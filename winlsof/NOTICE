@@ -1,0 +1,16 @@
+winlsof — a memory-safe, Windows-native reimplementation of lsof
+================================================================
+
+This project is an original Rust reimplementation. It is *inspired by* and aims
+for command-line / output compatibility with the lsof utility, but shares no
+source code with it.
+
+The original lsof was written by Victor A. Abell and is Copyright (c) 2002
+Purdue Research Foundation. See ../COPYING in this repository for the original
+lsof license. The behavioral specification this reimplementation targets is
+derived from the original lsof documentation (../docs, ../Lsof.8) and its
+observable behavior.
+
+Windows API access is provided through the `windows` crate
+(https://github.com/microsoft/windows-rs), Copyright (c) Microsoft Corporation,
+licensed under MIT/Apache-2.0.

@@ -1,0 +1,25 @@
+[package]
+name = "lsof-backend-windows"
+description = "Windows data-acquisition backend for winlsof: enumerates processes, owning users, and TCP/UDP endpoints through native Win32 APIs, behind a strict least-privilege model. Implements lsof-core's Backend trait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lsof-core = { path = "../lsof-core" }
+
+# Native Windows bindings are only pulled in (and the backend only compiled) when
+# targeting Windows; on other hosts this crate is an empty shell so the workspace
+# still builds and `lsof-core` stays testable everywhere.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
