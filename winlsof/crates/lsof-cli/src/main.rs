@@ -64,6 +64,7 @@ OUTPUT:\n\
     -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
     -J            aggregated JSON object\n\
     -j            JSON Lines (one object per file)\n\
+    -r [delay]    repeat every <delay>s (default 15) until interrupted\n\
 \n\
     -h, --help        show this help\n\
     -v, --version     show version\n\
@@ -87,7 +88,7 @@ fn main() {
         }
     };
 
-    let (selection, format) = match action {
+    let (selection, format, repeat) = match action {
         Action::Help => {
             print!("{}", usage());
             return;
@@ -99,7 +100,11 @@ fn main() {
             );
             return;
         }
-        Action::Run { selection, format } => (selection, format),
+        Action::Run {
+            selection,
+            format,
+            repeat,
+        } => (selection, format, repeat),
     };
 
     let env = make_env();
@@ -107,15 +112,6 @@ fn main() {
     if let Some(note) = &env.note {
         eprintln!("lsof: {note}");
     }
-
-    let procs = match env.backend.gather(&selection) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("lsof: {e}");
-            std::process::exit(1);
-        }
-    };
-    let procs = selection.apply(procs);
 
     // Least-privilege hint: only in table mode, so machine formats stay clean.
     #[cfg(windows)]
@@ -125,15 +121,35 @@ fn main() {
         );
     }
 
-    let out = match format {
-        Format::Table => table::render(&procs, selection.terse),
-        Format::Fields { nul } => fields::render(&procs, nul),
-        Format::Json => {
-            let mut s = json::render_aggregated(&procs);
-            s.push('\n');
-            s
-        }
-        Format::JsonLines => json::render_lines(&procs),
+    let run_cycle = move || {
+        let procs = match env.backend.gather(&selection) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("lsof: {e}");
+                std::process::exit(1);
+            }
+        };
+        let procs = selection.apply(procs);
+        let out = match format {
+            Format::Table => table::render(&procs, selection.terse),
+            Format::Fields { nul } => fields::render(&procs, nul),
+            Format::Json => {
+                let mut s = json::render_aggregated(&procs);
+                s.push('\n');
+                s
+            }
+            Format::JsonLines => json::render_lines(&procs),
+        };
+        print!("{out}");
     };
-    print!("{out}");
+
+    // `-r`: repeat until interrupted, printing lsof's `=======` separator.
+    match repeat {
+        Some(delay) => loop {
+            run_cycle();
+            println!("=======");
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+        },
+        None => run_cycle(),
+    }
 }

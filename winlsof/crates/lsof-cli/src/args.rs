@@ -17,6 +17,7 @@ pub enum Action {
     Run {
         selection: Selection,
         format: Format,
+        repeat: Option<u64>,
     },
 }
 
@@ -26,6 +27,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     let mut format = Format::Table;
     let mut want_help = false;
     let mut want_version = false;
+    let mut repeat: Option<u64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -59,6 +61,19 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'n' => sel.no_host_resolve = true,
                 'P' => sel.no_port_resolve = true,
                 't' => sel.terse = true,
+                'r' => {
+                    let rest: String = chars[j + 1..].iter().collect();
+                    repeat = Some(if rest.is_empty() {
+                        15
+                    } else {
+                        match rest.parse::<u64>() {
+                            Ok(n) => n,
+                            Err(_) => return Err(format!("invalid -r delay: {rest}")),
+                        }
+                    });
+                    j = chars.len();
+                    continue;
+                }
                 'J' => format = Format::Json,
                 'j' => format = Format::JsonLines,
                 'v' | 'V' => want_version = true,
@@ -108,6 +123,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     Ok(Action::Run {
         selection: sel,
         format,
+        repeat,
     })
 }
 
@@ -196,7 +212,9 @@ mod tests {
 
     fn run(argv: &[&str]) -> (Selection, Format) {
         match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
-            Action::Run { selection, format } => (selection, format),
+            Action::Run {
+                selection, format, ..
+            } => (selection, format),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -246,6 +264,21 @@ mod tests {
     fn help_and_version() {
         assert!(matches!(parse(vec!["-h".into()]).unwrap(), Action::Help));
         assert!(matches!(parse(vec!["-v".into()]).unwrap(), Action::Version));
+    }
+
+    fn repeat(argv: &[&str]) -> Option<u64> {
+        match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { repeat, .. } => repeat,
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeat_flag() {
+        assert_eq!(repeat(&["-r"]), Some(15));
+        assert_eq!(repeat(&["-r5"]), Some(5));
+        assert_eq!(repeat(&[]), None);
+        assert!(parse(vec!["-rx".into()]).is_err());
     }
 
     #[test]

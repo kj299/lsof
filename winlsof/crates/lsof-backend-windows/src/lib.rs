@@ -15,6 +15,8 @@ mod backend;
 #[cfg(windows)]
 mod handles;
 #[cfg(windows)]
+mod modules;
+#[cfg(windows)]
 mod privilege;
 #[cfg(windows)]
 mod process;

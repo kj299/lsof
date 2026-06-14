@@ -7,7 +7,7 @@ use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
-use crate::{handles, privilege, process, sockets};
+use crate::{handles, modules, privilege, process, sockets};
 
 /// winlsof's native Windows data source.
 pub struct WindowsBackend {
@@ -63,6 +63,12 @@ impl Backend for WindowsBackend {
         let mut idx: HashMap<u32, usize> = HashMap::with_capacity(procs.len());
         for (i, p) in procs.iter().enumerate() {
             idx.insert(p.pid, i);
+        }
+
+        // txt/mem: the loaded image and libraries for each process.
+        for p in procs.iter_mut() {
+            let mods = modules::enumerate(p.pid);
+            p.files.extend(mods);
         }
 
         for (pid, file) in sockets::collect() {
