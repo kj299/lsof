@@ -44,9 +44,15 @@ independent code and per-OS "dialect" backends:
 - ✅ **Phase 1** — process + owner enumeration; `-p` / `-c` / `-u` / `-t`.
 - ✅ **Phase 2** — TCP/UDP (v4+v6) with owning PID; `-i [46][tcp|udp][@host][:port]`,
   `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`) output.
-- ⏳ **Phase 3** — system-wide open *file handle* enumeration (the core lsof
-  behavior) via the NT handle table; see `lsof-backend-windows/src/handles.rs`.
-- ⏳ **Phase 4** — mapped modules (`mem`/`txt`), `cwd`/`rtd`, Restart Manager for
+- ✅ **Phase 3 (initial)** — system-wide open *file handle* enumeration via the
+  NT handle table (`NtQuerySystemInformation` + `DuplicateHandle` +
+  `NtQueryObject`): regular files, directories, and named pipes, with
+  drive-letter mapping (`QueryDosDeviceW`), size/file-index, access mode, and the
+  `0x0012019F` hang-avoidance heuristic — all under just-in-time `SeDebugPrivilege`
+  (`lsof-backend-windows/src/handles.rs`). Pure helpers are unit-tested on the
+  Windows CI runner; live full-system validation on a Windows host is pending.
+- ⏳ **Phase 4** — mapped modules (`mem`/`txt`), `cwd`/`rtd`, worker-thread name
+  resolution for the remaining hang-prone handles, Restart Manager for
   `+D`/named-file lookups, repeat mode.
 
 ## Privilege model (least privilege)
