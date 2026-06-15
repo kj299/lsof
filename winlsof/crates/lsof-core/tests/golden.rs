@@ -5,7 +5,7 @@ use lsof_core::render::{fields, json, table};
 
 #[test]
 fn table_has_header_and_rows() {
-    let out = table::render(&sample_processes(), false, false);
+    let out = table::render(&sample_processes(), false, false, false);
     let header = out.lines().next().unwrap();
     for col in ["COMMAND", "PID", "USER", "FD", "TYPE", "NODE", "NAME"] {
         assert!(header.contains(col), "header missing {col}: {header:?}");
@@ -20,7 +20,7 @@ fn table_has_header_and_rows() {
 
 #[test]
 fn terse_lists_unique_pids() {
-    let out = table::render(&sample_processes(), true, false);
+    let out = table::render(&sample_processes(), true, false, false);
     assert_eq!(out, "1000\n1500\n");
 }
 
@@ -50,10 +50,35 @@ fn fields_only_restricts_output() {
 
 #[test]
 fn table_ppid_column() {
-    let out = table::render(&sample_processes(), false, true);
+    let out = table::render(&sample_processes(), false, true, false);
     assert!(out.lines().next().unwrap().contains("PPID"));
     // explorer.exe's ppid (4) shows up.
     assert!(out.contains(" 4 ") || out.contains("   4 "));
+}
+
+#[test]
+fn table_offset_with_dash_o() {
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let p = Process {
+        pid: 7,
+        ppid: None,
+        command: "x".into(),
+        user: None,
+        files: vec![OpenFile {
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "C:\\f".into(),
+            device: Some("C:".into()),
+            size: Some(100),
+            offset: Some(42),
+            node: None,
+            socket: None,
+        }],
+    };
+    // Default prefers size; -o prefers the offset (0t<dec>).
+    assert!(table::render(std::slice::from_ref(&p), false, false, false).contains("100"));
+    assert!(table::render(&[p], false, false, true).contains("0t42"));
 }
 
 #[test]

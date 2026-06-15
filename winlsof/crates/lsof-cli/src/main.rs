@@ -63,6 +63,7 @@ OUTPUT:\n\
     -n            do not resolve host names\n\
     -P            do not resolve port names (show numeric ports)\n\
     -R            add a PPID (parent PID) column\n\
+    -o            show file offset in SIZE/OFF (0t<decimal>)\n\
     -t            terse: PIDs only\n\
     -V            verbose: report inaccessible / unmatched search items\n\
     -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
@@ -111,7 +112,7 @@ fn main() {
         }
     };
 
-    let (selection, format, repeat, show_ppid) = match action {
+    let (selection, format, repeat, show_ppid, show_offset) = match action {
         Action::Help => {
             print!("{}", usage());
             return;
@@ -128,7 +129,8 @@ fn main() {
             format,
             repeat,
             show_ppid,
-        } => (selection, format, repeat, show_ppid),
+            show_offset,
+        } => (selection, format, repeat, show_ppid, show_offset),
     };
 
     let env = make_env();
@@ -164,7 +166,7 @@ fn main() {
             report_unmatched(&selection, &procs);
         }
         let out = match &format {
-            Format::Table => table::render(&procs, selection.terse, show_ppid),
+            Format::Table => table::render(&procs, selection.terse, show_ppid, show_offset),
             Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref()),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);

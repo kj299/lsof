@@ -54,11 +54,19 @@ unsafe extern "system" {
         len: u32,
         ret_len: *mut u32,
     ) -> i32;
+    fn NtQueryInformationFile(
+        handle: HANDLE,
+        io_status: *mut IoStatusBlock,
+        info: *mut c_void,
+        len: u32,
+        class: i32,
+    ) -> i32;
 }
 
 const SYSTEM_EXTENDED_HANDLE_INFORMATION: i32 = 64;
 const OBJECT_NAME_INFORMATION: i32 = 1;
 const OBJECT_TYPE_INFORMATION: i32 = 2;
+const FILE_POSITION_INFORMATION_CLASS: i32 = 14;
 
 const STATUS_INFO_LENGTH_MISMATCH: i32 = -1073741820i32; // 0xC0000004
 const STATUS_BUFFER_OVERFLOW: i32 = -2147483643i32; // 0x80000005
@@ -113,6 +121,13 @@ struct SystemHandleInformationEx {
     number_of_handles: usize,
     reserved: usize,
     handles: [SystemHandleTableEntryInfoEx; 1],
+}
+
+#[repr(C)]
+#[allow(dead_code)] // FFI layout: only `Information` matters; the union is sized.
+struct IoStatusBlock {
+    status_or_pointer: usize,
+    information: usize,
 }
 
 /// Enumerate open file handles as `(owning_pid, OpenFile)` pairs. When `wanted`
@@ -196,7 +211,7 @@ pub fn enumerate(
                 name: d.name,
                 device: d.device,
                 size: d.size,
-                offset: None,
+                offset: d.offset,
                 node: d.node,
                 socket: None,
             },
@@ -329,6 +344,7 @@ struct Described {
     device: Option<String>,
     node: Option<String>,
     size: Option<u64>,
+    offset: Option<u64>,
 }
 
 /// Classify a File-typed handle by its file type and fill in name/size/node.
@@ -358,6 +374,7 @@ fn describe(
                 name,
                 node,
                 size,
+                offset: file_offset(dup),
             })
         }
         FILE_TYPE_PIPE => {
@@ -377,6 +394,7 @@ fn describe(
                     device: None,
                     node: None,
                     size: None,
+                    offset: None,
                 }),
                 // Sockets (\Device\Afd) and unnamed pipes: IP Helper covers
                 // sockets, so skip rather than emit a nameless row.
@@ -393,6 +411,7 @@ fn describe(
                 device: None,
                 node: None,
                 size: None,
+                offset: None,
             })
         }
         _ => {
@@ -404,13 +423,36 @@ fn describe(
                 file_type: FileType::Unknown,
                 node: None,
                 size: None,
+                offset: None,
             })
         }
     }
 }
 
+/// The current file offset of a disk handle, via `NtQueryInformationFile`.
+/// The duplicate shares the owner's file object, so this is the live position.
+fn file_offset(dup: HANDLE) -> Option<u64> {
+    let mut iosb: IoStatusBlock = unsafe { std::mem::zeroed() };
+    let mut pos: i64 = 0;
+    // SAFETY: writes a FILE_POSITION_INFORMATION (a single i64) into `pos`.
+    let status = unsafe {
+        NtQueryInformationFile(
+            dup,
+            &mut iosb,
+            &mut pos as *mut _ as *mut c_void,
+            8,
+            FILE_POSITION_INFORMATION_CLASS,
+        )
+    };
+    if status != 0 || pos < 0 {
+        None
+    } else {
+        Some(pos as u64)
+    }
+}
+
 /// The drive-letter `DEVICE` prefix of a `X:\...` path, if present.
-fn drive_of(path: &str) -> Option<String> {
+pub(crate) fn drive_of(path: &str) -> Option<String> {
     if path.len() >= 2 && path.as_bytes()[1] == b':' {
         Some(path[..2].to_string())
     } else {
@@ -479,7 +521,7 @@ fn disk_details(dup: HANDLE) -> (FileType, Option<String>, Option<u64>) {
 }
 
 /// Build the `\Device\...` → drive-letter map from the live volume set.
-fn build_dos_map() -> Vec<(String, String)> {
+pub(crate) fn build_dos_map() -> Vec<(String, String)> {
     let mut map = Vec::new();
     // SAFETY: no arguments; returns a bitmask of present drive letters.
     let drives = unsafe { GetLogicalDrives() };
@@ -508,7 +550,7 @@ fn build_dos_map() -> Vec<(String, String)> {
 /// Replace a `\Device\HarddiskVolumeN` prefix with its drive letter, requiring
 /// the match to fall on a path boundary. Returns the input unchanged if no
 /// mapping applies.
-fn device_to_dos(nt_name: &str, dos_map: &[(String, String)]) -> String {
+pub(crate) fn device_to_dos(nt_name: &str, dos_map: &[(String, String)]) -> String {
     for (dos, dev) in dos_map {
         if let Some(rest) = nt_name.strip_prefix(dev.as_str()) {
             if rest.is_empty() || rest.starts_with('\\') {

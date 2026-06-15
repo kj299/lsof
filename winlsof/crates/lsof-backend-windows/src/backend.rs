@@ -7,7 +7,7 @@ use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
-use crate::{handles, modules, peb, privilege, process, restart, sockets};
+use crate::{handles, mapped, modules, peb, privilege, process, restart, sockets};
 
 /// winlsof's native Windows data source.
 pub struct WindowsBackend {
@@ -95,7 +95,8 @@ impl Backend for WindowsBackend {
         let inet_only = sel.inet.enabled;
 
         if !inet_only {
-            // cwd + txt/mem for each in-scope process.
+            // cwd + txt/mem (modules) + mapped data files, for each in-scope process.
+            let dos_map = handles::build_dos_map();
             for p in procs.iter_mut() {
                 if !wanted(p.pid) {
                     continue;
@@ -104,6 +105,7 @@ impl Backend for WindowsBackend {
                     p.files.push(cwd);
                 }
                 p.files.extend(modules::enumerate(p.pid));
+                p.files.extend(mapped::enumerate(p.pid, &dos_map));
             }
         }
 

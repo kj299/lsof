@@ -20,14 +20,15 @@ fn fd_cell(f: &OpenFile) -> String {
     }
 }
 
-/// Render the SIZE/OFF cell: prefer size, else an offset as `0t<dec>`.
-fn size_off_cell(f: &OpenFile) -> String {
-    if let Some(sz) = f.size {
-        sz.to_string()
-    } else if let Some(off) = f.offset {
-        format!("0t{off}")
+/// Render the SIZE/OFF cell. By default prefer size; with `prefer_offset`
+/// (lsof `-o`) prefer the file offset, shown as `0t<dec>`.
+fn size_off_cell(f: &OpenFile, prefer_offset: bool) -> String {
+    let off = f.offset.map(|o| format!("0t{o}"));
+    let sz = f.size.map(|s| s.to_string());
+    if prefer_offset {
+        off.or(sz).unwrap_or_default()
     } else {
-        String::new()
+        sz.or(off).unwrap_or_default()
     }
 }
 
@@ -45,8 +46,9 @@ fn render_terse(procs: &[Process]) -> String {
 }
 
 /// Render `procs` as the default table (or terse list when `terse`). `show_ppid`
-/// adds a PPID column after PID (lsof `-R`).
-pub fn render(procs: &[Process], terse: bool, show_ppid: bool) -> String {
+/// adds a PPID column after PID (lsof `-R`); `show_offset` makes SIZE/OFF prefer
+/// the file offset (lsof `-o`).
+pub fn render(procs: &[Process], terse: bool, show_ppid: bool, show_offset: bool) -> String {
     if terse {
         return render_terse(procs);
     }
@@ -68,7 +70,7 @@ pub fn render(procs: &[Process], terse: bool, show_ppid: bool) -> String {
         r.push(fd_cell(f));
         r.push(f.file_type.code().to_string());
         r.push(f.device.clone().unwrap_or_default());
-        r.push(size_off_cell(f));
+        r.push(size_off_cell(f, show_offset));
         r.push(f.node.clone().unwrap_or_default());
         r.push(f.name.clone());
         r

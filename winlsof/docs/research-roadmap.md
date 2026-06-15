@@ -67,7 +67,7 @@ no new attack surface.
 
 ---
 
-## 3. `mem` for memory-mapped data files  (Effort M, Confidence High 📈)
+## 3. `mem` for memory-mapped data files  — ✅ IMPLEMENTED (Effort M, Confidence High 📈)
 
 **Goal:** show `mem` rows for data files mapped via `CreateFileMapping` /
 `MapViewOfFile`, not just loaded modules (DLLs/EXE).
@@ -93,7 +93,7 @@ iterations); fixed-size wide buffer for the name.
 
 ---
 
-## 4. File offset (`-o`)  (Effort S–M, Confidence High 📈)
+## 4. File offset (`-o`)  — ✅ IMPLEMENTED (Effort S–M, Confidence High 📈)
 
 **Goal:** lsof's current file position in the SIZE/OFF column under `-o`.
 
@@ -121,9 +121,9 @@ a safe wrapper; reuses the existing duplicate.
 
 ## Suggested order
 
-1. **`-o` offset** (High confidence, small) — quick, genuinely useful win.
-2. **mapped-data `mem`** (High confidence, medium) — closes a real lsof gap.
-3. **byte-range locks spike** (decide approximate-or-document).
+1. ~~`-o` offset~~ — ✅ done (`NtQueryInformationFile(FilePositionInformation)`).
+2. ~~mapped-data `mem`~~ — ✅ done (`VirtualQueryEx` + `GetMappedFileNameW`).
+3. **byte-range locks spike** (decide approximate-or-document). ← next
 4. **socket FD / AF_UNIX / raw spike** (largest, lowest confidence; gate hard).
 
 Items 1–2 are committable with the same host-tested-core + Windows-CI model used

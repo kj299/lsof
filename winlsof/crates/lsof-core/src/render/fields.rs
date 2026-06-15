@@ -62,6 +62,11 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                     push('s', &s.to_string());
                 }
             }
+            if want('o') {
+                if let Some(o) = f.offset {
+                    push('o', &format!("0t{o}"));
+                }
+            }
             if want('i') {
                 if let Some(n) = &f.node {
                     push('i', n);

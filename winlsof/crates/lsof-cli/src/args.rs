@@ -2,7 +2,8 @@
 //!
 //! Supported: `-p` (PIDs), `-i` (Internet, with `[46][proto][@host][:port]`),
 //! `-u` (users), `-c` (command), `-d` (FD filter), `-a` (AND), `-n` / `-P`
-//! (host/port resolution), `-R` (PPID column), `-t` (terse), `-V` (verbose),
+//! (host/port resolution), `-R` (PPID column), `-o` (file offset), `-t`
+//! (terse), `-V` (verbose),
 //! `-F[fields]` (field output, `-F0` = NUL), `-J` / `-j` (JSON), `-r` (repeat),
 //! and `-v` / `-h`. Flags may be clustered (e.g. `-ai`); value options take the
 //! rest of the token or the next argument (e.g. `-p123` or `-p 123`). A bare
@@ -25,6 +26,7 @@ pub enum Action {
         format: Format,
         repeat: Option<u64>,
         show_ppid: bool,
+        show_offset: bool,
     },
 }
 
@@ -36,6 +38,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     let mut want_version = false;
     let mut repeat: Option<u64> = None;
     let mut show_ppid = false;
+    let mut show_offset = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -109,6 +112,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'J' => format = Format::Json,
                 'j' => format = Format::JsonLines,
                 'R' => show_ppid = true,
+                'o' => show_offset = true,
                 'v' => want_version = true,
                 'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
@@ -177,6 +181,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
         format,
         repeat,
         show_ppid,
+        show_offset,
     })
 }
 
