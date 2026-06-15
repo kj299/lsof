@@ -13,10 +13,13 @@
 //!    drive letter via `QueryDosDeviceW`, and read size / file-index via
 //!    `GetFileInformationByHandle`.
 //!
-//! Hang avoidance: `NtQueryObject(ObjectNameInformation)` can block forever on
-//! certain synchronous handles (some pipes/devices). We apply the well-known
-//! heuristic of skipping the *name* query for handles whose granted access is
-//! the value used by those handles (`0x0012019F`); the type query is safe.
+//! Names: disk files use `GetFinalPathNameByHandleW` (robust, hang-free, and it
+//! yields a clean DOS path); char devices and named pipes fall back to
+//! `NtQueryObject(ObjectNameInformation)`, which can block on synchronous
+//! handles — so for the hang-prone access mask (`0x0012019F`) that query runs on
+//! a worker thread under a timeout. Only true socket/AFD handles are dropped
+//! (IP Helper lists those); every other File handle is emitted, with a
+//! placeholder name if it can't be resolved.
 //!
 //! Least privilege: reaching other users' / protected processes' handles needs
 //! `SeDebugPrivilege`. We enable it via [`PrivilegeGuard`] only for the duration
@@ -31,7 +34,8 @@ use std::time::Duration;
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
+    GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW, GetLogicalDrives,
+    QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess};
 
@@ -70,6 +74,11 @@ const FILE_WRITE_DATA: u32 = 0x0002;
 const FILE_APPEND_DATA: u32 = 0x0004;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
+
+// GetFileType return values.
+const FILE_TYPE_DISK: u32 = 0x0001;
+const FILE_TYPE_CHAR: u32 = 0x0002;
+const FILE_TYPE_PIPE: u32 = 0x0003;
 
 /// Granted-access mask used by synchronous handles on which
 /// `NtQueryObject(name)` can hang; we skip the name query for these.
@@ -150,30 +159,21 @@ pub fn enumerate(elevated: bool) -> Vec<(u32, OpenFile)> {
         let Some(dup) = duplicate(source.raw(), e.handle_value as HANDLE, me) else {
             continue;
         };
-        // Keep only File objects (files, dirs, named pipes); skip events, keys,
-        // unnamed socket/AFD handles, etc.
+        // Keep only File objects (disk files, dirs, named pipes, char devices,
+        // and sockets); other object types (keys, events, …) aren't lsof-like.
         if query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File") {
             continue;
         }
-        let nt_name = if e.granted_access == HANG_PRONE_ACCESS {
-            // Resolve on a worker thread with a timeout, using a dedicated dup
-            // the worker owns and closes — so our `dup` drops safely even if the
-            // name query hangs (the documented risk for these handles).
-            match duplicate(source.raw(), e.handle_value as HANDLE, me) {
-                Some(worker) => name_with_timeout(worker.into_raw(), Duration::from_millis(100)),
-                None => None,
-            }
-        } else {
-            query_object_string(dup.raw(), OBJECT_NAME_INFORMATION)
+        let Some(d) = describe(
+            source.raw(),
+            e.handle_value as HANDLE,
+            me,
+            dup.raw(),
+            e.granted_access,
+            &dos_map,
+        ) else {
+            continue; // a socket/AFD handle — listed via IP Helper
         };
-        let Some(nt_name) = nt_name else {
-            continue; // unnamed (e.g. a socket/AFD handle) — listed via IP Helper
-        };
-        if nt_name.is_empty() {
-            continue;
-        }
-
-        let d = describe(dup.raw(), &nt_name, &dos_map);
         out.push((
             pid,
             OpenFile {
@@ -309,53 +309,151 @@ struct Described {
     size: Option<u64>,
 }
 
-/// Classify a File handle and fill in name/device/size/node.
-fn describe(handle: HANDLE, nt_name: &str, dos_map: &[(String, String)]) -> Described {
-    let is_pipe = nt_name.starts_with("\\Device\\NamedPipe");
-    let display = device_to_dos(nt_name, dos_map);
-    let device = if display.len() >= 2 && display.as_bytes()[1] == b':' {
-        Some(display[..2].to_string())
-    } else {
-        None
-    };
-
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: handle is a live File handle; info is sized correctly.
-    let have = unsafe { GetFileInformationByHandle(handle, &mut info) } != 0;
-
-    if have {
-        let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-        let size = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
-        let node = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
-        Described {
-            file_type: if is_dir {
-                FileType::Dir
+/// Classify a File-typed handle by its file type and fill in name/size/node.
+/// Returns `None` only for socket/AFD handles (which IP Helper enumerates).
+fn describe(
+    source: HANDLE,
+    handle_value: HANDLE,
+    me: HANDLE,
+    dup: HANDLE,
+    granted: u32,
+    dos_map: &[(String, String)],
+) -> Option<Described> {
+    // SAFETY: dup is a live File handle.
+    match unsafe { GetFileType(dup) } {
+        FILE_TYPE_DISK => {
+            // Robust, hang-free path for disk files; fall back to the NT name.
+            let name = final_path(dup)
+                .or_else(|| {
+                    query_object_string(dup, OBJECT_NAME_INFORMATION)
+                        .map(|n| device_to_dos(&n, dos_map))
+                })
+                .unwrap_or_else(|| "(unnamed file)".to_string());
+            let (file_type, node, size) = disk_details(dup);
+            Some(Described {
+                file_type,
+                device: drive_of(&name),
+                name,
+                node,
+                size,
+            })
+        }
+        FILE_TYPE_PIPE => {
+            // A named pipe or a socket. Resolving the name can hang on a
+            // synchronous handle, so use the worker thread for the hang-prone
+            // access mask.
+            let name = if granted == HANG_PRONE_ACCESS {
+                duplicate(source, handle_value, me)
+                    .and_then(|w| name_with_timeout(w.into_raw(), Duration::from_millis(100)))
             } else {
-                FileType::Regular
-            },
-            name: display,
-            device,
-            node: Some(node.to_string()),
-            size: if is_dir { None } else { Some(size) },
+                query_object_string(dup, OBJECT_NAME_INFORMATION)
+            };
+            match name {
+                Some(n) if n.starts_with("\\Device\\NamedPipe") => Some(Described {
+                    file_type: FileType::Pipe,
+                    name: pipe_display(&n),
+                    device: None,
+                    node: None,
+                    size: None,
+                }),
+                // Sockets (\Device\Afd) and unnamed pipes: IP Helper covers
+                // sockets, so skip rather than emit a nameless row.
+                _ => None,
+            }
         }
-    } else if is_pipe {
-        Described {
-            file_type: FileType::Pipe,
-            name: display,
-            device: None,
-            node: None,
-            size: None,
+        FILE_TYPE_CHAR => {
+            let name = query_object_string(dup, OBJECT_NAME_INFORMATION)
+                .map(|n| device_to_dos(&n, dos_map))
+                .unwrap_or_else(|| "(character device)".to_string());
+            Some(Described {
+                file_type: FileType::Chr,
+                name,
+                device: None,
+                node: None,
+                size: None,
+            })
         }
-    } else {
-        // A named device we couldn't stat (console, etc.) — treat as character.
-        Described {
-            file_type: FileType::Chr,
-            name: display,
-            device,
-            node: None,
-            size: None,
+        _ => {
+            // Unknown file type: best-effort name, else drop.
+            let name = device_to_dos(&query_object_string(dup, OBJECT_NAME_INFORMATION)?, dos_map);
+            Some(Described {
+                device: drive_of(&name),
+                name,
+                file_type: FileType::Unknown,
+                node: None,
+                size: None,
+            })
         }
     }
+}
+
+/// The drive-letter `DEVICE` prefix of a `X:\...` path, if present.
+fn drive_of(path: &str) -> Option<String> {
+    if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        Some(path[..2].to_string())
+    } else {
+        None
+    }
+}
+
+/// `GetFinalPathNameByHandleW` → a clean DOS path (drops the `\\?\` prefix).
+fn final_path(dup: HANDLE) -> Option<String> {
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: buf/len are paired; returns the char count, the required length if
+    // the buffer is too small, or 0 on failure.
+    let mut len = unsafe { GetFinalPathNameByHandleW(dup, buf.as_mut_ptr(), buf.len() as u32, 0) };
+    if len == 0 {
+        return None;
+    }
+    if len as usize >= buf.len() {
+        buf = vec![0u16; len as usize + 1];
+        // SAFETY: as above, with a buffer grown to the reported size.
+        len = unsafe { GetFinalPathNameByHandleW(dup, buf.as_mut_ptr(), buf.len() as u32, 0) };
+        if len == 0 || len as usize >= buf.len() {
+            return None;
+        }
+    }
+    Some(normalize_final(&wide_to_string(&buf)))
+}
+
+/// Strip the `\\?\` / `\\?\UNC\` prefixes from a final-path string.
+fn normalize_final(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// `\Device\NamedPipe\foo` → `\\.\pipe\foo`.
+fn pipe_display(nt_name: &str) -> String {
+    match nt_name.strip_prefix("\\Device\\NamedPipe") {
+        Some(rest) => format!("\\\\.\\pipe{rest}"),
+        None => nt_name.to_string(),
+    }
+}
+
+/// Read dir/size/file-index for a disk file via `GetFileInformationByHandle`.
+fn disk_details(dup: HANDLE) -> (FileType, Option<String>, Option<u64>) {
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: dup is a live disk handle; info is sized correctly.
+    if unsafe { GetFileInformationByHandle(dup, &mut info) } == 0 {
+        return (FileType::Regular, None, None);
+    }
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    let node = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    let size = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
+    (
+        if is_dir {
+            FileType::Dir
+        } else {
+            FileType::Regular
+        },
+        Some(node.to_string()),
+        if is_dir { None } else { Some(size) },
+    )
 }
 
 /// Build the `\Device\...` → drive-letter map from the live volume set.
@@ -454,5 +552,26 @@ mod tests {
             AccessMode::ReadWrite
         );
         assert_eq!(access_from_granted(0), AccessMode::Unknown);
+    }
+
+    #[test]
+    fn normalizes_final_paths() {
+        assert_eq!(normalize_final("\\\\?\\C:\\a\\b.txt"), "C:\\a\\b.txt");
+        assert_eq!(
+            normalize_final("\\\\?\\UNC\\srv\\share\\f"),
+            "\\\\srv\\share\\f"
+        );
+        assert_eq!(normalize_final("C:\\plain"), "C:\\plain");
+    }
+
+    #[test]
+    fn pipe_display_names() {
+        assert_eq!(pipe_display("\\Device\\NamedPipe\\foo"), "\\\\.\\pipe\\foo");
+    }
+
+    #[test]
+    fn drive_prefix() {
+        assert_eq!(drive_of("C:\\x"), Some("C:".to_string()));
+        assert_eq!(drive_of("\\\\srv\\share"), None);
     }
 }
