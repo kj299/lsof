@@ -102,6 +102,10 @@ For end-to-end validation on a real Windows host (concrete commands + expected
 output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
 [`docs/windows-validation.md`](docs/windows-validation.md).
 
+The phased plan for the remaining research-grade gaps (socket FD correlation,
+AF_UNIX/raw, byte-range locks, mapped data files, file offset) is in
+[`docs/research-roadmap.md`](docs/research-roadmap.md).
+
 ## License / attribution
 
 Original Rust code. Command-line/output-compatible with `lsof` but sharing no
