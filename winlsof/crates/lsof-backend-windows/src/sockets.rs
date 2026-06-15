@@ -156,7 +156,10 @@ fn make_file(
     };
     OpenFile {
         fd: FdType::Unknown,
-        access: AccessMode::Unknown,
+        // Sockets are bidirectional; lsof shows them as `u` (read/write). The
+        // concrete handle value (FD) isn't in the MIB table — see the research
+        // roadmap on why per-endpoint FD correlation needs undocumented APIs.
+        access: AccessMode::ReadWrite,
         file_type: if is_v6 {
             FileType::Ipv6
         } else {

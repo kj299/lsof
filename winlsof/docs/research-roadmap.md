@@ -11,7 +11,7 @@ Effort: S/M/L. Confidence = likelihood a *safe, public-API* solution exists.
 
 ---
 
-## 1. Socket FD correlation + AF_UNIX / raw / ICMP  (Effort L, Confidence Low)
+## 1. Socket FD correlation + AF_UNIX / raw / ICMP  — 🔬 SPIKE COMPLETE (documented) (Effort L, Confidence Low)
 
 **Goal:** show a real FD/access for sockets (today `unk`), and list AF_UNIX,
 raw, and ICMP sockets (today only TCP/UDP via IP Helper).
@@ -40,9 +40,20 @@ cooperation, so a duplicated AFD handle can't simply be `getsockname`'d.
 **Memory safety:** all IOCTL output parsing in small audited `unsafe` wrappers
 over `Vec<u8>` with length checks; no raw pointer arithmetic in the hot path.
 
+**Spike conclusion (2026-06-15):** Confirmed against Microsoft docs —
+`GetExtendedTcpTable` / `GetExtendedUdpTable` cover only TCP/UDP (PID or MODULE
+owner); there is **no public IP Helper table** for raw/ICMP (`SOCK_RAW`) or
+AF_UNIX endpoints, and no public way to map an `\Device\Afd` handle to its
+address. Per-endpoint FD correlation and AF_UNIX/raw therefore require
+undocumented AFD IOCTLs (driver-adjacent) or an ETW `Microsoft-Windows-TCPIP`
+consumer — both out of scope for a safe, public-API tool. **Decision: gate
+closed → documented limitation.** Shipped the one safe, accurate change:
+Internet sockets now report `u` (read/write) access, matching lsof. If pursued
+later, the ETW route would be a separate opt-in feature.
+
 ---
 
-## 2. File byte-range locks  (Effort M, Confidence Low)
+## 2. File byte-range locks  — 🔬 SPIKE COMPLETE (documented) (Effort M, Confidence Low)
 
 **Goal:** lsof's lock indicator (e.g. `1uW`) for `LockFileEx` byte-range locks.
 
@@ -64,6 +75,16 @@ position/mode/name but not locks.
 
 **Memory safety:** read-only `NtQueryInformationFile` calls behind safe wrappers;
 no new attack surface.
+
+**Spike conclusion (2026-06-15):** Confirmed against Microsoft docs — the only
+API that *enumerates* a file's byte-range locks is `FsRtlGetNextFileLock`, a
+**kernel-mode** routine (ntifs.h) that needs the file's `FILE_LOCK` structure,
+available only inside a file-system driver. User-mode `LockFileEx` / `NtLockFile`
+only *create* locks; nothing in user mode lists existing locks, and a handle's
+share mode isn't queryable from another process. **Decision: gate closed →
+documented limitation** (true lock display would need a kernel-mode driver or an
+ETW FileIO trace). No safe user-mode code to add — emitting a fabricated lock
+column would be misleading, so we don't.
 
 ---
 
@@ -123,8 +144,12 @@ a safe wrapper; reuses the existing duplicate.
 
 1. ~~`-o` offset~~ — ✅ done (`NtQueryInformationFile(FilePositionInformation)`).
 2. ~~mapped-data `mem`~~ — ✅ done (`VirtualQueryEx` + `GetMappedFileNameW`).
-3. **byte-range locks spike** (decide approximate-or-document). ← next
-4. **socket FD / AF_UNIX / raw spike** (largest, lowest confidence; gate hard).
+3. ~~byte-range locks spike~~ — 🔬 done: gate closed, documented (needs a kernel driver / ETW).
+4. ~~socket FD / AF_UNIX / raw spike~~ — 🔬 done: gate closed, documented; sockets now show `u` access.
+
+All four research-grade items have now been resolved: two implemented (offset,
+mapped data files), two spiked to a documented platform limitation (locks,
+socket-FD/AF_UNIX/raw) with the precise future path recorded.
 
 Items 1–2 are committable with the same host-tested-core + Windows-CI model used
 so far. Items 3–4 begin with a spike whose decision gate may end in "document as
