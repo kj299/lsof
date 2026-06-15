@@ -98,6 +98,10 @@ cargo check --target x86_64-pc-windows-gnu
 CI (`.github/workflows/winlsof-ci.yml`) runs the lints + tests on Linux and
 builds/tests the native backend on `windows-latest`.
 
+For end-to-end validation on a real Windows host (concrete commands + expected
+output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
+[`docs/windows-validation.md`](docs/windows-validation.md).
+
 ## License / attribution
 
 Original Rust code. Command-line/output-compatible with `lsof` but sharing no

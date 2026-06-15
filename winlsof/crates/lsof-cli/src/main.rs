@@ -114,9 +114,15 @@ fn main() {
         eprintln!("lsof: {note}");
     }
 
-    // Least-privilege hint: only in table mode, so machine formats stay clean.
+    // Least-privilege hint: only in table mode (machine formats stay clean) and
+    // only when the run will attempt system-wide handle enumeration — not for
+    // `-i` network queries or path lookups, which need no elevation.
     #[cfg(windows)]
-    if !env.elevated && matches!(format, Format::Table) {
+    if !env.elevated
+        && matches!(format, Format::Table)
+        && !selection.inet.enabled
+        && selection.paths.is_empty()
+    {
         eprintln!(
             "lsof: showing your accessible processes; re-run as Administrator for a system-wide view"
         );

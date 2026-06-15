@@ -73,19 +73,30 @@ impl Backend for WindowsBackend {
             idx.insert(p.pid, i);
         }
 
-        // cwd + txt/mem for each process.
-        for p in procs.iter_mut() {
-            if let Some(cwd) = peb::cwd(p.pid) {
-                p.files.push(cwd);
+        // `-i` is a network-only query: gather only sockets, which need no
+        // elevation. Skipping cwd/modules/handle enumeration preserves the
+        // least-privilege guarantee (no SeDebugPrivilege for `-i`) and avoids
+        // needless work.
+        let inet_only = sel.inet.enabled;
+
+        if !inet_only {
+            // cwd + txt/mem for each process.
+            for p in procs.iter_mut() {
+                if let Some(cwd) = peb::cwd(p.pid) {
+                    p.files.push(cwd);
+                }
+                p.files.extend(modules::enumerate(p.pid));
             }
-            p.files.extend(modules::enumerate(p.pid));
         }
 
         for (pid, file) in sockets::collect() {
             attach(&mut procs, &mut idx, pid, file);
         }
-        for (pid, file) in handles::enumerate(self.elevated) {
-            attach(&mut procs, &mut idx, pid, file);
+
+        if !inet_only {
+            for (pid, file) in handles::enumerate(self.elevated) {
+                attach(&mut procs, &mut idx, pid, file);
+            }
         }
 
         Ok(procs)
