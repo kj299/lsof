@@ -17,9 +17,13 @@ mod handles;
 #[cfg(windows)]
 mod modules;
 #[cfg(windows)]
+mod peb;
+#[cfg(windows)]
 mod privilege;
 #[cfg(windows)]
 mod process;
+#[cfg(windows)]
+mod restart;
 #[cfg(windows)]
 mod sockets;
 #[cfg(windows)]

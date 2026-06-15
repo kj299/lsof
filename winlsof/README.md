@@ -51,10 +51,13 @@ independent code and per-OS "dialect" backends:
   `0x0012019F` hang-avoidance heuristic — all under just-in-time `SeDebugPrivilege`
   (`lsof-backend-windows/src/handles.rs`). Pure helpers are unit-tested on the
   Windows CI runner; live full-system validation on a Windows host is pending.
-- 🚧 **Phase 4 (in progress)** — ✅ mapped modules (`txt` image + `mem`
-  libraries, via a Toolhelp module snapshot) and ✅ repeat mode (`-r [delay]`);
-  pending: `cwd`/`rtd` via the process PEB, worker-thread name resolution for the
-  remaining hang-prone handles, and Restart Manager for `+D`/named-file lookups.
+- ✅ **Phase 4** — mapped modules (`txt`/`mem`); repeat mode (`-r [delay]`);
+  `cwd` via the process PEB (`rtd` is N/A on Windows); worker-thread name
+  resolution (with timeout) for the hang-prone handles previously skipped; and
+  Restart Manager for bare-path / `+D` "who has this open" lookups.
+
+All planned phases (0–4) are now implemented. Remaining work is live validation
+on a real Windows host and ongoing parity refinements.
 
 ## Privilege model (least privilege)
 

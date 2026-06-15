@@ -56,6 +56,7 @@ SELECTION:\n\
     -c <cmd>      select by command/image name (prefix/substring)\n\
     -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
     -a            AND the selectors together (default is OR)\n\
+    <path>        report processes holding <path> open (also +D/+d <path>)\n\
 \n\
 OUTPUT:\n\
     -n            do not resolve host names\n\

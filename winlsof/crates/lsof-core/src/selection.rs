@@ -45,6 +45,9 @@ pub struct Selection {
     pub no_port_resolve: bool,
     /// `-t`: terse output (PIDs only).
     pub terse: bool,
+    /// Bare path arguments / `+D` / `+d`: report only files whose name matches
+    /// one of these paths (used for "who has this file open" lookups).
+    pub paths: Vec<String>,
 }
 
 impl Selection {
@@ -80,9 +83,19 @@ impl Selection {
         }
     }
 
-    /// Whether a single file passes the `-i` Internet filter. Files are kept
-    /// when `-i` is not enabled.
+    /// Whether a single file passes the file-level filters (`-i` and path
+    /// matching). Kept when no file-level filter is active.
     fn file_matches(&self, f: &OpenFile) -> bool {
+        if !self.paths.is_empty() {
+            let name = f.name.to_ascii_lowercase();
+            let hit = self.paths.iter().any(|p| {
+                let p = p.to_ascii_lowercase();
+                name == p || name.starts_with(&p)
+            });
+            if !hit {
+                return false;
+            }
+        }
         if !self.inet.enabled {
             return true;
         }
@@ -130,8 +143,8 @@ impl Selection {
                 continue;
             }
             p.files.retain(|f| self.file_matches(f));
-            if self.inet.enabled && p.files.is_empty() {
-                // `-i` requires at least one matching socket.
+            if (self.inet.enabled || !self.paths.is_empty()) && p.files.is_empty() {
+                // `-i` and path lookups require at least one matching file.
                 continue;
             }
             out.push(p);
@@ -219,5 +232,20 @@ mod tests {
             ..Default::default()
         };
         assert!(sel.apply(mock::sample_processes()).is_empty());
+    }
+
+    #[test]
+    fn path_filter_keeps_only_matching_files() {
+        let sel = Selection {
+            paths: vec!["C:\\Users\\alice".into()],
+            ..Default::default()
+        };
+        let got = sel.apply(mock::sample_processes());
+        // Only the explorer cwd row matches that path prefix.
+        assert_eq!(got.len(), 1);
+        assert!(got[0]
+            .files
+            .iter()
+            .all(|f| f.name.starts_with("C:\\Users\\alice")));
     }
 }

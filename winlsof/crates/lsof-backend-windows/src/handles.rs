@@ -26,9 +26,10 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::time::Duration;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
-use windows_sys::Win32::Foundation::{DuplicateHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
 };
@@ -154,10 +155,18 @@ pub fn enumerate(elevated: bool) -> Vec<(u32, OpenFile)> {
         if query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File") {
             continue;
         }
-        if e.granted_access == HANG_PRONE_ACCESS {
-            continue; // would risk hanging on the name query
-        }
-        let Some(nt_name) = query_object_string(dup.raw(), OBJECT_NAME_INFORMATION) else {
+        let nt_name = if e.granted_access == HANG_PRONE_ACCESS {
+            // Resolve on a worker thread with a timeout, using a dedicated dup
+            // the worker owns and closes — so our `dup` drops safely even if the
+            // name query hangs (the documented risk for these handles).
+            match duplicate(source.raw(), e.handle_value as HANDLE, me) {
+                Some(worker) => name_with_timeout(worker.into_raw(), Duration::from_millis(100)),
+                None => None,
+            }
+        } else {
+            query_object_string(dup.raw(), OBJECT_NAME_INFORMATION)
+        };
+        let Some(nt_name) = nt_name else {
             continue; // unnamed (e.g. a socket/AFD handle) — listed via IP Helper
         };
         if nt_name.is_empty() {
@@ -274,6 +283,22 @@ fn duplicate(source: HANDLE, handle: HANDLE, me: HANDLE) -> Option<OwnedHandle> 
     } else {
         OwnedHandle::new(dup)
     }
+}
+
+/// Resolve a handle's object name on a worker thread, giving up after
+/// `timeout`. Takes ownership of `handle`: the worker closes it, so on a hang
+/// the handle (and thread) are abandoned rather than stalling enumeration.
+fn name_with_timeout(handle: HANDLE, timeout: Duration) -> Option<String> {
+    let handle_value = handle as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let handle = handle_value as HANDLE;
+        let name = query_object_string(handle, OBJECT_NAME_INFORMATION);
+        // SAFETY: this thread is the sole owner of `handle`; close it once.
+        unsafe { CloseHandle(handle) };
+        let _ = tx.send(name);
+    });
+    rx.recv_timeout(timeout).unwrap_or(None)
 }
 
 struct Described {

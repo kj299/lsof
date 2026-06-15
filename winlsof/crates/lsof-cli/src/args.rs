@@ -4,7 +4,9 @@
 //! `-u` (users), `-c` (command), `-a` (AND), `-n` / `-P` (no host/port resolve),
 //! `-t` (terse), `-F[fields]` (field output, `-F0` = NUL), `-J` / `-j` (JSON),
 //! and `-v` / `-h`. Flags may be clustered (e.g. `-ai`); value options take the
-//! rest of the token or the next argument (e.g. `-p123` or `-p 123`).
+//! rest of the token or the next argument (e.g. `-p123` or `-p 123`). A bare
+//! path argument, or `+D`/`+d <path>`, looks up which processes hold that path
+//! open.
 
 use lsof_core::render::Format;
 use lsof_core::{Protocol, Selection};
@@ -43,10 +45,34 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
             continue;
         }
 
+        if let Some(plus) = tok.strip_prefix('+') {
+            // `+d` / `+D <path>`: directory / path lookup.
+            let mut chars = plus.chars();
+            match chars.next() {
+                Some('d') | Some('D') => {
+                    let rest: String = chars.collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option +D requires a path".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    sel.paths.push(value);
+                }
+                _ => return Err(format!("unsupported option: {tok}")),
+            }
+            i += 1;
+            continue;
+        }
+
         let Some(body) = tok.strip_prefix('-') else {
-            return Err(format!(
-                "path/name arguments are not yet supported in this MVP: {tok:?}"
-            ));
+            // A bare argument is a path/name to look up.
+            sel.paths.push(tok.clone());
+            i += 1;
+            continue;
         };
         if body.is_empty() {
             return Err("a lone '-' is not a valid option".to_string());
@@ -279,6 +305,20 @@ mod tests {
         assert_eq!(repeat(&["-r5"]), Some(5));
         assert_eq!(repeat(&[]), None);
         assert!(parse(vec!["-rx".into()]).is_err());
+    }
+
+    fn paths(argv: &[&str]) -> Vec<String> {
+        match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { selection, .. } => selection.paths,
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_path_and_plus_d() {
+        assert_eq!(paths(&["C:\\f.txt"]), vec!["C:\\f.txt".to_string()]);
+        assert_eq!(paths(&["+D", "C:\\tmp"]), vec!["C:\\tmp".to_string()]);
+        assert_eq!(paths(&["+dC:\\x"]), vec!["C:\\x".to_string()]);
     }
 
     #[test]

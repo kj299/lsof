@@ -23,6 +23,14 @@ impl OwnedHandle {
     pub fn raw(&self) -> HANDLE {
         self.0
     }
+
+    /// Relinquish ownership, returning the raw handle without closing it. The
+    /// caller becomes responsible for closing it exactly once.
+    pub fn into_raw(self) -> HANDLE {
+        let h = self.0;
+        std::mem::forget(self);
+        h
+    }
 }
 
 impl Drop for OwnedHandle {

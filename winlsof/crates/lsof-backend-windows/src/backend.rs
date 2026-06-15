@@ -7,7 +7,7 @@ use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
-use crate::{handles, modules, privilege, process, sockets};
+use crate::{handles, modules, peb, privilege, process, restart, sockets};
 
 /// winlsof's native Windows data source.
 pub struct WindowsBackend {
@@ -58,17 +58,27 @@ impl Backend for WindowsBackend {
         "windows"
     }
 
-    fn gather(&self, _sel: &Selection) -> Result<Vec<Process>, BackendError> {
+    fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         let mut procs = process::enumerate();
+
+        // Path lookup mode (bare path / `+D`): Restart Manager finds the
+        // processes holding each path open, and works without elevation.
+        if !sel.paths.is_empty() {
+            let by_pid: HashMap<u32, Process> = procs.into_iter().map(|p| (p.pid, p)).collect();
+            return Ok(restart::lookup(&sel.paths, &by_pid));
+        }
+
         let mut idx: HashMap<u32, usize> = HashMap::with_capacity(procs.len());
         for (i, p) in procs.iter().enumerate() {
             idx.insert(p.pid, i);
         }
 
-        // txt/mem: the loaded image and libraries for each process.
+        // cwd + txt/mem for each process.
         for p in procs.iter_mut() {
-            let mods = modules::enumerate(p.pid);
-            p.files.extend(mods);
+            if let Some(cwd) = peb::cwd(p.pid) {
+                p.files.push(cwd);
+            }
+            p.files.extend(modules::enumerate(p.pid));
         }
 
         for (pid, file) in sockets::collect() {
