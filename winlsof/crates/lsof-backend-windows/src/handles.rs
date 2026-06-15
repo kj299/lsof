@@ -118,7 +118,12 @@ struct SystemHandleInformationEx {
 /// Enumerate open file handles as `(owning_pid, OpenFile)` pairs. When `wanted`
 /// is `Some`, only handles owned by those PIDs are inspected — so the expensive
 /// per-handle duplication is skipped for processes the user didn't ask about.
-pub fn enumerate(elevated: bool, wanted: Option<&HashSet<u32>>) -> Vec<(u32, OpenFile)> {
+/// With `verbose`, the count of processes that couldn't be opened is reported.
+pub fn enumerate(
+    elevated: bool,
+    wanted: Option<&HashSet<u32>>,
+    verbose: bool,
+) -> Vec<(u32, OpenFile)> {
     // Least privilege: only request SeDebugPrivilege when already elevated, and
     // only for this function (the guard drops it on return).
     let _guard = if elevated {
@@ -196,6 +201,15 @@ pub fn enumerate(elevated: bool, wanted: Option<&HashSet<u32>>) -> Vec<(u32, Ope
                 socket: None,
             },
         ));
+    }
+
+    if verbose {
+        let inaccessible = proc_cache.values().filter(|v| v.is_none()).count();
+        if inaccessible > 0 {
+            eprintln!(
+                "lsof: {inaccessible} process(es) not accessible (try running as Administrator)"
+            );
+        }
     }
     out
 }

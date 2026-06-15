@@ -16,16 +16,70 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
+use crate::resolve;
+
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
-/// Gather every TCP and UDP endpoint as `(owning_pid, OpenFile)` pairs.
-pub fn collect() -> Vec<(u32, OpenFile)> {
+/// Gather every TCP and UDP endpoint as `(owning_pid, OpenFile)` pairs, with the
+/// NAME field resolved per the `-n` (host) and `-P` (port) flags.
+pub fn collect(no_host: bool, no_port: bool) -> Vec<(u32, OpenFile)> {
     let mut out = Vec::new();
     out.extend(tcp4());
     out.extend(tcp6());
     out.extend(udp4());
     out.extend(udp6());
+    for (_pid, f) in out.iter_mut() {
+        let name = match &f.socket {
+            Some(sock) => format_socket(sock, no_host, no_port),
+            None => continue,
+        };
+        f.name = name;
+    }
     out
+}
+
+/// Build the lsof NAME for a socket, honoring host/port resolution flags.
+fn format_socket(sock: &SocketInfo, no_host: bool, no_port: bool) -> String {
+    let mut s = endpoint(sock.local, sock.protocol, no_host, no_port);
+    if let Some(r) = sock.remote {
+        if !(r.ip().is_unspecified() && r.port() == 0) {
+            s.push_str("->");
+            s.push_str(&endpoint(Some(r), sock.protocol, no_host, no_port));
+        }
+    }
+    if let Some(st) = sock.state {
+        s.push_str(" (");
+        s.push_str(st.as_str());
+        s.push(')');
+    }
+    s
+}
+
+/// Format a single `host:port`, resolving each part unless suppressed.
+fn endpoint(addr: Option<SocketAddr>, proto: Protocol, no_host: bool, no_port: bool) -> String {
+    let Some(addr) = addr else {
+        return "*:*".to_string();
+    };
+    let host = if addr.ip().is_unspecified() {
+        "*".to_string()
+    } else if no_host {
+        host_numeric(addr.ip())
+    } else {
+        resolve::host_name(addr.ip()).unwrap_or_else(|| host_numeric(addr.ip()))
+    };
+    let port = if addr.port() == 0 {
+        "*".to_string()
+    } else {
+        lsof_core::service::format_port(addr.port(), proto, no_port)
+    };
+    format!("{host}:{port}")
+}
+
+fn host_numeric(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("[{v6}]"),
+    }
 }
 
 /// Run the two-call (size, then fetch) pattern, retrying if the table grows, and

@@ -61,9 +61,9 @@ impl Backend for WindowsBackend {
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         let mut procs = process::enumerate();
 
-        // Path lookup mode (bare path / `+D`): Restart Manager finds the
-        // processes holding each path open, and works without elevation.
-        if !sel.paths.is_empty() {
+        // Bare-file path lookup via Restart Manager (unprivileged, exact) — but
+        // a `+D`/`+d` directory tree needs full enumeration, so it falls through.
+        if !sel.paths.is_empty() && !sel.has_dir_trees() {
             let by_pid: HashMap<u32, Process> = procs.into_iter().map(|p| (p.pid, p)).collect();
             return Ok(restart::lookup(&sel.paths, &by_pid));
         }
@@ -107,14 +107,14 @@ impl Backend for WindowsBackend {
             }
         }
 
-        for (pid, file) in sockets::collect() {
+        for (pid, file) in sockets::collect(sel.no_host_resolve, sel.no_port_resolve) {
             if wanted(pid) {
                 attach(&mut procs, &mut idx, pid, file);
             }
         }
 
         if !inet_only {
-            for (pid, file) in handles::enumerate(self.elevated, restrict.as_ref()) {
+            for (pid, file) in handles::enumerate(self.elevated, restrict.as_ref(), sel.verbose) {
                 attach(&mut procs, &mut idx, pid, file);
             }
         }

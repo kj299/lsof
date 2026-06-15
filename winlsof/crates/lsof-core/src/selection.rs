@@ -13,7 +13,7 @@
 //!   intent of `lsof -i ...`; see README for the deviation from classic OR.)
 //! * With no selectors at all, every process and file is listed.
 
-use crate::model::{OpenFile, Process, Protocol};
+use crate::model::{FdType, OpenFile, Process, Protocol};
 
 /// Parsed `-i` Internet filter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,6 +28,57 @@ pub struct InetFilter {
     pub port: Option<u16>,
     /// Restrict to a host substring (matched against the numeric address text).
     pub host: Option<String>,
+}
+
+/// A `-d` file-descriptor filter: which FD slots to include / exclude.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FdFilter {
+    pub include: Vec<FdSpec>,
+    pub exclude: Vec<FdSpec>,
+}
+
+/// One `-d` term.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FdSpec {
+    /// A special FD kind (`cwd`, `rtd`, `txt`, `mem`).
+    Named(FdKind),
+    /// A single numeric handle value.
+    Num(u64),
+    /// An inclusive numeric handle-value range.
+    Range(u64, u64),
+}
+
+/// The named FD kinds selectable with `-d`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FdKind {
+    Cwd,
+    Rtd,
+    Txt,
+    Mem,
+}
+
+impl FdSpec {
+    fn matches(&self, fd: &FdType) -> bool {
+        match (self, fd) {
+            (FdSpec::Named(FdKind::Cwd), FdType::Cwd) => true,
+            (FdSpec::Named(FdKind::Rtd), FdType::Root) => true,
+            (FdSpec::Named(FdKind::Txt), FdType::Txt) => true,
+            (FdSpec::Named(FdKind::Mem), FdType::Mem) => true,
+            (FdSpec::Num(n), FdType::Handle(h)) => h == n,
+            (FdSpec::Range(a, b), FdType::Handle(h)) => h >= a && h <= b,
+            _ => false,
+        }
+    }
+}
+
+impl FdFilter {
+    /// Whether `fd` passes the filter (exclusions win; an empty include = all).
+    fn matches(&self, fd: &FdType) -> bool {
+        if self.exclude.iter().any(|s| s.matches(fd)) {
+            return false;
+        }
+        self.include.is_empty() || self.include.iter().any(|s| s.matches(fd))
+    }
 }
 
 /// The full set of user-specified filters for one run.
@@ -45,9 +96,16 @@ pub struct Selection {
     pub no_port_resolve: bool,
     /// `-t`: terse output (PIDs only).
     pub terse: bool,
-    /// Bare path arguments / `+D` / `+d`: report only files whose name matches
-    /// one of these paths (used for "who has this file open" lookups).
+    /// `-V`: verbose — report inaccessible processes and unmatched search items.
+    pub verbose: bool,
+    /// Bare path arguments: report files whose name equals one of these
+    /// (resolved efficiently via Restart Manager when possible).
     pub paths: Vec<String>,
+    /// `+D` / `+d` directory arguments: report files whose name is under one of
+    /// these directory prefixes (requires full enumeration).
+    pub dir_trees: Vec<String>,
+    /// `-d`: file-descriptor filter.
+    pub fd_filter: Option<FdFilter>,
 }
 
 impl Selection {
@@ -95,16 +153,36 @@ impl Selection {
         self.has_proc_selector()
     }
 
-    /// Whether a single file passes the file-level filters (`-i` and path
-    /// matching). Kept when no file-level filter is active.
+    /// Whether any path / directory-tree filter was given.
+    pub fn has_path_filter(&self) -> bool {
+        !self.paths.is_empty() || !self.dir_trees.is_empty()
+    }
+
+    /// Whether a `+D`/`+d` directory filter was given — which forces full
+    /// enumeration rather than the Restart Manager fast path.
+    pub fn has_dir_trees(&self) -> bool {
+        !self.dir_trees.is_empty()
+    }
+
+    /// Whether a single file passes the file-level filters (`-d`, `-i`, and
+    /// path / directory matching). Kept when no file-level filter is active.
     fn file_matches(&self, f: &OpenFile) -> bool {
-        if !self.paths.is_empty() {
+        if let Some(fd) = &self.fd_filter {
+            if !fd.matches(&f.fd) {
+                return false;
+            }
+        }
+        if self.has_path_filter() {
             let name = f.name.to_ascii_lowercase();
-            let hit = self.paths.iter().any(|p| {
+            let exact = self.paths.iter().any(|p| {
                 let p = p.to_ascii_lowercase();
                 name == p || name.starts_with(&p)
             });
-            if !hit {
+            let under = self
+                .dir_trees
+                .iter()
+                .any(|d| under_dir(&name, &d.to_ascii_lowercase()));
+            if !(exact || under) {
                 return false;
             }
         }
@@ -155,14 +233,26 @@ impl Selection {
                 continue;
             }
             p.files.retain(|f| self.file_matches(f));
-            if (self.inet.enabled || !self.paths.is_empty()) && p.files.is_empty() {
-                // `-i` and path lookups require at least one matching file.
+            let needs_file =
+                self.inet.enabled || self.has_path_filter() || self.fd_filter.is_some();
+            if needs_file && p.files.is_empty() {
+                // `-i`, `-d`, and path lookups require at least one matching file.
                 continue;
             }
             out.push(p);
         }
         out
     }
+}
+
+/// Whether `name` is `dir` itself or a path beneath it (matching on a `\`
+/// boundary so `C:\foo` does not match `C:\foobar`).
+fn under_dir(name: &str, dir: &str) -> bool {
+    if name == dir {
+        return true;
+    }
+    let dir = dir.trim_end_matches('\\');
+    name.starts_with(dir) && name.as_bytes().get(dir.len()) == Some(&b'\\')
 }
 
 /// `-c` match: case-insensitive prefix or substring (lsof matches a leading
@@ -276,5 +366,52 @@ mod tests {
             .files
             .iter()
             .all(|f| f.name.starts_with("C:\\Users\\alice")));
+    }
+
+    #[test]
+    fn dir_tree_matches_on_boundary() {
+        let sel = Selection {
+            dir_trees: vec!["C:\\Users".into()],
+            ..Default::default()
+        };
+        let got = sel.apply(mock::sample_processes());
+        // C:\Users\alice is under C:\Users; C:\Windows\... is not.
+        assert_eq!(got.len(), 1);
+        assert!(got[0].files.iter().all(|f| f.name.starts_with("C:\\Users")));
+        // Boundary: a sibling prefix must not match.
+        assert!(!under_dir("c:\\usersdata\\x", "c:\\users"));
+        assert!(under_dir("c:\\users\\x", "c:\\users"));
+        assert!(under_dir("c:\\users", "c:\\users"));
+    }
+
+    #[test]
+    fn fd_filter_includes_and_excludes() {
+        use crate::model::FdType;
+        // Include only cwd.
+        let sel = Selection {
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Named(FdKind::Cwd)],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        };
+        let got = sel.apply(mock::sample_processes());
+        assert!(got
+            .iter()
+            .flat_map(|p| &p.files)
+            .all(|f| f.fd == FdType::Cwd));
+        // Exclude a numeric handle.
+        let sel = Selection {
+            fd_filter: Some(FdFilter {
+                include: vec![],
+                exclude: vec![FdSpec::Num(72)],
+            }),
+            ..Default::default()
+        };
+        let got = sel.apply(mock::sample_processes());
+        assert!(got
+            .iter()
+            .flat_map(|p| &p.files)
+            .all(|f| f.fd != FdType::Handle(72)));
     }
 }

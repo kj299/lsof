@@ -1,18 +1,22 @@
 //! lsof-compatible option parsing for the MVP switch set.
 //!
 //! Supported: `-p` (PIDs), `-i` (Internet, with `[46][proto][@host][:port]`),
-//! `-u` (users), `-c` (command), `-a` (AND), `-n` / `-P` (no host/port resolve),
-//! `-t` (terse), `-F[fields]` (field output, `-F0` = NUL), `-J` / `-j` (JSON),
+//! `-u` (users), `-c` (command), `-d` (FD filter), `-a` (AND), `-n` / `-P`
+//! (host/port resolution), `-R` (PPID column), `-t` (terse), `-V` (verbose),
+//! `-F[fields]` (field output, `-F0` = NUL), `-J` / `-j` (JSON), `-r` (repeat),
 //! and `-v` / `-h`. Flags may be clustered (e.g. `-ai`); value options take the
 //! rest of the token or the next argument (e.g. `-p123` or `-p 123`). A bare
-//! path argument, or `+D`/`+d <path>`, looks up which processes hold that path
-//! open.
+//! path argument is an exact-file lookup; `+D`/`+d <dir>` is a directory-tree
+//! lookup.
 
 use lsof_core::render::Format;
-use lsof_core::{Protocol, Selection};
+use lsof_core::{FdFilter, FdKind, FdSpec, Protocol, Selection};
 
 /// What the CLI should do after parsing.
 #[derive(Debug)]
+// Built once per invocation, then matched once — the size gap between the unit
+// variants and `Run` is irrelevant here, and boxing would only add an alloc.
+#[allow(clippy::large_enum_variant)]
 pub enum Action {
     Help,
     Version,
@@ -20,6 +24,7 @@ pub enum Action {
         selection: Selection,
         format: Format,
         repeat: Option<u64>,
+        show_ppid: bool,
     },
 }
 
@@ -30,6 +35,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     let mut want_help = false;
     let mut want_version = false;
     let mut repeat: Option<u64> = None;
+    let mut show_ppid = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -60,7 +66,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                         }
                         args[i].clone()
                     };
-                    sel.paths.push(value);
+                    sel.dir_trees.push(value);
                 }
                 _ => return Err(format!("unsupported option: {tok}")),
             }
@@ -102,12 +108,17 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 }
                 'J' => format = Format::Json,
                 'j' => format = Format::JsonLines,
-                'v' | 'V' => want_version = true,
+                'R' => show_ppid = true,
+                'v' => want_version = true,
+                'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
                 'F' => {
-                    let rest: String = chars[j + 1..].iter().collect();
+                    let rest: Vec<char> = chars[j + 1..].to_vec();
+                    let nul = rest.contains(&'0');
+                    let only: Vec<char> = rest.into_iter().filter(|c| *c != '0').collect();
                     format = Format::Fields {
-                        nul: rest.contains('0'),
+                        nul,
+                        only: (!only.is_empty()).then_some(only),
                     };
                     j = chars.len();
                     continue;
@@ -115,6 +126,21 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'i' => {
                     let rest: String = chars[j + 1..].iter().collect();
                     parse_inet(&mut sel, &rest)?;
+                    j = chars.len();
+                    continue;
+                }
+                'd' => {
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option -d requires a value".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    sel.fd_filter = Some(parse_fd_filter(&value)?);
                     j = chars.len();
                     continue;
                 }
@@ -150,7 +176,49 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
         selection: sel,
         format,
         repeat,
+        show_ppid,
     })
+}
+
+/// Parse a `-d` FD filter spec: comma-separated terms, each a named FD
+/// (`cwd`/`rtd`/`txt`/`mem`), a numeric handle, or a `a-b` range; a leading `^`
+/// excludes.
+fn parse_fd_filter(value: &str) -> Result<FdFilter, String> {
+    let mut filter = FdFilter::default();
+    for term in value.split(',').filter(|s| !s.is_empty()) {
+        let (exclude, body) = match term.strip_prefix('^') {
+            Some(rest) => (true, rest),
+            None => (false, term),
+        };
+        let spec = match body {
+            "cwd" => FdSpec::Named(FdKind::Cwd),
+            "rtd" => FdSpec::Named(FdKind::Rtd),
+            "txt" => FdSpec::Named(FdKind::Txt),
+            "mem" => FdSpec::Named(FdKind::Mem),
+            _ => {
+                if let Some((a, b)) = body.split_once('-') {
+                    let a = a
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid -d range: {body}"))?;
+                    let b = b
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid -d range: {body}"))?;
+                    FdSpec::Range(a, b)
+                } else {
+                    let n = body
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid -d term: {body}"))?;
+                    FdSpec::Num(n)
+                }
+            }
+        };
+        if exclude {
+            filter.exclude.push(spec);
+        } else {
+            filter.include.push(spec);
+        }
+    }
+    Ok(filter)
 }
 
 fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String> {
@@ -280,8 +348,27 @@ mod tests {
 
     #[test]
     fn field_and_json_formats() {
-        assert_eq!(run(&["-F0"]).1, Format::Fields { nul: true });
-        assert_eq!(run(&["-F"]).1, Format::Fields { nul: false });
+        assert_eq!(
+            run(&["-F0"]).1,
+            Format::Fields {
+                nul: true,
+                only: None
+            }
+        );
+        assert_eq!(
+            run(&["-F"]).1,
+            Format::Fields {
+                nul: false,
+                only: None
+            }
+        );
+        assert_eq!(
+            run(&["-Fn"]).1,
+            Format::Fields {
+                nul: false,
+                only: Some(vec!['n'])
+            }
+        );
         assert_eq!(run(&["-J"]).1, Format::Json);
         assert_eq!(run(&["-j"]).1, Format::JsonLines);
     }
@@ -314,11 +401,49 @@ mod tests {
         }
     }
 
+    fn dirs(argv: &[&str]) -> Vec<String> {
+        match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { selection, .. } => selection.dir_trees,
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn bare_path_and_plus_d() {
+    fn bare_path_vs_plus_d() {
         assert_eq!(paths(&["C:\\f.txt"]), vec!["C:\\f.txt".to_string()]);
-        assert_eq!(paths(&["+D", "C:\\tmp"]), vec!["C:\\tmp".to_string()]);
-        assert_eq!(paths(&["+dC:\\x"]), vec!["C:\\x".to_string()]);
+        assert!(dirs(&["C:\\f.txt"]).is_empty());
+        assert_eq!(dirs(&["+D", "C:\\tmp"]), vec!["C:\\tmp".to_string()]);
+        assert_eq!(dirs(&["+dC:\\x"]), vec!["C:\\x".to_string()]);
+        assert!(paths(&["+D", "C:\\tmp"]).is_empty());
+    }
+
+    #[test]
+    fn fd_filter_parsing() {
+        let (sel, _) = run(&["-d", "cwd,txt,1-3,^5"]);
+        let f = sel.fd_filter.expect("fd filter");
+        assert_eq!(
+            f.include,
+            vec![
+                FdSpec::Named(FdKind::Cwd),
+                FdSpec::Named(FdKind::Txt),
+                FdSpec::Range(1, 3),
+            ]
+        );
+        assert_eq!(f.exclude, vec![FdSpec::Num(5)]);
+        assert!(parse(vec!["-d".into(), "bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn ppid_and_verbose() {
+        let show_ppid = match parse(vec!["-R".into()]).unwrap() {
+            Action::Run { show_ppid, .. } => show_ppid,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert!(show_ppid);
+        let (sel, _) = run(&["-V"]);
+        assert!(sel.verbose);
+        // -v is version, distinct from -V (verbose).
+        assert!(matches!(parse(vec!["-v".into()]).unwrap(), Action::Version));
     }
 
     #[test]

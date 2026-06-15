@@ -5,7 +5,7 @@ use lsof_core::render::{fields, json, table};
 
 #[test]
 fn table_has_header_and_rows() {
-    let out = table::render(&sample_processes(), false);
+    let out = table::render(&sample_processes(), false, false);
     let header = out.lines().next().unwrap();
     for col in ["COMMAND", "PID", "USER", "FD", "TYPE", "NODE", "NAME"] {
         assert!(header.contains(col), "header missing {col}: {header:?}");
@@ -20,13 +20,13 @@ fn table_has_header_and_rows() {
 
 #[test]
 fn terse_lists_unique_pids() {
-    let out = table::render(&sample_processes(), true);
+    let out = table::render(&sample_processes(), true, false);
     assert_eq!(out, "1000\n1500\n");
 }
 
 #[test]
 fn fields_tokens() {
-    let out = fields::render(&sample_processes(), false);
+    let out = fields::render(&sample_processes(), false, None);
     assert!(out.contains("p1000\n"));
     assert!(out.contains("p1500\n"));
     assert!(out.contains("cexplorer.exe\n"));
@@ -37,8 +37,28 @@ fn fields_tokens() {
 }
 
 #[test]
+fn fields_only_restricts_output() {
+    // Request only the name field; structural p/f markers still appear.
+    let out = fields::render(&sample_processes(), false, Some(&['n']));
+    assert!(out.contains("p1000\n"));
+    assert!(out.contains("f"));
+    assert!(out.contains("nC:\\Users\\alice\n"));
+    // Command/type fields suppressed.
+    assert!(!out.contains("cexplorer.exe\n"));
+    assert!(!out.contains("tDIR\n"));
+}
+
+#[test]
+fn table_ppid_column() {
+    let out = table::render(&sample_processes(), false, true);
+    assert!(out.lines().next().unwrap().contains("PPID"));
+    // explorer.exe's ppid (4) shows up.
+    assert!(out.contains(" 4 ") || out.contains("   4 "));
+}
+
+#[test]
 fn fields_nul_terminator() {
-    let out = fields::render(&sample_processes(), true);
+    let out = fields::render(&sample_processes(), true, None);
     assert!(out.contains("p1000\0"));
     assert!(!out.contains('\n'));
 }

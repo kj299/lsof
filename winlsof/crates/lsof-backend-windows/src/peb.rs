@@ -1,15 +1,15 @@
 //! Current-directory (`cwd`) resolution by reading another process's PEB.
 //!
 //! Windows has no `/proc/<pid>/cwd`; the working directory lives in the
-//! process's PEB → `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory`. We obtain the
-//! PEB base via `NtQueryInformationProcess(ProcessBasicInformation)` and walk it
-//! with `ReadProcessMemory`, using the documented 64-bit field offsets.
+//! process's PEB → `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory`. We get the
+//! PEB base via `NtQueryInformationProcess` and walk it with `ReadProcessMemory`
+//! at the documented field offsets. Both 64-bit targets and 32-bit (WOW64)
+//! targets are handled — for WOW64 we use `ProcessWow64Information` to find the
+//! 32-bit PEB and read 32-bit pointers/offsets.
 //!
-//! This is strictly best-effort: it needs `PROCESS_QUERY_INFORMATION |
-//! PROCESS_VM_READ` on the target (so an unelevated run resolves its own
-//! processes), the offsets are for 64-bit processes, and any failure simply
-//! yields no `cwd` row. (Windows has no per-process root directory, so there is
-//! no `rtd` analog.)
+//! Best-effort: needs `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ` on the
+//! target, and any failure simply yields no `cwd` row. (Windows has no
+//! per-process root directory, so there is no `rtd` analog.)
 
 use std::ffi::c_void;
 use std::mem::{size_of, MaybeUninit};
@@ -24,10 +24,20 @@ use crate::util::OwnedHandle;
 const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
 const PROCESS_VM_READ: u32 = 0x0010;
 
-// 64-bit field offsets.
-const PEB_PROCESS_PARAMETERS: usize = 0x20;
-const RTLUPP_CURDIR_DOSPATH: usize = 0x38; // UNICODE_STRING: Length@+0, Buffer@+8
-const UNICODE_STRING_BUFFER: usize = 0x08;
+const PROCESS_BASIC_INFORMATION_CLASS: i32 = 0;
+const PROCESS_WOW64_INFORMATION_CLASS: i32 = 26;
+
+// 64-bit offsets: PEB.ProcessParameters, then CurrentDirectory.DosPath
+// (UNICODE_STRING: Length @ +0, 8-byte Buffer pointer @ +8).
+const PEB64_PARAMS: usize = 0x20;
+const RTLUPP64_CURDIR: usize = 0x38;
+const US64_BUFFER: usize = 0x08;
+
+// 32-bit (WOW64) offsets: PEB32.ProcessParameters, then CurrentDirectory.DosPath
+// (UNICODE_STRING32: Length @ +0, 4-byte Buffer pointer @ +4).
+const PEB32_PARAMS: usize = 0x10;
+const RTLUPP32_CURDIR: usize = 0x24;
+const US32_BUFFER: usize = 0x04;
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
@@ -57,43 +67,26 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
     let process = OwnedHandle::new(process)?;
 
-    let mut pbi: ProcessBasicInformation = unsafe { std::mem::zeroed() };
-    // SAFETY: class 0 (ProcessBasicInformation) fits the provided buffer.
-    let status = unsafe {
+    // A non-zero result means a 32-bit (WOW64) process, giving its PEB32 address.
+    let mut wow64_peb: usize = 0;
+    // SAFETY: writes one pointer-sized value into `wow64_peb`.
+    unsafe {
         NtQueryInformationProcess(
             process.raw(),
-            0,
-            &mut pbi as *mut _ as *mut c_void,
-            size_of::<ProcessBasicInformation>() as u32,
+            PROCESS_WOW64_INFORMATION_CLASS,
+            &mut wow64_peb as *mut _ as *mut c_void,
+            size_of::<usize>() as u32,
             std::ptr::null_mut(),
-        )
+        );
+    }
+
+    let raw = if wow64_peb != 0 {
+        read_cwd32(process.raw(), wow64_peb)?
+    } else {
+        read_cwd64(process.raw())?
     };
-    if status != 0 || pbi.peb_base_address.is_null() {
-        return None;
-    }
 
-    let peb = pbi.peb_base_address as usize;
-    let params: *mut c_void = read_pod(process.raw(), peb + PEB_PROCESS_PARAMETERS)?;
-    if params.is_null() {
-        return None;
-    }
-    let params = params as usize;
-
-    let length: u16 = read_pod(process.raw(), params + RTLUPP_CURDIR_DOSPATH)?;
-    let buffer: *mut u16 = read_pod(
-        process.raw(),
-        params + RTLUPP_CURDIR_DOSPATH + UNICODE_STRING_BUFFER,
-    )?;
-    if length == 0 || buffer.is_null() {
-        return None;
-    }
-
-    let bytes = read_bytes(process.raw(), buffer as usize, length as usize)?;
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let mut path = String::from_utf16_lossy(&units);
+    let mut path = raw;
     // The stored cwd usually ends with a separator; trim it (but keep `C:\`).
     while path.ends_with('\\') && path.len() > 3 {
         path.pop();
@@ -115,6 +108,58 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
         node: None,
         socket: None,
     })
+}
+
+/// 64-bit target: PEB → ProcessParameters → CurrentDirectory.DosPath.
+fn read_cwd64(handle: HANDLE) -> Option<String> {
+    let mut pbi: ProcessBasicInformation = unsafe { std::mem::zeroed() };
+    // SAFETY: class 0 (ProcessBasicInformation) fits the provided buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            handle,
+            PROCESS_BASIC_INFORMATION_CLASS,
+            &mut pbi as *mut _ as *mut c_void,
+            size_of::<ProcessBasicInformation>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != 0 || pbi.peb_base_address.is_null() {
+        return None;
+    }
+    let peb = pbi.peb_base_address as usize;
+    let params: u64 = read_pod(handle, peb + PEB64_PARAMS)?;
+    if params == 0 {
+        return None;
+    }
+    let params = params as usize;
+    let length: u16 = read_pod(handle, params + RTLUPP64_CURDIR)?;
+    let buffer: u64 = read_pod(handle, params + RTLUPP64_CURDIR + US64_BUFFER)?;
+    read_wide(handle, buffer as usize, length)
+}
+
+/// 32-bit (WOW64) target: PEB32 → ProcessParameters32 → CurrentDirectory.
+fn read_cwd32(handle: HANDLE, peb32: usize) -> Option<String> {
+    let params: u32 = read_pod(handle, peb32 + PEB32_PARAMS)?;
+    if params == 0 {
+        return None;
+    }
+    let params = params as usize;
+    let length: u16 = read_pod(handle, params + RTLUPP32_CURDIR)?;
+    let buffer: u32 = read_pod(handle, params + RTLUPP32_CURDIR + US32_BUFFER)?;
+    read_wide(handle, buffer as usize, length)
+}
+
+/// Read `length` bytes of UTF-16 at `addr` and decode to a `String`.
+fn read_wide(handle: HANDLE, addr: usize, length: u16) -> Option<String> {
+    if length == 0 || addr == 0 {
+        return None;
+    }
+    let bytes = read_bytes(handle, addr, length as usize)?;
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Some(String::from_utf16_lossy(&units))
 }
 
 /// Read a `Copy` value of type `T` from the target's address space.

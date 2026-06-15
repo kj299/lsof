@@ -1,16 +1,10 @@
 //! Default human-readable table renderer.
 //!
-//! Columns match classic lsof: `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE
-//! NAME`. Numeric columns (PID, SIZE/OFF) are right-aligned; the rest are
-//! left-aligned; columns are padded to the widest cell.
+//! Columns match classic lsof: `COMMAND PID [PPID] USER FD TYPE DEVICE SIZE/OFF
+//! NODE NAME` (PPID only with `-R`). Numeric columns are right-aligned; the rest
+//! are left-aligned; columns are padded to the widest cell.
 
-use crate::model::{AccessMode, FdType, OpenFile, Process};
-
-const HEADERS: [&str; 9] = [
-    "COMMAND", "PID", "USER", "FD", "TYPE", "DEVICE", "SIZE/OFF", "NODE", "NAME",
-];
-// Right-aligned columns by index (PID, SIZE/OFF).
-const RIGHT: [usize; 2] = [1, 6];
+use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
 
 /// Render the FD cell, e.g. `cwd`, `txt`, or `3u` (handle value + access char).
 fn fd_cell(f: &OpenFile) -> String {
@@ -37,20 +31,6 @@ fn size_off_cell(f: &OpenFile) -> String {
     }
 }
 
-fn row_for(p: &Process, f: &OpenFile) -> [String; 9] {
-    [
-        p.command.clone(),
-        p.pid.to_string(),
-        p.user.clone().unwrap_or_default(),
-        fd_cell(f),
-        f.file_type.code().to_string(),
-        f.device.clone().unwrap_or_default(),
-        size_off_cell(f),
-        f.node.clone().unwrap_or_default(),
-        f.name.clone(),
-    ]
-}
-
 /// `-t`: unique PIDs, ascending, one per line.
 fn render_terse(procs: &[Process]) -> String {
     let mut pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
@@ -64,21 +44,45 @@ fn render_terse(procs: &[Process]) -> String {
     s
 }
 
-/// Render `procs` as the default table (or terse list when `terse`).
-pub fn render(procs: &[Process], terse: bool) -> String {
+/// Render `procs` as the default table (or terse list when `terse`). `show_ppid`
+/// adds a PPID column after PID (lsof `-R`).
+pub fn render(procs: &[Process], terse: bool, show_ppid: bool) -> String {
     if terse {
         return render_terse(procs);
     }
 
-    let mut rows: Vec<[String; 9]> = Vec::new();
+    // Build the column header set (PPID optional).
+    let mut headers: Vec<&str> = vec!["COMMAND", "PID"];
+    if show_ppid {
+        headers.push("PPID");
+    }
+    headers.extend(["USER", "FD", "TYPE", "DEVICE", "SIZE/OFF", "NODE", "NAME"]);
+    let right = ["PID", "PPID", "SIZE/OFF"];
+
+    let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
+        let mut r = vec![p.command.clone(), p.pid.to_string()];
+        if show_ppid {
+            r.push(p.ppid.map(|v| v.to_string()).unwrap_or_default());
+        }
+        r.push(p.user.clone().unwrap_or_default());
+        r.push(fd_cell(f));
+        r.push(f.file_type.code().to_string());
+        r.push(f.device.clone().unwrap_or_default());
+        r.push(size_off_cell(f));
+        r.push(f.node.clone().unwrap_or_default());
+        r.push(f.name.clone());
+        r
+    };
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for p in procs {
         if p.files.is_empty() {
-            // A selected process with no displayed files still gets a line so
-            // it shows up (NAME left blank), mirroring lsof.
+            // A selected process with no displayed files still gets a line so it
+            // shows up (NAME left blank), mirroring lsof.
             let blank = OpenFile {
                 fd: FdType::Unknown,
                 access: AccessMode::Unknown,
-                file_type: crate::model::FileType::Unknown,
+                file_type: FileType::Unknown,
                 name: String::new(),
                 device: None,
                 size: None,
@@ -93,8 +97,8 @@ pub fn render(procs: &[Process], terse: bool) -> String {
         }
     }
 
-    // Column widths from headers + all cells (NAME is last; no trailing pad).
-    let mut widths = HEADERS.map(|h| h.len());
+    let ncols = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for r in &rows {
         for (i, cell) in r.iter().enumerate() {
             widths[i] = widths[i].max(cell.len());
@@ -102,26 +106,23 @@ pub fn render(procs: &[Process], terse: bool) -> String {
     }
 
     let mut out = String::new();
-    let emit = |out: &mut String, cells: &[String; 9]| {
+    let mut emit = |cells: &[String]| {
         for (i, cell) in cells.iter().enumerate() {
-            let last = i == cells.len() - 1;
-            if last {
-                out.push_str(cell);
-            } else if RIGHT.contains(&i) {
-                out.push_str(&format!("{cell:>width$}", width = widths[i]));
-                out.push(' ');
+            if i == ncols - 1 {
+                out.push_str(cell); // NAME: no trailing padding
+            } else if right.contains(&headers[i]) {
+                out.push_str(&format!("{cell:>width$} ", width = widths[i]));
             } else {
-                out.push_str(&format!("{cell:<width$}", width = widths[i]));
-                out.push(' ');
+                out.push_str(&format!("{cell:<width$} ", width = widths[i]));
             }
         }
         out.push('\n');
     };
 
-    let header_cells: [String; 9] = HEADERS.map(String::from);
-    emit(&mut out, &header_cells);
+    let header_cells: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
+    emit(&header_cells);
     for r in &rows {
-        emit(&mut out, r);
+        emit(r);
     }
     out
 }

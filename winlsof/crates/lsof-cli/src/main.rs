@@ -9,7 +9,7 @@ mod args;
 
 use args::{parse, Action};
 use lsof_core::render::{fields, json, table, Format};
-use lsof_core::Backend;
+use lsof_core::{Backend, Process, Selection};
 
 #[cfg(windows)]
 use lsof_backend_windows::WindowsBackend;
@@ -54,14 +54,17 @@ SELECTION:\n\
     -p <pids>     select by PID (comma/space separated)\n\
     -u <users>    select by owning user (comma separated)\n\
     -c <cmd>      select by command/image name (prefix/substring)\n\
+    -d <fds>      filter by FD: cwd,rtd,txt,mem, numbers, a-b ranges, ^exclude\n\
     -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
     -a            AND the selectors together (default is OR)\n\
-    <path>        report processes holding <path> open (also +D/+d <path>)\n\
+    <path>        exact-file lookup; +D/+d <dir> = directory-tree lookup\n\
 \n\
 OUTPUT:\n\
     -n            do not resolve host names\n\
-    -P            do not resolve port names\n\
+    -P            do not resolve port names (show numeric ports)\n\
+    -R            add a PPID (parent PID) column\n\
     -t            terse: PIDs only\n\
+    -V            verbose: report inaccessible / unmatched search items\n\
     -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
     -J            aggregated JSON object\n\
     -j            JSON Lines (one object per file)\n\
@@ -77,6 +80,25 @@ specific operations that need them.\n",
     )
 }
 
+/// `-V`: report `-p` PIDs and path/dir search items that matched nothing.
+fn report_unmatched(sel: &Selection, procs: &[Process]) {
+    for &pid in &sel.pids {
+        if !procs.iter().any(|p| p.pid == pid) {
+            eprintln!("lsof: PID {pid}: no matching open files");
+        }
+    }
+    for path in sel.paths.iter().chain(sel.dir_trees.iter()) {
+        let needle = path.to_ascii_lowercase();
+        let hit = procs.iter().flat_map(|p| &p.files).any(|f| {
+            let n = f.name.to_ascii_lowercase();
+            n == needle || n.starts_with(&needle)
+        });
+        if !hit {
+            eprintln!("lsof: {path}: no process found with it open");
+        }
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
@@ -89,7 +111,7 @@ fn main() {
         }
     };
 
-    let (selection, format, repeat) = match action {
+    let (selection, format, repeat, show_ppid) = match action {
         Action::Help => {
             print!("{}", usage());
             return;
@@ -105,7 +127,8 @@ fn main() {
             selection,
             format,
             repeat,
-        } => (selection, format, repeat),
+            show_ppid,
+        } => (selection, format, repeat, show_ppid),
     };
 
     let env = make_env();
@@ -121,7 +144,7 @@ fn main() {
     if !env.elevated
         && matches!(format, Format::Table)
         && !selection.inet.enabled
-        && selection.paths.is_empty()
+        && !selection.has_path_filter()
     {
         eprintln!(
             "lsof: showing your accessible processes; re-run as Administrator for a system-wide view"
@@ -137,9 +160,12 @@ fn main() {
             }
         };
         let procs = selection.apply(procs);
-        let out = match format {
-            Format::Table => table::render(&procs, selection.terse),
-            Format::Fields { nul } => fields::render(&procs, nul),
+        if selection.verbose {
+            report_unmatched(&selection, &procs);
+        }
+        let out = match &format {
+            Format::Table => table::render(&procs, selection.terse, show_ppid),
+            Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref()),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);
                 s.push('\n');

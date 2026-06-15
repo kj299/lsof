@@ -23,6 +23,8 @@ mod privilege;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
+mod resolve;
+#[cfg(windows)]
 mod restart;
 #[cfg(windows)]
 mod sockets;

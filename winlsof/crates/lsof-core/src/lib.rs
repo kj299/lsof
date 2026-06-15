@@ -18,7 +18,8 @@ pub mod mock;
 pub mod model;
 pub mod render;
 pub mod selection;
+pub mod service;
 
 pub use backend::{Backend, BackendError, Privilege};
 pub use model::{AccessMode, FdType, FileType, OpenFile, Process, Protocol, SocketInfo, TcpState};
-pub use selection::{InetFilter, Selection};
+pub use selection::{FdFilter, FdKind, FdSpec, InetFilter, Selection};
