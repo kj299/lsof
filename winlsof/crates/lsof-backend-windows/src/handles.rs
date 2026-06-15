@@ -27,7 +27,7 @@
 //! runs simply see fewer processes (the owner `OpenProcess` calls fail), exactly
 //! like lsof without root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::time::Duration;
 
@@ -115,8 +115,10 @@ struct SystemHandleInformationEx {
     handles: [SystemHandleTableEntryInfoEx; 1],
 }
 
-/// Enumerate open file handles as `(owning_pid, OpenFile)` pairs.
-pub fn enumerate(elevated: bool) -> Vec<(u32, OpenFile)> {
+/// Enumerate open file handles as `(owning_pid, OpenFile)` pairs. When `wanted`
+/// is `Some`, only handles owned by those PIDs are inspected — so the expensive
+/// per-handle duplication is skipped for processes the user didn't ask about.
+pub fn enumerate(elevated: bool, wanted: Option<&HashSet<u32>>) -> Vec<(u32, OpenFile)> {
     // Least privilege: only request SeDebugPrivilege when already elevated, and
     // only for this function (the guard drops it on return).
     let _guard = if elevated {
@@ -151,6 +153,12 @@ pub fn enumerate(elevated: bool) -> Vec<(u32, OpenFile)> {
         let pid = e.unique_process_id as u32;
         if pid == 0 {
             continue;
+        }
+        // Scope to the requested processes before the costly dup + NtQueryObject.
+        if let Some(w) = wanted {
+            if !w.contains(&pid) {
+                continue;
+            }
         }
         let source = proc_cache.entry(pid).or_insert_with(|| open_for_dup(pid));
         let Some(source) = source.as_ref() else {

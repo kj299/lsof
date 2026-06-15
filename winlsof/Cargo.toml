@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2021"
 license = "LicenseRef-lsof"
 repository = "https://github.com/kj299/lsof"
-rust-version = "1.74"
+rust-version = "1.82"
 
 [profile.release]
 lto = true

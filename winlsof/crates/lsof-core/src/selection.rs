@@ -83,6 +83,18 @@ impl Selection {
         }
     }
 
+    /// Whether `p` passes the process-level selectors (`-p` / `-u` / `-c`),
+    /// ignoring file-level filters. Backends use this to scope expensive
+    /// per-process work to the processes that could be selected.
+    pub fn selects_process(&self, p: &Process) -> bool {
+        self.proc_matches(p)
+    }
+
+    /// Whether any process-level selector (`-p` / `-u` / `-c`) was given.
+    pub fn has_process_selector(&self) -> bool {
+        self.has_proc_selector()
+    }
+
     /// Whether a single file passes the file-level filters (`-i` and path
     /// matching). Kept when no file-level filter is active.
     fn file_matches(&self, f: &OpenFile) -> bool {
@@ -220,6 +232,23 @@ mod tests {
                 })
                 .unwrap_or(false)
         }));
+    }
+
+    #[test]
+    fn selects_process_proc_level_only() {
+        let procs = mock::sample_processes();
+        let sel = Selection {
+            commands: vec!["server".into()],
+            ..Default::default()
+        };
+        assert!(sel.has_process_selector());
+        let matched: Vec<u32> = procs
+            .iter()
+            .filter(|p| sel.selects_process(p))
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(matched, vec![1500]);
+        assert!(!Selection::default().has_process_selector());
     }
 
     #[test]

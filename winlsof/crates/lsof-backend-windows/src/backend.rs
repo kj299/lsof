@@ -1,7 +1,7 @@
 //! The Windows [`Backend`] implementation: enumerate processes, then attach the
 //! sockets (and, in Phase 3, the file handles) they own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{OpenFile, Process};
@@ -68,20 +68,38 @@ impl Backend for WindowsBackend {
             return Ok(restart::lookup(&sel.paths, &by_pid));
         }
 
+        // Scope the expensive per-process work (handle duplication, module/PEB
+        // snapshots) to the processes the process-level selectors can match, so
+        // `lsof -p/-c/-u …` doesn't enumerate the whole system. `None` means no
+        // process selector was given — inspect everything.
+        let restrict: Option<HashSet<u32>> = if sel.has_process_selector() {
+            Some(
+                procs
+                    .iter()
+                    .filter(|p| sel.selects_process(p))
+                    .map(|p| p.pid)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let wanted = |pid: u32| restrict.as_ref().is_none_or(|s| s.contains(&pid));
+
         let mut idx: HashMap<u32, usize> = HashMap::with_capacity(procs.len());
         for (i, p) in procs.iter().enumerate() {
             idx.insert(p.pid, i);
         }
 
         // `-i` is a network-only query: gather only sockets, which need no
-        // elevation. Skipping cwd/modules/handle enumeration preserves the
-        // least-privilege guarantee (no SeDebugPrivilege for `-i`) and avoids
-        // needless work.
+        // elevation — preserving the least-privilege guarantee.
         let inet_only = sel.inet.enabled;
 
         if !inet_only {
-            // cwd + txt/mem for each process.
+            // cwd + txt/mem for each in-scope process.
             for p in procs.iter_mut() {
+                if !wanted(p.pid) {
+                    continue;
+                }
                 if let Some(cwd) = peb::cwd(p.pid) {
                     p.files.push(cwd);
                 }
@@ -90,11 +108,13 @@ impl Backend for WindowsBackend {
         }
 
         for (pid, file) in sockets::collect() {
-            attach(&mut procs, &mut idx, pid, file);
+            if wanted(pid) {
+                attach(&mut procs, &mut idx, pid, file);
+            }
         }
 
         if !inet_only {
-            for (pid, file) in handles::enumerate(self.elevated) {
+            for (pid, file) in handles::enumerate(self.elevated, restrict.as_ref()) {
                 attach(&mut procs, &mut idx, pid, file);
             }
         }
