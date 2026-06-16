@@ -1,0 +1,25 @@
+# winlsof — a memory-safe, Windows-native reimplementation of lsof, in Rust.
+#
+# This Cargo workspace lives alongside the original C lsof tree (it does not
+# modify or build it). The portable core (`lsof-core`) builds and is unit-tested
+# on any platform; the Windows data-acquisition backend is compiled and tested by
+# CI on `windows-latest`. See README.md and ../docs for the design and the plan.
+[workspace]
+resolver = "2"
+members = [
+    "crates/lsof-core",
+    "crates/lsof-cli",
+    "crates/lsof-backend-windows",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-lsof"
+repository = "https://github.com/kj299/lsof"
+rust-version = "1.82"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

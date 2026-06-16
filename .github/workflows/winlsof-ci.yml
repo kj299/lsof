@@ -1,0 +1,53 @@
+name: winlsof CI
+
+# CI for the Rust, memory-safe, Windows-native lsof rewrite under winlsof/.
+# The portable core builds and tests on Linux; the native Windows backend is
+# built and tested on a real windows-latest runner (the paths that can't be
+# linked off-Windows).
+on:
+  push:
+    paths:
+      - 'winlsof/**'
+      - '.github/workflows/winlsof-ci.yml'
+  pull_request:
+    paths:
+      - 'winlsof/**'
+      - '.github/workflows/winlsof-ci.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: winlsof
+
+jobs:
+  core-linux:
+    name: core + lints (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test (portable core + CLI via mock backend)
+        run: cargo test --all
+
+  windows:
+    name: native backend (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: clippy (windows)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: build (native Win32 backend)
+        run: cargo build --all
+      - name: test
+        run: cargo test --all

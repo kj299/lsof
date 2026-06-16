@@ -1,0 +1,15 @@
+[package]
+name = "lsof-core"
+description = "Platform-agnostic core for a memory-safe, Windows-native lsof: data model, selection engine, output renderers (table / -F field / JSON), and the Backend trait that platform dialects implement."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The portable core is pure safe Rust with zero external dependencies, so it
+# builds and tests fully offline on any host.
+
+[lints.rust]
+unsafe_code = "forbid"

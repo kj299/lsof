@@ -1,0 +1,22 @@
+[package]
+name = "lsof-cli"
+description = "Command-line front end for winlsof — parses lsof-compatible options and renders the table / -F / JSON output. Produces the `lsof` binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "lsof"
+path = "src/main.rs"
+
+[dependencies]
+lsof-core = { path = "../lsof-core" }
+
+# The real backend is only linked on Windows; elsewhere the CLI falls back to the
+# mock backend so the parse -> select -> render pipeline runs (and is testable)
+# on any host.
+[target.'cfg(windows)'.dependencies]
+lsof-backend-windows = { path = "../lsof-backend-windows" }
