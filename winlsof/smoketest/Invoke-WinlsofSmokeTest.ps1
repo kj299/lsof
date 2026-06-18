@@ -62,11 +62,19 @@ Write-Host "Elevated  : $IsAdmin   Coverage: $([bool]$Coverage)`n"
 # Build
 # ---------------------------------------------------------------------------
 $BuildProfile = if ($Coverage) { 'debug' } else { 'release' }
+if (-not $SkipBuild -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "cargo is not on PATH. Install Rust from https://rustup.rs and open a new shell, or pass -SkipBuild after placing a prebuilt lsof.exe at target\$BuildProfile\lsof.exe (you can download one from the PR's CI 'lsof-exe-windows' artifact)."
+}
 if (-not $SkipBuild) {
     Push-Location $Workspace
     try {
         if ($Coverage) {
-            & rustup component add llvm-tools-preview *> $null
+            if (Get-Command rustup -ErrorAction SilentlyContinue) {
+                & rustup component add llvm-tools-preview *> $null
+            }
+            else {
+                Write-Host "rustup not on PATH; skipping llvm-tools-preview install (coverage report may be skipped)." -ForegroundColor Yellow
+            }
             $env:RUSTFLAGS = '-C instrument-coverage'
             & cargo build
         }

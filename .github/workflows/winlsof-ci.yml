@@ -51,3 +51,11 @@ jobs:
         run: cargo build --all
       - name: test
         run: cargo test --all
+      - name: build release binary
+        run: cargo build --release --bin lsof
+      - name: upload lsof.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsof-exe-windows
+          path: winlsof/target/release/lsof.exe
+          if-no-files-found: error
