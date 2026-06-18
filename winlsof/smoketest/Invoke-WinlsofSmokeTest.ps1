@@ -411,7 +411,7 @@ if ($fail -gt 0) {
     $Results | Where-Object Status -eq 'FAIL' | ForEach-Object { Write-Host "  - $($_.Name): $($_.Detail)" -ForegroundColor Red }
 }
 if (-not $IsAdmin) {
-    Write-Host "`nNote: not elevated — re-run from an Administrator prompt for the system-wide cases." -ForegroundColor Yellow
+    Write-Host "`nNote: not elevated - re-run from an Administrator prompt for the system-wide cases." -ForegroundColor Yellow
 }
 
 Stop-Transcript | Out-Null
