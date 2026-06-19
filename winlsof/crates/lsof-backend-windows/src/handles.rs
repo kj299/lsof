@@ -44,7 +44,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
 
 use crate::privilege::PrivilegeGuard;
-use crate::util::{wide_to_string, OwnedHandle};
+use crate::util::{trace, wide_to_string, OwnedHandle};
 
 // --- NT functions (declared directly against ntdll to avoid binding churn) ---
 
@@ -159,11 +159,14 @@ pub fn enumerate(
     // classify handles without a per-handle NtQueryObject(type) — that call can
     // block forever on synchronous handles (console/pipe/device), which is what
     // made `lsof -p`/`-t` hang.
+    trace("handles: nul_probe");
     let probe = nul_probe();
 
+    trace("handles: query_all_handles start");
     let Some(buf) = query_all_handles() else {
         return Vec::new();
     };
+    trace("handles: query_all_handles done");
 
     // SAFETY: the buffer is 8-byte aligned (Vec<u64>) and was filled by the API
     // with a SystemHandleInformationEx header followed by `number_of_handles`
@@ -185,6 +188,9 @@ pub fn enumerate(
     let dos_map = build_dos_map();
     let mut proc_cache: HashMap<u32, Option<OwnedHandle>> = HashMap::new();
     let mut out = Vec::new();
+    trace(&format!(
+        "handles: scanning {count} entries (file_index={file_index:?})"
+    ));
 
     for e in entries {
         let pid = e.unique_process_id as u32;
@@ -244,6 +250,7 @@ pub fn enumerate(
             },
         ));
     }
+    trace(&format!("handles: scan done ({} file handles)", out.len()));
 
     if verbose {
         let inaccessible = proc_cache.values().filter(|v| v.is_none()).count();

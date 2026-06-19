@@ -7,6 +7,7 @@ use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
+use crate::util::trace;
 use crate::{handles, mapped, modules, peb, privilege, process, restart, sockets};
 
 /// winlsof's native Windows data source.
@@ -59,13 +60,21 @@ impl Backend for WindowsBackend {
     }
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
+        trace("gather: process::enumerate start");
         let mut procs = process::enumerate();
+        trace(&format!(
+            "gather: process::enumerate done ({} procs)",
+            procs.len()
+        ));
 
         // Bare-file path lookup via Restart Manager (unprivileged, exact) — but
         // a `+D`/`+d` directory tree needs full enumeration, so it falls through.
         if !sel.paths.is_empty() && !sel.has_dir_trees() {
+            trace("gather: restart::lookup (bare path) start");
             let by_pid: HashMap<u32, Process> = procs.into_iter().map(|p| (p.pid, p)).collect();
-            return Ok(restart::lookup(&sel.paths, &by_pid));
+            let r = restart::lookup(&sel.paths, &by_pid);
+            trace("gather: restart::lookup done");
+            return Ok(r);
         }
 
         // Scope the expensive per-process work (handle duplication, module/PEB
@@ -96,31 +105,54 @@ impl Backend for WindowsBackend {
 
         if !inet_only {
             // cwd + txt/mem (modules) + mapped data files, for each in-scope process.
+            trace("gather: build_dos_map start");
             let dos_map = handles::build_dos_map();
+            trace(&format!(
+                "gather: build_dos_map done ({} volumes)",
+                dos_map.len()
+            ));
+            trace("gather: per-process (cwd/modules/mapped) start");
             for p in procs.iter_mut() {
                 if !wanted(p.pid) {
                     continue;
                 }
+                trace(&format!("  cwd pid={}", p.pid));
                 if let Some(cwd) = peb::cwd(p.pid) {
                     p.files.push(cwd);
                 }
+                trace(&format!("  modules pid={}", p.pid));
                 p.files.extend(modules::enumerate(p.pid));
+                trace(&format!("  mapped pid={}", p.pid));
                 p.files.extend(mapped::enumerate(p.pid, &dos_map));
             }
+            trace("gather: per-process done");
         }
 
-        for (pid, file) in sockets::collect(sel.no_host_resolve, sel.no_port_resolve) {
+        trace("gather: sockets::collect start");
+        let socks = sockets::collect(sel.no_host_resolve, sel.no_port_resolve);
+        trace(&format!(
+            "gather: sockets::collect done ({} endpoints)",
+            socks.len()
+        ));
+        for (pid, file) in socks {
             if wanted(pid) {
                 attach(&mut procs, &mut idx, pid, file);
             }
         }
 
         if !inet_only {
-            for (pid, file) in handles::enumerate(self.elevated, restrict.as_ref(), sel.verbose) {
+            trace("gather: handles::enumerate start");
+            let hs = handles::enumerate(self.elevated, restrict.as_ref(), sel.verbose);
+            trace(&format!(
+                "gather: handles::enumerate done ({} handles)",
+                hs.len()
+            ));
+            for (pid, file) in hs {
                 attach(&mut procs, &mut idx, pid, file);
             }
         }
 
+        trace("gather: done");
         Ok(procs)
     }
 }
