@@ -120,6 +120,10 @@ function Invoke-Lsof {
     # rather than freezing the whole harness for hours.
     $p = Start-Process -FilePath $Bin -ArgumentList $LsofArgs -NoNewWindow -PassThru `
         -RedirectStandardOutput $outF -RedirectStandardError $errF
+    # Cache the process handle while it's alive. Without this, a -PassThru process
+    # object's .ExitCode reads back as $null after exit (a long-standing
+    # Start-Process quirk), which would make every exit-code assertion bogus.
+    $null = $p.Handle
     if (-not $p.WaitForExit($TimeoutSec * 1000)) {
         try { $p.Kill() } catch {}
         try { [void]$p.WaitForExit(5000) } catch {}

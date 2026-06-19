@@ -99,6 +99,11 @@ pub fn render(procs: &[Process], terse: bool, show_ppid: bool, show_offset: bool
         }
     }
 
+    // Nothing matched: emit nothing at all (no bare header), like lsof.
+    if rows.is_empty() {
+        return String::new();
+    }
+
     let ncols = headers.len();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for r in &rows {

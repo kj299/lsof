@@ -19,6 +19,14 @@ fn table_has_header_and_rows() {
 }
 
 #[test]
+fn table_empty_when_nothing_matches() {
+    // No matching processes -> no output at all (not even a bare header),
+    // matching lsof. Regression guard for `lsof -a -p <pid> -c <nomatch>`.
+    assert_eq!(table::render(&[], false, false, false), "");
+    assert_eq!(table::render(&[], false, true, false), "");
+}
+
+#[test]
 fn terse_lists_unique_pids() {
     let out = table::render(&sample_processes(), true, false, false);
     assert_eq!(out, "1000\n1500\n");
