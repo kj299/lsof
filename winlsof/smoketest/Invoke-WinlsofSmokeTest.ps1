@@ -184,7 +184,9 @@ try {
 
     # Memory-mapped DATA file (mem via mapped.rs).
     $fx.MapPath = Join-Path $env:TEMP ("winlsof_map_{0}.bin" -f $self)
-    [System.IO.File]::WriteAllBytes($fx.MapPath, [byte[]](1..4096))
+    # 4096-byte buffer. NB: [byte[]](1..4096) overflows -- a [byte] holds 0-255,
+    # so casting a 1..4096 range throws "Cannot convert value 256 to System.Byte".
+    [System.IO.File]::WriteAllBytes($fx.MapPath, [byte[]]::new(4096))
     $fx.Mmf = [System.IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile($fx.MapPath, 'Open', "winlsofmap$self")
     $fx.View = $fx.Mmf.CreateViewAccessor()
 
