@@ -121,5 +121,9 @@ red lines.
   `finally` block; child `cmd.exe` processes are hidden and killed at the end.
 - Queries are scoped (`-p <pid>`, `-i :port`) wherever possible, so handle
   enumeration stays bounded and avoids the `NtQueryObject` hang class by design.
+- Every case has a **hard per-invocation timeout** (`Invoke-Lsof -TimeoutSec`,
+  default 60s): if `lsof.exe` ever wedges, the harness kills it and records the
+  case as `FAIL` ("possible hang") instead of freezing — so a regression turns
+  into a fast, actionable signal rather than a stuck run.
 - The harness never elevates itself; run it elevated yourself for the system-wide
   cases.

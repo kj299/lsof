@@ -13,13 +13,13 @@
 //!    drive letter via `QueryDosDeviceW`, and read size / file-index via
 //!    `GetFileInformationByHandle`.
 //!
-//! Names: disk files use `GetFinalPathNameByHandleW` (robust, hang-free, and it
-//! yields a clean DOS path); char devices and named pipes fall back to
-//! `NtQueryObject(ObjectNameInformation)`, which can block on synchronous
-//! handles — so for the hang-prone access mask (`0x0012019F`) that query runs on
-//! a worker thread under a timeout. Only true socket/AFD handles are dropped
-//! (IP Helper lists those); every other File handle is emitted, with a
-//! placeholder name if it can't be resolved.
+//! Names: disk files use `GetFinalPathNameByHandleW` (robust and hang-free,
+//! yielding a clean DOS path); char devices, named pipes, and the disk fallback
+//! resolve via `NtQueryObject(ObjectNameInformation)`, which can block forever on
+//! synchronous handles — so *every* name query runs on a worker thread under a
+//! timeout (a hung query is abandoned, never allowed to freeze enumeration).
+//! Only true socket/AFD handles are dropped (IP Helper lists those); every other
+//! File handle is emitted, with a placeholder name if it can't be resolved.
 //!
 //! Least privilege: reaching other users' / protected processes' handles needs
 //! `SeDebugPrivilege`. We enable it via [`PrivilegeGuard`] only for the duration
@@ -87,10 +87,6 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_TYPE_DISK: u32 = 0x0001;
 const FILE_TYPE_CHAR: u32 = 0x0002;
 const FILE_TYPE_PIPE: u32 = 0x0003;
-
-/// Granted-access mask used by synchronous handles on which
-/// `NtQueryObject(name)` can hang; we skip the name query for these.
-const HANG_PRONE_ACCESS: u32 = 0x0012_019F;
 
 // --- NT structures (repr(C), matching the documented layouts) ---
 
@@ -197,7 +193,6 @@ pub fn enumerate(
             e.handle_value as HANDLE,
             me,
             dup.raw(),
-            e.granted_access,
             &dos_map,
         ) else {
             continue; // a socket/AFD handle — listed via IP Helper
@@ -338,6 +333,15 @@ fn name_with_timeout(handle: HANDLE, timeout: Duration) -> Option<String> {
     rx.recv_timeout(timeout).unwrap_or(None)
 }
 
+/// Resolve a handle's object name on a worker thread with a timeout, because
+/// `NtQueryObject(name)` can block forever on synchronous handles (pipes, some
+/// devices). Duplicates a dedicated handle the worker owns and closes, so a hung
+/// query is abandoned rather than freezing enumeration.
+fn timed_object_name(source: HANDLE, handle_value: HANDLE, me: HANDLE) -> Option<String> {
+    let worker = duplicate(source, handle_value, me)?;
+    name_with_timeout(worker.into_raw(), Duration::from_millis(100))
+}
+
 struct Described {
     file_type: FileType,
     name: String,
@@ -354,7 +358,6 @@ fn describe(
     handle_value: HANDLE,
     me: HANDLE,
     dup: HANDLE,
-    granted: u32,
     dos_map: &[(String, String)],
 ) -> Option<Described> {
     // SAFETY: dup is a live File handle.
@@ -363,8 +366,7 @@ fn describe(
             // Robust, hang-free path for disk files; fall back to the NT name.
             let name = final_path(dup)
                 .or_else(|| {
-                    query_object_string(dup, OBJECT_NAME_INFORMATION)
-                        .map(|n| device_to_dos(&n, dos_map))
+                    timed_object_name(source, handle_value, me).map(|n| device_to_dos(&n, dos_map))
                 })
                 .unwrap_or_else(|| "(unnamed file)".to_string());
             let (file_type, node, size) = disk_details(dup);
@@ -378,16 +380,9 @@ fn describe(
             })
         }
         FILE_TYPE_PIPE => {
-            // A named pipe or a socket. Resolving the name can hang on a
-            // synchronous handle, so use the worker thread for the hang-prone
-            // access mask.
-            let name = if granted == HANG_PRONE_ACCESS {
-                duplicate(source, handle_value, me)
-                    .and_then(|w| name_with_timeout(w.into_raw(), Duration::from_millis(100)))
-            } else {
-                query_object_string(dup, OBJECT_NAME_INFORMATION)
-            };
-            match name {
+            // A named pipe or a socket. The name query can hang on a synchronous
+            // handle, so it always goes through the timeout-bounded worker.
+            match timed_object_name(source, handle_value, me) {
                 Some(n) if n.starts_with("\\Device\\NamedPipe") => Some(Described {
                     file_type: FileType::Pipe,
                     name: pipe_display(&n),
@@ -402,7 +397,7 @@ fn describe(
             }
         }
         FILE_TYPE_CHAR => {
-            let name = query_object_string(dup, OBJECT_NAME_INFORMATION)
+            let name = timed_object_name(source, handle_value, me)
                 .map(|n| device_to_dos(&n, dos_map))
                 .unwrap_or_else(|| "(character device)".to_string());
             Some(Described {
@@ -416,7 +411,7 @@ fn describe(
         }
         _ => {
             // Unknown file type: best-effort name, else drop.
-            let name = device_to_dos(&query_object_string(dup, OBJECT_NAME_INFORMATION)?, dos_map);
+            let name = device_to_dos(&timed_object_name(source, handle_value, me)?, dos_map);
             Some(Described {
                 device: drive_of(&name),
                 name,

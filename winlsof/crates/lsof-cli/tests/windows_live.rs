@@ -8,17 +8,52 @@
 //! system-wide `NtQueryObject` work and thus no hang risk.
 #![cfg(windows)]
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Run the built `lsof` binary with `args` and return its stdout.
+///
+/// Bounded by a hard 60s deadline: if the child does not exit (e.g. a regressed
+/// `NtQueryObject` hang on a synchronous handle), it is killed and the test
+/// fails — turning a would-be multi-hour CI hang into a fast, actionable
+/// failure. stdout is drained on a reader thread so a full pipe buffer can
+/// never wedge the child; stderr is inherited (can't block on a pipe buffer).
 fn lsof(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_lsof"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lsof"))
         .args(args)
-        .output()
-        .expect("failed to run lsof.exe");
-    String::from_utf8_lossy(&output.stdout).into_owned()
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn lsof.exe");
+
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while child.try_wait().expect("try_wait lsof.exe").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "lsof.exe {args:?} did not exit within 60s — likely a hang \
+                 (e.g. NtQueryObject on a synchronous handle)"
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.wait();
+    let out = rx.recv().unwrap_or_default();
+    let _ = reader.join();
+    out
 }
 
 #[test]

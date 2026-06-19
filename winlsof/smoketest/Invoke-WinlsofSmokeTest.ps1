@@ -36,7 +36,12 @@ param(
     [string]$HandleExe
 )
 
-$ErrorActionPreference = 'Stop'
+# 'Continue', not 'Stop': native tools (rustup/cargo, llvm-cov) write progress and
+# warnings to stderr, and under 'Stop' PowerShell 5.1 turns that stderr into a
+# terminating NativeCommandError that aborts the whole run. Control flow here
+# relies on `throw` (Skip/Assert/build failures), which is terminating regardless
+# of this setting and is caught by each Test-Case, so 'Continue' is safe.
+$ErrorActionPreference = 'Continue'
 
 # ---------------------------------------------------------------------------
 # Paths & setup
@@ -99,14 +104,27 @@ $Results = New-Object System.Collections.Generic.List[object]
 $CaseIndex = 0
 
 function Invoke-Lsof {
-    param([Parameter(Mandatory)][string[]]$LsofArgs, [Parameter(Mandatory)][string]$Name)
+    param(
+        [Parameter(Mandatory)][string[]]$LsofArgs,
+        [Parameter(Mandatory)][string]$Name,
+        [int]$TimeoutSec = 60
+    )
     $script:CaseIndex++
     $tag = '{0:D3}-{1}' -f $script:CaseIndex, ($Name -replace '[^\w.-]', '_')
     $outF = Join-Path $CasesDir "$tag.out.txt"
     $errF = Join-Path $CasesDir "$tag.err.txt"
     if ($Coverage) { $env:LLVM_PROFILE_FILE = (Join-Path $ProfDir "$tag-%p.profraw") }
-    $p = Start-Process -FilePath $Bin -ArgumentList $LsofArgs -NoNewWindow -PassThru -Wait `
+    # Bounded wait: a healthy scoped query finishes in well under a second. If the
+    # child is still alive at the deadline it is almost certainly a regressed hang
+    # (e.g. NtQueryObject on a synchronous handle) -- kill it and fail this case
+    # rather than freezing the whole harness for hours.
+    $p = Start-Process -FilePath $Bin -ArgumentList $LsofArgs -NoNewWindow -PassThru `
         -RedirectStandardOutput $outF -RedirectStandardError $errF
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+        try { $p.Kill() } catch {}
+        try { [void]$p.WaitForExit(5000) } catch {}
+        throw "lsof $($LsofArgs -join ' ') did not exit within ${TimeoutSec}s (possible hang)"
+    }
     [pscustomobject]@{
         Out  = (Get-Content -LiteralPath $outF -Raw -ErrorAction SilentlyContinue)
         Err  = (Get-Content -LiteralPath $errF -Raw -ErrorAction SilentlyContinue)
