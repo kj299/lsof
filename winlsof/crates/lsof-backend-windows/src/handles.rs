@@ -5,10 +5,14 @@
 //! 1. `NtQuerySystemInformation(SystemExtendedHandleInformation)` lists every
 //!    handle in the system with its owning PID, value, granted access, and
 //!    object-type index.
-//! 2. For each handle we open the owner with `PROCESS_DUP_HANDLE` (cached per
-//!    PID), `DuplicateHandle` it into this process, and `NtQueryObject` for the
-//!    object type — keeping only `File` objects (regular files, directories,
-//!    named pipes), which are the lsof-relevant ones.
+//! 2. We keep only `File` objects (regular files, directories, named pipes,
+//!    char devices, sockets) — the lsof-relevant ones — by matching the entry's
+//!    object-type index against the index "File" uses this boot (learned once
+//!    from a NUL-device probe). This deliberately avoids a per-handle
+//!    `NtQueryObject(ObjectTypeInformation)`, which can block forever on
+//!    synchronous handles (console/pipe/device) and would hang enumeration. For
+//!    the survivors we open the owner with `PROCESS_DUP_HANDLE` (cached per PID)
+//!    and `DuplicateHandle` the handle into this process.
 //! 3. We resolve the NT name (`\Device\HarddiskVolumeN\...`) and map it to a
 //!    drive letter via `QueryDosDeviceW`, and read size / file-index via
 //!    `GetFileInformationByHandle`.
@@ -34,10 +38,10 @@ use std::time::Duration;
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW, GetLogicalDrives,
-    QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
+    CreateFileW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+    GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
 
 use crate::privilege::PrivilegeGuard;
 use crate::util::{wide_to_string, OwnedHandle};
@@ -82,6 +86,13 @@ const FILE_WRITE_DATA: u32 = 0x0002;
 const FILE_APPEND_DATA: u32 = 0x0004;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
+
+// CreateFileW arguments for the NUL-device type probe.
+const OPEN_EXISTING: u32 = 3;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 
 // GetFileType return values.
 const FILE_TYPE_DISK: u32 = 0x0001;
@@ -143,6 +154,13 @@ pub fn enumerate(
         None
     };
 
+    // Open a throwaway NUL handle *before* snapshotting so it appears in the
+    // table; its type index tells us which index means "File", letting us
+    // classify handles without a per-handle NtQueryObject(type) — that call can
+    // block forever on synchronous handles (console/pipe/device), which is what
+    // made `lsof -p`/`-t` hang.
+    let probe = nul_probe();
+
     let Some(buf) = query_all_handles() else {
         return Vec::new();
     };
@@ -158,6 +176,9 @@ pub fn enumerate(
             count,
         )
     };
+    let file_index = probe
+        .as_ref()
+        .and_then(|p| file_type_index(entries, p.raw()));
 
     // SAFETY: a pseudo-handle to the current process; must not be closed.
     let me = unsafe { GetCurrentProcess() };
@@ -170,9 +191,17 @@ pub fn enumerate(
         if pid == 0 {
             continue;
         }
-        // Scope to the requested processes before the costly dup + NtQueryObject.
+        // Scope to the requested processes before the costly duplicate.
         if let Some(w) = wanted {
             if !w.contains(&pid) {
+                continue;
+            }
+        }
+        // Keep only File objects (disk files, dirs, named pipes, char devices,
+        // and sockets); other object types (keys, events, …) aren't lsof-like.
+        // The table's type index does this without a hang-prone type query.
+        if let Some(fi) = file_index {
+            if e.object_type_index != fi {
                 continue;
             }
         }
@@ -183,9 +212,12 @@ pub fn enumerate(
         let Some(dup) = duplicate(source.raw(), e.handle_value as HANDLE, me) else {
             continue;
         };
-        // Keep only File objects (disk files, dirs, named pipes, char devices,
-        // and sockets); other object types (keys, events, …) aren't lsof-like.
-        if query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File") {
+        // Fallback only when the File index is unknown (the NUL probe failed):
+        // confirm the type directly. This is the lone remaining main-thread type
+        // query, and it's effectively unreachable in practice.
+        if file_index.is_none()
+            && query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File")
+        {
             continue;
         }
         let Some(d) = describe(
@@ -249,6 +281,39 @@ fn query_all_handles() -> Option<Vec<u64>> {
         return None;
     }
     None
+}
+
+/// Open a throwaway handle to the NUL device — a guaranteed File-type object
+/// that never blocks — used only to learn the "File" object-type index.
+fn nul_probe() -> Option<OwnedHandle> {
+    let name: Vec<u16> = "NUL\0".encode_utf16().collect();
+    // SAFETY: `name` is NUL-terminated; a plain read-only open of the NUL device.
+    let h = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    OwnedHandle::new(h)
+}
+
+/// The `ObjectTypeIndex` that "File" objects use this boot session, read from the
+/// NUL probe's entry in the handle snapshot. Every file-system object — disk
+/// files, directories, named pipes, console/char devices, AFD sockets — shares
+/// this one index, so it classifies handles without ever calling `NtQueryObject`.
+fn file_type_index(entries: &[SystemHandleTableEntryInfoEx], probe: HANDLE) -> Option<u16> {
+    // SAFETY: no arguments; returns this process's PID.
+    let me_pid = unsafe { GetCurrentProcessId() };
+    let probe_val = probe as usize;
+    entries
+        .iter()
+        .find(|e| e.unique_process_id as u32 == me_pid && e.handle_value == probe_val)
+        .map(|e| e.object_type_index)
 }
 
 /// `NtQueryObject` into a growing buffer, returning the inner `UNICODE_STRING`
