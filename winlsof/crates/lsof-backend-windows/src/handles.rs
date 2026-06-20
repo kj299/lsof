@@ -33,6 +33,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
@@ -183,9 +184,7 @@ pub fn enumerate(
         .as_ref()
         .and_then(|p| file_type_index(entries, p.raw()));
 
-    // SAFETY: a pseudo-handle to the current process; must not be closed.
-    let me = unsafe { GetCurrentProcess() };
-    let dos_map = build_dos_map();
+    let dos_map = Arc::new(build_dos_map());
     let mut proc_cache: HashMap<u32, Option<OwnedHandle>> = HashMap::new();
     let mut out = Vec::new();
     trace(&format!(
@@ -215,25 +214,20 @@ pub fn enumerate(
         let Some(source) = source.as_ref() else {
             continue;
         };
-        let Some(dup) = duplicate(source.raw(), e.handle_value as HANDLE, me) else {
-            continue;
-        };
-        // Fallback only when the File index is unknown (the NUL probe failed):
-        // confirm the type directly. This is the lone remaining main-thread type
-        // query, and it's effectively unreachable in practice.
-        if file_index.is_none()
-            && query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File")
-        {
-            continue;
-        }
-        let Some(d) = describe(
+        // Bound the whole per-handle classification (duplicate + GetFileType +
+        // name) on a worker thread. Any of those can block on a synchronous
+        // pipe/device handle, so abandoning a wedged worker after the timeout
+        // keeps one bad handle from freezing enumeration. `verify_type` re-checks
+        // the object type only in the (practically impossible) case the File
+        // type index couldn't be learned from the NUL probe.
+        let Some(d) = describe_bounded(
             source.raw(),
             e.handle_value as HANDLE,
-            me,
-            dup.raw(),
-            &dos_map,
+            Arc::clone(&dos_map),
+            Duration::from_millis(200),
+            file_index.is_none(),
         ) else {
-            continue; // a socket/AFD handle — listed via IP Helper
+            continue; // skipped: not a File handle, inaccessible, or timed out
         };
         out.push((
             pid,
@@ -412,6 +406,55 @@ fn name_with_timeout(handle: HANDLE, timeout: Duration) -> Option<String> {
 fn timed_object_name(source: HANDLE, handle_value: HANDLE, me: HANDLE) -> Option<String> {
     let worker = duplicate(source, handle_value, me)?;
     name_with_timeout(worker.into_raw(), Duration::from_millis(100))
+}
+
+/// Run the full classification of one handle — `DuplicateHandle`, the optional
+/// type check, `GetFileType`, and name resolution — on a worker thread, giving
+/// up after `timeout`. Each of those calls can block forever on a synchronous
+/// pipe/device handle; doing them off the main thread means a single wedged
+/// handle is abandoned instead of freezing the whole enumeration. (Abandoned
+/// workers are reaped when the process force-exits; see `crate::exit_now`.)
+fn describe_bounded(
+    source: HANDLE,
+    handle_value: HANDLE,
+    dos_map: Arc<Vec<(String, String)>>,
+    timeout: Duration,
+    verify_type: bool,
+) -> Option<Described> {
+    let source = source as usize;
+    let handle_value = handle_value as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // SAFETY: a pseudo-handle to the current process; never closed.
+        let me = unsafe { GetCurrentProcess() };
+        let result = classify(
+            source as HANDLE,
+            handle_value as HANDLE,
+            me,
+            &dos_map,
+            verify_type,
+        );
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).unwrap_or(None)
+}
+
+/// Duplicate `handle_value` from `source`, optionally confirm it's a `File`
+/// object, and classify it. Runs on the worker thread of [`describe_bounded`].
+fn classify(
+    source: HANDLE,
+    handle_value: HANDLE,
+    me: HANDLE,
+    dos_map: &[(String, String)],
+    verify_type: bool,
+) -> Option<Described> {
+    let dup = duplicate(source, handle_value, me)?;
+    if verify_type
+        && query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File")
+    {
+        return None;
+    }
+    describe(source, handle_value, me, dup.raw(), dos_map)
 }
 
 struct Described {
