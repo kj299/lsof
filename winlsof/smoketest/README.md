@@ -45,7 +45,10 @@ system-wide paths, elevation, WOW64, and the OS data sources end to end.
 ## Prerequisites
 
 - Windows 10/11 x64, PowerShell 5.1+ (or PowerShell 7).
-- Rust toolchain (`rustup`, `cargo`) with the MSVC target.
+- Rust toolchain (`rustup`, `cargo`) with the MSVC target — **only needed to build
+  from source.** Alternatively, download a prebuilt `lsof.exe` from the
+  [Releases](https://github.com/kj299/lsof/releases) page, drop it at
+  `winlsof\target\release\lsof.exe`, and run with `-SkipBuild` (no Rust needed).
 - For `-Coverage`: `rustup component add llvm-tools-preview` (the script attempts
   this automatically).
 - Optional: [Sysinternals `handle64.exe`](https://learn.microsoft.com/sysinternals/downloads/handle)
