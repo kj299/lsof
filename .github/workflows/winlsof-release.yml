@@ -1,0 +1,95 @@
+name: winlsof release
+
+# Build and publish a distributable, native Windows `lsof.exe` as a GitHub
+# Release asset (plus a SHA-256 for integrity). Trigger either by pushing a
+# version tag (e.g. `winlsof-v0.1.0`) or manually from the Actions tab
+# (workflow_dispatch), supplying the tag to create.
+on:
+  push:
+    tags:
+      - 'winlsof-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create (e.g. winlsof-v0.1.0)'
+        required: true
+
+# The release step needs to create the release and upload assets.
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: winlsof
+
+jobs:
+  release:
+    name: build + publish (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary (native MSVC)
+        run: cargo build --release --bin lsof
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          sha256sum target/release/lsof.exe | awk '{print $1}' > target/release/lsof.exe.sha256
+          NOTES="$(cat <<EOF
+          winlsof — a memory-safe, Windows-native reimplementation of \`lsof\` written in Rust.
+
+          Early MVP **prerelease**. \`lsof.exe\` is a standalone x86_64 Windows binary
+          (MSVC; no runtime install needed on Windows 10/11).
+
+          **What it does**
+          - Lists processes and their open file handles, TCP/UDP endpoints (\`-i\`),
+            loaded modules (\`txt\`/\`mem\`), current directory (\`cwd\`), and more.
+          - lsof-compatible options, columns, \`-F\` field codes, and JSON (\`-J\`/\`-j\`)
+            where the concepts map onto Windows.
+          - **Least privilege:** runs in your user context by default; run as
+            Administrator for a system-wide view. Elevation is never auto-requested.
+
+          **Usage**
+          \`\`\`
+          lsof -p <pid>            # open files/handles of a process
+          lsof -i                  # all TCP/UDP endpoints, with owning PID
+          lsof -nP -iTCP:443       # numeric, TCP port 443
+          lsof -p <pid> -J         # JSON output
+          lsof -h                  # full option list
+          \`\`\`
+
+          The binary is **unsigned**, so Windows SmartScreen may warn on first run.
+          Verify integrity against the published SHA-256 (\`lsof.exe.sha256\`).
+
+          SHA-256: \`$(cat target/release/lsof.exe.sha256)\`
+          EOF
+          )"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              target/release/lsof.exe target/release/lsof.exe.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" \
+              target/release/lsof.exe target/release/lsof.exe.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "winlsof $TAG" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --notes "$NOTES"
+          fi
