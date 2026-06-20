@@ -187,4 +187,11 @@ fn main() {
         },
         None => run_cycle(),
     }
+
+    // Output is written. Exit promptly: handle enumeration may have abandoned a
+    // worker thread blocked uninterruptibly in `NtQueryObject` (a synchronous
+    // pipe/device), which can otherwise stall normal process teardown. On other
+    // platforms a normal return suffices.
+    #[cfg(windows)]
+    lsof_backend_windows::exit_now(0);
 }
