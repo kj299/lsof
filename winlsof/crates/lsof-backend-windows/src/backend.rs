@@ -96,6 +96,16 @@ impl Backend for WindowsBackend {
             procs.len()
         ));
 
+        // Terse output (`-t`) is just the PID list, and the renderer prints a
+        // process's PID regardless of its files. So when no file-level filter
+        // needs per-file data, skip *all* handle/socket/module enumeration — it
+        // would be gathered only to be discarded. Pure optimization (identical
+        // output) that keeps `lsof -t` from doing system-wide work it never uses.
+        if sel.terse && !sel.inet.enabled && sel.fd_filter.is_none() && !sel.has_path_filter() {
+            trace("gather: terse fast-path (PIDs only)");
+            return Ok(procs);
+        }
+
         // Bare-file path lookup via Restart Manager (unprivileged, exact) — but
         // a `+D`/`+d` directory tree needs full enumeration, so it falls through.
         if !sel.paths.is_empty() && !sel.has_dir_trees() {

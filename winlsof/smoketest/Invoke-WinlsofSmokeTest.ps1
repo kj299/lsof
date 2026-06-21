@@ -475,9 +475,11 @@ if ($Coverage) {
 # Summary
 # ---------------------------------------------------------------------------
 $Results | Export-Csv -Path (Join-Path $RunDir 'results.csv') -NoTypeInformation
-$pass = ($Results | Where-Object Status -eq 'PASS').Count
-$fail = ($Results | Where-Object Status -eq 'FAIL').Count
-$skip = ($Results | Where-Object Status -eq 'SKIP').Count
+# @() forces array context so .Count is reliable even when exactly one case
+# matches (a lone scalar's .Count renders empty otherwise).
+$pass = @($Results | Where-Object Status -eq 'PASS').Count
+$fail = @($Results | Where-Object Status -eq 'FAIL').Count
+$skip = @($Results | Where-Object Status -eq 'SKIP').Count
 
 $summary = @"
 winlsof live smoke test  -  $Stamp
