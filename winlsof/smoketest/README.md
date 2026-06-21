@@ -82,7 +82,25 @@ powershell -ExecutionPolicy Bypass -File .\Invoke-WinlsofSmokeTest.ps1
 # 4) Point at a specific handle64.exe (otherwise it's auto-fetched);
 #    or disable the download with -NoFetchHandle.
 .\Invoke-WinlsofSmokeTest.ps1 -HandleExe C:\tools\handle64.exe
+
+# 5) Run the full suite against a PREBUILT binary (a downloaded release, a CI
+#    artifact, etc.) instead of building from source - skips the build:
+.\Invoke-WinlsofSmokeTest.ps1 -Binary $env:USERPROFILE\Downloads\lsof.exe
 ```
+
+### Quick portable check — `Test-Lsof.ps1`
+
+For a fast sanity check of any `lsof.exe` with **no repo, build, or Sysinternals
+needed**, use the standalone tester. It stands up its own fixtures (a held file +
+a loopback listener) and runs ~10 representative cases, each timeout-bounded:
+
+```powershell
+.\Test-Lsof.ps1 -Bin $env:USERPROFILE\Downloads\lsof.exe
+```
+
+Use `Invoke-WinlsofSmokeTest.ps1 -Binary <path>` for the exhaustive suite (pipes,
+mapped files, WOW64 cwd, modules, Restart Manager, every format, handle64 oracle);
+`Test-Lsof.ps1` for a 10-second "does this binary work" smoke.
 
 > The two SKIPs you'll see in a single elevated run are by design, not gaps:
 > `privilege-hint-unelevated` only applies to a **non-elevated** run (pass 1), and

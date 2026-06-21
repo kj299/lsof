@@ -34,7 +34,8 @@ param(
     [switch]$SkipBuild,
     [switch]$Coverage,
     [string]$HandleExe,
-    [switch]$NoFetchHandle
+    [switch]$NoFetchHandle,
+    [string]$Binary
 )
 
 # 'Continue', not 'Stop': native tools (rustup/cargo, llvm-cov) write progress and
@@ -67,11 +68,16 @@ Write-Host "Elevated  : $IsAdmin   Coverage: $([bool]$Coverage)`n"
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+# A prebuilt binary via -Binary (e.g. a downloaded release) skips the build.
+if ($Binary -and $Coverage) {
+    Write-Host "-Coverage ignored with -Binary (a prebuilt binary isn't instrumented)." -ForegroundColor Yellow
+    $Coverage = $false
+}
 $BuildProfile = if ($Coverage) { 'debug' } else { 'release' }
-if (-not $SkipBuild -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+if (-not $Binary -and -not $SkipBuild -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo is not on PATH. Install Rust from https://rustup.rs and open a new shell, or pass -SkipBuild after placing a prebuilt lsof.exe at target\$BuildProfile\lsof.exe (you can download one from the PR's CI 'lsof-exe-windows' artifact)."
 }
-if (-not $SkipBuild) {
+if (-not $Binary -and -not $SkipBuild) {
     Push-Location $Workspace
     try {
         if ($Coverage) {
@@ -112,8 +118,14 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 }
-$Bin = Join-Path $Workspace ("target\{0}\lsof.exe" -f $BuildProfile)
-if (-not (Test-Path $Bin)) { throw "lsof.exe not found at $Bin (build it or drop -SkipBuild)" }
+if ($Binary) {
+    if (-not (Test-Path $Binary)) { throw "-Binary not found: $Binary" }
+    $Bin = (Resolve-Path $Binary).Path
+}
+else {
+    $Bin = Join-Path $Workspace ("target\{0}\lsof.exe" -f $BuildProfile)
+}
+if (-not (Test-Path $Bin)) { throw "lsof.exe not found at $Bin (build it, pass -Binary <path>, or drop -SkipBuild)" }
 Write-Host "Binary    : $Bin`n"
 
 # ---------------------------------------------------------------------------
