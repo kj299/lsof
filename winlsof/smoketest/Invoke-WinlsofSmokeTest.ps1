@@ -83,11 +83,21 @@ if (-not $SkipBuild) {
             }
             $env:RUSTFLAGS = '-C instrument-coverage'
             & cargo build
+            $env:RUSTFLAGS = $null
+            if ($LASTEXITCODE -ne 0) {
+                # `-C instrument-coverage` needs the profiler runtime
+                # (profiler_builtins). The x86_64-pc-windows-gnu toolchain doesn't
+                # ship it; coverage on Windows needs the MSVC toolchain. Don't abort
+                # the whole run for that - fall back to a normal pass.
+                Write-Host "Instrumented (-Coverage) build failed: this toolchain has no profiler runtime (profiler_builtins). Coverage on Windows needs the MSVC toolchain (see README). Falling back to a normal run without coverage." -ForegroundColor Yellow
+                $Coverage = $false
+                $BuildProfile = 'release'
+            }
         }
-        else {
+        if (-not $Coverage) {
             & cargo build --release
+            if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
         }
-        if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
     }
     finally {
         $env:RUSTFLAGS = $null

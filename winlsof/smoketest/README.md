@@ -49,8 +49,13 @@ system-wide paths, elevation, WOW64, and the OS data sources end to end.
   from source.** Alternatively, download a prebuilt `lsof.exe` from the
   [Releases](https://github.com/kj299/lsof/releases) page, drop it at
   `winlsof\target\release\lsof.exe`, and run with `-SkipBuild` (no Rust needed).
-- For `-Coverage`: `rustup component add llvm-tools-preview` (the script attempts
-  this automatically).
+- For `-Coverage`: the **MSVC** toolchain (`stable-x86_64-pc-windows-msvc`) plus
+  `rustup component add llvm-tools-preview`. `-C instrument-coverage` needs the
+  `profiler_builtins` runtime, which the `x86_64-pc-windows-gnu` toolchain doesn't
+  ship — on a gnu toolchain the harness detects the failed instrumented build and
+  **falls back to a normal run** (no coverage report). To enable coverage:
+  `rustup toolchain install stable-x86_64-pc-windows-msvc` (needs VS Build Tools
+  for `link.exe`), then re-run with `-Coverage`.
 - [Sysinternals `handle64.exe`](https://learn.microsoft.com/sysinternals/downloads/handle)
   for the oracle cross-check — **fetched automatically** (official `Handle.zip`
   over HTTPS, into the run folder) if it isn't already on `PATH` or passed via
