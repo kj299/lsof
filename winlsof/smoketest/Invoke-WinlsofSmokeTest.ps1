@@ -96,7 +96,15 @@ if (-not $SkipBuild) {
         }
         if (-not $Coverage) {
             & cargo build --release
-            if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+            if ($LASTEXITCODE -ne 0) {
+                # A missing MSVC linker is the common foot-gun after switching the
+                # default toolchain to MSVC for coverage; point back to GNU.
+                $linkHint = if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+                    " If you switched to the MSVC toolchain, it needs VS Build Tools' link.exe; switch back with 'rustup default stable-x86_64-pc-windows-gnu' or install Build Tools for Visual Studio (Desktop C++ workload)."
+                }
+                else { '' }
+                throw "cargo build failed ($LASTEXITCODE).$linkHint"
+            }
         }
     }
     finally {
