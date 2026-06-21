@@ -171,10 +171,16 @@ impl Backend for WindowsBackend {
             socks.len()
         ));
         // Resolve names (reverse DNS / service lookup) only for the sockets we
-        // keep — a scoped query must not pay for system-wide PTR lookups.
+        // keep, and only when they can actually be displayed. A path/dir filter
+        // (`+D`/`+d`/bare path) never matches a socket (no filesystem path), so
+        // resolving them would be pure waste — and it's the slow, reverse-DNS
+        // path. So skip resolution for those queries.
+        let resolve_sockets = !sel.has_path_filter();
         for (pid, mut file) in socks {
             if wanted(pid) {
-                sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+                if resolve_sockets {
+                    sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+                }
                 attach(&mut procs, &mut idx, pid, file);
             }
         }
