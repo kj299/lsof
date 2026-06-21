@@ -2,6 +2,8 @@
 //! sockets (and, in Phase 3, the file handles) they own.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{OpenFile, Process};
@@ -9,6 +11,33 @@ use lsof_core::selection::Selection;
 
 use crate::util::trace;
 use crate::{handles, mapped, modules, peb, privilege, process, restart, sockets};
+
+/// Gather a process's `cwd` + loaded modules (`txt`/`mem`) + mapped data files on
+/// a worker thread, bounded by `timeout`. These run against a *foreign* process
+/// (`CreateToolhelp32Snapshot` for modules, PEB / address-space reads for the
+/// rest) and can occasionally block; doing them off the main thread means one
+/// slow process can't freeze the whole run. On timeout the worker is abandoned
+/// (its extras skipped) and reaped when the process exits.
+fn per_process_extras(
+    pid: u32,
+    dos_map: Arc<Vec<(String, String)>>,
+    timeout: Duration,
+) -> Vec<OpenFile> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut files = Vec::new();
+        trace(&format!("  cwd pid={pid}"));
+        if let Some(cwd) = peb::cwd(pid) {
+            files.push(cwd);
+        }
+        trace(&format!("  modules pid={pid}"));
+        files.extend(modules::enumerate(pid));
+        trace(&format!("  mapped pid={pid}"));
+        files.extend(mapped::enumerate(pid, &dos_map));
+        let _ = tx.send(files);
+    });
+    rx.recv_timeout(timeout).unwrap_or_default()
+}
 
 /// winlsof's native Windows data source.
 pub struct WindowsBackend {
@@ -106,7 +135,7 @@ impl Backend for WindowsBackend {
         if !inet_only {
             // cwd + txt/mem (modules) + mapped data files, for each in-scope process.
             trace("gather: build_dos_map start");
-            let dos_map = handles::build_dos_map();
+            let dos_map = Arc::new(handles::build_dos_map());
             trace(&format!(
                 "gather: build_dos_map done ({} volumes)",
                 dos_map.len()
@@ -116,14 +145,11 @@ impl Backend for WindowsBackend {
                 if !wanted(p.pid) {
                     continue;
                 }
-                trace(&format!("  cwd pid={}", p.pid));
-                if let Some(cwd) = peb::cwd(p.pid) {
-                    p.files.push(cwd);
-                }
-                trace(&format!("  modules pid={}", p.pid));
-                p.files.extend(modules::enumerate(p.pid));
-                trace(&format!("  mapped pid={}", p.pid));
-                p.files.extend(mapped::enumerate(p.pid, &dos_map));
+                p.files.extend(per_process_extras(
+                    p.pid,
+                    Arc::clone(&dos_map),
+                    Duration::from_secs(2),
+                ));
             }
             trace("gather: per-process done");
         }
