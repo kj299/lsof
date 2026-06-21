@@ -25,6 +25,7 @@ jobs:
   core-linux:
     name: core + lints (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,6 +41,7 @@ jobs:
   windows:
     name: native backend (windows)
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,3 +53,11 @@ jobs:
         run: cargo build --all
       - name: test
         run: cargo test --all
+      - name: build release binary
+        run: cargo build --release --bin lsof
+      - name: upload lsof.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsof-exe-windows
+          path: winlsof/target/release/lsof.exe
+          if-no-files-found: error

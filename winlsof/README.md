@@ -44,20 +44,29 @@ independent code and per-OS "dialect" backends:
 - ✅ **Phase 1** — process + owner enumeration; `-p` / `-c` / `-u` / `-t`.
 - ✅ **Phase 2** — TCP/UDP (v4+v6) with owning PID; `-i [46][tcp|udp][@host][:port]`,
   `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`) output.
-- ✅ **Phase 3 (initial)** — system-wide open *file handle* enumeration via the
-  NT handle table (`NtQuerySystemInformation` + `DuplicateHandle` +
-  `NtQueryObject`): regular files, directories, and named pipes, with
-  drive-letter mapping (`QueryDosDeviceW`), size/file-index, access mode, and the
-  `0x0012019F` hang-avoidance heuristic — all under just-in-time `SeDebugPrivilege`
-  (`lsof-backend-windows/src/handles.rs`). Pure helpers are unit-tested on the
-  Windows CI runner; live full-system validation on a Windows host is pending.
+- ✅ **Phase 3** — system-wide open *file handle* enumeration via the NT handle
+  table (`NtQuerySystemInformation` + `DuplicateHandle` + `NtQueryObject`):
+  regular files, directories, named pipes, and char devices, with drive-letter
+  mapping (`QueryDosDeviceW`), size/file-index, access mode, and file offset
+  (`-o`) — all under just-in-time `SeDebugPrivilege`
+  (`lsof-backend-windows/src/handles.rs`). Handles are classified by their NT
+  object-type index (avoiding a per-handle `NtQueryObject` type query that can
+  block forever on synchronous handles), and the entire per-handle
+  classification runs on a worker thread under a timeout, so a wedged pipe/device
+  handle can never freeze enumeration.
 - ✅ **Phase 4** — mapped modules (`txt`/`mem`); repeat mode (`-r [delay]`);
   `cwd` via the process PEB (`rtd` is N/A on Windows); worker-thread name
   resolution (with timeout) for the hang-prone handles previously skipped; and
   Restart Manager for bare-path / `+D` "who has this open" lookups.
 
-All planned phases (0–4) are now implemented. Remaining work is live validation
-on a real Windows host and ongoing parity refinements.
+All planned phases (0–4) are implemented and **validated on real Windows 11
+hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
+~37 cases covering every option, output format, and code path — 36 pass elevated
+and 36 pass unelevated (the one skip in each mode is mode-specific and passes in
+the other), with output differentially cross-checked against Sysinternals
+`handle64.exe`. Zero hangs, zero failures. Remaining work is ongoing parity
+refinement and the research-grade gaps tracked in
+[`docs/research-roadmap.md`](docs/research-roadmap.md).
 
 ## Privilege model (least privilege)
 
@@ -69,6 +78,25 @@ globally: it enables a privilege (e.g. `SeDebugPrivilege`) only just-in-time
 around the specific call that needs it, via the RAII `PrivilegeGuard`, and only
 when the switches in use actually require system-wide data. Queries like `-i`
 work entirely in the user context and never touch privileges.
+
+## Download
+
+Prebuilt **`lsof.exe`** for 64-bit Windows is published on the
+[**Releases**](https://github.com/kj299/lsof/releases) page — built natively on a
+`windows-latest` runner (MSVC; no runtime install needed on Windows 10/11):
+
+1. Grab `lsof.exe` (and `lsof.exe.sha256`) from the latest release.
+2. *(Optional)* verify the download in PowerShell:
+   ```powershell
+   (Get-FileHash .\lsof.exe -Algorithm SHA256).Hash.ToLower() -eq (Get-Content .\lsof.exe.sha256).Trim()
+   ```
+   `True` means the binary is intact.
+3. Run it from anywhere: `.\lsof.exe -nP -i`.
+
+The binary is **unsigned**, so Windows SmartScreen may warn on first run
+(*More info → Run anyway*). Releases are produced by pushing a `winlsof-v*` tag,
+which triggers [`.github/workflows/winlsof-release.yml`](../.github/workflows/winlsof-release.yml).
+Prefer building from source? See below.
 
 ## Build & run
 

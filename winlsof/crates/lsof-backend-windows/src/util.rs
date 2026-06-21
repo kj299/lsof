@@ -2,7 +2,20 @@
 //! backend is funneled through helpers like these so the rest of the code reads
 //! as ordinary safe Rust.
 
+use std::sync::OnceLock;
+
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+
+/// Opt-in phase tracing for diagnosing field hangs / slowness. Enabled by
+/// setting the `WINLSOF_TRACE` environment variable to anything; writes one
+/// marker line per call to stderr (which is unbuffered, so markers survive even
+/// if the process is killed mid-hang). Off by default with negligible cost.
+pub fn trace(msg: &str) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("WINLSOF_TRACE").is_some()) {
+        eprintln!("[winlsof] {msg}");
+    }
+}
 
 /// RAII wrapper that owns a Windows `HANDLE` and closes it exactly once on drop.
 /// This eliminates the handle-leak / double-close bugs that plague the C code.

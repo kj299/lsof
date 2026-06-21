@@ -8,6 +8,7 @@
 use std::mem::size_of;
 use std::net::IpAddr;
 use std::sync::Once;
+use std::time::Duration;
 
 use windows_sys::Win32::Networking::WinSock::{
     GetNameInfoW, WSAStartup, WSAStringToAddressW, AF_INET, AF_INET6, SOCKADDR, SOCKADDR_STORAGE,
@@ -27,7 +28,23 @@ fn ensure_wsa() {
 }
 
 /// Resolve an IP address to a host name, or `None` if there is no PTR record.
+///
+/// Bounded on a worker thread: reverse DNS (`GetNameInfoW` with `NI_NAMEREQD`)
+/// issues a real PTR query that can take many seconds against an unresponsive
+/// resolver, and lsof resolves by default. A lookup that overruns the timeout is
+/// abandoned and falls back to the numeric address (the `-n` behavior), so one
+/// slow DNS server can never stall enumeration. The abandoned worker returns on
+/// its own once the OS resolver times out.
 pub fn host_name(ip: IpAddr) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(resolve_blocking(ip));
+    });
+    rx.recv_timeout(Duration::from_secs(2)).ok().flatten()
+}
+
+/// The blocking reverse-DNS lookup, run on the worker thread of [`host_name`].
+fn resolve_blocking(ip: IpAddr) -> Option<String> {
     ensure_wsa();
 
     let af = if ip.is_ipv6() { AF_INET6 } else { AF_INET };

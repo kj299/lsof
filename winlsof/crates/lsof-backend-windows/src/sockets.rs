@@ -20,22 +20,27 @@ use crate::resolve;
 
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
-/// Gather every TCP and UDP endpoint as `(owning_pid, OpenFile)` pairs, with the
-/// NAME field resolved per the `-n` (host) and `-P` (port) flags.
-pub fn collect(no_host: bool, no_port: bool) -> Vec<(u32, OpenFile)> {
+/// Gather every TCP and UDP endpoint as `(owning_pid, OpenFile)` pairs, each with
+/// a *numeric* NAME. Name resolution is deferred to [`resolve_name`] so the
+/// caller resolves only the endpoints it will actually display — reverse DNS is
+/// slow, and a scoped query (`-p`, `-d`, …) must not pay for system-wide PTR
+/// lookups on sockets it filters out.
+pub fn collect() -> Vec<(u32, OpenFile)> {
     let mut out = Vec::new();
     out.extend(tcp4());
     out.extend(tcp6());
     out.extend(udp4());
     out.extend(udp6());
-    for (_pid, f) in out.iter_mut() {
-        let name = match &f.socket {
-            Some(sock) => format_socket(sock, no_host, no_port),
-            None => continue,
-        };
-        f.name = name;
-    }
     out
+}
+
+/// Resolve a socket file's NAME in place, honoring `-n` (host) and `-P` (port).
+/// Call this only for sockets that survive selection, so reverse DNS runs the
+/// minimum number of times.
+pub fn resolve_name(file: &mut OpenFile, no_host: bool, no_port: bool) {
+    if let Some(sock) = &file.socket {
+        file.name = format_socket(sock, no_host, no_port);
+    }
 }
 
 /// Build the lsof NAME for a socket, honoring host/port resolution flags.

@@ -5,21 +5,25 @@
 //! 1. `NtQuerySystemInformation(SystemExtendedHandleInformation)` lists every
 //!    handle in the system with its owning PID, value, granted access, and
 //!    object-type index.
-//! 2. For each handle we open the owner with `PROCESS_DUP_HANDLE` (cached per
-//!    PID), `DuplicateHandle` it into this process, and `NtQueryObject` for the
-//!    object type — keeping only `File` objects (regular files, directories,
-//!    named pipes), which are the lsof-relevant ones.
+//! 2. We keep only `File` objects (regular files, directories, named pipes,
+//!    char devices, sockets) — the lsof-relevant ones — by matching the entry's
+//!    object-type index against the index "File" uses this boot (learned once
+//!    from a NUL-device probe). This deliberately avoids a per-handle
+//!    `NtQueryObject(ObjectTypeInformation)`, which can block forever on
+//!    synchronous handles (console/pipe/device) and would hang enumeration. For
+//!    the survivors we open the owner with `PROCESS_DUP_HANDLE` (cached per PID)
+//!    and `DuplicateHandle` the handle into this process.
 //! 3. We resolve the NT name (`\Device\HarddiskVolumeN\...`) and map it to a
 //!    drive letter via `QueryDosDeviceW`, and read size / file-index via
 //!    `GetFileInformationByHandle`.
 //!
-//! Names: disk files use `GetFinalPathNameByHandleW` (robust, hang-free, and it
-//! yields a clean DOS path); char devices and named pipes fall back to
-//! `NtQueryObject(ObjectNameInformation)`, which can block on synchronous
-//! handles — so for the hang-prone access mask (`0x0012019F`) that query runs on
-//! a worker thread under a timeout. Only true socket/AFD handles are dropped
-//! (IP Helper lists those); every other File handle is emitted, with a
-//! placeholder name if it can't be resolved.
+//! Names: disk files use `GetFinalPathNameByHandleW` (robust and hang-free,
+//! yielding a clean DOS path); char devices, named pipes, and the disk fallback
+//! resolve via `NtQueryObject(ObjectNameInformation)`, which can block forever on
+//! synchronous handles — so *every* name query runs on a worker thread under a
+//! timeout (a hung query is abandoned, never allowed to freeze enumeration).
+//! Only true socket/AFD handles are dropped (IP Helper lists those); every other
+//! File handle is emitted, with a placeholder name if it can't be resolved.
 //!
 //! Least privilege: reaching other users' / protected processes' handles needs
 //! `SeDebugPrivilege`. We enable it via [`PrivilegeGuard`] only for the duration
@@ -29,18 +33,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW, GetLogicalDrives,
-    QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
+    CreateFileW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+    GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
 
 use crate::privilege::PrivilegeGuard;
-use crate::util::{wide_to_string, OwnedHandle};
+use crate::util::{trace, wide_to_string, OwnedHandle};
 
 // --- NT functions (declared directly against ntdll to avoid binding churn) ---
 
@@ -83,14 +88,17 @@ const FILE_APPEND_DATA: u32 = 0x0004;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 
+// CreateFileW arguments for the NUL-device type probe.
+const OPEN_EXISTING: u32 = 3;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+
 // GetFileType return values.
 const FILE_TYPE_DISK: u32 = 0x0001;
 const FILE_TYPE_CHAR: u32 = 0x0002;
 const FILE_TYPE_PIPE: u32 = 0x0003;
-
-/// Granted-access mask used by synchronous handles on which
-/// `NtQueryObject(name)` can hang; we skip the name query for these.
-const HANG_PRONE_ACCESS: u32 = 0x0012_019F;
 
 // --- NT structures (repr(C), matching the documented layouts) ---
 
@@ -147,9 +155,19 @@ pub fn enumerate(
         None
     };
 
+    // Open a throwaway NUL handle *before* snapshotting so it appears in the
+    // table; its type index tells us which index means "File", letting us
+    // classify handles without a per-handle NtQueryObject(type) — that call can
+    // block forever on synchronous handles (console/pipe/device), which is what
+    // made `lsof -p`/`-t` hang.
+    trace("handles: nul_probe");
+    let probe = nul_probe();
+
+    trace("handles: query_all_handles start");
     let Some(buf) = query_all_handles() else {
         return Vec::new();
     };
+    trace("handles: query_all_handles done");
 
     // SAFETY: the buffer is 8-byte aligned (Vec<u64>) and was filled by the API
     // with a SystemHandleInformationEx header followed by `number_of_handles`
@@ -162,21 +180,33 @@ pub fn enumerate(
             count,
         )
     };
+    let file_index = probe
+        .as_ref()
+        .and_then(|p| file_type_index(entries, p.raw()));
 
-    // SAFETY: a pseudo-handle to the current process; must not be closed.
-    let me = unsafe { GetCurrentProcess() };
-    let dos_map = build_dos_map();
+    let dos_map = Arc::new(build_dos_map());
     let mut proc_cache: HashMap<u32, Option<OwnedHandle>> = HashMap::new();
     let mut out = Vec::new();
+    trace(&format!(
+        "handles: scanning {count} entries (file_index={file_index:?})"
+    ));
 
     for e in entries {
         let pid = e.unique_process_id as u32;
         if pid == 0 {
             continue;
         }
-        // Scope to the requested processes before the costly dup + NtQueryObject.
+        // Scope to the requested processes before the costly duplicate.
         if let Some(w) = wanted {
             if !w.contains(&pid) {
+                continue;
+            }
+        }
+        // Keep only File objects (disk files, dirs, named pipes, char devices,
+        // and sockets); other object types (keys, events, …) aren't lsof-like.
+        // The table's type index does this without a hang-prone type query.
+        if let Some(fi) = file_index {
+            if e.object_type_index != fi {
                 continue;
             }
         }
@@ -184,23 +214,20 @@ pub fn enumerate(
         let Some(source) = source.as_ref() else {
             continue;
         };
-        let Some(dup) = duplicate(source.raw(), e.handle_value as HANDLE, me) else {
-            continue;
-        };
-        // Keep only File objects (disk files, dirs, named pipes, char devices,
-        // and sockets); other object types (keys, events, …) aren't lsof-like.
-        if query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File") {
-            continue;
-        }
-        let Some(d) = describe(
+        // Bound the whole per-handle classification (duplicate + GetFileType +
+        // name) on a worker thread. Any of those can block on a synchronous
+        // pipe/device handle, so abandoning a wedged worker after the timeout
+        // keeps one bad handle from freezing enumeration. `verify_type` re-checks
+        // the object type only in the (practically impossible) case the File
+        // type index couldn't be learned from the NUL probe.
+        let Some(d) = describe_bounded(
             source.raw(),
             e.handle_value as HANDLE,
-            me,
-            dup.raw(),
-            e.granted_access,
-            &dos_map,
+            Arc::clone(&dos_map),
+            Duration::from_millis(200),
+            file_index.is_none(),
         ) else {
-            continue; // a socket/AFD handle — listed via IP Helper
+            continue; // skipped: not a File handle, inaccessible, or timed out
         };
         out.push((
             pid,
@@ -217,6 +244,7 @@ pub fn enumerate(
             },
         ));
     }
+    trace(&format!("handles: scan done ({} file handles)", out.len()));
 
     if verbose {
         let inaccessible = proc_cache.values().filter(|v| v.is_none()).count();
@@ -254,6 +282,39 @@ fn query_all_handles() -> Option<Vec<u64>> {
         return None;
     }
     None
+}
+
+/// Open a throwaway handle to the NUL device — a guaranteed File-type object
+/// that never blocks — used only to learn the "File" object-type index.
+fn nul_probe() -> Option<OwnedHandle> {
+    let name: Vec<u16> = "NUL\0".encode_utf16().collect();
+    // SAFETY: `name` is NUL-terminated; a plain read-only open of the NUL device.
+    let h = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    OwnedHandle::new(h)
+}
+
+/// The `ObjectTypeIndex` that "File" objects use this boot session, read from the
+/// NUL probe's entry in the handle snapshot. Every file-system object — disk
+/// files, directories, named pipes, console/char devices, AFD sockets — shares
+/// this one index, so it classifies handles without ever calling `NtQueryObject`.
+fn file_type_index(entries: &[SystemHandleTableEntryInfoEx], probe: HANDLE) -> Option<u16> {
+    // SAFETY: no arguments; returns this process's PID.
+    let me_pid = unsafe { GetCurrentProcessId() };
+    let probe_val = probe as usize;
+    entries
+        .iter()
+        .find(|e| e.unique_process_id as u32 == me_pid && e.handle_value == probe_val)
+        .map(|e| e.object_type_index)
 }
 
 /// `NtQueryObject` into a growing buffer, returning the inner `UNICODE_STRING`
@@ -338,6 +399,64 @@ fn name_with_timeout(handle: HANDLE, timeout: Duration) -> Option<String> {
     rx.recv_timeout(timeout).unwrap_or(None)
 }
 
+/// Resolve a handle's object name on a worker thread with a timeout, because
+/// `NtQueryObject(name)` can block forever on synchronous handles (pipes, some
+/// devices). Duplicates a dedicated handle the worker owns and closes, so a hung
+/// query is abandoned rather than freezing enumeration.
+fn timed_object_name(source: HANDLE, handle_value: HANDLE, me: HANDLE) -> Option<String> {
+    let worker = duplicate(source, handle_value, me)?;
+    name_with_timeout(worker.into_raw(), Duration::from_millis(100))
+}
+
+/// Run the full classification of one handle — `DuplicateHandle`, the optional
+/// type check, `GetFileType`, and name resolution — on a worker thread, giving
+/// up after `timeout`. Each of those calls can block forever on a synchronous
+/// pipe/device handle; doing them off the main thread means a single wedged
+/// handle is abandoned instead of freezing the whole enumeration. (Abandoned
+/// workers are reaped when the process force-exits; see `crate::exit_now`.)
+fn describe_bounded(
+    source: HANDLE,
+    handle_value: HANDLE,
+    dos_map: Arc<Vec<(String, String)>>,
+    timeout: Duration,
+    verify_type: bool,
+) -> Option<Described> {
+    let source = source as usize;
+    let handle_value = handle_value as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // SAFETY: a pseudo-handle to the current process; never closed.
+        let me = unsafe { GetCurrentProcess() };
+        let result = classify(
+            source as HANDLE,
+            handle_value as HANDLE,
+            me,
+            &dos_map,
+            verify_type,
+        );
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).unwrap_or(None)
+}
+
+/// Duplicate `handle_value` from `source`, optionally confirm it's a `File`
+/// object, and classify it. Runs on the worker thread of [`describe_bounded`].
+fn classify(
+    source: HANDLE,
+    handle_value: HANDLE,
+    me: HANDLE,
+    dos_map: &[(String, String)],
+    verify_type: bool,
+) -> Option<Described> {
+    let dup = duplicate(source, handle_value, me)?;
+    if verify_type
+        && query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File")
+    {
+        return None;
+    }
+    describe(source, handle_value, me, dup.raw(), dos_map)
+}
+
 struct Described {
     file_type: FileType,
     name: String,
@@ -354,7 +473,6 @@ fn describe(
     handle_value: HANDLE,
     me: HANDLE,
     dup: HANDLE,
-    granted: u32,
     dos_map: &[(String, String)],
 ) -> Option<Described> {
     // SAFETY: dup is a live File handle.
@@ -363,8 +481,7 @@ fn describe(
             // Robust, hang-free path for disk files; fall back to the NT name.
             let name = final_path(dup)
                 .or_else(|| {
-                    query_object_string(dup, OBJECT_NAME_INFORMATION)
-                        .map(|n| device_to_dos(&n, dos_map))
+                    timed_object_name(source, handle_value, me).map(|n| device_to_dos(&n, dos_map))
                 })
                 .unwrap_or_else(|| "(unnamed file)".to_string());
             let (file_type, node, size) = disk_details(dup);
@@ -378,16 +495,9 @@ fn describe(
             })
         }
         FILE_TYPE_PIPE => {
-            // A named pipe or a socket. Resolving the name can hang on a
-            // synchronous handle, so use the worker thread for the hang-prone
-            // access mask.
-            let name = if granted == HANG_PRONE_ACCESS {
-                duplicate(source, handle_value, me)
-                    .and_then(|w| name_with_timeout(w.into_raw(), Duration::from_millis(100)))
-            } else {
-                query_object_string(dup, OBJECT_NAME_INFORMATION)
-            };
-            match name {
+            // A named pipe or a socket. The name query can hang on a synchronous
+            // handle, so it always goes through the timeout-bounded worker.
+            match timed_object_name(source, handle_value, me) {
                 Some(n) if n.starts_with("\\Device\\NamedPipe") => Some(Described {
                     file_type: FileType::Pipe,
                     name: pipe_display(&n),
@@ -402,7 +512,7 @@ fn describe(
             }
         }
         FILE_TYPE_CHAR => {
-            let name = query_object_string(dup, OBJECT_NAME_INFORMATION)
+            let name = timed_object_name(source, handle_value, me)
                 .map(|n| device_to_dos(&n, dos_map))
                 .unwrap_or_else(|| "(character device)".to_string());
             Some(Described {
@@ -416,7 +526,7 @@ fn describe(
         }
         _ => {
             // Unknown file type: best-effort name, else drop.
-            let name = device_to_dos(&query_object_string(dup, OBJECT_NAME_INFORMATION)?, dos_map);
+            let name = device_to_dos(&timed_object_name(source, handle_value, me)?, dos_map);
             Some(Described {
                 device: drive_of(&name),
                 name,
