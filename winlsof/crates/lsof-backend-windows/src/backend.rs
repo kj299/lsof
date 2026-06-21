@@ -155,13 +155,16 @@ impl Backend for WindowsBackend {
         }
 
         trace("gather: sockets::collect start");
-        let socks = sockets::collect(sel.no_host_resolve, sel.no_port_resolve);
+        let socks = sockets::collect();
         trace(&format!(
             "gather: sockets::collect done ({} endpoints)",
             socks.len()
         ));
-        for (pid, file) in socks {
+        // Resolve names (reverse DNS / service lookup) only for the sockets we
+        // keep — a scoped query must not pay for system-wide PTR lookups.
+        for (pid, mut file) in socks {
             if wanted(pid) {
+                sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
                 attach(&mut procs, &mut idx, pid, file);
             }
         }
