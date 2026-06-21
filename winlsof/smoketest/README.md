@@ -51,15 +51,19 @@ system-wide paths, elevation, WOW64, and the OS data sources end to end.
   `winlsof\target\release\lsof.exe`, and run with `-SkipBuild` (no Rust needed).
 - For `-Coverage`: `rustup component add llvm-tools-preview` (the script attempts
   this automatically).
-- Optional: [Sysinternals `handle64.exe`](https://learn.microsoft.com/sysinternals/downloads/handle)
-  on `PATH` or passed via `-HandleExe`.
+- [Sysinternals `handle64.exe`](https://learn.microsoft.com/sysinternals/downloads/handle)
+  for the oracle cross-check — **fetched automatically** (official `Handle.zip`
+  over HTTPS, into the run folder) if it isn't already on `PATH` or passed via
+  `-HandleExe`. Pass `-NoFetchHandle` to disable the download (that case then
+  SKIPs).
 
 ## Running it
 
 ```powershell
 cd winlsof\smoketest
 
-# 1) Standard pass (current-user view). Some elevated-only cases will SKIP.
+# 1) Standard pass (current-user view). This is the pass that exercises the
+#    unelevated privilege-hint case (it SKIPs under elevation).
 powershell -ExecutionPolicy Bypass -File .\Invoke-WinlsofSmokeTest.ps1
 
 # 2) Full pass — run from an ELEVATED PowerShell so the system-wide / other-user
@@ -70,9 +74,15 @@ powershell -ExecutionPolicy Bypass -File .\Invoke-WinlsofSmokeTest.ps1
 # 3) With measurable line coverage (recommended; run elevated for max coverage):
 .\Invoke-WinlsofSmokeTest.ps1 -Coverage
 
-# 4) Extra handle cross-checks:
+# 4) Point at a specific handle64.exe (otherwise it's auto-fetched);
+#    or disable the download with -NoFetchHandle.
 .\Invoke-WinlsofSmokeTest.ps1 -HandleExe C:\tools\handle64.exe
 ```
+
+> The two SKIPs you'll see in a single elevated run are by design, not gaps:
+> `privilege-hint-unelevated` only applies to a **non-elevated** run (pass 1), and
+> `handle-exe-cross-check` only SKIPs if `handle64.exe` can't be fetched/found.
+> Running pass 1 **and** pass 2 exercises everything.
 
 Results land in `.\winlsof-smoke-results\<timestamp>\`.
 

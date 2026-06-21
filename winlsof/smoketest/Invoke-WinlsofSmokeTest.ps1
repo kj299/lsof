@@ -33,7 +33,8 @@ param(
     [string]$OutDir = (Join-Path (Get-Location) 'winlsof-smoke-results'),
     [switch]$SkipBuild,
     [switch]$Coverage,
-    [string]$HandleExe
+    [string]$HandleExe,
+    [switch]$NoFetchHandle
 )
 
 # 'Continue', not 'Stop': native tools (rustup/cargo, llvm-cov) write progress and
@@ -167,6 +168,36 @@ function Test-Case {
     $color = switch ($st) { 'PASS' { 'Green' } 'FAIL' { 'Red' } 'SKIP' { 'Yellow' } default { 'Gray' } }
     Write-Host ("  [{0}] {1,-30} {2}" -f $st, $Name, $detail) -ForegroundColor $color
 }
+
+# Locate Sysinternals handle64.exe for the oracle cross-check: an explicit
+# -HandleExe wins, then one already on PATH, else (unless -NoFetchHandle) fetch
+# the official Handle.zip over HTTPS into the run folder. Returns $null if it
+# can't be found/fetched (the oracle case then SKIPs, as before).
+function Resolve-HandleExe {
+    param([string]$Provided, [switch]$NoFetch, [string]$ToolsDir)
+    if ($Provided -and (Test-Path $Provided)) { return (Resolve-Path $Provided).Path }
+    $onPath = (Get-Command handle64.exe -ErrorAction SilentlyContinue).Source
+    if ($onPath) { return $onPath }
+    if ($NoFetch) { return $null }
+    try {
+        New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
+        $exe = Join-Path $ToolsDir 'handle64.exe'
+        if (Test-Path $exe) { return $exe }
+        $zip = Join-Path $ToolsDir 'Handle.zip'
+        Write-Host "Fetching Sysinternals handle64.exe for the oracle cross-check..." -ForegroundColor Cyan
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/Handle.zip' `
+            -OutFile $zip -UseBasicParsing -TimeoutSec 30
+        Expand-Archive -LiteralPath $zip -DestinationPath $ToolsDir -Force
+        if (Test-Path $exe) { return $exe }
+        return $null
+    }
+    catch {
+        Write-Host "  could not fetch handle64.exe ($($_.Exception.Message)); oracle case will SKIP." -ForegroundColor Yellow
+        return $null
+    }
+}
+$HandleExePath = Resolve-HandleExe -Provided $HandleExe -NoFetch:$NoFetchHandle -ToolsDir (Join-Path $RunDir 'tools')
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -370,11 +401,10 @@ try {
         Assert (($null -ne $o) -and $o.Contains('=======')) 'no repeat separator seen'
     }
 
-    # ===================== optional: Sysinternals handle.exe cross-check =====================
+    # ===================== Sysinternals handle.exe cross-check =====================
     Test-Case 'handle-exe-cross-check' 'oracle/handle' {
-        $he = if ($HandleExe) { $HandleExe } else { (Get-Command handle64.exe -ErrorAction SilentlyContinue).Source }
-        if (-not $he) { Skip 'handle64.exe not provided' }
-        $h = & $he -accepteula -p $self 2>$null | Out-String
+        if (-not $HandleExePath) { Skip 'handle64.exe unavailable (pass -HandleExe or allow the download)' }
+        $h = & $HandleExePath -accepteula -p $self 2>$null | Out-String
         Assert-ContainsCI $h "winlsof_file_$self" 'handle64.exe should also see our file'
         $r = Invoke-Lsof @('-p', "$self") 'p-self-handlecmp'
         Assert-ContainsCI $r.Out "winlsof_file_$self"
@@ -405,7 +435,10 @@ if ($Coverage) {
         $cov = Join-Path $llvmbin 'llvm-cov.exe'
         $merged = Join-Path $RunDir 'coverage.profdata'
         $raws = (Get-ChildItem -Path $ProfDir -Filter '*.profraw' -ErrorAction SilentlyContinue).FullName
-        if ($raws) {
+        if (-not (Test-Path $profdata) -or -not (Test-Path $cov)) {
+            Write-Host "llvm-tools not found under $llvmbin. Run: rustup component add llvm-tools-preview" -ForegroundColor Yellow
+        }
+        elseif ($raws) {
             & $profdata merge -sparse $raws -o $merged
             & $cov report $Bin "--instr-profile=$merged" (Join-Path $Workspace 'crates') |
                 Tee-Object -FilePath (Join-Path $RunDir 'coverage-summary.txt')
