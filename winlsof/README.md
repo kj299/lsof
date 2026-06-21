@@ -59,9 +59,14 @@ independent code and per-OS "dialect" backends:
   resolution (with timeout) for the hang-prone handles previously skipped; and
   Restart Manager for bare-path / `+D` "who has this open" lookups.
 
-All planned phases (0–4) are now implemented and the binary runs on real
-Windows 10/11 hardware; live validation is in progress via the
-[`smoketest/`](smoketest/) harness, with ongoing parity refinements.
+All planned phases (0–4) are implemented and **validated on real Windows 11
+hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
+~37 cases covering every option, output format, and code path — 36 pass elevated
+and 36 pass unelevated (the one skip in each mode is mode-specific and passes in
+the other), with output differentially cross-checked against Sysinternals
+`handle64.exe`. Zero hangs, zero failures. Remaining work is ongoing parity
+refinement and the research-grade gaps tracked in
+[`docs/research-roadmap.md`](docs/research-roadmap.md).
 
 ## Privilege model (least privilege)
 
