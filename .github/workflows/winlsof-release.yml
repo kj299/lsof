@@ -75,7 +75,20 @@ jobs:
           \`\`\`
 
           The binary is **unsigned**, so Windows SmartScreen may warn on first run.
-          Verify integrity against the published SHA-256 (\`lsof.exe.sha256\`).
+
+          **Antivirus / Defender note.** winlsof does what an open-files lister
+          must - enumerate every process's handles, enable \`SeDebugPrivilege\`, and
+          read process memory (for \`cwd\`/PEB) - so heuristic AV including Microsoft
+          Defender may flag a *downloaded* copy as a "hacktool" / potentially-unwanted
+          program and block it from running, exactly like Sysinternals \`handle.exe\`.
+          This is a **false positive**: verify the download against
+          \`lsof.exe.sha256\` (below), then allow it in Windows Security -> Protection
+          history, or add an exclusion in an elevated shell:
+          \`Add-MpPreference -ExclusionPath <path-to-lsof.exe>\`. A locally built
+          binary isn't internet-marked, so it usually isn't flagged. Proper code
+          signing would establish reputation and is tracked for a future release.
+
+          Verify integrity against the published SHA-256 (\`lsof.exe.sha256\`):
 
           SHA-256: \`$(cat target/release/lsof.exe.sha256)\`
           EOF
