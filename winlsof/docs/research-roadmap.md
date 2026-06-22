@@ -140,17 +140,60 @@ a safe wrapper; reuses the existing duplicate.
 
 ---
 
+## 5. ETW-based socket → FD correlation  — 🟡 OPEN (Effort L, Confidence Medium)
+
+**Goal:** show real handle / access values on socket rows (replacing today's
+`unk`), and gain visibility into raw / ICMP endpoints — **without** the
+undocumented AFD IOCTLs that closed item §1. The roadmap explicitly flagged
+ETW as the safer follow-up route; this item formalizes it.
+
+**Why feasible:** the `Microsoft-Windows-TCPIP` ETW provider emits events on
+socket create / connect / disconnect / close that carry the owning process ID,
+the endpoint (addr+port), and — in several event IDs — the kernel object /
+handle. A short-lived ETW consumer can build a `(PID, local, remote) → (handle,
+access)` index at gather time, then join with the existing IP Helper rows to
+attach a real handle value to each socket row. The provider also exposes raw /
+ICMP events, which gives item §1's AF_RAW visibility as a follow-on.
+
+**Phased:**
+- **P1 — spike (S):** capture `Microsoft-Windows-TCPIP` events for a few
+  seconds with `logman start … -p Microsoft-Windows-TCPIP` (or the
+  [`ferrisetw`](https://crates.io/crates/ferrisetw) / `krabsetw` Rust bindings)
+  and verify the events carry enough info to map (PID, endpoint) → handle.
+  Measure: does the realtime session work as Administrator only, or any user?
+  How long must we listen to repopulate the index after a `lsof` invocation?
+- **Decision gate:** if events don't carry the handle reliably, **stop** —
+  document and keep `unk`. (The roadmap will not reopen the undocumented-AFD
+  path.) If the spike works only under elevation, ship as an **opt-in feature**
+  rather than the default.
+- **P2 — implement (M):** add `etw.rs` with a bounded realtime session (cap
+  duration, cap event count, drop unknown events) that populates an in-memory
+  index; thread the lookup into `sockets::collect`. New unsafe surface is
+  confined to ETW buffer parsing in small audited wrappers; everything else is
+  safe Rust.
+- **P3 — extend (M):** surface raw / ICMP rows on `-i` (likely as a separate
+  `-iRAW` / `-iICMP` flag, since the upstream lsof doesn't unify them).
+
+**Memory safety:** ETW is a *consumer* surface — we don't emit; we parse
+read-only buffers behind length-checked `Vec<u8>` wrappers. No new
+network/handle attack surface.
+
+**Open questions captured by the spike:**
+- Does the modern provider include the socket handle on `TcpipDataSent` /
+  `TcpipDisconnectTcb`, or only on `TcpipCloseTcb`?
+- How does the index decay handle correctly when the snapshot is taken
+  *between* socket-create and socket-close events?
+
+---
+
 ## Suggested order
 
 1. ~~`-o` offset~~ — ✅ done (`NtQueryInformationFile(FilePositionInformation)`).
 2. ~~mapped-data `mem`~~ — ✅ done (`VirtualQueryEx` + `GetMappedFileNameW`).
 3. ~~byte-range locks spike~~ — 🔬 done: gate closed, documented (needs a kernel driver / ETW).
-4. ~~socket FD / AF_UNIX / raw spike~~ — 🔬 done: gate closed, documented; sockets now show `u` access.
+4. ~~socket FD / AF_UNIX / raw spike (undocumented IOCTLs)~~ — 🔬 done: gate closed, documented; sockets now show `u` access.
+5. **ETW-based socket → FD correlation** — 🟡 next open item: safer public path to attach real handle/access to socket rows, and unblock raw/ICMP visibility.
 
-All four research-grade items have now been resolved: two implemented (offset,
-mapped data files), two spiked to a documented platform limitation (locks,
-socket-FD/AF_UNIX/raw) with the precise future path recorded.
-
-Items 1–2 are committable with the same host-tested-core + Windows-CI model used
-so far. Items 3–4 begin with a spike whose decision gate may end in "document as
-a platform limitation" rather than code.
+Items 1–2 shipped in v0.1.0. Items 3–4 are platform-limit gates with the future
+path recorded. Item 5 is the next concrete spike — start with P1 to validate
+the ETW event shape before committing to code.

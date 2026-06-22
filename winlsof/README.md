@@ -145,9 +145,20 @@ For end-to-end validation on a real Windows host (concrete commands + expected
 output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
 [`docs/windows-validation.md`](docs/windows-validation.md).
 
-The phased plan for the remaining research-grade gaps (socket FD correlation,
-AF_UNIX/raw, byte-range locks, mapped data files, file offset) is in
-[`docs/research-roadmap.md`](docs/research-roadmap.md).
+## Docs index
+
+- [`CHANGELOG.md`](CHANGELOG.md) — released versions and what changed.
+- [`docs/known-limitations.md`](docs/known-limitations.md) — what winlsof
+  deliberately doesn't show (socket FD value, byte-range locks, raw/ICMP/
+  AF_UNIX), and why; user-facing.
+- [`docs/code-signing.md`](docs/code-signing.md) — tracking doc for signing
+  the release binary (the SmartScreen / Defender fix).
+- [`docs/research-roadmap.md`](docs/research-roadmap.md) — engineering spike
+  records and the next open item (ETW-based socket → FD correlation).
+- [`docs/windows-validation.md`](docs/windows-validation.md) — manual T1–T20
+  validation plan against Windows oracles.
+- [`smoketest/README.md`](smoketest/README.md) — live Windows smoke-test
+  harness (run against source or a downloaded release binary).
 
 ## License / attribution
 
