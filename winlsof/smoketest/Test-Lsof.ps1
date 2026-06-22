@@ -32,6 +32,7 @@ $Bin = (Resolve-Path $Bin).Path
 $self = $PID
 $script:pass = 0
 $script:fail = 0
+$script:launchError = $null
 
 # Run lsof with a hard timeout; capture stdout/stderr/exit. Caching $p.Handle
 # keeps .ExitCode readable after a -PassThru process exits (a PS quirk).
@@ -39,8 +40,16 @@ function Invoke-Bin {
     param([string[]]$LsofArgs)
     $o = [IO.Path]::GetTempFileName()
     $e = [IO.Path]::GetTempFileName()
-    $p = Start-Process -FilePath $Bin -ArgumentList $LsofArgs -NoNewWindow -PassThru `
-        -RedirectStandardOutput $o -RedirectStandardError $e
+    try {
+        $p = Start-Process -FilePath $Bin -ArgumentList $LsofArgs -NoNewWindow -PassThru `
+            -RedirectStandardOutput $o -RedirectStandardError $e -ErrorAction Stop
+    }
+    catch {
+        # e.g. the OS/AV refuses to launch it (Defender PUA/virus block, MOTW).
+        Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
+        $script:launchError = $_.Exception.Message
+        return [pscustomobject]@{ Out = ''; Err = $_.Exception.Message; Exit = $null; Hung = $false }
+    }
     $null = $p.Handle
     if (-not $p.WaitForExit($TimeoutSec * 1000)) {
         try { $p.Kill() } catch {}
@@ -117,7 +126,17 @@ finally {
 
 $total = $script:pass + $script:fail
 Write-Host ("`nResult: PASS={0}  FAIL={1}  (total {2})" -f $script:pass, $script:fail, $total)
-$color = if ($script:fail -gt 0) { 'Red' } else { 'Green' }
-$msg = if ($script:fail -gt 0) { 'Some checks failed.' } else { 'All checks passed.' }
+if ($script:launchError) {
+    Write-Host "The binary could not be launched: $script:launchError" -ForegroundColor Red
+    if ($script:launchError -match 'virus|unwanted|potentially') {
+        Write-Host "This is a Windows Defender false-positive on the handle-enumeration tool" -ForegroundColor Yellow
+        Write-Host "(it enables SeDebugPrivilege and reads process memory, like Sysinternals handle.exe)." -ForegroundColor Yellow
+        Write-Host "The binary itself is fine - verify it with its published SHA-256. To run it, add a" -ForegroundColor Yellow
+        Write-Host "Defender exclusion in an elevated shell:  Add-MpPreference -ExclusionPath '$Bin'" -ForegroundColor Yellow
+    }
+    exit 2
+}
+$color = if ($script:fail -gt 0 -or $script:pass -eq 0) { 'Red' } else { 'Green' }
+$msg = if ($script:fail -gt 0) { 'Some checks failed.' } elseif ($script:pass -eq 0) { 'No checks ran.' } else { 'All checks passed.' }
 Write-Host $msg -ForegroundColor $color
-exit ([int]($script:fail -gt 0))
+exit ([int](($script:fail -gt 0) -or ($script:pass -eq 0)))

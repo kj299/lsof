@@ -94,8 +94,23 @@ Prebuilt **`lsof.exe`** for 64-bit Windows is published on the
 3. Run it from anywhere: `.\lsof.exe -nP -i`.
 
 The binary is **unsigned**, so Windows SmartScreen may warn on first run
-(*More info → Run anyway*). Releases are produced by pushing a `winlsof-v*` tag,
-which triggers [`.github/workflows/winlsof-release.yml`](../.github/workflows/winlsof-release.yml).
+(*More info → Run anyway*).
+
+> **Antivirus / Defender note.** Like Sysinternals `handle.exe` and Process
+> Explorer, winlsof does exactly what an open-files lister must — it enumerates
+> every process's handles, enables `SeDebugPrivilege`, and reads process memory
+> (for `cwd`/PEB). Heuristic AV (including Microsoft Defender) may therefore
+> flag a *downloaded* copy as a "hacktool" / potentially-unwanted program and
+> block it from running. This is a **false positive**: verify the download
+> against the published `lsof.exe.sha256`, and if you want to run it, allow it in
+> Windows Security → Protection history, or add an exclusion in an elevated
+> shell: `Add-MpPreference -ExclusionPath <path-to-lsof.exe>`. (A locally built
+> binary isn't internet-marked, so it usually isn't flagged.) Proper code
+> signing would establish reputation and reduce this — tracked for a future
+> release.
+
+Releases are produced by pushing a `winlsof-v*` tag, which triggers
+[`.github/workflows/winlsof-release.yml`](../.github/workflows/winlsof-release.yml).
 Prefer building from source? See below.
 
 ## Build & run
