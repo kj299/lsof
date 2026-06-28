@@ -140,49 +140,59 @@ a safe wrapper; reuses the existing duplicate.
 
 ---
 
-## 5. ETW-based socket → FD correlation  — 🟡 OPEN, P1 SPIKE READY (Effort L, Confidence Medium)
+## 5. ETW-based socket coverage — 🟡 OPEN, P1 SPIKE DONE (Effort L, Confidence Medium)
 
-**Goal:** show real handle / access values on socket rows (replacing today's
-`unk`), and gain visibility into raw / ICMP endpoints — **without** the
-undocumented AFD IOCTLs that closed item §1. The roadmap explicitly flagged
-ETW as the safer follow-up route; this item formalizes it.
+**Original goal:** show real handle / access values on socket rows (replacing
+today's `unk`), and gain visibility into raw / ICMP endpoints — **without** the
+undocumented AFD IOCTLs that closed item §1.
 
-**Why feasible:** the `Microsoft-Windows-TCPIP` ETW provider emits events on
-socket create / connect / disconnect / close that carry the owning process ID,
-the endpoint (addr+port), and — in several event IDs — the kernel object /
-handle. A short-lived ETW consumer can build a `(PID, local, remote) → (handle,
-access)` index at gather time, then join with the existing IP Helper rows to
-attach a real handle value to each socket row. The provider also exposes raw /
-ICMP events, which gives item §1's AF_RAW visibility as a follow-on.
+**P1 spike — done (2026-06-22).** Captured 10s of
+`Microsoft-Windows-Winsock-AFD` + `Microsoft-Windows-TCPIP` events via
+`logman` + `tracerpt`, then dumped with `Get-WinEvent` for proper
+manifest-resolved per-event-ID detail. Both providers fire on **any socket
+type** (the sample even captured an IPv6 mDNS UDP socket via AFD Id 1009).
+What the events carry, and what they don't:
 
-**P1 spike — ready to run.** See [`etw-spike.md`](etw-spike.md): instead of
-writing the Rust consumer first, use the built-in `logman` + `tracerpt` to
-capture 10 seconds of TCPIP + AFD events on Windows and dump them to CSV. That
-answers the real gating question (do the events even carry handle data?) in
-minutes, at zero code cost. If positive → P2; if not → close item §5 the way
-§1 and §2 closed, with the artifact in hand.
+| Field needed | In events? |
+|---|---|
+| Owning PID | ✅ (`EventRecord.ProcessId` header) |
+| AFD endpoint kernel pointer | ✅ (`Endpoint 0xffffd48fe3cb8010`) |
+| Local + remote address + port | ✅ (TCPIP Id 1332 has `local=… remote=…`; AFD 1015/1007 carry remote `Addr`) |
+| **User-space HANDLE value** (what lsof's FD column shows) | ❌ Not in any event |
+| Session ETW capture | ✅ Works under elevation; needs SE_AUDIT_NAME or *Performance Log Users* |
+
+The "real FD" sub-goal is **unreachable from user mode** — the kernel
+Endpoint pointer can't be mapped to a user-space HANDLE without walking
+`FILE_OBJECT.FsContext`, which only a driver can do. (Process Hacker /
+TCPView ship their own kernel driver for this.)
+
+**Decision:** **scope pivot, not a closed gate.** ETW's unique value here
+is **extending `-i` to socket families IP Helper doesn't enumerate** (raw,
+ICMP, AF_UNIX), since AFD events fire for those identically. The "real FD"
+sub-goal is closed (driver-only). The "expand `-i`" sub-goal moves forward
+as the new P2.
 
 **P2 — implement (M):** add `etw.rs` with a bounded realtime session (cap
-duration, cap event count, drop unknown events) that populates an in-memory
-index; thread the lookup into `sockets::collect`. New unsafe surface confined
-to ETW buffer parsing in small audited wrappers; everything else safe Rust.
-Use `windows-sys`'s `Win32_System_Diagnostics_Etw` feature for the FFI types,
-matching the rest of the backend's "raw windows-sys + thin unsafe wrappers"
-style — no new high-level wrapper crate.
+duration, cap event count, drop unknown events) over the AFD provider. Use
+`windows-sys`'s `Win32_System_Diagnostics_Etw` feature for the FFI types,
+matching the rest of the backend's raw-windows-sys style — no new wrapper
+crate. Aggregate (PID, AFD endpoint, addr) tuples observed during the
+window, dedupe by endpoint pointer, and emit rows on `-i` for socket
+families the IP Helper tables don't cover. Behind an opt-in flag
+(`--etw`) since the capture session needs elevation. Bonus: TCPIP Id 1169 /
+1170 expose UDP *remote* endpoints — enrich UDP rows with the most
+recently observed remote.
 
-**P3 — extend (M):** surface raw / ICMP rows on `-i` (likely as a separate
-`-iRAW` / `-iICMP` flag, since the upstream lsof doesn't unify them).
+**P3 — extend (M):** surface a `-iRAW` / `-iICMP` family filter
+(upstream lsof doesn't unify them; mirror its convention).
 
 **Memory safety:** ETW is a *consumer* surface — we don't emit; we parse
 read-only buffers behind length-checked `Vec<u8>` wrappers. No new
 network/handle attack surface.
 
-**Open questions captured by the spike:**
-- Does the modern provider include the socket handle on any of the
-  TCP/UDP/AFD events, or only the (PID, endpoint) pair (which we already have)?
-- Does starting an ETW realtime session require Administrator, or does
-  *Performance Log Users* membership suffice? Determines whether P2 can be
-  default-on or has to be opt-in / elevated.
+**Spike artifacts:** the per-event-ID summary, full property dump, and raw
+CSV are in `winlsof-smoke-results\…\` on the validating host; key findings
+captured in this section.
 
 ---
 
