@@ -10,7 +10,7 @@ use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
 use crate::util::trace;
-use crate::{handles, mapped, modules, peb, privilege, process, restart, sockets};
+use crate::{etw, handles, mapped, modules, peb, privilege, process, restart, sockets};
 
 /// Gather a process's `cwd` + loaded modules (`txt`/`mem`) + mapped data files on
 /// a worker thread, bounded by `timeout`. These run against a *foreign* process
@@ -182,6 +182,23 @@ impl Backend for WindowsBackend {
                     sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
                 }
                 attach(&mut procs, &mut idx, pid, file);
+            }
+        }
+
+        // `--etw` (opt-in): run a short AFD-provider capture, then surface its
+        // histogram on stderr. Iteration 1 emits no socket rows yet — this is
+        // the FFI-verification step before TDH parsing lands in iteration 2.
+        // Roadmap §5.
+        if sel.use_etw {
+            trace("gather: etw::capture start");
+            if let Some(summary) = etw::capture(Duration::from_secs(2)) {
+                trace(&format!(
+                    "gather: etw::capture done ({} events)",
+                    summary.total
+                ));
+                eprintln!("{}", summary.render(10));
+            } else {
+                trace("gather: etw::capture returned None (setup failed)");
             }
         }
 

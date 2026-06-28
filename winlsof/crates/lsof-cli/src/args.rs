@@ -53,6 +53,11 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
             i += 1;
             continue;
         }
+        if tok == "--etw" {
+            sel.use_etw = true;
+            i += 1;
+            continue;
+        }
 
         if let Some(plus) = tok.strip_prefix('+') {
             // `+d` / `+D <path>`: directory / path lookup.

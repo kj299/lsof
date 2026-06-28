@@ -106,6 +106,10 @@ pub struct Selection {
     pub dir_trees: Vec<String>,
     /// `-d`: file-descriptor filter.
     pub fd_filter: Option<FdFilter>,
+    /// `--etw`: opt-in ETW realtime capture for socket families IP Helper
+    /// doesn't enumerate (raw/ICMP/AF_UNIX). Off by default; needs elevation.
+    /// See `docs/research-roadmap.md` §5.
+    pub use_etw: bool,
 }
 
 impl Selection {

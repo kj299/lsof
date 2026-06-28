@@ -13,6 +13,8 @@
 #[cfg(windows)]
 mod backend;
 #[cfg(windows)]
+mod etw;
+#[cfg(windows)]
 mod handles;
 #[cfg(windows)]
 mod mapped;

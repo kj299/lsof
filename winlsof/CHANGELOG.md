@@ -9,7 +9,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-(No changes yet.)
+### Added
+
+- **`--etw` opt-in flag** (Windows, iteration 1): runs a short
+  `Microsoft-Windows-Winsock-AFD` ETW realtime capture and prints a
+  per-event-ID histogram to stderr. Needs Administrator (or *Performance Log
+  Users* membership). No row emission yet — this is the FFI-verification
+  step for the eventual P2 deliverable in
+  [`docs/research-roadmap.md`](docs/research-roadmap.md) §5: extending `-i`
+  coverage to socket families IP Helper doesn't enumerate (raw, ICMP,
+  AF_UNIX). Iteration 2 adds TDH event parsing and the actual row
+  emission.
 
 ## [0.1.0] — 2026-06-21
 

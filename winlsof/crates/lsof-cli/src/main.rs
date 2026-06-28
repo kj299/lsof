@@ -71,6 +71,12 @@ OUTPUT:\n\
     -j            JSON Lines (one object per file)\n\
     -r [delay]    repeat every <delay>s (default 15) until interrupted\n\
 \n\
+    --etw         (Windows, opt-in) short ETW capture against the AFD\n\
+                  provider to extend `-i` coverage to socket families\n\
+                  IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).\n\
+                  Needs Administrator. Currently iteration 1: prints an\n\
+                  event-id histogram to stderr; no rows emitted yet.\n\
+\n\
     -h, --help        show this help\n\
     -v, --version     show version\n\
 \n\
