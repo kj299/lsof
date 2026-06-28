@@ -106,11 +106,15 @@ impl FileType {
     }
 }
 
-/// Transport protocol for a network socket.
+/// Transport protocol for a network socket. `Other(name)` carries a static
+/// upper-case protocol name (e.g. "ICMP", "ICMPV6", "RAW", "AF_UNIX") for
+/// non-TCP/UDP sockets surfaced from sources beyond IP Helper (currently the
+/// ETW backend, when `--etw` is on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
     Tcp,
     Udp,
+    Other(&'static str),
 }
 
 impl Protocol {
@@ -118,6 +122,7 @@ impl Protocol {
         match self {
             Protocol::Tcp => "TCP",
             Protocol::Udp => "UDP",
+            Protocol::Other(s) => s,
         }
     }
 }

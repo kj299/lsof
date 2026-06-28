@@ -14,24 +14,41 @@
 //! `--etw` is opt-in, never default; a setup failure (e.g. not enough
 //! privilege) is reported via stderr and the rest of `gather` continues.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::slice;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use lsof_core::model::{AccessMode, FdType, FileType, OpenFile, Protocol, SocketInfo};
 use windows_sys::core::GUID;
 use windows_sys::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
-    TdhGetEventInformation, CONTROLTRACE_HANDLE, EVENT_PROPERTY_INFO, EVENT_RECORD,
-    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
-    EVENT_TRACE_REAL_TIME_MODE, PROCESSTRACE_HANDLE, PROCESS_TRACE_MODE_EVENT_RECORD,
-    PROCESS_TRACE_MODE_REAL_TIME, TRACE_EVENT_INFO, WNODE_FLAG_TRACED_GUID,
+    TdhGetEventInformation, TdhGetProperty, TdhGetPropertySize, CONTROLTRACE_HANDLE,
+    EVENT_PROPERTY_INFO, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW,
+    EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESSTRACE_HANDLE,
+    PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, PROPERTY_DATA_DESCRIPTOR,
+    TRACE_EVENT_INFO, WNODE_FLAG_TRACED_GUID,
 };
 
 use crate::util::trace;
+
+// --- AFD socket families and protocols we recognize ---
+// AddressFamily values (per `ws2def.h`).
+const AF_UNSPEC: u16 = 0;
+const AF_UNIX: u16 = 1;
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 23;
+
+// IP protocols (per `IANA` / `winsock2.h`).
+const IPPROTO_ICMP: u32 = 1;
+const IPPROTO_TCP: u32 = 6;
+const IPPROTO_UDP: u32 = 17;
+const IPPROTO_ICMPV6: u32 = 58;
+const IPPROTO_RAW: u32 = 255;
 
 /// `Microsoft-Windows-Winsock-AFD` provider GUID. AFD's per-socket I/O events
 /// fire for *every* socket family it manages (TCP, UDP, raw, ICMP, AF_UNIX,
@@ -61,6 +78,20 @@ const NULL_CONTROLTRACE_HANDLE: CONTROLTRACE_HANDLE = CONTROLTRACE_HANDLE { Valu
 /// Sentinel returned by [`OpenTraceW`] on failure.
 const INVALID_PROCESSTRACE_HANDLE: u64 = u64::MAX;
 
+// --- AFD event IDs we parse (confirmed by the iteration-2 schema dump) ---
+/// `AfdCreate` — Process, Endpoint, AddressFamily, SocketType, Protocol.
+const EVENT_ID_AFD_CREATE: u16 = 1000;
+/// Address-bearing AFD events. Each carries `Endpoint` and the variable-size
+/// `Address` blob (a sockaddr) we decode via `parse_sockaddr`.
+const EVENT_IDS_AFD_WITH_ADDRESS: &[u16] = &[
+    1007, // SendTo
+    1009, // RecvFrom (older variant)
+    1015, // RecvMsg with addr
+    1018, // RecvFrom (newer variant)
+    1030, // ConnectWithAddress
+    3004, // Data indication (with addr)
+];
+
 /// Aggregated result of one ETW capture window — the only data iteration 1
 /// emits. Iteration 2 will replace this with parsed (PID, endpoint, addr)
 /// records.
@@ -69,16 +100,99 @@ pub struct Summary {
     pub total: usize,
     pub by_event_id: BTreeMap<u16, usize>,
     /// Pre-rendered schema text for each unique `(Id, Version)` we've seen.
-    /// Captured in the callback via TDH, surfaced at the end so iteration 3
-    /// can pick authoritative property names / types instead of guessing
-    /// offsets into `EVENT_RECORD.UserData`.
+    /// Captured in the callback via TDH; useful for diagnosing/extending
+    /// `parse_afd_create` / `parse_afd_address` on future Windows builds.
     pub schemas: BTreeMap<(u16, u8), String>,
+    /// AFD-observed sockets, keyed by Endpoint pointer. The caller
+    /// (`backend::gather`) filters out IP-Helper-covered rows via
+    /// [`EtwSocket::is_covered_by_ip_helper`] and emits the rest as `-i`
+    /// rows. Empty if the capture window saw no AfdCreate / address events.
+    pub sockets: Vec<EtwSocket>,
 }
 
 /// `STATUS_BUFFER_TOO_SMALL` returned by `TdhGetEventInformation` when our
 /// buffer is too small to hold the full `TRACE_EVENT_INFO` — used to drive
 /// the "ask for size, grow, retry" loop.
 const STATUS_BUFFER_TOO_SMALL: u32 = 122; // ERROR_INSUFFICIENT_BUFFER
+
+/// One AFD-observed socket, keyed by `Endpoint` (the kernel AFD-endpoint
+/// pointer that uniquely identifies a socket within a boot session). Populated
+/// from AfdCreate (Id 1000) and refined by the address-bearing events.
+#[derive(Clone, Debug)]
+pub struct EtwSocket {
+    pub pid: u32,
+    pub endpoint: u64,
+    /// Raw AddressFamily from AfdCreate (`AF_INET`, `AF_INET6`, `AF_UNIX`, …).
+    pub family: u16,
+    pub socket_type: u32,
+    pub protocol_raw: u32,
+    /// Last remote address observed via an addr-bearing AFD event.
+    pub last_remote: Option<SocketAddr>,
+}
+
+impl EtwSocket {
+    /// Whether this endpoint is one IP Helper's TCP/UDP tables already cover —
+    /// in which case our [`emit_extras`] caller should skip it. We surface only
+    /// the rows IP Helper *doesn't* enumerate.
+    pub fn is_covered_by_ip_helper(&self) -> bool {
+        (self.family == AF_INET || self.family == AF_INET6)
+            && (self.protocol_raw == IPPROTO_TCP || self.protocol_raw == IPPROTO_UDP)
+    }
+
+    /// lsof-style protocol label (NODE column) — TCP/UDP for the boring rows,
+    /// "ICMP"/"ICMPV6"/"RAW"/"AF_UNIX"/etc. for the interesting ones.
+    pub fn protocol(&self) -> Protocol {
+        match (self.family, self.protocol_raw) {
+            (_, IPPROTO_TCP) => Protocol::Tcp,
+            (_, IPPROTO_UDP) => Protocol::Udp,
+            (_, IPPROTO_ICMP) => Protocol::Other("ICMP"),
+            (_, IPPROTO_ICMPV6) => Protocol::Other("ICMPV6"),
+            (_, IPPROTO_RAW) => Protocol::Other("RAW"),
+            (AF_UNIX, _) => Protocol::Other("AF_UNIX"),
+            (AF_UNSPEC, _) => Protocol::Other("AF_UNSPEC"),
+            _ => Protocol::Other("OTHER"),
+        }
+    }
+
+    /// lsof TYPE-column code (IPv4 / IPv6 / unix / unknown) for this endpoint.
+    fn file_type(&self) -> FileType {
+        match self.family {
+            AF_INET => FileType::Ipv4,
+            AF_INET6 => FileType::Ipv6,
+            AF_UNIX => FileType::Unix,
+            _ => FileType::Unknown,
+        }
+    }
+}
+
+/// Build an `OpenFile` row from an AFD-observed socket. The IP-Helper-covered
+/// rows are filtered out upstream by [`EtwSocket::is_covered_by_ip_helper`];
+/// what this emits is the non-TCP/UDP coverage the `--etw` mode exists for.
+pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
+    let protocol = sock.protocol();
+    let info = SocketInfo {
+        protocol,
+        local: None, // AfdBind events don't expose the bound addr as a
+        // named property; iteration 4 may revisit.
+        remote: sock.last_remote,
+        state: None,
+    };
+    let name = match sock.last_remote {
+        Some(addr) => format!("->{addr}"),
+        None => format!("(endpoint 0x{:x})", sock.endpoint),
+    };
+    OpenFile {
+        fd: FdType::Unknown,
+        access: AccessMode::ReadWrite,
+        file_type: sock.file_type(),
+        name,
+        device: None,
+        size: None,
+        offset: None,
+        node: Some(protocol.as_str().to_string()),
+        socket: Some(info),
+    }
+}
 
 impl Summary {
     /// Render a one-line summary, the top-N event-ID counts (sorted by
@@ -93,6 +207,18 @@ impl Summary {
         );
         for (id, count) in by_id.into_iter().take(top_n) {
             out.push_str(&format!("\netw:   id={id:<5} count={count}"));
+        }
+        if !self.sockets.is_empty() {
+            let extras: usize = self
+                .sockets
+                .iter()
+                .filter(|s| !s.is_covered_by_ip_helper())
+                .count();
+            out.push_str(&format!(
+                "\netw: aggregated {} unique endpoints ({} non-TCP/UDP)",
+                self.sockets.len(),
+                extras
+            ));
         }
         for ((id, ver), schema) in &self.schemas {
             out.push_str(&format!("\netw schema: id={id} version={ver}\n{schema}"));
@@ -109,6 +235,9 @@ struct CallbackState {
     /// `(EventId, Version)` pairs whose schema we've already dumped, to keep
     /// the schema work O(1) amortized per unique event.
     schema_seen: Mutex<HashSet<(u16, u8)>>,
+    /// Aggregator keyed by AFD `Endpoint` pointer — accumulates create info
+    /// (family/type/protocol) and refines with any address-bearing event.
+    sockets: Mutex<HashMap<u64, EtwSocket>>,
 }
 
 /// `EVENT_RECORD_CALLBACK` for the AFD realtime session. Runs on the
@@ -130,6 +259,7 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
     let state = unsafe { &*state_ptr };
     let id = r.EventHeader.EventDescriptor.Id;
     let version = r.EventHeader.EventDescriptor.Version;
+    let pid = r.EventHeader.ProcessId;
     if let Ok(mut s) = state.summary.lock() {
         s.total += 1;
         *s.by_event_id.entry(id).or_insert(0) += 1;
@@ -151,6 +281,169 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
             }
         }
     }
+    // Per-event aggregation. SAFETY: `record` is valid; helpers only read.
+    if id == EVENT_ID_AFD_CREATE {
+        if let Some((endpoint, family, sock_type, protocol)) = unsafe { parse_afd_create(record) } {
+            if let Ok(mut socks) = state.sockets.lock() {
+                socks
+                    .entry(endpoint)
+                    .and_modify(|e| {
+                        e.family = family;
+                        e.socket_type = sock_type;
+                        e.protocol_raw = protocol;
+                    })
+                    .or_insert(EtwSocket {
+                        pid,
+                        endpoint,
+                        family,
+                        socket_type: sock_type,
+                        protocol_raw: protocol,
+                        last_remote: None,
+                    });
+            }
+        }
+    } else if EVENT_IDS_AFD_WITH_ADDRESS.contains(&id) {
+        if let Some((endpoint, addr)) = unsafe { parse_afd_address(record) } {
+            if let Ok(mut socks) = state.sockets.lock() {
+                socks
+                    .entry(endpoint)
+                    .and_modify(|e| e.last_remote = Some(addr))
+                    .or_insert(EtwSocket {
+                        pid,
+                        endpoint,
+                        // No create event was seen in this window: family
+                        // unknown. Infer from the sockaddr family if we can.
+                        family: match addr {
+                            SocketAddr::V4(_) => AF_INET,
+                            SocketAddr::V6(_) => AF_INET6,
+                        },
+                        socket_type: 0,
+                        protocol_raw: 0,
+                        last_remote: Some(addr),
+                    });
+            }
+        }
+    }
+}
+
+/// Pull `(Endpoint, AddressFamily, SocketType, Protocol)` out of an AfdCreate
+/// (Id 1000) event using TDH-by-name. Property names confirmed by the
+/// iteration-2 schema dump.
+///
+/// SAFETY: `record` must point to a valid `EVENT_RECORD` for the call.
+unsafe fn parse_afd_create(record: *const EVENT_RECORD) -> Option<(u64, u16, u32, u32)> {
+    let endpoint = unsafe { get_property_u64(record, "Endpoint") }?;
+    let family = unsafe { get_property_u32(record, "AddressFamily") }? as u16;
+    let socket_type = unsafe { get_property_u32(record, "SocketType") }.unwrap_or(0);
+    let protocol = unsafe { get_property_u32(record, "Protocol") }.unwrap_or(0);
+    Some((endpoint, family, socket_type, protocol))
+}
+
+/// Pull `(Endpoint, sockaddr)` out of an address-bearing AFD event (Id 1007 /
+/// 1009 / 1015 / 1018 / 1030 / 3004).
+///
+/// SAFETY: `record` must point to a valid `EVENT_RECORD` for the call.
+unsafe fn parse_afd_address(record: *const EVENT_RECORD) -> Option<(u64, SocketAddr)> {
+    let endpoint = unsafe { get_property_u64(record, "Endpoint") }?;
+    let blob = unsafe { get_property_bytes(record, "Address") }?;
+    let addr = parse_sockaddr(&blob)?;
+    Some((endpoint, addr))
+}
+
+/// Decode a Windows `SOCKADDR_IN` / `SOCKADDR_IN6` blob to a `SocketAddr`.
+/// The first 2 bytes are `sin_family` (little-endian u16); for `AF_INET` the
+/// next 2 are the port (network order) and the next 4 are the IPv4 address;
+/// for `AF_INET6` the next 2 are the port, then 4 bytes flowinfo, then 16
+/// bytes of address. Returns `None` if the blob is too short or the family
+/// isn't an IP family.
+fn parse_sockaddr(blob: &[u8]) -> Option<SocketAddr> {
+    if blob.len() < 2 {
+        return None;
+    }
+    let family = u16::from_le_bytes([blob[0], blob[1]]);
+    match family {
+        AF_INET if blob.len() >= 8 => {
+            let port = u16::from_be_bytes([blob[2], blob[3]]);
+            let addr = Ipv4Addr::new(blob[4], blob[5], blob[6], blob[7]);
+            Some(SocketAddr::new(IpAddr::V4(addr), port))
+        }
+        AF_INET6 if blob.len() >= 24 => {
+            let port = u16::from_be_bytes([blob[2], blob[3]]);
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&blob[8..24]);
+            let addr = Ipv6Addr::from(octets);
+            Some(SocketAddr::new(IpAddr::V6(addr), port))
+        }
+        _ => None,
+    }
+}
+
+/// `TdhGetProperty` wrapper for fixed-width scalars. Returns `None` if TDH
+/// can't find or read the named property.
+///
+/// SAFETY: `record` must point to a valid `EVENT_RECORD`.
+unsafe fn get_property_scalar<T: Copy + Default>(
+    record: *const EVENT_RECORD,
+    name: &str,
+) -> Option<T> {
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let descriptor = PROPERTY_DATA_DESCRIPTOR {
+        PropertyName: name_wide.as_ptr() as u64,
+        ArrayIndex: 0,
+        Reserved: 0,
+    };
+    let mut value: T = T::default();
+    let rc = unsafe {
+        TdhGetProperty(
+            record,
+            0,
+            std::ptr::null(),
+            1,
+            &descriptor,
+            size_of::<T>() as u32,
+            &mut value as *mut T as *mut u8,
+        )
+    };
+    (rc == 0).then_some(value)
+}
+
+unsafe fn get_property_u32(record: *const EVENT_RECORD, name: &str) -> Option<u32> {
+    unsafe { get_property_scalar::<u32>(record, name) }
+}
+
+unsafe fn get_property_u64(record: *const EVENT_RECORD, name: &str) -> Option<u64> {
+    unsafe { get_property_scalar::<u64>(record, name) }
+}
+
+/// `TdhGetProperty` wrapper for variable-length byte properties (e.g. the
+/// AFD `Address` sockaddr blob). Returns `None` if TDH can't find/read it.
+///
+/// SAFETY: `record` must point to a valid `EVENT_RECORD`.
+unsafe fn get_property_bytes(record: *const EVENT_RECORD, name: &str) -> Option<Vec<u8>> {
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let descriptor = PROPERTY_DATA_DESCRIPTOR {
+        PropertyName: name_wide.as_ptr() as u64,
+        ArrayIndex: 0,
+        Reserved: 0,
+    };
+    let mut size: u32 = 0;
+    let rc = unsafe { TdhGetPropertySize(record, 0, std::ptr::null(), 1, &descriptor, &mut size) };
+    if rc != 0 || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe {
+        TdhGetProperty(
+            record,
+            0,
+            std::ptr::null(),
+            1,
+            &descriptor,
+            size,
+            buf.as_mut_ptr(),
+        )
+    };
+    (rc == 0).then_some(buf)
 }
 
 /// Pull the property schema for one event out of TDH and pretty-print it as
@@ -346,6 +639,7 @@ pub fn capture(duration: Duration) -> Option<Summary> {
     let state = Box::new(CallbackState {
         summary: Mutex::new(Summary::default()),
         schema_seen: Mutex::new(HashSet::new()),
+        sockets: Mutex::new(HashMap::new()),
     });
     let state_addr = Box::into_raw(state) as usize;
 
@@ -414,5 +708,14 @@ pub fn capture(duration: Duration) -> Option<Summary> {
     // can reference it.
     // SAFETY: we created this Box::into_raw above; it's only reclaimed here.
     let state = unsafe { Box::from_raw(state_addr as *mut CallbackState) };
-    Some(state.summary.into_inner().unwrap_or_default())
+    let CallbackState {
+        summary, sockets, ..
+    } = *state;
+    let mut summary = summary.into_inner().unwrap_or_default();
+    // Drain the aggregator into the Summary so the caller doesn't need to
+    // know about the internal mutex.
+    if let Ok(map) = sockets.into_inner() {
+        summary.sockets = map.into_values().collect();
+    }
+    Some(summary)
 }

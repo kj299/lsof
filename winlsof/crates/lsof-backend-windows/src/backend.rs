@@ -185,17 +185,24 @@ impl Backend for WindowsBackend {
             }
         }
 
-        // `--etw` (opt-in): run a short AFD-provider capture, then surface its
-        // histogram on stderr. Iteration 1 emits no socket rows yet — this is
-        // the FFI-verification step before TDH parsing lands in iteration 2.
-        // Roadmap §5.
+        // `--etw` (opt-in): run a short AFD-provider capture and emit any
+        // non-TCP/UDP sockets (raw / ICMP / AF_UNIX) we observe as additional
+        // `-i` rows — IP Helper has no table for those. Histogram + per-event
+        // schemas still surface on stderr for diagnosability. Roadmap §5.
         if sel.use_etw {
             trace("gather: etw::capture start");
             if let Some(summary) = etw::capture(Duration::from_secs(2)) {
                 trace(&format!(
-                    "gather: etw::capture done ({} events)",
-                    summary.total
+                    "gather: etw::capture done ({} events, {} sockets)",
+                    summary.total,
+                    summary.sockets.len()
                 ));
+                for s in &summary.sockets {
+                    if s.is_covered_by_ip_helper() || !wanted(s.pid) {
+                        continue;
+                    }
+                    attach(&mut procs, &mut idx, s.pid, etw::to_open_file(s));
+                }
                 eprintln!("{}", summary.render(10));
             } else {
                 trace("gather: etw::capture returned None (setup failed)");
