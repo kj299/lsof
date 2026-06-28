@@ -9,7 +9,8 @@
 use std::ffi::c_void;
 
 use lsof_core::model::Process;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
     GetTokenInformation, LookupAccountSidW, TokenUser, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
 };
@@ -24,7 +25,7 @@ use crate::util::{wide_to_string, OwnedHandle};
 
 /// Enumerate all processes visible to the caller, with PID, PPID, image name,
 /// and (best-effort) owning user. Files are left empty; callers attach them.
-pub fn enumerate() -> Vec<Process> {
+pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
     let mut out = Vec::new();
 
     // SAFETY: returns a snapshot handle or INVALID_HANDLE_VALUE (rejected below).
@@ -44,7 +45,7 @@ pub fn enumerate() -> Vec<Process> {
             pid,
             ppid: Some(entry.th32ParentProcessID),
             command: wide_to_string(&entry.szExeFile),
-            user: owner_user(pid),
+            user: owner_user(pid, numeric_ids),
             files: Vec::new(),
         });
         // SAFETY: same invariants as Process32FirstW.
@@ -55,7 +56,7 @@ pub fn enumerate() -> Vec<Process> {
 
 /// Resolve a process's owning account as `DOMAIN\\user`, or `None` if it can't
 /// be read with least-privilege access.
-fn owner_user(pid: u32) -> Option<String> {
+fn owner_user(pid: u32, numeric_ids: bool) -> Option<String> {
     // SAFETY: returns null on failure (rejected by OwnedHandle::new).
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     let process = OwnedHandle::new(process)?;
@@ -92,7 +93,35 @@ fn owner_user(pid: u32) -> Option<String> {
     // SAFETY: buf holds a valid TOKEN_USER written by the call above; the SID it
     // points into lives within `buf`, which outlives this borrow.
     let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
-    lookup_account(token_user.User.Sid)
+    if numeric_ids {
+        sid_to_string(token_user.User.Sid)
+    } else {
+        lookup_account(token_user.User.Sid)
+    }
+}
+
+/// `-l` rendering: return the SID in its canonical `S-1-5-...` string form
+/// instead of resolving to `DOMAIN\\user`. Used when `Selection::numeric_ids`
+/// is set.
+fn sid_to_string(sid: *mut c_void) -> Option<String> {
+    let mut wide: *mut u16 = std::ptr::null_mut();
+    // SAFETY: ConvertSidToStringSidW allocates a wide string via LocalAlloc;
+    // we must LocalFree it once we've copied the chars.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &mut wide) };
+    if ok == 0 || wide.is_null() {
+        return None;
+    }
+    // Read the NUL-terminated wide string into a Rust String.
+    let mut len = 0usize;
+    // SAFETY: wide points to a NUL-terminated buffer the API just produced.
+    while unsafe { *wide.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(wide, len) };
+    let out = String::from_utf16_lossy(slice);
+    // SAFETY: pair to the API's LocalAlloc above.
+    unsafe { LocalFree(wide as *mut c_void) };
+    Some(out)
 }
 
 /// Resolve a SID to `DOMAIN\\name` via `LookupAccountSidW`.

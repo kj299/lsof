@@ -223,6 +223,7 @@ pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
         size: None,
         offset: None,
         node: Some(protocol.as_str().to_string()),
+        links: None,
         socket: Some(info),
     }
 }

@@ -175,6 +175,7 @@ fn make_file(
         size: None,
         offset: None,
         node: Some(proto.as_str().to_string()),
+        links: None,
         socket: Some(sock),
     }
 }

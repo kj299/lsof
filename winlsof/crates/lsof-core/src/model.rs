@@ -240,6 +240,11 @@ pub struct OpenFile {
     /// NODE column — the file-index (inode analog) for files, or the protocol
     /// (`TCP`/`UDP`) for sockets.
     pub node: Option<String>,
+    /// Hard-link count from `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks`, when
+    /// known. Surfaced as the NLINK column under `-L` and used by `+L count`
+    /// to filter to files with fewer than `count` links (e.g. `+L1` for
+    /// unlinked-but-still-open files — a security-interesting case).
+    pub links: Option<u32>,
     /// Present iff this is a network socket.
     pub socket: Option<SocketInfo>,
 }

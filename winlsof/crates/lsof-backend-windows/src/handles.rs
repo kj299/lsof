@@ -240,6 +240,7 @@ pub fn enumerate(
                 size: d.size,
                 offset: d.offset,
                 node: d.node,
+                links: None,
                 socket: None,
             },
         ));

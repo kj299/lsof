@@ -11,6 +11,7 @@
 //! lookup.
 
 use lsof_core::render::Format;
+use lsof_core::selection::StateFilter;
 use lsof_core::{FdFilter, FdKind, FdSpec, Protocol, Selection};
 
 /// What the CLI should do after parsing.
@@ -58,9 +59,20 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
             i += 1;
             continue;
         }
+        // `--` ends option parsing; remaining tokens are paths.
+        if tok == "--" {
+            i += 1;
+            while i < args.len() {
+                sel.paths.push(args[i].clone());
+                i += 1;
+            }
+            break;
+        }
 
         if let Some(plus) = tok.strip_prefix('+') {
             // `+d` / `+D <path>`: directory / path lookup.
+            // `+c <n>`: cap COMMAND column width to <n>.
+            // `+w`: enable warnings (the default; inverse of `-w`).
             let mut chars = plus.chars();
             match chars.next() {
                 Some('d') | Some('D') => {
@@ -76,6 +88,23 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     };
                     sel.dir_trees.push(value);
                 }
+                Some('c') => {
+                    let rest: String = chars.collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option +c requires a width".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    let n: usize = value
+                        .parse()
+                        .map_err(|_| format!("invalid +c width: {value}"))?;
+                    sel.command_width = Some(n);
+                }
+                Some('w') => sel.suppress_warnings = false,
                 _ => return Err(format!("unsupported option: {tok}")),
             }
             i += 1;
@@ -121,6 +150,12 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'v' => want_version = true,
                 'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
+                'l' => sel.numeric_ids = true,
+                'Q' => sel.quiet = true,
+                'w' => sel.suppress_warnings = true,
+                'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
+                     and document as a no-op for portability. */
+                }
                 'F' => {
                     let rest: Vec<char> = chars[j + 1..].to_vec();
                     let nul = rest.contains(&'0');
@@ -153,7 +188,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     j = chars.len();
                     continue;
                 }
-                'p' | 'u' | 'c' => {
+                'p' | 'u' | 'c' | 'g' => {
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
@@ -165,6 +200,21 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                         args[i].clone()
                     };
                     apply_value(&mut sel, c, &value)?;
+                    j = chars.len();
+                    continue;
+                }
+                's' => {
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option -s requires a [proto:state] value".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    sel.state_filter = Some(parse_state_filter(&value)?);
                     j = chars.len();
                     continue;
                 }
@@ -250,9 +300,55 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             }
         }
         'c' => sel.commands.push(value.to_string()),
+        'g' => {
+            // Windows extension: `-g <ppid>[,<ppid>...]` selects processes
+            // whose PPID is in the list (no PGID on Windows). See
+            // docs/feature-parity-plan.md.
+            for t in value
+                .split(|ch: char| ch == ',' || ch.is_whitespace())
+                .filter(|s| !s.is_empty())
+            {
+                match t.parse::<u32>() {
+                    Ok(p) => sel.ppid_filter.push(p),
+                    Err(_) => return Err(format!("invalid -g ppid: {t}")),
+                }
+            }
+        }
         _ => unreachable!(),
     }
     Ok(())
+}
+
+/// Parse a `-s [proto:][state[,state...]]` value into a [`StateFilter`].
+/// Accepts `TCP:LISTEN`, `TCP:LISTEN,ESTABLISHED`, `TCP:^TIME_WAIT`, or a
+/// bare proto like `TCP:` (proto-only filter, any state).
+fn parse_state_filter(value: &str) -> Result<StateFilter, String> {
+    let (proto, states_part) = match value.find(':') {
+        Some(idx) => {
+            let p = &value[..idx];
+            let s = &value[idx + 1..];
+            let proto = match p.to_ascii_lowercase().as_str() {
+                "" => None,
+                "tcp" => Some(Protocol::Tcp),
+                "udp" => Some(Protocol::Udp),
+                other => return Err(format!("invalid -s protocol: {other}")),
+            };
+            (proto, s)
+        }
+        None => (None, value),
+    };
+    let mut filter = StateFilter {
+        proto,
+        ..Default::default()
+    };
+    for term in states_part.split(',').filter(|s| !s.is_empty()) {
+        if let Some(rest) = term.strip_prefix('^') {
+            filter.exclude.push(rest.to_string());
+        } else {
+            filter.include.push(term.to_string());
+        }
+    }
+    Ok(filter)
 }
 
 /// Parse an `-i` spec: `[46][tcp|udp][@host][:port]`. An empty spec means "all

@@ -90,7 +90,7 @@ impl Backend for WindowsBackend {
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         trace("gather: process::enumerate start");
-        let mut procs = process::enumerate();
+        let mut procs = process::enumerate(sel.numeric_ids);
         trace(&format!(
             "gather: process::enumerate done ({} procs)",
             procs.len()

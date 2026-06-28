@@ -48,7 +48,13 @@ fn render_terse(procs: &[Process]) -> String {
 /// Render `procs` as the default table (or terse list when `terse`). `show_ppid`
 /// adds a PPID column after PID (lsof `-R`); `show_offset` makes SIZE/OFF prefer
 /// the file offset (lsof `-o`).
-pub fn render(procs: &[Process], terse: bool, show_ppid: bool, show_offset: bool) -> String {
+pub fn render(
+    procs: &[Process],
+    terse: bool,
+    show_ppid: bool,
+    show_offset: bool,
+    command_width: Option<usize>,
+) -> String {
     if terse {
         return render_terse(procs);
     }
@@ -62,7 +68,13 @@ pub fn render(procs: &[Process], terse: bool, show_ppid: bool, show_offset: bool
     let right = ["PID", "PPID", "SIZE/OFF"];
 
     let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
-        let mut r = vec![p.command.clone(), p.pid.to_string()];
+        let cmd = match command_width {
+            Some(n) if p.command.chars().count() > n => {
+                p.command.chars().take(n).collect::<String>()
+            }
+            _ => p.command.clone(),
+        };
+        let mut r = vec![cmd, p.pid.to_string()];
         if show_ppid {
             r.push(p.ppid.map(|v| v.to_string()).unwrap_or_default());
         }
@@ -90,6 +102,7 @@ pub fn render(procs: &[Process], terse: bool, show_ppid: bool, show_offset: bool
                 size: None,
                 offset: None,
                 node: None,
+                links: None,
                 socket: None,
             };
             rows.push(row_for(p, &blank));

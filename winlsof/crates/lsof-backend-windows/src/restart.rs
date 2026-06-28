@@ -117,6 +117,7 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
                 size: None,
                 offset: None,
                 node: None,
+                links: None,
                 socket: None,
             });
         }

@@ -54,8 +54,11 @@ SELECTION:\n\
     -p <pids>     select by PID (comma/space separated)\n\
     -u <users>    select by owning user (comma separated)\n\
     -c <cmd>      select by command/image name (prefix/substring)\n\
+    -g <ppids>    select children of these PPIDs (Windows extension of -g)\n\
     -d <fds>      filter by FD: cwd,rtd,txt,mem, numbers, a-b ranges, ^exclude\n\
     -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
+    -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
+                  (comma-separated, `^` prefix excludes)\n\
     -a            AND the selectors together (default is OR)\n\
     <path>        exact-file lookup; +D/+d <dir> = directory-tree lookup\n\
 \n\
@@ -65,17 +68,24 @@ OUTPUT:\n\
     -R            add a PPID (parent PID) column\n\
     -o            show file offset in SIZE/OFF (0t<decimal>)\n\
     -t            terse: PIDs only\n\
+    -l            numeric USER (show SID string instead of resolved name)\n\
     -V            verbose: report inaccessible / unmatched search items\n\
     -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
     -J            aggregated JSON object\n\
     -j            JSON Lines (one object per file)\n\
     -r [delay]    repeat every <delay>s (default 15) until interrupted\n\
+    +c <n>        cap COMMAND column width at <n> characters\n\
+\n\
+MISCELLANEOUS:\n\
+    -Q            quiet: suppress 'no matching open files' on empty result\n\
+    -w / +w       suppress / enable non-fatal stderr warnings (default on)\n\
+    -O            no-op (Unix-specific perf hint; accepted for portability)\n\
+    --            end of options; remaining args are paths\n\
 \n\
     --etw         (Windows, opt-in) short ETW capture against the AFD\n\
                   provider to extend `-i` coverage to socket families\n\
                   IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).\n\
-                  Needs Administrator. Currently iteration 1: prints an\n\
-                  event-id histogram to stderr; no rows emitted yet.\n\
+                  Needs Administrator.\n\
 \n\
     -h, --help        show this help\n\
     -v, --version     show version\n\
@@ -89,6 +99,10 @@ specific operations that need them.\n",
 
 /// `-V`: report `-p` PIDs and path/dir search items that matched nothing.
 fn report_unmatched(sel: &Selection, procs: &[Process]) {
+    if sel.quiet {
+        // `-Q`: silent on empty / unmatched search items.
+        return;
+    }
     for &pid in &sel.pids {
         if !procs.iter().any(|p| p.pid == pid) {
             eprintln!("lsof: PID {pid}: no matching open files");
@@ -147,9 +161,11 @@ fn main() {
 
     // Least-privilege hint: only in table mode (machine formats stay clean) and
     // only when the run will attempt system-wide handle enumeration — not for
-    // `-i` network queries or path lookups, which need no elevation.
+    // `-i` network queries or path lookups, which need no elevation. `-w`
+    // suppresses the hint per the lsof convention.
     #[cfg(windows)]
     if !env.elevated
+        && !selection.suppress_warnings
         && matches!(format, Format::Table)
         && !selection.inet.enabled
         && !selection.has_path_filter()
@@ -172,7 +188,13 @@ fn main() {
             report_unmatched(&selection, &procs);
         }
         let out = match &format {
-            Format::Table => table::render(&procs, selection.terse, show_ppid, show_offset),
+            Format::Table => table::render(
+                &procs,
+                selection.terse,
+                show_ppid,
+                show_offset,
+                selection.command_width,
+            ),
             Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref()),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);

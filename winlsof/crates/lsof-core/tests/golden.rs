@@ -5,7 +5,7 @@ use lsof_core::render::{fields, json, table};
 
 #[test]
 fn table_has_header_and_rows() {
-    let out = table::render(&sample_processes(), false, false, false);
+    let out = table::render(&sample_processes(), false, false, false, None);
     let header = out.lines().next().unwrap();
     for col in ["COMMAND", "PID", "USER", "FD", "TYPE", "NODE", "NAME"] {
         assert!(header.contains(col), "header missing {col}: {header:?}");
@@ -22,13 +22,13 @@ fn table_has_header_and_rows() {
 fn table_empty_when_nothing_matches() {
     // No matching processes -> no output at all (not even a bare header),
     // matching lsof. Regression guard for `lsof -a -p <pid> -c <nomatch>`.
-    assert_eq!(table::render(&[], false, false, false), "");
-    assert_eq!(table::render(&[], false, true, false), "");
+    assert_eq!(table::render(&[], false, false, false, None), "");
+    assert_eq!(table::render(&[], false, true, false, None), "");
 }
 
 #[test]
 fn terse_lists_unique_pids() {
-    let out = table::render(&sample_processes(), true, false, false);
+    let out = table::render(&sample_processes(), true, false, false, None);
     assert_eq!(out, "1000\n1500\n");
 }
 
@@ -58,7 +58,7 @@ fn fields_only_restricts_output() {
 
 #[test]
 fn table_ppid_column() {
-    let out = table::render(&sample_processes(), false, true, false);
+    let out = table::render(&sample_processes(), false, true, false, None);
     assert!(out.lines().next().unwrap().contains("PPID"));
     // explorer.exe's ppid (4) shows up.
     assert!(out.contains(" 4 ") || out.contains("   4 "));
@@ -81,12 +81,13 @@ fn table_offset_with_dash_o() {
             size: Some(100),
             offset: Some(42),
             node: None,
+            links: None,
             socket: None,
         }],
     };
     // Default prefers size; -o prefers the offset (0t<dec>).
-    assert!(table::render(std::slice::from_ref(&p), false, false, false).contains("100"));
-    assert!(table::render(&[p], false, false, true).contains("0t42"));
+    assert!(table::render(std::slice::from_ref(&p), false, false, false, None).contains("100"));
+    assert!(table::render(&[p], false, false, true, None).contains("0t42"));
 }
 
 #[test]

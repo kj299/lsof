@@ -30,6 +30,22 @@ pub struct InetFilter {
     pub host: Option<String>,
 }
 
+/// Parsed `-s [proto:state[,state]]` selector. Includes/excludes apply to
+/// TCP/UDP sockets only; rows without a recognized state are passed through
+/// when only TCP filters are set. Multiple includes are OR-ed; an exclude
+/// kills the row even if it also matches an include.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StateFilter {
+    /// Restrict to one protocol, e.g. `TCP`. `None` if `-s` was given without
+    /// a `proto:` prefix (which we treat as "any socket protocol").
+    pub proto: Option<Protocol>,
+    /// State names to include (case-insensitive match against
+    /// `TcpState::as_str`). Empty means "any state for this proto".
+    pub include: Vec<String>,
+    /// State names to exclude (the `^` prefix in lsof's syntax).
+    pub exclude: Vec<String>,
+}
+
 /// A `-d` file-descriptor filter: which FD slots to include / exclude.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FdFilter {
@@ -106,6 +122,26 @@ pub struct Selection {
     pub dir_trees: Vec<String>,
     /// `-d`: file-descriptor filter.
     pub fd_filter: Option<FdFilter>,
+    /// `-s [proto:state[,state]]`: TCP socket state filter, e.g.
+    /// `TCP:LISTEN`, `TCP:^TIME_WAIT`, `TCP:LISTEN,ESTABLISHED`. Applies
+    /// only to sockets; non-socket rows are unaffected.
+    pub state_filter: Option<StateFilter>,
+    /// `-g <ppid>[,<ppid>...]`: Windows-extension semantics — select
+    /// processes whose PPID is in this list (the closest analog to lsof's
+    /// `-g` PGID filter, since Windows has no process groups).
+    pub ppid_filter: Vec<u32>,
+    /// `-l`: render numeric IDs (raw SID string) instead of the resolved
+    /// account name in the USER column.
+    pub numeric_ids: bool,
+    /// `-Q`: suppress "no matching open files" stderr and treat an empty
+    /// result set as success.
+    pub quiet: bool,
+    /// `-w` sets this, `+w` clears it (default `false` — warnings on):
+    /// suppresses the privilege-hint and other non-fatal stderr warnings.
+    pub suppress_warnings: bool,
+    /// `+c <n>`: max width of the COMMAND column (truncate long names).
+    /// `None` means no cap (current behavior).
+    pub command_width: Option<usize>,
     /// `--etw`: opt-in ETW realtime capture for socket families IP Helper
     /// doesn't enumerate (raw/ICMP/AF_UNIX). Off by default; needs elevation.
     /// See `docs/research-roadmap.md` §5.
@@ -115,7 +151,10 @@ pub struct Selection {
 impl Selection {
     /// True if any process-level selector was specified.
     fn has_proc_selector(&self) -> bool {
-        !self.pids.is_empty() || !self.users.is_empty() || !self.commands.is_empty()
+        !self.pids.is_empty()
+            || !self.users.is_empty()
+            || !self.commands.is_empty()
+            || !self.ppid_filter.is_empty()
     }
 
     /// Whether this process matches the specified process-level selectors,
@@ -138,11 +177,50 @@ impl Selection {
         if !self.commands.is_empty() {
             results.push(self.commands.iter().any(|c| command_matches(c, &p.command)));
         }
+        if !self.ppid_filter.is_empty() {
+            // `-g` Windows extension: select processes whose parent is in the
+            // PPID list (the closest analog to PGID selection on Unix).
+            results.push(p.ppid.is_some_and(|pp| self.ppid_filter.contains(&pp)));
+        }
         if self.and_mode {
             results.iter().all(|&b| b)
         } else {
             results.iter().any(|&b| b)
         }
+    }
+
+    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
+    /// Non-sockets and "no `-s`" always pass; sockets with `^excluded`
+    /// states are always dropped; positive states act as a whitelist.
+    fn state_matches(&self, f: &OpenFile) -> bool {
+        let Some(filter) = &self.state_filter else {
+            return true;
+        };
+        let Some(sock) = &f.socket else {
+            // Non-sockets are passed through unchanged — `-s` is socket-only.
+            return true;
+        };
+        if let Some(proto) = filter.proto {
+            if sock.protocol != proto {
+                return false;
+            }
+        }
+        let state_name = sock
+            .state
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if filter
+            .exclude
+            .iter()
+            .any(|e| state_name.eq_ignore_ascii_case(e))
+        {
+            return false;
+        }
+        filter.include.is_empty()
+            || filter
+                .include
+                .iter()
+                .any(|i| state_name.eq_ignore_ascii_case(i))
     }
 
     /// Whether `p` passes the process-level selectors (`-p` / `-u` / `-c`),
@@ -168,9 +246,13 @@ impl Selection {
         !self.dir_trees.is_empty()
     }
 
-    /// Whether a single file passes the file-level filters (`-d`, `-i`, and
-    /// path / directory matching). Kept when no file-level filter is active.
+    /// Whether a single file passes the file-level filters (`-d`, `-i`, `-s`,
+    /// and path / directory matching). Kept when no file-level filter is
+    /// active.
     fn file_matches(&self, f: &OpenFile) -> bool {
+        if !self.state_matches(f) {
+            return false;
+        }
         if let Some(fd) = &self.fd_filter {
             if !fd.matches(&f.fd) {
                 return false;
