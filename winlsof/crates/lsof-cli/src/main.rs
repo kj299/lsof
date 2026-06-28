@@ -87,7 +87,7 @@ MISCELLANEOUS:\n\
                   IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).\n\
                   Needs Administrator.\n\
 \n\
-    -h, --help        show this help\n\
+    -h, -?, --help    show this help\n\
     -v, --version     show version\n\
 \n\
 Without elevation, winlsof shows the processes you can access; run as\n\
@@ -121,6 +121,10 @@ fn report_unmatched(sel: &Selection, procs: &[Process]) {
 }
 
 fn main() {
+    // Make em-dashes and arrows in our help / banner text render correctly on
+    // PowerShell 5.1 / cmd.exe (which default to Windows-1252, not UTF-8).
+    #[cfg(windows)]
+    lsof_backend_windows::enable_utf8_console();
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
     let action = match parse(argv) {
