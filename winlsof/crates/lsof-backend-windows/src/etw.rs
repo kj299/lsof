@@ -184,6 +184,10 @@ pub fn capture(duration: Duration) -> Option<Summary> {
         );
         return None;
     }
+    trace(&format!(
+        "etw: StartTraceW ok (session handle = {:#x})",
+        session_handle.Value
+    ));
 
     // SAFETY: session_handle is now valid; the provider GUID is a const we own.
     let rc = unsafe {
@@ -211,6 +215,7 @@ pub fn capture(duration: Duration) -> Option<Summary> {
         }
         return None;
     }
+    trace("etw: EnableTraceEx2 ok (AFD provider enabled)");
 
     let state = Box::new(CallbackState {
         summary: Mutex::new(Summary::default()),
@@ -233,14 +238,27 @@ pub fn capture(duration: Duration) -> Option<Summary> {
         logfile.Anonymous2.EventRecordCallback = Some(event_callback);
         logfile.Context = state_ptr as *mut c_void;
 
+        trace("etw: worker: OpenTraceW...");
         // SAFETY: logfile is fully initialized for realtime consumption.
         let trace_handle: PROCESSTRACE_HANDLE = unsafe { OpenTraceW(&mut logfile) };
         if trace_handle.Value == INVALID_PROCESSTRACE_HANDLE {
+            // GetLastError is the only diagnostic — surface it so the user can
+            // map e.g. 0xC0000034 (STATUS_OBJECT_NAME_NOT_FOUND) /
+            // 1018 (ERROR_WMI_INSTANCE_NOT_FOUND) to the cause.
+            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            trace(&format!(
+                "etw: worker: OpenTraceW returned INVALID_PROCESSTRACE_HANDLE (GetLastError = {err})"
+            ));
             return;
         }
+        trace(&format!(
+            "etw: worker: OpenTraceW ok (trace handle = {:#x}); ProcessTrace start (blocks)",
+            trace_handle.Value
+        ));
         // SAFETY: ProcessTrace blocks, dispatching events to the callback,
         // and returns when the session is stopped from the main thread.
-        let _ = unsafe { ProcessTrace(&trace_handle, 1, std::ptr::null(), std::ptr::null()) };
+        let rc = unsafe { ProcessTrace(&trace_handle, 1, std::ptr::null(), std::ptr::null()) };
+        trace(&format!("etw: worker: ProcessTrace returned (status {rc})"));
         // SAFETY: trace_handle was returned by OpenTraceW above.
         unsafe {
             CloseTrace(trace_handle);
@@ -251,15 +269,19 @@ pub fn capture(duration: Duration) -> Option<Summary> {
 
     // Stopping the session makes ProcessTrace return on the worker.
     // SAFETY: session_handle is valid; props buffer is the one we kept alive.
-    unsafe {
+    let stop_rc = unsafe {
         ControlTraceW(
             session_handle,
             std::ptr::null(),
             props_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES,
             EVENT_TRACE_CONTROL_STOP,
-        );
-    }
+        )
+    };
+    trace(&format!(
+        "etw: ControlTraceW STOP issued (status {stop_rc}); joining worker"
+    ));
     let _ = worker.join();
+    trace("etw: worker joined");
 
     // Reclaim the callback state; the worker is joined so no further events
     // can reference it.
