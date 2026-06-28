@@ -86,11 +86,17 @@ const EVENT_ID_AFD_CREATE: u16 = 1000;
 const EVENT_IDS_AFD_WITH_ADDRESS: &[u16] = &[
     1007, // SendTo
     1009, // RecvFrom (older variant)
+    1013, // RecvFrom (V2 variant, same shape as 1015 per the schema dump)
     1015, // RecvMsg with addr
     1018, // RecvFrom (newer variant)
     1030, // ConnectWithAddress
     3004, // Data indication (with addr)
 ];
+
+// SOCK_* values from winsock2.h, used as the SocketType in AfdCreate.
+const SOCK_STREAM: u32 = 1;
+const SOCK_DGRAM: u32 = 2;
+const SOCK_RAW: u32 = 3;
 
 /// Aggregated result of one ETW capture window — the only data iteration 1
 /// emits. Iteration 2 will replace this with parsed (PID, endpoint, addr)
@@ -131,18 +137,38 @@ pub struct EtwSocket {
 }
 
 impl EtwSocket {
+    /// IP protocol number, after the `socket(..., 0)` fallback. Callers should
+    /// use this rather than `protocol_raw`: AfdCreate records the value passed
+    /// to the userland `socket()` call verbatim, which is commonly `0`
+    /// ("default for this socket type"). Without the fallback every
+    /// `socket(AF_INET, SOCK_STREAM, 0)` (i.e. every normal TCP socket) would
+    /// look like "unknown protocol" and dodge the IP-Helper-coverage filter.
+    pub fn effective_protocol(&self) -> u32 {
+        if self.protocol_raw != 0 {
+            return self.protocol_raw;
+        }
+        match self.socket_type {
+            SOCK_STREAM => IPPROTO_TCP,
+            SOCK_DGRAM => IPPROTO_UDP,
+            SOCK_RAW => IPPROTO_RAW,
+            _ => 0,
+        }
+    }
+
     /// Whether this endpoint is one IP Helper's TCP/UDP tables already cover —
     /// in which case our [`emit_extras`] caller should skip it. We surface only
     /// the rows IP Helper *doesn't* enumerate.
     pub fn is_covered_by_ip_helper(&self) -> bool {
+        let proto = self.effective_protocol();
         (self.family == AF_INET || self.family == AF_INET6)
-            && (self.protocol_raw == IPPROTO_TCP || self.protocol_raw == IPPROTO_UDP)
+            && (proto == IPPROTO_TCP || proto == IPPROTO_UDP)
     }
 
     /// lsof-style protocol label (NODE column) — TCP/UDP for the boring rows,
     /// "ICMP"/"ICMPV6"/"RAW"/"AF_UNIX"/etc. for the interesting ones.
     pub fn protocol(&self) -> Protocol {
-        match (self.family, self.protocol_raw) {
+        let proto = self.effective_protocol();
+        match (self.family, proto) {
             (_, IPPROTO_TCP) => Protocol::Tcp,
             (_, IPPROTO_UDP) => Protocol::Udp,
             (_, IPPROTO_ICMP) => Protocol::Other("ICMP"),
@@ -170,16 +196,23 @@ impl EtwSocket {
 /// what this emits is the non-TCP/UDP coverage the `--etw` mode exists for.
 pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
     let protocol = sock.protocol();
+    // ETW doesn't reliably expose the local bind address (AfdBind's address
+    // sits in an unnamed binary property — see the schema dump). The
+    // renderer prints `*:*` for an absent local, which is lsof's convention.
     let info = SocketInfo {
         protocol,
-        local: None, // AfdBind events don't expose the bound addr as a
-        // named property; iteration 4 may revisit.
+        local: None,
         remote: sock.last_remote,
         state: None,
     };
-    let name = match sock.last_remote {
-        Some(addr) => format!("->{addr}"),
-        None => format!("(endpoint 0x{:x})", sock.endpoint),
+    // Use lsof's NAME convention: `*:*->1.2.3.4:443` when we have a remote
+    // (the local `*:*` reflects unknown bind). For endpoints we only saw via
+    // create/bind/connect events (no addr), fall back to the kernel
+    // endpoint pointer so the row still identifies the socket uniquely.
+    let name = if sock.last_remote.is_some() {
+        info.display_name(true, true)
+    } else {
+        format!("(endpoint 0x{:x})", sock.endpoint)
     };
     OpenFile {
         fd: FdType::Unknown,
