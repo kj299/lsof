@@ -140,7 +140,7 @@ a safe wrapper; reuses the existing duplicate.
 
 ---
 
-## 5. ETW-based socket → FD correlation  — 🟡 OPEN (Effort L, Confidence Medium)
+## 5. ETW-based socket → FD correlation  — 🟡 OPEN, P1 SPIKE READY (Effort L, Confidence Medium)
 
 **Goal:** show real handle / access values on socket rows (replacing today's
 `unk`), and gain visibility into raw / ICMP endpoints — **without** the
@@ -155,34 +155,34 @@ access)` index at gather time, then join with the existing IP Helper rows to
 attach a real handle value to each socket row. The provider also exposes raw /
 ICMP events, which gives item §1's AF_RAW visibility as a follow-on.
 
-**Phased:**
-- **P1 — spike (S):** capture `Microsoft-Windows-TCPIP` events for a few
-  seconds with `logman start … -p Microsoft-Windows-TCPIP` (or the
-  [`ferrisetw`](https://crates.io/crates/ferrisetw) / `krabsetw` Rust bindings)
-  and verify the events carry enough info to map (PID, endpoint) → handle.
-  Measure: does the realtime session work as Administrator only, or any user?
-  How long must we listen to repopulate the index after a `lsof` invocation?
-- **Decision gate:** if events don't carry the handle reliably, **stop** —
-  document and keep `unk`. (The roadmap will not reopen the undocumented-AFD
-  path.) If the spike works only under elevation, ship as an **opt-in feature**
-  rather than the default.
-- **P2 — implement (M):** add `etw.rs` with a bounded realtime session (cap
-  duration, cap event count, drop unknown events) that populates an in-memory
-  index; thread the lookup into `sockets::collect`. New unsafe surface is
-  confined to ETW buffer parsing in small audited wrappers; everything else is
-  safe Rust.
-- **P3 — extend (M):** surface raw / ICMP rows on `-i` (likely as a separate
-  `-iRAW` / `-iICMP` flag, since the upstream lsof doesn't unify them).
+**P1 spike — ready to run.** See [`etw-spike.md`](etw-spike.md): instead of
+writing the Rust consumer first, use the built-in `logman` + `tracerpt` to
+capture 10 seconds of TCPIP + AFD events on Windows and dump them to CSV. That
+answers the real gating question (do the events even carry handle data?) in
+minutes, at zero code cost. If positive → P2; if not → close item §5 the way
+§1 and §2 closed, with the artifact in hand.
+
+**P2 — implement (M):** add `etw.rs` with a bounded realtime session (cap
+duration, cap event count, drop unknown events) that populates an in-memory
+index; thread the lookup into `sockets::collect`. New unsafe surface confined
+to ETW buffer parsing in small audited wrappers; everything else safe Rust.
+Use `windows-sys`'s `Win32_System_Diagnostics_Etw` feature for the FFI types,
+matching the rest of the backend's "raw windows-sys + thin unsafe wrappers"
+style — no new high-level wrapper crate.
+
+**P3 — extend (M):** surface raw / ICMP rows on `-i` (likely as a separate
+`-iRAW` / `-iICMP` flag, since the upstream lsof doesn't unify them).
 
 **Memory safety:** ETW is a *consumer* surface — we don't emit; we parse
 read-only buffers behind length-checked `Vec<u8>` wrappers. No new
 network/handle attack surface.
 
 **Open questions captured by the spike:**
-- Does the modern provider include the socket handle on `TcpipDataSent` /
-  `TcpipDisconnectTcb`, or only on `TcpipCloseTcb`?
-- How does the index decay handle correctly when the snapshot is taken
-  *between* socket-create and socket-close events?
+- Does the modern provider include the socket handle on any of the
+  TCP/UDP/AFD events, or only the (PID, endpoint) pair (which we already have)?
+- Does starting an ETW realtime session require Administrator, or does
+  *Performance Log Users* membership suffice? Determines whether P2 can be
+  default-on or has to be opt-in / elevated.
 
 ---
 

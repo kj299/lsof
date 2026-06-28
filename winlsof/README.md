@@ -155,6 +155,8 @@ output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
   the release binary (the SmartScreen / Defender fix).
 - [`docs/research-roadmap.md`](docs/research-roadmap.md) — engineering spike
   records and the next open item (ETW-based socket → FD correlation).
+- [`docs/etw-spike.md`](docs/etw-spike.md) — step-by-step `logman` + `tracerpt`
+  P1 spike for item §5; no Rust needed, answers the gating question first.
 - [`docs/windows-validation.md`](docs/windows-validation.md) — manual T1–T20
   validation plan against Windows oracles.
 - [`smoketest/README.md`](smoketest/README.md) — live Windows smoke-test
