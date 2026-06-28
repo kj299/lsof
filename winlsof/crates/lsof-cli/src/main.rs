@@ -45,7 +45,7 @@ fn make_env() -> Env {
 
 fn usage() -> String {
     format!(
-        "winlsof {ver} — a memory-safe, Windows-native lsof (list open files)\n\
+        "winlsof {ver} - a memory-safe, Windows-native lsof (list open files)\n\
 \n\
 USAGE:\n\
     lsof [options]\n\
