@@ -142,6 +142,11 @@ pub struct Selection {
     /// `+c <n>`: max width of the COMMAND column (truncate long names).
     /// `None` means no cap (current behavior).
     pub command_width: Option<usize>,
+    /// `--unicode`: enable UTF-8 output (banner / future Unicode glyphs) and
+    /// switch the Windows console to CP 65001 at startup. Default (false) is
+    /// pure ASCII output, which is the safe choice for legacy terminals like
+    /// PowerShell 5.1 / cmd.exe whose default code page is Windows-1252.
+    pub unicode_output: bool,
     /// `--etw`: opt-in ETW realtime capture for socket families IP Helper
     /// doesn't enumerate (raw/ICMP/AF_UNIX). Off by default; needs elevation.
     /// See `docs/research-roadmap.md` §5.

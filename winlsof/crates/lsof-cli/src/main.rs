@@ -86,6 +86,10 @@ MISCELLANEOUS:\n\
                   provider to extend `-i` coverage to socket families\n\
                   IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).\n\
                   Needs Administrator.\n\
+    --unicode     emit UTF-8 (switches the Windows console to CP 65001 at\n\
+                  startup). Default is plain ASCII output — safer on PS 5.1\n\
+                  and legacy cmd.exe whose default console is Windows-1252.\n\
+    --ascii       force ASCII output (the default; flag kept for symmetry).\n\
 \n\
     -h, -?, --help    show this help\n\
     -v, --version     show version\n\
@@ -121,11 +125,16 @@ fn report_unmatched(sel: &Selection, procs: &[Process]) {
 }
 
 fn main() {
-    // Make em-dashes and arrows in our help / banner text render correctly on
-    // PowerShell 5.1 / cmd.exe (which default to Windows-1252, not UTF-8).
-    #[cfg(windows)]
-    lsof_backend_windows::enable_utf8_console();
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // Default output is ASCII (safe on PowerShell 5.1 / cmd.exe whose console
+    // is Windows-1252). Users on modern terminals can pass `--unicode` to
+    // switch the console code page to UTF-8 (and opt in to Unicode glyphs in
+    // any future output).
+    #[cfg(windows)]
+    if argv.iter().any(|a| a == "--unicode") {
+        lsof_backend_windows::enable_utf8_console();
+    }
 
     let action = match parse(argv) {
         Ok(a) => a,

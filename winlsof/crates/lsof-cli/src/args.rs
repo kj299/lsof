@@ -59,6 +59,17 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
             i += 1;
             continue;
         }
+        if tok == "--unicode" {
+            sel.unicode_output = true;
+            i += 1;
+            continue;
+        }
+        if tok == "--ascii" {
+            // Explicit opt-out; redundant with the default, kept for symmetry.
+            sel.unicode_output = false;
+            i += 1;
+            continue;
+        }
         // `--` ends option parsing; remaining tokens are paths.
         if tok == "--" {
             i += 1;
