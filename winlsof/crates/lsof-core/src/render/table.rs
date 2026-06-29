@@ -54,6 +54,7 @@ pub fn render(
     show_ppid: bool,
     show_offset: bool,
     command_width: Option<usize>,
+    show_links: bool,
 ) -> String {
     if terse {
         return render_terse(procs);
@@ -64,8 +65,12 @@ pub fn render(
     if show_ppid {
         headers.push("PPID");
     }
-    headers.extend(["USER", "FD", "TYPE", "DEVICE", "SIZE/OFF", "NODE", "NAME"]);
-    let right = ["PID", "PPID", "SIZE/OFF"];
+    headers.extend(["USER", "FD", "TYPE", "DEVICE", "SIZE/OFF"]);
+    if show_links {
+        headers.push("NLINK");
+    }
+    headers.extend(["NODE", "NAME"]);
+    let right = ["PID", "PPID", "SIZE/OFF", "NLINK"];
 
     let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
         let cmd = match command_width {
@@ -83,6 +88,9 @@ pub fn render(
         r.push(f.file_type.code().to_string());
         r.push(f.device.clone().unwrap_or_default());
         r.push(size_off_cell(f, show_offset));
+        if show_links {
+            r.push(f.links.map(|n| n.to_string()).unwrap_or_default());
+        }
         r.push(f.node.clone().unwrap_or_default());
         r.push(f.name.clone());
         r

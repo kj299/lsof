@@ -82,6 +82,11 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                     }
                 }
             }
+            if want('k') {
+                if let Some(n) = f.links {
+                    push('k', &n.to_string());
+                }
+            }
             if want('n') {
                 push('n', &f.name);
             }

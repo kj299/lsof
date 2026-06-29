@@ -240,7 +240,7 @@ pub fn enumerate(
                 size: d.size,
                 offset: d.offset,
                 node: d.node,
-                links: None,
+                links: d.links,
                 socket: None,
             },
         ));
@@ -465,6 +465,7 @@ struct Described {
     node: Option<String>,
     size: Option<u64>,
     offset: Option<u64>,
+    links: Option<u32>,
 }
 
 /// Classify a File-typed handle by its file type and fill in name/size/node.
@@ -485,7 +486,7 @@ fn describe(
                     timed_object_name(source, handle_value, me).map(|n| device_to_dos(&n, dos_map))
                 })
                 .unwrap_or_else(|| "(unnamed file)".to_string());
-            let (file_type, node, size) = disk_details(dup);
+            let (file_type, node, size, links) = disk_details(dup);
             Some(Described {
                 file_type,
                 device: drive_of(&name),
@@ -493,6 +494,7 @@ fn describe(
                 node,
                 size,
                 offset: file_offset(dup),
+                links,
             })
         }
         FILE_TYPE_PIPE => {
@@ -506,6 +508,7 @@ fn describe(
                     node: None,
                     size: None,
                     offset: None,
+                    links: None,
                 }),
                 // Sockets (\Device\Afd) and unnamed pipes: IP Helper covers
                 // sockets, so skip rather than emit a nameless row.
@@ -523,6 +526,7 @@ fn describe(
                 node: None,
                 size: None,
                 offset: None,
+                links: None,
             })
         }
         _ => {
@@ -535,6 +539,7 @@ fn describe(
                 node: None,
                 size: None,
                 offset: None,
+                links: None,
             })
         }
     }
@@ -610,12 +615,14 @@ fn pipe_display(nt_name: &str) -> String {
     }
 }
 
-/// Read dir/size/file-index for a disk file via `GetFileInformationByHandle`.
-fn disk_details(dup: HANDLE) -> (FileType, Option<String>, Option<u64>) {
+/// Read type/node/size/link-count for a disk file via
+/// `GetFileInformationByHandle`. The link count powers the `-L` NLINK column
+/// and the `+L count` filter for unlinked-but-still-open files.
+fn disk_details(dup: HANDLE) -> (FileType, Option<String>, Option<u64>, Option<u32>) {
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: dup is a live disk handle; info is sized correctly.
     if unsafe { GetFileInformationByHandle(dup, &mut info) } == 0 {
-        return (FileType::Regular, None, None);
+        return (FileType::Regular, None, None, None);
     }
     let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
     let node = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
@@ -628,6 +635,7 @@ fn disk_details(dup: HANDLE) -> (FileType, Option<String>, Option<u64>) {
         },
         Some(node.to_string()),
         if is_dir { None } else { Some(size) },
+        Some(info.nNumberOfLinks),
     )
 }
 

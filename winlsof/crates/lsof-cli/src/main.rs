@@ -69,6 +69,9 @@ OUTPUT:\n\
     -o            show file offset in SIZE/OFF (0t<decimal>)\n\
     -t            terse: PIDs only\n\
     -l            numeric USER (show SID string instead of resolved name)\n\
+    -L            show NLINK (link count) column\n\
+    +L <count>    keep only files with link count < <count>; implies -L\n\
+                  (`+L 1` = unlinked-but-still-open files; security check)\n\
     -V            verbose: report inaccessible / unmatched search items\n\
     -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
     -J            aggregated JSON object\n\
@@ -207,6 +210,7 @@ fn main() {
                 show_ppid,
                 show_offset,
                 selection.command_width,
+                selection.show_links,
             ),
             Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref()),
             Format::Json => {

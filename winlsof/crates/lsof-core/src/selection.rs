@@ -147,6 +147,14 @@ pub struct Selection {
     /// pure ASCII output, which is the safe choice for legacy terminals like
     /// PowerShell 5.1 / cmd.exe whose default code page is Windows-1252.
     pub unicode_output: bool,
+    /// `-L`: add the NLINK (link count) column to table output. Implies the
+    /// renderer pulls `OpenFile::links` into a new column.
+    pub show_links: bool,
+    /// `+L <count>`: keep only files whose link count is **less than** `count`
+    /// (lsof convention). `+L 1` keeps link-count-zero files — the
+    /// "unlinked but still open" security case. Files with unknown links
+    /// (sockets, non-disk handles) pass through.
+    pub max_links: Option<u32>,
     /// `--etw`: opt-in ETW realtime capture for socket families IP Helper
     /// doesn't enumerate (raw/ICMP/AF_UNIX). Off by default; needs elevation.
     /// See `docs/research-roadmap.md` §5.
@@ -257,6 +265,15 @@ impl Selection {
     fn file_matches(&self, f: &OpenFile) -> bool {
         if !self.state_matches(f) {
             return false;
+        }
+        if let Some(max) = self.max_links {
+            // `+L count`: keep links < count; drop if we know links and it's
+            // not under the threshold. Unknown links (sockets etc.) pass.
+            if let Some(n) = f.links {
+                if n >= max {
+                    return false;
+                }
+            }
         }
         if let Some(fd) = &self.fd_filter {
             if !fd.matches(&f.fd) {

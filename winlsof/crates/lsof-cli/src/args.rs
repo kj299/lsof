@@ -116,6 +116,25 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     sel.command_width = Some(n);
                 }
                 Some('w') => sel.suppress_warnings = false,
+                Some('L') => {
+                    // `+L <count>`: drop files whose link count is >= <count>.
+                    // Implies the NLINK column, mirroring lsof.
+                    let rest: String = chars.collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option +L requires a count".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    let n: u32 = value
+                        .parse()
+                        .map_err(|_| format!("invalid +L count: {value}"))?;
+                    sel.max_links = Some(n);
+                    sel.show_links = true;
+                }
                 _ => return Err(format!("unsupported option: {tok}")),
             }
             i += 1;
@@ -162,6 +181,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
                 'l' => sel.numeric_ids = true,
+                'L' => sel.show_links = true,
                 'Q' => sel.quiet = true,
                 'w' => sel.suppress_warnings = true,
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
