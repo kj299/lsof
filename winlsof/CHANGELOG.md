@@ -11,6 +11,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Phase 5B — `-T [fqsw]` extended TCP info** (iteration 1, IPv4):
+  annotates established TCP socket rows with the current receive window
+  (`(Win=N)`) and app queue depths (`(QR=N)` / `(QS=N)`), read from
+  per-connection extended TCP statistics (`GetPerTcpConnectionEStats`).
+  EStats collection is enabled just-in-time per connection (needs
+  Administrator) and disabled again — bounded and reversed. `s` (state)
+  is already shown; `f` (follow) is a no-op for a snapshot. Verified on
+  Windows 11 (e.g. `(Win=262144)` on live connections). IPv6 and the
+  send/recv-queue under load are follow-ups.
 - **Phase 5A — lsof option-parity port** (12 canonical switches the MVP
   didn't ship). All additive; the v0.1.0 CLI surface is unchanged.
   - **`-s [proto:state]`** — socket protocol/state filter

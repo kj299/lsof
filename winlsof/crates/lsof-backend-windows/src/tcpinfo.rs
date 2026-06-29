@@ -52,6 +52,13 @@ pub fn annotate(file: &mut OpenFile, flags: &TcpInfoFlags, elevated: bool) {
     if sock.protocol != Protocol::Tcp {
         return;
     }
+    // EStats are only supported (and only meaningful) for an established
+    // connection: TIME_WAIT and other closing states have no live TCB and
+    // return ERROR_NOT_SUPPORTED (50). Skipping them avoids ~dozens of
+    // doomed enable/read/disable round-trips on a busy host.
+    if sock.state != Some(TcpState::Established) {
+        return;
+    }
     // EStats apply to a connected 4-tuple; listening rows have no remote.
     let (Some(SocketAddr::V4(local)), Some(SocketAddr::V4(remote))) = (sock.local, sock.remote)
     else {
