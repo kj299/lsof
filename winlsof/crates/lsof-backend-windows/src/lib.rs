@@ -33,6 +33,8 @@ mod restart;
 #[cfg(windows)]
 mod sockets;
 #[cfg(windows)]
+mod tcpinfo;
+#[cfg(windows)]
 mod threads;
 #[cfg(windows)]
 mod util;

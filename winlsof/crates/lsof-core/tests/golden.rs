@@ -117,9 +117,15 @@ fn fields_skips_empty_name() {
     };
     let out = fields::render(&[p], false, None);
     assert!(out.contains("ftask\n"), "task FD field expected: {out:?}");
-    assert!(out.contains("i4242\n"), "TID in the i field expected: {out:?}");
+    assert!(
+        out.contains("i4242\n"),
+        "TID in the i field expected: {out:?}"
+    );
     // No bare `n` line.
-    assert!(!out.lines().any(|l| l == "n"), "bare empty n field: {out:?}");
+    assert!(
+        !out.lines().any(|l| l == "n"),
+        "bare empty n field: {out:?}"
+    );
 }
 
 #[test]

@@ -12,7 +12,7 @@
 
 use lsof_core::render::Format;
 use lsof_core::selection::StateFilter;
-use lsof_core::{FdFilter, FdKind, FdSpec, Protocol, Selection};
+use lsof_core::{FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags};
 
 /// What the CLI should do after parsing.
 #[derive(Debug)]
@@ -186,6 +186,30 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'w' => sel.suppress_warnings = true,
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
                      and document as a no-op for portability. */
+                }
+                'T' => {
+                    // `-T [fqsw]`: TCP info on socket rows. f=follow (no-op for
+                    // a snapshot), q=queue, s=state, w=window. Bare `-T`
+                    // defaults to queue+state, matching lsof.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let mut flags = TcpInfoFlags::default();
+                    if rest.is_empty() {
+                        flags.queue = true;
+                        flags.state = true;
+                    } else {
+                        for ch in rest.chars() {
+                            match ch {
+                                'f' => {}
+                                'q' => flags.queue = true,
+                                's' => flags.state = true,
+                                'w' => flags.window = true,
+                                other => return Err(format!("invalid -T sub-option: {other}")),
+                            }
+                        }
+                    }
+                    sel.tcp_info = Some(flags);
+                    j = chars.len();
+                    continue;
                 }
                 'K' => {
                     // `-K [i]`: list each process's threads as `task` rows.

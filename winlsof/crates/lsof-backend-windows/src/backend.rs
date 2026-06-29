@@ -10,7 +10,9 @@ use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
 use crate::util::trace;
-use crate::{etw, handles, mapped, modules, peb, privilege, process, restart, sockets, threads};
+use crate::{
+    etw, handles, mapped, modules, peb, privilege, process, restart, sockets, tcpinfo, threads,
+};
 
 /// Gather a process's `cwd` + loaded modules (`txt`/`mem`) + mapped data files on
 /// a worker thread, bounded by `timeout`. These run against a *foreign* process
@@ -180,6 +182,11 @@ impl Backend for WindowsBackend {
             if wanted(pid) {
                 if resolve_sockets {
                     sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+                }
+                // `-T q/w`: append extended TCP stats (window / queue) to the
+                // socket NAME via per-connection EStats. Needs elevation.
+                if let Some(t) = &sel.tcp_info {
+                    tcpinfo::annotate(&mut file, t, self.elevated);
                 }
                 attach(&mut procs, &mut idx, pid, file);
             }

@@ -60,6 +60,8 @@ SELECTION:\n\
     -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
                   (comma-separated, `^` prefix excludes)\n\
     -K            list each process's threads as `task` rows (TID in NODE)\n\
+    -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
+                  (q/w need Administrator; IPv4 connections; bare -T = qs)\n\
     -a            AND the selectors together (default is OR)\n\
     <path>        exact-file lookup; +D/+d <dir> = directory-tree lookup\n\
 \n\

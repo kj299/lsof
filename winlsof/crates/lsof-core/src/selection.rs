@@ -30,6 +30,16 @@ pub struct InetFilter {
     pub host: Option<String>,
 }
 
+/// `-T [fqsw]` sub-flags. `f` (follow/repeat) is accepted but a no-op for a
+/// snapshot tool. `s` (state) is shown already; `q` (queue) and `w` (window)
+/// drive the extended-TCP-stats lookup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TcpInfoFlags {
+    pub state: bool,
+    pub queue: bool,
+    pub window: bool,
+}
+
 /// Parsed `-s [proto:state[,state]]` selector. Includes/excludes apply to
 /// TCP/UDP sockets only; rows without a recognized state are passed through
 /// when only TCP filters are set. Multiple includes are OR-ed; an exclude
@@ -156,6 +166,11 @@ pub struct Selection {
     /// any value but the backend always emits all threads of in-scope
     /// processes.
     pub list_tasks: bool,
+    /// `-T [fqsw]`: TCP/TPI info to append to socket rows. `None` = no `-T`.
+    /// `s` (state) is already shown; `q` (queue) and `w` (window) come from
+    /// per-connection extended TCP stats (`GetPerTcpConnectionEStats`), which
+    /// require elevation. See `docs/feature-parity-plan.md` Phase 5B.
+    pub tcp_info: Option<TcpInfoFlags>,
     /// `+L <count>`: keep only files whose link count is **less than** `count`
     /// (lsof convention). `+L 1` keeps link-count-zero files — the
     /// "unlinked but still open" security case. Files with unknown links
