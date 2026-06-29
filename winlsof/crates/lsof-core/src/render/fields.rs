@@ -87,7 +87,10 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                     push('k', &n.to_string());
                 }
             }
-            if want('n') {
+            // Emit NAME only when there is one. Some rows (e.g. `-K` thread
+            // `task` rows) have no name; a bare `n` field code with an empty
+            // value is just noise.
+            if want('n') && !f.name.is_empty() {
                 push('n', &f.name);
             }
         }

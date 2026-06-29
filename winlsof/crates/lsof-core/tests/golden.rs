@@ -93,6 +93,36 @@ fn table_offset_with_dash_o() {
 }
 
 #[test]
+fn fields_skips_empty_name() {
+    // `-K` thread `task` rows have no name; the -F output must not emit a bare
+    // `n` field code (regression guard for the lone-`n`-line bug).
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let p = Process {
+        pid: 7,
+        ppid: None,
+        command: "x".into(),
+        user: None,
+        files: vec![OpenFile {
+            fd: FdType::Task,
+            access: AccessMode::Unknown,
+            file_type: FileType::Thread,
+            name: String::new(),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some("4242".into()),
+            links: None,
+            socket: None,
+        }],
+    };
+    let out = fields::render(&[p], false, None);
+    assert!(out.contains("ftask\n"), "task FD field expected: {out:?}");
+    assert!(out.contains("i4242\n"), "TID in the i field expected: {out:?}");
+    // No bare `n` line.
+    assert!(!out.lines().any(|l| l == "n"), "bare empty n field: {out:?}");
+}
+
+#[test]
 fn fields_nul_terminator() {
     let out = fields::render(&sample_processes(), true, None);
     assert!(out.contains("p1000\0"));
