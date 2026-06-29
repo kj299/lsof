@@ -431,6 +431,75 @@ try {
         Assert (($null -ne $o) -and $o.Contains('=======')) 'no repeat separator seen'
     }
 
+    # ===================== Phase 5A: parity switches =====================
+    Test-Case 'state-filter-listen' 'selection/-s' {
+        # -iTCP:<port> matches the listener (LISTEN) + the established pair;
+        # -sTCP:LISTEN must keep only the LISTEN row.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:LISTEN') 's-listen'
+        Assert-Contains $r.Out 'LISTEN'
+        Assert-NotContains $r.Out 'ESTABLISHED' '-sTCP:LISTEN should exclude ESTABLISHED'
+    }
+    Test-Case 'state-filter-exclude' 'selection/-s^' {
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:^LISTEN') 's-not-listen'
+        Assert-NotContains $r.Out 'LISTEN' '-sTCP:^LISTEN should exclude LISTEN'
+    }
+    Test-Case 'tasks-dash-K' 'selection/-K' {
+        $r = Invoke-Lsof @('-K', '-p', "$self") 'K'
+        Assert-Contains $r.Out 'THRD' '-K should emit THRD task rows'
+    }
+    Test-Case 'link-count-dash-L' 'render/-L' {
+        $r = Invoke-Lsof @('-L', '-p', "$self") 'L'
+        Assert-Contains $r.Out 'NLINK' '-L should add the NLINK column'
+    }
+    Test-Case 'link-filter-plus-L' 'selection/+L' {
+        # +L 1 keeps only link-count-0 files; deterministic content varies, so
+        # just assert it parses and runs cleanly (implies -L).
+        $r = Invoke-Lsof @('+L', '1', '-p', "$self") 'plusL'
+        Assert ($r.Exit -eq 0) "+L 1 should run cleanly (exit=$($r.Exit))"
+    }
+    Test-Case 'numeric-ids-dash-l' 'render/-l' {
+        $r = Invoke-Lsof @('-l', '-p', "$self") 'l'
+        Assert-Contains $r.Out 'S-1-' '-l should render the numeric SID'
+    }
+    Test-Case 'ppid-select-dash-g' 'selection/-g' {
+        # Our cmd.exe child's parent is this harness ($self); -g <self> selects it.
+        $r = Invoke-Lsof @('-g', "$self") 'g'
+        Assert-Contains $r.Out "$($fx.Cwd64.Id)" '-g <self> should select our child cmd.exe'
+    }
+    Test-Case 'quiet-dash-Q' 'misc/-Q' {
+        $r = Invoke-Lsof @('-Q', '-p', '4294967294') 'Q'
+        Assert-NotContains $r.Err 'no matching' '-Q should suppress the no-match message'
+    }
+    Test-Case 'suppress-warnings-dash-w' 'misc/-w' {
+        if ($IsAdmin) { Skip 'privilege hint only appears unelevated' }
+        $r = Invoke-Lsof @('-w', '-p', "$self") 'w'
+        Assert-NotContains $r.Err 'Administrator' '-w should suppress the privilege hint'
+    }
+    Test-Case 'no-op-dash-O' 'misc/-O' {
+        $r = Invoke-Lsof @('-O', '-p', "$self") 'O'
+        Assert ($r.Exit -eq 0) "-O should be accepted (exit=$($r.Exit))"
+    }
+    Test-Case 'command-width-plus-c' 'render/+c' {
+        $r = Invoke-Lsof @('+c', '4', '-p', "$self") 'plusc'
+        Assert ($r.Exit -eq 0) "+c should be accepted (exit=$($r.Exit))"
+    }
+    Test-Case 'help-alias-question' 'misc/-?' {
+        $r = Invoke-Lsof @('-?') 'q-help'; Assert-Contains $r.Out 'USAGE'
+    }
+    Test-Case 'end-of-options-dashdash' 'misc/--' {
+        # `--` ends options; the path after it is looked up (RM finds our PID).
+        $r = Invoke-Lsof @('--', $fx.FilePath) 'dashdash'
+        Assert-Contains $r.Out "$self" '-- <file> should be treated as a path lookup'
+    }
+
+    # ===================== Phase 5B: -T extended TCP info =====================
+    Test-Case 'tcp-info-window-dash-T' 'render/-T' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        # The established loopback pair on Port4 should report a receive window.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tw') 'T-window'
+        Assert-Contains $r.Out '(Win=' '-Tw should annotate established rows with a window'
+    }
+
     # ===================== Sysinternals handle.exe cross-check =====================
     Test-Case 'handle-exe-cross-check' 'oracle/handle' {
         if (-not $HandleExePath) { Skip 'handle64.exe unavailable (pass -HandleExe or allow the download)' }

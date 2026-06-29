@@ -93,6 +93,49 @@ fn table_offset_with_dash_o() {
 }
 
 #[test]
+fn table_command_width_caps() {
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let p = Process {
+        pid: 7,
+        ppid: None,
+        command: "verylongcommandname.exe".into(),
+        user: None,
+        files: vec![OpenFile {
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "C:\\f".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        }],
+    };
+    // +c 4: the COMMAND cell is truncated to 4 chars; the full name is gone.
+    let capped = table::render(
+        std::slice::from_ref(&p),
+        false,
+        false,
+        false,
+        Some(4),
+        false,
+    );
+    assert!(
+        capped.contains("very"),
+        "expected truncated command: {capped:?}"
+    );
+    assert!(
+        !capped.contains("verylongcommandname.exe"),
+        "full command should be truncated: {capped:?}"
+    );
+    // Without the cap, the full name is present.
+    let full = table::render(&[p], false, false, false, None, false);
+    assert!(full.contains("verylongcommandname.exe"));
+}
+
+#[test]
 fn fields_skips_empty_name() {
     // `-K` thread `task` rows have no name; the -F output must not emit a bare
     // `n` field code (regression guard for the lone-`n`-line bug).
