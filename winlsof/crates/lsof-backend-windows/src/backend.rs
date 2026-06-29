@@ -10,7 +10,7 @@ use lsof_core::model::{OpenFile, Process};
 use lsof_core::selection::Selection;
 
 use crate::util::trace;
-use crate::{etw, handles, mapped, modules, peb, privilege, process, restart, sockets};
+use crate::{etw, handles, mapped, modules, peb, privilege, process, restart, sockets, threads};
 
 /// Gather a process's `cwd` + loaded modules (`txt`/`mem`) + mapped data files on
 /// a worker thread, bounded by `timeout`. These run against a *foreign* process
@@ -218,6 +218,23 @@ impl Backend for WindowsBackend {
             ));
             for (pid, file) in hs {
                 attach(&mut procs, &mut idx, pid, file);
+            }
+        }
+
+        // `-K`: list each in-scope process's threads as `task` rows. Toolhelp's
+        // thread snapshot needs no elevation, so this works regardless of the
+        // `-i`/path scoping above.
+        if sel.list_tasks {
+            trace("gather: threads::enumerate start");
+            let ts = threads::enumerate(restrict.as_ref());
+            trace(&format!(
+                "gather: threads::enumerate done ({} threads)",
+                ts.len()
+            ));
+            for (pid, file) in ts {
+                if wanted(pid) {
+                    attach(&mut procs, &mut idx, pid, file);
+                }
             }
         }
 

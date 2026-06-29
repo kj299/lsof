@@ -59,6 +59,7 @@ SELECTION:\n\
     -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
     -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
                   (comma-separated, `^` prefix excludes)\n\
+    -K            list each process's threads as `task` rows (TID in NODE)\n\
     -a            AND the selectors together (default is OR)\n\
     <path>        exact-file lookup; +D/+d <dir> = directory-tree lookup\n\
 \n\

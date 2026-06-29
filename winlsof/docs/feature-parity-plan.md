@@ -85,11 +85,13 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `--` | misc | 🟡 **Phase 5A** | End-of-options sentinel — one-line parser change so `lsof -- -file` lets you name a file that starts with `-` |
 | `<bare>` | sel | ✅ shipped | Path/name lookup via Restart Manager |
 
-## Phase 5A — quick parity wins (target: this iteration)
+## Phase 5A — quick parity wins — ✅ COMPLETE
 
-Goal: implement every option that's a small render-tweak, filter-tweak, or
-one-line argparse change. Each is bounded; together they close the
-biggest gap in lsof-canonical CLI surface.
+All 12 switches landed (commits across three iterations: the nine
+render/filter/argparse tweaks, then `-L`/`+L`, then `-K`). Each is a small
+render-tweak, filter-tweak, or argparse change. Together they close the
+biggest gap in lsof-canonical CLI surface. Bonus: `--unicode`/`--ascii`
+output-encoding flags were added after hardware feedback on console garbling.
 
 | Switch | Effort | What lands |
 |---|---|---|
@@ -133,10 +135,12 @@ than appearing to accept and surprising the user.
 
 ## Sequencing
 
-1. **Phase 5A** (this work) — quick wins, all 12 switches in one go.
-2. **Phase 5B** (next) — `-T`, `-E`, `-U` (the last gated on ETW iteration 3).
-3. **ETW iteration 3** (deferred) — finish the AFD-event parsing using the
-   schemas captured by iteration 2 (commit `108d066`); needed to unblock `-U`.
+1. ~~**Phase 5A** — quick wins, all 12 switches~~ — ✅ **done.**
+2. ~~**ETW iteration 3** — AFD-event parsing → non-TCP/UDP `-i` rows~~ —
+   ✅ **done** (raw/ICMP/AF_UNIX now surface under `--etw`); unblocks `-U`.
+3. **Phase 5B** (next) — `-T` (TCP queue/window via `GetPerTcp*EStats`),
+   `-E`/`+E` (endpoint detail), `-U` (UNIX-domain filter, now backed by the
+   ETW AFD path).
 4. **Smoke-test additions** — extend `Invoke-WinlsofSmokeTest.ps1` with one
    case per new Phase 5A switch (target: 37 → ~50 cases).
 

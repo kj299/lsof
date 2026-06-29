@@ -150,6 +150,12 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-K`: list each in-scope process's threads as additional rows
+    /// (FD = `task`, TYPE = `THRD`, NODE = TID). Lsof's `-K` takes an
+    /// optional argument (`-Ki` for selection mode); the parser accepts
+    /// any value but the backend always emits all threads of in-scope
+    /// processes.
+    pub list_tasks: bool,
     /// `+L <count>`: keep only files whose link count is **less than** `count`
     /// (lsof convention). `+L 1` keeps link-count-zero files — the
     /// "unlinked but still open" security case. Files with unknown links

@@ -187,6 +187,16 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
                      and document as a no-op for portability. */
                 }
+                'K' => {
+                    // `-K [i]`: list each process's threads as `task` rows.
+                    // lsof's optional arg selects task mode; we always list
+                    // all threads of in-scope processes, so any attached value
+                    // is consumed and ignored (and `-Ki` doesn't misparse the
+                    // `i` as the `-i` inet flag).
+                    sel.list_tasks = true;
+                    j = chars.len();
+                    continue;
+                }
                 'F' => {
                     let rest: Vec<char> = chars[j + 1..].to_vec();
                     let nul = rest.contains(&'0');

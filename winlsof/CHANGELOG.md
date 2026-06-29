@@ -11,6 +11,33 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Phase 5A — lsof option-parity port** (12 canonical switches the MVP
+  didn't ship). All additive; the v0.1.0 CLI surface is unchanged.
+  - **`-s [proto:state]`** — socket protocol/state filter
+    (`TCP:LISTEN`, `TCP:^TIME_WAIT`, `TCP:LISTEN,ESTABLISHED`).
+  - **`-K`** — list each in-scope process's threads as `task` rows
+    (TID in NODE), via `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD)`;
+    needs no elevation.
+  - **`-L`** — NLINK (hard-link count) column, from
+    `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks`. **`+L <n>`** keeps only
+    files with link count `< n` (`+L 1` = unlinked-but-still-open).
+    Also surfaced as the `-F k` field code and a `"links"` JSON key.
+  - **`-l`** — numeric USER column (the raw SID string via
+    `ConvertSidToStringSidW`) instead of the resolved `DOMAIN\user`.
+  - **`-g <ppid>[,…]`** — Windows-extension semantics: select processes
+    whose parent PID is in the list (Windows has no PGID).
+  - **`-Q`** — quiet; suppress "no matching open files" on empty results.
+  - **`-w` / `+w`** — suppress / enable non-fatal stderr warnings
+    (the least-privilege hint).
+  - **`-O`** — accepted as a documented no-op (Unix "avoid fork" hint).
+  - **`+c <n>`** — cap the COMMAND column width.
+  - **`-?`** — alias for `-h`.
+  - **`--`** — end-of-options sentinel (so `lsof -- -name` is a path).
+  - **`--unicode` / `--ascii`** — opt-in UTF-8 vs default ASCII output
+    (`SetConsoleOutputCP(65001)`), so the banner/glyphs don't garble on
+    PowerShell 5.1 / cmd.exe (Windows-1252 console).
+  - `OpenFile` gained a `links: Option<u32>` field; `FdType::Task` and a
+    `task`/`THRD` rendering path were added to `lsof-core`.
 - **`--etw` opt-in flag** (Windows, iterations 1–3): runs a short
   `Microsoft-Windows-Winsock-AFD` ETW realtime capture (needs Administrator
   or *Performance Log Users* membership) and emits the **non-TCP/UDP**

@@ -21,6 +21,9 @@ pub enum FdType {
     Txt,
     /// Memory-mapped module (`mem`).
     Mem,
+    /// A thread (`task`) row emitted under `-K`. The TID lives in
+    /// [`OpenFile::node`] and the thread state / start in `name`.
+    Task,
     /// Type could not be determined.
     Unknown,
 }
@@ -34,6 +37,7 @@ impl FdType {
             FdType::Root => "rtd".to_string(),
             FdType::Txt => "txt".to_string(),
             FdType::Mem => "mem".to_string(),
+            FdType::Task => "task".to_string(),
             FdType::Unknown => "unk".to_string(),
         }
     }
