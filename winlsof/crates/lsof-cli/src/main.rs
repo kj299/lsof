@@ -45,7 +45,7 @@ fn make_env() -> Env {
 
 fn usage() -> String {
     format!(
-        "winlsof {ver} — a memory-safe, Windows-native lsof (list open files)\n\
+        "winlsof {ver} - a memory-safe, Windows-native lsof (list open files)\n\
 \n\
 USAGE:\n\
     lsof [options]\n\
@@ -54,8 +54,15 @@ SELECTION:\n\
     -p <pids>     select by PID (comma/space separated)\n\
     -u <users>    select by owning user (comma separated)\n\
     -c <cmd>      select by command/image name (prefix/substring)\n\
+    -g <ppids>    select children of these PPIDs (Windows extension of -g)\n\
     -d <fds>      filter by FD: cwd,rtd,txt,mem, numbers, a-b ranges, ^exclude\n\
     -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
+    -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
+                  (comma-separated, `^` prefix excludes)\n\
+    -U            list UNIX-domain (AF_UNIX) sockets (via ETW; needs Admin)\n\
+    -K            list each process's threads as `task` rows (TID in NODE)\n\
+    -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
+                  (q/w need Administrator; IPv4 + IPv6; bare -T = qs)\n\
     -a            AND the selectors together (default is OR)\n\
     <path>        exact-file lookup; +D/+d <dir> = directory-tree lookup\n\
 \n\
@@ -65,13 +72,36 @@ OUTPUT:\n\
     -R            add a PPID (parent PID) column\n\
     -o            show file offset in SIZE/OFF (0t<decimal>)\n\
     -t            terse: PIDs only\n\
+    -E            pipe endpoint info: append peer server/client PID+command\n\
+                  to pipe NAMEs (GetNamedPipe*ProcessId)\n\
+    +E            same, and also list the peer processes' own pipe rows\n\
+    -l            numeric USER (show SID string instead of resolved name)\n\
+    -L            show NLINK (link count) column\n\
+    +L <count>    keep only files with link count < <count>; implies -L\n\
+                  (`+L 1` = unlinked-but-still-open files; security check)\n\
     -V            verbose: report inaccessible / unmatched search items\n\
     -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
     -J            aggregated JSON object\n\
     -j            JSON Lines (one object per file)\n\
     -r [delay]    repeat every <delay>s (default 15) until interrupted\n\
+    +c <n>        cap COMMAND column width at <n> characters\n\
 \n\
-    -h, --help        show this help\n\
+MISCELLANEOUS:\n\
+    -Q            quiet: suppress 'no matching open files' on empty result\n\
+    -w / +w       suppress / enable non-fatal stderr warnings (default on)\n\
+    -O            no-op (Unix-specific perf hint; accepted for portability)\n\
+    --            end of options; remaining args are paths\n\
+\n\
+    --etw         (Windows, opt-in) short ETW capture against the AFD\n\
+                  provider to extend `-i` coverage to socket families\n\
+                  IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).\n\
+                  Needs Administrator.\n\
+    --unicode     emit UTF-8 (switches the Windows console to CP 65001 at\n\
+                  startup). Default is plain ASCII output — safer on PS 5.1\n\
+                  and legacy cmd.exe whose default console is Windows-1252.\n\
+    --ascii       force ASCII output (the default; flag kept for symmetry).\n\
+\n\
+    -h, -?, --help    show this help\n\
     -v, --version     show version\n\
 \n\
 Without elevation, winlsof shows the processes you can access; run as\n\
@@ -83,6 +113,10 @@ specific operations that need them.\n",
 
 /// `-V`: report `-p` PIDs and path/dir search items that matched nothing.
 fn report_unmatched(sel: &Selection, procs: &[Process]) {
+    if sel.quiet {
+        // `-Q`: silent on empty / unmatched search items.
+        return;
+    }
     for &pid in &sel.pids {
         if !procs.iter().any(|p| p.pid == pid) {
             eprintln!("lsof: PID {pid}: no matching open files");
@@ -102,6 +136,15 @@ fn report_unmatched(sel: &Selection, procs: &[Process]) {
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // Default output is ASCII (safe on PowerShell 5.1 / cmd.exe whose console
+    // is Windows-1252). Users on modern terminals can pass `--unicode` to
+    // switch the console code page to UTF-8 (and opt in to Unicode glyphs in
+    // any future output).
+    #[cfg(windows)]
+    if argv.iter().any(|a| a == "--unicode") {
+        lsof_backend_windows::enable_utf8_console();
+    }
 
     let action = match parse(argv) {
         Ok(a) => a,
@@ -141,11 +184,14 @@ fn main() {
 
     // Least-privilege hint: only in table mode (machine formats stay clean) and
     // only when the run will attempt system-wide handle enumeration — not for
-    // `-i` network queries or path lookups, which need no elevation.
+    // `-i` network queries or path lookups, which need no elevation. `-w`
+    // suppresses the hint per the lsof convention.
     #[cfg(windows)]
     if !env.elevated
+        && !selection.suppress_warnings
         && matches!(format, Format::Table)
         && !selection.inet.enabled
+        && !selection.unix_only
         && !selection.has_path_filter()
     {
         eprintln!(
@@ -166,7 +212,14 @@ fn main() {
             report_unmatched(&selection, &procs);
         }
         let out = match &format {
-            Format::Table => table::render(&procs, selection.terse, show_ppid, show_offset),
+            Format::Table => table::render(
+                &procs,
+                selection.terse,
+                show_ppid,
+                show_offset,
+                selection.command_width,
+                selection.show_links,
+            ),
             Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref()),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);

@@ -71,6 +71,7 @@ fn try_enumerate(pid: u32) -> Result<Vec<OpenFile>, bool> {
             size: Some(entry.modBaseSize as u64),
             offset: None,
             node: None,
+            links: None,
             socket: None,
         });
         is_image = false;

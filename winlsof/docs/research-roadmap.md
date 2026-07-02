@@ -140,17 +140,70 @@ a safe wrapper; reuses the existing duplicate.
 
 ---
 
+## 5. ETW-based socket coverage — 🟡 OPEN, P1 SPIKE DONE (Effort L, Confidence Medium)
+
+**Original goal:** show real handle / access values on socket rows (replacing
+today's `unk`), and gain visibility into raw / ICMP endpoints — **without** the
+undocumented AFD IOCTLs that closed item §1.
+
+**P1 spike — done (2026-06-22).** Captured 10s of
+`Microsoft-Windows-Winsock-AFD` + `Microsoft-Windows-TCPIP` events via
+`logman` + `tracerpt`, then dumped with `Get-WinEvent` for proper
+manifest-resolved per-event-ID detail. Both providers fire on **any socket
+type** (the sample even captured an IPv6 mDNS UDP socket via AFD Id 1009).
+What the events carry, and what they don't:
+
+| Field needed | In events? |
+|---|---|
+| Owning PID | ✅ (`EventRecord.ProcessId` header) |
+| AFD endpoint kernel pointer | ✅ (`Endpoint 0xffffd48fe3cb8010`) |
+| Local + remote address + port | ✅ (TCPIP Id 1332 has `local=… remote=…`; AFD 1015/1007 carry remote `Addr`) |
+| **User-space HANDLE value** (what lsof's FD column shows) | ❌ Not in any event |
+| Session ETW capture | ✅ Works under elevation; needs SE_AUDIT_NAME or *Performance Log Users* |
+
+The "real FD" sub-goal is **unreachable from user mode** — the kernel
+Endpoint pointer can't be mapped to a user-space HANDLE without walking
+`FILE_OBJECT.FsContext`, which only a driver can do. (Process Hacker /
+TCPView ship their own kernel driver for this.)
+
+**Decision:** **scope pivot, not a closed gate.** ETW's unique value here
+is **extending `-i` to socket families IP Helper doesn't enumerate** (raw,
+ICMP, AF_UNIX), since AFD events fire for those identically. The "real FD"
+sub-goal is closed (driver-only). The "expand `-i`" sub-goal moves forward
+as the new P2.
+
+**P2 — implement (M):** add `etw.rs` with a bounded realtime session (cap
+duration, cap event count, drop unknown events) over the AFD provider. Use
+`windows-sys`'s `Win32_System_Diagnostics_Etw` feature for the FFI types,
+matching the rest of the backend's raw-windows-sys style — no new wrapper
+crate. Aggregate (PID, AFD endpoint, addr) tuples observed during the
+window, dedupe by endpoint pointer, and emit rows on `-i` for socket
+families the IP Helper tables don't cover. Behind an opt-in flag
+(`--etw`) since the capture session needs elevation. Bonus: TCPIP Id 1169 /
+1170 expose UDP *remote* endpoints — enrich UDP rows with the most
+recently observed remote.
+
+**P3 — extend (M):** surface a `-iRAW` / `-iICMP` family filter
+(upstream lsof doesn't unify them; mirror its convention).
+
+**Memory safety:** ETW is a *consumer* surface — we don't emit; we parse
+read-only buffers behind length-checked `Vec<u8>` wrappers. No new
+network/handle attack surface.
+
+**Spike artifacts:** the per-event-ID summary, full property dump, and raw
+CSV are in `winlsof-smoke-results\…\` on the validating host; key findings
+captured in this section.
+
+---
+
 ## Suggested order
 
 1. ~~`-o` offset~~ — ✅ done (`NtQueryInformationFile(FilePositionInformation)`).
 2. ~~mapped-data `mem`~~ — ✅ done (`VirtualQueryEx` + `GetMappedFileNameW`).
 3. ~~byte-range locks spike~~ — 🔬 done: gate closed, documented (needs a kernel driver / ETW).
-4. ~~socket FD / AF_UNIX / raw spike~~ — 🔬 done: gate closed, documented; sockets now show `u` access.
+4. ~~socket FD / AF_UNIX / raw spike (undocumented IOCTLs)~~ — 🔬 done: gate closed, documented; sockets now show `u` access.
+5. **ETW-based socket → FD correlation** — 🟡 next open item: safer public path to attach real handle/access to socket rows, and unblock raw/ICMP visibility.
 
-All four research-grade items have now been resolved: two implemented (offset,
-mapped data files), two spiked to a documented platform limitation (locks,
-socket-FD/AF_UNIX/raw) with the precise future path recorded.
-
-Items 1–2 are committable with the same host-tested-core + Windows-CI model used
-so far. Items 3–4 begin with a spike whose decision gate may end in "document as
-a platform limitation" rather than code.
+Items 1–2 shipped in v0.1.0. Items 3–4 are platform-limit gates with the future
+path recorded. Item 5 is the next concrete spike — start with P1 to validate
+the ETW event shape before committing to code.

@@ -6,11 +6,13 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use lsof_core::backend::{Backend, BackendError};
-use lsof_core::model::{OpenFile, Process};
-use lsof_core::selection::Selection;
+use lsof_core::model::{FileType, OpenFile, Process};
+use lsof_core::selection::{EndpointMode, Selection};
 
 use crate::util::trace;
-use crate::{handles, mapped, modules, peb, privilege, process, restart, sockets};
+use crate::{
+    etw, handles, mapped, modules, peb, privilege, process, restart, sockets, tcpinfo, threads,
+};
 
 /// Gather a process's `cwd` + loaded modules (`txt`/`mem`) + mapped data files on
 /// a worker thread, bounded by `timeout`. These run against a *foreign* process
@@ -77,6 +79,7 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
             ppid: None,
             command: "<unknown>".to_string(),
             user: None,
+            endpoint_peer: false,
             files: vec![file],
         });
         idx.insert(pid, i);
@@ -90,7 +93,7 @@ impl Backend for WindowsBackend {
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         trace("gather: process::enumerate start");
-        let mut procs = process::enumerate();
+        let mut procs = process::enumerate(sel.numeric_ids);
         trace(&format!(
             "gather: process::enumerate done ({} procs)",
             procs.len()
@@ -138,11 +141,13 @@ impl Backend for WindowsBackend {
             idx.insert(p.pid, i);
         }
 
-        // `-i` is a network-only query: gather only sockets, which need no
-        // elevation — preserving the least-privilege guarantee.
-        let inet_only = sel.inet.enabled;
+        // `-i` and `-U` are network-only queries: gather only sockets and skip
+        // the handle/per-process enumeration (which is where elevation matters),
+        // preserving the least-privilege guarantee. (`-U`'s data itself comes
+        // from ETW, which does need admin — handled in that block.)
+        let socket_only = sel.inet.enabled || sel.unix_only;
 
-        if !inet_only {
+        if !socket_only {
             // cwd + txt/mem (modules) + mapped data files, for each in-scope process.
             trace("gather: build_dos_map start");
             let dos_map = Arc::new(handles::build_dos_map());
@@ -164,36 +169,133 @@ impl Backend for WindowsBackend {
             trace("gather: per-process done");
         }
 
-        trace("gather: sockets::collect start");
-        let socks = sockets::collect();
-        trace(&format!(
-            "gather: sockets::collect done ({} endpoints)",
-            socks.len()
-        ));
-        // Resolve names (reverse DNS / service lookup) only for the sockets we
-        // keep, and only when they can actually be displayed. A path/dir filter
-        // (`+D`/`+d`/bare path) never matches a socket (no filesystem path), so
-        // resolving them would be pure waste — and it's the slow, reverse-DNS
-        // path. So skip resolution for those queries.
-        let resolve_sockets = !sel.has_path_filter();
-        for (pid, mut file) in socks {
-            if wanted(pid) {
-                if resolve_sockets {
-                    sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+        // IP Helper covers TCP/UDP. Show those unless this is a `-U`-only
+        // (UNIX-domain) query, which wants just the ETW-sourced AF_UNIX rows.
+        let show_inet_sockets = sel.inet.enabled || !sel.unix_only;
+        if show_inet_sockets {
+            trace("gather: sockets::collect start");
+            let socks = sockets::collect();
+            trace(&format!(
+                "gather: sockets::collect done ({} endpoints)",
+                socks.len()
+            ));
+            // Resolve names (reverse DNS / service lookup) only for the sockets
+            // we keep, and only when they can actually be displayed. A path/dir
+            // filter (`+D`/`+d`/bare path) never matches a socket (no filesystem
+            // path), so resolving them would be pure waste — and it's the slow,
+            // reverse-DNS path. So skip resolution for those queries.
+            let resolve_sockets = !sel.has_path_filter();
+            for (pid, mut file) in socks {
+                if wanted(pid) {
+                    if resolve_sockets {
+                        sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+                    }
+                    // `-T q/w`: append extended TCP stats (window / queue) to the
+                    // socket NAME via per-connection EStats. Needs elevation.
+                    if let Some(t) = &sel.tcp_info {
+                        tcpinfo::annotate(&mut file, t, self.elevated);
+                    }
+                    attach(&mut procs, &mut idx, pid, file);
                 }
-                attach(&mut procs, &mut idx, pid, file);
             }
         }
 
-        if !inet_only {
+        // AFD sockets IP Helper can't enumerate come from a short ETW capture.
+        // `--etw` surfaces all of them (raw / ICMP / AF_UNIX); `-U` narrows to
+        // AF_UNIX. Either implies the (Administrator-only) capture. Histogram +
+        // per-event schemas still surface on stderr for diagnosability (§5).
+        if sel.use_etw || sel.unix_only {
+            trace("gather: etw::capture start");
+            if let Some(summary) = etw::capture(Duration::from_secs(2)) {
+                trace(&format!(
+                    "gather: etw::capture done ({} events, {} sockets)",
+                    summary.total,
+                    summary.sockets.len()
+                ));
+                for s in &summary.sockets {
+                    if !wanted(s.pid) {
+                        continue;
+                    }
+                    // `-U`: keep only AF_UNIX; otherwise keep everything IP
+                    // Helper didn't already cover.
+                    let keep = if sel.unix_only {
+                        s.is_unix()
+                    } else {
+                        !s.is_covered_by_ip_helper()
+                    };
+                    if keep {
+                        attach(&mut procs, &mut idx, s.pid, etw::to_open_file(s));
+                    }
+                }
+                eprintln!("{}", summary.render(10));
+            } else {
+                trace("gather: etw::capture returned None (setup failed)");
+            }
+        }
+
+        if !socket_only {
             trace("gather: handles::enumerate start");
-            let hs = handles::enumerate(self.elevated, restrict.as_ref(), sel.verbose);
+            // `-E`/`+E`: hand enumeration a pid → command map so pipe rows can
+            // name their peer endpoints; its presence turns the queries on.
+            let endpoint_cmds: Option<HashMap<u32, String>> = sel
+                .endpoints
+                .map(|_| procs.iter().map(|p| (p.pid, p.command.clone())).collect());
+            let (hs, peers) = handles::enumerate(
+                self.elevated,
+                restrict.as_ref(),
+                sel.verbose,
+                endpoint_cmds.as_ref(),
+            );
             trace(&format!(
                 "gather: handles::enumerate done ({} handles)",
                 hs.len()
             ));
             for (pid, file) in hs {
                 attach(&mut procs, &mut idx, pid, file);
+            }
+
+            // `+E`: also display the endpoint processes' own pipe rows. Peers
+            // inside the selected set are fully shown already; enumerate the
+            // rest, keep just their pipe rows, and mark each process so the
+            // selection engine retains it despite matching no selector.
+            if sel.endpoints == Some(EndpointMode::Files) {
+                if let Some(r) = &restrict {
+                    let missing: HashSet<u32> = peers.difference(r).copied().collect();
+                    if !missing.is_empty() {
+                        trace(&format!("gather: +E peer pass ({} pids)", missing.len()));
+                        let (extra, _) = handles::enumerate(
+                            self.elevated,
+                            Some(&missing),
+                            false,
+                            endpoint_cmds.as_ref(),
+                        );
+                        for (pid, file) in extra {
+                            if file.file_type == FileType::Pipe {
+                                attach(&mut procs, &mut idx, pid, file);
+                                if let Some(&i) = idx.get(&pid) {
+                                    procs[i].endpoint_peer = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // `-K`: list each in-scope process's threads as `task` rows. Toolhelp's
+        // thread snapshot needs no elevation, so this works regardless of the
+        // `-i`/path scoping above.
+        if sel.list_tasks {
+            trace("gather: threads::enumerate start");
+            let ts = threads::enumerate(restrict.as_ref());
+            trace(&format!(
+                "gather: threads::enumerate done ({} threads)",
+                ts.len()
+            ));
+            for (pid, file) in ts {
+                if wanted(pid) {
+                    attach(&mut procs, &mut idx, pid, file);
+                }
             }
         }
 

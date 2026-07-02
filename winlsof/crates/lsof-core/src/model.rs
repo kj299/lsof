@@ -21,6 +21,9 @@ pub enum FdType {
     Txt,
     /// Memory-mapped module (`mem`).
     Mem,
+    /// A thread (`task`) row emitted under `-K`. The TID lives in
+    /// [`OpenFile::node`] and the thread state / start in `name`.
+    Task,
     /// Type could not be determined.
     Unknown,
 }
@@ -34,6 +37,7 @@ impl FdType {
             FdType::Root => "rtd".to_string(),
             FdType::Txt => "txt".to_string(),
             FdType::Mem => "mem".to_string(),
+            FdType::Task => "task".to_string(),
             FdType::Unknown => "unk".to_string(),
         }
     }
@@ -106,11 +110,15 @@ impl FileType {
     }
 }
 
-/// Transport protocol for a network socket.
+/// Transport protocol for a network socket. `Other(name)` carries a static
+/// upper-case protocol name (e.g. "ICMP", "ICMPV6", "RAW", "AF_UNIX") for
+/// non-TCP/UDP sockets surfaced from sources beyond IP Helper (currently the
+/// ETW backend, when `--etw` is on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
     Tcp,
     Udp,
+    Other(&'static str),
 }
 
 impl Protocol {
@@ -118,6 +126,7 @@ impl Protocol {
         match self {
             Protocol::Tcp => "TCP",
             Protocol::Udp => "UDP",
+            Protocol::Other(s) => s,
         }
     }
 }
@@ -235,6 +244,11 @@ pub struct OpenFile {
     /// NODE column — the file-index (inode analog) for files, or the protocol
     /// (`TCP`/`UDP`) for sockets.
     pub node: Option<String>,
+    /// Hard-link count from `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks`, when
+    /// known. Surfaced as the NLINK column under `-L` and used by `+L count`
+    /// to filter to files with fewer than `count` links (e.g. `+L1` for
+    /// unlinked-but-still-open files — a security-interesting case).
+    pub links: Option<u32>,
     /// Present iff this is a network socket.
     pub socket: Option<SocketInfo>,
 }
@@ -256,4 +270,9 @@ pub struct Process {
     /// Owning account, e.g. `DOMAIN\\user` (lsof "USER").
     pub user: Option<String>,
     pub files: Vec<OpenFile>,
+    /// `+E`: set by a backend when this process is in the result only because
+    /// it is the peer endpoint of a selected process's pipe. The selection
+    /// engine keeps such a process (its pipe rows only) even though it matches
+    /// no process selector — lsof's "endpoint files are also displayed".
+    pub endpoint_peer: bool,
 }

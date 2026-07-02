@@ -11,7 +11,8 @@
 //! lookup.
 
 use lsof_core::render::Format;
-use lsof_core::{FdFilter, FdKind, FdSpec, Protocol, Selection};
+use lsof_core::selection::StateFilter;
+use lsof_core::{EndpointMode, FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags};
 
 /// What the CLI should do after parsing.
 #[derive(Debug)]
@@ -53,9 +54,36 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
             i += 1;
             continue;
         }
+        if tok == "--etw" {
+            sel.use_etw = true;
+            i += 1;
+            continue;
+        }
+        if tok == "--unicode" {
+            sel.unicode_output = true;
+            i += 1;
+            continue;
+        }
+        if tok == "--ascii" {
+            // Explicit opt-out; redundant with the default, kept for symmetry.
+            sel.unicode_output = false;
+            i += 1;
+            continue;
+        }
+        // `--` ends option parsing; remaining tokens are paths.
+        if tok == "--" {
+            i += 1;
+            while i < args.len() {
+                sel.paths.push(args[i].clone());
+                i += 1;
+            }
+            break;
+        }
 
         if let Some(plus) = tok.strip_prefix('+') {
             // `+d` / `+D <path>`: directory / path lookup.
+            // `+c <n>`: cap COMMAND column width to <n>.
+            // `+w`: enable warnings (the default; inverse of `-w`).
             let mut chars = plus.chars();
             match chars.next() {
                 Some('d') | Some('D') => {
@@ -70,6 +98,43 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                         args[i].clone()
                     };
                     sel.dir_trees.push(value);
+                }
+                Some('c') => {
+                    let rest: String = chars.collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option +c requires a width".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    let n: usize = value
+                        .parse()
+                        .map_err(|_| format!("invalid +c width: {value}"))?;
+                    sel.command_width = Some(n);
+                }
+                Some('w') => sel.suppress_warnings = false,
+                Some('E') => sel.endpoints = Some(EndpointMode::Files),
+                Some('L') => {
+                    // `+L <count>`: drop files whose link count is >= <count>.
+                    // Implies the NLINK column, mirroring lsof.
+                    let rest: String = chars.collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option +L requires a count".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    let n: u32 = value
+                        .parse()
+                        .map_err(|_| format!("invalid +L count: {value}"))?;
+                    sel.max_links = Some(n);
+                    sel.show_links = true;
                 }
                 _ => return Err(format!("unsupported option: {tok}")),
             }
@@ -116,6 +181,55 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'v' => want_version = true,
                 'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
+                'l' => sel.numeric_ids = true,
+                'L' => sel.show_links = true,
+                'U' => sel.unix_only = true,
+                // `-E` after `+E` must not downgrade the "also show peer
+                // files" mode — lsof treats +E as a superset of -E.
+                'E' => {
+                    if sel.endpoints != Some(EndpointMode::Files) {
+                        sel.endpoints = Some(EndpointMode::Info);
+                    }
+                }
+                'Q' => sel.quiet = true,
+                'w' => sel.suppress_warnings = true,
+                'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
+                     and document as a no-op for portability. */
+                }
+                'T' => {
+                    // `-T [fqsw]`: TCP info on socket rows. f=follow (no-op for
+                    // a snapshot), q=queue, s=state, w=window. Bare `-T`
+                    // defaults to queue+state, matching lsof.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let mut flags = TcpInfoFlags::default();
+                    if rest.is_empty() {
+                        flags.queue = true;
+                        flags.state = true;
+                    } else {
+                        for ch in rest.chars() {
+                            match ch {
+                                'f' => {}
+                                'q' => flags.queue = true,
+                                's' => flags.state = true,
+                                'w' => flags.window = true,
+                                other => return Err(format!("invalid -T sub-option: {other}")),
+                            }
+                        }
+                    }
+                    sel.tcp_info = Some(flags);
+                    j = chars.len();
+                    continue;
+                }
+                'K' => {
+                    // `-K [i]`: list each process's threads as `task` rows.
+                    // lsof's optional arg selects task mode; we always list
+                    // all threads of in-scope processes, so any attached value
+                    // is consumed and ignored (and `-Ki` doesn't misparse the
+                    // `i` as the `-i` inet flag).
+                    sel.list_tasks = true;
+                    j = chars.len();
+                    continue;
+                }
                 'F' => {
                     let rest: Vec<char> = chars[j + 1..].to_vec();
                     let nul = rest.contains(&'0');
@@ -148,7 +262,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     j = chars.len();
                     continue;
                 }
-                'p' | 'u' | 'c' => {
+                'p' | 'u' | 'c' | 'g' => {
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
@@ -160,6 +274,21 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                         args[i].clone()
                     };
                     apply_value(&mut sel, c, &value)?;
+                    j = chars.len();
+                    continue;
+                }
+                's' => {
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err("option -s requires a [proto:state] value".to_string());
+                        }
+                        args[i].clone()
+                    };
+                    sel.state_filter = Some(parse_state_filter(&value)?);
                     j = chars.len();
                     continue;
                 }
@@ -245,9 +374,55 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             }
         }
         'c' => sel.commands.push(value.to_string()),
+        'g' => {
+            // Windows extension: `-g <ppid>[,<ppid>...]` selects processes
+            // whose PPID is in the list (no PGID on Windows). See
+            // docs/feature-parity-plan.md.
+            for t in value
+                .split(|ch: char| ch == ',' || ch.is_whitespace())
+                .filter(|s| !s.is_empty())
+            {
+                match t.parse::<u32>() {
+                    Ok(p) => sel.ppid_filter.push(p),
+                    Err(_) => return Err(format!("invalid -g ppid: {t}")),
+                }
+            }
+        }
         _ => unreachable!(),
     }
     Ok(())
+}
+
+/// Parse a `-s [proto:][state[,state...]]` value into a [`StateFilter`].
+/// Accepts `TCP:LISTEN`, `TCP:LISTEN,ESTABLISHED`, `TCP:^TIME_WAIT`, or a
+/// bare proto like `TCP:` (proto-only filter, any state).
+fn parse_state_filter(value: &str) -> Result<StateFilter, String> {
+    let (proto, states_part) = match value.find(':') {
+        Some(idx) => {
+            let p = &value[..idx];
+            let s = &value[idx + 1..];
+            let proto = match p.to_ascii_lowercase().as_str() {
+                "" => None,
+                "tcp" => Some(Protocol::Tcp),
+                "udp" => Some(Protocol::Udp),
+                other => return Err(format!("invalid -s protocol: {other}")),
+            };
+            (proto, s)
+        }
+        None => (None, value),
+    };
+    let mut filter = StateFilter {
+        proto,
+        ..Default::default()
+    };
+    for term in states_part.split(',').filter(|s| !s.is_empty()) {
+        if let Some(rest) = term.strip_prefix('^') {
+            filter.exclude.push(rest.to_string());
+        } else {
+            filter.include.push(term.to_string());
+        }
+    }
+    Ok(filter)
 }
 
 /// Parse an `-i` spec: `[46][tcp|udp][@host][:port]`. An empty spec means "all
@@ -454,5 +629,15 @@ mod tests {
     #[test]
     fn unknown_option_errors() {
         assert!(parse(vec!["-Z".into()]).is_err());
+    }
+
+    #[test]
+    fn endpoint_modes() {
+        assert_eq!(run(&["-E"]).0.endpoints, Some(EndpointMode::Info));
+        assert_eq!(run(&["+E"]).0.endpoints, Some(EndpointMode::Files));
+        // +E is a superset of -E: a later -E must not downgrade it.
+        assert_eq!(run(&["+E", "-E"]).0.endpoints, Some(EndpointMode::Files));
+        assert_eq!(run(&["-E", "+E"]).0.endpoints, Some(EndpointMode::Files));
+        assert_eq!(run(&[]).0.endpoints, None);
     }
 }

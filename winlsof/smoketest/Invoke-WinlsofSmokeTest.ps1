@@ -34,7 +34,8 @@ param(
     [switch]$SkipBuild,
     [switch]$Coverage,
     [string]$HandleExe,
-    [switch]$NoFetchHandle
+    [switch]$NoFetchHandle,
+    [string]$Binary
 )
 
 # 'Continue', not 'Stop': native tools (rustup/cargo, llvm-cov) write progress and
@@ -67,11 +68,16 @@ Write-Host "Elevated  : $IsAdmin   Coverage: $([bool]$Coverage)`n"
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+# A prebuilt binary via -Binary (e.g. a downloaded release) skips the build.
+if ($Binary -and $Coverage) {
+    Write-Host "-Coverage ignored with -Binary (a prebuilt binary isn't instrumented)." -ForegroundColor Yellow
+    $Coverage = $false
+}
 $BuildProfile = if ($Coverage) { 'debug' } else { 'release' }
-if (-not $SkipBuild -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+if (-not $Binary -and -not $SkipBuild -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo is not on PATH. Install Rust from https://rustup.rs and open a new shell, or pass -SkipBuild after placing a prebuilt lsof.exe at target\$BuildProfile\lsof.exe (you can download one from the PR's CI 'lsof-exe-windows' artifact)."
 }
-if (-not $SkipBuild) {
+if (-not $Binary -and -not $SkipBuild) {
     Push-Location $Workspace
     try {
         if ($Coverage) {
@@ -97,13 +103,20 @@ if (-not $SkipBuild) {
         if (-not $Coverage) {
             & cargo build --release
             if ($LASTEXITCODE -ne 0) {
-                # A missing MSVC linker is the common foot-gun after switching the
-                # default toolchain to MSVC for coverage; point back to GNU.
-                $linkHint = if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
-                    " If you switched to the MSVC toolchain, it needs VS Build Tools' link.exe; switch back with 'rustup default stable-x86_64-pc-windows-gnu' or install Build Tools for Visual Studio (Desktop C++ workload)."
+                $existingBin = Join-Path $Workspace 'target\release\lsof.exe'
+                $hint = ''
+                if (Test-Path $existingBin) {
+                    # A previously built binary is present, so a build failure
+                    # here is almost always a transient file lock on target\
+                    # (OneDrive sync, antivirus, or an elevated run clashing
+                    # with a prior unelevated one) rather than a code error.
+                    $hint = " A built lsof.exe already exists, so this looks like a transient file lock on target\ (OneDrive sync / antivirus / an elevated-vs-unelevated clash), not a code error. Re-run with -SkipBuild to reuse the current binary; longer term, pause OneDrive during builds or move the clone off OneDrive."
                 }
-                else { '' }
-                throw "cargo build failed ($LASTEXITCODE).$linkHint"
+                elseif (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+                    # Missing MSVC linker (e.g. after switching toolchains).
+                    $hint = " If you switched to the MSVC toolchain, it needs VS Build Tools' link.exe; switch back with 'rustup default stable-x86_64-pc-windows-gnu' or install Build Tools for Visual Studio (Desktop C++ workload)."
+                }
+                throw "cargo build failed ($LASTEXITCODE).$hint"
             }
         }
     }
@@ -112,8 +125,14 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 }
-$Bin = Join-Path $Workspace ("target\{0}\lsof.exe" -f $BuildProfile)
-if (-not (Test-Path $Bin)) { throw "lsof.exe not found at $Bin (build it or drop -SkipBuild)" }
+if ($Binary) {
+    if (-not (Test-Path $Binary)) { throw "-Binary not found: $Binary" }
+    $Bin = (Resolve-Path $Binary).Path
+}
+else {
+    $Bin = Join-Path $Workspace ("target\{0}\lsof.exe" -f $BuildProfile)
+}
+if (-not (Test-Path $Bin)) { throw "lsof.exe not found at $Bin (build it, pass -Binary <path>, or drop -SkipBuild)" }
 Write-Host "Binary    : $Bin`n"
 
 # ---------------------------------------------------------------------------
@@ -231,9 +250,17 @@ try {
     $bytes = [byte[]](0..255); $fx.File.Write($bytes, 0, $bytes.Length); $fx.File.Flush()
     [void]$fx.File.Seek(128, [System.IO.SeekOrigin]::Begin)
 
-    # Named pipe server (PIPE).
+    # Named pipe server (PIPE), plus a connected client end so `-E` can
+    # resolve both endpoint PIDs (an unconnected instance has no client).
     $fx.PipeName = "winlsof_pipe_$self"
     $fx.Pipe = New-Object System.IO.Pipes.NamedPipeServerStream($fx.PipeName, [System.IO.Pipes.PipeDirection]::InOut)
+    try {
+        $accept = $fx.Pipe.WaitForConnectionAsync()
+        $fx.PipeClient = New-Object System.IO.Pipes.NamedPipeClientStream('.', $fx.PipeName, [System.IO.Pipes.PipeDirection]::InOut)
+        $fx.PipeClient.Connect(2000)
+        [void]$accept.Wait(2000)
+    }
+    catch { $fx.PipeClient = $null }
 
     # Memory-mapped DATA file (mem via mapped.rs).
     $fx.MapPath = Join-Path $env:TEMP ("winlsof_map_{0}.bin" -f $self)
@@ -251,11 +278,14 @@ try {
     $fx.Client4.Connect([System.Net.IPAddress]::Loopback, $fx.Port4)
     $fx.Server4 = $fx.Tcp4.AcceptTcpClient()
 
-    # TCP v6 listener (may be unavailable; tolerate).
+    # TCP v6 listener + an established connection pair (may be unavailable; tolerate).
     try {
         $fx.Tcp6 = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::IPv6Loopback, 0)
         $fx.Tcp6.Start()
         $fx.Port6 = ([System.Net.IPEndPoint]$fx.Tcp6.LocalEndpoint).Port
+        $fx.Client6 = [System.Net.Sockets.TcpClient]::new([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+        $fx.Client6.Connect([System.Net.IPAddress]::IPv6Loopback, $fx.Port6)
+        $fx.Server6 = $fx.Tcp6.AcceptTcpClient()
     }
     catch { $fx.Port6 = $null }
 
@@ -419,6 +449,114 @@ try {
         Assert (($null -ne $o) -and $o.Contains('=======')) 'no repeat separator seen'
     }
 
+    # ===================== Phase 5A: parity switches =====================
+    Test-Case 'state-filter-listen' 'selection/-s' {
+        # -iTCP:<port> matches the listener (LISTEN) + the established pair;
+        # -sTCP:LISTEN must keep only the LISTEN row.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:LISTEN') 's-listen'
+        Assert-Contains $r.Out 'LISTEN'
+        Assert-NotContains $r.Out 'ESTABLISHED' '-sTCP:LISTEN should exclude ESTABLISHED'
+    }
+    Test-Case 'state-filter-exclude' 'selection/-s^' {
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:^LISTEN') 's-not-listen'
+        Assert-NotContains $r.Out 'LISTEN' '-sTCP:^LISTEN should exclude LISTEN'
+    }
+    Test-Case 'tasks-dash-K' 'selection/-K' {
+        $r = Invoke-Lsof @('-K', '-p', "$self") 'K'
+        Assert-Contains $r.Out 'THRD' '-K should emit THRD task rows'
+    }
+    Test-Case 'link-count-dash-L' 'render/-L' {
+        $r = Invoke-Lsof @('-L', '-p', "$self") 'L'
+        Assert-Contains $r.Out 'NLINK' '-L should add the NLINK column'
+    }
+    Test-Case 'link-filter-plus-L' 'selection/+L' {
+        # +L 1 keeps only link-count-0 files; deterministic content varies, so
+        # just assert it parses and runs cleanly (implies -L).
+        $r = Invoke-Lsof @('+L', '1', '-p', "$self") 'plusL'
+        Assert ($r.Exit -eq 0) "+L 1 should run cleanly (exit=$($r.Exit))"
+    }
+    Test-Case 'numeric-ids-dash-l' 'render/-l' {
+        $r = Invoke-Lsof @('-l', '-p', "$self") 'l'
+        Assert-Contains $r.Out 'S-1-' '-l should render the numeric SID'
+    }
+    Test-Case 'ppid-select-dash-g' 'selection/-g' {
+        # Our cmd.exe child's parent is this harness ($self); -g <self> selects it.
+        $r = Invoke-Lsof @('-g', "$self") 'g'
+        Assert-Contains $r.Out "$($fx.Cwd64.Id)" '-g <self> should select our child cmd.exe'
+    }
+    Test-Case 'quiet-dash-Q' 'misc/-Q' {
+        $r = Invoke-Lsof @('-Q', '-p', '4294967294') 'Q'
+        Assert-NotContains $r.Err 'no matching' '-Q should suppress the no-match message'
+    }
+    Test-Case 'suppress-warnings-dash-w' 'misc/-w' {
+        if ($IsAdmin) { Skip 'privilege hint only appears unelevated' }
+        $r = Invoke-Lsof @('-w', '-p', "$self") 'w'
+        Assert-NotContains $r.Err 'Administrator' '-w should suppress the privilege hint'
+    }
+    Test-Case 'no-op-dash-O' 'misc/-O' {
+        $r = Invoke-Lsof @('-O', '-p', "$self") 'O'
+        Assert ($r.Exit -eq 0) "-O should be accepted (exit=$($r.Exit))"
+    }
+    Test-Case 'command-width-plus-c' 'render/+c' {
+        $r = Invoke-Lsof @('+c', '4', '-p', "$self") 'plusc'
+        Assert ($r.Exit -eq 0) "+c should be accepted (exit=$($r.Exit))"
+    }
+    Test-Case 'help-alias-question' 'misc/-?' {
+        $r = Invoke-Lsof @('-?') 'q-help'; Assert-Contains $r.Out 'USAGE'
+    }
+    Test-Case 'end-of-options-dashdash' 'misc/--' {
+        # `--` ends options; the path after it is looked up (RM finds our PID).
+        $r = Invoke-Lsof @('--', $fx.FilePath) 'dashdash'
+        Assert-Contains $r.Out "$self" '-- <file> should be treated as a path lookup'
+    }
+
+    # ===================== Phase 5B: -T extended TCP info =====================
+    Test-Case 'tcp-info-window-dash-T' 'render/-T' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        # The established loopback pair on Port4 should report a receive window.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tw') 'T-window'
+        Assert-Contains $r.Out '(Win=' '-Tw should annotate established rows with a window'
+    }
+    Test-Case 'tcp-info-window-v6-dash-T' 'render/-T6' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        if (-not $fx.Server6) { Skip 'no established IPv6 loopback pair' }
+        # Same, over IPv6 (GetPerTcp6ConnectionEStats / MIB_TCP6ROW path).
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port6)", '-Tw') 'T-window-v6'
+        Assert-Contains $r.Out '(Win=' '-Tw should annotate established IPv6 rows'
+    }
+
+    # ===================== Phase 5B: -E pipe endpoint info =====================
+    Test-Case 'pipe-endpoints-dash-E' 'render/-E' {
+        if (-not $fx.PipeClient -or -not $fx.PipeClient.IsConnected) { Skip 'pipe client did not connect' }
+        # Both ends of the fixture pipe live in this process; -E annotates the
+        # pipe rows with peer PIDs via GetNamedPipe{Server,Client}ProcessId.
+        # Needs no elevation (own-process handles).
+        $r = Invoke-Lsof @('-E', '-p', "$self") 'E'
+        Assert-Contains $r.Out "server=$self" '-E should annotate pipe rows with the server PID'
+        Assert-Contains $r.Out "client=$self" '-E should annotate pipe rows with the client PID'
+    }
+    Test-Case 'pipe-endpoints-plus-E' 'render/+E' {
+        if (-not $fx.PipeClient -or -not $fx.PipeClient.IsConnected) { Skip 'pipe client did not connect' }
+        # +E = -E plus the peers' own rows. Our peer is this same process (so
+        # already selected); assert the superset parses and annotates alike.
+        $r = Invoke-Lsof @('+E', '-p', "$self") 'plusE'
+        Assert ($r.Exit -eq 0) "+E should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Out "server=$self" '+E should annotate like -E'
+    }
+
+    # ===================== Phase 5B: -U UNIX-domain sockets (ETW) =====================
+    Test-Case 'unix-sockets-dash-U' 'sockets/-U' {
+        if (-not $IsAdmin) { Skip 'AF_UNIX enumeration uses the ETW AFD capture (needs Administrator)' }
+        # `-U` triggers the short ETW AFD capture and restricts output to AF_UNIX
+        # rows. AF_UNIX sockets are ephemeral, so a 2s capture window can't
+        # guarantee a specific row; assert instead that the capture fired (its
+        # histogram is written to stderr whenever the AFD session starts) and
+        # that the run exits cleanly.
+        $r = Invoke-Lsof @('-U') 'U'
+        Assert ($r.Exit -eq 0) "-U should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Err 'etw: captured' '-U stderr (ETW histogram)'
+    }
+
     # ===================== Sysinternals handle.exe cross-check =====================
     Test-Case 'handle-exe-cross-check' 'oracle/handle' {
         if (-not $HandleExePath) { Skip 'handle64.exe unavailable (pass -HandleExe or allow the download)' }
@@ -430,10 +568,11 @@ try {
 }
 finally {
     Write-Host "`nCleaning up fixtures..." -ForegroundColor Cyan
-    foreach ($k in 'Server4', 'Client4', 'Udp4', 'Udp6') { if ($fx[$k]) { try { $fx[$k].Dispose() } catch {} } }
+    foreach ($k in 'Server4', 'Client4', 'Server6', 'Client6', 'Udp4', 'Udp6') { if ($fx[$k]) { try { $fx[$k].Dispose() } catch {} } }
     foreach ($k in 'Tcp4', 'Tcp6') { if ($fx[$k]) { try { $fx[$k].Stop() } catch {} } }
     if ($fx.View) { try { $fx.View.Dispose() } catch {} }
     if ($fx.Mmf) { try { $fx.Mmf.Dispose() } catch {} }
+    if ($fx.PipeClient) { try { $fx.PipeClient.Dispose() } catch {} }
     if ($fx.Pipe) { try { $fx.Pipe.Dispose() } catch {} }
     if ($fx.File) { try { $fx.File.Dispose() } catch {} }
     foreach ($k in 'Cwd64', 'Cwd32') { if ($fx[$k]) { try { Stop-Process -Id $fx[$k].Id -Force -ErrorAction SilentlyContinue } catch {} } }

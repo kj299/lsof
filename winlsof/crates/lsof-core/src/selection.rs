@@ -13,7 +13,7 @@
 //!   intent of `lsof -i ...`; see README for the deviation from classic OR.)
 //! * With no selectors at all, every process and file is listed.
 
-use crate::model::{FdType, OpenFile, Process, Protocol};
+use crate::model::{FdType, FileType, OpenFile, Process, Protocol};
 
 /// Parsed `-i` Internet filter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,6 +28,43 @@ pub struct InetFilter {
     pub port: Option<u16>,
     /// Restrict to a host substring (matched against the numeric address text).
     pub host: Option<String>,
+}
+
+/// `-E` (Info) vs `+E` (Files) pipe-endpoint display modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointMode {
+    /// `-E`: annotate pipe rows with peer endpoint info (server/client PID
+    /// and command).
+    Info,
+    /// `+E`: annotate, and also display the peer processes' own pipe rows
+    /// even when those processes match no selector.
+    Files,
+}
+
+/// `-T [fqsw]` sub-flags. `f` (follow/repeat) is accepted but a no-op for a
+/// snapshot tool. `s` (state) is shown already; `q` (queue) and `w` (window)
+/// drive the extended-TCP-stats lookup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TcpInfoFlags {
+    pub state: bool,
+    pub queue: bool,
+    pub window: bool,
+}
+
+/// Parsed `-s [proto:state[,state]]` selector. Includes/excludes apply to
+/// TCP/UDP sockets only; rows without a recognized state are passed through
+/// when only TCP filters are set. Multiple includes are OR-ed; an exclude
+/// kills the row even if it also matches an include.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StateFilter {
+    /// Restrict to one protocol, e.g. `TCP`. `None` if `-s` was given without
+    /// a `proto:` prefix (which we treat as "any socket protocol").
+    pub proto: Option<Protocol>,
+    /// State names to include (case-insensitive match against
+    /// `TcpState::as_str`). Empty means "any state for this proto".
+    pub include: Vec<String>,
+    /// State names to exclude (the `^` prefix in lsof's syntax).
+    pub exclude: Vec<String>,
 }
 
 /// A `-d` file-descriptor filter: which FD slots to include / exclude.
@@ -106,12 +143,73 @@ pub struct Selection {
     pub dir_trees: Vec<String>,
     /// `-d`: file-descriptor filter.
     pub fd_filter: Option<FdFilter>,
+    /// `-s [proto:state[,state]]`: TCP socket state filter, e.g.
+    /// `TCP:LISTEN`, `TCP:^TIME_WAIT`, `TCP:LISTEN,ESTABLISHED`. Applies
+    /// only to sockets; non-socket rows are unaffected.
+    pub state_filter: Option<StateFilter>,
+    /// `-g <ppid>[,<ppid>...]`: Windows-extension semantics — select
+    /// processes whose PPID is in this list (the closest analog to lsof's
+    /// `-g` PGID filter, since Windows has no process groups).
+    pub ppid_filter: Vec<u32>,
+    /// `-l`: render numeric IDs (raw SID string) instead of the resolved
+    /// account name in the USER column.
+    pub numeric_ids: bool,
+    /// `-Q`: suppress "no matching open files" stderr and treat an empty
+    /// result set as success.
+    pub quiet: bool,
+    /// `-w` sets this, `+w` clears it (default `false` — warnings on):
+    /// suppresses the privilege-hint and other non-fatal stderr warnings.
+    pub suppress_warnings: bool,
+    /// `+c <n>`: max width of the COMMAND column (truncate long names).
+    /// `None` means no cap (current behavior).
+    pub command_width: Option<usize>,
+    /// `--unicode`: enable UTF-8 output (banner / future Unicode glyphs) and
+    /// switch the Windows console to CP 65001 at startup. Default (false) is
+    /// pure ASCII output, which is the safe choice for legacy terminals like
+    /// PowerShell 5.1 / cmd.exe whose default code page is Windows-1252.
+    pub unicode_output: bool,
+    /// `-L`: add the NLINK (link count) column to table output. Implies the
+    /// renderer pulls `OpenFile::links` into a new column.
+    pub show_links: bool,
+    /// `-K`: list each in-scope process's threads as additional rows
+    /// (FD = `task`, TYPE = `THRD`, NODE = TID). Lsof's `-K` takes an
+    /// optional argument (`-Ki` for selection mode); the parser accepts
+    /// any value but the backend always emits all threads of in-scope
+    /// processes.
+    pub list_tasks: bool,
+    /// `-T [fqsw]`: TCP/TPI info to append to socket rows. `None` = no `-T`.
+    /// `s` (state) is already shown; `q` (queue) and `w` (window) come from
+    /// per-connection extended TCP stats (`GetPerTcpConnectionEStats`), which
+    /// require elevation. See `docs/feature-parity-plan.md` Phase 5B.
+    pub tcp_info: Option<TcpInfoFlags>,
+    /// `-U`: list UNIX-domain (AF_UNIX) sockets. On Windows these surface only
+    /// via the ETW AFD path, so `-U` implies the (Administrator-only) ETW
+    /// capture and restricts socket output to the AF_UNIX family.
+    pub unix_only: bool,
+    /// `-E` / `+E`: pipe endpoint info. On Windows the peer PIDs come from the
+    /// documented `GetNamedPipe{Server,Client}ProcessId` APIs, queried on the
+    /// already-duplicated pipe handle during enumeration. `Info` annotates
+    /// pipe rows; `Files` additionally shows the peer processes' pipe rows
+    /// (see [`Process::endpoint_peer`]).
+    pub endpoints: Option<EndpointMode>,
+    /// `+L <count>`: keep only files whose link count is **less than** `count`
+    /// (lsof convention). `+L 1` keeps link-count-zero files — the
+    /// "unlinked but still open" security case. Files with unknown links
+    /// (sockets, non-disk handles) pass through.
+    pub max_links: Option<u32>,
+    /// `--etw`: opt-in ETW realtime capture for socket families IP Helper
+    /// doesn't enumerate (raw/ICMP/AF_UNIX). Off by default; needs elevation.
+    /// See `docs/research-roadmap.md` §5.
+    pub use_etw: bool,
 }
 
 impl Selection {
     /// True if any process-level selector was specified.
     fn has_proc_selector(&self) -> bool {
-        !self.pids.is_empty() || !self.users.is_empty() || !self.commands.is_empty()
+        !self.pids.is_empty()
+            || !self.users.is_empty()
+            || !self.commands.is_empty()
+            || !self.ppid_filter.is_empty()
     }
 
     /// Whether this process matches the specified process-level selectors,
@@ -134,11 +232,50 @@ impl Selection {
         if !self.commands.is_empty() {
             results.push(self.commands.iter().any(|c| command_matches(c, &p.command)));
         }
+        if !self.ppid_filter.is_empty() {
+            // `-g` Windows extension: select processes whose parent is in the
+            // PPID list (the closest analog to PGID selection on Unix).
+            results.push(p.ppid.is_some_and(|pp| self.ppid_filter.contains(&pp)));
+        }
         if self.and_mode {
             results.iter().all(|&b| b)
         } else {
             results.iter().any(|&b| b)
         }
+    }
+
+    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
+    /// Non-sockets and "no `-s`" always pass; sockets with `^excluded`
+    /// states are always dropped; positive states act as a whitelist.
+    fn state_matches(&self, f: &OpenFile) -> bool {
+        let Some(filter) = &self.state_filter else {
+            return true;
+        };
+        let Some(sock) = &f.socket else {
+            // Non-sockets are passed through unchanged — `-s` is socket-only.
+            return true;
+        };
+        if let Some(proto) = filter.proto {
+            if sock.protocol != proto {
+                return false;
+            }
+        }
+        let state_name = sock
+            .state
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if filter
+            .exclude
+            .iter()
+            .any(|e| state_name.eq_ignore_ascii_case(e))
+        {
+            return false;
+        }
+        filter.include.is_empty()
+            || filter
+                .include
+                .iter()
+                .any(|i| state_name.eq_ignore_ascii_case(i))
     }
 
     /// Whether `p` passes the process-level selectors (`-p` / `-u` / `-c`),
@@ -164,9 +301,22 @@ impl Selection {
         !self.dir_trees.is_empty()
     }
 
-    /// Whether a single file passes the file-level filters (`-d`, `-i`, and
-    /// path / directory matching). Kept when no file-level filter is active.
+    /// Whether a single file passes the file-level filters (`-d`, `-i`, `-s`,
+    /// and path / directory matching). Kept when no file-level filter is
+    /// active.
     fn file_matches(&self, f: &OpenFile) -> bool {
+        if !self.state_matches(f) {
+            return false;
+        }
+        if let Some(max) = self.max_links {
+            // `+L count`: keep links < count; drop if we know links and it's
+            // not under the threshold. Unknown links (sockets etc.) pass.
+            if let Some(n) = f.links {
+                if n >= max {
+                    return false;
+                }
+            }
+        }
         if let Some(fd) = &self.fd_filter {
             if !fd.matches(&f.fd) {
                 return false;
@@ -229,14 +379,26 @@ impl Selection {
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
         let mut out = Vec::new();
         for mut p in procs {
-            if !self.proc_matches(&p) {
-                continue;
+            let selected = self.proc_matches(&p);
+            if !selected {
+                // `+E`: a process brought in only as a pipe-endpoint peer is
+                // shown despite matching no selector — but only its pipe
+                // (endpoint) rows, mirroring lsof's "the files of the
+                // endpoints are also displayed".
+                if !p.endpoint_peer {
+                    continue;
+                }
+                p.files.retain(|f| f.file_type == FileType::Pipe);
             }
             p.files.retain(|f| self.file_matches(f));
             let needs_file =
                 self.inet.enabled || self.has_path_filter() || self.fd_filter.is_some();
             if needs_file && p.files.is_empty() {
                 // `-i`, `-d`, and path lookups require at least one matching file.
+                continue;
+            }
+            if !selected && p.files.is_empty() {
+                // An endpoint peer with nothing left to show isn't a result row.
                 continue;
             }
             out.push(p);
@@ -382,6 +544,56 @@ mod tests {
         assert!(!under_dir("c:\\usersdata\\x", "c:\\users"));
         assert!(under_dir("c:\\users\\x", "c:\\users"));
         assert!(under_dir("c:\\users", "c:\\users"));
+    }
+
+    #[test]
+    fn endpoint_peer_kept_with_pipe_rows_only() {
+        use crate::model::{AccessMode, FdType, OpenFile};
+        let pipe = OpenFile {
+            fd: FdType::Handle(64),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Pipe,
+            name: "\\\\.\\pipe\\x (server=1000,a.exe client=9999,b.exe)".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        };
+        let reg = OpenFile {
+            file_type: FileType::Regular,
+            name: "C:\\peer\\data.txt".into(),
+            ..pipe.clone()
+        };
+        // 9999 matches no selector but was marked by the backend as a `+E`
+        // endpoint peer: it must survive apply() with ONLY its pipe rows.
+        let peer = Process {
+            pid: 9999,
+            ppid: None,
+            command: "b.exe".into(),
+            user: None,
+            endpoint_peer: true,
+            files: vec![pipe.clone(), reg.clone()],
+        };
+        // 8888 matches no selector and is no peer: dropped as usual.
+        let stranger = Process {
+            pid: 8888,
+            ppid: None,
+            command: "c.exe".into(),
+            user: None,
+            endpoint_peer: false,
+            files: vec![pipe, reg],
+        };
+        let sel = Selection {
+            pids: vec![1000],
+            ..Default::default()
+        };
+        let got = sel.apply(vec![peer, stranger]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].pid, 9999);
+        assert_eq!(got[0].files.len(), 1);
+        assert_eq!(got[0].files[0].file_type, FileType::Pipe);
     }
 
     #[test]

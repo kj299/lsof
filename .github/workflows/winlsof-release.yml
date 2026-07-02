@@ -54,14 +54,17 @@ jobs:
           NOTES="$(cat <<EOF
           winlsof — a memory-safe, Windows-native reimplementation of \`lsof\` written in Rust.
 
-          Early MVP **prerelease**. \`lsof.exe\` is a standalone x86_64 Windows binary
+          **Prerelease.** \`lsof.exe\` is a standalone x86_64 Windows binary
           (MSVC; no runtime install needed on Windows 10/11).
 
           **What it does**
           - Lists processes and their open file handles, TCP/UDP endpoints (\`-i\`),
             loaded modules (\`txt\`/\`mem\`), current directory (\`cwd\`), and more.
-          - lsof-compatible options, columns, \`-F\` field codes, and JSON (\`-J\`/\`-j\`)
-            where the concepts map onto Windows.
+          - Full lsof option parity where the concepts map onto Windows: \`-s\`
+            socket-state filters, \`-K\` threads, \`-L\`/\`+L\` link counts, \`-T\`
+            TCP window/queue (EStats), \`-U\` AF_UNIX sockets (via ETW), \`-E\`/\`+E\`
+            pipe endpoint peers, and more — see \`lsof -h\` and the CHANGELOG.
+          - lsof-compatible options, columns, \`-F\` field codes, and JSON (\`-J\`/\`-j\`).
           - **Least privilege:** runs in your user context by default; run as
             Administrator for a system-wide view. Elevation is never auto-requested.
 
@@ -70,12 +73,26 @@ jobs:
           lsof -p <pid>            # open files/handles of a process
           lsof -i                  # all TCP/UDP endpoints, with owning PID
           lsof -nP -iTCP:443       # numeric, TCP port 443
+          lsof -E -p <pid>         # pipe rows show who is on the other end
           lsof -p <pid> -J         # JSON output
           lsof -h                  # full option list
           \`\`\`
 
           The binary is **unsigned**, so Windows SmartScreen may warn on first run.
-          Verify integrity against the published SHA-256 (\`lsof.exe.sha256\`).
+
+          **Antivirus / Defender note.** winlsof does what an open-files lister
+          must - enumerate every process's handles, enable \`SeDebugPrivilege\`, and
+          read process memory (for \`cwd\`/PEB) - so heuristic AV including Microsoft
+          Defender may flag a *downloaded* copy as a "hacktool" / potentially-unwanted
+          program and block it from running, exactly like Sysinternals \`handle.exe\`.
+          This is a **false positive**: verify the download against
+          \`lsof.exe.sha256\` (below), then allow it in Windows Security -> Protection
+          history, or add an exclusion in an elevated shell:
+          \`Add-MpPreference -ExclusionPath <path-to-lsof.exe>\`. A locally built
+          binary isn't internet-marked, so it usually isn't flagged. Proper code
+          signing would establish reputation and is tracked for a future release.
+
+          Verify integrity against the published SHA-256 (\`lsof.exe.sha256\`):
 
           SHA-256: \`$(cat target/release/lsof.exe.sha256)\`
           EOF

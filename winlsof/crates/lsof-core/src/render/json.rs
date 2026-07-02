@@ -53,6 +53,9 @@ fn file_members(f: &OpenFile) -> Vec<String> {
     if let Some(n) = &f.node {
         m.push(format!("\"node\":{}", qs(n)));
     }
+    if let Some(n) = f.links {
+        m.push(format!("\"links\":{n}"));
+    }
     if let Some(sock) = &f.socket {
         m.push(format!("\"protocol\":{}", qs(sock.protocol.as_str())));
         if let Some(a) = sock.local {

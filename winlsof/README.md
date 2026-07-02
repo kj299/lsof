@@ -94,8 +94,23 @@ Prebuilt **`lsof.exe`** for 64-bit Windows is published on the
 3. Run it from anywhere: `.\lsof.exe -nP -i`.
 
 The binary is **unsigned**, so Windows SmartScreen may warn on first run
-(*More info → Run anyway*). Releases are produced by pushing a `winlsof-v*` tag,
-which triggers [`.github/workflows/winlsof-release.yml`](../.github/workflows/winlsof-release.yml).
+(*More info → Run anyway*).
+
+> **Antivirus / Defender note.** Like Sysinternals `handle.exe` and Process
+> Explorer, winlsof does exactly what an open-files lister must — it enumerates
+> every process's handles, enables `SeDebugPrivilege`, and reads process memory
+> (for `cwd`/PEB). Heuristic AV (including Microsoft Defender) may therefore
+> flag a *downloaded* copy as a "hacktool" / potentially-unwanted program and
+> block it from running. This is a **false positive**: verify the download
+> against the published `lsof.exe.sha256`, and if you want to run it, allow it in
+> Windows Security → Protection history, or add an exclusion in an elevated
+> shell: `Add-MpPreference -ExclusionPath <path-to-lsof.exe>`. (A locally built
+> binary isn't internet-marked, so it usually isn't flagged.) Proper code
+> signing would establish reputation and reduce this — tracked for a future
+> release.
+
+Releases are produced by pushing a `winlsof-v*` tag, which triggers
+[`.github/workflows/winlsof-release.yml`](../.github/workflows/winlsof-release.yml).
 Prefer building from source? See below.
 
 ## Build & run
@@ -130,9 +145,22 @@ For end-to-end validation on a real Windows host (concrete commands + expected
 output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
 [`docs/windows-validation.md`](docs/windows-validation.md).
 
-The phased plan for the remaining research-grade gaps (socket FD correlation,
-AF_UNIX/raw, byte-range locks, mapped data files, file offset) is in
-[`docs/research-roadmap.md`](docs/research-roadmap.md).
+## Docs index
+
+- [`CHANGELOG.md`](CHANGELOG.md) — released versions and what changed.
+- [`docs/known-limitations.md`](docs/known-limitations.md) — what winlsof
+  deliberately doesn't show (socket FD value, byte-range locks, raw/ICMP/
+  AF_UNIX), and why; user-facing.
+- [`docs/code-signing.md`](docs/code-signing.md) — tracking doc for signing
+  the release binary (the SmartScreen / Defender fix).
+- [`docs/research-roadmap.md`](docs/research-roadmap.md) — engineering spike
+  records and the next open item (ETW-based socket → FD correlation).
+- [`docs/etw-spike.md`](docs/etw-spike.md) — step-by-step `logman` + `tracerpt`
+  P1 spike for item §5; no Rust needed, answers the gating question first.
+- [`docs/windows-validation.md`](docs/windows-validation.md) — manual T1–T20
+  validation plan against Windows oracles.
+- [`smoketest/README.md`](smoketest/README.md) — live Windows smoke-test
+  harness (run against source or a downloaded release binary).
 
 ## License / attribution
 

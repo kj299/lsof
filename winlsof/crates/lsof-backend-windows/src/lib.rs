@@ -13,6 +13,8 @@
 #[cfg(windows)]
 mod backend;
 #[cfg(windows)]
+mod etw;
+#[cfg(windows)]
 mod handles;
 #[cfg(windows)]
 mod mapped;
@@ -31,10 +33,28 @@ mod restart;
 #[cfg(windows)]
 mod sockets;
 #[cfg(windows)]
+mod tcpinfo;
+#[cfg(windows)]
+mod threads;
+#[cfg(windows)]
 mod util;
 
 #[cfg(windows)]
 pub use backend::WindowsBackend;
+
+/// Switch the console output code page to UTF-8 (65001), so non-ASCII glyphs
+/// in our user-facing strings (em-dashes, arrows in socket NAMEs) render
+/// correctly. PowerShell 5.1 and cmd.exe default to Windows-1252 / OEM CP,
+/// which would otherwise mangle the bytes into Latin-1 garbage like `â€”`.
+/// Idempotent; called once near main entry.
+#[cfg(windows)]
+pub fn enable_utf8_console() {
+    // SAFETY: SetConsoleOutputCP takes one UINT, returns BOOL. Failure is
+    // harmless (the worst case is the previous behavior).
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleOutputCP(65001);
+    }
+}
 
 /// Flush stdio and terminate the current process *now* with `code`.
 ///

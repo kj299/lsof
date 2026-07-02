@@ -20,6 +20,7 @@ pub fn sample_processes() -> Vec<Process> {
             ppid: Some(4),
             command: "explorer.exe".into(),
             user: Some("EXAMPLE\\alice".into()),
+            endpoint_peer: false,
             files: vec![
                 OpenFile {
                     fd: FdType::Cwd,
@@ -30,6 +31,7 @@ pub fn sample_processes() -> Vec<Process> {
                     size: None,
                     offset: None,
                     node: None,
+                    links: None,
                     socket: None,
                 },
                 OpenFile {
@@ -41,6 +43,7 @@ pub fn sample_processes() -> Vec<Process> {
                     size: Some(4096),
                     offset: None,
                     node: Some("123456".into()),
+                    links: None,
                     socket: None,
                 },
             ],
@@ -50,6 +53,7 @@ pub fn sample_processes() -> Vec<Process> {
             ppid: Some(1000),
             command: "server.exe".into(),
             user: Some("EXAMPLE\\alice".into()),
+            endpoint_peer: false,
             files: vec![
                 OpenFile {
                     fd: FdType::Handle(72),
@@ -60,6 +64,7 @@ pub fn sample_processes() -> Vec<Process> {
                     size: None,
                     offset: None,
                     node: Some("TCP".into()),
+                    links: None,
                     socket: Some(SocketInfo {
                         protocol: Protocol::Tcp,
                         local: Some(addr("0.0.0.0:445")),
@@ -76,6 +81,7 @@ pub fn sample_processes() -> Vec<Process> {
                     size: None,
                     offset: None,
                     node: Some("TCP".into()),
+                    links: None,
                     socket: Some(SocketInfo {
                         protocol: Protocol::Tcp,
                         local: Some(addr("127.0.0.1:445")),
@@ -92,6 +98,7 @@ pub fn sample_processes() -> Vec<Process> {
                     size: None,
                     offset: None,
                     node: Some("UDP".into()),
+                    links: None,
                     socket: Some(SocketInfo {
                         protocol: Protocol::Udp,
                         local: Some(addr("[::]:53")),
