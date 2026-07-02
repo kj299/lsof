@@ -171,6 +171,10 @@ pub struct Selection {
     /// per-connection extended TCP stats (`GetPerTcpConnectionEStats`), which
     /// require elevation. See `docs/feature-parity-plan.md` Phase 5B.
     pub tcp_info: Option<TcpInfoFlags>,
+    /// `-U`: list UNIX-domain (AF_UNIX) sockets. On Windows these surface only
+    /// via the ETW AFD path, so `-U` implies the (Administrator-only) ETW
+    /// capture and restricts socket output to the AF_UNIX family.
+    pub unix_only: bool,
     /// `+L <count>`: keep only files whose link count is **less than** `count`
     /// (lsof convention). `+L 1` keeps link-count-zero files — the
     /// "unlinked but still open" security case. Files with unknown links

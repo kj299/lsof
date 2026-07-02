@@ -72,9 +72,9 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-s [p:s]` | sel | 🟡 **Phase 5A** | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. |
 | `-S [t]` | prec | ❌ N/A | `lstat`/`readlink` timeout — Unix; we have our own bounded model |
 | `-t` | out | ✅ shipped | Terse PIDs only |
-| `-T [t]` | out | 🟡 **Phase 5B** | TCP/TPI info: `-Tfqsw` = follow / queue lengths / state / TCP window. Windows: state is free; queue/window need `GetPerTcpConnectionEStats` (per-connection extended stats, IPv4 only, needs admin). Partial. |
+| `-T [t]` | out | ✅ shipped | TCP/TPI info: `-Tfqsw` = follow / queue lengths / state / TCP window. Windows: state is free; queue/window via `GetPerTcp{,6}ConnectionEStats` (per-connection extended stats, IPv4 + IPv6, ESTABLISHED-only, queue/window need admin). `f` (follow) accepted as no-op. |
 | `-u s` | sel | ✅ shipped | User filter |
-| `-U` | sel | 🟡 **Phase 5B** | UNIX-domain sockets. Windows: AF_UNIX exists since Win10 1803 — surfaces via the deferred ETW item §5 (currently the only public way). |
+| `-U` | sel | ✅ shipped | UNIX-domain sockets. Windows: AF_UNIX exists since Win10 1803 — surfaces via the ETW AFD capture (§5); `-U` implies that (Administrator-only) capture and restricts output to AF_UNIX rows. |
 | `-v` | misc | ✅ shipped | Version banner |
 | `-V` | misc | ✅ shipped | Verbose unmatched-search reporting |
 | `+|-w` | misc | 🟡 **Phase 5A** | Warning enable/disable. We mostly already suppress; add the toggle. |
@@ -117,14 +117,17 @@ affects rendering, plus a smoke-test case in `Invoke-WinlsofSmokeTest.ps1`.
 
 Switches that need new Windows API work, or significant data-model expansion:
 
-- **`-T [fqsw]`** — TCP queue/window: per-connection extended stats via
-  `GetPerTcpConnectionEStats` / `GetPerTcp6ConnectionEStats`. Admin required;
-  IPv4 fully supported, IPv6 partial. Render under the existing socket NAME or
-  as a follow-on `(state) (rx_q=N tx_q=M win=N)` suffix.
+- **`-T [fqsw]`** — ✅ **done.** TCP queue/window via
+  `GetPerTcpConnectionEStats` / `GetPerTcp6ConnectionEStats` (IPv4 + IPv6,
+  ESTABLISHED-only; queue/window need admin). State (`s`) is free from the
+  socket table; `f` (follow) is accepted as a no-op. Rendered as a
+  `(state) (RxQ=N TxQ=M Win=N)` suffix on the socket NAME.
+- **`-U`** — ✅ **done.** Explicit UNIX-domain filter, backed by the ETW AFD
+  capture (§5): `-U` implies the (Administrator-only) capture and restricts
+  output to AF_UNIX rows.
 - **`-E` / `+E`** — endpoint detail expansion. Lsof shows peer-PID for UNIX
   sockets; the closest Windows analog is the AFD-endpoint pointer surfaced by
-  ETW. Bundle with item §5 resume.
-- **`-U`** — explicit UNIX-domain filter. Lights up once ETW iteration 3 lands.
+  ETW. Bundle with item §5 resume. **(remaining Phase 5B item.)**
 
 ## Out of scope (Unix-only — accept-and-no-op or reject)
 
@@ -138,9 +141,9 @@ than appearing to accept and surprising the user.
 1. ~~**Phase 5A** — quick wins, all 12 switches~~ — ✅ **done.**
 2. ~~**ETW iteration 3** — AFD-event parsing → non-TCP/UDP `-i` rows~~ —
    ✅ **done** (raw/ICMP/AF_UNIX now surface under `--etw`); unblocks `-U`.
-3. **Phase 5B** (next) — `-T` (TCP queue/window via `GetPerTcp*EStats`),
-   `-E`/`+E` (endpoint detail), `-U` (UNIX-domain filter, now backed by the
-   ETW AFD path).
+3. **Phase 5B** — ~~`-T` (TCP queue/window via `GetPerTcp*EStats`, IPv4 + IPv6)~~
+   ✅ **done**; ~~`-U` (UNIX-domain filter, backed by the ETW AFD path)~~
+   ✅ **done**; `-E`/`+E` (endpoint detail) remaining.
 4. **Smoke-test additions** — extend `Invoke-WinlsofSmokeTest.ps1` with one
    case per new Phase 5A switch (target: 37 → ~50 cases).
 

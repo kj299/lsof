@@ -517,6 +517,19 @@ try {
         Assert-Contains $r.Out '(Win=' '-Tw should annotate established IPv6 rows'
     }
 
+    # ===================== Phase 5B: -U UNIX-domain sockets (ETW) =====================
+    Test-Case 'unix-sockets-dash-U' 'sockets/-U' {
+        if (-not $IsAdmin) { Skip 'AF_UNIX enumeration uses the ETW AFD capture (needs Administrator)' }
+        # `-U` triggers the short ETW AFD capture and restricts output to AF_UNIX
+        # rows. AF_UNIX sockets are ephemeral, so a 2s capture window can't
+        # guarantee a specific row; assert instead that the capture fired (its
+        # histogram is written to stderr whenever the AFD session starts) and
+        # that the run exits cleanly.
+        $r = Invoke-Lsof @('-U') 'U'
+        Assert ($r.Exit -eq 0) "-U should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Err 'etw: captured' '-U stderr (ETW histogram)'
+    }
+
     # ===================== Sysinternals handle.exe cross-check =====================
     Test-Case 'handle-exe-cross-check' 'oracle/handle' {
         if (-not $HandleExePath) { Skip 'handle64.exe unavailable (pass -HandleExe or allow the download)' }

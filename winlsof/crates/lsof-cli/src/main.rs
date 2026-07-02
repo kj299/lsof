@@ -59,6 +59,7 @@ SELECTION:\n\
     -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
     -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
                   (comma-separated, `^` prefix excludes)\n\
+    -U            list UNIX-domain (AF_UNIX) sockets (via ETW; needs Admin)\n\
     -K            list each process's threads as `task` rows (TID in NODE)\n\
     -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
                   (q/w need Administrator; IPv4 + IPv6; bare -T = qs)\n\
@@ -187,6 +188,7 @@ fn main() {
         && !selection.suppress_warnings
         && matches!(format, Format::Table)
         && !selection.inet.enabled
+        && !selection.unix_only
         && !selection.has_path_filter()
     {
         eprintln!(

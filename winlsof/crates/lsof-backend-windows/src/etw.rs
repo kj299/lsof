@@ -155,6 +155,12 @@ impl EtwSocket {
         }
     }
 
+    /// Whether this endpoint is an AF_UNIX (UNIX-domain) socket — the `-U`
+    /// filter keeps only these.
+    pub fn is_unix(&self) -> bool {
+        self.family == AF_UNIX
+    }
+
     /// Whether this endpoint is one IP Helper's TCP/UDP tables already cover —
     /// in which case our [`emit_extras`] caller should skip it. We surface only
     /// the rows IP Helper *doesn't* enumerate.

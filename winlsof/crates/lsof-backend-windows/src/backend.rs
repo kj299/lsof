@@ -140,11 +140,13 @@ impl Backend for WindowsBackend {
             idx.insert(p.pid, i);
         }
 
-        // `-i` is a network-only query: gather only sockets, which need no
-        // elevation — preserving the least-privilege guarantee.
-        let inet_only = sel.inet.enabled;
+        // `-i` and `-U` are network-only queries: gather only sockets and skip
+        // the handle/per-process enumeration (which is where elevation matters),
+        // preserving the least-privilege guarantee. (`-U`'s data itself comes
+        // from ETW, which does need admin — handled in that block.)
+        let socket_only = sel.inet.enabled || sel.unix_only;
 
-        if !inet_only {
+        if !socket_only {
             // cwd + txt/mem (modules) + mapped data files, for each in-scope process.
             trace("gather: build_dos_map start");
             let dos_map = Arc::new(handles::build_dos_map());
@@ -166,37 +168,42 @@ impl Backend for WindowsBackend {
             trace("gather: per-process done");
         }
 
-        trace("gather: sockets::collect start");
-        let socks = sockets::collect();
-        trace(&format!(
-            "gather: sockets::collect done ({} endpoints)",
-            socks.len()
-        ));
-        // Resolve names (reverse DNS / service lookup) only for the sockets we
-        // keep, and only when they can actually be displayed. A path/dir filter
-        // (`+D`/`+d`/bare path) never matches a socket (no filesystem path), so
-        // resolving them would be pure waste — and it's the slow, reverse-DNS
-        // path. So skip resolution for those queries.
-        let resolve_sockets = !sel.has_path_filter();
-        for (pid, mut file) in socks {
-            if wanted(pid) {
-                if resolve_sockets {
-                    sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+        // IP Helper covers TCP/UDP. Show those unless this is a `-U`-only
+        // (UNIX-domain) query, which wants just the ETW-sourced AF_UNIX rows.
+        let show_inet_sockets = sel.inet.enabled || !sel.unix_only;
+        if show_inet_sockets {
+            trace("gather: sockets::collect start");
+            let socks = sockets::collect();
+            trace(&format!(
+                "gather: sockets::collect done ({} endpoints)",
+                socks.len()
+            ));
+            // Resolve names (reverse DNS / service lookup) only for the sockets
+            // we keep, and only when they can actually be displayed. A path/dir
+            // filter (`+D`/`+d`/bare path) never matches a socket (no filesystem
+            // path), so resolving them would be pure waste — and it's the slow,
+            // reverse-DNS path. So skip resolution for those queries.
+            let resolve_sockets = !sel.has_path_filter();
+            for (pid, mut file) in socks {
+                if wanted(pid) {
+                    if resolve_sockets {
+                        sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
+                    }
+                    // `-T q/w`: append extended TCP stats (window / queue) to the
+                    // socket NAME via per-connection EStats. Needs elevation.
+                    if let Some(t) = &sel.tcp_info {
+                        tcpinfo::annotate(&mut file, t, self.elevated);
+                    }
+                    attach(&mut procs, &mut idx, pid, file);
                 }
-                // `-T q/w`: append extended TCP stats (window / queue) to the
-                // socket NAME via per-connection EStats. Needs elevation.
-                if let Some(t) = &sel.tcp_info {
-                    tcpinfo::annotate(&mut file, t, self.elevated);
-                }
-                attach(&mut procs, &mut idx, pid, file);
             }
         }
 
-        // `--etw` (opt-in): run a short AFD-provider capture and emit any
-        // non-TCP/UDP sockets (raw / ICMP / AF_UNIX) we observe as additional
-        // `-i` rows — IP Helper has no table for those. Histogram + per-event
-        // schemas still surface on stderr for diagnosability. Roadmap §5.
-        if sel.use_etw {
+        // AFD sockets IP Helper can't enumerate come from a short ETW capture.
+        // `--etw` surfaces all of them (raw / ICMP / AF_UNIX); `-U` narrows to
+        // AF_UNIX. Either implies the (Administrator-only) capture. Histogram +
+        // per-event schemas still surface on stderr for diagnosability (§5).
+        if sel.use_etw || sel.unix_only {
             trace("gather: etw::capture start");
             if let Some(summary) = etw::capture(Duration::from_secs(2)) {
                 trace(&format!(
@@ -205,10 +212,19 @@ impl Backend for WindowsBackend {
                     summary.sockets.len()
                 ));
                 for s in &summary.sockets {
-                    if s.is_covered_by_ip_helper() || !wanted(s.pid) {
+                    if !wanted(s.pid) {
                         continue;
                     }
-                    attach(&mut procs, &mut idx, s.pid, etw::to_open_file(s));
+                    // `-U`: keep only AF_UNIX; otherwise keep everything IP
+                    // Helper didn't already cover.
+                    let keep = if sel.unix_only {
+                        s.is_unix()
+                    } else {
+                        !s.is_covered_by_ip_helper()
+                    };
+                    if keep {
+                        attach(&mut procs, &mut idx, s.pid, etw::to_open_file(s));
+                    }
                 }
                 eprintln!("{}", summary.render(10));
             } else {
@@ -216,7 +232,7 @@ impl Backend for WindowsBackend {
             }
         }
 
-        if !inet_only {
+        if !socket_only {
             trace("gather: handles::enumerate start");
             let hs = handles::enumerate(self.elevated, restrict.as_ref(), sel.verbose);
             trace(&format!(

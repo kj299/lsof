@@ -182,6 +182,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'h' | '?' => want_help = true,
                 'l' => sel.numeric_ids = true,
                 'L' => sel.show_links = true,
+                'U' => sel.unix_only = true,
                 'Q' => sel.quiet = true,
                 'w' => sel.suppress_warnings = true,
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
