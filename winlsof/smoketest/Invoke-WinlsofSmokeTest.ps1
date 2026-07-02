@@ -270,11 +270,14 @@ try {
     $fx.Client4.Connect([System.Net.IPAddress]::Loopback, $fx.Port4)
     $fx.Server4 = $fx.Tcp4.AcceptTcpClient()
 
-    # TCP v6 listener (may be unavailable; tolerate).
+    # TCP v6 listener + an established connection pair (may be unavailable; tolerate).
     try {
         $fx.Tcp6 = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::IPv6Loopback, 0)
         $fx.Tcp6.Start()
         $fx.Port6 = ([System.Net.IPEndPoint]$fx.Tcp6.LocalEndpoint).Port
+        $fx.Client6 = [System.Net.Sockets.TcpClient]::new([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+        $fx.Client6.Connect([System.Net.IPAddress]::IPv6Loopback, $fx.Port6)
+        $fx.Server6 = $fx.Tcp6.AcceptTcpClient()
     }
     catch { $fx.Port6 = $null }
 
@@ -506,6 +509,13 @@ try {
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tw') 'T-window'
         Assert-Contains $r.Out '(Win=' '-Tw should annotate established rows with a window'
     }
+    Test-Case 'tcp-info-window-v6-dash-T' 'render/-T6' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        if (-not $fx.Server6) { Skip 'no established IPv6 loopback pair' }
+        # Same, over IPv6 (GetPerTcp6ConnectionEStats / MIB_TCP6ROW path).
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port6)", '-Tw') 'T-window-v6'
+        Assert-Contains $r.Out '(Win=' '-Tw should annotate established IPv6 rows'
+    }
 
     # ===================== Sysinternals handle.exe cross-check =====================
     Test-Case 'handle-exe-cross-check' 'oracle/handle' {
@@ -518,7 +528,7 @@ try {
 }
 finally {
     Write-Host "`nCleaning up fixtures..." -ForegroundColor Cyan
-    foreach ($k in 'Server4', 'Client4', 'Udp4', 'Udp6') { if ($fx[$k]) { try { $fx[$k].Dispose() } catch {} } }
+    foreach ($k in 'Server4', 'Client4', 'Server6', 'Client6', 'Udp4', 'Udp6') { if ($fx[$k]) { try { $fx[$k].Dispose() } catch {} } }
     foreach ($k in 'Tcp4', 'Tcp6') { if ($fx[$k]) { try { $fx[$k].Stop() } catch {} } }
     if ($fx.View) { try { $fx.View.Dispose() } catch {} }
     if ($fx.Mmf) { try { $fx.Mmf.Dispose() } catch {} }
