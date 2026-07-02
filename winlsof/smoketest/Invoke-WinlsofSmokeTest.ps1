@@ -103,13 +103,20 @@ if (-not $Binary -and -not $SkipBuild) {
         if (-not $Coverage) {
             & cargo build --release
             if ($LASTEXITCODE -ne 0) {
-                # A missing MSVC linker is the common foot-gun after switching the
-                # default toolchain to MSVC for coverage; point back to GNU.
-                $linkHint = if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
-                    " If you switched to the MSVC toolchain, it needs VS Build Tools' link.exe; switch back with 'rustup default stable-x86_64-pc-windows-gnu' or install Build Tools for Visual Studio (Desktop C++ workload)."
+                $existingBin = Join-Path $Workspace 'target\release\lsof.exe'
+                $hint = ''
+                if (Test-Path $existingBin) {
+                    # A previously built binary is present, so a build failure
+                    # here is almost always a transient file lock on target\
+                    # (OneDrive sync, antivirus, or an elevated run clashing
+                    # with a prior unelevated one) rather than a code error.
+                    $hint = " A built lsof.exe already exists, so this looks like a transient file lock on target\ (OneDrive sync / antivirus / an elevated-vs-unelevated clash), not a code error. Re-run with -SkipBuild to reuse the current binary; longer term, pause OneDrive during builds or move the clone off OneDrive."
                 }
-                else { '' }
-                throw "cargo build failed ($LASTEXITCODE).$linkHint"
+                elseif (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+                    # Missing MSVC linker (e.g. after switching toolchains).
+                    $hint = " If you switched to the MSVC toolchain, it needs VS Build Tools' link.exe; switch back with 'rustup default stable-x86_64-pc-windows-gnu' or install Build Tools for Visual Studio (Desktop C++ workload)."
+                }
+                throw "cargo build failed ($LASTEXITCODE).$hint"
             }
         }
     }
