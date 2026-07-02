@@ -9,17 +9,47 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] — 2026-07-02
+
+**Full lsof option-parity** ("Phase 5"): every in-scope lsof switch is now
+implemented — [`docs/feature-parity-plan.md`](docs/feature-parity-plan.md)
+holds the complete option inventory. Validated end-to-end on real Windows 11
+hardware in both privilege modes with the expanded 55-case smoke suite
+(elevated: 53 pass / 0 fail / 2 skip; unelevated: 51 / 0 / 4 — the union
+covers all 55 cases).
+
 ### Added
 
-- **Phase 5B — `-T [fqsw]` extended TCP info** (iteration 1, IPv4):
-  annotates established TCP socket rows with the current receive window
+- **Phase 5B — `-T [fqsw]` extended TCP info** (complete: IPv4 + IPv6):
+  annotates **ESTABLISHED** TCP socket rows with the current receive window
   (`(Win=N)`) and app queue depths (`(QR=N)` / `(QS=N)`), read from
-  per-connection extended TCP statistics (`GetPerTcpConnectionEStats`).
-  EStats collection is enabled just-in-time per connection (needs
-  Administrator) and disabled again — bounded and reversed. `s` (state)
-  is already shown; `f` (follow) is a no-op for a snapshot. Verified on
-  Windows 11 (e.g. `(Win=262144)` on live connections). IPv6 and the
-  send/recv-queue under load are follow-ups.
+  per-connection extended TCP statistics (`GetPerTcpConnectionEStats` /
+  `GetPerTcp6ConnectionEStats`, dispatched over a `RowKey { V4, V6 }` so the
+  enable → read → disable flow is written once). EStats collection is
+  enabled just-in-time per connection (needs Administrator) and disabled
+  again — bounded and reversed; non-ESTABLISHED rows are skipped (EStats
+  reports `ERROR_NOT_SUPPORTED` for them). `s` (state) is already shown;
+  `f` (follow) is a no-op for a snapshot. Verified on Windows 11 over live
+  v4 and v6 loopback pairs. Known corner: link-local (`fe80::`) rows carry
+  scope id 0 internally and are left unannotated.
+- **Phase 5B — `-U` UNIX-domain sockets**: AF_UNIX endpoints (Windows 10
+  1803+) have no IP Helper table, so `-U` implies the (Administrator-only)
+  ETW AFD capture and restricts socket output to AF_UNIX rows. A bare `-U`
+  stays least-privilege — no handle-table enumeration; `-U -i` lists
+  TCP/UDP (IP Helper) plus AF_UNIX (ETW).
+- **Phase 5B — `-E` / `+E` pipe endpoint info**: pipe NAMEs gain
+  ` (server=PID,cmd client=PID,cmd)` via the documented
+  `GetNamedPipeServerProcessId` / `GetNamedPipeClientProcessId` APIs
+  (anonymous pipes included), queried on the already-duplicated handle
+  inside the hang-bounded per-handle worker, so the no-freeze invariant
+  holds. `+E` additionally displays the peer processes' own pipe rows even
+  when they match no selector (new `Process::endpoint_peer` flag, honored
+  by the selection engine and composing with `-d`/`-s`/path filters).
+  Works unelevated on your own processes. AF_UNIX peer PIDs have no public
+  API; the ETW endpoint pointer on `--etw` rows remains the correlation
+  key there.
 - **Phase 5A — lsof option-parity port** (12 canonical switches the MVP
   didn't ship). All additive; the v0.1.0 CLI surface is unchanged.
   - **`-s [proto:state]`** — socket protocol/state filter
@@ -59,6 +89,21 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   socket NODE column can render "ICMP", "ICMPV6", "RAW", "AF_UNIX", … for
   ETW-discovered rows. Existing `Protocol::Tcp`/`Protocol::Udp` matches
   unchanged.
+- **Smoke suite: 37 → 55 cases** — one case per new switch, plus an
+  established IPv6 loopback pair fixture (for `-T` v6 EStats), a connected
+  named-pipe client fixture (so `-E` resolves both endpoint PIDs), and a
+  `-U` case asserting the ETW capture fires. The harness also recognizes
+  `target\` file-lock build failures (OneDrive sync handles) and suggests
+  `-SkipBuild` when a current binary already exists.
+
+### Fixed
+
+- `-F` field output no longer emits a bare `n` field code for rows with an
+  empty NAME (the `-K` thread `task` rows); regression-guarded by a golden
+  test.
+- Console output now defaults to pure ASCII so the banner doesn't garble
+  on PowerShell 5.1 / cmd.exe (Windows-1252 console); `--unicode` opts
+  into CP 65001 UTF-8.
 
 ## [0.1.0] — 2026-06-21
 
@@ -187,5 +232,6 @@ Foundation; see `../COPYING`). No source is shared with the C tree;
 behavior and CLI surface are compatible where the concepts map onto
 Windows.
 
-[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v0.1.0...HEAD
+[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v0.2.0...HEAD
+[0.2.0]: https://github.com/kj299/lsof/compare/winlsof-v0.1.0...winlsof-v0.2.0
 [0.1.0]: https://github.com/kj299/lsof/releases/tag/winlsof-v0.1.0
