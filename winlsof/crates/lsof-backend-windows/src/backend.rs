@@ -6,8 +6,8 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use lsof_core::backend::{Backend, BackendError};
-use lsof_core::model::{OpenFile, Process};
-use lsof_core::selection::Selection;
+use lsof_core::model::{FileType, OpenFile, Process};
+use lsof_core::selection::{EndpointMode, Selection};
 
 use crate::util::trace;
 use crate::{
@@ -79,6 +79,7 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
             ppid: None,
             command: "<unknown>".to_string(),
             user: None,
+            endpoint_peer: false,
             files: vec![file],
         });
         idx.insert(pid, i);
@@ -234,13 +235,50 @@ impl Backend for WindowsBackend {
 
         if !socket_only {
             trace("gather: handles::enumerate start");
-            let hs = handles::enumerate(self.elevated, restrict.as_ref(), sel.verbose);
+            // `-E`/`+E`: hand enumeration a pid → command map so pipe rows can
+            // name their peer endpoints; its presence turns the queries on.
+            let endpoint_cmds: Option<HashMap<u32, String>> = sel
+                .endpoints
+                .map(|_| procs.iter().map(|p| (p.pid, p.command.clone())).collect());
+            let (hs, peers) = handles::enumerate(
+                self.elevated,
+                restrict.as_ref(),
+                sel.verbose,
+                endpoint_cmds.as_ref(),
+            );
             trace(&format!(
                 "gather: handles::enumerate done ({} handles)",
                 hs.len()
             ));
             for (pid, file) in hs {
                 attach(&mut procs, &mut idx, pid, file);
+            }
+
+            // `+E`: also display the endpoint processes' own pipe rows. Peers
+            // inside the selected set are fully shown already; enumerate the
+            // rest, keep just their pipe rows, and mark each process so the
+            // selection engine retains it despite matching no selector.
+            if sel.endpoints == Some(EndpointMode::Files) {
+                if let Some(r) = &restrict {
+                    let missing: HashSet<u32> = peers.difference(r).copied().collect();
+                    if !missing.is_empty() {
+                        trace(&format!("gather: +E peer pass ({} pids)", missing.len()));
+                        let (extra, _) = handles::enumerate(
+                            self.elevated,
+                            Some(&missing),
+                            false,
+                            endpoint_cmds.as_ref(),
+                        );
+                        for (pid, file) in extra {
+                            if file.file_type == FileType::Pipe {
+                                attach(&mut procs, &mut idx, pid, file);
+                                if let Some(&i) = idx.get(&pid) {
+                                    procs[i].endpoint_peer = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

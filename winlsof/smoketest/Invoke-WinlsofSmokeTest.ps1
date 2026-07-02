@@ -250,9 +250,17 @@ try {
     $bytes = [byte[]](0..255); $fx.File.Write($bytes, 0, $bytes.Length); $fx.File.Flush()
     [void]$fx.File.Seek(128, [System.IO.SeekOrigin]::Begin)
 
-    # Named pipe server (PIPE).
+    # Named pipe server (PIPE), plus a connected client end so `-E` can
+    # resolve both endpoint PIDs (an unconnected instance has no client).
     $fx.PipeName = "winlsof_pipe_$self"
     $fx.Pipe = New-Object System.IO.Pipes.NamedPipeServerStream($fx.PipeName, [System.IO.Pipes.PipeDirection]::InOut)
+    try {
+        $accept = $fx.Pipe.WaitForConnectionAsync()
+        $fx.PipeClient = New-Object System.IO.Pipes.NamedPipeClientStream('.', $fx.PipeName, [System.IO.Pipes.PipeDirection]::InOut)
+        $fx.PipeClient.Connect(2000)
+        [void]$accept.Wait(2000)
+    }
+    catch { $fx.PipeClient = $null }
 
     # Memory-mapped DATA file (mem via mapped.rs).
     $fx.MapPath = Join-Path $env:TEMP ("winlsof_map_{0}.bin" -f $self)
@@ -517,6 +525,25 @@ try {
         Assert-Contains $r.Out '(Win=' '-Tw should annotate established IPv6 rows'
     }
 
+    # ===================== Phase 5B: -E pipe endpoint info =====================
+    Test-Case 'pipe-endpoints-dash-E' 'render/-E' {
+        if (-not $fx.PipeClient -or -not $fx.PipeClient.IsConnected) { Skip 'pipe client did not connect' }
+        # Both ends of the fixture pipe live in this process; -E annotates the
+        # pipe rows with peer PIDs via GetNamedPipe{Server,Client}ProcessId.
+        # Needs no elevation (own-process handles).
+        $r = Invoke-Lsof @('-E', '-p', "$self") 'E'
+        Assert-Contains $r.Out "server=$self" '-E should annotate pipe rows with the server PID'
+        Assert-Contains $r.Out "client=$self" '-E should annotate pipe rows with the client PID'
+    }
+    Test-Case 'pipe-endpoints-plus-E' 'render/+E' {
+        if (-not $fx.PipeClient -or -not $fx.PipeClient.IsConnected) { Skip 'pipe client did not connect' }
+        # +E = -E plus the peers' own rows. Our peer is this same process (so
+        # already selected); assert the superset parses and annotates alike.
+        $r = Invoke-Lsof @('+E', '-p', "$self") 'plusE'
+        Assert ($r.Exit -eq 0) "+E should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Out "server=$self" '+E should annotate like -E'
+    }
+
     # ===================== Phase 5B: -U UNIX-domain sockets (ETW) =====================
     Test-Case 'unix-sockets-dash-U' 'sockets/-U' {
         if (-not $IsAdmin) { Skip 'AF_UNIX enumeration uses the ETW AFD capture (needs Administrator)' }
@@ -545,6 +572,7 @@ finally {
     foreach ($k in 'Tcp4', 'Tcp6') { if ($fx[$k]) { try { $fx[$k].Stop() } catch {} } }
     if ($fx.View) { try { $fx.View.Dispose() } catch {} }
     if ($fx.Mmf) { try { $fx.Mmf.Dispose() } catch {} }
+    if ($fx.PipeClient) { try { $fx.PipeClient.Dispose() } catch {} }
     if ($fx.Pipe) { try { $fx.Pipe.Dispose() } catch {} }
     if ($fx.File) { try { $fx.File.Dispose() } catch {} }
     foreach ($k in 'Cwd64', 'Cwd32') { if ($fx[$k]) { try { Stop-Process -Id $fx[$k].Id -Force -ErrorAction SilentlyContinue } catch {} } }

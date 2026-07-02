@@ -20,6 +20,7 @@ pub fn sample_processes() -> Vec<Process> {
             ppid: Some(4),
             command: "explorer.exe".into(),
             user: Some("EXAMPLE\\alice".into()),
+            endpoint_peer: false,
             files: vec![
                 OpenFile {
                     fd: FdType::Cwd,
@@ -52,6 +53,7 @@ pub fn sample_processes() -> Vec<Process> {
             ppid: Some(1000),
             command: "server.exe".into(),
             user: Some("EXAMPLE\\alice".into()),
+            endpoint_peer: false,
             files: vec![
                 OpenFile {
                     fd: FdType::Handle(72),

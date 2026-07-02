@@ -40,8 +40,8 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-D D` | prec | ❌ N/A | Device cache `/dev` — Unix-only |
 | `+D D` | sel | ✅ shipped | Directory tree (recursive) |
 | `-e s` | prec | ❌ N/A | Filesystem exempt — Unix mount-table thing |
-| `-E` | out | 🟡 **Phase 5B** | Show socket endpoint detail; partially redundant with our `-i` NAME |
-| `+E` | out | 🟡 **Phase 5B** | Same, extended |
+| `-E` | out | ✅ shipped | Pipe endpoint info: pipe NAMEs gain ` (server=PID,cmd client=PID,cmd)` via the documented `GetNamedPipe{Server,Client}ProcessId` APIs (works for anonymous pipes too; no elevation needed for your own processes) |
+| `+E` | out | ✅ shipped | Same, plus the peer processes' own pipe rows are displayed even when they match no selector |
 | `-f [cfgGn]` | misc | ❌ mostly N/A | Filesystem-detail sub-flags; Unix-specific internals |
 | `+f [cfgGn]` | misc | ❌ mostly N/A | Same |
 | `-F [f]` | out | ✅ shipped | Field output (with `-F0` for NUL) |
@@ -125,9 +125,14 @@ Switches that need new Windows API work, or significant data-model expansion:
 - **`-U`** — ✅ **done.** Explicit UNIX-domain filter, backed by the ETW AFD
   capture (§5): `-U` implies the (Administrator-only) capture and restricts
   output to AF_UNIX rows.
-- **`-E` / `+E`** — endpoint detail expansion. Lsof shows peer-PID for UNIX
-  sockets; the closest Windows analog is the AFD-endpoint pointer surfaced by
-  ETW. Bundle with item §5 resume. **(remaining Phase 5B item.)**
+- **`-E` / `+E`** — ✅ **done.** Pipe endpoint info via the documented
+  `GetNamedPipe{Server,Client}ProcessId` APIs, queried on the already-duplicated
+  handle inside the hang-bounded worker: pipe NAMEs gain
+  ` (server=PID,cmd client=PID,cmd)`. `+E` additionally displays the peer
+  processes' own pipe rows (`Process::endpoint_peer` keeps them through the
+  selection engine). Lsof's UNIX-socket peer display has no Windows analog —
+  no public API exposes AF_UNIX peers; the ETW AFD endpoint pointer on `--etw`
+  rows remains the correlation key there.
 
 ## Out of scope (Unix-only — accept-and-no-op or reject)
 
@@ -143,7 +148,8 @@ than appearing to accept and surprising the user.
    ✅ **done** (raw/ICMP/AF_UNIX now surface under `--etw`); unblocks `-U`.
 3. **Phase 5B** — ~~`-T` (TCP queue/window via `GetPerTcp*EStats`, IPv4 + IPv6)~~
    ✅ **done**; ~~`-U` (UNIX-domain filter, backed by the ETW AFD path)~~
-   ✅ **done**; `-E`/`+E` (endpoint detail) remaining.
+   ✅ **done**; ~~`-E`/`+E` (pipe endpoint info via
+   `GetNamedPipe{Server,Client}ProcessId`)~~ ✅ **done** — **Phase 5B complete.**
 4. **Smoke-test additions** — extend `Invoke-WinlsofSmokeTest.ps1` with one
    case per new Phase 5A switch (target: 37 → ~50 cases).
 

@@ -46,6 +46,7 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
             ppid: Some(entry.th32ParentProcessID),
             command: wide_to_string(&entry.szExeFile),
             user: owner_user(pid, numeric_ids),
+            endpoint_peer: false,
             files: Vec::new(),
         });
         // SAFETY: same invariants as Process32FirstW.

@@ -72,6 +72,9 @@ OUTPUT:\n\
     -R            add a PPID (parent PID) column\n\
     -o            show file offset in SIZE/OFF (0t<decimal>)\n\
     -t            terse: PIDs only\n\
+    -E            pipe endpoint info: append peer server/client PID+command\n\
+                  to pipe NAMEs (GetNamedPipe*ProcessId)\n\
+    +E            same, and also list the peer processes' own pipe rows\n\
     -l            numeric USER (show SID string instead of resolved name)\n\
     -L            show NLINK (link count) column\n\
     +L <count>    keep only files with link count < <count>; implies -L\n\

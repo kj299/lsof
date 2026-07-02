@@ -42,6 +42,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
     GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
 };
+use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
 
 use crate::privilege::PrivilegeGuard;
@@ -142,11 +143,17 @@ struct IoStatusBlock {
 /// is `Some`, only handles owned by those PIDs are inspected — so the expensive
 /// per-handle duplication is skipped for processes the user didn't ask about.
 /// With `verbose`, the count of processes that couldn't be opened is reported.
+///
+/// `endpoints` (`-E`/`+E`): when `Some`, pipe rows are annotated with their
+/// peer server/client PIDs (named with the map's pid → command entries), and
+/// the second element of the return value collects every peer PID seen — the
+/// input `+E` uses to also display the peers' own pipe rows.
 pub fn enumerate(
     elevated: bool,
     wanted: Option<&HashSet<u32>>,
     verbose: bool,
-) -> Vec<(u32, OpenFile)> {
+    endpoints: Option<&HashMap<u32, String>>,
+) -> (Vec<(u32, OpenFile)>, HashSet<u32>) {
     // Least privilege: only request SeDebugPrivilege when already elevated, and
     // only for this function (the guard drops it on return).
     let _guard = if elevated {
@@ -165,7 +172,7 @@ pub fn enumerate(
 
     trace("handles: query_all_handles start");
     let Some(buf) = query_all_handles() else {
-        return Vec::new();
+        return (Vec::new(), HashSet::new());
     };
     trace("handles: query_all_handles done");
 
@@ -187,6 +194,7 @@ pub fn enumerate(
     let dos_map = Arc::new(build_dos_map());
     let mut proc_cache: HashMap<u32, Option<OwnedHandle>> = HashMap::new();
     let mut out = Vec::new();
+    let mut peers: HashSet<u32> = HashSet::new();
     trace(&format!(
         "handles: scanning {count} entries (file_index={file_index:?})"
     ));
@@ -220,15 +228,24 @@ pub fn enumerate(
         // keeps one bad handle from freezing enumeration. `verify_type` re-checks
         // the object type only in the (practically impossible) case the File
         // type index couldn't be learned from the NUL probe.
-        let Some(d) = describe_bounded(
+        let Some(mut d) = describe_bounded(
             source.raw(),
             e.handle_value as HANDLE,
             Arc::clone(&dos_map),
             Duration::from_millis(200),
             file_index.is_none(),
+            endpoints.is_some(),
         ) else {
             continue; // skipped: not a File handle, inaccessible, or timed out
         };
+        // `-E`/`+E`: append the pipe's peer info to NAME and remember the peer
+        // PIDs so `+E` can pull in their rows.
+        if let (Some(cmds), Some((server, client))) = (endpoints, d.pipe_peers) {
+            peers.extend([server, client].into_iter().flatten());
+            if let Some(sfx) = endpoint_suffix(server, client, cmds) {
+                d.name.push_str(&sfx);
+            }
+        }
         out.push((
             pid,
             OpenFile {
@@ -255,7 +272,7 @@ pub fn enumerate(
             );
         }
     }
-    out
+    (out, peers)
 }
 
 /// Call `NtQuerySystemInformation` with a growing, 8-byte-aligned buffer.
@@ -421,6 +438,7 @@ fn describe_bounded(
     dos_map: Arc<Vec<(String, String)>>,
     timeout: Duration,
     verify_type: bool,
+    want_endpoints: bool,
 ) -> Option<Described> {
     let source = source as usize;
     let handle_value = handle_value as usize;
@@ -434,6 +452,7 @@ fn describe_bounded(
             me,
             &dos_map,
             verify_type,
+            want_endpoints,
         );
         let _ = tx.send(result);
     });
@@ -448,6 +467,7 @@ fn classify(
     me: HANDLE,
     dos_map: &[(String, String)],
     verify_type: bool,
+    want_endpoints: bool,
 ) -> Option<Described> {
     let dup = duplicate(source, handle_value, me)?;
     if verify_type
@@ -455,7 +475,7 @@ fn classify(
     {
         return None;
     }
-    describe(source, handle_value, me, dup.raw(), dos_map)
+    describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints)
 }
 
 struct Described {
@@ -466,6 +486,9 @@ struct Described {
     size: Option<u64>,
     offset: Option<u64>,
     links: Option<u32>,
+    /// `(server_pid, client_pid)` of a named-pipe handle, when `-E`/`+E`
+    /// requested endpoint info. `None` for non-pipes or when not requested.
+    pipe_peers: Option<(Option<u32>, Option<u32>)>,
 }
 
 /// Classify a File-typed handle by its file type and fill in name/size/node.
@@ -476,6 +499,7 @@ fn describe(
     me: HANDLE,
     dup: HANDLE,
     dos_map: &[(String, String)],
+    want_endpoints: bool,
 ) -> Option<Described> {
     // SAFETY: dup is a live File handle.
     match unsafe { GetFileType(dup) } {
@@ -495,6 +519,7 @@ fn describe(
                 size,
                 offset: file_offset(dup),
                 links,
+                pipe_peers: None,
             })
         }
         FILE_TYPE_PIPE => {
@@ -509,6 +534,10 @@ fn describe(
                     size: None,
                     offset: None,
                     links: None,
+                    // `-E`/`+E`: both peer-PID queries are local npfs FSCTLs;
+                    // we are already on the bounded worker, so a wedged query
+                    // is abandoned like any other per-handle call here.
+                    pipe_peers: want_endpoints.then(|| pipe_peers(dup)),
                 }),
                 // Sockets (\Device\Afd) and unnamed pipes: IP Helper covers
                 // sockets, so skip rather than emit a nameless row.
@@ -527,6 +556,7 @@ fn describe(
                 size: None,
                 offset: None,
                 links: None,
+                pipe_peers: None,
             })
         }
         _ => {
@@ -540,8 +570,50 @@ fn describe(
                 size: None,
                 offset: None,
                 links: None,
+                pipe_peers: None,
             })
         }
+    }
+}
+
+/// The owning PIDs of a named pipe's two ends, via the documented
+/// `GetNamedPipe{Server,Client}ProcessId` APIs (Vista+; they work on anonymous
+/// pipes too, which are named-pipe instances underneath). Each side resolves
+/// independently — e.g. a listening server instance with no connected client
+/// yields `(Some(server), None)`.
+fn pipe_peers(dup: HANDLE) -> (Option<u32>, Option<u32>) {
+    let mut server = 0u32;
+    let mut client = 0u32;
+    // SAFETY: dup is a live named-pipe handle; the out-params are valid u32s.
+    let s = unsafe { GetNamedPipeServerProcessId(dup, &mut server) };
+    // SAFETY: as above.
+    let c = unsafe { GetNamedPipeClientProcessId(dup, &mut client) };
+    ((s != 0).then_some(server), (c != 0).then_some(client))
+}
+
+/// Build the ` (server=PID,cmd client=PID,cmd)` NAME suffix for a pipe row from
+/// its endpoint PIDs. Sides that didn't resolve are omitted; a PID missing from
+/// the command map (e.g. the peer exited) is shown bare.
+fn endpoint_suffix(
+    server: Option<u32>,
+    client: Option<u32>,
+    cmds: &HashMap<u32, String>,
+) -> Option<String> {
+    let one = |label: &str, pid: Option<u32>| -> Option<String> {
+        let pid = pid?;
+        Some(match cmds.get(&pid) {
+            Some(cmd) => format!("{label}={pid},{cmd}"),
+            None => format!("{label}={pid}"),
+        })
+    };
+    let parts: Vec<String> = [one("server", server), one("client", client)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!(" ({})", parts.join(" ")))
     }
 }
 
@@ -756,5 +828,23 @@ mod tests {
     fn drive_prefix() {
         assert_eq!(drive_of("C:\\x"), Some("C:".to_string()));
         assert_eq!(drive_of("\\\\srv\\share"), None);
+    }
+
+    #[test]
+    fn endpoint_suffixes() {
+        let mut cmds = HashMap::new();
+        cmds.insert(1234, "srv.exe".to_string());
+        // Both sides known; the client's command isn't in the map (exited).
+        assert_eq!(
+            endpoint_suffix(Some(1234), Some(77), &cmds).as_deref(),
+            Some(" (server=1234,srv.exe client=77)")
+        );
+        // Unconnected server instance: only the server side resolves.
+        assert_eq!(
+            endpoint_suffix(Some(1234), None, &cmds).as_deref(),
+            Some(" (server=1234,srv.exe)")
+        );
+        // Nothing resolved: no suffix at all.
+        assert_eq!(endpoint_suffix(None, None, &cmds), None);
     }
 }

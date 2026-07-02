@@ -13,7 +13,7 @@
 //!   intent of `lsof -i ...`; see README for the deviation from classic OR.)
 //! * With no selectors at all, every process and file is listed.
 
-use crate::model::{FdType, OpenFile, Process, Protocol};
+use crate::model::{FdType, FileType, OpenFile, Process, Protocol};
 
 /// Parsed `-i` Internet filter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,6 +28,17 @@ pub struct InetFilter {
     pub port: Option<u16>,
     /// Restrict to a host substring (matched against the numeric address text).
     pub host: Option<String>,
+}
+
+/// `-E` (Info) vs `+E` (Files) pipe-endpoint display modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointMode {
+    /// `-E`: annotate pipe rows with peer endpoint info (server/client PID
+    /// and command).
+    Info,
+    /// `+E`: annotate, and also display the peer processes' own pipe rows
+    /// even when those processes match no selector.
+    Files,
 }
 
 /// `-T [fqsw]` sub-flags. `f` (follow/repeat) is accepted but a no-op for a
@@ -175,6 +186,12 @@ pub struct Selection {
     /// via the ETW AFD path, so `-U` implies the (Administrator-only) ETW
     /// capture and restricts socket output to the AF_UNIX family.
     pub unix_only: bool,
+    /// `-E` / `+E`: pipe endpoint info. On Windows the peer PIDs come from the
+    /// documented `GetNamedPipe{Server,Client}ProcessId` APIs, queried on the
+    /// already-duplicated pipe handle during enumeration. `Info` annotates
+    /// pipe rows; `Files` additionally shows the peer processes' pipe rows
+    /// (see [`Process::endpoint_peer`]).
+    pub endpoints: Option<EndpointMode>,
     /// `+L <count>`: keep only files whose link count is **less than** `count`
     /// (lsof convention). `+L 1` keeps link-count-zero files — the
     /// "unlinked but still open" security case. Files with unknown links
@@ -362,14 +379,26 @@ impl Selection {
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
         let mut out = Vec::new();
         for mut p in procs {
-            if !self.proc_matches(&p) {
-                continue;
+            let selected = self.proc_matches(&p);
+            if !selected {
+                // `+E`: a process brought in only as a pipe-endpoint peer is
+                // shown despite matching no selector — but only its pipe
+                // (endpoint) rows, mirroring lsof's "the files of the
+                // endpoints are also displayed".
+                if !p.endpoint_peer {
+                    continue;
+                }
+                p.files.retain(|f| f.file_type == FileType::Pipe);
             }
             p.files.retain(|f| self.file_matches(f));
             let needs_file =
                 self.inet.enabled || self.has_path_filter() || self.fd_filter.is_some();
             if needs_file && p.files.is_empty() {
                 // `-i`, `-d`, and path lookups require at least one matching file.
+                continue;
+            }
+            if !selected && p.files.is_empty() {
+                // An endpoint peer with nothing left to show isn't a result row.
                 continue;
             }
             out.push(p);
@@ -515,6 +544,56 @@ mod tests {
         assert!(!under_dir("c:\\usersdata\\x", "c:\\users"));
         assert!(under_dir("c:\\users\\x", "c:\\users"));
         assert!(under_dir("c:\\users", "c:\\users"));
+    }
+
+    #[test]
+    fn endpoint_peer_kept_with_pipe_rows_only() {
+        use crate::model::{AccessMode, FdType, OpenFile};
+        let pipe = OpenFile {
+            fd: FdType::Handle(64),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Pipe,
+            name: "\\\\.\\pipe\\x (server=1000,a.exe client=9999,b.exe)".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        };
+        let reg = OpenFile {
+            file_type: FileType::Regular,
+            name: "C:\\peer\\data.txt".into(),
+            ..pipe.clone()
+        };
+        // 9999 matches no selector but was marked by the backend as a `+E`
+        // endpoint peer: it must survive apply() with ONLY its pipe rows.
+        let peer = Process {
+            pid: 9999,
+            ppid: None,
+            command: "b.exe".into(),
+            user: None,
+            endpoint_peer: true,
+            files: vec![pipe.clone(), reg.clone()],
+        };
+        // 8888 matches no selector and is no peer: dropped as usual.
+        let stranger = Process {
+            pid: 8888,
+            ppid: None,
+            command: "c.exe".into(),
+            user: None,
+            endpoint_peer: false,
+            files: vec![pipe, reg],
+        };
+        let sel = Selection {
+            pids: vec![1000],
+            ..Default::default()
+        };
+        let got = sel.apply(vec![peer, stranger]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].pid, 9999);
+        assert_eq!(got[0].files.len(), 1);
+        assert_eq!(got[0].files[0].file_type, FileType::Pipe);
     }
 
     #[test]

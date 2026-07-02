@@ -270,4 +270,9 @@ pub struct Process {
     /// Owning account, e.g. `DOMAIN\\user` (lsof "USER").
     pub user: Option<String>,
     pub files: Vec<OpenFile>,
+    /// `+E`: set by a backend when this process is in the result only because
+    /// it is the peer endpoint of a selected process's pipe. The selection
+    /// engine keeps such a process (its pipe rows only) even though it matches
+    /// no process selector — lsof's "endpoint files are also displayed".
+    pub endpoint_peer: bool,
 }

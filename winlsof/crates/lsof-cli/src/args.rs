@@ -12,7 +12,7 @@
 
 use lsof_core::render::Format;
 use lsof_core::selection::StateFilter;
-use lsof_core::{FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags};
+use lsof_core::{EndpointMode, FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags};
 
 /// What the CLI should do after parsing.
 #[derive(Debug)]
@@ -116,6 +116,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     sel.command_width = Some(n);
                 }
                 Some('w') => sel.suppress_warnings = false,
+                Some('E') => sel.endpoints = Some(EndpointMode::Files),
                 Some('L') => {
                     // `+L <count>`: drop files whose link count is >= <count>.
                     // Implies the NLINK column, mirroring lsof.
@@ -183,6 +184,13 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'l' => sel.numeric_ids = true,
                 'L' => sel.show_links = true,
                 'U' => sel.unix_only = true,
+                // `-E` after `+E` must not downgrade the "also show peer
+                // files" mode — lsof treats +E as a superset of -E.
+                'E' => {
+                    if sel.endpoints != Some(EndpointMode::Files) {
+                        sel.endpoints = Some(EndpointMode::Info);
+                    }
+                }
                 'Q' => sel.quiet = true,
                 'w' => sel.suppress_warnings = true,
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
@@ -621,5 +629,15 @@ mod tests {
     #[test]
     fn unknown_option_errors() {
         assert!(parse(vec!["-Z".into()]).is_err());
+    }
+
+    #[test]
+    fn endpoint_modes() {
+        assert_eq!(run(&["-E"]).0.endpoints, Some(EndpointMode::Info));
+        assert_eq!(run(&["+E"]).0.endpoints, Some(EndpointMode::Files));
+        // +E is a superset of -E: a later -E must not downgrade it.
+        assert_eq!(run(&["+E", "-E"]).0.endpoints, Some(EndpointMode::Files));
+        assert_eq!(run(&["-E", "+E"]).0.endpoints, Some(EndpointMode::Files));
+        assert_eq!(run(&[]).0.endpoints, None);
     }
 }

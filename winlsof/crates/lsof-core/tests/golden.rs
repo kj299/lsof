@@ -72,6 +72,7 @@ fn table_offset_with_dash_o() {
         ppid: None,
         command: "x".into(),
         user: None,
+        endpoint_peer: false,
         files: vec![OpenFile {
             fd: FdType::Handle(3),
             access: AccessMode::Read,
@@ -100,6 +101,7 @@ fn table_command_width_caps() {
         ppid: None,
         command: "verylongcommandname.exe".into(),
         user: None,
+        endpoint_peer: false,
         files: vec![OpenFile {
             fd: FdType::Handle(3),
             access: AccessMode::Read,
@@ -145,6 +147,7 @@ fn fields_skips_empty_name() {
         ppid: None,
         command: "x".into(),
         user: None,
+        endpoint_peer: false,
         files: vec![OpenFile {
             fd: FdType::Task,
             access: AccessMode::Unknown,
