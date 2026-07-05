@@ -8,6 +8,15 @@ Paste this when a port (or a major phase) is done. This is what makes the kit
 The `[PROJECT]` port (or phase `[PHASE]`) is complete. Run the closing
 retrospective and **patch the Porting Kit** with what you learned.
 
+0. **Run every harness against the real target and record what each finds.** This
+   is not optional and not last: the kit's three post-ship dry-runs (LESSONS
+   #2–#4) each found a defect *in a harness* — a scanner too noisy to trust, a
+   gate delegated to an unwired lint, a differential that judged less than it
+   captured — and *none* surfaced from reading the playbook. A dry-run that
+   doesn't execute the tools against the actual codebase is theater. Run
+   `scan_c_flaws.py`, `audit_unsafe.py`, the differential, etc. against this
+   project and eyeball the signal-to-noise before trusting any of it.
+
 1. **Reconstruct the experience from artifacts**, the way
    `RETROSPECTIVE-lsof.md` was built — lean on git history, especially:
    - commit *sequences* where a message says "the real fix" / "actually" (these

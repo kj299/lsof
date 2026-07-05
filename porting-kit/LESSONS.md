@@ -131,3 +131,41 @@ Format per entry:
 - **Section amended:** skeleton/Cargo.toml (`[workspace.lints]`) + each crate's
   `[lints]`; harnesses/ci/porting-ci.template.yml (clippy step);
   SECURITY-CHECKLIST · per-module; audit_unsafe.py docstring.
+
+---
+
+## 004. Differential fidelity is stdout AND exit code, not stdout alone
+
+- **Date:** 2026-07-05
+- **Codebase:** winlsof — dry-run pass 3 (kit run against lsof's real behavior)
+- **What happened:** `diff_run.py` *captured* both binaries' exit codes but its
+  verdict was computed from normalized stdout only — the codes were reported and
+  ignored. So a rewrite with identical output and a wrong exit status passed as
+  MATCH. That is a real fidelity hole: lsof exits 1 on "no matching open files"
+  and shell scripts branch on it (`lsof -t … || echo none`); winlsof itself had a
+  documented exit-code-capture bug (commit `3a56937`). A harness that blesses the
+  wrong status defeats the point of a differential.
+- **Kit change:** the verdict is now `stdout_match AND exit_match`; an exit-only
+  difference DIVERGEs with a note naming both codes; `--ignore-exit` opts out for
+  tools without stable statuses. Pinned with a self-test (same stdout + different
+  exit → DIVERGE; `--ignore-exit` → MATCH). PLAYBOOK Phase 4 gate 2 updated.
+- **Section amended:** harnesses/differential/diff_run.py (`compare`, CLI,
+  self-test); PLAYBOOK · Phase 4 gate 2.
+
+## Meta — three dry-run passes, three distinct classes of gap
+
+Running the kit against lsof's *actual* code three times (LESSONS #2–#4) found
+three different failure classes, none of which the paper Phase-3 pass (#1) caught
+— because #1 was a walk of the retrospective's narrative, and these only appear
+when you *execute the harnesses against the real codebase*:
+- **#2 — too noisy to trust:** a scanner with 828 false positives is muted.
+- **#3 — claimed but unwired:** an unsafe-fn doc gate delegated to a lint nobody
+  enabled.
+- **#4 — checks less than it captures:** a differential that reads exit codes but
+  judges on stdout alone.
+The lesson about the lessons: **a dry-run that doesn't run the tools against the
+real target is theater.** All three gaps were in the *harnesses* (the kit's own
+code), not the playbook prose — evidence that a kit is only as good as its tools
+are exercised. `PROMPTS/90-retrospective.md` already says "run against the real
+code"; these passes prove that half is where the findings live, and it is now
+the emphasized half.

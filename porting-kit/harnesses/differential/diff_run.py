@@ -85,7 +85,7 @@ def run_one(binary, case, default_timeout=15):
         sys.exit(f"error: binary not found: {binary}")
 
 
-def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers):
+def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers, ignore_exit=False):
     known = load_ledger(ledger)
     results = []
     for case in matrix:
@@ -94,18 +94,26 @@ def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers):
         r_out, r_rc = run_one(rust_bin, case)
         norm = lambda t: N.normalize_text(t, sort=sort, strip_blank=True, mask_numbers=mask_numbers)
         o_n, r_n = norm(o_out), norm(r_out)
-        if o_n == r_n:
+        # Fidelity is stdout AND exit code: a rewrite that prints the right thing
+        # but returns the wrong status (lsof exits 1 on no-match; scripts branch
+        # on it) is NOT a match. Exit-code drift was a real winlsof bug.
+        # (LESSONS #4). `--ignore-exit` opts out for tools without stable codes.
+        stdout_match = o_n == r_n
+        exit_match = ignore_exit or (o_rc == r_rc)
+        if stdout_match and exit_match:
             verdict = "MATCH"
         elif name in known:
             verdict = "DIVERGE(ledgered)"
         else:
             verdict = "DIVERGE"
+        note = "" if exit_match else f"exit code differs: oracle={o_rc} rust={r_rc}\n"
+        body = "" if stdout_match else "".join(difflib.unified_diff(
+            o_n.splitlines(keepends=True), r_n.splitlines(keepends=True),
+            fromfile=f"oracle:{name}", tofile=f"rust:{name}"))
         results.append({
             "name": name, "verdict": verdict,
-            "oracle_rc": o_rc, "rust_rc": r_rc,
-            "diff": None if verdict == "MATCH" else "".join(difflib.unified_diff(
-                o_n.splitlines(keepends=True), r_n.splitlines(keepends=True),
-                fromfile=f"oracle:{name}", tofile=f"rust:{name}")),
+            "oracle_rc": o_rc, "rust_rc": r_rc, "exit_match": exit_match,
+            "diff": None if verdict == "MATCH" else (note + body),
         })
     return results
 
@@ -118,6 +126,7 @@ def main(argv=None):
     ap.add_argument("--ledger", default="DIVERGENCES.md", help="known-intentional-divergence ledger")
     ap.add_argument("--sort", action="store_true", help="order-independent compare")
     ap.add_argument("--mask-numbers", action="store_true", help="mask bare numbers (PIDs) too")
+    ap.add_argument("--ignore-exit", action="store_true", help="don't treat an exit-code difference as a divergence")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
@@ -130,7 +139,7 @@ def main(argv=None):
         return 2
 
     results = compare(args.oracle, args.rust, load_matrix(args.matrix),
-                      args.ledger, args.sort, args.mask_numbers)
+                      args.ledger, args.sort, args.mask_numbers, args.ignore_exit)
     unexplained = [r for r in results if r["verdict"] == "DIVERGE"]
     if args.json:
         print(json.dumps(results, indent=2))
@@ -175,6 +184,17 @@ def _self_test():
     res = compare(echo, printf, diff_case, ledger=ledger_path, sort=False, mask_numbers=False)
     check("ledgered divergence → suppressed", res[0]["verdict"] == "DIVERGE(ledgered)")
     os.unlink(ledger_path)
+
+    # exit-code fidelity: same stdout, different exit status must DIVERGE.
+    with tempfile.TemporaryDirectory() as d:
+        o = os.path.join(d, "o.sh"); open(o, "w").write("#!/bin/sh\necho hi\n"); os.chmod(o, 0o755)
+        r = os.path.join(d, "r.sh"); open(r, "w").write("#!/bin/sh\necho hi\nexit 3\n"); os.chmod(r, 0o755)
+        ec = [{"name": "exitcode", "args": []}]
+        res = compare(o, r, ec, ledger=None, sort=False, mask_numbers=False)
+        check("same stdout + different exit code → DIVERGE", res[0]["verdict"] == "DIVERGE")
+        check("divergence note names the exit codes", "exit code differs" in (res[0]["diff"] or ""))
+        res = compare(o, r, ec, ledger=None, sort=False, mask_numbers=False, ignore_exit=True)
+        check("--ignore-exit suppresses an exit-only divergence → MATCH", res[0]["verdict"] == "MATCH")
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

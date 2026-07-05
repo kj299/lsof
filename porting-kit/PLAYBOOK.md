@@ -190,11 +190,15 @@ Then the loop — each step is a CI-enforced gate:
    audited casts with a `// SAFETY:` proof; integer math → checked/`saturating`.
 2. **Differential-test** against the oracle (`harnesses/differential/diff_run.py`).
    A divergence is a *triage*, not an auto-fail: {Rust bug → fix} vs {C bug →
-   log in `DIVERGENCES.md`, keep the safe behavior}. This gate is also the
-   **liveness backstop** (LESSONS #1): a hang is not UB, so sanitizers won't see
-   it — the harness's per-case timeout marks a wedged run as `<<TIMEOUT>>` and
-   fails it. Treat a timeout as a design smell (an unbounded blocking call on the
-   hot path) — the winlsof fix was to *avoid* the blocking call, not wrap it.
+   log in `DIVERGENCES.md`, keep the safe behavior}. The verdict is **stdout AND
+   exit code** (LESSONS #4): a rewrite that prints the right thing but returns
+   the wrong status is not a match — lsof exits 1 on no-match and scripts branch
+   on it; `--ignore-exit` opts out for tools without stable codes. This gate is
+   also the **liveness backstop** (LESSONS #1): a hang is not UB, so sanitizers
+   won't see it — the harness's per-case timeout marks a wedged run as
+   `<<TIMEOUT>>` and fails it. Treat a timeout as a design smell (an unbounded
+   blocking call on the hot path) — the winlsof fix was to *avoid* the blocking
+   call, not wrap it.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker.
