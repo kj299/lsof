@@ -152,6 +152,29 @@ Format per entry:
 - **Section amended:** harnesses/differential/diff_run.py (`compare`, CLI,
   self-test); PLAYBOOK · Phase 4 gate 2.
 
+## 005. Path-scope CI, or unrelated changes make PRs look "unstable"
+
+- **Date:** 2026-07-05
+- **Codebase:** winlsof / lsof — the repo's own CI, found while landing the kit
+- **What happened:** The kit's PR merged from GitHub `mergeable_state: "unstable"`.
+  Nothing was failing — all checks went green — but the C project's `build.yml`
+  (a full autotools `configure`/`make`/`make check`/`distcheck` on ubuntu-24.04 +
+  ubuntu-22.04 + macOS) triggered on **every push/PR with no path filter**, so a
+  *docs-and-scripts-only* `porting-kit/` change (and every `winlsof/` change,
+  which already has its own path-scoped CI) kicked off three heavyweight C builds
+  and left the PR "unstable" until they drained. Wasted CI, and a merge state that
+  reads as broken when it isn't. `mergeable_state: "unstable"` means *pending or
+  failing non-required checks* — not necessarily failure.
+- **Kit change:** added `paths-ignore: ['porting-kit/**', 'winlsof/**']` to the
+  C workflow's `push` and `pull_request` triggers (mirroring the path-scoping the
+  Rust CI already used), and taught the kit's CI template to scope each
+  language/subtree's workflow to its own paths. In a gradual port — where C and
+  Rust coexist in one repo — an unscoped `on: [push]` runs the heavy build on
+  changes it cannot affect; scope it.
+- **Section amended:** harnesses/ci/porting-ci.template.yml (`on:` triggers);
+  the `porting-kit-audit` skill (CI-hygiene gate). General rule for PLAYBOOK ·
+  Phase 3 (skeleton/CI): scope every workflow to the paths it actually builds.
+
 ## Meta — three dry-run passes, three distinct classes of gap
 
 Running the kit against lsof's *actual* code three times (LESSONS #2–#4) found

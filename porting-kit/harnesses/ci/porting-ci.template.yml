@@ -8,7 +8,17 @@
 #   sanitizers | fuzz smoke | supply-chain (audit + deny) | differential
 name: porting-ci
 
-on: [push, pull_request]
+# LESSONS #5 — path-scope CI to what it actually builds. During a gradual port the
+# C tree and the Rust workspace coexist in one repo; an unscoped `on: [push]` runs
+# this whole safety pipeline on changes it cannot affect (docs, the C tree), wasting
+# CI and leaving PRs misleadingly "unstable" while unrelated jobs drain. Scope this
+# Rust workflow to the Rust paths, and scope the C workflow to the C paths, so each
+# change triggers only the pipeline that can be affected by it. Tune the globs.
+on:
+  push:
+    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml']
+  pull_request:
+    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml']
 
 permissions:
   contents: read

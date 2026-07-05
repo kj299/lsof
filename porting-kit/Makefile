@@ -17,6 +17,8 @@ check-kit:
 	@echo "== supply-chain ==";     bash  $(H)/supply-chain/run_supply_chain.sh --check
 	@echo "== sanitizers ==";       bash  $(H)/sanitizers/run_sanitizers.sh --check
 	@echo "== matrix parses ==";    $(PY) -c "import tomllib; tomllib.load(open('$(H)/differential/input-matrix.example.toml','rb')); print('PASS  matrix parses')"
+	@echo "== skills self-test =="; $(PY) skills/check_skills.py --self-test
+	@echo "== skills integrity =="; $(PY) skills/check_skills.py
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 

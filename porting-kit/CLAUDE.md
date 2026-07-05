@@ -55,6 +55,16 @@ bash only; no toolchain needed).
 - **The test harness is software with a hostile host** — budget for its
   encoding/quoting/portability hardening explicitly.
 
+## Skills
+
+`skills/` operationalizes this kit as invokable Claude Code skills —
+`porting-kit-{kickoff,cflaw-scan,oracle,module,audit,retrospective}`. They are
+**thin wrappers**: they point at the authoritative docs here and run the real
+harness commands, never a divergent copy. **Keep them in integrity with the kit** —
+if you rename a harness or change a flag, update every skill that references it;
+`skills/check_skills.py` (in `make check-kit`) hard-fails on a dangling reference.
+The retrospective (which patches the kit after every port) must patch the skills too.
+
 ## Working notes
 
 - Keep `progress.json` current (`harnesses/progress/progress.py`) so any new
