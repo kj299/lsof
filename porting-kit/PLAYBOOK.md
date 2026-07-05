@@ -38,6 +38,10 @@ per-module control ledger the phases refer to.
   integer-overflow-before-`malloc`, `system`/`popen`, format-string,
   `gets`, TOCTOU pairs). Every hit becomes a note on the owning module: *do not
   port this bug — fix it, and log the fix as an intentional divergence.*
+  A scanner is only useful if it is *trusted*: tune it for signal-to-noise
+  against the real target before relying on it — a check that cries wolf gets
+  muted, and the real flaws drown (LESSONS #2: the format-string check once
+  produced 828 false positives on lsof, burying ~215 real candidates).
 - **Classify the FFI/syscall surface by failure mode** (LESSONS #1). For each
   external call the port will make, record three properties: can it **block
   indefinitely** (→ needs a timeout / worker thread / a design that avoids it),

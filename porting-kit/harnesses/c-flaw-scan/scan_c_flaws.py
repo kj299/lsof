@@ -37,8 +37,6 @@ CHECKS = [
      re.compile(r"\b(strcpy|strcat|sprintf|vsprintf|gets)\s*\(")),
     ("unbounded-copy", "CWE-120",
      re.compile(r"\bscanf\s*\([^)]*%s")),
-    ("format-string", "CWE-134",
-     re.compile(r"\b(printf|fprintf|snprintf|syslog|err|warn)\s*\(\s*[A-Za-z_]\w*\s*[,)]")),
     ("stack-vla-alloca", "CWE-770",
      re.compile(r"\balloca\s*\(")),
     ("int-overflow-mul", "CWE-190",
@@ -48,6 +46,76 @@ CHECKS = [
     ("toctou", "CWE-367",
      re.compile(r"\b(access|stat|lstat)\s*\(")),
 ]
+
+# printf-family: name -> index of the *format-string* argument. The format is
+# NOT always arg 0 — it follows the stream (fprintf), buffer (sprintf), size
+# (snprintf), or priority/eval (syslog/err). Flagging arg 0 blindly produces a
+# false positive on every `fprintf(stderr, "literal", ...)` — which is what
+# buried the real findings when this scanner was first run against lsof
+# (828 false positives). We flag only when the format-position arg is a
+# *non-literal* (doesn't start with a string literal). (LESSONS #2)
+FORMAT_FUNCS = {
+    "printf": 0, "vprintf": 0, "warn": 0, "warnx": 0, "vwarn": 0,
+    "fprintf": 1, "vfprintf": 1, "dprintf": 1, "sprintf": 1, "vsprintf": 1,
+    "syslog": 1, "vsyslog": 1, "err": 1, "errx": 1, "asprintf": 1,
+    "snprintf": 2, "vsnprintf": 2,
+}
+_FMT_CALL = re.compile(r"\b(" + "|".join(FORMAT_FUNCS) + r")\s*\(")
+
+
+def _call_args(src, open_paren):
+    """Return the top-level comma-separated argument strings of a call whose
+    '(' is at index `open_paren`, plus the index just past the ')'. Skips string
+    and char literals and nested parens. Best-effort on an unbalanced tail."""
+    depth, args, cur, j, n = 0, [], [], open_paren, len(src)
+    while j < n:
+        c = src[j]
+        if c in '"\'':
+            quote = c
+            cur.append(c); j += 1
+            while j < n and src[j] != quote:
+                if src[j] == "\\" and j + 1 < n:
+                    cur.append(src[j]); cur.append(src[j + 1]); j += 2; continue
+                cur.append(src[j]); j += 1
+            if j < n:
+                cur.append(src[j]); j += 1
+            continue
+        if c == "(":
+            depth += 1
+            if depth > 1:
+                cur.append(c)
+            j += 1; continue
+        if c == ")":
+            depth -= 1
+            if depth == 0:
+                args.append("".join(cur))
+                return args, j + 1
+            cur.append(c); j += 1; continue
+        if c == "," and depth == 1:
+            args.append("".join(cur)); cur = []; j += 1; continue
+        cur.append(c); j += 1
+    args.append("".join(cur))
+    return args, n
+
+
+def _scan_format_strings(src):
+    hits = []
+    for m in _FMT_CALL.finditer(src):
+        name = m.group(1)
+        args, _end = _call_args(src, m.end() - 1)
+        idx = FORMAT_FUNCS[name]
+        if idx >= len(args):
+            continue  # too few args to tell; don't cry wolf
+        fmt = args[idx].strip()
+        # Literal format (starts with a string, or a wide/utf literal) is safe.
+        if fmt.startswith(('"', 'L"', 'u8"', 'u"', 'U"')):
+            continue
+        if not fmt:
+            continue
+        lineno = src.count("\n", 0, m.start()) + 1
+        hits.append({"line": lineno, "category": "format-string", "cwe": "CWE-134",
+                     "text": (name + "(" + args[idx].strip())[:120]})
+    return hits
 
 
 def scan_text(src):
@@ -60,6 +128,8 @@ def scan_text(src):
         for cat, cwe, rx in CHECKS:
             if rx.search(line):
                 hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
+    hits.extend(_scan_format_strings(src))
+    hits.sort(key=lambda h: h["line"])
     return hits
 
 
@@ -100,13 +170,16 @@ def run(paths, as_json, strict):
 
 SELF_TEST_C = r'''
 #include <stdio.h>
-void bad(char *u) {
+void bad(char *u, char *dynfmt) {
     char buf[16];
-    strcpy(buf, u);              /* unbounded-copy */
-    printf(u);                   /* format-string  */
-    char *p = malloc(n * width); /* int-overflow-mul */
-    system(cmd);                 /* command-exec */
-    if (access(path, R_OK)) {}   /* toctou */
+    strcpy(buf, u);                     /* unbounded-copy */
+    printf(u);                          /* format-string: arg 0 non-literal */
+    fprintf(stderr, "literal %s\n", u); /* SAFE: format arg is a literal */
+    fprintf(stderr, dynfmt, u);         /* format-string: arg 1 non-literal */
+    snprintf(buf, sizeof buf, "%d", 1); /* SAFE: format arg (idx 2) literal */
+    char *p = malloc(n * width);        /* int-overflow-mul */
+    system(cmd);                        /* command-exec */
+    if (access(path, R_OK)) {}          /* toctou */
     /* strcpy(x, y);  in a comment - should be ignored */
 }
 '''
@@ -115,6 +188,7 @@ void bad(char *u) {
 def _self_test():
     hits = scan_text(SELF_TEST_C)
     cats = {h["category"] for h in hits}
+    fmt_hits = [h for h in hits if h["category"] == "format-string"]
     ok = True
 
     def check(name, cond):
@@ -129,6 +203,12 @@ def _self_test():
     check("flags toctou", "toctou" in cats)
     check("ignores the commented strcpy (no double count)",
           sum(1 for h in hits if h["category"] == "unbounded-copy") == 1)
+    # The Pass-1 fix: only NON-LITERAL format args flag; the stream/buffer/size
+    # arg is not mistaken for the format. Exactly 2 real hits (printf(u), the
+    # variable-format fprintf); the two literal-format calls must NOT flag.
+    check("format-string flags exactly the 2 non-literal calls", len(fmt_hits) == 2)
+    check("literal-format fprintf/snprintf NOT flagged",
+          not any("literal" in h["text"] or '"%d"' in h["text"] for h in fmt_hits))
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

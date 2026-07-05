@@ -73,3 +73,33 @@ Format per entry:
   gate) and buy time to find the insight, but inventing the safe design remains
   human/agent work. A future kit lesson may add a "hazardous-API pattern library"
   of known avoid-the-call recipes.
+
+---
+
+## 002. A noisy Phase-0 scanner is worse than none — it gets ignored
+
+- **Date:** 2026-07-05
+- **Codebase:** winlsof — dry-run pass 2 (kit run against lsof's *actual* C tree)
+- **What happened:** Running `c-flaw-scan/scan_c_flaws.py` against real lsof
+  (`lib/ src/`) returned **1044 hits, of which 828 were false "format-string"
+  positives.** The check flagged arg 0 of every printf-family call, but the
+  format string is not arg 0 for `fprintf`/`sprintf`/`snprintf`/`syslog`/`err`
+  (it follows the stream / buffer / size / priority). So every
+  `fprintf(stderr, "literal", ...)` — the overwhelmingly common, *safe* case —
+  was flagged. A Phase-0 tool that cries wolf 828 times gets muted, and the
+  ~215 real candidates (97 TOCTOU, 94 integer-overflow, 24 unbounded-copy) drown
+  in the noise. That is the exact opposite of the tool's purpose: to *bootstrap
+  the flaw inventory*. This is itself a lsof-class failure — a control so noisy
+  it is ignored is a broken control (the retrospective's own "a skipped control
+  is a broken control").
+- **Kit change:** rewrote the format-string check to locate the *format-position*
+  argument per function (a small arg-list parser + per-function format index)
+  and flag only when that argument is a **non-literal**. Result on the same lsof
+  tree: format-string **828 → 8** (all 8 genuine non-literal formats), total
+  **1044 → 224**. Pinned with a self-test that asserts `fprintf(stderr, var, ...)`
+  flags but `fprintf(stderr, "literal", ...)` and `snprintf(buf, n, "%d", ...)`
+  do not.
+- **Section amended:** harnesses/c-flaw-scan/scan_c_flaws.py (`FORMAT_FUNCS`,
+  `_call_args`, `_scan_format_strings`); the general principle — *tune every
+  Phase-0 scanner for signal-to-noise against the real target before trusting
+  it* — belongs to PLAYBOOK · Phase 0.
