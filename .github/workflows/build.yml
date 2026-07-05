@@ -2,8 +2,14 @@ name: C/C++ CI
 
 on:
   push:
+    paths-ignore:
+      - 'porting-kit/**'
+      - 'winlsof/**'
   pull_request:
     branches: [ "master" ]
+    paths-ignore:
+      - 'porting-kit/**'
+      - 'winlsof/**'
 
 jobs:
   linux:
