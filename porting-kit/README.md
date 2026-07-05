@@ -23,6 +23,26 @@ vulnerability. Maximize safety controls.
 | The control ledger | [`SECURITY-CHECKLIST.md`](SECURITY-CHECKLIST.md) |
 | Standing rules for any kit repo | [`CLAUDE.md`](CLAUDE.md) |
 
+## Skills (invokable wrappers over the kit)
+
+`skills/` holds Claude Code skills that operationalize the kit — each a thin wrapper
+that reads the authoritative docs and runs the real harness commands (never a
+divergent restatement). `skills/check_skills.py` (run by `make check-kit`) fails if
+any skill references a kit path that no longer exists, so they can't drift.
+
+| Skill | Use it to |
+|---|---|
+| `porting-kit-kickoff` | start a new port: Phase 0 inventory + flaw scan + threat model, propose the order |
+| `porting-kit-cflaw-scan` | hunt C vulnerabilities before porting and triage them into the ledger |
+| `porting-kit-oracle` | establish the differential oracle + test-vector harness before translating |
+| `porting-kit-module` | port one module through the six safety gates |
+| `porting-kit-audit` | run the full safety-gate suite and report a gate-status table |
+| `porting-kit-retrospective` | close a port and patch the kit (the compounding loop) |
+
+**Install:** copy or symlink `porting-kit/skills/*` into the target repo's
+`.claude/skills/` so Claude Code discovers them (they assume the kit lives at
+repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
+
 ## Harnesses (all runnable; `make check-kit` smoke-tests them all)
 
 | Harness | Purpose | Gate |
