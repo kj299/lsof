@@ -1,0 +1,17 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "port"        # rename to your tool's binary name
+path = "src/main.rs"
+
+[dependencies]
+core = { path = "../core" }
+sys = { path = "../sys" }
+
+[lints]
+workspace = true

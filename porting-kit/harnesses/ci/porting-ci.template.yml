@@ -1,0 +1,103 @@
+# Safety-first CI for a C-to-Rust port. Copy to .github/workflows/ci.yml and tune.
+# The matrix is organized around SAFETY GATES, not OS coverage — the point of the
+# rewrite is safety, so the pipeline centers on proving it. Keep a small OS row if
+# your port is cross-platform; it is not the focus.
+#
+# Gates (each PLAYBOOK Phase 4 / cross-cutting control):
+#   build+test | clippy -D warnings | unsafe-audit (HARD FAIL) | miri |
+#   sanitizers | fuzz smoke | supply-chain (audit + deny) | differential
+name: porting-ci
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build + test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy, rustfmt }
+      - run: cargo fmt --all -- --check
+      # -D warnings escalates the workspace safety lints (see skeleton Cargo.toml
+      # [workspace.lints]) to hard errors. The explicit -D flags below are
+      # belt-and-suspenders so this gate holds even if a repo copies this CI
+      # without the [workspace.lints] table — every `unsafe fn` needs `# Safety`,
+      # every `unsafe {}` a doc (cross-checks the audit harness). (LESSONS #3)
+      - run: >
+          cargo clippy --all-targets --
+          -D warnings
+          -D clippy::missing_safety_doc
+          -D clippy::undocumented_unsafe_blocks
+      - run: cargo test --all
+
+  unsafe-audit:
+    name: unsafe-audit (hard fail on undocumented unsafe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      # Fails the build if ANY `unsafe {}` block lacks a // SAFETY: comment.
+      - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/
+
+  miri:
+    name: miri (UB in unsafe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: miri }
+      - run: cargo +nightly miri test
+
+  sanitizers:
+    name: sanitizers (asan + ubsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh asan .
+      - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh ubsan .
+
+  fuzz-smoke:
+    name: fuzz (60s smoke per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz
+      # Short smoke in CI; schedule a nightly deep run separately.
+      - run: |
+          for t in $(cargo fuzz list 2>/dev/null); do
+            cargo fuzz run "$t" -- -max_total_time=60
+          done
+
+  supply-chain:
+    name: supply-chain (audit + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit cargo-deny
+      - run: bash porting-kit/harnesses/supply-chain/run_supply_chain.sh .
+
+  differential:
+    name: differential vs C oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      # Build both, then diff over the input matrix. If the C reference can't run
+      # here, replace --oracle with the golden-replay wrapper (harnesses/golden).
+      - run: |
+          cargo build --release
+          # ./build-c-oracle.sh   # your C build
+          python3 porting-kit/harnesses/differential/diff_run.py \
+            --oracle ./c-oracle --rust ./target/release/<binary> \
+            --matrix porting-kit/harnesses/differential/input-matrix.example.toml \
+            --ledger DIVERGENCES.md

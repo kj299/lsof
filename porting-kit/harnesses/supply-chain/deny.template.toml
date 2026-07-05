@@ -1,0 +1,27 @@
+# cargo-deny policy for a safety-first C-to-Rust port. Copy to the workspace root
+# as deny.toml and tune. Philosophy: a rewrite for safety must not import
+# unsafety through the dependency tree — few deps, all vetted, no known CVEs.
+
+[advisories]
+# Fail on any RUSTSEC advisory. Unmaintained crates are a supply-chain risk too.
+yanked = "deny"
+ignore = []            # add "RUSTSEC-XXXX-YYYY" only with a written justification
+
+[bans]
+# Multiple versions of the same crate bloat the trusted surface; warn and prune.
+multiple-versions = "warn"
+wildcard-dependencies = "deny"
+# Keep the dependency count auditable. A safety port earns trust by being small.
+# deny = [{ name = "openssl-sys" }]   # example: prefer rustls over C OpenSSL
+
+[licenses]
+# Allow-list, not deny-list: you must positively approve every license present.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[sources]
+# Only crates.io by default. A git or unknown-registry dependency is an explicit,
+# reviewed decision — not something that slips in.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

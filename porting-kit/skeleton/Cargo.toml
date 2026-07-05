@@ -1,0 +1,35 @@
+# Architecture skeleton for a safety-first C-to-Rust port. Copy this directory to
+# your new project root and rename the crates. The layering (see
+# ../ARCHITECTURE-TEMPLATE.md) makes safety STRUCTURAL:
+#   core : #![forbid(unsafe_code)]  — all pure logic lives here, testable anywhere
+#   sys  : the ONLY crate allowed unsafe — FFI wrapped in audited safe fns + RAII
+#   cli  : thin — parse -> core -> render
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/sys", "crates/cli"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.74"
+
+[profile.release]
+# Overflow checks ON even in release: silent wraparound is exactly the class of
+# C bug a safety-first rewrite must not reproduce. Cheap insurance.
+overflow-checks = true
+lto = true
+
+# Workspace-wide safety lints (every crate opts in via `[lints] workspace = true`).
+# These are the compiler/clippy half of the unsafe-doc gate: the Python
+# audit harness covers `unsafe {}` blocks with no toolchain; clippy's
+# missing_safety_doc covers `unsafe fn` `# Safety` sections, which the harness
+# deliberately does not (LESSONS #3 — this delegation was previously unwired).
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"   # cross-checks the audit harness
+missing_safety_doc = "warn"           # every `pub unsafe fn` needs `# Safety`
+# Reject the C-idiom footguns a safety rewrite must not carry over:
+cast_possible_truncation = "warn"     # `x as u16` on a length/offset from input
+arithmetic_side_effects = "warn"      # unchecked +/-/* that can overflow
