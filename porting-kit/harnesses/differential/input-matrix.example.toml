@@ -1,0 +1,50 @@
+# Differential input matrix (example) - the documented set of inputs the C
+# oracle and the Rust rewrite are diffed over. Keep it in version control; it
+# IS the behavioral contract. Grow it every time a bug escapes (add the case
+# that would have caught it). A .json matrix with the same shape works too.
+#
+# Each [[case]] runs both binaries with `args` (and optional stdin/env/
+# timeout), normalizes both outputs (see normalize.py), and diffs. Cover the
+# axes that matter for a rewrite: empty/edge inputs, large inputs, every
+# output format, every flag, and - critically - the malformed/hostile inputs
+# that exercise the safety improvements over C. Control bytes use TOML \u.
+
+[[case]]
+name = "help"
+args = ["--help"]
+
+[[case]]
+name = "version"
+args = ["--version"]
+
+[[case]]
+name = "no-args-default-output"
+args = []
+
+[[case]]
+name = "json-format"
+args = ["--format", "json"]
+
+# Edge / adversarial inputs - where a C rewrite most earns its safety. These
+# should behave *better* than C (no crash, no UB), and may be ledgered as
+# intentional divergences in DIVERGENCES.md.
+[[case]]
+name = "empty-stdin"
+args = ["-"]
+stdin = ""
+
+[[case]]
+name = "oversized-token"
+args = ["--name"]
+stdin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+[[case]]
+name = "negative-number-arg"
+args = ["-n", "-1"]
+
+[[case]]
+name = "utf8-and-control-bytes"
+args = ["-"]
+# ESC + ANSI color escape, then multibyte UTF-8; control byte via TOML escape.
+stdin = "safe \u001B[31m manana"
+timeout = 10

@@ -348,3 +348,39 @@ The reusable, evidence-backed lessons:
    ones.
 8. **Fix-forward, then immediately pin the regression test** — practiced but not
    enforced; several fidelity misses shipped before their test existed.
+
+---
+
+## 9. Addendum — scope direction from the author (2026-07-05)
+
+After the retrospective was drafted, the author redirected the *kit's* focus (not
+this historical record) on PR #5:
+
+> "Ignore the need to reconstitute code on another operating system. Focus the
+> harnesses for this porting mission to best practices in rewriting from C to
+> Rust. Recognize that the existing operating system running code may have other
+> flaws. Do as much as possible to add controls to adhere to safety and
+> security."
+
+Consequences for the Porting Kit (this doc stays as-is; the playbook/harnesses
+adopt the new emphasis):
+
+- **Cross-OS reconstitution is de-emphasized.** §0's "reimplement-behind-a-seam
+  vs translate-via-FFI" classification and §3's platform-abstraction lessons
+  remain *true history*, but the kit does not center OS portability. The seam is
+  kept only as an isolation boundary for unsafe/FFI, not as a multi-OS mechanism.
+- **The C source is not ground truth.** "Existing code may have other flaws"
+  elevates a new first-class step: **scan the C for vulnerability classes before
+  porting** (so a CVE isn't faithfully re-implemented), and treat every
+  oracle divergence as a triage question — *bug in Rust* vs *intentional fix of a
+  C defect* — recorded in an **intentional-divergence ledger**, not silently
+  matched.
+- **Safety/security controls are maximized.** The kit's harnesses and CI center
+  on: `forbid(unsafe_code)` on pure crates, a **hard-fail** unsafe-audit gate
+  (every `unsafe` needs a `// SAFETY:`), Miri, ASan/UBSan/TSan over the FFI
+  surface, `cargo-fuzz`, and supply-chain gates (`cargo-deny` / `cargo-audit`).
+  This resolves the §4 "144-vs-91" gap by construction: the gate fails CI rather
+  than accruing undocumented `unsafe`.
+
+The rest of this document is unchanged: it is the evidence, and the evidence is
+what the kit is built to not repeat.

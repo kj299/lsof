@@ -1,0 +1,20 @@
+# Architecture skeleton for a safety-first C-to-Rust port. Copy this directory to
+# your new project root and rename the crates. The layering (see
+# ../ARCHITECTURE-TEMPLATE.md) makes safety STRUCTURAL:
+#   core : #![forbid(unsafe_code)]  — all pure logic lives here, testable anywhere
+#   sys  : the ONLY crate allowed unsafe — FFI wrapped in audited safe fns + RAII
+#   cli  : thin — parse -> core -> render
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/sys", "crates/cli"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.74"
+
+[profile.release]
+# Overflow checks ON even in release: silent wraparound is exactly the class of
+# C bug a safety-first rewrite must not reproduce. Cheap insurance.
+overflow-checks = true
+lto = true
