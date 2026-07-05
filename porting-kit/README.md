@@ -41,6 +41,14 @@ vulnerability. Maximize safety controls.
 make check-kit      # smoke-test every harness (python3 + bash only, no toolchain)
 ```
 
+## Related
+
+- [`C-to-Rust-Playbook-Best-of-Both.md`](C-to-Rust-Playbook-Best-of-Both.md) — a
+  standalone synthesis that merges this kit's executable layer with the
+  TRACTOR-hardened (DARPA/MIT-LL, Feb 2026) four-step translation playbook.
+  Written as portable feedback; useful when the port is a *translation*
+  (transpile / LLM / FFI-coexistence) rather than a reimplementation.
+
 ## The compounding loop
 
 Kick off → per-module loop (port → differential → fuzz → sanitize → unsafe-audit)
