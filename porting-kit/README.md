@@ -16,6 +16,7 @@ vulnerability. Maximize safety controls.
 | You want to… | Read / run |
 |---|---|
 | Understand the whole process | [`PLAYBOOK.md`](PLAYBOOK.md) (≤400 lines) |
+| Run a port well (tokens, efficiency, security, backlog) | [`OPERATING-GUIDE.md`](OPERATING-GUIDE.md) |
 | Kick off a new port | paste [`PROMPTS/00-new-port-kickoff.md`](PROMPTS/00-new-port-kickoff.md) |
 | Port one module | paste [`PROMPTS/10-module-port.md`](PROMPTS/10-module-port.md) |
 | Close a port & improve the kit | paste [`PROMPTS/90-retrospective.md`](PROMPTS/90-retrospective.md) |
