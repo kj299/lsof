@@ -9,9 +9,15 @@ to safety and security" — this is that list.
 - [ ] **No `unsafe` in `core`.** `#![forbid(unsafe_code)]` present → compile-time.
 - [ ] **Every `unsafe` block justified.** `unsafe-audit/audit_unsafe.py crates/`
       reports 0 undocumented. Each `// SAFETY:` states the invariant that makes
-      the block sound, not just "it's fine."
-- [ ] **`#![deny(unsafe_op_in_unsafe_fn)]`** in the `sys` crate, so every unsafe
-      op inside an unsafe fn is individually blocked and commented.
+      the block sound, not just "it's fine." (Toolchain-free hard gate.)
+- [ ] **Every `unsafe fn` justified.** `clippy::missing_safety_doc` is enabled
+      (via `[workspace.lints]`) and `-D` in CI, so every `pub unsafe fn` carries a
+      `/// # Safety` section. The audit harness deliberately doesn't cover fns —
+      clippy does; both must be wired (LESSONS #3: they weren't, so 11 winlsof
+      `unsafe fn` went unchecked). `clippy::undocumented_unsafe_blocks` also runs
+      as a cross-check of the harness.
+- [ ] **`unsafe_op_in_unsafe_fn = "deny"`** (workspace lint), so every unsafe op
+      inside an unsafe fn is individually blocked and commented.
 - [ ] **No panic on untrusted input.** A `cargo-fuzz` target exists for every
       parse/decode entry point and runs clean (60s smoke min; nightly deep).
       No `unwrap()`/`expect()`/`[i]` indexing on attacker-controlled data.

@@ -12,7 +12,12 @@ and embeddable in the progress tracker via --json.
 Scope: `unsafe { ... }` blocks and `unsafe impl` items. `unsafe fn`/`unsafe
 trait`/`unsafe extern` *declarations* are documented via a `/// # Safety` doc
 section (clippy's `missing_safety_doc`) and are intentionally out of scope here —
-delegate those to clippy.
+delegate those to clippy. That delegation is only real if clippy is wired to
+enforce it: the CI template (`ci/porting-ci.template.yml`) and the skeleton
+`[workspace.lints]` now enable `clippy::missing_safety_doc` +
+`clippy::undocumented_unsafe_blocks` (LESSONS #3). This harness is the
+*toolchain-free* half — it runs anywhere (no nightly/clippy) and is the hard
+gate for blocks; clippy is the belt-and-suspenders that also covers `unsafe fn`.
 
 Usage:
   audit_unsafe.py PATH [PATH ...] [--window N] [--warn] [--json] [--quiet]

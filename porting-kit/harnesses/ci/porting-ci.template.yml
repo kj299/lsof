@@ -22,7 +22,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy, rustfmt }
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
+      # -D warnings escalates the workspace safety lints (see skeleton Cargo.toml
+      # [workspace.lints]) to hard errors. The explicit -D flags below are
+      # belt-and-suspenders so this gate holds even if a repo copies this CI
+      # without the [workspace.lints] table — every `unsafe fn` needs `# Safety`,
+      # every `unsafe {}` a doc (cross-checks the audit harness). (LESSONS #3)
+      - run: >
+          cargo clippy --all-targets --
+          -D warnings
+          -D clippy::missing_safety_doc
+          -D clippy::undocumented_unsafe_blocks
       - run: cargo test --all
 
   unsafe-audit:

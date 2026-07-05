@@ -10,3 +10,6 @@ rust-version.workspace = true
 # harness runs against this crate in CI and HARD-FAILS on any undocumented block.
 [dependencies]
 core = { path = "../core" }
+
+[lints]
+workspace = true

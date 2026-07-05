@@ -8,3 +8,6 @@ rust-version.workspace = true
 # No dependencies by default. Every dependency added here must clear the
 # supply-chain gate (harnesses/supply-chain). Keep the trusted surface small.
 [dependencies]
+
+[lints]
+workspace = true

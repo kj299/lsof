@@ -79,7 +79,7 @@ Format per entry:
 ## 002. A noisy Phase-0 scanner is worse than none — it gets ignored
 
 - **Date:** 2026-07-05
-- **Codebase:** winlsof — dry-run pass 2 (kit run against lsof's *actual* C tree)
+- **Codebase:** winlsof — dry-run pass 1 (kit run against lsof's *actual* C tree)
 - **What happened:** Running `c-flaw-scan/scan_c_flaws.py` against real lsof
   (`lib/ src/`) returned **1044 hits, of which 828 were false "format-string"
   positives.** The check flagged arg 0 of every printf-family call, but the
@@ -103,3 +103,31 @@ Format per entry:
   `_call_args`, `_scan_format_strings`); the general principle — *tune every
   Phase-0 scanner for signal-to-noise against the real target before trusting
   it* — belongs to PLAYBOOK · Phase 0.
+
+---
+
+## 003. A "delegated" control that nothing enforces is not a control
+
+- **Date:** 2026-07-05
+- **Codebase:** winlsof — dry-run pass 2 (kit run against lsof/winlsof's real code)
+- **What happened:** The unsafe-audit harness documents that it covers `unsafe {}`
+  blocks + `unsafe impl`, and *delegates* `unsafe fn` `# Safety`-doc coverage to
+  "clippy's `missing_safety_doc`." But grepping the shipped winlsof backend found
+  **11 `unsafe fn` / `unsafe extern fn` definitions** (ETW callbacks and TDH
+  property parsers — real FFI-facing unsafe surface), and **neither the CI
+  template nor the skeleton enabled that clippy lint** (it is allow-by-default).
+  So the delegation was fiction: no tool, anywhere, checked that any `unsafe fn`
+  had a safety contract. A control you point at another tool that you never turn
+  on is worse than an acknowledged gap — it reads as covered.
+- **Kit change:** wired the clippy half for real. `[workspace.lints]` in the
+  skeleton now sets `clippy::missing_safety_doc` + `undocumented_unsafe_blocks`
+  (plus `cast_possible_truncation` and `arithmetic_side_effects` — the C-idiom
+  footguns), each crate opts in via `[lints] workspace = true`, and the CI
+  clippy step passes `-D clippy::missing_safety_doc -D
+  clippy::undocumented_unsafe_blocks` as belt-and-suspenders for repos that copy
+  the CI without the lints table. Documented the two-layer split (harness =
+  toolchain-free block gate; clippy = `unsafe fn` docs + block cross-check) in
+  the harness docstring and SECURITY-CHECKLIST. Skeleton still builds offline.
+- **Section amended:** skeleton/Cargo.toml (`[workspace.lints]`) + each crate's
+  `[lints]`; harnesses/ci/porting-ci.template.yml (clippy step);
+  SECURITY-CHECKLIST · per-module; audit_unsafe.py docstring.

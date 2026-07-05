@@ -10,7 +10,6 @@
 //!
 //! The example below is self-contained (no external -sys crate) so the skeleton
 //! builds offline; replace the raw-pointer round-trip with your real FFI.
-#![deny(unsafe_op_in_unsafe_fn)]
 
 /// RAII owner of a heap resource obtained through a raw pointer — the shape of an
 /// `OwnedHandle` / `OwnedFd` / `PrivilegeGuard`. The invariant: `ptr` is always
