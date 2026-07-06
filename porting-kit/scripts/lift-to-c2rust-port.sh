@@ -18,25 +18,53 @@
 # USAGE
 #   sh porting-kit/scripts/lift-to-c2rust-port.sh        # run from your lsof clone
 #   OWNER=me REPO=my-kit sh ...                          # different destination
-#   BASE=HEAD sh ...                                     # lift local HEAD instead of origin/master
+#   BASE=<ref> sh ...                                    # lift a specific ref
+#                                                        # (default: origin/master,
+#                                                        #  else origin/main, else HEAD)
+#   FORCE=1 sh ...                                       # overwrite a non-empty main
 set -eu
+
+# Refuse to be sourced (`. ./script`) — that would apply set -eu to YOUR shell
+# and exit it on the first error. Run it instead:  sh <path-to-script>
+case "${0##*/}" in
+  sh|-sh|ash|-ash|dash|-dash|bash|-bash|ksh|-ksh|zsh|-zsh)
+    echo "ERROR: run me, don't source me:  sh porting-kit/scripts/lift-to-c2rust-port.sh" >&2
+    return 1 2>/dev/null || exit 1 ;;
+esac
 
 OWNER="${OWNER:-kj299}"
 REPO="${REPO:-c2rust-port}"
 PREFIX="${PREFIX:-porting-kit}"
 DEST="${DEST:-git@github.com:$OWNER/$REPO.git}"      # SSH by default; override for HTTPS
-BASE="${BASE:-origin/master}"
+BASE="${BASE:-}"                                     # empty = auto-pick below
 
 command -v git >/dev/null 2>&1 || { echo "ERROR: git not found." >&2; exit 1; }
+
+# Absolute path to this script, captured BEFORE any cd, so re-run hints are
+# paste-able no matter where we end up.
+case "$0" in /*) SELF=$0 ;; *) SELF=$PWD/$0 ;; esac
 
 # Must run inside a git checkout.
 TOP=$(git rev-parse --show-toplevel 2>/dev/null) \
   || { echo "ERROR: not inside a git checkout. cd into your kj299/lsof clone and re-run." >&2; exit 1; }
 cd "$TOP"
 
-# Refresh and resolve the base ref (fall back to local HEAD if origin/master is absent).
-git fetch origin master --quiet 2>/dev/null || true
-git rev-parse -q --verify "$BASE" >/dev/null 2>&1 || BASE=HEAD
+# Resolve the base ref. An explicitly requested BASE must exist — never
+# silently substitute something else for what the user asked for. With no BASE
+# given, prefer origin/master, then origin/main, then HEAD — and say so when
+# not using the primary default, so a stale/odd clone can't lift the wrong
+# tree unnoticed.
+git fetch origin master --quiet 2>/dev/null || git fetch origin main --quiet 2>/dev/null || true
+if [ -n "$BASE" ]; then
+  git rev-parse -q --verify "$BASE" >/dev/null 2>&1 \
+    || { echo "ERROR: requested BASE '$BASE' does not resolve in this clone." >&2; exit 1; }
+else
+  for cand in origin/master origin/main HEAD; do
+    if git rev-parse -q --verify "$cand" >/dev/null 2>&1; then BASE=$cand; break; fi
+  done
+  [ -n "$BASE" ] || { echo "ERROR: no usable base ref (no origin/master, origin/main, or HEAD)." >&2; exit 1; }
+  [ "$BASE" = origin/master ] || echo "note: origin/master not found — lifting from $BASE instead."
+fi
 
 # Verify PREFIX/ exists AT THE BASE WE WILL LIFT FROM — not just in the working
 # tree, which can differ from $BASE (wrong branch checked out, etc.).
@@ -53,7 +81,7 @@ GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
   exit 1
 }
 
-echo "Lifting $PREFIX/ @ $BASE  ->  $DEST  (branch: main, with history)"
+echo "Lifting $PREFIX/ @ $BASE  ->  $DEST  (branch: main)"
 
 # Default is a NON-force push (safe into the empty repo you just created). If the
 # destination's main already has commits the push is rejected — re-run with
@@ -63,21 +91,35 @@ FORCE_FLAG=""
 push_main() { # push_main <local-ref-to-put-on-main>
   git push $FORCE_FLAG "$DEST" "$1:refs/heads/main" && return 0
   echo "ERROR: push to $DEST 'main' was rejected — it already has commits." >&2
-  echo "       Re-run with FORCE=1 to overwrite it:  FORCE=1 sh $0" >&2
+  echo "       Re-run with FORCE=1 to overwrite it:  FORCE=1 sh $SELF" >&2
   exit 1
 }
 
-if SPLIT=$(git subtree split --prefix="$PREFIX" "$BASE" 2>/dev/null) && [ -n "$SPLIT" ]; then
+# Prefer git-subtree (keeps history). Keep its stderr so a real subtree ERROR is
+# shown, and only fall back to the snapshot when subtree is genuinely absent —
+# don't conflate "not installed" with "failed".
+split_err=$(mktemp)
+if SPLIT=$(git subtree split --prefix="$PREFIX" "$BASE" 2>"$split_err") && [ -n "$SPLIT" ]; then
+  rm -f "$split_err"
+  echo "  full history preserved: $(git rev-list --count "$SPLIT") commits"
   push_main "$SPLIT"
-else
-  # git-subtree not installed: push a no-history snapshot instead.
-  echo "  (git subtree unavailable — pushing a snapshot without history)"
+elif grep -q "not a git command" "$split_err" 2>/dev/null; then
+  rm -f "$split_err"
+  echo "  (git subtree not installed — pushing a snapshot WITHOUT history)"
   snap=$(mktemp -d)
-  git archive "$BASE" "$PREFIX" | ( cd "$snap" && tar -x )
+  # No pipeline here: `git archive | tar` would let an archive failure vanish
+  # behind tar's exit status; -o + set -e aborts cleanly instead.
+  git archive -o "$snap/_kit.tar" "$BASE" "$PREFIX"
+  ( cd "$snap" && tar -xf _kit.tar && rm -f _kit.tar )
   cd "$snap/$PREFIX"
   git init -q && git add -A
   git -c user.email=lift@localhost -c user.name=lift commit -q -m "Import $PREFIX"
   push_main HEAD
+else
+  echo "ERROR: git subtree split failed:" >&2
+  cat "$split_err" >&2
+  rm -f "$split_err"
+  exit 1
 fi
 
 echo "Done -> https://github.com/$OWNER/$REPO"
