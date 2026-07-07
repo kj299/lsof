@@ -41,6 +41,17 @@ BASE="${BASE:-}"                                     # empty = auto-pick below
 
 command -v git >/dev/null 2>&1 || { echo "ERROR: git not found." >&2; exit 1; }
 
+# Containers / rootless sandboxes often report temp dirs as owned by a different
+# uid, which trips git's "dubious ownership" guard on the clones and snapshot
+# repos this script creates under /tmp. Neutralize it FOR THIS RUN ONLY, without
+# editing ~/.gitconfig: copy the user's global config into a scratch file and
+# append safe.directory=*. (safe.directory is honored from system/global config,
+# not from -c, so a scratch GIT_CONFIG_GLOBAL is the right lever.)
+_gk=$(mktemp)
+cat "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" "$HOME/.gitconfig" 2>/dev/null >>"$_gk" || true
+printf '\n[safe]\n\tdirectory = *\n' >>"$_gk"
+export GIT_CONFIG_GLOBAL="$_gk"
+
 # Absolute path to this script, captured BEFORE any cd, so re-run hints are
 # paste-able no matter where we end up.
 case "$0" in /*) SELF=$0 ;; *) SELF=$PWD/$0 ;; esac
@@ -133,6 +144,7 @@ if SPLIT=$(git subtree split --prefix="$PREFIX" "$BASE" 2>"$split_err") && [ -n 
 elif grep -q "not a git command" "$split_err" 2>/dev/null; then
   rm -f "$split_err"
   echo "  (git subtree not installed — pushing a snapshot WITHOUT history)"
+  echo "  tip: install git-subtree to keep full history (it ships with git's contrib)"
   snap=$(mktemp -d)
   # No pipeline here: `git archive | tar` would let an archive failure vanish
   # behind tar's exit status; -o + set -e aborts cleanly instead.
