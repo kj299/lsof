@@ -36,6 +36,7 @@ OWNER="${OWNER:-kj299}"
 REPO="${REPO:-c2rust-port}"
 PREFIX="${PREFIX:-porting-kit}"
 DEST="${DEST:-git@github.com:$OWNER/$REPO.git}"      # SSH by default; override for HTTPS
+SRC_REMOTE="${SRC_REMOTE:-git@github.com:kj299/lsof.git}"  # cloned only if you're not already in a checkout
 BASE="${BASE:-}"                                     # empty = auto-pick below
 
 command -v git >/dev/null 2>&1 || { echo "ERROR: git not found." >&2; exit 1; }
@@ -44,10 +45,17 @@ command -v git >/dev/null 2>&1 || { echo "ERROR: git not found." >&2; exit 1; }
 # paste-able no matter where we end up.
 case "$0" in /*) SELF=$0 ;; *) SELF=$PWD/$0 ;; esac
 
-# Must run inside a git checkout.
-TOP=$(git rev-parse --show-toplevel 2>/dev/null) \
-  || { echo "ERROR: not inside a git checkout. cd into your kj299/lsof clone and re-run." >&2; exit 1; }
-cd "$TOP"
+# Run from a git checkout if we're in one; otherwise self-bootstrap by cloning
+# the source repo (needs history for the subtree split, so a full clone).
+if TOP=$(git rev-parse --show-toplevel 2>/dev/null); then
+  cd "$TOP"
+else
+  echo "Not inside a git checkout — cloning $SRC_REMOTE to lift from (one-time)..."
+  TOP="$(mktemp -d)/src"
+  git clone --quiet "$SRC_REMOTE" "$TOP" \
+    || { echo "ERROR: clone of $SRC_REMOTE failed. Is SSH set up?  ssh -T git@github.com" >&2; exit 1; }
+  cd "$TOP"
+fi
 
 # Resolve the base ref. An explicitly requested BASE must exist — never
 # silently substitute something else for what the user asked for. With no BASE
@@ -71,15 +79,34 @@ fi
 git cat-file -e "$BASE:$PREFIX" 2>/dev/null \
   || { echo "ERROR: '$PREFIX/' not found at $BASE. Run from the lsof clone, or set BASE to a ref that has it." >&2; exit 1; }
 
-# Reachability check without hanging on an SSH prompt: BatchMode fails fast
-# instead of asking for a password when keys aren't set up.
-GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
-  git ls-remote "$DEST" >/dev/null 2>&1 || {
-  echo "ERROR: can't reach $DEST." >&2
-  echo "  - create the empty repo first:  https://github.com/new  (name: $REPO)" >&2
-  echo "  - check SSH auth:               ssh -T git@github.com" >&2
+# Reachability check. Capture git's own message so we can tell the two very
+# different causes apart instead of listing both every time: BatchMode fails
+# fast (no password prompt) when keys aren't set up.
+if ls_err=$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" git ls-remote "$DEST" 2>&1); then
+  :   # reachable
+else
+  case "$ls_err" in
+    *"Repository not found"*|*"does not exist"*|*"not found"*)
+      echo "ERROR: the repo $OWNER/$REPO doesn't exist yet — SSH auth is fine, this is only that." >&2
+      echo "  Create it EMPTY once, then re-run this script:" >&2
+      echo "    https://github.com/new   ->   name: $REPO   ->   Create repository   (no README)" >&2
+      ;;
+    *"Permission denied"*|*"publickey"*|*"authenticate"*)
+      echo "ERROR: SSH could not authenticate to GitHub for $DEST." >&2
+      echo "  Verify your key:  ssh -T git@github.com   (should print: Hi $OWNER!)" >&2
+      printf '  git said: %s\n' "$ls_err" >&2
+      ;;
+    *"Could not resolve"*|*"Connection"*|*"timed out"*|*"Network"*)
+      echo "ERROR: couldn't reach github.com (network/DNS) for $DEST." >&2
+      printf '  git said: %s\n' "$ls_err" >&2
+      ;;
+    *)
+      echo "ERROR: can't reach $DEST:" >&2
+      printf '  %s\n' "$ls_err" >&2
+      ;;
+  esac
   exit 1
-}
+fi
 
 echo "Lifting $PREFIX/ @ $BASE  ->  $DEST  (branch: main)"
 
