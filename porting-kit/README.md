@@ -1,5 +1,12 @@
 # Porting Kit — rewrite C in Rust, safely, and get faster each time
 
+> **This kit has moved.** Active development happens in
+> [`kj299/c2rust-port`](https://github.com/kj299/c2rust-port), lifted from this
+> directory at master `c703f2b` (2026-07-18). This copy stays as the historical
+> source alongside the winlsof port it was distilled from and is no longer
+> updated — take fixes and new work to `c2rust-port`. The v1.0 backlog that was
+> staged here as issues #8–#19 lives there too.
+
 A reusable set of playbooks, working harnesses, an architecture skeleton, and
 session prompts for **safety-first C→Rust rewrites**. Distilled from a real port
 (see [`RETROSPECTIVE-lsof.md`](RETROSPECTIVE-lsof.md)) and built to **compound**:
