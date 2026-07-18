@@ -560,8 +560,20 @@ try {
     # ===================== Sysinternals handle.exe cross-check =====================
     Test-Case 'handle-exe-cross-check' 'oracle/handle' {
         if (-not $HandleExePath) { Skip 'handle64.exe unavailable (pass -HandleExe or allow the download)' }
-        $h = & $HandleExePath -accepteula -p $self 2>$null | Out-String
-        Assert-ContainsCI $h "winlsof_file_$self" 'handle64.exe should also see our file'
+        # Keep the oracle's raw output (version banner, errors, rows) on disk:
+        # a cross-check verdict is undiagnosable without what handle64 printed.
+        $h = & $HandleExePath -accepteula -p $self 2>&1 | Out-String
+        Set-Content -LiteralPath (Join-Path $CasesDir 'handle64-cross-check.out.txt') -Value $h
+        # Unelevated, handle64 can resolve no file names at all: reading the
+        # name of another process's synchronous file handle is exactly what it
+        # must do defensively without elevation, and on some builds/AV setups
+        # it comes back empty. An oracle that listed no File rows is blind,
+        # not disagreeing -- SKIP with the output saved. If it did list File
+        # rows and ours is missing, that stays a genuine FAIL.
+        if (-not $IsAdmin -and ($h -notmatch '(?im)^\s*[0-9A-F]+:\s+File\b')) {
+            Skip 'handle64.exe resolved no File handles unelevated (blind oracle; see cases\handle64-cross-check.out.txt)'
+        }
+        Assert-ContainsCI $h "winlsof_file_$self" 'handle64.exe should also see our file (see cases\handle64-cross-check.out.txt)'
         $r = Invoke-Lsof @('-p', "$self") 'p-self-handlecmp'
         Assert-ContainsCI $r.Out "winlsof_file_$self"
     }

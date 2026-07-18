@@ -61,10 +61,11 @@ independent code and per-OS "dialect" backends:
 
 All planned phases (0–4) are implemented and **validated on real Windows 11
 hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
-~37 cases covering every option, output format, and code path — 36 pass elevated
-and 36 pass unelevated (the one skip in each mode is mode-specific and passes in
-the other), with output differentially cross-checked against Sysinternals
-`handle64.exe`. Zero hangs, zero failures. Remaining work is ongoing parity
+55 cases covering every option, output format, and code path, differentially
+cross-checked against native oracles and Sysinternals `handle64.exe`. The few
+skips in any single pass are mode-specific (admin-only features unelevated, and
+vice versa) — running an unelevated **and** an elevated pass exercises
+everything. Zero hangs. Remaining work is ongoing parity
 refinement and the research-grade gaps tracked in
 [`docs/research-roadmap.md`](docs/research-roadmap.md).
 
