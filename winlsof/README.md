@@ -65,8 +65,11 @@ hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
 cross-checked against native oracles and Sysinternals `handle64.exe`. The few
 skips in any single pass are mode-specific (admin-only features unelevated, and
 vice versa) — running an unelevated **and** an elevated pass exercises
-everything. Zero hangs. Remaining work is ongoing parity
-refinement and the research-grade gaps tracked in
+everything. Latest field validation: the released v0.2.0 `lsof.exe`, as
+downloaded, on a second Windows 11 machine (build 26200) — 51 PASS unelevated
+and 53 PASS elevated, zero failures, zero hangs, all 55 cases green in at
+least one mode. Remaining work is ongoing parity refinement and the
+research-grade gaps tracked in
 [`docs/research-roadmap.md`](docs/research-roadmap.md).
 
 ## Privilege model (least privilege)
