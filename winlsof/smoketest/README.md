@@ -103,8 +103,9 @@ mapped files, WOW64 cwd, modules, Restart Manager, every format, handle64 oracle
 `Test-Lsof.ps1` for a 10-second "does this binary work" smoke.
 
 > SKIPs in a single pass are by design, not gaps: the `-T`, `-U`, and
-> system-process cases need Administrator (they run in pass 2), while
-> `privilege-hint-unelevated` only applies to a **non-elevated** run (pass 1).
+> system-process cases need Administrator (they run in pass 2), while the
+> privilege-hint cases (`privilege-hint-unelevated`, `suppress-warnings-dash-w`)
+> only apply to a **non-elevated** run (pass 1).
 > `handle-exe-cross-check` SKIPs when `handle64.exe` can't be fetched/found, or
 > — unelevated — when handle64 resolves no File handle names at all (a blind
 > oracle can't disagree; its raw output is saved to
