@@ -1,8 +1,75 @@
 # Code-signing winlsof release binaries — tracking doc
 
-> Lives as a doc rather than a GitHub Issue because this repository has Issues
-> disabled. If Issues are enabled later (**Settings → General → Features →
-> Issues**), file this content as one and link back here.
+> Tracked as [issue #3](https://github.com/kj299/lsof/issues/3). This doc holds
+> the detail; the issue holds the state.
+
+## Decision (2026-07-19): Azure Artifact Signing
+
+**Chosen: Azure Artifact Signing** (the service formerly named Microsoft
+Trusted Signing), Basic tier ~$9.99/mo. Why the field narrowed to it:
+
+- **EV eliminated.** Microsoft removed EV's instant SmartScreen reputation in
+  March 2024 — EV now builds reputation exactly like OV, so its price premium
+  buys nothing for this use case.
+- **OV eliminated.** For a US individual it is dominated by Artifact Signing:
+  more expensive, hardware-token key custody, no first-party CI integration.
+  Only relevant as a fallback outside the USA/Canada.
+- **SignPath Foundation (free, OSS) blocked.** Requires an OSI-approved
+  license; winlsof ships as `LicenseRef-lsof` (the custom lsof/Purdue license,
+  permissive but not OSI). Relicensing `winlsof/` to MIT/Apache-2.0 would
+  unblock it — deliberately not taken on for now.
+- **Artifact Signing fits.** Individual developers in the USA/Canada are
+  eligible (reconfirmed after the April 2025 org-only restriction was lifted);
+  identity-tied reputation survives its daily cert rotation; first-party
+  GitHub Actions integration (`azure/artifact-signing-action@v2`). Note the
+  publisher name on the binary is the verified **legal name** (no custom CN),
+  and *no* option grants instant SmartScreen trust anymore — reputation
+  accrues over weeks of clean downloads regardless.
+
+### What is already wired (this repo)
+
+`.github/workflows/winlsof-release.yml` signs `lsof.exe` before the SHA-256 is
+computed and verifies the signature, **gated on repository secrets** — until
+they exist the steps no-op and releases ship unsigned as before. Required
+secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `AZSIGN_TENANT_ID` | Entra tenant ID |
+| `AZSIGN_CLIENT_ID` | App-registration (service principal) client ID |
+| `AZSIGN_CLIENT_SECRET` | Its client secret |
+| `AZSIGN_ENDPOINT` | Account region endpoint, e.g. `https://eus.codesigning.azure.net/` |
+| `AZSIGN_ACCOUNT` | Artifact Signing account name |
+| `AZSIGN_PROFILE` | Certificate profile name |
+
+### Azure setup runbook (manual, one-time, ~few business days for KYC)
+
+1. Azure subscription — **pay-as-you-go, not trial** (trial subscriptions
+   stall identity validation), billing account type **Individual**, legal
+   name/address exactly as they should appear on the certificate.
+2. Register the `Microsoft.CodeSigning` resource provider; create an
+   **Artifact Signing account** (Basic) in a supported region; note the
+   region endpoint.
+3. Assign yourself **Artifact Signing Identity Verifier**; create a **New
+   identity validation → Individual** (portal only) and complete KYC.
+4. Create a **certificate profile** (Public Trust) bound to the validated
+   identity.
+5. Create an Entra **app registration** + client secret; grant it **Trusted
+   Signing Certificate Profile Signer** on the account. (Upgrade path:
+   swap the client secret for OIDC federated credentials later.)
+6. Add the six `AZSIGN_*` repository secrets — the next tag push signs.
+
+### After the first signed release
+
+- Submit the signed `lsof.exe` to Microsoft's
+  [false-positive portal](https://www.microsoft.com/wdsi/filesubmission) to
+  clear the Defender hacktool/PUA heuristic (signing makes this appealable).
+- Verify on a clean Win10/11 box (SmartScreen tone, Defender behavior).
+- Update the README "Antivirus / Defender note" and the release-notes
+  template in `winlsof-release.yml` (drop "the binary is unsigned"; keep
+  SHA-256 verification).
+- Expect SmartScreen warnings to soften, not vanish, until download
+  reputation accrues.
 
 ## Why
 
@@ -29,7 +96,7 @@ unacceptable long-term.
 Establish reputation for `lsof.exe` so downloads run without warnings (or
 with a one-time, gentler warning), without compromising the release pipeline.
 
-## Options to evaluate
+## Options originally evaluated (superseded by the decision above)
 
 | Option | Cost | Effort | Notes |
 |---|---|---|---|
