@@ -26,12 +26,43 @@ jobs:
   release:
     name: build + publish (windows)
     runs-on: windows-latest
+    # Signing (issue #3) turns on automatically once the AZSIGN_* repository
+    # secrets exist; until then the signing steps no-op and releases ship
+    # unsigned exactly as before. Setup runbook: winlsof/docs/code-signing.md.
+    env:
+      AZSIGN_ENABLED: ${{ secrets.AZSIGN_TENANT_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary (native MSVC)
         run: cargo build --release --bin lsof
+
+      # Must run BEFORE the SHA-256 is computed in "Publish release" — the
+      # Authenticode signature changes the binary's bytes.
+      - name: Sign lsof.exe (Azure Artifact Signing)
+        if: env.AZSIGN_ENABLED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZSIGN_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZSIGN_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZSIGN_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZSIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZSIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZSIGN_PROFILE }}
+          files-folder: ${{ github.workspace }}/winlsof/target/release
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify signature
+        if: env.AZSIGN_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature target\release\lsof.exe
+          $sig | Format-List Status, StatusMessage, SignerCertificate
+          if ($sig.Status -ne 'Valid') { throw "lsof.exe signature status: $($sig.Status)" }
 
       - name: Resolve tag
         id: tag
