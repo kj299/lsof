@@ -196,6 +196,30 @@ class CanonIPv6(unittest.TestCase):
         self.assertEqual(od.canon_addr("0.0.0.0"), "*")
 
 
+class OracleShape(unittest.TestCase):
+    """Guards the real CI bug: PowerShell ConvertTo-Json double-wrapped [[...]]."""
+
+    def test_double_wrapped_array_is_unwrapped(self):
+        rows_single = json.loads(ORACLE)
+        double = json.dumps([rows_single])  # [[ {...}, {...}, {...} ]]
+        parsed = od.parse_oracle_json(double)
+        self.assertEqual(sorted(parsed), sorted(od.parse_oracle_json(ORACLE)))
+
+    def test_non_dict_row_raises_valueerror(self):
+        # Malformed -> ValueError so main() classifies it as infra, not exit 1.
+        with self.assertRaises(ValueError):
+            od.parse_oracle_json(json.dumps(["not-an-object"]))
+
+    def test_malformed_oracle_via_main_is_infra(self):
+        p = os.path.join(tempfile.mkdtemp(), "o.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps([["nested"]]))  # unwraps to ["nested"] -> non-dict
+        w = os.path.join(tempfile.mkdtemp(), "w.json")
+        with open(w, "w", encoding="utf-8") as fh:
+            fh.write(WINLSOF_JSON)
+        self.assertEqual(od.main(["--winlsof-json", w, "--oracle", p]), od.EXIT_INFRA)
+
+
 class MainCli(unittest.TestCase):
     """Exit-code contract: 0 match, 1 divergence, 2 infra (empty/malformed)."""
 

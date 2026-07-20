@@ -229,8 +229,19 @@ def parse_oracle_json(text):
     A JSON array of objects: proto, local_addr, local_port, remote_addr,
     remote_port, state, pid (remote_*/state null for UDP).
     """
+    data = json.loads(text)
+    # Defensive: PowerShell's ConvertTo-Json can double-wrap an array into
+    # [[...]]; unwrap a lone nested list rather than crash on it.
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], list):
+        data = data[0]
+    if not isinstance(data, list):
+        raise ValueError("oracle JSON must be a list of rows, got {0}".format(type(data).__name__))
     rows = []
-    for o in json.loads(text):
+    for o in data:
+        if not isinstance(o, dict):
+            # Malformed capture -> raise so main() classifies it as infra
+            # (exit 2), never as a socket-set divergence.
+            raise ValueError("oracle row is not an object: {0!r}".format(o))
         proto = (o.get("proto") or "").upper()
         rows.append(SocketRow(
             proto=proto,

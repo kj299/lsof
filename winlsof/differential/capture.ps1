@@ -153,7 +153,9 @@ try {
     }
 
     $oracleJson = Join-Path $work 'oracle.json'
-    ConvertTo-Json -InputObject $rows.ToArray() -Depth 4 -AsArray | Set-Content -LiteralPath $oracleJson -Encoding utf8
+    # Pipe the rows (NOT -InputObject, which with -AsArray double-wraps into
+    # [[...]]); -AsArray keeps a single row a top-level JSON list.
+    $rows | ConvertTo-Json -Depth 4 -AsArray | Set-Content -LiteralPath $oracleJson -Encoding utf8
 
     # --- diff (comparator classifies: 0 ok / 1 divergence / 2 infra) ---------
     $ledger = Join-Path $here 'ledger.json'
