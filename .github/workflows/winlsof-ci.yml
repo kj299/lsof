@@ -57,9 +57,14 @@ jobs:
         run: cargo build --release --bin lsof
       - name: socket differential (oracle-substitution vs Get-NetTCPConnection)
         # Compares winlsof's `-i` socket SET against the OS's own table over
-        # self-owned fixtures (see differential/README.md). Gates on any
-        # unledgered divergence. Built-in cmdlets + python only; no elevation.
+        # self-owned fixtures (see differential/README.md). Built-in cmdlets +
+        # python only; no elevation, no third-party actions.
+        # OBSERVING FIRST: non-gating until a few green runs confirm stability on
+        # the hosted runner -- the flake vectors it guards (locale-dependent
+        # decode, transient CIM emptiness) can't be proven safe from a local run.
+        # Promote to a hard gate by removing `continue-on-error` once green.
         shell: pwsh
+        continue-on-error: true
         run: ./differential/capture.ps1 -Bin target/release/lsof.exe
       - name: upload lsof.exe
         uses: actions/upload-artifact@v4

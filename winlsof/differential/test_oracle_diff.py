@@ -8,6 +8,8 @@ Get-NetTCPConnection/Get-NetUDPEndpoint view of the same three sockets.
 """
 
 import json
+import os
+import tempfile
 import unittest
 
 import oracle_diff as od
@@ -159,6 +161,78 @@ class Canonicalization(unittest.TestCase):
         self.assertEqual(od.canon_remote("0.0.0.0", 0), "-")
         self.assertEqual(od.canon_remote("::", "0"), "-")
         self.assertEqual(od.canon_remote("127.0.0.1", 51000), "127.0.0.1:51000")
+
+
+class Multiset(unittest.TestCase):
+    def test_duplicate_winlsof_row_is_extra(self):
+        # winlsof over-emits the UDP socket twice; a set would collapse it.
+        rows = od.parse_winlsof_json(WINLSOF_JSON)
+        dup = rows + [r for r in rows if r.proto == "UDP"]
+        m, e, n = od.diff(dup, od.parse_oracle_json(ORACLE))
+        self.assertEqual(len(e), 1)
+        self.assertEqual(e[0][0].proto, "UDP")
+        self.assertEqual(e[0][2], 1)  # exactly one surplus copy
+
+    def test_duplicate_oracle_row_is_missing(self):
+        w = od.parse_winlsof_json(WINLSOF_JSON)
+        o = od.parse_oracle_json(ORACLE)
+        o2 = o + [r for r in o if r.proto == "UDP"]
+        m, e, n = od.diff(w, o2)
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][2], 1)
+
+
+class CanonIPv6(unittest.TestCase):
+    def test_compressed_forms_equal(self):
+        self.assertEqual(od.canon_addr("2001:0db8:0000:0000:0000:0000:0000:0001"),
+                         od.canon_addr("2001:db8::1"))
+
+    def test_bracket_and_plain_equal(self):
+        self.assertEqual(od.canon_addr("[2001:db8::1]"), od.canon_addr("2001:db8::1"))
+
+    def test_v4_and_wildcards(self):
+        self.assertEqual(od.canon_addr("127.0.0.1"), "127.0.0.1")
+        self.assertEqual(od.canon_addr("::"), "*")
+        self.assertEqual(od.canon_addr("0.0.0.0"), "*")
+
+
+class MainCli(unittest.TestCase):
+    """Exit-code contract: 0 match, 1 divergence, 2 infra (empty/malformed)."""
+
+    def _write(self, name, content):
+        p = os.path.join(tempfile.mkdtemp(), name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return p
+
+    def test_match_exit_0(self):
+        rc = od.main(["--winlsof-json", self._write("w.json", WINLSOF_JSON),
+                      "--oracle", self._write("o.json", ORACLE), "--scope-pid", "1500"])
+        self.assertEqual(rc, od.EXIT_OK)
+
+    def test_diverge_exit_1(self):
+        oracle = json.dumps(json.loads(ORACLE)[:2])  # drop the UDP row -> extra
+        rc = od.main(["--winlsof-json", self._write("w.json", WINLSOF_JSON),
+                      "--oracle", self._write("o.json", oracle), "--scope-pid", "1500"])
+        self.assertEqual(rc, od.EXIT_DIVERGENCE)
+
+    def test_empty_scope_is_infra_exit_2(self):
+        # A port no fixture uses -> both sides empty in scope -> infra, not a pass.
+        rc = od.main(["--winlsof-json", self._write("w.json", WINLSOF_JSON),
+                      "--oracle", self._write("o.json", ORACLE), "--scope-ports", "9"])
+        self.assertEqual(rc, od.EXIT_INFRA)
+
+    def test_empty_oracle_is_infra_not_false_extra(self):
+        # The flake the review flagged: a transiently-empty oracle must NOT
+        # read as "winlsof invented 3 sockets" (EXIT_DIVERGENCE). It's infra.
+        rc = od.main(["--winlsof-json", self._write("w.json", WINLSOF_JSON),
+                      "--oracle", self._write("o.json", "[]"), "--scope-pid", "1500"])
+        self.assertEqual(rc, od.EXIT_INFRA)
+
+    def test_malformed_winlsof_is_infra_exit_2(self):
+        rc = od.main(["--winlsof-json", self._write("w.json", "{ truncated"),
+                      "--oracle", self._write("o.json", ORACLE)])
+        self.assertEqual(rc, od.EXIT_INFRA)
 
 
 if __name__ == "__main__":

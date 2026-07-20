@@ -27,11 +27,14 @@ Two pieces, split so the logic is testable off-Windows:
 **Why the capture is fixture-scoped.** winlsof and the oracle are sampled a few
 milliseconds apart, so a machine-wide comparison would flake on every transient
 connection. Instead `capture.ps1` creates sockets it owns — a loopback TCP
-listener, an established loopback pair (which exercises the remote-address and
-TCP-state path, where fidelity bugs like the EStats-on-non-ESTABLISHED regression
-hid), and a bound UDP socket — then scopes the diff to **this pid and these
-ports**. Deterministic, zero-flake, and still exercises enumeration →
-classification → field formatting end to end.
+listener, an established loopback pair (which exercises the remote-address path),
+and a bound UDP socket — then scopes the diff to **this pid and these ports**.
+Deterministic, zero-flake, and it still exercises enumeration → classification →
+field formatting end to end. Today's fixtures cover **LISTEN + ESTABLISHED + UDP
+over IPv4 loopback**; IPv6/dual-stack and a non-ESTABLISHED state (e.g.
+`CLOSE_WAIT`) are a planned follow-up so the gate also covers the family/state
+classes — the comparator already canonicalizes IPv6 (RFC 5952), so those fixtures
+drop in without further work.
 
 **Why JSON is the gate.** winlsof's `-J` emits structured `local`/`remote`/`state`
 already, so it maps onto the oracle without fragile string-splitting. The `-F`
@@ -48,11 +51,25 @@ runs on `-J`.
 ## The ledger
 
 `ledger.json` is a list of rules; a divergence is suppressed when every key it
-pins (`proto`/`family`/`state` exact, `local`/`remote` substring, `side` =
-`missing`|`extra`|`any`) matches. It is **empty** for the fixture gate — the
-controlled sockets must match exactly. It exists for the broader, machine-wide
-mode and for documenting real API-attributed gaps (e.g. connected-UDP foreign
-address, which IP Helper does not expose) when this is pointed at live traffic.
+pins matches — `proto`/`family`/`state` and `local`/`remote` are **exact**
+against the canonical form (`*:53`, `127.0.0.1:445`, compressed IPv6), and `side`
+is `missing`|`extra`|`any`. Exact (not substring) so a rule for `*:53` can't
+silently swallow `*:5353`. It is **empty** for the fixture gate — the controlled
+sockets must match exactly. It exists for the broader, machine-wide mode and for
+documenting real API-attributed gaps (e.g. connected-UDP foreign address, which
+IP Helper does not expose) when this is pointed at live traffic.
+
+## Exit codes
+
+The comparator and `capture.ps1` share three codes so CI triage can tell a real
+bug from broken plumbing: **0** = winlsof's set matches the oracle; **1** = a
+genuine socket-set divergence (a missing/extra/misclassified row); **2** = infra
+— an empty or malformed capture, a winlsof non-zero exit/hang, or a transient
+oracle failure — which is explicitly *not* a winlsof verdict. The comparator
+refuses to pass on an empty in-scope capture (a `{"processes":[]}` regression
+can't slip through green), and `capture.ps1` asserts its own fixtures appear in
+the oracle before diffing (a transiently-empty oracle can't masquerade as
+winlsof "extras").
 
 ## Run it
 
@@ -66,10 +83,13 @@ pwsh winlsof/differential/capture.ps1 -Bin winlsof/target/release/lsof.exe
 python3 winlsof/differential/test_oracle_diff.py
 ```
 
-CI wires `capture.ps1` into the `windows` job of `.github/workflows/winlsof-ci.yml`,
-so the differential gates every PR on a real `windows-latest` runner — the
-retrospective's "fix → then pin the test that would have caught it", finally
-enforced instead of practiced.
+CI wires `capture.ps1` into the `windows` job of `.github/workflows/winlsof-ci.yml`.
+It runs on every PR on a real `windows-latest` runner, but starts **non-gating**
+(`continue-on-error: true`): its flake vectors are environment- and
+timing-dependent and can't be proven safe from a local run, so it observes for a
+few green runs before being promoted to a hard gate (remove `continue-on-error`).
+That is the retrospective's "fix → then pin the test that would have caught it",
+finally on its way to being enforced instead of only practiced.
 
 ## Lineage
 

@@ -21,9 +21,15 @@ diff, and honor a divergence ledger for intentional, documented differences.
 """
 
 import argparse
+import ipaddress
 import json
 import sys
-from collections import namedtuple
+from collections import Counter, namedtuple
+
+# Exit codes, kept distinct so CI can tell a real divergence from broken plumbing.
+EXIT_OK = 0
+EXIT_DIVERGENCE = 1  # winlsof's set differs from the oracle's
+EXIT_INFRA = 2       # empty/malformed capture -- the comparison never really ran
 
 # A canonicalized socket endpoint row. Everything compared is already normalized
 # so that == means "the same socket" regardless of which tool reported it.
@@ -52,7 +58,12 @@ _WILDCARD_ADDRS = {"0.0.0.0", "::", "", "*", "[::]"}
 
 
 def canon_addr(addr):
-    """Normalize a host so wildcards and IPv6 spellings compare equal."""
+    """Normalize a host so wildcards and IPv6 spellings compare equal.
+
+    IP literals are folded to one canonical form via ``ipaddress`` (RFC 5952
+    for IPv6), so the Rust and Windows stacks never disagree merely on
+    zero-run compression or embedded-IPv4 notation.
+    """
     if addr is None:
         return "*"
     a = addr.strip()
@@ -62,7 +73,11 @@ def canon_addr(addr):
     a = a.lower()
     if a in _WILDCARD_ADDRS:
         return "*"
-    return a
+    try:
+        ip = ipaddress.ip_address(a)
+        return "*" if ip.is_unspecified else ip.compressed
+    except ValueError:
+        return a
 
 
 def split_endpoint(s):
@@ -140,7 +155,7 @@ def parse_winlsof_json(text):
                 remote = "-"
             rows.append(SocketRow(
                 proto=proto.upper(),
-                family=canon_family(f.get("type"), f.get("local")),
+                family=canon_family(f.get("type"), lh),
                 local=canon_ep(lh, lp) if lh is not None else "-",
                 remote=remote,
                 state=canon_state(f.get("state")),
@@ -175,7 +190,7 @@ def parse_winlsof_fields(text):
             remote = "-"
         rows.append(SocketRow(
             proto=(proto or "").upper(),
-            family=canon_family(fam, lo if "->" in body else body),
+            family=canon_family(fam, lh),
             local=canon_ep(lh, lp),
             remote=remote,
             state=canon_state(state),
@@ -241,7 +256,7 @@ def load_ledger(path):
     """
     if not path:
         return []
-    with open(path, "r") as fh:
+    with open(path, "r", encoding="utf-8-sig") as fh:
         rules = json.load(fh)
     if not isinstance(rules, list):
         raise ValueError("ledger must be a JSON list of rules")
@@ -254,8 +269,10 @@ def _row_matches_rule(row, side, rule):
     for key in ("proto", "family", "state"):
         if key in rule and rule[key].upper() != getattr(row, key).upper():
             return False
+    # Endpoints match exactly against the canonical form (e.g. "*:53",
+    # "127.0.0.1:445"); exact, not substring, so "53" can't silence ":5353".
     for key in ("local", "remote"):
-        if key in rule and rule[key] not in getattr(row, key):
+        if key in rule and rule[key] != getattr(row, key):
             return False
     return True
 
@@ -267,47 +284,65 @@ def _suppressed(row, side, ledger):
     return None
 
 
-def diff(winlsof_rows, oracle_rows, scope_ports=None, scope_pid=None, ledger=None):
-    """Set-diff winlsof vs oracle within scope. Returns (missing, extra, notes).
+def _in_scope(row, scope_ports, scope_pid):
+    if scope_pid is not None and row.pid != scope_pid:
+        return False
+    if scope_ports:
+        lp = row.local.rsplit(":", 1)[-1]
+        rp = row.remote.rsplit(":", 1)[-1] if row.remote != "-" else None
+        if lp not in scope_ports and rp not in scope_ports:
+            return False
+    return True
 
-    missing = in oracle, absent from winlsof (winlsof under-reported).
-    extra   = in winlsof, absent from oracle (winlsof over-reported).
-    Ledgered divergences are moved to notes instead of failing.
+
+def scoped(rows, scope_ports=None, scope_pid=None):
+    """Rows within the pid/port scope -- also used for the empty-capture floor."""
+    return [r for r in rows if _in_scope(r, scope_ports, scope_pid)]
+
+
+def diff(winlsof_rows, oracle_rows, scope_ports=None, scope_pid=None, ledger=None):
+    """Multiset diff of winlsof vs oracle within scope.
+
+    Returns (missing, extra, notes); each item is (representative_row, why, count).
+
+    missing = in oracle, under-reported by winlsof.
+    extra   = in winlsof, not backed by the oracle.
+    A *multiset* (not a set), so a duplicated/over-emitted row is caught rather
+    than collapsing onto its twin. Ledgered divergences move to notes.
     """
     ledger = ledger or []
+    w_rows = scoped(winlsof_rows, scope_ports, scope_pid)
+    o_rows = scoped(oracle_rows, scope_ports, scope_pid)
 
-    def in_scope(row):
-        if scope_pid is not None and row.pid != scope_pid:
-            return False
-        if scope_ports:
-            lp = row.local.rsplit(":", 1)[-1]
-            rp = row.remote.rsplit(":", 1)[-1] if row.remote != "-" else None
-            if lp not in scope_ports and (rp not in scope_ports):
-                return False
-        return True
-
-    # Compare on the identity tuple without pid (scope already pins ownership;
-    # some oracles report a socket the enumerator attributes to a helper pid).
+    # Drop pid from the identity only when scope already pins one process; else
+    # keep it so a cross-process mismatch cannot silently cancel out.
     def key(r):
-        return (r.proto, r.family, r.local, r.remote, r.state)
+        base = (r.proto, r.family, r.local, r.remote, r.state)
+        return base if scope_pid is not None else base + (r.pid,)
 
-    w = {key(r): r for r in winlsof_rows if in_scope(r)}
-    o = {key(r): r for r in oracle_rows if in_scope(r)}
+    wc, oc = Counter(map(key, w_rows)), Counter(map(key, o_rows))
+    wrep = {key(r): r for r in w_rows}
+    orep = {key(r): r for r in o_rows}
 
     missing, extra, notes = [], [], []
-    for k in sorted(set(o) - set(w)):
-        why = _suppressed(o[k], "missing", ledger)
-        (notes if why else missing).append((o[k], why))
-    for k in sorted(set(w) - set(o)):
-        why = _suppressed(w[k], "extra", ledger)
-        (notes if why else extra).append((w[k], why))
+    for k in sorted(set(wc) | set(oc), key=repr):
+        delta = wc[k] - oc[k]
+        if delta < 0:  # oracle has more copies -> winlsof under-reports
+            row = orep[k]
+            why = _suppressed(row, "missing", ledger)
+            (notes if why else missing).append((row, why, -delta))
+        elif delta > 0:  # winlsof has more copies -> over-reports
+            row = wrep[k]
+            why = _suppressed(row, "extra", ledger)
+            (notes if why else extra).append((row, why, delta))
     return missing, extra, notes
 
 
-def _fmt(row):
+def _fmt(row, count=1):
     r = "" if row.remote == "-" else "->{0}".format(row.remote)
     st = "" if row.state == "-" else " ({0})".format(row.state)
-    return "{0}/{1} {2}{3}{4} pid={5}".format(row.proto, row.family, row.local, r, st, row.pid)
+    mult = "" if count == 1 else " x{0}".format(count)
+    return "{0}/{1} {2}{3}{4} pid={5}{6}".format(row.proto, row.family, row.local, r, st, row.pid, mult)
 
 
 # --------------------------------------------------------------------------- #
@@ -340,38 +375,65 @@ def main(argv=None):
     ap.add_argument("--ledger", help="intentional-divergence ledger (JSON)")
     ap.add_argument("--scope-ports", help="comma-separated ports to restrict the comparison to")
     ap.add_argument("--scope-pid", type=int, help="restrict the comparison to one pid")
+    ap.add_argument("--min-rows", type=int, default=1,
+                    help="infra-fail (exit 2) if either side has fewer in-scope rows (default 1)")
     args = ap.parse_args(argv)
 
-    if args.winlsof_json:
-        winlsof_rows = parse_winlsof_json(_read(args.winlsof_json))
-    else:
-        winlsof_rows = parse_winlsof_fields(_read(args.winlsof_fields))
-    oracle_rows = parse_oracle_json(_read(args.oracle))
+    try:
+        if args.winlsof_json:
+            winlsof_rows = parse_winlsof_json(_read(args.winlsof_json))
+        else:
+            winlsof_rows = parse_winlsof_fields(_read(args.winlsof_fields))
+        oracle_rows = parse_oracle_json(_read(args.oracle))
+    except (ValueError, json.JSONDecodeError) as exc:
+        # Malformed/truncated capture (e.g. winlsof killed on the hang path) is
+        # infrastructure breakage, not a socket-set divergence -- keep it a
+        # distinct exit so CI triage doesn't read it as "winlsof is wrong".
+        print("INFRA: malformed capture: {0}".format(exc))
+        return EXIT_INFRA
+
     ledger = load_ledger(args.ledger)
     scope_ports = set(p.strip() for p in args.scope_ports.split(",")) if args.scope_ports else None
 
+    w_scoped = scoped(winlsof_rows, scope_ports, args.scope_pid)
+    o_scoped = scoped(oracle_rows, scope_ports, args.scope_pid)
+    print("winlsof rows: {0} ({1} in scope)   oracle rows: {2} ({3} in scope)   scope: pid={4} ports={5}".format(
+        len(winlsof_rows), len(w_scoped), len(oracle_rows), len(o_scoped),
+        args.scope_pid, sorted(scope_ports) if scope_ports else "all"))
+
+    # Empty-capture floor. If either side has nothing in scope the comparison is
+    # vacuous: an empty==empty "match" would hide a winlsof enumeration
+    # regression, and an empty oracle would masquerade as all-EXTRA. Fail as
+    # infra (exit 2), never as a divergence verdict.
+    if len(w_scoped) < args.min_rows or len(o_scoped) < args.min_rows:
+        print("INFRA: too few in-scope rows (winlsof={0}, oracle={1}, need >= {2}); "
+              "capture likely empty/failed -- not a divergence verdict".format(
+                  len(w_scoped), len(o_scoped), args.min_rows))
+        return EXIT_INFRA
+
     missing, extra, notes = diff(winlsof_rows, oracle_rows, scope_ports, args.scope_pid, ledger)
 
-    print("winlsof rows: {0}   oracle rows: {1}   scope: pid={2} ports={3}".format(
-        len(winlsof_rows), len(oracle_rows), args.scope_pid, sorted(scope_ports) if scope_ports else "all"))
-    for row, why in notes:
-        print("  LEDGERED  {0}  <- {1}".format(_fmt(row), why))
-    for row, _ in missing:
-        print("  MISSING   {0}   (oracle has it, winlsof does not)".format(_fmt(row)))
-    for row, _ in extra:
-        print("  EXTRA     {0}   (winlsof has it, oracle does not)".format(_fmt(row)))
+    for row, why, count in notes:
+        print("  LEDGERED  {0}  <- {1}".format(_fmt(row, count), why))
+    for row, _why, count in missing:
+        print("  MISSING   {0}   (oracle has it, winlsof does not)".format(_fmt(row, count)))
+    for row, _why, count in extra:
+        print("  EXTRA     {0}   (winlsof has it, oracle does not)".format(_fmt(row, count)))
 
     if missing or extra:
         print("DIFFERENTIAL FAILED: {0} missing, {1} extra ({2} ledgered)".format(
             len(missing), len(extra), len(notes)))
-        return 1
+        return EXIT_DIVERGENCE
     print("DIFFERENTIAL OK: winlsof's socket set matches the OS oracle within scope "
           "({0} ledgered divergence(s))".format(len(notes)))
-    return 0
+    return EXIT_OK
 
 
 def _read(path):
-    with open(path, "r") as fh:
+    # The capture artifacts are UTF-8 (winlsof `-i -J` embeds every process's
+    # command/user verbatim); decoding them as the Windows ANSI code page would
+    # crash on the first non-ASCII byte. utf-8-sig also tolerates a BOM.
+    with open(path, "r", encoding="utf-8-sig") as fh:
         return fh.read()
 
 
