@@ -54,10 +54,17 @@ runs on `-J`.
 pins matches — `proto`/`family`/`state` and `local`/`remote` are **exact**
 against the canonical form (`*:53`, `127.0.0.1:445`, compressed IPv6), and `side`
 is `missing`|`extra`|`any`. Exact (not substring) so a rule for `*:53` can't
-silently swallow `*:5353`. It is **empty** for the fixture gate — the controlled
-sockets must match exactly. It exists for the broader, machine-wide mode and for
-documenting real API-attributed gaps (e.g. connected-UDP foreign address, which
-IP Helper does not expose) when this is pointed at live traffic.
+silently swallow `*:5353`.
+
+It carries one entry the fixture gate needs, and it is a real finding the
+differential surfaced on its first Windows run: winlsof enumerates via
+`GetExtendedTcpTable` (connection-oriented, like lsof), so it does **not** report
+transient **`BOUND`** sockets that the NSI source behind `Get-NetTCPConnection`
+does (a .NET client leaves a dual-stack `BOUND` IPv6 shadow). That is a documented
+data-source difference, not a bug — so `{"state":"BOUND","side":"missing"}` is
+ledgered. The ledger also covers the broader machine-wide mode and other
+API-attributed gaps (e.g. connected-UDP foreign address, which IP Helper does not
+expose) when this is pointed at live traffic.
 
 ## Exit codes
 

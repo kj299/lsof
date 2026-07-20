@@ -196,6 +196,45 @@ class CanonIPv6(unittest.TestCase):
         self.assertEqual(od.canon_addr("0.0.0.0"), "*")
 
 
+class RealLedgerBoundSocket(unittest.TestCase):
+    """Replays the exact first-CI-run finding: an IPv6 BOUND shadow socket the
+    oracle reports and winlsof (GetExtendedTcpTable) does not — must be ledgered,
+    using the checked-in ledger.json, not fail the gate."""
+
+    def _scenario(self):
+        # winlsof's 4 in-scope rows (listener + established pair + UDP).
+        winlsof = json.dumps({"processes": [{"pid": 7124, "command": "pwsh.exe", "files": [
+            {"fd": "1", "type": "IPv4", "protocol": "TCP", "local": "127.0.0.1:63268", "state": "LISTEN"},
+            {"fd": "2", "type": "IPv4", "protocol": "TCP", "local": "127.0.0.1:63268", "remote": "127.0.0.1:63269", "state": "ESTABLISHED"},
+            {"fd": "3", "type": "IPv4", "protocol": "TCP", "local": "127.0.0.1:63269", "remote": "127.0.0.1:63268", "state": "ESTABLISHED"},
+            {"fd": "4", "type": "IPv4", "protocol": "UDP", "local": "0.0.0.0:54389"}]}]})
+        # oracle: the same 4 PLUS the IPv6 BOUND shadow on the client port.
+        oracle = json.dumps([
+            {"proto": "TCP", "local_addr": "127.0.0.1", "local_port": 63268, "remote_addr": "0.0.0.0", "remote_port": 0, "state": "Listen", "pid": 7124},
+            {"proto": "TCP", "local_addr": "127.0.0.1", "local_port": 63268, "remote_addr": "127.0.0.1", "remote_port": 63269, "state": "Established", "pid": 7124},
+            {"proto": "TCP", "local_addr": "127.0.0.1", "local_port": 63269, "remote_addr": "127.0.0.1", "remote_port": 63268, "state": "Established", "pid": 7124},
+            {"proto": "UDP", "local_addr": "0.0.0.0", "local_port": 54389, "remote_addr": None, "remote_port": None, "state": None, "pid": 7124},
+            {"proto": "TCP", "local_addr": "::", "local_port": 63269, "remote_addr": "::", "remote_port": 0, "state": "Bound", "pid": 7124}])
+        return winlsof, oracle
+
+    def test_bound_is_ledgered_not_failed(self):
+        ledger = od.load_ledger(os.path.join(os.path.dirname(__file__), "ledger.json"))
+        winlsof, oracle = self._scenario()
+        m, e, n = od.diff(od.parse_winlsof_json(winlsof), od.parse_oracle_json(oracle),
+                          scope_pid=7124, ledger=ledger)
+        self.assertEqual((m, e), ([], []), "BOUND shadow must be ledgered, not a failure")
+        self.assertEqual(len(n), 1)
+        self.assertEqual(n[0][0].state, "BOUND")
+
+    def test_without_ledger_it_would_fail(self):
+        # Sanity: the divergence is real; the ledger is what makes it pass.
+        winlsof, oracle = self._scenario()
+        m, e, n = od.diff(od.parse_winlsof_json(winlsof), od.parse_oracle_json(oracle),
+                          scope_pid=7124, ledger=[])
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][0].state, "BOUND")
+
+
 class OracleShape(unittest.TestCase):
     """Guards the real CI bug: PowerShell ConvertTo-Json double-wrapped [[...]]."""
 
