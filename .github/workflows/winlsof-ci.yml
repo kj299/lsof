@@ -55,6 +55,12 @@ jobs:
         run: cargo test --all
       - name: build release binary
         run: cargo build --release --bin lsof
+      - name: socket differential (oracle-substitution vs Get-NetTCPConnection)
+        # Compares winlsof's `-i` socket SET against the OS's own table over
+        # self-owned fixtures (see differential/README.md). Gates on any
+        # unledgered divergence. Built-in cmdlets + python only; no elevation.
+        shell: pwsh
+        run: ./differential/capture.ps1 -Bin target/release/lsof.exe
       - name: upload lsof.exe
         uses: actions/upload-artifact@v4
         with:
