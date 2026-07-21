@@ -37,6 +37,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test (portable core + CLI via mock backend)
         run: cargo test --all
+      - name: unsafe-audit (// SAFETY on every unsafe block)
+        # Toolchain-free text scan from the porting kit. ADVISORY (--warn -> exit
+        # 0) while the backend's unsafe blocks are being annotated; promote to a
+        # hard gate by dropping --warn once the count reaches 0.
+        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py --warn crates/lsof-backend-windows/src
 
   windows:
     name: native backend (windows)
