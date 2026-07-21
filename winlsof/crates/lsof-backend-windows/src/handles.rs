@@ -281,12 +281,14 @@ fn query_all_handles() -> Option<Vec<u64>> {
     for _ in 0..8 {
         let mut buf = vec![0u64; cap / 8];
         let mut ret = 0u32;
-        // SAFETY: buf is `cap` bytes; the class writes a SystemHandleInformationEx.
+        // SAFETY: the length passed equals buf.len()*8 — the exact byte size of
+        // the allocation (`cap / 8` floors, so `cap` itself could exceed it) — so
+        // the class never writes past the buffer.
         let status = unsafe {
             NtQuerySystemInformation(
                 SYSTEM_EXTENDED_HANDLE_INFORMATION,
                 buf.as_mut_ptr() as *mut c_void,
-                cap as u32,
+                (buf.len() * 8) as u32,
                 &mut ret,
             )
         };
@@ -342,13 +344,16 @@ fn query_object_string(handle: HANDLE, class: i32) -> Option<String> {
     for _ in 0..6 {
         let mut buf = vec![0u64; cap / 8];
         let mut ret = 0u32;
-        // SAFETY: handle is a live duplicated handle; buf is `cap` bytes.
+        // SAFETY: handle is a live duplicated handle; the length passed equals
+        // buf.len()*8 — the exact allocation size (`cap / 8` floors, so `cap`
+        // could exceed it for a non-8-multiple cap) — so NtQueryObject never
+        // overruns the buffer.
         let status = unsafe {
             NtQueryObject(
                 handle,
                 class,
                 buf.as_mut_ptr() as *mut c_void,
-                cap as u32,
+                (buf.len() * 8) as u32,
                 &mut ret,
             )
         };

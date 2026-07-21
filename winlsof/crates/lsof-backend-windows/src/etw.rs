@@ -531,9 +531,17 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
     if count == 0 {
         return Some("  (no properties)".to_string());
     }
-    let props_start = size_of::<TRACE_EVENT_INFO>();
-    // SAFETY: TDH guarantees the array of `count` EVENT_PROPERTY_INFO entries
-    // follows the header, within `size` bytes.
+    // The array begins at the EventPropertyInfoArray offset, NOT at
+    // size_of::<TRACE_EVENT_INFO>(): the struct's size already includes the
+    // trailing `[EVENT_PROPERTY_INFO; 1]` flexible member, so size_of would skip
+    // property[0] and run one entry past the array.
+    let props_start = core::mem::offset_of!(TRACE_EVENT_INFO, EventPropertyInfoArray);
+    if props_start + count * size_of::<EVENT_PROPERTY_INFO>() > buf.len() {
+        return Some("  (schema larger than buffer)".to_string());
+    }
+    // SAFETY: TDH wrote `count` EVENT_PROPERTY_INFO entries starting at the
+    // EventPropertyInfoArray offset; the bounds check above confirms they lie
+    // within the buffer TDH filled. We only read.
     let props: &[EVENT_PROPERTY_INFO] =
         unsafe { slice::from_raw_parts(buf.as_ptr().add(props_start) as *const _, count) };
 
