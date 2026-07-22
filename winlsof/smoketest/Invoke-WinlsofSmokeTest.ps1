@@ -7,7 +7,9 @@
     offset, named pipe, mapped data file, TCP v4/v6 listeners + an established
     pair, UDP v4/v6, child processes with a known cwd incl. 32-bit WOW64), then
     exercises every lsof option / code path, captures output, and cross-checks
-    against Windows oracles. Optionally emits an llvm-cov line-coverage report.
+    against native Windows oracles (Get-NetTCPConnection, Get-Process) and the
+    harness's own fixtures. No executables are downloaded. Optionally emits an
+    llvm-cov line-coverage report.
 
     See README.md for the coverage map and how to report findings.
 
@@ -20,9 +22,6 @@
 .PARAMETER Coverage
     Build an instrumented debug binary and produce a line-coverage report.
 
-.PARAMETER HandleExe
-    Path to Sysinternals handle64.exe for extra cross-checks (optional).
-
 .EXAMPLE
     .\Invoke-WinlsofSmokeTest.ps1
 .EXAMPLE
@@ -33,8 +32,6 @@ param(
     [string]$OutDir = (Join-Path (Get-Location) 'winlsof-smoke-results'),
     [switch]$SkipBuild,
     [switch]$Coverage,
-    [string]$HandleExe,
-    [switch]$NoFetchHandle,
     [string]$Binary
 )
 
@@ -205,36 +202,6 @@ function Test-Case {
     $color = switch ($st) { 'PASS' { 'Green' } 'FAIL' { 'Red' } 'SKIP' { 'Yellow' } default { 'Gray' } }
     Write-Host ("  [{0}] {1,-30} {2}" -f $st, $Name, $detail) -ForegroundColor $color
 }
-
-# Locate Sysinternals handle64.exe for the oracle cross-check: an explicit
-# -HandleExe wins, then one already on PATH, else (unless -NoFetchHandle) fetch
-# the official Handle.zip over HTTPS into the run folder. Returns $null if it
-# can't be found/fetched (the oracle case then SKIPs, as before).
-function Resolve-HandleExe {
-    param([string]$Provided, [switch]$NoFetch, [string]$ToolsDir)
-    if ($Provided -and (Test-Path $Provided)) { return (Resolve-Path $Provided).Path }
-    $onPath = (Get-Command handle64.exe -ErrorAction SilentlyContinue).Source
-    if ($onPath) { return $onPath }
-    if ($NoFetch) { return $null }
-    try {
-        New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
-        $exe = Join-Path $ToolsDir 'handle64.exe'
-        if (Test-Path $exe) { return $exe }
-        $zip = Join-Path $ToolsDir 'Handle.zip'
-        Write-Host "Fetching Sysinternals handle64.exe for the oracle cross-check..." -ForegroundColor Cyan
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/Handle.zip' `
-            -OutFile $zip -UseBasicParsing -TimeoutSec 30
-        Expand-Archive -LiteralPath $zip -DestinationPath $ToolsDir -Force
-        if (Test-Path $exe) { return $exe }
-        return $null
-    }
-    catch {
-        Write-Host "  could not fetch handle64.exe ($($_.Exception.Message)); oracle case will SKIP." -ForegroundColor Yellow
-        return $null
-    }
-}
-$HandleExePath = Resolve-HandleExe -Provided $HandleExe -NoFetch:$NoFetchHandle -ToolsDir (Join-Path $RunDir 'tools')
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -557,25 +524,23 @@ try {
         Assert-Contains $r.Err 'etw: captured' '-U stderr (ETW histogram)'
     }
 
-    # ===================== Sysinternals handle.exe cross-check =====================
-    Test-Case 'handle-exe-cross-check' 'oracle/handle' {
-        if (-not $HandleExePath) { Skip 'handle64.exe unavailable (pass -HandleExe or allow the download)' }
-        # Keep the oracle's raw output (version banner, errors, rows) on disk:
-        # a cross-check verdict is undiagnosable without what handle64 printed.
-        $h = & $HandleExePath -accepteula -p $self 2>&1 | Out-String
-        Set-Content -LiteralPath (Join-Path $CasesDir 'handle64-cross-check.out.txt') -Value $h
-        # Unelevated, handle64 can resolve no file names at all: reading the
-        # name of another process's synchronous file handle is exactly what it
-        # must do defensively without elevation, and on some builds/AV setups
-        # it comes back empty. An oracle that listed no File rows is blind,
-        # not disagreeing -- SKIP with the output saved. If it did list File
-        # rows and ours is missing, that stays a genuine FAIL.
-        if (-not $IsAdmin -and ($h -notmatch '(?im)^\s*[0-9A-F]+:\s+File\b')) {
-            Skip 'handle64.exe resolved no File handles unelevated (blind oracle; see cases\handle64-cross-check.out.txt)'
-        }
-        Assert-ContainsCI $h "winlsof_file_$self" 'handle64.exe should also see our file (see cases\handle64-cross-check.out.txt)'
+    # ===================== native oracle cross-check =====================
+    # No downloads. The harness OWNS its fixtures, so their paths are
+    # authoritative ground truth, and Get-Process is a native, always-present
+    # oracle. (This replaces the former Sysinternals handle64.exe cross-check,
+    # which downloaded an executable at runtime -- a supply-chain risk if the
+    # download host were compromised. Sockets are already cross-checked natively
+    # against Get-NetTCPConnection in tcp4-listen-by-port above.)
+    Test-Case 'native-handle-cross-check' 'oracle/native' {
         $r = Invoke-Lsof @('-p', "$self") 'p-self-handlecmp'
-        Assert-ContainsCI $r.Out "winlsof_file_$self"
+        # winlsof must report every resource this process is known to hold open.
+        Assert-ContainsCI $r.Out "winlsof_file_$self" 'winlsof should list the held-open fixture file'
+        Assert-ContainsCI $r.Out "winlsof_pipe_$self" 'winlsof should list the fixture named pipe'
+        Assert-ContainsCI $r.Out "winlsof_map_$self" 'winlsof should list the mapped fixture file'
+        # Native independent signal: this process really does hold kernel handles.
+        $native = (Get-Process -Id $self).HandleCount
+        Assert ($native -ge 1) 'Get-Process reported no handle count for this process'
+        "fixtures matched; Get-Process HandleCount=$native"
     }
 }
 finally {

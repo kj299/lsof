@@ -9,7 +9,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **smoketest: removed the runtime download of Sysinternals `handle64.exe`.** The
+  live harness fetched and executed `handle64.exe` from `download.sysinternals.com`
+  as a handle-enumeration oracle — a supply-chain risk if the download host were
+  compromised. Replaced with native oracles only (`Get-Process` + the harness's own
+  fixture ground truth); `Get-NetTCPConnection` continues to cross-check sockets.
+  Nothing is downloaded at test time.
+
+### Added
+- **Socket oracle-substitution differential** (`winlsof/differential/`) gating
+  winlsof's `-i` output against `Get-NetTCPConnection`/`Get-NetUDPEndpoint` on
+  `windows-latest`, and a toolchain-free **unsafe-audit** CI gate (a `// SAFETY:`
+  justification on every backend `unsafe` block, 131/131).
+
+### Fixed
+- Three FFI soundness bugs in the Windows backend found by an unsafe audit: an
+  out-of-bounds read over an empty `MIB_*TABLE_OWNER_PID` table (reachable on every
+  `lsof -i` when a TCP6/UDP table is empty), an off-by-one over the ETW property
+  array, and an `NtQuery*` buffer-length-vs-allocation mismatch.
 
 ## [0.2.0] — 2026-07-02
 
