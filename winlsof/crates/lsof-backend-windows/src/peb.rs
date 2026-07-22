@@ -113,6 +113,7 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
 
 /// 64-bit target: PEB → ProcessParameters → CurrentDirectory.DosPath.
 fn read_cwd64(handle: HANDLE) -> Option<String> {
+    // SAFETY: all-zero is a valid ProcessBasicInformation.
     let mut pbi: ProcessBasicInformation = unsafe { std::mem::zeroed() };
     // SAFETY: class 0 (ProcessBasicInformation) fits the provided buffer.
     let status = unsafe {

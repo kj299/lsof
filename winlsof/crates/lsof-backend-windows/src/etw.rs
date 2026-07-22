@@ -291,11 +291,16 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
     if record.is_null() {
         return;
     }
+    // SAFETY: null-checked above; ETW guarantees `record` points to a valid
+    // EVENT_RECORD for the duration of this callback.
     let r = unsafe { &*record };
     let state_ptr = r.UserContext as *const CallbackState;
     if state_ptr.is_null() {
         return;
     }
+    // SAFETY: UserContext is the Box<CallbackState> leaked at session start
+    // (null-checked above); the main thread joins the worker before reclaiming
+    // it, so it outlives every callback invocation.
     let state = unsafe { &*state_ptr };
     let id = r.EventHeader.EventDescriptor.Id;
     let version = r.EventHeader.EventDescriptor.Version;
@@ -321,8 +326,9 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
             }
         }
     }
-    // Per-event aggregation. SAFETY: `record` is valid; helpers only read.
+    // Per-event aggregation: the helpers only read from the record.
     if id == EVENT_ID_AFD_CREATE {
+        // SAFETY: `record` is valid for the duration of this callback.
         if let Some((endpoint, family, sock_type, protocol)) = unsafe { parse_afd_create(record) } {
             if let Ok(mut socks) = state.sockets.lock() {
                 socks
@@ -343,6 +349,7 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
             }
         }
     } else if EVENT_IDS_AFD_WITH_ADDRESS.contains(&id) {
+        // SAFETY: `record` is valid for the duration of this callback.
         if let Some((endpoint, addr)) = unsafe { parse_afd_address(record) } {
             if let Ok(mut socks) = state.sockets.lock() {
                 socks
@@ -372,9 +379,13 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
 ///
 /// SAFETY: `record` must point to a valid `EVENT_RECORD` for the call.
 unsafe fn parse_afd_create(record: *const EVENT_RECORD) -> Option<(u64, u16, u32, u32)> {
+    // SAFETY: caller guarantees `record` is valid; TDH only reads from it.
     let endpoint = unsafe { get_property_u64(record, "Endpoint") }?;
+    // SAFETY: as above.
     let family = unsafe { get_property_u32(record, "AddressFamily") }? as u16;
+    // SAFETY: as above.
     let socket_type = unsafe { get_property_u32(record, "SocketType") }.unwrap_or(0);
+    // SAFETY: as above.
     let protocol = unsafe { get_property_u32(record, "Protocol") }.unwrap_or(0);
     Some((endpoint, family, socket_type, protocol))
 }
@@ -384,7 +395,9 @@ unsafe fn parse_afd_create(record: *const EVENT_RECORD) -> Option<(u64, u16, u32
 ///
 /// SAFETY: `record` must point to a valid `EVENT_RECORD` for the call.
 unsafe fn parse_afd_address(record: *const EVENT_RECORD) -> Option<(u64, SocketAddr)> {
+    // SAFETY: caller guarantees `record` is valid; TDH only reads from it.
     let endpoint = unsafe { get_property_u64(record, "Endpoint") }?;
+    // SAFETY: as above.
     let blob = unsafe { get_property_bytes(record, "Address") }?;
     let addr = parse_sockaddr(&blob)?;
     Some((endpoint, addr))
@@ -433,6 +446,9 @@ unsafe fn get_property_scalar<T: Copy + Default>(
         Reserved: 0,
     };
     let mut value: T = T::default();
+    // SAFETY: caller guarantees `record` is valid; `descriptor` points at the
+    // live NUL-terminated `name_wide`; the out buffer is `&mut value`, exactly
+    // the size_of::<T>() bytes we declare. TDH writes at most that many.
     let rc = unsafe {
         TdhGetProperty(
             record,
@@ -448,10 +464,12 @@ unsafe fn get_property_scalar<T: Copy + Default>(
 }
 
 unsafe fn get_property_u32(record: *const EVENT_RECORD, name: &str) -> Option<u32> {
+    // SAFETY: caller's contract (`record` valid) is passed through unchanged.
     unsafe { get_property_scalar::<u32>(record, name) }
 }
 
 unsafe fn get_property_u64(record: *const EVENT_RECORD, name: &str) -> Option<u64> {
+    // SAFETY: caller's contract (`record` valid) is passed through unchanged.
     unsafe { get_property_scalar::<u64>(record, name) }
 }
 
@@ -467,11 +485,15 @@ unsafe fn get_property_bytes(record: *const EVENT_RECORD, name: &str) -> Option<
         Reserved: 0,
     };
     let mut size: u32 = 0;
+    // SAFETY: caller guarantees `record` is valid; `descriptor` points at the
+    // live `name_wide`; `size` is a live out-param TDH writes the length to.
     let rc = unsafe { TdhGetPropertySize(record, 0, std::ptr::null(), 1, &descriptor, &mut size) };
     if rc != 0 || size == 0 {
         return None;
     }
     let mut buf = vec![0u8; size as usize];
+    // SAFETY: `buf` is exactly the `size` bytes TDH just reported; TDH writes
+    // at most `size` bytes through the pointer.
     let rc = unsafe {
         TdhGetProperty(
             record,
@@ -494,6 +516,8 @@ unsafe fn get_property_bytes(record: *const EVENT_RECORD, name: &str) -> Option<
 unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
     // Two-call idiom: ask for required size, then allocate + ask for content.
     let mut size: u32 = 0;
+    // SAFETY: caller guarantees `record` is valid; a null buffer with `size`
+    // as a live out-param is the documented sizing call.
     let rc = unsafe {
         TdhGetEventInformation(record, 0, std::ptr::null(), std::ptr::null_mut(), &mut size)
     };
@@ -507,6 +531,8 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
         return None;
     }
     let mut buf = vec![0u8; size as usize];
+    // SAFETY: `buf` is exactly the `size` bytes TDH just asked for; TDH writes
+    // at most `size` bytes through the pointer.
     let rc = unsafe {
         TdhGetEventInformation(
             record,
@@ -543,7 +569,7 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
     // EventPropertyInfoArray offset; the bounds check above confirms they lie
     // within the buffer TDH filled. We only read.
     let props: &[EVENT_PROPERTY_INFO] =
-        unsafe { slice::from_raw_parts(buf.as_ptr().add(props_start) as *const _, count) };
+        unsafe { slice::from_raw_parts(buf.as_ptr().add(props_start) as *const _, count) }; // SAFETY: see above.
 
     let mut out = String::new();
     for (i, p) in props.iter().enumerate() {
@@ -553,7 +579,7 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
         // array variant is uncommon for AFD events; we just print whatever's
         // there as `InType` / `OutType` u16s without interpreting.
         let in_type = unsafe { p.Anonymous1.nonStructType.InType };
-        let out_type = unsafe { p.Anonymous1.nonStructType.OutType };
+        let out_type = unsafe { p.Anonymous1.nonStructType.OutType }; // SAFETY: as above.
         out.push_str(&format!(
             "  [{i:>2}] {name:<28} InType={in_type:<3} OutType={out_type}\n"
         ));
@@ -698,6 +724,8 @@ pub fn capture(duration: Duration) -> Option<Summary> {
     let name_for_worker = session_name_wide.clone();
     let worker = thread::spawn(move || {
         let state_ptr = state_addr as *mut CallbackState;
+        // SAFETY: EVENT_TRACE_LOGFILEW is a plain-data Win32 struct (integers,
+        // pointers, unions) for which all-zero bytes is a valid value.
         let mut logfile: EVENT_TRACE_LOGFILEW = unsafe { zeroed() };
         logfile.LoggerName = name_for_worker.as_ptr() as *mut u16;
         // Writing through a union field does not require `unsafe` (only
@@ -714,6 +742,8 @@ pub fn capture(duration: Duration) -> Option<Summary> {
             // GetLastError is the only diagnostic — surface it so the user can
             // map e.g. 0xC0000034 (STATUS_OBJECT_NAME_NOT_FOUND) /
             // 1018 (ERROR_WMI_INSTANCE_NOT_FOUND) to the cause.
+            // SAFETY: GetLastError has no preconditions (reads this thread's
+            // last-error slot).
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             trace(&format!(
                 "etw: worker: OpenTraceW returned INVALID_PROCESSTRACE_HANDLE (GetLastError = {err})"

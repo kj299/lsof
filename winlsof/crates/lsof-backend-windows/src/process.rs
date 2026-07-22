@@ -34,6 +34,7 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
         return out;
     };
 
+    // SAFETY: all-zero is a valid PROCESSENTRY32W (dwSize set below).
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
@@ -118,6 +119,7 @@ fn sid_to_string(sid: *mut c_void) -> Option<String> {
     while unsafe { *wide.add(len) } != 0 {
         len += 1;
     }
+    // SAFETY: `wide` points at `len` u16s before the NUL we just scanned to.
     let slice = unsafe { std::slice::from_raw_parts(wide, len) };
     let out = String::from_utf16_lossy(slice);
     // SAFETY: pair to the API's LocalAlloc above.

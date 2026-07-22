@@ -40,6 +40,7 @@ pub fn enumerate(wanted: Option<&HashSet<u32>>) -> Vec<(u32, OpenFile)> {
         return out;
     };
 
+    // SAFETY: all-zero is a valid THREADENTRY32 (dwSize set below).
     let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
 

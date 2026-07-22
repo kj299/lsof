@@ -21,6 +21,7 @@ static WSA: Once = Once::new();
 
 fn ensure_wsa() {
     WSA.call_once(|| {
+        // SAFETY: all-zero is a valid WSADATA.
         let mut data: WSADATA = unsafe { std::mem::zeroed() };
         // SAFETY: standard Winsock startup, version 2.2.
         unsafe { WSAStartup(0x0202, &mut data) };
@@ -53,6 +54,7 @@ fn resolve_blocking(ip: IpAddr) -> Option<String> {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
+    // SAFETY: all-zero is a valid SOCKADDR_STORAGE.
     let mut storage: SOCKADDR_STORAGE = unsafe { std::mem::zeroed() };
     let mut len = size_of::<SOCKADDR_STORAGE>() as i32;
 
