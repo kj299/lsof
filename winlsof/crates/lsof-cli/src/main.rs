@@ -7,6 +7,8 @@
 
 mod args;
 
+use std::collections::HashSet;
+
 use args::{parse, Action};
 use lsof_core::render::{fields, json, table, Format};
 use lsof_core::{Backend, Process, Selection};
@@ -111,15 +113,23 @@ specific operations that need them.\n",
     )
 }
 
-/// `-V`: report `-p` PIDs and path/dir search items that matched nothing.
-fn report_unmatched(sel: &Selection, procs: &[Process]) {
-    if sel.quiet {
-        // `-Q`: silent on empty / unmatched search items.
-        return;
-    }
+/// Report `-p` PIDs and path/dir search items that could not be located, and
+/// return how many. `-p` PIDs are checked against the *located* set (the PIDs
+/// the backend gathered, before selection filtering): a PID that exists but is
+/// filtered out by e.g. `-a` was still located, so it is not "unmatched". Paths
+/// are checked against the selected result. The message is printed only under
+/// `-V` (and never under `-Q`), as before — but the count is returned
+/// regardless, because lsof exits 1 on an unlocated search item even when it
+/// prints nothing (so `lsof -t <file> && ...` and `if lsof ...; then` work).
+fn report_unmatched(sel: &Selection, located: &HashSet<u32>, procs: &[Process]) -> usize {
+    let print = sel.verbose && !sel.quiet;
+    let mut unmatched = 0usize;
     for &pid in &sel.pids {
-        if !procs.iter().any(|p| p.pid == pid) {
-            eprintln!("lsof: PID {pid}: no matching open files");
+        if !located.contains(&pid) {
+            unmatched += 1;
+            if print {
+                eprintln!("lsof: PID {pid}: no matching open files");
+            }
         }
     }
     for path in sel.paths.iter().chain(sel.dir_trees.iter()) {
@@ -129,9 +139,13 @@ fn report_unmatched(sel: &Selection, procs: &[Process]) {
             n == needle || n.starts_with(&needle)
         });
         if !hit {
-            eprintln!("lsof: {path}: no process found with it open");
+            unmatched += 1;
+            if print {
+                eprintln!("lsof: {path}: no process found with it open");
+            }
         }
     }
+    unmatched
 }
 
 fn main() {
@@ -199,18 +213,19 @@ fn main() {
         );
     }
 
-    let run_cycle = move || {
-        let procs = match env.backend.gather(&selection) {
+    let run_cycle = move || -> usize {
+        let gathered = match env.backend.gather(&selection) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("lsof: {e}");
                 std::process::exit(1);
             }
         };
-        let procs = selection.apply(procs);
-        if selection.verbose {
-            report_unmatched(&selection, &procs);
-        }
+        // PIDs the backend actually located, captured before selection filtering
+        // so a PID dropped by e.g. `-a` isn't misreported as "not found".
+        let located: HashSet<u32> = gathered.iter().map(|p| p.pid).collect();
+        let procs = selection.apply(gathered);
+        let unmatched = report_unmatched(&selection, &located, &procs);
         let out = match &format {
             Format::Table => table::render(
                 &procs,
@@ -229,22 +244,26 @@ fn main() {
             Format::JsonLines => json::render_lines(&procs),
         };
         print!("{out}");
+        unmatched
     };
 
     // `-r`: repeat until interrupted, printing lsof's `=======` separator.
+    // Exit promptly after the final cycle: handle enumeration may have abandoned
+    // a worker thread blocked uninterruptibly in `NtQueryObject` (a synchronous
+    // pipe/device), which can otherwise stall normal process teardown. lsof's
+    // exit status is 1 when a specified `-p`/path search item was not located.
     match repeat {
         Some(delay) => loop {
             run_cycle();
             println!("=======");
             std::thread::sleep(std::time::Duration::from_secs(delay));
         },
-        None => run_cycle(),
+        None => {
+            let code = if run_cycle() > 0 { 1 } else { 0 };
+            #[cfg(windows)]
+            lsof_backend_windows::exit_now(code);
+            #[cfg(not(windows))]
+            std::process::exit(code);
+        }
     }
-
-    // Output is written. Exit promptly: handle enumeration may have abandoned a
-    // worker thread blocked uninterruptibly in `NtQueryObject` (a synchronous
-    // pipe/device), which can otherwise stall normal process teardown. On other
-    // platforms a normal return suffices.
-    #[cfg(windows)]
-    lsof_backend_windows::exit_now(0);
 }

@@ -4,11 +4,11 @@
 //! enumerate (raw, ICMP, AF_UNIX); see `docs/research-roadmap.md` §5 for the
 //! P1 spike findings that scoped this work.
 //!
-//! Iteration 1 (this file): just the session lifecycle and an event-ID
-//! histogram. No row emission yet. The histogram lets us verify the FFI
-//! machinery (StartTraceW / EnableTraceEx2 / ProcessTrace / ControlTraceW)
-//! and the callback flow end-to-end against the same event mix the P1 spike
-//! captured, before adding TDH parsing in iteration 2.
+//! The session lifecycle (StartTraceW / EnableTraceEx2 / ProcessTrace /
+//! ControlTraceW) drives a per-event callback that keeps an event-ID histogram
+//! AND parses AFD create/address events via TDH into `EtwSocket` rows, which
+//! `gather` merges into `-i`/`-U` output. The histogram is retained as a
+//! diagnostic (`--etw` prints it to stderr).
 //!
 //! The session needs Administrator (or *Performance Log Users* membership).
 //! `--etw` is opt-in, never default; a setup failure (e.g. not enough

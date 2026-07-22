@@ -1,7 +1,9 @@
 //! JSON renderers (`-J` aggregated object, `-j` JSON Lines).
 //!
-//! Hand-written to keep `lsof-core` dependency-free; the shape mirrors lsof's
-//! own JSON so existing consumers keep working.
+//! Hand-written to keep `lsof-core` dependency-free. This is winlsof's own JSON
+//! shape — mainline lsof has no JSON output, so there is no upstream format to
+//! mirror; the goal is a stable, self-consistent shape for scripts that consume
+//! `-J`/`-j`.
 
 use crate::model::{AccessMode, FdType, OpenFile, Process};
 
