@@ -1,0 +1,32 @@
+# cargo-deny — supply-chain gate for the winlsof workspace.
+#
+#   cargo deny check          (run from winlsof/)
+#
+# The whole third-party dependency tree is the `windows-sys` family
+# (windows-sys -> windows-targets -> the per-arch import-lib shims), all
+# MIT OR Apache-2.0. winlsof's own crates are `publish = false` with
+# LicenseRef-lsof and are skipped via `private.ignore`.
+
+[advisories]
+version = 2
+# Fail on a yanked crate in the lockfile; RUSTSEC vulnerability/unmaintained
+# advisories are denied by default in v2.
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0"]
+# winlsof's workspace crates are unpublished (LicenseRef-lsof); don't judge them.
+private = { ignore = true }
+
+[bans]
+# Flag (don't fail on) duplicate versions of a crate; deny explicit `*` version
+# requirements, but allow the workspace's own path dependencies.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io; refuse an unknown registry or a git dependency.
+unknown-registry = "deny"
+unknown-git = "deny"

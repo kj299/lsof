@@ -5,11 +5,9 @@
 //! chosen format. On Windows it uses the native backend; on other hosts it
 //! falls back to the mock backend so the pipeline runs anywhere.
 
-mod args;
-
 use std::collections::HashSet;
 
-use args::{parse, Action};
+use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Format};
 use lsof_core::{Backend, Process, Selection};
 
