@@ -38,18 +38,21 @@ pub fn enumerate(pid: u32) -> Vec<OpenFile> {
 
 /// One attempt. `Err(true)` means "transient — retry"; `Err(false)` means give up.
 fn try_enumerate(pid: u32) -> Result<Vec<OpenFile>, bool> {
-    // SAFETY: returns a snapshot handle or INVALID_HANDLE_VALUE.
     let snapshot =
+        // SAFETY: returns a snapshot handle or INVALID_HANDLE_VALUE.
         unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
     let Some(snapshot) = OwnedHandle::new(snapshot) else {
+        // SAFETY: GetLastError has no preconditions.
         return Err(transient(unsafe { GetLastError() }));
     };
 
+    // SAFETY: all-zero is a valid MODULEENTRY32W (dwSize set below).
     let mut entry: MODULEENTRY32W = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
 
     // SAFETY: snapshot is valid; `entry.dwSize` is set as the API requires.
     if unsafe { Module32FirstW(snapshot.raw(), &mut entry) } == 0 {
+        // SAFETY: GetLastError has no preconditions.
         return Err(transient(unsafe { GetLastError() }));
     }
 

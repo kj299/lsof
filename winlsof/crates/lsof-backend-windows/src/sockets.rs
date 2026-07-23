@@ -190,15 +190,28 @@ fn remote_opt(addr: IpAddr, p: u16) -> Option<SocketAddr> {
 }
 
 fn tcp4() -> Vec<(u32, OpenFile)> {
+    // SAFETY: GetExtendedTcpTable writes the table through `ptr` (up to `*sz`
+    // bytes) and updates `*sz`; `fill` passes null (sizing) or a live `*sz`-byte
+    // buffer and retains no pointer past the call.
     let Some(buf) = fill(|ptr, sz| unsafe {
         GetExtendedTcpTable(ptr, sz, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0)
     }) else {
         return Vec::new();
     };
-    // SAFETY: buf is 4-byte aligned and large enough; the API wrote a valid table.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-    let rows: &[MIB_TCPROW_OWNER_PID] =
-        unsafe { std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize) };
+    let base = buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
+    // SAFETY: buf is a Vec<u32> (align 4) and MIB_TCPROW_OWNER_PID is align-4, so
+    // `base` is aligned; dwNumEntries is at offset 0, within the >=4-byte buffer.
+    // addr_of! avoids forming a &MIB_TCPTABLE_OWNER_PID (its size_of spans a
+    // phantom `[row; 1]`, an OOB read for an empty 4-byte table).
+    let count = unsafe { std::ptr::addr_of!((*base).dwNumEntries).read() } as usize;
+    // SAFETY: the API wrote exactly `count` contiguous rows at the `table` offset;
+    // the slice covers only those (empty, reading nothing, when count is 0).
+    let rows: &[MIB_TCPROW_OWNER_PID] = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*base).table) as *const MIB_TCPROW_OWNER_PID,
+            count,
+        )
+    };
     rows.iter()
         .map(|r| {
             let local = SocketAddr::new(IpAddr::V4(ipv4(r.dwLocalAddr)), port(r.dwLocalPort));
@@ -216,15 +229,24 @@ fn tcp4() -> Vec<(u32, OpenFile)> {
 }
 
 fn tcp6() -> Vec<(u32, OpenFile)> {
+    // SAFETY: as tcp4 — GetExtendedTcpTable writes up to `*sz` bytes through
+    // `ptr` and updates `*sz`; `fill` passes null or a live `*sz`-byte buffer.
     let Some(buf) = fill(|ptr, sz| unsafe {
         GetExtendedTcpTable(ptr, sz, 0, AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL, 0)
     }) else {
         return Vec::new();
     };
-    // SAFETY: see tcp4.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
-    let rows: &[MIB_TCP6ROW_OWNER_PID] =
-        unsafe { std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize) };
+    let base = buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID;
+    // SAFETY: as tcp4 — aligned Vec<u32>; read dwNumEntries via addr_of! without
+    // forming a &MIB_TCP6TABLE_OWNER_PID (OOB for an empty 4-byte table).
+    let count = unsafe { std::ptr::addr_of!((*base).dwNumEntries).read() } as usize;
+    // SAFETY: as tcp4 — the API wrote exactly `count` contiguous rows at `table`.
+    let rows: &[MIB_TCP6ROW_OWNER_PID] = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*base).table) as *const MIB_TCP6ROW_OWNER_PID,
+            count,
+        )
+    };
     rows.iter()
         .map(|r| {
             let local = SocketAddr::new(IpAddr::V6(ipv6(r.ucLocalAddr)), port(r.dwLocalPort));
@@ -242,15 +264,24 @@ fn tcp6() -> Vec<(u32, OpenFile)> {
 }
 
 fn udp4() -> Vec<(u32, OpenFile)> {
+    // SAFETY: as tcp4 — GetExtendedUdpTable writes up to `*sz` bytes through
+    // `ptr` and updates `*sz`; `fill` passes null or a live `*sz`-byte buffer.
     let Some(buf) = fill(|ptr, sz| unsafe {
         GetExtendedUdpTable(ptr, sz, 0, AF_INET as u32, UDP_TABLE_OWNER_PID, 0)
     }) else {
         return Vec::new();
     };
-    // SAFETY: see tcp4.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
-    let rows: &[MIB_UDPROW_OWNER_PID] =
-        unsafe { std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize) };
+    let base = buf.as_ptr() as *const MIB_UDPTABLE_OWNER_PID;
+    // SAFETY: as tcp4 — aligned Vec<u32>; read dwNumEntries via addr_of! without
+    // forming a &MIB_UDPTABLE_OWNER_PID (OOB for an empty 4-byte table).
+    let count = unsafe { std::ptr::addr_of!((*base).dwNumEntries).read() } as usize;
+    // SAFETY: as tcp4 — the API wrote exactly `count` contiguous rows at `table`.
+    let rows: &[MIB_UDPROW_OWNER_PID] = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*base).table) as *const MIB_UDPROW_OWNER_PID,
+            count,
+        )
+    };
     rows.iter()
         .map(|r| {
             let local = SocketAddr::new(IpAddr::V4(ipv4(r.dwLocalAddr)), port(r.dwLocalPort));
@@ -261,15 +292,24 @@ fn udp4() -> Vec<(u32, OpenFile)> {
 }
 
 fn udp6() -> Vec<(u32, OpenFile)> {
+    // SAFETY: as tcp4 — GetExtendedUdpTable writes up to `*sz` bytes through
+    // `ptr` and updates `*sz`; `fill` passes null or a live `*sz`-byte buffer.
     let Some(buf) = fill(|ptr, sz| unsafe {
         GetExtendedUdpTable(ptr, sz, 0, AF_INET6 as u32, UDP_TABLE_OWNER_PID, 0)
     }) else {
         return Vec::new();
     };
-    // SAFETY: see tcp4.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
-    let rows: &[MIB_UDP6ROW_OWNER_PID] =
-        unsafe { std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize) };
+    let base = buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID;
+    // SAFETY: as tcp4 — aligned Vec<u32>; read dwNumEntries via addr_of! without
+    // forming a &MIB_UDP6TABLE_OWNER_PID (OOB for an empty 4-byte table).
+    let count = unsafe { std::ptr::addr_of!((*base).dwNumEntries).read() } as usize;
+    // SAFETY: as tcp4 — the API wrote exactly `count` contiguous rows at `table`.
+    let rows: &[MIB_UDP6ROW_OWNER_PID] = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*base).table) as *const MIB_UDP6ROW_OWNER_PID,
+            count,
+        )
+    };
     rows.iter()
         .map(|r| {
             let local = SocketAddr::new(IpAddr::V6(ipv6(r.ucLocalAddr)), port(r.dwLocalPort));

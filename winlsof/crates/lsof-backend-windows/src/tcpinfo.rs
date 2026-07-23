@@ -176,6 +176,9 @@ fn set_collection(row: &RowKey, estats: TCP_ESTATS_TYPE, on: bool) -> u32 {
 /// SAFETY: `rod` must point to a writable buffer of at least `rod_size` bytes
 /// matching the Rod struct for `estats`.
 unsafe fn get_rod(row: &RowKey, estats: TCP_ESTATS_TYPE, rod: *mut u8, rod_size: u32) -> u32 {
+    // SAFETY: the caller guarantees `rod`/`rod_size` describe a writable buffer
+    // matching the Rod struct for `estats`; GetPerTcpConnectionEStats writes at
+    // most `rod_size` bytes there.
     unsafe {
         match row {
             RowKey::V4(r) => GetPerTcpConnectionEStats(
@@ -219,6 +222,7 @@ fn query(row: RowKey, elevated: bool, want_q: bool, want_w: bool) -> Option<TcpI
                 trace(&format!("tcpinfo: enable Rec failed ({s})"));
             }
         }
+        // SAFETY: all-zero is a valid TCP_ESTATS_REC_ROD_v0 (plain integers).
         let mut rod: TCP_ESTATS_REC_ROD_v0 = unsafe { zeroed() };
         // SAFETY: rod is sized for the REC Rod struct.
         let st = unsafe {
@@ -251,6 +255,7 @@ fn query(row: RowKey, elevated: bool, want_q: bool, want_w: bool) -> Option<TcpI
                 trace(&format!("tcpinfo: enable SendBuff failed ({s})"));
             }
         }
+        // SAFETY: all-zero is a valid TCP_ESTATS_SEND_BUFF_ROD_v0.
         let mut rod: TCP_ESTATS_SEND_BUFF_ROD_v0 = unsafe { zeroed() };
         // SAFETY: rod is sized for the SEND_BUFF Rod struct.
         let st = unsafe {

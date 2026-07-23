@@ -33,9 +33,10 @@ system-wide paths, elevation, WOW64, and the OS data sources end to end.
      **WOW64**, exercises the 32-bit PEB cwd path).
 3. **Runs ~50 cases** covering every flag/format/branch, writing each invocation's
    stdout/stderr/exit code to `cases\NNN-name.out.txt` / `.err.txt`.
-4. **Cross-checks** against `Get-NetTCPConnection`, `Get-NetUDPEndpoint`,
-   `Get-Process` (`.Path`/`.Modules`), `netstat -ano`, and Sysinternals
-   `handle64.exe` if supplied.
+4. **Cross-checks** against native Windows oracles — `Get-NetTCPConnection`
+   (socket owners) and `Get-Process` (`.Path`, `.HandleCount`) — and the
+   harness's own fixtures, whose paths/ports are authoritative ground truth.
+   **Nothing is downloaded.**
 5. **Emits results**: `results.csv`, `summary.txt`, a console PASS/FAIL/SKIP
    roll-up, and a full `transcript.log`.
 6. **Optional coverage** (`-Coverage`): merges per-case `*.profraw` and produces
@@ -56,11 +57,8 @@ system-wide paths, elevation, WOW64, and the OS data sources end to end.
   **falls back to a normal run** (no coverage report). To enable coverage:
   `rustup toolchain install stable-x86_64-pc-windows-msvc` (needs VS Build Tools
   for `link.exe`), then re-run with `-Coverage`.
-- [Sysinternals `handle64.exe`](https://learn.microsoft.com/sysinternals/downloads/handle)
-  for the oracle cross-check — **fetched automatically** (official `Handle.zip`
-  over HTTPS, into the run folder) if it isn't already on `PATH` or passed via
-  `-HandleExe`. Pass `-NoFetchHandle` to disable the download (that case then
-  SKIPs).
+- **No external tools or downloads.** Every oracle is a native Windows command
+  (`Get-NetTCPConnection`, `Get-Process`); the harness fetches nothing at runtime.
 
 ## Running it
 
@@ -79,11 +77,7 @@ powershell -ExecutionPolicy Bypass -File .\Invoke-WinlsofSmokeTest.ps1
 # 3) With measurable line coverage (recommended; run elevated for max coverage):
 .\Invoke-WinlsofSmokeTest.ps1 -Coverage
 
-# 4) Point at a specific handle64.exe (otherwise it's auto-fetched);
-#    or disable the download with -NoFetchHandle.
-.\Invoke-WinlsofSmokeTest.ps1 -HandleExe C:\tools\handle64.exe
-
-# 5) Run the full suite against a PREBUILT binary (a downloaded release, a CI
+# 4) Run the full suite against a PREBUILT binary (a downloaded release, a CI
 #    artifact, etc.) instead of building from source - skips the build:
 .\Invoke-WinlsofSmokeTest.ps1 -Binary $env:USERPROFILE\Downloads\lsof.exe
 ```
@@ -99,18 +93,16 @@ a loopback listener) and runs ~10 representative cases, each timeout-bounded:
 ```
 
 Use `Invoke-WinlsofSmokeTest.ps1 -Binary <path>` for the exhaustive suite (pipes,
-mapped files, WOW64 cwd, modules, Restart Manager, every format, handle64 oracle);
+mapped files, WOW64 cwd, modules, Restart Manager, every format, native oracles);
 `Test-Lsof.ps1` for a 10-second "does this binary work" smoke.
 
 > SKIPs in a single pass are by design, not gaps: the `-T`, `-U`, and
 > system-process cases need Administrator (they run in pass 2), while the
 > privilege-hint cases (`privilege-hint-unelevated`, `suppress-warnings-dash-w`)
 > only apply to a **non-elevated** run (pass 1).
-> `handle-exe-cross-check` SKIPs when `handle64.exe` can't be fetched/found, or
-> — unelevated — when handle64 resolves no File handle names at all (a blind
-> oracle can't disagree; its raw output is saved to
-> `cases\handle64-cross-check.out.txt` either way, so a FAIL is diagnosable).
-> Running pass 1 **and** pass 2 exercises everything.
+> The `native-handle-cross-check` case needs no elevation and never SKIPs for a
+> missing tool — it verifies winlsof against the harness's own fixtures (which it
+> holds open) and `Get-Process`. Running pass 1 **and** pass 2 exercises everything.
 
 Results land in `.\winlsof-smoke-results\<timestamp>\`.
 
@@ -148,7 +140,7 @@ For each `FAIL` (or surprising output), the fix loop needs:
 1. The **`summary.txt`** and **`results.csv`** from the run folder.
 2. The failing case's raw **`cases\NNN-name.out.txt` / `.err.txt`**.
 3. The matching **oracle** output (the harness prints it for socket cases; for
-   others run e.g. `Get-Process -Id <pid> | Format-List` / `handle64.exe -p <pid>`).
+   others run e.g. `Get-Process -Id <pid> | Format-List`).
 4. With `-Coverage`: the **`coverage-summary.txt`** (per-file line %), and a note
    of any source lines still red in `coverage-html`.
 
@@ -168,3 +160,7 @@ red lines.
   into a fast, actionable signal rather than a stuck run.
 - The harness never elevates itself; run it elevated yourself for the system-wide
   cases.
+- **No downloads.** The harness runs only native Windows commands and never fetches
+  an executable at runtime, so a compromised download host cannot inject code into
+  the test machine. (This is why the former Sysinternals `handle64.exe` oracle was
+  removed in favor of native `Get-Process` + fixture ground truth.)

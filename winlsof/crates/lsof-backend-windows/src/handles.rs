@@ -181,6 +181,8 @@ pub fn enumerate(
     // entries.
     let info = unsafe { &*(buf.as_ptr() as *const SystemHandleInformationEx) };
     let count = info.number_of_handles;
+    // SAFETY: the API wrote `count` contiguous entries after the header; the
+    // slice covers exactly those, borrowing `buf` which outlives it.
     let entries = unsafe {
         std::slice::from_raw_parts(
             std::ptr::addr_of!(info.handles) as *const SystemHandleTableEntryInfoEx,
@@ -281,12 +283,14 @@ fn query_all_handles() -> Option<Vec<u64>> {
     for _ in 0..8 {
         let mut buf = vec![0u64; cap / 8];
         let mut ret = 0u32;
-        // SAFETY: buf is `cap` bytes; the class writes a SystemHandleInformationEx.
+        // SAFETY: the length passed equals buf.len()*8 — the exact byte size of
+        // the allocation (`cap / 8` floors, so `cap` itself could exceed it) — so
+        // the class never writes past the buffer.
         let status = unsafe {
             NtQuerySystemInformation(
                 SYSTEM_EXTENDED_HANDLE_INFORMATION,
                 buf.as_mut_ptr() as *mut c_void,
-                cap as u32,
+                (buf.len() * 8) as u32,
                 &mut ret,
             )
         };
@@ -342,13 +346,16 @@ fn query_object_string(handle: HANDLE, class: i32) -> Option<String> {
     for _ in 0..6 {
         let mut buf = vec![0u64; cap / 8];
         let mut ret = 0u32;
-        // SAFETY: handle is a live duplicated handle; buf is `cap` bytes.
+        // SAFETY: handle is a live duplicated handle; the length passed equals
+        // buf.len()*8 — the exact allocation size (`cap / 8` floors, so `cap`
+        // could exceed it for a non-8-multiple cap) — so NtQueryObject never
+        // overruns the buffer.
         let status = unsafe {
             NtQueryObject(
                 handle,
                 class,
                 buf.as_mut_ptr() as *mut c_void,
-                cap as u32,
+                (buf.len() * 8) as u32,
                 &mut ret,
             )
         };
@@ -377,6 +384,8 @@ fn parse_unicode_string(buf: &[u64]) -> Option<String> {
         return None;
     }
     let n = (us.length as usize) / 2;
+    // SAFETY: buffer is non-null (checked) and points at `length` bytes = `n`
+    // UTF-16 code units the API wrote; the slice reads only those.
     let chars = unsafe { std::slice::from_raw_parts(us.buffer, n) };
     Some(String::from_utf16_lossy(chars))
 }
@@ -620,6 +629,7 @@ fn endpoint_suffix(
 /// The current file offset of a disk handle, via `NtQueryInformationFile`.
 /// The duplicate shares the owner's file object, so this is the live position.
 fn file_offset(dup: HANDLE) -> Option<u64> {
+    // SAFETY: all-zero is a valid IoStatusBlock (integers/pointer).
     let mut iosb: IoStatusBlock = unsafe { std::mem::zeroed() };
     let mut pos: i64 = 0;
     // SAFETY: writes a FILE_POSITION_INFORMATION (a single i64) into `pos`.
@@ -691,6 +701,7 @@ fn pipe_display(nt_name: &str) -> String {
 /// `GetFileInformationByHandle`. The link count powers the `-L` NLINK column
 /// and the `+L count` filter for unlinked-but-still-open files.
 fn disk_details(dup: HANDLE) -> (FileType, Option<String>, Option<u64>, Option<u32>) {
+    // SAFETY: all-zero is a valid BY_HANDLE_FILE_INFORMATION.
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: dup is a live disk handle; info is sized correctly.
     if unsafe { GetFileInformationByHandle(dup, &mut info) } == 0 {
@@ -724,8 +735,9 @@ pub(crate) fn build_dos_map() -> Vec<(String, String)> {
         let dos = format!("{letter}:");
         let devname: Vec<u16> = format!("{dos}\0").encode_utf16().collect();
         let mut target = [0u16; 512];
-        // SAFETY: devname is NUL-terminated; target/len are paired.
         let len =
+            // SAFETY: devname is NUL-terminated; QueryDosDeviceW writes up to
+            // target.len() u16s into `target`.
             unsafe { QueryDosDeviceW(devname.as_ptr(), target.as_mut_ptr(), target.len() as u32) };
         if len == 0 {
             continue;

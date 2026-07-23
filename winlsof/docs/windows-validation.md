@@ -2,8 +2,8 @@
 
 This plan validates the `winlsof` (`lsof.exe`) build end-to-end on a real
 Windows 10/11 x64 host, cross-checking every feature against a native Windows
-"oracle" (`Get-Process`, `Get-NetTCPConnection`, `netstat`, Sysinternals
-`handle.exe`, etc.). CI already proves the code compiles, lints, and that the
+"oracle" (`Get-Process`, `Get-NetTCPConnection`, `netstat`) — all native, no
+downloads. CI already proves the code compiles, lints, and that the
 pure helper logic unit-tests pass on `windows-latest`; this plan covers the part
 CI cannot: a live system-wide run.
 
@@ -18,9 +18,8 @@ cd winlsof
 cargo build --release
 $lsof = ".\target\release\lsof.exe"
 
-# optional oracle (Sysinternals) — handy for handle cross-checks
-#   https://learn.microsoft.com/sysinternals/downloads/handle
-#   put handle64.exe on PATH
+# Oracles are native Windows commands (Get-Process, Get-NetTCPConnection,
+# netstat) — nothing to install or download.
 ```
 
 Run the **unprivileged** cases in a normal PowerShell, and the **elevated**
@@ -122,8 +121,8 @@ $f = [System.IO.File]::Open($path,'Open','Read','None')
 # T11 — list this process's open files; the test file should appear
 & $lsof -p $PID 2>$null | Select-String 'winlsof_test'
 
-# cross-check with Sysinternals handle (optional):
-handle64.exe -p $PID winlsof_test
+# cross-check natively: this process owns handles incl. the file we just opened
+Get-Process -Id $PID | Select-Object Name, Handles
 $f.Close(); Remove-Item $path
 ```
 

@@ -38,6 +38,7 @@ pub fn enumerate(pid: u32, dos_map: &[(String, String)]) -> Vec<OpenFile> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut addr: usize = 0;
     for _ in 0..MAX_REGIONS {
+        // SAFETY: all-zero is a valid MEMORY_BASIC_INFORMATION.
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: mbi is correctly sized; VirtualQueryEx returns 0 past the end
         // of the address space.

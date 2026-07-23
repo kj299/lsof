@@ -34,6 +34,7 @@ pub fn is_elevated() -> bool {
     let Some(token) = OwnedHandle::new(token) else {
         return false;
     };
+    // SAFETY: all-zero is a valid TOKEN_ELEVATION.
     let mut elevation: TOKEN_ELEVATION = unsafe { zeroed() };
     let mut ret_len = 0u32;
     // SAFETY: token is valid; the buffer matches TOKEN_ELEVATION's size.
@@ -81,6 +82,7 @@ impl PrivilegeGuard {
         }
         let token = OwnedHandle::new(token)?;
 
+        // SAFETY: all-zero is a valid LUID.
         let mut luid: LUID = unsafe { zeroed() };
         // SAFETY: looking up a well-known privilege name into `luid`.
         let ok = unsafe { LookupPrivilegeValueW(std::ptr::null(), wide.as_ptr(), &mut luid) };

@@ -176,9 +176,30 @@ fn fields_skips_empty_name() {
 
 #[test]
 fn fields_nul_terminator() {
+    // -F0: fields within a set are NUL-separated, and each process/file set ends
+    // with a NL so a consumer can split records on it (lsof's documented format).
     let out = fields::render(&sample_processes(), true, None);
-    assert!(out.contains("p1000\0"));
-    assert!(!out.contains('\n'));
+    assert!(
+        out.contains("p1000\0"),
+        "fields within a set are NUL-separated: {out:?}"
+    );
+    assert!(
+        out.contains('\n'),
+        "sets must be NL-delimited so parsers can split them"
+    );
+    // The last field of a set is NL-terminated, NOT NUL — no `\0\n` sequence.
+    assert!(
+        !out.contains("\0\n"),
+        "a set's last field should end with NL, not NUL+NL: {out:?}"
+    );
+    // Every NL-delimited set begins with a `p` or `f` structural marker.
+    for set in out.split('\n').filter(|s| !s.is_empty()) {
+        let first = set.chars().next().unwrap();
+        assert!(
+            first == 'p' || first == 'f',
+            "set must start with p/f: {set:?}"
+        );
+    }
 }
 
 #[test]

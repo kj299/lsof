@@ -63,6 +63,7 @@ fn get_list(session: u32) -> Vec<u32> {
         return Vec::new();
     }
 
+    // SAFETY: all-zero is a valid RM_PROCESS_INFO.
     let mut infos: Vec<RM_PROCESS_INFO> = vec![unsafe { std::mem::zeroed() }; needed as usize];
     have = needed;
     // SAFETY: `infos` has `have` elements as the call requires.

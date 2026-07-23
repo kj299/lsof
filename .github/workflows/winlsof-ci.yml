@@ -37,6 +37,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test (portable core + CLI via mock backend)
         run: cargo test --all
+      - name: unsafe-audit (// SAFETY on every unsafe block)
+        # Toolchain-free text scan from the porting kit. HARD gate: every unsafe
+        # block in the backend carries a // SAFETY: justification (131/131), so
+        # a new undocumented block fails CI.
+        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src
 
   windows:
     name: native backend (windows)
@@ -55,6 +60,15 @@ jobs:
         run: cargo test --all
       - name: build release binary
         run: cargo build --release --bin lsof
+      - name: socket differential (oracle-substitution vs Get-NetTCPConnection)
+        # Compares winlsof's `-i` socket SET against the OS's own table over
+        # self-owned fixtures (see differential/README.md). Built-in cmdlets +
+        # python only; no elevation, no third-party actions.
+        # HARD gate: promoted after consecutive green runs on the hosted runner.
+        # The comparator distinguishes divergence (exit 1) from infra (exit 2),
+        # and the one known data-source divergence (BOUND sockets) is ledgered.
+        shell: pwsh
+        run: ./differential/capture.ps1 -Bin target/release/lsof.exe
       - name: upload lsof.exe
         uses: actions/upload-artifact@v4
         with:
