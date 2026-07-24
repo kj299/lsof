@@ -445,6 +445,11 @@ fn timed_object_name(source: HANDLE, handle_value: HANDLE, me: HANDLE) -> Option
 /// pipe/device handle; doing them off the main thread means a single wedged
 /// handle is abandoned instead of freezing the whole enumeration. (Abandoned
 /// workers are reaped when the process force-exits; see `crate::exit_now`.)
+// The classification inputs must be passed explicitly rather than captured:
+// they cross the `spawn` boundary into the worker (which can outlive this frame
+// when a handle wedges), so `dos_map`/`type_cache` are moved in as owned `Arc`s
+// while `classify` borrows them — a split a single context struct can't unify.
+#[allow(clippy::too_many_arguments)]
 fn describe_bounded(
     source: HANDLE,
     handle_value: HANDLE,
@@ -478,6 +483,8 @@ fn describe_bounded(
 
 /// Duplicate `handle_value` from `source`, optionally confirm it's a `File`
 /// object, and classify it. Runs on the worker thread of [`describe_bounded`].
+// Mirrors `describe_bounded`'s threaded inputs, received by borrow on the worker.
+#[allow(clippy::too_many_arguments)]
 fn classify(
     source: HANDLE,
     handle_value: HANDLE,
