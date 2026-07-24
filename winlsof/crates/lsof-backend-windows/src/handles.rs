@@ -212,33 +212,30 @@ pub fn enumerate(
                 continue;
             }
         }
-        // Keep only File objects (disk files, dirs, named pipes, char devices,
-        // and sockets); other object types (keys, events, …) aren't lsof-like.
-        // The table's type index does this without a hang-prone type query.
-        if let Some(fi) = file_index {
-            if e.object_type_index != fi {
-                continue;
-            }
-        }
+        // Classify EVERY object type — like lsof lists every open descriptor.
+        // File-typed handles (disk files, dirs, named pipes, char devices; AFD
+        // sockets are dropped inside `describe`) take the fast path via the
+        // table's File type index, with no type query; every other kernel object
+        // (keys, events, mutants, sections, processes, threads, tokens, jobs, …)
+        // resolves its object type name on the bounded worker below.
+        let is_file_fast = file_index == Some(e.object_type_index);
         let source = proc_cache.entry(pid).or_insert_with(|| open_for_dup(pid));
         let Some(source) = source.as_ref() else {
             continue;
         };
-        // Bound the whole per-handle classification (duplicate + GetFileType +
-        // name) on a worker thread. Any of those can block on a synchronous
-        // pipe/device handle, so abandoning a wedged worker after the timeout
-        // keeps one bad handle from freezing enumeration. `verify_type` re-checks
-        // the object type only in the (practically impossible) case the File
-        // type index couldn't be learned from the NUL probe.
+        // Bound the whole per-handle classification (duplicate + type/name
+        // queries + GetFileType) on a worker thread. Any of those can block on a
+        // synchronous handle, so abandoning a wedged worker after the timeout
+        // keeps one bad handle from freezing enumeration.
         let Some(mut d) = describe_bounded(
             source.raw(),
             e.handle_value as HANDLE,
             Arc::clone(&dos_map),
             Duration::from_millis(200),
-            file_index.is_none(),
+            is_file_fast,
             endpoints.is_some(),
         ) else {
-            continue; // skipped: not a File handle, inaccessible, or timed out
+            continue; // inaccessible, untypeable, a bare socket, or timed out
         };
         // `-E`/`+E`: append the pipe's peer info to NAME and remember the peer
         // PIDs so `+E` can pull in their rows.
@@ -446,7 +443,7 @@ fn describe_bounded(
     handle_value: HANDLE,
     dos_map: Arc<Vec<(String, String)>>,
     timeout: Duration,
-    verify_type: bool,
+    is_file_fast: bool,
     want_endpoints: bool,
 ) -> Option<Described> {
     let source = source as usize;
@@ -460,7 +457,7 @@ fn describe_bounded(
             handle_value as HANDLE,
             me,
             &dos_map,
-            verify_type,
+            is_file_fast,
             want_endpoints,
         );
         let _ = tx.send(result);
@@ -475,16 +472,85 @@ fn classify(
     handle_value: HANDLE,
     me: HANDLE,
     dos_map: &[(String, String)],
-    verify_type: bool,
+    is_file_fast: bool,
     want_endpoints: bool,
 ) -> Option<Described> {
     let dup = duplicate(source, handle_value, me)?;
-    if verify_type
-        && query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File")
-    {
-        return None;
+    // Fast path: the handle table's type index already identified a File object.
+    if is_file_fast {
+        return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
     }
-    describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints)
+    // Otherwise resolve the object type name — this both classifies non-File
+    // objects and recognizes a File when the File type index couldn't be learned
+    // from the NUL probe. (`NtQueryObject(TypeInformation)` doesn't touch the
+    // object's driver, so it's safe to call directly on the bounded worker.)
+    let type_name = query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION)?;
+    if type_name == "File" {
+        return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
+    }
+    // A native kernel object (Key/Event/Mutant/Section/Process/Thread/Token/…).
+    // Its name (`\REGISTRY\…`, `\BaseNamedObjects\…`) comes from the same
+    // timeout-bounded OBJECT_NAME_INFORMATION query used for devices; many
+    // objects (Process/Thread) are unnamed, which is fine — the TYPE and the
+    // handle value still identify them.
+    let name = timed_object_name(source, handle_value, me)
+        .map(|n| device_to_dos(&n, dos_map))
+        .unwrap_or_default();
+    Some(Described {
+        file_type: win_type_to_filetype(&type_name),
+        name,
+        device: None,
+        node: None,
+        size: None,
+        offset: None,
+        links: None,
+        pipe_peers: None,
+    })
+}
+
+/// Map a Windows kernel object type name (from `NtQueryObject(TypeInformation)`)
+/// to a lsof TYPE. Common types get a named [`FileType`]; every other type is
+/// carried by [`FileType::Other`] with a short code, so no object is dropped.
+fn win_type_to_filetype(type_name: &str) -> FileType {
+    match type_name {
+        "Key" => FileType::Key,
+        "Event" => FileType::Event,
+        "Mutant" => FileType::Mutant,
+        "Section" => FileType::Section,
+        "Process" => FileType::Process,
+        "Thread" => FileType::Thread,
+        "Token" => FileType::Token,
+        "Semaphore" => FileType::Other("SEM".into()),
+        "Timer" | "IRTimer" => FileType::Other("TMR".into()),
+        "Job" => FileType::Other("JOB".into()),
+        "IoCompletion" => FileType::Other("IOCP".into()),
+        "TpWorkerFactory" => FileType::Other("TPWF".into()),
+        "ALPC Port" => FileType::Other("ALPC".into()),
+        "Directory" => FileType::Other("ODIR".into()),
+        "SymbolicLink" => FileType::Other("LINK".into()),
+        "Desktop" => FileType::Other("DESK".into()),
+        "WindowStation" => FileType::Other("WSTA".into()),
+        "KeyedEvent" => FileType::Other("KEVT".into()),
+        "WmiGuid" => FileType::Other("WMI".into()),
+        "EtwRegistration" => FileType::Other("ETW".into()),
+        other => FileType::Other(short_type_code(other)),
+    }
+}
+
+/// A short, upper-case TYPE code for an object type without a dedicated mapping
+/// (e.g. "Partition" -> "PARTITIO").
+fn short_type_code(name: &str) -> String {
+    let code: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .take(8)
+        .collect();
+    if code.is_empty() {
+        "OBJ".to_string()
+    } else {
+        code
+    }
 }
 
 struct Described {

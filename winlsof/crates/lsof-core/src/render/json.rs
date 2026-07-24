@@ -40,7 +40,7 @@ fn fd_code(f: &OpenFile) -> String {
 fn file_members(f: &OpenFile) -> Vec<String> {
     let mut m = vec![
         format!("\"fd\":{}", qs(&fd_code(f))),
-        format!("\"type\":{}", qs(f.file_type.code())),
+        format!("\"type\":{}", qs(&f.file_type.code())),
         format!("\"name\":{}", qs(&f.name)),
     ];
     if f.access != AccessMode::Unknown {

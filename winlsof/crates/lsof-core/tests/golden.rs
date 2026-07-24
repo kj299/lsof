@@ -203,6 +203,51 @@ fn fields_nul_terminator() {
 }
 
 #[test]
+fn windows_object_types_render() {
+    // The all-handle scan surfaces native kernel objects (registry keys, events,
+    // semaphores, …). Named variants and `FileType::Other(code)` must both show
+    // their TYPE code in the table and `-F t` and carry their object-path NAME.
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let mk = |h: u64, ft: FileType, name: &str| OpenFile {
+        fd: FdType::Handle(h),
+        access: AccessMode::ReadWrite,
+        file_type: ft,
+        name: name.into(),
+        device: None,
+        size: None,
+        offset: None,
+        node: None,
+        links: None,
+        socket: None,
+    };
+    let p = Process {
+        pid: 7,
+        ppid: None,
+        command: "svc".into(),
+        user: None,
+        endpoint_peer: false,
+        files: vec![
+            mk(0x1a4, FileType::Key, "\\REGISTRY\\MACHINE\\SOFTWARE"),
+            mk(
+                0x1a8,
+                FileType::Other("SEM".into()),
+                "\\BaseNamedObjects\\Foo",
+            ),
+        ],
+    };
+    let table = table::render(std::slice::from_ref(&p), false, false, false, None, false);
+    assert!(table.contains("KEY"), "registry-key TYPE code: {table:?}");
+    assert!(table.contains("SEM"), "Other object TYPE code: {table:?}");
+    assert!(
+        table.contains("\\REGISTRY\\MACHINE\\SOFTWARE"),
+        "key path in NAME"
+    );
+    let f = fields::render(&[p], false, None);
+    assert!(f.contains("tKEY\n"), "-Ft KEY: {f:?}");
+    assert!(f.contains("tSEM\n"), "-Ft SEM: {f:?}");
+}
+
+#[test]
 fn json_aggregated_shape() {
     let out = json::render_aggregated(&sample_processes());
     assert!(out.starts_with("{\"processes\":["));

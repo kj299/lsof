@@ -85,7 +85,7 @@ pub fn render(
         }
         r.push(p.user.clone().unwrap_or_default());
         r.push(fd_cell(f));
-        r.push(f.file_type.code().to_string());
+        r.push(f.file_type.code());
         r.push(f.device.clone().unwrap_or_default());
         r.push(size_off_cell(f, show_offset));
         if show_links {

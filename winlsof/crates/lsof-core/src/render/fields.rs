@@ -68,7 +68,7 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                 push!('a', &f.access.code().to_string());
             }
             if want('t') {
-                push!('t', f.file_type.code());
+                push!('t', &f.file_type.code());
             }
             if want('d') {
                 if let Some(d) = &f.device {
