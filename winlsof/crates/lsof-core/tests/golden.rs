@@ -268,6 +268,33 @@ fn windows_object_types_render() {
 }
 
 #[test]
+fn repeat_marker_is_format_aware() {
+    // lsof's `-r` cycle separator differs by format (src/main.c): `=======` for
+    // the table, the `m` marker field for `-F` (NUL- then NL-terminated under
+    // `-F0`), and nothing for JSON (objects self-delimit).
+    use lsof_core::render::Format;
+    assert_eq!(Format::Table.repeat_marker(), "=======\n");
+    assert_eq!(
+        Format::Fields {
+            nul: false,
+            only: None
+        }
+        .repeat_marker(),
+        "m\n"
+    );
+    assert_eq!(
+        Format::Fields {
+            nul: true,
+            only: None
+        }
+        .repeat_marker(),
+        "m\0\n"
+    );
+    assert_eq!(Format::Json.repeat_marker(), "");
+    assert_eq!(Format::JsonLines.repeat_marker(), "");
+}
+
+#[test]
 fn json_aggregated_shape() {
     let out = json::render_aggregated(&sample_processes());
     assert!(out.starts_with("{\"processes\":["));
