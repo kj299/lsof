@@ -384,3 +384,45 @@ adopt the new emphasis):
 
 The rest of this document is unchanged: it is the evidence, and the evidence is
 what the kit is built to not repeat.
+
+---
+
+## 10. Addendum — the hardening arc (2026-07-24): the kit applied back to winlsof
+
+§1–§8 are the *forensic* record of the original port; §9 redirected the kit. This
+addendum records what happened when the hardened kit was turned back on winlsof
+itself across three merged PRs — the compounding loop closing on its origin
+project. Detail lives in LESSONS #6–#10; the arc:
+
+- **The safety gates went from prose to CI (PR #30).** The `unsafe-audit` hard
+  gate, `cargo-deny`, `[workspace.lints]` (incl. `undocumented_unsafe_blocks`),
+  and a `cargo-fuzz` arg-parser target were wired into CI. The audit paid the §4
+  "144-vs-91" debt down to **0 undocumented** — and wiring the clippy half exposed
+  a real bug the audit alone had blessed: the two gates disagreed on SAFETY-comment
+  placement (LESSONS #7). Three genuine FFI soundness bugs (an OOB read in
+  `sockets.rs`, an off-by-one in `etw.rs`, a wrong length in `handles.rs`) were
+  found and fixed *while documenting the blocks* (`cf230fe`) — evidence that
+  writing the SAFETY comment is itself a review pass, not paperwork.
+- **The oracle-substitution differential was built and promoted (PR #29).** The
+  mode §5 said the kit "must support" now exists: winlsof's socket SET diffed
+  against `Get-NetTCPConnection` / `Get-NetUDPEndpoint` over self-owned fixtures,
+  observe-first then hard-gated. It taught LESSONS #6 (the native oracle lies in
+  new ways) and, by omission, #8 (a green diff over a socket-only matrix hid that
+  every non-File object type was dropped).
+- **The depth gaps were closed (PR #31).** A gap analysis against the C
+  established the option surface was complete (47/47) but the *depth* was not:
+  all-handle object classification (the biggest gap), the `(deleted)` marker, and
+  `-F`/JSON scripting fidelity. All three shipped behind the now-green gates.
+- **The test harness was de-weaponized.** The `handle64.exe` auto-download (§5,
+  praised there as convenient) was removed as a supply-chain hole in the *test*
+  path (LESSONS #10) — native commands only.
+
+**The single failure the kit still would not have prevented** (the next target):
+the depth gap (#8) was invisible until a *human-directed* analysis enumerated the
+C's feature surface and asked "what does lsof emit that no fixture creates?" The
+differential, the golden tests, and the option-parity count were all green while
+whole object classes were dropped. The kit can now *hold* that enumeration (the
+matrix-completeness note) but cannot yet *generate* it — a future harness that
+diffs the C's emitted-TYPE / option enumeration against the matrix's coverage
+would turn #8 from a discipline into a gate. Until then, "green on the matrix"
+remains a statement about the matrix, not the port.

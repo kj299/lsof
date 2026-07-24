@@ -198,7 +198,16 @@ Then the loop — each step is a CI-enforced gate:
    won't see it — the harness's per-case timeout marks a wedged run as
    `<<TIMEOUT>>` and fails it. Treat a timeout as a design smell (an unbounded
    blocking call on the hot path) — the winlsof fix was to *avoid* the blocking
-   call, not wrap it.
+   call, not wrap it. Two things this gate can't see on its own — **coverage**
+   and **an oracle that won't run on the target** (LESSONS #6, #8). The
+   differential only checks the inputs in the matrix: a green run over a matrix
+   that omits a feature class proves nothing about that class (winlsof's socket
+   diff was green while every non-File handle type was silently dropped — no
+   fixture ever created one). Enumerate the C's feature surface and give each a
+   case. When the reference binary can't run on the target platform, switch to
+   **oracle-substitution** (diff against a native tool over self-owned fixtures)
+   with a three-way exit contract — match / divergence / infra-error — so a
+   broken harness can't read as a port bug. Both modes are in the matrix header.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker.
@@ -256,6 +265,18 @@ kept both trees side by side — preserve that discipline.
 
 See `harnesses/ci/porting-ci.template.yml` for the wiring and
 `make -C porting-kit check-kit` to smoke-test every harness.
+
+**When a gate can only run in CI** — a platform backend you can't build on the
+dev host (winlsof's Windows crate on a Linux box) — land it *observe-first*
+(continue-on-error) and read a few real runs before promoting it to a hard gate,
+so a flaky harness doesn't wedge every PR (LESSONS #9). Two traps: (a) give an
+infra/harness error a **distinct exit code** from a real failure, or the noise
+trains you to ignore red; (b) **a superseded CI run is not a passed run** — rapid
+pushes cancel in-flight runs, so "I saw green" can mean an *earlier* commit while
+the head commit's gate never finished. Before calling a CI-only-validated change
+green, confirm the head SHA has a *completed* run — winlsof's `too_many_arguments`
+clippy error slipped in exactly this way: its Windows run was cancelled by the
+next push and the lint surfaced only two commits later.
 
 ---
 

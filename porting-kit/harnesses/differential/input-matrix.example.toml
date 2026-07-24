@@ -8,6 +8,27 @@
 # axes that matter for a rewrite: empty/edge inputs, large inputs, every
 # output format, every flag, and - critically - the malformed/hostile inputs
 # that exercise the safety improvements over C. Control bytes use TOML \u.
+#
+# COMPLETENESS IS NOT GREENNESS. A differential only checks the inputs you list:
+# a fully-green run over a matrix that omits a feature class says *nothing* about
+# that class. Enumerate the C's feature surface up front - every option letter,
+# every object/record TYPE the tool can emit - and give each a case. winlsof's
+# socket differential was green while the port silently dropped every non-File
+# handle type (registry Key/Event/Mutant/...): the matrix only made sockets, so
+# no fixture ever created the objects that would have exposed the gap. Matches-
+# the-oracle-on-the-matrix is not ports-all-functionality.
+#
+# TWO MODES. (1) same-binary-both-platforms: run the C oracle and the Rust side
+# on one host (the case this file shows). (2) oracle-substitution: when the C
+# binary can't run on the target (winlsof: no lsof on Windows), diff the Rust
+# output against a *native* oracle (Get-NetTCPConnection, netstat, ...) over
+# self-owned fixtures. Mode 2 needs a three-way exit contract - 0 match,
+# 1 divergence, 2 infra-error - so a broken oracle/harness can't masquerade as a
+# port bug, and it must parse the oracle *defensively* (PowerShell's
+# ConvertTo-Json double-wrapped a single-element set and read as a divergence).
+# In mode 2 the coverage trap above is sharper still: the oracle only observes
+# what your fixtures create, so an un-created type is invisible to *both* sides -
+# a false MATCH, never a divergence.
 
 [[case]]
 name = "help"

@@ -192,3 +192,125 @@ code), not the playbook prose — evidence that a kit is only as good as its too
 are exercised. `PROMPTS/90-retrospective.md` already says "run against the real
 code"; these passes prove that half is where the findings live, and it is now
 the emphasized half.
+
+---
+
+## 006. Oracle-substitution differential — built, and the native oracle lies in new ways
+
+- **Date:** 2026-07-24
+- **Codebase:** winlsof — the socket differential, promoted to a hard CI gate (PR #29)
+- **What happened:** RETROSPECTIVE §5 / LESSONS #4 named "oracle-substitution" as
+  the differential mode the kit *needs* when the C binary won't run on the target
+  (no lsof on Windows). This session built it: winlsof `-i` socket SET vs
+  `Get-NetTCPConnection` / `Get-NetUDPEndpoint` over self-owned fixtures, landed
+  observe-first then promoted to a hard gate once green. Two failure classes
+  appeared that a same-binary diff never produces. (a) **The oracle's serializer
+  lied:** `ConvertTo-Json -AsArray` on a single-element set emitted `[[…]]`, and
+  the parser read the double-wrap as a divergence (fixed `48d8b4c` — pipe to
+  `ConvertTo-Json`, unwrap defensively, and raise on a shape it can't trust). (b)
+  **A benign platform race:** a transient IPv6 BOUND shadow socket reported by NSI
+  but not `GetExtendedTcpTable` — real, not a port bug — which the divergence
+  ledger must *absorb*, not fail on (`61e1f04`). The exit contract grew a third
+  value: infra-error (2) ≠ divergence (1) ≠ match (0), so a broken harness can't
+  masquerade as a rewrite bug.
+- **Kit change:** documented oracle-substitution as a first-class second
+  differential mode in the matrix header (both modes, the three-way exit contract,
+  and "parse the oracle defensively — its serializer is not your friend"); PLAYBOOK
+  Phase 4 gate 2 now points at both modes.
+- **Section amended:** harnesses/differential/input-matrix.example.toml (header);
+  PLAYBOOK · Phase 4 gate 2.
+
+---
+
+## 007. Two gates for one property must accept the same thing (audit vs clippy SAFETY placement)
+
+- **Date:** 2026-07-24
+- **Codebase:** winlsof — the safety-gate PR (#30), caught in CI at `etw.rs`
+- **What happened:** The kit runs two checks for "every `unsafe` block is
+  documented": the toolchain-free `audit_unsafe.py` (hard gate) and clippy's
+  `undocumented_unsafe_blocks` (wired via `[workspace.lints]` + `-D warnings`,
+  LESSONS #3). They **disagreed on placement**: the audit accepted a `// SAFETY:`
+  *trailing* on the block's own line; clippy credits the comment only when it
+  *precedes* the block. So a block documented trailing-style passed the audit
+  locally and then failed the clippy gate in CI (`etw.rs:582`). Worse, for a split
+  `let x =` / `unsafe { … }` statement the comment must sit *between* the two lines
+  to satisfy both (the audit stops at the first real code line; clippy credits a
+  comment above the statement). Two gates for one invariant that bless different
+  layouts = a gate that greenlights what its twin rejects.
+- **Kit change:** tightened `audit_unsafe.py`'s `has_safety_comment` to
+  **preceding-only**, matching clippy, so a green audit predicts a green clippy;
+  pinned with a self-test (a trailing `// SAFETY:` is now flagged). Re-ran against
+  the shipped backend: still **133/133** documented (every block was already
+  preceding-style, because clippy enforces it on the green CI), so the tightening
+  is regression-free.
+- **Section amended:** harnesses/unsafe-audit/audit_unsafe.py (`has_safety_comment`,
+  self-test, docstring); SECURITY-CHECKLIST · per-module `unsafe` item.
+
+---
+
+## 008. "Matches the oracle" ≠ "ports all functionality" — a differential is only as complete as its matrix
+
+- **Date:** 2026-07-24
+- **Codebase:** winlsof — the full-port depth gap analysis (PR #31)
+- **What happened:** A gap analysis found the *option surface* complete (47/47
+  switches) and the socket differential fully green — yet the port silently
+  dropped **every non-File kernel object type**: registry Keys, Events, Mutants,
+  Sections, Process/Thread/Token/Job/ALPC/IOCP handles were skipped with a
+  `continue` and never emitted (the `KEY/EVT/MUT/SECT/…` TYPE codes were dead enum
+  arms). The differential said nothing because its fixtures only created sockets;
+  the golden tests said nothing because they only built File handles. **A green
+  differential over a matrix that never exercises a feature class is silent about
+  that class** — and in oracle-substitution mode it's sharper, because the native
+  oracle *also* only observes what your fixtures create, so an un-created type is a
+  *false MATCH*, never a divergence. Fixed by classifying every type via
+  `NtQueryObject(TypeInformation)` with `FileType::Other(code)` for the long tail
+  (`b6581b9`), so nothing is dropped.
+- **Kit change:** added a "COMPLETENESS IS NOT GREENNESS" section to the matrix
+  header — enumerate the C's feature surface (every option, every object/record
+  TYPE) and give each a case; PLAYBOOK gate 2 carries the caveat. The
+  retrospective/audit must include a "what does the C emit that no fixture
+  exercises?" completeness pass.
+- **Section amended:** harnesses/differential/input-matrix.example.toml (header);
+  PLAYBOOK · Phase 4 gate 2.
+
+---
+
+## 009. A superseded CI run is not a passed run — the trap of a CI-only-validated backend
+
+- **Date:** 2026-07-24
+- **Codebase:** winlsof — the Windows backend, un-buildable on the Linux dev host
+- **What happened:** The Windows crate compiles only on Windows, so its gates
+  (clippy/build/test/differential) can *only* run in CI. Two hazards followed.
+  First, promoting a brand-new gate straight to hard-fail risks a flaky harness
+  wedging every PR — the differential was landed **observe-first**
+  (continue-on-error) and read across several real runs before promotion. Second,
+  and subtler: an index-cache commit pushed two functions to 8 arguments, tripping
+  `clippy::too_many_arguments` — but that failure **never surfaced for two
+  commits**, because each rapid follow-up push *cancelled the in-flight Windows
+  run*. "CI was green" had referred to an *earlier* commit; the head commit's
+  clippy gate had never finished. The lint appeared only when a later push finally
+  let a Windows run complete (fixed `9e0bbcf`).
+- **Kit change:** PLAYBOOK documents the observe-first→promote pattern for
+  CI-only gates, the infra-vs-failure exit-code split, and the rule — before
+  calling a CI-only-validated change green, confirm the *head SHA* has a
+  **completed** (not cancelled/superseded) run.
+- **Section amended:** PLAYBOOK · Cross-cutting controls (CI-only gates).
+
+---
+
+## 010. The test harness's supply chain counts too — don't download-and-run a binary oracle
+
+- **Date:** 2026-07-24
+- **Codebase:** winlsof — the live smoke harness (`Invoke-WinlsofSmokeTest.ps1`)
+- **What happened:** The smoke harness auto-fetched Sysinternals `handle64.exe`
+  from a live URL (RETROSPECTIVE §5, commit `0bb76f0`) and executed it as a handle
+  oracle. That is a supply-chain hole in the *test* path: a compromised host (or a
+  MITM) would run attacker code in the dev/CI environment — with none of the
+  `cargo-deny`/`cargo-audit` scrutiny applied to the *shipped* dependencies. The
+  harness was rewritten to drop the download entirely and cross-check against
+  **native, OS-shipped commands** only (`Get-Process`, `Get-NetTCPConnection`,
+  `netstat`). Supply-chain hygiene has to cover the code that *tests* the port,
+  not only the code it ships.
+- **Kit change:** SECURITY-CHECKLIST gained a per-release item — the harness must
+  not download-and-execute a binary oracle; use native/OS-shipped commands.
+- **Section amended:** SECURITY-CHECKLIST · per-release supply-chain.
