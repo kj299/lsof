@@ -39,8 +39,9 @@ use std::time::Duration;
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-    GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
+    CreateFileW, FileStandardInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileType, GetFinalPathNameByHandleW, GetLogicalDrives, QueryDosDeviceW,
+    BY_HANDLE_FILE_INFORMATION, FILE_STANDARD_INFO,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
@@ -606,15 +607,21 @@ fn describe(
     match unsafe { GetFileType(dup) } {
         FILE_TYPE_DISK => {
             // Robust, hang-free path for disk files; fall back to the NT name.
-            let name = final_path(dup)
+            let mut name = final_path(dup)
                 .or_else(|| {
                     timed_object_name(source, handle_value, me).map(|n| device_to_dos(&n, dos_map))
                 })
                 .unwrap_or_else(|| "(unnamed file)".to_string());
+            let device = drive_of(&name);
+            // lsof's `(deleted)` decoration for an open-but-unlinked file
+            // (delete-pending). Pairs with `+L 1` (link count 0).
+            if delete_pending(dup) {
+                name.push_str(" (deleted)");
+            }
             let (file_type, node, size, links) = disk_details(dup);
             Some(Described {
                 file_type,
-                device: drive_of(&name),
+                device,
                 name,
                 node,
                 size,
@@ -716,6 +723,25 @@ fn endpoint_suffix(
     } else {
         Some(format!(" ({})", parts.join(" ")))
     }
+}
+
+/// Whether a disk file has a pending unlink (open but deleted) — lsof's
+/// `(deleted)` NAME decoration. `GetFileInformationByHandleEx(FileStandardInfo)`
+/// exposes `DeletePending`; anything it can't answer reads as not deleted.
+fn delete_pending(dup: HANDLE) -> bool {
+    // SAFETY: all-zero is a valid FILE_STANDARD_INFO.
+    let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: dup is a live disk handle; `info` is a FILE_STANDARD_INFO of the
+    // size we declare, which the API fills.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            dup,
+            FileStandardInfo,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    ok != 0 && info.DeletePending != 0
 }
 
 /// The current file offset of a disk handle, via `NtQueryInformationFile`.
