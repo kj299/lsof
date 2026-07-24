@@ -203,6 +203,26 @@ fn fields_nul_terminator() {
 }
 
 #[test]
+fn fields_no_inode_for_sockets() {
+    // lsof leaves `-F i` empty for sockets — the protocol goes in `P`, not the
+    // inode. (Regression guard: the socket `node` carries the protocol string
+    // for the table's NODE column, which must not leak into `-F i`.)
+    let out = fields::render(&sample_processes(), false, None);
+    assert!(
+        !out.contains("iTCP\n"),
+        "socket protocol leaked into -Fi: {out:?}"
+    );
+    assert!(
+        !out.contains("iUDP\n"),
+        "socket protocol leaked into -Fi: {out:?}"
+    );
+    assert!(
+        out.contains("PTCP\n"),
+        "protocol still reported via -FP: {out:?}"
+    );
+}
+
+#[test]
 fn windows_object_types_render() {
     // The all-handle scan surfaces native kernel objects (registry keys, events,
     // semaphores, …). Named variants and `FileType::Other(code)` must both show
