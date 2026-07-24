@@ -33,7 +33,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
@@ -195,6 +195,10 @@ pub fn enumerate(
 
     let dos_map = Arc::new(build_dos_map());
     let mut proc_cache: HashMap<u32, Option<OwnedHandle>> = HashMap::new();
+    // Resolve each object type's TYPE at most once per type index, shared across
+    // the per-handle workers, so an unscoped scan (tens of thousands of handles,
+    // ~50 distinct types) doesn't type-query every non-File handle.
+    let type_cache: Arc<Mutex<HashMap<u16, FileType>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut out = Vec::new();
     let mut peers: HashSet<u32> = HashSet::new();
     trace(&format!(
@@ -233,6 +237,8 @@ pub fn enumerate(
             Arc::clone(&dos_map),
             Duration::from_millis(200),
             is_file_fast,
+            e.object_type_index,
+            Arc::clone(&type_cache),
             endpoints.is_some(),
         ) else {
             continue; // inaccessible, untypeable, a bare socket, or timed out
@@ -444,6 +450,8 @@ fn describe_bounded(
     dos_map: Arc<Vec<(String, String)>>,
     timeout: Duration,
     is_file_fast: bool,
+    type_index: u16,
+    type_cache: Arc<Mutex<HashMap<u16, FileType>>>,
     want_endpoints: bool,
 ) -> Option<Described> {
     let source = source as usize;
@@ -458,6 +466,8 @@ fn describe_bounded(
             me,
             &dos_map,
             is_file_fast,
+            type_index,
+            &type_cache,
             want_endpoints,
         );
         let _ = tx.send(result);
@@ -473,6 +483,8 @@ fn classify(
     me: HANDLE,
     dos_map: &[(String, String)],
     is_file_fast: bool,
+    type_index: u16,
+    type_cache: &Mutex<HashMap<u16, FileType>>,
     want_endpoints: bool,
 ) -> Option<Described> {
     let dup = duplicate(source, handle_value, me)?;
@@ -480,14 +492,28 @@ fn classify(
     if is_file_fast {
         return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
     }
-    // Otherwise resolve the object type name — this both classifies non-File
-    // objects and recognizes a File when the File type index couldn't be learned
-    // from the NUL probe. (`NtQueryObject(TypeInformation)` doesn't touch the
-    // object's driver, so it's safe to call directly on the bounded worker.)
-    let type_name = query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION)?;
-    if type_name == "File" {
-        return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
-    }
+    // Resolve this object type's TYPE, cached by type index (query the object
+    // type name at most once per type). Bind the lookup to `cached` first so the
+    // MutexGuard drops before the match — otherwise the `None` arm, which locks
+    // again to insert, would deadlock on the scrutinee's still-held guard. The
+    // lock is never held across the query, so a hung query (worker abandoned at
+    // the timeout) can't wedge it.
+    let cached = type_cache.lock().unwrap().get(&type_index).cloned();
+    let file_type = match cached {
+        Some(ft) => ft,
+        None => {
+            // `NtQueryObject(TypeInformation)` doesn't touch the object's driver,
+            // so it's safe to call directly on the bounded worker. It also
+            // recognizes a File when the File type index couldn't be learned.
+            let type_name = query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION)?;
+            if type_name == "File" {
+                return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
+            }
+            let ft = win_type_to_filetype(&type_name);
+            type_cache.lock().unwrap().insert(type_index, ft.clone());
+            ft
+        }
+    };
     // A native kernel object (Key/Event/Mutant/Section/Process/Thread/Token/…).
     // Its name (`\REGISTRY\…`, `\BaseNamedObjects\…`) comes from the same
     // timeout-bounded OBJECT_NAME_INFORMATION query used for devices; many
@@ -497,7 +523,7 @@ fn classify(
         .map(|n| device_to_dos(&n, dos_map))
         .unwrap_or_default();
     Some(Described {
-        file_type: win_type_to_filetype(&type_name),
+        file_type,
         name,
         device: None,
         node: None,
