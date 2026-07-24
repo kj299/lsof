@@ -9,7 +9,11 @@ to safety and security" — this is that list.
 - [ ] **No `unsafe` in `core`.** `#![forbid(unsafe_code)]` present → compile-time.
 - [ ] **Every `unsafe` block justified.** `unsafe-audit/audit_unsafe.py crates/`
       reports 0 undocumented. Each `// SAFETY:` states the invariant that makes
-      the block sound, not just "it's fine." (Toolchain-free hard gate.)
+      the block sound, not just "it's fine." (Toolchain-free hard gate.) The
+      comment must *precede* the block, not trail it — matching clippy's
+      `undocumented_unsafe_blocks`, so a green audit predicts a green clippy
+      (LESSONS #007; the two gates once disagreed and a trailing comment passed
+      the audit but failed CI).
 - [ ] **Every `unsafe fn` justified.** `clippy::missing_safety_doc` is enabled
       (via `[workspace.lints]`) and `-D` in CI, so every `pub unsafe fn` carries a
       `/// # Safety` section. The audit harness deliberately doesn't cover fns —
@@ -39,6 +43,12 @@ to safety and security" — this is that list.
       (no open RUSTSEC advisories) + `cargo deny` (licenses allow-listed, sources
       restricted to crates.io, no banned/duplicate crates). Dependency count is
       justifiable — a safety rewrite doesn't import unsafety through its deps.
+- [ ] **The harness supply chain is clean, too.** The test / differential / smoke
+      harness must not download-and-execute a binary oracle: a compromised host
+      would run arbitrary code in your dev/CI environment. Use OS-shipped native
+      commands as oracles (winlsof's smoke test fetched `handle64.exe` from a live
+      URL — removed, replaced with native `Get-*` / `netstat`). Supply chain
+      covers the code that *tests* the port, not only the code it ships.
 - [ ] **Least privilege.** Privileges acquired just-in-time and scoped to the one
       call that needs them (RAII guard), never held globally. Runs unprivileged
       by default; degrades rather than fails when it can't reach something.
