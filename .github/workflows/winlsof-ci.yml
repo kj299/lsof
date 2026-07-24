@@ -75,3 +75,32 @@ jobs:
           name: lsof-exe-windows
           path: winlsof/target/release/lsof.exe
           if-no-files-found: error
+
+  supply-chain:
+    name: supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        # advisories + licenses + bans + sources, per winlsof/deny.toml. The
+        # third-party surface is just the windows-sys family (MIT/Apache-2.0).
+        run: cargo deny check
+
+  fuzz:
+    name: fuzz smoke (arg parser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz the argument parser (short smoke)
+        # Adversarial input into the hand-rolled option parser: it must never
+        # panic. A short time-boxed run gates every PR; a longer nightly run can
+        # follow. See winlsof/fuzz/.
+        run: cargo fuzz run parse_args -- -max_total_time=45 -rss_limit_mb=2048

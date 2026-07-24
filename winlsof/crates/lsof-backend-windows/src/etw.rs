@@ -565,11 +565,11 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
     if props_start + count * size_of::<EVENT_PROPERTY_INFO>() > buf.len() {
         return Some("  (schema larger than buffer)".to_string());
     }
-    // SAFETY: TDH wrote `count` EVENT_PROPERTY_INFO entries starting at the
-    // EventPropertyInfoArray offset; the bounds check above confirms they lie
-    // within the buffer TDH filled. We only read.
     let props: &[EVENT_PROPERTY_INFO] =
-        unsafe { slice::from_raw_parts(buf.as_ptr().add(props_start) as *const _, count) }; // SAFETY: see above.
+        // SAFETY: TDH wrote `count` EVENT_PROPERTY_INFO entries starting at the
+        // EventPropertyInfoArray offset; the bounds check above confirms they
+        // lie within the buffer TDH filled. We only read.
+        unsafe { slice::from_raw_parts(buf.as_ptr().add(props_start) as *const _, count) };
 
     let mut out = String::new();
     for (i, p) in props.iter().enumerate() {
@@ -579,7 +579,8 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
         // array variant is uncommon for AFD events; we just print whatever's
         // there as `InType` / `OutType` u16s without interpreting.
         let in_type = unsafe { p.Anonymous1.nonStructType.InType };
-        let out_type = unsafe { p.Anonymous1.nonStructType.OutType }; // SAFETY: as above.
+        // SAFETY: the same union read as `in_type`.
+        let out_type = unsafe { p.Anonymous1.nonStructType.OutType };
         out.push_str(&format!(
             "  [{i:>2}] {name:<28} InType={in_type:<3} OutType={out_type}\n"
         ));

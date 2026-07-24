@@ -20,3 +20,6 @@ lsof-core = { path = "../lsof-core" }
 # on any host.
 [target.'cfg(windows)'.dependencies]
 lsof-backend-windows = { path = "../lsof-backend-windows" }
+
+[lints]
+workspace = true

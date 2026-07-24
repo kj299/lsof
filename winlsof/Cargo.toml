@@ -11,6 +11,17 @@ members = [
     "crates/lsof-cli",
     "crates/lsof-backend-windows",
 ]
+# The fuzz crate is its own workspace (nightly + libfuzzer-sys); keep it out of
+# the main build.
+exclude = ["fuzz"]
+
+# Encode the // SAFETY discipline as a native clippy lint (belt-and-suspenders
+# with the toolchain-free unsafe-audit gate): every `unsafe {}` block must carry
+# a `// SAFETY:` justification. The CLI and the backend opt in via
+# `[lints] workspace = true`; lsof-core keeps its stricter local
+# `unsafe_code = "forbid"`.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
 
 [workspace.package]
 version = "0.2.0"
