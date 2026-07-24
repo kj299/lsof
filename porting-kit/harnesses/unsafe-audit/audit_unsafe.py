@@ -163,15 +163,16 @@ def find_unsafe_blocks(src: str):
 
 
 def has_safety_comment(lines, line_no: int, window: int) -> bool:
-    """True if a `// SAFETY:` (or `/* SAFETY: */`) documents the block on
-    `line_no`. Accepts a trailing marker on the block's own line, or a marker on
-    the contiguous run of comment / attribute / blank lines *immediately* above
-    it. The scan stops at the first real code line, so one block's SAFETY comment
-    cannot bleed onto a following block, and gives up after `window` lines."""
-    # trailing `// SAFETY:` on the block's own line
-    own = lines[line_no - 1] if 0 < line_no <= len(lines) else ""
-    if SAFETY_MARK in own and ("//" in own or "/*" in own):
-        return True
+    """True if a `// SAFETY:` (or `/* SAFETY: */`) *precedes* the block on
+    `line_no` — a marker on the contiguous run of comment / attribute / blank
+    lines immediately above it. A trailing marker on the block's own line is
+    deliberately NOT accepted: clippy's `undocumented_unsafe_blocks` credits a
+    SAFETY comment only when it precedes the block, so honouring a trailing one
+    here would greenlight code that then fails the clippy gate in CI — the exact
+    split that bit winlsof (LESSONS #007). Keeping the two gates in agreement
+    means a green audit predicts a green clippy. The scan stops at the first real
+    code line, so one block's SAFETY comment cannot bleed onto a following block,
+    and gives up after `window` lines."""
     scanned = 0
     for idx in range(line_no - 2, -1, -1):  # walk upward from the line above
         if scanned >= window:
@@ -251,6 +252,8 @@ unsafe { do_thing(); }
 
 unsafe { undocumented(); }        // should be flagged
 
+unsafe { trailing_only(); }       // SAFETY: trailing — clippy rejects, so we do too (#007)
+
 let s = "unsafe { not_real() }";  // in a string, must be ignored
 // unsafe { also_not_real() }     // in a comment, must be ignored
 
@@ -270,10 +273,14 @@ def self_test():
         print(("PASS" if cond else "FAIL") + f"  {name}")
         ok = ok and cond
 
-    check("1 documented block + 1 documented impl", len(doc) == 2)
-    check("exactly 1 undocumented block", len(undoc) == 1)
-    check("undocumented is the block on line 5", undoc and undoc[0][1] == "block")
-    check("string/comment `unsafe` ignored (no extra findings)", len(doc) + len(undoc) == 3)
+    check("1 documented block (preceding) + 1 documented impl", len(doc) == 2)
+    check("2 undocumented blocks (the bare one + the trailing-only one)", len(undoc) == 2)
+    check("both undocumented findings are blocks", all(k == "block" for _, k in undoc))
+    check(
+        "a trailing `// SAFETY:` is NOT accepted — matches clippy (#007)",
+        any("trailing_only" in (SELF_TEST_SRC.splitlines()[ln - 1]) for ln, _ in undoc),
+    )
+    check("string/comment `unsafe` ignored (no extra findings)", len(doc) + len(undoc) == 4)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
