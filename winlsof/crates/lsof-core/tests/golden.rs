@@ -203,6 +203,98 @@ fn fields_nul_terminator() {
 }
 
 #[test]
+fn fields_no_inode_for_sockets() {
+    // lsof leaves `-F i` empty for sockets — the protocol goes in `P`, not the
+    // inode. (Regression guard: the socket `node` carries the protocol string
+    // for the table's NODE column, which must not leak into `-F i`.)
+    let out = fields::render(&sample_processes(), false, None);
+    assert!(
+        !out.contains("iTCP\n"),
+        "socket protocol leaked into -Fi: {out:?}"
+    );
+    assert!(
+        !out.contains("iUDP\n"),
+        "socket protocol leaked into -Fi: {out:?}"
+    );
+    assert!(
+        out.contains("PTCP\n"),
+        "protocol still reported via -FP: {out:?}"
+    );
+}
+
+#[test]
+fn windows_object_types_render() {
+    // The all-handle scan surfaces native kernel objects (registry keys, events,
+    // semaphores, …). Named variants and `FileType::Other(code)` must both show
+    // their TYPE code in the table and `-F t` and carry their object-path NAME.
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let mk = |h: u64, ft: FileType, name: &str| OpenFile {
+        fd: FdType::Handle(h),
+        access: AccessMode::ReadWrite,
+        file_type: ft,
+        name: name.into(),
+        device: None,
+        size: None,
+        offset: None,
+        node: None,
+        links: None,
+        socket: None,
+    };
+    let p = Process {
+        pid: 7,
+        ppid: None,
+        command: "svc".into(),
+        user: None,
+        endpoint_peer: false,
+        files: vec![
+            mk(0x1a4, FileType::Key, "\\REGISTRY\\MACHINE\\SOFTWARE"),
+            mk(
+                0x1a8,
+                FileType::Other("SEM".into()),
+                "\\BaseNamedObjects\\Foo",
+            ),
+        ],
+    };
+    let table = table::render(std::slice::from_ref(&p), false, false, false, None, false);
+    assert!(table.contains("KEY"), "registry-key TYPE code: {table:?}");
+    assert!(table.contains("SEM"), "Other object TYPE code: {table:?}");
+    assert!(
+        table.contains("\\REGISTRY\\MACHINE\\SOFTWARE"),
+        "key path in NAME"
+    );
+    let f = fields::render(&[p], false, None);
+    assert!(f.contains("tKEY\n"), "-Ft KEY: {f:?}");
+    assert!(f.contains("tSEM\n"), "-Ft SEM: {f:?}");
+}
+
+#[test]
+fn repeat_marker_is_format_aware() {
+    // lsof's `-r` cycle separator differs by format (src/main.c): `=======` for
+    // the table, the `m` marker field for `-F` (NUL- then NL-terminated under
+    // `-F0`), and nothing for JSON (objects self-delimit).
+    use lsof_core::render::Format;
+    assert_eq!(Format::Table.repeat_marker(), "=======\n");
+    assert_eq!(
+        Format::Fields {
+            nul: false,
+            only: None
+        }
+        .repeat_marker(),
+        "m\n"
+    );
+    assert_eq!(
+        Format::Fields {
+            nul: true,
+            only: None
+        }
+        .repeat_marker(),
+        "m\0\n"
+    );
+    assert_eq!(Format::Json.repeat_marker(), "");
+    assert_eq!(Format::JsonLines.repeat_marker(), "");
+}
+
+#[test]
 fn json_aggregated_shape() {
     let out = json::render_aggregated(&sample_processes());
     assert!(out.starts_with("{\"processes\":["));

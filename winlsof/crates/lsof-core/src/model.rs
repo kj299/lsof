@@ -65,7 +65,13 @@ impl AccessMode {
 }
 
 /// The kind of object an open file refers to — lsof's "TYPE" column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Windows has ~40–60 kernel object types; the common ones a Windows lsof
+/// surfaces get a named variant, and every other type is carried by
+/// [`FileType::Other`] holding its short display code, so the all-handle scan
+/// can classify anything without an exhaustive enum. (Not `Copy` because of the
+/// owned `String`; it stays cheap to clone.)
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileType {
     Regular,
     Dir,
@@ -75,7 +81,7 @@ pub enum FileType {
     Ipv4,
     Ipv6,
     Unix,
-    // Native Windows object types (shown when all-handle enumeration is enabled).
+    // Native Windows kernel object types surfaced by the all-handle scan.
     Key,
     Event,
     Mutant,
@@ -83,29 +89,33 @@ pub enum FileType {
     Process,
     Thread,
     Token,
+    /// Any other Windows object type, carrying its short TYPE code (e.g. `SEM`,
+    /// `JOB`, `IOCP`, `ALPC`, or an uppercased/truncated type name).
+    Other(String),
     Unknown,
 }
 
 impl FileType {
     /// lsof-style TYPE code.
-    pub fn code(self) -> &'static str {
+    pub fn code(&self) -> String {
         match self {
-            FileType::Regular => "REG",
-            FileType::Dir => "DIR",
-            FileType::Chr => "CHR",
-            FileType::Fifo => "FIFO",
-            FileType::Pipe => "PIPE",
-            FileType::Ipv4 => "IPv4",
-            FileType::Ipv6 => "IPv6",
-            FileType::Unix => "unix",
-            FileType::Key => "KEY",
-            FileType::Event => "EVT",
-            FileType::Mutant => "MUT",
-            FileType::Section => "SECT",
-            FileType::Process => "PROC",
-            FileType::Thread => "THRD",
-            FileType::Token => "TOKN",
-            FileType::Unknown => "unknown",
+            FileType::Regular => "REG".into(),
+            FileType::Dir => "DIR".into(),
+            FileType::Chr => "CHR".into(),
+            FileType::Fifo => "FIFO".into(),
+            FileType::Pipe => "PIPE".into(),
+            FileType::Ipv4 => "IPv4".into(),
+            FileType::Ipv6 => "IPv6".into(),
+            FileType::Unix => "unix".into(),
+            FileType::Key => "KEY".into(),
+            FileType::Event => "EVT".into(),
+            FileType::Mutant => "MUT".into(),
+            FileType::Section => "SECT".into(),
+            FileType::Process => "PROC".into(),
+            FileType::Thread => "THRD".into(),
+            FileType::Token => "TOKN".into(),
+            FileType::Other(code) => code.clone(),
+            FileType::Unknown => "unknown".into(),
         }
     }
 }

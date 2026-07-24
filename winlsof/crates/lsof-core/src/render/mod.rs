@@ -23,3 +23,20 @@ pub enum Format {
     /// `-j` JSON Lines (one object per file).
     JsonLines,
 }
+
+impl Format {
+    /// The between-cycle separator lsof prints in repeat (`-r`) mode, chosen by
+    /// format to match `src/main.c`: `=======` for the table, the `m` marker
+    /// field for `-F` (NL-terminated, or `\0\n` under `-F0` so a NUL-splitting
+    /// parser still finds the record boundary), and nothing for JSON, whose
+    /// objects already self-delimit ("JSON modes handle their own cycle
+    /// separation"). Each non-empty value carries its own trailing NL.
+    pub fn repeat_marker(&self) -> &'static str {
+        match self {
+            Format::Table => "=======\n",
+            Format::Fields { nul: true, .. } => "m\0\n",
+            Format::Fields { nul: false, .. } => "m\n",
+            Format::Json | Format::JsonLines => "",
+        }
+    }
+}

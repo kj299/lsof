@@ -211,6 +211,10 @@ fn main() {
         );
     }
 
+    // The between-cycle separator `-r` prints is format-aware (see
+    // `Format::repeat_marker`). Captured before `run_cycle` moves `format` in.
+    let repeat_marker = format.repeat_marker();
+
     let run_cycle = move || -> usize {
         let gathered = match env.backend.gather(&selection) {
             Ok(p) => p,
@@ -245,15 +249,18 @@ fn main() {
         unmatched
     };
 
-    // `-r`: repeat until interrupted, printing lsof's `=======` separator.
+    // `-r`: repeat until interrupted, printing the format-aware cycle marker.
     // Exit promptly after the final cycle: handle enumeration may have abandoned
     // a worker thread blocked uninterruptibly in `NtQueryObject` (a synchronous
     // pipe/device), which can otherwise stall normal process teardown. lsof's
     // exit status is 1 when a specified `-p`/path search item was not located.
     match repeat {
         Some(delay) => loop {
+            use std::io::Write;
             run_cycle();
-            println!("=======");
+            print!("{repeat_marker}");
+            // lsof flushes each cycle so a piped consumer sees output promptly.
+            let _ = std::io::stdout().flush();
             std::thread::sleep(std::time::Duration::from_secs(delay));
         },
         None => {

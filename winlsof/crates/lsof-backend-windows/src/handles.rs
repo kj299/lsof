@@ -33,14 +33,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-    GetLogicalDrives, QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION,
+    CreateFileW, FileStandardInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileType, GetFinalPathNameByHandleW, GetLogicalDrives, QueryDosDeviceW,
+    BY_HANDLE_FILE_INFORMATION, FILE_STANDARD_INFO,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
@@ -195,6 +196,10 @@ pub fn enumerate(
 
     let dos_map = Arc::new(build_dos_map());
     let mut proc_cache: HashMap<u32, Option<OwnedHandle>> = HashMap::new();
+    // Resolve each object type's TYPE at most once per type index, shared across
+    // the per-handle workers, so an unscoped scan (tens of thousands of handles,
+    // ~50 distinct types) doesn't type-query every non-File handle.
+    let type_cache: Arc<Mutex<HashMap<u16, FileType>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut out = Vec::new();
     let mut peers: HashSet<u32> = HashSet::new();
     trace(&format!(
@@ -212,33 +217,32 @@ pub fn enumerate(
                 continue;
             }
         }
-        // Keep only File objects (disk files, dirs, named pipes, char devices,
-        // and sockets); other object types (keys, events, …) aren't lsof-like.
-        // The table's type index does this without a hang-prone type query.
-        if let Some(fi) = file_index {
-            if e.object_type_index != fi {
-                continue;
-            }
-        }
+        // Classify EVERY object type — like lsof lists every open descriptor.
+        // File-typed handles (disk files, dirs, named pipes, char devices; AFD
+        // sockets are dropped inside `describe`) take the fast path via the
+        // table's File type index, with no type query; every other kernel object
+        // (keys, events, mutants, sections, processes, threads, tokens, jobs, …)
+        // resolves its object type name on the bounded worker below.
+        let is_file_fast = file_index == Some(e.object_type_index);
         let source = proc_cache.entry(pid).or_insert_with(|| open_for_dup(pid));
         let Some(source) = source.as_ref() else {
             continue;
         };
-        // Bound the whole per-handle classification (duplicate + GetFileType +
-        // name) on a worker thread. Any of those can block on a synchronous
-        // pipe/device handle, so abandoning a wedged worker after the timeout
-        // keeps one bad handle from freezing enumeration. `verify_type` re-checks
-        // the object type only in the (practically impossible) case the File
-        // type index couldn't be learned from the NUL probe.
+        // Bound the whole per-handle classification (duplicate + type/name
+        // queries + GetFileType) on a worker thread. Any of those can block on a
+        // synchronous handle, so abandoning a wedged worker after the timeout
+        // keeps one bad handle from freezing enumeration.
         let Some(mut d) = describe_bounded(
             source.raw(),
             e.handle_value as HANDLE,
             Arc::clone(&dos_map),
             Duration::from_millis(200),
-            file_index.is_none(),
+            is_file_fast,
+            e.object_type_index,
+            Arc::clone(&type_cache),
             endpoints.is_some(),
         ) else {
-            continue; // skipped: not a File handle, inaccessible, or timed out
+            continue; // inaccessible, untypeable, a bare socket, or timed out
         };
         // `-E`/`+E`: append the pipe's peer info to NAME and remember the peer
         // PIDs so `+E` can pull in their rows.
@@ -441,12 +445,19 @@ fn timed_object_name(source: HANDLE, handle_value: HANDLE, me: HANDLE) -> Option
 /// pipe/device handle; doing them off the main thread means a single wedged
 /// handle is abandoned instead of freezing the whole enumeration. (Abandoned
 /// workers are reaped when the process force-exits; see `crate::exit_now`.)
+// The classification inputs must be passed explicitly rather than captured:
+// they cross the `spawn` boundary into the worker (which can outlive this frame
+// when a handle wedges), so `dos_map`/`type_cache` are moved in as owned `Arc`s
+// while `classify` borrows them — a split a single context struct can't unify.
+#[allow(clippy::too_many_arguments)]
 fn describe_bounded(
     source: HANDLE,
     handle_value: HANDLE,
     dos_map: Arc<Vec<(String, String)>>,
     timeout: Duration,
-    verify_type: bool,
+    is_file_fast: bool,
+    type_index: u16,
+    type_cache: Arc<Mutex<HashMap<u16, FileType>>>,
     want_endpoints: bool,
 ) -> Option<Described> {
     let source = source as usize;
@@ -460,7 +471,9 @@ fn describe_bounded(
             handle_value as HANDLE,
             me,
             &dos_map,
-            verify_type,
+            is_file_fast,
+            type_index,
+            &type_cache,
             want_endpoints,
         );
         let _ = tx.send(result);
@@ -470,21 +483,108 @@ fn describe_bounded(
 
 /// Duplicate `handle_value` from `source`, optionally confirm it's a `File`
 /// object, and classify it. Runs on the worker thread of [`describe_bounded`].
+// Mirrors `describe_bounded`'s threaded inputs, received by borrow on the worker.
+#[allow(clippy::too_many_arguments)]
 fn classify(
     source: HANDLE,
     handle_value: HANDLE,
     me: HANDLE,
     dos_map: &[(String, String)],
-    verify_type: bool,
+    is_file_fast: bool,
+    type_index: u16,
+    type_cache: &Mutex<HashMap<u16, FileType>>,
     want_endpoints: bool,
 ) -> Option<Described> {
     let dup = duplicate(source, handle_value, me)?;
-    if verify_type
-        && query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION).as_deref() != Some("File")
-    {
-        return None;
+    // Fast path: the handle table's type index already identified a File object.
+    if is_file_fast {
+        return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
     }
-    describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints)
+    // Resolve this object type's TYPE, cached by type index (query the object
+    // type name at most once per type). Bind the lookup to `cached` first so the
+    // MutexGuard drops before the match — otherwise the `None` arm, which locks
+    // again to insert, would deadlock on the scrutinee's still-held guard. The
+    // lock is never held across the query, so a hung query (worker abandoned at
+    // the timeout) can't wedge it.
+    let cached = type_cache.lock().unwrap().get(&type_index).cloned();
+    let file_type = match cached {
+        Some(ft) => ft,
+        None => {
+            // `NtQueryObject(TypeInformation)` doesn't touch the object's driver,
+            // so it's safe to call directly on the bounded worker. It also
+            // recognizes a File when the File type index couldn't be learned.
+            let type_name = query_object_string(dup.raw(), OBJECT_TYPE_INFORMATION)?;
+            if type_name == "File" {
+                return describe(source, handle_value, me, dup.raw(), dos_map, want_endpoints);
+            }
+            let ft = win_type_to_filetype(&type_name);
+            type_cache.lock().unwrap().insert(type_index, ft.clone());
+            ft
+        }
+    };
+    // A native kernel object (Key/Event/Mutant/Section/Process/Thread/Token/…).
+    // Its name (`\REGISTRY\…`, `\BaseNamedObjects\…`) comes from the same
+    // timeout-bounded OBJECT_NAME_INFORMATION query used for devices; many
+    // objects (Process/Thread) are unnamed, which is fine — the TYPE and the
+    // handle value still identify them.
+    let name = timed_object_name(source, handle_value, me)
+        .map(|n| device_to_dos(&n, dos_map))
+        .unwrap_or_default();
+    Some(Described {
+        file_type,
+        name,
+        device: None,
+        node: None,
+        size: None,
+        offset: None,
+        links: None,
+        pipe_peers: None,
+    })
+}
+
+/// Map a Windows kernel object type name (from `NtQueryObject(TypeInformation)`)
+/// to a lsof TYPE. Common types get a named [`FileType`]; every other type is
+/// carried by [`FileType::Other`] with a short code, so no object is dropped.
+fn win_type_to_filetype(type_name: &str) -> FileType {
+    match type_name {
+        "Key" => FileType::Key,
+        "Event" => FileType::Event,
+        "Mutant" => FileType::Mutant,
+        "Section" => FileType::Section,
+        "Process" => FileType::Process,
+        "Thread" => FileType::Thread,
+        "Token" => FileType::Token,
+        "Semaphore" => FileType::Other("SEM".into()),
+        "Timer" | "IRTimer" => FileType::Other("TMR".into()),
+        "Job" => FileType::Other("JOB".into()),
+        "IoCompletion" => FileType::Other("IOCP".into()),
+        "TpWorkerFactory" => FileType::Other("TPWF".into()),
+        "ALPC Port" => FileType::Other("ALPC".into()),
+        "Directory" => FileType::Other("ODIR".into()),
+        "SymbolicLink" => FileType::Other("LINK".into()),
+        "Desktop" => FileType::Other("DESK".into()),
+        "WindowStation" => FileType::Other("WSTA".into()),
+        "KeyedEvent" => FileType::Other("KEVT".into()),
+        "WmiGuid" => FileType::Other("WMI".into()),
+        "EtwRegistration" => FileType::Other("ETW".into()),
+        other => FileType::Other(short_type_code(other)),
+    }
+}
+
+/// A short, upper-case TYPE code for an object type without a dedicated mapping
+/// (e.g. "Partition" -> "PARTITIO").
+fn short_type_code(name: &str) -> String {
+    let code: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .take(8)
+        .collect();
+    if code.is_empty() {
+        "OBJ".to_string()
+    } else {
+        code
+    }
 }
 
 struct Described {
@@ -514,15 +614,21 @@ fn describe(
     match unsafe { GetFileType(dup) } {
         FILE_TYPE_DISK => {
             // Robust, hang-free path for disk files; fall back to the NT name.
-            let name = final_path(dup)
+            let mut name = final_path(dup)
                 .or_else(|| {
                     timed_object_name(source, handle_value, me).map(|n| device_to_dos(&n, dos_map))
                 })
                 .unwrap_or_else(|| "(unnamed file)".to_string());
+            let device = drive_of(&name);
+            // lsof's `(deleted)` decoration for an open-but-unlinked file
+            // (delete-pending). Pairs with `+L 1` (link count 0).
+            if delete_pending(dup) {
+                name.push_str(" (deleted)");
+            }
             let (file_type, node, size, links) = disk_details(dup);
             Some(Described {
                 file_type,
-                device: drive_of(&name),
+                device,
                 name,
                 node,
                 size,
@@ -624,6 +730,25 @@ fn endpoint_suffix(
     } else {
         Some(format!(" ({})", parts.join(" ")))
     }
+}
+
+/// Whether a disk file has a pending unlink (open but deleted) — lsof's
+/// `(deleted)` NAME decoration. `GetFileInformationByHandleEx(FileStandardInfo)`
+/// exposes `DeletePending`; anything it can't answer reads as not deleted.
+fn delete_pending(dup: HANDLE) -> bool {
+    // SAFETY: all-zero is a valid FILE_STANDARD_INFO.
+    let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: dup is a live disk handle; `info` is a FILE_STANDARD_INFO of the
+    // size we declare, which the API fills.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            dup,
+            FileStandardInfo,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    ok != 0 && info.DeletePending != 0
 }
 
 /// The current file offset of a disk handle, via `NtQueryInformationFile`.

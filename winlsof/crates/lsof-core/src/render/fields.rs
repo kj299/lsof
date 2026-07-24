@@ -68,7 +68,7 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                 push!('a', &f.access.code().to_string());
             }
             if want('t') {
-                push!('t', f.file_type.code());
+                push!('t', &f.file_type.code());
             }
             if want('d') {
                 if let Some(d) = &f.device {
@@ -85,7 +85,10 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                     push!('o', &format!("0t{o}"));
                 }
             }
-            if want('i') {
+            // lsof leaves the `i` (inode) field empty for sockets — the protocol
+            // is reported via `P` (and shown in the table's NODE column), never
+            // as an inode. Emit `i` only for non-socket rows.
+            if want('i') && f.socket.is_none() {
                 if let Some(n) = &f.node {
                     push!('i', n);
                 }
