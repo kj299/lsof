@@ -1020,10 +1020,13 @@ mod tests {
     #[test]
     fn enumerates_real_kernel_object_types() {
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-        use windows_sys::Win32::Security::{OpenProcessToken, TOKEN_QUERY};
+        // `TOKEN_QUERY` is a security access mask, but `OpenProcessToken` itself
+        // lives in processthreadsapi.h alongside OpenProcess/GetCurrentProcess —
+        // so windows-sys puts it under System::Threading, not Security.
+        use windows_sys::Win32::Security::TOKEN_QUERY;
         use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
         use windows_sys::Win32::System::Threading::{
-            CreateEventW, CreateMutexW, PROCESS_QUERY_LIMITED_INFORMATION,
+            CreateEventW, CreateMutexW, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
         // Each object is held in scope for the whole enumeration; OwnedHandle
