@@ -16,6 +16,13 @@ semantic-comparison stage, not build time — "it builds" tells you almost nothi
    critically — malformed/hostile inputs and **every integer boundary**
    (`INT_MAX`/`CHAR_MAX`, off-by-one indices, empty buffers): the UB shapes a rewrite
    must handle better than C.
+   Then **prove the matrix covers the C's enumerated surface** (LESSONS #8 —
+   a green diff over an incomplete matrix is silent about what it omits):
+   `python3 porting-kit/harnesses/coverage/coverage_gate.py --extract-options <main.c> --extract-types <print.c> --emit-inventory > inventory.toml`
+   — curate it (waivers need reasons), then gate:
+   `python3 porting-kit/harnesses/coverage/coverage_gate.py --inventory inventory.toml --matrix <m>`
+   (fixture-borne coverage — the TYPEs a case creates — is declared per case via
+   `covers = [...]`).
 3. **Capture + version the golden corpus**, flagging oracle nondeterminism so you
    normalize it instead of enshrining it:
    `python3 porting-kit/harnesses/golden/golden.py capture --oracle <c-bin> --matrix <m> --corpus <dir>`

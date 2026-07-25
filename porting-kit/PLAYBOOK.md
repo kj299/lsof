@@ -204,7 +204,10 @@ Then the loop — each step is a CI-enforced gate:
    that omits a feature class proves nothing about that class (winlsof's socket
    diff was green while every non-File handle type was silently dropped — no
    fixture ever created one). Enumerate the C's feature surface and give each a
-   case. When the reference binary can't run on the target platform, switch to
+   case — **enforced by `harnesses/coverage/coverage_gate.py`**: bootstrap the
+   inventory from the C (`--extract-options`/`--extract-types`), curate it, and
+   the gate exits 1 on any feature no matrix case exercises (waivers carry
+   reasons). When the reference binary can't run on the target platform, switch to
    **oracle-substitution** (diff against a native tool over self-owned fixtures)
    with a three-way exit contract — match / divergence / infra-error — so a
    broken harness can't read as a port bug. Both modes are in the matrix header.
@@ -260,6 +263,7 @@ kept both trees side by side — preserve that discipline.
 | No panics on untrusted input | `fuzz/` (`cargo-fuzz`) | CI smoke + nightly deep |
 | No vulnerable/untrusted deps | `supply-chain/run_supply_chain.sh` (`cargo audit`,`cargo deny`) | CI |
 | No silent behavior drift | `differential/diff_run.py` + `DIVERGENCES.md` | CI |
+| Matrix covers the C's surface | `coverage/coverage_gate.py` (inventory vs matrix) | CI |
 | Lints as errors | `clippy -D warnings` (+ overflow/cast lints) | CI |
 | Don't re-port a C vuln | `c-flaw-scan/scan_c_flaws.py` at Phase 0 | review |
 

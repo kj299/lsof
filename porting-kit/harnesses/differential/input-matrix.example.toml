@@ -18,6 +18,14 @@
 # no fixture ever created the objects that would have exposed the gap. Matches-
 # the-oracle-on-the-matrix is not ports-all-functionality.
 #
+# ENFORCE IT: ../coverage/coverage_gate.py diffs a feature inventory
+# (bootstrapped from the C via --extract-options/--extract-types, then curated)
+# against this matrix's cases and exits 1 on any feature no case exercises.
+# Option coverage is inferred from each case's `args`; fixture-borne coverage
+# (the TYPEs a case's fixtures create) is declared per case:
+#   covers = ["type:KEY", "type:REG"]
+# Out-of-scope features get a [[waive]] with a reason in the inventory.
+#
 # TWO MODES. (1) same-binary-both-platforms: run the C oracle and the Rust side
 # on one host (the case this file shows). (2) oracle-substitution: when the C
 # binary can't run on the target (winlsof: no lsof on Windows), diff the Rust

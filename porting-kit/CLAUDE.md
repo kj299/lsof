@@ -39,6 +39,7 @@ compiles and matches the oracle is at step 2 of 6, not done.
 | no panic on input | `harnesses/fuzz/` (cargo-fuzz) |
 | clean deps | `harnesses/supply-chain/run_supply_chain.sh` |
 | no silent drift | `harnesses/differential/diff_run.py` + `DIVERGENCES.md` |
+| matrix covers the C's surface | `harnesses/coverage/coverage_gate.py` |
 | don't re-port a vuln | `harnesses/c-flaw-scan/scan_c_flaws.py` at Phase 0 |
 
 Smoke-test the harnesses anytime with `make -C porting-kit check-kit` (python3 +
