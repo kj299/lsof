@@ -43,6 +43,18 @@ jobs:
         # a new undocumented block fails CI.
         run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src
 
+      - name: coverage gate (test surface vs the C's feature surface)
+        # The question no other gate asks: are we testing everything the port
+        # claims to do? A green differential says nothing about a feature no
+        # fixture creates — that is how every non-File object type stayed
+        # silently dropped (porting-kit LESSONS #8). HARD gate: the C's full
+        # surface minus explicit, reasoned waivers must all be exercised, so a
+        # newly dropped or newly untested feature fails CI. See coverage/README.md.
+        run: |
+          python3 ../porting-kit/harnesses/coverage/coverage_gate.py \
+            --inventory coverage/feature-inventory-winlsof.toml \
+            --matrix coverage/coverage-matrix.toml
+
   windows:
     name: native backend (windows)
     runs-on: windows-latest

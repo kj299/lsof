@@ -14,6 +14,9 @@
 
 [features]
 options = ["A", "C", "D", "E", "F", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "X", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "v", "w", "x", "z"]
+# Options that consume a value: a matrix case's `-iTCP:80` counts as `i`
+# alone, so the value's characters aren't miscredited as coverage.
+takes_value = ["A", "D", "F", "K", "L", "S", "T", "Z", "c", "d", "e", "f", "g", "i", "k", "m", "o", "p", "r", "s", "u", "x", "z"]
 types = ["ATALK", "BLK", "CHR", "DEL", "DIR", "DOOR", "EVENTFD", "FIFO", "FSEVENTS", "IPv4", "IPv6", "KQUEUE", "LINK", "MPB", "MPC", "NPOLICY", "PAS", "PAXV", "PCRE", "PCTL", "PCUR", "PCWD", "PDIR", "PETY", "PFD", "PFDR", "PFIL", "PFPR", "PGD", "PGID", "PIPE", "PLC", "PLDR", "PLDT", "PLPI", "PLST", "PLU", "PLWG", "PLWI", "PLWS", "PLWU", "PLWX", "PMAP", "PMEM", "PMPS", "PNTF", "POBJ", "PODR", "POLP", "POPF", "POPG", "PORT", "PREG", "PRMP", "PROCDSC", "PRTD", "PSGA", "PSIN", "PSTA", "PSXMQ", "PSXSEM", "PSXSHM", "PTS", "PUSG", "PW", "PXMP", "REG", "SHM", "SMT", "SOCK", "STR", "STSO", "UNKN", "UNKNcwd", "UNKNdel", "UNKNfd", "UNKNmem", "UNKNrtd", "UNKNtxt", "UNNM", "UNSP", "VBAD", "VBLK", "VCHR", "VDIR", "VLNK", "VMPC", "VNON", "VREG", "XNAM", "XSD", "XSEM", "a_inode", "ax25", "icmp", "inet", "ipx", "key", "lla", "ndrv", "netlink", "pack", "ppp", "raw", "raw6", "rte", "sock", "systm", "unix", "unknown", "x.25"]
 
 # [[waive]]
