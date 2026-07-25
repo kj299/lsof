@@ -60,6 +60,35 @@ name = "golden/object-types-render"
 covers = ["type:KEY"]
 args = []
 
+[[case]]
+name = "core/user-filter-u"
+# args::tests::user_filter_parses (`-u`, `-ualice`, comma lists) plus
+# selection::tests::user_selector (matches bare account or DOMAIN\user, either
+# case; rejects a different domain and an unknown user).
+args = ["-u", "USER"]
+
+# ------------------------------------------------------- backend unit tests
+# crates/lsof-backend-windows/src/handles.rs `#[cfg(test)] mod tests`, run by
+# `cargo test --all` on the windows CI runner.
+
+[[case]]
+name = "backend/enumerates-real-kernel-object-types"
+# enumerates_real_kernel_object_types: creates a real Event, Mutant, Section,
+# process handle, token and NUL char device in-process, runs the actual
+# `enumerate()` over this PID, and requires each object's TYPE code back. This
+# is end-to-end on purpose — the bug it guards (every non-File object dropped)
+# lived in the enumeration loop, upstream of classification, so a mapping unit
+# test could not have caught it.
+args = []
+covers = [
+  "type:EVT",
+  "type:MUT",
+  "type:SECT",
+  "type:PROC",
+  "type:TOKN",
+  "type:CHR",
+]
+
 # ------------------------------------------------------------- differential
 # Oracle-substitution vs Get-NetTCPConnection / Get-NetUDPEndpoint over
 # self-owned loopback fixtures. TCP LISTEN + ESTABLISHED + UDP, IPv4.

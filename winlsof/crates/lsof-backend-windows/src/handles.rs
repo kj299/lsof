@@ -984,4 +984,120 @@ mod tests {
         // Nothing resolved: no suffix at all.
         assert_eq!(endpoint_suffix(None, None, &cmds), None);
     }
+
+    #[test]
+    fn maps_windows_type_names_to_lsof_codes() {
+        // The classification table the all-handle scan drives. Named variants
+        // and the `Other` long tail both have to produce a TYPE code.
+        for (name, code) in [
+            ("Key", "KEY"),
+            ("Event", "EVT"),
+            ("Mutant", "MUT"),
+            ("Section", "SECT"),
+            ("Process", "PROC"),
+            ("Thread", "THRD"),
+            ("Token", "TOKN"),
+            ("Semaphore", "SEM"),
+            ("Job", "JOB"),
+            ("IoCompletion", "IOCP"),
+            ("ALPC Port", "ALPC"),
+        ] {
+            assert_eq!(win_type_to_filetype(name).code(), code, "type {name}");
+        }
+        // An unmapped type still yields a usable, bounded code — never dropped.
+        assert_eq!(win_type_to_filetype("Partition").code(), "PARTITIO");
+        assert_eq!(win_type_to_filetype("!!!").code(), "OBJ");
+    }
+
+    /// End-to-end coverage for the all-handle scan: create real kernel objects
+    /// in this process, enumerate our own handles, and require each object's
+    /// lsof TYPE code to come back.
+    ///
+    /// This is deliberately not a unit test of [`win_type_to_filetype`] — the
+    /// bug this guards against (every non-File object silently dropped before
+    /// PR #31) lived in the enumeration loop, *upstream* of classification, so
+    /// only a real enumeration can catch it. See `winlsof/coverage/README.md`.
+    #[test]
+    fn enumerates_real_kernel_object_types() {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Security::{OpenProcessToken, TOKEN_QUERY};
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
+        use windows_sys::Win32::System::Threading::{
+            CreateEventW, CreateMutexW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // Each object is held in scope for the whole enumeration; OwnedHandle
+        // closes it on drop. Each raw handle is bound on its own line so the
+        // `unsafe` block starts its statement — keeping the SAFETY comment
+        // directly above it where both the audit and clippy accept it, and
+        // where `cargo fmt` won't split the two apart (LESSONS #007).
+        // SAFETY: null attributes/name are valid — an unnamed, manual-reset event.
+        let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        let event = OwnedHandle::new(h);
+        // SAFETY: null attributes/name are valid — an unnamed, unowned mutex.
+        let h = unsafe { CreateMutexW(std::ptr::null(), 0, std::ptr::null()) };
+        let mutex = OwnedHandle::new(h);
+        // SAFETY: INVALID_HANDLE_VALUE selects a pagefile-backed section; the
+        // null name makes it unnamed. Size is one 4 KiB page.
+        let section = OwnedHandle::new(unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                4096,
+                std::ptr::null(),
+            )
+        });
+        // SAFETY: opening a limited-information handle to ourselves always
+        // succeeds; the PID is this process's own.
+        let process = OwnedHandle::new(unsafe {
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, GetCurrentProcessId())
+        });
+        let mut raw_token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `raw_token` is a live HANDLE slot the call fills; the pseudo
+        // handle from GetCurrentProcess is always valid.
+        let rc = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) };
+        let token_ok = rc != 0;
+        let token = if token_ok {
+            OwnedHandle::new(raw_token)
+        } else {
+            None
+        };
+        // A character device of our own, so CHR coverage doesn't depend on the
+        // scan's internal NUL probe being observable.
+        let nul = nul_probe();
+
+        let mut wanted = HashSet::new();
+        // SAFETY: no arguments; returns this process's PID.
+        wanted.insert(unsafe { GetCurrentProcessId() });
+        let (files, _) = enumerate(false, Some(&wanted), false, None);
+        let codes: HashSet<String> = files.iter().map(|(_, f)| f.file_type.code()).collect();
+
+        // Only assert on objects we actually managed to create, so a hardened
+        // environment that refuses one of them can't produce a phantom failure.
+        let expected = [
+            (event.is_some(), "EVT"),
+            (mutex.is_some(), "MUT"),
+            (section.is_some(), "SECT"),
+            (process.is_some(), "PROC"),
+            (token.is_some(), "TOKN"),
+            // The NUL device is a character device: the FILE_TYPE_CHAR arm.
+            (nul.is_some(), "CHR"),
+        ];
+        for (created, code) in expected {
+            if created {
+                assert!(
+                    codes.contains(code),
+                    "created a {code} object but the scan never reported one; \
+                     saw: {codes:?}"
+                );
+            }
+        }
+        // The whole point of the scan: at least one of these is not a File.
+        assert!(
+            event.is_some() || mutex.is_some() || section.is_some(),
+            "no kernel object could be created; the test proved nothing"
+        );
+    }
 }
