@@ -86,19 +86,17 @@ jobs:
         # offset, named pipe with a connected client, mapped data file, TCP
         # v4/v6 + UDP sockets, child processes with a known cwd) and exercises
         # every option against them, cross-checking native oracles. Built-in
-        # cmdlets only — nothing is downloaded.
+        # cmdlets only — nothing is downloaded. It is the source of most of
+        # coverage/coverage-matrix.toml's declared cases; running it here is
+        # what makes that coverage claim real.
         #
-        # It is the source of most of coverage/coverage-matrix.toml's declared
-        # cases, which until now rested on a harness CI never ran. Running it
-        # here is what makes that coverage claim real.
-        #
-        # OBSERVE-FIRST (porting-kit LESSONS #9): a brand-new CI-only gate is
-        # landed non-blocking and promoted to a hard gate after consecutive
-        # green runs on the hosted runner, so a harness that turns out to be
-        # environment-sensitive can't wedge every PR. Every environment-
-        # dependent case already self-SKIPs (elevation, IPv6, WOW64), and the
-        # harness exits 1 only on a real FAIL.
-        continue-on-error: true
+        # HARD gate: landed observe-first (porting-kit LESSONS #9) and promoted
+        # after its first run surfaced two real findings (an 8.3 short-name gap
+        # in path selectors; a fixture asserting a kernel file position modern
+        # .NET no longer moves — both fixed in PR #37) and then went green on
+        # two consecutive hosted-runner runs (PR #37 + master 5549503),
+        # PASS=53 FAIL=0 SKIP=2 each — the SKIPs are the elevation-dependent
+        # cases, which self-skip by design.
         shell: pwsh
         run: ./smoketest/Invoke-WinlsofSmokeTest.ps1 -SkipBuild -Binary target/release/lsof.exe -OutDir smoke-results
       - name: upload smoke-test results

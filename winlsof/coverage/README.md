@@ -25,10 +25,16 @@ backend unit tests via `cargo test --all` (both runners), the socket
 differential and the live smoke harness on the Windows runner. The smoke
 harness was manual-only until 2026-07-25 — the matrix was crediting coverage
 from a harness CI never ran, which is precisely the "declaring coverage you
-don't have" failure this gate exists to prevent. It now runs
-**observe-first** (non-blocking, results uploaded as an artifact) and is
-promoted to a hard gate after consecutive green runs, per porting-kit
-LESSONS #9.
+don't have" failure this gate exists to prevent.
+
+It was landed **observe-first** per porting-kit LESSONS #9, and the pattern
+paid immediately: the first hosted-runner execution surfaced two real findings
+(an 8.3 short-name gap in winlsof's path selectors, and a fixture asserting a
+kernel file position modern .NET no longer moves — both fixed) without ever
+turning master red. After two consecutive fully-green runs
+(`PASS=53 FAIL=0 SKIP=2`; the SKIPs are elevation-dependent cases that
+self-skip by design), it was **promoted to a hard gate** — a smoke FAIL now
+fails the Windows job.
 
 ## Running it
 
