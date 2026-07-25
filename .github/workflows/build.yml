@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-24.04, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v5
     - name: install dependencies
       run: sudo apt install -y pkg-config
     - name: autoconf
@@ -43,7 +43,7 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v5
     - name: install dependencies
       run: brew install pkg-config libtool autoconf automake groff
     - name: configure

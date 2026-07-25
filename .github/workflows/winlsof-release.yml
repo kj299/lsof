@@ -32,7 +32,7 @@ jobs:
     env:
       AZSIGN_ENABLED: ${{ secrets.AZSIGN_TENANT_ID != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary (native MSVC)
