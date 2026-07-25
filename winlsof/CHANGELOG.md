@@ -9,25 +9,82 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Security
-- **smoketest: removed the runtime download of Sysinternals `handle64.exe`.** The
-  live harness fetched and executed `handle64.exe` from `download.sysinternals.com`
-  as a handle-enumeration oracle — a supply-chain risk if the download host were
-  compromised. Replaced with native oracles only (`Get-Process` + the harness's own
-  fixture ground truth); `Get-NetTCPConnection` continues to cross-check sockets.
-  Nothing is downloaded at test time.
+## [0.3.0] — 2026-07-25
+
+**The depth-and-verification release.** 0.2.0 completed the option *surface*;
+0.3.0 closes the depth gaps a full-port gap analysis found behind it — above
+all, handle types the scan silently dropped — and hard-gates the whole feature
+surface in CI so a dropped or untested feature now fails the build.
 
 ### Added
-- **Socket oracle-substitution differential** (`winlsof/differential/`) gating
-  winlsof's `-i` output against `Get-NetTCPConnection`/`Get-NetUDPEndpoint` on
-  `windows-latest`, and a toolchain-free **unsafe-audit** CI gate (a `// SAFETY:`
-  justification on every backend `unsafe` block, 131/131).
+- **All Windows kernel object types in the handle listing.** The all-handle
+  scan previously classified only `File` handles and silently skipped every
+  other object type. It now types and names them all: registry keys (`KEY`,
+  `\REGISTRY\...`), events (`EVT`), mutants (`MUT`), sections (`SECT`),
+  process/thread/token handles (`PROC`/`THRD`/`TOKN`), and a long tail via
+  short codes (`SEM`, `JOB`, `IOCP`, `ALPC`, `TMR`, ...). Named objects show
+  their object-namespace path; a per-boot type-index cache keeps the unscoped
+  scan at one type query per object type, not per handle. Pinned end-to-end by
+  a test that creates real Event/Mutant/Section/process/token/char-device
+  handles and requires each TYPE code back from an actual enumeration.
+- **`(deleted)` NAME decoration** for open-but-unlinked regular files (the
+  Windows delete-pending state) — the classic lsof signal for a file held open
+  after removal; pairs with `+L 1`.
+- **Socket oracle-substitution differential** (`winlsof/differential/`):
+  winlsof's `-i` socket *set* is diffed against the OS's own table
+  (`Get-NetTCPConnection`/`Get-NetUDPEndpoint`) over self-owned fixtures on
+  every CI run — landed observe-first, now a hard gate, with a ledger for the
+  one documented data-source divergence (transient BOUND sockets).
+- **Feature-coverage gate in CI.** A curated inventory of the C's enumerated
+  surface (45 option letters, 111 TYPE codes, extracted from lsof's own
+  source) plus winlsof's Windows-native types is diffed against what the test
+  suite actually exercises; anything neither covered nor explicitly waived
+  (with a reason) fails the build. 163 features: 45 covered, 118 waived, 0
+  silent.
+- **The 55-case live smoke harness now runs in CI as a hard gate** (previously
+  manual-only). Its first hosted run immediately found a real product bug (see
+  Fixed) and a fixture bug — fixtures are now correct on pwsh 7/hosted
+  runners (kernel-level file-position ground truth; elevation-dependent cases
+  self-skip).
+- **CI safety gates:** toolchain-free unsafe-audit (a `// SAFETY:` on every
+  backend `unsafe` block — 139/139, hard fail), `cargo-deny` supply-chain
+  checks, `[workspace.lints]` (incl. `undocumented_unsafe_blocks` and
+  `missing_safety_doc` as errors), and a `cargo-fuzz` smoke run over the
+  argument parser on every PR.
+
+### Changed
+- **`-F i` no longer leaks the socket protocol as an inode.** lsof leaves the
+  `i` field empty for sockets (the protocol is reported via `P`); winlsof now
+  matches.
+- **The `-r` repeat-cycle marker is format-aware**, matching lsof: `=======`
+  for the table, the `m` marker field for `-F` (NUL-then-NL under `-F0` so
+  record splitting still works), and nothing for JSON, whose objects
+  self-delimit. Previously a bare `=======` corrupted `-F`/`-J` streams under
+  `-r`.
+- **Path selectors are canonicalized before matching.** Bare paths and
+  `+d`/`+D` directories are resolved to the same long-form spelling the
+  backend reports, so 8.3 short names (`C:\Users\RUNNER~1\...`), relative
+  paths, and symlinked directories now match instead of silently selecting
+  nothing. Unresolvable paths are kept as typed, preserving the exit-1
+  unmatched-item contract.
 
 ### Fixed
-- Three FFI soundness bugs in the Windows backend found by an unsafe audit: an
-  out-of-bounds read over an empty `MIB_*TABLE_OWNER_PID` table (reachable on every
-  `lsof -i` when a TCP6/UDP table is empty), an off-by-one over the ETW property
-  array, and an `NtQuery*` buffer-length-vs-allocation mismatch.
+- Three FFI soundness bugs in the Windows backend found by the unsafe audit:
+  an out-of-bounds read over an empty `MIB_*TABLE_OWNER_PID` table (reachable
+  on every `lsof -i` when a TCP6/UDP table is empty), an off-by-one over the
+  ETW property array, and an `NtQuery*` buffer-length-vs-allocation mismatch.
+- `-u` (user filter) had no test at any layer; it now has parser and
+  selection-engine tests (bare account and `DOMAIN\user`, case-insensitive,
+  cross-domain rejection).
+
+### Security
+- **smoketest: removed the runtime download of Sysinternals `handle64.exe`.**
+  The live harness fetched and executed `handle64.exe` from
+  `download.sysinternals.com` as a handle-enumeration oracle — a supply-chain
+  risk if the download host were compromised. Replaced with native oracles
+  only (`Get-Process` + the harness's own fixture ground truth);
+  `Get-NetTCPConnection` continues to cross-check sockets. Nothing is
+  downloaded at test time.
 
 ## [0.2.0] — 2026-07-02
 
