@@ -81,6 +81,35 @@ jobs:
         # and the one known data-source divergence (BOUND sockets) is ledgered.
         shell: pwsh
         run: ./differential/capture.ps1 -Bin target/release/lsof.exe
+      - name: live smoke test (55 cases over self-owned fixtures)
+        # The end-to-end harness: stands up real fixtures (held file at a known
+        # offset, named pipe with a connected client, mapped data file, TCP
+        # v4/v6 + UDP sockets, child processes with a known cwd) and exercises
+        # every option against them, cross-checking native oracles. Built-in
+        # cmdlets only — nothing is downloaded.
+        #
+        # It is the source of most of coverage/coverage-matrix.toml's declared
+        # cases, which until now rested on a harness CI never ran. Running it
+        # here is what makes that coverage claim real.
+        #
+        # OBSERVE-FIRST (porting-kit LESSONS #9): a brand-new CI-only gate is
+        # landed non-blocking and promoted to a hard gate after consecutive
+        # green runs on the hosted runner, so a harness that turns out to be
+        # environment-sensitive can't wedge every PR. Every environment-
+        # dependent case already self-SKIPs (elevation, IPv6, WOW64), and the
+        # harness exits 1 only on a real FAIL.
+        continue-on-error: true
+        shell: pwsh
+        run: ./smoketest/Invoke-WinlsofSmokeTest.ps1 -SkipBuild -Binary target/release/lsof.exe -OutDir smoke-results
+      - name: upload smoke-test results
+        # Uploaded even when the step above fails: results.csv / summary.txt /
+        # transcript.log are how the observe-first runs get read before promotion.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: winlsof-smoke-results
+          path: winlsof/smoke-results
+          if-no-files-found: warn
       - name: upload lsof.exe
         uses: actions/upload-artifact@v4
         with:
