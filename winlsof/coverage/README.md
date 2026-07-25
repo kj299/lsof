@@ -17,6 +17,19 @@ winlsof's two inputs.
 | `feature-inventory-winlsof.toml` | The **contract**: the C's full enumerated surface (45 option letters, 111 TYPE codes — extracted from `src/main.c` + `lib/print.c`) plus winlsof's 7 Windows-native TYPE codes, minus explicit waivers. |
 | `coverage-matrix.toml` | The **declaration**: one `[[case]]` per real test in winlsof's suite — golden tests, the socket differential, and the 55-case live smoke harness. |
 
+### All three sources actually run in CI
+
+A coverage declaration is only worth as much as the test behind it, so every
+source the matrix cites is executed by `winlsof-ci.yml`: golden tests and the
+backend unit tests via `cargo test --all` (both runners), the socket
+differential and the live smoke harness on the Windows runner. The smoke
+harness was manual-only until 2026-07-25 — the matrix was crediting coverage
+from a harness CI never ran, which is precisely the "declaring coverage you
+don't have" failure this gate exists to prevent. It now runs
+**observe-first** (non-blocking, results uploaded as an artifact) and is
+promoted to a hard gate after consecutive green runs, per porting-kit
+LESSONS #9.
+
 ## Running it
 
 ```sh
