@@ -161,36 +161,9 @@ ids = [
 ]
 reason = "Windows has no FIFO distinct from named pipes — pipe handles are typed PIPE"
 
-# 3. COVERAGE DEBT — in scope, shipped, but not yet exercised by any test.
-#    These are NOT scope decisions: each one is a missing fixture, and this is
-#    the list the gate exists to keep visible. Delete the waiver the moment a
-#    test covers it; the gate then enforces it forever after. Everything else
-#    in this file is hard-gated today, so a NEW dropped feature fails CI.
-
-[[waive]]
-id = "opt:u"
-reason = "shipped (user filter) but no smoke case runs -u yet — coverage debt"
-
-[[waive]]
-id = "type:CHR"
-reason = "no fixture opens a character device/console handle yet — coverage debt"
-
-[[waive]]
-id = "type:EVT"
-reason = "all-handle scan types Events, but no fixture creates one yet — coverage debt"
-
-[[waive]]
-id = "type:MUT"
-reason = "all-handle scan types Mutants, but no fixture creates one yet — coverage debt"
-
-[[waive]]
-id = "type:SECT"
-reason = "all-handle scan types Sections, but no fixture creates one yet — coverage debt"
-
-[[waive]]
-id = "type:PROC"
-reason = "all-handle scan types Process handles, but no fixture opens one yet — coverage debt"
-
-[[waive]]
-id = "type:TOKN"
-reason = "all-handle scan types Tokens, but no fixture opens one yet — coverage debt"
+# 3. COVERAGE DEBT — none. Every in-scope feature is exercised by a real test.
+#    (Closed 2026-07-25: `-u` gained parser + selection tests, and the six
+#    object types gained `enumerates_real_kernel_object_types`, which creates
+#    real Event/Mutant/Section/process/token/char-device handles and runs the
+#    actual enumeration over them. If a fixture is ever removed, the gate fails
+#    rather than quietly reverting to an untested feature.)

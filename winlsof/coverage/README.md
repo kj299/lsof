@@ -54,20 +54,27 @@ C later can never be swallowed by an existing waiver. Three kinds:
 2. **Other dialects' TYPE codes** (103) — Solaris `/proc`, BSD/macOS vnodes, Unix
    socket families, and `FIFO` (unreachable on Windows: pipe handles type as
    `PIPE`).
-3. **Coverage debt** (7) — *in scope, shipped, not yet exercised.* These are not
-   scope decisions, they are missing fixtures, and the gate prints them on every
-   run so they stay visible:
+3. **Coverage debt** — **none.** Every in-scope feature is exercised by a real
+   test.
 
-   | Feature | Missing fixture |
-   |---|---|
-   | `opt:u` | no smoke case runs `-u` (user filter) |
-   | `type:CHR` | nothing opens a character-device/console handle |
-   | `type:EVT` `type:MUT` `type:SECT` `type:PROC` `type:TOKN` | the all-handle scan types these, but no fixture creates/opens one |
+## Coverage debt: closed (2026-07-25)
 
-   Delete the waiver the moment a test covers it — the gate then enforces it
-   forever. Everything else is hard-gated today, so a *newly* dropped feature
-   fails CI immediately.
+The gate's first run reported 7 in-scope features that no test touched. They were
+closed with tests, not with waivers:
 
-The `type:KEY` entry is not on that list because the golden test
-`windows_object_types_render` genuinely asserts it. Dropping that assertion makes
-the gate fail with `UNCOVERED type:KEY` — verified.
+| Was uncovered | Now covered by |
+|---|---|
+| `opt:u` | `args::tests::user_filter_parses` (`-u alice`, `-ualice`, comma lists) + `selection::tests::user_selector` (bare account or `DOMAIN\user`, either case; rejects a different domain and an unknown user) |
+| `type:CHR` `type:EVT` `type:MUT` `type:SECT` `type:PROC` `type:TOKN` | `handles::tests::enumerates_real_kernel_object_types` |
+
+That last test is deliberately **end-to-end**: it creates a real Event, Mutant,
+Section, process handle, token, and NUL character device in-process, then runs the
+actual `enumerate()` over this PID and requires each object's TYPE code to come
+back. A unit test of the type-name→`FileType` mapping would *not* have caught the
+original bug, which was a `continue` in the enumeration loop — upstream of
+classification. It asserts only on objects it actually managed to create, so a
+hardened environment can't produce a phantom failure, and it fails outright if it
+could create none.
+
+Everything is hard-gated now: deleting any coverage declaration makes the gate
+exit 1 naming that feature (verified for `type:KEY`, `type:TOKN`, and `opt:u`).

@@ -461,6 +461,34 @@ mod tests {
     }
 
     #[test]
+    fn user_selector() {
+        // `-u` matches the bare account name or the full DOMAIN\user, either
+        // case, and selects nothing when the user doesn't exist.
+        for needle in ["alice", "ALICE", "EXAMPLE\\alice", "example\\ALICE"] {
+            let sel = Selection {
+                users: vec![needle.to_string()],
+                ..Default::default()
+            };
+            let got = sel.apply(mock::sample_processes());
+            assert!(!got.is_empty(), "-u {needle} matched nothing");
+            assert!(got
+                .iter()
+                .all(|p| p.user.as_deref() == Some("EXAMPLE\\alice")));
+        }
+        let sel = Selection {
+            users: vec!["nobody".to_string()],
+            ..Default::default()
+        };
+        assert!(sel.apply(mock::sample_processes()).is_empty());
+        // A domain-qualified needle must not match a different domain.
+        let sel = Selection {
+            users: vec!["OTHER\\alice".to_string()],
+            ..Default::default()
+        };
+        assert!(sel.apply(mock::sample_processes()).is_empty());
+    }
+
+    #[test]
     fn inet_only_keeps_socket_files() {
         let mut sel = Selection::default();
         sel.inet.enabled = true;

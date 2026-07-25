@@ -640,4 +640,17 @@ mod tests {
         assert_eq!(run(&["-E", "+E"]).0.endpoints, Some(EndpointMode::Files));
         assert_eq!(run(&[]).0.endpoints, None);
     }
+
+    #[test]
+    fn user_filter_parses() {
+        // `-u` takes a value, either attached or as the next argument, and
+        // accepts a comma-separated list like lsof's other selectors.
+        assert_eq!(run(&["-u", "alice"]).0.users, vec!["alice"]);
+        assert_eq!(run(&["-ualice"]).0.users, vec!["alice"]);
+        assert_eq!(
+            run(&["-u", "alice,EXAMPLE\\bob"]).0.users,
+            vec!["alice", "EXAMPLE\\bob"]
+        );
+        assert!(run(&[]).0.users.is_empty());
+    }
 }
