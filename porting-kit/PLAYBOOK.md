@@ -115,7 +115,15 @@ winlsof's phase order was sound; its one miss was not spiking the hang first.
   harness itself. Two defenses: write kit-level harnesses in a portable language
   (these are Python + POSIX sh on purpose, not the target's shell), and pin the
   tool's default output to the lowest-common-denominator encoding of the target's
-  default shell (winlsof: ASCII default, UTF-8 opt-in).
+  default shell (winlsof: ASCII default, UTF-8 opt-in). And the **CI runner is
+  yet another host** (LESSONS #13): hosted runners differ from any dev box in
+  ways fixtures silently assume — 8.3 short paths in `%TEMP%`, always-elevated
+  consoles, a newer shell *runtime* (winlsof's `-o` fixture seeked via .NET
+  `FileStream`, which stopped moving the kernel file pointer in .NET 6+; green
+  on PS 5.1 locally, red on pwsh CI). Establish fixture ground truth **at the
+  layer the tool reads it** (set the kernel state, don't trust a runtime
+  wrapper's view of it), and treat environment-dependent cases as first-class
+  SKIPs, never FAILs.
 - Stand up an **intentional-divergence ledger** (`DIVERGENCES.md`, template in
   the skeleton): every place the Rust will *deliberately* differ from C —
   starting with the Phase-0 flaw scan's findings.
@@ -280,7 +288,14 @@ pushes cancel in-flight runs, so "I saw green" can mean an *earlier* commit whil
 the head commit's gate never finished. Before calling a CI-only-validated change
 green, confirm the head SHA has a *completed* run — winlsof's `too_many_arguments`
 clippy error slipped in exactly this way: its Windows run was cancelled by the
-next push and the lint surfaced only two commits later.
+next push and the lint surfaced only two commits later. And (c) **while a gate
+is in observe mode, job status is meaningless** — `continue-on-error` shows a
+green job over a failing step, so verdicts must be read from the step's own
+log or uploaded artifact (upload results with `if: always()`, or observing is
+theater). Promotion mechanics that worked (LESSONS #13): the bar is
+*consecutive log-verified green runs*; flip the flag **in its own PR**, so the
+newly-hard gate must pass on the promotion PR itself before it can merge — the
+promotion is validated by the mechanism it enables.
 
 ---
 

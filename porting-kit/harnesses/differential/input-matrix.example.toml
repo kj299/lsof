@@ -25,6 +25,10 @@
 # (the TYPEs a case's fixtures create) is declared per case:
 #   covers = ["type:KEY", "type:REG"]
 # Out-of-scope features get a [[waive]] with a reason in the inventory.
+# A case may only cite a test that CI actually EXECUTES (and, once stable,
+# enforces): winlsof's matrix credited its 55-case smoke harness while CI never
+# ran it — coverage backed by a test nobody runs is the same silent gap this
+# gate exists to close, one layer up (LESSONS #13).
 #
 # TWO MODES. (1) same-binary-both-platforms: run the C oracle and the Rust side
 # on one host (the case this file shows). (2) oracle-substitution: when the C

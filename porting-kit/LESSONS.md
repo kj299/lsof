@@ -396,3 +396,61 @@ the emphasized half.
   `extract_options`, `matrix_coverage`, `load_inventory`, self-test);
   harnesses/coverage/feature-inventory-lsof.toml; winlsof/coverage/ (new);
   .github/workflows/winlsof-ci.yml (core-linux).
+
+---
+
+## 013. The smoke-harness arc — observe-first, run end to end (PRs #36–#39)
+
+- **Date:** 2026-07-25
+- **Codebase:** winlsof — wiring the 55-case live smoke harness into CI,
+  fixing what its first run found, and promoting it to a hard gate
+- **What happened:** The coverage matrix (#012) credited three test sources,
+  but CI executed only two — the smoke harness, source of most declared cases,
+  was manual-only. Wiring it in observe-first (the #9 pattern) and driving it
+  to enforcement produced four distinct lessons:
+
+  1. **A cited test source must itself run in CI.** Coverage backed by a
+     harness nobody executes is the #8 silent gap one layer up: the gate said
+     "covered", the covering test never ran. Every source the matrix credits is
+     now executed *and* enforced.
+     → *Section amended:* input-matrix header ("a case may only cite a test CI
+     executes"); winlsof/coverage/README.md.
+
+  2. **The CI runner is yet another host — including its *runtime versions*.**
+     The first hosted run failed 2/55 for host reasons no dev box showed:
+     hosted `%TEMP%` is an 8.3 short name (`C:\Users\RUNNER~1\...`), which
+     defeated winlsof's literal path-selector matching — a *real product bug*
+     (fixed: selectors are canonicalized to the long form the backend reports);
+     and the `-o` fixture seeked via .NET `FileStream`, whose .NET 6+
+     implementation does positional I/O and never moves the kernel file
+     pointer the product actually reads — green under PS 5.1 locally, red on
+     pwsh CI, and *the product was right, the fixture was wrong*. Establish
+     fixture ground truth at the layer the tool reads it (the fixture now sets
+     the kernel position via `SetFilePointerEx`, idempotent under PS 5.1).
+     → *Section amended:* PLAYBOOK · Phase 2 "harden the harness for its host".
+
+  3. **While a gate observes, job status is meaningless.** `continue-on-error`
+     shows a green job over a failing step, so the observe phase must read the
+     step's own log or artifact (`if: always()` upload) — a verdict inferred
+     from the job conclusion is theater. Both failures and both later green
+     runs were log-verified, never status-inferred.
+     → *Section amended:* PLAYBOOK · cross-cutting (CI-only gates, trap c).
+
+  4. **Promote in the gate's own PR.** The bar was consecutive log-verified
+     green runs (PR #37's run + the post-merge master run); the flag flip then
+     went in its own PR, so the newly-hard gate had to pass on the promotion PR
+     itself before merging — the promotion validated by the mechanism it
+     enables. Observe-first earned its keep in numbers: promoted on day one,
+     the two findings would have broken master; observed, they cost zero red
+     builds and yielded one product fix plus one fixture fix.
+     → *Section amended:* PLAYBOOK · cross-cutting (promotion mechanics).
+
+  Hygiene coda: workflow-file edits made in this arc (#36/#38) each launched
+  the three heavyweight C builds — `build.yml` ignored the winlsof *trees* but
+  not the winlsof *workflow files*; #005's scoping rule extended to them (#39).
+- **Kit change:** the PLAYBOOK and matrix-header edits above; the winlsof
+  fixes themselves live in the port (selector canonicalization + unit tests;
+  kernel-pointer fixture; hard-gated smoke step in winlsof-ci.yml).
+- **Section amended:** PLAYBOOK · Phase 2 + cross-cutting;
+  harnesses/differential/input-matrix.example.toml (header);
+  .github/workflows/build.yml (`paths-ignore`).
