@@ -314,3 +314,35 @@ the emphasized half.
 - **Kit change:** SECURITY-CHECKLIST gained a per-release item — the harness must
   not download-and-execute a binary oracle; use native/OS-shipped commands.
 - **Section amended:** SECURITY-CHECKLIST · per-release supply-chain.
+
+---
+
+## 011. The matrix-coverage gate — #8 promoted from a discipline to a control
+
+- **Date:** 2026-07-24
+- **Codebase:** winlsof / lsof — closing the "next target" named by LESSONS #8
+  and RETROSPECTIVE §10
+- **What happened:** #8 established that a green differential over an incomplete
+  matrix is silent about everything the matrix omits, and left the fix as a
+  *discipline* ("enumerate the C's feature surface and give each a case") — the
+  same kind of unenforced delegation #3 warned about: a rule nothing checks is
+  not a control. The enumeration is mechanically extractable from the C: lsof's
+  option surface is one `snpf`-built getopt rules string (every `#if` branch a
+  string literal in the same call — the union across build configs falls out of
+  scanning the call), and the emitted TYPE universe is `lib/print.c`'s
+  `snpf(buf, buf_len, "REG")` switch. If a tool can extract it, a gate can diff
+  it against the matrix.
+- **Kit change:** new harness `coverage/coverage_gate.py` —
+  `--extract-options`/`--extract-types` bootstrap a feature inventory from the C
+  (validated against the real tree: 45 option letters, 111 TYPE literals →
+  `feature-inventory-lsof.toml`, the worked example); the gate diffs
+  inventory-minus-waivers against matrix coverage (option letters inferred from
+  each case's `args` incl. short-option clusters; fixture-borne TYPE coverage
+  declared per case via `covers = [...]`; every waiver requires a reason) and
+  exits 1 on anything uncovered — with the #8 scenario (socket-only matrix,
+  un-created `type:KEY`) pinned in its self-test. Wired into `make check-kit`;
+  referenced from the matrix header, PLAYBOOK gate 2 + controls table, CLAUDE.md
+  gates table, and the oracle skill (step 2).
+- **Section amended:** harnesses/coverage/ (new); Makefile · check-kit;
+  harnesses/differential/input-matrix.example.toml (header); PLAYBOOK · Phase 4
+  gate 2 + cross-cutting controls; CLAUDE.md · gates; skills/porting-kit-oracle.

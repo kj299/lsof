@@ -426,3 +426,11 @@ matrix-completeness note) but cannot yet *generate* it — a future harness that
 diffs the C's emitted-TYPE / option enumeration against the matrix's coverage
 would turn #8 from a discipline into a gate. Until then, "green on the matrix"
 remains a statement about the matrix, not the port.
+
+*Closed 2026-07-24 (same day):* that harness now exists —
+`harnesses/coverage/coverage_gate.py` bootstraps the inventory from the C
+itself (validated on the real tree: the 45-letter union optstring across all
+`#if` branches of `src/main.c`, and all 111 TYPE literals `lib/print.c` can
+emit → `feature-inventory-lsof.toml`), infers option coverage from each matrix
+case's `args`, takes fixture-borne TYPE coverage via a per-case `covers` list,
+and exits 1 on any non-waived feature no case exercises. LESSONS #11.

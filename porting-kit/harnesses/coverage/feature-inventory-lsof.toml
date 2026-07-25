@@ -1,0 +1,21 @@
+# feature-inventory — lsof's enumerated C surface (the kit's worked example).
+# Generated from the real tree by:
+#   coverage_gate.py --extract-options src/main.c --extract-types lib/print.c \
+#                    --emit-inventory
+# options = the union optstring across every build configuration (all #if
+# branches of src/main.c's snpf-built rules string; 45 letters); types = every
+# TYPE literal lib/print.c can emit (111, including dialect-specific ones).
+#
+# CURATE before gating a real port: drop dialect-irrelevant entries, then add a
+# [[waive]] (with a reason) for anything deliberately out of scope — e.g. a
+# Windows port would waive the Solaris PLW* /proc types. Gate with:
+#   coverage_gate.py --inventory this-file --matrix your-input-matrix.toml
+# Uncovered features exit 1: LESSONS #8 as a gate, not a discipline.
+
+[features]
+options = ["A", "C", "D", "E", "F", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "X", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "v", "w", "x", "z"]
+types = ["ATALK", "BLK", "CHR", "DEL", "DIR", "DOOR", "EVENTFD", "FIFO", "FSEVENTS", "IPv4", "IPv6", "KQUEUE", "LINK", "MPB", "MPC", "NPOLICY", "PAS", "PAXV", "PCRE", "PCTL", "PCUR", "PCWD", "PDIR", "PETY", "PFD", "PFDR", "PFIL", "PFPR", "PGD", "PGID", "PIPE", "PLC", "PLDR", "PLDT", "PLPI", "PLST", "PLU", "PLWG", "PLWI", "PLWS", "PLWU", "PLWX", "PMAP", "PMEM", "PMPS", "PNTF", "POBJ", "PODR", "POLP", "POPF", "POPG", "PORT", "PREG", "PRMP", "PROCDSC", "PRTD", "PSGA", "PSIN", "PSTA", "PSXMQ", "PSXSEM", "PSXSHM", "PTS", "PUSG", "PW", "PXMP", "REG", "SHM", "SMT", "SOCK", "STR", "STSO", "UNKN", "UNKNcwd", "UNKNdel", "UNKNfd", "UNKNmem", "UNKNrtd", "UNKNtxt", "UNNM", "UNSP", "VBAD", "VBLK", "VCHR", "VDIR", "VLNK", "VMPC", "VNON", "VREG", "XNAM", "XSD", "XSEM", "a_inode", "ax25", "icmp", "inet", "ipx", "key", "lla", "ndrv", "netlink", "pack", "ppp", "raw", "raw6", "rte", "sock", "systm", "unix", "unknown", "x.25"]
+
+# [[waive]]
+# id = "opt:X"
+# reason = "why this is out of the port's declared scope"
