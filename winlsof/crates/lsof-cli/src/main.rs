@@ -111,6 +111,34 @@ specific operations that need them.\n",
     )
 }
 
+/// Resolve a user-typed path selector (`+d`/`+D` directory, bare path) to its
+/// canonical long form so the literal prefix/equality match in the selection
+/// engine sees the same spelling the backend reports. This is what bridges 8.3
+/// short names (`C:\Users\RUNNER~1\...` — the default %TEMP% on hosted Windows
+/// CI), relative paths, and symlinked directories. `std::fs::canonicalize`
+/// returns Windows paths in verbatim form (`\\?\C:\...`, `\\?\UNC\srv\...`);
+/// strip that the same way the backend's `normalize_final` does, so both sides
+/// of the comparison use one spelling. A path that can't be resolved (it
+/// doesn't exist) is left as typed — the unmatched-item reporting owns that.
+fn canonicalize_selector(p: &mut String) {
+    let Ok(resolved) = std::fs::canonicalize(&*p) else {
+        return;
+    };
+    *p = strip_verbatim(&resolved.to_string_lossy());
+}
+
+/// `\\?\C:\x` -> `C:\x`; `\\?\UNC\srv\share` -> `\\srv\share`; anything else
+/// unchanged — the same spelling the backend's `normalize_final` produces.
+fn strip_verbatim(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Report `-p` PIDs and path/dir search items that could not be located, and
 /// return how many. `-p` PIDs are checked against the *located* set (the PIDs
 /// the backend gathered, before selection filtering): a PID that exists but is
@@ -186,6 +214,19 @@ fn main() {
             show_ppid,
             show_offset,
         } => (selection, format, repeat, show_ppid, show_offset),
+    };
+    let selection = {
+        let mut sel = selection;
+        // Path selectors are literal prefix/equality matches against the
+        // long-form names the backend reports, so resolve what the user typed
+        // first — otherwise an 8.3 short name (`C:\Users\RUNNER~1\...`, the
+        // hosted-CI %TEMP%), a relative path, or a symlink silently matches
+        // nothing. A path that doesn't resolve is kept as typed; the
+        // unmatched-item reporting handles it.
+        for p in sel.paths.iter_mut().chain(sel.dir_trees.iter_mut()) {
+            canonicalize_selector(p);
+        }
+        sel
     };
 
     let env = make_env();
@@ -270,5 +311,48 @@ fn main() {
             #[cfg(not(windows))]
             std::process::exit(code);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonicalize_selector;
+
+    #[test]
+    fn canonicalize_resolves_relative_and_keeps_missing() {
+        // A real relative path resolves to an absolute one.
+        let dir = std::env::temp_dir().join("winlsof_canon_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let mut p = ".".to_string();
+        canonicalize_selector(&mut p);
+        std::env::set_current_dir(prev).unwrap();
+        assert!(
+            std::path::Path::new(&p).is_absolute(),
+            "relative selector should resolve absolute: {p:?}"
+        );
+        assert!(
+            !p.starts_with("\\\\?\\"),
+            "verbatim prefix must be stripped: {p:?}"
+        );
+        // A path that doesn't exist stays exactly as typed.
+        let mut missing = "definitely/not/a/real/path-xyzzy".to_string();
+        canonicalize_selector(&mut missing);
+        assert_eq!(missing, "definitely/not/a/real/path-xyzzy");
+    }
+
+    #[test]
+    fn strip_verbatim_matches_backend_spelling() {
+        // Must mirror the backend's normalize_final so both sides of the
+        // selection comparison use one spelling.
+        use super::strip_verbatim;
+        assert_eq!(strip_verbatim("\\\\?\\C:\\a\\b.txt"), "C:\\a\\b.txt");
+        assert_eq!(
+            strip_verbatim("\\\\?\\UNC\\srv\\share\\f"),
+            "\\\\srv\\share\\f"
+        );
+        assert_eq!(strip_verbatim("C:\\plain"), "C:\\plain");
+        assert_eq!(strip_verbatim("/unix/path"), "/unix/path");
     }
 }
