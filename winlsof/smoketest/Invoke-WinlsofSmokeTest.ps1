@@ -216,6 +216,24 @@ try {
     $fx.File = [System.IO.File]::Open($fx.FilePath, 'Create', 'ReadWrite', 'None')
     $bytes = [byte[]](0..255); $fx.File.Write($bytes, 0, $bytes.Length); $fx.File.Flush()
     [void]$fx.File.Seek(128, [System.IO.SeekOrigin]::Begin)
+    # Park the KERNEL file pointer at 128 too. winlsof reports the kernel
+    # position (NtQueryInformationFile), but .NET 6+ FileStream (pwsh 7) does
+    # positional I/O and never moves the OS pointer -- Seek() above only updates
+    # the managed view, so on pwsh the kernel position would still be 0 and the
+    # `-o` case would fail (as it did on hosted CI). Under PS 5.1 / .NET
+    # Framework, Seek() calls SetFilePointer eagerly, so this is idempotent.
+    if (-not ('WinlsofNative.Kernel32' -as [type])) {
+        Add-Type -Namespace WinlsofNative -Name Kernel32 -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceToMove, out long lpNewFilePointer, uint dwMoveMethod);
+'@
+    }
+    $kernelPos = 0L
+    $seekOk = [WinlsofNative.Kernel32]::SetFilePointerEx(
+        $fx.File.SafeFileHandle.DangerousGetHandle(), 128, [ref]$kernelPos, 0)  # 0 = FILE_BEGIN
+    if (-not $seekOk -or $kernelPos -ne 128) {
+        Write-Host "warn: could not park the kernel file pointer at 128 (got $kernelPos); the -o case may fail" -ForegroundColor Yellow
+    }
 
     # Named pipe server (PIPE), plus a connected client end so `-E` can
     # resolve both endpoint PIDs (an unconnected instance has no client).
