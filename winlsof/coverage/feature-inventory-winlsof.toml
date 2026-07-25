@@ -1,0 +1,196 @@
+# feature-inventory — winlsof (the Windows Rust port of lsof)
+#
+# [features] is the C's FULL enumerated surface, extracted from src/main.c and
+# lib/print.c by the kit's coverage gate, plus winlsof's own Windows-native TYPE
+# codes. Waivers SUBTRACT from it. Keeping the whole C surface here is the point:
+# when the C grows a feature, it shows up as uncovered rather than never being
+# noticed, and the waiver list is a reviewable record of every conscious
+# exclusion (LESSONS #8 — nothing is dropped silently).
+#
+# Gate:  python3 ../../porting-kit/harnesses/coverage/coverage_gate.py \
+#          --inventory feature-inventory-winlsof.toml --matrix coverage-matrix.toml
+
+[features]
+options = [
+  "A", "C", "D", "E", "F", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+  "S", "T", "U", "V", "X", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i",
+  "j", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "v", "w", "x", "z"
+]
+# Options that consume a value, so `-iTCP:80` counts as `i` alone and the
+# value's characters are never miscredited as coverage.
+takes_value = [
+  "A", "D", "F", "K", "L", "S", "T", "Z", "c", "d", "e", "f", "g", "i", "k",
+  "m", "o", "p", "r", "s", "u", "x", "z"
+]
+types = [
+  "ATALK", "BLK", "CHR", "DEL", "DIR", "DOOR", "EVENTFD", "FIFO",
+  "FSEVENTS", "IPv4", "IPv6", "KQUEUE", "LINK", "MPB", "MPC", "NPOLICY",
+  "PAS", "PAXV", "PCRE", "PCTL", "PCUR", "PCWD", "PDIR", "PETY", "PFD",
+  "PFDR", "PFIL", "PFPR", "PGD", "PGID", "PIPE", "PLC", "PLDR", "PLDT",
+  "PLPI", "PLST", "PLU", "PLWG", "PLWI", "PLWS", "PLWU", "PLWX", "PMAP",
+  "PMEM", "PMPS", "PNTF", "POBJ", "PODR", "POLP", "POPF", "POPG", "PORT",
+  "PREG", "PRMP", "PROCDSC", "PRTD", "PSGA", "PSIN", "PSTA", "PSXMQ",
+  "PSXSEM", "PSXSHM", "PTS", "PUSG", "PW", "PXMP", "REG", "SHM", "SMT",
+  "SOCK", "STR", "STSO", "UNKN", "UNKNcwd", "UNKNdel", "UNKNfd", "UNKNmem",
+  "UNKNrtd", "UNKNtxt", "UNNM", "UNSP", "VBAD", "VBLK", "VCHR", "VDIR",
+  "VLNK", "VMPC", "VNON", "VREG", "XNAM", "XSD", "XSEM", "a_inode", "ax25",
+  "icmp", "inet", "ipx", "key", "lla", "ndrv", "netlink", "pack", "ppp",
+  "raw", "raw6", "rte", "sock", "systm", "unix", "unknown", "x.25"
+]
+# Windows-native TYPE codes with no C counterpart — the all-handle scan's
+# kernel object types (lsof-core `FileType::code`). Exactly the class that was
+# silently dropped until PR #31, so they are required coverage here.
+extra = [
+  "type:EVT", "type:KEY", "type:MUT", "type:PROC", "type:SECT", "type:THRD",
+  "type:TOKN"
+]
+
+# ============================================================== waivers
+# 1. Options winlsof declares N/A (reasons verbatim from
+#    docs/feature-parity-plan.md).
+
+[[waive]]
+id = "opt:A"
+reason = "AFS NWA mode (HP-UX); not portable"
+
+[[waive]]
+id = "opt:C"
+reason = "kernel name cache; Unix-only"
+
+[[waive]]
+id = "opt:H"
+reason = "legacy \"headers\" toggle on certain dialects"
+
+[[waive]]
+id = "opt:M"
+reason = "portmapper — Unix RPC"
+
+[[waive]]
+id = "opt:N"
+reason = "NFS-file listing"
+
+[[waive]]
+id = "opt:S"
+reason = "lstat/readlink timeout — Unix; winlsof has its own bounded model"
+
+[[waive]]
+id = "opt:X"
+reason = "cross-over info — Linux epoll bridge"
+
+[[waive]]
+id = "opt:Z"
+reason = "SELinux contexts"
+
+[[waive]]
+id = "opt:b"
+reason = "\"avoid blocking kernel\" — superseded by winlsof's bounded-worker model"
+
+[[waive]]
+id = "opt:e"
+reason = "filesystem exempt — Unix mount-table concept"
+
+[[waive]]
+id = "opt:f"
+reason = "filesystem-detail sub-flags; Unix-specific internals"
+
+[[waive]]
+id = "opt:k"
+reason = "kernel symbol file — Unix-only"
+
+[[waive]]
+id = "opt:m"
+reason = "mount supplement — Unix mtab"
+
+[[waive]]
+id = "opt:x"
+reason = "cross-mount FS traversal — Unix mount table"
+
+[[waive]]
+id = "opt:z"
+reason = "Solaris zones"
+
+# 2. TYPE codes of other dialects, or unreachable on Windows. Grouped `ids`
+#    share a reason; every id is still named explicitly — no globs, so a
+#    feature added to the C later can never be swallowed by an old waiver.
+
+[[waive]]
+ids = [
+  "type:PAS", "type:PAXV", "type:PCRE", "type:PCTL", "type:PCUR",
+  "type:PCWD", "type:PDIR", "type:PETY", "type:PFD", "type:PFDR",
+  "type:PFIL", "type:PFPR", "type:PGD", "type:PGID", "type:PLC",
+  "type:PLDR", "type:PLDT", "type:PLPI", "type:PLST", "type:PLU",
+  "type:PLWG", "type:PLWI", "type:PLWS", "type:PLWU", "type:PLWX",
+  "type:PMAP", "type:PMEM", "type:PMPS", "type:PNTF", "type:POBJ",
+  "type:PODR", "type:POLP", "type:POPF", "type:POPG", "type:PORT",
+  "type:PREG", "type:PRMP", "type:PROCDSC", "type:PRTD", "type:PSGA",
+  "type:PSIN", "type:PSTA", "type:PSXMQ", "type:PSXSEM", "type:PSXSHM",
+  "type:PTS", "type:PUSG", "type:PW", "type:PXMP"
+]
+reason = "Solaris /proc file types — no Windows equivalent"
+
+[[waive]]
+ids = [
+  "type:VBAD", "type:VBLK", "type:VCHR", "type:VDIR", "type:VLNK",
+  "type:VMPC", "type:VNON", "type:VREG"
+]
+reason = "BSD/macOS vnode types — winlsof reports Windows object types instead"
+
+[[waive]]
+ids = [
+  "type:ATALK", "type:a_inode", "type:ax25", "type:icmp", "type:inet",
+  "type:ipx", "type:key", "type:lla", "type:ndrv", "type:netlink",
+  "type:pack", "type:ppp", "type:raw", "type:raw6", "type:rte", "type:sock",
+  "type:systm", "type:x.25"
+]
+reason = "Unix socket families not reachable on Windows"
+
+[[waive]]
+ids = [
+  "type:BLK", "type:DEL", "type:DOOR", "type:EVENTFD", "type:FSEVENTS",
+  "type:KQUEUE", "type:LINK", "type:MPB", "type:MPC", "type:NPOLICY",
+  "type:SHM", "type:SMT", "type:SOCK", "type:STR", "type:STSO", "type:UNKN",
+  "type:UNKNcwd", "type:UNKNdel", "type:UNKNfd", "type:UNKNmem",
+  "type:UNKNrtd", "type:UNKNtxt", "type:UNNM", "type:UNSP", "type:XNAM",
+  "type:XSD", "type:XSEM"
+]
+reason = "Unix/other-dialect object types with no Windows analogue"
+
+[[waive]]
+ids = [
+  "type:FIFO"
+]
+reason = "Windows has no FIFO distinct from named pipes — pipe handles are typed PIPE"
+
+# 3. COVERAGE DEBT — in scope, shipped, but not yet exercised by any test.
+#    These are NOT scope decisions: each one is a missing fixture, and this is
+#    the list the gate exists to keep visible. Delete the waiver the moment a
+#    test covers it; the gate then enforces it forever after. Everything else
+#    in this file is hard-gated today, so a NEW dropped feature fails CI.
+
+[[waive]]
+id = "opt:u"
+reason = "shipped (user filter) but no smoke case runs -u yet — coverage debt"
+
+[[waive]]
+id = "type:CHR"
+reason = "no fixture opens a character device/console handle yet — coverage debt"
+
+[[waive]]
+id = "type:EVT"
+reason = "all-handle scan types Events, but no fixture creates one yet — coverage debt"
+
+[[waive]]
+id = "type:MUT"
+reason = "all-handle scan types Mutants, but no fixture creates one yet — coverage debt"
+
+[[waive]]
+id = "type:SECT"
+reason = "all-handle scan types Sections, but no fixture creates one yet — coverage debt"
+
+[[waive]]
+id = "type:PROC"
+reason = "all-handle scan types Process handles, but no fixture opens one yet — coverage debt"
+
+[[waive]]
+id = "type:TOKN"
+reason = "all-handle scan types Tokens, but no fixture opens one yet — coverage debt"

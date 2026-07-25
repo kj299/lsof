@@ -105,19 +105,24 @@ def _call_span(src: str, start: int) -> str:
     return ""
 
 
-def _optstring_letters(fragment: str) -> set[str]:
-    """Option letters in a getopt-rules fragment ('c:' -> {'c'}), ignoring
-    format holes (%s), '?', ':' markers, and anything non-alphanumeric."""
-    letters = set()
+def _optstring_letters(fragment: str) -> tuple[set[str], set[str]]:
+    """(all letters, value-taking letters) in a getopt-rules fragment.
+    'c:' -> ({'c'}, {'c'}); 'ab' -> ({'a','b'}, set()). Format holes (%s), '?'
+    and other punctuation are ignored. Knowing which options take a value is
+    what stops `-iTCP:80` from being miscounted as the options i, T, C and P."""
+    letters, takes = set(), set()
     frag = fragment.replace("%s", "")
-    for ch in frag:
-        if ch.isalnum():
-            letters.add(ch)
-    return letters
+    for i, ch in enumerate(frag):
+        if not ch.isalnum():
+            continue
+        letters.add(ch)
+        if i + 1 < len(frag) and frag[i + 1] == ":":
+            takes.add(ch)
+    return letters, takes
 
 
-def extract_options(files) -> set[str]:
-    """Union of option letters any build of the C can accept.
+def extract_options(files) -> tuple[set[str], set[str]]:
+    """(option letters, value-taking letters) any build of the C can accept.
 
     Handles two idioms: a direct string literal passed to getopt()/GetOpt(),
     and lsof's snpf-built rules string — a format literal full of `x:` pairs
@@ -126,6 +131,13 @@ def extract_options(files) -> set[str]:
     text yields the superset across build configurations (which is exactly
     what a port-completeness inventory wants)."""
     letters: set[str] = set()
+    takes: set[str] = set()
+
+    def absorb(lit: str) -> None:
+        l, t = _optstring_letters(lit)
+        letters.update(l)
+        takes.update(t)
+
     for path in files:
         src = _strip_c_comments(open(path, encoding="utf-8", errors="replace").read())
         # direct: getopt(argc, argv, "ab:c")  /  GetOpt(ctx, ct, opt, "ab:c", ...)
@@ -133,7 +145,7 @@ def extract_options(files) -> set[str]:
             call = _call_span(src, m.end())
             for lit in _STR_LIT.findall(call):
                 if re.search(r"[A-Za-z]:", lit):
-                    letters |= _optstring_letters(lit)
+                    absorb(lit)
         # built: snpf(options, sizeof(options), "?a%sbc:...", "A:", "", ...)
         for m in re.finditer(r"\bsnpf?f?\s*\(|\bsnprintf\s*\(|\bsnpf\s*\(", src):
             call = _call_span(src, m.start())
@@ -143,8 +155,8 @@ def extract_options(files) -> set[str]:
             # An optstring format has several `x:` option markers.
             if len(re.findall(r"[A-Za-z]:", lits[0])) >= 3:
                 for lit in lits:
-                    letters |= _optstring_letters(lit)
-    return letters
+                    absorb(lit)
+    return letters, takes
 
 
 def extract_types(files) -> set[str]:
@@ -175,23 +187,38 @@ def load_toml_or_json(path: str):
 
 
 def load_inventory(path: str):
-    """-> (required feature-id set, waives list of {id, reason})."""
+    """-> (required ids, waives [{id, reason}], value-taking option letters).
+
+    A `[[waive]]` names one `id` or a list of `ids` (explicit enumeration only —
+    no globs, so a waiver can never silently swallow a feature added later), and
+    every waiver must carry a non-empty `reason`."""
     data = load_toml_or_json(path)
     feats = data.get("features", {})
     required = {f"opt:{o}" for o in feats.get("options", [])}
     required |= {f"type:{t}" for t in feats.get("types", [])}
     required |= set(feats.get("extra", []))  # free-form ids (fmt:json, field:T, ...)
-    waives = data.get("waive", [])
-    for w in waives:
-        if "id" not in w or not str(w.get("reason", "")).strip():
-            sys.exit(f"error: every [[waive]] needs an id and a non-empty reason: {w}")
-    return required, waives
+    takes_value = set(feats.get("takes_value", []))
+    waives = []
+    for w in data.get("waive", []):
+        ids = w.get("ids") or ([w["id"]] if "id" in w else [])
+        reason = str(w.get("reason", "")).strip()
+        if not ids or not reason:
+            sys.exit(f"error: every [[waive]] needs id/ids and a non-empty reason: {w}")
+        for wid in ids:
+            waives.append({"id": wid, "reason": reason})
+    return required, waives, takes_value
 
 
-def matrix_coverage(path: str) -> set[str]:
+def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
     """Feature ids the matrix's cases exercise: option letters inferred from
     `args` (short-option clusters; `--long` and bare `-` are skipped) plus each
-    case's explicit `covers` list."""
+    case's explicit `covers` list.
+
+    Scanning a cluster STOPS after a value-taking option, because everything
+    after it is that option's argument, not more options: `-iTCP:80` is `-i`
+    with the value `TCP:80`, and crediting T/C/P would be *false coverage* —
+    a gate that over-credits hides exactly the gaps it exists to find."""
+    takes_value = takes_value or set()
     data = load_toml_or_json(path)
     covered: set[str] = set()
     for case in data.get("case", []):
@@ -202,8 +229,11 @@ def matrix_coverage(path: str) -> set[str]:
                 continue
             if tok[0] in "-+":
                 for ch in tok[1:]:
-                    if ch.isalnum():
-                        covered.add(f"opt:{ch}")
+                    if not ch.isalnum():
+                        break  # punctuation: the rest is a value
+                    covered.add(f"opt:{ch}")
+                    if ch in takes_value:
+                        break  # the remainder is this option's argument
         for cid in case.get("covers", []):
             covered.add(str(cid))
     return covered
@@ -213,8 +243,8 @@ def matrix_coverage(path: str) -> set[str]:
 
 
 def run_gate(inventory_path: str, matrix_path: str, warn: bool, as_json: bool) -> int:
-    required, waives = load_inventory(inventory_path)
-    covered = matrix_coverage(matrix_path)
+    required, waives, takes_value = load_inventory(inventory_path)
+    covered = matrix_coverage(matrix_path, takes_value)
     waived_ids = {w["id"] for w in waives}
     stale_waives = sorted(waived_ids - required)
     uncovered = sorted(required - waived_ids - covered)
@@ -244,7 +274,7 @@ def run_gate(inventory_path: str, matrix_path: str, warn: bool, as_json: bool) -
     return 0
 
 
-def emit_inventory(options: set[str], types: set[str]) -> str:
+def emit_inventory(options: set[str], types: set[str], takes_value: set[str]) -> str:
     lines = [
         "# feature-inventory — the C's enumerated surface, bootstrapped by",
         "#   coverage_gate.py --extract-options/--extract-types --emit-inventory",
@@ -253,10 +283,13 @@ def emit_inventory(options: set[str], types: set[str]) -> str:
         "",
         "[features]",
         "options = [" + ", ".join(f'"{o}"' for o in sorted(options)) + "]",
+        "# Options that consume a value: a matrix case's `-iTCP:80` counts as `i`",
+        "# alone, so the value's characters aren't miscredited as coverage.",
+        "takes_value = [" + ", ".join(f'"{o}"' for o in sorted(takes_value)) + "]",
         "types = [" + ", ".join(f'"{t}"' for t in sorted(types)) + "]",
         "",
         "# [[waive]]",
-        '# id = "opt:X"',
+        '# id = "opt:X"          # or: ids = ["opt:X", "opt:Y"]',
         '# reason = "why this is out of the port\'s declared scope"',
     ]
     return "\n".join(lines) + "\n"
@@ -303,18 +336,24 @@ void fmt() { snpf(buf, len, "x=%d"); }
 """
 
 INV_FIXTURE = {
-    "features": {"options": ["a", "b", "i", "t"], "types": ["REG", "KEY"]},
+    "features": {
+        "options": ["a", "b", "i", "t", "C", "P", "T"],
+        "takes_value": ["i"],
+        "types": ["REG", "KEY"],
+    },
     "waive": [
         {"id": "opt:t", "reason": "terse mode is out of the demo's scope"},
         {"id": "opt:Z", "reason": "stale: no longer in the inventory"},
+        {"ids": ["opt:C", "opt:P", "opt:T"], "reason": "grouped waiver: Unix-only dialect flags"},
     ],
 }
 
 # The LESSONS #8 reproduction: a socket-only matrix — option coverage looks
-# fine, but nothing declares `type:KEY`, so the gate must fail on it.
+# fine, but nothing declares `type:KEY`, so the gate must fail on it. The
+# `-iTCP:80` case also guards the false-coverage bug: T/C/P are the *value*.
 MATRIX_FIXTURE = {
     "case": [
-        {"name": "sockets", "args": ["-i", "-a"], "covers": ["type:REG"]},
+        {"name": "sockets", "args": ["-iTCP:80", "-a"], "covers": ["type:REG"]},
         {"name": "grouped", "args": ["-ab"]},
         {"name": "long-and-bare", "args": ["--json", "-"]},
     ]
@@ -338,11 +377,12 @@ def self_test() -> int:
         open(copt, "w").write(C_OPTSTRING_FIXTURE)
         open(ctyp, "w").write(C_TYPES_FIXTURE)
 
-        opts = extract_options([copt])
+        opts, takes = extract_options([copt])
         check(
             "optstring union: format + all #if branches + direct getopt",
             opts == {"a", "b", "c", "i", "t", "k", "X", "q", "z"},
         )
+        check("value-taking options detected from `x:`", takes == {"b", "c", "i", "k", "z"})
         types = extract_types([ctyp])
         check("TYPE literals extracted, %-formats skipped", types == {"REG", "DIR", "KEY"})
 
@@ -351,11 +391,16 @@ def self_test() -> int:
         json.dump(INV_FIXTURE, open(inv, "w"))
         json.dump(MATRIX_FIXTURE, open(mat, "w"))
 
-        required, waives = load_inventory(inv)
-        covered = matrix_coverage(mat)
+        required, waives, takes_value = load_inventory(inv)
+        covered = matrix_coverage(mat, takes_value)
         check("args infer short options incl. clusters", {"opt:a", "opt:b", "opt:i"} <= covered)
         check("--long and bare - are not option coverage", "opt:j" not in covered and "opt:-" not in covered)
         check("covers= declares fixture-borne TYPE coverage", "type:REG" in covered)
+        check(
+            "no false coverage: `-iTCP:80` is opt:i, not T/C/P",
+            not ({"opt:T", "opt:C", "opt:P"} & covered),
+        )
+        check("grouped `ids = [...]` waiver expands", {"opt:C", "opt:P", "opt:T"} <= {w["id"] for w in waives})
 
         uncovered = sorted(required - {w["id"] for w in waives} - covered)
         check("LESSONS #8: the un-created TYPE is caught", uncovered == ["type:KEY"])
@@ -401,16 +446,17 @@ def main(argv=None) -> int:
 
     if args.extract_options or args.extract_types:
         try:
-            opts = extract_options(args.extract_options or [])
+            opts, takes = extract_options(args.extract_options or [])
             types = extract_types(args.extract_types or [])
         except OSError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
         if args.emit_inventory:
-            sys.stdout.write(emit_inventory(opts, types))
+            sys.stdout.write(emit_inventory(opts, types, takes))
         else:
             if opts:
                 print("options:", " ".join(sorted(opts)))
+                print("takes value:", " ".join(sorted(takes)))
             if types:
                 print("types:", " ".join(sorted(types)))
         return 0

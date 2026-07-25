@@ -346,3 +346,53 @@ the emphasized half.
 - **Section amended:** harnesses/coverage/ (new); Makefile · check-kit;
   harnesses/differential/input-matrix.example.toml (header); PLAYBOOK · Phase 4
   gate 2 + cross-cutting controls; CLAUDE.md · gates; skills/porting-kit-oracle.
+
+---
+
+## 012. A coverage gate that over-credits is worse than none — and the inventory must hold the WHOLE surface
+
+- **Date:** 2026-07-25
+- **Codebase:** winlsof — curating the real inventory and wiring the #011 gate
+  into CI (the first real use of the harness)
+- **What happened:** Applying the new gate to a real port immediately found two
+  design defects in the gate itself — neither visible when it was written against
+  fixtures, both obvious the moment it met real data (the #2/#3/#4 pattern again:
+  *the findings live where the tool meets the actual codebase*).
+
+  1. **False coverage.** Option coverage was inferred by walking every character
+     of an argument token, so a matrix case running `-iTCP:80` credited `opt:T`,
+     `opt:C` and `opt:P` — the *value's* characters read as option letters. On
+     winlsof's real suite that inflated coverage by three options. A coverage
+     gate that over-credits doesn't merely mis-measure, it **hides the gaps it
+     exists to find** — the same failure mode as #2's noisy scanner, inverted.
+     The fix was already in the source data: the C's optstring marks
+     value-taking options (`c:` vs `a`), so the extractor now records
+     `takes_value` and cluster-scanning stops at the first such option.
+  2. **The inventory must be the full surface, not the in-scope subset.** The
+     first curation listed only what winlsof supports and kept the exclusions
+     elsewhere — so every waiver referenced an id not in the inventory and the
+     tool's own stale-waiver check fired 118 times. Modelling it the other way
+     (inventory = the C's *entire* enumerated surface, waivers *subtract*) makes
+     the waiver list a reviewable record of every conscious exclusion, and means
+     a feature the C gains later shows up as uncovered instead of never being
+     noticed at all. The exclusion list is the artifact worth version-controlling.
+
+  Grouped waivers (`ids = [...]` sharing one reason, explicit enumeration, no
+  globs) made a 103-entry dialect exclusion writable without letting a waiver
+  silently swallow a future feature.
+- **Result on the real port:** 163 features (45 C options + 111 C TYPE codes + 7
+  Windows-native), 125 waived with reasons, 38 covered, and **7 genuine gaps**
+  found — `-u` shipped but never exercised, and five all-handle object types
+  (`EVT`/`MUT`/`SECT`/`PROC`/`TOKN`) that PR #31 taught winlsof to emit but that
+  no fixture creates. Recorded as an explicit, individually-named *coverage debt*
+  section the gate prints every run, so today's debt is visible while everything
+  else is hard-gated — a newly dropped feature now fails CI.
+- **Kit change:** `coverage_gate.py` gained `takes_value` extraction + value-aware
+  cluster scanning (pinned: `-iTCP:80` must not credit T/C/P) and grouped `ids`
+  waivers; `emit_inventory` emits `takes_value`; the full-surface-minus-waivers
+  model is documented in the harness, the lsof inventory header, and winlsof's
+  `coverage/README.md`. Gate wired into winlsof CI as a hard gate.
+- **Section amended:** harnesses/coverage/coverage_gate.py (`_optstring_letters`,
+  `extract_options`, `matrix_coverage`, `load_inventory`, self-test);
+  harnesses/coverage/feature-inventory-lsof.toml; winlsof/coverage/ (new);
+  .github/workflows/winlsof-ci.yml (core-linux).
