@@ -9,15 +9,13 @@ on:
     paths-ignore:
       - 'porting-kit/**'
       - 'winlsof/**'
-      - '.github/workflows/winlsof-ci.yml'
-      - '.github/workflows/winlsof-release.yml'
+      - '.github/workflows/winlsof-*.yml'
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - 'porting-kit/**'
       - 'winlsof/**'
-      - '.github/workflows/winlsof-ci.yml'
-      - '.github/workflows/winlsof-release.yml'
+      - '.github/workflows/winlsof-*.yml'
 
 jobs:
   linux:
@@ -44,6 +42,20 @@ jobs:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v5
+    - name: make the hostname resolution round-trip (LTsock)
+      # The C suite's LTsock resolves gethostname() and hands lsof the selector
+      # -i@<hostname>:<port>, so the test and lsof must resolve that name to
+      # the same address, and lsof's reverse lookup must return it. On 2026-08
+      # macos-latest images the runner hostname is a *.local name, which macOS
+      # resolves via mDNS -- /etc/hosts pinning does not reliably apply to
+      # .local, and the round-trip broke ("no client socket by host and
+      # port"). Setting HostName to localhost removes mDNS from the loop
+      # entirely: gethostname() returns a name whose forward (127.0.0.1) and
+      # reverse (localhost) resolution are symmetric on every path via the
+      # stock /etc/hosts. CI-environment workaround only; no C source touched.
+      run: |
+        sudo scutil --set HostName localhost
+        echo "hostname is now: $(hostname)"
     - name: install dependencies
       run: brew install pkg-config libtool autoconf automake groff
     - name: configure
