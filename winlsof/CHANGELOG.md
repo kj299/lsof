@@ -9,6 +9,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Docs truth pass.** `feature-parity-plan.md` still marked all twelve
+  Phase 5A switches 🟡-planned though they shipped in v0.2.0 (now recorded as
+  the option inventory + mapping decisions); `windows-validation.md` still
+  instructed using Sysinternals `handle64.exe` as the file-handle oracle,
+  contradicting the v0.3.0 supply-chain decision that removed downloaded
+  oracles from the test path (now native fixtures/`Get-Process` only, and
+  version-agnostic); the research-roadmap intro and README pointers now
+  reflect that every roadmap item is shipped or a documented closed gate.
+
 ### Added
 - **`-iICMP` / `-iRAW` family filters** — the last open research-roadmap item
   (§5 P3). The `-i` spec now accepts `icmp` and `raw` protocol names like
