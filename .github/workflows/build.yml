@@ -42,6 +42,15 @@ jobs:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v5
+    - name: pin the runner hostname to loopback (LTsock)
+      # The C suite's LTsock creates sockets on gethostbyname(hostname) and
+      # then matches lsof's output by hostname@port. On 2026-08 macos-latest
+      # images the runner hostname no longer round-trips to the same address,
+      # so the test fails ("no client socket by host and port"). Pinning the
+      # hostname to loopback makes the test's resolution and lsof's rendering
+      # agree by construction. CI-environment workaround only; no C source is
+      # touched.
+      run: echo "127.0.0.1 $(hostname)" | sudo tee -a /etc/hosts
     - name: install dependencies
       run: brew install pkg-config libtool autoconf automake groff
     - name: configure
