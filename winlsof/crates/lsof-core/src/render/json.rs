@@ -69,6 +69,19 @@ fn file_members(f: &OpenFile) -> Vec<String> {
         if let Some(st) = sock.state {
             m.push(format!("\"state\":{}", qs(st.as_str())));
         }
+        // `-T q/w` extended TCP info, flat like the rest of the shape. Keys
+        // mirror the `-F` T-token meanings (QR/QS/WR).
+        if let Some(tcp) = &sock.tcp {
+            if let Some(w) = tcp.recv_window {
+                m.push(format!("\"tcp_window\":{w}"));
+            }
+            if let Some(q) = tcp.recv_queue {
+                m.push(format!("\"tcp_queue_recv\":{q}"));
+            }
+            if let Some(q) = tcp.send_queue {
+                m.push(format!("\"tcp_queue_send\":{q}"));
+            }
+        }
     }
     m
 }

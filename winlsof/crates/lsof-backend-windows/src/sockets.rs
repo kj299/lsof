@@ -158,6 +158,7 @@ fn make_file(
         local: Some(local),
         remote,
         state,
+        tcp: None,
     };
     OpenFile {
         fd: FdType::Unknown,

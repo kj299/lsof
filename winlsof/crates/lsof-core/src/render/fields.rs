@@ -101,6 +101,20 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
                     if let Some(st) = sock.state {
                         push!('T', &format!("ST={}", st.as_str()));
                     }
+                    // `-T q/w` extended info as repeated `T` fields with
+                    // lsof's own prefixes: QR (read queue), QS (send queue),
+                    // WR (window read size = our advertised receive window).
+                    if let Some(tcp) = &sock.tcp {
+                        if let Some(q) = tcp.recv_queue {
+                            push!('T', &format!("QR={q}"));
+                        }
+                        if let Some(q) = tcp.send_queue {
+                            push!('T', &format!("QS={q}"));
+                        }
+                        if let Some(w) = tcp.recv_window {
+                            push!('T', &format!("WR={w}"));
+                        }
+                    }
                 }
             }
             if want('k') {

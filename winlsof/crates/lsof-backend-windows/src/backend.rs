@@ -190,8 +190,8 @@ impl Backend for WindowsBackend {
                     if resolve_sockets {
                         sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
                     }
-                    // `-T q/w`: append extended TCP stats (window / queue) to the
-                    // socket NAME via per-connection EStats. Needs elevation.
+                    // `-T q/w`: attach extended TCP stats (window / queue) to
+                    // the row via per-connection EStats. Needs elevation.
                     if let Some(t) = &sel.tcp_info {
                         tcpinfo::annotate(&mut file, t, self.elevated);
                     }

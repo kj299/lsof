@@ -210,6 +210,7 @@ pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
         local: None,
         remote: sock.last_remote,
         state: None,
+        tcp: None,
     };
     // Use lsof's NAME convention: `*:*->1.2.3.4:443` when we have a remote
     // (the local `*:*` reflects unknown bind). For endpoints we only saw via

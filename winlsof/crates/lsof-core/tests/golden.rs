@@ -324,3 +324,81 @@ fn json_escapes_backslashes() {
     assert!(out.contains("EXAMPLE\\\\alice"));
     assert!(out.contains("C:\\\\Users\\\\alice"));
 }
+
+/// One established-TCP process with `-T q/w` extended info attached — what the
+/// Windows backend produces under `-Tqw` (elevated). Built directly because
+/// the mock's static sample deliberately has `tcp: None` (a plain run shows
+/// nothing extra).
+fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
+    use lsof_core::model::{
+        AccessMode, FdType, FileType, OpenFile, Process, Protocol, SocketInfo, TcpExtInfo, TcpState,
+    };
+    let sock = SocketInfo {
+        protocol: Protocol::Tcp,
+        local: Some("127.0.0.1:5000".parse().unwrap()),
+        remote: Some("127.0.0.1:51000".parse().unwrap()),
+        state: Some(TcpState::Established),
+        tcp: Some(TcpExtInfo {
+            recv_window: Some(262144),
+            recv_queue: Some(0),
+            send_queue: Some(12),
+        }),
+    };
+    vec![Process {
+        pid: 2000,
+        ppid: None,
+        command: "server.exe".to_string(),
+        user: Some("EXAMPLE\\alice".to_string()),
+        files: vec![OpenFile {
+            fd: FdType::Handle(77),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Ipv4,
+            name: sock.display_name(false, false),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some("TCP".to_string()),
+            links: None,
+            socket: Some(sock),
+        }],
+        endpoint_peer: false,
+    }]
+}
+
+#[test]
+fn tcp_info_table_suffix() {
+    // The exact v0.2.0-validated shape the live smoke cases assert: the info
+    // rides the NAME column, after the state.
+    let out = table::render(&tcp_info_fixture(), false, false, false, None, false);
+    assert!(
+        out.contains("(ESTABLISHED) (Win=262144) (QR=0) (QS=12)"),
+        "table NAME must carry the (Win=)/(QR=)/(QS=) suffix: {out:?}"
+    );
+}
+
+#[test]
+fn tcp_info_fields_tokens() {
+    // Structured `T` tokens with lsof's own prefixes (QR/QS/WR), after ST=;
+    // the n (name) field stays clean of the table-only suffix.
+    let out = fields::render(&tcp_info_fixture(), false, None);
+    assert!(out.contains("TST=ESTABLISHED\nTQR=0\nTQS=12\nTWR=262144\n"));
+    assert!(
+        !out.contains("(Win="),
+        "-F must not leak the table suffix into the name field: {out:?}"
+    );
+}
+
+#[test]
+fn tcp_info_json_keys() {
+    let out = json::render_aggregated(&tcp_info_fixture());
+    for key in [
+        "\"tcp_window\":262144",
+        "\"tcp_queue_recv\":0",
+        "\"tcp_queue_send\":12",
+    ] {
+        assert!(out.contains(key), "JSON missing {key}: {out:?}");
+    }
+    assert!(!out.contains("(Win="), "JSON name must stay clean: {out:?}");
+    // And absent info stays absent: the plain mock sample has no tcp_* keys.
+    assert!(!json::render_aggregated(&sample_processes()).contains("tcp_window"));
+}

@@ -509,6 +509,25 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port6)", '-Tw') 'T-window-v6'
         Assert-Contains $r.Out '(Win=' '-Tw should annotate established IPv6 rows'
     }
+    Test-Case 'tcp-info-fields-dash-T' 'render/-T -F' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        # -F carries the stats as structured T tokens with lsof's prefixes
+        # (QR/QS/WR); the table-only (Win=) suffix must NOT leak into the
+        # n (name) field.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tqw', '-F') 'T-fields'
+        Assert-Contains $r.Out 'TWR=' '-Tw should emit a TWR= (window) T field'
+        Assert-Contains $r.Out 'TQR=' '-Tq should emit a TQR= (read queue) T field'
+        Assert-Contains $r.Out 'TQS=' '-Tq should emit a TQS= (send queue) T field'
+        Assert-NotContains $r.Out '(Win=' '-F name must stay clean of the table suffix'
+    }
+    Test-Case 'tcp-info-json-dash-T' 'render/-T -J' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tqw', '-J') 'T-json'
+        Assert-Contains $r.Out '"tcp_window":' '-Tw should emit tcp_window in JSON'
+        Assert-Contains $r.Out '"tcp_queue_recv":' '-Tq should emit tcp_queue_recv'
+        Assert-Contains $r.Out '"tcp_queue_send":' '-Tq should emit tcp_queue_send'
+        $null = $r.Out | ConvertFrom-Json   # throws if the JSON regressed
+    }
 
     # ===================== Phase 5B: -E pipe endpoint info =====================
     Test-Case 'pipe-endpoints-dash-E' 'render/-E' {
