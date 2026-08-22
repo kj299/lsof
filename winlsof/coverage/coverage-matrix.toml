@@ -67,6 +67,15 @@ name = "core/user-filter-u"
 # case; rejects a different domain and an unknown user).
 args = ["-u", "USER"]
 
+[[case]]
+name = "core/privilege-hint-predicate"
+# main.rs tests::privilege_hint_* over the extracted wants_privilege_hint():
+# both elevation branches through the real argv parser (`-w` suppression,
+# table-only, -i/-U/path exemptions). This is what makes `-w`'s semantics
+# CI-covered at all — the smoke -w case SKIPs on the always-elevated hosted
+# runner (docs/road-to-1.0.md, the elevation blind spot).
+args = ["-w"]
+
 # ------------------------------------------------------- backend unit tests
 # crates/lsof-backend-windows/src/handles.rs `#[cfg(test)] mod tests`, run by
 # `cargo test --all` on the windows CI runner.

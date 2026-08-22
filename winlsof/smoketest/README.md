@@ -99,7 +99,11 @@ mapped files, WOW64 cwd, modules, Restart Manager, every format, native oracles)
 > SKIPs in a single pass are by design, not gaps: the `-T`, `-U`, and
 > system-process cases need Administrator (they run in pass 2), while the
 > privilege-hint cases (`privilege-hint-unelevated`, `suppress-warnings-dash-w`)
-> only apply to a **non-elevated** run (pass 1).
+> only apply to a **non-elevated** run (pass 1). Hosted CI runners are always
+> elevated, so pass 1's two cases never execute there — their decision logic is
+> unit-tested portably instead, and the live unelevated pass is a per-release
+> manual checkpoint: see
+> [`docs/road-to-1.0.md`](../docs/road-to-1.0.md) (the elevation blind spot).
 > The `native-handle-cross-check` case needs no elevation and never SKIPs for a
 > missing tool — it verifies winlsof against the harness's own fixtures (which it
 > holds open) and `Get-Process`. Running pass 1 **and** pass 2 exercises everything.
