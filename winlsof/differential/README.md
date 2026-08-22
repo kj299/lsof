@@ -30,11 +30,15 @@ connection. Instead `capture.ps1` creates sockets it owns — a loopback TCP
 listener, an established loopback pair (which exercises the remote-address path),
 and a bound UDP socket — then scopes the diff to **this pid and these ports**.
 Deterministic, zero-flake, and it still exercises enumeration → classification →
-field formatting end to end. Today's fixtures cover **LISTEN + ESTABLISHED + UDP
-over IPv4 loopback**; IPv6/dual-stack and a non-ESTABLISHED state (e.g.
-`CLOSE_WAIT`) are a planned follow-up so the gate also covers the family/state
-classes — the comparator already canonicalizes IPv6 (RFC 5952), so those fixtures
-drop in without further work.
+field formatting end to end. The fixtures cover both the **family** and **state**
+classes: over IPv4 loopback, `LISTEN` + `ESTABLISHED` + a half-closed pair pinned
+in **`CLOSE_WAIT`/`FIN_WAIT2`** + a bound UDP socket; over IPv6 loopback,
+`LISTEN` + `ESTABLISHED`. The half-close (client `Shutdown(Send)` with the socket
+kept open) is what makes the non-ESTABLISHED states deterministic — both rows
+stay owned by the harness pid and hold their state for as long as the sockets
+live, where a full close would instead orphan an unattributable pid-0
+`TIME_WAIT`. A host without `::1` degrades the IPv6 class with a warning rather
+than failing (hosted runners always have it).
 
 **Why JSON is the gate.** winlsof's `-J` emits structured `local`/`remote`/`state`
 already, so it maps onto the oracle without fragile string-splitting. The `-F`

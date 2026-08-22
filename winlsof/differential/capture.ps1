@@ -5,8 +5,10 @@
 .DESCRIPTION
     The C `lsof` cannot run on Windows, so there is no same-binary oracle. This
     script substitutes the OS's own socket table: it stands up deterministic,
-    self-owned fixtures (a loopback TCP listener, an established loopback pair,
-    and a bound UDP socket), captures winlsof's `-i -J` view AND the equivalent
+    self-owned fixtures (IPv4 loopback: a TCP listener, an established pair, a
+    half-closed pair pinned in CLOSE_WAIT/FIN_WAIT2, and a bound UDP socket;
+    IPv6 loopback: a TCP listener and an established pair), captures winlsof's
+    `-i -J` view AND the equivalent
     Get-NetTCPConnection / Get-NetUDPEndpoint view, and hands both to the
     portable comparator (oracle_diff.py), which fails on any unledgered set
     divergence. Scoping to this process's pid and to the fixture ports makes the
@@ -77,6 +79,7 @@ function Get-OracleRows {
 }
 
 $listener = $client = $server = $udp = $null
+$cwClient = $cwServer = $listener6 = $client6 = $server6 = $null
 $rc = $EXIT_INFRA
 try {
     # --- fixtures owned by THIS process (inside try, so a setup throw still
@@ -91,10 +94,50 @@ try {
     $cport = ([Net.IPEndPoint]$client.Client.LocalEndPoint).Port
     $udp = [Net.Sockets.UdpClient]::new(0, [Net.Sockets.AddressFamily]::InterNetwork)
     $uport = ([Net.IPEndPoint]$udp.Client.LocalEndPoint).Port
-    $ports = @($lport, $cport, $uport)
-    # NB: covers LISTEN + ESTABLISHED + UDP over IPv4 loopback. IPv6 and
-    # non-ESTABLISHED-state fixtures are a documented follow-up (README).
-    Write-Host ("Fixtures: TCP listen={0}  established={0}<->{1}  UDP={2}" -f $lport, $cport, $uport)
+
+    # Non-ESTABLISHED states: a second IPv4 connection, half-closed from the
+    # client (Shutdown Send; the socket object stays open). The FIN drives the
+    # server side to CLOSE_WAIT and, once ACKed, the client side to FIN_WAIT2.
+    # Both rows are owned by this pid and hold their state for as long as the
+    # sockets stay open, so the two capture passes cannot race them. (A full
+    # client Close would instead orphan a pid-0 TIME_WAIT row -- flaky and
+    # unattributable, which is why the half-close is the fixture.)
+    $cwClient = [Net.Sockets.TcpClient]::new()
+    $cwClient.Connect($loop, $lport)
+    $cwServer = $listener.AcceptTcpClient()
+    $cwPort = ([Net.IPEndPoint]$cwClient.Client.LocalEndPoint).Port
+    $cwClient.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+    Start-Sleep -Milliseconds 300   # let the FIN round-trip settle both states
+
+    # IPv6 loopback: listener + established pair (the family class). Always
+    # present on windows-latest; a host without ::1 degrades with a warning
+    # (the run still gates the IPv4 classes) rather than failing as infra.
+    $l6port = $c6port = $null
+    try {
+        $listener6 = [Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Loopback, 0)
+        $listener6.Start()
+        $l6port = ([Net.IPEndPoint]$listener6.LocalEndpoint).Port
+        $client6 = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
+        $client6.Connect([Net.IPAddress]::IPv6Loopback, $l6port)
+        $server6 = $listener6.AcceptTcpClient()
+        $c6port = ([Net.IPEndPoint]$client6.Client.LocalEndPoint).Port
+    } catch {
+        Write-Host ("  IPv6 loopback unavailable ({0}); family coverage degraded this run" -f $_.Exception.Message) -ForegroundColor Yellow
+        foreach ($d in @($server6, $client6)) { if ($null -ne $d) { try { $d.Dispose() } catch {} } }
+        if ($null -ne $listener6) { try { $listener6.Stop() } catch {} }
+        $listener6 = $client6 = $server6 = $null
+        $l6port = $c6port = $null
+    }
+
+    $ports = @($lport, $cport, $uport, $cwPort)
+    if ($null -ne $l6port) { $ports += @($l6port, $c6port) }
+    # Coverage: LISTEN + ESTABLISHED + CLOSE_WAIT + FIN_WAIT2 + UDP over IPv4,
+    # and LISTEN + ESTABLISHED over IPv6 -- the family and state classes the
+    # README once listed as follow-ups.
+    Write-Host ("Fixtures: TCP listen={0}  established={0}<->{1}  half-closed={0}<->{2} (CLOSE_WAIT/FIN_WAIT2)  UDP={3}" -f $lport, $cport, $cwPort, $uport)
+    if ($null -ne $l6port) {
+        Write-Host ("          TCP6 listen={0}  established={0}<->{1}" -f $l6port, $c6port)
+    }
 
     # --- capture winlsof's view (bounded; a hang fails fast as infra) --------
     $wlJson = Join-Path $work 'winlsof.json'
@@ -167,8 +210,10 @@ try {
     $rc = $LASTEXITCODE
 }
 finally {
-    foreach ($d in @($server, $client, $udp)) { if ($null -ne $d) { try { $d.Dispose() } catch {} } }
-    if ($null -ne $listener) { try { $listener.Stop() } catch {} }
+    foreach ($d in @($server, $client, $udp, $cwServer, $cwClient, $server6, $client6)) {
+        if ($null -ne $d) { try { $d.Dispose() } catch {} }
+    }
+    foreach ($l in @($listener, $listener6)) { if ($null -ne $l) { try { $l.Stop() } catch {} } }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 

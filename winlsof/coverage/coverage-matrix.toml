@@ -91,17 +91,19 @@ covers = [
 
 # ------------------------------------------------------------- differential
 # Oracle-substitution vs Get-NetTCPConnection / Get-NetUDPEndpoint over
-# self-owned loopback fixtures. TCP LISTEN + ESTABLISHED + UDP, IPv4.
+# self-owned loopback fixtures. IPv4: TCP LISTEN + ESTABLISHED + a half-closed
+# CLOSE_WAIT/FIN_WAIT2 pair + UDP. IPv6: TCP LISTEN + ESTABLISHED (always
+# present on the hosted runner; a host without ::1 degrades with a warning).
 
 [[case]]
 name = "diff/sockets-json"
 args = ["-J", "-nP", "-i"]
-covers = ["type:IPv4"]
+covers = ["type:IPv4", "type:IPv6"]
 
 [[case]]
 name = "diff/sockets-fields"
 args = ["-F", "-nP", "-i"]
-covers = ["type:IPv4"]
+covers = ["type:IPv4", "type:IPv6"]
 
 # --------------------------------------------------------------- smoke tests
 # The 55-case live harness. Fixtures are self-owned (a held file at a known
