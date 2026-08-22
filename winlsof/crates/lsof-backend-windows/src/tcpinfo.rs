@@ -1,4 +1,4 @@
-//! `-T [qsw]` — extended TCP info appended to socket rows (Phase 5B).
+//! `-T [qsw]` — extended TCP info attached to socket rows (Phase 5B).
 //!
 //! `s` (state) is already shown by the socket NAME formatter, so this module
 //! only handles `q` (queue) and `w` (window). Those come from Windows'
@@ -28,7 +28,7 @@ use std::mem::{size_of, zeroed};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::ptr::null_mut;
 
-use lsof_core::model::{OpenFile, Protocol, TcpState};
+use lsof_core::model::{OpenFile, Protocol, TcpExtInfo, TcpState};
 use lsof_core::TcpInfoFlags;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetPerTcp6ConnectionEStats, GetPerTcpConnectionEStats, SetPerTcp6ConnectionEStats,
@@ -40,22 +40,18 @@ use windows_sys::Win32::Networking::WinSock::{IN6_ADDR, IN6_ADDR_0};
 
 use crate::util::trace;
 
-#[derive(Default)]
-struct TcpInfo {
-    recv_window: Option<u32>,
-    recv_queue: Option<u64>,
-    send_queue: Option<u64>,
-}
-
 /// A connection key for the EStats calls, in the family-specific MIB row shape.
 enum RowKey {
     V4(MIB_TCPROW_LH),
     V6(MIB_TCP6ROW),
 }
 
-/// Append `-T` queue/window annotations to a socket row's NAME, in place.
-/// No-op for non-TCP rows and non-established connections. `-Ts` needs nothing
-/// here — state is already in the name.
+/// Attach `-T` queue/window stats to a socket row as structured
+/// [`TcpExtInfo`] — the table renderer formats the `(Win=) (QR=) (QS=)`
+/// suffix from it, and the machine formats emit `-F` `T` tokens / JSON keys
+/// (the NAME string itself stays clean). No-op for non-TCP rows and
+/// non-established connections. `-Ts` needs nothing here — state is already
+/// on the row.
 pub fn annotate(file: &mut OpenFile, flags: &TcpInfoFlags, elevated: bool) {
     if !(flags.queue || flags.window) {
         return;
@@ -85,22 +81,9 @@ pub fn annotate(file: &mut OpenFile, flags: &TcpInfoFlags, elevated: bool) {
     let Some(info) = query(row, elevated, flags.queue, flags.window) else {
         return;
     };
-
-    let mut suffix = String::new();
-    if flags.window {
-        if let Some(w) = info.recv_window {
-            suffix.push_str(&format!(" (Win={w})"));
-        }
+    if let Some(sock) = &mut file.socket {
+        sock.tcp = Some(info);
     }
-    if flags.queue {
-        if let Some(q) = info.recv_queue {
-            suffix.push_str(&format!(" (QR={q})"));
-        }
-        if let Some(q) = info.send_queue {
-            suffix.push_str(&format!(" (QS={q})"));
-        }
-    }
-    file.name.push_str(&suffix);
 }
 
 /// Map our [`TcpState`] to the `MIB_TCP_STATE` number for the row key.
@@ -211,8 +194,8 @@ unsafe fn get_rod(row: &RowKey, estats: TCP_ESTATS_TYPE, rod: *mut u8, rod_size:
     }
 }
 
-fn query(row: RowKey, elevated: bool, want_q: bool, want_w: bool) -> Option<TcpInfo> {
-    let mut info = TcpInfo::default();
+fn query(row: RowKey, elevated: bool, want_q: bool, want_w: bool) -> Option<TcpExtInfo> {
+    let mut info = TcpExtInfo::default();
 
     // REC: receive window + receive app queue.
     if want_w || want_q {

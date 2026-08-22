@@ -70,6 +70,7 @@ pub fn sample_processes() -> Vec<Process> {
                         local: Some(addr("0.0.0.0:445")),
                         remote: None,
                         state: Some(TcpState::Listen),
+                        tcp: None,
                     }),
                 },
                 OpenFile {
@@ -87,6 +88,7 @@ pub fn sample_processes() -> Vec<Process> {
                         local: Some(addr("127.0.0.1:445")),
                         remote: Some(addr("127.0.0.1:51000")),
                         state: Some(TcpState::Established),
+                        tcp: None,
                     }),
                 },
                 OpenFile {
@@ -104,6 +106,7 @@ pub fn sample_processes() -> Vec<Process> {
                         local: Some(addr("[::]:53")),
                         remote: None,
                         state: None,
+                        tcp: None,
                     }),
                 },
             ],

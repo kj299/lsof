@@ -10,6 +10,22 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`-T` queue/window stats in the machine formats.** The `-Tq`/`-Tw`
+  extended TCP info (EStats) was previously table-only; it now also emits
+  structured `-F` `T` fields using lsof's own prefixes — `TQR=` (read queue),
+  `TQS=` (send queue), `TWR=` (advertised receive window), after the existing
+  `TST=` — and JSON keys `tcp_window` / `tcp_queue_recv` / `tcp_queue_send`
+  on socket objects. Pinned by portable golden tests across all three
+  renderers and two new elevated live smoke cases (`-F` and `-J`).
+
+### Changed
+- **`-T` annotations no longer pollute machine-format names.** The
+  `(Win=N) (QR=N) (QS=N)` decoration used to be appended to the row's NAME
+  string at capture time, so `-T` combined with `-F`/`-J` leaked it into the
+  `n` field / JSON `"name"`. The stats now travel as structured data; the
+  table renders the identical suffix at display time (table output is
+  byte-for-byte unchanged — the live smoke assertions still pass), and the
+  machine formats keep a clean name plus the structured tokens above.
 - **Nightly deep fuzz with an accumulating corpus**
   (`.github/workflows/winlsof-fuzz-nightly.yml`): a scheduled 30-minute
   `cargo-fuzz` run over the argument parser — 40× the PR gate's budget —

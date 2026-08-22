@@ -121,8 +121,10 @@ Switches that need new Windows API work, or significant data-model expansion:
   `GetPerTcpConnectionEStats` / `GetPerTcp6ConnectionEStats` (IPv4 + IPv6,
   ESTABLISHED-only; queue/window need admin). State (`s`) is free from the
   socket table; `f` (follow) is accepted as a no-op. Rendered as
-  `(Win=N)` / `(QR=N)` / `(QS=N)` suffixes on the socket NAME (lsof's own
-  QR/QS queue labels).
+  `(Win=N)` / `(QR=N)` / `(QS=N)` suffixes on the socket NAME in the table
+  (lsof's own QR/QS queue labels), and as structured data in the machine
+  formats: `-F` `T` fields `TQR=`/`TQS=`/`TWR=` after `TST=`, JSON keys
+  `tcp_window`/`tcp_queue_recv`/`tcp_queue_send`.
 - **`-U`** — ✅ **done.** Explicit UNIX-domain filter, backed by the ETW AFD
   capture (§5): `-U` implies the (Administrator-only) capture and restricts
   output to AF_UNIX rows.

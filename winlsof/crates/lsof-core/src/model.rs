@@ -188,6 +188,43 @@ pub struct SocketInfo {
     pub remote: Option<SocketAddr>,
     /// `None` for connectionless protocols (UDP).
     pub state: Option<TcpState>,
+    /// `-T q/w` extended TCP info. A backend populates this only when the run
+    /// requested it and the per-connection stats were readable; `None`
+    /// otherwise, so renderers emit nothing extra on a plain run.
+    pub tcp: Option<TcpExtInfo>,
+}
+
+/// Extended per-connection TCP statistics for `-T` (Windows EStats). Each
+/// member is present only if its sub-flag was requested (`q` → queues, `w` →
+/// window) and the kernel returned it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TcpExtInfo {
+    /// Receive window currently advertised, in bytes (`-Tw`; lsof's `WR=`).
+    pub recv_window: Option<u32>,
+    /// Bytes queued for the application to read (`-Tq`; lsof's `QR=`).
+    pub recv_queue: Option<u64>,
+    /// Bytes queued to send (`-Tq`; lsof's `QS=`).
+    pub send_queue: Option<u64>,
+}
+
+impl TcpExtInfo {
+    /// The table NAME suffix, e.g. `" (Win=262144) (QR=0) (QS=12)"` — exactly
+    /// the shape v0.2.0 shipped and the live smoke cases assert. Machine
+    /// formats never use this; they emit the structured `-F` `T` tokens /
+    /// JSON keys instead.
+    pub fn table_suffix(&self) -> String {
+        let mut s = String::new();
+        if let Some(w) = self.recv_window {
+            s.push_str(&format!(" (Win={w})"));
+        }
+        if let Some(q) = self.recv_queue {
+            s.push_str(&format!(" (QR={q})"));
+        }
+        if let Some(q) = self.send_queue {
+            s.push_str(&format!(" (QS={q})"));
+        }
+        s
+    }
 }
 
 impl SocketInfo {

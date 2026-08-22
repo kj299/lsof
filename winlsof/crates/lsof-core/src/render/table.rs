@@ -92,7 +92,13 @@ pub fn render(
             r.push(f.links.map(|n| n.to_string()).unwrap_or_default());
         }
         r.push(f.node.clone().unwrap_or_default());
-        r.push(f.name.clone());
+        // `-T q/w` extended TCP info renders as a NAME suffix in the table
+        // only; machine formats carry it structured (`-F` T tokens, JSON keys).
+        let mut name = f.name.clone();
+        if let Some(tcp) = f.socket.as_ref().and_then(|s| s.tcp.as_ref()) {
+            name.push_str(&tcp.table_suffix());
+        }
+        r.push(name);
         r
     };
 

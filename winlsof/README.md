@@ -61,7 +61,7 @@ independent code and per-OS "dialect" backends:
 
 All planned phases (0–4) are implemented and **validated on real Windows 11
 hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
-55 cases covering every option, output format, and code path, differentially
+57 cases covering every option, output format, and code path, differentially
 cross-checked against native Windows oracles (no downloads). The few
 skips in any single pass are mode-specific (admin-only features unelevated, and
 vice versa) — running an unelevated **and** an elevated pass exercises

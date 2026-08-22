@@ -61,6 +61,15 @@ covers = ["type:KEY"]
 args = []
 
 [[case]]
+name = "golden/tcp-info-structured"
+# tcp_info_{table_suffix,fields_tokens,json_keys}: a fixture with TcpExtInfo
+# set renders the table (Win=/QR=/QS= NAME suffix), -F (TQR/TQS/TWR tokens
+# after TST), and JSON (tcp_window/tcp_queue_recv/tcp_queue_send); absent
+# info renders nothing extra, and the suffix never leaks into -F/JSON names.
+args = ["-T"]
+covers = ["type:IPv4"]
+
+[[case]]
 name = "core/user-filter-u"
 # args::tests::user_filter_parses (`-u`, `-ualice`, comma lists) plus
 # selection::tests::user_selector (matches bare account or DOMAIN\user, either
@@ -287,6 +296,16 @@ args = ["-O", "-p", "SELF"]
 [[case]]
 name = "smoke/tcp-info-T"
 args = ["-T", "-nP", "-iTCP:PORT"]
+
+[[case]]
+name = "smoke/tcp-info-fields"
+args = ["-Tqw", "-F", "-nP", "-iTCP:PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "smoke/tcp-info-json"
+args = ["-Tqw", "-J", "-nP", "-iTCP:PORT"]
+covers = ["type:IPv4"]
 
 [[case]]
 name = "smoke/pipe-endpoints-E"
