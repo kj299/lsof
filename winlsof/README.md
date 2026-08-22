@@ -67,10 +67,11 @@ skips in any single pass are mode-specific (admin-only features unelevated, and
 vice versa) — running an unelevated **and** an elevated pass exercises
 everything. Latest field validation: the released v0.2.0 `lsof.exe`, as
 downloaded, on a second Windows 11 machine (build 26200) — 51 PASS unelevated
-and 53 PASS elevated, zero failures, zero hangs, all 55 cases green in at
-least one mode. Remaining work is ongoing parity refinement and the
-research-grade gaps tracked in
-[`docs/research-roadmap.md`](docs/research-roadmap.md).
+and 53 PASS elevated, zero failures, zero hangs, all 55 cases (the suite's
+size at the time) green in at least one mode. The
+[research roadmap](docs/research-roadmap.md) is fully dispositioned — every
+item is shipped or a documented closed gate — and the remaining work is the
+release track in [`docs/road-to-1.0.md`](docs/road-to-1.0.md).
 
 ## Privilege model (least privilege)
 
@@ -146,7 +147,8 @@ CI (`.github/workflows/winlsof-ci.yml`) runs the lints + tests on Linux and
 builds/tests the native backend on `windows-latest`.
 
 For end-to-end validation on a real Windows host (concrete commands + expected
-output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
+output, cross-checked against native oracles — `Get-NetTCPConnection`,
+`Get-Process`, the fixtures themselves; nothing downloaded), see
 [`docs/windows-validation.md`](docs/windows-validation.md).
 
 ## Docs index

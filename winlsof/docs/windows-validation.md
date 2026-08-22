@@ -3,9 +3,13 @@
 This plan validates the `winlsof` (`lsof.exe`) build end-to-end on a real
 Windows 10/11 x64 host, cross-checking every feature against a native Windows
 "oracle" (`Get-Process`, `Get-NetTCPConnection`, `netstat`) — all native, no
-downloads. CI already proves the code compiles, lints, and that the
-pure helper logic unit-tests pass on `windows-latest`; this plan covers the part
-CI cannot: a live system-wide run.
+downloads. For routine validation prefer the automated
+[smoke harness](../smoketest/README.md) (the same checks, self-fixtured, ~59
+cases); this doc is the **guided manual walkthrough** of the same ground, for
+when you want to see and poke each behavior yourself. CI already proves the
+code compiles, lints, and that the pure helper logic unit-tests pass on
+`windows-latest`; both this plan and the harness cover the part CI cannot: a
+live system-wide run in both privilege modes.
 
 Example outputs below are **representative** (real PIDs/paths will differ). A
 case passes if the shape matches and the cross-check agrees.
@@ -31,7 +35,7 @@ cases (§8) in a PowerShell started with "Run as administrator".
 
 | # | Command | Expected |
 |---|---|---|
-| T1 | `& $lsof -v` | `winlsof 0.1.0 (memory-safe lsof for Windows)` |
+| T1 | `& $lsof -v` | `winlsof <current version> (memory-safe lsof for Windows)` |
 | T2 | `& $lsof -h` | usage text listing `-p -u -c -i -a -n -P -t -F -J -j -r` and `+D` |
 
 ---
@@ -133,8 +137,8 @@ powershell 4180 DOMAIN\alice  784r REG C: 3 196610 C:\Users\alice\AppData\Local\
 ```
 
 **Pass:** the file path appears under the correct PID with access `r`, a numeric
-FD (the handle value), and a NODE (file index); `handle64.exe` lists the same
-file for that PID.
+FD (the handle value), and a NODE (file index). The fixture is the oracle: this
+shell (`$PID`) holds the file open, so the row must be under `$PID`.
 
 ---
 
@@ -149,8 +153,9 @@ $f = [System.IO.File]::Open($path,'Open','Read','None')
 # T13 — directory form
 & $lsof +D $env:TEMP 2>$null | Select-String 'winlsof_test'
 
-# cross-check:
-handle64.exe $path
+# cross-check: THIS shell holds the file, so the fixture is the ground truth —
+# the holder lsof reports must be $PID (no external tool needed).
+$PID
 $f.Close(); Remove-Item $path
 ```
 
@@ -162,7 +167,7 @@ powershell 4180 DOMAIN\alice unk REG  C:                    C:\Users\alice\AppDa
 ```
 
 **Pass:** the holding process (powershell) is listed even in a *non-elevated*
-shell; the PID matches `handle64.exe`'s output.
+shell, and its PID equals `$PID` — the fixture-owning shell itself.
 
 ---
 
@@ -251,8 +256,8 @@ stops on Ctrl-C.
 | T1–T2 | version/help | — | strings present |
 | T3–T5 | processes/command/user | `Get-Process` | PID set & image path match |
 | T6–T10 | TCP/UDP v4/v6, `-i`, `-F`/`-J` | `Get-NetTCPConnection`, `netstat`, `Get-NetUDPEndpoint` | owning PID + state match |
-| T11 | file handles | `handle64.exe` | path under right PID, access `r` |
-| T12–T13 | named-file / `+D` (RM) | `handle64.exe` | holder PID match, no admin needed |
+| T11 | file handles | own fixture + `Get-Process` | path under right PID, access `r` |
+| T12–T13 | named-file / `+D` (RM) | own fixture (`$PID`) | holder PID match, no admin needed |
 | T14 | `cwd` | known launch dir | path matches |
 | T15 | `txt`/`mem` | `(Get-Process).Modules` | subset/equality |
 | T16–T19 | least privilege | run elevated vs not, ProcMon | hint + visibility + no SeDebug for `-i` |

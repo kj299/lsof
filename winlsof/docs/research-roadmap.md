@@ -5,7 +5,9 @@ change. Each has a **spike → implement → polish** plan with an explicit
 **decision gate** (so we don't sink effort into a dead end), and memory-safety
 notes. Investigation showed two of these are actually achievable with public
 APIs (📈 **offset**, 📈 **mapped data files**); two are genuinely API-limited
-(sockets beyond TCP/UDP, byte-range locks).
+(per-socket FD correlation, byte-range locks). The sockets-beyond-TCP/UDP
+goal, first filed under the same gate, later shipped via the opt-in ETW
+capture (§5) — the gate applies to the FD/handle half only.
 
 Effort: S/M/L. Confidence = likelihood a *safe, public-API* solution exists.
 

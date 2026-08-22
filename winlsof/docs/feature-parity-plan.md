@@ -6,8 +6,16 @@ data, validate end-to-end on real hardware, ship. That milestone landed as
 [v0.1.0](https://github.com/kj299/lsof/releases/tag/winlsof-v0.1.0). But a
 *full* port of upstream lsof needs the rest of the option surface — the user
 correctly pointed out that switches like `-s`, `-K`, `-L`, `-l`, `-g`, `-T`
-were never planned past the MVP. This doc reconstitutes the missing
-requirements and lays out **Phase 5** to close the gap.
+were never planned past the MVP. This doc reconstituted the missing
+requirements and laid out **Phase 5** to close the gap.
+
+**Status: complete.** Phase 5A and 5B both shipped in
+[v0.2.0](../CHANGELOG.md) (full option parity, validated on real hardware
+in both privilege modes); later releases deepened individual switches
+(structured `-T` output, `-iICMP`/`-iRAW`). The table below is now the
+**record of the option inventory and each Windows mapping decision** —
+the per-row notes describe the mapping as it was designed, and match what
+was built.
 
 ## Source of truth
 
@@ -33,7 +41,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-A A` | sel | ❌ N/A | AFS NWA mode (HP-UX); not portable |
 | `-b` | prec | ❌ N/A | "avoid blocking kernel" — superseded by our own bounded-worker model |
 | `-c c` | sel | ✅ shipped | Match by command/image name |
-| `+c c` | out | 🟡 **Phase 5A** | Max command-name width in the COMMAND column — small render tweak |
+| `+c c` | out | ✅ shipped (5A) | Max command-name width in the COMMAND column — small render tweak |
 | `-C` | prec | ❌ N/A | Kernel name cache; Unix-only |
 | `-d d` | sel | ✅ shipped | FD filter (`cwd`/`txt`/`mem`/numbers/ranges/`^excl`) |
 | `+d d` | sel | ✅ shipped | Directory tree (non-recursive) |
@@ -45,31 +53,31 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-f [cfgGn]` | misc | ❌ mostly N/A | Filesystem-detail sub-flags; Unix-specific internals |
 | `+f [cfgGn]` | misc | ❌ mostly N/A | Same |
 | `-F [f]` | out | ✅ shipped | Field output (with `-F0` for NUL) |
-| `-g [s]` | sel | 🟡 **Phase 5A** | Process *group* filter. Windows has no PGID — map to PPID (select children of PPID) and document as a Windows extension of `-g` semantics. |
+| `-g [s]` | sel | ✅ shipped (5A) | Process *group* filter. Windows has no PGID — map to PPID (select children of PPID) and document as a Windows extension of `-g` semantics. |
 | `-h` | misc | ✅ shipped | Help |
-| `-?` | misc | 🟡 **Phase 5A** | Alias for `-h` — one-line add |
+| `-?` | misc | ✅ shipped (5A) | Alias for `-h` — one-line add |
 | `-H` | out | ❌ N/A | Legacy "headers" toggle on certain dialects |
 | `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|icmp|raw][@host][:port]`; `icmp`/`raw` are ETW-sourced (imply the Administrator-only capture) |
 | `-J` | out | ✅ shipped | JSON aggregated (winlsof extension, matches upstream's new format) |
 | `-j` | out | ✅ shipped | JSON Lines (winlsof extension) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |
-| `-K [t]` | sel | 🟡 **Phase 5A** | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one row per thread under the process, with thread ID and start address. |
-| `-l` | out | 🟡 **Phase 5A** | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
-| `-L [l]` | out | 🟡 **Phase 5A** | **Show link count column** (with `+L count` filtering). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
-| `+L [l]` | sel | 🟡 **Phase 5A** | Filter to files whose link count < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too) |
+| `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one row per thread under the process, with thread ID and start address. |
+| `-l` | out | ✅ shipped (5A) | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
+| `-L [l]` | out | ✅ shipped (5A) | **Show link count column** (with `+L count` filtering). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
+| `+L [l]` | sel | ✅ shipped (5A) | Filter to files whose link count < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too) |
 | `-m m` | misc | ❌ N/A | Mount supplement — Unix mtab |
 | `+m [m]` | misc | ❌ N/A | Mount supplement output |
 | `+|-M` | misc | ❌ N/A | Portmapper — Unix RPC |
 | `-n` | out | ✅ shipped | No host name resolution |
 | `-N` | sel | ❌ N/A | NFS-file listing |
 | `-o [o]` | out | ✅ shipped | File offset in SIZE/OFF |
-| `-O` | prec | 🟡 **Phase 5A** | "Avoid fork" — Unix-specific perf flag; safe to accept as a documented no-op for portability |
+| `-O` | prec | ✅ shipped (5A) | "Avoid fork" — Unix-specific perf flag; safe to accept as a documented no-op for portability |
 | `-p s` | sel | ✅ shipped | PID filter (comma-separated, accepts `^excl`) |
 | `-P` | out | ✅ shipped | Numeric port instead of service name |
-| `-Q` | misc | 🟡 **Phase 5A** | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
+| `-Q` | misc | ✅ shipped (5A) | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
 | `+|-r [t]` | misc | ✅ shipped | Repeat (default 15s) |
 | `-R` | out | ✅ shipped | PPID column |
-| `-s [p:s]` | sel | 🟡 **Phase 5A** | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. |
+| `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. |
 | `-S [t]` | prec | ❌ N/A | `lstat`/`readlink` timeout — Unix; we have our own bounded model |
 | `-t` | out | ✅ shipped | Terse PIDs only |
 | `-T [t]` | out | ✅ shipped | TCP/TPI info: `-Tfqsw` = follow / queue lengths / state / TCP window. Windows: state is free; queue/window via `GetPerTcp{,6}ConnectionEStats` (per-connection extended stats, IPv4 + IPv6, ESTABLISHED-only, queue/window need admin). `f` (follow) accepted as no-op. |
@@ -77,12 +85,12 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-U` | sel | ✅ shipped | UNIX-domain sockets. Windows: AF_UNIX exists since Win10 1803 — surfaces via the ETW AFD capture (§5); `-U` implies that (Administrator-only) capture and restricts output to AF_UNIX rows. |
 | `-v` | misc | ✅ shipped | Version banner |
 | `-V` | misc | ✅ shipped | Verbose unmatched-search reporting |
-| `+|-w` | misc | 🟡 **Phase 5A** | Warning enable/disable. We mostly already suppress; add the toggle. |
+| `+|-w` | misc | ✅ shipped (5A) | Warning enable/disable. We mostly already suppress; add the toggle. |
 | `-x [fl]` | misc | ❌ N/A | Cross-mount FS traversal — Unix mount table |
 | `-X` | out | ❌ N/A | Cross-over info — Linux epoll bridge |
 | `-z [z]` | sel | ❌ N/A | Solaris zones |
 | `-Z [Z]` | sel | ❌ N/A | SELinux contexts |
-| `--` | misc | 🟡 **Phase 5A** | End-of-options sentinel — one-line parser change so `lsof -- -file` lets you name a file that starts with `-` |
+| `--` | misc | ✅ shipped (5A) | End-of-options sentinel — one-line parser change so `lsof -- -file` lets you name a file that starts with `-` |
 | `<bare>` | sel | ✅ shipped | Path/name lookup via Restart Manager |
 
 ## Phase 5A — quick parity wins — ✅ COMPLETE
