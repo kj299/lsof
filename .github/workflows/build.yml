@@ -9,15 +9,13 @@ on:
     paths-ignore:
       - 'porting-kit/**'
       - 'winlsof/**'
-      - '.github/workflows/winlsof-ci.yml'
-      - '.github/workflows/winlsof-release.yml'
+      - '.github/workflows/winlsof-*.yml'
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - 'porting-kit/**'
       - 'winlsof/**'
-      - '.github/workflows/winlsof-ci.yml'
-      - '.github/workflows/winlsof-release.yml'
+      - '.github/workflows/winlsof-*.yml'
 
 jobs:
   linux:
