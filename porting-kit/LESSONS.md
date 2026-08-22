@@ -454,3 +454,44 @@ the emphasized half.
 - **Section amended:** PLAYBOOK · Phase 2 + cross-cutting;
   harnesses/differential/input-matrix.example.toml (header);
   .github/workflows/build.yml (`paths-ignore`).
+
+---
+
+## 014. Release mechanics are part of the environment — preflight them like the toolchain
+
+- **Date:** 2026-07-25
+- **Codebase:** winlsof — cutting v0.3.0 (PRs #41–#42 + the `winlsof-v0.3.0`
+  tag/release) from an automated remote session
+- **What happened:** Every *code* gate was green and the release commit was
+  merged — and then the release stalled on mechanics no gate had ever checked.
+  The session's git identity could push branches but **not tags** (proxy 403,
+  policy), and its API credential lacked `actions: write`, so
+  `workflow_dispatch` was also 403. Both walls were discovered *at release
+  time*, the worst moment. Two designed-in properties saved the cut:
+
+  1. **The release workflow had a human-button fallback.** It triggers on a
+     tag push *or* `workflow_dispatch` with a tag input — and on dispatch,
+     `gh release create --target $GITHUB_SHA` creates the tag server-side, so
+     no local git is needed at all. One human click shipped v0.3.0 targeted at
+     exactly the intended commit. A tag-push-only workflow would have left the
+     release hostage to the sandbox's permissions.
+  2. **Public pages are a quota-free oracle.** The same day, the session
+     exhausted the user's hourly API quota (a ~55-minute stall on one PR
+     merge, cleared by escalating backoff — never by hammering). While the API
+     was dark, the *public* release page verified the shipped release (assets,
+     target SHA, checksum) and the PR's state — reads that consume no quota
+     and, for a release, prove what users actually see rather than what the
+     API says.
+
+  A sequencing footnote: the release run raced the action-version bump PR and
+  so printed one last `checkout@v4` deprecation warning — harmless, but a
+  reminder that a release consumes whatever workflow is on the default branch
+  at fire time, not what is merged a minute later.
+- **Kit change:** PLAYBOOK Phase 3's environment preflight now includes
+  release credentials (can this identity push a tag / dispatch a workflow /
+  create a release?) — a ten-second check that belongs next to "does the
+  linker work"; Phase 5 gained the human-button-fallback rule, the
+  verify-from-the-public-page step, and the API-quota-as-budget note for long
+  automated sessions.
+- **Section amended:** PLAYBOOK · Phase 3 (environment preflight) + Phase 5
+  (release mechanics).

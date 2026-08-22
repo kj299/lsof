@@ -157,7 +157,11 @@ The invariant it encodes:
 target actually links here (winlsof lost time to an MSVC-vs-GNU linker mismatch)
 and that the build directory is not a synced/locked folder (OneDrive locked
 `target\` → `os error 5`). Cheap checks that prevent days of "is it my code or my
-machine?".
+machine?". If the port will be released from an automated session, preflight the
+**release credentials** now too (LESSONS #14): can this identity push a tag?
+dispatch a workflow? create a release? winlsof discovered at release time that
+its sandbox could push branches but not tags and could not dispatch workflows —
+a ten-second check months earlier.
 
 **Entry criteria:** oracle in place.
 **Exit criteria:** workspace builds; `core` is `forbid(unsafe_code)`; unsafe-audit
@@ -251,6 +255,19 @@ undocumented unsafe (gate 5).
 - Keep the C runnable as the oracle through one release overlap; only then retire.
 - Ship the `DIVERGENCES.md` as user-facing release notes ("behaviors we
   deliberately changed, and why") — the security fixes are a *feature*.
+- **Design the release trigger with a human-button fallback** (LESSONS #14):
+  winlsof's release workflow fires on a tag push *or* `workflow_dispatch` with a
+  tag input, and the dispatch path — where `gh release create --target
+  $GITHUB_SHA` makes the tag server-side — is what shipped v0.3.0 when the
+  automated session turned out to lack both tag-push and dispatch permission.
+  Preflight those permissions before declaring release-ready (Phase 3), and
+  verify the *published* release from its public page rather than the API — a
+  quota-free check that also proves what users actually see (assets, target
+  SHA, checksum).
+- Long automated sessions: treat the platform **API quota as a budgeted
+  resource**. winlsof's release day stalled a merge for ~an hour on an
+  exhausted hourly limit; back off in growing intervals rather than hammering,
+  and prefer public-page reads (no quota) for state checks while it recovers.
 
 **Entry criteria:** all target modules merged & gated.
 **Exit criteria:** Rust is the shipped artifact; supply-chain clean; divergences
