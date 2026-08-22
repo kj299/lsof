@@ -43,6 +43,25 @@ fn make_env() -> Env {
     }
 }
 
+/// Least-privilege hint predicate: the hint prints only in table mode (machine
+/// formats stay clean) and only when the run will attempt system-wide handle
+/// enumeration — not for `-i` network queries, `-U`, or path lookups, which
+/// need no elevation. `-w` suppresses it per the lsof convention.
+///
+/// Kept as a pure, portable function (only the printing call site is
+/// Windows-only) so both elevation branches are unit-tested on every CI push —
+/// hosted runners are always elevated, so a live unelevated invocation can't
+/// happen in CI; see `docs/road-to-1.0.md` (the elevation blind spot).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wants_privilege_hint(elevated: bool, selection: &Selection, format: &Format) -> bool {
+    !elevated
+        && !selection.suppress_warnings
+        && matches!(format, Format::Table)
+        && !selection.inet.enabled
+        && !selection.unix_only
+        && !selection.has_path_filter()
+}
+
 fn usage() -> String {
     format!(
         "winlsof {ver} - a memory-safe, Windows-native lsof (list open files)\n\
@@ -235,18 +254,8 @@ fn main() {
         eprintln!("lsof: {note}");
     }
 
-    // Least-privilege hint: only in table mode (machine formats stay clean) and
-    // only when the run will attempt system-wide handle enumeration — not for
-    // `-i` network queries or path lookups, which need no elevation. `-w`
-    // suppresses the hint per the lsof convention.
     #[cfg(windows)]
-    if !env.elevated
-        && !selection.suppress_warnings
-        && matches!(format, Format::Table)
-        && !selection.inet.enabled
-        && !selection.unix_only
-        && !selection.has_path_filter()
-    {
+    if wants_privilege_hint(env.elevated, &selection, &format) {
         eprintln!(
             "lsof: showing your accessible processes; re-run as Administrator for a system-wide view"
         );
@@ -317,6 +326,77 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::canonicalize_selector;
+    use super::wants_privilege_hint;
+    use lsof_cli::args::{parse, Action};
+    use lsof_core::render::Format;
+    use lsof_core::Selection;
+
+    /// Parse argv exactly as `main` does and hand back the hint inputs.
+    fn parsed(argv: &[&str]) -> (Selection, Format) {
+        match parse(argv.iter().map(|s| s.to_string()).collect()) {
+            Ok(Action::Run {
+                selection, format, ..
+            }) => (selection, format),
+            other => panic!("expected Action::Run for {argv:?}, got {other:?}"),
+        }
+    }
+
+    /// The predicate behind the "re-run as Administrator" stderr hint. Hosted
+    /// CI runners are always elevated, so the live smoke cases for the
+    /// unelevated branch (`privilege-hint-unelevated`, `suppress-warnings-
+    /// dash-w`) SKIP there and only run on real hardware; these tests pin the
+    /// same argv → hint decisions portably on every push. The residue a unit
+    /// test cannot cover — `is_elevated()`'s token query itself — is the
+    /// per-release manual checkpoint in docs/road-to-1.0.md.
+    #[test]
+    fn privilege_hint_prints_only_unelevated_table_mode() {
+        // The smoke case `privilege-hint-unelevated`: plain `-p <pid>` run.
+        let (sel, fmt) = parsed(&["-p", "1234"]);
+        assert!(wants_privilege_hint(false, &sel, &fmt));
+        // Elevated: same argv, no hint (the smoke case's Skip branch).
+        assert!(!wants_privilege_hint(true, &sel, &fmt));
+        // A bare system-wide run hints too.
+        let (sel, fmt) = parsed(&[]);
+        assert!(wants_privilege_hint(false, &sel, &fmt));
+    }
+
+    #[test]
+    fn privilege_hint_suppressed_by_dash_w() {
+        // The smoke case `suppress-warnings-dash-w`: `-w -p <pid>`, unelevated.
+        let (sel, fmt) = parsed(&["-w", "-p", "1234"]);
+        assert!(!wants_privilege_hint(false, &sel, &fmt));
+    }
+
+    #[test]
+    fn privilege_hint_absent_for_queries_needing_no_elevation() {
+        // The smoke case `inet-no-privilege-hint`: `-i` never hints.
+        let (sel, fmt) = parsed(&["-nP", "-i"]);
+        assert!(!wants_privilege_hint(false, &sel, &fmt));
+        // `-U` implies the ETW path with its own explicit privilege error.
+        let (sel, fmt) = parsed(&["-U"]);
+        assert!(!wants_privilege_hint(false, &sel, &fmt));
+        // Path lookups go through the Restart Manager, no elevation needed.
+        let (sel, fmt) = parsed(&["C:\\some\\file.txt"]);
+        assert!(!wants_privilege_hint(false, &sel, &fmt));
+        let (sel, fmt) = parsed(&["+D", "C:\\temp"]);
+        assert!(!wants_privilege_hint(false, &sel, &fmt));
+    }
+
+    #[test]
+    fn privilege_hint_never_touches_machine_formats() {
+        // -F / -J / -j consumers parse the stream; the hint is table-only.
+        // (`-t` is terse *table* output and keeps the hint — on stderr, so
+        // `kill $(lsof -t ...)` still reads clean stdout, as with C lsof.)
+        for argv in [&["-F"][..], &["-J"], &["-j"]] {
+            let (sel, fmt) = parsed(argv);
+            assert!(
+                !wants_privilege_hint(false, &sel, &fmt),
+                "hint must stay off for {argv:?}"
+            );
+        }
+        let (sel, fmt) = parsed(&["-t"]);
+        assert!(wants_privilege_hint(false, &sel, &fmt));
+    }
 
     #[test]
     fn canonicalize_resolves_relative_and_keeps_missing() {

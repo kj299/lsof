@@ -152,6 +152,9 @@ output, cross-checked against `Get-NetTCPConnection`, `handle.exe`, etc.), see
 ## Docs index
 
 - [`CHANGELOG.md`](CHANGELOG.md) — released versions and what changed.
+- [`docs/road-to-1.0.md`](docs/road-to-1.0.md) — what 1.0 means, the exit
+  criteria checklist, and the elevation blind-spot decision record with the
+  per-release manual (unelevated) checkpoint.
 - [`docs/known-limitations.md`](docs/known-limitations.md) — what winlsof
   deliberately doesn't show (socket FD value, byte-range locks, raw/ICMP/
   AF_UNIX), and why; user-facing.

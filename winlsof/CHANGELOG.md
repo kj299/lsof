@@ -9,6 +9,28 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Nightly deep fuzz with an accumulating corpus**
+  (`.github/workflows/winlsof-fuzz-nightly.yml`): a scheduled 30-minute
+  `cargo-fuzz` run over the argument parser — 40× the PR gate's budget —
+  restoring the previous night's corpus from the Actions cache and saving the
+  grown one, so coverage compounds across nights. Crash reproducers upload as
+  artifacts on a finding.
+- **The privilege-hint decision is unit-tested on both elevation branches on
+  every push.** Hosted CI runners are always elevated, so the two
+  unelevated-only smoke cases (hint present; `-w` suppresses it) permanently
+  SKIP in CI. The hint condition is now the extracted pure
+  `wants_privilege_hint()` predicate, tested through the real argv parser on
+  all platforms; the untestable-in-CI residue (the `TokenElevation` query
+  itself) is a documented per-release manual checkpoint.
+- **[`docs/road-to-1.0.md`](docs/road-to-1.0.md)**: what 1.0 means (a
+  stability commitment on the option surface and `-F`/`-J` schemas), the
+  six-item exit-criteria checklist (signed releases, a 14-night green fuzz
+  soak, RC field validation in both privilege modes, gates green), and the
+  elevation blind-spot decision record — why a low-privilege CI step on
+  always-admin, UAC-disabled runners would test the runner rather than the
+  product.
+
 ## [0.3.0] — 2026-07-25
 
 **The depth-and-verification release.** 0.2.0 completed the option *surface*;
