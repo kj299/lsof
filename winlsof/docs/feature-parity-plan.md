@@ -49,7 +49,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-h` | misc | ✅ shipped | Help |
 | `-?` | misc | 🟡 **Phase 5A** | Alias for `-h` — one-line add |
 | `-H` | out | ❌ N/A | Legacy "headers" toggle on certain dialects |
-| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp][@host][:port]` |
+| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|icmp|raw][@host][:port]`; `icmp`/`raw` are ETW-sourced (imply the Administrator-only capture) |
 | `-J` | out | ✅ shipped | JSON aggregated (winlsof extension, matches upstream's new format) |
 | `-j` | out | ✅ shipped | JSON Lines (winlsof extension) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |

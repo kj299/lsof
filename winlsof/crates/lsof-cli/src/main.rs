@@ -75,7 +75,8 @@ SELECTION:\n\
     -c <cmd>      select by command/image name (prefix/substring)\n\
     -g <ppids>    select children of these PPIDs (Windows extension of -g)\n\
     -d <fds>      filter by FD: cwd,rtd,txt,mem, numbers, a-b ranges, ^exclude\n\
-    -i [spec]     only Internet sockets; spec = [46][tcp|udp][@host][:port]\n\
+    -i [spec]     only Internet sockets; spec = [46][tcp|udp|icmp|raw][@host][:port]\n\
+                  (icmp/raw come from the ETW capture; needs Admin)\n\
     -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
                   (comma-separated, `^` prefix excludes)\n\
     -U            list UNIX-domain (AF_UNIX) sockets (via ETW; needs Admin)\n\

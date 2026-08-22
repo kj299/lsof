@@ -25,15 +25,16 @@ ports, and TCP state are all accurate.
 public-ish path and is the next open roadmap item — see
 [`research-roadmap.md`](research-roadmap.md) §5.
 
-### `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX need `--etw` or `-U`
+### `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX are ETW-sourced
 
 There is no public IP Helper table for raw sockets (`SOCK_RAW`), ICMP, or
-AF_UNIX endpoints. Since 0.2.0 those families are recoverable through a short
-opt-in ETW capture against the `Microsoft-Windows-Winsock-AFD` provider:
-`--etw` adds every non-TCP/UDP socket observed during the capture window as
-extra `-i` rows, and `-U` narrows the output to AF_UNIX. Both need
-Administrator (ETW session), and only sockets with AFD activity during the
-~2 s window are seen — it is a sample, not a table dump.
+AF_UNIX endpoints. Those families are recoverable through a short ETW capture
+against the `Microsoft-Windows-Winsock-AFD` provider: `--etw` adds every
+non-TCP/UDP socket observed during the capture window as extra `-i` rows,
+`-U` narrows the output to AF_UNIX, and `-iICMP` / `-iRAW` filter to those
+families directly (each of the three implies the capture on its own). All
+need Administrator (ETW session), and only sockets with AFD activity during
+the ~2 s window are seen — it is a sample, not a table dump.
 
 ## Files
 

@@ -450,6 +450,15 @@ fn parse_inet(sel: &mut Selection, spec: &str) -> Result<(), String> {
     } else if low.starts_with("udp") {
         sel.inet.proto = Some(Protocol::Udp);
         s = &s[3..];
+    } else if low.starts_with("icmp") {
+        // ETW-only family (no IP Helper table): the filter implies the AFD
+        // capture — see InetFilter::needs_etw. `-iICMP` covers v4 + v6 ICMP;
+        // narrow with the `[46]` prefix (`-i6ICMP`), like TCP/UDP.
+        sel.inet.proto = Some(Protocol::Other("ICMP"));
+        s = &s[4..];
+    } else if low.starts_with("raw") {
+        sel.inet.proto = Some(Protocol::Other("RAW"));
+        s = &s[3..];
     }
 
     let (host, port) = if let Some(at) = s.find('@') {
@@ -524,6 +533,28 @@ mod tests {
         let (sel, _) = run(&["-i6", "-i:53"]);
         assert!(sel.inet.enabled);
         assert_eq!(sel.inet.port, Some(53));
+    }
+
+    #[test]
+    fn inet_etw_families_icmp_raw() {
+        // Roadmap §5 P3: RAW/ICMP are ETW-only families; the spec accepts
+        // them like tcp/udp (case-insensitive, family prefix composes) and
+        // the parsed filter reports that it implies the ETW capture.
+        let (sel, _) = run(&["-iICMP"]);
+        assert_eq!(sel.inet.proto, Some(Protocol::Other("ICMP")));
+        assert!(sel.inet.needs_etw());
+
+        let (sel, _) = run(&["-i6icmp"]);
+        assert_eq!(sel.inet.family, Some(6));
+        assert_eq!(sel.inet.proto, Some(Protocol::Other("ICMP")));
+
+        let (sel, _) = run(&["-iRAW"]);
+        assert_eq!(sel.inet.proto, Some(Protocol::Other("RAW")));
+        assert!(sel.inet.needs_etw());
+
+        // TCP/UDP/plain -i never imply the capture.
+        assert!(!run(&["-iTCP"]).0.inet.needs_etw());
+        assert!(!run(&["-i"]).0.inet.needs_etw());
     }
 
     #[test]

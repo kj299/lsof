@@ -30,6 +30,28 @@ pub struct InetFilter {
     pub host: Option<String>,
 }
 
+impl InetFilter {
+    /// True when the requested protocol is only visible through the ETW AFD
+    /// capture — RAW and ICMP have no IP Helper table — so `-iRAW`/`-iICMP`
+    /// must imply the (Administrator-only) capture the way `-U` does, or the
+    /// filter would silently match nothing.
+    pub fn needs_etw(&self) -> bool {
+        matches!(self.proto, Some(Protocol::Other(_)))
+    }
+
+    /// Protocol test for `-i`. Protocol names are family-agnostic (like
+    /// TCP/UDP): `-iICMP` matches both the v4 `ICMP` and v6 `ICMPV6` codes,
+    /// with the `[46]` prefix as the family narrower.
+    fn proto_matches(&self, actual: Protocol) -> bool {
+        match self.proto {
+            None => true,
+            Some(p) if p == actual => true,
+            Some(Protocol::Other("ICMP")) => actual == Protocol::Other("ICMPV6"),
+            Some(_) => false,
+        }
+    }
+}
+
 /// `-E` (Info) vs `+E` (Files) pipe-endpoint display modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointMode {
@@ -346,10 +368,8 @@ impl Selection {
             return false;
         }
         let i = &self.inet;
-        if let Some(proto) = i.proto {
-            if sock.protocol != proto {
-                return false;
-            }
+        if !i.proto_matches(sock.protocol) {
+            return false;
         }
         if let Some(fam) = i.family {
             let is_v6 = f.file_type == crate::model::FileType::Ipv6;
@@ -512,6 +532,67 @@ mod tests {
                 })
                 .unwrap_or(false)
         }));
+    }
+
+    #[test]
+    fn inet_etw_family_filters_icmp_raw() {
+        use crate::model::{AccessMode, FdType, FileType, OpenFile, Protocol, SocketInfo};
+        // ETW-shaped rows: what etw::to_open_file emits for the families IP
+        // Helper can't see (v4 ICMP, v6 ICMP, v4 RAW) plus a normal TCP row.
+        let sock_row = |ft: FileType, proto: Protocol| OpenFile {
+            fd: FdType::Unknown,
+            access: AccessMode::ReadWrite,
+            file_type: ft,
+            name: "*:*->127.0.0.1:0".to_string(),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some(proto.as_str().to_string()),
+            links: None,
+            socket: Some(SocketInfo {
+                protocol: proto,
+                local: None,
+                remote: Some("127.0.0.1:0".parse().unwrap()),
+                state: None,
+                tcp: None,
+            }),
+        };
+        let icmp4 = sock_row(FileType::Ipv4, Protocol::Other("ICMP"));
+        let icmp6 = sock_row(FileType::Ipv6, Protocol::Other("ICMPV6"));
+        let raw4 = sock_row(FileType::Ipv4, Protocol::Other("RAW"));
+        let tcp4 = sock_row(FileType::Ipv4, Protocol::Tcp);
+
+        let filt = |proto: Option<Protocol>, family: Option<u8>| {
+            let mut sel = Selection::default();
+            sel.inet.enabled = true;
+            sel.inet.proto = proto;
+            sel.inet.family = family;
+            sel
+        };
+
+        // -iICMP matches both the v4 and v6 ICMP codes, nothing else.
+        let icmp = filt(Some(Protocol::Other("ICMP")), None);
+        assert!(icmp.file_matches(&icmp4));
+        assert!(icmp.file_matches(&icmp6));
+        assert!(!icmp.file_matches(&raw4));
+        assert!(!icmp.file_matches(&tcp4));
+
+        // -i6ICMP narrows by family.
+        let icmp_v6 = filt(Some(Protocol::Other("ICMP")), Some(6));
+        assert!(!icmp_v6.file_matches(&icmp4));
+        assert!(icmp_v6.file_matches(&icmp6));
+
+        // -iRAW matches RAW only — never ICMP (exact, not substring/prefix).
+        let raw = filt(Some(Protocol::Other("RAW")), None);
+        assert!(raw.file_matches(&raw4));
+        assert!(!raw.file_matches(&icmp4));
+        assert!(!raw.file_matches(&tcp4));
+
+        // Plain -i still matches every internet family.
+        let any = filt(None, None);
+        for r in [&icmp4, &icmp6, &raw4, &tcp4] {
+            assert!(any.file_matches(r));
+        }
     }
 
     #[test]

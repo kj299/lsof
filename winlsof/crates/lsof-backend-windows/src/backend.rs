@@ -202,9 +202,10 @@ impl Backend for WindowsBackend {
 
         // AFD sockets IP Helper can't enumerate come from a short ETW capture.
         // `--etw` surfaces all of them (raw / ICMP / AF_UNIX); `-U` narrows to
-        // AF_UNIX. Either implies the (Administrator-only) capture. Histogram +
+        // AF_UNIX; `-iRAW`/`-iICMP` select families only this capture can see.
+        // Any of them implies the (Administrator-only) capture. Histogram +
         // per-event schemas still surface on stderr for diagnosability (§5).
-        if sel.use_etw || sel.unix_only {
+        if sel.use_etw || sel.unix_only || sel.inet.needs_etw() {
             trace("gather: etw::capture start");
             if let Some(summary) = etw::capture(Duration::from_secs(2)) {
                 trace(&format!(

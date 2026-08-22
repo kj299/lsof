@@ -15,7 +15,7 @@ winlsof's two inputs.
 | File | Role |
 |---|---|
 | `feature-inventory-winlsof.toml` | The **contract**: the C's full enumerated surface (45 option letters, 111 TYPE codes — extracted from `src/main.c` + `lib/print.c`) plus winlsof's 7 Windows-native TYPE codes, minus explicit waivers. |
-| `coverage-matrix.toml` | The **declaration**: one `[[case]]` per real test in winlsof's suite — golden tests, the socket differential, and the 57-case live smoke harness. |
+| `coverage-matrix.toml` | The **declaration**: one `[[case]]` per real test in winlsof's suite — golden tests, the socket differential, and the 59-case live smoke harness. |
 
 ### All three sources actually run in CI
 
