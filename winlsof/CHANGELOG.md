@@ -10,6 +10,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`-iICMP` / `-iRAW` family filters** — the last open research-roadmap item
+  (§5 P3). The `-i` spec now accepts `icmp` and `raw` protocol names like
+  `tcp`/`udp` (case-insensitive; the `[46]` prefix narrows the family, so
+  `-i6ICMP` is v6-only, and `ICMP` covers both the v4 `ICMP` and v6 `ICMPV6`
+  codes). These families exist only in the ETW AFD capture — they have no IP
+  Helper table — so either filter **implies the (Administrator-only) capture**
+  the way `-U` does, instead of silently matching nothing. With this, roadmap
+  §5 is complete and the roadmap has no open items.
 - **`-T` queue/window stats in the machine formats.** The `-Tq`/`-Tw`
   extended TCP info (EStats) was previously table-only; it now also emits
   structured `-F` `T` fields using lsof's own prefixes — `TQR=` (read queue),

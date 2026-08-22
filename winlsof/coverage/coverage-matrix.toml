@@ -77,6 +77,14 @@ name = "core/user-filter-u"
 args = ["-u", "USER"]
 
 [[case]]
+name = "core/inet-etw-families"
+# args::tests::inet_etw_families_icmp_raw (icmp/raw parse like tcp/udp, the
+# [46] prefix composes, needs_etw reports the ETW implication) plus
+# selection::tests::inet_etw_family_filters_icmp_raw (ICMP matches the v4+v6
+# codes, RAW is exact, family narrows). Portable, every push.
+args = ["-iICMP"]
+
+[[case]]
 name = "core/privilege-hint-predicate"
 # main.rs tests::privilege_hint_* over the extracted wants_privilege_hint():
 # both elevation branches through the real argv parser (`-w` suppression,
@@ -191,6 +199,16 @@ covers = ["type:IPv4"]
 name = "smoke/inet6-filter"
 args = ["-nP", "-i6"]
 covers = ["type:IPv6"]
+
+[[case]]
+name = "smoke/inet-icmp-family"
+# -iICMP implies the ETW AFD capture (no --etw flag) and excludes TCP rows;
+# lenient like smoke/unix-sockets-U (a 2s window can't guarantee ICMP traffic).
+args = ["-nP", "-iICMP"]
+
+[[case]]
+name = "smoke/inet-raw-family"
+args = ["-nP", "-iRAW"]
 
 [[case]]
 name = "smoke/inet-tcp-only"

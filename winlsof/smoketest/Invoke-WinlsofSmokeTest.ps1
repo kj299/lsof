@@ -560,6 +560,23 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert ($r.Exit -eq 0) "-U should run cleanly (exit=$($r.Exit))"
         Assert-Contains $r.Err 'etw: captured' '-U stderr (ETW histogram)'
     }
+    Test-Case 'inet-icmp-family-dash-i' 'sockets/-iICMP' {
+        if (-not $IsAdmin) { Skip 'ICMP rows come from the ETW AFD capture (needs Administrator)' }
+        # `-iICMP` implies the ETW capture with NO --etw flag (the wiring under
+        # test). Same leniency as -U: a 2s window can't guarantee live ICMP
+        # traffic, so assert the capture fired and the run exits cleanly.
+        $r = Invoke-Lsof @('-nP', '-iICMP') 'i-icmp'
+        Assert ($r.Exit -eq 0) "-iICMP should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Err 'etw: captured' '-iICMP must imply the ETW capture'
+        Assert-NotContains $r.Out ' TCP ' '-iICMP must not list TCP rows'
+    }
+    Test-Case 'inet-raw-family-dash-i' 'sockets/-iRAW' {
+        if (-not $IsAdmin) { Skip 'RAW rows come from the ETW AFD capture (needs Administrator)' }
+        $r = Invoke-Lsof @('-nP', '-iRAW') 'i-raw'
+        Assert ($r.Exit -eq 0) "-iRAW should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Err 'etw: captured' '-iRAW must imply the ETW capture'
+        Assert-NotContains $r.Out ' UDP ' '-iRAW must not list UDP rows'
+    }
 
     # ===================== native oracle cross-check =====================
     # No downloads. The harness OWNS its fixtures, so their paths are

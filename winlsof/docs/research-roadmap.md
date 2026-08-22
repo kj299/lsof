@@ -140,7 +140,7 @@ a safe wrapper; reuses the existing duplicate.
 
 ---
 
-## 5. ETW-based socket coverage — 🟡 OPEN, P1 SPIKE DONE (Effort L, Confidence Medium)
+## 5. ETW-based socket coverage — ✅ COMPLETE (scope-pivoted) (Effort L)
 
 **Original goal:** show real handle / access values on socket rows (replacing
 today's `unk`), and gain visibility into raw / ICMP endpoints — **without** the
@@ -183,8 +183,12 @@ families the IP Helper tables don't cover. Behind an opt-in flag
 1170 expose UDP *remote* endpoints — enrich UDP rows with the most
 recently observed remote.
 
-**P3 — extend (M):** surface a `-iRAW` / `-iICMP` family filter
-(upstream lsof doesn't unify them; mirror its convention).
+**P3 — extend (M): ✅ done (2026-08-22).** `-iRAW` / `-iICMP` parse like
+`tcp`/`udp` in the `-i` spec (family prefix composes: `-i6ICMP`), match the
+ETW rows' protocol codes (`ICMP` covers both `ICMP` and `ICMPV6`; `RAW` is
+exact), and **imply the ETW capture** the way `-U` does — without that, the
+filter would silently match nothing since the selected families have no IP
+Helper table (`InetFilter::needs_etw`).
 
 **Memory safety:** ETW is a *consumer* surface — we don't emit; we parse
 read-only buffers behind length-checked `Vec<u8>` wrappers. No new
@@ -202,8 +206,8 @@ captured in this section.
 2. ~~mapped-data `mem`~~ — ✅ done (`VirtualQueryEx` + `GetMappedFileNameW`).
 3. ~~byte-range locks spike~~ — 🔬 done: gate closed, documented (needs a kernel driver / ETW).
 4. ~~socket FD / AF_UNIX / raw spike (undocumented IOCTLs)~~ — 🔬 done: gate closed, documented; sockets now show `u` access.
-5. **ETW-based socket → FD correlation** — 🟡 next open item: safer public path to attach real handle/access to socket rows, and unblock raw/ICMP visibility.
+5. ~~ETW-based socket coverage~~ — ✅ done, scope-pivoted: the "real FD" sub-goal is driver-only (closed); the `-i` expansion shipped — P2 `--etw`/`-U` in v0.2.0, P3 `-iRAW`/`-iICMP` family filters after v0.3.0.
 
 Items 1–2 shipped in v0.1.0. Items 3–4 are platform-limit gates with the future
-path recorded. Item 5 is the next concrete spike — start with P1 to validate
-the ETW event shape before committing to code.
+path recorded. Item 5 completed across v0.2.0 (P2) and post-v0.3.0 (P3): the
+roadmap has no open items — anything new starts a fresh numbered entry.
