@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "lsof-backend-windows"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "lsof-core",
  "windows-sys",
@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "lsof-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "lsof-backend-windows",
  "lsof-core",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "lsof-core"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "windows-sys"
