@@ -9,15 +9,18 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- **Docs truth pass.** `feature-parity-plan.md` still marked all twelve
-  Phase 5A switches 🟡-planned though they shipped in v0.2.0 (now recorded as
-  the option inventory + mapping decisions); `windows-validation.md` still
-  instructed using Sysinternals `handle64.exe` as the file-handle oracle,
-  contradicting the v0.3.0 supply-chain decision that removed downloaded
-  oracles from the test path (now native fixtures/`Get-Process` only, and
-  version-agnostic); the research-roadmap intro and README pointers now
-  reflect that every roadmap item is shipped or a documented closed gate.
+## [0.4.0] — 2026-08-23
+
+**The runway release.** Every open engineering item from the v0.3.0
+retrospective and the post-release survey is closed: the machine formats carry
+the last table-only data (`-T` stats), the `-i` grammar reaches the last
+socket families (ETW-sourced ICMP/RAW — the research roadmap now has zero
+open items), the elevation blind spot is dispositioned with the untestable
+residue documented as a per-release checkpoint, the nightly deep-fuzz soak
+that gates 1.0 is running with an accumulating corpus, and
+[`docs/road-to-1.0.md`](docs/road-to-1.0.md) turns "prerelease" into a
+six-item exit checklist. What remains for 1.0 is runway, not construction:
+signed releases, the 14-night soak, and release-candidate field validation.
 
 ### Added
 - **`-iICMP` / `-iRAW` family filters** — the last open research-roadmap item
@@ -35,15 +38,6 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `TST=` — and JSON keys `tcp_window` / `tcp_queue_recv` / `tcp_queue_send`
   on socket objects. Pinned by portable golden tests across all three
   renderers and two new elevated live smoke cases (`-F` and `-J`).
-
-### Changed
-- **`-T` annotations no longer pollute machine-format names.** The
-  `(Win=N) (QR=N) (QS=N)` decoration used to be appended to the row's NAME
-  string at capture time, so `-T` combined with `-F`/`-J` leaked it into the
-  `n` field / JSON `"name"`. The stats now travel as structured data; the
-  table renders the identical suffix at display time (table output is
-  byte-for-byte unchanged — the live smoke assertions still pass), and the
-  machine formats keep a clean name plus the structured tokens above.
 - **Nightly deep fuzz with an accumulating corpus**
   (`.github/workflows/winlsof-fuzz-nightly.yml`): a scheduled 30-minute
   `cargo-fuzz` run over the argument parser — 40× the PR gate's budget —
@@ -64,6 +58,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   elevation blind-spot decision record — why a low-privilege CI step on
   always-admin, UAC-disabled runners would test the runner rather than the
   product.
+
+### Changed
+- **`-T` annotations no longer pollute machine-format names.** The
+  `(Win=N) (QR=N) (QS=N)` decoration used to be appended to the row's NAME
+  string at capture time, so `-T` combined with `-F`/`-J` leaked it into the
+  `n` field / JSON `"name"`. The stats now travel as structured data; the
+  table renders the identical suffix at display time (table output is
+  byte-for-byte unchanged — the live smoke assertions still pass), and the
+  machine formats keep a clean name plus the structured tokens above.
+
+### Fixed
+- **Docs truth pass.** `feature-parity-plan.md` still marked all twelve
+  Phase 5A switches 🟡-planned though they shipped in v0.2.0 (now recorded as
+  the option inventory + mapping decisions); `windows-validation.md` still
+  instructed using Sysinternals `handle64.exe` as the file-handle oracle,
+  contradicting the v0.3.0 supply-chain decision that removed downloaded
+  oracles from the test path (now native fixtures/`Get-Process` only, and
+  version-agnostic); the research-roadmap intro and README pointers now
+  reflect that every roadmap item is shipped or a documented closed gate.
 
 ## [0.3.0] — 2026-07-25
 
@@ -363,6 +376,8 @@ Foundation; see `../COPYING`). No source is shared with the C tree;
 behavior and CLI surface are compatible where the concepts map onto
 Windows.
 
-[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v0.2.0...HEAD
+[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v0.4.0...HEAD
+[0.4.0]: https://github.com/kj299/lsof/compare/winlsof-v0.3.0...winlsof-v0.4.0
+[0.3.0]: https://github.com/kj299/lsof/compare/winlsof-v0.2.0...winlsof-v0.3.0
 [0.2.0]: https://github.com/kj299/lsof/compare/winlsof-v0.1.0...winlsof-v0.2.0
 [0.1.0]: https://github.com/kj299/lsof/releases/tag/winlsof-v0.1.0
