@@ -37,7 +37,7 @@ Cut `winlsof-v1.0.0` when — and only when — every **required** box is checke
 | 2 | **Elevation blind spot dispositioned**: the privilege-hint logic is CI-tested on both elevation branches on every push, and the residue is a documented per-release checkpoint (this doc, below). | ✅ |
 | 3 | **Signed releases** — **OPTIONAL, not a 1.0 blocker.** Unsigned `lsof.exe` + a published SHA-256 is the accepted default shipping posture; signing can be added later via [`code-signing.md`](code-signing.md) if desired. See *Why signing is optional* below. | ◻️ optional (deferred by choice) |
 | 4 | **Fuzz saturation**: the argument parser is fuzzed to the point of diminishing returns — cumulative deep-fuzz effort with an accumulating corpus, coverage plateaued, and **zero findings**. Measured, not timed; see *How criterion 4 is measured* below. | ✅ met 2026-08-30 (evidence below) |
-| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅ (see log); **1.0 pending its artifact** |
+| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅; **v1.0.0 ❌ failed** (see log), pending on 1.0.1 |
 | 6 | **No open correctness findings**: no unledgered differential divergence, no open bug against rendered output, and [`known-limitations.md`](known-limitations.md) current as of the RC. | ✅ for the 1.0 RC |
 
 Criteria 5–6 are evaluated against the release candidate; 1, 2, 4 are standing
@@ -185,7 +185,30 @@ elevated) are expected and mirror each other.
 | Release | Date | Host | Unelevated | Elevated | Verdict |
 |---|---|---|---|---|---|
 | v0.4.0 | 2026-08-30 | Win 11 build 26200 | 51 PASS / 0 FAIL / 8 SKIP | 57 PASS / 0 FAIL / 2 SKIP | ✅ union = all 59, 0 FAIL/hang; the 8⊕2 skips mirror exactly |
+| **v1.0.0** | 2026-08-30 | Win 11 build 26200 | 51 PASS / 0 FAIL / 8 SKIP | **56 PASS / 1 FAIL / 2 SKIP** | ❌ **failed** — `plus-D-directory-tree` exceeded 60 s elevated. Root-caused to a pre-existing defect; fixed in 1.0.1 |
 
 Notes for v0.4.0: the release's four new cases — structured `-T` `-F`/`-J` output
 and the `-iICMP`/`-iRAW` family filters — all pass elevated (correctly skipping
 unelevated, since they need the Administrator-only ETW/EStats path).
+
+**Notes for v1.0.0 — the checkpoint earned its keep.** The elevated pass hung
+`lsof +D %TEMP%` past the harness's 60 s bound. Diagnosis, in order:
+
+1. **Not a bad build, and not the `-T` scope-id change.** The *same binary*
+   passed that case unelevated 11 minutes later, and `git diff` over
+   `lsof-backend-windows/` since the v0.4.0 build shows only `sockets.rs` and
+   `tcpinfo.rs` — `backend.rs` was untouched.
+2. **Not directory size.** A direct measurement took **214 s** against a
+   `%TEMP%` holding just **431 entries**.
+3. **Root cause:** the per-process extras phase waited on each process *in
+   turn*, up to 2 s apiece — worst case `2 s × process count`, unbounded in
+   aggregate. Unelevated it is invisible (foreign `OpenProcess` fails
+   instantly); elevated, `SeDebugPrivilege` makes every read genuinely succeed
+   and some of them slow. Hosted CI never sees it because runners have a small,
+   idle process set.
+
+So the defect is **pre-existing — v0.4.0 has it too, and passed on timing
+luck** — and it is exactly the class of bug only a real-hardware checkpoint
+finds. Fixed in 1.0.1 by running the phase concurrently under one global
+budget. **v1.0.0 therefore never satisfied criterion 5**; 1.0.1 is the release
+that must.
