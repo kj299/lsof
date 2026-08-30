@@ -17,12 +17,11 @@
 //! ethos). Unelevated, the read returns nothing and the row is left unchanged.
 //!
 //! Both IPv4 and IPv6 are handled (a single [`RowKey`] enum drives the same
-//! enable/read/disable flow over the v4 or v6 EStats calls). One v6 corner:
-//! our sockets carry a scope id of 0 (IP Helper's scope is dropped when the
-//! `SocketAddrV6` is built), so link-local (`fe80::`) TCP connections won't
-//! match the EStats row key and are left unannotated — global and loopback
-//! IPv6, which is essentially all TCP, use scope 0 and work. Everything is
-//! best-effort: any non-zero status leaves the row untouched, never errors.
+//! enable/read/disable flow over the v4 or v6 EStats calls). The v6 row key
+//! includes the connection's scope id, which `sockets::sockaddr_v6` now carries
+//! through from IP Helper (`dw*ScopeId`), so link-local (`fe80::`) connections
+//! match their EStats row too; global and loopback IPv6 use scope 0. Everything
+//! is best-effort: any non-zero status leaves the row untouched, never errors.
 
 use std::mem::{size_of, zeroed};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
