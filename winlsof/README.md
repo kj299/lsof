@@ -161,6 +161,10 @@ output, cross-checked against native oracles — `Get-NetTCPConnection`,
 - [`docs/road-to-1.0.md`](docs/road-to-1.0.md) — what 1.0 means, the exit
   criteria checklist, and the elevation blind-spot decision record with the
   per-release manual (unelevated) checkpoint.
+- [`docs/linux-backend-scope.md`](docs/linux-backend-scope.md) — scoping study
+  for a second (Linux/`/proc`) backend behind the same `Backend` seam: effort,
+  module map, and the C-vs-Rust differential it would unlock. A proposal, not a
+  commitment.
 - [`docs/known-limitations.md`](docs/known-limitations.md) — what winlsof
   deliberately doesn't show (socket FD value, byte-range locks, raw/ICMP/
   AF_UNIX), and why; user-facing.
