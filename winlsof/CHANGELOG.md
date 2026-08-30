@@ -9,6 +9,31 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-08-30
+
+**Found by the 1.0 field checkpoint.** The per-release two-pass validation on
+real hardware failed for v1.0.0, and root-causing it surfaced a defect that had
+been present since Phase 4.
+
+### Fixed
+- **Elevated runs no longer stall for minutes.** The per-process extras phase
+  (`cwd`, `txt`/`mem` modules, mapped files) waited on each process **in turn**
+  with a 2-second timeout apiece, so its worst case was `2 s × process count` —
+  unbounded in aggregate. Unelevated this is invisible, because `OpenProcess`
+  on a foreign process fails instantly; *elevated*, `SeDebugPrivilege` makes
+  every read genuinely succeed and some of them slow. A measured `lsof +D
+  %TEMP%` on a normal Windows 11 desktop took **214 seconds** — against a
+  `%TEMP%` holding only 431 entries, so the cost was entirely this loop and not
+  the directory.
+
+  The phase now runs every process concurrently (as it always did per-process,
+  just serially awaited) under a **single 20-second budget** for the whole
+  phase. Wedged workers are still abandoned exactly as before, and a
+  pathological box now degrades to "some extras missing" — reported under
+  `WINLSOF_TRACE` — rather than stalling. Hosted CI never caught this because
+  runners have a small, idle process set; only the real-hardware checkpoint
+  could.
+
 ## [1.0.0] — 2026-08-30
 
 **Stable.** 1.0 is a **stability commitment, not a feature milestone**: the CLI
@@ -433,7 +458,8 @@ Foundation; see `../COPYING`). No source is shared with the C tree;
 behavior and CLI surface are compatible where the concepts map onto
 Windows.
 
-[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v1.0.0...HEAD
+[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v1.0.1...HEAD
+[1.0.1]: https://github.com/kj299/lsof/compare/winlsof-v1.0.0...winlsof-v1.0.1
 [1.0.0]: https://github.com/kj299/lsof/compare/winlsof-v0.4.0...winlsof-v1.0.0
 [0.4.0]: https://github.com/kj299/lsof/compare/winlsof-v0.3.0...winlsof-v0.4.0
 [0.3.0]: https://github.com/kj299/lsof/compare/winlsof-v0.2.0...winlsof-v0.3.0

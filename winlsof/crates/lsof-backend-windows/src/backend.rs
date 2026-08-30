@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{FileType, OpenFile, Process};
@@ -14,31 +14,81 @@ use crate::{
     etw, handles, mapped, modules, peb, privilege, process, restart, sockets, tcpinfo, threads,
 };
 
-/// Gather a process's `cwd` + loaded modules (`txt`/`mem`) + mapped data files on
-/// a worker thread, bounded by `timeout`. These run against a *foreign* process
-/// (`CreateToolhelp32Snapshot` for modules, PEB / address-space reads for the
-/// rest) and can occasionally block; doing them off the main thread means one
-/// slow process can't freeze the whole run. On timeout the worker is abandoned
-/// (its extras skipped) and reaped when the process exits.
-fn per_process_extras(
-    pid: u32,
-    dos_map: Arc<Vec<(String, String)>>,
-    timeout: Duration,
-) -> Vec<OpenFile> {
+/// Wall-clock ceiling for the whole per-process extras phase (`cwd`, `txt`/`mem`
+/// modules, mapped files). Generous enough that a normal run finishes well
+/// inside it — the workers report as they finish, so this is a ceiling, not a
+/// delay — but low enough that a pathological box degrades to "some extras
+/// missing" instead of stalling for minutes.
+const EXTRAS_BUDGET_SECS: u64 = 20;
+
+/// Gather every in-scope process's `cwd` + loaded modules (`txt`/`mem`) + mapped
+/// data files, **concurrently**, bounded by a single `budget` for the whole
+/// phase.
+///
+/// Each process is worked on its own thread because these run against a
+/// *foreign* process (`CreateToolhelp32Snapshot` for modules, PEB /
+/// address-space reads for the rest) and can occasionally block indefinitely; a
+/// worker that wedges is simply abandoned (its extras skipped) and reaped when
+/// the process exits.
+///
+/// **Why one global budget rather than a per-process timeout.** This phase used
+/// to wait on each process in turn, up to 2 s apiece, which made the worst case
+/// `2 s × process count` — unbounded in aggregate. Unelevated that is invisible
+/// (foreign processes fail `OpenProcess` instantly), but *elevated*
+/// `SeDebugPrivilege` makes every read genuinely succeed and some of them slow,
+/// so a real desktop could stall for minutes: a live run measured **214 s** for
+/// `lsof +D %TEMP%` on a box whose `%TEMP%` held only 431 entries — the cost was
+/// entirely this loop, not the directory. Waiting on all of them at once bounds
+/// the phase at `budget` no matter how many processes there are.
+fn per_process_extras_all(
+    pids: &[u32],
+    dos_map: &Arc<Vec<(String, String)>>,
+    budget: Duration,
+) -> HashMap<u32, Vec<OpenFile>> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut files = Vec::new();
-        trace(&format!("  cwd pid={pid}"));
-        if let Some(cwd) = peb::cwd(pid) {
-            files.push(cwd);
+    for &pid in pids {
+        let tx = tx.clone();
+        let dos_map = Arc::clone(dos_map);
+        std::thread::spawn(move || {
+            let mut files = Vec::new();
+            trace(&format!("  cwd pid={pid}"));
+            if let Some(cwd) = peb::cwd(pid) {
+                files.push(cwd);
+            }
+            trace(&format!("  modules pid={pid}"));
+            files.extend(modules::enumerate(pid));
+            trace(&format!("  mapped pid={pid}"));
+            files.extend(mapped::enumerate(pid, &dos_map));
+            let _ = tx.send((pid, files));
+        });
+    }
+    // Drop our own sender so the loop ends as soon as every worker has either
+    // reported or died — the deadline is the ceiling, not the normal path.
+    drop(tx);
+
+    let deadline = Instant::now() + budget;
+    let mut out = HashMap::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
         }
-        trace(&format!("  modules pid={pid}"));
-        files.extend(modules::enumerate(pid));
-        trace(&format!("  mapped pid={pid}"));
-        files.extend(mapped::enumerate(pid, &dos_map));
-        let _ = tx.send(files);
-    });
-    rx.recv_timeout(timeout).unwrap_or_default()
+        match rx.recv_timeout(left) {
+            Ok((pid, files)) => {
+                out.insert(pid, files);
+            }
+            // Timed out, or every sender is gone: either way this phase is done.
+            Err(_) => break,
+        }
+    }
+    if out.len() < pids.len() {
+        trace(&format!(
+            "gather: per-process extras {}/{} within budget",
+            out.len(),
+            pids.len()
+        ));
+    }
+    out
 }
 
 /// winlsof's native Windows data source.
@@ -156,15 +206,17 @@ impl Backend for WindowsBackend {
                 dos_map.len()
             ));
             trace("gather: per-process (cwd/modules/mapped) start");
+            let want: Vec<u32> = procs
+                .iter()
+                .map(|p| p.pid)
+                .filter(|&pid| wanted(pid))
+                .collect();
+            let mut extras =
+                per_process_extras_all(&want, &dos_map, Duration::from_secs(EXTRAS_BUDGET_SECS));
             for p in procs.iter_mut() {
-                if !wanted(p.pid) {
-                    continue;
+                if let Some(files) = extras.remove(&p.pid) {
+                    p.files.extend(files);
                 }
-                p.files.extend(per_process_extras(
-                    p.pid,
-                    Arc::clone(&dos_map),
-                    Duration::from_secs(2),
-                ));
             }
             trace("gather: per-process done");
         }
