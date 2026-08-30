@@ -11,9 +11,11 @@ use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Format};
 use lsof_core::{Backend, Process, Selection};
 
+#[cfg(target_os = "linux")]
+use lsof_backend_linux::LinuxBackend;
 #[cfg(windows)]
 use lsof_backend_windows::WindowsBackend;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 use lsof_core::mock::MockBackend;
 
 /// The resolved runtime environment: a backend plus context for messaging.
@@ -34,12 +36,30 @@ fn make_env() -> Env {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn make_env() -> Env {
+    let backend = LinuxBackend::new();
+    // Running as root is Linux's analog of an elevated Windows token: it is what
+    // makes other users' /proc/<pid>/fd readable.
+    let elevated = backend.is_root();
+    Env {
+        backend: Box::new(backend),
+        elevated,
+        // Phase L0 has no socket support, so say so rather than letting `-i`
+        // look like it found nothing. See lsof-backend-linux's crate docs.
+        note: Some(
+            "linux backend (phase L0): sockets are not yet classified, so -i matches nothing"
+                .to_string(),
+        ),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn make_env() -> Env {
     Env {
         backend: Box::new(MockBackend),
         elevated: false,
-        note: Some("non-Windows build: showing sample (mock) data".to_string()),
+        note: Some("no native backend for this platform: showing sample (mock) data".to_string()),
     }
 }
 

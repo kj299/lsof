@@ -1,0 +1,20 @@
+[package]
+name = "lsof-backend-linux"
+description = "Linux data-acquisition backend for winlsof: enumerates processes and their open files from /proc. Implements lsof-core's Backend trait. Dependency-free — everything it needs is in std."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lsof-core = { path = "../lsof-core" }
+
+# No platform bindings: /proc is a filesystem, and `std::os::unix::fs::MetadataExt`
+# exposes every stat field this backend needs (mode, ino, dev, size, nlink). That
+# keeps the dependency surface — and so the `cargo-deny` supply-chain gate —
+# exactly as small as `lsof-core`'s.
+
+[lints]
+workspace = true

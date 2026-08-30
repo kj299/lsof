@@ -76,6 +76,9 @@ pub enum FileType {
     Regular,
     Dir,
     Chr,
+    /// Block device. Unix-only — Windows has no analog, so the Windows backend
+    /// never produces this.
+    Block,
     Fifo,
     Pipe,
     Ipv4,
@@ -102,6 +105,7 @@ impl FileType {
             FileType::Regular => "REG".into(),
             FileType::Dir => "DIR".into(),
             FileType::Chr => "CHR".into(),
+            FileType::Block => "BLK".into(),
             FileType::Fifo => "FIFO".into(),
             FileType::Pipe => "PIPE".into(),
             FileType::Ipv4 => "IPv4".into(),

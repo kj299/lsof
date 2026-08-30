@@ -21,5 +21,8 @@ lsof-core = { path = "../lsof-core" }
 [target.'cfg(windows)'.dependencies]
 lsof-backend-windows = { path = "../lsof-backend-windows" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+lsof-backend-linux = { path = "../lsof-backend-linux" }
+
 [lints]
 workspace = true
