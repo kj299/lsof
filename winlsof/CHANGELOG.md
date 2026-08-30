@@ -27,12 +27,13 @@ been present since Phase 4.
   the directory.
 
   The phase now runs every process concurrently (as it always did per-process,
-  just serially awaited) under a **single 20-second budget** for the whole
-  phase. Wedged workers are still abandoned exactly as before, and a
-  pathological box now degrades to "some extras missing" — reported under
-  `WINLSOF_TRACE` — rather than stalling. Hosted CI never caught this because
-  runners have a small, idle process set; only the real-hardware checkpoint
-  could.
+  just serially awaited) under a **single 5-second budget** for the whole phase
+  — sized against the 2-second per-process bound it replaces, since concurrent
+  workers no longer queue behind each other. Wedged workers are still abandoned
+  exactly as before, and a pathological box degrades to "some extras missing"
+  (reported under `WINLSOF_TRACE`) rather than stalling. Hosted CI never caught
+  this because runners have a small, idle process set; only the real-hardware
+  checkpoint could.
 
 ## [1.0.0] — 2026-08-30
 

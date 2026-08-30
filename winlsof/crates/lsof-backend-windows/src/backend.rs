@@ -15,11 +15,22 @@ use crate::{
 };
 
 /// Wall-clock ceiling for the whole per-process extras phase (`cwd`, `txt`/`mem`
-/// modules, mapped files). Generous enough that a normal run finishes well
-/// inside it — the workers report as they finish, so this is a ceiling, not a
-/// delay — but low enough that a pathological box degrades to "some extras
-/// missing" instead of stalling for minutes.
-const EXTRAS_BUDGET_SECS: u64 = 20;
+/// modules, mapped files).
+///
+/// Sized against the per-process bound it replaces (2 s), not against the number
+/// of processes, because the work now runs **concurrently**: a process that the
+/// old 2 s-apiece rule would have collected still finishes inside this window,
+/// since it no longer waits its turn behind every other process. The margin over
+/// 2 s covers thread-spawn and contention overhead when a few hundred workers
+/// start at once.
+///
+/// It deliberately is *not* generous, because this is also the cost of a
+/// **wedged** worker: a thread that never returns never drops its sender either,
+/// so the collector waits out the whole budget. Keeping it near the old
+/// per-process timeout means a scoped query against one stuck process
+/// (`lsof -p <pid>`) degrades roughly as it always did, rather than paying a
+/// whole-phase budget for a single casualty.
+const EXTRAS_BUDGET_SECS: u64 = 5;
 
 /// Gather every in-scope process's `cwd` + loaded modules (`txt`/`mem`) + mapped
 /// data files, **concurrently**, bounded by a single `budget` for the whole
