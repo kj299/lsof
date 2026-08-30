@@ -31,7 +31,7 @@ Cut `winlsof-v1.0.0` when — and only when — every box is checked:
 | 2 | **Elevation blind spot dispositioned**: the privilege-hint logic is CI-tested on both elevation branches on every push, and the residue is a documented per-release checkpoint (this doc, below). | ✅ |
 | 3 | **Signed releases**: the `AZSIGN_*` secrets are live and a release has shipped with a **signed `lsof.exe`** — the SmartScreen/Defender false-positive story in [`code-signing.md`](code-signing.md) resolved by reputation rather than README workarounds. | ⬜ ops-side (Azure setup) |
 | 4 | **Fuzz soak**: ≥ **14 consecutive green nightly deep-fuzz runs** (the 30-minute [`winlsof-fuzz-nightly.yml`](../../.github/workflows/winlsof-fuzz-nightly.yml) job with its accumulating corpus) with no parser findings. Two weeks of soak, restarting the count from any finding's fix. | ⬜ workflow landed 2026-08-22 |
-| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release |
+| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅ (see log) |
 | 6 | **No open correctness findings**: no unledgered differential divergence, no open bug against rendered output, and [`known-limitations.md`](known-limitations.md) current as of the RC. | ⬜ per release |
 
 Items 5–6 are evaluated against the release candidate; items 1–4 are standing
@@ -105,3 +105,19 @@ cd winlsof\smoketest
 at least one pass (the per-pass SKIPs are mode-specific by design — see
 [`smoketest/README.md`](../smoketest/README.md)). Record the two PASS/FAIL/SKIP
 lines in the release notes, as v0.2.0 did (51 unelevated / 53 elevated, 0 FAIL).
+
+## Validation log
+
+The completed per-release checkpoint (criterion 5) for each shipped release —
+the union of an unelevated and an elevated pass over the **downloaded** artifact.
+Every case must be green in at least one mode with zero FAIL and zero hangs in
+both; the mode-specific SKIPs (admin-only cases unelevated, privilege-hint cases
+elevated) are expected and mirror each other.
+
+| Release | Date | Host | Unelevated | Elevated | Verdict |
+|---|---|---|---|---|---|
+| v0.4.0 | 2026-08-30 | Win 11 build 26200 | 51 PASS / 0 FAIL / 8 SKIP | 57 PASS / 0 FAIL / 2 SKIP | ✅ union = all 59, 0 FAIL/hang; the 8⊕2 skips mirror exactly |
+
+Notes for v0.4.0: the release's four new cases — structured `-T` `-F`/`-J` output
+and the `-iICMP`/`-iRAW` family filters — all pass elevated (correctly skipping
+unelevated, since they need the Administrator-only ETW/EStats path).
