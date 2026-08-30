@@ -5,10 +5,10 @@ that hedge into a checklist: what 1.0 *means*, the concrete exit criteria, and
 the decision record for the one verification gap that stays manual (the
 elevation blind spot) with the per-release checkpoint that covers it.
 
-> **Status (2026-08-30): cutting 1.0.** Criteria 1, 2, 4 and 6 hold; 3 is
-> optional by choice. The last box is criterion 5 — the two-pass field
-> checkpoint against the **published 1.0 artifact**, which by construction can
-> only run once that artifact exists.
+> **Status (2026-08-30): shipped — every required criterion met, at
+> `winlsof-v1.0.1`.** Criteria 1, 2, 4 and 6 held at the 1.0.0 cut; 3 is
+> optional by choice; criterion 5 **failed on v1.0.0 and passed on v1.0.1**,
+> which is the whole reason the checkpoint exists. See the validation log.
 
 ## What 1.0 means
 
@@ -37,7 +37,7 @@ Cut `winlsof-v1.0.0` when — and only when — every **required** box is checke
 | 2 | **Elevation blind spot dispositioned**: the privilege-hint logic is CI-tested on both elevation branches on every push, and the residue is a documented per-release checkpoint (this doc, below). | ✅ |
 | 3 | **Signed releases** — **OPTIONAL, not a 1.0 blocker.** Unsigned `lsof.exe` + a published SHA-256 is the accepted default shipping posture; signing can be added later via [`code-signing.md`](code-signing.md) if desired. See *Why signing is optional* below. | ◻️ optional (deferred by choice) |
 | 4 | **Fuzz saturation**: the argument parser is fuzzed to the point of diminishing returns — cumulative deep-fuzz effort with an accumulating corpus, coverage plateaued, and **zero findings**. Measured, not timed; see *How criterion 4 is measured* below. | ✅ met 2026-08-30 (evidence below) |
-| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅; **v1.0.0 ❌ failed** (see log), pending on 1.0.1 |
+| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅; v1.0.0 ❌; **v1.0.1 ✅** (see log) |
 | 6 | **No open correctness findings**: no unledgered differential divergence, no open bug against rendered output, and [`known-limitations.md`](known-limitations.md) current as of the RC. | ✅ for the 1.0 RC |
 
 Criteria 5–6 are evaluated against the release candidate; 1, 2, 4 are standing
@@ -186,6 +186,7 @@ elevated) are expected and mirror each other.
 |---|---|---|---|---|---|
 | v0.4.0 | 2026-08-30 | Win 11 build 26200 | 51 PASS / 0 FAIL / 8 SKIP | 57 PASS / 0 FAIL / 2 SKIP | ✅ union = all 59, 0 FAIL/hang; the 8⊕2 skips mirror exactly |
 | **v1.0.0** | 2026-08-30 | Win 11 build 26200 | 51 PASS / 0 FAIL / 8 SKIP | **56 PASS / 1 FAIL / 2 SKIP** | ❌ **failed** — `plus-D-directory-tree` exceeded 60 s elevated. Root-caused to a pre-existing defect; fixed in 1.0.1 |
+| **v1.0.1** | 2026-08-30 | Win 11 build 26200 | 51 PASS / 0 FAIL / 8 SKIP | 57 PASS / 0 FAIL / 2 SKIP | ✅ union = all 59, 0 FAIL/hang; skips mirror. `lsof +D %TEMP%` elevated: **214 s → 8.7 s** |
 
 Notes for v0.4.0: the release's four new cases — structured `-T` `-F`/`-J` output
 and the `-iICMP`/`-iRAW` family filters — all pass elevated (correctly skipping
@@ -211,4 +212,19 @@ So the defect is **pre-existing — v0.4.0 has it too, and passed on timing
 luck** — and it is exactly the class of bug only a real-hardware checkpoint
 finds. Fixed in 1.0.1 by running the phase concurrently under one global
 budget. **v1.0.0 therefore never satisfied criterion 5**; 1.0.1 is the release
-that must.
+that did.
+
+**Notes for v1.0.1 — fix confirmed.** The same measurement that exposed the bug
+now reads **8.7 s** where it read 214 s, and the elevated suite's wall clock
+returned to its 31 s baseline (the failing v1.0.0 run took 92 s, essentially all
+of it in this one case). Both passes are clean, so criterion 5 is met and the
+required checklist is complete.
+
+**What this episode is worth remembering for.** Every automated gate — 59 smoke
+cases, the socket differential, the coverage gate, saturation fuzzing — was
+green on a binary that stalled for three and a half minutes on a routine
+elevated command. Hosted runners have a small, idle process set and simply
+cannot express the condition. The manual per-release checkpoint is not
+ceremony left over from before CI got good; it covers a class of defect the
+automation is structurally blind to, and it earned its place the first time it
+was run in anger.

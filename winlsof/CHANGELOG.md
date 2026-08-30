@@ -15,6 +15,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 real hardware failed for v1.0.0, and root-causing it surfaced a defect that had
 been present since Phase 4.
 
+Validated in turn: 1.0.1 passes both modes on Windows 11 — 51 PASS / 0 FAIL /
+8 SKIP unelevated, 57 PASS / 0 FAIL / 2 SKIP elevated — with `lsof +D %TEMP%`
+elevated going from **214 s to 8.7 s**.
+
 ### Fixed
 - **Elevated runs no longer stall for minutes.** The per-process extras phase
   (`cwd`, `txt`/`mem` modules, mapped files) waited on each process **in turn**

@@ -69,6 +69,25 @@ results. The CLI prints a one-line hint about re-running as Administrator
 when a system-wide switch is used; `-V` reports how many processes were
 inaccessible. This mirrors Unix `lsof` without root.
 
+### `cwd` / `txt` / `mem` collection is time-bounded
+
+Gathering a process's working directory, loaded modules and mapped files means
+reading a *foreign* process (PEB reads, `CreateToolhelp32Snapshot`,
+`VirtualQueryEx`), any of which can block indefinitely on a wedged process. That
+whole phase therefore runs concurrently under a **single 5-second budget**;
+whatever has not reported by then is omitted, and the run continues.
+
+In practice every process reports in well under the budget. It can bite on a
+heavily loaded machine *when elevated*, because `SeDebugPrivilege` makes these
+reads genuinely succeed against hundreds of processes rather than failing fast —
+so a few processes may show no `cwd`/`txt`/`mem` rows. Set `WINLSOF_TRACE=1` to
+see a `per-process extras N/M within budget` line whenever anything was dropped.
+
+The alternative is worse: before 1.0.1 this phase waited on each process in turn
+for up to 2 seconds apiece, so its cost scaled with process count — a measured
+`lsof +D %TEMP%` took **214 seconds** on a normal desktop. Bounded-and-complete
+is not available here; bounded-and-slightly-incomplete beats unbounded.
+
 ## Distribution
 
 ### Released `lsof.exe` is unsigned
