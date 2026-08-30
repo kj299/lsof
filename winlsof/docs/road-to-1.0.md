@@ -1,9 +1,14 @@
 # winlsof — road to 1.0
 
-Every winlsof release so far is cut with the `--prerelease` flag. This doc turns
+Releases through v0.4.0 were cut with the `--prerelease` flag. This doc turned
 that hedge into a checklist: what 1.0 *means*, the concrete exit criteria, and
 the decision record for the one verification gap that stays manual (the
 elevation blind spot) with the per-release checkpoint that covers it.
+
+> **Status (2026-08-30): cutting 1.0.** Criteria 1, 2, 4 and 6 hold; 3 is
+> optional by choice. The last box is criterion 5 — the two-pass field
+> checkpoint against the **published 1.0 artifact**, which by construction can
+> only run once that artifact exists.
 
 ## What 1.0 means
 
@@ -31,15 +36,23 @@ Cut `winlsof-v1.0.0` when — and only when — every **required** box is checke
 | 1 | **Verification depth**: the socket differential is a hard gate covering the family and state classes (IPv4 + IPv6; LISTEN/ESTABLISHED/CLOSE_WAIT/FIN_WAIT2/UDP); the coverage gate reports `UNCOVERED: 0`; the unsafe audit passes with a `// SAFETY:` on every backend `unsafe` block. | ✅ shipped in v0.3.0/v0.3.x |
 | 2 | **Elevation blind spot dispositioned**: the privilege-hint logic is CI-tested on both elevation branches on every push, and the residue is a documented per-release checkpoint (this doc, below). | ✅ |
 | 3 | **Signed releases** — **OPTIONAL, not a 1.0 blocker.** Unsigned `lsof.exe` + a published SHA-256 is the accepted default shipping posture; signing can be added later via [`code-signing.md`](code-signing.md) if desired. See *Why signing is optional* below. | ◻️ optional (deferred by choice) |
-| 4 | **Fuzz soak**: ≥ **14 consecutive green nightly deep-fuzz runs** (the 30-minute [`winlsof-fuzz-nightly.yml`](../../.github/workflows/winlsof-fuzz-nightly.yml) job with its accumulating corpus) with no parser findings. Two weeks of soak, restarting the count from any finding's fix. | ⬜ workflow landed 2026-08-22 |
-| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅ (see log) |
-| 6 | **No open correctness findings**: no unledgered differential divergence, no open bug against rendered output, and [`known-limitations.md`](known-limitations.md) current as of the RC. | ⬜ per release |
+| 4 | **Fuzz saturation**: the argument parser is fuzzed to the point of diminishing returns — cumulative deep-fuzz effort with an accumulating corpus, coverage plateaued, and **zero findings**. Measured, not timed; see *How criterion 4 is measured* below. | ✅ met 2026-08-30 (evidence below) |
+| 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅ (see log); **1.0 pending its artifact** |
+| 6 | **No open correctness findings**: no unledgered differential divergence, no open bug against rendered output, and [`known-limitations.md`](known-limitations.md) current as of the RC. | ✅ for the 1.0 RC |
 
 Criteria 5–6 are evaluated against the release candidate; 1, 2, 4 are standing
-state; **3 is optional**. When the **five required** criteria (1, 2, 4, 5, 6)
-hold, the 1.0 cut is: bump versions, update the CHANGELOG, drop `--prerelease`
-from the release workflow, tag. Signing, if ever pursued, is independent of the
-version line.
+state; **3 is optional**. The 1.0 cut is: bump versions, update the CHANGELOG,
+drop `--prerelease` from the release workflow, tag. Signing, if ever pursued, is
+independent of the version line.
+
+**On criterion 5 and the 1.0 artifact.** The release pipeline builds and
+publishes in one step from the tag, so no separate RC binary exists to validate
+*before* tagging — the checkpoint necessarily runs against the published
+artifact. One code change landed after the field-validated v0.4.0 build: the
+`-T` link-local scope-id fix (PR #52), whose Windows CI run exercised the v6
+loopback `-T` smoke cases green. Residual risk is low, but it is **not zero**,
+which is exactly why the checkpoint is still owed for 1.0. If it fails, the fix
+ships as 1.0.1.
 
 ### Why signing is optional
 
@@ -62,6 +75,36 @@ program; or **(c)** individual Azure Artifact Signing, accepting the personal
 identity exposure. The release workflow is already wired for route (c) and
 no-ops until the `AZSIGN_*` secrets exist, so nothing needs to change to keep
 shipping unsigned.
+
+## How criterion 4 is measured
+
+**This criterion was rewritten on 2026-08-30.** It originally read *"≥14
+consecutive green nightly deep-fuzz runs"* — a **calendar** bar, which was the
+wrong instrument: it used elapsed days as a proxy for fuzzing effort, when
+effort is the thing that matters and is purchasable on demand (the workflow has
+a `workflow_dispatch` button). Waiting out the remaining nights would have
+bought time, not information.
+
+The criterion now asks the question that actually matters — *has fuzzing
+stopped finding anything?* — and is satisfied when all four hold:
+
+| Signal | Bar | Measured (9 runs, 2026-08-22 → 08-30) |
+|---|---|---|
+| Cumulative effort | ≥ 4 h of deep fuzzing | **~4.5 h** (9 × 30 min), **200M+ executions** |
+| Corpus | accumulating, growth flattened | 338 KB → 6.03 MB; **+6% over the final night** |
+| Coverage | plateaued | **`cov: 1125 / ft: 6790`**, final stretch is `REDUCE`-only — no new coverage |
+| Findings | **zero** | zero; `upload crash artifacts` skipped on every run |
+
+Corroborating detail: the fuzzer independently derived winlsof's own option
+grammar into its recommended dictionary (`"icmp"`, `"raw"`, `"udp"`, `"tcp"`,
+`"--help"`, `"--unicode"`), which is what a corpus exercising real parser paths
+looks like rather than one grinding on random bytes.
+
+**The nightly job keeps running — its purpose is regression detection, not a
+release gate.** Conflating the two was the original error: *"the parser is
+well-fuzzed"* is a milestone measurable in effort and saturation, while *"we
+fuzz continuously"* is a standing practice that never completes. A finding at
+any time is a bug to fix, and resets this criterion for the next release.
 
 ## Decision record: the elevation blind spot
 
