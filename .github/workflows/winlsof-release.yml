@@ -18,6 +18,17 @@ on:
 permissions:
   contents: write
 
+# Two runs for the same tag must never publish concurrently. They raced once
+# (v1.0.1): both built `lsof.exe` — MSVC output is not byte-reproducible, so the
+# two binaries differed — one created the release embedding *its* SHA-256 in the
+# notes, and the other then clobbered the assets with *its* binary, leaving a
+# release whose published hash did not match its own download. Serializing means
+# the second run takes the "already exists" path below, which now replaces the
+# notes as well as the assets, so the two always describe the same build.
+concurrency:
+  group: winlsof-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 defaults:
   run:
     working-directory: winlsof
@@ -134,9 +145,14 @@ jobs:
           EOF
           )"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Replace the notes too, not just the assets: the notes quote the
+            # SHA-256 of the binary this run built, so uploading one without the
+            # other publishes a hash that doesn't match the download.
             gh release upload "$TAG" \
               target/release/lsof.exe target/release/lsof.exe.sha256 \
               --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
           else
             gh release create "$TAG" \
               target/release/lsof.exe target/release/lsof.exe.sha256 \
