@@ -3,6 +3,13 @@
 version = 3
 
 [[package]]
+name = "lsof-backend-linux"
+version = "1.0.1"
+dependencies = [
+ "lsof-core",
+]
+
+[[package]]
 name = "lsof-backend-windows"
 version = "1.0.1"
 dependencies = [
@@ -14,6 +21,7 @@ dependencies = [
 name = "lsof-cli"
 version = "1.0.1"
 dependencies = [
+ "lsof-backend-linux",
  "lsof-backend-windows",
  "lsof-core",
 ]
