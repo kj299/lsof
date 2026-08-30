@@ -20,6 +20,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   no longer waits on it; the release workflow stays wired to sign automatically
   if the `AZSIGN_*` secrets are ever added.
 
+### Fixed
+- **`-T` now annotates link-local (`fe80::`) IPv6 connections.** IPv6 socket
+  rows were built with `SocketAddr::new`, which forces the scope id to 0, so a
+  link-local connection never matched its `GetPerTcp6ConnectionEStats` row key
+  and its `-T` window/queue was silently dropped. Sockets now carry the scope
+  id IP Helper already reports (`dw*ScopeId`). Global and loopback IPv6 use
+  scope 0, so their behavior — and the numeric NAME, which never showed the
+  scope — is unchanged.
+
 ## [0.4.0] — 2026-08-23
 
 **The runway release.** Every open engineering item from the v0.3.0

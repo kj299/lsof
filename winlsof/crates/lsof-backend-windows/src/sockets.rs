@@ -6,7 +6,7 @@
 //! (just like `netstat -ano`) — so `-i` needs no elevation.
 
 use std::ffi::c_void;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile, Protocol, SocketInfo, TcpState};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -121,6 +121,17 @@ fn ipv6(addr: [u8; 16]) -> Ipv6Addr {
     Ipv6Addr::from(addr)
 }
 
+/// Build an IPv6 `SocketAddr` that **preserves the scope id** IP Helper reports
+/// (`dw*ScopeId`). `SocketAddr::new` can't set it, so it would otherwise be lost
+/// — and a link-local (`fe80::`) connection whose scope is dropped won't match
+/// its `GetPerTcp6ConnectionEStats` row key, leaving `-T` window/queue
+/// unannotated (`tcpinfo::row_v6`). Scope is 0 for global/loopback, so this is a
+/// no-op there; the numeric NAME never shows the scope (the renderer uses the
+/// bare address), so display is unchanged.
+fn sockaddr_v6(addr: [u8; 16], p: u16, scope: u32) -> SocketAddr {
+    SocketAddr::V6(SocketAddrV6::new(ipv6(addr), p, 0, scope))
+}
+
 /// Convert a port stored in network byte order (low 16 bits of a DWORD).
 fn port(p: u32) -> u16 {
     u16::from_be((p & 0xFFFF) as u16)
@@ -182,11 +193,11 @@ fn make_file(
 }
 
 /// A non-zero remote endpoint (listening rows have an all-zero remote).
-fn remote_opt(addr: IpAddr, p: u16) -> Option<SocketAddr> {
-    if p == 0 && addr.is_unspecified() {
+fn remote_opt(addr: SocketAddr) -> Option<SocketAddr> {
+    if addr.port() == 0 && addr.ip().is_unspecified() {
         None
     } else {
-        Some(SocketAddr::new(addr, p))
+        Some(addr)
     }
 }
 
@@ -216,7 +227,10 @@ fn tcp4() -> Vec<(u32, OpenFile)> {
     rows.iter()
         .map(|r| {
             let local = SocketAddr::new(IpAddr::V4(ipv4(r.dwLocalAddr)), port(r.dwLocalPort));
-            let remote = remote_opt(IpAddr::V4(ipv4(r.dwRemoteAddr)), port(r.dwRemotePort));
+            let remote = remote_opt(SocketAddr::new(
+                IpAddr::V4(ipv4(r.dwRemoteAddr)),
+                port(r.dwRemotePort),
+            ));
             let file = make_file(
                 false,
                 Protocol::Tcp,
@@ -250,8 +264,12 @@ fn tcp6() -> Vec<(u32, OpenFile)> {
     };
     rows.iter()
         .map(|r| {
-            let local = SocketAddr::new(IpAddr::V6(ipv6(r.ucLocalAddr)), port(r.dwLocalPort));
-            let remote = remote_opt(IpAddr::V6(ipv6(r.ucRemoteAddr)), port(r.dwRemotePort));
+            let local = sockaddr_v6(r.ucLocalAddr, port(r.dwLocalPort), r.dwLocalScopeId);
+            let remote = remote_opt(sockaddr_v6(
+                r.ucRemoteAddr,
+                port(r.dwRemotePort),
+                r.dwRemoteScopeId,
+            ));
             let file = make_file(
                 true,
                 Protocol::Tcp,
@@ -313,7 +331,7 @@ fn udp6() -> Vec<(u32, OpenFile)> {
     };
     rows.iter()
         .map(|r| {
-            let local = SocketAddr::new(IpAddr::V6(ipv6(r.ucLocalAddr)), port(r.dwLocalPort));
+            let local = sockaddr_v6(r.ucLocalAddr, port(r.dwLocalPort), r.dwLocalScopeId);
             let file = make_file(true, Protocol::Udp, local, None, None);
             (r.dwOwningPid, file)
         })
