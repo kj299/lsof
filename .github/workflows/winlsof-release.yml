@@ -85,7 +85,7 @@ jobs:
           NOTES="$(cat <<EOF
           winlsof — a memory-safe, Windows-native reimplementation of \`lsof\` written in Rust.
 
-          **Prerelease.** \`lsof.exe\` is a standalone x86_64 Windows binary
+          \`lsof.exe\` is a standalone x86_64 Windows binary
           (MSVC; no runtime install needed on Windows 10/11).
 
           **What it does**
@@ -109,7 +109,11 @@ jobs:
           lsof -h                  # full option list
           \`\`\`
 
-          The binary is **unsigned**, so Windows SmartScreen may warn on first run.
+          The binary is **unsigned by design** (a privacy-conscious choice: a
+          publicly-trusted signing certificate would put the maintainer's validated
+          legal name and location permanently on every binary, and would buy only
+          reduced download-friction, not the integrity the SHA-256 below already
+          gives). Windows SmartScreen may therefore warn on first run.
 
           **Antivirus / Defender note.** winlsof does what an open-files lister
           must - enumerate every process's handles, enable \`SeDebugPrivilege\`, and
@@ -120,8 +124,9 @@ jobs:
           \`lsof.exe.sha256\` (below), then allow it in Windows Security -> Protection
           history, or add an exclusion in an elevated shell:
           \`Add-MpPreference -ExclusionPath <path-to-lsof.exe>\`. A locally built
-          binary isn't internet-marked, so it usually isn't flagged. Proper code
-          signing would establish reputation and is tracked for a future release.
+          binary isn't internet-marked, so it usually isn't flagged. Code signing
+          would reduce this over time and remains an option, not a plan - see
+          \`winlsof/docs/code-signing.md\`.
 
           Verify integrity against the published SHA-256 (\`lsof.exe.sha256\`):
 
@@ -138,6 +143,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "winlsof $TAG" \
               --target "$GITHUB_SHA" \
-              --prerelease \
               --notes "$NOTES"
           fi

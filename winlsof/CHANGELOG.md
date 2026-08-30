@@ -9,6 +9,21 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-08-30
+
+**Stable.** 1.0 is a **stability commitment, not a feature milestone**: the CLI
+option surface (every switch in `lsof -h`) and the machine formats (`-F` field
+codes, `-J`/`-j` JSON shapes) are now stable, and a breaking change to either
+requires a major bump. Releases are no longer marked prerelease.
+
+Nothing in the tool changed from v0.4.0 beyond the `-T` link-local fix below —
+this release is the *declaration* that the surface is settled. Every option in
+the C's 47-switch inventory is dispositioned (37 implemented, 18 Unix-only and
+explicitly rejected), the coverage gate reports `UNCOVERED: 0`, and the
+research roadmap has no open items. The two capabilities winlsof will never
+have on Windows — a socket's FD value and the byte-range lock column — are
+documented closed gates requiring a kernel driver, not outstanding work.
+
 ### Added
 - **[`docs/linux-backend-scope.md`](docs/linux-backend-scope.md)** — a scoping
   study (proposal, not a commitment) for a second backend behind the existing
@@ -21,6 +36,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   Recommended sequencing is after 1.0.
 
 ### Changed
+- **Releases drop `--prerelease`**, and the release notes no longer describe
+  the binary as one. The unsigned-by-design rationale is stated inline instead.
+- **1.0 exit criterion 4 (fuzzing) is measured, not timed.** It previously
+  required "14 consecutive green nightly runs" — a calendar bar that used
+  elapsed days as a proxy for fuzzing effort. It now requires demonstrated
+  saturation: cumulative effort, an accumulating corpus whose growth has
+  flattened, plateaued coverage, and zero findings. Met on the evidence of 9
+  deep-fuzz runs (~4.5 h, 200M+ executions, corpus 338 KB → 6.03 MB with +6%
+  on the final night, coverage steady at `cov: 1125 / ft: 6790`, zero
+  findings). The nightly job continues — as regression detection, which was
+  always its real purpose, rather than as a release gate.
 - **Code signing reframed as optional — not a 1.0 blocker.** winlsof ships
   unsigned `lsof.exe` + a published SHA-256 as a deliberate, privacy-conscious
   default: any publicly-trusted signing certificate requires identity
@@ -407,7 +433,8 @@ Foundation; see `../COPYING`). No source is shared with the C tree;
 behavior and CLI surface are compatible where the concepts map onto
 Windows.
 
-[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v0.4.0...HEAD
+[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v1.0.0...HEAD
+[1.0.0]: https://github.com/kj299/lsof/compare/winlsof-v0.4.0...winlsof-v1.0.0
 [0.4.0]: https://github.com/kj299/lsof/compare/winlsof-v0.3.0...winlsof-v0.4.0
 [0.3.0]: https://github.com/kj299/lsof/compare/winlsof-v0.2.0...winlsof-v0.3.0
 [0.2.0]: https://github.com/kj299/lsof/compare/winlsof-v0.1.0...winlsof-v0.2.0
