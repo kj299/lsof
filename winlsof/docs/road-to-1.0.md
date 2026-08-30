@@ -23,20 +23,45 @@ elevation blind spot) with the per-release checkpoint that covers it.
 
 ## Exit criteria
 
-Cut `winlsof-v1.0.0` when — and only when — every box is checked:
+Cut `winlsof-v1.0.0` when — and only when — every **required** box is checked
+(criterion 3, signing, is **optional** — see below):
 
 | # | Criterion | Status |
 |---|---|---|
 | 1 | **Verification depth**: the socket differential is a hard gate covering the family and state classes (IPv4 + IPv6; LISTEN/ESTABLISHED/CLOSE_WAIT/FIN_WAIT2/UDP); the coverage gate reports `UNCOVERED: 0`; the unsafe audit passes with a `// SAFETY:` on every backend `unsafe` block. | ✅ shipped in v0.3.0/v0.3.x |
 | 2 | **Elevation blind spot dispositioned**: the privilege-hint logic is CI-tested on both elevation branches on every push, and the residue is a documented per-release checkpoint (this doc, below). | ✅ |
-| 3 | **Signed releases**: the `AZSIGN_*` secrets are live and a release has shipped with a **signed `lsof.exe`** — the SmartScreen/Defender false-positive story in [`code-signing.md`](code-signing.md) resolved by reputation rather than README workarounds. | ⬜ ops-side (Azure setup) |
+| 3 | **Signed releases** — **OPTIONAL, not a 1.0 blocker.** Unsigned `lsof.exe` + a published SHA-256 is the accepted default shipping posture; signing can be added later via [`code-signing.md`](code-signing.md) if desired. See *Why signing is optional* below. | ◻️ optional (deferred by choice) |
 | 4 | **Fuzz soak**: ≥ **14 consecutive green nightly deep-fuzz runs** (the 30-minute [`winlsof-fuzz-nightly.yml`](../../.github/workflows/winlsof-fuzz-nightly.yml) job with its accumulating corpus) with no parser findings. Two weeks of soak, restarting the count from any finding's fix. | ⬜ workflow landed 2026-08-22 |
 | 5 | **Release-candidate field validation**: the **exact release artifact** (downloaded `lsof.exe`, not a local build) passes the full smoke suite (59 cases today) on real Windows 11 hardware in **both** privilege modes — the per-release checkpoint below — with zero FAIL and zero hangs. | ⬜ per release — v0.4.0 ✅ (see log) |
 | 6 | **No open correctness findings**: no unledgered differential divergence, no open bug against rendered output, and [`known-limitations.md`](known-limitations.md) current as of the RC. | ⬜ per release |
 
-Items 5–6 are evaluated against the release candidate; items 1–4 are standing
-state. When all six hold, the 1.0 cut is: bump versions, update the CHANGELOG,
-drop `--prerelease` from the release workflow, tag.
+Criteria 5–6 are evaluated against the release candidate; 1, 2, 4 are standing
+state; **3 is optional**. When the **five required** criteria (1, 2, 4, 5, 6)
+hold, the 1.0 cut is: bump versions, update the CHANGELOG, drop `--prerelease`
+from the release workflow, tag. Signing, if ever pursued, is independent of the
+version line.
+
+### Why signing is optional
+
+A publicly-trusted code-signing certificate — from **any** provider, since it's
+a CA/Browser Forum requirement, not a Microsoft one — mandates **identity
+validation**, and the resulting certificate puts the maintainer's **legal name
+and city/state/country** permanently and publicly on every signed binary. For a
+solo-maintainer project that is a real privacy cost, and signing buys only
+*reduced download friction* (a quieter SmartScreen prompt, no Defender PUA flag)
+— never integrity or security, which the **published SHA-256 already provides**.
+So winlsof ships **unsigned + SHA-256** as a deliberate, privacy-conscious
+default, and does not gate 1.0 on signing.
+
+If the friction ever justifies signing, the privacy-preserving routes (in
+[`code-signing.md`](code-signing.md) / [issue #3](https://github.com/kj299/lsof/issues/3))
+are, in order of preference: **(a)** sign behind a business entity (an LLC's name
+and location on the cert, not a person's) via an OV certificate; **(b)** relicense
+the `winlsof/` subtree to an OSI license to unblock the free SignPath Foundation
+program; or **(c)** individual Azure Artifact Signing, accepting the personal
+identity exposure. The release workflow is already wired for route (c) and
+no-ops until the `AZSIGN_*` secrets exist, so nothing needs to change to keep
+shipping unsigned.
 
 ## Decision record: the elevation blind spot
 

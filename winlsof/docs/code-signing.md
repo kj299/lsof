@@ -3,7 +3,26 @@
 > Tracked as [issue #3](https://github.com/kj299/lsof/issues/3). This doc holds
 > the detail; the issue holds the state.
 
-## Decision (2026-07-19): Azure Artifact Signing
+## Status (2026-08-30): OPTIONAL — deferred by choice
+
+**Signing is not a 1.0 blocker and is not currently planned.** winlsof ships
+**unsigned `lsof.exe` + a published SHA-256** as a deliberate, privacy-conscious
+default: any publicly-trusted signing certificate requires identity validation
+that puts the maintainer's legal name and city/state/country permanently and
+publicly on every binary (a CA/Browser Forum requirement, not Microsoft's), and
+signing buys only *reduced download friction* — never integrity, which the
+SHA-256 already provides. See *Why signing is optional* in
+[`road-to-1.0.md`](road-to-1.0.md).
+
+The rest of this doc is the **runbook, kept ready** in case the friction ever
+justifies signing. Preferred order if pursued: **(a)** sign behind a business
+entity (LLC name on the cert, not a person's) via an OV certificate; **(b)**
+relicense `winlsof/` to an OSI license to unblock the free SignPath Foundation
+program; **(c)** the individual Azure Artifact Signing path below, accepting the
+personal-identity exposure. The release workflow is already wired for (c) and
+no-ops until the `AZSIGN_*` secrets exist, so shipping unsigned needs no change.
+
+## Decision (2026-07-19, superseded 2026-08-30 → optional): Azure Artifact Signing
 
 **Chosen: Azure Artifact Signing** (the service formerly named Microsoft
 Trusted Signing), Basic tier ~$9.99/mo. Why the field narrowed to it:

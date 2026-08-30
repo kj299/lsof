@@ -110,9 +110,13 @@ The binary is **unsigned**, so Windows SmartScreen may warn on first run
 > against the published `lsof.exe.sha256`, and if you want to run it, allow it in
 > Windows Security → Protection history, or add an exclusion in an elevated
 > shell: `Add-MpPreference -ExclusionPath <path-to-lsof.exe>`. (A locally built
-> binary isn't internet-marked, so it usually isn't flagged.) Proper code
-> signing would establish reputation and reduce this — tracked for a future
-> release.
+> binary isn't internet-marked, so it usually isn't flagged.) winlsof ships
+> **unsigned by design** — a privacy-conscious choice, since a publicly-trusted
+> signing certificate would put the maintainer's validated legal name and
+> location permanently on every binary, and it would buy only reduced
+> download-friction, not the integrity the SHA-256 already gives. Signing is an
+> optional future route, not a planned change; see
+> [`docs/code-signing.md`](docs/code-signing.md).
 
 Releases are produced by pushing a `winlsof-v*` tag, which triggers
 [`.github/workflows/winlsof-release.yml`](../.github/workflows/winlsof-release.yml).
