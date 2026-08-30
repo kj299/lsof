@@ -1,13 +1,39 @@
 # Changelog
 
-All notable changes to **winlsof** (the Rust, Windows-native `lsof`
-reimplementation under [`winlsof/`](.)). The changelog tracks the new Rust
-workspace; the legacy C `lsof` tree in the parent directory is untouched.
+All notable changes to **winlsof** (the Rust `lsof` reimplementation under
+[`winlsof/`](.), with native Windows and Linux backends). The changelog tracks
+the new Rust workspace; the legacy C `lsof` tree in the parent directory is
+untouched. Entries below are left as written at the time, so older ones
+describe the project while it was still Windows-only.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+- **Linux backend, phase L0** (`lsof-backend-linux`): processes and owners from
+  `/proc/<pid>/status`, open files from `/proc/<pid>/fd` plus the
+  `cwd`/`root`/`exe` links, and types/DEVICE/SIZE/NODE/NLINK from `stat`.
+  Dependency-free and `#![forbid(unsafe_code)]` — `/proc` is a filesystem, so
+  no FFI is involved. Enough for `-p`, `-c`, `-u`, `-t`, `-d`, `-a`, `-R`, bare
+  paths and `+D`/`+d`; **`-i` matches nothing until phase L1** adds socket
+  classification, which the CLI states on startup rather than letting an empty
+  result look like a filter bug. Verified by diffing against the real C `lsof`
+  4.95.0 on the same host — the differential Windows structurally cannot have.
+- `FileType::Block` (`BLK`) in `lsof-core`. Unix-only; the Windows backend
+  never emits it.
+
+### Changed
+- **Docs no longer describe the project as Windows-only**, which stopped being
+  true when the Linux backend landed. The README now leads with both backends
+  and their status, and the privilege section covers Linux's uid-based split
+  alongside Windows' `SeDebugPrivilege` model. The **name** `winlsof` is
+  knowingly left inaccurate for now: renaming (to `lsof-rs`) touches the
+  release-tag prefix and every CI path filter, so it is scheduled for when the
+  Linux backend reaches L1 and the cross-platform claim is fully earned.
+- Corrected a stale README claim that cited **v0.2.0** as the latest field
+  validation; it is v1.0.1 (51 unelevated / 57 elevated, 0 FAIL).
 
 ## [1.0.1] — 2026-08-30
 
