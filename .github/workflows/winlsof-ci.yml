@@ -4,14 +4,33 @@ name: winlsof CI
 # The portable core builds and tests on Linux; the native Windows backend is
 # built and tested on a real windows-latest runner (the paths that can't be
 # linked off-Windows).
+#
+# Two trigger notes, both about not burning runner time:
+#
+# `push` is limited to master. Without that, every PR ran this workflow twice —
+# once for the branch push and once for the pull_request — so a PR showed 8
+# check runs, including the native-Windows job (release build + socket
+# differential + the 59-case smoke suite) twice over. The pull_request run
+# covers the branch; this one covers master after a merge.
+#
+# The `!` negations skip documentation-only changes: a markdown edit cannot
+# affect the build, the gates, or the smoke suite. A change touching docs *and*
+# code still runs everything, because the filter tests the union of changed
+# files. (A docs-only PR therefore shows no checks at all — correct, but worth
+# knowing before turning on required status checks.)
 on:
   push:
+    branches: [master]
     paths:
       - 'winlsof/**'
+      - '!winlsof/**.md'
+      - '!winlsof/docs/**'
       - '.github/workflows/winlsof-ci.yml'
   pull_request:
     paths:
       - 'winlsof/**'
+      - '!winlsof/**.md'
+      - '!winlsof/docs/**'
       - '.github/workflows/winlsof-ci.yml'
 
 permissions:
