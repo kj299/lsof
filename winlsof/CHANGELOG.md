@@ -9,6 +9,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Code signing reframed as optional — not a 1.0 blocker.** winlsof ships
+  unsigned `lsof.exe` + a published SHA-256 as a deliberate, privacy-conscious
+  default: any publicly-trusted signing certificate requires identity
+  validation that puts the maintainer's legal name and city/state/country
+  permanently on every binary (a CA/Browser Forum requirement), and signing
+  buys only reduced download friction — never integrity, which the SHA-256
+  already provides. `docs/road-to-1.0.md` criterion 3 is now optional and 1.0
+  no longer waits on it; the release workflow stays wired to sign automatically
+  if the `AZSIGN_*` secrets are ever added.
+
 ## [0.4.0] — 2026-08-23
 
 **The runway release.** Every open engineering item from the v0.3.0
