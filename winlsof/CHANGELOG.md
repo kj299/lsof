@@ -9,6 +9,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **[`docs/linux-backend-scope.md`](docs/linux-backend-scope.md)** — a scoping
+  study (proposal, not a commitment) for a second backend behind the existing
+  `Backend` seam: measured against the C's own Linux dialect in this repo
+  (10,205 lines, half of it sockets), it estimates ~2,200 Rust lines plus one
+  small core addition (a lock-state field). The strategic point: on Linux the C
+  `lsof` *runs*, so a real C-vs-Rust differential replaces the
+  oracle-substitution workaround Windows forces — and two closed Windows gates
+  (socket-FD correlation, byte-range locks) become ordinary features.
+  Recommended sequencing is after 1.0.
+
 ### Changed
 - **Code signing reframed as optional — not a 1.0 blocker.** winlsof ships
   unsigned `lsof.exe` + a published SHA-256 as a deliberate, privacy-conscious
