@@ -1,4 +1,4 @@
-# Retrospective — the winlsof port (C `lsof` → Rust, Windows)
+# Retrospective — the lsof-rs port (C `lsof` → Rust, Windows)
 
 A forensic account of how this project actually unfolded, reconstructed from the
 repository, the git history (59 non-merge commits, 2026-06-14 → 2026-07-02, no
@@ -74,7 +74,7 @@ before you schedule it, not during.**
 
 **There was none, by design — and that was correct here.** No FFI to the C code,
 no `bindgen`/`cbindgen`, no linking Rust into the C build or vice versa, no
-transpilation. The two trees coexist in one repo, untouched (`winlsof/` beside
+transpilation. The two trees coexist in one repo, untouched (`lsof-rs/` beside
 the original), and share nothing but behavior.
 
 Why this worked: the entire value of lsof on Windows is in the *acquisition*
@@ -194,10 +194,10 @@ Two-tier, because the obvious oracle was unavailable:
 2. **Correctness of the *data* was verified against native Windows oracles**, not
    against C lsof: `Get-Process`, `Get-NetTCPConnection`, `netstat -ano`, and
    Sysinternals `handle64.exe` (auto-fetched by the harness, `0bb76f0`). The
-   **55-case live smoke harness** (`Invoke-WinlsofSmokeTest.ps1`) stands up
+   **55-case live smoke harness** (`Invoke-LsofRsSmokeTest.ps1`) stands up
    deterministic fixtures (a held file at a known offset, a named pipe with a
    connected client, a mapped data file, TCP v4/v6 listener+established pairs,
-   UDP, child processes with known cwd in 64- and 32-bit) and asserts winlsof
+   UDP, child processes with known cwd in 64- and 32-bit) and asserts lsof-rs
    reports them, cross-checking `handle64.exe` where it can.
 
 Where behavior silently diverged, and how it was caught:
@@ -241,7 +241,7 @@ distinct approaches, each addressing the previous one's shortfall:
 | 1 | `f92d3bc` | Add a timeout around the name query | The worker thread still blocked; timeout freed the *caller* but leaked stuck threads |
 | 2 | `493bbb0` | Bound the **whole per-handle classify** on a worker thread | Better, but exit still hung on the abandoned worker |
 | 3 | `5b6d8fd` | **Hard-terminate the process** after output so a stuck worker can't hang teardown | Treats the symptom at exit; enumeration still paid the stall |
-| 4 | `91e453d` | Add `WINLSOF_TRACE` phase tracing **to find where** it hung | Diagnostic, not a fix — but the pivot point |
+| 4 | `91e453d` | Add `LSOF_RS_TRACE` phase tracing **to find where** it hung | Diagnostic, not a fix — but the pivot point |
 | 5 | `25d9a1c` | **Classify handles by NT type-index** (learned from a NUL probe) so the hang-prone query is *never issued* for the wrong types | The real fix — avoids the dangerous call by construction |
 
 Then a **second, separate hang** surfaced in socket reverse-DNS (`5f8c47b`) and
@@ -311,7 +311,7 @@ steady CLI-growth taxes and I'm ordering by commit count.
    1186 lines). Five approaches to §6.1 plus the two follow-on hangs. **The
    single biggest sink**, and the most preventable with an up-front syscall-hazard
    spike.
-2. **The live smoke harness** — `Invoke-WinlsofSmokeTest.ps1` (16 commits, 706
+2. **The live smoke harness** — `Invoke-LsofRsSmokeTest.ps1` (16 commits, 706
    lines). The §6.2 encoding saga plus continuous fixture growth. High value
    (it caught real bugs) but under-budgeted.
 3. **CLI surface** — `main.rs` (18 commits) + `args.rs` (13 commits). Each new
@@ -387,10 +387,10 @@ what the kit is built to not repeat.
 
 ---
 
-## 10. Addendum — the hardening arc (2026-07-24): the kit applied back to winlsof
+## 10. Addendum — the hardening arc (2026-07-24): the kit applied back to lsof-rs
 
 §1–§8 are the *forensic* record of the original port; §9 redirected the kit. This
-addendum records what happened when the hardened kit was turned back on winlsof
+addendum records what happened when the hardened kit was turned back on lsof-rs
 itself across three merged PRs — the compounding loop closing on its origin
 project. Detail lives in LESSONS #6–#10; the arc:
 
@@ -404,7 +404,7 @@ project. Detail lives in LESSONS #6–#10; the arc:
   found and fixed *while documenting the blocks* (`cf230fe`) — evidence that
   writing the SAFETY comment is itself a review pass, not paperwork.
 - **The oracle-substitution differential was built and promoted (PR #29).** The
-  mode §5 said the kit "must support" now exists: winlsof's socket SET diffed
+  mode §5 said the kit "must support" now exists: lsof-rs's socket SET diffed
   against `Get-NetTCPConnection` / `Get-NetUDPEndpoint` over self-owned fixtures,
   observe-first then hard-gated. It taught LESSONS #6 (the native oracle lies in
   new ways) and, by omission, #8 (a green diff over a socket-only matrix hid that

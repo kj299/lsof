@@ -3,7 +3,7 @@
 > **This kit has moved.** Active development happens in
 > [`kj299/c2rust-port`](https://github.com/kj299/c2rust-port), lifted from this
 > directory at master `c703f2b` (2026-07-18). This copy stays as the historical
-> source alongside the winlsof port it was distilled from and is no longer
+> source alongside the lsof-rs port it was distilled from and is no longer
 > updated — take fixes and new work to `c2rust-port`. The v1.0 backlog that was
 > staged here as issues #8–#19 lives there too.
 

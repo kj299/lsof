@@ -35,7 +35,7 @@ Then run every gate; each is a hard requirement before merge:
    flags.
 6. **Pin the oracle case + merge.** If a bug slipped through, add the golden/
    matrix case that would have caught it *in the same change* (the retrospective's
-   "fix-forward, then immediately pin" rule — winlsof often shipped the fix first
+   "fix-forward, then immediately pin" rule — lsof-rs often shipped the fix first
    and the test late).
 
 Advance the tracker as gates clear:

@@ -47,12 +47,12 @@ bash only; no toolchain needed).
 
 ## Habits the retrospective bought in blood
 
-- **Spike the scary module before scheduling it** (the winlsof hang: 7 commits
+- **Spike the scary module before scheduling it** (the lsof-rs hang: 7 commits
   reactively vs ~1 day up front).
 - **Fix-forward, then immediately pin the regression test** — in the *same*
   change, not "later."
 - **Scaffold tracing + the unsafe-audit gate on day one** — both were added
-  reactively in winlsof and both would have paid immediately.
+  reactively in lsof-rs and both would have paid immediately.
 - **The test harness is software with a hostile host** — budget for its
   encoding/quoting/portability hardening explicitly.
 

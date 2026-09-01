@@ -72,7 +72,7 @@ The kit is designed so an agent reads *verdicts, not corpora*. Lean into that:
 - **`core` builds/tests on the cheap default runner** (no target setup) → fastest
   feedback loop; keep the logic there.
 - **Pin + vendor deps** so a clean-machine build never becomes a re-debug session.
-- **Spike hazardous modules first** — the winlsof hang cost 7 reactive commits vs
+- **Spike hazardous modules first** — the lsof-rs hang cost 7 reactive commits vs
   ~1 day up front. The most expensive inefficiency in the whole retrospective.
 
 ## 3. Security hardening (beyond `SECURITY-CHECKLIST.md`)

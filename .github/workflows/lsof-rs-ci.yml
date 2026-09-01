@@ -1,0 +1,175 @@
+name: lsof-rs CI
+
+# CI for the Rust, memory-safe, Windows-native lsof rewrite under lsof-rs/.
+# The portable core builds and tests on Linux; the native Windows backend is
+# built and tested on a real windows-latest runner (the paths that can't be
+# linked off-Windows).
+#
+# Two trigger notes, both about not burning runner time:
+#
+# `push` is limited to master. Without that, every PR ran this workflow twice —
+# once for the branch push and once for the pull_request — so a PR showed 8
+# check runs, including the native-Windows job (release build + socket
+# differential + the 59-case smoke suite) twice over. The pull_request run
+# covers the branch; this one covers master after a merge.
+#
+# The `!` negations skip documentation-only changes: a markdown edit cannot
+# affect the build, the gates, or the smoke suite. A change touching docs *and*
+# code still runs everything, because the filter tests the union of changed
+# files. (A docs-only PR therefore shows no checks at all — correct, but worth
+# knowing before turning on required status checks.)
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'lsof-rs/**'
+      - '!lsof-rs/**.md'
+      - '!lsof-rs/docs/**'
+      - '.github/workflows/lsof-rs-ci.yml'
+  pull_request:
+    paths:
+      - 'lsof-rs/**'
+      - '!lsof-rs/**.md'
+      - '!lsof-rs/docs/**'
+      - '.github/workflows/lsof-rs-ci.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: lsof-rs
+
+jobs:
+  core-linux:
+    name: core + lints (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test (portable core + CLI via mock backend)
+        run: cargo test --all
+      - name: unsafe-audit (// SAFETY on every unsafe block)
+        # Toolchain-free text scan from the porting kit. HARD gate: every unsafe
+        # block in the backend carries a // SAFETY: justification (131/131), so
+        # a new undocumented block fails CI.
+        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src
+
+      - name: coverage gate (test surface vs the C's feature surface)
+        # The question no other gate asks: are we testing everything the port
+        # claims to do? A green differential says nothing about a feature no
+        # fixture creates — that is how every non-File object type stayed
+        # silently dropped (porting-kit LESSONS #8). HARD gate: the C's full
+        # surface minus explicit, reasoned waivers must all be exercised, so a
+        # newly dropped or newly untested feature fails CI. See coverage/README.md.
+        #
+        # Run once PER PLATFORM. A waiver's reason is usually platform-specific
+        # ("Unix-only", "no Windows equivalent"), and such a reason expires
+        # silently when the port grows a backend for that platform — the file
+        # does not change, so an unscoped gate stays green while excusing
+        # features the new backend is expected to have. Gating each platform
+        # separately is what makes that expiry fail instead of pass.
+        run: |
+          for p in windows linux; do
+            echo "=== coverage gate: $p ==="
+            python3 ../porting-kit/harnesses/coverage/coverage_gate.py \
+              --inventory coverage/feature-inventory-lsof-rs.toml \
+              --matrix coverage/coverage-matrix.toml \
+              --platform "$p"
+          done
+
+  windows:
+    name: native backend (windows)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: clippy (windows)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: build (native Win32 backend)
+        run: cargo build --all
+      - name: test
+        run: cargo test --all
+      - name: build release binary
+        run: cargo build --release --bin lsof
+      - name: socket differential (oracle-substitution vs Get-NetTCPConnection)
+        # Compares lsof-rs's `-i` socket SET against the OS's own table over
+        # self-owned fixtures (see differential/README.md). Built-in cmdlets +
+        # python only; no elevation, no third-party actions.
+        # HARD gate: promoted after consecutive green runs on the hosted runner.
+        # The comparator distinguishes divergence (exit 1) from infra (exit 2),
+        # and the one known data-source divergence (BOUND sockets) is ledgered.
+        shell: pwsh
+        run: ./differential/capture.ps1 -Bin target/release/lsof.exe
+      - name: live smoke test (55 cases over self-owned fixtures)
+        # The end-to-end harness: stands up real fixtures (held file at a known
+        # offset, named pipe with a connected client, mapped data file, TCP
+        # v4/v6 + UDP sockets, child processes with a known cwd) and exercises
+        # every option against them, cross-checking native oracles. Built-in
+        # cmdlets only — nothing is downloaded. It is the source of most of
+        # coverage/coverage-matrix.toml's declared cases; running it here is
+        # what makes that coverage claim real.
+        #
+        # HARD gate: landed observe-first (porting-kit LESSONS #9) and promoted
+        # after its first run surfaced two real findings (an 8.3 short-name gap
+        # in path selectors; a fixture asserting a kernel file position modern
+        # .NET no longer moves — both fixed in PR #37) and then went green on
+        # two consecutive hosted-runner runs (PR #37 + master 5549503),
+        # PASS=53 FAIL=0 SKIP=2 each — the SKIPs are the elevation-dependent
+        # cases, which self-skip by design.
+        shell: pwsh
+        run: ./smoketest/Invoke-LsofRsSmokeTest.ps1 -SkipBuild -Binary target/release/lsof.exe -OutDir smoke-results
+      - name: upload smoke-test results
+        # Uploaded even when the step above fails: results.csv / summary.txt /
+        # transcript.log are how the observe-first runs get read before promotion.
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lsof-rs-smoke-results
+          path: lsof-rs/smoke-results
+          if-no-files-found: warn
+      - name: upload lsof.exe
+        uses: actions/upload-artifact@v6
+        with:
+          name: lsof-exe-windows
+          path: lsof-rs/target/release/lsof.exe
+          if-no-files-found: error
+
+  supply-chain:
+    name: supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        # advisories + licenses + bans + sources, per lsof-rs/deny.toml. The
+        # third-party surface is just the windows-sys family (MIT/Apache-2.0).
+        run: cargo deny check
+
+  fuzz:
+    name: fuzz smoke (arg parser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz the argument parser (short smoke)
+        # Adversarial input into the hand-rolled option parser: it must never
+        # panic. A short time-boxed run gates every PR; a longer nightly run can
+        # follow. See lsof-rs/fuzz/.
+        run: cargo fuzz run parse_args -- -max_total_time=45 -rss_limit_mb=2048

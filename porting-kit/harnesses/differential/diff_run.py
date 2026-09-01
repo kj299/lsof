@@ -96,7 +96,7 @@ def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers, ignore_exi
         o_n, r_n = norm(o_out), norm(r_out)
         # Fidelity is stdout AND exit code: a rewrite that prints the right thing
         # but returns the wrong status (lsof exits 1 on no-match; scripts branch
-        # on it) is NOT a match. Exit-code drift was a real winlsof bug.
+        # on it) is NOT a match. Exit-code drift was a real lsof-rs bug.
         # (LESSONS #4). `--ignore-exit` opts out for tools without stable codes.
         stdout_match = o_n == r_n
         exit_match = ignore_exit or (o_rc == r_rc)

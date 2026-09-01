@@ -1,0 +1,253 @@
+# feature-inventory — lsof-rs (the Windows Rust port of lsof)
+#
+# [features] is the C's FULL enumerated surface, extracted from src/main.c and
+# lib/print.c by the kit's coverage gate, plus lsof-rs's own Windows-native TYPE
+# codes. Waivers SUBTRACT from it. Keeping the whole C surface here is the point:
+# when the C grows a feature, it shows up as uncovered rather than never being
+# noticed, and the waiver list is a reviewable record of every conscious
+# exclusion (LESSONS #8 — nothing is dropped silently).
+#
+# Gate:  python3 ../../porting-kit/harnesses/coverage/coverage_gate.py \
+#          --inventory feature-inventory-lsof-rs.toml --matrix coverage-matrix.toml
+
+[features]
+options = [
+  "A", "C", "D", "E", "F", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+  "S", "T", "U", "V", "X", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i",
+  "j", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "v", "w", "x", "z"
+]
+# Options that consume a value, so `-iTCP:80` counts as `i` alone and the
+# value's characters are never miscredited as coverage.
+takes_value = [
+  "A", "D", "F", "K", "L", "S", "T", "Z", "c", "d", "e", "f", "g", "i", "k",
+  "m", "o", "p", "r", "s", "u", "x", "z"
+]
+types = [
+  "ATALK", "BLK", "CHR", "DEL", "DIR", "DOOR", "EVENTFD", "FIFO",
+  "FSEVENTS", "IPv4", "IPv6", "KQUEUE", "LINK", "MPB", "MPC", "NPOLICY",
+  "PAS", "PAXV", "PCRE", "PCTL", "PCUR", "PCWD", "PDIR", "PETY", "PFD",
+  "PFDR", "PFIL", "PFPR", "PGD", "PGID", "PIPE", "PLC", "PLDR", "PLDT",
+  "PLPI", "PLST", "PLU", "PLWG", "PLWI", "PLWS", "PLWU", "PLWX", "PMAP",
+  "PMEM", "PMPS", "PNTF", "POBJ", "PODR", "POLP", "POPF", "POPG", "PORT",
+  "PREG", "PRMP", "PROCDSC", "PRTD", "PSGA", "PSIN", "PSTA", "PSXMQ",
+  "PSXSEM", "PSXSHM", "PTS", "PUSG", "PW", "PXMP", "REG", "SHM", "SMT",
+  "SOCK", "STR", "STSO", "UNKN", "UNKNcwd", "UNKNdel", "UNKNfd", "UNKNmem",
+  "UNKNrtd", "UNKNtxt", "UNNM", "UNSP", "VBAD", "VBLK", "VCHR", "VDIR",
+  "VLNK", "VMPC", "VNON", "VREG", "XNAM", "XSD", "XSEM", "a_inode", "ax25",
+  "icmp", "inet", "ipx", "key", "lla", "ndrv", "netlink", "pack", "ppp",
+  "raw", "raw6", "rte", "sock", "systm", "unix", "unknown", "x.25"
+]
+# Windows-native TYPE codes with no C counterpart — the all-handle scan's
+# kernel object types (lsof-core `FileType::code`). Exactly the class that was
+# silently dropped until PR #31, so they are required coverage here.
+extra = [
+  "type:EVT", "type:KEY", "type:MUT", "type:PROC", "type:SECT", "type:THRD",
+  "type:TOKN"
+]
+
+# ============================================================== waivers
+#
+# PLATFORM SCOPE. A waiver carries `platforms = [...]` when its *reason* is
+# platform-specific. This is not bookkeeping: most of the reasons below were
+# written when "Unix" meant "not our platform", and they silently stopped being
+# true the day the Linux backend merged. A waiver reading "SELinux contexts" is
+# an honest exclusion on Windows and a false one on Linux, and an unscoped gate
+# cannot tell the two apart — it stays green either way. Scoping makes that
+# expiry a gate failure instead of a comment nobody re-reads.
+#
+#   platforms omitted     -> valid on every platform (genuinely other-dialect)
+#   platforms = [...]     -> valid only there; elsewhere the feature is required
+#
+# The gate is run once per platform:
+#   coverage_gate.py --inventory ... --matrix ... --platform windows
+#   coverage_gate.py --inventory ... --matrix ... --platform linux
+#
+# 1a. Options that are N/A on BOTH backends — other dialects entirely, so no
+#     scope is needed. (Reasons from docs/feature-parity-plan.md.)
+
+[[waive]]
+id = "opt:A"
+reason = "AFS NWA mode — HP-UX/AIX AFS; neither backend's platform has it"
+
+[[waive]]
+id = "opt:C"
+reason = "kernel name cache — a BSD/Solaris construct; neither Windows nor /proc has one to disable"
+
+[[waive]]
+id = "opt:H"
+reason = "legacy \"headers\" toggle on certain dialects"
+
+[[waive]]
+id = "opt:k"
+reason = "kernel symbol file — for dialects that read kernel memory; both backends read a documented API instead"
+
+[[waive]]
+id = "opt:z"
+reason = "Solaris zones"
+
+# 1b. Options waived ONLY on Windows. Each of these is a real feature of the C
+#     on Linux, so on that platform the waiver does not apply and the option
+#     becomes required — see 1c for the debt this exposes.
+
+[[waive]]
+ids = ["opt:M", "opt:N"]
+platforms = ["windows"]
+reason = "portmapper / NFS — Unix RPC and NFS have no Windows analogue"
+
+[[waive]]
+id = "opt:S"
+platforms = ["windows"]
+reason = "lstat/readlink timeout — lsof-rs has its own bounded-worker model"
+
+[[waive]]
+id = "opt:b"
+platforms = ["windows"]
+reason = "\"avoid blocking kernel\" — superseded by lsof-rs's bounded-worker model"
+
+[[waive]]
+ids = ["opt:X", "opt:Z"]
+platforms = ["windows"]
+reason = "epoll bridge / SELinux contexts — Linux kernel features with no Windows counterpart"
+
+[[waive]]
+ids = ["opt:e", "opt:f", "opt:m", "opt:x"]
+platforms = ["windows"]
+reason = "mount-table concepts (exempt FS, FS detail, mtab supplement, cross-mount walk) — Windows has no mount table in this sense"
+
+# 1c. COVERAGE DEBT on Linux. These are the waivers above whose justification
+#     was "Unix-only" — true of Windows, false here. The C implements every one
+#     of them on Linux; this port does not, yet. They are declared as debt with
+#     the phase that closes them, NOT re-waived as out of scope: a waiver says
+#     "we will never do this", and that would be untrue.
+
+[[waive]]
+ids = ["opt:e", "opt:f", "opt:m", "opt:x"]
+platforms = ["linux"]
+reason = "DEBT (L2): needs /proc/mounts; unimplemented and untested"
+
+[[waive]]
+ids = ["opt:M", "opt:N"]
+platforms = ["linux"]
+reason = "DEBT (L2+): portmapper and NFS reporting; unimplemented and untested"
+
+[[waive]]
+id = "opt:X"
+platforms = ["linux"]
+reason = "DEBT (L2): epoll bridge, needs anon_inode+fdinfo correlation; unimplemented"
+
+[[waive]]
+id = "opt:Z"
+platforms = ["linux"]
+reason = "DEBT (L2): SELinux contexts from /proc/<pid>/attr/current; unimplemented"
+
+[[waive]]
+id = "opt:S"
+platforms = ["linux"]
+reason = "DEBT (L2): the C's stat/readlink timeout; L0 relies on /proc being non-blocking, which is true for local FS and not for a hung NFS mount"
+
+[[waive]]
+id = "opt:b"
+platforms = ["linux"]
+reason = "DEBT (L2): pairs with -S; no avoid-blocking mode implemented"
+
+# 2. TYPE codes of other dialects, or unreachable on Windows. Grouped `ids`
+#    share a reason; every id is still named explicitly — no globs, so a
+#    feature added to the C later can never be swallowed by an old waiver.
+
+[[waive]]
+ids = [
+  "type:PAS", "type:PAXV", "type:PCRE", "type:PCTL", "type:PCUR",
+  "type:PCWD", "type:PDIR", "type:PETY", "type:PFD", "type:PFDR",
+  "type:PFIL", "type:PFPR", "type:PGD", "type:PGID", "type:PLC",
+  "type:PLDR", "type:PLDT", "type:PLPI", "type:PLST", "type:PLU",
+  "type:PLWG", "type:PLWI", "type:PLWS", "type:PLWU", "type:PLWX",
+  "type:PMAP", "type:PMEM", "type:PMPS", "type:PNTF", "type:POBJ",
+  "type:PODR", "type:POLP", "type:POPF", "type:POPG", "type:PORT",
+  "type:PREG", "type:PRMP", "type:PROCDSC", "type:PRTD", "type:PSGA",
+  "type:PSIN", "type:PSTA", "type:PSXMQ", "type:PSXSEM", "type:PSXSHM",
+  "type:PTS", "type:PUSG", "type:PW", "type:PXMP"
+]
+reason = "Solaris /proc file types — no Windows equivalent"
+
+[[waive]]
+ids = [
+  "type:VBAD", "type:VBLK", "type:VCHR", "type:VDIR", "type:VLNK",
+  "type:VMPC", "type:VNON", "type:VREG"
+]
+reason = "BSD/macOS vnode types — lsof-rs reports Windows object types instead"
+
+[[waive]]
+ids = [
+  "type:ATALK", "type:lla", "type:ndrv", "type:ppp", "type:systm"
+]
+reason = "macOS/BSD link-layer and AppleTalk families — no backend targets those dialects"
+
+# Socket families the Linux kernel really has. On Windows they are unreachable;
+# on Linux they are exactly what phase L1 exists to classify, so the same ids
+# are debt there rather than waived away.
+[[waive]]
+ids = [
+  "type:a_inode", "type:ax25", "type:icmp", "type:inet", "type:ipx",
+  "type:key", "type:netlink", "type:pack", "type:raw", "type:raw6",
+  "type:rte", "type:sock", "type:x.25"
+]
+platforms = ["windows"]
+reason = "Unix socket families not reachable on Windows"
+
+[[waive]]
+ids = [
+  "type:a_inode", "type:ax25", "type:icmp", "type:inet", "type:ipx",
+  "type:key", "type:netlink", "type:pack", "type:raw", "type:raw6",
+  "type:rte", "type:sock", "type:x.25"
+]
+platforms = ["linux"]
+reason = "DEBT (L2): L1 resolves TCP/UDP/raw/unix sockets into IPv4/IPv6/unix rows, but these are lsof's per-FAMILY type codes, which need /proc/net/netlink, /proc/net/packet and the C's family naming; an fd in a family not read here still shows the unresolved SOCK row"
+
+[[waive]]
+ids = [
+  "type:DOOR", "type:FSEVENTS", "type:KQUEUE", "type:MPB", "type:MPC",
+  "type:NPOLICY", "type:SMT", "type:STR", "type:STSO", "type:XNAM",
+  "type:XSD", "type:XSEM"
+]
+reason = "Solaris doors/STREAMS, BSD kqueue, macOS fsevents — other dialects entirely"
+
+[[waive]]
+ids = [
+  "type:DEL", "type:EVENTFD", "type:LINK", "type:SHM", "type:SOCK",
+  "type:UNKN", "type:UNKNcwd", "type:UNKNdel", "type:UNKNfd",
+  "type:UNKNmem", "type:UNKNrtd", "type:UNKNtxt", "type:UNNM", "type:UNSP"
+]
+platforms = ["windows"]
+reason = "Unix object types with no Windows analogue"
+
+[[waive]]
+ids = [
+  "type:DEL", "type:EVENTFD", "type:SHM", "type:UNKNdel", "type:UNKNmem",
+  "type:UNNM", "type:UNSP"
+]
+platforms = ["linux"]
+reason = "DEBT (L2): deleted-file marking, named anon_inode kinds, and mem rows from /proc/<pid>/maps"
+
+[[waive]]
+ids = ["type:UNKN", "type:UNKNcwd", "type:UNKNfd", "type:UNKNrtd", "type:UNKNtxt"]
+platforms = ["linux"]
+reason = "DEBT (L2): the C emits these on an unreadable link, with the errno; L0 omits the row entirely (see lsof-backend-linux crate docs)"
+
+# type:FIFO and type:BLK are NOT waived on Linux: L0 emits both today
+# (S_IFIFO -> FIFO, S_IFBLK -> BLK), so they are covered, not excused.
+[[waive]]
+id = "type:FIFO"
+platforms = ["windows"]
+reason = "Windows has no FIFO distinct from named pipes — pipe handles are typed PIPE"
+
+[[waive]]
+id = "type:BLK"
+platforms = ["windows"]
+reason = "Windows exposes no block-device object type through the handle table"
+
+# 3. COVERAGE DEBT — none. Every in-scope feature is exercised by a real test.
+#    (Closed 2026-07-25: `-u` gained parser + selection tests, and the six
+#    object types gained `enumerates_real_kernel_object_types`, which creates
+#    real Event/Mutant/Section/process/token/char-device handles and runs the
+#    actual enumeration over them. If a fixture is ever removed, the gate fails
+#    rather than quietly reverting to an untested feature.)

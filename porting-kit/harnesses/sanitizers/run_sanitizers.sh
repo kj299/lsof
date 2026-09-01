@@ -4,7 +4,7 @@
 #   * Miri            — UB in the pure/unsafe Rust (OOB, use-after-free, invalid
 #                       aligns, data races in `unsafe`). Runs the test suite.
 #   * ASan/UBSan      — the same classes at the real FFI boundary (needs nightly
-#                       -Zsanitizer). TSan for threaded code (the winlsof hang
+#                       -Zsanitizer). TSan for threaded code (the lsof-rs hang
 #                       class — worker threads over shared handles).
 # (PLAYBOOK Phase 4 gate 4; SECURITY-CHECKLIST "no UB at the FFI boundary".)
 #

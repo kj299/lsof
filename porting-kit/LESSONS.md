@@ -18,7 +18,7 @@ Format per entry:
 ## 001. The kit's own dry-run against lsof's failure inventory
 
 - **Date:** 2026-07-05
-- **Codebase:** winlsof (C `lsof` → Rust, Windows) — Phase 3 self-validation
+- **Codebase:** lsof-rs (C `lsof` → Rust, Windows) — Phase 3 self-validation
 - **What happened:** Walking `PLAYBOOK.md` end-to-end against the
   `RETROSPECTIVE-lsof.md` §6 failure inventory surfaced five failures the
   playbook, as first drafted, would *not* have prevented. Each was fixed in the
@@ -41,10 +41,10 @@ Format per entry:
      timeout is a design smell to be *designed out*, not wrapped.
      → *Section amended:* PLAYBOOK · Phase 4 gate 2.
 
-  3. **The research-grade spike-and-gate ritual — winlsof's biggest win — was
+  3. **The research-grade spike-and-gate ritual — lsof-rs's biggest win — was
      underweighted.** The draft only spiked *hazardous modules*, not *capabilities
      that might be impossible*. Those need effort/confidence ratings, a written
-     decision gate, and a pivot check (winlsof's ETW pivot: couldn't get the real
+     decision gate, and a pivot check (lsof-rs's ETW pivot: couldn't get the real
      FD, but shipped raw/ICMP/AF_UNIX coverage instead).
      → **Kit change:** added the explicit spike-and-gate sub-process.
      → *Section amended:* PLAYBOOK · Phase 4 (research-grade capability).
@@ -62,7 +62,7 @@ Format per entry:
      → *Section amended:* PLAYBOOK · Phase 3.
 
 - **Validation the kit already pays off:** running the new
-  `unsafe-audit/audit_unsafe.py` against the shipped winlsof backend reported
+  `unsafe-audit/audit_unsafe.py` against the shipped lsof-rs backend reported
   **131 real `unsafe` blocks, 51 undocumented** — empirically confirming the
   retrospective's inferred "144-vs-91" gap (the tool correctly excludes the
   comment/string matches that inflated the raw grep). The hard-fail gate would
@@ -79,7 +79,7 @@ Format per entry:
 ## 002. A noisy Phase-0 scanner is worse than none — it gets ignored
 
 - **Date:** 2026-07-05
-- **Codebase:** winlsof — dry-run pass 1 (kit run against lsof's *actual* C tree)
+- **Codebase:** lsof-rs — dry-run pass 1 (kit run against lsof's *actual* C tree)
 - **What happened:** Running `c-flaw-scan/scan_c_flaws.py` against real lsof
   (`lib/ src/`) returned **1044 hits, of which 828 were false "format-string"
   positives.** The check flagged arg 0 of every printf-family call, but the
@@ -109,10 +109,10 @@ Format per entry:
 ## 003. A "delegated" control that nothing enforces is not a control
 
 - **Date:** 2026-07-05
-- **Codebase:** winlsof — dry-run pass 2 (kit run against lsof/winlsof's real code)
+- **Codebase:** lsof-rs — dry-run pass 2 (kit run against lsof/lsof-rs's real code)
 - **What happened:** The unsafe-audit harness documents that it covers `unsafe {}`
   blocks + `unsafe impl`, and *delegates* `unsafe fn` `# Safety`-doc coverage to
-  "clippy's `missing_safety_doc`." But grepping the shipped winlsof backend found
+  "clippy's `missing_safety_doc`." But grepping the shipped lsof-rs backend found
   **11 `unsafe fn` / `unsafe extern fn` definitions** (ETW callbacks and TDH
   property parsers — real FFI-facing unsafe surface), and **neither the CI
   template nor the skeleton enabled that clippy lint** (it is allow-by-default).
@@ -137,12 +137,12 @@ Format per entry:
 ## 004. Differential fidelity is stdout AND exit code, not stdout alone
 
 - **Date:** 2026-07-05
-- **Codebase:** winlsof — dry-run pass 3 (kit run against lsof's real behavior)
+- **Codebase:** lsof-rs — dry-run pass 3 (kit run against lsof's real behavior)
 - **What happened:** `diff_run.py` *captured* both binaries' exit codes but its
   verdict was computed from normalized stdout only — the codes were reported and
   ignored. So a rewrite with identical output and a wrong exit status passed as
   MATCH. That is a real fidelity hole: lsof exits 1 on "no matching open files"
-  and shell scripts branch on it (`lsof -t … || echo none`); winlsof itself had a
+  and shell scripts branch on it (`lsof -t … || echo none`); lsof-rs itself had a
   documented exit-code-capture bug (commit `3a56937`). A harness that blesses the
   wrong status defeats the point of a differential.
 - **Kit change:** the verdict is now `stdout_match AND exit_match`; an exit-only
@@ -155,17 +155,17 @@ Format per entry:
 ## 005. Path-scope CI, or unrelated changes make PRs look "unstable"
 
 - **Date:** 2026-07-05
-- **Codebase:** winlsof / lsof — the repo's own CI, found while landing the kit
+- **Codebase:** lsof-rs / lsof — the repo's own CI, found while landing the kit
 - **What happened:** The kit's PR merged from GitHub `mergeable_state: "unstable"`.
   Nothing was failing — all checks went green — but the C project's `build.yml`
   (a full autotools `configure`/`make`/`make check`/`distcheck` on ubuntu-24.04 +
   ubuntu-22.04 + macOS) triggered on **every push/PR with no path filter**, so a
-  *docs-and-scripts-only* `porting-kit/` change (and every `winlsof/` change,
+  *docs-and-scripts-only* `porting-kit/` change (and every `lsof-rs/` change,
   which already has its own path-scoped CI) kicked off three heavyweight C builds
   and left the PR "unstable" until they drained. Wasted CI, and a merge state that
   reads as broken when it isn't. `mergeable_state: "unstable"` means *pending or
   failing non-required checks* — not necessarily failure.
-- **Kit change:** added `paths-ignore: ['porting-kit/**', 'winlsof/**']` to the
+- **Kit change:** added `paths-ignore: ['porting-kit/**', 'lsof-rs/**']` to the
   C workflow's `push` and `pull_request` triggers (mirroring the path-scoping the
   Rust CI already used), and taught the kit's CI template to scope each
   language/subtree's workflow to its own paths. In a gradual port — where C and
@@ -198,10 +198,10 @@ the emphasized half.
 ## 006. Oracle-substitution differential — built, and the native oracle lies in new ways
 
 - **Date:** 2026-07-24
-- **Codebase:** winlsof — the socket differential, promoted to a hard CI gate (PR #29)
+- **Codebase:** lsof-rs — the socket differential, promoted to a hard CI gate (PR #29)
 - **What happened:** RETROSPECTIVE §5 / LESSONS #4 named "oracle-substitution" as
   the differential mode the kit *needs* when the C binary won't run on the target
-  (no lsof on Windows). This session built it: winlsof `-i` socket SET vs
+  (no lsof on Windows). This session built it: lsof-rs `-i` socket SET vs
   `Get-NetTCPConnection` / `Get-NetUDPEndpoint` over self-owned fixtures, landed
   observe-first then promoted to a hard gate once green. Two failure classes
   appeared that a same-binary diff never produces. (a) **The oracle's serializer
@@ -225,7 +225,7 @@ the emphasized half.
 ## 007. Two gates for one property must accept the same thing (audit vs clippy SAFETY placement)
 
 - **Date:** 2026-07-24
-- **Codebase:** winlsof — the safety-gate PR (#30), caught in CI at `etw.rs`
+- **Codebase:** lsof-rs — the safety-gate PR (#30), caught in CI at `etw.rs`
 - **What happened:** The kit runs two checks for "every `unsafe` block is
   documented": the toolchain-free `audit_unsafe.py` (hard gate) and clippy's
   `undocumented_unsafe_blocks` (wired via `[workspace.lints]` + `-D warnings`,
@@ -251,7 +251,7 @@ the emphasized half.
 ## 008. "Matches the oracle" ≠ "ports all functionality" — a differential is only as complete as its matrix
 
 - **Date:** 2026-07-24
-- **Codebase:** winlsof — the full-port depth gap analysis (PR #31)
+- **Codebase:** lsof-rs — the full-port depth gap analysis (PR #31)
 - **What happened:** A gap analysis found the *option surface* complete (47/47
   switches) and the socket differential fully green — yet the port silently
   dropped **every non-File kernel object type**: registry Keys, Events, Mutants,
@@ -278,7 +278,7 @@ the emphasized half.
 ## 009. A superseded CI run is not a passed run — the trap of a CI-only-validated backend
 
 - **Date:** 2026-07-24
-- **Codebase:** winlsof — the Windows backend, un-buildable on the Linux dev host
+- **Codebase:** lsof-rs — the Windows backend, un-buildable on the Linux dev host
 - **What happened:** The Windows crate compiles only on Windows, so its gates
   (clippy/build/test/differential) can *only* run in CI. Two hazards followed.
   First, promoting a brand-new gate straight to hard-fail risks a flaky harness
@@ -301,7 +301,7 @@ the emphasized half.
 ## 010. The test harness's supply chain counts too — don't download-and-run a binary oracle
 
 - **Date:** 2026-07-24
-- **Codebase:** winlsof — the live smoke harness (`Invoke-WinlsofSmokeTest.ps1`)
+- **Codebase:** lsof-rs — the live smoke harness (`Invoke-LsofRsSmokeTest.ps1`)
 - **What happened:** The smoke harness auto-fetched Sysinternals `handle64.exe`
   from a live URL (RETROSPECTIVE §5, commit `0bb76f0`) and executed it as a handle
   oracle. That is a supply-chain hole in the *test* path: a compromised host (or a
@@ -320,7 +320,7 @@ the emphasized half.
 ## 011. The matrix-coverage gate — #8 promoted from a discipline to a control
 
 - **Date:** 2026-07-24
-- **Codebase:** winlsof / lsof — closing the "next target" named by LESSONS #8
+- **Codebase:** lsof-rs / lsof — closing the "next target" named by LESSONS #8
   and RETROSPECTIVE §10
 - **What happened:** #8 established that a green differential over an incomplete
   matrix is silent about everything the matrix omits, and left the fix as a
@@ -352,7 +352,7 @@ the emphasized half.
 ## 012. A coverage gate that over-credits is worse than none — and the inventory must hold the WHOLE surface
 
 - **Date:** 2026-07-25
-- **Codebase:** winlsof — curating the real inventory and wiring the #011 gate
+- **Codebase:** lsof-rs — curating the real inventory and wiring the #011 gate
   into CI (the first real use of the harness)
 - **What happened:** Applying the new gate to a real port immediately found two
   design defects in the gate itself — neither visible when it was written against
@@ -362,14 +362,14 @@ the emphasized half.
   1. **False coverage.** Option coverage was inferred by walking every character
      of an argument token, so a matrix case running `-iTCP:80` credited `opt:T`,
      `opt:C` and `opt:P` — the *value's* characters read as option letters. On
-     winlsof's real suite that inflated coverage by three options. A coverage
+     lsof-rs's real suite that inflated coverage by three options. A coverage
      gate that over-credits doesn't merely mis-measure, it **hides the gaps it
      exists to find** — the same failure mode as #2's noisy scanner, inverted.
      The fix was already in the source data: the C's optstring marks
      value-taking options (`c:` vs `a`), so the extractor now records
      `takes_value` and cluster-scanning stops at the first such option.
   2. **The inventory must be the full surface, not the in-scope subset.** The
-     first curation listed only what winlsof supports and kept the exclusions
+     first curation listed only what lsof-rs supports and kept the exclusions
      elsewhere — so every waiver referenced an id not in the inventory and the
      tool's own stale-waiver check fired 118 times. Modelling it the other way
      (inventory = the C's *entire* enumerated surface, waivers *subtract*) makes
@@ -383,26 +383,26 @@ the emphasized half.
 - **Result on the real port:** 163 features (45 C options + 111 C TYPE codes + 7
   Windows-native), 125 waived with reasons, 38 covered, and **7 genuine gaps**
   found — `-u` shipped but never exercised, and five all-handle object types
-  (`EVT`/`MUT`/`SECT`/`PROC`/`TOKN`) that PR #31 taught winlsof to emit but that
+  (`EVT`/`MUT`/`SECT`/`PROC`/`TOKN`) that PR #31 taught lsof-rs to emit but that
   no fixture creates. Recorded as an explicit, individually-named *coverage debt*
   section the gate prints every run, so today's debt is visible while everything
   else is hard-gated — a newly dropped feature now fails CI.
 - **Kit change:** `coverage_gate.py` gained `takes_value` extraction + value-aware
   cluster scanning (pinned: `-iTCP:80` must not credit T/C/P) and grouped `ids`
   waivers; `emit_inventory` emits `takes_value`; the full-surface-minus-waivers
-  model is documented in the harness, the lsof inventory header, and winlsof's
-  `coverage/README.md`. Gate wired into winlsof CI as a hard gate.
+  model is documented in the harness, the lsof inventory header, and lsof-rs's
+  `coverage/README.md`. Gate wired into lsof-rs CI as a hard gate.
 - **Section amended:** harnesses/coverage/coverage_gate.py (`_optstring_letters`,
   `extract_options`, `matrix_coverage`, `load_inventory`, self-test);
-  harnesses/coverage/feature-inventory-lsof.toml; winlsof/coverage/ (new);
-  .github/workflows/winlsof-ci.yml (core-linux).
+  harnesses/coverage/feature-inventory-lsof.toml; lsof-rs/coverage/ (new);
+  .github/workflows/lsof-rs-ci.yml (core-linux).
 
 ---
 
 ## 013. The smoke-harness arc — observe-first, run end to end (PRs #36–#39)
 
 - **Date:** 2026-07-25
-- **Codebase:** winlsof — wiring the 55-case live smoke harness into CI,
+- **Codebase:** lsof-rs — wiring the 55-case live smoke harness into CI,
   fixing what its first run found, and promoting it to a hard gate
 - **What happened:** The coverage matrix (#012) credited three test sources,
   but CI executed only two — the smoke harness, source of most declared cases,
@@ -414,12 +414,12 @@ the emphasized half.
      "covered", the covering test never ran. Every source the matrix credits is
      now executed *and* enforced.
      → *Section amended:* input-matrix header ("a case may only cite a test CI
-     executes"); winlsof/coverage/README.md.
+     executes"); lsof-rs/coverage/README.md.
 
   2. **The CI runner is yet another host — including its *runtime versions*.**
      The first hosted run failed 2/55 for host reasons no dev box showed:
      hosted `%TEMP%` is an 8.3 short name (`C:\Users\RUNNER~1\...`), which
-     defeated winlsof's literal path-selector matching — a *real product bug*
+     defeated lsof-rs's literal path-selector matching — a *real product bug*
      (fixed: selectors are canonicalized to the long form the backend reports);
      and the `-o` fixture seeked via .NET `FileStream`, whose .NET 6+
      implementation does positional I/O and never moves the kernel file
@@ -446,11 +446,11 @@ the emphasized half.
      → *Section amended:* PLAYBOOK · cross-cutting (promotion mechanics).
 
   Hygiene coda: workflow-file edits made in this arc (#36/#38) each launched
-  the three heavyweight C builds — `build.yml` ignored the winlsof *trees* but
-  not the winlsof *workflow files*; #005's scoping rule extended to them (#39).
-- **Kit change:** the PLAYBOOK and matrix-header edits above; the winlsof
+  the three heavyweight C builds — `build.yml` ignored the lsof-rs *trees* but
+  not the lsof-rs *workflow files*; #005's scoping rule extended to them (#39).
+- **Kit change:** the PLAYBOOK and matrix-header edits above; the lsof-rs
   fixes themselves live in the port (selector canonicalization + unit tests;
-  kernel-pointer fixture; hard-gated smoke step in winlsof-ci.yml).
+  kernel-pointer fixture; hard-gated smoke step in lsof-rs-ci.yml).
 - **Section amended:** PLAYBOOK · Phase 2 + cross-cutting;
   harnesses/differential/input-matrix.example.toml (header);
   .github/workflows/build.yml (`paths-ignore`).
@@ -460,7 +460,7 @@ the emphasized half.
 ## 014. Release mechanics are part of the environment — preflight them like the toolchain
 
 - **Date:** 2026-07-25
-- **Codebase:** winlsof — cutting v0.3.0 (PRs #41–#42 + the `winlsof-v0.3.0`
+- **Codebase:** lsof-rs — cutting v0.3.0 (PRs #41–#42 + the `winlsof-v0.3.0`
   tag/release) from an automated remote session
 - **What happened:** Every *code* gate was green and the release commit was
   merged — and then the release stalled on mechanics no gate had ever checked.

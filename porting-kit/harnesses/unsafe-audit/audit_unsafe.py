@@ -2,7 +2,7 @@
 """Unsafe-audit harness — every `unsafe {}` block and `unsafe impl` must carry a
 `// SAFETY:` justification. Hard-fails (exit 1) on any undocumented block.
 
-This is the control the winlsof retrospective wished for: it counted 144 grep
+This is the control the lsof-rs retrospective wished for: it counted 144 grep
 hits of "unsafe" but only 91 `// SAFETY:` comments, unable to tell real blocks
 from the word appearing in comments/strings. This tool tokenizes just enough to
 ignore comments and string literals, so it counts *real* blocks — the same scope
@@ -169,7 +169,7 @@ def has_safety_comment(lines, line_no: int, window: int) -> bool:
     deliberately NOT accepted: clippy's `undocumented_unsafe_blocks` credits a
     SAFETY comment only when it precedes the block, so honouring a trailing one
     here would greenlight code that then fails the clippy gate in CI — the exact
-    split that bit winlsof (LESSONS #007). Keeping the two gates in agreement
+    split that bit lsof-rs (LESSONS #007). Keeping the two gates in agreement
     means a green audit predicts a green clippy. The scan stops at the first real
     code line, so one block's SAFETY comment cannot bleed onto a following block,
     and gives up after `window` lines."""

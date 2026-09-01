@@ -1,7 +1,7 @@
 # PLAYBOOK — porting a C codebase to Rust, safely
 
 A repeatable, codebase-agnostic procedure for rewriting C in Rust with **safety
-and security as the primary goal** — distilled from the winlsof port (see
+and security as the primary goal** — distilled from the lsof-rs port (see
 [`RETROSPECTIVE-lsof.md`](RETROSPECTIVE-lsof.md)) and designed to compound after
 every use (see [`CLAUDE.md`](CLAUDE.md) and [`LESSONS.md`](LESSONS.md)).
 
@@ -46,7 +46,7 @@ per-module control ledger the phases refer to.
   external call the port will make, record three properties: can it **block
   indefinitely** (→ needs a timeout / worker thread / a design that avoids it),
   does it need **privilege**, does its behavior **vary by OS/version**? This is
-  what makes Phase 1's "spike the scary module" rule actually fire. The winlsof
+  what makes Phase 1's "spike the scary module" rule actually fire. The lsof-rs
   hang cost seven commits precisely because `NtQueryObject`'s blocking behavior
   was never classified up front — the spike-first rule can't trigger on a hazard
   no one wrote down.
@@ -87,7 +87,7 @@ it lands.
 flagged for a pre-port spike.
 **Artifacts:** ordered list in the `progress` table.
 **lsof failure modes this prevents:** ad-hoc order that defers integration risk.
-winlsof's phase order was sound; its one miss was not spiking the hang first.
+lsof-rs's phase order was sound; its one miss was not spiking the hang first.
 
 ---
 
@@ -103,7 +103,7 @@ winlsof's phase order was sound; its one miss was not spiking the hang first.
   and flags fields that vary (PIDs, timestamps, addresses, ordering). Those feed
   the normalization rules (`harnesses/differential/normalize.py`), so a real
   regression isn't masked by noise and noise isn't mistaken for a regression.
-- If the reference binary **cannot run on your dev/target environment** (winlsof:
+- If the reference binary **cannot run on your dev/target environment** (lsof-rs:
   C lsof doesn't run on Windows), substitute:
   - **structural golden tests** for output *format* (columns, field codes, JSON
     shape), and
@@ -111,14 +111,14 @@ winlsof's phase order was sound; its one miss was not spiking the hang first.
     facts a different way).
 - **Harden the harness for its host** (LESSONS #1). The test harness is software,
   and it runs in a shell with its own encoding/quoting model that *will* bite —
-  winlsof spent six commits on PowerShell-5.1 / Windows-1252 breakage in the
+  lsof-rs spent six commits on PowerShell-5.1 / Windows-1252 breakage in the
   harness itself. Two defenses: write kit-level harnesses in a portable language
   (these are Python + POSIX sh on purpose, not the target's shell), and pin the
   tool's default output to the lowest-common-denominator encoding of the target's
-  default shell (winlsof: ASCII default, UTF-8 opt-in). And the **CI runner is
+  default shell (lsof-rs: ASCII default, UTF-8 opt-in). And the **CI runner is
   yet another host** (LESSONS #13): hosted runners differ from any dev box in
   ways fixtures silently assume — 8.3 short paths in `%TEMP%`, always-elevated
-  consoles, a newer shell *runtime* (winlsof's `-o` fixture seeked via .NET
+  consoles, a newer shell *runtime* (lsof-rs's `-o` fixture seeked via .NET
   `FileStream`, which stopped moving the kernel file pointer in .NET 6+; green
   on PS 5.1 locally, red on pwsh CI). Establish fixture ground truth **at the
   layer the tool reads it** (set the kernel state, don't trust a runtime
@@ -154,12 +154,12 @@ The invariant it encodes:
   wait for the first hang to add it.
 
 **Environment preflight** (LESSONS #1): before the loop, confirm the toolchain
-target actually links here (winlsof lost time to an MSVC-vs-GNU linker mismatch)
+target actually links here (lsof-rs lost time to an MSVC-vs-GNU linker mismatch)
 and that the build directory is not a synced/locked folder (OneDrive locked
 `target\` → `os error 5`). Cheap checks that prevent days of "is it my code or my
 machine?". If the port will be released from an automated session, preflight the
 **release credentials** now too (LESSONS #14): can this identity push a tag?
-dispatch a workflow? create a release? winlsof discovered at release time that
+dispatch a workflow? create a release? lsof-rs discovered at release time that
 its sandbox could push branches but not tags and could not dispatch workflows —
 a ten-second check months earlier.
 
@@ -168,7 +168,7 @@ a ten-second check months earlier.
 gate wired into CI (`harnesses/unsafe-audit`); trace logger present; environment
 preflight clean.
 **Artifacts:** the workspace; CI config from `harnesses/ci/porting-ci.template.yml`.
-**lsof failure modes this prevents:** scattered `unsafe` (winlsof kept 0 in core /
+**lsof failure modes this prevents:** scattered `unsafe` (lsof-rs kept 0 in core /
 144 in the sys layer — but only 91 documented; the gate makes the gap a build
 failure). Tracing added reactively at hang-fix step 4 of 5.
 
@@ -184,13 +184,13 @@ need privilege? vary by version?) *before* committing to a design. Record the
 result. This is the single highest-ROI habit in the retrospective.
 
 **For a *research-grade* capability — one that might be impossible, not merely
-hard** (winlsof: socket-FD correlation, byte-range locks, AF_UNIX/raw) — run the
+hard** (lsof-rs: socket-FD correlation, byte-range locks, AF_UNIX/raw) — run the
 **spike-and-gate ritual** instead of an open-ended attempt (LESSONS #1). It was
-winlsof's biggest win: the hard gaps became the cheap ones. Steps: (a) rate
+lsof-rs's biggest win: the hard gaps became the cheap ones. Steps: (a) rate
 **effort** (S/M/L) and **confidence** a safe/public solution exists (Low/Med/
 High); (b) write a **decision gate** *before* coding — the concrete signal that
 says "stop, document as a platform limit"; (c) on hitting the gate, do a **pivot
-check** — is there an adjacent, reachable goal? (winlsof's ETW spike couldn't get
+check** — is there an adjacent, reachable goal? (lsof-rs's ETW spike couldn't get
 the "real FD" but pivoted to extending `-i` to raw/ICMP/AF_UNIX, which shipped).
 A closed sub-goal must not kill the shippable one beside it.
 
@@ -209,11 +209,11 @@ Then the loop — each step is a CI-enforced gate:
    also the **liveness backstop** (LESSONS #1): a hang is not UB, so sanitizers
    won't see it — the harness's per-case timeout marks a wedged run as
    `<<TIMEOUT>>` and fails it. Treat a timeout as a design smell (an unbounded
-   blocking call on the hot path) — the winlsof fix was to *avoid* the blocking
+   blocking call on the hot path) — the lsof-rs fix was to *avoid* the blocking
    call, not wrap it. Two things this gate can't see on its own — **coverage**
    and **an oracle that won't run on the target** (LESSONS #6, #8). The
    differential only checks the inputs in the matrix: a green run over a matrix
-   that omits a feature class proves nothing about that class (winlsof's socket
+   that omits a feature class proves nothing about that class (lsof-rs's socket
    diff was green while every non-File handle type was silently dropped — no
    fixture ever created one). Enumerate the C's feature surface and give each a
    case — **enforced by `harnesses/coverage/coverage_gate.py`**: bootstrap the
@@ -227,7 +227,7 @@ Then the loop — each step is a CI-enforced gate:
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker.
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
-   logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). winlsof's
+   logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). lsof-rs's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
@@ -256,7 +256,7 @@ undocumented unsafe (gate 5).
 - Ship the `DIVERGENCES.md` as user-facing release notes ("behaviors we
   deliberately changed, and why") — the security fixes are a *feature*.
 - **Design the release trigger with a human-button fallback** (LESSONS #14):
-  winlsof's release workflow fires on a tag push *or* `workflow_dispatch` with a
+  lsof-rs's release workflow fires on a tag push *or* `workflow_dispatch` with a
   tag input, and the dispatch path — where `gh release create --target
   $GITHUB_SHA` makes the tag server-side — is what shipped v0.3.0 when the
   automated session turned out to lack both tag-push and dispatch permission.
@@ -265,7 +265,7 @@ undocumented unsafe (gate 5).
   quota-free check that also proves what users actually see (assets, target
   SHA, checksum).
 - Long automated sessions: treat the platform **API quota as a budgeted
-  resource**. winlsof's release day stalled a merge for ~an hour on an
+  resource**. lsof-rs's release day stalled a merge for ~an hour on an
   exhausted hourly limit; back off in growing intervals rather than hammering,
   and prefer public-page reads (no quota) for state checks while it recovers.
 
@@ -273,7 +273,7 @@ undocumented unsafe (gate 5).
 **Exit criteria:** Rust is the shipped artifact; supply-chain clean; divergences
 published; C archived (not deleted until an overlap release proves parity).
 **Artifacts:** release, `DIVERGENCES.md`, final `progress` table.
-**lsof failure modes this prevents:** big-bang deletion before parity; winlsof
+**lsof failure modes this prevents:** big-bang deletion before parity; lsof-rs
 kept both trees side by side — preserve that discipline.
 
 ---
@@ -296,14 +296,14 @@ See `harnesses/ci/porting-ci.template.yml` for the wiring and
 `make -C porting-kit check-kit` to smoke-test every harness.
 
 **When a gate can only run in CI** — a platform backend you can't build on the
-dev host (winlsof's Windows crate on a Linux box) — land it *observe-first*
+dev host (lsof-rs's Windows crate on a Linux box) — land it *observe-first*
 (continue-on-error) and read a few real runs before promoting it to a hard gate,
 so a flaky harness doesn't wedge every PR (LESSONS #9). Two traps: (a) give an
 infra/harness error a **distinct exit code** from a real failure, or the noise
 trains you to ignore red; (b) **a superseded CI run is not a passed run** — rapid
 pushes cancel in-flight runs, so "I saw green" can mean an *earlier* commit while
 the head commit's gate never finished. Before calling a CI-only-validated change
-green, confirm the head SHA has a *completed* run — winlsof's `too_many_arguments`
+green, confirm the head SHA has a *completed* run — lsof-rs's `too_many_arguments`
 clippy error slipped in exactly this way: its Windows run was cancelled by the
 next push and the lint surfaced only two commits later. And (c) **while a gate
 is in observe mode, job status is meaningless** — `continue-on-error` shows a

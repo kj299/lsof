@@ -33,7 +33,7 @@ faithfully re-implement a vulnerability. Maximize safety controls.
    (library internals preserved)? State which and why; it sets the strategy.
 
 Then propose the **dependency-graph-driven port order** (Phase 1), flagging any
-known-hazardous module for a pre-port spike (the winlsof hang cost 7 commits
+known-hazardous module for a pre-port spike (the lsof-rs hang cost 7 commits
 because it wasn't spiked first).
 
 **Stop and present** the Phase 0 report + proposed order before Phase 2. Do not

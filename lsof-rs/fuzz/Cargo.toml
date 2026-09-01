@@ -1,0 +1,26 @@
+[package]
+name = "lsof-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace so libfuzzer-sys (and the nightly-only fuzz build) never
+# enter the main lsof-rs workspace / release build.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lsof-cli = { path = "../crates/lsof-cli" }
+
+[[bin]]
+name = "parse_args"
+path = "fuzz_targets/parse_args.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

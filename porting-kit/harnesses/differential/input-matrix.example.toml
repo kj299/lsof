@@ -12,7 +12,7 @@
 # COMPLETENESS IS NOT GREENNESS. A differential only checks the inputs you list:
 # a fully-green run over a matrix that omits a feature class says *nothing* about
 # that class. Enumerate the C's feature surface up front - every option letter,
-# every object/record TYPE the tool can emit - and give each a case. winlsof's
+# every object/record TYPE the tool can emit - and give each a case. lsof-rs's
 # socket differential was green while the port silently dropped every non-File
 # handle type (registry Key/Event/Mutant/...): the matrix only made sockets, so
 # no fixture ever created the objects that would have exposed the gap. Matches-
@@ -26,13 +26,13 @@
 #   covers = ["type:KEY", "type:REG"]
 # Out-of-scope features get a [[waive]] with a reason in the inventory.
 # A case may only cite a test that CI actually EXECUTES (and, once stable,
-# enforces): winlsof's matrix credited its 55-case smoke harness while CI never
+# enforces): lsof-rs's matrix credited its 55-case smoke harness while CI never
 # ran it — coverage backed by a test nobody runs is the same silent gap this
 # gate exists to close, one layer up (LESSONS #13).
 #
 # TWO MODES. (1) same-binary-both-platforms: run the C oracle and the Rust side
 # on one host (the case this file shows). (2) oracle-substitution: when the C
-# binary can't run on the target (winlsof: no lsof on Windows), diff the Rust
+# binary can't run on the target (lsof-rs: no lsof on Windows), diff the Rust
 # output against a *native* oracle (Get-NetTCPConnection, netstat, ...) over
 # self-owned fixtures. Mode 2 needs a three-way exit contract - 0 match,
 # 1 divergence, 2 infra-error - so a broken oracle/harness can't masquerade as a

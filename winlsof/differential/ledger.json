@@ -1,7 +1,0 @@
-[
-  {
-    "state": "BOUND",
-    "side": "missing",
-    "reason": "winlsof enumerates sockets via GetExtendedTcpTable/GetExtendedUdpTable (connection-oriented, mirroring lsof). The NSI source behind Get-NetTCPConnection additionally reports transient BOUND sockets (e.g. a .NET client's dual-stack shadow) that GetExtendedTcpTable does not surface. Documented data-source difference, not a winlsof bug."
-  }
-]
