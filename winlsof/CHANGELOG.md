@@ -12,15 +12,27 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Linux backend, phase L0** (`lsof-backend-linux`): processes and owners from
-  `/proc/<pid>/status`, open files from `/proc/<pid>/fd` plus the
-  `cwd`/`root`/`exe` links, and types/DEVICE/SIZE/NODE/NLINK from `stat`.
+- **Linux backend** (`lsof-backend-linux`), phases **L0** and **L1**.
   Dependency-free and `#![forbid(unsafe_code)]` — `/proc` is a filesystem, so
-  no FFI is involved. Enough for `-p`, `-c`, `-u`, `-t`, `-d`, `-a`, `-R`, bare
-  paths and `+D`/`+d`; **`-i` matches nothing until phase L1** adds socket
-  classification, which the CLI states on startup rather than letting an empty
-  result look like a filter bug. Verified by diffing against the real C `lsof`
-  4.95.0 on the same host — the differential Windows structurally cannot have.
+  no FFI is involved.
+  - **L0** — processes and owners from `/proc/<pid>/status`, open files from
+    `/proc/<pid>/fd` plus the `cwd`/`root`/`exe` links, and
+    types/DEVICE/SIZE/NODE/NLINK from `stat`. Covers `-p`, `-c`, `-u`, `-t`,
+    `-d`, `-a`, `-R`, bare paths and `+D`/`+d`.
+  - **L1 — sockets.** `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}` is read
+    once per gather and indexed by inode; an fd whose link target is
+    `socket:[N]` resolves by that key into a real TYPE (`IPv4`/`IPv6`/`unix`),
+    protocol, addresses and TCP state. **`-i` and `-U` work**, as does `-T q`
+    (the queue depths sit in the same line, so they cost nothing — but they
+    stay gated on the flag, because the table renderer emits its `(QR=…)`
+    suffix whenever the field is present). An inode that is not found — a
+    socket in another network namespace, or a family not read — degrades to
+    the L0 `SOCK` row rather than to a wrong answer.
+
+  Verified by diffing against the real C `lsof` 4.95.0 on the same host, the
+  differential Windows structurally cannot have: `-i`, `-iTCP:443`,
+  `-i@127.0.0.1`, `-i4` and `-iUDP` all return identical row counts, and `-U`
+  matches cell for cell.
 - `FileType::Block` (`BLK`) in `lsof-core`. Unix-only; the Windows backend
   never emits it.
 - **Platform-scoped coverage waivers.** `[[waive]]` entries take
@@ -29,11 +41,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   the platform under test stops applying, so whatever it excused becomes
   required again. Waivers without `platforms` apply everywhere, so
   single-platform ports are unaffected.
-- Four new matrix cases declaring what the Linux backend's tests cover, and a
+- Matrix cases declaring what the Linux backend's tests cover, and a
   `type:LINK` assertion in `mode_maps_to_lsof_type_codes` — the code mapped
   `S_IFLNK` to `LINK` but no test had ever asserted it.
 
 ### Fixed
+- **`-U` never filtered anything.** `Selection::unix_only` was declared and
+  never read: on Windows the ETW path happened to yield only AF_UNIX rows when
+  `-U` was set, so the missing predicate was invisible. Against a backend that
+  returns every open file, `-U` listed the whole system. It is now a file-level
+  predicate in `lsof-core`, where it belongs, and a process with no AF_UNIX
+  socket is no longer a `-U` result row. This also corrects Windows.
 - **The coverage gate was excusing features the port now intends to ship.**
   Most waiver reasons were platform-specific ("Unix-only", "no Windows
   equivalent") and expired silently when the Linux backend merged: nothing in
@@ -43,18 +61,31 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `type:BLK` and `type:FIFO` were waived as having no Windows analogue while
   the Linux backend was already emitting both; they are now **covered**, not
   waived. The Linux-side features whose waiver expired are recorded as
-  `DEBT (L1)` / `DEBT (L2)` naming the phase that closes them, rather than
-  re-waived — a waiver claims "we will never do this", which is untrue of `-Z`
-  or of socket classification.
+  `DEBT (L2)` naming the phase that closes them, rather than re-waived — a
+  waiver claims "we will never do this", which is untrue of `-Z`.
+
+### Known, recorded rather than changed
+- Three renderer divergences from the C, found by the L1 differential and
+  written up in [`docs/known-limitations.md`](docs/known-limitations.md). Each
+  alters output the Windows golden fixtures and 59-case smoke suite assert, so
+  matching the C is a compatibility decision rather than a fix to slip into a
+  backend phase: the `-T` suffix shape (`(QR=0) (QS=0)` vs the C's
+  `(QR=0 QS=0)`), `-Tq` appending to the state rather than replacing it, and
+  `COMMAND` not being truncated to the C's default width of 9. All three have
+  applied to the **Windows** output since v0.2.0 and were invisible there for
+  want of a reference implementation on the same host.
 
 ### Changed
 - **Docs no longer describe the project as Windows-only**, which stopped being
   true when the Linux backend landed. The README now leads with both backends
   and their status, and the privilege section covers Linux's uid-based split
   alongside Windows' `SeDebugPrivilege` model. The **name** `winlsof` is
-  knowingly left inaccurate for now: renaming (to `lsof-rs`) touches the
-  release-tag prefix and every CI path filter, so it is scheduled for when the
-  Linux backend reaches L1 and the cross-platform claim is fully earned.
+  knowingly still inaccurate: renaming (to `lsof-rs`) touches the release-tag
+  prefix and every CI path filter, and was scheduled for when the Linux backend
+  reached L1. **L1 has now landed, so the rename is due** — it is deliberately
+  not bundled into this phase, because a mechanical rename across the tag glob
+  and the workflow `paths:` filters is its own change with its own failure mode
+  (miss one and CI silently stops running).
 - Corrected a stale README claim that cited **v0.2.0** as the latest field
   validation; it is v1.0.1 (51 unelevated / 57 elevated, 0 FAIL).
 

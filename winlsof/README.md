@@ -11,7 +11,7 @@ It ships **two data-acquisition backends** behind one platform seam:
 | Backend | Status | Data source |
 |---|---|---|
 | **Windows** | complete — [v1.0.1](https://github.com/kj299/lsof/releases), field-validated | Win32/NT: Toolhelp, IP Helper, the NT handle table, ETW |
-| **Linux** | **phase L0** — processes, fds, `cwd`/`rtd`/`txt`; **no sockets yet, so `-i` matches nothing** | `/proc` |
+| **Linux** | **phase L1** — processes, fds, `cwd`/`rtd`/`txt`, and sockets (`-i`, `-U`) | `/proc` |
 
 Everything above the seam — the selection engine, all three output formats, the
 argument parser — is shared and platform-agnostic, which is why adding Linux
@@ -100,24 +100,29 @@ in 1.0.1, on a build every automated gate had passed. The
 item is shipped or a documented closed gate — and the release criteria are in
 [`docs/road-to-1.0.md`](docs/road-to-1.0.md).
 
-### Linux backend — phase L0 of 4
+### Linux backend — phase L1 of 4
 
 - ✅ **L0** — processes and owners from `/proc/<pid>/status`; open files from
   `/proc/<pid>/fd` plus the `cwd`/`root`/`exe` links; types, DEVICE, SIZE,
   NODE and NLINK from `stat`. Enough for `-p`, `-c`, `-u`, `-t`, `-d`, `-a`,
   `-R`, bare paths and `+D`/`+d`.
-- ⬜ **L1** — sockets: `/proc/net/*` joined to fds by `socket:[inode]`. **Until
-  this lands `-i` matches nothing**, which the CLI says on startup rather than
-  letting an empty result look like a filter bug.
+- ✅ **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}` is read
+  once per gather and indexed by inode; an fd whose target is `socket:[N]`
+  resolves by that key into a real TYPE, protocol, addresses and TCP state.
+  **`-i` and `-U` work** in every form the core supports, as does `-T q`.
 - ⬜ **L2** — `mem` rows from `/proc/<pid>/maps`, the lock column from
-  `/proc/locks`, named `anon_inode` kinds.
+  `/proc/locks`, named `anon_inode` kinds, the mount-table options, and
+  per-network-namespace socket reads.
 - ⬜ **L3** — the C-vs-Rust differential as a CI gate.
 
-L0 is already diffed by hand against the real C `lsof` 4.95.0 on the same host:
-across 40 processes **no row it emits disagrees with the C**, and the only
-differences are rows the C emits and L0 does not (`mem`, and rows reporting
-files it could not read). Both are recorded in the crate docs rather than left
-looking like parity.
+Both phases were diffed by hand against the real C `lsof` 4.95.0 on the same
+host, and that diff is the reason to trust them: **`-i`, `-iTCP:443`,
+`-i@127.0.0.1`, `-i4` and `-iUDP` all return the same row count as the C, and
+`-U` matches it cell for cell.** The differences that remain are recorded in
+[`docs/known-limitations.md`](docs/known-limitations.md) rather than left
+looking like parity — including three renderer divergences the diff exposed
+that had been latent in the **Windows** output since v0.2.0, where no C exists
+to compare against.
 
 ## Privilege model (least privilege)
 

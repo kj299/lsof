@@ -1,36 +1,42 @@
-//! Linux data-acquisition backend for winlsof — **Phase L0**.
+//! Linux data-acquisition backend for winlsof — **Phase L1**.
 //!
 //! Implements [`lsof_core::backend::Backend`] over `/proc`, which is the whole
 //! data source: process identity from `/proc/<pid>/status`, open files from
-//! `/proc/<pid>/fd` (plus the `cwd`/`root`/`exe` magic links), and file
-//! attributes from `stat`. `std::os::unix::fs::MetadataExt` exposes every field
-//! needed, so this crate has **no dependencies** — the same posture as
-//! `lsof-core`, and it keeps the supply-chain gate's surface unchanged.
+//! `/proc/<pid>/fd` (plus the `cwd`/`root`/`exe` magic links), file attributes
+//! from `stat`, and sockets from `/proc/net/*`.
+//! `std::os::unix::fs::MetadataExt` exposes every field needed, so this crate
+//! has **no dependencies** — the same posture as `lsof-core`, and it keeps the
+//! supply-chain gate's surface unchanged.
 //!
 //! `#![forbid(unsafe_code)]`: unlike the Windows backend, nothing here needs
 //! FFI. Reading a filesystem is safe Rust all the way down.
 //!
-//! # What Phase L0 covers
+//! # What is covered
 //!
-//! Enough for `-p`, `-c`, `-u`, `-t`, `-d`, `-a`, `-R`, bare paths and `+D`/`+d`
-//! to work, since the portable selection engine and all three renderers are
-//! reused unchanged. Regular files, directories, character and **block**
-//! devices, and FIFOs are typed from `st_mode`; DEVICE, SIZE, NODE and NLINK
-//! come from the same `stat`.
+//! * **L0** — processes, owners, and open files. Regular files, directories,
+//!   character and **block** devices, and FIFOs are typed from `st_mode`;
+//!   DEVICE, SIZE, NODE and NLINK come from the same `stat`. Enough for `-p`,
+//!   `-c`, `-u`, `-t`, `-d`, `-a`, `-R`, bare paths and `+D`/`+d`.
+//! * **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}` is read
+//!   once per gather and indexed by inode; an fd whose link target is
+//!   `socket:[N]` is resolved by that key into a real TYPE (`IPv4`/`IPv6`/
+//!   `unix`), protocol, addresses and TCP state. **`-i` and `-U` work**, in
+//!   every form the core supports (`-iTCP:443`, `-i@host`, `-i4`/`-i6`,
+//!   `-iUDP`, `-iICMP`, `-iRAW`), as does `-T q`.
 //!
 //! # What it does not cover yet
 //!
-//! **Sockets are not classified.** Doing so means parsing `/proc/net/{tcp,udp,
-//! unix,…}` and joining on the `socket:[inode]` an fd link reports — Phase L1.
-//! Until then a socket fd is reported with the type code `SOCK` and its
-//! `socket:[inode]` name rather than being guessed at or hidden: the row is
-//! real, and the inode is exactly the key L1 will join on. A consequence worth
-//! stating plainly is that **`-i` matches nothing on this backend today**, which
-//! is the honest result of having no socket data — not a filter bug.
+//! Deferred to L2: `mem` rows from `/proc/<pid>/maps`, the lock column from
+//! `/proc/locks`, named `anon_inode` kinds, deleted-file marking, and the
+//! mount-table options (`-e`, `-m`, `+|-x`). See
+//! `winlsof/docs/linux-backend-scope.md`, and the `DEBT (L2)` entries in
+//! `winlsof/coverage/feature-inventory-winlsof.toml`, which the coverage gate
+//! prints on every run.
 //!
-//! Also deferred: `mem` rows from `/proc/<pid>/maps`, the lock column from
-//! `/proc/locks`, and named `anon_inode` kinds (Phase L2). See
-//! `winlsof/docs/linux-backend-scope.md`.
+//! **Network namespaces.** `/proc/net` is the *caller's* namespace, so a socket
+//! held by a process in a container will not be found. That degrades to the L0
+//! row — `SOCK` with the `socket:[inode]` name — rather than to a wrong answer.
+//! Reading per-namespace is L2.
 //!
 //! **Inaccessible files are omitted, not reported.** Diffed against the C
 //! `lsof` 4.95.0, this is the one behavioural difference in rows L0 claims to
@@ -52,8 +58,13 @@
 //! lsof -p <pid>   (C)   vs   lsof -p <pid>   (this backend)
 //! ```
 //!
-//! That comparison is what found the error-row difference above, on the first
-//! run.
+//! That comparison is what found the error-row difference above on the first
+//! run, and in L1 it caught four more before any of it shipped: the DEVICE and
+//! NODE cells are filled differently per socket family (inet shows inode and
+//! protocol, AF_UNIX shows the kernel socket pointer and inode — getting them
+//! backwards is invisible without the diff), `-U` was never enforced in the
+//! core at all, and three renderer divergences that had been latent on Windows
+//! since v0.2.0 (see `docs/known-limitations.md`).
 //!
 //! # Privilege
 //!
@@ -77,6 +88,8 @@
 mod backend;
 #[cfg(target_os = "linux")]
 mod files;
+#[cfg(target_os = "linux")]
+mod net;
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]

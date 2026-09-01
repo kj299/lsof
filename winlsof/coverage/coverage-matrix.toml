@@ -378,3 +378,23 @@ args = ["-t"]
 [[case]]
 name = "linux/process-selector-scope"
 args = ["-p", "PID"]
+
+# ------------------------------------------------- linux backend: sockets (L1)
+# crates/lsof-backend-linux/src/net.rs. The address/state/queue decoders are
+# unit-tested against the exact byte patterns the kernel writes; the table and
+# column cases parse this host's real /proc/net on every Linux CI run.
+
+[[case]]
+name = "linux/proc-net-socket-table"
+args = ["-i"]
+covers = ["type:IPv4", "type:unix"]
+
+[[case]]
+name = "linux/socket-device-node-split"
+args = ["-i"]
+covers = ["type:IPv4", "type:unix"]
+
+[[case]]
+name = "linux/unix-socket-type-suffix"
+args = ["-U"]
+covers = ["type:unix"]

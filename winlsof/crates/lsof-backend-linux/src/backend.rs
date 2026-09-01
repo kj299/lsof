@@ -7,6 +7,7 @@ use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::Process;
 use lsof_core::selection::Selection;
 
+use crate::net::SocketTable;
 use crate::{files, process};
 
 /// winlsof's native Linux data source.
@@ -66,6 +67,11 @@ impl Backend for LinuxBackend {
             None
         };
 
+        // /proc/net is system-wide, so it is read once for the whole gather
+        // rather than per process. `-T q` is the only reason to pay for queue
+        // depths; see SocketTable::load.
+        let socks = SocketTable::load(sel.tcp_info.is_some_and(|t| t.queue));
+
         for p in procs.iter_mut() {
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
                 continue;
@@ -73,7 +79,7 @@ impl Backend for LinuxBackend {
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid) {
+            if let Some(files) = files::for_pid(p.pid, &socks) {
                 p.files = files;
             }
         }

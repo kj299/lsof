@@ -330,6 +330,14 @@ impl Selection {
         if !self.state_matches(f) {
             return false;
         }
+        // `-U` keeps AF_UNIX sockets only. This lives here rather than in a
+        // backend because it is a selection question, not an acquisition one:
+        // on Windows the ETW path happened to yield only AF_UNIX rows when `-U`
+        // was set, so the filter was never needed — until a backend that
+        // returns everything (Linux `/proc`) made `-U` list every open file.
+        if self.unix_only && f.file_type != FileType::Unix {
+            return false;
+        }
         if let Some(max) = self.max_links {
             // `+L count`: keep links < count; drop if we know links and it's
             // not under the threshold. Unknown links (sockets etc.) pass.
@@ -411,10 +419,13 @@ impl Selection {
                 p.files.retain(|f| f.file_type == FileType::Pipe);
             }
             p.files.retain(|f| self.file_matches(f));
-            let needs_file =
-                self.inet.enabled || self.has_path_filter() || self.fd_filter.is_some();
+            let needs_file = self.inet.enabled
+                || self.unix_only
+                || self.has_path_filter()
+                || self.fd_filter.is_some();
             if needs_file && p.files.is_empty() {
-                // `-i`, `-d`, and path lookups require at least one matching file.
+                // `-i`, `-U`, `-d`, and path lookups require at least one
+                // matching file: a process with none is not a result row.
                 continue;
             }
             if !selected && p.files.is_empty() {
@@ -515,6 +526,27 @@ mod tests {
         let got = sel.apply(mock::sample_processes());
         assert!(got.iter().all(|p| p.files.iter().all(|f| f.is_internet())));
         assert!(got.iter().all(|p| !p.files.is_empty()));
+    }
+
+    #[test]
+    fn unix_only_keeps_af_unix_rows_and_drops_processes_without_any() {
+        // `-U` was never enforced here: the Windows ETW path happened to yield
+        // only AF_UNIX rows, so nothing noticed. A backend that returns every
+        // open file (Linux /proc) made `-U` list the whole system.
+        let sel = Selection {
+            unix_only: true,
+            ..Default::default()
+        };
+        let got = sel.apply(mock::sample_processes());
+        assert!(
+            got.iter()
+                .all(|p| p.files.iter().all(|f| f.file_type == FileType::Unix)),
+            "-U must keep only AF_UNIX rows"
+        );
+        assert!(
+            got.iter().all(|p| !p.files.is_empty()),
+            "a process with no AF_UNIX socket is not a -U result row"
+        );
     }
 
     #[test]
