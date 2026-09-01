@@ -21,15 +21,27 @@ Three layers:
   2. The **inventory** (TOML/JSON) — the curated contract. `[features]` lists
      `options` (letters) and `types` (TYPE codes); `[[waive]]` entries document
      features deliberately out of the port's scope, each with a `reason`
-     (a waiver without a reason is a silent drop with paperwork).
+     (a waiver without a reason is a silent drop with paperwork). A waiver may
+     add `platforms = [...]` to say which platforms its reason holds for —
+     see `--platform`.
   3. The **gate**: `--inventory INV --matrix MATRIX` computes covered features —
      option letters inferred from each case's `args` (short-option clusters like
      `-nP` count both) plus each case's explicit `covers = ["type:KEY", ...]`
      list (TYPE coverage comes from *fixtures*, which no flag spells, so it must
      be declared) — and fails on `required - waived - covered`.
 
+Multi-platform ports: a waiver's reason is usually platform-specific
+("Unix-only", "no Windows equivalent"), which means it EXPIRES the day the port
+grows a backend for that platform — and expires invisibly, because the file
+does not change. `platforms = [...]` on a waiver plus `--platform NAME` at the
+gate turns that expiry into a failure: run the gate once per platform, and a
+waiver that does not name the platform under test stops applying, so whatever it
+excused becomes required again. Waivers with no `platforms` apply everywhere, so
+single-platform ports need no annotation.
+
 Usage:
   coverage_gate.py --inventory INV.toml --matrix MATRIX.toml [--warn] [--json]
+                   [--platform NAME]
   coverage_gate.py --extract-options FILE.c [...] [--emit-inventory]
   coverage_gate.py --extract-types FILE.c [...]   [--emit-inventory]
   coverage_gate.py --self-test
@@ -186,12 +198,26 @@ def load_toml_or_json(path: str):
         return tomllib.load(f)
 
 
-def load_inventory(path: str):
-    """-> (required ids, waives [{id, reason}], value-taking option letters).
+def load_inventory(path: str, platform: str | None = None):
+    """-> (required ids, waives [{id, reason, platforms}], value-taking letters).
 
     A `[[waive]]` names one `id` or a list of `ids` (explicit enumeration only —
     no globs, so a waiver can never silently swallow a feature added later), and
-    every waiver must carry a non-empty `reason`."""
+    every waiver must carry a non-empty `reason`.
+
+    A waiver may also carry `platforms = ["windows", ...]`, naming the platforms
+    it is valid for. This exists because a waiver's *reason* is usually
+    platform-specific — "Unix-only", "no Windows equivalent" — and such a reason
+    silently expires when the port grows a backend for that very platform. A
+    port whose inventory waives `opt:Z` as "SELinux contexts" is telling the
+    truth on Windows and lying on Linux; without this field the gate cannot tell
+    those apart and stays green through the change.
+
+    Omitting `platforms` means "valid everywhere", so single-platform ports need
+    no annotation and existing inventories keep working unchanged. When
+    `--platform` is given, a waiver that does NOT list that platform is dropped,
+    so the features it covered become required again — and surface as uncovered
+    rather than staying quietly excused."""
     data = load_toml_or_json(path)
     feats = data.get("features", {})
     required = {f"opt:{o}" for o in feats.get("options", [])}
@@ -204,8 +230,15 @@ def load_inventory(path: str):
         reason = str(w.get("reason", "")).strip()
         if not ids or not reason:
             sys.exit(f"error: every [[waive]] needs id/ids and a non-empty reason: {w}")
+        platforms = w.get("platforms")
+        if platforms is not None and not isinstance(platforms, list):
+            sys.exit(f"error: [[waive]] `platforms` must be a list: {w}")
+        # A waiver scoped to platforms other than the one under test does not
+        # apply; its ids fall back to required.
+        if platform is not None and platforms is not None and platform not in platforms:
+            continue
         for wid in ids:
-            waives.append({"id": wid, "reason": reason})
+            waives.append({"id": wid, "reason": reason, "platforms": platforms})
     return required, waives, takes_value
 
 
@@ -242,13 +275,20 @@ def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
 # ------------------------------------------------------------------------ gate
 
 
-def run_gate(inventory_path: str, matrix_path: str, warn: bool, as_json: bool) -> int:
-    required, waives, takes_value = load_inventory(inventory_path)
+def run_gate(
+    inventory_path: str,
+    matrix_path: str,
+    warn: bool,
+    as_json: bool,
+    platform: str | None = None,
+) -> int:
+    required, waives, takes_value = load_inventory(inventory_path, platform)
     covered = matrix_coverage(matrix_path, takes_value)
     waived_ids = {w["id"] for w in waives}
     stale_waives = sorted(waived_ids - required)
     uncovered = sorted(required - waived_ids - covered)
     report = {
+        "platform": platform,
         "required": len(required),
         "covered": len(required & covered),
         "waived": sorted(waived_ids & required),
@@ -265,9 +305,10 @@ def run_gate(inventory_path: str, matrix_path: str, warn: bool, as_json: bool) -
                 print(f"waived    {w['id']}  — {w['reason']}")
         for fid in stale_waives:
             print(f"warn: stale waive {fid} (not in the inventory — curate it away)")
+        scope = f" [platform: {platform}]" if platform else ""
         print(
             f"\nfeatures: {len(required)}  covered: {report['covered']}"
-            f"  waived: {len(report['waived'])}  UNCOVERED: {len(uncovered)}"
+            f"  waived: {len(report['waived'])}  UNCOVERED: {len(uncovered)}{scope}"
         )
     if uncovered and not warn:
         return 1
@@ -420,6 +461,68 @@ def self_test() -> int:
         except SystemExit:
             check("reasonless waive rejected", True)
 
+        # --- platform-scoped waivers -------------------------------------
+        # The failure this models is the real one: a port waives a feature as
+        # "Unix-only", then grows a Unix backend. The waiver's sentence is now
+        # false, but nothing in the file changed, so an unscoped gate stays
+        # green. Scoping makes that expiry visible the moment the new platform
+        # is gated.
+        plat = os.path.join(td, "plat.json")
+        json.dump(
+            {
+                "features": {"options": ["a", "b", "c"]},
+                "waive": [
+                    {"id": "opt:a", "reason": "SELinux — Unix-only", "platforms": ["windows"]},
+                    {"id": "opt:b", "reason": "Solaris zones — no backend targets it"},
+                ],
+            },
+            open(plat, "w"),
+        )
+        _, w_none, _ = load_inventory(plat)
+        check(
+            "no --platform: every waiver applies (back-compatible)",
+            {w["id"] for w in w_none} == {"opt:a", "opt:b"},
+        )
+        _, w_win, _ = load_inventory(plat, "windows")
+        check(
+            "--platform windows: the windows-scoped waiver still applies",
+            {w["id"] for w in w_win} == {"opt:a", "opt:b"},
+        )
+        _, w_lin, _ = load_inventory(plat, "linux")
+        check(
+            "--platform linux: the windows-only waiver EXPIRES, opt:a is required again",
+            {w["id"] for w in w_lin} == {"opt:b"},
+        )
+        check(
+            "an unscoped waiver stays valid on every platform",
+            "opt:b" in {w["id"] for w in w_lin},
+        )
+
+        pmat = os.path.join(td, "pmat.json")
+        json.dump({"case": [{"name": "x", "args": ["-c"]}]}, open(pmat, "w"))
+        check(
+            "gate passes on windows (opt:a waived there)",
+            run_gate(plat, pmat, warn=False, as_json=False, platform="windows") == 0,
+        )
+        check(
+            "gate FAILS on linux — the expired waiver no longer excuses opt:a",
+            run_gate(plat, pmat, warn=False, as_json=False, platform="linux") == 1,
+        )
+
+        nonlist = os.path.join(td, "nonlist.json")
+        json.dump(
+            {
+                "features": {"options": ["a"]},
+                "waive": [{"id": "opt:a", "reason": "r", "platforms": "windows"}],
+            },
+            open(nonlist, "w"),
+        )
+        try:
+            load_inventory(nonlist)
+            check("non-list `platforms` rejected", False)
+        except SystemExit:
+            check("non-list `platforms` rejected", True)
+
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -436,6 +539,7 @@ def main(argv=None) -> int:
     ap.add_argument("--extract-options", nargs="+", metavar="FILE.C", help="bootstrap: option letters from C source")
     ap.add_argument("--extract-types", nargs="+", metavar="FILE.C", help="bootstrap: TYPE literals from C source")
     ap.add_argument("--emit-inventory", action="store_true", help="print extraction as a curate-me TOML inventory")
+    ap.add_argument("--platform", metavar="NAME", help="evaluate waivers for this platform; a [[waive]] with a `platforms` list not naming it does not apply")
     ap.add_argument("--warn", action="store_true", help="report but exit 0 (advisory mode)")
     ap.add_argument("--json", action="store_true", help="machine-readable gate report")
     ap.add_argument("--self-test", action="store_true", help="run the built-in fixture tests")
@@ -466,7 +570,7 @@ def main(argv=None) -> int:
         print("error: need --inventory and --matrix (or an --extract-* / --self-test mode)", file=sys.stderr)
         return 2
     try:
-        return run_gate(args.inventory, args.matrix, args.warn, args.json)
+        return run_gate(args.inventory, args.matrix, args.warn, args.json, args.platform)
     except OSError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

@@ -344,3 +344,37 @@ covers = ["type:unix"]
 name = "smoke/elevated-system-handles"
 args = ["-p", "PID"]
 covers = ["type:unknown"]
+
+# ------------------------------------------------------- linux backend tests
+# crates/lsof-backend-linux/src/*.rs — real `cargo test` cases, run on every
+# Linux CI push. Unlike the smoke suite these need no host fixtures: the type
+# mapping is asserted against st_mode bit patterns (ABI-fixed), and the live
+# cases read this host's own /proc, which every Linux runner has.
+#
+# These exist as matrix cases because the platform-scoped gate now REQUIRES
+# these TYPE codes on Linux. Before scoping, all four sat under a waiver
+# reading "no Windows analogue" — which excused, on Linux, codes the Linux
+# backend was already emitting.
+
+[[case]]
+name = "linux/type-codes-from-st_mode"
+args = []
+covers = ["type:REG", "type:DIR", "type:CHR", "type:BLK", "type:FIFO", "type:SOCK", "type:LINK", "type:unknown"]
+
+[[case]]
+name = "linux/device-node-rdev"
+args = []
+covers = ["type:CHR"]
+
+[[case]]
+name = "linux/live-proc-self-fds"
+args = ["-p", "SELF"]
+covers = ["type:REG", "type:CHR"]
+
+[[case]]
+name = "linux/terse-fast-path"
+args = ["-t"]
+
+[[case]]
+name = "linux/process-selector-scope"
+args = ["-p", "PID"]

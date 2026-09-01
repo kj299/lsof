@@ -177,6 +177,7 @@ mod tests {
         assert_eq!(type_from_mode(S_IFBLK | 0o660).code(), "BLK");
         assert_eq!(type_from_mode(S_IFIFO | 0o600).code(), "FIFO");
         assert_eq!(type_from_mode(S_IFSOCK | 0o777).code(), "SOCK");
+        assert_eq!(type_from_mode(S_IFLNK | 0o777).code(), "LINK");
         assert_eq!(type_from_mode(0).code(), "unknown");
     }
 
