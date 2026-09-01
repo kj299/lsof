@@ -1,0 +1,535 @@
+//! Socket classification from `/proc/net/*`, joined to fds by inode.
+//!
+//! An fd that is a socket has a link target of `socket:[12345]` and nothing
+//! else — no address, no protocol, not even a family. The number is the socket's
+//! inode, and it is the join key: `/proc/net/tcp` and its siblings list every
+//! socket in the network namespace with its inode in a column. Read those once,
+//! index by inode, and every socket fd can be resolved by lookup.
+//!
+//! # Namespaces
+//!
+//! `/proc/net` resolves to the *calling* process's network namespace. A process
+//! inside a container has its sockets in a different namespace, so its inodes
+//! will not be found here. That is not a silent wrong answer: an unresolved
+//! inode falls back to the phase-L0 row (`SOCK` with the `socket:[inode]` name),
+//! which is exactly what shipped before this module existed. Reading
+//! `/proc/<pid>/net/*` per namespace is deferred to L2.
+
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+use lsof_core::model::{FileType, Protocol, SocketInfo, TcpExtInfo, TcpState};
+
+/// One resolved socket: what the fd row becomes once the inode is matched.
+pub struct SocketEntry {
+    pub file_type: FileType,
+    pub info: SocketInfo,
+    /// The bound path of an AF_UNIX socket, when it has one. An unbound
+    /// (anonymous) socket has none, and lsof then shows only the `type=` suffix.
+    pub path: Option<String>,
+    /// The DEVICE cell. lsof fills it differently per family: an internet
+    /// socket shows its inode, an AF_UNIX socket the kernel's socket pointer
+    /// (the leading `Num` column of `/proc/net/unix`, printed as `0x…`).
+    pub device: String,
+    /// The NODE cell — the protocol name (`TCP`/`UDP`) for internet sockets,
+    /// the inode for AF_UNIX. Again lsof's own split, not ours.
+    pub node: String,
+    /// AF_UNIX only: the ` type=STREAM (CONNECTED)` tail lsof appends to NAME.
+    pub unix_suffix: Option<String>,
+}
+
+#[derive(Default)]
+pub struct SocketTable {
+    by_inode: HashMap<u64, SocketEntry>,
+}
+
+impl SocketTable {
+    /// Read every `/proc/net` table once.
+    ///
+    /// `want_queues` mirrors `-T q`: the send/receive queue depths sit in the
+    /// same line we are already parsing, so they cost nothing to read — but
+    /// the table renderer emits a `(QR=…) (QS=…)` suffix whenever the field is
+    /// present, not when `-T` was asked for. Populating it unconditionally
+    /// would therefore change the output of a plain `lsof -i`, so it stays
+    /// gated on the flag.
+    pub fn load(want_queues: bool) -> Self {
+        let mut t = SocketTable::default();
+        // Absent files are normal, not an error: a host built without IPv6 has
+        // no /proc/net/tcp6 at all.
+        t.load_inet("/proc/net/tcp", Protocol::Tcp, false, want_queues);
+        t.load_inet("/proc/net/tcp6", Protocol::Tcp, true, want_queues);
+        t.load_inet("/proc/net/udp", Protocol::Udp, false, want_queues);
+        t.load_inet("/proc/net/udp6", Protocol::Udp, true, want_queues);
+        t.load_raw("/proc/net/raw", false);
+        t.load_raw("/proc/net/raw6", true);
+        t.load_unix("/proc/net/unix");
+        t
+    }
+
+    pub fn get(&self, inode: u64) -> Option<&SocketEntry> {
+        self.by_inode.get(&inode)
+    }
+
+    fn load_inet(&mut self, path: &str, proto: Protocol, v6: bool, queues: bool) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < INET_INODE + 1 {
+                continue;
+            }
+            let Some(inode) = f[INET_INODE].parse::<u64>().ok() else {
+                continue;
+            };
+            let local = parse_addr(f[INET_LOCAL], v6);
+            let remote = parse_addr(f[INET_REMOTE], v6);
+            // UDP has no connection state; the column exists but means nothing,
+            // and lsof prints no state for it.
+            let state = if proto == Protocol::Tcp {
+                Some(tcp_state(f[INET_STATE]))
+            } else {
+                None
+            };
+            let tcp = if queues && proto == Protocol::Tcp {
+                parse_queues(f[INET_QUEUES])
+            } else {
+                None
+            };
+            self.by_inode.insert(
+                inode,
+                SocketEntry {
+                    file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },
+                    info: SocketInfo {
+                        protocol: proto,
+                        local,
+                        remote,
+                        state,
+                        tcp,
+                    },
+                    path: None,
+                    device: inode.to_string(),
+                    node: proto.as_str().to_string(),
+                    unix_suffix: None,
+                },
+            );
+        }
+    }
+
+    /// `/proc/net/raw` shares the inet layout with one difference that matters:
+    /// the local address's second half is **not** a port, it is the IP protocol
+    /// number. That is how ICMP is identified — there is no `/proc/net/icmp`.
+    fn load_raw(&mut self, path: &str, v6: bool) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < INET_INODE + 1 {
+                continue;
+            }
+            let Some(inode) = f[INET_INODE].parse::<u64>().ok() else {
+                continue;
+            };
+            let protocol = match f[INET_LOCAL]
+                .split_once(':')
+                .and_then(|(_, p)| u16::from_str_radix(p, 16).ok())
+            {
+                Some(1) => Protocol::Other("ICMP"),
+                Some(58) => Protocol::Other("ICMPV6"),
+                _ => Protocol::Other("RAW"),
+            };
+            // Zero the "port", which is the protocol number here — reporting it
+            // as a port would make `-i :1` match every ICMP socket.
+            let local = parse_addr(f[INET_LOCAL], v6).map(|a| SocketAddr::new(a.ip(), 0));
+            let remote = parse_addr(f[INET_REMOTE], v6).map(|a| SocketAddr::new(a.ip(), 0));
+            self.by_inode.insert(
+                inode,
+                SocketEntry {
+                    file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },
+                    info: SocketInfo {
+                        protocol,
+                        local,
+                        remote,
+                        state: None,
+                        tcp: None,
+                    },
+                    path: None,
+                    device: inode.to_string(),
+                    node: protocol.as_str().to_string(),
+                    unix_suffix: None,
+                },
+            );
+        }
+    }
+
+    fn load_unix(&mut self, path: &str) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in text.lines().skip(1) {
+            // The path is the last field and may itself contain spaces, so the
+            // tail is taken verbatim rather than whitespace-split.
+            let f = fields_with_rest(line, UNIX_PATH + 1);
+            if f.len() < UNIX_INODE + 1 {
+                continue;
+            }
+            let Some(inode) = f[UNIX_INODE].parse::<u64>().ok() else {
+                continue;
+            };
+            // The leading `Num` column is the kernel's socket address, and it
+            // is what lsof shows as DEVICE for an AF_UNIX row — printed `0x…`
+            // and zero-padded to 16, exactly as the kernel wrote it.
+            let device = format!("0x{}", f[0].trim_end_matches(':'));
+            self.by_inode.insert(
+                inode,
+                SocketEntry {
+                    file_type: FileType::Unix,
+                    info: SocketInfo {
+                        protocol: Protocol::Other("unix"),
+                        local: None,
+                        remote: None,
+                        state: None,
+                        tcp: None,
+                    },
+                    path: f.get(UNIX_PATH).map(|s| s.to_string()),
+                    device,
+                    node: inode.to_string(),
+                    unix_suffix: Some(unix_suffix(f[UNIX_TYPE], f[UNIX_FLAGS], f[UNIX_STATE])),
+                },
+            );
+        }
+    }
+}
+
+/// lsof's ` type=STREAM (LISTEN)` tail for an AF_UNIX row.
+///
+/// The state shown is not simply the `St` column: a listening socket sits in
+/// `St=01` (unconnected) and is distinguished only by `SO_ACCEPTCON` in the
+/// flags, which is how the C tells a server socket from an idle one.
+fn unix_suffix(ty: &str, flags: &str, st: &str) -> String {
+    let kind = match u32::from_str_radix(ty, 16) {
+        Ok(1) => "STREAM",
+        Ok(2) => "DGRAM",
+        Ok(5) => "SEQPACKET",
+        _ => "UNKNOWN",
+    };
+    const SO_ACCEPTCON: u32 = 0x0001_0000;
+    let listening = u32::from_str_radix(flags, 16).is_ok_and(|f| f & SO_ACCEPTCON != 0);
+    let state = if listening {
+        Some("LISTEN")
+    } else {
+        match u32::from_str_radix(st, 16) {
+            Ok(0x02) => Some("CONNECTING"),
+            Ok(0x03) => Some("CONNECTED"),
+            Ok(0x04) => Some("DISCONNECTING"),
+            _ => None,
+        }
+    };
+    match state {
+        Some(s) => format!("type={kind} ({s})"),
+        None => format!("type={kind}"),
+    }
+}
+
+// Column indices, from the header lines the kernel writes:
+//   sl local_address rem_address st tx_queue:rx_queue tr tm->when retrnsmt uid timeout inode
+const INET_LOCAL: usize = 1;
+const INET_REMOTE: usize = 2;
+const INET_STATE: usize = 3;
+const INET_QUEUES: usize = 4;
+const INET_INODE: usize = 9;
+//   Num RefCount Protocol Flags Type St Inode Path
+const UNIX_FLAGS: usize = 3;
+const UNIX_TYPE: usize = 4;
+const UNIX_STATE: usize = 5;
+const UNIX_INODE: usize = 6;
+const UNIX_PATH: usize = 7;
+
+/// Split into at most `n` whitespace-separated fields, the last of which is the
+/// untouched remainder of the line. An AF_UNIX socket may be bound to a path
+/// containing spaces, and plain `split_whitespace` would truncate it.
+fn fields_with_rest(line: &str, n: usize) -> Vec<&str> {
+    let mut out = Vec::with_capacity(n);
+    let mut rest = line.trim_start();
+    while out.len() + 1 < n {
+        match rest.find(char::is_whitespace) {
+            Some(i) => {
+                out.push(&rest[..i]);
+                rest = rest[i..].trim_start();
+            }
+            None => break,
+        }
+    }
+    if !rest.is_empty() {
+        out.push(rest);
+    }
+    out
+}
+
+/// Decode one `HEX:HEX` address column.
+///
+/// The kernel prints the address words as host-order `%08X` of the bytes as
+/// they sit in memory, so the decode is "hex -> u32 -> native-endian bytes":
+/// on a little-endian machine `0100007F` yields the bytes 7F 00 00 01, i.e.
+/// 127.0.0.1. Going through `to_ne_bytes` rather than a byte-swap keeps that
+/// correct on a big-endian host too, where the kernel would have printed
+/// `7F000001` for the same address.
+fn parse_addr(s: &str, v6: bool) -> Option<SocketAddr> {
+    let (host, port) = s.split_once(':')?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    if v6 {
+        if host.len() != 32 {
+            return None;
+        }
+        let mut b = [0u8; 16];
+        for i in 0..4 {
+            let w = u32::from_str_radix(&host[i * 8..(i + 1) * 8], 16).ok()?;
+            b[i * 4..(i + 1) * 4].copy_from_slice(&w.to_ne_bytes());
+        }
+        Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(b)), port))
+    } else {
+        if host.len() != 8 {
+            return None;
+        }
+        let w = u32::from_str_radix(host, 16).ok()?;
+        Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::from(w.to_ne_bytes())),
+            port,
+        ))
+    }
+}
+
+/// The `st` column's hex code. These are the kernel's `TCP_*` enum values, not
+/// the wire states, so the mapping is fixed by include/net/tcp_states.h.
+fn tcp_state(hex: &str) -> TcpState {
+    match u8::from_str_radix(hex, 16) {
+        Ok(0x01) => TcpState::Established,
+        Ok(0x02) => TcpState::SynSent,
+        Ok(0x03) => TcpState::SynReceived,
+        Ok(0x04) => TcpState::FinWait1,
+        Ok(0x05) => TcpState::FinWait2,
+        Ok(0x06) => TcpState::TimeWait,
+        Ok(0x07) => TcpState::Closed,
+        Ok(0x08) => TcpState::CloseWait,
+        Ok(0x09) => TcpState::LastAck,
+        Ok(0x0a) => TcpState::Listen,
+        Ok(0x0b) => TcpState::Closing,
+        _ => TcpState::Unknown,
+    }
+}
+
+/// `tx_queue:rx_queue`, both hex. lsof's `QS=` is the send queue and `QR=` the
+/// receive queue.
+fn parse_queues(s: &str) -> Option<TcpExtInfo> {
+    let (tx, rx) = s.split_once(':')?;
+    Some(TcpExtInfo {
+        recv_window: None,
+        send_queue: u64::from_str_radix(tx, 16).ok(),
+        recv_queue: u64::from_str_radix(rx, 16).ok(),
+    })
+}
+
+/// The inode inside an fd link target of the form `socket:[12345]`.
+pub fn socket_inode(target: &str) -> Option<u64> {
+    target
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v4_address_decodes_little_endian() {
+        // The exact bytes /proc/net/tcp prints for 127.0.0.1:43831 on this host.
+        let a = parse_addr("0100007F:AB37", false).expect("parses");
+        assert_eq!(a.ip().to_string(), "127.0.0.1");
+        assert_eq!(a.port(), 43831);
+        // The all-zero wildcard, which lsof renders as `*`.
+        let w = parse_addr("00000000:0000", false).expect("parses");
+        assert!(w.ip().is_unspecified());
+        assert_eq!(w.port(), 0);
+        // 8.8.8.8:53 — asymmetric in every byte, so a wrong byte order shows.
+        let d = parse_addr("08080808:0035", false).expect("parses");
+        assert_eq!(d.ip().to_string(), "8.8.8.8");
+        assert_eq!(d.port(), 53);
+        let x = parse_addr("0100000A:0050", false).expect("parses");
+        assert_eq!(x.ip().to_string(), "10.0.0.1");
+    }
+
+    #[test]
+    fn v6_address_decodes_per_word() {
+        // ::1 — the loopback, written as four words with only the last set.
+        let a = parse_addr("00000000000000000000000001000000:0016", true).expect("parses");
+        assert_eq!(a.ip().to_string(), "::1");
+        assert_eq!(a.port(), 22);
+        // The v6 wildcard.
+        let w = parse_addr("00000000000000000000000000000000:1F90", true).expect("parses");
+        assert!(w.ip().is_unspecified());
+        assert_eq!(w.port(), 8080);
+        // 2001:db8::1 — spans two words, so per-word byte order is exercised.
+        let g = parse_addr("B80D0120000000000000000001000000:0050", true).expect("parses");
+        assert_eq!(g.ip().to_string(), "2001:db8::1");
+    }
+
+    #[test]
+    fn malformed_addresses_are_rejected_not_guessed() {
+        assert!(parse_addr("nonsense", false).is_none());
+        assert!(parse_addr("0100007F", false).is_none(), "no port half");
+        assert!(parse_addr("0100007:0035", false).is_none(), "short v4 host");
+        assert!(parse_addr("0100007F:ZZZZ", false).is_none(), "bad port");
+        assert!(parse_addr("0100007F:0035", true).is_none(), "v4 host as v6");
+    }
+
+    #[test]
+    fn tcp_states_map_to_lsof_names() {
+        assert_eq!(tcp_state("0A").as_str(), "LISTEN");
+        assert_eq!(tcp_state("01").as_str(), "ESTABLISHED");
+        assert_eq!(tcp_state("06").as_str(), "TIME_WAIT");
+        assert_eq!(tcp_state("08").as_str(), "CLOSE_WAIT");
+        // Lowercase is what the kernel actually writes for 0x0a in some files.
+        assert_eq!(tcp_state("0a").as_str(), "LISTEN");
+        assert_eq!(tcp_state("ff").as_str(), "UNKNOWN");
+        assert_eq!(tcp_state("").as_str(), "UNKNOWN");
+    }
+
+    #[test]
+    fn queues_split_send_from_receive() {
+        // tx_queue:rx_queue — tx is what lsof calls QS.
+        let q = parse_queues("0000000C:00000005").expect("parses");
+        assert_eq!(q.send_queue, Some(12));
+        assert_eq!(q.recv_queue, Some(5));
+        assert_eq!(q.recv_window, None, "window has no /proc source");
+        assert!(parse_queues("nocolon").is_none());
+    }
+
+    #[test]
+    fn socket_inode_extracted_from_link_target() {
+        assert_eq!(socket_inode("socket:[3485]"), Some(3485));
+        assert_eq!(socket_inode("pipe:[3485]"), None);
+        assert_eq!(socket_inode("/etc/passwd"), None);
+        assert_eq!(socket_inode("socket:[]"), None);
+        assert_eq!(socket_inode("socket:[abc]"), None);
+    }
+
+    #[test]
+    fn unix_path_with_spaces_survives_field_splitting() {
+        // The reason fields_with_rest exists: an AF_UNIX socket can be bound to
+        // a path containing spaces, and split_whitespace would truncate it.
+        let line = "0000: 00000002 00000000 00010000 0001 01 184 /tmp/my sock/x.sock";
+        let f = fields_with_rest(line, UNIX_PATH + 1);
+        assert_eq!(f[UNIX_INODE], "184");
+        assert_eq!(f[UNIX_PATH], "/tmp/my sock/x.sock");
+    }
+
+    #[test]
+    fn unix_line_without_a_path_is_anonymous_not_malformed() {
+        let line = "0000: 00000003 00000000 00000000 0001 03  1181";
+        let f = fields_with_rest(line, UNIX_PATH + 1);
+        assert_eq!(f.len(), UNIX_PATH, "seven fields, no path");
+        assert_eq!(f[UNIX_INODE], "1181");
+        assert!(f.get(UNIX_PATH).is_none());
+    }
+
+    #[test]
+    fn reads_this_hosts_real_proc_net() {
+        // Parses whatever this kernel actually has. Asserting a specific socket
+        // exists would be host-dependent; asserting the parse survives the real
+        // file is not, and it is what catches a format drift.
+        let t = SocketTable::load(false);
+        for e in t.by_inode.values() {
+            match &e.file_type {
+                FileType::Ipv4 | FileType::Ipv6 | FileType::Unix => {}
+                other => panic!("unexpected socket file type {other:?}"),
+            }
+        }
+        // /proc/net/unix is present on every Linux and always has at least the
+        // sockets systemd/journald or the container runtime hold open, so an
+        // empty table would mean the parse silently dropped everything.
+        assert!(
+            !t.by_inode.is_empty(),
+            "expected at least one socket on a live host"
+        );
+    }
+
+    #[test]
+    fn unix_suffix_matches_the_c() {
+        // Byte-for-byte the tails `lsof -U` prints. A listening socket sits in
+        // St=01 (unconnected) and is identified only by SO_ACCEPTCON, so the
+        // flags column — not the state column — is what makes it LISTEN.
+        assert_eq!(
+            unix_suffix("0001", "00010000", "01"),
+            "type=STREAM (LISTEN)"
+        );
+        assert_eq!(
+            unix_suffix("0001", "00000000", "03"),
+            "type=STREAM (CONNECTED)"
+        );
+        assert_eq!(unix_suffix("0002", "00000000", "01"), "type=DGRAM");
+        assert_eq!(
+            unix_suffix("0005", "00000000", "03"),
+            "type=SEQPACKET (CONNECTED)"
+        );
+        // A socket both listening and "connected" is still LISTEN: the flag
+        // wins, which is the case a state-only mapping would get wrong.
+        assert_eq!(
+            unix_suffix("0001", "00010000", "03"),
+            "type=STREAM (LISTEN)"
+        );
+        assert_eq!(unix_suffix("zz", "zz", "zz"), "type=UNKNOWN");
+    }
+
+    #[test]
+    fn device_and_node_follow_lsofs_per_family_split() {
+        // lsof fills these two cells differently per family, and getting them
+        // backwards is invisible without a real diff against the C:
+        //   inet  DEVICE = inode, NODE = protocol
+        //   unix  DEVICE = kernel socket pointer, NODE = inode
+        let t = SocketTable::load(false);
+        for e in t.by_inode.values() {
+            match &e.file_type {
+                FileType::Ipv4 | FileType::Ipv6 => {
+                    assert!(
+                        e.device.parse::<u64>().is_ok(),
+                        "inet DEVICE should be the inode, got {:?}",
+                        e.device
+                    );
+                    assert!(
+                        ["TCP", "UDP", "RAW", "ICMP", "ICMPV6"].contains(&e.node.as_str()),
+                        "inet NODE should be the protocol, got {:?}",
+                        e.node
+                    );
+                }
+                FileType::Unix => {
+                    assert!(
+                        e.device.starts_with("0x"),
+                        "unix DEVICE should be the kernel pointer, got {:?}",
+                        e.device
+                    );
+                    assert!(
+                        e.node.parse::<u64>().is_ok(),
+                        "unix NODE should be the inode, got {:?}",
+                        e.node
+                    );
+                    assert!(e.unix_suffix.is_some(), "unix rows carry a type= tail");
+                }
+                other => panic!("unexpected socket file type {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn queues_are_absent_unless_asked_for() {
+        // The renderer emits a (QR=)(QS=) suffix whenever the field is present,
+        // so a plain run must not populate it.
+        let t = SocketTable::load(false);
+        assert!(
+            t.by_inode.values().all(|e| e.info.tcp.is_none()),
+            "load(false) must leave TcpExtInfo unset"
+        );
+    }
+}

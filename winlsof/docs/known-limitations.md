@@ -105,6 +105,35 @@ The binary itself is fine — verify the download against the published
 [README](../README.md) (Defender exclusion via `Add-MpPreference`). A
 locally built binary is not internet-marked and is usually not flagged.
 
+## Rendering divergences from the C, found by the Linux differential
+
+These are **not** Linux-specific and **not** introduced by the Linux backend.
+They live in `lsof-core`'s renderer, so they have always applied to the Windows
+output too — nobody could see them because Windows has no C `lsof` to compare
+against. The moment a backend landed on a platform where the reference
+implementation runs on the same host, all three fell out of a single
+side-by-side run.
+
+They are recorded rather than fixed because each one changes output that the
+Windows golden fixtures and the 59-case live smoke suite currently assert.
+Matching the C is very likely right, but it is a deliberate compatibility
+decision, not a bug fix to slip into a backend phase.
+
+| # | The C | winlsof | Notes |
+|---|---|---|---|
+| 1 | `(QR=0 QS=0)` | `(QR=0) (QS=0)` | `-T` suffix: the C emits **one** parenthesised group, space-separated. |
+| 2 | `-Tq` replaces the state | `-Tq` keeps `(ESTABLISHED)` and appends | In the C, `-T`'s sub-flags select *what is shown*; `-Ts` is what asks for state, and it is the default. Ours treats queues as purely additive. |
+| 3 | `COMMAND` truncated to 9 | not truncated | The C's default column width is 9 (`+c` overrides). `command_width` defaults to `None` here, so a 15-char `/proc` comm prints in full. |
+
+A fourth difference is deliberate and stays: **winlsof never resolves hostnames
+or service names**, so it behaves as though `-n -P` were always given. The core
+renders the numeric form it is handed (`model::SocketInfo::display_name`), and
+resolution is documented there as a backend concern. The C resolves by default,
+so `192.0.2.2:43378->160.79.104.10:443` here is
+`192.0.2.2:43378->api.anthropic.com:https` there. Resolution costs DNS traffic
+from a diagnostic tool, which is a poor default for the environments this runs
+in; `-n`/`-P` are accepted and are no-ops.
+
 ## Where these limitations are tracked
 
 - **Spike records** (closed gates with the engineering reasoning):

@@ -5,6 +5,8 @@ use std::path::Path;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 
+use crate::net::{self, SocketTable};
+
 /// `st_mode` file-type mask and its values (POSIX `S_IFMT` and friends). Spelled
 /// out rather than pulled from `libc` — they are fixed by the ABI.
 const S_IFMT: u32 = 0o170000;
@@ -34,9 +36,10 @@ fn type_from_mode(mode: u32) -> FileType {
         // A pipe and a FIFO are the same object to the kernel; lsof prints FIFO.
         S_IFIFO => FileType::Fifo,
         S_IFLNK => FileType::Other("LINK".into()),
-        // Sockets need /proc/net to classify (IPv4/IPv6/unix) and to name.
-        // Phase L0 has no socket support, so they are reported honestly as an
-        // unresolved socket rather than guessed at — see the crate docs.
+        // Reached only when the /proc/net join missed — a socket in another
+        // network namespace, or a family not read (netlink, packet). The row is
+        // still real, and its `socket:[inode]` name is the key that would
+        // resolve it, so it is reported unresolved rather than guessed at.
         S_IFSOCK => FileType::Other("SOCK".into()),
         _ => FileType::Unknown,
     }
@@ -75,7 +78,7 @@ fn access_for(pid: u32, fd: &str) -> AccessMode {
 ///
 /// A row is emitted if either succeeds; an fd we can see but cannot stat is
 /// still worth showing.
-fn row(link: &Path, fd: FdType, access: AccessMode) -> Option<OpenFile> {
+fn row(link: &Path, fd: FdType, access: AccessMode, socks: &SocketTable) -> Option<OpenFile> {
     let target = std::fs::read_link(link).ok();
     let meta = std::fs::metadata(link).ok();
     if target.is_none() && meta.is_none() {
@@ -85,6 +88,39 @@ fn row(link: &Path, fd: FdType, access: AccessMode) -> Option<OpenFile> {
     let name = target
         .map(|t| t.to_string_lossy().into_owned())
         .unwrap_or_default();
+
+    // A socket fd's link target carries only `socket:[inode]`; the inode is the
+    // join key into /proc/net. A hit replaces the L0 row wholesale — real TYPE
+    // (IPv4/IPv6/unix), protocol, addresses and state. A miss keeps the L0 row
+    // exactly as it was, which is the honest result for a socket in another
+    // network namespace.
+    if let Some(inode) = net::socket_inode(&name) {
+        if let Some(e) = socks.get(inode) {
+            // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
+            // anonymous socket has no path and shows the tail alone.
+            let name = match &e.unix_suffix {
+                Some(suffix) => match &e.path {
+                    Some(p) => format!("{p} {suffix}"),
+                    None => suffix.clone(),
+                },
+                None => e.info.display_name(false, false),
+            };
+            return Some(OpenFile {
+                fd,
+                access,
+                file_type: e.file_type.clone(),
+                name,
+                device: Some(e.device.clone()),
+                size: None,
+                // lsof prints `0t0` in SIZE/OFF for every socket row — a socket
+                // has no size, and its offset is meaningless but always shown.
+                offset: Some(0),
+                node: Some(e.node.clone()),
+                links: None,
+                socket: Some(e.info.clone()),
+            });
+        }
+    }
 
     let (file_type, device, size, node, links) = match &meta {
         Some(m) => {
@@ -129,7 +165,7 @@ fn row(link: &Path, fd: FdType, access: AccessMode) -> Option<OpenFile> {
 /// exited, or it belongs to another user and we are not root. The caller
 /// distinguishes those (a vanished pid vs. a permission wall) only in aggregate,
 /// which is enough for the `-V` inaccessible count.
-pub fn for_pid(pid: u32) -> Option<Vec<OpenFile>> {
+pub fn for_pid(pid: u32, socks: &SocketTable) -> Option<Vec<OpenFile>> {
     let mut out = Vec::new();
 
     // The specials. Unlike fds these have no access mode of their own.
@@ -139,7 +175,7 @@ pub fn for_pid(pid: u32) -> Option<Vec<OpenFile>> {
         ("exe", FdType::Txt),
     ] {
         let p = format!("/proc/{pid}/{name}");
-        if let Some(f) = row(Path::new(&p), fd, AccessMode::Unknown) {
+        if let Some(f) = row(Path::new(&p), fd, AccessMode::Unknown, socks) {
             out.push(f);
         }
     }
@@ -157,7 +193,7 @@ pub fn for_pid(pid: u32) -> Option<Vec<OpenFile>> {
     for (num, name) in fds {
         let p = format!("/proc/{pid}/fd/{name}");
         let access = access_for(pid, &name);
-        if let Some(f) = row(Path::new(&p), FdType::Handle(num), access) {
+        if let Some(f) = row(Path::new(&p), FdType::Handle(num), access, socks) {
             out.push(f);
         }
     }
@@ -199,8 +235,13 @@ mod tests {
     fn device_nodes_report_their_own_number_not_the_filesystem() {
         // The DEVICE column means st_rdev for a device node and st_dev for
         // everything else; /dev/null is the canonical check (1,3 not 0,6).
-        let f = row(Path::new("/dev/null"), FdType::Handle(0), AccessMode::Read)
-            .expect("/dev/null is stat-able");
+        let f = row(
+            Path::new("/dev/null"),
+            FdType::Handle(0),
+            AccessMode::Read,
+            &SocketTable::default(),
+        )
+        .expect("/dev/null is stat-able");
         assert_eq!(f.file_type, FileType::Chr);
         assert_eq!(f.device.as_deref(), Some("1,3"));
     }
@@ -215,7 +256,8 @@ mod tests {
             .next()
             .and_then(|s| s.parse().ok())
             .expect("pid parses");
-        let files = for_pid(pid).expect("own /proc/<pid>/fd is readable");
+        let files =
+            for_pid(pid, &SocketTable::load(false)).expect("own /proc/<pid>/fd is readable");
 
         assert!(
             files.iter().any(|f| f.fd == FdType::Cwd),

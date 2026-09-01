@@ -45,12 +45,9 @@ fn make_env() -> Env {
     Env {
         backend: Box::new(backend),
         elevated,
-        // Phase L0 has no socket support, so say so rather than letting `-i`
-        // look like it found nothing. See lsof-backend-linux's crate docs.
-        note: Some(
-            "linux backend (phase L0): sockets are not yet classified, so -i matches nothing"
-                .to_string(),
-        ),
+        // Phase L1 classifies sockets from /proc/net, so the L0 note that `-i`
+        // matched nothing no longer applies and would now be a false warning.
+        note: None,
     }
 }
 

@@ -201,7 +201,7 @@ ids = [
   "type:rte", "type:sock", "type:x.25"
 ]
 platforms = ["linux"]
-reason = "DEBT (L1): socket classification via /proc/net/* joined on socket:[inode]; L0 emits the unresolved SOCK row instead"
+reason = "DEBT (L2): L1 resolves TCP/UDP/raw/unix sockets into IPv4/IPv6/unix rows, but these are lsof's per-FAMILY type codes, which need /proc/net/netlink, /proc/net/packet and the C's family naming; an fd in a family not read here still shows the unresolved SOCK row"
 
 [[waive]]
 ids = [
