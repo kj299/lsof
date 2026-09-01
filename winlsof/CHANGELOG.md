@@ -23,6 +23,29 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   4.95.0 on the same host — the differential Windows structurally cannot have.
 - `FileType::Block` (`BLK`) in `lsof-core`. Unix-only; the Windows backend
   never emits it.
+- **Platform-scoped coverage waivers.** `[[waive]]` entries take
+  `platforms = [...]`, and `coverage_gate.py` takes `--platform NAME`; CI runs
+  the gate once for `windows` and once for `linux`. A waiver that does not name
+  the platform under test stops applying, so whatever it excused becomes
+  required again. Waivers without `platforms` apply everywhere, so
+  single-platform ports are unaffected.
+- Four new matrix cases declaring what the Linux backend's tests cover, and a
+  `type:LINK` assertion in `mode_maps_to_lsof_type_codes` — the code mapped
+  `S_IFLNK` to `LINK` but no test had ever asserted it.
+
+### Fixed
+- **The coverage gate was excusing features the port now intends to ship.**
+  Most waiver reasons were platform-specific ("Unix-only", "no Windows
+  equivalent") and expired silently when the Linux backend merged: nothing in
+  the file changed, so the gate stayed green while waiving `-Z` (SELinux), `-X`
+  (epoll bridge), the mount-table options, and every Unix socket family — on a
+  port that now targets Linux. Two were not merely expired but wrong that day:
+  `type:BLK` and `type:FIFO` were waived as having no Windows analogue while
+  the Linux backend was already emitting both; they are now **covered**, not
+  waived. The Linux-side features whose waiver expired are recorded as
+  `DEBT (L1)` / `DEBT (L2)` naming the phase that closes them, rather than
+  re-waived — a waiver claims "we will never do this", which is untrue of `-Z`
+  or of socket classification.
 
 ### Changed
 - **Docs no longer describe the project as Windows-only**, which stopped being

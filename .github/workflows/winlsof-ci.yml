@@ -69,10 +69,21 @@ jobs:
         # silently dropped (porting-kit LESSONS #8). HARD gate: the C's full
         # surface minus explicit, reasoned waivers must all be exercised, so a
         # newly dropped or newly untested feature fails CI. See coverage/README.md.
+        #
+        # Run once PER PLATFORM. A waiver's reason is usually platform-specific
+        # ("Unix-only", "no Windows equivalent"), and such a reason expires
+        # silently when the port grows a backend for that platform — the file
+        # does not change, so an unscoped gate stays green while excusing
+        # features the new backend is expected to have. Gating each platform
+        # separately is what makes that expiry fail instead of pass.
         run: |
-          python3 ../porting-kit/harnesses/coverage/coverage_gate.py \
-            --inventory coverage/feature-inventory-winlsof.toml \
-            --matrix coverage/coverage-matrix.toml
+          for p in windows linux; do
+            echo "=== coverage gate: $p ==="
+            python3 ../porting-kit/harnesses/coverage/coverage_gate.py \
+              --inventory coverage/feature-inventory-winlsof.toml \
+              --matrix coverage/coverage-matrix.toml \
+              --platform "$p"
+          done
 
   windows:
     name: native backend (windows)

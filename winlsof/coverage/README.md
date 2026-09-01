@@ -66,15 +66,45 @@ this gate from a control into a lie.
 
 Everything out of scope is an explicit `[[waive]]` with a reason; grouped
 `ids = [...]` share one reason, and there are no globs, so a feature added to the
-C later can never be swallowed by an existing waiver. Three kinds:
+C later can never be swallowed by an existing waiver.
 
-1. **Options declared N/A** (15) — reasons verbatim from
-   `docs/feature-parity-plan.md` (`-A` AFS, `-z` Solaris zones, `-Z` SELinux, …).
-2. **Other dialects' TYPE codes** (103) — Solaris `/proc`, BSD/macOS vnodes, Unix
-   socket families, and `FIFO` (unreachable on Windows: pipe handles type as
-   `PIPE`).
-3. **Coverage debt** — **none.** Every in-scope feature is exercised by a real
-   test.
+### Waivers are scoped per platform
+
+A waiver may carry `platforms = [...]`, and **the gate runs once per platform**:
+
+```sh
+coverage_gate.py --inventory ... --matrix ... --platform windows
+coverage_gate.py --inventory ... --matrix ... --platform linux
+```
+
+This exists because of a failure this file actually had. Most waiver reasons are
+platform-specific — "Unix-only", "no Windows equivalent" — and such a reason
+**expires the day the port grows a backend for that platform**. Nothing in the
+file changes, so an unscoped gate stays green while excusing features the new
+backend is expected to have. When the Linux backend merged, this inventory was
+waiving `-Z` as "SELinux contexts", `-X` as "Linux epoll bridge", and every Unix
+socket family — on a port that now targets Linux.
+
+Two of them were not merely expired but wrong on the day: `type:BLK` and
+`type:FIFO` were waived as having no Windows analogue while the Linux backend was
+already emitting both. Scoping turned them from waived into **covered**.
+
+A waiver with no `platforms` applies everywhere, and that is the right default
+for genuinely other-dialect features (Solaris zones, BSD kqueue, HP-UX AFS).
+
+### The three kinds
+
+1. **Options declared N/A** — 5 unscoped (`-A` AFS, `-z` Solaris zones, `-C`
+   kernel name cache, `-H`, `-k`), 10 Windows-scoped.
+2. **Other dialects' TYPE codes** — Solaris `/proc`, BSD/macOS vnodes, and
+   macOS link-layer families are unscoped; Unix socket families and Unix object
+   types are Windows-scoped.
+3. **Coverage debt** — **none on Windows.** On Linux, the features whose Windows
+   waiver expired are declared as debt (`reason` beginning `DEBT (L1)` / `DEBT
+   (L2)`) naming the phase that closes them. They are *debt, not waivers*: a
+   waiver claims "we will never do this", which would be untrue of `-Z` or of
+   socket classification. The gate output prints each one, so the list cannot rot
+   unseen.
 
 ## Coverage debt: closed (2026-07-25)
 
