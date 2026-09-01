@@ -1,21 +1,21 @@
 name: C/C++ CI
 
 # The Rust port's trees AND its workflow files are ignored: an edit to
-# winlsof's CI/release workflow can't affect the C build, but without these
+# lsof-rs's CI/release workflow can't affect the C build, but without these
 # entries it still kicked off all three heavyweight C jobs (the same waste the
 # tree-level ignores fixed — porting-kit LESSONS #005).
 on:
   push:
     paths-ignore:
       - 'porting-kit/**'
-      - 'winlsof/**'
-      - '.github/workflows/winlsof-*.yml'
+      - 'lsof-rs/**'
+      - '.github/workflows/lsof-rs-*.yml'
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - 'porting-kit/**'
-      - 'winlsof/**'
-      - '.github/workflows/winlsof-*.yml'
+      - 'lsof-rs/**'
+      - '.github/workflows/lsof-rs-*.yml'
 
 jobs:
   linux:

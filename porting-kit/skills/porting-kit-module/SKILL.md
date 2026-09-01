@@ -11,7 +11,7 @@ Wraps `porting-kit/PROMPTS/10-module-port.md` and PLAYBOOK Phase 4. Re-read thos
 If flagged in Phase 1 (blocking syscall, exotic ioctl, unions, threads), run a
 timeboxed spike on the one scary operation — does it block? need privilege? vary by
 version? — and record the result *before* committing to a design. This is the
-highest-ROI habit in the retrospective (the winlsof `NtQueryObject` hang cost 7
+highest-ROI habit in the retrospective (the lsof-rs `NtQueryObject` hang cost 7
 commits reactively vs ~1 day up front). For a capability that might be *impossible*
 (not just hard), use the research spike-and-gate ritual: rate effort/confidence,
 write the decision gate before coding, and do a pivot check before declaring it dead.

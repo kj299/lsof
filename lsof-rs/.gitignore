@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+
+# Live smoke-test output (transcript, per-case captures, results.csv, coverage).
+# `smoke-results` is what CI passes via -OutDir; `lsof-rs-smoke-results` is the
+# harness's default when it's run by hand.
+/smoke-results/
+/lsof-rs-smoke-results/

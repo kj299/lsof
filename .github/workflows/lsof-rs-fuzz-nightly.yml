@@ -1,0 +1,53 @@
+name: lsof-rs nightly fuzz
+
+# Deep fuzzing on a schedule — the long-budget counterpart to lsof-rs-ci.yml's
+# 45-second PR smoke. Same target (the hand-rolled argument parser must never
+# panic on adversarial input), 40x the budget, plus a corpus that accumulates
+# across nights via the cache: each run restores the newest previous corpus,
+# fuzzes on top of it, and saves the grown corpus for the next night.
+#
+# `workflow_dispatch` is the human button (porting-kit LESSONS #14): schedule
+# workflows only fire from the default branch, so the button is both the way to
+# exercise this on demand and the way to validate it right after merging
+# instead of waiting for the first 03:43 UTC firing.
+on:
+  schedule:
+    - cron: '43 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: lsof-rs
+
+jobs:
+  deep-fuzz:
+    name: deep fuzz (arg parser, 30 min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: restore accumulated corpus
+        uses: actions/cache@v5
+        with:
+          path: lsof-rs/fuzz/corpus
+          # The run-id key never hits, so the post-job save always stores the
+          # grown corpus; restore-keys pulls the newest previous night's.
+          key: fuzz-corpus-parse_args-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-parse_args-
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: deep fuzz the argument parser
+        run: cargo fuzz run parse_args -- -max_total_time=1800 -rss_limit_mb=2048
+      - name: upload crash artifacts
+        # Only exists on a finding; libFuzzer writes the reproducer input here.
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lsof-rs-fuzz-crashes
+          path: lsof-rs/fuzz/artifacts
+          if-no-files-found: warn

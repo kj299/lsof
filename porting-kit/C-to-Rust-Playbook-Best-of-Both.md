@@ -7,7 +7,7 @@
    Feb 2026), a six-performer study with hard numbers. This supplies the
    *what and why, with evidence*.
 2. **An executable "porting kit"** distilled from a real completed C→Rust port
-   (winlsof — `lsof` reimplemented in Rust) plus its four self-patching
+   (lsof-rs — `lsof` reimplemented in Rust) plus its four self-patching
    retrospectives. This supplies the *how*: runnable harnesses that mechanically
    enforce the plan, a proactive flaw-hunt, and a loop that improves the playbook
    after every port.

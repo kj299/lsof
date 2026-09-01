@@ -1,0 +1,400 @@
+# coverage-matrix — what lsof-rs's verification surface actually exercises.
+#
+# This is NOT a differential input matrix (lsof-rs's differential is
+# oracle-substitution over live fixtures — see ../differential/README.md). It is
+# the coverage *declaration* the kit's gate reads: one [[case]] per real test in
+# lsof-rs's suite, naming the args it runs and the TYPE codes its fixtures
+# create. Option coverage is inferred from `args`; TYPE coverage must be
+# declared with `covers`, because no flag spells what a fixture creates — which
+# is precisely how the dropped-object-type gap stayed invisible (LESSONS #8).
+#
+# Sources, all three real and maintained:
+#   golden/*      crates/lsof-core/tests/golden.rs   (portable, every CI push)
+#   diff/*        ../differential/capture.ps1        (windows CI, hard gate)
+#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (55-case live harness)
+#
+# Keep it truthful: a case belongs here only if a test really runs those args
+# and really asserts on that output. Declaring coverage you don't have converts
+# this gate from a control into a lie.
+
+# ---------------------------------------------------------------- golden tests
+# Renderer-level, over the deterministic mock backend. These pin FORMAT, and the
+# object-type test pins that native kernel TYPE codes render at all.
+
+[[case]]
+name = "golden/table"
+args = []
+covers = ["type:REG", "type:DIR"]
+
+[[case]]
+name = "golden/fields-F"
+args = ["-F"]
+
+[[case]]
+name = "golden/json-J"
+args = ["-J"]
+
+[[case]]
+name = "golden/json-lines-j"
+args = ["-j"]
+
+[[case]]
+name = "golden/terse-t"
+args = ["-t"]
+
+[[case]]
+name = "golden/ppid-R"
+args = ["-R"]
+
+[[case]]
+name = "golden/offset-o"
+args = ["-o"]
+
+[[case]]
+name = "golden/command-width-plus-c"
+args = ["+c", "4"]
+
+[[case]]
+name = "golden/object-types-render"
+# windows_object_types_render: KEY + FileType::Other("SEM") in table and -F t.
+covers = ["type:KEY"]
+args = []
+
+[[case]]
+name = "golden/tcp-info-structured"
+# tcp_info_{table_suffix,fields_tokens,json_keys}: a fixture with TcpExtInfo
+# set renders the table (Win=/QR=/QS= NAME suffix), -F (TQR/TQS/TWR tokens
+# after TST), and JSON (tcp_window/tcp_queue_recv/tcp_queue_send); absent
+# info renders nothing extra, and the suffix never leaks into -F/JSON names.
+args = ["-T"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "core/user-filter-u"
+# args::tests::user_filter_parses (`-u`, `-ualice`, comma lists) plus
+# selection::tests::user_selector (matches bare account or DOMAIN\user, either
+# case; rejects a different domain and an unknown user).
+args = ["-u", "USER"]
+
+[[case]]
+name = "core/inet-etw-families"
+# args::tests::inet_etw_families_icmp_raw (icmp/raw parse like tcp/udp, the
+# [46] prefix composes, needs_etw reports the ETW implication) plus
+# selection::tests::inet_etw_family_filters_icmp_raw (ICMP matches the v4+v6
+# codes, RAW is exact, family narrows). Portable, every push.
+args = ["-iICMP"]
+
+[[case]]
+name = "core/privilege-hint-predicate"
+# main.rs tests::privilege_hint_* over the extracted wants_privilege_hint():
+# both elevation branches through the real argv parser (`-w` suppression,
+# table-only, -i/-U/path exemptions). This is what makes `-w`'s semantics
+# CI-covered at all — the smoke -w case SKIPs on the always-elevated hosted
+# runner (docs/road-to-1.0.md, the elevation blind spot).
+args = ["-w"]
+
+# ------------------------------------------------------- backend unit tests
+# crates/lsof-backend-windows/src/handles.rs `#[cfg(test)] mod tests`, run by
+# `cargo test --all` on the windows CI runner.
+
+[[case]]
+name = "backend/enumerates-real-kernel-object-types"
+# enumerates_real_kernel_object_types: creates a real Event, Mutant, Section,
+# process handle, token and NUL char device in-process, runs the actual
+# `enumerate()` over this PID, and requires each object's TYPE code back. This
+# is end-to-end on purpose — the bug it guards (every non-File object dropped)
+# lived in the enumeration loop, upstream of classification, so a mapping unit
+# test could not have caught it.
+args = []
+covers = [
+  "type:EVT",
+  "type:MUT",
+  "type:SECT",
+  "type:PROC",
+  "type:TOKN",
+  "type:CHR",
+]
+
+# ------------------------------------------------------------- differential
+# Oracle-substitution vs Get-NetTCPConnection / Get-NetUDPEndpoint over
+# self-owned loopback fixtures. IPv4: TCP LISTEN + ESTABLISHED + a half-closed
+# CLOSE_WAIT/FIN_WAIT2 pair + UDP. IPv6: TCP LISTEN + ESTABLISHED (always
+# present on the hosted runner; a host without ::1 degrades with a warning).
+
+[[case]]
+name = "diff/sockets-json"
+args = ["-J", "-nP", "-i"]
+covers = ["type:IPv4", "type:IPv6"]
+
+[[case]]
+name = "diff/sockets-fields"
+args = ["-F", "-nP", "-i"]
+covers = ["type:IPv4", "type:IPv6"]
+
+# --------------------------------------------------------------- smoke tests
+# The 55-case live harness. Fixtures are self-owned (a held file at a known
+# offset, a named pipe, a mapped data file, TCP v4/v6 + UDP sockets, child
+# processes with known cwd in 64- and 32-bit).
+
+[[case]]
+name = "smoke/version"
+args = ["-v"]
+
+[[case]]
+name = "smoke/help"
+args = ["-h"]
+
+[[case]]
+name = "smoke/terse-pids"
+args = ["-t"]
+
+[[case]]
+name = "smoke/process-of-self"
+args = ["-p", "SELF"]
+
+[[case]]
+name = "smoke/command-filter"
+args = ["-c", "cmd", "-d", "txt"]
+
+[[case]]
+name = "smoke/open-file-listed"
+args = ["-p", "SELF"]
+covers = ["type:REG"]
+
+[[case]]
+name = "smoke/file-offset-o"
+args = ["-o", "-p", "SELF"]
+
+[[case]]
+name = "smoke/named-pipe-listed"
+args = ["-p", "SELF"]
+covers = ["type:PIPE"]
+
+[[case]]
+name = "smoke/mapped-data-file"
+args = ["-p", "SELF"]
+covers = ["type:REG"]
+
+[[case]]
+name = "smoke/tcp4-listen-by-port"
+args = ["-nP", "-iTCP:PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "smoke/tcp4-established-state"
+args = ["-nP", "-iTCP:PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "smoke/tcp6-listen"
+args = ["-nP", "-iTCP:PORT6"]
+covers = ["type:IPv6"]
+
+[[case]]
+name = "smoke/udp4-by-port"
+args = ["-nP", "-iUDP:PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "smoke/inet6-filter"
+args = ["-nP", "-i6"]
+covers = ["type:IPv6"]
+
+[[case]]
+name = "smoke/inet-icmp-family"
+# -iICMP implies the ETW AFD capture (no --etw flag) and excludes TCP rows;
+# lenient like smoke/unix-sockets-U (a 2s window can't guarantee ICMP traffic).
+args = ["-nP", "-iICMP"]
+
+[[case]]
+name = "smoke/inet-raw-family"
+args = ["-nP", "-iRAW"]
+
+[[case]]
+name = "smoke/inet-tcp-only"
+args = ["-nP", "-iTCP"]
+
+[[case]]
+name = "smoke/port-service-name"
+args = ["-n", "-iTCP:PORT"]
+
+[[case]]
+name = "smoke/cwd-64bit"
+args = ["-d", "cwd", "-p", "PID"]
+covers = ["type:DIR"]
+
+[[case]]
+name = "smoke/cwd-wow64-32bit"
+args = ["-d", "cwd", "-p", "PID"]
+covers = ["type:DIR"]
+
+[[case]]
+name = "smoke/modules-txt-image"
+args = ["-d", "txt", "-p", "PID"]
+covers = ["type:REG"]
+
+[[case]]
+name = "smoke/modules-mem-dll"
+args = ["-d", "mem", "-p", "PID"]
+covers = ["type:REG"]
+
+[[case]]
+name = "smoke/plus-D-directory-tree"
+args = ["+D", "TEMP"]
+
+[[case]]
+name = "smoke/ppid-column-R"
+args = ["-R", "-p", "SELF"]
+
+[[case]]
+name = "smoke/and-mode-a"
+args = ["-a", "-p", "SELF", "-c", "no-such-command-xyz"]
+
+[[case]]
+name = "smoke/field-output-Fpn"
+args = ["-Fpn", "-p", "SELF"]
+
+[[case]]
+name = "smoke/field-output-nul-F0"
+args = ["-F0", "-p", "SELF"]
+
+[[case]]
+name = "smoke/json-aggregated-J"
+args = ["-J", "-p", "SELF"]
+
+[[case]]
+name = "smoke/json-lines-j"
+args = ["-j", "-p", "SELF"]
+
+[[case]]
+name = "smoke/verbose-V"
+args = ["-V", "-p", "4294967294"]
+
+[[case]]
+name = "smoke/repeat-mode-r"
+args = ["-r1", "-nP", "-iTCP:PORT"]
+
+[[case]]
+name = "smoke/state-filter-listen"
+args = ["-sTCP:LISTEN", "-nP", "-i"]
+
+[[case]]
+name = "smoke/tasks-K"
+args = ["-K", "-p", "SELF"]
+covers = ["type:THRD"]
+
+[[case]]
+name = "smoke/link-count-L"
+args = ["-L", "-p", "SELF"]
+
+[[case]]
+name = "smoke/link-filter-plus-L"
+args = ["+L", "1", "-p", "SELF"]
+
+[[case]]
+name = "smoke/numeric-ids-l"
+args = ["-l", "-p", "SELF"]
+
+[[case]]
+name = "smoke/ppid-select-g"
+args = ["-g", "SELF"]
+
+[[case]]
+name = "smoke/quiet-Q"
+args = ["-Q", "-p", "4294967294"]
+
+[[case]]
+name = "smoke/suppress-warnings-w"
+args = ["-w", "-p", "SELF"]
+
+[[case]]
+name = "smoke/no-op-O"
+args = ["-O", "-p", "SELF"]
+
+[[case]]
+name = "smoke/tcp-info-T"
+args = ["-T", "-nP", "-iTCP:PORT"]
+
+[[case]]
+name = "smoke/tcp-info-fields"
+args = ["-Tqw", "-F", "-nP", "-iTCP:PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "smoke/tcp-info-json"
+args = ["-Tqw", "-J", "-nP", "-iTCP:PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "smoke/pipe-endpoints-E"
+args = ["-E", "-p", "SELF"]
+covers = ["type:PIPE"]
+
+[[case]]
+name = "smoke/pipe-endpoints-plus-E"
+args = ["+E", "-p", "SELF"]
+covers = ["type:PIPE"]
+
+[[case]]
+name = "smoke/unix-sockets-U"
+args = ["-U"]
+covers = ["type:unix"]
+
+[[case]]
+name = "smoke/elevated-system-handles"
+args = ["-p", "PID"]
+covers = ["type:unknown"]
+
+# ------------------------------------------------------- linux backend tests
+# crates/lsof-backend-linux/src/*.rs — real `cargo test` cases, run on every
+# Linux CI push. Unlike the smoke suite these need no host fixtures: the type
+# mapping is asserted against st_mode bit patterns (ABI-fixed), and the live
+# cases read this host's own /proc, which every Linux runner has.
+#
+# These exist as matrix cases because the platform-scoped gate now REQUIRES
+# these TYPE codes on Linux. Before scoping, all four sat under a waiver
+# reading "no Windows analogue" — which excused, on Linux, codes the Linux
+# backend was already emitting.
+
+[[case]]
+name = "linux/type-codes-from-st_mode"
+args = []
+covers = ["type:REG", "type:DIR", "type:CHR", "type:BLK", "type:FIFO", "type:SOCK", "type:LINK", "type:unknown"]
+
+[[case]]
+name = "linux/device-node-rdev"
+args = []
+covers = ["type:CHR"]
+
+[[case]]
+name = "linux/live-proc-self-fds"
+args = ["-p", "SELF"]
+covers = ["type:REG", "type:CHR"]
+
+[[case]]
+name = "linux/terse-fast-path"
+args = ["-t"]
+
+[[case]]
+name = "linux/process-selector-scope"
+args = ["-p", "PID"]
+
+# ------------------------------------------------- linux backend: sockets (L1)
+# crates/lsof-backend-linux/src/net.rs. The address/state/queue decoders are
+# unit-tested against the exact byte patterns the kernel writes; the table and
+# column cases parse this host's real /proc/net on every Linux CI run.
+
+[[case]]
+name = "linux/proc-net-socket-table"
+args = ["-i"]
+covers = ["type:IPv4", "type:unix"]
+
+[[case]]
+name = "linux/socket-device-node-split"
+args = ["-i"]
+covers = ["type:IPv4", "type:unix"]
+
+[[case]]
+name = "linux/unix-socket-type-suffix"
+args = ["-U"]
+covers = ["type:unix"]

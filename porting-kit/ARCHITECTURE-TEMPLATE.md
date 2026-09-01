@@ -1,7 +1,7 @@
 # Architecture template — the workspace shape that makes safety structural
 
 Copy [`skeleton/`](skeleton/) to your new project root and rename the crates.
-This is the layering that worked in the winlsof port, refocused (per the author's
+This is the layering that worked in the lsof-rs port, refocused (per the author's
 direction) on **unsafe isolation and safety**, not OS abstraction.
 
 ```
@@ -31,7 +31,7 @@ workspace/
   `OwnedHandle`/`PrivilegeGuard` analog). Use-after-free, double-free, leak, and
   privilege-held-too-long stop being possible, not just unlikely.
 - **`core` testable everywhere** means CI runs the real logic tests on the cheap
-  default runner, every push, regardless of the target platform — winlsof kept
+  default runner, every push, regardless of the target platform — lsof-rs kept
   its 26 core tests green on Linux CI while the backend was Windows-only.
 
 ## Conventions the skeleton encodes

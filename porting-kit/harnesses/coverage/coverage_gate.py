@@ -5,7 +5,7 @@ it diffs the C's enumerated feature surface (option letters, emitted TYPE codes)
 against the differential input matrix's cases and hard-fails on any feature no
 case exercises.
 
-The winlsof failure this prevents: the socket differential was fully green while
+The lsof-rs failure this prevents: the socket differential was fully green while
 the port silently dropped every non-File kernel object type — no fixture ever
 created a registry Key/Event/Mutant, so the gap was invisible to *both* sides of
 the diff (a false MATCH, never a divergence). A green differential over a matrix

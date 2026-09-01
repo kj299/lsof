@@ -4,7 +4,7 @@
 The C oracle and the Rust rewrite will differ in *nondeterministic* ways that are
 not bugs: PIDs, timestamps, ephemeral ports, pointer/handle values, and sometimes
 line ordering. If you diff raw output, that noise buries real regressions and
-fakes false ones. These rules (learned from winlsof, where PIDs/timestamps/hex
+fakes false ones. These rules (learned from lsof-rs, where PIDs/timestamps/hex
 handles all varied run-to-run) canonicalize both sides *identically* before the
 diff, so only meaningful differences survive.
 

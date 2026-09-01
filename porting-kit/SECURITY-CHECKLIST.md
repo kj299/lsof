@@ -17,7 +17,7 @@ to safety and security" — this is that list.
 - [ ] **Every `unsafe fn` justified.** `clippy::missing_safety_doc` is enabled
       (via `[workspace.lints]`) and `-D` in CI, so every `pub unsafe fn` carries a
       `/// # Safety` section. The audit harness deliberately doesn't cover fns —
-      clippy does; both must be wired (LESSONS #3: they weren't, so 11 winlsof
+      clippy does; both must be wired (LESSONS #3: they weren't, so 11 lsof-rs
       `unsafe fn` went unchecked). `clippy::undocumented_unsafe_blocks` also runs
       as a cross-check of the harness.
 - [ ] **`unsafe_op_in_unsafe_fn = "deny"`** (workspace lint), so every unsafe op
@@ -26,7 +26,7 @@ to safety and security" — this is that list.
       parse/decode entry point and runs clean (60s smoke min; nightly deep).
       No `unwrap()`/`expect()`/`[i]` indexing on attacker-controlled data.
 - [ ] **No UB.** Miri passes on the pure logic; ASan/UBSan pass over the FFI
-      layer; TSan if the module shares state across threads (winlsof's hang class).
+      layer; TSan if the module shares state across threads (lsof-rs's hang class).
 - [ ] **Integer safety.** `overflow-checks = true`; size math uses
       `checked_*`/`saturating_*`; no `as` truncation on lengths/offsets from
       input. (Closes the C `malloc(a*b)` overflow class.)
@@ -46,7 +46,7 @@ to safety and security" — this is that list.
 - [ ] **The harness supply chain is clean, too.** The test / differential / smoke
       harness must not download-and-execute a binary oracle: a compromised host
       would run arbitrary code in your dev/CI environment. Use OS-shipped native
-      commands as oracles (winlsof's smoke test fetched `handle64.exe` from a live
+      commands as oracles (lsof-rs's smoke test fetched `handle64.exe` from a live
       URL — removed, replaced with native `Get-*` / `netstat`). Supply chain
       covers the code that *tests* the port, not only the code it ships.
 - [ ] **Least privilege.** Privileges acquired just-in-time and scoped to the one
@@ -54,7 +54,7 @@ to safety and security" — this is that list.
       by default; degrades rather than fails when it can't reach something.
 - [ ] **No secrets / hostnames / tokens** in the binary, logs, or committed
       artifacts. Default output encoding is the target's lowest-common-denominator
-      shell (winlsof: ASCII default; UTF-8 opt-in) so it can't be mis-rendered.
+      shell (lsof-rs: ASCII default; UTF-8 opt-in) so it can't be mis-rendered.
 - [ ] **Reproducible + verifiable build.** Publish a checksum; document it.
       Code-sign if distributing binaries (unsigned → SmartScreen/AV friction).
 - [ ] **`DIVERGENCES.md` shipped as release notes.** The security fixes over the
