@@ -127,6 +127,13 @@ decision, not a bug fix to slip into a backend phase.
 | 2 | `-Tq` replaces the state | `-Tq` keeps `(ESTABLISHED)` and appends | In the C, `-T`'s sub-flags select *what is shown*; `-Ts` is what asks for state, and it is the default. Ours treats queues as purely additive. |
 | 3 | `COMMAND` truncated to 9 | not truncated | The C's default column width is 9 (`+c` overrides). `command_width` defaults to `None` here, so a 15-char `/proc` comm prints in full. |
 
+Since 2026-09-02 the Linux differential runs as a CI gate and keeps the full
+list in [`../DIVERGENCES.md`](../DIVERGENCES.md), which adds six more found the
+day it landed — among them lsof's **OR-by-default list semantics** (lsof-rs
+ANDs file-level selectors unconditionally), the `-F` field set (`g u G l D`),
+and `-o`'s `OFFSET` header. Read that file as the authoritative ledger; this
+section is the narrative for the first three.
+
 A fourth difference is deliberate and stays: **lsof-rs never resolves hostnames
 or service names**, so it behaves as though `-n -P` were always given. The core
 renders the numeric form it is handed (`model::SocketInfo::display_name`), and

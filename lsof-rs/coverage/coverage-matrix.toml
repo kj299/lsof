@@ -398,3 +398,45 @@ covers = ["type:IPv4", "type:unix"]
 name = "linux/unix-socket-type-suffix"
 args = ["-U"]
 covers = ["type:unix"]
+
+# ------------------------------------------ linux differential vs the C (L3)
+# differential/linux_diff.py + linux-matrix.toml — mode 1 of the kit's
+# differential: the C lsof built from THIS tree, run against the same fixture
+# process as lsof-rs, diffed through porting-kit diff_run.py. Executed on every
+# Linux CI run as a HARD gate (job `differential (linux, vs the C)`). Fixture A
+# holds a regular file, a directory and a FIFO; fixture B a TCP listener, a UDP
+# socket and an AF_UNIX listener — so these cases are the only ones in this
+# matrix whose TYPE coverage is checked against the reference implementation
+# rather than asserted by a fixture the author wrote.
+
+[[case]]
+name = "linux/differential-files-table"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:REG", "type:DIR", "type:CHR", "type:FIFO"]
+
+[[case]]
+name = "linux/differential-files-fd-3"
+args = ["-n", "-P", "-a", "-d", "3", "-p", "PID"]
+covers = ["type:REG"]
+
+[[case]]
+name = "linux/differential-files-terse"
+args = ["-t", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-files-offset-o"
+args = ["-n", "-P", "-o", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-files-fields-F"
+args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-sockets-inet"
+args = ["-n", "-P", "-a", "-i", "-p", "PID"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "linux/differential-sockets-unix-U"
+args = ["-n", "-P", "-a", "-U", "-p", "PID"]
+covers = ["type:unix"]

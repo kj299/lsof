@@ -12,6 +12,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Linux backend phase L3 — the C-vs-Rust differential as a CI gate**
+  (`differential/linux_diff.py`, `linux-matrix.toml`, `DIVERGENCES.md`). Mode 1
+  of the porting kit's differential, the one Windows structurally cannot have:
+  the C `lsof` built from **this tree** (4.99.6 — not apt's older package,
+  which would let the harness manufacture divergences that are not the port's)
+  and lsof-rs, run against the same self-owned fixture process at the same
+  instant and diffed through the kit's `diff_run.py`. Two fixtures: a sleeper
+  holding a regular file, a directory and a FIFO; a process holding a TCP
+  listener, a UDP socket and an AF_UNIX listener. 13 cases, every one carrying
+  `-a` (see Fixed/Known below for why); a hard gate on every Linux CI run from
+  its first — it is not CI-only, so it was run end to end before the job was
+  written: 9 MATCH, 4 DIVERGE(ledgered), 0 unexplained. Three-way exit so a
+  broken harness cannot read as a port bug. The wrapper adds nothing to the
+  comparison; normalization and the ledger are the kit's.
+- **`DIVERGENCES.md`**, the kit's intentional-divergence ledger, which the
+  retrospective found this port had reached 1.0 without. It carries the four
+  ledgered cases with the phase or decision that closes each, the record of
+  what the gate found, and the C-flaw scan's 127 findings marked — honestly —
+  as untriaged.
 - **Linux backend** (`lsof-backend-linux`), phases **L0** and **L1**.
   Dependency-free and `#![forbid(unsafe_code)]` — `/proc` is a filesystem, so
   no FFI is involved.
@@ -46,6 +65,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `S_IFLNK` to `LINK` but no test had ever asserted it.
 
 ### Fixed
+- **SIZE/OFF for character devices and FIFOs, and `-o` on Linux.** The C
+  prints the offset (`0t0`) where a size means nothing; the Linux backend
+  printed the size (`0`). It now withholds `st_size` for `CHR`/`BLK`/`FIFO`
+  and reads the offset from `/proc/<pid>/fdinfo`'s `pos:` line — the same
+  file it already opened for `flags:` — so the shared renderer falls through
+  to `0t<pos>` with no platform branch in `lsof-core`, and `-o` and the `-F o`
+  field become real on Linux. Found by the differential's first fixture.
+- **`pipe` in NAME.** The C prints `pipe` for a pipe fd; the Linux backend
+  printed the raw link target `pipe:[12047]`. The inode is already NODE. Same
+  fixture, same run.
 - **`-U` never filtered anything.** `Selection::unix_only` was declared and
   never read: on Windows the ETW path happened to yield only AF_UNIX rows when
   `-U` was set, so the missing predicate was invisible. Against a backend that
@@ -65,6 +94,20 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   waiver claims "we will never do this", which is untrue of `-Z`.
 
 ### Known, recorded rather than changed
+- **Six more divergences from the C, found by the L3 differential the day it
+  landed** and recorded in `DIVERGENCES.md` for decision — each changes shared
+  output, so none was fixed in a backend phase. The largest: **lsof ORs its
+  list options unless `-a`** (Lsof.8: "list options that are specifically
+  stated are ORed"), and lsof-rs does so for the process selectors but applies
+  file-level selectors (`-i`, `-d`, `-U`, paths) unconditionally — so
+  `lsof -d ^mem -p PID` lists the whole host in the C and one process here.
+  Also: the `-F` default field set (`g u G l D` and empty `a`/`l`, which
+  lsof-rs omits; `d` where the C emits `D`), `-o`'s `OFFSET` header and blank
+  cells, the `W` write-lock marker on FD, `a_inode` typing, and a directory fd
+  the C shows as `u` where fdinfo says read-only — that last one an open
+  question about the C, not yet a verdict. Every matrix case carries `-a` so
+  the gate measures what it names; one case deliberately does not, so the
+  OR divergence stays visible in every run.
 - Three renderer divergences from the C, found by the L1 differential and
   written up in [`docs/known-limitations.md`](docs/known-limitations.md). Each
   alters output the Windows golden fixtures and 59-case smoke suite assert, so

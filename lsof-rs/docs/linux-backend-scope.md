@@ -161,7 +161,7 @@ capabilities the Windows build structurally cannot have**.
 | **L0** | processes + fds + stat + `cwd`/`rtd`/`txt` → `-p -c -u -t -d`, bare paths, `+D` all work | 750 |
 | **L1** | sockets + fd join → `-i`, `-s`, and **FD values actually populated** | 700 |
 | **L2** | `maps` → `mem`, `/proc/locks` → lock column, anon inodes, raw/netlink | 450 |
-| **L3** | **C-vs-Rust differential harness** + coverage-matrix rework | 500 |
+| **L3** ✅ | **C-vs-Rust differential harness** + coverage-matrix rework — *delivered 2026-09-02 as `differential/linux_diff.py` (a thin wrapper over the kit's `diff_run.py`; ~250 lines, not 500, because the kit already had the comparator) plus the per-platform coverage gate landed earlier in PR #61* | 500 |
 
 L0 + L1 alone is a genuinely useful cross-platform `lsof`. **Start L3's harness
 immediately after L0**, per the note above.

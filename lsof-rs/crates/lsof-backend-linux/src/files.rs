@@ -45,26 +45,48 @@ fn type_from_mode(mode: u32) -> FileType {
     }
 }
 
-/// Access mode for one fd, from `/proc/<pid>/fdinfo/<fd>`'s `flags:` line.
+/// Access mode and file position for one fd, from `/proc/<pid>/fdinfo/<fd>`.
 ///
-/// The flags are octal and their low two bits are `O_ACCMODE`. Absent or
-/// unreadable fdinfo yields `Unknown`, which renders as lsof's `-`.
-fn access_for(pid: u32, fd: &str) -> AccessMode {
+/// Two lines matter: `flags:` (octal; the low two bits are `O_ACCMODE`) and
+/// `pos:` (decimal; the kernel's current file offset). Absent or unreadable
+/// fdinfo yields `Unknown` and no offset, which render as lsof's `-` and an
+/// empty cell. The position is what lsof shows as `0t<n>` in SIZE/OFF for any
+/// file without a meaningful size — a device node, a FIFO — and what `-o`
+/// asks for on every file; it was the first fidelity gap the C-vs-Rust
+/// differential found, on its first fixture.
+fn fdinfo_for(pid: u32, fd: &str) -> (AccessMode, Option<u64>) {
     let Ok(info) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
-        return AccessMode::Unknown;
+        return (AccessMode::Unknown, None);
     };
-    let Some(flags) = info.lines().find_map(|l| l.strip_prefix("flags:")) else {
-        return AccessMode::Unknown;
-    };
-    let Ok(flags) = u32::from_str_radix(flags.trim(), 8) else {
-        return AccessMode::Unknown;
-    };
-    match flags & 0o3 {
-        0 => AccessMode::Read,
-        1 => AccessMode::Write,
-        2 => AccessMode::ReadWrite,
-        _ => AccessMode::Unknown,
+    let mut access = AccessMode::Unknown;
+    let mut pos = None;
+    for line in info.lines() {
+        if let Some(v) = line.strip_prefix("flags:") {
+            if let Ok(flags) = u32::from_str_radix(v.trim(), 8) {
+                access = match flags & 0o3 {
+                    0 => AccessMode::Read,
+                    1 => AccessMode::Write,
+                    2 => AccessMode::ReadWrite,
+                    _ => AccessMode::Unknown,
+                };
+            }
+        } else if let Some(v) = line.strip_prefix("pos:") {
+            pos = v.trim().parse::<u64>().ok();
+        }
     }
+    (access, pos)
+}
+
+/// The NAME cell for a magic-link target. Real paths pass through. A pipe's
+/// target is `pipe:[inode]`, and lsof prints just `pipe` — the inode is
+/// already the NODE cell, so repeating it in NAME is noise the C does not
+/// emit. Sockets are resolved elsewhere (`net`), and any other synthetic
+/// target (`anon_inode:[eventfd]`) is kept verbatim until L2 names those.
+fn name_for_target(target: &str) -> String {
+    if target.starts_with("pipe:[") && target.ends_with(']') {
+        return "pipe".to_string();
+    }
+    target.to_string()
 }
 
 /// Build one row from a path under `/proc` that is a magic symlink (an fd, or
@@ -78,7 +100,16 @@ fn access_for(pid: u32, fd: &str) -> AccessMode {
 ///
 /// A row is emitted if either succeeds; an fd we can see but cannot stat is
 /// still worth showing.
-fn row(link: &Path, fd: FdType, access: AccessMode, socks: &SocketTable) -> Option<OpenFile> {
+///
+/// `offset` is the fd's file position from fdinfo (`None` for the `cwd`/
+/// `rtd`/`txt` specials, which have none).
+fn row(
+    link: &Path,
+    fd: FdType,
+    access: AccessMode,
+    offset: Option<u64>,
+    socks: &SocketTable,
+) -> Option<OpenFile> {
     let target = std::fs::read_link(link).ok();
     let meta = std::fs::metadata(link).ok();
     if target.is_none() && meta.is_none() {
@@ -133,10 +164,20 @@ fn row(link: &Path, fd: FdType, access: AccessMode, socks: &SocketTable) -> Opti
                 FileType::Chr | FileType::Block => m.rdev(),
                 _ => m.dev(),
             };
+            // SIZE/OFF: lsof shows a size only where one means something. A
+            // device node or a FIFO has an st_size of 0 that describes nothing,
+            // so the C prints the offset (`0t0`) there and the size for regular
+            // files and directories. Withholding the size for those types lets
+            // the shared renderer fall through to the offset, matching the C
+            // without a platform branch in `lsof-core`.
+            let size = match ty {
+                FileType::Chr | FileType::Block | FileType::Fifo => None,
+                _ => Some(m.size()),
+            };
             (
                 ty,
                 Some(dev_string(dev)),
-                Some(m.size()),
+                size,
                 Some(m.ino().to_string()),
                 u32::try_from(m.nlink()).ok(),
             )
@@ -148,10 +189,10 @@ fn row(link: &Path, fd: FdType, access: AccessMode, socks: &SocketTable) -> Opti
         fd,
         access,
         file_type,
-        name,
+        name: name_for_target(&name),
         device,
         size,
-        offset: None,
+        offset,
         node,
         links,
         socket: None,
@@ -175,7 +216,7 @@ pub fn for_pid(pid: u32, socks: &SocketTable) -> Option<Vec<OpenFile>> {
         ("exe", FdType::Txt),
     ] {
         let p = format!("/proc/{pid}/{name}");
-        if let Some(f) = row(Path::new(&p), fd, AccessMode::Unknown, socks) {
+        if let Some(f) = row(Path::new(&p), fd, AccessMode::Unknown, None, socks) {
             out.push(f);
         }
     }
@@ -192,8 +233,8 @@ pub fn for_pid(pid: u32, socks: &SocketTable) -> Option<Vec<OpenFile>> {
 
     for (num, name) in fds {
         let p = format!("/proc/{pid}/fd/{name}");
-        let access = access_for(pid, &name);
-        if let Some(f) = row(Path::new(&p), FdType::Handle(num), access, socks) {
+        let (access, pos) = fdinfo_for(pid, &name);
+        if let Some(f) = row(Path::new(&p), FdType::Handle(num), access, pos, socks) {
             out.push(f);
         }
     }
@@ -239,6 +280,7 @@ mod tests {
             Path::new("/dev/null"),
             FdType::Handle(0),
             AccessMode::Read,
+            None,
             &SocketTable::default(),
         )
         .expect("/dev/null is stat-able");
@@ -280,5 +322,72 @@ mod tests {
             .iter()
             .filter(|f| matches!(f.fd, FdType::Handle(_)))
             .all(|f| f.file_type != FileType::Unknown));
+    }
+
+    fn self_pid() -> u32 {
+        std::fs::read_to_string("/proc/self/stat")
+            .expect("/proc/self/stat readable")
+            .split(' ')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("pid parses")
+    }
+
+    #[test]
+    fn pipe_target_is_named_pipe_everything_else_passes_through() {
+        // The C prints `pipe` for a pipe fd; the inode is already NODE. Found by
+        // the first C-vs-Rust differential fixture, which showed `pipe:[12047]`.
+        assert_eq!(name_for_target("pipe:[12047]"), "pipe");
+        assert_eq!(name_for_target("/etc/passwd"), "/etc/passwd");
+        assert_eq!(name_for_target("socket:[99]"), "socket:[99]");
+        assert_eq!(
+            name_for_target("anon_inode:[eventfd]"),
+            "anon_inode:[eventfd]"
+        );
+        // Not a pipe target, merely a path that starts like one.
+        assert_eq!(name_for_target("pipe:[unterminated"), "pipe:[unterminated");
+    }
+
+    #[test]
+    fn fdinfo_reports_access_and_the_kernel_file_position() {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+        // Write five bytes: the kernel's `pos:` for this fd must read 5, and the
+        // flags must decode to write-only. Real fdinfo on a real fd — no fixture
+        // text — so a format change in the kernel would fail here, not in CI's
+        // differential.
+        let dir = std::env::temp_dir().join(format!("lsof_rs_fdinfo_{}", self_pid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("five")).unwrap();
+        f.write_all(b"12345").unwrap();
+        let (access, pos) = fdinfo_for(self_pid(), &f.as_raw_fd().to_string());
+        assert_eq!(access, AccessMode::Write);
+        assert_eq!(pos, Some(5), "pos: must track the write position");
+        drop(f);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipe_fd_is_a_fifo_named_pipe_with_offset_not_size() {
+        use std::os::unix::io::AsRawFd;
+        // An anonymous pipe is the exact shape the C showed: FIFO, NAME `pipe`,
+        // SIZE/OFF as offset (`0t0`) because a pipe's st_size means nothing.
+        let (reader, _writer) = std::io::pipe().expect("pipe(2)");
+        let raw = reader.as_raw_fd();
+        let link = format!("/proc/self/fd/{raw}");
+        let (access, pos) = fdinfo_for(self_pid(), &raw.to_string());
+        let f = row(
+            Path::new(&link),
+            FdType::Handle(raw as u64),
+            access,
+            pos,
+            &SocketTable::default(),
+        )
+        .expect("pipe fd is stat-able");
+        assert_eq!(f.file_type, FileType::Fifo);
+        assert_eq!(f.name, "pipe");
+        assert_eq!(f.size, None, "a FIFO has no meaningful size");
+        assert_eq!(f.offset, Some(0), "offset is shown instead, as the C does");
+        assert_eq!(f.access, AccessMode::Read);
     }
 }
