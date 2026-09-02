@@ -76,6 +76,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   want of a reference implementation on the same host.
 
 ### Changed
+- **miri is a hard gate.** Landed observe-first in the retrospective PR after
+  the playbook's sanitizer gate was found never to have been wired for this
+  port; promoted in its own PR on the kit's rule — consecutive log-verified
+  green runs (two, 54 tests each, zero UB findings), with the promotion PR
+  itself the third. Scope is the `forbid(unsafe_code)` crates: `lsof-core` and
+  `lsof-cli`. The Windows backend needs Windows and the Linux backend reads
+  live `/proc`, so those two rows stay open in `progress.json`. The nightly is
+  **pinned** (`nightly-2026-08-31`, the build that produced the green runs): a
+  hard gate must fail only for the code's reasons, so a newer miri is a
+  deliberate bump rather than a surprise red on someone else's PR.
 - **Docs no longer describe the project as Windows-only**, which stopped being
   true when the Linux backend landed. The README now leads with both backends
   and their status, and the privilege section covers Linux's uid-based split
