@@ -85,6 +85,12 @@ jobs:
               --platform "$p"
           done
 
+      - name: ledgers exist (progress, divergences, fuzz target, sanitizer job)
+        # porting-kit LESSONS #19: the playbook names these as exit criteria and
+        # this port reached 1.0 with three of the four absent while every gate
+        # was green, because no gate looked. Now one does.
+        run: python3 ../porting-kit/harnesses/ledgers/check_ledgers.py . --ci-dir ../.github/workflows
+
   windows:
     name: native backend (windows)
     runs-on: windows-latest
@@ -173,3 +179,23 @@ jobs:
         # panic. A short time-boxed run gates every PR; a longer nightly run can
         # follow. See lsof-rs/fuzz/.
         run: cargo fuzz run parse_args -- -max_total_time=45 -rss_limit_mb=2048
+
+  miri:
+    name: miri (observe-first — UB in the portable crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # OBSERVE-FIRST (porting-kit LESSONS #9 / #13): the retrospective found the
+    # playbook's sanitizer gate had never been wired for this port at all
+    # (LESSONS #19). This lands it as a job that cannot yet fail the build; it
+    # is promoted to a hard gate in its own PR after consecutive log-verified
+    # green runs. Only the forbid(unsafe_code) crates run here — the Windows
+    # backend needs Windows, and the Linux backend reads live /proc, which miri
+    # cannot interpose — so today this gate proves the *portable* core is UB-free
+    # rather than the FFI layer. Read the verdict from the step log, not the job.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: miri }
+      - name: miri over lsof-core + lsof-cli
+        run: cargo +nightly miri test -p lsof-core -p lsof-cli

@@ -1,0 +1,8 @@
+{
+  "modules": {
+    "lsof-backend-linux": "ported",
+    "lsof-backend-windows": "differential",
+    "lsof-cli": "fuzzed",
+    "lsof-core": "fuzzed"
+  }
+}
