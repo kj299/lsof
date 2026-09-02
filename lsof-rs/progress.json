@@ -2,7 +2,7 @@
   "modules": {
     "lsof-backend-linux": "ported",
     "lsof-backend-windows": "differential",
-    "lsof-cli": "fuzzed",
-    "lsof-core": "fuzzed"
+    "lsof-cli": "unsafe_audited",
+    "lsof-core": "unsafe_audited"
   }
 }
