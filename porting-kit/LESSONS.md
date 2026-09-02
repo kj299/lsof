@@ -495,3 +495,176 @@ the emphasized half.
   automated sessions.
 - **Section amended:** PLAYBOOK · Phase 3 (environment preflight) + Phase 5
   (release mechanics).
+
+## 015. Hosted CI cannot see real hardware — the field checkpoint is a gate, not a formality
+
+- **Date:** 2026-08-30
+- **Codebase:** lsof-rs — v1.0.0 → v1.0.1, the same day
+- **What happened:** Every automated gate was green on the 1.0.0 artifact —
+  differential, coverage, unsafe audit, fuzz, supply chain, 59-case smoke on
+  `windows-latest`. The release's own exit criterion 5 (run the *downloaded*
+  artifact on real hardware in both privilege modes) then failed one case:
+  `plus-D-directory-tree` took **214 s** elevated. Root cause was a
+  `2 s × process-count` serial wait in the per-process extras phase, present
+  since Phase 4 and invisible on hosted runners, whose process set is small and
+  idle. Not a 1.0 regression; v0.4.0 had passed the same case on timing. The
+  fix (concurrent workers under one global budget) had its own defect — a 20 s
+  budget where the old bound was 2 s — caught pre-merge by asking what the
+  number *replaced* and sizing it against that.
+- **Kit change:** Phase 5 gains a required **field checkpoint**: the exact
+  release artifact, real target hardware, every privilege mode, a per-case time
+  ceiling, results logged in the release doc with the verdict. The playbook now
+  says outright that a hosted runner cannot substitute for it.
+- **Section amended:** PLAYBOOK · Phase 5.
+
+## 016. Calendar time is not a measurement — write exit criteria in the unit you mean
+
+- **Date:** 2026-08-30
+- **Codebase:** lsof-rs — road-to-1.0 exit criterion 4
+- **What happened:** The criterion read "14 consecutive green nightly deep-fuzz
+  runs". Asked why 1.0 had to wait, no answer survived: the nightly had already
+  done 200M+ executions, corpus growth had flattened to +6 %, coverage sat at
+  `cov: 1125 / ft: 6790`, zero findings. Elapsed days were a proxy for fuzzing
+  effort, and a bad one — the same 14 nights on a faster runner would have
+  meant more work, on a broken cron none. Rewritten as the quantities it had
+  meant: cumulative effort, coverage plateau, corpus saturation, zero findings.
+- **Kit change:** Phase 5's cutover criteria state that any time-based gate
+  must name the *measurement* the time stands in for and gate on that instead.
+- **Section amended:** PLAYBOOK · Phase 5.
+
+## 017. A second platform where the reference runs is an oracle for every line of shared code
+
+- **Date:** 2026-09-01
+- **Codebase:** lsof-rs — Linux backend L0/L1, diffed against C lsof 4.95.0 on
+  the same host
+- **What happened:** The Windows port had never had a same-host reference
+  (Phase 2's oracle-substitution mode). The Linux backend did, and its first
+  side-by-side runs found: the DEVICE/NODE cells are filled differently per
+  socket family (inode+protocol for inet, kernel-pointer+inode for AF_UNIX);
+  `-U` had *never been enforced* in `lsof-core` (declared, never read — the
+  Windows ETW path happened to yield only AF_UNIX rows, hiding it); a listening
+  AF_UNIX socket is identified by `SO_ACCEPTCON`, not its state column; and
+  **three renderer divergences that had shipped in every Windows release since
+  v0.2.0** (the `-T` suffix shape, `-Tq` semantics, `COMMAND` width). The Linux
+  differential found Windows bugs. None of these was visible to golden tests,
+  because a golden test pins what its author believed the C emits.
+- **Kit change:** Phase 2 gains the **asymmetric-oracle** case: when a port
+  targets several platforms and the reference runs on any of them, that
+  platform's C-vs-Rust diff is the oracle for all shared code — build it before
+  the second backend's first phase, and treat every finding as cross-platform
+  until proven backend-local. The scope doc for the Linux backend had said
+  exactly this ("start L3's harness immediately after L0") and it was not
+  done; the findings above came from diffs run by hand.
+- **Section amended:** PLAYBOOK · Phase 2 (oracle) + Phase 4 step 2.
+
+## 018. A waiver whose reason names a platform expires the day you add that platform — silently
+
+- **Date:** 2026-09-01
+- **Codebase:** lsof-rs — coverage inventory, 118 waivers
+- **What happened:** Roughly half the waivers read "Unix-only" or "no Windows
+  equivalent". True when written. The day the Linux backend merged they became
+  false, and **nothing in the file changed**, so the gate stayed green while
+  excusing `-Z` (SELinux), `-X` (epoll), the mount-table options and every Unix
+  socket family on a port that now targeted Linux. Two were wrong on the day:
+  `type:BLK` and `type:FIFO`, waived as having no Windows analogue while the
+  Linux backend already emitted both. Once scoped, the Linux run demanded
+  `type:LINK`, which the code mapped and **no test asserted** — the assertion
+  went in before the coverage claim.
+- **Kit change:** `coverage_gate.py` takes `--platform`; a `[[waive]]` may carry
+  `platforms = [...]` and stops applying to any platform it does not name.
+  Waivers without the list apply everywhere, so single-platform ports are
+  unaffected. CI runs the gate once per platform. Seven self-test cases,
+  including the real shape of the failure (one inventory, green on `windows`,
+  red on `linux`). Linux-side gaps are recorded as `DEBT (Lx)` naming the phase
+  that closes them, not re-waived — a waiver claims "never", which was untrue.
+- **Section amended:** PLAYBOOK · cross-cutting controls (coverage row) +
+  Phase 4 step 2.
+
+## 019. A control the kit asserts but never checks for does not exist — the three missing ledgers
+
+- **Date:** 2026-09-02 (found at retrospective step 0)
+- **Codebase:** lsof-rs — after 21 PRs and three releases
+- **What happened:** Running every harness against the real tree, as the
+  retrospective prompt requires, showed that three artifacts the playbook names
+  as exit criteria had **never been created**: `progress.json` (CLAUDE.md "keep
+  current"; Phase 4 step 6), `DIVERGENCES.md` (Phase 2 exit; Phase 5 "ship as
+  release notes"), and a fuzz target per parse module (Phase 4 step 3 — one
+  target exists, `parse_args`; the Linux backend's seven `/proc` text parsers
+  have none). The C-flaw scan's own output ends "Triage each… record in
+  DIVERGENCES.md" — 127 findings, none triaged. The sanitizer row of the control
+  table says "CI"; the port's CI has zero sanitizer mentions. 1.0 shipped
+  without any of them, and every gate was green, because no gate looks for
+  them. Reading the playbook did not surface this; executing the tools did.
+- **Kit change:** `harnesses/ledgers/check_ledgers.py` — a port-side presence
+  check for the mandated ledgers (progress file, divergence ledger, ≥1 fuzz
+  target, sanitizer job in CI), exit 1 on any absence, with a `--allow` list
+  for a documented waiver. Wired into `check-kit`'s self-test and named in
+  Phase 3's exit criteria and the CI template, so the assertion becomes a
+  failing build.
+- **Section amended:** PLAYBOOK · Phase 3 (exit criteria) + cross-cutting
+  controls; `harnesses/ci/porting-ci.template.yml`.
+
+## 020. Renaming a project: three passes, because each method finds what the others cannot
+
+- **Date:** 2026-09-01
+- **Codebase:** lsof-rs — `winlsof` → `lsof-rs`, 92 files, 73 detected renames
+- **What happened:** Pass 1 (do it) missed `Invoke-WinlsofSmokeTest.ps1`
+  because `find -name` is case-sensitive. Pass 2 (verify by *executing*, per
+  category) found three: a bare `winlsof` used as a Python variable became
+  `lsof-rs` and did not parse; CI invoked a script filename that did not yet
+  exist; `Add-Type -Namespace Lsof-rsNative` — a .NET namespace cannot contain
+  a hyphen — from the PascalCase rule. Pass 3 (adversarial) found the worst:
+  the regex protecting published tag names guarded only the *left* side of each
+  CHANGELOG compare URL, leaving six dead links. Three things were deliberately
+  kept: the six published `winlsof-v*` tags (release trigger now fires on both
+  prefixes), `WINLSOF_TRACE` as a live alias, and historical entries — a v1.0.1
+  binary only knows the old variable, so telling its reader otherwise is false.
+- **Kit change:** PLAYBOOK gains a rename procedure under cross-cutting
+  controls: inventory case-insensitively; convert by identifier context
+  (SCREAMING/snake/kebab/Pascal), never one rule; protect published tags and
+  verify every tag named against the remote; alias user-facing env vars; then
+  three passes — mechanical, execute-every-script, adversarial — and a
+  self-referential check that the CI path filters still select a code-only
+  change.
+- **Section amended:** PLAYBOOK · cross-cutting controls (new "Renaming the
+  port" subsection).
+
+## 021. The second backend is a new port loop — fuzz its parsers, or Phase 4 step 3 was skipped
+
+- **Date:** 2026-09-02
+- **Codebase:** lsof-rs — `lsof-backend-linux`, 1,201 lines, 19 tests
+- **What happened:** The Linux backend parses kernel-supplied text: seven
+  functions over `/proc/net/*` lines, `/proc/<pid>/status`, fdinfo `flags:`.
+  The `Name:` field is attacker-influenced (`prctl(PR_SET_NAME)`), and the
+  `/proc/net/unix` path column can contain spaces and arbitrary bytes. Phase 4
+  step 3 says fuzz the module's parse surface; it was applied to the Windows
+  port's argument parser and to nothing in the second backend. The backend is
+  `#![forbid(unsafe_code)]`, so the risk is panic/DoS rather than memory
+  safety — but a panic on a hostile `/proc` line is still a release blocker
+  under the kit's own rule, and no gate asked.
+- **Kit change:** `PROMPTS/20-new-backend.md` — the second-platform prompt —
+  makes the six-gate loop explicit *per backend crate*, with "one fuzz target
+  per text-parsing module" as an entry to its step 3, and `check_ledgers.py`
+  counts fuzz targets. ARCHITECTURE-TEMPLATE now describes one backend crate
+  per platform and says a backend may itself be `forbid(unsafe_code)`.
+- **Section amended:** ARCHITECTURE-TEMPLATE · "If your port is
+  cross-platform"; new PROMPTS/20-new-backend.md.
+
+## 022. Release mechanics II — a workflow that can fire twice will publish two truths
+
+- **Date:** 2026-08-30
+- **Codebase:** lsof-rs — v1.0.1 release
+- **What happened:** Two dispatches of the release workflow raced. The release
+  notes carried one SHA-256 (`9289af7a…`) and the uploaded asset another
+  (`0d884147…`). Nothing failed; a user verifying the download would have
+  concluded the binary was tampered with. #014 had covered release
+  *credentials*; it had not covered release *concurrency*. Fixed with a
+  `concurrency` group keyed on the tag and by writing the notes from the same
+  run that uploads the asset (`gh release edit --notes`), so there is one
+  source of truth per release. The user deleted the bad release; it was re-cut
+  once.
+- **Kit change:** Phase 5 release mechanics: the release workflow declares a
+  `concurrency` group; checksum and notes are produced by the run that uploads
+  the asset, never by a second run; verify from the public page that the
+  published checksum matches the published asset before announcing.
+- **Section amended:** PLAYBOOK · Phase 5 (release mechanics).

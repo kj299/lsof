@@ -17,6 +17,7 @@ check-kit:
 	@echo "== supply-chain ==";     bash  $(H)/supply-chain/run_supply_chain.sh --check
 	@echo "== sanitizers ==";       bash  $(H)/sanitizers/run_sanitizers.sh --check
 	@echo "== coverage gate ==";    $(PY) $(H)/coverage/coverage_gate.py --self-test
+	@echo "== ledgers ==";          $(PY) $(H)/ledgers/check_ledgers.py --self-test
 	@echo "== matrix parses ==";    $(PY) -c "import tomllib; tomllib.load(open('$(H)/differential/input-matrix.example.toml','rb')); print('PASS  matrix parses')"
 	@echo "== inventory parses =="; $(PY) -c "import tomllib; d = tomllib.load(open('$(H)/coverage/feature-inventory-lsof.toml','rb')); print('PASS  lsof inventory parses (%d options, %d types)' % (len(d['features']['options']), len(d['features']['types'])))"
 	@echo "== skills self-test =="; $(PY) skills/check_skills.py --self-test

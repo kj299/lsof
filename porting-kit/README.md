@@ -27,6 +27,7 @@ vulnerability. Maximize safety controls.
 | Lift this kit into its own repo over SSH (two git commands) | [`scripts/lift-to-c2rust-port.sh`](scripts/lift-to-c2rust-port.sh) |
 | Kick off a new port | paste [`PROMPTS/00-new-port-kickoff.md`](PROMPTS/00-new-port-kickoff.md) |
 | Port one module | paste [`PROMPTS/10-module-port.md`](PROMPTS/10-module-port.md) |
+| Add a backend for a second platform | paste [`PROMPTS/20-new-backend.md`](PROMPTS/20-new-backend.md) |
 | Close a port & improve the kit | paste [`PROMPTS/90-retrospective.md`](PROMPTS/90-retrospective.md) |
 | Lay out the workspace | copy [`skeleton/`](skeleton/); see [`ARCHITECTURE-TEMPLATE.md`](ARCHITECTURE-TEMPLATE.md) |
 | The control ledger | [`SECURITY-CHECKLIST.md`](SECURITY-CHECKLIST.md) |
@@ -64,6 +65,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/supply-chain/run_supply_chain.sh` | `cargo audit` + `cargo deny` | CI |
 | `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting | Phase 0 |
 | `harnesses/progress/progress.py` | per-module status table incl. safety gates | tracking |
+| `harnesses/ledgers/check_ledgers.py` | the ledgers the playbook mandates actually exist (progress, divergences, fuzz target, sanitizer job) | CI |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
 ```

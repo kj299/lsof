@@ -124,9 +124,21 @@ lsof-rs's phase order was sound; its one miss was not spiking the hang first.
   layer the tool reads it** (set the kernel state, don't trust a runtime
   wrapper's view of it), and treat environment-dependent cases as first-class
   SKIPs, never FAILs.
+- **The asymmetric oracle** (LESSONS #17). If the port targets several platforms
+  and the reference runs on *any* of them, that platform's C-vs-Rust diff is the
+  oracle for **every line of shared code**, not just for that backend. Build it
+  before the second backend's first phase and treat each finding as
+  cross-platform until proven backend-local: lsof-rs's Linux diff found three
+  renderer bugs that had shipped in every Windows release, plus a selection
+  predicate (`-U`) that had never been enforced. On a platform with no
+  reference, format fidelity is a claim, not a measurement — a golden test
+  pins what its author *believed* the C emits — so say so in the release notes
+  until a same-host diff exists somewhere in the port.
 - Stand up an **intentional-divergence ledger** (`DIVERGENCES.md`, template in
   the skeleton): every place the Rust will *deliberately* differ from C —
-  starting with the Phase-0 flaw scan's findings.
+  starting with the Phase-0 flaw scan's findings. **Its existence is checked**
+  (`harnesses/ledgers/check_ledgers.py`, LESSONS #19): lsof-rs shipped 1.0 with
+  127 untriaged flaw-scan findings and no ledger, and every gate was green.
 
 **Entry criteria:** ordered module list.
 **Exit criteria:** golden corpus captured + versioned; nondeterminism map;
@@ -166,7 +178,11 @@ a ten-second check months earlier.
 **Entry criteria:** oracle in place.
 **Exit criteria:** workspace builds; `core` is `forbid(unsafe_code)`; unsafe-audit
 gate wired into CI (`harnesses/unsafe-audit`); trace logger present; environment
-preflight clean.
+preflight clean; **the ledgers exist and CI checks that they do** —
+`harnesses/ledgers/check_ledgers.py` passes (progress file, divergence ledger,
+≥1 fuzz target, a sanitizer job). Create them empty on day one: lsof-rs reached
+1.0 with none of the first three and no sanitizer job, because nothing failed
+without them (LESSONS #19).
 **Artifacts:** the workspace; CI config from `harnesses/ci/porting-ci.template.yml`.
 **lsof failure modes this prevents:** scattered `unsafe` (lsof-rs kept 0 in core /
 144 in the sys layer — but only 91 documented; the gate makes the gap a build
@@ -225,7 +241,11 @@ Then the loop — each step is a CI-enforced gate:
    broken harness can't read as a port bug. Both modes are in the matrix header.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
-   release blocker.
+   release blocker. **This applies per backend crate, and "input" includes text
+   the OS hands you** (LESSONS #21): `/proc` lines, registry values, `sysctl`
+   output. lsof-rs fuzzed the first backend's argument parser and none of the
+   second backend's seven `/proc` parsers — a `forbid(unsafe_code)` crate can
+   still panic on a hostile `Name:` field.
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
    logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). lsof-rs's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
@@ -251,7 +271,15 @@ undocumented unsafe (gate 5).
 - Gate cutover on: 100% of the port's target modules through all six gates; the
   differential corpus green (modulo logged divergences); fuzz corpus seeded and
   clean; supply-chain gate clean (`harnesses/supply-chain/run_supply_chain.sh` —
-  `cargo audit` + `cargo deny`).
+  `cargo audit` + `cargo deny`); **and the field checkpoint** (LESSONS #15): the
+  *exact* release artifact — downloaded, not a local build — run on real target
+  hardware in every privilege mode, with a per-case time ceiling, results logged
+  next to the verdict. **Hosted CI cannot substitute for this.** lsof-rs's 1.0.0
+  passed every automated gate and then took 214 s on one case elevated, from a
+  defect present since Phase 4 that a runner's small idle process set can never
+  express. Write any time-based criterion in the unit it stands for (LESSONS
+  #16): "14 green nights" measured the calendar, not the fuzzing; gate on
+  cumulative effort, coverage plateau and zero findings instead.
 - Keep the C runnable as the oracle through one release overlap; only then retire.
 - Ship the `DIVERGENCES.md` as user-facing release notes ("behaviors we
   deliberately changed, and why") — the security fixes are a *feature*.
@@ -268,6 +296,12 @@ undocumented unsafe (gate 5).
   resource**. lsof-rs's release day stalled a merge for ~an hour on an
   exhausted hourly limit; back off in growing intervals rather than hammering,
   and prefer public-page reads (no quota) for state checks while it recovers.
+- **A release workflow that can fire twice will publish two truths** (LESSONS
+  #22): lsof-rs's 1.0.1 notes carried one SHA-256 and the asset another, from a
+  double dispatch. Declare a `concurrency` group keyed on the tag; produce the
+  checksum and the notes in the *same run* that uploads the asset; and confirm
+  from the public page that the published checksum matches the published file
+  before announcing.
 
 **Entry criteria:** all target modules merged & gated.
 **Exit criteria:** Rust is the shipped artifact; supply-chain clean; divergences
@@ -288,7 +322,8 @@ kept both trees side by side — preserve that discipline.
 | No panics on untrusted input | `fuzz/` (`cargo-fuzz`) | CI smoke + nightly deep |
 | No vulnerable/untrusted deps | `supply-chain/run_supply_chain.sh` (`cargo audit`,`cargo deny`) | CI |
 | No silent behavior drift | `differential/diff_run.py` + `DIVERGENCES.md` | CI |
-| Matrix covers the C's surface | `coverage/coverage_gate.py` (inventory vs matrix) | CI |
+| Matrix covers the C's surface | `coverage/coverage_gate.py` (inventory vs matrix), **run once per platform** with `--platform` — a waiver whose reason names a platform (`platforms = [...]`) expires the day that platform is added, silently unless scoped (LESSONS #18) | CI |
+| The mandated ledgers exist | `ledgers/check_ledgers.py` — progress file, divergence ledger, ≥1 fuzz target, sanitizer job (LESSONS #19) | CI |
 | Lints as errors | `clippy -D warnings` (+ overflow/cast lints) | CI |
 | Don't re-port a C vuln | `c-flaw-scan/scan_c_flaws.py` at Phase 0 | review |
 
@@ -315,6 +350,29 @@ newly-hard gate must pass on the promotion PR itself before it can merge — the
 promotion is validated by the mechanism it enables.
 
 ---
+
+### Renaming the port
+
+A mechanical rename fails quietly, so it gets three passes (LESSONS #20 —
+lsof-rs's `winlsof` → `lsof-rs`, 92 files, four breakages found *after* pass 1):
+
+1. **Inventory case-insensitively** (`find -iname`, `git grep -i`); pass 1
+   missed `Invoke-WinlsofSmokeTest.ps1` on a case-sensitive `find`.
+2. **Convert by identifier context, never one rule**: `SCREAMING_` → `NEW_`,
+   `snake_` → `new_`, kebab → kebab, PascalCase → PascalCase. One rule produced a
+   Python variable named `lsof-rs` (does not parse) and a .NET namespace
+   `Lsof-rsNative` (hyphens are illegal there).
+3. **Protect what must keep the old name** and verify it against the remote:
+   published tags (rewriting them makes dead links — the protection regex must
+   cover *both* sides of a compare URL), user-facing env vars (alias, don't
+   rename — a v1.0.1 binary only knows `WINLSOF_TRACE`), historical entries
+   that describe a shipped artifact. Fire the release trigger on both prefixes.
+4. **Pass 2 — verify by executing, per category**: syntax-check every tracked
+   script (`py_compile`, `bash -n`), build, run every harness, resolve every
+   path a workflow names. Reading the diff found none of the four.
+5. **Pass 3 — adversarial**: grep for the old name and justify every survivor;
+   resolve every markdown link; then push a code-only change and confirm the CI
+   path filters still select it — the failure that never announces itself.
 
 ## The compounding loop
 

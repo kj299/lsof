@@ -54,6 +54,19 @@ jobs:
       # Fails the build if ANY `unsafe {}` block lacks a // SAFETY: comment.
       - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/
 
+  ledgers:
+    name: ledgers exist (progress, divergences, fuzz target, sanitizer job)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      # LESSONS #19 — the PLAYBOOK names these as exit criteria, and lsof-rs
+      # shipped 1.0 with three of the four absent while every gate was green,
+      # because no gate looked. A control that is asserted but never checked
+      # does not exist. Waive one only with a reason: --allow NAME=WHY.
+      - run: python3 porting-kit/harnesses/ledgers/check_ledgers.py . --ci-dir .github/workflows
+
   miri:
     name: miri (UB in unsafe)
     runs-on: ubuntu-latest

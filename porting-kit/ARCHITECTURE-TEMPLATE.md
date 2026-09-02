@@ -49,6 +49,23 @@ workspace/
 ## If your port *is* cross-platform
 
 Keep the seam, but as an *isolation* boundary, not a feature: a trait in `core`
-whose implementations live in `sys` behind `#[cfg(...)]`, with a mock impl so
-`core` stays testable off-target. That is all the OS abstraction the kit
-prescribes — the focus stays on safety, per the author's direction.
+(`Backend`), a mock impl so `core` stays testable off-target, and **one backend
+crate per platform** — `[port]-backend-windows`, `[port]-backend-linux` — each
+gated `#[cfg(target_os = "…")]` at its crate root so every other target compiles
+it to an empty shell and the cross-check CI stays green with all of them in one
+workspace. That is all the OS abstraction the kit prescribes.
+
+Two corrections from lsof-rs's second backend (LESSONS #017, #021):
+
+- **"`sys` is the unsafe crate" is a property of the *first* platform, not of
+  backends.** A backend whose data source is a filesystem or a documented API
+  (Linux `/proc`) needs no FFI and should be `#![forbid(unsafe_code)]` itself —
+  lsof-rs's is, at 1,200 lines. The unsafe audit runs per backend crate; a
+  backend with zero `unsafe` is the goal, not an anomaly the template lacks a
+  slot for.
+- **The seam earns its keep when the second backend costs `core` almost
+  nothing.** Adding Linux touched `lsof-core` by one enum variant
+  (`FileType::Block`) and nothing else; the selection engine and all three
+  renderers were reused unchanged. If a new backend needs more than that from
+  `core`, the seam is in the wrong place — fix the seam, do not special-case
+  the backend.
