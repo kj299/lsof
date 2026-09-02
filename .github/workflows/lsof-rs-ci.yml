@@ -198,4 +198,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
       - name: miri over lsof-core + lsof-cli
+        # First observe-first run: all 14 lsof-cli lib tests passed under miri,
+        # then a binary test that creates a temp dir hit "mkdir not available
+        # when isolation is enabled". Isolation is miri's determinism sandbox,
+        # not its UB detection; disabling it keeps every soundness check and
+        # lets tests that touch a real tmpdir run. The test is legitimate and
+        # stays (never skip a test to get green).
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly miri test -p lsof-core -p lsof-cli
