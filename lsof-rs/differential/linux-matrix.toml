@@ -1,0 +1,101 @@
+# lsof-rs Linux differential matrix — mode 1: the real C oracle, same host.
+#
+# Run by linux_diff.py, which stands up two fixture processes and substitutes
+# their PIDs for {A} (files: cwd, a regular file on fd 3, a directory on fd 5, a
+# FIFO on fd 6) and {B} (sockets: a TCP listener, a UDP socket, an AF_UNIX
+# listener), then hands the rendered matrix to the porting kit's diff_run.py.
+# Both binaries run against the SAME process at the same instant, so PIDs,
+# inodes, devices and sizes are identical on both sides and the kit's default
+# whitespace-only normalization is sufficient. Numbers are never masked here:
+# they are exactly the cells this gate exists to compare.
+#
+# EVERY CASE CARRIES -a. lsof ORs its list options unless -a ANDs them
+# (Lsof.8: "list options that are specifically stated are ORed"); lsof-rs applies
+# file-level selectors unconditionally. Without -a, `-d ^mem -p PID` means
+# "files that are not mem OR process PID" to the C — the whole system — and
+# "process PID's non-mem files" to lsof-rs. That is a real, recorded divergence
+# (DIVERGENCES.md, `files-or-semantics-no-a`); the -a makes every other case
+# mean the same thing to both binaries so it measures what it names.
+#
+# -n -P everywhere: the C resolves hostnames and service names by default;
+# lsof-rs never does (a deliberate difference, docs/known-limitations.md), so
+# the C is asked for the numeric form it will otherwise not print.
+#
+# -d ^mem on file cases: the C emits a `mem` row per mapped library; lsof-rs's
+# Linux backend does not until phase L2. Excluding mem lets each case measure
+# its own surface; `files-mem-rows` measures the gap itself, and is ledgered as
+# debt naming the phase that closes it.
+#
+# A case is ledgered (DIVERGENCES.md, `- [x] name: reason`) only for a known,
+# reasoned difference. Everything else must MATCH — stdout AND exit code.
+
+# ------------------------------------------------------------- files fixture
+
+[[case]]
+name = "files-table"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+name = "files-fd-3"
+args = ["-n", "-P", "-a", "-d", "3", "-p", "{A}"]
+
+[[case]]
+name = "files-terse"
+args = ["-t", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# LEDGERED. The C prints OFFSET as the column header and an empty cell for the
+# cwd/rtd/txt specials; lsof-rs keeps SIZE/OFF and falls back to size. Shared
+# renderer behavior (affects Windows), so a decision, not a backend fix.
+name = "files-offset-o"
+args = ["-n", "-P", "-o", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# LEDGERED as DEBT (L2): the C emits one `mem` row per mapped library from
+# /proc/<pid>/maps; the Linux backend does not read maps yet.
+name = "files-mem-rows"
+args = ["-n", "-P", "-a", "-d", "mem", "-p", "{A}"]
+
+[[case]]
+# LEDGERED. -F field set: the C emits g (pgid), u (uid), G (flags), l (lock),
+# D (hex device) and empty a/l fields that lsof-rs does not; lsof-rs emits d
+# (maj,min) where the C emits D. Shared renderer/model, so a decision.
+name = "files-fields-F"
+args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# LEDGERED, and the ONLY case without -a, on purpose: it exercises lsof's
+# OR-by-default list semantics, which lsof-rs does not implement for file-level
+# selectors. To the C this lists every process on the host; to lsof-rs, one.
+name = "files-or-semantics-no-a"
+args = ["-n", "-P", "-d", "^mem", "-p", "{A}"]
+
+# ----------------------------------------------------------- sockets fixture
+
+[[case]]
+name = "sockets-table"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{B}"]
+
+[[case]]
+name = "sockets-inet"
+args = ["-n", "-P", "-a", "-i", "-p", "{B}"]
+
+[[case]]
+name = "sockets-inet-tcp"
+args = ["-n", "-P", "-a", "-iTCP", "-p", "{B}"]
+
+[[case]]
+name = "sockets-inet-udp"
+args = ["-n", "-P", "-a", "-iUDP", "-p", "{B}"]
+
+[[case]]
+name = "sockets-unix-U"
+args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
+
+# ------------------------------------------------------------- exit contract
+
+[[case]]
+# No such process: both print nothing and exit 1. Exit-code fidelity was a real
+# lsof-rs bug once (LESSONS #4); the kit runner diffs the code, not just stdout.
+name = "no-match-exit-code"
+args = ["-n", "-P", "-a", "-p", "999999999"]

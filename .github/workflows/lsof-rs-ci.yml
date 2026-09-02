@@ -180,6 +180,49 @@ jobs:
         # follow. See lsof-rs/fuzz/.
         run: cargo fuzz run parse_args -- -max_total_time=45 -rss_limit_mb=2048
 
+  differential-linux:
+    name: differential (linux, vs the C)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Mode 1 of the porting kit's differential — the one Windows cannot have:
+    # the C lsof built from THIS tree (the exact source being ported, not apt's
+    # older package) and lsof-rs, run against the same self-owned fixture
+    # process at the same instant, diffed through porting-kit diff_run.py with
+    # DIVERGENCES.md as the ledger. Every L0/L1 fidelity finding came from
+    # doing this by hand; this is it as a gate. See differential/linux_diff.py.
+    #
+    # HARD gate from its first run, on purpose: unlike the Windows smoke suite
+    # this is not CI-only — it runs identically on any Linux box, and it was run
+    # end to end (13 cases, 9 MATCH, 4 ledgered, 0 unexplained) before this job
+    # was written. A promotion PR validates itself by the mechanism it enables.
+    #
+    # Exit contract: 0 match/ledgered, 1 unexplained divergence, 2 infra (a
+    # binary that cannot run, a fixture that did not come up) — so a broken
+    # harness cannot read as a port bug (LESSONS #6).
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: build the C oracle from this tree
+        # The same recipe build.yml proves on this runner, minus the man page
+        # (`make lsof`, the binary target alone — the docs step needs groff and
+        # the oracle needs no manual).
+        working-directory: .
+        run: |
+          sudo apt-get install -y pkg-config
+          autoreconf -vif
+          ./configure
+          make -j"$(nproc)" lsof
+          # lsof writes -v to STDERR. Without 2>&1 grep sees nothing, exits 1,
+          # and pipefail fails the step after a successful build — which is
+          # exactly what happened on this job's first run.
+          ./lsof -v 2>&1 | grep revision
+      - name: build lsof-rs
+        run: cargo build --release --bin lsof
+      - name: differential vs the C oracle
+        run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
+
   miri:
     name: miri (UB in the portable crates)
     runs-on: ubuntu-latest

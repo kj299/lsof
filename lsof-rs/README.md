@@ -115,7 +115,13 @@ item is shipped or a documented closed gate — and the release criteria are in
 - ⬜ **L2** — `mem` rows from `/proc/<pid>/maps`, the lock column from
   `/proc/locks`, named `anon_inode` kinds, the mount-table options, and
   per-network-namespace socket reads.
-- ⬜ **L3** — the C-vs-Rust differential as a CI gate.
+- ✅ **L3** — the C-vs-Rust differential as a CI gate
+  ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
+  from **this tree** and lsof-rs, run against the same fixture process, diffed
+  through the porting kit's runner with [`DIVERGENCES.md`](DIVERGENCES.md) as
+  the ledger. 13 cases; every unledgered difference fails the build. On its
+  first fixture it found two more fidelity gaps (the offset cell for devices
+  and FIFOs, `pipe` in NAME), fixed the same day.
 
 Both phases were diffed by hand against the real C `lsof` 4.95.0 on the same
 host, and that diff is the reason to trust them: **`-i`, `-iTCP:443`,

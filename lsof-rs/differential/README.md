@@ -108,3 +108,39 @@ This applies the pattern from the **porting kit** (now `kj299/c2rust-port` v1.0)
 that this very port helped distill: normalize both sides identically, diff, and
 ledger the intentional divergences. It is the "oracle-substitution" second mode
 that `RETROSPECTIVE-lsof.md` said the kit's differential must support.
+
+---
+
+## Linux — mode 1, the real C oracle (`linux_diff.py`)
+
+On Linux the reference implementation runs on the same host, so the substitute
+above is not needed: this is the kit's **mode 1** differential — the C `lsof`
+built from **this tree** (the exact source being ported; apt's package is four
+minor versions behind and would let the harness manufacture divergences that are
+not the port's) and lsof-rs, run against the same fixture process at the same
+instant, diffed through `porting-kit/harnesses/differential/diff_run.py` with
+[`../DIVERGENCES.md`](../DIVERGENCES.md) as the ledger.
+
+| File | Role |
+|---|---|
+| `linux_diff.py` | Stand up two self-owned fixtures (A: cwd + a regular file, a directory and a FIFO on fds 3/5/6; B: a TCP listener, a UDP socket, an AF_UNIX listener), substitute their PIDs into the matrix, hand it to the kit runner, tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra. |
+| `linux-matrix.toml` | 13 cases. Every one carries `-a` (lsof ORs list options otherwise — see the ledger) and `-n -P` (lsof-rs never resolves names). File cases pass `-d ^mem` so they measure their own surface; `files-mem-rows` measures that gap and is ledgered as L2 debt. |
+
+Why the fixture matters: both binaries see the **same** process, so PIDs, inodes,
+devices and sizes are identical on both sides and the kit's default
+whitespace-only normalization is all that is needed. Numbers are never masked
+here — they are exactly the cells this gate exists to compare.
+
+```sh
+# from the repo root: build the oracle (binary target only; the man page
+# needs groff and the oracle needs no manual), then lsof-rs, then diff
+autoreconf -vif && ./configure && make lsof
+( cd lsof-rs && cargo build --release --bin lsof )
+python3 lsof-rs/differential/linux_diff.py --oracle ./lsof --rust lsof-rs/target/release/lsof
+```
+
+First run, 2026-09-02, against C 4.99.6: 13 cases, 9 MATCH, 4
+DIVERGE(ledgered), 0 unexplained. Before it was a gate, doing this by hand
+found every fidelity bug in phases L0 and L1 — and on its first fixture it found
+two more (the `0t0` offset cell for devices and FIFOs; `pipe` in NAME), fixed in
+the same PR. It runs on every Linux CI push as a hard gate.
