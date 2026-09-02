@@ -434,3 +434,215 @@ itself (validated on the real tree: the 45-letter union optstring across all
 emit → `feature-inventory-lsof.toml`), infers option coverage from each matrix
 case's `args`, takes fixture-borne TYPE coverage via a per-case `covers` list,
 and exits 1 on any non-waived feature no case exercises. LESSONS #11.
+
+## 11. Addendum — the 1.0 arc and the second platform (2026-08-22 → 2026-09-01)
+
+Scope: PRs #43–#63 — 24 non-merge commits in eleven days. Three releases
+(v0.4.0, v1.0.0, v1.0.1), a Linux backend to phase L1, a per-platform coverage
+gate, and the rename to `lsof-rs`. Reconstructed from git, the release
+validation log in `docs/road-to-1.0.md`, and step 0 of the retrospective
+prompt: every harness re-run against the real tree on 2026-09-02.
+
+### 11.0 Step-0 results — what the harnesses found *about themselves*
+
+Run first, as the prompt insists, and it paid immediately. The code gates were
+all green (unsafe 139/139 documented; coverage 0 uncovered on both platforms;
+differential self-test 30/30; `check-kit` OK). The findings were about **controls
+the kit mandates that this port never instantiated**:
+
+| Kit control | Where mandated | State in lsof-rs after 21 PRs |
+|---|---|---|
+| `progress.json` | CLAUDE.md "keep current"; Phase 4 step 6; retrospective step 1 | **never created** |
+| `DIVERGENCES.md` | Phase 2 exit criteria; Phase 5 "ship as release notes"; control table | **never created** — `ledger.json` holds one entry |
+| C-flaw triage | scan output: "Triage each… record in DIVERGENCES.md" | 127 findings (94 int-overflow-mul, 24 unbounded-copy, 8 format-string, 1 command-exec), **none triaged** |
+| Sanitizers | control table row "No UB at the FFI boundary — CI"; template has `miri` + `asan` jobs | **zero mentions in the port's CI** |
+| Fuzz per parse module | Phase 4 step 3 | one target (`parse_args`); the Linux backend's seven `/proc` text parsers unfuzzed |
+
+None of these surfaced from reading the playbook, and none would have from a
+green CI. They surfaced because the prompt says *run* the harnesses and one of
+them ends its output with an instruction nobody had followed. The lesson is not
+"be more diligent"; it is that the kit **asserts** these artifacts exist and
+**checks** none of them (§11.4, LESSONS #019).
+
+### 11.1 Failure inventory
+
+Ranked by what it cost and what it taught. Every item was found by something
+that executed against reality, and none by review.
+
+**F1 — v1.0.0 failed its own field checkpoint** (`36ace1e`, `1a66cd6`).
+Every automated gate was green on the 1.0.0 artifact. The manual pass on real
+Windows 11, elevated, failed one case: `plus-D-directory-tree` exceeded 60 s —
+measured at **214 s** against a `%TEMP%` of 431 entries. Root cause: the
+per-process extras phase awaited each process *in turn* with a 2 s timeout, so
+its worst case was `2 s × process count`. Unelevated it is invisible
+(`OpenProcess` on a foreign process fails instantly); elevated, `SeDebugPrivilege`
+makes every read succeed and some of them slow. **Not a 1.0 regression**: the
+code was unchanged since Phase 4; v0.4.0 had passed the same case on timing.
+Hosted runners have a small idle process set and cannot express the condition.
+The fix ran the phase concurrently under one global budget; the first budget
+value (20 s) was itself wrong — a wedged worker would have cost `lsof -p` 20 s
+where the old code cost 2 s — and was caught pre-merge by asking "what does this
+number replace?" and sizing it against that (5 s).
+
+**F2 — exit criterion 4 measured calendar, not effort** (`edb763b`).
+"14 consecutive green nightly deep-fuzz runs" used elapsed days as a proxy for
+fuzzing work. Asked why 1.0 had to wait, there was no answer that survived
+contact: the nightly had already done 200M+ execs with corpus growth flattened to
++6 % and coverage steady at `cov: 1125 / ft: 6790`. The criterion was rewritten
+to what it had meant to measure — cumulative effort plus a coverage plateau plus
+zero findings — and 1.0 cut the same day.
+
+**F3 — the release published a checksum for a different binary** (`220ea86`).
+Two dispatches of the release workflow raced; the notes carried one SHA-256 and
+the asset another. Fixed with a `concurrency` group and by writing the notes from
+the run that uploaded the asset. The user deleted the release and it was re-cut
+once, cleanly. LESSONS #014 had covered release *permissions*; it had not
+covered release *concurrency*.
+
+**F4 — the coverage gate excused features the port now intended to ship**
+(`9dce2f4`). 118 waivers. Roughly half rested on "Unix-only" or "no Windows
+equivalent". All true when written; all false the day the Linux backend merged;
+**nothing in the file changed**, so the gate stayed green. Two were wrong on the
+day, not merely expired: `type:BLK` and `type:FIFO` were waived as having no
+Windows analogue while the Linux backend was already emitting both. The fix gave
+waivers a `platforms` list and the gate a `--platform` flag, run once per
+platform; the Linux run then demanded four TYPE codes, one of which
+(`type:LINK`) the code mapped but **no test had ever asserted** — declaring it
+covered without the assertion would have been exactly the lie the gate exists
+to catch, so the assertion went in first.
+
+**F5 — `-U` had never filtered anything** (`7d64265`). `Selection::unix_only`
+was declared and never read. On Windows the ETW path happened to yield only
+AF_UNIX rows when `-U` was set, so the missing predicate was invisible for the
+flag's whole life. Against a backend that returns every open file, `-U` listed
+the system. Fixed in `lsof-core`; Windows' smoke suite still passed, proving the
+predicate a no-op there and a fix on Linux.
+
+**F6 — DEVICE/NODE are filled differently per socket family** (`7d64265`).
+lsof puts inode+protocol in those cells for inet rows and kernel-pointer+inode
+for AF_UNIX. L1's first cut had the inode in NODE for both — reasonable-looking,
+wrong, and invisible to any unit test. Found by the first side-by-side run
+against the C. Likewise `st_rdev` vs `st_dev` for device nodes in L0
+(`a58d133`), and that a *listening* AF_UNIX socket sits in `St=01` and is
+identified only by `SO_ACCEPTCON` in the flags column.
+
+**F7 — three renderer divergences latent in the Windows output since v0.2.0**
+(`docs/known-limitations.md`). The `-T` suffix shape (`(QR=0) (QS=0)` vs the C's
+`(QR=0 QS=0)`); `-Tq` appending to the state where the C replaces it; `COMMAND`
+never truncated to the C's default 9. All in `lsof-core`'s renderer, so they
+had applied to every Windows release; nobody could see them because Windows has
+no C to compare against. **The Linux differential found Windows bugs.** They are
+recorded, not fixed — each alters output the golden fixtures and 59 smoke cases
+assert, which makes matching the C a compatibility decision for the maintainer.
+
+**F8 — the rename broke four things across three passes** (`e73c73c`). A
+case-sensitive `find -name` missed `Invoke-WinlsofSmokeTest.ps1`. A bare
+`winlsof` used as a Python variable became `lsof-rs` (does not parse). CI called
+a script filename that did not yet exist. `Add-Type -Namespace Lsof-rsNative` —
+a .NET namespace cannot contain a hyphen. And the protection regex for published
+tags guarded only the *left* side of each CHANGELOG compare URL, leaving six
+dead links. Pass 1 did the rename; pass 2 found three by **syntax-checking every
+tracked script**; pass 3 found the dead links by verifying every tag named in
+the file against the remote. The silent-CI failure I had been guarding against
+never happened; the loud and the quiet-but-wrong ones did.
+
+**F9 — invented test expectations** (L0). The `dev_t` decode test was written
+with hex expectations I had not computed; it failed twice. Fixed by computing
+them. Small, but it is the same species as F6: a test pins what you *believe*.
+
+### 11.2 Diff against the playbook — what it prevented and what it lacked
+
+*Prevented, as written.* Observe-first promotion of CI-only gates (LESSONS #9/#13)
+held: the Linux job landed hard-gated only because its tests were host-portable.
+Spike-and-gate (Phase 4) held for `-iICMP/-iRAW`. The human-button release
+fallback (LESSONS #14) was used again. The coverage gate (LESSONS #11/#12) did its
+job the moment it was given a platform axis. `forbid(unsafe_code)` on `core`
+extended cleanly to a whole second backend.
+
+*Lacked — the failures the playbook, as written, would not have prevented:*
+
+1. **Phase 2 has no "asymmetric oracle" case.** It covers "reference runs here"
+   and "reference cannot run on the target" (substitute). It has nothing for the
+   situation that actually produced the most findings: *the port targets two
+   platforms and the reference runs on one of them*. That platform's diff is an
+   oracle for every line of shared code — F5, F6, F7 all came from it — and the
+   playbook did not tell me to build it first or treat its findings as
+   cross-platform. The scope doc did ("start L3's harness immediately after L0")
+   and I did not; the diff was done by hand.
+2. **Phase 5 has no real-hardware field checkpoint.** It gates cutover on the
+   differential, fuzz corpus and supply chain — all things a hosted runner can
+   run. F1 is a defect no hosted runner can express. `road-to-1.0.md` criterion 5
+   (the *exact* release artifact, real hardware, every privilege mode, with a
+   per-case ceiling) is what caught it; the kit had no such gate.
+3. **The architecture template knows one `sys` crate.** "Implementations live in
+   `sys` behind `#[cfg(...)]`." lsof-rs has two backend crates, and the second is
+   `#![forbid(unsafe_code)]` — a backend needing no FFI, which the template's
+   defining invariant ("`sys` = the unsafe crate") has no slot for. Adding a
+   platform touched `lsof-core` by one enum variant and nothing else, which is
+   the seam working *better* than the template describes.
+4. **Waiver reasons had no platform scope** (F4). Fixed in the kit this window.
+5. **Three mandated ledgers with no existence check** (§11.0). The playbook
+   names `progress.json`, `DIVERGENCES.md` and a fuzz target per parse module
+   as exit criteria. Nothing fails when they are absent; a 21-PR port shipped
+   1.0 without any of them.
+6. **No procedure for renaming a project** (F8), and no prompt for adding a
+   backend — `PROMPTS/` has kickoff, module, retrospective.
+7. **Release concurrency** (F3) — #014 covered credentials, not races.
+
+*The scope doc versus what happened.* It estimated L0+L1 at 1,450 lines; actual
+is 1,201 (the Linux crate, including tests). It said to decide the name *before*
+L0; it was decided after L1, which cost one more release under the old prefix
+and one more PR of prose. It said to settle the matrix shape in L3; that became
+its own PR between L0 and L1 — the right call, because L1's own TYPE codes were
+pre-waived and building against that gate would have produced no signal. And it
+said to start the L3 harness right after L0; that is still not started, and the
+diffs in F5–F7 were run by hand in a shell. **L3 is the highest-leverage open
+item in the port** and the kit should have made it a gate, not a suggestion.
+
+### 11.3 Top time sinks (churn + clustering)
+
+| Rank | Where | Signal |
+|---|---|---|
+| 1 | `CHANGELOG.md` (16 commits), `README.md` (9), `road-to-1.0.md` (9) | Docs churn tracked every decision; the price of keeping them truthful was paid continuously and was worth it — a stale v0.2.0 validation claim was found and fixed. |
+| 2 | Release day 2026-08-30 — 12 commits, 14:37 → 21:07 | v0.4.0 validation, 1.0.0 cut, its field failure, root cause, 1.0.1, re-validation, CI dedupe, then L0 — six hours from "1.0 is done" to "1.0 was wrong" to "1.0.1 is validated". |
+| 3 | `coverage-matrix.toml` (7) | Every feature PR touched it — the gate is load-bearing. |
+| 4 | `lsof-backend-windows/src/backend.rs` (5) | The extras-budget fix and its self-caught correction. |
+| 5 | The rename (92 files, 73 detected renames) | One PR, three passes, four breakages. |
+
+### 11.4 What to carry into the kit (this addendum's patches)
+
+1. **Phase 2 — the asymmetric oracle.** If the reference runs on *any* target
+   platform, that platform's C-vs-Rust diff is the oracle for all shared code;
+   build it before the second backend's phase 1 and treat its findings as
+   cross-platform.
+2. **Phase 5 — the field checkpoint.** Per release: the exact artifact, real
+   hardware, every privilege mode, per-case time ceiling, results logged with the
+   verdict. Hosted CI cannot substitute.
+3. **Architecture template — one backend crate per platform**, each `cfg`-gated
+   at its root, any of which may be `forbid(unsafe_code)`; the unsafe audit runs
+   per crate.
+4. **`harnesses/ledgers/check_ledgers.py`** — a port-side presence check for the
+   three mandated ledgers, wired into `check-kit`'s self-test and offered for the
+   port's CI, so "the playbook says so" becomes "the build says so".
+5. **Coverage gate `--platform`** and `platforms` on waivers (already landed;
+   documented in the control table with its expiry failure mode).
+6. **A rename procedure** (three passes; protect published tags; alias env vars;
+   inventory case-insensitively; verify by executing).
+7. **`PROMPTS/20-new-backend.md`** — the second-platform prompt.
+8. **Release concurrency** added to Phase 5's mechanics.
+
+### 11.5 The single failure the kit still would not prevent
+
+**F7.** After every patch above, a port whose reference implementation cannot
+run on its *only* target platform still has no way to find fidelity bugs in what
+it renders. The kit's answer for that case is oracle-substitution: a native data
+oracle plus golden tests for format. But a golden test pins what its author
+*believed* the C emits, and for the `-T` suffix, `-Tq` semantics and the
+`COMMAND` width that belief was wrong for six releases. The thing that found
+them was not a control — it was acquiring a second platform where the C runs,
+which is a project, not a gate. The kit can say this plainly (Phase 2 now
+does): **on a platform with no reference, format fidelity is a claim, not a
+measurement, until a same-host diff exists somewhere in the port.** It cannot
+manufacture that diff. The next single-platform port's target is to find a
+cheaper substitute — a recorded C transcript corpus captured on any host where
+the C runs, replayed as golden input on the target — before it ships 1.0.

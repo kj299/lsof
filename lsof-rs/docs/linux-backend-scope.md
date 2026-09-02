@@ -168,10 +168,13 @@ immediately after L0**, per the note above.
 
 ## Open decisions
 
-1. **The name.** `lsof-rs` stops being accurate the moment Linux lands. Options:
-   rename the workspace (churns every doc and the release-tag prefix), or keep
-   `lsof-rs` as the *Windows binary's* name under a differently-named workspace.
-   Decide **before** L0, not after.
+1. **The name.** *(Written when the project was `winlsof`; the rename to
+   `lsof-rs` landed after L1 — PR #63.)* The old name stopped being accurate
+   the moment Linux landed. The options were: rename the workspace (churns
+   every doc and the release-tag prefix), or keep it as the *Windows binary's*
+   name under a differently-named workspace. The advice stands for the next
+   port: decide **before** L0, not after — deciding after L1 cost one more
+   release under the old prefix and a 92-file rename PR (LESSONS #020).
 2. **Coverage matrix shape.** The matrix and feature inventory are currently
    Windows-shaped (`feature-inventory-lsof-rs.toml`, 118 waivers reading
    "no Windows analogue"). Cross-platform means either per-platform inventories

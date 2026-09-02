@@ -23,7 +23,9 @@ The Rust must be **safer and more secure** than the C, not merely equivalent.
 Phase 0 inventory + C-flaw scan + threat model → Phase 1 dependency-ordered port
 plan → Phase 2 oracle → Phase 3 skeleton → Phase 4 per-module loop → Phase 5
 cutover. Do not skip Phase 0's flaw scan or the oracle: they are what make the
-port *safe* and *verifiable*.
+port *safe* and *verifiable*. **Adding a second platform is a new port loop, not
+"a few PRs"** — run `PROMPTS/20-new-backend.md`; lsof-rs's Linux backend skipped
+the loop's fuzz and ledger gates because nothing asked (LESSONS #017–#021).
 
 ## The gates (non-negotiable, wired into CI)
 
@@ -39,7 +41,8 @@ compiles and matches the oracle is at step 2 of 6, not done.
 | no panic on input | `harnesses/fuzz/` (cargo-fuzz) |
 | clean deps | `harnesses/supply-chain/run_supply_chain.sh` |
 | no silent drift | `harnesses/differential/diff_run.py` + `DIVERGENCES.md` |
-| matrix covers the C's surface | `harnesses/coverage/coverage_gate.py` |
+| matrix covers the C's surface | `harnesses/coverage/coverage_gate.py --platform X`, once per platform |
+| the mandated ledgers exist | `harnesses/ledgers/check_ledgers.py` — progress, divergences, fuzz target, sanitizer job |
 | don't re-port a vuln | `harnesses/c-flaw-scan/scan_c_flaws.py` at Phase 0 |
 
 Smoke-test the harnesses anytime with `make -C porting-kit check-kit` (python3 +
