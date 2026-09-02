@@ -72,6 +72,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Land this observe-first (continue-on-error: true) and promote it in its
+      # own PR after consecutive log-verified green runs (LESSONS #13, #19). Once
+      # it is a HARD gate, PIN the nightly to the build that produced those runs:
+      #   - uses: dtolnay/rust-toolchain@master
+      #     with: { toolchain: nightly-YYYY-MM-DD, components: miri }
+      # and `cargo +nightly-YYYY-MM-DD miri test`. miri ships inside the nightly
+      # and its sysroot build can break on any given day; a hard gate must fail
+      # only for the code's reasons, so a newer miri is a deliberate bump in its
+      # own PR, not a surprise red on someone else's. Floating is fine while the
+      # job cannot block.
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
       # Isolation is miri's determinism sandbox, not its UB detection. Any test
