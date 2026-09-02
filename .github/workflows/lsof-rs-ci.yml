@@ -181,29 +181,37 @@ jobs:
         run: cargo fuzz run parse_args -- -max_total_time=45 -rss_limit_mb=2048
 
   miri:
-    name: miri (observe-first — UB in the portable crates)
+    name: miri (UB in the portable crates)
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # OBSERVE-FIRST (porting-kit LESSONS #9 / #13): the retrospective found the
-    # playbook's sanitizer gate had never been wired for this port at all
-    # (LESSONS #19). This lands it as a job that cannot yet fail the build; it
-    # is promoted to a hard gate in its own PR after consecutive log-verified
-    # green runs. Only the forbid(unsafe_code) crates run here — the Windows
-    # backend needs Windows, and the Linux backend reads live /proc, which miri
-    # cannot interpose — so today this gate proves the *portable* core is UB-free
-    # rather than the FFI layer. Read the verdict from the step log, not the job.
-    continue-on-error: true
+    # HARD GATE. Landed observe-first (continue-on-error) in the retrospective
+    # PR #64 after LESSONS #19 found the playbook's sanitizer gate had never been
+    # wired for this port; promoted here, in its own PR, on the kit's promotion
+    # rule (LESSONS #13): consecutive log-verified green runs — two, heads
+    # ae32953 and 5c1b654, 54 tests each (lsof-cli 14 lib + 6 bin, lsof-core
+    # 15 lib + 19 golden), zero UB findings, read from the step log and not the
+    # job status. This PR itself is the third: a promotion is validated by the
+    # mechanism it enables.
+    #
+    # Scope: only the forbid(unsafe_code) crates. The Windows backend needs
+    # Windows, and the Linux backend reads live /proc, which miri cannot
+    # interpose — so this proves the *portable* core is UB-free, not the FFI
+    # layer. Those two are the open rows in progress.json.
+    #
+    # The nightly is PINNED to the build that produced the green runs. miri
+    # ships inside the nightly and its sysroot build can break on any given
+    # day; a hard gate must fail only for the code's reasons, so a newer miri
+    # is a deliberate bump in its own PR, not a surprise red on someone else's.
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-        with: { components: miri }
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-31
+          components: miri
       - name: miri over lsof-core + lsof-cli
-        # First observe-first run: all 14 lsof-cli lib tests passed under miri,
-        # then a binary test that creates a temp dir hit "mkdir not available
-        # when isolation is enabled". Isolation is miri's determinism sandbox,
-        # not its UB detection; disabling it keeps every soundness check and
-        # lets tests that touch a real tmpdir run. The test is legitimate and
-        # stays (never skip a test to get green).
+        # Isolation is miri's determinism sandbox, not its UB detection; the
+        # first observe-first run tripped it on a legitimate temp-dir test after
+        # 14 tests had passed. Disabling it keeps every soundness check.
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly miri test -p lsof-core -p lsof-cli
+        run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
