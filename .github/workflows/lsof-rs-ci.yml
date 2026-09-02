@@ -214,7 +214,10 @@ jobs:
           autoreconf -vif
           ./configure
           make -j"$(nproc)" lsof
-          ./lsof -v | grep revision
+          # lsof writes -v to STDERR. Without 2>&1 grep sees nothing, exits 1,
+          # and pipefail fails the step after a successful build — which is
+          # exactly what happened on this job's first run.
+          ./lsof -v 2>&1 | grep revision
       - name: build lsof-rs
         run: cargo build --release --bin lsof
       - name: differential vs the C oracle
