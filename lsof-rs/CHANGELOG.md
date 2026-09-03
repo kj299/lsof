@@ -12,6 +12,20 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Fuzz targets for every Linux-backend text parser** — `proc_net`
+  (`/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}` tables and the address, state,
+  queue and field decoders under them), `proc_status` (`/proc/<pid>/status`,
+  whose `Name:` an unprivileged local process sets outright), `proc_fdinfo`
+  (`flags:`/`pos:` and the magic-link NAME mapping) and `passwd`
+  (`/etc/passwd`, the libc-free `getpwuid`). Each parser was split into a
+  `read → parse(&str)` pair so the exact code path the backend runs on
+  kernel-supplied text can be driven with arbitrary bytes; the pure halves are
+  exposed to the fuzz crate through a `fuzzing` cargo feature the CLI never
+  enables. Both CI fuzz jobs now loop over `cargo fuzz list`, so a target added
+  to `fuzz/Cargo.toml` is gated on every PR and soaked nightly without editing
+  a workflow — a target that exists but is not run is the LESSONS #019 failure
+  again. Before this, the backend's seven parsers had no fuzz target
+  (LESSONS #021); the argv parser was the only one.
 - **Linux backend phase L3 — the C-vs-Rust differential as a CI gate**
   (`differential/linux_diff.py`, `linux-matrix.toml`, `DIVERGENCES.md`). Mode 1
   of the porting kit's differential, the one Windows structurally cannot have:
@@ -65,6 +79,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `S_IFLNK` to `LINK` but no test had ever asserted it.
 
 ### Fixed
+- **A panic in the IPv6 address decoder on non-ASCII input** — found by the
+  `proc_net` fuzz target within seconds of its first run. `parse_addr` checked
+  the host half was 32 *bytes* and then sliced it at 8-byte offsets; a host made
+  of multi-byte characters passes the check and is sliced mid-character, which
+  panics. Hex digits are ASCII, so the decoder now rejects anything else before
+  indexing. The kernel would never write such a line, which is exactly why no
+  test had — and why a parser over kernel text still needs a fuzzer: the
+  contract is *no panic on any input*, not *no panic on well-formed input*.
+  Regression tests pin the misaligned case and the lossy-UTF-8 shape the fuzzer
+  produced.
 - **SIZE/OFF for character devices and FIFOs, and `-o` on Linux.** The C
   prints the offset (`0t0`) where a size means nothing; the Linux backend
   printed the size (`0`). It now withholds `st_size` for `CHR`/`BLK`/`FIFO`
@@ -94,6 +118,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   waiver claims "we will never do this", which is untrue of `-Z`.
 
 ### Known, recorded rather than changed
+- **Control characters in a process name reach the COMMAND column raw**
+  (`DIVERGENCES.md` #10). Found by the `proc_status` fuzz target — not as a
+  parser bug but as a wrong invariant in the target's first draft: a bare `\r`
+  in `Name:` survives `lines()` and `trim()`, and the kernel escapes only `\n`
+  and `\\` in `/proc/<pid>/status`, so the parser is right to return it
+  verbatim. The C's `safestrprt()` escapes non-printables on output; lsof-rs
+  does not, on either platform. A process named with an ANSI escape sequence
+  would drive the terminal of whoever runs lsof-rs. **A decision, and a
+  security one**; the safer fix is the C's.
 - **Six more divergences from the C, found by the L3 differential the day it
   landed** and recorded in `DIVERGENCES.md` for decision — each changes shared
   output, so none was fixed in a backend phase. The largest: **lsof ORs its

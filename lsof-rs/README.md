@@ -226,6 +226,19 @@ On Linux, `cargo test --all` includes the Linux backend's own tests, three of
 which read this host's live `/proc` rather than a fixture — the cheapest way to
 keep the parsing honest against a real kernel.
 
+Every parser that takes text from outside the process has a cargo-fuzz target
+under [`fuzz/`](fuzz/) — the argv parser, and the Linux backend's `/proc/net`
+tables, `/proc/<pid>/status`, fdinfo and `/etc/passwd` readers. The contract is
+*no panic on any input*; CI smoke-runs all of them on every PR and soaks them
+nightly. The `proc_net` target found a real panic in the IPv6 decoder in its
+first seconds.
+
+```sh
+cargo +nightly install cargo-fuzz
+cd lsof-rs/fuzz && cargo +nightly fuzz list          # the targets
+cargo +nightly fuzz run proc_net -- -max_total_time=60
+```
+
 CI (`.github/workflows/lsof-rs-ci.yml`) runs the lints + tests on Linux and
 builds/tests the Windows backend on `windows-latest`.
 

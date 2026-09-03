@@ -14,10 +14,46 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 lsof-cli = { path = "../crates/lsof-cli" }
+# The `fuzzing` feature exposes the Linux backend's pure text parsers
+# (fuzz_api). The CLI never enables it; only these targets do.
+lsof-backend-linux = { path = "../crates/lsof-backend-linux", features = ["fuzzing"] }
 
 [[bin]]
 name = "parse_args"
 path = "fuzz_targets/parse_args.rs"
+test = false
+doc = false
+bench = false
+
+# One target per text-parsing module of the Linux backend (PLAYBOOK Phase 4
+# gate 3; LESSONS #021). Each drives the pure parsing half of a read→parse
+# split with arbitrary bytes — the exact code path the backend runs on
+# kernel-supplied text — and must never panic.
+
+[[bin]]
+name = "proc_net"
+path = "fuzz_targets/proc_net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proc_status"
+path = "fuzz_targets/proc_status.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proc_fdinfo"
+path = "fuzz_targets/proc_fdinfo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "passwd"
+path = "fuzz_targets/passwd.rs"
 test = false
 doc = false
 bench = false

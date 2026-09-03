@@ -1,6 +1,6 @@
 {
   "modules": {
-    "lsof-backend-linux": "differential",
+    "lsof-backend-linux": "fuzzed",
     "lsof-backend-windows": "differential",
     "lsof-cli": "unsafe_audited",
     "lsof-core": "unsafe_audited"
