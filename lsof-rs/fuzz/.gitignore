@@ -1,0 +1,11 @@
+# cargo-fuzz's working state, none of which belongs in the tree:
+#   target/    the nightly-only fuzz build (libfuzzer-sys, sanitizer flags)
+#   artifacts/ crash reproducers — libFuzzer writes one file per finding here.
+#              A finding is turned into a unit test next to the parser it broke
+#              (see the regression tests in lsof-backend-linux), which is the
+#              form that survives and runs on every push; the raw input does not.
+#   corpus/    the accumulating corpus; persisted between nightly runs by the
+#              workflow's actions/cache, not by git.
+target/
+artifacts/
+corpus/

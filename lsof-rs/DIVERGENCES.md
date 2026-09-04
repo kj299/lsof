@@ -53,6 +53,28 @@ both backend-local to `lsof-backend-linux`:
 - **`pipe` in NAME.** The C prints `pipe`; lsof-rs printed the raw link target
   `pipe:[12047]`. The inode is already the NODE cell.
 
+## Fixed by the fuzz targets, before they were a gate (2026-09-03)
+
+The Linux backend's four text parsers gained cargo-fuzz targets (`proc_net`,
+`proc_status`, `proc_fdinfo`, `passwd`). Run for sixty seconds each before the
+CI job that runs them was written:
+
+- **`proc_net`: a panic in the IPv6 address decoder** — within seconds.
+  `parse_addr` checked the host half was 32 *bytes* and then sliced it at
+  8-byte offsets; a host made of multi-byte characters passes the check and is
+  sliced mid-character. Hex digits are ASCII, so anything else is now rejected
+  before indexing. The kernel would never write such a line, which is exactly
+  why no test had — the contract is *no panic on any input*, not on
+  well-formed input. Regression tests pin the misaligned case and the
+  lossy-UTF-8 shape the fuzzer produced; the reproducer replays clean.
+- **`proc_status`: a wrong invariant in the target itself** — also within
+  seconds. The first draft asserted the command carried no `\r`; the fuzzer
+  produced `Name:PPid:\rd:Uid:` and the parser returned it verbatim, which is
+  correct: `lines()` splits only on `\n`, and the kernel escapes only `\n` and
+  `\\` in `/proc/<pid>/status`. Not a parser bug. What it *is* is item 10 in
+  the table below — a renderer decision this port has not made.
+- `proc_fdinfo` and `passwd`: clean at 1.4 and 1.5 million cases.
+
 ## Recorded for decision — shared output, found by the Linux oracle
 
 These change what the **Windows** binary prints too, and each alters output the
@@ -70,6 +92,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 7 | `8uW` — `W` marks a write lock on the fd | `8u` | lock column; Linux source is `/proc/locks` (L2), Windows has byte-range locks |
 | 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | `unknown`, `anon_inode:[eventpoll]` | DEBT (L2), Linux: named anon_inode kinds |
 | 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
+| 10 | non-printable bytes in a name are escaped (`safestrprt()`) | printed raw | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reaches the COMMAND column. A process named with an ANSI escape sequence would drive the terminal of whoever runs lsof-rs — the classic control-character injection the C closes and this port does not, yet. **DECISION**, and a security one: the safer fix is the C's. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

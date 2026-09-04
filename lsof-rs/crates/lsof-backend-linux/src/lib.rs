@@ -97,3 +97,29 @@ mod users;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
+
+/// The pure text parsers, exposed for the cargo-fuzz targets in `../../fuzz`.
+///
+/// Every function here takes `&str` and touches no file: each is the parsing
+/// half of a `read → parse` split, so that the exact code path the backend runs
+/// on kernel-supplied text can be driven with arbitrary bytes. This module exists
+/// only under the `fuzzing` feature, which the CLI never enables; it is not API.
+///
+/// Why these are worth fuzzing at all in a `forbid(unsafe_code)` crate: the
+/// contract is *no panic on hostile input* (PLAYBOOK Phase 4 gate 3), and
+/// `/proc/<pid>/status`'s `Name:` is attacker-settable, an AF_UNIX path can hold
+/// arbitrary bytes, and `/etc/passwd` is only as well-formed as its last editor.
+/// A panic while listing files is a denial of service against the tool that is
+/// supposed to be diagnosing one (LESSONS #021).
+#[cfg(all(target_os = "linux", feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzz_api {
+    pub use crate::files::{name_for_target, parse_fdinfo};
+    pub use crate::net::{
+        fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_suffix,
+        SocketTable,
+    };
+    pub use crate::process::parse_status;
+    pub use crate::users::parse_passwd;
+    pub use lsof_core::model::Protocol;
+}

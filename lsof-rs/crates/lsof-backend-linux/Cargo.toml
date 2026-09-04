@@ -16,5 +16,12 @@ lsof-core = { path = "../lsof-core" }
 # keeps the dependency surface — and so the `cargo-deny` supply-chain gate —
 # exactly as small as `lsof-core`'s.
 
+[features]
+# Exposes the pure text parsers (`/proc/net/*`, `/proc/<pid>/status`, fdinfo,
+# /etc/passwd) through `fuzz_api` so the cargo-fuzz targets in ../../fuzz can
+# reach them. Nothing else changes; the crate stays forbid(unsafe_code). Never
+# enabled by the CLI (porting-kit PLAYBOOK Phase 4 gate 3, LESSONS #021).
+fuzzing = []
+
 [lints]
 workspace = true

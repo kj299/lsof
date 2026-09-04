@@ -71,9 +71,15 @@ impl SocketTable {
     }
 
     fn load_inet(&mut self, path: &str, proto: Protocol, v6: bool, queues: bool) {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
-        };
+        if let Ok(text) = std::fs::read_to_string(path) {
+            self.parse_inet(&text, proto, v6, queues);
+        }
+    }
+
+    /// The parsing half of [`Self::load_inet`], over a whole `/proc/net/{tcp,udp}
+    /// {,6}` table. Pure; the fuzz target drives it with arbitrary bytes and it
+    /// must never panic. Malformed lines are skipped, never guessed at.
+    pub fn parse_inet(&mut self, text: &str, proto: Protocol, v6: bool, queues: bool) {
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split_whitespace().collect();
             if f.len() < INET_INODE + 1 {
@@ -120,9 +126,13 @@ impl SocketTable {
     /// the local address's second half is **not** a port, it is the IP protocol
     /// number. That is how ICMP is identified — there is no `/proc/net/icmp`.
     fn load_raw(&mut self, path: &str, v6: bool) {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
-        };
+        if let Ok(text) = std::fs::read_to_string(path) {
+            self.parse_raw(&text, v6);
+        }
+    }
+
+    /// The parsing half of [`Self::load_raw`]. Pure; must never panic.
+    pub fn parse_raw(&mut self, text: &str, v6: bool) {
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split_whitespace().collect();
             if f.len() < INET_INODE + 1 {
@@ -164,9 +174,14 @@ impl SocketTable {
     }
 
     fn load_unix(&mut self, path: &str) {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
-        };
+        if let Ok(text) = std::fs::read_to_string(path) {
+            self.parse_unix(&text);
+        }
+    }
+
+    /// The parsing half of [`Self::load_unix`]. Pure; must never panic — the
+    /// path column is arbitrary bytes chosen by whoever bound the socket.
+    pub fn parse_unix(&mut self, text: &str) {
         for line in text.lines().skip(1) {
             // The path is the last field and may itself contain spaces, so the
             // tail is taken verbatim rather than whitespace-split.
@@ -207,7 +222,7 @@ impl SocketTable {
 /// The state shown is not simply the `St` column: a listening socket sits in
 /// `St=01` (unconnected) and is distinguished only by `SO_ACCEPTCON` in the
 /// flags, which is how the C tells a server socket from an idle one.
-fn unix_suffix(ty: &str, flags: &str, st: &str) -> String {
+pub fn unix_suffix(ty: &str, flags: &str, st: &str) -> String {
     let kind = match u32::from_str_radix(ty, 16) {
         Ok(1) => "STREAM",
         Ok(2) => "DGRAM",
@@ -249,7 +264,7 @@ const UNIX_PATH: usize = 7;
 /// Split into at most `n` whitespace-separated fields, the last of which is the
 /// untouched remainder of the line. An AF_UNIX socket may be bound to a path
 /// containing spaces, and plain `split_whitespace` would truncate it.
-fn fields_with_rest(line: &str, n: usize) -> Vec<&str> {
+pub fn fields_with_rest(line: &str, n: usize) -> Vec<&str> {
     let mut out = Vec::with_capacity(n);
     let mut rest = line.trim_start();
     while out.len() + 1 < n {
@@ -275,11 +290,16 @@ fn fields_with_rest(line: &str, n: usize) -> Vec<&str> {
 /// 127.0.0.1. Going through `to_ne_bytes` rather than a byte-swap keeps that
 /// correct on a big-endian host too, where the kernel would have printed
 /// `7F000001` for the same address.
-fn parse_addr(s: &str, v6: bool) -> Option<SocketAddr> {
+pub fn parse_addr(s: &str, v6: bool) -> Option<SocketAddr> {
     let (host, port) = s.split_once(':')?;
     let port = u16::from_str_radix(port, 16).ok()?;
     if v6 {
-        if host.len() != 32 {
+        // `len()` counts bytes, and the slices below are byte ranges: a 32-byte
+        // host made of multi-byte characters would be sliced mid-character and
+        // panic. Hex digits are ASCII, so anything else is malformed — reject
+        // it here rather than index into it. Found by the proc_net fuzz target
+        // within seconds of its first run.
+        if host.len() != 32 || !host.is_ascii() {
             return None;
         }
         let mut b = [0u8; 16];
@@ -302,7 +322,7 @@ fn parse_addr(s: &str, v6: bool) -> Option<SocketAddr> {
 
 /// The `st` column's hex code. These are the kernel's `TCP_*` enum values, not
 /// the wire states, so the mapping is fixed by include/net/tcp_states.h.
-fn tcp_state(hex: &str) -> TcpState {
+pub fn tcp_state(hex: &str) -> TcpState {
     match u8::from_str_radix(hex, 16) {
         Ok(0x01) => TcpState::Established,
         Ok(0x02) => TcpState::SynSent,
@@ -321,7 +341,7 @@ fn tcp_state(hex: &str) -> TcpState {
 
 /// `tx_queue:rx_queue`, both hex. lsof's `QS=` is the send queue and `QR=` the
 /// receive queue.
-fn parse_queues(s: &str) -> Option<TcpExtInfo> {
+pub fn parse_queues(s: &str) -> Option<TcpExtInfo> {
     let (tx, rx) = s.split_once(':')?;
     Some(TcpExtInfo {
         recv_window: None,
@@ -383,6 +403,22 @@ mod tests {
         assert!(parse_addr("0100007:0035", false).is_none(), "short v4 host");
         assert!(parse_addr("0100007F:ZZZZ", false).is_none(), "bad port");
         assert!(parse_addr("0100007F:0035", true).is_none(), "v4 host as v6");
+        // Regression, found by the proc_net fuzz target on its first run: a
+        // 32-BYTE host built from multi-byte characters passes the length check
+        // and then gets sliced at byte offsets that fall inside a character.
+        // "a" + 15×"é" + "b" is 1 + 30 + 1 = 32 bytes with byte 8 mid-"é".
+        let misaligned = format!("a{}b:0050", "é".repeat(15));
+        assert_eq!(misaligned.len(), 37, "32-byte host + ':0050'");
+        assert!(
+            parse_addr(&misaligned, true).is_none(),
+            "non-ASCII host must be rejected, not indexed into"
+        );
+        // And the lossy-UTF-8 shape the fuzzer actually produced.
+        let replacement = format!(
+            "{}:0016",
+            "\u{FFFD}".repeat(10).chars().take(10).collect::<String>() + "ab"
+        );
+        assert!(parse_addr(&replacement, true).is_none());
     }
 
     #[test]

@@ -166,7 +166,7 @@ jobs:
         run: cargo deny check
 
   fuzz:
-    name: fuzz smoke (arg parser)
+    name: fuzz smoke (every target)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -174,11 +174,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - name: install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: fuzz the argument parser (short smoke)
-        # Adversarial input into the hand-rolled option parser: it must never
-        # panic. A short time-boxed run gates every PR; a longer nightly run can
-        # follow. See lsof-rs/fuzz/.
-        run: cargo fuzz run parse_args -- -max_total_time=45 -rss_limit_mb=2048
+      - name: fuzz every target (short smoke)
+        # Adversarial input into every parser that takes text from outside the
+        # process: the hand-rolled option parser (argv) and the Linux backend's
+        # /proc/net tables, /proc/<pid>/status, fdinfo and /etc/passwd readers
+        # (kernel- and user-supplied text; `Name:` is attacker-settable). None
+        # may panic. The loop is over `cargo fuzz list`, so a target added to
+        # fuzz/Cargo.toml is gated here without touching this file — a target
+        # that exists but is not run is the LESSONS #019 failure again. Short
+        # time-box per target gates every PR; the nightly runs long.
+        run: |
+          for t in $(cargo fuzz list); do
+            echo "=== fuzz smoke: $t ==="
+            cargo fuzz run "$t" -- -max_total_time=45 -rss_limit_mb=2048
+          done
 
   differential-linux:
     name: differential (linux, vs the C)

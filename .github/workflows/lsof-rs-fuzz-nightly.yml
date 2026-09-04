@@ -24,7 +24,7 @@ defaults:
 
 jobs:
   deep-fuzz:
-    name: deep fuzz (arg parser, 30 min)
+    name: deep fuzz (every target, 30 min)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -36,13 +36,30 @@ jobs:
           path: lsof-rs/fuzz/corpus
           # The run-id key never hits, so the post-job save always stores the
           # grown corpus; restore-keys pulls the newest previous night's.
-          key: fuzz-corpus-parse_args-${{ github.run_id }}
+          # One cache for the whole corpus dir (per-target subdirs inside), so
+          # a new target starts accumulating the night it lands. The key was
+          # per-target (fuzz-corpus-parse_args-) while there was one target;
+          # the first night on this key starts from that target's seeds only.
+          key: fuzz-corpus-${{ github.run_id }}
           restore-keys: |
+            fuzz-corpus-
             fuzz-corpus-parse_args-
       - name: install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: deep fuzz the argument parser
-        run: cargo fuzz run parse_args -- -max_total_time=1800 -rss_limit_mb=2048
+      - name: deep fuzz every target
+        # The 30-minute budget is split evenly across whatever `cargo fuzz list`
+        # reports, so a target added to fuzz/Cargo.toml is soaked nightly
+        # without touching this file. Five targets today: the argv parser and
+        # the Linux backend's four /proc and /etc/passwd text parsers.
+        run: |
+          targets=$(cargo fuzz list)
+          n=$(echo "$targets" | wc -w)
+          per=$(( 1800 / n ))
+          echo "$n targets, ${per}s each"
+          for t in $targets; do
+            echo "=== deep fuzz: $t (${per}s) ==="
+            cargo fuzz run "$t" -- -max_total_time="$per" -rss_limit_mb=2048
+          done
       - name: upload crash artifacts
         # Only exists on a finding; libFuzzer writes the reproducer input here.
         if: failure()

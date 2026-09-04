@@ -55,9 +55,15 @@ fn type_from_mode(mode: u32) -> FileType {
 /// asks for on every file; it was the first fidelity gap the C-vs-Rust
 /// differential found, on its first fixture.
 fn fdinfo_for(pid: u32, fd: &str) -> (AccessMode, Option<u64>) {
-    let Ok(info) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
-        return (AccessMode::Unknown, None);
-    };
+    match std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) {
+        Ok(info) => parse_fdinfo(&info),
+        Err(_) => (AccessMode::Unknown, None),
+    }
+}
+
+/// The parsing half of [`fdinfo_for`], over the file's text. Pure, so the fuzz
+/// target can drive it with arbitrary bytes; must never panic.
+pub fn parse_fdinfo(info: &str) -> (AccessMode, Option<u64>) {
     let mut access = AccessMode::Unknown;
     let mut pos = None;
     for line in info.lines() {
@@ -82,7 +88,7 @@ fn fdinfo_for(pid: u32, fd: &str) -> (AccessMode, Option<u64>) {
 /// already the NODE cell, so repeating it in NAME is noise the C does not
 /// emit. Sockets are resolved elsewhere (`net`), and any other synthetic
 /// target (`anon_inode:[eventfd]`) is kept verbatim until L2 names those.
-fn name_for_target(target: &str) -> String {
+pub fn name_for_target(target: &str) -> String {
     if target.starts_with("pipe:[") && target.ends_with(']') {
         return "pipe".to_string();
     }
@@ -389,5 +395,29 @@ mod tests {
         assert_eq!(f.size, None, "a FIFO has no meaningful size");
         assert_eq!(f.offset, Some(0), "offset is shown instead, as the C does");
         assert_eq!(f.access, AccessMode::Read);
+    }
+
+    #[test]
+    fn fdinfo_text_is_parsed_defensively() {
+        // The pure half of fdinfo_for, over text rather than a live fd.
+        assert_eq!(
+            parse_fdinfo("pos:\t5\nflags:\t0100001\n"),
+            (AccessMode::Write, Some(5))
+        );
+        assert_eq!(parse_fdinfo("flags:\t02\n"), (AccessMode::ReadWrite, None));
+        assert_eq!(parse_fdinfo("pos:\t12\n"), (AccessMode::Unknown, Some(12)));
+        // Non-octal flags, a negative or absurd pos, junk lines, no newline at
+        // all: each degrades to Unknown/None, none may panic.
+        assert_eq!(parse_fdinfo("flags:\t9z\n"), (AccessMode::Unknown, None));
+        assert_eq!(parse_fdinfo("pos:\t-1\n"), (AccessMode::Unknown, None));
+        assert_eq!(parse_fdinfo("pos:\t99999999999999999999999\n").1, None);
+        assert_eq!(parse_fdinfo(""), (AccessMode::Unknown, None));
+        assert_eq!(
+            parse_fdinfo("flags:pos:flags:\u{FFFD}"),
+            (AccessMode::Unknown, None)
+        );
+        // A repeated line: the last one wins, which is what a real kernel could
+        // never produce and a fuzzer always will.
+        assert_eq!(parse_fdinfo("pos:\t1\npos:\t2\n").1, Some(2));
     }
 }
