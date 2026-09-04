@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use lsof_cli::args::{parse, Action};
-use lsof_core::render::{fields, json, table, Format};
+use lsof_core::render::{fields, json, table, Escaper, Format};
 use lsof_core::{Backend, Process, Selection};
 
 #[cfg(target_os = "linux")]
@@ -296,6 +296,10 @@ fn main() {
         let located: HashSet<u32> = gathered.iter().map(|p| p.pid).collect();
         let procs = selection.apply(gathered);
         let unmatched = report_unmatched(&selection, &located, &procs);
+        // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
+        // platform rule is whether `\` is (Unix) or is the path separator
+        // (Windows). See lsof_core::render::escape.
+        let esc = Escaper::for_host();
         let out = match &format {
             Format::Table => table::render(
                 &procs,
@@ -304,8 +308,9 @@ fn main() {
                 show_offset,
                 selection.command_width,
                 selection.show_links,
+                esc,
             ),
-            Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref()),
+            Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref(), esc),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);
                 s.push('\n');

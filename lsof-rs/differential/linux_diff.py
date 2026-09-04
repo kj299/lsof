@@ -16,15 +16,38 @@ runner unchanged. Nothing here re-implements comparison, normalization, or the
 ledger — those are the kit's, on purpose.
 
   fixture A  a sleeper with a known cwd and fds 3 (regular file, write),
-             5 (directory, read) and 6 (FIFO, read/write); stdio on /dev/null
+             4 (a file whose NAME holds one of every hostile character class,
+             read), 5 (directory, read) and 6 (FIFO, read/write); stdio on
+             /dev/null
   fixture B  a listening TCP socket, a bound UDP socket and a listening
              AF_UNIX socket; stdio on /dev/null
+  fixture C  a sleeper whose COMMAND is hostile ASCII: an ANSI clear-screen,
+             CR, space, backslash, DEL, TAB, ^A
+  fixture D  the same plus é (printable) and U+009B (the 8-bit CSI) — the
+             non-ASCII classes, which the C sizes differently from how it
+             prints them (see the matrix)
 
-Both are stable for the run's duration and hold nothing that changes size, so
-the two binaries see identical state. Because PIDs, inodes and devices are
+C and D exist because COMMAND and NAME are the two cells a local user chooses
+outright (a process names itself; anyone can name a file), and the C escapes
+every byte isprint() rejects before printing them. lsof-rs printed them raw
+until the `proc_status` fuzz target pointed at it (DIVERGENCES.md #10). The
+comm comes from exec'ing a symlink to `sleep` whose basename is the hostile
+string — the kernel takes comm from the exec'd file's name, so no prctl and no
+helper binary are needed, and the string is passed as bytes so no locale is
+consulted on the way in.
+
+All four are stable for the run's duration and hold nothing that changes size,
+so the two binaries see identical state. Because PIDs, inodes and devices are
 then identical on both sides, the kit's default normalization (whitespace only)
 is all that is needed; `--mask-numbers` is deliberately NOT used — it would hide
 exactly the cells this gate exists to compare.
+
+Both binaries run with LC_ALL=C.UTF-8. The C calls setlocale(LC_CTYPE, "") and
+its safestrprt() passes a printable multibyte character through only in a
+UTF-8 locale (in POSIX every byte >= 0x80 is printed as a hex escape); lsof-rs
+is locale-independent and matches the UTF-8 behavior. The runner's default
+locale is not part of the contract, so it is pinned here, and its absence is
+infra.
 
 Every case passes `-a`. lsof ORs its list options unless `-a` ANDs them
 (Lsof.8: "list options that are specifically stated are ORed"); lsof-rs applies
@@ -73,11 +96,16 @@ def infra(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 class Fixture:
     """One self-owned process whose open files are the thing under test."""
 
-    def __init__(self, name: str, argv: list[str], cwd: str, expect_fds: int):
+    def __init__(self, name: str, argv: list, cwd: str, expect_fds: int, expect_comm: bytes | None = None):
         self.name = name
         self.argv = argv
         self.cwd = cwd
         self.expect_fds = expect_fds
+        # A fixture that `exec`s its final image is two processes in turn under
+        # one pid; fds 0-2 exist from the first instant, so an fd count alone
+        # can declare a bash-that-has-not-exec'd-yet ready. When set, the comm
+        # must match too.
+        self.expect_comm = expect_comm
         self.proc: subprocess.Popen | None = None
 
     @property
@@ -100,10 +128,16 @@ class Fixture:
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
                 infra(f"fixture {self.name} exited early (rc={self.proc.returncode})")
-            if fd_count(self.pid) >= self.expect_fds:
+            if fd_count(self.pid) >= self.expect_fds and (
+                self.expect_comm is None or comm(self.pid) == self.expect_comm
+            ):
                 return
             time.sleep(0.02)
-        infra(f"fixture {self.name} did not reach {self.expect_fds} fds within 3s")
+        infra(
+            f"fixture {self.name} did not reach {self.expect_fds} fds"
+            + (f" as {self.expect_comm!r}" if self.expect_comm else "")
+            + " within 3s"
+        )
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -121,19 +155,64 @@ def fd_count(pid: int) -> int:
         return 0
 
 
-def make_fixtures(work: str) -> tuple[Fixture, Fixture]:
+def comm(pid: int) -> bytes:
+    """The raw comm: /proc/<pid>/comm is unescaped bytes plus one newline."""
+    try:
+        with open(f"/proc/{pid}/comm", "rb") as f:
+            return f.read().removesuffix(b"\n")
+    except OSError:
+        return b""
+
+
+# One of every character class the C's safepup() treats differently, in a
+# comm (<= 15 bytes, TASK_COMM_LEN - 1) and in a file name. What the C prints
+# for each is pinned byte for byte in lsof-core's golden tests
+# (`hostile_names_are_escaped_the_way_the_c_prints_them`); this run checks the
+# two binaries against each other on the live thing.
+HOSTILE_ASCII_COMM = "h\x1b[2J\r \\\x7f\t\x01z"  # ESC-sequence CR space \ DEL TAB ^A
+HOSTILE_UTF8_COMM = "h\x1b[2J\r \\\x7f\téz"  # + é (printable) + U+009B (C1 CSI)
+HOSTILE_FILE = "n\x1b[31m\r\t \\\x7fé.txt"
+LOCALE = "C.UTF-8"
+
+
+def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
+    """A `sleep` whose comm is `comm`: exec'd through a symlink of that name.
+
+    Bytes, not str, on the way to the kernel: the string must arrive as UTF-8
+    whatever Python decided the filesystem encoding is (a POSIX locale would
+    otherwise reject the é). `bash -c CMD ARG0` makes ARG0 `$0`, so the
+    quoting-hostile name never appears inside the shell text."""
+    cdir = os.path.join(work, name)
+    os.makedirs(cdir)
+    link = os.path.join(cdir.encode(), comm.encode("utf-8"))
+    os.symlink(shutil.which("sleep"), link)
+    return Fixture(
+        f"{name}(comm)",
+        [b"bash", b"-c", b'exec "$0" 600', link],
+        cwd=cdir,
+        expect_fds=3,
+        expect_comm=comm.encode("utf-8"),
+    )
+
+
+def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
     with open(os.path.join(fdir, "f.txt"), "w") as f:
         f.write("fixture data\n")
     os.mkfifo(os.path.join(fdir, "fifo"))
+    hostile = os.path.join(fdir.encode(), HOSTILE_FILE.encode("utf-8"))
+    with open(hostile, "wb") as f:
+        f.write(b"x\n")
     # exec keeps the pid stable (no bash parent lingering as the "process"), and
-    # <> on the FIFO opens it read/write so the open cannot block.
+    # <> on the FIFO opens it read/write so the open cannot block. The hostile
+    # file name travels as `$1`, outside the shell text.
     a = Fixture(
         "A(files)",
-        ["bash", "-c", "exec 3>f.txt 5<sub 6<>fifo && exec sleep 600"],
+        [b"bash", b"-c", b'exec 3>f.txt 4<"$1" 5<sub 6<>fifo && exec sleep 600', b"fixture-a", hostile],
         cwd=fdir,
-        expect_fds=6,  # 0,1,2 + 3,5,6
+        expect_fds=7,  # 0,1,2 + 3,4,5,6
+        expect_comm=b"sleep",
     )
     sdir = os.path.join(work, "sockets")
     os.makedirs(sdir)
@@ -145,7 +224,9 @@ def make_fixtures(work: str) -> tuple[Fixture, Fixture]:
         "time.sleep(600)\n" % sdir
     )
     b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)  # 0,1,2 + 3 sockets
-    return a, b
+    c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
+    d = hostile_sleeper("D", work, HOSTILE_UTF8_COMM)
+    return a, b, c, d
 
 
 # -------------------------------------------------------------------- matrix
@@ -192,6 +273,19 @@ def preflight(binary: str, label: str) -> None:
         infra(f"{label} `-v` exited {p.returncode}: {p.stderr.decode(errors='replace')[:200]}")
 
 
+def preflight_locale() -> None:
+    """The oracle's escaping of non-ASCII is locale-dependent; a runner without
+    the pinned locale would make the C print `\\xc3\\xa9` for é and manufacture
+    a divergence that is not the port's. That is infra, not a verdict."""
+    try:
+        p = subprocess.run(["locale", "-a"], capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        infra(f"cannot list locales: {e}")
+    have = {ln.strip().lower().replace("-", "") for ln in p.stdout.decode(errors="replace").splitlines()}
+    if LOCALE.lower().replace("-", "") not in have:
+        infra(f"locale {LOCALE} is not installed (locale -a); the C oracle is compared under it")
+
+
 # ---------------------------------------------------------------------- main
 
 
@@ -200,13 +294,18 @@ def run(args) -> int:
         infra(f"kit runner not found at {KIT_RUNNER}")
     preflight(args.oracle, "oracle (C lsof)")
     preflight(args.rust, "rust (lsof-rs)")
+    preflight_locale()
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
-    a, b = make_fixtures(work)
+    fixtures = make_fixtures(work)
+    a, b, c, d = fixtures
     try:
-        a.start()
-        b.start()
-        cases = render_matrix(args.matrix, {"A": str(a.pid), "B": str(b.pid)})
+        for fx in fixtures:
+            fx.start()
+        cases = render_matrix(
+            args.matrix,
+            {"A": str(a.pid), "B": str(b.pid), "C": str(c.pid), "D": str(d.pid)},
+        )
         matrix_json = os.path.join(work, "matrix.json")
         with open(matrix_json, "w") as f:
             json.dump({"case": cases}, f, indent=1)
@@ -219,17 +318,21 @@ def run(args) -> int:
         ]
         if args.json:
             cmd.append("--json")
-        print(f"linux_diff: fixtures A={a.pid} (files, cwd {a.cwd}) B={b.pid} (sockets)")
+        print(
+            f"linux_diff: fixtures A={a.pid} (files, cwd {a.cwd}) B={b.pid} (sockets) "
+            f"C={c.pid} D={d.pid} (hostile comms); LC_ALL={LOCALE}"
+        )
         print(f"linux_diff: {len(cases)} cases -> {os.path.relpath(KIT_RUNNER, REPO)}")
-        p = subprocess.run(cmd)
+        # The kit runner hands its own environment to both binaries.
+        p = subprocess.run(cmd, env={**os.environ, "LC_ALL": LOCALE})
         if p.returncode not in (0, 1):
             # The kit runner sys.exit()s with a message on its own infra errors
             # (missing binary, unparseable matrix); those are not verdicts.
             infra(f"kit runner exited {p.returncode}")
         return p.returncode
     finally:
-        a.stop()
-        b.stop()
+        for fx in fixtures:
+            fx.stop()
         if args.keep_fixtures:
             print(f"linux_diff: fixtures kept under {work}")
         else:
@@ -261,6 +364,19 @@ def self_test() -> int:
         check("fixture start waits for the expected fd count", fd_count(fx.pid) >= 4)
         fx.stop()
         check("fixture stop terminates it", fx.proc.poll() is not None)
+
+        # The hostile comm really reaches the kernel, byte for byte: the
+        # symlink route gives a comm equal to the basename, and the kernel
+        # escapes only `\n` and `\` in /proc/<pid>/status (`\` -> `\\`).
+        for label, comm in [("ascii", HOSTILE_ASCII_COMM), ("utf8", HOSTILE_UTF8_COMM)]:
+            check(f"{label} comm fits TASK_COMM_LEN", len(comm.encode("utf-8")) <= 15)
+            hs = hostile_sleeper(label, td, comm)
+            hs.start()
+            with open(f"/proc/{hs.pid}/status", "rb") as f:
+                name = f.readline()
+            hs.stop()
+            expect = b"Name:\t" + comm.encode("utf-8").replace(b"\\", b"\\\\") + b"\n"
+            check(f"{label} comm is the fixture's comm", name == expect)
 
         # Infra paths exit 2, never 0 or 1.
         for label, fn in [

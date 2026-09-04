@@ -14,6 +14,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 lsof-cli = { path = "../crates/lsof-cli" }
+lsof-core = { path = "../crates/lsof-core" }
 # The `fuzzing` feature exposes the Linux backend's pure text parsers
 # (fuzz_api). The CLI never enables it; only these targets do.
 lsof-backend-linux = { path = "../crates/lsof-backend-linux", features = ["fuzzing"] }
@@ -54,6 +55,17 @@ bench = false
 [[bin]]
 name = "passwd"
 path = "fuzz_targets/passwd.rs"
+test = false
+doc = false
+bench = false
+
+# The renderer's escaping (lsof-core, `render::escape`) — the security boundary
+# the parser targets point at. Its contract is the inverse of theirs: whatever
+# they pass through verbatim must leave here unable to drive a terminal.
+
+[[bin]]
+name = "render_escape"
+path = "fuzz_targets/render_escape.rs"
 test = false
 doc = false
 bench = false

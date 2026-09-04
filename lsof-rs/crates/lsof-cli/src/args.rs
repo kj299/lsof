@@ -113,7 +113,10 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     let n: usize = value
                         .parse()
                         .map_err(|_| format!("invalid +c width: {value}"))?;
-                    sel.command_width = Some(n);
+                    // Lsof.8: "If w is zero (0), all command characters are
+                    // printed." The C tests `CmdLim && len > CmdLim`, so 0 is
+                    // no cap — not a cap of nothing.
+                    sel.command_width = (n != 0).then_some(n);
                 }
                 Some('w') => sel.suppress_warnings = false,
                 Some('E') => sel.endpoints = Some(EndpointMode::Files),

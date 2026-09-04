@@ -1,13 +1,15 @@
 # lsof-rs Linux differential matrix — mode 1: the real C oracle, same host.
 #
-# Run by linux_diff.py, which stands up two fixture processes and substitutes
-# their PIDs for {A} (files: cwd, a regular file on fd 3, a directory on fd 5, a
-# FIFO on fd 6) and {B} (sockets: a TCP listener, a UDP socket, an AF_UNIX
-# listener), then hands the rendered matrix to the porting kit's diff_run.py.
-# Both binaries run against the SAME process at the same instant, so PIDs,
-# inodes, devices and sizes are identical on both sides and the kit's default
-# whitespace-only normalization is sufficient. Numbers are never masked here:
-# they are exactly the cells this gate exists to compare.
+# Run by linux_diff.py, which stands up four fixture processes and substitutes
+# their PIDs for {A} (files: cwd, a regular file on fd 3, a hostile-named file
+# on fd 4, a directory on fd 5, a FIFO on fd 6), {B} (sockets: a TCP listener,
+# a UDP socket, an AF_UNIX listener), {C} (a sleeper whose COMMAND is hostile
+# ASCII) and {D} (hostile with non-ASCII), then hands the rendered matrix to
+# the porting kit's diff_run.py. Both binaries run against the SAME process at
+# the same instant, under LC_ALL=C.UTF-8, so PIDs, inodes, devices and sizes
+# are identical on both sides and the kit's default whitespace-only
+# normalization is sufficient. Numbers are never masked here: they are exactly
+# the cells this gate exists to compare.
 #
 # EVERY CASE CARRIES -a. lsof ORs its list options unless -a ANDs them
 # (Lsof.8: "list options that are specifically stated are ORed"); lsof-rs applies
@@ -38,6 +40,21 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{A}"]
 [[case]]
 name = "files-fd-3"
 args = ["-n", "-P", "-a", "-d", "3", "-p", "{A}"]
+
+[[case]]
+# NAME escaping in the table: fd 4 is a file named with an ANSI colour
+# sequence, CR, TAB, a space, a backslash, DEL, é and U+009B. The C prints
+# `^[[31m\r\t \\\x7f` + é + `\xc2\x9b` — spaces and printable UTF-8 are text
+# in NAME, the 8-bit CSI is not.
+name = "files-fd-4-hostile-name"
+args = ["-n", "-P", "-a", "-d", "4", "-p", "{A}"]
+
+[[case]]
+# The same name through -F n. `-Ffn`, not `-Fn`: lsof-rs emits the `f` marker
+# unconditionally, the C only when selected (DIVERGENCES.md #11), so `f` is
+# selected explicitly to compare the escaping and not the marker.
+name = "files-fields-Ffn-hostile-name"
+args = ["-n", "-P", "-a", "-Ffn", "-d", "4", "-p", "{A}"]
 
 [[case]]
 name = "files-terse"
@@ -91,6 +108,42 @@ args = ["-n", "-P", "-a", "-iUDP", "-p", "{B}"]
 [[case]]
 name = "sockets-unix-U"
 args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
+
+# ---------------------------------------------------------- hostile COMMANDs
+# A process names itself, and until DIVERGENCES.md #10 was closed lsof-rs
+# printed the name raw — a comm holding ESC [2J cleared the screen of whoever
+# ran it. The C escapes COMMAND with safestrprtn(…, 2): control characters,
+# DEL and the backslash in visible form, the space as \x20 (so the column
+# still splits on whitespace) and every non-ASCII byte as \xNN.
+
+[[case]]
+# +c 0 lifts the C's default 9-column COMMAND cap (DIVERGENCES.md #3), so the
+# whole escaped comm is compared: `h^[[2J\r\x20\\\x7f\t^Az`.
+name = "hostile-comm-table"
+args = ["-n", "-P", "+c", "0", "-a", "-d", "^mem", "-p", "{C}"]
+
+[[case]]
+# -F c goes through safestrprt(…, 0): same escapes, the space kept.
+name = "hostile-comm-fields-Ffc"
+args = ["-n", "-P", "-a", "-Ffc", "-d", "^mem", "-p", "{C}"]
+
+[[case]]
+# LEDGERED — the C's defect, not the port's, and deliberately not reproduced
+# (porting-kit CLAUDE.md: the C is a specification that may be buggy).
+# safestrlen() sizes the column by comparing each `char` with 0x20; `char` is
+# signed on x86-64, so every byte >= 0x80 is counted as a 2-column escape when
+# safestrprtn() will print 4 (`\xc3`), and the printer then cuts the command
+# to the undersized width — here `\xc2\x9bz` is silently dropped even with
+# +c 0. lsof-rs sizes and prints the same text. `-Ffc` on the same comm below
+# MATCHes: the width bug is the table's alone.
+name = "hostile-comm-utf8-table"
+args = ["-n", "-P", "+c", "0", "-a", "-d", "^mem", "-p", "{D}"]
+
+[[case]]
+# é passes through (printable, UTF-8 locale); U+009B, which iswprint()
+# rejects, is `\xc2\x9b`.
+name = "hostile-comm-utf8-fields-Ffc"
+args = ["-n", "-P", "-a", "-Ffc", "-d", "^mem", "-p", "{D}"]
 
 # ------------------------------------------------------------- exit contract
 

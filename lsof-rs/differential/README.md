@@ -123,7 +123,7 @@ instant, diffed through `porting-kit/harnesses/differential/diff_run.py` with
 
 | File | Role |
 |---|---|
-| `linux_diff.py` | Stand up two self-owned fixtures (A: cwd + a regular file, a directory and a FIFO on fds 3/5/6; B: a TCP listener, a UDP socket, an AF_UNIX listener), substitute their PIDs into the matrix, hand it to the kit runner, tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra. |
+| `linux_diff.py` | Stand up four self-owned fixtures (A: cwd + a regular file, a hostile-named file, a directory and a FIFO on fds 3/4/5/6; B: a TCP listener, a UDP socket, an AF_UNIX listener; C and D: sleepers whose COMMAND holds one of every character class the C escapes — ASCII controls, then é and the 8-bit CSI), substitute their PIDs into the matrix, run the kit runner under `LC_ALL=C.UTF-8` (the C's `safestrprt()` is locale-dependent; lsof-rs matches its UTF-8 behavior), tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra (a missing binary, a fixture that did not come up, the locale not installed). |
 | `linux-matrix.toml` | 13 cases. Every one carries `-a` (lsof ORs list options otherwise — see the ledger) and `-n -P` (lsof-rs never resolves names). File cases pass `-d ^mem` so they measure their own surface; `files-mem-rows` measures that gap and is ledgered as L2 debt. |
 
 Why the fixture matters: both binaries see the **same** process, so PIDs, inodes,
