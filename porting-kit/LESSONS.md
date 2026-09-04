@@ -703,7 +703,11 @@ the emphasized half.
   numeric literal without an `(unsigned char)` cast. (4) A fuzz target's
   assertions are code under test too: when one fires, first ask whether the
   invariant is right — twice now the answer was no — and when it is fixed,
-  write down the input that broke it.
+  write down the input that broke it. And re-run every target whose module's
+  *contract* the change touched, not only the new one: this PR changed what
+  `parse_status` returns (it now decodes the kernel's `\n`), ran only the new
+  `render_escape` target locally, and CI's 45-second smoke of `proc_status`
+  found its "no newline" invariant stale on the first run.
 - **Section amended:** lsof-rs `DIVERGENCES.md` (the `C-DEFECT` kind);
   PLAYBOOK Phase 2/4 candidates for the next kit retrospective, recorded here
   so they are not lost.
