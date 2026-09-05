@@ -163,6 +163,47 @@ args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
 name = "mappings-mem-and-del"
 args = ["-n", "-P", "-a", "-p", "{E}"]
 
+# --------------------------------------------------------------- path arguments
+# lsof matches a path argument by what the file IS -- its (device, inode) --
+# not by what it is called, and `+d` (one level) is not `+D` (the tree). All
+# three were one lowercased string-prefix match, which both invented rows and
+# missed them. Every case here names fixture A's own directory, so the result
+# is that fixture and nothing else on the host.
+
+[[case]]
+# LEDGERED for the NAME cell only. Identity, decisively: hard.txt is a second
+# name for f.txt, which fixture A holds on fd 3 under the FIRST name, and
+# matching by name would find nothing. Both binaries now find the same fd on
+# the same inode; they disagree on what to call it. The C substitutes the name
+# you ASKED about, lsof-rs prints the name the process actually opened
+# (DIVERGENCES.md #17).
+name = "path-bare-hardlink"
+args = ["-n", "-P", "{HARDLINK}"]
+
+[[case]]
+# A directory names the directory, NOT the files under it. Fixture A holds its
+# own cwd, so the cwd row matches and fd 3/4/6 must not.
+name = "path-bare-dir-is-not-a-prefix"
+args = ["-n", "-P", "{ADIR}"]
+
+[[case]]
+# A directory nobody has open matches nothing at all -- and exits 1, because
+# the search item was never located.
+name = "path-bare-dir-unopened"
+args = ["-n", "-P", "{ASUB}"]
+
+[[case]]
+# `+d` is ONE level: the directory and its immediate entries, so f.txt and the
+# hostile-named file, but nothing inside sub/. Exit 1 whenever some expanded
+# entry is not open, which the C treats as an unlocated search item.
+name = "path-plus-d-one-level"
+args = ["-n", "-P", "+d", "{ADIR}"]
+
+[[case]]
+# `+D` descends the tree, so sub/ and anything below it join the set.
+name = "path-plus-D-tree"
+args = ["-n", "-P", "+D", "{ADIR}"]
+
 # ----------------------------------------------------------- anonymous inodes
 [[case]]
 # Fds with no filesystem identity: the kernel names them `anon_inode:<kind>`

@@ -133,6 +133,13 @@ item is shipped or a documented closed gate — and the release criteria are in
   comparison that truncates non-ASCII commands), which the port deliberately
   does not reproduce.
 
+**A path argument names a file, not a prefix.** `lsof /path/to/file` matches
+that file by its `(device, inode)`, so a hard link to it counts and a different
+file that merely *starts with* the same text does not. Naming a directory
+matches the directory, not everything inside it — `+d <dir>` adds its immediate
+entries and `+D <dir>` the whole tree. lsof-rs used one string-prefix match for
+all three, which both invented rows and missed them.
+
 **Selection follows lsof's OR rule.** lsof ORs its list options unless `-a`
 ANDs them, so `lsof -d ^mem -p PID` lists the whole host in real lsof — and now
 in lsof-rs, which used to list one process. Every file carries the set of

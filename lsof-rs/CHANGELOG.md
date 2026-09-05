@@ -11,6 +11,32 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A path argument now matches the file it names, not a name prefix**
+  (`DIVERGENCES.md` #14). lsof matches by the file's `(device, inode)`, and
+  `+d` (one directory level) is not `+D` (the tree); lsof-rs had a single
+  lowercased string-prefix match doing all three jobs, so it was wrong in both
+  directions. Measured against the C: querying a file through a **hard link**
+  found nothing where the C finds the fd; naming a **directory** dragged in
+  every file beneath it, and naming a directory nobody had open still produced
+  rows; `+d` and `+D` both returned only the directory itself. All six cases
+  now match the C, exit codes included. Inventing rows was the worse half — it
+  answers a question the user did not ask.
+
+  The `Backend` trait gains `identify_path`, returning a path's `(DEVICE,
+  NODE)` **rendered exactly as that backend renders a row**, so selection is an
+  equality test and the formatting stays with the code that produces it. A
+  backend that returns `None` falls back to comparing names, which is what
+  Windows still does — unchanged there, except that `+d` now stops at one level
+  rather than silently behaving like `+D`.
+
+  Two details cost a round each. The identity has to be the **DEVICE cell**,
+  not `st_dev`: a row shows `st_rdev` for a device node, so an `identify_path`
+  returning `st_dev` made `lsof /dev/null` find the row and then report it as an
+  unlocated search item, exiting 1. And **every expanded entry is a search
+  item** — `+d dir` exits 0 when all its entries are open and 1 when one is not,
+  which a single unopened file flips.
+
 ### Added
 - **Linux phase L2, three of its four parts** — each verified against the C
   built from this tree, each with its own differential fixture.

@@ -33,6 +33,14 @@ disagreeing, and it names the C code so anyone can check the triage.
   `u` (uid), `G` (file flags), `l` (lock), `D` (device as hex) and *empty*
   `a`/`l` fields; lsof-rs emits none of those and `d` (`maj,min`) where the C
   emits `D`. Model and renderer gaps shared with Windows.
+- [x] path-bare-hardlink: DECISION — the NAME cell only. Both binaries find
+  the same fd on the same inode when a file is queried through a hard link;
+  they disagree on what to call it. The C substitutes **the name you asked
+  about** (`hard.txt`) into NAME, lsof-rs prints **the name the process
+  actually opened** (`f.txt`). The C's choice also makes its exit status
+  depend on which name it bound first — with two names for one inode in a
+  `+d` expansion, the other is reported unlocated and the run exits 1. See
+  item 17.
 - [x] hostile-comm-utf8-table: C-DEFECT, not reproduced — the C sizes the
   COMMAND column with `safestrlen()` (`lib/misc.c`), which compares each
   `char` with `0x20`; `char` is signed on x86-64, so every byte ≥ 0x80 is
@@ -74,6 +82,58 @@ against the C by a new fixture holding one of each kind at once
 that keep the NAME cell bounded and ordered: the tfd list is capped at 32 and
 sorted, the `anon_inode:` prefix is always dropped, and a name that differs
 from the bare kind is an enrichment of it rather than something new.
+
+## Fixed by matching a path by what the file is (2026-09-05)
+
+Item 14 below is closed, and item 15 is re-scoped with a much sharper reason.
+
+lsof matches a path argument by the file's **identity** — its `(device,
+inode)` — not by its name, and `+d` (one directory level) is not `+D` (the
+tree). lsof-rs had one lowercased string-prefix match doing all three jobs, so
+it was wrong in both directions at once. Measured against the C on one fixture:
+
+| query | the C | lsof-rs before |
+|---|---|---|
+| `shallow.txt` | its fd | same |
+| its **hard link** | its fd | nothing — **missed** |
+| `top` (a directory) | the `cwd` row only | that plus every file under it — **invented** |
+| `mid` (nobody holds it) | nothing | a file inside it — **invented** |
+| `+d top` (one level) | `top` + its entries | only `top` — **missed** |
+| `+D top` (recursive) | the whole tree | only `top` — **missed** |
+
+Inventing rows is the worse half: it answers a question the user did not ask.
+All six now match the C, exit codes included.
+
+How it works: the `Backend` trait gains `identify_path`, which returns the
+`(DEVICE, NODE)` of a path **rendered exactly as that backend renders a row**,
+so selection is a plain equality test and the formatting stays with the code
+that produces it. The CLI resolves the arguments once at startup, expanding
+`+d` one level and `+D` through the tree, into `Selection::path_ids`. A backend
+that cannot identify paths returns `None` and selection falls back to comparing
+names — which is what the Windows backend still does, so its behaviour is
+unchanged except that `+d` there now stops at one level too.
+
+Two things this cost, both worth recording:
+
+- **The identity has to be the DEVICE cell, not `st_dev`.** A row shows
+  `st_rdev` for a device node and `st_dev` for everything else, so an
+  `identify_path` that returned `st_dev` made `lsof /dev/null` compare `0,6`
+  against the row's `1,3` — the row was found and then reported as an
+  unlocated search item, exiting 1. Both now render through one function.
+- **Every expanded entry is a search item.** `+d dir` exits 0 when every entry
+  is open and 1 when one is not — verified by adding a single unopened file to
+  a directory and watching the exit status flip. The reporting is identity-based
+  too, so a file queried through a hard link counts as found under its other
+  name.
+
+Item 15, the mount-point rule, is **not** implemented, and the attempt is why
+the reason is now precise: naming a mount point selects everything on that
+filesystem, which is a match on the **filesystem** device — but the DEVICE cell
+is `st_rdev` for device nodes, so it cannot be used for that, and the model has
+nowhere else to carry the filesystem. Matching on the cell listed a process's
+`cwd` and `rtd` for `lsof /` that the C does not list. It was backed out rather
+than shipped half-working; closing it needs `OpenFile` to carry the filesystem
+device separately from the one it displays.
 
 ## Fixed by reading /proc/locks (2026-09-05)
 
@@ -290,9 +350,11 @@ likely right; it is a compatibility decision, not a backend phase.
 
 | 13 | `lsof -c ^name` **exits 1** even on a successful listing (1522 rows here), while `lsof -u ^name` exits 0 | both exit 0 | exit status. The C counts a negated `-c` as a search item it never located, and a negated `-u` not at all — an asymmetry between two options the man page describes identically, which is why this reads as an accident rather than a design. lsof-rs copies the half that is defensible: an *excluded* process does not count as a located `-p`, so `-c ^sleep -p <that sleep>` exits 1 in both. **C-DEFECT**, not reproduced. |
 
-| 14 | a **path argument matches by `(device, inode)`**, so `lsof /path/hardlink` finds the file opened under its other name, and a socket merely *named* under a queried directory is not matched | matches by lowercased string prefix, so it **misses** the hard link and **over-reports** anything whose name starts with the query | `lsof-core`'s `Selection::path_matches`. Measured both ways: a file opened as `orig.txt` and queried by its hard link `hard.txt` gives the C 1 row and lsof-rs 0; `lsof /proc` gives lsof-rs an extra row for an AF_UNIX socket bound at `/proc/self/fd/17/sock`, which the C does not list. Over-reporting is the worse half — it answers a question the user did not ask. **DEBT (L2)**: it needs the query path's device and inode carried into the core, so it changes Windows (file index) too. |
-| 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | matches only names under that prefix | mount table. Measured: `lsof /dev` lists a process's `cwd` and `rtd` — both named `/` — because they live on the devtmpfs mounted at `/dev`. **DEBT (L2)**, and the same change as #14: both are "match by device, not by name". |
+| 14 | a **path argument matches by `(device, inode)`**, and `+d` is one directory level where `+D` is the tree | ~~one lowercased string-prefix match for all three~~ **resolved 2026-09-05** | see "Fixed by matching a path by what the file is" above |
+| 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | matches only the mount point itself, so it **under-reports** | Measured: `lsof /dev` lists a process's `cwd` and `rtd` — both named `/` — because they live on the devtmpfs mounted there; `lsof /proc` lists 9 rows to lsof-rs's 0. **DEBT**, and now precisely scoped: this is a match on the **filesystem** device, and the DEVICE cell a row carries is `st_rdev` for a device node, so the model has to carry the filesystem device separately before it can be done. Implementing it off the DEVICE cell was tried and backed out — it over-reported `lsof /`. |
 | 16 | a socket in **another network namespace** resolves far enough to print `sock` / `protocol: TCP` | `SOCK` / `socket:[14902]`, and SIZE/OFF as a size rather than the offset | the socket table is read once from `/proc/net/*`, which is *this* namespace's view. The C reads the target's own `/proc/<pid>/net/*`. **DEBT (L2)**: making the read per-namespace changes the cost model, since the tables would be read once per distinct netns rather than once per run. |
+
+| 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

@@ -21,6 +21,17 @@ const S_IFIFO: u32 = 0o010000;
 /// Decode Linux's packed `dev_t` into lsof's `major,minor` DEVICE column.
 /// The layout is glibc's: 12 low + 20 high bits of major, 8 low + 12 high of
 /// minor, interleaved.
+/// The DEVICE cell for a stat result: `st_rdev` for a device node (a
+/// character or block special names *its own* device), `st_dev` for everything
+/// else (the filesystem the file lives on). Shared with `identify_path` so a
+/// path argument and the row it should match are rendered by one rule.
+pub(crate) fn dev_cell(md: &std::fs::Metadata) -> String {
+    match type_from_mode(md.mode()) {
+        FileType::Chr | FileType::Block => dev_string(md.rdev()),
+        _ => dev_string(md.dev()),
+    }
+}
+
 pub(crate) fn dev_string(dev: u64) -> String {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfffu64);
     let minor = (dev & 0xff) | ((dev >> 12) & !0xffu64);

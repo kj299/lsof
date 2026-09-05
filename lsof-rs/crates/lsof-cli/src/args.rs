@@ -86,18 +86,24 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
             // `+w`: enable warnings (the default; inverse of `-w`).
             let mut chars = plus.chars();
             match chars.next() {
-                Some('d') | Some('D') => {
+                // `+d` is ONE level (the directory and its immediate entries);
+                // `+D` descends the whole tree. lsof distinguishes them.
+                Some(c @ ('d' | 'D')) => {
                     let rest: String = chars.collect();
                     let value = if !rest.is_empty() {
                         rest
                     } else {
                         i += 1;
                         if i >= args.len() {
-                            return Err("option +D requires a path".to_string());
+                            return Err(format!("option +{c} requires a path"));
                         }
                         args[i].clone()
                     };
-                    sel.dir_trees.push(value);
+                    if c == 'd' {
+                        sel.dirs_one_level.push(value);
+                    } else {
+                        sel.dir_trees.push(value);
+                    }
                 }
                 Some('c') => {
                     let rest: String = chars.collect();
@@ -637,8 +643,26 @@ mod tests {
         assert_eq!(paths(&["C:\\f.txt"]), vec!["C:\\f.txt".to_string()]);
         assert!(dirs(&["C:\\f.txt"]).is_empty());
         assert_eq!(dirs(&["+D", "C:\\tmp"]), vec!["C:\\tmp".to_string()]);
-        assert_eq!(dirs(&["+dC:\\x"]), vec!["C:\\x".to_string()]);
         assert!(paths(&["+D", "C:\\tmp"]).is_empty());
+    }
+
+    #[test]
+    fn plus_d_is_one_level_and_plus_d_upper_is_the_tree() {
+        // lsof distinguishes them: `+d` reports the directory and its
+        // immediate entries, `+D` descends the whole tree. They were parsed
+        // into one list, which both missed rows and invented them.
+        let one = |a: &[&str]| run(a).0.dirs_one_level;
+        assert_eq!(one(&["+dC:\\x"]), vec!["C:\\x".to_string()]);
+        assert_eq!(one(&["+d", "C:\\x"]), vec!["C:\\x".to_string()]);
+        assert!(dirs(&["+d", "C:\\x"]).is_empty(), "+d is not a tree");
+        assert!(one(&["+D", "C:\\x"]).is_empty(), "+D is not one level");
+        // The error text names the option the user actually typed.
+        assert!(parse(vec!["+d".into()])
+            .unwrap_err()
+            .contains("+d requires a path"));
+        assert!(parse(vec!["+D".into()])
+            .unwrap_err()
+            .contains("+D requires a path"));
     }
 
     #[test]

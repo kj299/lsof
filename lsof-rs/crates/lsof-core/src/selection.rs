@@ -254,6 +254,22 @@ pub struct Selection {
     /// `+D` / `+d` directory arguments: report files whose name is under one of
     /// these directory prefixes (requires full enumeration).
     pub dir_trees: Vec<String>,
+    /// `+d <dir>`: report files in this directory, **one level only** — the
+    /// directory itself and its immediate entries, not the tree beneath it.
+    /// lsof distinguishes this from `+D`; conflating them both misses and
+    /// invents rows.
+    pub dirs_one_level: Vec<String>,
+    /// The `(DEVICE, NODE)` identities named by the path arguments, resolved
+    /// once at startup through [`Backend::identify_path`](crate::Backend) and
+    /// expanded for `+d`/`+D`.
+    ///
+    /// lsof matches a path argument by **what the file is, not what it is
+    /// called** — which is why it finds a file queried through a hard link and
+    /// why naming a directory does not drag in everything under it. Empty when
+    /// no path was given, or when the backend cannot identify paths; in the
+    /// latter case selection falls back to matching names, which is what the
+    /// Windows backend still does.
+    pub path_ids: std::collections::HashSet<(String, String)>,
     /// `-d`: file-descriptor filter.
     pub fd_filter: Option<FdFilter>,
     /// `-s [proto:state[,state]]`: TCP socket state filter, e.g.
@@ -415,6 +431,23 @@ impl Selection {
     /// Whether `f`'s name is one of the path arguments or under one of the
     /// `+d`/`+D` trees. Only called when such an argument was given.
     fn path_matches(&self, f: &OpenFile) -> bool {
+        // Identity first: a path argument names a *file*, and lsof matches the
+        // file it names however that file is reached. `+d`/`+D` were already
+        // expanded into this set, so a directory tree is just more identities.
+        if !self.path_ids.is_empty() {
+            if let (Some(dev), Some(node)) = (f.device.as_deref(), f.node.as_deref()) {
+                if self.path_ids.contains(&(dev.to_string(), node.to_string())) {
+                    return true;
+                }
+            }
+            // A row with no identity (a socket, a row the backend could not
+            // stat) can still be named exactly — `lsof /run/x.sock` should find
+            // the AF_UNIX socket bound there, which has a name but no inode of
+            // its own on this row.
+            return self.paths.contains(&f.name);
+        }
+        // No identities: the backend cannot resolve paths, so fall back to
+        // matching names. This is the Windows path today.
         let name = f.name.to_ascii_lowercase();
         let exact = self.paths.iter().any(|p| {
             let p = p.to_ascii_lowercase();
@@ -425,9 +458,13 @@ impl Selection {
                 .dir_trees
                 .iter()
                 .any(|d| under_dir(&name, &d.to_ascii_lowercase()))
+            || self
+                .dirs_one_level
+                .iter()
+                .any(|d| directly_in_dir(&name, &d.to_ascii_lowercase()))
     }
 
-    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
+    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
     /// Non-sockets and "no `-s`" always pass; sockets with `^excluded`
     /// states are always dropped; positive states act as a whitelist.
     fn state_matches(&self, f: &OpenFile) -> bool {
@@ -560,13 +597,13 @@ impl Selection {
 
     /// Whether any path / directory-tree filter was given.
     pub fn has_path_filter(&self) -> bool {
-        !self.paths.is_empty() || !self.dir_trees.is_empty()
+        !self.paths.is_empty() || !self.dir_trees.is_empty() || !self.dirs_one_level.is_empty()
     }
 
     /// Whether a `+D`/`+d` directory filter was given — which forces full
     /// enumeration rather than the Restart Manager fast path.
     pub fn has_dir_trees(&self) -> bool {
-        !self.dir_trees.is_empty()
+        !self.dir_trees.is_empty() || !self.dirs_one_level.is_empty()
     }
 
     /// Apply the full selection to a backend's raw output, returning the
@@ -628,6 +665,21 @@ impl Selection {
             out.push(p);
         }
         out
+    }
+}
+
+/// Whether `name` is `dir` itself or an entry *directly* in it — `+d`, one
+/// level, with nothing deeper. Used only by the name-matching fallback; where
+/// the backend can identify paths, `+d` is expanded into identities instead.
+fn directly_in_dir(name: &str, dir: &str) -> bool {
+    if !under_dir(name, dir) {
+        return false;
+    }
+    let dir = dir.trim_end_matches('\\');
+    match name.len() > dir.len() {
+        // `dir\a` is in it; `dir\a\b` is a level too deep.
+        true => !name[dir.len() + 1..].contains('\\'),
+        false => true, // the directory itself
     }
 }
 
@@ -945,6 +997,63 @@ mod tests {
             !sel.selects_process(other),
             "under -a a process failing -p can contribute nothing"
         );
+    }
+
+    #[test]
+    fn a_path_argument_matches_identity_not_a_name_prefix() {
+        // lsof matches a path by what the file IS. The identity set is filled
+        // by the CLI from the backend, so here it stands in directly: a row
+        // whose (DEVICE, NODE) is in the set matches whatever it is called,
+        // and a row merely *named* under the query does not.
+        use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
+        let row = |name: &str, dev: &str, node: &str| OpenFile {
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: name.into(),
+            device: Some(dev.into()),
+            size: None,
+            offset: None,
+            node: Some(node.into()),
+            links: None,
+            socket: None,
+        };
+        let mut sel = Selection {
+            paths: vec!["C:\\dir".into()],
+            ..Default::default()
+        };
+        sel.path_ids.insert(("C:".into(), "42".into()));
+        let p = Process {
+            pid: 7,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            files: vec![
+                // The file itself, open under a DIFFERENT name (a hard link).
+                row("C:\\other\\name.txt", "C:", "42"),
+                // Named under the query, but a different file: the old
+                // prefix match invented this row.
+                row("C:\\dir\\inside.txt", "C:", "99"),
+            ],
+        };
+        let got = sel.apply(vec![p]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].files.len(), 1, "only the identity match: {got:#?}");
+        assert_eq!(got[0].files[0].node.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn plus_d_is_one_level_where_only_names_are_available() {
+        // The fallback used when a backend cannot identify paths (Windows).
+        // `+d` must still mean one level, or it silently becomes `+D`.
+        assert!(directly_in_dir("c:\\dir", "c:\\dir"));
+        assert!(directly_in_dir("c:\\dir\\a.txt", "c:\\dir"));
+        assert!(!directly_in_dir("c:\\dir\\sub\\a.txt", "c:\\dir"));
+        assert!(!directly_in_dir("c:\\dirother\\a.txt", "c:\\dir"));
+        // `+D` still descends.
+        assert!(under_dir("c:\\dir\\sub\\a.txt", "c:\\dir"));
     }
 
     #[test]
