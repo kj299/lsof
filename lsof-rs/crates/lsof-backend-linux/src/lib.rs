@@ -118,7 +118,7 @@ pub use backend::LinuxBackend;
 #[cfg(all(target_os = "linux", feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzz_api {
-    pub use crate::files::{name_for_target, parse_fdinfo};
+    pub use crate::files::{name_for_target, parse_fdinfo, FdInfo};
     pub use crate::locks::parse_locks;
     pub use crate::maps::{parse_maps, Mapping};
     pub use crate::net::{

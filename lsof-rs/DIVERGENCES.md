@@ -44,6 +44,37 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by naming anonymous inodes (2026-09-05)
+
+Item 8 below is closed. An epoll, eventfd, pidfd or inotify fd has no
+filesystem identity at all — the kernel gives it a link target of
+`anon_inode:<kind>` — and lsof-rs typed those `unknown` and printed the raw
+target. The C types them `a_inode`, drops the prefix, and prints the kind.
+
+Three kinds carry an identity in `fdinfo` that the C substitutes in
+(`lib/dialects/linux/dproc.c:1283-1301`), and each had to be measured rather
+than guessed:
+
+- **`[eventpoll:4,6]`** — the `tfd:` lines, which are the fds the epoll is
+  watching. `fdinfo` lists them most-recent-first and the C sorts them
+  ascending, so a fixture with a single registration would not have tested the
+  sort. Capped at 32 with a trailing `...`, the C's `EPOLL_MAX_TFDS`.
+- **`[eventfd:6]`** — `eventfd-id`. Not the counter (`eventfd-count`, 7 in the
+  fixture) and not the fd number (8): three plausible readings, one right, and
+  only running the C separates them.
+- **`[pidfd:4242]`** — the `Pid:` line, the process the pidfd refers to.
+
+Everything else keeps its bare kind: `inotify` prints as `inotify`, with no
+brackets, because that is what the kernel wrote after the colon.
+
+`parse_fdinfo` now returns a struct rather than a pair, since an fd's fdinfo
+carries these three identities as well as the access mode and offset. Verified
+against the C by a new fixture holding one of each kind at once
+(`anon-inode-kinds`), and the `proc_fdinfo` fuzz target gained the invariants
+that keep the NAME cell bounded and ordered: the tfd list is capped at 32 and
+sorted, the `anon_inode:` prefix is always dropped, and a name that differs
+from the bare kind is an enrichment of it rather than something new.
+
 ## Fixed by reading /proc/locks (2026-09-05)
 
 Item 7 below — the lock character on the FD cell — is closed on Linux. `lsof`
@@ -250,7 +281,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 5 | `-F` emits `g u G l D`, empty `a`/`l` | omits them; `d` for `D` | `-F` renderer + model · `files-fields-F` above |
 | 6 | `-o` → header `OFFSET`, blank when unknown | header unchanged, falls back to size | renderer · `files-offset-o` above |
 | 7 | `8uW` — `W` marks a write lock on the fd | ~~`8u`~~ **resolved on Linux 2026-09-05** | lock column, from `/proc/locks`. Windows still shows none: `FsRtlGetNextFileLock` is kernel-mode and nothing in user mode enumerates another process's locks (`docs/known-limitations.md`). |
-| 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | `unknown`, `anon_inode:[eventpoll]` | DEBT (L2), Linux: named anon_inode kinds |
+| 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | ~~`unknown`, `anon_inode:[eventpoll]`~~ **resolved 2026-09-05** | Linux: named anon_inode kinds; see "Fixed by naming anonymous inodes" above |
 | 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
 | 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |
 | 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | `f` on every file, whatever the selection | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. **DECISION** — a Windows `-F` consumer that selects fields without `f` sees `f` lines today. |

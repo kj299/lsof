@@ -163,6 +163,17 @@ args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
 name = "mappings-mem-and-del"
 args = ["-n", "-P", "-a", "-p", "{E}"]
 
+# ----------------------------------------------------------- anonymous inodes
+[[case]]
+# Fds with no filesystem identity: the kernel names them `anon_inode:<kind>`
+# and lsof types them `a_inode`, drops the prefix and prints the kind. Three
+# kinds carry an identity in fdinfo that the C substitutes in — an eventpoll's
+# watched fds (sorted, and fdinfo lists them most-recent-first), an eventfd's
+# `eventfd-id` (not its count, and not the fd number), and a pidfd's target
+# pid. `inotify` is the control: no identity, so it prints bare.
+name = "anon-inode-kinds"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{G}"]
+
 # ------------------------------------------------------------------- locks
 [[case]]
 # The lock character lsof appends to the FD cell: `3uW` for a whole-file write
