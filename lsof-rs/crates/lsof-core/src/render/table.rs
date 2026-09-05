@@ -3,8 +3,15 @@
 //! Columns match classic lsof: `COMMAND PID [PPID] USER FD TYPE DEVICE SIZE/OFF
 //! NODE NAME` (PPID only with `-R`). Numeric columns are right-aligned; the rest
 //! are left-aligned; columns are padded to the widest cell.
+//!
+//! COMMAND, USER and NAME are escaped through [`Escaper`] before they are
+//! measured or printed, as lsof's `print.c` does with `safestrprt()`: a process
+//! or file named with an ESC sequence must not drive the terminal of whoever
+//! runs lsof. Column widths are computed on the escaped text, so a `^[` counts
+//! as the two columns it occupies.
 
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
+use crate::render::Escaper;
 
 /// Render the FD cell, e.g. `cwd`, `txt`, or `3u` (handle value + access char).
 fn fd_cell(f: &OpenFile) -> String {
@@ -47,7 +54,9 @@ fn render_terse(procs: &[Process]) -> String {
 
 /// Render `procs` as the default table (or terse list when `terse`). `show_ppid`
 /// adds a PPID column after PID (lsof `-R`); `show_offset` makes SIZE/OFF prefer
-/// the file offset (lsof `-o`).
+/// the file offset (lsof `-o`); `command_width` caps COMMAND at that many
+/// printed characters (lsof `+c`, counted after escaping, like the C); `esc`
+/// chooses the platform's backslash rule.
 pub fn render(
     procs: &[Process],
     terse: bool,
@@ -55,6 +64,7 @@ pub fn render(
     show_offset: bool,
     command_width: Option<usize>,
     show_links: bool,
+    esc: Escaper,
 ) -> String {
     if terse {
         return render_terse(procs);
@@ -73,17 +83,23 @@ pub fn render(
     let right = ["PID", "PPID", "SIZE/OFF", "NLINK"];
 
     let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
+        // The command is escaped (and, under `+c`, cut) the way the C's
+        // safestrprtn() does it: whitespace-free, pure ASCII, and a cap that
+        // never leaves half an escape at the end of the cell.
         let cmd = match command_width {
-            Some(n) if p.command.chars().count() > n => {
-                p.command.chars().take(n).collect::<String>()
-            }
-            _ => p.command.clone(),
+            Some(n) => esc.command_truncated(&p.command, n),
+            None => esc.command(&p.command).into_owned(),
         };
         let mut r = vec![cmd, p.pid.to_string()];
         if show_ppid {
             r.push(p.ppid.map(|v| v.to_string()).unwrap_or_default());
         }
-        r.push(p.user.clone().unwrap_or_default());
+        r.push(
+            p.user
+                .as_deref()
+                .map(|u| esc.text(u).into_owned())
+                .unwrap_or_default(),
+        );
         r.push(fd_cell(f));
         r.push(f.file_type.code());
         r.push(f.device.clone().unwrap_or_default());
@@ -94,7 +110,8 @@ pub fn render(
         r.push(f.node.clone().unwrap_or_default());
         // `-T q/w` extended TCP info renders as a NAME suffix in the table
         // only; machine formats carry it structured (`-F` T tokens, JSON keys).
-        let mut name = f.name.clone();
+        // The suffix is generated here, so only the name itself is escaped.
+        let mut name = esc.text(&f.name).into_owned();
         if let Some(tcp) = f.socket.as_ref().and_then(|s| s.tcp.as_ref()) {
             name.push_str(&tcp.table_suffix());
         }

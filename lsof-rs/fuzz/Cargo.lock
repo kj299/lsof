@@ -104,6 +104,7 @@ dependencies = [
  "libfuzzer-sys",
  "lsof-backend-linux",
  "lsof-cli",
+ "lsof-core",
 ]
 
 [[package]]

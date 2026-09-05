@@ -9,12 +9,20 @@
 //! When `only` is `Some`, only the requested field letters are emitted. The
 //! structural record markers `p` (process) and `f` (file) are always emitted so
 //! the stream stays parseable, matching lsof.
+//!
+//! The `c` (command), `L` (user) and `n` (name) values are escaped through
+//! [`Escaper`] exactly as lsof's `print.c` passes them through
+//! `safestrprt(…, 0)`: a control character in a name can neither drive the
+//! terminal nor forge a field or record boundary — the terminators (`\n`, or
+//! `\0` under `-F0`) cannot appear inside a value.
 
 use crate::model::{AccessMode, FdType, Process};
+use crate::render::Escaper;
 
 /// Render `procs` in `-F` format. `nul` selects NUL line termination (`-F0`);
-/// `only` restricts the emitted fields (besides the `p`/`f` markers).
-pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
+/// `only` restricts the emitted fields (besides the `p`/`f` markers); `esc`
+/// chooses the platform's backslash rule.
+pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>, esc: Escaper) -> String {
     let term = if nul { '\0' } else { '\n' };
     let want = |c: char| only.is_none_or(|s| s.contains(&c));
     let mut out = String::new();
@@ -50,11 +58,11 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
             }
         }
         if want('c') {
-            push!('c', &p.command);
+            push!('c', &esc.text(&p.command));
         }
         if want('L') {
             if let Some(user) = &p.user {
-                push!('L', user);
+                push!('L', &esc.text(user));
             }
         }
         end_set!();
@@ -126,7 +134,7 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>) -> String {
             // `task` rows) have no name; a bare `n` field code with an empty
             // value is just noise.
             if want('n') && !f.name.is_empty() {
-                push!('n', &f.name);
+                push!('n', &esc.text(&f.name));
             }
             end_set!();
         }

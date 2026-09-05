@@ -8,6 +8,12 @@
 use crate::model::{AccessMode, FdType, OpenFile, Process};
 
 /// Escape a string as a JSON string body (without surrounding quotes).
+///
+/// The grammar requires escaping only `"`, `\` and the C0 controls. Also
+/// escaped, as `\uXXXX`: DEL and the C1 controls (a JSON document is read on
+/// terminals too, and U+009B is the 8-bit CSI), and U+2028/U+2029, which are
+/// legal in JSON but are line terminators to JavaScript and to some
+/// line-oriented consumers of `-j`. A decoder sees the same string either way.
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
     for c in s.chars() {
@@ -17,7 +23,9 @@ fn esc(s: &str) -> String {
             '\n' => o.push_str("\\n"),
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+                o.push_str(&format!("\\u{:04x}", c as u32))
+            }
             c => o.push(c),
         }
     }

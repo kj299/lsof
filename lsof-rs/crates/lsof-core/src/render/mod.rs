@@ -3,10 +3,17 @@
 //! Three formats are supported, matching lsof so existing scripts keep working:
 //! the default human-readable [`table`], the `-F` machine-readable [`fields`]
 //! output, and [`json`] (`-J` / `-j`).
+//!
+//! Text a local user chooses — COMMAND, NAME, and USER — never reaches the
+//! terminal raw: the table and `-F` renderers pass it through [`escape`]
+//! (lsof's `safestrprt()`), and the JSON renderers escape per the JSON grammar.
 
+pub mod escape;
 pub mod fields;
 pub mod json;
 pub mod table;
+
+pub use escape::Escaper;
 
 /// Selected output format.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

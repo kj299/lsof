@@ -11,7 +11,52 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **Control characters in COMMAND, NAME and USER are escaped before they reach
+  the terminal, on both platforms** (DIVERGENCES.md #10, found by the
+  `proc_status` fuzz target). A process names itself and anyone can name a
+  file, so both cells are text a local user chooses; lsof-rs printed them
+  raw, and a process called `h\x1b[2J` cleared the screen of whoever ran it.
+  `lsof-core` now has `render::escape`, a port of the C's `safestrprt()` /
+  `safestrprtn()` / `safepup()`: `\b \f \n \r \t` by name, `^X` for the other
+  C0 controls, `\x7f` for DEL, the space as `\x20` in COMMAND only (the column
+  still splits on whitespace), and — following the C's two printers exactly —
+  COMMAND always pure ASCII (`\xc3\xa9` for é) while NAME and `-F` values keep
+  printable Unicode and hex-escape only what `iswprint()` rejects (the C1
+  controls, U+2028/U+2029). `-J`/`-j`, which already escaped the C0 range,
+  now escape DEL, the C1 block and U+2028/U+2029 too. Nothing is allocated
+  when nothing needs escaping. Two deliberate differences from the C, both
+  safer: the backslash is escaped on Unix but stays the path separator on
+  Windows (`C:\Windows`, not `C:\\Windows`), and USER is escaped although the
+  C prints it raw. Checked against the C oracle byte for byte by six new
+  differential cases on three hostile fixtures, pinned by golden tests, and
+  fuzzed by the new `render_escape` target (both styles; no control character
+  in any output, COMMAND ASCII and whitespace-free, `+c` never splits an
+  escape).
+- The Linux backend un-escapes the kernel's `\n` and `\\` in
+  `/proc/<pid>/status` so the model carries the raw comm the C reads from
+  `stat`; left encoded, one backslash in a name would have printed as four.
+  The comm's own whitespace is now kept (a trailing space is legal and the C
+  shows it as `\x20`).
+
+### Fixed
+- **`+c 0` is no cap.** Lsof.8: "If w is zero (0), all command characters are
+  printed"; lsof-rs read it as a width of zero and printed an empty COMMAND
+  column.
+
 ### Added
+- **The differential's hostile-name fixtures** — fixture A gains a file on fd
+  4 whose name holds an ANSI colour sequence, CR, TAB, a space, a backslash,
+  DEL, é and U+009B; fixtures C and D are sleepers whose *comm* is hostile
+  (ASCII-only, then with é and U+009B), exec'd through a symlink so the kernel
+  itself sets the name. 19 cases now (from 13), run under a pinned
+  `LC_ALL=C.UTF-8` because the C's escaping is locale-dependent; a runner
+  without that locale is an infra exit, not a verdict. One case is ledgered as
+  the first **`C-DEFECT`**: the C's `safestrlen()` compares a signed `char`
+  with `0x20`, sizes every byte ≥ 0x80 as 2 columns where it prints 4, and
+  then truncates its own COMMAND to the undersized width — `+c 0` loses the
+  end of a non-ASCII command. lsof-rs does not reproduce it. Also recorded:
+  the C emits the `-F` `f` marker only when selected (#11, a decision).
 - **Fuzz targets for every Linux-backend text parser** — `proc_net`
   (`/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}` tables and the address, state,
   queue and field decoders under them), `proc_status` (`/proc/<pid>/status`,
@@ -118,15 +163,13 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   waiver claims "we will never do this", which is untrue of `-Z`.
 
 ### Known, recorded rather than changed
-- **Control characters in a process name reach the COMMAND column raw**
-  (`DIVERGENCES.md` #10). Found by the `proc_status` fuzz target — not as a
+- ~~**Control characters in a process name reach the COMMAND column raw**
+  (`DIVERGENCES.md` #10).~~ Found by the `proc_status` fuzz target — not as a
   parser bug but as a wrong invariant in the target's first draft: a bare `\r`
   in `Name:` survives `lines()` and `trim()`, and the kernel escapes only `\n`
   and `\\` in `/proc/<pid>/status`, so the parser is right to return it
-  verbatim. The C's `safestrprt()` escapes non-printables on output; lsof-rs
-  does not, on either platform. A process named with an ANSI escape sequence
-  would drive the terminal of whoever runs lsof-rs. **A decision, and a
-  security one**; the safer fix is the C's.
+  verbatim. Recorded here as a decision on 2026-09-03 and **closed on
+  2026-09-04** as the C does it — see *Security* above.
 - **Six more divergences from the C, found by the L3 differential the day it
   landed** and recorded in `DIVERGENCES.md` for decision — each changes shared
   output, so none was fixed in a backend phase. The largest: **lsof ORs its

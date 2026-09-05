@@ -134,6 +134,16 @@ ANDs file-level selectors unconditionally), the `-F` field set (`g u G l D`),
 and `-o`'s `OFFSET` header. Read that file as the authoritative ledger; this
 section is the narrative for the first three.
 
+One entry in that ledger has since been **closed rather than recorded**, because
+it was a security fix and not a compatibility choice: control characters in
+COMMAND and NAME were printed raw, so a process or file named with an ANSI
+escape sequence drove the terminal of whoever ran lsof-rs. Both cells (and
+USER) now go through the C's `safestrprt()` rules on every platform; the only
+deliberate difference is that the backslash stays a path separator on Windows.
+`+c 0`, which the C documents as "print every character", was also read as a
+cap of zero and is now unlimited. Both are checked against the C oracle by the
+differential's hostile-name fixtures.
+
 A fourth difference is deliberate and stays: **lsof-rs never resolves hostnames
 or service names**, so it behaves as though `-n -P` were always given. The core
 renders the numeric form it is handed (`model::SocketInfo::display_name`), and

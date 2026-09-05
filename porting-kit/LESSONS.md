@@ -668,3 +668,46 @@ the emphasized half.
   the asset, never by a second run; verify from the public page that the
   published checksum matches the published asset before announcing.
 - **Section amended:** PLAYBOOK · Phase 5 (release mechanics).
+
+## 023. Feed the oracle hostile input — it finds the C's bugs, and it is the only thing that will
+
+- **Date:** 2026-09-04
+- **Codebase:** lsof-rs — closing DIVERGENCES.md #10 (control characters in
+  COMMAND/NAME printed raw)
+- **What happened:** The fix was a port of the C's `safestrprt()`, so the
+  differential got fixtures whose comm and file name hold one of every
+  character class it escapes (ESC sequence, CR, space, backslash, DEL, TAB,
+  `^A`, é, U+009B). Five of the six new cases matched byte for byte. The sixth
+  showed the *C* dropping the end of a command even under `+c 0`: `safestrlen()`
+  compares a `char` with `0x20`, `char` is signed on x86-64, so every byte
+  ≥ 0x80 is sized as 2 columns while the printer emits 4, and the printer then
+  truncates to the undersized width. Reading the source had not caught it —
+  the two functions look consistent — and `scan_c_flaws.py` has no pattern
+  for it. Only running the C on the hostile bytes did. Ledgered as a new entry
+  kind, `C-DEFECT`, that the port deliberately does not reproduce (prime
+  directive: the C is a specification that may be buggy). Three smaller
+  things fell out of the same run, none visible from the source: the C prints
+  COMMAND and NAME through *different* functions with different Unicode rules
+  (`safestrprtn()` has no wide-char path); `-F` emits the `f` marker only when
+  selected; and the fuzz target written to guard the fix had an over-strong
+  invariant that the fuzzer disproved in seconds — the second time in two
+  days a target, not the code, was what was wrong (#021's `proc_status` was
+  the first).
+- **Kit change:** (1) When a port closes a divergence by copying the C's
+  behavior, add fixtures that exercise the *hostile* input the behavior exists
+  for, not just the well-formed case — the C's own bugs live there, and a
+  well-formed fixture will match a buggy C. (2) `DIVERGENCES.md` gets a third
+  entry kind, `C-DEFECT`, naming the C code, so a permanent DIVERGE reads as a
+  triaged finding and not as noise. (3) Candidate `scan_c_flaws.py` rule,
+  `signed-char-compare`: a `char` lvalue or `*p` over `char *` compared with a
+  numeric literal without an `(unsigned char)` cast. (4) A fuzz target's
+  assertions are code under test too: when one fires, first ask whether the
+  invariant is right — twice now the answer was no — and when it is fixed,
+  write down the input that broke it. And re-run every target whose module's
+  *contract* the change touched, not only the new one: this PR changed what
+  `parse_status` returns (it now decodes the kernel's `\n`), ran only the new
+  `render_escape` target locally, and CI's 45-second smoke of `proc_status`
+  found its "no newline" invariant stale on the first run.
+- **Section amended:** lsof-rs `DIVERGENCES.md` (the `C-DEFECT` kind);
+  PLAYBOOK Phase 2/4 candidates for the next kit retrospective, recorded here
+  so they are not lost.

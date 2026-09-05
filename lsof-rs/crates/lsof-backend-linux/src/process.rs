@@ -59,7 +59,10 @@ pub fn parse_status(status: &str) -> (String, Option<u32>, Option<u32>) {
     let mut uid = None;
     for line in status.lines() {
         if let Some(v) = line.strip_prefix("Name:") {
-            command = v.trim().to_string();
+            // The kernel writes `Name:\t<comm>` — exactly one tab. The comm's
+            // own whitespace (a trailing space is legal) is part of the name
+            // and is kept; the renderer decides how to show it.
+            command = unescape_comm(v.strip_prefix('\t').unwrap_or(v));
         } else if let Some(v) = line.strip_prefix("PPid:") {
             ppid = v.trim().parse::<u32>().ok();
         } else if let Some(v) = line.strip_prefix("Uid:") {
@@ -74,6 +77,44 @@ pub fn parse_status(status: &str) -> (String, Option<u32>, Option<u32>) {
         }
     }
     (command, ppid, uid)
+}
+
+/// Undo the kernel's escaping of the command in `/proc/<pid>/status`.
+///
+/// `fs/proc/array.c` writes `Name:` through `seq_escape_str(…, ESCAPE_SPECIAL,
+/// "\n\\")`, which turns a newline into the two characters `\n` and a backslash
+/// into `\\`, and touches nothing else (a `\r` or an ESC comes through raw —
+/// the `proc_status` fuzz target's finding). The C `lsof` reads the comm from
+/// `stat`, where it is raw, so the model must hold the raw bytes for both
+/// binaries to escape it the same way in the renderer; left encoded, one
+/// backslash in a name would print as four. A `\` followed by anything else
+/// cannot come from the kernel and is kept literally — this must be faithful
+/// and must not panic, whatever a fuzzer feeds it.
+pub fn unescape_comm(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    chars.next();
+                    out.push('\n');
+                    continue;
+                }
+                Some('\\') => {
+                    chars.next();
+                    out.push('\\');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Whether this process is running as root, the Linux analog of the Windows
@@ -119,6 +160,26 @@ mod tests {
         let (cmd, ppid, uid) = parse_status("Name:PPid:\rd:Uid:");
         assert_eq!(cmd, "PPid:\rd:Uid:");
         assert_eq!((ppid, uid), (None, None));
+    }
+
+    #[test]
+    fn the_kernels_status_escaping_is_undone_nothing_else_is_touched() {
+        // What the kernel wrote for a comm of `a\b` (one backslash) and for one
+        // holding a newline — observed on 6.x: `Name:\ta\\b`, `Name:\tx\ny`.
+        assert_eq!(parse_status("Name:\ta\\\\b\n").0, "a\\b");
+        assert_eq!(parse_status("Name:\tx\\ny\n").0, "x\ny");
+        // Raw controls and non-ASCII are not the kernel's to escape and come
+        // through untouched; so does the comm's own trailing whitespace.
+        assert_eq!(
+            parse_status("Name:\th\x1b[2J\r \x7f\t\u{e9}\u{9b}z\n").0,
+            "h\x1b[2J\r \x7f\t\u{e9}\u{9b}z"
+        );
+        assert_eq!(parse_status("Name:\ttrailing \n").0, "trailing ");
+        // Shapes the kernel never produces must be kept literally, not guessed.
+        assert_eq!(unescape_comm("a\\tb"), "a\\tb");
+        assert_eq!(unescape_comm("trailing\\"), "trailing\\");
+        assert_eq!(unescape_comm("\\\\\\n"), "\\\n");
+        assert_eq!(unescape_comm(""), "");
     }
 
     #[test]

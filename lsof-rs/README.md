@@ -119,9 +119,24 @@ item is shipped or a documented closed gate — and the release criteria are in
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed
   through the porting kit's runner with [`DIVERGENCES.md`](DIVERGENCES.md) as
-  the ledger. 13 cases; every unledgered difference fails the build. On its
-  first fixture it found two more fidelity gaps (the offset cell for devices
-  and FIFOs, `pipe` in NAME), fixed the same day.
+  the ledger. 19 cases over four fixtures; every unledgered difference fails
+  the build. On its first fixture it found two more fidelity gaps (the offset
+  cell for devices and FIFOs, `pipe` in NAME), fixed the same day; its
+  hostile-name fixtures then found a defect in the C itself (a signed-`char`
+  comparison that truncates non-ASCII commands), which the port deliberately
+  does not reproduce.
+
+**Names are escaped before they reach your terminal.** A process names itself
+and anyone can name a file, so COMMAND and NAME are text a local user chooses.
+lsof-rs prints them the way the C's `safestrprt()` does — `^[` for ESC, `\r`,
+`\t`, `\x7f`, `\xc2\x9b` for the 8-bit CSI — in the table and in `-F`, and
+escapes them per the JSON grammar in `-J`/`-j`, so a process called
+`h\x1b[2J` cannot clear the screen of whoever runs `lsof`. The one place
+lsof-rs differs from the C on purpose: on Windows the backslash is the path
+separator and stays `C:\Windows`, where the C would print `C:\\Windows`. The
+rules, byte for byte, are in `lsof-core`'s `render::escape`, pinned by golden
+tests, fuzzed (`render_escape`), and checked against the C on every Linux CI
+run.
 
 Both phases were diffed by hand against the real C `lsof` 4.95.0 on the same
 host, and that diff is the reason to trust them: **`-i`, `-iTCP:443`,

@@ -17,6 +17,12 @@ built from **this tree** (4.99.6) against lsof-rs on the same fixtures, on every
 Linux CI run. The Windows side has no such oracle; see `differential/README.md`
 for its oracle-substitution mode.
 
+A third kind of entry exists since 2026-09-04: **`C-DEFECT`** — a divergence
+where the C is wrong and the port deliberately does not follow it (porting-kit
+`CLAUDE.md`: "the C is a specification that may be buggy; do not faithfully
+re-implement a vulnerability"). It stays ledgered because the oracle will keep
+disagreeing, and it names the C code so anyone can check the triage.
+
 ## Ledger (read by `diff_run.py`)
 
 - [x] files-mem-rows: DEBT (L2) — the C emits one `mem` row per mapped library
@@ -38,6 +44,63 @@ for its oracle-substitution mode.
   `lsof -d ^mem -p PID` lists the whole host in the C and one process in
   lsof-rs. Deliberately the only un-`-a`'d case, so the divergence stays
   visible in every run.
+- [x] hostile-comm-utf8-table: C-DEFECT, not reproduced — the C sizes the
+  COMMAND column with `safestrlen()` (`lib/misc.c`), which compares each
+  `char` with `0x20`; `char` is signed on x86-64, so every byte ≥ 0x80 is
+  sized as a 2-column escape while `safestrprtn()` prints 4 (`\xc3`). The
+  printer then cuts the command to the undersized width: fixture D's comm
+  `h^[[2J\r\x20\\\x7f\t\xc3\xa9\xc2\x9bz` loses `\xc2\x9bz` even under
+  `+c 0`, which is documented to print every character. lsof-rs sizes and
+  prints the same text. `hostile-comm-utf8-fields-Ffc` on the same comm
+  MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
+  in the C (an unsigned-`char` target such as aarch64 sizes correctly).
+
+## Fixed by the renderer escaping (2026-09-04)
+
+Item 10 below — found by the `proc_status` fuzz target, decided as the
+security fix the kit's prime directive asks for — is closed. COMMAND, USER and
+NAME now go through `lsof-core`'s `render::escape`, a port of the C's
+`safestrprt()`/`safestrprtn()`/`safepup()`, in the table and in `-F`; the JSON
+renderers, which already escaped the C0 range, now also escape DEL, the C1
+controls and U+2028/U+2029. The Linux backend un-escapes the kernel's `\n` and
+`\\` in `/proc/<pid>/status` so the model carries the raw comm the C reads from
+`stat`, and both binaries escape the same bytes. Verified against the oracle
+by four new fixtures-worth of cases (a file and two comms named with an ANSI
+clear-screen, CR, space, backslash, DEL, TAB, `^A`, é and the 8-bit CSI
+U+009B): `files-fd-4-hostile-name`, `files-fields-Ffn-hostile-name`,
+`hostile-comm-table`, `hostile-comm-fields-Ffc`, `hostile-comm-utf8-fields-Ffc`
+all MATCH byte for byte; `hostile-comm-utf8-table` is the C-DEFECT above.
+
+Two things the oracle taught on the way, neither visible from the source:
+
+- **COMMAND and NAME are printed by different functions.** `safestrprtn()`
+  (COMMAND) has no wide-character path, so the column is always pure ASCII
+  (é is `\xc3\xa9`) and a space is `\x20`; `safestrprt()` (NAME, `-F`) passes
+  printable UTF-8 through in a UTF-8 locale and escapes only what
+  `iswprint()` rejects. lsof-rs mirrors both, locale-independently, which is
+  why the differential now pins `LC_ALL=C.UTF-8` for both binaries.
+- **`+c 0` means no cap** (`CmdLim && len > CmdLim`); lsof-rs read it as a
+  cap of zero and printed an empty COMMAND column. Fixed.
+
+Two decisions where lsof-rs is deliberately *not* the C, both safer:
+
+- **The backslash is escaped on Unix and is text on Windows.** The C doubles
+  it so `\` `n` cannot pose as a newline; on Windows every NAME is `C:\…` and
+  every domain user `DOMAIN\user`, so that rule would make the common case
+  unreadable to close an ambiguity `-J`/`-j` already close. `Escaper::for_host`
+  is the one platform-dependent line in the renderer.
+- **USER is escaped too.** The C prints it raw (`printf`). Its source is
+  root-controlled (`/etc/passwd`, the SAM), so this changes no real output;
+  it removes the last cell the renderer trusted.
+
+The `render_escape` fuzz target guards the property (no control character in
+any output; COMMAND pure ASCII and whitespace-free; `+c` never splits an
+escape) under both styles. Its first draft repeated the `proc_status` lesson:
+it checked "no partial escape" by looking for a trailing `^` or `\`, and the
+fuzzer disproved that in seconds with `\n\x1e`, whose escape `\n^^` ends in
+`^` legitimately (0x1e + 0x40). The invariant was rewritten as "the cut is the
+escaped form of the longest input prefix that fits", which is what the C's
+`break` means. 1.9M runs clean after that.
 
 ## Fixed by the gate, before it was a gate (2026-09-02)
 
@@ -92,7 +155,8 @@ likely right; it is a compatibility decision, not a backend phase.
 | 7 | `8uW` — `W` marks a write lock on the fd | `8u` | lock column; Linux source is `/proc/locks` (L2), Windows has byte-range locks |
 | 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | `unknown`, `anon_inode:[eventpoll]` | DEBT (L2), Linux: named anon_inode kinds |
 | 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
-| 10 | non-printable bytes in a name are escaped (`safestrprt()`) | printed raw | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reaches the COMMAND column. A process named with an ANSI escape sequence would drive the terminal of whoever runs lsof-rs — the classic control-character injection the C closes and this port does not, yet. **DECISION**, and a security one: the safer fix is the C's. |
+| 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |
+| 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | `f` on every file, whatever the selection | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. **DECISION** — a Windows `-F` consumer that selects fields without `f` sees `f` lines today. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden
@@ -122,3 +186,10 @@ absence had gone unnoticed through three releases (LESSONS #019). The Windows
 backend's 139 `unsafe` blocks are individually documented (`audit_unsafe.py`
 139/139) but have never been run under a sanitizer; the Linux backend and the
 core have none.
+
+The scan has no pattern for the defect the differential found on 2026-09-04
+(`safestrlen()`: a signed `char` compared with `0x20`, so bytes ≥ 0x80 take the
+wrong branch). A `signed-char-compare` rule — `char` variables or `*p` derefs
+of `char *` compared against a numeric literal without an `(unsigned char)`
+cast — would have flagged it and its siblings; it is a candidate for the kit's
+next retrospective, recorded in LESSONS #023.

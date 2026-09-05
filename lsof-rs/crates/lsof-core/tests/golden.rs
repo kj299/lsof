@@ -2,10 +2,19 @@
 
 use lsof_core::mock::sample_processes;
 use lsof_core::render::{fields, json, table};
+use lsof_core::Escaper;
 
 #[test]
 fn table_has_header_and_rows() {
-    let out = table::render(&sample_processes(), false, false, false, None, false);
+    let out = table::render(
+        &sample_processes(),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
     let header = out.lines().next().unwrap();
     for col in ["COMMAND", "PID", "USER", "FD", "TYPE", "NODE", "NAME"] {
         assert!(header.contains(col), "header missing {col}: {header:?}");
@@ -22,19 +31,33 @@ fn table_has_header_and_rows() {
 fn table_empty_when_nothing_matches() {
     // No matching processes -> no output at all (not even a bare header),
     // matching lsof. Regression guard for `lsof -a -p <pid> -c <nomatch>`.
-    assert_eq!(table::render(&[], false, false, false, None, false), "");
-    assert_eq!(table::render(&[], false, true, false, None, false), "");
+    assert_eq!(
+        table::render(&[], false, false, false, None, false, Escaper::WINDOWS),
+        ""
+    );
+    assert_eq!(
+        table::render(&[], false, true, false, None, false, Escaper::WINDOWS),
+        ""
+    );
 }
 
 #[test]
 fn terse_lists_unique_pids() {
-    let out = table::render(&sample_processes(), true, false, false, None, false);
+    let out = table::render(
+        &sample_processes(),
+        true,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
     assert_eq!(out, "1000\n1500\n");
 }
 
 #[test]
 fn fields_tokens() {
-    let out = fields::render(&sample_processes(), false, None);
+    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
     assert!(out.contains("p1000\n"));
     assert!(out.contains("p1500\n"));
     assert!(out.contains("cexplorer.exe\n"));
@@ -47,7 +70,7 @@ fn fields_tokens() {
 #[test]
 fn fields_only_restricts_output() {
     // Request only the name field; structural p/f markers still appear.
-    let out = fields::render(&sample_processes(), false, Some(&['n']));
+    let out = fields::render(&sample_processes(), false, Some(&['n']), Escaper::WINDOWS);
     assert!(out.contains("p1000\n"));
     assert!(out.contains("f"));
     assert!(out.contains("nC:\\Users\\alice\n"));
@@ -58,7 +81,15 @@ fn fields_only_restricts_output() {
 
 #[test]
 fn table_ppid_column() {
-    let out = table::render(&sample_processes(), false, true, false, None, false);
+    let out = table::render(
+        &sample_processes(),
+        false,
+        true,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
     assert!(out.lines().next().unwrap().contains("PPID"));
     // explorer.exe's ppid (4) shows up.
     assert!(out.contains(" 4 ") || out.contains("   4 "));
@@ -87,10 +118,19 @@ fn table_offset_with_dash_o() {
         }],
     };
     // Default prefers size; -o prefers the offset (0t<dec>).
+    assert!(table::render(
+        std::slice::from_ref(&p),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS
+    )
+    .contains("100"));
     assert!(
-        table::render(std::slice::from_ref(&p), false, false, false, None, false).contains("100")
+        table::render(&[p], false, false, true, None, false, Escaper::WINDOWS).contains("0t42")
     );
-    assert!(table::render(&[p], false, false, true, None, false).contains("0t42"));
 }
 
 #[test]
@@ -123,6 +163,7 @@ fn table_command_width_caps() {
         false,
         Some(4),
         false,
+        Escaper::WINDOWS,
     );
     assert!(
         capped.contains("very"),
@@ -133,7 +174,7 @@ fn table_command_width_caps() {
         "full command should be truncated: {capped:?}"
     );
     // Without the cap, the full name is present.
-    let full = table::render(&[p], false, false, false, None, false);
+    let full = table::render(&[p], false, false, false, None, false, Escaper::WINDOWS);
     assert!(full.contains("verylongcommandname.exe"));
 }
 
@@ -161,7 +202,7 @@ fn fields_skips_empty_name() {
             socket: None,
         }],
     };
-    let out = fields::render(&[p], false, None);
+    let out = fields::render(&[p], false, None, Escaper::WINDOWS);
     assert!(out.contains("ftask\n"), "task FD field expected: {out:?}");
     assert!(
         out.contains("i4242\n"),
@@ -178,7 +219,7 @@ fn fields_skips_empty_name() {
 fn fields_nul_terminator() {
     // -F0: fields within a set are NUL-separated, and each process/file set ends
     // with a NL so a consumer can split records on it (lsof's documented format).
-    let out = fields::render(&sample_processes(), true, None);
+    let out = fields::render(&sample_processes(), true, None, Escaper::WINDOWS);
     assert!(
         out.contains("p1000\0"),
         "fields within a set are NUL-separated: {out:?}"
@@ -207,7 +248,7 @@ fn fields_no_inode_for_sockets() {
     // lsof leaves `-F i` empty for sockets — the protocol goes in `P`, not the
     // inode. (Regression guard: the socket `node` carries the protocol string
     // for the table's NODE column, which must not leak into `-F i`.)
-    let out = fields::render(&sample_processes(), false, None);
+    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
     assert!(
         !out.contains("iTCP\n"),
         "socket protocol leaked into -Fi: {out:?}"
@@ -255,14 +296,22 @@ fn windows_object_types_render() {
             ),
         ],
     };
-    let table = table::render(std::slice::from_ref(&p), false, false, false, None, false);
+    let table = table::render(
+        std::slice::from_ref(&p),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
     assert!(table.contains("KEY"), "registry-key TYPE code: {table:?}");
     assert!(table.contains("SEM"), "Other object TYPE code: {table:?}");
     assert!(
         table.contains("\\REGISTRY\\MACHINE\\SOFTWARE"),
         "key path in NAME"
     );
-    let f = fields::render(&[p], false, None);
+    let f = fields::render(&[p], false, None, Escaper::WINDOWS);
     assert!(f.contains("tKEY\n"), "-Ft KEY: {f:?}");
     assert!(f.contains("tSEM\n"), "-Ft SEM: {f:?}");
 }
@@ -325,6 +374,179 @@ fn json_escapes_backslashes() {
     assert!(out.contains("C:\\\\Users\\\\alice"));
 }
 
+/// One process whose command, user and single file name are whatever the test
+/// says — the shape of the hostile-name checks below.
+fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    Process {
+        pid: 7,
+        ppid: None,
+        command: command.into(),
+        user: Some(user.into()),
+        endpoint_peer: false,
+        files: vec![OpenFile {
+            fd: FdType::Handle(4),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: name.into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        }],
+    }
+}
+
+#[test]
+fn hostile_names_are_escaped_the_way_the_c_prints_them() {
+    // DIVERGENCES.md #10, found by the proc_status fuzz target: a `\r` — or an
+    // ANSI escape — in COMMAND or NAME reached the terminal raw, on both
+    // platforms. COMMAND, USER and NAME now go through lsof's safestrprt()
+    // rules. The comm and the file name are the Linux differential's hostile
+    // fixtures, and the expected text is what the C (4.99.6, C.UTF-8) prints
+    // for them: COMMAND whitespace-free and pure ASCII, NAME with the space
+    // and the é kept and the 8-bit CSI (U+009B) hex-escaped.
+    let comm = "h\x1b[2J\r \\\x7f\t\u{e9}\u{9b}z";
+    let file = "/tmp/n\x1b[31m\r\t \\\x7f\u{e9}\u{9b}.txt";
+    let p = named(comm, "us\x1ber", file);
+
+    let table = table::render(
+        std::slice::from_ref(&p),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::UNIX,
+    );
+    let row = table.lines().nth(1).expect("one data row");
+    assert!(
+        row.starts_with("h^[[2J\\r\\x20\\\\\\x7f\\t\\xc3\\xa9\\xc2\\x9bz "),
+        "COMMAND cell: {row:?}"
+    );
+    assert!(
+        row.ends_with(" /tmp/n^[[31m\\r\\t \\\\\\x7f\u{e9}\\xc2\\x9b.txt"),
+        "NAME cell: {row:?}"
+    );
+    assert!(row.contains(" us^[er "), "USER cell: {row:?}");
+    assert!(
+        !table.chars().any(|c| c.is_control() && c != '\n'),
+        "a control character reached the table: {table:?}"
+    );
+
+    // `-F`: the values are text-mode (space kept), and the terminators cannot
+    // be forged — a newline in a name is `\n`, so it is still one `n` field.
+    let f = fields::render(std::slice::from_ref(&p), false, None, Escaper::UNIX);
+    assert!(
+        f.contains("ch^[[2J\\r \\\\\\x7f\\t\u{e9}\\xc2\\x9bz\n"),
+        "{f:?}"
+    );
+    assert!(f.contains("Lus^[er\n"), "{f:?}");
+    assert!(
+        f.contains("n/tmp/n^[[31m\\r\\t \\\\\\x7f\u{e9}\\xc2\\x9b.txt\n"),
+        "{f:?}"
+    );
+    let split = named("x", "u", "two\nlines");
+    let f0 = fields::render(&[split], true, None, Escaper::UNIX);
+    assert!(f0.contains("ntwo\\nlines\n"), "{f0:?}");
+    assert_eq!(
+        f0.matches('\n').count(),
+        2,
+        "one process set, one file set: {f0:?}"
+    );
+
+    // The fuzz target's exact finding, in COMMAND.
+    let q = named("PPid:\rd:Uid:", "u", "f");
+    let t = table::render(&[q], false, false, false, None, false, Escaper::UNIX);
+    assert!(t.contains("PPid:\\rd:Uid:"), "{t:?}");
+}
+
+#[test]
+fn backslash_is_text_on_windows_and_escaped_on_unix() {
+    // Every Windows NAME is `C:\…` and every domain user is `DOMAIN\user`; the
+    // C's `\\` rule would double each separator, so on Windows the backslash is
+    // text. On Unix it is escaped so `\` `n` cannot pose as a newline.
+    let win = table::render(
+        &sample_processes(),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
+    assert!(win.contains("C:\\Windows\\System32\\config.dat"), "{win:?}");
+    assert!(win.contains("EXAMPLE\\alice"), "{win:?}");
+    let unix = table::render(
+        &sample_processes(),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::UNIX,
+    );
+    assert!(
+        unix.contains("C:\\\\Windows\\\\System32\\\\config.dat"),
+        "{unix:?}"
+    );
+    assert!(unix.contains("EXAMPLE\\\\alice"), "{unix:?}");
+    assert_eq!(
+        Escaper::for_host(),
+        if cfg!(windows) {
+            Escaper::WINDOWS
+        } else {
+            Escaper::UNIX
+        }
+    );
+}
+
+#[test]
+fn command_width_is_counted_after_escaping() {
+    // `+c 3` on a command that prints as `a^[bcd`: the C's safestrprtn() emits
+    // an escape only if it fits whole, so 3 gives `a^[` and 2 gives `a`.
+    let p = named("a\x1bbcd", "u", "f");
+    let cell = |w: usize| -> String {
+        let out = table::render(
+            std::slice::from_ref(&p),
+            false,
+            false,
+            false,
+            Some(w),
+            false,
+            Escaper::UNIX,
+        );
+        out.lines()
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(cell(6), "a^[bcd");
+    assert_eq!(cell(3), "a^[");
+    assert_eq!(cell(2), "a");
+}
+
+#[test]
+fn json_escapes_every_control_and_the_line_separators() {
+    // JSON needs only C0 escaped; DEL, the C1 block (U+009B is the 8-bit CSI)
+    // and U+2028/U+2029 are escaped too, so `-j` stays one object per line and
+    // a document read on a terminal cannot drive it. Decoders see the same
+    // string either way.
+    let p = named("a\u{9b}b\u{2028}c\x7f\x1b", "u", "f");
+    let out = json::render_lines(&[p]);
+    assert!(
+        out.contains("\"command\":\"a\\u009bb\\u2028c\\u007f\\u001b\""),
+        "{out:?}"
+    );
+    assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+    assert_eq!(out.matches('\n').count(), 1);
+}
+
 /// One established-TCP process with `-T q/w` extended info attached — what the
 /// Windows backend produces under `-Tqw` (elevated). Built directly because
 /// the mock's static sample deliberately has `tcp: None` (a plain run shows
@@ -369,7 +591,15 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
 fn tcp_info_table_suffix() {
     // The exact v0.2.0-validated shape the live smoke cases assert: the info
     // rides the NAME column, after the state.
-    let out = table::render(&tcp_info_fixture(), false, false, false, None, false);
+    let out = table::render(
+        &tcp_info_fixture(),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
     assert!(
         out.contains("(ESTABLISHED) (Win=262144) (QR=0) (QS=12)"),
         "table NAME must carry the (Win=)/(QR=)/(QS=) suffix: {out:?}"
@@ -380,7 +610,7 @@ fn tcp_info_table_suffix() {
 fn tcp_info_fields_tokens() {
     // Structured `T` tokens with lsof's own prefixes (QR/QS/WR), after ST=;
     // the n (name) field stays clean of the table-only suffix.
-    let out = fields::render(&tcp_info_fixture(), false, None);
+    let out = fields::render(&tcp_info_fixture(), false, None, Escaper::WINDOWS);
     assert!(out.contains("TST=ESTABLISHED\nTQR=0\nTQS=12\nTWR=262144\n"));
     assert!(
         !out.contains("(Win="),
