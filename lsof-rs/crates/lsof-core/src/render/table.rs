@@ -13,9 +13,10 @@
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
 use crate::render::Escaper;
 
-/// Render the FD cell, e.g. `cwd`, `txt`, or `3u` (handle value + access char).
+/// Render the FD cell, e.g. `cwd`, `txt`, `3u`, or `3uW` — handle value,
+/// access character, then the lock character when the file is locked.
 fn fd_cell(f: &OpenFile) -> String {
-    match f.fd {
+    let mut s = match f.fd {
         FdType::Handle(n) => {
             if f.access == AccessMode::Unknown {
                 n.to_string()
@@ -24,7 +25,11 @@ fn fd_cell(f: &OpenFile) -> String {
             }
         }
         _ => f.fd.code(),
+    };
+    if let Some(lock) = f.lock {
+        s.push(lock.code());
     }
+    s
 }
 
 /// Render the SIZE/OFF cell. By default prefer size; with `prefer_offset`
@@ -125,6 +130,7 @@ pub fn render(
             // A selected process with no displayed files still gets a line so it
             // shows up (NAME left blank), mirroring lsof.
             let blank = OpenFile {
+                lock: None,
                 fd: FdType::Unknown,
                 access: AccessMode::Unknown,
                 file_type: FileType::Unknown,

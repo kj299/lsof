@@ -21,6 +21,10 @@ pub enum FdType {
     Txt,
     /// Memory-mapped module (`mem`).
     Mem,
+    /// A file that is still mapped but has been deleted (`DEL`). lsof's
+    /// canonical use: after a package upgrade, `lsof | grep DEL` finds the
+    /// processes still running against the replaced shared objects.
+    Deleted,
     /// A thread (`task`) row emitted under `-K`. The TID lives in
     /// [`OpenFile::node`] and the thread state / start in `name`.
     Task,
@@ -37,6 +41,7 @@ impl FdType {
             FdType::Root => "rtd".to_string(),
             FdType::Txt => "txt".to_string(),
             FdType::Mem => "mem".to_string(),
+            FdType::Deleted => "DEL".to_string(),
             FdType::Task => "task".to_string(),
             FdType::Unknown => "unk".to_string(),
         }
@@ -60,6 +65,50 @@ impl AccessMode {
             AccessMode::Write => 'w',
             AccessMode::ReadWrite => 'u',
             AccessMode::Unknown => '-',
+        }
+    }
+}
+
+/// A byte-range or whole-file lock held on an open file — the character lsof
+/// appends to the FD column, so `8u` becomes `8uW`.
+///
+/// Linux reports only shared/exclusive in `/proc/locks`, which is these four.
+/// The C also knows `u`/`U` (read *and* write, from systems whose lock tables
+/// distinguish it) and `x`/`X` (Xenix); neither is reachable on Linux, and
+/// Windows cannot enumerate another process's locks at all
+/// (`docs/known-limitations.md`), so they are deliberately absent rather than
+/// defined and never produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockKind {
+    /// `r` — read (shared) lock on part of the file.
+    ReadPartial,
+    /// `R` — read (shared) lock on the whole file.
+    ReadFull,
+    /// `w` — write (exclusive) lock on part of the file.
+    WritePartial,
+    /// `W` — write (exclusive) lock on the whole file.
+    WriteFull,
+}
+
+impl LockKind {
+    /// The character lsof appends to the FD cell.
+    pub fn code(self) -> char {
+        match self {
+            LockKind::ReadPartial => 'r',
+            LockKind::ReadFull => 'R',
+            LockKind::WritePartial => 'w',
+            LockKind::WriteFull => 'W',
+        }
+    }
+
+    /// Classify a lock from the two facts `/proc/locks` gives: whether it is a
+    /// write lock, and whether it covers the whole file (`0` to `EOF`).
+    pub fn new(write: bool, whole_file: bool) -> Self {
+        match (write, whole_file) {
+            (true, true) => LockKind::WriteFull,
+            (true, false) => LockKind::WritePartial,
+            (false, true) => LockKind::ReadFull,
+            (false, false) => LockKind::ReadPartial,
         }
     }
 }
@@ -300,6 +349,9 @@ pub struct OpenFile {
     /// to filter to files with fewer than `count` links (e.g. `+L1` for
     /// unlinked-but-still-open files — a security-interesting case).
     pub links: Option<u32>,
+    /// A lock held on this file, shown as a suffix on the FD cell (`8uW`).
+    /// `None` means no lock, or a platform that cannot enumerate them.
+    pub lock: Option<LockKind>,
     /// Present iff this is a network socket.
     pub socket: Option<SocketInfo>,
 }

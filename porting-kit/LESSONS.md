@@ -702,12 +702,25 @@ the emphasized half.
   `signed-char-compare`: a `char` lvalue or `*p` over `char *` compared with a
   numeric literal without an `(unsigned char)` cast. (4) A fuzz target's
   assertions are code under test too: when one fires, first ask whether the
-  invariant is right — twice now the answer was no — and when it is fixed,
-  write down the input that broke it. And re-run every target whose module's
-  *contract* the change touched, not only the new one: this PR changed what
-  `parse_status` returns (it now decodes the kernel's `\n`), ran only the new
-  `render_escape` target locally, and CI's 45-second smoke of `proc_status`
+  invariant is right — **three times now the answer was no** — and when it is
+  fixed, write down the input that broke it. And re-run every target whose
+  module's *contract* the change touched, not only the new one: one PR changed
+  what `parse_status` returns (it now decodes the kernel's `\n`), ran only the
+  new `render_escape` target locally, and CI's 45-second smoke of `proc_status`
   found its "no newline" invariant stale on the first run.
+
+  **The shape of all three wrong invariants is the same, and it is worth
+  naming: each was a *stronger proxy* that happens to hold for kernel-shaped
+  input.** "The command holds no `\r`" (the kernel escapes only `\n`).
+  "A truncated cell never ends in `^`" (`\n\x1e` escapes to `\n^^`). "The
+  name never starts with `anon_inode:`" (the kind of `anon_inode:anon_inode:3`
+  legitimately does). Each is easy to write, reads as obviously true, and is
+  true of every input the kernel will ever produce — which is exactly why only
+  a fuzzer finds it. Write the property the code actually promises: not "the
+  result never looks like X" but "the result is the escaped form of the longest
+  prefix that fits", "exactly one prefix is dropped". If the precise property
+  is hard to state, that is a signal about the code, not a licence to assert a
+  convenient approximation.
 - **Section amended:** lsof-rs `DIVERGENCES.md` (the `C-DEFECT` kind);
   PLAYBOOK Phase 2/4 candidates for the next kit retrospective, recorded here
   so they are not lost.

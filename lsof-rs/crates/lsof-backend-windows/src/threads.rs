@@ -57,6 +57,7 @@ pub fn enumerate(wanted: Option<&HashSet<u32>>) -> Vec<(u32, OpenFile)> {
             out.push((
                 pid,
                 OpenFile {
+                    lock: None,
                     fd: FdType::Task,
                     access: AccessMode::Unknown,
                     file_type: FileType::Thread,

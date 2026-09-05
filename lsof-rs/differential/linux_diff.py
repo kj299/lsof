@@ -26,6 +26,14 @@ ledger — those are the kit's, on purpose.
   fixture D  the same plus é (printable) and U+009B (the 8-bit CSI) — the
              non-ASCII classes, which the C sizes differently from how it
              prints them (see the matrix)
+  fixture E  a process holding one live mapped library and one that has been
+             deleted while still mapped — the `mem` and `DEL` rows that come
+             from /proc/<pid>/maps rather than from an fd
+  fixture F  a process holding one of each lock character Linux can report:
+             whole-file and partial, read and write (`R r W w`)
+  fixture G  a process holding one of each anonymous-inode kind lsof names —
+             eventpoll, eventfd, pidfd, inotify — which have no filesystem
+             identity and are typed `a_inode`
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -195,7 +203,87 @@ def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
     )
 
 
-def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture]:
+def mapping_holder(work: str) -> Fixture:
+    """A process with one live mapped library and one deleted-but-mapped one.
+
+    The deleted mapping is the `DEL` row -- lsof's canonical "who is still
+    running against the old shared object after an upgrade" answer -- and it is
+    the one maps row that cannot be stat'd, so it exercises the branch that
+    takes its device and inode from the maps line instead. Both copies carry a
+    space in the name, because a maps path is the rest of the line and must not
+    be split on whitespace."""
+    mdir = os.path.join(work, "maps")
+    os.makedirs(mdir)
+    live = os.path.join(mdir, "live lib.so")
+    gone = os.path.join(mdir, "gone lib.so")
+    shutil.copy("/usr/lib/x86_64-linux-gnu/libm.so.6", live)
+    shutil.copy("/usr/lib/x86_64-linux-gnu/libc.so.6", gone)
+    py = (
+        "import ctypes,os,time\n"
+        "a=ctypes.CDLL(%r)\n"
+        "b=ctypes.CDLL(%r)\n"
+        "os.unlink(%r)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (live, gone, gone, mdir)
+    )
+    return Fixture("E(mappings)", [sys.executable, "-c", py], cwd=mdir, expect_fds=3)
+
+
+def lock_holder(work: str) -> Fixture:
+    """A process holding one of each lock character lsof can print on Linux.
+
+    /proc/locks reports only shared-vs-exclusive and the byte range, which is
+    exactly the four characters `R`, `r`, `W`, `w` -- whole-file read, partial
+    read, whole-file write, partial write. The partial locks are what separate
+    the lower-case characters from the upper-case ones, so both are held."""
+    ldir = os.path.join(work, "locks")
+    os.makedirs(ldir)
+    py = (
+        "import fcntl,os,time\n"
+        "def f(n):\n"
+        "    h=open(os.path.join(%r,n),'w+'); h.write('x'*100); h.flush(); return h\n"
+        "wf=f('write-full'); wp=f('write-part'); rf=f('read-full'); rp=f('read-part')\n"
+        "fcntl.lockf(wf, fcntl.LOCK_EX)\n"
+        "fcntl.lockf(wp, fcntl.LOCK_EX, 5, 10)\n"
+        "fcntl.lockf(rf, fcntl.LOCK_SH)\n"
+        "fcntl.lockf(rp, fcntl.LOCK_SH, 5, 10)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (ldir, ldir)
+    )
+    return Fixture("F(locks)", [sys.executable, "-c", py], cwd=ldir, expect_fds=7)
+
+
+def anon_inode_holder(work: str) -> Fixture:
+    """A process holding one of each anonymous-inode kind lsof names.
+
+    The kernel gives these fds a link target of `anon_inode:<kind>` and no
+    filesystem identity at all. lsof types them `a_inode` and prints the kind,
+    substituting an identity from fdinfo for the three kinds that carry one:
+    an eventpoll's watched fds, an eventfd's id, a pidfd's target pid. An
+    `inotify` fd is here as the control: it has no identity and prints bare.
+
+    Two epoll registrations, not one, because the C sorts the fd list and
+    fdinfo lists it most-recent-first — with a single entry the sort would be
+    untested."""
+    adir = os.path.join(work, "anon")
+    os.makedirs(adir)
+    py = (
+        "import ctypes,os,select,socket,time\n"
+        "ep=select.epoll()\n"
+        "a,_b=socket.socketpair(); c,_d=socket.socketpair()\n"
+        "ep.register(a); ep.register(c)\n"
+        "ev=os.eventfd(7)\n"
+        "pf=os.pidfd_open(os.getpid())\n"
+        "ino=ctypes.CDLL('libc.so.6').inotify_init()\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % adir
+    )
+    return Fixture("G(anon inodes)", [sys.executable, "-c", py], cwd=adir, expect_fds=3)
+
+
+def make_fixtures(
+    work: str,
+) -> tuple[Fixture, Fixture, Fixture, Fixture, Fixture, Fixture, Fixture]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
     with open(os.path.join(fdir, "f.txt"), "w") as f:
@@ -231,7 +319,10 @@ def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture]:
     b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)  # 0,1,2 + 3 sockets
     c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
     d = hostile_sleeper("D", work, HOSTILE_UTF8_COMM)
-    return a, b, c, d
+    e = mapping_holder(work)
+    f = lock_holder(work)
+    g = anon_inode_holder(work)
+    return a, b, c, d, e, f, g
 
 
 # -------------------------------------------------------------------- matrix
@@ -303,10 +394,23 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d = fixtures
+    a, b, c, d, e, lk, anon = fixtures
     try:
         for fx in fixtures:
             fx.start()
+        # E's mappings land after its fds do; it writes `ready` once both
+        # libraries are loaded and one is unlinked. Waiting on the marker
+        # keeps a half-loaded fixture from producing a matching-but-partial
+        # table on both sides, which would be a false green (LESSONS #6).
+        for fx in (e, lk, anon):
+            ready = os.path.join(fx.cwd, "ready")
+            deadline = time.monotonic() + 5.0
+            while not os.path.exists(ready) and time.monotonic() < deadline:
+                if fx.proc is not None and fx.proc.poll() is not None:
+                    infra(f"fixture {fx.name} exited early (rc={fx.proc.returncode})")
+                time.sleep(0.02)
+            if not os.path.exists(ready):
+                infra(f"fixture {fx.name} was not ready within 5s")
         # {FILE} is a path only fixture A holds; {PORT} is fixture B's
         # listener. Both name exactly one fixture, which is what makes the
         # un-`-a`ed OR cases deterministic.
@@ -328,6 +432,9 @@ def run(args) -> int:
                 "B": str(b.pid),
                 "C": str(c.pid),
                 "D": str(d.pid),
+                "E": str(e.pid),
+                "F": str(lk.pid),
+                "G": str(anon.pid),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "PORT": port,
             },

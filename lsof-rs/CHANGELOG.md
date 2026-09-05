@@ -11,6 +11,54 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Linux phase L2, three of its four parts** — each verified against the C
+  built from this tree, each with its own differential fixture.
+  - **`mem` and `DEL` rows from `/proc/<pid>/maps`.** A mapping keeps a file
+    open exactly as an fd does, and a dozen rows per process were simply
+    missing. One row per *distinct file*, identified by the `(device, inode)`
+    pair and not the path, in maps order, between `txt` and the numbered fds;
+    SIZE is the file's size, not the mapping's length. A mapping whose file was
+    **deleted** is not a `mem` row at all but a new `FdType::Deleted` (`DEL`)
+    row — the one `lsof | grep DEL` looks for after a package upgrade — with
+    device and inode from the maps line and SIZE blank. That cost a wrong first
+    conclusion: `lsof -d mem` showed nothing for a deleted mapping, which read
+    as "the C skips it" until the unfiltered run showed it under a different FD.
+    Retires the `files-mem-rows` ledger entry.
+  - **The lock character on the FD cell** (`3uW`), from `/proc/locks`, closing
+    `DIVERGENCES.md` #7 on Linux. Two details would each have produced a *wrong*
+    lock character, which is worse than none: a line beginning `N: -> ` is a
+    process **blocked waiting**, not holding, and an `OFDLCK` line reports pid
+    `-1` because the lock belongs to the open file description. Windows still
+    shows none — nothing in user mode enumerates another process's locks.
+  - **Named anonymous-inode kinds**, closing #8. `a_inode` as the TYPE, and the
+    kind as the NAME with an identity substituted for the three kinds that have
+    one: `[eventpoll:4,6]` (the watched fds, sorted — `fdinfo` lists them
+    most-recent-first), `[eventfd:6]` (`eventfd-id`, *not* the count and not the
+    fd number), `[pidfd:N]`. `inotify` and the rest print their bare kind.
+- Two fuzz targets for the new parsers, `proc_maps` and `proc_locks`, per the
+  kit's one-per-text-parser rule. `proc_locks` earned its place on its first
+  run: the inode was validated as a number but stored as the *text* read, and
+  Rust's integer parser accepts a leading `+`, so an inode written `+7` was
+  keyed `"+7"` and could never match a row whose node is `"7"` — a lock
+  silently missed where the C, which keys on the number, finds it.
+- Three new differential fixtures (mapped files, locks, anonymous inodes) and
+  six cases; 26 cases over seven fixtures, 0 unexplained divergences.
+
+### Known, measured, not yet changed
+- `DIVERGENCES.md` **#14/#15**: lsof matches a **path argument by device and
+  inode**, not by name — which is also why naming a mount point selects
+  everything on that filesystem. lsof-rs matches by lowercased string prefix, so
+  it **misses** a file queried through a hard link and **over-reports** anything
+  whose name merely starts with the query (`lsof /proc` picks up an AF_UNIX
+  socket bound at `/proc/self/fd/17/sock`). Over-reporting is the worse half.
+  Fixing it means carrying the query path's device and inode into the core, so
+  it changes Windows too — its own change, not a backend phase.
+- `DIVERGENCES.md` **#16**: a socket in another network namespace. The C reads
+  the target's own `/proc/<pid>/net/*` and gets as far as `sock` /
+  `protocol: TCP`; lsof-rs reads `/proc/net/*` once, which is this namespace's
+  view, and leaves `SOCK` / `socket:[N]`.
+
 ### Changed
 - **Selection now follows lsof's OR rule** (`DIVERGENCES.md` #4, the largest
   behavioural gap left, and it changes Windows output too). lsof ORs its list

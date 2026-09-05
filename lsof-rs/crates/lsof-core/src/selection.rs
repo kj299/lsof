@@ -767,6 +767,7 @@ mod tests {
         // "matches -i" is now "contributes the NET selecter kind" — the bit the
         // OR/AND rule then tests.
         let sock_row = |ft: FileType, proto: Protocol| OpenFile {
+            lock: None,
             fd: FdType::Unknown,
             access: AccessMode::ReadWrite,
             file_type: ft,
@@ -1034,6 +1035,7 @@ mod tests {
     fn endpoint_peer_kept_with_pipe_rows_only() {
         use crate::model::{AccessMode, FdType, OpenFile};
         let pipe = OpenFile {
+            lock: None,
             fd: FdType::Handle(64),
             access: AccessMode::ReadWrite,
             file_type: FileType::Pipe,
@@ -1046,6 +1048,7 @@ mod tests {
             socket: None,
         };
         let reg = OpenFile {
+            lock: None,
             file_type: FileType::Regular,
             name: "C:\\peer\\data.txt".into(),
             ..pipe.clone()
