@@ -1,19 +1,97 @@
 //! The selection / filtering engine — the portable equivalent of the option
 //! handling in lsof's `src/arg.c` + `src/main.c`.
 //!
-//! MVP semantics (documented deliberately, since lsof's full AND/OR matrix is
-//! intricate):
+//! lsof's selection rule, which this reproduces exactly, is a set membership
+//! test rather than a chain of filters (`lib/proc.c:is_file_sel`, seven lines
+//! that decide everything):
 //!
-//! * Process selectors `-p` / `-u` / `-c` choose processes. Among the selectors
-//!   that are actually specified, they combine with OR by default and with AND
-//!   when `-a` ([`Selection::and_mode`]) is set.
-//! * `-i` is always an additional constraint: when present, only Internet
-//!   sockets are shown, optionally narrowed by protocol / port / host / family,
-//!   and a process with no matching socket is dropped. (This favors the common
-//!   intent of `lsof -i ...`; see README for the deviation from classic OR.)
-//! * With no selectors at all, every process and file is listed.
+//! * Each **list option** is a *kind* of selector ([`SelKinds`], the C's `SEL*`
+//!   bits). [`Selection::specified`] is the set of kinds this run gave — the
+//!   C's `Selflags`.
+//! * Every file accumulates the set of kinds *it* matched. A file starts with
+//!   the set its **process** matched (`lib/proc.c:178`, `Lf->sf = Lp->sf`) and
+//!   then ORs in the file-level kinds it matches itself.
+//! * With no `-a`, a file is listed when that set is **non-empty** — matching
+//!   any one specified selector is enough. This is lsof's documented
+//!   OR-by-default ("list options that are specifically stated are ORed").
+//! * With `-a`, the set must **contain every specified kind**.
+//! * With no selectors at all, everything is listed (the C's `AllProc`).
+//!
+//! The consequence that surprises everyone, verified against the C: without
+//! `-a`, `lsof -d ^mem -p PID` lists the whole host, *including* that PID's
+//! `mem` rows — they inherit the PID kind from their process even though the
+//! fd selector excluded them. Adding `-a` gives the intersection everyone
+//! expected. lsof-rs got this wrong until it was measured (DIVERGENCES.md #4).
+//!
+//! `-s` is deliberately **not** a list option: the C has no `SEL*` bit for
+//! socket state, so it can only veto a row, never select one. Same for the
+//! `-s` exclusion form, which is the C's `SELEXCLF` — an absolute veto that
+//! outranks the OR.
 
 use crate::model::{FdType, FileType, OpenFile, Process, Protocol};
+
+/// A set of selector *kinds* — lsof's "list options", the ones that take part
+/// in its OR-by-default / `-a`-ANDs rule. Mirrors the C's `SEL*` bits and their
+/// `SELPROC` / `SELFILE` / `SELNW` groupings (`lib/common.h:536-580`).
+///
+/// A tiny hand-rolled bitset rather than a dependency: `lsof-core` is zero-dep
+/// by policy, and this needs six operations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelKinds(u16);
+
+impl SelKinds {
+    /// No kinds — the C's `Selflags == 0` (before it defaults to `SelAll`).
+    pub const NONE: Self = Self(0);
+    /// `-p`, the C's `SELPID`.
+    pub const PID: Self = Self(1 << 0);
+    /// `-u`, the C's `SELUID`.
+    pub const UID: Self = Self(1 << 1);
+    /// `-c`, the C's `SELCMD`.
+    pub const CMD: Self = Self(1 << 2);
+    /// `-g`, the C's `SELPGID`.
+    pub const PGID: Self = Self(1 << 3);
+    /// `-d`, the C's `SELFD`.
+    pub const FD: Self = Self(1 << 4);
+    /// `-i`, the C's `SELNET`.
+    pub const NET: Self = Self(1 << 5);
+    /// `-U`, the C's `SELUNX`.
+    pub const UNX: Self = Self(1 << 6);
+    /// A path / `+d` / `+D` argument, the C's `SELNM`.
+    pub const NM: Self = Self(1 << 7);
+    /// `+L`, the C's `SELNLINK`.
+    pub const NLINK: Self = Self(1 << 8);
+
+    /// The process selecters — the C's `SELPROC`. A file inherits these from
+    /// its process; the rest it must match itself.
+    pub const PROC: Self = Self(Self::PID.0 | Self::UID.0 | Self::CMD.0 | Self::PGID.0);
+    /// The file and network selecters — the C's `SELFILE | SELNW`.
+    pub const FILE: Self =
+        Self(Self::FD.0 | Self::NET.0 | Self::UNX.0 | Self::NM.0 | Self::NLINK.0);
+
+    /// No selector of any kind — the run selects everything (`AllProc`).
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+    /// Every kind in `other` is present. The `-a` test.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+    /// At least one kind in `other` is present.
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+    /// The kinds present in both.
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+    /// The kinds present in either.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+    fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
 
 /// Parsed `-i` Internet filter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -146,6 +224,19 @@ pub struct Selection {
     pub pids: Vec<u32>,
     pub users: Vec<String>,
     pub commands: Vec<String>,
+    /// `-u ^name` / `-u ^uid`: accounts whose processes are never listed.
+    ///
+    /// Lsof.8: "A negated login name or user ID selection is neither ANDed nor
+    /// ORed with other selections; it is applied before all other selections
+    /// and absolutely excludes the listing of the files of the process." So
+    /// this is not a [`SelKinds`] kind at all — it cannot select anything, and
+    /// it outranks every selector that could, `-a` or no `-a`.
+    pub user_excludes: Vec<String>,
+    /// `-c ^name`: commands whose processes are never listed. The same
+    /// absolute exclusion as [`Selection::user_excludes`] (Lsof.8 `-c`: "then
+    /// the following characters specify a command name whose processes are to
+    /// be ignored").
+    pub command_excludes: Vec<String>,
     pub inet: InetFilter,
     /// `-a`: AND together the specified process selectors.
     pub and_mode: bool,
@@ -226,149 +317,68 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// True if any process-level selector was specified.
-    fn has_proc_selector(&self) -> bool {
-        !self.pids.is_empty()
-            || !self.users.is_empty()
-            || !self.commands.is_empty()
-            || !self.ppid_filter.is_empty()
+    /// Which process selecters `p` matches — the C's `lp->sf`
+    /// (`lib/proc.c:is_proc_excl`). A kind absent from
+    /// [`Selection::specified`] can never appear here.
+    fn proc_kinds(&self, p: &Process) -> SelKinds {
+        let mut k = SelKinds::NONE;
+        if !self.pids.is_empty() && self.pids.contains(&p.pid) {
+            k.insert(SelKinds::PID);
+        }
+        if !self.users.is_empty()
+            && self
+                .users
+                .iter()
+                .any(|u| user_matches(u, p.user.as_deref()))
+        {
+            k.insert(SelKinds::UID);
+        }
+        if !self.commands.is_empty() && self.commands.iter().any(|c| command_matches(c, &p.command))
+        {
+            k.insert(SelKinds::CMD);
+        }
+        // `-g` Windows extension: select processes whose parent is in the PPID
+        // list (the closest analog to PGID selection on Unix).
+        if !self.ppid_filter.is_empty() && p.ppid.is_some_and(|pp| self.ppid_filter.contains(&pp)) {
+            k.insert(SelKinds::PGID);
+        }
+        k
     }
 
-    /// Whether this process matches the specified process-level selectors,
-    /// combining them per the AND/OR rule. Returns `true` if none specified.
-    fn proc_matches(&self, p: &Process) -> bool {
-        if !self.has_proc_selector() {
-            return true;
-        }
-        let mut results: Vec<bool> = Vec::new();
-        if !self.pids.is_empty() {
-            results.push(self.pids.contains(&p.pid));
-        }
-        if !self.users.is_empty() {
-            results.push(
-                self.users
-                    .iter()
-                    .any(|u| user_matches(u, p.user.as_deref())),
-            );
-        }
-        if !self.commands.is_empty() {
-            results.push(self.commands.iter().any(|c| command_matches(c, &p.command)));
-        }
-        if !self.ppid_filter.is_empty() {
-            // `-g` Windows extension: select processes whose parent is in the
-            // PPID list (the closest analog to PGID selection on Unix).
-            results.push(p.ppid.is_some_and(|pp| self.ppid_filter.contains(&pp)));
-        }
-        if self.and_mode {
-            results.iter().all(|&b| b)
-        } else {
-            results.iter().any(|&b| b)
-        }
-    }
-
-    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
-    /// Non-sockets and "no `-s`" always pass; sockets with `^excluded`
-    /// states are always dropped; positive states act as a whitelist.
-    fn state_matches(&self, f: &OpenFile) -> bool {
-        let Some(filter) = &self.state_filter else {
-            return true;
-        };
-        let Some(sock) = &f.socket else {
-            // Non-sockets are passed through unchanged — `-s` is socket-only.
-            return true;
-        };
-        if let Some(proto) = filter.proto {
-            if sock.protocol != proto {
-                return false;
+    /// Which file selecters `f` matches — the bits the C ORs into `lf->sf`
+    /// (`lib/proc.c:219`, `:420`, and the dialect code). Note `-d ^mem` is an
+    /// *inclusion* here exactly as in the C: a file the exclusion does not name
+    /// matches the fd selecter and can be listed on that basis alone
+    /// (`lib/proc.c:223`, `if (fds != 1) Lf->sf |= SELFD`).
+    fn file_kinds(&self, f: &OpenFile) -> SelKinds {
+        let mut k = SelKinds::NONE;
+        if let Some(fd) = &self.fd_filter {
+            if fd.matches(&f.fd) {
+                k.insert(SelKinds::FD);
             }
         }
-        let state_name = sock
-            .state
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_default();
-        if filter
-            .exclude
-            .iter()
-            .any(|e| state_name.eq_ignore_ascii_case(e))
-        {
-            return false;
+        if self.unix_only && f.file_type == FileType::Unix {
+            k.insert(SelKinds::UNX);
         }
-        filter.include.is_empty()
-            || filter
-                .include
-                .iter()
-                .any(|i| state_name.eq_ignore_ascii_case(i))
-    }
-
-    /// Whether `p` passes the process-level selectors (`-p` / `-u` / `-c`),
-    /// ignoring file-level filters. Backends use this to scope expensive
-    /// per-process work to the processes that could be selected.
-    pub fn selects_process(&self, p: &Process) -> bool {
-        self.proc_matches(p)
-    }
-
-    /// Whether any process-level selector (`-p` / `-u` / `-c`) was given.
-    pub fn has_process_selector(&self) -> bool {
-        self.has_proc_selector()
-    }
-
-    /// Whether any path / directory-tree filter was given.
-    pub fn has_path_filter(&self) -> bool {
-        !self.paths.is_empty() || !self.dir_trees.is_empty()
-    }
-
-    /// Whether a `+D`/`+d` directory filter was given — which forces full
-    /// enumeration rather than the Restart Manager fast path.
-    pub fn has_dir_trees(&self) -> bool {
-        !self.dir_trees.is_empty()
-    }
-
-    /// Whether a single file passes the file-level filters (`-d`, `-i`, `-s`,
-    /// and path / directory matching). Kept when no file-level filter is
-    /// active.
-    fn file_matches(&self, f: &OpenFile) -> bool {
-        if !self.state_matches(f) {
-            return false;
+        if self.inet.enabled && self.inet_matches(f) {
+            k.insert(SelKinds::NET);
         }
-        // `-U` keeps AF_UNIX sockets only. This lives here rather than in a
-        // backend because it is a selection question, not an acquisition one:
-        // on Windows the ETW path happened to yield only AF_UNIX rows when `-U`
-        // was set, so the filter was never needed — until a backend that
-        // returns everything (Linux `/proc`) made `-U` list every open file.
-        if self.unix_only && f.file_type != FileType::Unix {
-            return false;
+        if self.has_path_filter() && self.path_matches(f) {
+            k.insert(SelKinds::NM);
         }
         if let Some(max) = self.max_links {
-            // `+L count`: keep links < count; drop if we know links and it's
-            // not under the threshold. Unknown links (sockets etc.) pass.
-            if let Some(n) = f.links {
-                if n >= max {
-                    return false;
-                }
+            // `+L count`: keep links < count. Unknown links (sockets etc.)
+            // pass, as they always have.
+            if !matches!(f.links, Some(n) if n >= max) {
+                k.insert(SelKinds::NLINK);
             }
         }
-        if let Some(fd) = &self.fd_filter {
-            if !fd.matches(&f.fd) {
-                return false;
-            }
-        }
-        if self.has_path_filter() {
-            let name = f.name.to_ascii_lowercase();
-            let exact = self.paths.iter().any(|p| {
-                let p = p.to_ascii_lowercase();
-                name == p || name.starts_with(&p)
-            });
-            let under = self
-                .dir_trees
-                .iter()
-                .any(|d| under_dir(&name, &d.to_ascii_lowercase()));
-            if !(exact || under) {
-                return false;
-            }
-        }
-        if !self.inet.enabled {
-            return true;
-        }
+        k
+    }
+
+    /// Whether `f` satisfies the `-i` narrowing (protocol / family / port /
+    /// host). Only called when `-i` was given.
+    fn inet_matches(&self, f: &OpenFile) -> bool {
         let Some(sock) = &f.socket else {
             return false;
         };
@@ -402,35 +412,218 @@ impl Selection {
         true
     }
 
+    /// Whether `f`'s name is one of the path arguments or under one of the
+    /// `+d`/`+D` trees. Only called when such an argument was given.
+    fn path_matches(&self, f: &OpenFile) -> bool {
+        let name = f.name.to_ascii_lowercase();
+        let exact = self.paths.iter().any(|p| {
+            let p = p.to_ascii_lowercase();
+            name == p || name.starts_with(&p)
+        });
+        exact
+            || self
+                .dir_trees
+                .iter()
+                .any(|d| under_dir(&name, &d.to_ascii_lowercase()))
+    }
+
+    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
+    /// Non-sockets and "no `-s`" always pass; sockets with `^excluded`
+    /// states are always dropped; positive states act as a whitelist.
+    fn state_matches(&self, f: &OpenFile) -> bool {
+        let Some(filter) = &self.state_filter else {
+            return true;
+        };
+        let Some(sock) = &f.socket else {
+            // Non-sockets are passed through unchanged — `-s` is socket-only.
+            return true;
+        };
+        if let Some(proto) = filter.proto {
+            if sock.protocol != proto {
+                return false;
+            }
+        }
+        let state_name = sock
+            .state
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if filter
+            .exclude
+            .iter()
+            .any(|e| state_name.eq_ignore_ascii_case(e))
+        {
+            return false;
+        }
+        filter.include.is_empty()
+            || filter
+                .include
+                .iter()
+                .any(|i| state_name.eq_ignore_ascii_case(i))
+    }
+
+    /// Whether `p` is absolutely excluded by a `^` negation on `-u` or `-c`.
+    ///
+    /// Applied before everything else and never ORed or ANDed, per Lsof.8.
+    /// Verified against the C: `lsof -c ^sleep -p <a sleep's pid>` prints
+    /// nothing, with or without `-a`, even though `-p` names that very
+    /// process.
+    pub fn excludes_process(&self, p: &Process) -> bool {
+        self.command_excludes
+            .iter()
+            .any(|c| command_matches(c, &p.command))
+            || self
+                .user_excludes
+                .iter()
+                .any(|u| user_matches(u, p.user.as_deref()))
+    }
+
+    /// The set of selector kinds this run specified — the C's `Selflags`
+    /// (`src/main.c:1199-1240`). Empty means "no selectors at all", the C's
+    /// `AllProc`: everything is listed.
+    pub fn specified(&self) -> SelKinds {
+        let mut k = SelKinds::NONE;
+        if !self.pids.is_empty() {
+            k.insert(SelKinds::PID);
+        }
+        if !self.users.is_empty() {
+            k.insert(SelKinds::UID);
+        }
+        if !self.commands.is_empty() {
+            k.insert(SelKinds::CMD);
+        }
+        if !self.ppid_filter.is_empty() {
+            k.insert(SelKinds::PGID);
+        }
+        if self.fd_filter.is_some() {
+            k.insert(SelKinds::FD);
+        }
+        if self.inet.enabled {
+            k.insert(SelKinds::NET);
+        }
+        if self.unix_only {
+            k.insert(SelKinds::UNX);
+        }
+        if self.has_path_filter() {
+            k.insert(SelKinds::NM);
+        }
+        if self.max_links.is_some() {
+            k.insert(SelKinds::NLINK);
+        }
+        k
+    }
+
+    /// Whether a backend must enumerate `p` at all — the only safe way to skip
+    /// work, now that selection ORs.
+    ///
+    /// This is *not* "is `p` selected": under the OR rule a file selecter can
+    /// select a file of a process that matches no process selecter, so
+    /// `lsof -d 3 -p PID` has to walk every process on the host. Skipping is
+    /// therefore allowed only when no file selecter was given (so nothing but
+    /// the process selecters can bring a row in), or under `-a`, where a
+    /// process failing any specified process selecter can contribute nothing.
+    /// The C gets the same effect from `is_proc_excl`'s `Selflags == SELPID`
+    /// equality tests (`lib/proc.c:684-720`) — "is this the *only* selecter".
+    pub fn selects_process(&self, p: &Process) -> bool {
+        if self.excludes_process(p) {
+            return false;
+        }
+        let specified = self.specified();
+        if specified.is_empty() {
+            return true;
+        }
+        if !self.and_mode && specified.intersects(SelKinds::FILE) {
+            return true;
+        }
+        self.proc_selected(self.proc_kinds(p))
+    }
+
+    /// Whether the process *itself* satisfied the process-level selecters,
+    /// under this run's OR/AND rule. A file's fate is decided by its own kind
+    /// set, not by this; the two things that still ask are the bare
+    /// process-row case in [`Selection::apply`] and the backend fast path.
+    fn proc_selected(&self, kinds: SelKinds) -> bool {
+        let spec = self.specified().intersection(SelKinds::PROC);
+        if spec.is_empty() {
+            return true;
+        }
+        if self.and_mode {
+            kinds.contains(spec)
+        } else {
+            !kinds.is_empty()
+        }
+    }
+
+    /// Whether any process-level selector    /// Whether any process-level selector (`-p` / `-u` / `-c`) was given.
+    pub fn has_process_selector(&self) -> bool {
+        self.specified().intersects(SelKinds::PROC)
+    }
+
+    /// Whether any path / directory-tree filter was given.
+    pub fn has_path_filter(&self) -> bool {
+        !self.paths.is_empty() || !self.dir_trees.is_empty()
+    }
+
+    /// Whether a `+D`/`+d` directory filter was given — which forces full
+    /// enumeration rather than the Restart Manager fast path.
+    pub fn has_dir_trees(&self) -> bool {
+        !self.dir_trees.is_empty()
+    }
+
     /// Apply the full selection to a backend's raw output, returning the
     /// processes to display with their files already filtered.
+    ///
+    /// This is `lib/proc.c:is_file_sel` with the same structure: build the set
+    /// of selecters each file matched, then test that set against the
+    /// specified set — non-empty for the OR, complete for `-a`.
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
+        let specified = self.specified();
         let mut out = Vec::new();
         for mut p in procs {
-            let selected = self.proc_matches(&p);
-            if !selected {
-                // `+E`: a process brought in only as a pipe-endpoint peer is
-                // shown despite matching no selector — but only its pipe
-                // (endpoint) rows, mirroring lsof's "the files of the
-                // endpoints are also displayed".
-                if !p.endpoint_peer {
+            if self.excludes_process(&p) {
+                continue; // `-u ^root` / `-c ^name`: before all other selection
+            }
+            // The kinds this process matched. A file inherits them only if the
+            // process matched something, the C's `PS_PRI` gate on
+            // `Lf->sf = Lp->sf` (`lib/proc.c:178`).
+            let inherited = self.proc_kinds(&p);
+            let peer_only = p.endpoint_peer && inherited.is_empty();
+            p.files.retain(|f| {
+                // `-s` is not a list option: it can only veto. Its exclusion
+                // form is the C's `SELEXCLF`, which outranks even the OR
+                // (`lib/proc.c:572`).
+                if !self.state_matches(f) {
+                    return false;
+                }
+                if specified.is_empty() {
+                    return true; // AllProc
+                }
+                // `+E`: a pipe row of a process pulled in only as an endpoint
+                // peer is force-selected, exactly as the C does it
+                // (`Lf->sf = Selflags`, `lib/proc.c:958`), so it survives both
+                // the OR and the `-a` test.
+                let sf = if peer_only {
+                    if f.file_type != FileType::Pipe {
+                        return false;
+                    }
+                    specified
+                } else {
+                    inherited.union(self.file_kinds(f))
+                };
+                if sf.is_empty() {
+                    return false;
+                }
+                !self.and_mode || sf.contains(specified)
+            });
+            if p.files.is_empty() {
+                // A process with no rows left is a result only when it was
+                // itself selected and no file selecter was given — the case
+                // where the renderer prints a bare process line.
+                if !self.proc_selected(inherited)
+                    || specified.intersects(SelKinds::FILE)
+                    || peer_only
+                {
                     continue;
                 }
-                p.files.retain(|f| f.file_type == FileType::Pipe);
-            }
-            p.files.retain(|f| self.file_matches(f));
-            let needs_file = self.inet.enabled
-                || self.unix_only
-                || self.has_path_filter()
-                || self.fd_filter.is_some();
-            if needs_file && p.files.is_empty() {
-                // `-i`, `-U`, `-d`, and path lookups require at least one
-                // matching file: a process with none is not a result row.
-                continue;
-            }
-            if !selected && p.files.is_empty() {
-                // An endpoint peer with nothing left to show isn't a result row.
-                continue;
             }
             out.push(p);
         }
@@ -571,6 +764,8 @@ mod tests {
         use crate::model::{AccessMode, FdType, FileType, OpenFile, Protocol, SocketInfo};
         // ETW-shaped rows: what etw::to_open_file emits for the families IP
         // Helper can't see (v4 ICMP, v6 ICMP, v4 RAW) plus a normal TCP row.
+        // "matches -i" is now "contributes the NET selecter kind" — the bit the
+        // OR/AND rule then tests.
         let sock_row = |ft: FileType, proto: Protocol| OpenFile {
             fd: FdType::Unknown,
             access: AccessMode::ReadWrite,
@@ -604,26 +799,26 @@ mod tests {
 
         // -iICMP matches both the v4 and v6 ICMP codes, nothing else.
         let icmp = filt(Some(Protocol::Other("ICMP")), None);
-        assert!(icmp.file_matches(&icmp4));
-        assert!(icmp.file_matches(&icmp6));
-        assert!(!icmp.file_matches(&raw4));
-        assert!(!icmp.file_matches(&tcp4));
+        assert!(icmp.file_kinds(&icmp4).intersects(SelKinds::NET));
+        assert!(icmp.file_kinds(&icmp6).intersects(SelKinds::NET));
+        assert!(!icmp.file_kinds(&raw4).intersects(SelKinds::NET));
+        assert!(!icmp.file_kinds(&tcp4).intersects(SelKinds::NET));
 
         // -i6ICMP narrows by family.
         let icmp_v6 = filt(Some(Protocol::Other("ICMP")), Some(6));
-        assert!(!icmp_v6.file_matches(&icmp4));
-        assert!(icmp_v6.file_matches(&icmp6));
+        assert!(!icmp_v6.file_kinds(&icmp4).intersects(SelKinds::NET));
+        assert!(icmp_v6.file_kinds(&icmp6).intersects(SelKinds::NET));
 
         // -iRAW matches RAW only — never ICMP (exact, not substring/prefix).
         let raw = filt(Some(Protocol::Other("RAW")), None);
-        assert!(raw.file_matches(&raw4));
-        assert!(!raw.file_matches(&icmp4));
-        assert!(!raw.file_matches(&tcp4));
+        assert!(raw.file_kinds(&raw4).intersects(SelKinds::NET));
+        assert!(!raw.file_kinds(&icmp4).intersects(SelKinds::NET));
+        assert!(!raw.file_kinds(&tcp4).intersects(SelKinds::NET));
 
         // Plain -i still matches every internet family.
         let any = filt(None, None);
         for r in [&icmp4, &icmp6, &raw4, &tcp4] {
-            assert!(any.file_matches(r));
+            assert!(any.file_kinds(r).intersects(SelKinds::NET));
         }
     }
 
@@ -642,6 +837,154 @@ mod tests {
             .collect();
         assert_eq!(matched, vec![1500]);
         assert!(!Selection::default().has_process_selector());
+    }
+
+    #[test]
+    fn list_options_or_by_default_across_kinds() {
+        // The rule this port got wrong until it was measured against the C:
+        // `-p 1000 -i` is a UNION. Process 1000 has no sockets, yet all of its
+        // files are listed (they inherit the PID match); process 1500 matches
+        // no process selecter, yet its sockets are listed (they match `-i`).
+        let mut sel = Selection {
+            pids: vec![1000],
+            ..Default::default()
+        };
+        sel.inet.enabled = true;
+        let got = sel.apply(mock::sample_processes());
+        assert_eq!(got.len(), 2, "both processes: {got:#?}");
+        let p1000 = got.iter().find(|p| p.pid == 1000).expect("1000 listed");
+        assert_eq!(p1000.files.len(), 2, "every file of the selected process");
+        assert!(
+            p1000.files.iter().all(|f| f.socket.is_none()),
+            "including the ones `-i` does not match"
+        );
+        let p1500 = got.iter().find(|p| p.pid == 1500).expect("1500 listed");
+        assert_eq!(p1500.files.len(), 3, "its sockets match `-i` on their own");
+    }
+
+    #[test]
+    fn dash_a_ands_across_kinds() {
+        // The same two selecters under `-a`: no file is both "belongs to 1000"
+        // and "is an Internet socket", so the result is empty.
+        let mut sel = Selection {
+            pids: vec![1000],
+            and_mode: true,
+            ..Default::default()
+        };
+        sel.inet.enabled = true;
+        assert!(sel.apply(mock::sample_processes()).is_empty());
+    }
+
+    #[test]
+    fn an_fd_exclusion_selects_what_it_does_not_exclude() {
+        // `-d ^cwd` is an *inclusion* of everything else, exactly as in the C
+        // (`lib/proc.c:223`, `if (fds != 1) Lf->sf |= SELFD`) — so on its own it
+        // lists the whole system minus cwd rows, rather than filtering some
+        // other selecter's result.
+        let sel = Selection {
+            fd_filter: Some(FdFilter {
+                include: vec![],
+                exclude: vec![FdSpec::Named(FdKind::Cwd)],
+            }),
+            ..Default::default()
+        };
+        let got = sel.apply(mock::sample_processes());
+        assert_eq!(got.len(), 2, "every process still appears");
+        let files: usize = got.iter().map(|p| p.files.len()).sum();
+        assert_eq!(files, 4, "5 files less the one cwd row");
+        assert!(got
+            .iter()
+            .flat_map(|p| &p.files)
+            .all(|f| f.fd != FdType::Cwd));
+    }
+
+    #[test]
+    fn a_state_filter_can_only_veto_never_select() {
+        // `-s` has no `SEL*` bit in the C, so it is not a list option: it
+        // cannot bring a row in, only drop one. With `-s` as the only argument
+        // the run still selects everything, minus the sockets it vetoes.
+        let sel = Selection {
+            state_filter: Some(StateFilter {
+                proto: None,
+                include: vec!["LISTEN".into()],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(sel.specified().is_empty(), "-s is not a specified kind");
+        let got = sel.apply(mock::sample_processes());
+        assert_eq!(got.len(), 2, "non-socket rows are untouched");
+        let states: usize = got
+            .iter()
+            .flat_map(|p| &p.files)
+            .filter(|f| f.socket.is_some())
+            .count();
+        assert_eq!(states, 1, "only the LISTEN socket survives");
+    }
+
+    #[test]
+    fn a_backend_may_not_skip_a_process_when_a_file_selecter_can_reach_it() {
+        // The scoping predicate backends use to avoid work. Under the OR rule a
+        // file selecter can select a file of a process that matches no process
+        // selecter, so nothing may be skipped; under `-a` it may.
+        let procs = mock::sample_processes();
+        let other = procs.iter().find(|p| p.pid == 1500).unwrap();
+        let mut sel = Selection {
+            pids: vec![1000],
+            ..Default::default()
+        };
+        assert!(!sel.selects_process(other), "-p alone can skip");
+        sel.inet.enabled = true;
+        assert!(
+            sel.selects_process(other),
+            "`-p 1000 -i` must still walk 1500 — its sockets match `-i`"
+        );
+        sel.and_mode = true;
+        assert!(
+            !sel.selects_process(other),
+            "under -a a process failing -p can contribute nothing"
+        );
+    }
+
+    #[test]
+    fn a_negation_excludes_absolutely_and_is_not_a_list_option() {
+        // Lsof.8: "A negated login name or user ID selection is neither ANDed
+        // nor ORed with other selections; it is applied before all other
+        // selections and absolutely excludes the listing of the files of the
+        // process." Verified against the C: `-c ^sleep -p <a sleep>` prints
+        // nothing, with or without `-a`, though `-p` names that process.
+        for and_mode in [false, true] {
+            let sel = Selection {
+                pids: vec![1000],
+                command_excludes: vec!["explorer".into()],
+                and_mode,
+                ..Default::default()
+            };
+            assert!(
+                sel.specified().intersects(SelKinds::PID),
+                "-p is still a specified kind"
+            );
+            assert_eq!(
+                sel.specified().0.count_ones(),
+                1,
+                "the negation adds no kind of its own"
+            );
+            let got = sel.apply(mock::sample_processes());
+            assert!(
+                !got.iter().any(|p| p.pid == 1000),
+                "and_mode={and_mode}: the negation outranks -p"
+            );
+        }
+        // It also stops the process from being walked at all, so a backend
+        // does no work for it and `-p` does not count it as located.
+        let sel = Selection {
+            user_excludes: vec!["alice".into()],
+            ..Default::default()
+        };
+        let procs = mock::sample_processes();
+        assert!(!sel.selects_process(&procs[0]));
+        assert!(sel.excludes_process(&procs[0]));
+        assert!(sel.apply(procs).is_empty(), "every mock process is alice's");
     }
 
     #[test]

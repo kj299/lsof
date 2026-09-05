@@ -292,8 +292,15 @@ fn main() {
             }
         };
         // PIDs the backend actually located, captured before selection filtering
-        // so a PID dropped by e.g. `-a` isn't misreported as "not found".
-        let located: HashSet<u32> = gathered.iter().map(|p| p.pid).collect();
+        // so a PID dropped by e.g. `-a` isn't misreported as "not found". A
+        // process killed by a `^` negation is the exception: the C marks a PID
+        // search item found only if the process survives exclusion, so
+        // `lsof -c ^sleep -p <a sleep>` exits 1 there, and now here.
+        let located: HashSet<u32> = gathered
+            .iter()
+            .filter(|p| !selection.excludes_process(p))
+            .map(|p| p.pid)
+            .collect();
         let procs = selection.apply(gathered);
         let unmatched = report_unmatched(&selection, &located, &procs);
         // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one

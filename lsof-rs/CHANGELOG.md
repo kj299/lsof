@@ -11,6 +11,51 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Selection now follows lsof's OR rule** (`DIVERGENCES.md` #4, the largest
+  behavioural gap left, and it changes Windows output too). lsof ORs its list
+  options unless `-a` ANDs them; lsof-rs ORed the *process* selectors but
+  applied every *file-level* one (`-i`, `-d`, `-U`, `+L`, paths)
+  unconditionally, so `lsof -d ^mem -p PID` listed one process where the C
+  lists the whole host. **If you relied on the old behaviour, add `-a`** — which
+  is what the same command has always required of the C.
+
+  `lsof-core` now models the C's actual rule, which is a set membership test
+  rather than a chain of filters (`lib/proc.c:is_file_sel`, seven lines). Each
+  list option is a *kind* (`SelKinds`, the C's `SEL*` bits); every file carries
+  the set of kinds it matched, starting from the set its **process** matched
+  and adding the file-level kinds it matches itself. Without `-a` a non-empty
+  set lists the file; with `-a` the set must contain every specified kind. Four
+  things fell out of measuring that against the C rather than reading it: a
+  `-d ^mem` **exclusion is an inclusion** of everything it does not name, so on
+  its own it selects the whole system; `-s` is **not** a list option (the C has
+  no bit for socket state, so it can only veto); a process failing its *only*
+  process selector is dropped, while one failing *one of several* is still
+  walked so its files can match; and, the case that proves the model,
+  `-d ^mem -p PID` without `-a` still shows that PID's `mem` rows, because they
+  inherit the PID match even though the fd selector excluded them.
+- **`-u ^name` and `-c ^name` are negations, and now behave like it.** They
+  were parsed as literal names, so `lsof -u ^root` matched an account called
+  "^root" and printed nothing where the C prints every non-root row — a wrong
+  answer, not a missing feature. Lsof.8 is explicit that a negation "is neither
+  ANDed nor ORed with other selections; it is applied before all other
+  selections and absolutely excludes the listing of the files of the process",
+  and the C bears that out: `-c ^sleep -p <a sleep's pid>` prints nothing with
+  or without `-a`, though `-p` names that very process. A negation is therefore
+  not a `SelKinds` kind at all — it cannot select, only veto, and it outranks
+  everything that can. An excluded process also stops counting as a located
+  `-p` search item, so that command exits 1 in both binaries. Two differential
+  cases pin it.
+- `Selection::selects_process`, the predicate backends use to skip work, had to
+  change with it: under the OR rule a file selector can select a file of a
+  process matching no process selector, so a backend may only skip when no file
+  selector was given, or under `-a`. Skipping wrongly would have silently
+  under-reported instead of failing.
+- The Windows smoke suite gains `-a` on the seven cases that combined a file
+  selector with a process selector and meant the intersection. One of them
+  (`-d cwd -p PID` asserting no `REG` rows) would have failed outright; the
+  other six would have kept passing for the wrong reason, which is worse.
+
 ### Security
 - **Control characters in COMMAND, NAME and USER are escaped before they reach
   the terminal, on both platforms** (DIVERGENCES.md #10, found by the
@@ -45,6 +90,26 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   column.
 
 ### Added
+- **The differential proves the OR rule with a deterministic pair**,
+  `or-semantics-path-or-inet` and `or-semantics-path-and-inet` (20 cases now,
+  from 19). Each ORs two selectors that name exactly one fixture apiece — a
+  path only fixture A holds, and fixture B's TCP listener, whose ephemeral port
+  the harness now publishes — so the union is two rows and nothing on the host
+  can drift into it. They replace `files-or-semantics-no-a`, which ran a
+  whole-host command and therefore **could never be gated**: each binary lists
+  *itself* under a pid that differs every run, so two consecutive runs of the C
+  do not match each other. Neither new case uses a process selector, on
+  purpose: a process selector makes its process "primarily selected" and every
+  one of its files then inherits that match, `mem` rows included, so such a
+  case would measure the L2 mem-row debt instead of the rule.
+- `DIVERGENCES.md` #13: the C exits **1** from a successful `lsof -c ^name`
+  listing but **0** from `lsof -u ^name`, an asymmetry between two options its
+  own manual describes identically. Recorded as a C-DEFECT and not reproduced.
+- `DIVERGENCES.md` #12, found while writing those cases: **lsof stops option
+  parsing at the first non-option argument**, so `lsof FILE -iTCP:N` reads
+  `-iTCP:N` as a second *filename* and exits 1; lsof-rs permutes. Recorded
+  rather than changed, since matching the C would break command lines that work
+  today.
 - **The differential's hostile-name fixtures** — fixture A gains a file on fd
   4 whose name holds an ANSI colour sequence, CR, TAB, a space, a backslash,
   DEL, é and U+009B; fixtures C and D are sleepers whose *comm* is hostile

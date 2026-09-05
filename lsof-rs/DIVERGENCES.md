@@ -36,14 +36,6 @@ disagreeing, and it names the C code so anyone can check the triage.
   `u` (uid), `G` (file flags), `l` (lock), `D` (device as hex) and *empty*
   `a`/`l` fields; lsof-rs emits none of those and `d` (`maj,min`) where the C
   emits `D`. Model and renderer gaps shared with Windows.
-- [x] files-or-semantics-no-a: DECISION — lsof ORs list options unless `-a`
-  (Lsof.8 §OPTIONS: "list options that are specifically stated are ORed";
-  `-a` "causes all list selection options to be ANDed"). lsof-rs ORs the
-  *process* selectors (`-p -c -u -g`) unless `-a`, matching the C, but applies
-  *file-level* selectors (`-i`, `-d`, `-U`, paths) unconditionally. So
-  `lsof -d ^mem -p PID` lists the whole host in the C and one process in
-  lsof-rs. Deliberately the only un-`-a`'d case, so the divergence stays
-  visible in every run.
 - [x] hostile-comm-utf8-table: C-DEFECT, not reproduced — the C sizes the
   COMMAND column with `safestrlen()` (`lib/misc.c`), which compares each
   `char` with `0x20`; `char` is signed on x86-64, so every byte ≥ 0x80 is
@@ -54,6 +46,47 @@ disagreeing, and it names the C code so anyone can check the triage.
   prints the same text. `hostile-comm-utf8-fields-Ffc` on the same comm
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
+
+## Fixed by rebuilding the selection engine (2026-09-05)
+
+Item 4 below — lsof's OR-by-default list semantics — is closed. It was the
+largest behavioural gap left, and it changes Windows output too.
+
+The C's rule is a set membership test, not a chain of filters, and it lives in
+seven lines (`lib/proc.c:is_file_sel`). Every file carries the set of selecters
+it matched: it starts with the set its *process* matched (`lib/proc.c:178`,
+`Lf->sf = Lp->sf`) and ORs in the file-level kinds it matches itself. Without
+`-a` a file is listed when that set is non-empty; with `-a` the set must contain
+every specified kind. `lsof-core`'s `selection::SelKinds` now models exactly
+that, where before it ORed the process selecters and applied every file-level
+selecter unconditionally.
+
+Measured against the C, not inferred. The consequence nobody predicts, and the
+one that proves the model: without `-a`, `lsof -d ^mem -p PID` lists the whole
+host **including that PID's `mem` rows** — they inherit the PID kind even though
+the fd selecter excluded them. Both binaries now agree at 11 rows, 4 of them
+`mem`; adding `-a` gives 7 rows and none. Three further facts the source alone
+did not settle, each measured:
+
+- **`-d ^mem` is an inclusion.** The exclusion form sets the fd selecter's bit
+  on every file it does *not* name (`lib/proc.c:223`), so on its own it selects
+  the whole system minus `mem` rows rather than filtering something else.
+- **`-s` is not a list option.** The C has no `SEL*` bit for socket state, so
+  `-s` can only veto a row, never select one; its exclusion form is `SELEXCLF`,
+  a veto that outranks even the OR.
+- **A process failing its only process selecter is dropped outright**, but one
+  failing *one of several* is not — it is still walked so its files can match
+  file selecters (the `Selflags == SELPID` equality tests at
+  `lib/proc.c:684-720`). The same asymmetry governs when a backend may skip a
+  process, which is why `Selection::selects_process` had to change with it.
+
+The gate changed shape too. `files-or-semantics-no-a` is gone: it ran a
+whole-host command, and a whole-host command **cannot be gated**, because each
+binary lists *itself* under a pid that differs every run — two consecutive runs
+of the C do not even match each other. It is replaced by
+`or-semantics-path-or-inet` and `or-semantics-path-and-inet`, which OR (and AND)
+two selecters that each name exactly one fixture, so the result is two rows and
+nothing on the host can drift into it. Both MATCH, stdout and exit code.
 
 ## Fixed by the renderer escaping (2026-09-04)
 
@@ -149,7 +182,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 1 | `(QR=0 QS=0)` | `(QR=0) (QS=0)` | `-T` suffix shape · `docs/known-limitations.md` |
 | 2 | `-Tq` replaces the state | keeps `(ESTABLISHED)`, appends | `-T` semantics · `docs/known-limitations.md` |
 | 3 | `COMMAND` truncated to 9 | not truncated | default column width · `docs/known-limitations.md` |
-| 4 | list options ORed unless `-a` | file-level selectors always ANDed | selection engine · `files-or-semantics-no-a` above |
+| 4 | list options ORed unless `-a` | ~~file-level selectors always ANDed~~ **resolved 2026-09-05** | selection engine; see "Fixed by rebuilding the selection engine" above |
 | 5 | `-F` emits `g u G l D`, empty `a`/`l` | omits them; `d` for `D` | `-F` renderer + model · `files-fields-F` above |
 | 6 | `-o` → header `OFFSET`, blank when unknown | header unchanged, falls back to size | renderer · `files-offset-o` above |
 | 7 | `8uW` — `W` marks a write lock on the fd | `8u` | lock column; Linux source is `/proc/locks` (L2), Windows has byte-range locks |
@@ -157,6 +190,10 @@ likely right; it is a compatibility decision, not a backend phase.
 | 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
 | 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |
 | 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | `f` on every file, whatever the selection | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. **DECISION** — a Windows `-F` consumer that selects fields without `f` sees `f` lines today. |
+
+| 12 | option parsing **stops at the first non-option argument**, so `lsof FILE -iTCP:N` reads `-iTCP:N` as a second *filename*, does not find it, and exits 1 | permutes: `-iTCP:N` is an option wherever it appears | `lsof-cli`'s argument parser. Found by the `or-semantics-*` cases, whose first draft put the path first and diverged for this reason rather than the one they test. **DECISION** — matching the C would make command lines that work today stop working, so it is recorded rather than changed alongside the selection fix. |
+
+| 13 | `lsof -c ^name` **exits 1** even on a successful listing (1522 rows here), while `lsof -u ^name` exits 0 | both exit 0 | exit status. The C counts a negated `-c` as a search item it never located, and a negated `-u` not at all — an asymmetry between two options the man page describes identically, which is why this reads as an accident rather than a design. lsof-rs copies the half that is defensible: an *excluded* process does not count as a located `-p`, so `-c ^sleep -p <that sleep>` exits 1 in both. **C-DEFECT**, not reproduced. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

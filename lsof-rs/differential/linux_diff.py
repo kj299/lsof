@@ -216,12 +216,17 @@ def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture]:
     )
     sdir = os.path.join(work, "sockets")
     os.makedirs(sdir)
+    # The TCP listener's port is written to a file so the matrix can name it
+    # ({PORT}). An OR case is only deterministic when every one of its
+    # selectors names a fixture, and "-iTCP:<port>" is the one file-level
+    # selector that can (see linux-matrix.toml, or-semantics-*).
     py = (
         "import socket,os,time\n"
         "t=socket.socket(); t.bind(('127.0.0.1',0)); t.listen(1)\n"
+        "open(os.path.join(%r,'port'),'w').write(str(t.getsockname()[1]))\n"
         "u=socket.socket(socket.AF_UNIX); u.bind(os.path.join(%r,'u.sock')); u.listen(1)\n"
         "g=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); g.bind(('127.0.0.1',0))\n"
-        "time.sleep(600)\n" % sdir
+        "time.sleep(600)\n" % (sdir, sdir)
     )
     b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)  # 0,1,2 + 3 sockets
     c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
@@ -302,9 +307,30 @@ def run(args) -> int:
     try:
         for fx in fixtures:
             fx.start()
+        # {FILE} is a path only fixture A holds; {PORT} is fixture B's
+        # listener. Both name exactly one fixture, which is what makes the
+        # un-`-a`ed OR cases deterministic.
+        port_file = os.path.join(b.cwd, "port")
+        deadline = time.monotonic() + 3.0
+        while not os.path.exists(port_file) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        try:
+            with open(port_file) as f:
+                port = f.read().strip()
+        except OSError as e:
+            infra(f"fixture B did not publish its listener port: {e}")
+        if not port.isdigit():
+            infra(f"fixture B published a non-numeric port: {port!r}")
         cases = render_matrix(
             args.matrix,
-            {"A": str(a.pid), "B": str(b.pid), "C": str(c.pid), "D": str(d.pid)},
+            {
+                "A": str(a.pid),
+                "B": str(b.pid),
+                "C": str(c.pid),
+                "D": str(d.pid),
+                "FILE": os.path.join(a.cwd, "f.txt"),
+                "PORT": port,
+            },
         )
         matrix_json = os.path.join(work, "matrix.json")
         with open(matrix_json, "w") as f:
