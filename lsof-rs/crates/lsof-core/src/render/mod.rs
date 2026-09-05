@@ -14,6 +14,7 @@ pub mod json;
 pub mod table;
 
 pub use escape::Escaper;
+pub use table::TableOpts;
 
 /// Selected output format.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

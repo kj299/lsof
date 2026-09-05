@@ -116,20 +116,31 @@ against. The moment a backend landed on a platform where the reference
 implementation runs on the same host, all three fell out of a single
 side-by-side run.
 
-They are recorded rather than fixed because each one changes output that the
-Windows golden fixtures and the 61-case live smoke suite currently assert.
-Matching the C is very likely right, but it is a deliberate compatibility
-decision, not a bug fix to slip into a backend phase.
+All three have since been **fixed**, and each turned out to be larger than the
+one-line entry suggested. They are kept here because the change is visible on
+Windows too, where there is no C to compare against:
 
-| # | The C | lsof-rs | Notes |
-|---|---|---|---|
-| 1 | `(QR=0 QS=0)` | `(QR=0) (QS=0)` | `-T` suffix: the C emits **one** parenthesised group, space-separated. |
-| 2 | `-Tq` replaces the state | `-Tq` keeps `(ESTABLISHED)` and appends | In the C, `-T`'s sub-flags select *what is shown*; `-Ts` is what asks for state, and it is the default. Ours treats queues as purely additive. |
-| 3 | `COMMAND` truncated to 9 | not truncated | The C's default column width is 9 (`+c` overrides). `command_width` defaults to `None` here, so a 15-char `/proc` comm prints in full. |
+| # | The C, now matched | what lsof-rs did before |
+|---|---|---|
+| 1 | `(LISTEN QR=0 QS=0)` — **one** parenthesised group, space-separated, in `print_tcptpi()`'s own order | one group per fact: `(LISTEN) (QR=0) (QS=0)` |
+| 2 | `-T`'s letters **select**: `-T q` is the queues *instead of* the state, a bare `-T` annotates nothing, and `+T` restores the state-only default | treated them as additive, and rejected `+T` outright |
+| 3 | `COMMAND` is capped at 9 characters (`CMDL`) unless `+c` says otherwise | printed the whole name |
+
+Two further `-T` rules came out of the same measurement: `-T` takes a value, so
+`lsof -T q` with a space works (lsof-rs read `q` as a filename and exited 1);
+and `w` is not a letter the **Linux** C accepts, so `-T w` is a hard error
+there while staying valid on Windows, which can actually read the window. `+c`
+likewise gained two: the cut happens at the resulting **column width**, never
+narrower than the `COMMAND` header — so `+c 5` prints seven characters — and a
+`+c` wider than the longest command name the system can report is an error.
+
+`-T` does not gate JSON: `-J` / `-j` remain the full structured dump, with
+`state` and `tcp_*` keys whenever the model holds them. `-T` is about the
+table's NAME annotation and `-F`'s `T` tokens, which is where the C applies it.
 
 Since 2026-09-02 the Linux differential runs as a CI gate and keeps the full
 list in [`../DIVERGENCES.md`](../DIVERGENCES.md), which adds six more found the
-day it landed. Two of the largest have since been **fixed**:
+day it landed. The largest have since been **fixed**:
 
 * lsof's **OR-by-default list semantics** — lsof-rs applied file-level selectors
   unconditionally, so `lsof -d ^mem -p PID` listed one process where the C lists
@@ -145,7 +156,7 @@ day it landed. Two of the largest have since been **fixed**:
   it. The table still shows ` (LISTEN)` — it was being reported twice.
 
 Read that file as the authoritative ledger; this section is the narrative for
-the first three.
+the first three, which are now closed as well.
 
 One entry in that ledger has since been **closed rather than recorded**, because
 it was a security fix and not a compatibility choice: control characters in

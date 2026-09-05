@@ -180,6 +180,53 @@ name = "sockets-fields-F"
 args = ["-n", "-P", "-F", "-a", "-p", "{B}"]
 
 [[case]]
+# THE -T SELECTION MODEL. `-T`'s sub-letters SELECT, they do not add: the C
+# zeroes Ftcptpi before ORing them in, so `-T q` is the queues INSTEAD of the
+# state. And the annotation is ONE parenthesised group, space-separated, in
+# print_tcptpi()'s own order (state, read queue, send queue) rather than the
+# order the letters were given.
+name = "sockets-dash-T-queues-only"
+args = ["-n", "-P", "-a", "-i", "-T", "q", "-p", "{B}"]
+
+[[case]]
+name = "sockets-dash-T-state-and-queues"
+args = ["-n", "-P", "-a", "-i", "-Tqs", "-p", "{B}"]
+
+[[case]]
+# Letter order must not reach the output: print_tcptpi() has its own.
+name = "sockets-dash-T-letter-order-ignored"
+args = ["-n", "-P", "-a", "-i", "-Tsq", "-p", "{B}"]
+
+[[case]]
+# A bare `-T` DISABLES the annotation (main.c: `Ftcptpi = GOp == '-' ? 0 : …`).
+# It is not "-T with default sub-options", which is what lsof-rs used to read
+# it as.
+name = "sockets-dash-T-bare-disables"
+args = ["-n", "-P", "-a", "-i", "-T", "-p", "{B}"]
+
+[[case]]
+# ...and `+T` is the way back to the state-only default.
+name = "sockets-plus-T-restores-default"
+args = ["-n", "-P", "-a", "-i", "+T", "-p", "{B}"]
+
+[[case]]
+# `-T f` selects the socket options, which the Linux dialect fills only for
+# AF_UNIX rows and whose printer then ignores. So nothing prints — but the C
+# has already written the separator space, so every socket row ends in one.
+# (The differential normalizer strips trailing whitespace, so what this case
+# really gates is that no row gained a *group*; the golden test holds the
+# space itself.)
+name = "sockets-dash-T-options-only"
+args = ["-n", "-P", "-a", "-i", "-Tf", "-p", "{B}"]
+
+[[case]]
+# `w` is not a letter the Linux C accepts: HASTCPTPIW is undefined there, so
+# `-T w` is a hard error and exit 1, not a request that quietly returns
+# nothing. Windows, which can read the window from EStats, still accepts it.
+name = "sockets-dash-T-window-rejected"
+args = ["-n", "-P", "-a", "-i", "-Tw", "-p", "{B}"]
+
+[[case]]
 # The AF_UNIX state, which is not in the NAME: the C keeps it in `Lf->lts` and
 # prints it from print_tcptpi(), so `-Fn` carries `… type=STREAM` and the state
 # arrives separately as `TST=`. Fixture B holds one socket in each state lsof
@@ -206,6 +253,42 @@ args = ["-n", "-P", "-a", "-p", "{E}"]
 # so `-F D` is the only place a wrong decoding shows.
 name = "mappings-fields-F"
 args = ["-n", "-P", "-F", "-a", "-p", "{E}"]
+
+# ------------------------------------------------- COMMAND column width (H)
+# THE DEFAULT WIDTH. The C caps COMMAND at CMDL (9) unless `+c` says
+# otherwise; lsof-rs printed the whole name. Every other fixture's command is
+# `sleep`, `python3` or a hostile string — under the cap, or ledgered for a
+# different reason — so fixture H exists purely to make the cap visible. Its
+# command is 15 characters, the Linux comm ceiling.
+
+[[case]]
+name = "command-width-default-is-nine"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{H}"]
+
+[[case]]
+# `+c 0` is no cap at all, not a cap of nothing (Lsof.8).
+name = "command-width-plus-c-zero-is-no-cap"
+args = ["-n", "-P", "+c", "0", "-a", "-d", "cwd", "-p", "{H}"]
+
+[[case]]
+# A `+c` narrower than the `COMMAND` header is effectively the header width:
+# `+c` caps each row's CONTRIBUTION to the column, and the cut then happens at
+# the column width, which starts at strlen("COMMAND"). So `+c 3` prints seven
+# characters, not three.
+name = "command-width-plus-c-below-header"
+args = ["-n", "-P", "+c", "3", "-a", "-d", "cwd", "-p", "{H}"]
+
+[[case]]
+# Exactly the ceiling: accepted, and the whole 15-character name prints.
+name = "command-width-plus-c-at-system-max"
+args = ["-n", "-P", "+c", "15", "-a", "-d", "cwd", "-p", "{H}"]
+
+[[case]]
+# The C refuses a width wider than the longest command name the system can
+# report (MAXSYSCMDL, 15 on Linux) rather than accepting a number it could
+# never fill. Exit 1, no output.
+name = "command-width-plus-c-over-system-max"
+args = ["-n", "-P", "+c", "16", "-a", "-d", "cwd", "-p", "{H}"]
 
 # --------------------------------------------------------------- path arguments
 # lsof matches a path argument by what the file IS -- its (device, inode) --

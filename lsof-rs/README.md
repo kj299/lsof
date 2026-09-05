@@ -89,13 +89,13 @@ independent code and per-OS "dialect" backends:
 
 All planned phases (0–4) are implemented and **validated on real Windows 11
 hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
-61 cases covering every option, output format, and code path, differentially
+62 cases covering every option, output format, and code path, differentially
 cross-checked against native Windows oracles (no downloads). The few
 skips in any single pass are mode-specific (admin-only features unelevated, and
 vice versa) — running an unelevated **and** an elevated pass exercises
 everything. Latest field validation: the released **v1.0.1** `lsof.exe`, as
 downloaded, on Windows 11 (build 26200) — 51 PASS unelevated and 57 PASS
-elevated, zero failures, zero hangs, all 61 cases green in at least one mode.
+elevated, zero failures, zero hangs, all 62 cases green in at least one mode.
 That checkpoint is not a formality: it is what caught the elevated stall fixed
 in 1.0.1, on a build every automated gate had passed. The
 [research roadmap](docs/research-roadmap.md) is fully dispositioned — every

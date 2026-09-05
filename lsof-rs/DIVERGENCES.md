@@ -48,6 +48,79 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by measuring `-T` and the COMMAND column (2026-09-05)
+
+Closes items 1, 2 and 3 of the decision table — the last of the "recorded for
+decision" renderer differences, all three found on the day the Linux
+differential landed and all three shared with Windows.
+
+The sweep found **more than the three**: `-T` turned out to be a selection
+model, not a set of additive flags, and `+c` turned out to have three separate
+rules rather than one number.
+
+### `-T` selects; it does not add (items 1 and 2)
+
+The C keeps one bitset, `Ftcptpi`, and `-T<letters>` **zeroes it** before ORing
+the letters in. Measured, on a fixture holding TCP, UDP and four AF_UNIX rows:
+
+| | the C | lsof-rs before |
+|---|---|---|
+| no `-T` | `(LISTEN)` | same |
+| `-T` | *nothing at all* | `(LISTEN) (QR=0) (QS=0)` |
+| `+T` | `(LISTEN)` | **rejected as an unknown option** |
+| `-T s` | `(LISTEN)` | same |
+| `-T q` | `(QR=0 QS=0)` | `(LISTEN) (QR=0) (QS=0)` |
+| `-T qs` / `-T sq` | `(LISTEN QR=0 QS=0)` | `(LISTEN) (QR=0) (QS=0)` |
+| `-T w` | error, exit 1 | accepted, rendered nothing |
+
+Three things fall out of that table beyond the two ledgered items:
+
+* **A bare `-T` disables the annotation** (`main.c`:
+  `Ftcptpi = (GOp == '-') ? 0 : TCPTPI_STATE`). It is how lsof is told to stop
+  annotating socket rows, and `+T` is the way back — an option lsof-rs did not
+  accept at all.
+* **`-T` takes a value** (`T:` in the C's option string), so `lsof -T q` with a
+  space works and `lsof -T /path` consumes the path and rejects `/` as a
+  sub-option. lsof-rs read the following word as a filename and exited 1.
+* **`w` is not a letter the Linux C accepts.** `HASTCPTPIW` is undefined there,
+  so `-T w` is a hard error rather than a request that quietly returns nothing.
+  It stays valid on Windows, which reads the window from EStats — the C
+  compiles its letter list per dialect and so does lsof-rs now.
+* **The letter order never reaches the output**: `print_tcptpi()` has its own
+  fixed order (state, read queue, send queue).
+* **`f` is the socket's options** (`SO=ACCEPTCON,…`), not "follow" as lsof-rs's
+  parser had it. Its Linux dialect fills `lts.opt` only for AF_UNIX rows, whose
+  printer ignores everything but the state, so `-T f` there selects something
+  that never prints — and leaves the separator space below on every row.
+
+One C artifact is **reproduced deliberately**: the separator space is written
+*before* `print_tcptpi()` runs, on the strength of `Ftcptpi` being non-zero and
+the row being a resolved socket. When nothing then prints, the space is left, so
+`lsof -T f` ends every socket row in whitespace. The differential's normalizer
+strips trailing whitespace, so a golden test is what holds it.
+
+### The COMMAND column has three rules, not one (item 3)
+
+Measured with a 15-character command (the Linux comm ceiling):
+
+* **The default width is 9** — the C's `CMDL`. lsof-rs printed the whole name.
+* **`+c` caps a row's *contribution* to the column width; the cut happens at the
+  resulting width.** `CmdColW` starts at `strlen("COMMAND")` and the print pass
+  is `safestrprtn(cp, CmdColW, …)`, so **`+c 5` still prints seven characters**.
+  lsof-rs cut at the `+c` number, so it printed five. Nothing had noticed
+  because no case used a `+c` below the header width.
+* **`+c` above `MAXSYSCMDL` is an error** — "what system provides", 15 on Linux.
+  lsof-rs accepted any number. Platform-specific, like the `-T w` letter:
+  Windows has no such ceiling on an image name and keeps accepting.
+
+### What the gate gained
+
+Fixture **H** exists because of a mutation test: deleting the new default cap
+left all 46 cases green. Every other fixture's command is `sleep`, `python3` or
+a hostile string — under the cap, or ledgered for another reason — so nothing
+could see it. H is a sleeper with a plain 15-character name. Seven mutants were
+then run against the 48-case suite and each was caught by the case meant for it.
+
 ## Fixed by implementing the whole `-F` field set (2026-09-05)
 
 Retires ledger entries `files-fields-F` and item 11, and closes items 5 and 11
@@ -391,14 +464,14 @@ CI job that runs them was written:
 ## Recorded for decision — shared output, found by the Linux oracle
 
 These change what the **Windows** binary prints too, and each alters output the
-golden fixtures and the 61-case smoke suite assert. Matching the C is very
+golden fixtures and the 62-case smoke suite assert. Matching the C is very
 likely right; it is a compatibility decision, not a backend phase.
 
 | # | The C | lsof-rs | Where |
 |---|---|---|---|
-| 1 | `(QR=0 QS=0)` | `(QR=0) (QS=0)` | `-T` suffix shape · `docs/known-limitations.md` |
-| 2 | `-Tq` replaces the state | keeps `(ESTABLISHED)`, appends | `-T` semantics · `docs/known-limitations.md` |
-| 3 | `COMMAND` truncated to 9 | not truncated | default column width · `docs/known-limitations.md` |
+| 1 | `(QR=0 QS=0)` | ~~`(QR=0) (QS=0)`~~ **resolved 2026-09-05** | `-T` suffix is one space-separated group; see "Fixed by measuring `-T` and the COMMAND column" above |
+| 2 | `-Tq` replaces the state | ~~keeps `(ESTABLISHED)`, appends~~ **resolved 2026-09-05** | `-T`'s letters select rather than add; a bare `-T` disables, `+T` restores |
+| 3 | `COMMAND` truncated to 9 | ~~not truncated~~ **resolved 2026-09-05** | default column width, plus the `+c` cut rule and the `MAXSYSCMDL` ceiling |
 | 4 | list options ORed unless `-a` | ~~file-level selectors always ANDed~~ **resolved 2026-09-05** | selection engine; see "Fixed by rebuilding the selection engine" above |
 | 5 | `-F` emits `g u G l D`, empty `a`/`l` | ~~omits them; `d` for `D`~~ **resolved 2026-09-05** | `-F` renderer + model; see "Fixed by implementing the whole `-F` field set" above |
 | 6 | `-o` → header `OFFSET`, blank when unknown | header unchanged, falls back to size | renderer · `files-offset-o` above |

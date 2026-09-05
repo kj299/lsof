@@ -11,7 +11,7 @@
 # Sources, all three real and maintained:
 #   golden/*      crates/lsof-core/tests/golden.rs   (portable, every CI push)
 #   diff/*        ../differential/capture.ps1        (windows CI, hard gate)
-#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (61-case live harness)
+#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (62-case live harness)
 #
 # Keep it truthful: a case belongs here only if a test really runs those args
 # and really asserts on that output. Declaring coverage you don't have converts
@@ -267,6 +267,10 @@ name = "smoke/field-output-nul-F0"
 args = ["-F0", "-p", "SELF"]
 
 [[case]]
+name = "smoke/tcp-info-selects-not-adds-dash-T"
+args = ["-nP", "-iTCP:PORT", "-Tq"]
+
+[[case]]
 name = "smoke/json-aggregated-J"
 args = ["-J", "-p", "SELF"]
 
@@ -461,6 +465,29 @@ covers = ["type:unix"]
 name = "linux/differential-sockets-fields-F"
 args = ["-n", "-P", "-F", "-a", "-p", "PID"]
 covers = ["type:IPv4", "type:unix"]
+
+[[case]]
+name = "linux/differential-sockets-dash-T-queues-only"
+args = ["-n", "-P", "-a", "-i", "-T", "q", "-p", "PID"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "linux/differential-sockets-dash-T-state-and-queues"
+args = ["-n", "-P", "-a", "-i", "-Tqs", "-p", "PID"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "linux/differential-sockets-dash-T-bare-disables"
+args = ["-n", "-P", "-a", "-i", "-T", "-p", "PID"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "linux/differential-command-width-default"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-command-width-plus-c"
+args = ["-n", "-P", "+c", "3", "-a", "-d", "cwd", "-p", "PID"]
 
 [[case]]
 name = "linux/differential-sockets-unix-fields-F"

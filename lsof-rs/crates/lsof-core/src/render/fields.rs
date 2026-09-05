@@ -39,11 +39,19 @@
 
 use crate::model::{AccessMode, FdType, FileType, Process};
 use crate::render::Escaper;
+use crate::selection::TcpInfoFlags;
 
 /// Render `procs` in `-F` format. `nul` selects NUL line termination (`-F0`);
-/// `only` restricts the emitted fields (besides the `p`/`f` markers); `esc`
-/// chooses the platform's backslash rule.
-pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>, esc: Escaper) -> String {
+/// `only` restricts the emitted fields; `tcp_show` is `-T`'s selection, which
+/// gates the `T` tokens the same way it gates the table's suffix; `esc` chooses
+/// the platform's backslash rule.
+pub fn render(
+    procs: &[Process],
+    nul: bool,
+    only: Option<&[char]>,
+    tcp_show: TcpInfoFlags,
+    esc: Escaper,
+) -> String {
     let term = if nul { '\0' } else { '\n' };
     let want = |c: char| only.is_none_or(|s| s.contains(&c));
     let mut out = String::new();
@@ -185,23 +193,33 @@ pub fn render(procs: &[Process], nul: bool, only: Option<&[char]>, esc: Escaper)
             }
             // The TCP/TPI tokens come last, *after* the name: `print.c` calls
             // `print_tcptpi()` once `printname()` has run.
+            // Selecting the `T` field says these tokens may appear; `-T`
+            // says which of them do. `print_tcptpi()` consults `Ftcptpi` in
+            // both output modes, so the two gates are independent and both
+            // apply. (Bare `-F` sets `Ftcptpi` itself — see the CLI.)
             if want('T') {
                 if let Some(sock) = &f.socket {
-                    if let Some(st) = sock.state {
-                        push!('T', &format!("ST={}", st.as_str()));
+                    if tcp_show.state {
+                        if let Some(st) = sock.state {
+                            push!('T', &format!("ST={}", st.as_str()));
+                        }
                     }
                     // Extended info as repeated `T` fields with lsof's own
                     // prefixes: QR (read queue), QS (send queue), WR (window
                     // read size = our advertised receive window).
                     if let Some(tcp) = &sock.tcp {
-                        if let Some(q) = tcp.recv_queue {
-                            push!('T', &format!("QR={q}"));
+                        if tcp_show.queue {
+                            if let Some(q) = tcp.recv_queue {
+                                push!('T', &format!("QR={q}"));
+                            }
+                            if let Some(q) = tcp.send_queue {
+                                push!('T', &format!("QS={q}"));
+                            }
                         }
-                        if let Some(q) = tcp.send_queue {
-                            push!('T', &format!("QS={q}"));
-                        }
-                        if let Some(w) = tcp.recv_window {
-                            push!('T', &format!("WR={w}"));
+                        if tcp_show.window {
+                            if let Some(w) = tcp.recv_window {
+                                push!('T', &format!("WR={w}"));
+                            }
                         }
                     }
                 }

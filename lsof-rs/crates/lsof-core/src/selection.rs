@@ -141,14 +141,77 @@ pub enum EndpointMode {
     Files,
 }
 
-/// `-T [fqsw]` sub-flags. `f` (follow/repeat) is accepted but a no-op for a
-/// snapshot tool. `s` (state) is shown already; `q` (queue) and `w` (window)
-/// drive the extended-TCP-stats lookup.
+/// `-T [fqsw]`: which TCP/TPI facts a socket row shows.
+///
+/// These **select**, they do not add. The C keeps one bitset (`Ftcptpi`) and
+/// `-T<letters>` clears it before ORing in each letter, so `-T q` shows the
+/// queues and *not* the state — the state is what `s` asks for, and it is the
+/// default only because nothing else was said. A bare `-T` selects nothing at
+/// all (`main.c`: `Ftcptpi = (GOp == '-') ? 0 : TCPTPI_STATE`), which is how
+/// lsof is told to stop annotating socket rows; `+T` is the way back to the
+/// default. [`TcpInfoFlags::default`] is therefore all-false — "show nothing" —
+/// and the absence of any `-T` is [`TcpInfoFlags::DEFAULT`], state alone.
+///
+/// `f` is the socket's **options** (`SO=ACCEPTCON,…`), not "follow": the C's
+/// `TCPTPI_FLAGS`. Its Linux dialect fills `lts.opt` only for AF_UNIX rows,
+/// whose printer ignores everything but the state, so `-T f` there selects
+/// something that never prints. Accepted and carried; nothing renders it yet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TcpInfoFlags {
     pub state: bool,
     pub queue: bool,
     pub window: bool,
+    /// `f`: socket options. Parsed and stored; no renderer emits them.
+    pub options: bool,
+}
+
+impl TcpInfoFlags {
+    /// What a run with no `-T` at all shows: the connection state.
+    pub const DEFAULT: Self = Self {
+        state: true,
+        queue: false,
+        window: false,
+        options: false,
+    };
+
+    /// Whether anything at all is selected — the C's `Ftcptpi` being non-zero.
+    pub fn any(self) -> bool {
+        self.state || self.queue || self.window || self.options
+    }
+}
+
+/// The C's `CMDL`: characters of the command name the COMMAND column shows
+/// when `+c` says nothing (`lib/common.h`, applied at `lsof.c:110`). Not
+/// dialect-specific — the same nine on every platform the C builds for.
+pub const DEFAULT_COMMAND_WIDTH: usize = 9;
+
+/// `+c <n>`: how much of the command name the COMMAND column shows — the C's
+/// `CmdLim`.
+///
+/// Three states, not an `Option<usize>`, because `+c 0` and "no `+c` at all"
+/// are different answers and both would otherwise be `None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandWidth {
+    /// No `+c` given: [`DEFAULT_COMMAND_WIDTH`].
+    #[default]
+    Standard,
+    /// `+c 0` — Lsof.8: "If w is zero (0), all command characters are printed."
+    /// The C tests `CmdLim && len > CmdLim`, so zero is no cap rather than a
+    /// cap of nothing.
+    Unlimited,
+    /// `+c <n>`.
+    Chars(usize),
+}
+
+impl CommandWidth {
+    /// The cap in printed characters; `None` for no cap.
+    pub fn cap(self) -> Option<usize> {
+        match self {
+            CommandWidth::Standard => Some(DEFAULT_COMMAND_WIDTH),
+            CommandWidth::Unlimited => None,
+            CommandWidth::Chars(n) => Some(n),
+        }
+    }
 }
 
 /// Parsed `-s [proto:state[,state]]` selector. Includes/excludes apply to
@@ -289,9 +352,9 @@ pub struct Selection {
     /// `-w` sets this, `+w` clears it (default `false` — warnings on):
     /// suppresses the privilege-hint and other non-fatal stderr warnings.
     pub suppress_warnings: bool,
-    /// `+c <n>`: max width of the COMMAND column (truncate long names).
-    /// `None` means no cap (current behavior).
-    pub command_width: Option<usize>,
+    /// `+c <n>`: how much of the command name the COMMAND column shows.
+    /// Defaults to [`CommandWidth::Standard`] — a plain `lsof` run caps it.
+    pub command_width: CommandWidth,
     /// `--unicode`: enable UTF-8 output (banner / future Unicode glyphs) and
     /// switch the Windows console to CP 65001 at startup. Default (false) is
     /// pure ASCII output, which is the safe choice for legacy terminals like
@@ -306,11 +369,13 @@ pub struct Selection {
     /// any value but the backend always emits all threads of in-scope
     /// processes.
     pub list_tasks: bool,
-    /// `-T [fqsw]`: TCP/TPI info to append to socket rows. `None` = no `-T`.
-    /// `s` (state) is already shown; `q` (queue) and `w` (window) come from
-    /// per-connection extended TCP stats (`GetPerTcpConnectionEStats`), which
+    /// `-T [fqsw]`: which TCP/TPI facts socket rows show. `None` means no `-T`
+    /// was given, which is **not** the same as `-T` with no letters — see
+    /// [`TcpInfoFlags`] — so ask [`Selection::tcp_info`] rather than reading
+    /// this directly. `q` (queue) and `w` (window) come from per-connection
+    /// extended TCP stats (`GetPerTcpConnectionEStats` on Windows), which
     /// require elevation. See `docs/feature-parity-plan.md` Phase 5B.
-    pub tcp_info: Option<TcpInfoFlags>,
+    pub tcp_info_opt: Option<TcpInfoFlags>,
     /// `-U`: list UNIX-domain (AF_UNIX) sockets. On Windows these surface only
     /// via the ETW AFD path, so `-U` implies the (Administrator-only) ETW
     /// capture and restricts socket output to the AF_UNIX family.
@@ -333,6 +398,15 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Which TCP/TPI facts to show, resolving "no `-T` given" to the default.
+    ///
+    /// The distinction the `Option` carries is real: `None` is "the user said
+    /// nothing", which shows the state, while `Some(TcpInfoFlags::default())`
+    /// is a bare `-T`, which shows nothing.
+    pub fn tcp_info(&self) -> TcpInfoFlags {
+        self.tcp_info_opt.unwrap_or(TcpInfoFlags::DEFAULT)
+    }
+
     /// Which process selecters `p` matches — the C's `lp->sf`
     /// (`lib/proc.c:is_proc_excl`). A kind absent from
     /// [`Selection::specified`] can never appear here.

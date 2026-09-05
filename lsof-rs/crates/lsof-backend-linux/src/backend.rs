@@ -84,7 +84,7 @@ impl Backend for LinuxBackend {
         // /proc/net is system-wide, so it is read once for the whole gather
         // rather than per process. `-T q` is the only reason to pay for queue
         // depths; see SocketTable::load.
-        let socks = SocketTable::load(sel.tcp_info.is_some_and(|t| t.queue));
+        let socks = SocketTable::load(sel.tcp_info().queue);
         // /proc/locks is one table for the whole system, with a pid column, so
         // it is read once here rather than per process.
         let locks = crate::locks::load();

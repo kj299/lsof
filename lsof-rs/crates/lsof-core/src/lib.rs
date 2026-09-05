@@ -27,5 +27,6 @@ pub use model::{
 };
 pub use render::Escaper;
 pub use selection::{
-    EndpointMode, FdFilter, FdKind, FdSpec, InetFilter, Selection, StateFilter, TcpInfoFlags,
+    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, InetFilter, Selection, StateFilter,
+    TcpInfoFlags, DEFAULT_COMMAND_WIDTH,
 };
