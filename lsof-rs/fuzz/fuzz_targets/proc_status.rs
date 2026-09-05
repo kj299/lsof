@@ -16,7 +16,7 @@ use lsof_backend_linux::fuzz_api::parse_status;
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
-    let (command, _ppid, _uid) = parse_status(&text);
+    let command = parse_status(&text).command;
     // The command came from a single `Name:` line, so `str::lines` guarantees
     // the LINE held no '\n'. The parser then undoes the kernel's escaping of
     // that line — `\n` (two characters) back to a newline, `\\` back to `\` —
@@ -26,7 +26,10 @@ fuzz_target!(|data: &[u8]| {
     // from anywhere else would be `lines()` leaking. The renderer, not this
     // parser, keeps it off the terminal (lsof-core `render::escape`).
     //
-    // History, because this target has been wrong twice and the parser never:
+    // History, because this target has been wrong three times and the parser
+    // never — the third time it did not even compile, because `parse_status`
+    // grew from a tuple into a struct and nothing in `cargo test` builds this
+    // crate. `cargo fuzz build` is now part of the verification sweep:
     // the first draft asserted "no '\r'", disproved in seconds by
     // `Name:PPid:\rd:Uid:` (the kernel escapes only '\n' and '\\' here, so a
     // bare '\r' is faithful). The second asserted "no '\n'" after the parser

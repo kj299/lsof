@@ -90,6 +90,9 @@ pub struct FdInfo {
     pub eventfd_id: Option<i64>,
     /// `Pid:` on a pidfd — the process it refers to.
     pub pidfd_pid: Option<i64>,
+    /// The raw `flags:` value, octal in the file. lsof's `-F G` prints it in
+    /// hex; the access mode above is its low two bits.
+    pub flags: Option<u32>,
     /// `tfd:` lines — the fds an eventpoll watches, ascending, capped.
     pub tfds: Vec<i64>,
     /// There were more than [`EPOLL_MAX_TFDS`] of them, so the list is cut.
@@ -110,6 +113,7 @@ pub fn parse_fdinfo(info: &str) -> FdInfo {
     for line in info.lines() {
         if let Some(v) = line.strip_prefix("flags:") {
             if let Ok(flags) = u32::from_str_radix(v.trim(), 8) {
+                out.flags = Some(flags);
                 out.access = Some(match flags & 0o3 {
                     0 => AccessMode::Read,
                     1 => AccessMode::Write,
@@ -218,6 +222,11 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, socks: &SocketTable) -> Option<Op
                 None => e.info.display_name(false, false),
             };
             return Some(OpenFile {
+                // A socket has no filesystem device, so `-F D` has nothing to
+                // print; its open-file flags are real and come from fdinfo just
+                // like any other fd's.
+                fs_device: None,
+                file_flags: info.flags,
                 lock: None,
                 fd,
                 access,
@@ -235,6 +244,7 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, socks: &SocketTable) -> Option<Op
         }
     }
 
+    let fs_device = meta.as_ref().map(|m| m.dev());
     let (file_type, device, size, node, links) = match &meta {
         Some(m) => {
             // An anonymous inode stats as a regular file, but lsof types it
@@ -276,6 +286,8 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, socks: &SocketTable) -> Option<Op
     };
 
     Some(OpenFile {
+        fs_device,
+        file_flags: info.flags,
         lock: None,
         fd,
         access,

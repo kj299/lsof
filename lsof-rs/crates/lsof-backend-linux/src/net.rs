@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use lsof_core::model::{FileType, Protocol, SocketInfo, TcpExtInfo, TcpState};
+use lsof_core::model::{FileType, Protocol, SocketInfo, TcpExtInfo, TcpState, UnixState};
 
 /// One resolved socket: what the fd row becomes once the inode is matched.
 pub struct SocketEntry {
@@ -34,7 +34,10 @@ pub struct SocketEntry {
     /// The NODE cell — the protocol name (`TCP`/`UDP`) for internet sockets,
     /// the inode for AF_UNIX. Again lsof's own split, not ours.
     pub node: String,
-    /// AF_UNIX only: the ` type=STREAM (CONNECTED)` tail lsof appends to NAME.
+    /// AF_UNIX only: the ` type=STREAM` tail lsof appends to NAME. The state
+    /// is **not** part of it — the C keeps that in `Lf->lts` and prints it from
+    /// `print_tcptpi()`, the same place a TCP row's state comes from, so it
+    /// lands in `info.state` here and reaches `-F` as a `TST=` token.
     pub unix_suffix: Option<String>,
 }
 
@@ -90,14 +93,21 @@ impl SocketTable {
             };
             let local = parse_addr(f[INET_LOCAL], v6);
             let remote = parse_addr(f[INET_REMOTE], v6);
-            // UDP has no connection state; the column exists but means nothing,
-            // and lsof prints no state for it.
-            let state = if proto == Protocol::Tcp {
-                Some(tcp_state(f[INET_STATE]))
-            } else {
-                None
+            // Linux's `/proc/net/udp` reuses the TCP state numbers, but lsof
+            // registers exactly one name for UDP — `ESTABLISHED` (1), for a
+            // connected socket. Every other value, `TCP_CLOSE` (7) for the
+            // usual unconnected socket included, prints no state at all. That
+            // one-entry table is `build_IPstates()` verbatim, not a
+            // simplification.
+            let state = match proto {
+                Protocol::Tcp => Some(tcp_state(f[INET_STATE]).into()),
+                Protocol::Udp => (u32::from_str_radix(f[INET_STATE], 16) == Ok(0x01))
+                    .then(|| TcpState::Established.into()),
+                _ => None,
             };
-            let tcp = if queues && proto == Protocol::Tcp {
+            // Both tables carry `tx_queue:rx_queue`, and lsof reports the
+            // queues for UDP just as it does for TCP.
+            let tcp = if queues && matches!(proto, Protocol::Tcp | Protocol::Udp) {
                 parse_queues(f[INET_QUEUES])
             } else {
                 None
@@ -204,46 +214,54 @@ impl SocketTable {
                         protocol: Protocol::Other("unix"),
                         local: None,
                         remote: None,
-                        state: None,
+                        state: Some(unix_state(f[UNIX_FLAGS], f[UNIX_STATE]).into()),
                         tcp: None,
                     },
                     path: f.get(UNIX_PATH).map(|s| s.to_string()),
                     device,
                     node: inode.to_string(),
-                    unix_suffix: Some(unix_suffix(f[UNIX_TYPE], f[UNIX_FLAGS], f[UNIX_STATE])),
+                    unix_suffix: Some(unix_suffix(f[UNIX_TYPE])),
                 },
             );
         }
     }
 }
 
-/// lsof's ` type=STREAM (LISTEN)` tail for an AF_UNIX row.
-///
-/// The state shown is not simply the `St` column: a listening socket sits in
-/// `St=01` (unconnected) and is distinguished only by `SO_ACCEPTCON` in the
-/// flags, which is how the C tells a server socket from an idle one.
-pub fn unix_suffix(ty: &str, flags: &str, st: &str) -> String {
+/// lsof's ` type=STREAM` NAME tail for an AF_UNIX row, from the `Type` column
+/// of `/proc/net/unix`. The state is deliberately not here — see [`unix_state`].
+pub fn unix_suffix(ty: &str) -> String {
     let kind = match u32::from_str_radix(ty, 16) {
         Ok(1) => "STREAM",
         Ok(2) => "DGRAM",
         Ok(5) => "SEQPACKET",
         _ => "UNKNOWN",
     };
+    format!("type={kind}")
+}
+
+/// The state lsof shows for an AF_UNIX row, from the `Flags` and `St` columns.
+///
+/// It is not simply `St`: a listening socket sits in `SS_UNCONNECTED` and is
+/// told apart only by `SO_ACCEPTCON` in the flags. The C tests that with
+/// `Lf->lts.opt == __SO_ACCEPTCON` — **equality**, not a bit test — so a socket
+/// carrying any other flag alongside it is reported by its `St` instead; that
+/// is reproduced here rather than "fixed", because a consumer diffing the two
+/// binaries would see the difference.
+///
+/// Every row gets a state: a column that will not parse, or a number outside
+/// the kernel's `socket_state` enum, is `UNKNOWN` — which is what the C prints
+/// once its own `strtoul` failure has left the value at 0 (`SS_FREE`).
+pub fn unix_state(flags: &str, st: &str) -> UnixState {
     const SO_ACCEPTCON: u32 = 0x0001_0000;
-    let listening = u32::from_str_radix(flags, 16).is_ok_and(|f| f & SO_ACCEPTCON != 0);
-    let state = if listening {
-        Some("LISTEN")
-    } else {
-        match u32::from_str_radix(st, 16) {
-            Ok(0x02) => Some("CONNECTING"),
-            Ok(0x03) => Some("CONNECTED"),
-            Ok(0x04) => Some("DISCONNECTING"),
-            _ => None,
-        }
-    };
-    match state {
-        Some(s) => format!("type={kind} ({s})"),
-        None => format!("type={kind}"),
+    if u32::from_str_radix(flags, 16) == Ok(SO_ACCEPTCON) {
+        return UnixState::Listen;
+    }
+    match u32::from_str_radix(st, 16) {
+        Ok(0x01) => UnixState::Unconnected,
+        Ok(0x02) => UnixState::Connecting,
+        Ok(0x03) => UnixState::Connected,
+        Ok(0x04) => UnixState::Disconnecting,
+        _ => UnixState::Unknown,
     }
 }
 
@@ -493,30 +511,42 @@ mod tests {
     }
 
     #[test]
-    fn unix_suffix_matches_the_c() {
-        // Byte-for-byte the tails `lsof -U` prints. A listening socket sits in
-        // St=01 (unconnected) and is identified only by SO_ACCEPTCON, so the
-        // flags column — not the state column — is what makes it LISTEN.
-        assert_eq!(
-            unix_suffix("0001", "00010000", "01"),
-            "type=STREAM (LISTEN)"
-        );
-        assert_eq!(
-            unix_suffix("0001", "00000000", "03"),
-            "type=STREAM (CONNECTED)"
-        );
-        assert_eq!(unix_suffix("0002", "00000000", "01"), "type=DGRAM");
-        assert_eq!(
-            unix_suffix("0005", "00000000", "03"),
-            "type=SEQPACKET (CONNECTED)"
-        );
-        // A socket both listening and "connected" is still LISTEN: the flag
-        // wins, which is the case a state-only mapping would get wrong.
-        assert_eq!(
-            unix_suffix("0001", "00010000", "03"),
-            "type=STREAM (LISTEN)"
-        );
-        assert_eq!(unix_suffix("zz", "zz", "zz"), "type=UNKNOWN");
+    fn unix_suffix_is_the_type_alone() {
+        // Byte-for-byte the NAME tail `lsof -U` prints. The state is not part
+        // of it — see `unix_state_matches_the_c`.
+        assert_eq!(unix_suffix("0001"), "type=STREAM");
+        assert_eq!(unix_suffix("0002"), "type=DGRAM");
+        assert_eq!(unix_suffix("0005"), "type=SEQPACKET");
+        assert_eq!(unix_suffix("zz"), "type=UNKNOWN");
+        assert_eq!(unix_suffix(""), "type=UNKNOWN");
+    }
+
+    #[test]
+    fn unix_state_matches_the_c() {
+        // A listening socket sits in St=01 (unconnected) and is identified only
+        // by SO_ACCEPTCON, so the flags column — not the state column — is what
+        // makes it LISTEN.
+        assert_eq!(unix_state("00010000", "01"), UnixState::Listen);
+        assert_eq!(unix_state("00000000", "03"), UnixState::Connected);
+        // The case a state-only mapping gets wrong: both listening and
+        // "connected". The flag wins.
+        assert_eq!(unix_state("00010000", "03"), UnixState::Listen);
+        // Every other socket_state value, spelled the way the kernel does.
+        assert_eq!(unix_state("00000000", "01"), UnixState::Unconnected);
+        assert_eq!(unix_state("00000000", "02"), UnixState::Connecting);
+        assert_eq!(unix_state("00000000", "04"), UnixState::Disconnecting);
+        // SS_FREE (0), an out-of-range number, and unparsable columns are all
+        // UNKNOWN — never "no state", which is what a socket with a state the
+        // C cannot name still prints.
+        assert_eq!(unix_state("00000000", "00"), UnixState::Unknown);
+        assert_eq!(unix_state("00000000", "7f"), UnixState::Unknown);
+        assert_eq!(unix_state("zz", "zz"), UnixState::Unknown);
+        assert_eq!(unix_state("", ""), UnixState::Unknown);
+        // The C tests `Lf->lts.opt == __SO_ACCEPTCON` — equality, not a bit
+        // test — so SO_ACCEPTCON alongside any other flag is *not* LISTEN.
+        // Faithful to the oracle, deliberately, so a diff of the two binaries
+        // stays clean.
+        assert_eq!(unix_state("00010001", "03"), UnixState::Connected);
     }
 
     #[test]

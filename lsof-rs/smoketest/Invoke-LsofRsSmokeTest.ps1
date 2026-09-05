@@ -381,13 +381,48 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
 
     # ===================== output formats =====================
     Test-Case 'field-output-Fpn' 'render/-F' {
+        # Only the named letters may appear. `p` is the one field Lsof.8 calls
+        # "always selected"; `f` is NOT — the C emits the fd marker only when it
+        # is asked for, so a consumer keying on `f` to start a file record must
+        # not see one here.
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Fpn') 'Fpn'
         Assert-Contains $r.Out "p$self"; Assert ($r.Out -match "(?m)^n") 'no n field'
         Assert-NotContains $r.Out 'tIPv4' 'type field should be suppressed by -Fpn'
+        Assert (-not ($r.Out -match "(?m)^f")) '-Fpn must not emit the f marker'
+    }
+    Test-Case 'field-output-bare-F' 'render/-F' {
+        # Bare -F selects every standard field, in print.c's order. On Windows
+        # the model has no lock, file flags or filesystem device, so the fields
+        # that do appear are the ones with values -- plus `a` and `l`, which the
+        # C prints EMPTY rather than omitting so every file record has the same
+        # shape. Order: f a l t ... i k P n, then the T tokens after the name.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-F') 'F-bare'
+        Assert-Contains $r.Out "p$self"
+        Assert ($r.Out -match "(?m)^f\d+") 'bare -F must emit the f marker'
+        Assert ($r.Out -match "(?m)^a[ ru]$") 'bare -F must emit the a field'
+        Assert ($r.Out -match "(?m)^l ?$") 'bare -F must emit an empty l field'
+        Assert ($r.Out -match "(?ms)^PTCP.*?^n") 'P must come before n'
+    }
+    Test-Case 'field-output-socket-state' 'render/-F' {
+        # The state is not part of NAME: the C keeps it in Lf->lts and prints it
+        # from print_tcptpi(), so `n` carries the endpoints alone and the state
+        # arrives as its own TST= token. Reporting it in both is the bug this
+        # guards.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-FnT') 'F-state'
+        Assert-Contains $r.Out 'TST=LISTEN'
+        Assert-NotContains $r.Out '(LISTEN)' 'the state must not also be in the n field'
+        # ...while the table still shows it, appended by the renderer.
+        $t = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)") 'F-state-table'
+        Assert-Contains $t.Out '(LISTEN)'
     }
     Test-Case 'field-output-nul-F0' 'render/-F0' {
+        # Every field is NUL-terminated and each set gets a NL *appended* after
+        # that NUL, so a set ends "...`0`n". Appending rather than replacing is
+        # the whole point of -F0: a consumer splitting the stream on NUL
+        # otherwise gets one set's last field glued to the next set's first.
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-F0') 'F0'
         Assert ($r.Out.Contains([char]0)) 'expected NUL terminators'
+        Assert ($r.Out.Contains("$([char]0)`n")) 'a set must end with NUL then NL'
     }
     Test-Case 'json-aggregated-J' 'render/-J' {
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-J') 'J'

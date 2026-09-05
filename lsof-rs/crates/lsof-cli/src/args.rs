@@ -243,6 +243,20 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     let rest: Vec<char> = chars[j + 1..].to_vec();
                     let nul = rest.contains(&'0');
                     let only: Vec<char> = rest.into_iter().filter(|c| *c != '0').collect();
+                    // The C's field table gives some letters a side effect:
+                    // selecting one also switches on the collection it needs
+                    // (`store.c` — `T` carries `Ftcptpi |= TCPTPI_ALL`). That is
+                    // why bare `-F` prints `TQR=`/`TQS=` with no `-T` at all.
+                    // Linux compiles the window block out of `print_tcptpi()`
+                    // and rejects `-T w`, so "all" is state + queues there.
+                    // The other side effects (`k`→nlink, `g`/`R`→pgid/ppid,
+                    // `o`→offset) are no-ops here: those values are always
+                    // gathered, so the field prints whenever it has one.
+                    if only.is_empty() || only.contains(&'T') {
+                        let t = sel.tcp_info.get_or_insert_with(TcpInfoFlags::default);
+                        t.state = true;
+                        t.queue = true;
+                    }
                     format = Format::Fields {
                         nul,
                         only: (!only.is_empty()).then_some(only),

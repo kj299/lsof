@@ -233,14 +233,80 @@ impl TcpState {
     }
 }
 
+/// The state lsof reports for a socket row.
+///
+/// It is a tagged union because the C's is: `print_tcptpi()` branches on the
+/// row's file type and looks the number up in a *different* table per family —
+/// TCP's connection states, or an AF_UNIX socket's `socket_state`. Renderers
+/// only ever need the name, so [`SockState::as_str`] is the common exit; the
+/// tag matters to the one caller that must know a connection is established
+/// before asking Windows for its per-connection statistics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SockState {
+    Tcp(TcpState),
+    Unix(UnixState),
+}
+
+impl SockState {
+    /// lsof-style state name, e.g. `LISTEN` or `UNCONNECTED`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SockState::Tcp(s) => s.as_str(),
+            SockState::Unix(s) => s.as_str(),
+        }
+    }
+}
+
+impl From<TcpState> for SockState {
+    fn from(s: TcpState) -> Self {
+        SockState::Tcp(s)
+    }
+}
+
+impl From<UnixState> for SockState {
+    fn from(s: UnixState) -> Self {
+        SockState::Unix(s)
+    }
+}
+
+/// An AF_UNIX socket's state — the kernel's `socket_state` enum, as the `St`
+/// column of `/proc/net/unix` spells it, plus lsof's `LISTEN`, which is not a
+/// state at all: a listening socket sits in `SS_UNCONNECTED` and is told apart
+/// only by `SO_ACCEPTCON` in the `Flags` column.
+///
+/// Unlike TCP, *every* AF_UNIX row has one — a number lsof cannot place comes
+/// out as `UNKNOWN`, not as "no state".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnixState {
+    Listen,
+    Unconnected,
+    Connecting,
+    Connected,
+    Disconnecting,
+    Unknown,
+}
+
+impl UnixState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnixState::Listen => "LISTEN",
+            UnixState::Unconnected => "UNCONNECTED",
+            UnixState::Connecting => "CONNECTING",
+            UnixState::Connected => "CONNECTED",
+            UnixState::Disconnecting => "DISCONNECTING",
+            UnixState::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 /// Network details for a socket-backed [`OpenFile`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SocketInfo {
     pub protocol: Protocol,
     pub local: Option<SocketAddr>,
     pub remote: Option<SocketAddr>,
-    /// `None` for connectionless protocols (UDP).
-    pub state: Option<TcpState>,
+    /// `None` for connectionless protocols (UDP); always `Some` for AF_UNIX.
+    pub state: Option<SockState>,
     /// `-T q/w` extended TCP info. A backend populates this only when the run
     /// requested it and the per-connection stats were readable; `None`
     /// otherwise, so renderers emit nothing extra on a plain run.
@@ -300,12 +366,20 @@ impl SocketInfo {
                 s.push_str(&fmt_addr(r));
             }
         }
-        if let Some(st) = self.state {
-            s.push_str(" (");
-            s.push_str(st.as_str());
-            s.push(')');
-        }
         s
+    }
+
+    /// The ` (LISTEN)` suffix the **table** appends to a socket's NAME.
+    ///
+    /// Deliberately not part of [`SocketInfo::display_name`]: the C reports the
+    /// state as a `TST=` token under `-F` and as its own key in JSON, and
+    /// baking it into the stored name put it in both places at once — `-F n`
+    /// carried `127.0.0.1:80 (LISTEN)` *and* `TST=LISTEN`.
+    pub fn table_state_suffix(&self) -> String {
+        match self.state {
+            Some(st) => format!(" ({})", st.as_str()),
+            None => String::new(),
+        }
     }
 }
 
@@ -352,6 +426,18 @@ pub struct OpenFile {
     /// A lock held on this file, shown as a suffix on the FD cell (`8uW`).
     /// `None` means no lock, or a platform that cannot enumerate them.
     pub lock: Option<LockKind>,
+    /// The **filesystem** device the file lives on (`st_dev`), which is not
+    /// always what [`OpenFile::device`] displays: for a character or block
+    /// special, that cell shows the device the node *names* (`st_rdev`)
+    /// instead. lsof keeps them apart too — `-F D` reports this one and `-F r`
+    /// the raw one — and the mount-point rule (`lsof /mnt` selecting a whole
+    /// filesystem) needs this one as well. `None` where the platform does not
+    /// supply it.
+    pub fs_device: Option<u64>,
+    /// The open file's flags, as the kernel reports them (`O_RDWR`,
+    /// `O_CLOEXEC`, …). lsof's `-F G` field prints them in hex. `None` where
+    /// unknown.
+    pub file_flags: Option<u32>,
     /// Present iff this is a network socket.
     pub socket: Option<SocketInfo>,
 }
@@ -372,6 +458,12 @@ pub struct Process {
     pub command: String,
     /// Owning account, e.g. `DOMAIN\\user` (lsof "USER").
     pub user: Option<String>,
+    /// Numeric owner id, for lsof's `-F u` field. The USER column shows
+    /// [`Process::user`]; scripts asking for `u` want the number.
+    pub uid: Option<u32>,
+    /// Process group ID, for lsof's `-F g` field. `None` on platforms without
+    /// process groups (Windows).
+    pub pgid: Option<u32>,
     pub files: Vec<OpenFile>,
     /// `+E`: set by a backend when this process is in the result only because
     /// it is the peer endpoint of a selected process's pipe. The selection

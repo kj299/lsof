@@ -14,8 +14,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_backend_linux::fuzz_api::{
-    fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_suffix, Protocol,
-    SocketTable,
+    fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_state, unix_suffix,
+    Protocol, SocketTable,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -58,7 +58,18 @@ fuzz_target!(|data: &[u8]| {
         }
         let f = fields_with_rest(line, 8);
         if f.len() >= 6 {
-            let _ = unix_suffix(f[4], f[3], f[5]);
+            // /proc/net/unix column order: Num RefCount Protocol Flags Type St.
+            let _ = unix_suffix(f[4]);
+            // Every AF_UNIX row has a state — an unparsable or out-of-range
+            // pair is UNKNOWN, never "no state", which is what the C prints
+            // once its own strtoul failure has left the value at 0.
+            let st = unix_state(f[3], f[5]);
+            assert!(
+                !st.as_str().is_empty(),
+                "unix_state({:?}, {:?}) produced an empty name",
+                f[3],
+                f[5]
+            );
         }
     }
 });

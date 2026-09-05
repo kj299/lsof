@@ -44,6 +44,12 @@ pub fn resolve_name(file: &mut OpenFile, no_host: bool, no_port: bool) {
 }
 
 /// Build the lsof NAME for a socket, honoring host/port resolution flags.
+///
+/// The state is **not** part of it. The C keeps it in `Lf->lts` and prints it
+/// from `print_tcptpi()`, which is why the table appends
+/// `SocketInfo::table_state_suffix()` and `-F` emits a separate `TST=` token:
+/// putting it in the name reports it twice in the table and in both the `n` and
+/// `T` fields of `-F`.
 fn format_socket(sock: &SocketInfo, no_host: bool, no_port: bool) -> String {
     let mut s = endpoint(sock.local, sock.protocol, no_host, no_port);
     if let Some(r) = sock.remote {
@@ -51,11 +57,6 @@ fn format_socket(sock: &SocketInfo, no_host: bool, no_port: bool) -> String {
             s.push_str("->");
             s.push_str(&endpoint(Some(r), sock.protocol, no_host, no_port));
         }
-    }
-    if let Some(st) = sock.state {
-        s.push_str(" (");
-        s.push_str(st.as_str());
-        s.push(')');
     }
     s
 }
@@ -168,10 +169,14 @@ fn make_file(
         protocol: proto,
         local: Some(local),
         remote,
-        state,
+        // Windows reports only TCP connection states, so every state this
+        // backend produces is a `SockState::Tcp`.
+        state: state.map(Into::into),
         tcp: None,
     };
     OpenFile {
+        fs_device: None,
+        file_flags: None,
         lock: None,
         fd: FdType::Unknown,
         // Sockets are bidirectional; lsof shows them as `u` (read/write). The

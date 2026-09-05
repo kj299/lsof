@@ -99,12 +99,16 @@ fn table_ppid_column() {
 fn table_offset_with_dash_o() {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
+        uid: None,
+        pgid: None,
         pid: 7,
         ppid: None,
         command: "x".into(),
         user: None,
         endpoint_peer: false,
         files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Handle(3),
             access: AccessMode::Read,
@@ -138,12 +142,16 @@ fn table_offset_with_dash_o() {
 fn table_command_width_caps() {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
+        uid: None,
+        pgid: None,
         pid: 7,
         ppid: None,
         command: "verylongcommandname.exe".into(),
         user: None,
         endpoint_peer: false,
         files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Handle(3),
             access: AccessMode::Read,
@@ -186,12 +194,16 @@ fn fields_skips_empty_name() {
     // `n` field code (regression guard for the lone-`n`-line bug).
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
+        uid: None,
+        pgid: None,
         pid: 7,
         ppid: None,
         command: "x".into(),
         user: None,
         endpoint_peer: false,
         files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Task,
             access: AccessMode::Unknown,
@@ -220,22 +232,35 @@ fn fields_skips_empty_name() {
 
 #[test]
 fn fields_nul_terminator() {
-    // -F0: fields within a set are NUL-separated, and each process/file set ends
-    // with a NL so a consumer can split records on it (lsof's documented format).
+    // -F0: every field is NUL-terminated, and each process/file set gets a NL
+    // *appended* after that NUL, so a set ends `…\0\n`. Measured against
+    // lsof 4.99.6: `lsof -Fcn0 -p <pid>` returns
+    // `p3792\0cpython3\0\nn/tmp/x\0\nn/\0\n`. Appending rather than replacing
+    // is what makes `-F0` usable at all — a consumer splitting the stream on
+    // NUL, which is the whole point of the flag, otherwise gets the last field
+    // of one set glued to the first field of the next.
     let out = fields::render(&sample_processes(), true, None, Escaper::WINDOWS);
     assert!(
         out.contains("p1000\0"),
-        "fields within a set are NUL-separated: {out:?}"
+        "fields within a set are NUL-terminated: {out:?}"
     );
     assert!(
-        out.contains('\n'),
-        "sets must be NL-delimited so parsers can split them"
+        out.contains("\0\n"),
+        "a set ends with its field's NUL and then a NL: {out:?}"
     );
-    // The last field of a set is NL-terminated, NOT NUL — no `\0\n` sequence.
-    assert!(
-        !out.contains("\0\n"),
-        "a set's last field should end with NL, not NUL+NL: {out:?}"
-    );
+    // Every field is NUL-terminated: nothing sits between a NL and the next
+    // field, so splitting on NUL never yields a value with a stray letter on it.
+    for field in out.split('\0') {
+        // The set-closing NL rides ahead of the next field, and the stream ends
+        // with one; neither is a field.
+        let Some(first) = field.trim_start_matches('\n').chars().next() else {
+            continue;
+        };
+        assert!(
+            first.is_ascii_alphabetic(),
+            "a NUL-split field must start with its letter: {field:?}"
+        );
+    }
     // Every NL-delimited set begins with a `p` or `f` structural marker.
     for set in out.split('\n').filter(|s| !s.is_empty()) {
         let first = set.chars().next().unwrap();
@@ -273,6 +298,8 @@ fn windows_object_types_render() {
     // their TYPE code in the table and `-F t` and carry their object-path NAME.
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let mk = |h: u64, ft: FileType, name: &str| OpenFile {
+        fs_device: None,
+        file_flags: None,
         lock: None,
         fd: FdType::Handle(h),
         access: AccessMode::ReadWrite,
@@ -286,6 +313,8 @@ fn windows_object_types_render() {
         socket: None,
     };
     let p = Process {
+        uid: None,
+        pgid: None,
         pid: 7,
         ppid: None,
         command: "svc".into(),
@@ -383,12 +412,16 @@ fn json_escapes_backslashes() {
 fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     Process {
+        uid: None,
+        pgid: None,
         pid: 7,
         ppid: None,
         command: command.into(),
         user: Some(user.into()),
         endpoint_peer: false,
         files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Handle(4),
             access: AccessMode::Read,
@@ -455,7 +488,10 @@ fn hostile_names_are_escaped_the_way_the_c_prints_them() {
     );
     let split = named("x", "u", "two\nlines");
     let f0 = fields::render(&[split], true, None, Escaper::UNIX);
-    assert!(f0.contains("ntwo\\nlines\n"), "{f0:?}");
+    // Under `-F0` the name's own newline is escaped, so the only real NUL and
+    // the only real NL are the ones the renderer wrote: the value cannot forge
+    // either boundary.
+    assert!(f0.contains("ntwo\\nlines\0\n"), "{f0:?}");
     assert_eq!(
         f0.matches('\n').count(),
         2,
@@ -564,7 +600,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         protocol: Protocol::Tcp,
         local: Some("127.0.0.1:5000".parse().unwrap()),
         remote: Some("127.0.0.1:51000".parse().unwrap()),
-        state: Some(TcpState::Established),
+        state: Some(TcpState::Established.into()),
         tcp: Some(TcpExtInfo {
             recv_window: Some(262144),
             recv_queue: Some(0),
@@ -572,11 +608,15 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         }),
     };
     vec![Process {
+        uid: None,
+        pgid: None,
         pid: 2000,
         ppid: None,
         command: "server.exe".to_string(),
         user: Some("EXAMPLE\\alice".to_string()),
         files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Handle(77),
             access: AccessMode::ReadWrite,
@@ -637,4 +677,103 @@ fn tcp_info_json_keys() {
     assert!(!out.contains("(Win="), "JSON name must stay clean: {out:?}");
     // And absent info stays absent: the plain mock sample has no tcp_* keys.
     assert!(!json::render_aggregated(&sample_processes()).contains("tcp_window"));
+}
+
+#[test]
+fn fields_follow_the_cs_order() {
+    // `print.c` walks a fixed sequence and prints each selected field that has
+    // a value. Order is not cosmetic: a `-F` consumer that treats the first `T`
+    // after `n` as the end of a record mis-parses a differently ordered stream.
+    // Measured against lsof 4.99.6 on a live fixture, one field per line:
+    //   f a l t G d D s o i k P n  TST= TQR= TQS=
+    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    let letters: Vec<char> = out.lines().filter_map(|l| l.chars().next()).collect();
+    // The process set comes first and starts with `p`, the one field Lsof.8
+    // calls "always selected".
+    assert_eq!(letters[0], 'p', "{out:?}");
+    // Within one file set, the letters appear in this relative order.
+    const ORDER: &str = "faltGdDsoikPnT";
+    let mut seen_file_set = false;
+    let mut last = 0usize;
+    for c in letters {
+        if c == 'f' {
+            seen_file_set = true;
+            last = 0;
+        }
+        if !seen_file_set {
+            continue;
+        }
+        let Some(pos) = ORDER.find(c) else { continue };
+        assert!(
+            pos >= last,
+            "field {c:?} came after a later field in {out:?}"
+        );
+        last = pos;
+    }
+}
+
+#[test]
+fn fields_report_a_sockets_node_cell_as_p_never_as_i() {
+    // `i` and `P` are one cell under two names, and the C picks between them
+    // with one discriminant (`Lf->inp_ty`): an internet socket's NODE *is* its
+    // protocol, so it comes out as `P` and never as `i`. (An AF_UNIX socket
+    // takes the other branch — see the `sockets-unix-fields-F` differential
+    // case, which has a real /proc to read.)
+    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    assert!(out.contains("PTCP\n"), "{out:?}");
+    assert!(out.contains("PUDP\n"), "{out:?}");
+    assert!(!out.contains("iTCP"), "protocol leaked into i: {out:?}");
+    // The mock's sockets carry no inode, so no socket row may emit `i` at all;
+    // the only `i` in the output belongs to the regular file.
+    assert_eq!(out.matches("\ni").count(), 1, "{out:?}");
+}
+
+#[test]
+fn a_sockets_state_is_reported_once_and_in_its_own_field() {
+    // Baking the state into NAME reported it twice — in the table's NAME cell
+    // (once from the name, once from the suffix) and in both the `n` and `T`
+    // fields of `-F`. It lives in `SocketInfo::state`, and each renderer places
+    // it: a table suffix, a `TST=` token, a JSON key.
+    let t = table::render(
+        &sample_processes(),
+        false,
+        false,
+        false,
+        None,
+        false,
+        Escaper::WINDOWS,
+    );
+    assert_eq!(t.matches("(LISTEN)").count(), 1, "{t:?}");
+    assert_eq!(t.matches("(ESTABLISHED)").count(), 1, "{t:?}");
+
+    let f = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    assert!(f.contains("n*:445\n"), "state in the n field: {f:?}");
+    assert!(f.contains("TST=LISTEN\n"), "{f:?}");
+    assert_eq!(f.matches("LISTEN").count(), 1, "{f:?}");
+
+    let j = json::render_aggregated(&sample_processes());
+    assert!(j.contains("\"state\":\"LISTEN\""), "{j:?}");
+    assert!(j.contains("\"name\":\"*:445\""), "{j:?}");
+}
+
+#[test]
+fn a_restricted_field_list_emits_only_those_letters() {
+    // `-Fcn`: `p` is always selected, `f` is not — the C emits the `f` marker
+    // only when it is asked for, so a consumer keying on `f` to start a file
+    // record must not see one here.
+    let out = fields::render(
+        &sample_processes(),
+        false,
+        Some(&['c', 'n']),
+        Escaper::WINDOWS,
+    );
+    for line in out.lines().filter(|l| !l.is_empty()) {
+        let c = line.chars().next().unwrap();
+        assert!(
+            c == 'p' || c == 'c' || c == 'n',
+            "unselected field {c:?} emitted: {out:?}"
+        );
+    }
+    assert!(out.contains("cserver.exe\n"), "{out:?}");
+    assert!(out.contains("n*:445\n"), "{out:?}");
 }

@@ -222,6 +222,8 @@ pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
         format!("(endpoint 0x{:x})", sock.endpoint)
     };
     OpenFile {
+        fs_device: None,
+        file_flags: None,
         lock: None,
         fd: FdType::Unknown,
         access: AccessMode::ReadWrite,

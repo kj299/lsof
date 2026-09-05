@@ -819,6 +819,8 @@ mod tests {
         // "matches -i" is now "contributes the NET selecter kind" — the bit the
         // OR/AND rule then tests.
         let sock_row = |ft: FileType, proto: Protocol| OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Unknown,
             access: AccessMode::ReadWrite,
@@ -1007,6 +1009,8 @@ mod tests {
         // and a row merely *named* under the query does not.
         use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
         let row = |name: &str, dev: &str, node: &str| OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Handle(3),
             access: AccessMode::Read,
@@ -1025,6 +1029,8 @@ mod tests {
         };
         sel.path_ids.insert(("C:".into(), "42".into()));
         let p = Process {
+            uid: None,
+            pgid: None,
             pid: 7,
             ppid: None,
             command: "x".into(),
@@ -1144,6 +1150,8 @@ mod tests {
     fn endpoint_peer_kept_with_pipe_rows_only() {
         use crate::model::{AccessMode, FdType, OpenFile};
         let pipe = OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: FdType::Handle(64),
             access: AccessMode::ReadWrite,
@@ -1157,6 +1165,8 @@ mod tests {
             socket: None,
         };
         let reg = OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             file_type: FileType::Regular,
             name: "C:\\peer\\data.txt".into(),
@@ -1165,6 +1175,8 @@ mod tests {
         // 9999 matches no selector but was marked by the backend as a `+E`
         // endpoint peer: it must survive apply() with ONLY its pipe rows.
         let peer = Process {
+            uid: None,
+            pgid: None,
             pid: 9999,
             ppid: None,
             command: "b.exe".into(),
@@ -1174,6 +1186,8 @@ mod tests {
         };
         // 8888 matches no selector and is no peer: dropped as usual.
         let stranger = Process {
+            uid: None,
+            pgid: None,
             pid: 8888,
             ppid: None,
             command: "c.exe".into(),

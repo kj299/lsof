@@ -117,8 +117,14 @@ pub fn render(
         // only; machine formats carry it structured (`-F` T tokens, JSON keys).
         // The suffix is generated here, so only the name itself is escaped.
         let mut name = esc.text(&f.name).into_owned();
-        if let Some(tcp) = f.socket.as_ref().and_then(|s| s.tcp.as_ref()) {
-            name.push_str(&tcp.table_suffix());
+        if let Some(sock) = f.socket.as_ref() {
+            // The socket state is a *table* decoration, like the `-T` suffix
+            // below it: `-F` reports it as a `TST=` token and JSON as its own
+            // key, so it is appended here rather than stored in the name.
+            name.push_str(&sock.table_state_suffix());
+            if let Some(tcp) = sock.tcp.as_ref() {
+                name.push_str(&tcp.table_suffix());
+            }
         }
         r.push(name);
         r
@@ -130,6 +136,8 @@ pub fn render(
             // A selected process with no displayed files still gets a line so it
             // shows up (NAME left blank), mirroring lsof.
             let blank = OpenFile {
+                fs_device: None,
+                file_flags: None,
                 lock: None,
                 fd: FdType::Unknown,
                 access: AccessMode::Unknown,

@@ -29,10 +29,6 @@ disagreeing, and it names the C code so anyone can check the triage.
   and prints an empty cell for `cwd`/`rtd`/`txt` (no fdinfo, no offset);
   lsof-rs keeps `SIZE/OFF` and falls back to the size. Shared renderer
   (`lsof-core`), so it changes Windows output too; not a backend fix.
-- [x] files-fields-F: DECISION — `-F` default field set. The C emits `g` (pgid),
-  `u` (uid), `G` (file flags), `l` (lock), `D` (device as hex) and *empty*
-  `a`/`l` fields; lsof-rs emits none of those and `d` (`maj,min`) where the C
-  emits `D`. Model and renderer gaps shared with Windows.
 - [x] path-bare-hardlink: DECISION — the NAME cell only. Both binaries find
   the same fd on the same inode when a file is queried through a hard link;
   they disagree on what to call it. The C substitutes **the name you asked
@@ -51,6 +47,72 @@ disagreeing, and it names the C code so anyone can check the triage.
   prints the same text. `hostile-comm-utf8-fields-Ffc` on the same comm
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
+
+## Fixed by implementing the whole `-F` field set (2026-09-05)
+
+Retires ledger entries `files-fields-F` and item 11, and closes items 5 and 11
+of the decision table. `-F` is lsof's scripting format: everything that consumes
+lsof programmatically parses this, so a missing field or a reordered stream is a
+broken script, not a cosmetic difference. Bare `-F` now matches the C
+byte-for-byte on every fixture, and the differential grew four cases
+(`files-fields-F0`, `files-fields-Fcn`, `sockets-fields-F`,
+`sockets-unix-fields-F`) to hold it there.
+
+Found by sweeping every field letter, and several combinations, against the
+oracle rather than by reading `print.c` — six of these eight would have survived
+a careful read.
+
+- **The `f` marker was unconditional.** Lsof.8 says only `p` is "always
+  selected"; the C emits `f` when it is asked for. `-Fcn` yielded `p c f n` here
+  and `p c n` there, so a consumer keying on `f` to start a file record saw one
+  extra record per file. (Item 11.)
+- **Six fields were missing outright**: `g` (pgid), `u` (uid), `G` (file flags,
+  `0x<flags>;0x<per-open>`), `l` (lock), `D` (device number in hex) and the
+  *empty* `a`/`l` values the C prints so every file record has the same shape.
+  `D` is the **filesystem** device — for `/dev/null` the C prints the devtmpfs
+  the node lives on, not the `1,3` its DEVICE column shows — which is why the
+  model needed `fs_device` separately from the DEVICE cell.
+- **The field order was wrong.** The C walks a fixed sequence
+  (`f a l t G d D s o i k P n`, then the `T` tokens) and the `T` tokens come
+  *after* the name, because `print.c` calls `print_tcptpi()` once `printname()`
+  has run. lsof-rs emitted `TST=` before `n`.
+- **`-F0` replaced the NUL instead of appending the NL.** The C writes the
+  field's `\0` and then the set's `\n`, so a set ends `…\0\n`. Replacing it
+  breaks the one thing `-F0` exists for: a consumer splitting the stream on NUL
+  got the last field of one set glued to the first field of the next. The golden
+  test asserted the wrong rule, which is LESSONS #023 again — a golden test pins
+  what its author believed.
+- **`i` and `P` are one cell under two names**, and the C picks between them with
+  one discriminant (`Lf->inp_ty`): a row's NODE either *is* an inode or *is* a
+  protocol. Only an internet socket takes the protocol branch — an **AF_UNIX**
+  socket reports its inode, like a regular file. lsof-rs emitted `Punix` and no
+  `i` for every unix socket.
+- **An AF_UNIX socket's state was baked into its NAME.** The C keeps it in
+  `Lf->lts` and prints it from `print_tcptpi()`, exactly as it does a TCP row's,
+  so `-Fn` carries `/path type=STREAM` and the state arrives separately as
+  `TST=LISTEN`. lsof-rs put `(LISTEN)` in the name, so `-F` reported it twice
+  and in the wrong field.
+- **`UNCONNECTED` was missing.** Every AF_UNIX row has a state; lsof-rs mapped
+  only `CONNECTING`/`CONNECTED`/`DISCONNECTING` and showed nothing for the
+  common `SS_UNCONNECTED`, which is what a datagram or an unconnected stream
+  socket sits in. Visible in the **table** too, not just `-F`.
+- **UDP carried neither queues nor state.** `/proc/net/udp` has the same
+  `tx_queue:rx_queue` column as `/proc/net/tcp` and lsof reports it; a
+  *connected* UDP socket also has a state, though Linux registers exactly one
+  name for UDP — `ESTABLISHED` — and prints nothing for any other value
+  (`build_IPstates()`).
+
+Two selection side effects came with it, from the C's field table (`store.c`):
+selecting a field also switches on the collection it needs, which is why bare
+`-F` prints `TQR=`/`TQS=` with no `-T` at all. The others (`k`→nlink,
+`g`/`R`→pgid/ppid, `o`→offset) are no-ops here because those values are always
+gathered.
+
+Deliberately reproduced rather than corrected: the C decides an AF_UNIX socket
+is `LISTEN` with `Lf->lts.opt == __SO_ACCEPTCON` — **equality**, not a bit test —
+so a socket carrying any other flag alongside `SO_ACCEPTCON` is reported by its
+`St` instead. Copied as-is; a diff of the two binaries stays clean, and the unit
+test says why.
 
 ## Fixed by naming anonymous inodes (2026-09-05)
 
@@ -329,7 +391,7 @@ CI job that runs them was written:
 ## Recorded for decision — shared output, found by the Linux oracle
 
 These change what the **Windows** binary prints too, and each alters output the
-golden fixtures and the 59-case smoke suite assert. Matching the C is very
+golden fixtures and the 61-case smoke suite assert. Matching the C is very
 likely right; it is a compatibility decision, not a backend phase.
 
 | # | The C | lsof-rs | Where |
@@ -338,13 +400,13 @@ likely right; it is a compatibility decision, not a backend phase.
 | 2 | `-Tq` replaces the state | keeps `(ESTABLISHED)`, appends | `-T` semantics · `docs/known-limitations.md` |
 | 3 | `COMMAND` truncated to 9 | not truncated | default column width · `docs/known-limitations.md` |
 | 4 | list options ORed unless `-a` | ~~file-level selectors always ANDed~~ **resolved 2026-09-05** | selection engine; see "Fixed by rebuilding the selection engine" above |
-| 5 | `-F` emits `g u G l D`, empty `a`/`l` | omits them; `d` for `D` | `-F` renderer + model · `files-fields-F` above |
+| 5 | `-F` emits `g u G l D`, empty `a`/`l` | ~~omits them; `d` for `D`~~ **resolved 2026-09-05** | `-F` renderer + model; see "Fixed by implementing the whole `-F` field set" above |
 | 6 | `-o` → header `OFFSET`, blank when unknown | header unchanged, falls back to size | renderer · `files-offset-o` above |
 | 7 | `8uW` — `W` marks a write lock on the fd | ~~`8u`~~ **resolved on Linux 2026-09-05** | lock column, from `/proc/locks`. Windows still shows none: `FsRtlGetNextFileLock` is kernel-mode and nothing in user mode enumerates another process's locks (`docs/known-limitations.md`). |
 | 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | ~~`unknown`, `anon_inode:[eventpoll]`~~ **resolved 2026-09-05** | Linux: named anon_inode kinds; see "Fixed by naming anonymous inodes" above |
 | 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
 | 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |
-| 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | `f` on every file, whatever the selection | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. **DECISION** — a Windows `-F` consumer that selects fields without `f` sees `f` lines today. |
+| 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | ~~`f` on every file, whatever the selection~~ **resolved 2026-09-05** | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. Windows `-F` output loses an `f` line per file when the selection omits it — which is the point. |
 
 | 12 | option parsing **stops at the first non-option argument**, so `lsof FILE -iTCP:N` reads `-iTCP:N` as a second *filename*, does not find it, and exits 1 | permutes: `-iTCP:N` is an option wherever it appears | `lsof-cli`'s argument parser. Found by the `or-semantics-*` cases, whose first draft put the path first and diverged for this reason rather than the one they test. **DECISION** — matching the C would make command lines that work today stop working, so it is recorded rather than changed alongside the selection fix. |
 
@@ -353,6 +415,8 @@ likely right; it is a compatibility decision, not a backend phase.
 | 14 | a **path argument matches by `(device, inode)`**, and `+d` is one directory level where `+D` is the tree | ~~one lowercased string-prefix match for all three~~ **resolved 2026-09-05** | see "Fixed by matching a path by what the file is" above |
 | 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | matches only the mount point itself, so it **under-reports** | Measured: `lsof /dev` lists a process's `cwd` and `rtd` — both named `/` — because they live on the devtmpfs mounted there; `lsof /proc` lists 9 rows to lsof-rs's 0. **DEBT**, and now precisely scoped: this is a match on the **filesystem** device, and the DEVICE cell a row carries is `st_rdev` for a device node, so the model has to carry the filesystem device separately before it can be done. Implementing it off the DEVICE cell was tried and backed out — it over-reported `lsof /`. |
 | 16 | a socket in **another network namespace** resolves far enough to print `sock` / `protocol: TCP` | `SOCK` / `socket:[14902]`, and SIZE/OFF as a size rather than the offset | the socket table is read once from `/proc/net/*`, which is *this* namespace's view. The C reads the target's own `/proc/<pid>/net/*`. **DEBT (L2)**: making the read per-namespace changes the cost model, since the tables would be read once per distinct netns rather than once per run. |
+
+| 18 | on Linux the C lists **threads by default** — every task gets its own `cwd`/`rtd`/`txt` rows and the table grows `TID`/`TASKCMD` columns; `-K i` turns it off | lists processes only; `-K` opts in | Measured on this host: `lsof -w -n -P` is **1052** rows from the C, **279** with `-K i`, **261** from lsof-rs (the remainder is process churn between the two runs, not a systematic gap — an earlier count that looked like one was an artifact of keying on the C's 9-char-truncated COMMAND, item 3). **DEBT** — lsof-rs already has the machinery (`-K` renders `task` rows); what is missing is the default and the two extra columns. Not visible to any current differential case: every one of them names a fixture with `-p`, and the fixtures are single-threaded. |
 
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 

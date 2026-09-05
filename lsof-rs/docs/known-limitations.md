@@ -117,7 +117,7 @@ implementation runs on the same host, all three fell out of a single
 side-by-side run.
 
 They are recorded rather than fixed because each one changes output that the
-Windows golden fixtures and the 59-case live smoke suite currently assert.
+Windows golden fixtures and the 61-case live smoke suite currently assert.
 Matching the C is very likely right, but it is a deliberate compatibility
 decision, not a bug fix to slip into a backend phase.
 
@@ -129,13 +129,23 @@ decision, not a bug fix to slip into a backend phase.
 
 Since 2026-09-02 the Linux differential runs as a CI gate and keeps the full
 list in [`../DIVERGENCES.md`](../DIVERGENCES.md), which adds six more found the
-day it landed — among them the `-F` field set (`g u G l D`) and `-o`'s `OFFSET`
-header. The largest of them, lsof's **OR-by-default list semantics**, has since
-been **fixed**: lsof-rs applied file-level selectors unconditionally, so
-`lsof -d ^mem -p PID` listed one process where the C lists the whole host. It
-now models the C's rule exactly. Add `-a` to any command that relied on the old
-intersection behaviour. Read that file as the authoritative ledger; this
-section is the narrative for the first three.
+day it landed. Two of the largest have since been **fixed**:
+
+* lsof's **OR-by-default list semantics** — lsof-rs applied file-level selectors
+  unconditionally, so `lsof -d ^mem -p PID` listed one process where the C lists
+  the whole host. It now models the C's rule exactly. Add `-a` to any command
+  that relied on the old intersection behaviour.
+* the **`-F` field set**. `-F` is the scripting format, so a missing field or a
+  reordered stream is a broken script rather than a cosmetic difference. Bare
+  `-F` now matches the C byte-for-byte. Three of the eight changes are visible
+  on Windows: the `f` fd marker is emitted only when it is selected (`-Fcn`
+  yields `p c n`, not `p c f n`); `a` and `l` are emitted **empty** rather than
+  omitted, so every file record has the same shape; and a socket's state has
+  moved out of the `n` (name) field into its own `TST=` token, where the C keeps
+  it. The table still shows ` (LISTEN)` — it was being reported twice.
+
+Read that file as the authoritative ledger; this section is the narrative for
+the first three.
 
 One entry in that ledger has since been **closed rather than recorded**, because
 it was a security fix and not a compatibility choice: control characters in
