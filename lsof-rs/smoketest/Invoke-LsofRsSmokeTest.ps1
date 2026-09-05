@@ -396,10 +396,17 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         # that do appear are the ones with values -- plus `a` and `l`, which the
         # C prints EMPTY rather than omitting so every file record has the same
         # shape. Order: f a l t ... i k P n, then the T tokens after the name.
+        #
+        # The f VALUE here is `unk`, not a number: GetExtendedTcpTable has no
+        # handle value to give for a socket row (sockets.rs), so the marker is
+        # the FD code. Asserting `^f\d+` is a stronger-than-true proxy that
+        # holds only where a socket fd has a number -- it was written that way
+        # once and only a real Windows runner disproved it. What this case is
+        # for is that the marker EXISTS, in contrast to field-output-Fpn.
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-F') 'F-bare'
         Assert-Contains $r.Out "p$self"
-        Assert ($r.Out -match "(?m)^f\d+") 'bare -F must emit the f marker'
-        Assert ($r.Out -match "(?m)^a[ ru]$") 'bare -F must emit the a field'
+        Assert ($r.Out -match "(?m)^f\S") 'bare -F must emit the f marker'
+        Assert ($r.Out -match "(?m)^a[ ruw]$") 'bare -F must emit the a field'
         Assert ($r.Out -match "(?m)^l ?$") 'bare -F must emit an empty l field'
         Assert ($r.Out -match "(?ms)^PTCP.*?^n") 'P must come before n'
     }

@@ -757,6 +757,59 @@ fn a_sockets_state_is_reported_once_and_in_its_own_field() {
 }
 
 #[test]
+fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
+    // A backend that cannot name a row's fd still gets an `f` marker under bare
+    // `-F` — the value is the FD *code*, `unk`, not a number. The Windows
+    // backend's socket rows are exactly this shape: `GetExtendedTcpTable` has
+    // no handle value to give (`sockets.rs`), so every `-iTCP:… -F` row there
+    // is `funk`. Guarding it here rather than only in the Windows smoke suite,
+    // because "the fd field is numeric" is the kind of stronger-than-true
+    // proxy that reads as obvious and holds on exactly one platform — it was
+    // asserted in that suite and only a real Windows runner disproved it.
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process, Protocol, SocketInfo};
+    let p = Process {
+        uid: None,
+        pgid: None,
+        pid: 7,
+        ppid: None,
+        command: "server.exe".into(),
+        user: None,
+        endpoint_peer: false,
+        files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Unknown,
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Ipv4,
+            name: "*:445".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some("TCP".into()),
+            links: None,
+            socket: Some(SocketInfo {
+                protocol: Protocol::Tcp,
+                local: None,
+                remote: None,
+                state: None,
+                tcp: None,
+            }),
+        }],
+    };
+    let out = fields::render(&[p], false, None, Escaper::WINDOWS);
+    assert!(out.contains("funk\n"), "{out:?}");
+    // And a list that does not name `f` still has none, whatever the value.
+    let only = fields::render(
+        std::slice::from_ref(&sample_processes()[1]),
+        false,
+        Some(&['n']),
+        Escaper::WINDOWS,
+    );
+    assert!(!only.lines().any(|l| l.starts_with('f')), "{only:?}");
+}
+
+#[test]
 fn a_restricted_field_list_emits_only_those_letters() {
     // `-Fcn`: `p` is always selected, `f` is not — the C emits the `f` marker
     // only when it is asked for, so a consumer keying on `f` to start a file
