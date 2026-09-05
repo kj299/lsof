@@ -30,10 +30,14 @@ fuzz_target!(|data: &[u8]| {
     if text.starts_with("pipe:[") && text.ends_with(']') {
         assert_eq!(name, "pipe");
     } else if let Some(kind) = text.strip_prefix("anon_inode:") {
-        assert!(
-            !name.starts_with("anon_inode:"),
-            "the prefix must be dropped: {name:?}"
-        );
+        // EXACTLY ONE prefix is dropped, which is not the same as "the result
+        // never starts with anon_inode:". CI's first run of this target found
+        // the difference with `anon_inode:anon_inode:3:...`, whose kind is
+        // legitimately `anon_inode:3:...` — the C takes everything after the
+        // first colon too, so the parser was right and this assertion was
+        // wrong. Third time a target's invariant, not the code, was the bug
+        // (LESSONS #023).
+        assert_ne!(name, text.as_ref(), "the prefix must be dropped");
         // Only the three enriched kinds may differ from the bare kind, and
         // each keeps the kind as its stem.
         if name != kind {

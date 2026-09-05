@@ -458,6 +458,14 @@ mod tests {
         // kinds that have one. Every string here was read off the real C.
         let none = FdInfo::default();
         assert_eq!(name_for_target("anon_inode:inotify", &none), "inotify");
+        // Exactly one prefix is dropped: the kind is everything after the
+        // FIRST colon, as it is in the C. Found by the proc_fdinfo fuzz target
+        // on CI, whose assertion had been the stronger "never starts with
+        // anon_inode:" — wrong, not the parser.
+        assert_eq!(
+            name_for_target("anon_inode:anon_inode:3", &none),
+            "anon_inode:3"
+        );
         assert_eq!(name_for_target("anon_inode:[timerfd]", &none), "[timerfd]");
         // eventfd: the *id*, not the counter and not the fd number.
         let ev = parse_fdinfo("pos:\t0\neventfd-count:\t7\neventfd-id: 6\n");
