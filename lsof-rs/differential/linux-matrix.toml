@@ -24,10 +24,11 @@
 # lsof-rs never does (a deliberate difference, docs/known-limitations.md), so
 # the C is asked for the numeric form it will otherwise not print.
 #
-# -d ^mem on file cases: the C emits a `mem` row per mapped library; lsof-rs's
-# Linux backend does not until phase L2. Excluding mem lets each case measure
-# its own surface; `files-mem-rows` measures the gap itself, and is ledgered as
-# debt naming the phase that closes it.
+# -d ^mem on most file cases: a process maps a dozen libraries, and excluding
+# them lets each case measure the surface it names instead of drowning in them.
+# It is no longer a workaround — the backend reads /proc/<pid>/maps now, and
+# `files-mem-rows`, `files-table-with-mem` and `mappings-mem-and-del` compare
+# those rows head-on.
 #
 # A case is ledgered (DIVERGENCES.md, `- [x] name: reason`) only for a known,
 # reasoned difference. Everything else must MATCH — stdout AND exit code.
@@ -69,10 +70,17 @@ name = "files-offset-o"
 args = ["-n", "-P", "-o", "-a", "-d", "^mem", "-p", "{A}"]
 
 [[case]]
-# LEDGERED as DEBT (L2): the C emits one `mem` row per mapped library from
-# /proc/<pid>/maps; the Linux backend does not read maps yet.
+# The `mem` rows themselves, one per distinct mapped file. Ledgered as DEBT
+# (L2) until the backend learned to read /proc/<pid>/maps; it MATCHes now.
 name = "files-mem-rows"
 args = ["-n", "-P", "-a", "-d", "mem", "-p", "{A}"]
+
+[[case]]
+# The whole default table for the files fixture, mem rows included. Every
+# other case still passes `-d ^mem` to measure its own surface; this one does
+# not, so the mem rows are compared in place, in order, against the C.
+name = "files-table-with-mem"
+args = ["-n", "-P", "-a", "-p", "{A}"]
 
 [[case]]
 # LEDGERED. -F field set: the C emits g (pgid), u (uid), G (flags), l (lock),
@@ -141,6 +149,19 @@ args = ["-n", "-P", "-a", "-iUDP", "-p", "{B}"]
 [[case]]
 name = "sockets-unix-U"
 args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
+
+# ------------------------------------------------------------ mapped files
+# Rows that come from /proc/<pid>/maps rather than from an fd. Fixture E holds
+# one live mapped library and one deleted while still mapped.
+
+[[case]]
+# The DEL row: a file unlinked but still mapped, which is what `lsof | grep DEL`
+# finds after a package upgrade. It is also the one maps row that cannot be
+# stat'd, so its device and inode come from the maps line and SIZE is blank.
+# Both library copies have a space in the name, because a maps path is the rest
+# of the line and must never be split on whitespace.
+name = "mappings-mem-and-del"
+args = ["-n", "-P", "-a", "-p", "{E}"]
 
 # ---------------------------------------------------------- hostile COMMANDs
 # A process names itself, and until DIVERGENCES.md #10 was closed lsof-rs

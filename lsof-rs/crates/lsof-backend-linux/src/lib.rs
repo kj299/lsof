@@ -89,6 +89,8 @@ mod backend;
 #[cfg(target_os = "linux")]
 mod files;
 #[cfg(target_os = "linux")]
+mod maps;
+#[cfg(target_os = "linux")]
 mod net;
 #[cfg(target_os = "linux")]
 mod process;
@@ -115,6 +117,7 @@ pub use backend::LinuxBackend;
 #[doc(hidden)]
 pub mod fuzz_api {
     pub use crate::files::{name_for_target, parse_fdinfo};
+    pub use crate::maps::{parse_maps, Mapping};
     pub use crate::net::{
         fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_suffix,
         SocketTable,

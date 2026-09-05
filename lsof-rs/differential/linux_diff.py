@@ -26,6 +26,9 @@ ledger — those are the kit's, on purpose.
   fixture D  the same plus é (printable) and U+009B (the 8-bit CSI) — the
              non-ASCII classes, which the C sizes differently from how it
              prints them (see the matrix)
+  fixture E  a process holding one live mapped library and one that has been
+             deleted while still mapped — the `mem` and `DEL` rows that come
+             from /proc/<pid>/maps rather than from an fd
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -195,7 +198,33 @@ def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
     )
 
 
-def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture]:
+def mapping_holder(work: str) -> Fixture:
+    """A process with one live mapped library and one deleted-but-mapped one.
+
+    The deleted mapping is the `DEL` row -- lsof's canonical "who is still
+    running against the old shared object after an upgrade" answer -- and it is
+    the one maps row that cannot be stat'd, so it exercises the branch that
+    takes its device and inode from the maps line instead. Both copies carry a
+    space in the name, because a maps path is the rest of the line and must not
+    be split on whitespace."""
+    mdir = os.path.join(work, "maps")
+    os.makedirs(mdir)
+    live = os.path.join(mdir, "live lib.so")
+    gone = os.path.join(mdir, "gone lib.so")
+    shutil.copy("/usr/lib/x86_64-linux-gnu/libm.so.6", live)
+    shutil.copy("/usr/lib/x86_64-linux-gnu/libc.so.6", gone)
+    py = (
+        "import ctypes,os,time\n"
+        "a=ctypes.CDLL(%r)\n"
+        "b=ctypes.CDLL(%r)\n"
+        "os.unlink(%r)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (live, gone, gone, mdir)
+    )
+    return Fixture("E(mappings)", [sys.executable, "-c", py], cwd=mdir, expect_fds=3)
+
+
+def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture, Fixture]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
     with open(os.path.join(fdir, "f.txt"), "w") as f:
@@ -231,7 +260,8 @@ def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture]:
     b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)  # 0,1,2 + 3 sockets
     c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
     d = hostile_sleeper("D", work, HOSTILE_UTF8_COMM)
-    return a, b, c, d
+    e = mapping_holder(work)
+    return a, b, c, d, e
 
 
 # -------------------------------------------------------------------- matrix
@@ -303,10 +333,22 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d = fixtures
+    a, b, c, d, e = fixtures
     try:
         for fx in fixtures:
             fx.start()
+        # E's mappings land after its fds do; it writes `ready` once both
+        # libraries are loaded and one is unlinked. Waiting on the marker
+        # keeps a half-loaded fixture from producing a matching-but-partial
+        # table on both sides, which would be a false green (LESSONS #6).
+        ready = os.path.join(e.cwd, "ready")
+        deadline = time.monotonic() + 5.0
+        while not os.path.exists(ready) and time.monotonic() < deadline:
+            if e.proc is not None and e.proc.poll() is not None:
+                infra(f"fixture {e.name} exited early (rc={e.proc.returncode})")
+            time.sleep(0.02)
+        if not os.path.exists(ready):
+            infra(f"fixture {e.name} did not finish mapping within 5s")
         # {FILE} is a path only fixture A holds; {PORT} is fixture B's
         # listener. Both name exactly one fixture, which is what makes the
         # un-`-a`ed OR cases deterministic.
@@ -328,6 +370,7 @@ def run(args) -> int:
                 "B": str(b.pid),
                 "C": str(c.pid),
                 "D": str(d.pid),
+                "E": str(e.pid),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "PORT": port,
             },

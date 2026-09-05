@@ -21,6 +21,10 @@ pub enum FdType {
     Txt,
     /// Memory-mapped module (`mem`).
     Mem,
+    /// A file that is still mapped but has been deleted (`DEL`). lsof's
+    /// canonical use: after a package upgrade, `lsof | grep DEL` finds the
+    /// processes still running against the replaced shared objects.
+    Deleted,
     /// A thread (`task`) row emitted under `-K`. The TID lives in
     /// [`OpenFile::node`] and the thread state / start in `name`.
     Task,
@@ -37,6 +41,7 @@ impl FdType {
             FdType::Root => "rtd".to_string(),
             FdType::Txt => "txt".to_string(),
             FdType::Mem => "mem".to_string(),
+            FdType::Deleted => "DEL".to_string(),
             FdType::Task => "task".to_string(),
             FdType::Unknown => "unk".to_string(),
         }

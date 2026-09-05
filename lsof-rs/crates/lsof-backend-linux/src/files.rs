@@ -21,7 +21,7 @@ const S_IFIFO: u32 = 0o010000;
 /// Decode Linux's packed `dev_t` into lsof's `major,minor` DEVICE column.
 /// The layout is glibc's: 12 low + 20 high bits of major, 8 low + 12 high of
 /// minor, interleaved.
-fn dev_string(dev: u64) -> String {
+pub(crate) fn dev_string(dev: u64) -> String {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfffu64);
     let minor = (dev & 0xff) | ((dev >> 12) & !0xffu64);
     format!("{major},{minor}")
@@ -226,6 +226,15 @@ pub fn for_pid(pid: u32, socks: &SocketTable) -> Option<Vec<OpenFile>> {
             out.push(f);
         }
     }
+
+    // Mapped files, after the specials and before the numbered fds — the
+    // order the C emits them in. The txt row, if there is one, identifies the
+    // executable's own mapping so it is not listed a second time as `mem`.
+    let exe = out
+        .iter()
+        .find(|f| f.fd == FdType::Txt)
+        .and_then(|f| Some((f.device.as_deref()?, f.node.as_deref()?)));
+    out.extend(crate::maps::rows_for(pid, exe));
 
     let dir = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
     let mut fds: Vec<(u64, String)> = dir

@@ -25,9 +25,6 @@ disagreeing, and it names the C code so anyone can check the triage.
 
 ## Ledger (read by `diff_run.py`)
 
-- [x] files-mem-rows: DEBT (L2) — the C emits one `mem` row per mapped library
-  from `/proc/<pid>/maps`; the Linux backend does not read `maps` yet. Every
-  other file case passes `-d ^mem` so it measures its own surface.
 - [x] files-offset-o: DECISION — with `-o` the C changes the header to `OFFSET`
   and prints an empty cell for `cwd`/`rtd`/`txt` (no fdinfo, no offset);
   lsof-rs keeps `SIZE/OFF` and falls back to the size. Shared renderer
@@ -46,6 +43,44 @@ disagreeing, and it names the C code so anyone can check the triage.
   prints the same text. `hostile-comm-utf8-fields-Ffc` on the same comm
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
+
+## Fixed by reading /proc/<pid>/maps (2026-09-05)
+
+`files-mem-rows` is no longer ledgered debt: the Linux backend emits `mem` rows,
+so it MATCHes. A mapping keeps a file open exactly as an fd does, and lsof lists
+both. What the C does, established by running it rather than reading it:
+
+- One row per **distinct file**, identified by the `(device, inode)` pair from
+  the maps line and not by the path — a shared object is normally mapped four or
+  five times, one segment per protection, and collapses to one row.
+- In **maps order** (ascending address), between the `txt` row and the numbered
+  fds. The differential compares stdout byte for byte, so the order is part of
+  the contract.
+- The executable's own mapping is the `txt` row and is not repeated as `mem`.
+- SIZE is the **file's** size from `stat`, not the mapping's length.
+- A mapping whose file has been **deleted** is not a `mem` row at all: it is an
+  `FdType::Deleted` (`DEL`) row carrying the device and inode from the maps
+  line, with SIZE blank — there is nothing left to stat. This is the row
+  `lsof | grep DEL` looks for after a package upgrade, to find the processes
+  still running against the replaced shared objects. It cost a wrong first
+  conclusion: `lsof -d mem` showed nothing for a deleted mapping, which looked
+  like "the C skips it", until running without the filter showed the row under
+  a different FD.
+
+`mem` rows also made two things testable that were not: `files-table-with-mem`
+compares the whole default table with mem rows in place, and `mappings-mem-and-del`
+runs against a new fixture holding one live mapped library and one deleted while
+still mapped. Both library copies have a space in the name, because a maps path
+is the rest of the line and must never be split on whitespace — the `proc_maps`
+fuzz target asserts that, along with "no row is invented", "every path is
+absolute", "the kernel's ` (deleted)` marker never reaches a name" and "one row
+per (device, inode)". 1.9M runs clean.
+
+What the C prints and lsof-rs still does not: a mapping it cannot `stat`, and
+one whose `stat` disagrees with the maps line, get a row with a
+`(stat: ...)` or `(path inode=...)` name addition. lsof-rs omits rows it cannot
+describe, the same deliberate choice it makes for an unreadable `/proc` link
+(see "Deliberate, and staying").
 
 ## Fixed by rebuilding the selection engine (2026-09-05)
 
