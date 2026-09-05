@@ -371,12 +371,22 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                 }
             }
         }
+        // `-u ^name` and `-c ^name` are negations, not selections: they
+        // exclude absolutely and take no part in the OR/AND rule (Lsof.8).
         'u' => {
             for t in value.split(',').filter(|s| !s.is_empty()) {
-                sel.users.push(t.to_string());
+                match t.strip_prefix('^') {
+                    Some("") => return Err("option -u^ requires a name".to_string()),
+                    Some(name) => sel.user_excludes.push(name.to_string()),
+                    None => sel.users.push(t.to_string()),
+                }
             }
         }
-        'c' => sel.commands.push(value.to_string()),
+        'c' => match value.strip_prefix('^') {
+            Some("") => return Err("option -c^ requires a name".to_string()),
+            Some(name) => sel.command_excludes.push(name.to_string()),
+            None => sel.commands.push(value.to_string()),
+        },
         'g' => {
             // Windows extension: `-g <ppid>[,<ppid>...]` selects processes
             // whose PPID is in the list (no PGID on Windows). See

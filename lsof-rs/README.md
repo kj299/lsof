@@ -119,12 +119,22 @@ item is shipped or a documented closed gate — and the release criteria are in
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed
   through the porting kit's runner with [`DIVERGENCES.md`](DIVERGENCES.md) as
-  the ledger. 19 cases over four fixtures; every unledgered difference fails
+  the ledger. 20 cases over four fixtures; every unledgered difference fails
   the build. On its first fixture it found two more fidelity gaps (the offset
   cell for devices and FIFOs, `pipe` in NAME), fixed the same day; its
   hostile-name fixtures then found a defect in the C itself (a signed-`char`
   comparison that truncates non-ASCII commands), which the port deliberately
   does not reproduce.
+
+**Selection follows lsof's OR rule.** lsof ORs its list options unless `-a`
+ANDs them, so `lsof -d ^mem -p PID` lists the whole host in real lsof — and now
+in lsof-rs, which used to list one process. Every file carries the set of
+selectors it matched, inheriting its process's matches; without `-a` any one
+match lists it, with `-a` it needs them all. If you relied on lsof-rs's older
+behaviour, add `-a`, which is what you would have had to write for the C
+anyway. The consequence to know, verified against the C: `-d ^mem -p PID`
+without `-a` still shows that PID's `mem` rows, because they inherit the PID
+match even though the fd selector excluded them.
 
 **Names are escaped before they reach your terminal.** A process names itself
 and anyone can name a file, so COMMAND and NAME are text a local user chooses.

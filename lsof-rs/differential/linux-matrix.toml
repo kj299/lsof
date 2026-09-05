@@ -11,13 +11,14 @@
 # normalization is sufficient. Numbers are never masked here: they are exactly
 # the cells this gate exists to compare.
 #
-# EVERY CASE CARRIES -a. lsof ORs its list options unless -a ANDs them
-# (Lsof.8: "list options that are specifically stated are ORed"); lsof-rs applies
-# file-level selectors unconditionally. Without -a, `-d ^mem -p PID` means
-# "files that are not mem OR process PID" to the C — the whole system — and
-# "process PID's non-mem files" to lsof-rs. That is a real, recorded divergence
-# (DIVERGENCES.md, `files-or-semantics-no-a`); the -a makes every other case
-# mean the same thing to both binaries so it measures what it names.
+# MOST CASES CARRY -a, and the two that do not are the whole point of
+# `or-semantics-*`. lsof ORs its list options unless -a ANDs them (Lsof.8:
+# "list options that are specifically stated are ORed"), which lsof-rs now
+# implements. Keeping -a on the other cases is still not optional: without it
+# `-d ^mem -p PID` means "every non-mem file on the host OR process PID's
+# files", so the case would measure the whole system instead of the fixture it
+# names — and a whole-system case cannot be gated at all, because each binary
+# lists ITSELF, under a pid that differs on every run.
 #
 # -n -P everywhere: the C resolves hostnames and service names by default;
 # lsof-rs never does (a deliberate difference, docs/known-limitations.md), so
@@ -81,11 +82,43 @@ name = "files-fields-F"
 args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "{A}"]
 
 [[case]]
-# LEDGERED, and the ONLY case without -a, on purpose: it exercises lsof's
-# OR-by-default list semantics, which lsof-rs does not implement for file-level
-# selectors. To the C this lists every process on the host; to lsof-rs, one.
-name = "files-or-semantics-no-a"
-args = ["-n", "-P", "-d", "^mem", "-p", "{A}"]
+# THE OR RULE ITSELF, made deterministic. Both selectors name exactly one
+# fixture — {FILE} is a path only A holds, -iTCP:{PORT} is only B's listener —
+# so the union is two rows and nothing else on the host can drift into it.
+# Neither is a PROCESS selector, which matters: a process selector makes its
+# process "primarily selected" and every one of its files then inherits that
+# match, mem rows included (lib/proc.c:178). Those lsof-rs cannot emit until
+# L2, so any OR case built on -p would measure the mem-row debt, not the rule.
+#
+# THE OPTION MUST COME BEFORE THE PATH. lsof stops option parsing at the first
+# non-option argument, so `lsof FILE -iTCP:N` reads `-iTCP:N` as a second
+# FILENAME (which does not exist, hence exit 1); lsof-rs permutes and reads it
+# as an option. That is DIVERGENCES.md #12, found by this case.
+name = "or-semantics-path-or-inet"
+args = ["-n", "-P", "-iTCP:{PORT}", "{FILE}"]
+
+[[case]]
+# The same two selectors ANDed. No file is both A's regular file and B's TCP
+# listener, so both binaries print nothing and exit 1. The OR/AND pair is what
+# proves -a is wired to the rule rather than merely accepted.
+name = "or-semantics-path-and-inet"
+args = ["-n", "-P", "-a", "-iTCP:{PORT}", "{FILE}"]
+
+[[case]]
+# A `^` negation is neither ORed nor ANDed: Lsof.8 says it "is applied before
+# all other selections and absolutely excludes the listing of the files of the
+# process". Fixture A is a `sleep`, so `-c ^sleep` kills it even though `-p`
+# names it — both binaries print nothing and exit 1, the 1 because an excluded
+# process never counts as a located `-p` search item.
+name = "negation-excludes-absolutely"
+args = ["-n", "-P", "-c", "^sleep", "-p", "{A}"]
+
+[[case]]
+# Same, with -a, because Lsof.8 warns that -a's placement is irrelevant:
+# "Wherever -a is placed, it causes the ANDing of all selection options" — and
+# a negation takes part in neither.
+name = "negation-outranks-dash-a"
+args = ["-n", "-P", "-a", "-c", "^sleep", "-p", "{A}"]
 
 # ----------------------------------------------------------- sockets fixture
 

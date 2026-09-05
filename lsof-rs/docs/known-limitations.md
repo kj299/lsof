@@ -129,9 +129,12 @@ decision, not a bug fix to slip into a backend phase.
 
 Since 2026-09-02 the Linux differential runs as a CI gate and keeps the full
 list in [`../DIVERGENCES.md`](../DIVERGENCES.md), which adds six more found the
-day it landed — among them lsof's **OR-by-default list semantics** (lsof-rs
-ANDs file-level selectors unconditionally), the `-F` field set (`g u G l D`),
-and `-o`'s `OFFSET` header. Read that file as the authoritative ledger; this
+day it landed — among them the `-F` field set (`g u G l D`) and `-o`'s `OFFSET`
+header. The largest of them, lsof's **OR-by-default list semantics**, has since
+been **fixed**: lsof-rs applied file-level selectors unconditionally, so
+`lsof -d ^mem -p PID` listed one process where the C lists the whole host. It
+now models the C's rule exactly. Add `-a` to any command that relied on the old
+intersection behaviour. Read that file as the authoritative ledger; this
 section is the narrative for the first three.
 
 One entry in that ledger has since been **closed rather than recorded**, because

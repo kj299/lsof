@@ -303,7 +303,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert ($r.Out -match [regex]::Escape($env:USERNAME)) "USER column should mention $($env:USERNAME)"
     }
     Test-Case 'command-filter' 'selection/-c' {
-        $r = Invoke-Lsof @('-c', 'cmd', '-d', 'txt') 'c-cmd'; Assert-ContainsCI $r.Out 'cmd.exe'
+        $r = Invoke-Lsof @('-a', '-c', 'cmd', '-d', 'txt') 'c-cmd'; Assert-ContainsCI $r.Out 'cmd.exe'
     }
 
     # ===================== handles: file / offset / pipe / mapped =====================
@@ -344,19 +344,19 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
 
     # ===================== cwd / modules (child processes) =====================
     Test-Case 'cwd-64bit' 'cwd' {
-        $r = Invoke-Lsof @('-d', 'cwd', '-p', "$($fx.Cwd64.Id)") 'cwd64'; Assert-ContainsCI $r.Out 'cwd'; Assert-ContainsCI $r.Out 'C:\Windows'
+        $r = Invoke-Lsof @('-a', '-d', 'cwd', '-p', "$($fx.Cwd64.Id)") 'cwd64'; Assert-ContainsCI $r.Out 'cwd'; Assert-ContainsCI $r.Out 'C:\Windows'
     }
     Test-Case 'cwd-wow64-32bit' 'cwd/wow64' {
         if (-not $fx.Cwd32) { Skip 'no SysWOW64 cmd.exe' }
-        $r = Invoke-Lsof @('-d', 'cwd', '-p', "$($fx.Cwd32.Id)") 'cwd32'; Assert-ContainsCI $r.Out 'C:\Windows'
+        $r = Invoke-Lsof @('-a', '-d', 'cwd', '-p', "$($fx.Cwd32.Id)") 'cwd32'; Assert-ContainsCI $r.Out 'C:\Windows'
     }
     Test-Case 'modules-txt-image' 'modules' {
-        $r = Invoke-Lsof @('-d', 'txt', '-p', "$($fx.Cwd64.Id)") 'txt'; Assert-ContainsCI $r.Out 'cmd.exe'
+        $r = Invoke-Lsof @('-a', '-d', 'txt', '-p', "$($fx.Cwd64.Id)") 'txt'; Assert-ContainsCI $r.Out 'cmd.exe'
         $img = (Get-Process -Id $fx.Cwd64.Id).Path
         if ($img) { Assert-ContainsCI $r.Out (Split-Path $img -Leaf) 'txt vs Get-Process.Path' }
     }
     Test-Case 'modules-mem-dll' 'modules' {
-        $r = Invoke-Lsof @('-d', 'mem', '-p', "$($fx.Cwd64.Id)") 'mem'; Assert-ContainsCI $r.Out '.dll'
+        $r = Invoke-Lsof @('-a', '-d', 'mem', '-p', "$($fx.Cwd64.Id)") 'mem'; Assert-ContainsCI $r.Out '.dll'
     }
 
     # ===================== Restart Manager / paths =====================
@@ -369,7 +369,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
 
     # ===================== selection: -d / -R / -a =====================
     Test-Case 'fd-filter-named-cwd' 'selection/-d' {
-        $r = Invoke-Lsof @('-d', 'cwd', '-p', "$($fx.Cwd64.Id)") 'd-cwd'; Assert-NotContains $r.Out ' REG ' '-d cwd should exclude REG'
+        $r = Invoke-Lsof @('-a', '-d', 'cwd', '-p', "$($fx.Cwd64.Id)") 'd-cwd'; Assert-NotContains $r.Out ' REG ' '-d cwd should exclude REG'
     }
     Test-Case 'ppid-column-dash-R' 'render/-R' {
         $r = Invoke-Lsof @('-R', '-p', "$self") 'R'; Assert-Contains $r.Out 'PPID'
@@ -457,7 +457,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Test-Case 'link-filter-plus-L' 'selection/+L' {
         # +L 1 keeps only link-count-0 files; deterministic content varies, so
         # just assert it parses and runs cleanly (implies -L).
-        $r = Invoke-Lsof @('+L', '1', '-p', "$self") 'plusL'
+        $r = Invoke-Lsof @('-a', '+L', '1', '-p', "$self") 'plusL'
         Assert ($r.Exit -eq 0) "+L 1 should run cleanly (exit=$($r.Exit))"
     }
     Test-Case 'numeric-ids-dash-l' 'render/-l' {
