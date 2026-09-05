@@ -12,6 +12,42 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **`-F` now emits the C's whole field set, in the C's order** (`DIVERGENCES.md`
+  items 5 and 11). `-F` is lsof's scripting format — everything that consumes
+  lsof programmatically parses this — so a missing field or a reordered stream
+  is a broken script, not a cosmetic difference. Bare `-F` now matches the C
+  byte-for-byte on every fixture. Found by sweeping every field letter against
+  the oracle rather than by reading `print.c`; six of the eight would have
+  survived a careful read.
+
+  **Breaking for `-F` consumers, deliberately.** Three of the changes are
+  visible on Windows too: the `f` fd marker is emitted only when it is selected
+  (`-Fcn` yields `p c n`, not `p c f n` — Lsof.8: only `p` is "always
+  selected"); `a` and `l` are emitted **empty** rather than omitted, so every
+  file record has the same shape; and a socket's state has moved out of the `n`
+  (name) field into its own `TST=` token, where the C keeps it.
+
+  The rest: six fields were missing outright — `g` (pgid), `u` (uid), `G` (file
+  flags), `l` (lock), `D` (device number in hex) and the empty `a`/`l` values;
+  the field order was wrong (the `T` tokens belong **after** the name, because
+  `print.c` calls `print_tcptpi()` once `printname()` has run); `-F0` replaced
+  the last field's NUL with the set-closing NL instead of appending it, which
+  breaks the one thing `-F0` exists for; `i` and `P` are one cell under two
+  names and an **AF_UNIX** socket takes the inode branch, not the protocol one;
+  and UDP carried neither its queues nor its state.
+
+  Two backend bugs came out with it, both visible in the plain table: an
+  AF_UNIX socket in the common `SS_UNCONNECTED` state showed no state at all,
+  and a socket's state was being reported **twice** in the NAME cell on
+  Windows — once from the name the backend built, once from the renderer's
+  suffix.
+
+  `D` is the **filesystem** device, not the DEVICE cell: for `/dev/null` the C
+  prints the devtmpfs the node lives on, not the `1,3` the column shows. The
+  model carries both. Selecting a field also switches on the collection it
+  needs, as the C's field table does (`store.c`), which is why bare `-F` prints
+  `TQR=`/`TQS=` with no `-T`.
+
 - **A path argument now matches the file it names, not a name prefix**
   (`DIVERGENCES.md` #14). lsof matches by the file's `(device, inode)`, and
   `+d` (one directory level) is not `+D` (the tree); lsof-rs had a single

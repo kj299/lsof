@@ -100,6 +100,8 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
             let entry = out.entry(pid).or_insert_with(|| {
                 let base = by_pid.get(&pid);
                 Process {
+                    uid: None,
+                    pgid: None,
                     pid,
                     ppid: base.and_then(|p| p.ppid),
                     command: base
@@ -111,6 +113,8 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
                 }
             });
             entry.files.push(OpenFile {
+                fs_device: None,
+                file_flags: None,
                 lock: None,
                 fd: FdType::Unknown,
                 access: AccessMode::Unknown,

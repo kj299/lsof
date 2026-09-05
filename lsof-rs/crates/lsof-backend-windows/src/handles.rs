@@ -255,6 +255,8 @@ pub fn enumerate(
         out.push((
             pid,
             OpenFile {
+                fs_device: None,
+                file_flags: None,
                 lock: None,
                 fd: FdType::Handle(e.handle_value as u64),
                 access: access_from_granted(e.granted_access),

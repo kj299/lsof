@@ -12,10 +12,18 @@ use crate::selection::Selection;
 
 /// A small, fixed set of processes covering a regular file, a directory, a
 /// listening TCP socket, an established TCP socket, and a UDP socket.
+///
+/// A socket's `name` holds the endpoints and nothing else: the state is carried
+/// in `SocketInfo::state` and each renderer decides where it goes (a table
+/// suffix, a `-F` `TST=` token, a JSON key). Baking it into the name here would
+/// make the table and `-F n` report it twice, which is the shape a backend has
+/// to avoid too.
 pub fn sample_processes() -> Vec<Process> {
     let addr = |s: &str| -> SocketAddr { s.parse().expect("valid test addr") };
     vec![
         Process {
+            uid: None,
+            pgid: None,
             pid: 1000,
             ppid: Some(4),
             command: "explorer.exe".into(),
@@ -23,6 +31,8 @@ pub fn sample_processes() -> Vec<Process> {
             endpoint_peer: false,
             files: vec![
                 OpenFile {
+                    fs_device: None,
+                    file_flags: None,
                     lock: None,
                     fd: FdType::Cwd,
                     access: AccessMode::Read,
@@ -36,6 +46,8 @@ pub fn sample_processes() -> Vec<Process> {
                     socket: None,
                 },
                 OpenFile {
+                    fs_device: None,
+                    file_flags: None,
                     lock: None,
                     fd: FdType::Handle(220),
                     access: AccessMode::Read,
@@ -51,6 +63,8 @@ pub fn sample_processes() -> Vec<Process> {
             ],
         },
         Process {
+            uid: None,
+            pgid: None,
             pid: 1500,
             ppid: Some(1000),
             command: "server.exe".into(),
@@ -58,11 +72,13 @@ pub fn sample_processes() -> Vec<Process> {
             endpoint_peer: false,
             files: vec![
                 OpenFile {
+                    fs_device: None,
+                    file_flags: None,
                     lock: None,
                     fd: FdType::Handle(72),
                     access: AccessMode::ReadWrite,
                     file_type: FileType::Ipv4,
-                    name: "*:445 (LISTEN)".into(),
+                    name: "*:445".into(),
                     device: None,
                     size: None,
                     offset: None,
@@ -72,16 +88,18 @@ pub fn sample_processes() -> Vec<Process> {
                         protocol: Protocol::Tcp,
                         local: Some(addr("0.0.0.0:445")),
                         remote: None,
-                        state: Some(TcpState::Listen),
+                        state: Some(TcpState::Listen.into()),
                         tcp: None,
                     }),
                 },
                 OpenFile {
+                    fs_device: None,
+                    file_flags: None,
                     lock: None,
                     fd: FdType::Handle(88),
                     access: AccessMode::ReadWrite,
                     file_type: FileType::Ipv4,
-                    name: "127.0.0.1:445->127.0.0.1:51000 (ESTABLISHED)".into(),
+                    name: "127.0.0.1:445->127.0.0.1:51000".into(),
                     device: None,
                     size: None,
                     offset: None,
@@ -91,11 +109,13 @@ pub fn sample_processes() -> Vec<Process> {
                         protocol: Protocol::Tcp,
                         local: Some(addr("127.0.0.1:445")),
                         remote: Some(addr("127.0.0.1:51000")),
-                        state: Some(TcpState::Established),
+                        state: Some(TcpState::Established.into()),
                         tcp: None,
                     }),
                 },
                 OpenFile {
+                    fs_device: None,
+                    file_flags: None,
                     lock: None,
                     fd: FdType::Handle(96),
                     access: AccessMode::ReadWrite,

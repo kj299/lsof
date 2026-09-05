@@ -136,6 +136,8 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
     } else {
         let i = procs.len();
         procs.push(Process {
+            uid: None,
+            pgid: None,
             pid,
             ppid: None,
             command: "<unknown>".to_string(),

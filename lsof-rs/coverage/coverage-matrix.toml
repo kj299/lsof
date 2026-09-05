@@ -11,7 +11,7 @@
 # Sources, all three real and maintained:
 #   golden/*      crates/lsof-core/tests/golden.rs   (portable, every CI push)
 #   diff/*        ../differential/capture.ps1        (windows CI, hard gate)
-#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (55-case live harness)
+#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (61-case live harness)
 #
 # Keep it truthful: a case belongs here only if a test really runs those args
 # and really asserts on that output. Declaring coverage you don't have converts
@@ -255,6 +255,14 @@ name = "smoke/field-output-Fpn"
 args = ["-Fpn", "-p", "SELF"]
 
 [[case]]
+name = "smoke/field-output-bare-F"
+args = ["-F", "-p", "SELF"]
+
+[[case]]
+name = "smoke/field-output-socket-state"
+args = ["-FnT", "-p", "SELF"]
+
+[[case]]
 name = "smoke/field-output-nul-F0"
 args = ["-F0", "-p", "SELF"]
 
@@ -432,6 +440,14 @@ name = "linux/differential-files-fields-F"
 args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "PID"]
 
 [[case]]
+name = "linux/differential-files-fields-F0"
+args = ["-n", "-P", "-F0", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-files-fields-Fcn"
+args = ["-n", "-P", "-Fcn", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
 name = "linux/differential-sockets-inet"
 args = ["-n", "-P", "-a", "-i", "-p", "PID"]
 covers = ["type:IPv4"]
@@ -439,4 +455,14 @@ covers = ["type:IPv4"]
 [[case]]
 name = "linux/differential-sockets-unix-U"
 args = ["-n", "-P", "-a", "-U", "-p", "PID"]
+covers = ["type:unix"]
+
+[[case]]
+name = "linux/differential-sockets-fields-F"
+args = ["-n", "-P", "-F", "-a", "-p", "PID"]
+covers = ["type:IPv4", "type:unix"]
+
+[[case]]
+name = "linux/differential-sockets-unix-fields-F"
+args = ["-n", "-P", "-a", "-U", "-FtiPnT", "-p", "PID"]
 covers = ["type:unix"]

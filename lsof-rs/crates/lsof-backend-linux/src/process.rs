@@ -35,28 +35,42 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<Process> {
     // real and exploitable parsing trap, since process names are attacker-
     // controlled. `status` is line-oriented and has no such ambiguity.
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    let (command, ppid, uid) = parse_status(&status);
+    let st = parse_status(&status);
 
     Some(Process {
+        uid: st.uid,
+        pgid: st.pgid,
         pid,
-        ppid,
-        command,
-        user: uid.map(|u| users::name_for(u, numeric_ids)),
+        ppid: st.ppid,
+        command: st.command,
+        user: st.uid.map(|u| users::name_for(u, numeric_ids)),
         files: Vec::new(),
         endpoint_peer: false,
     })
 }
 
-/// The parsing half of [`read_one`]: `(command, ppid, real uid)` from the text
+/// What one `/proc/<pid>/status` yields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub command: String,
+    pub ppid: Option<u32>,
+    /// The **real** uid — the owner lsof shows, and its `-F u` value.
+    pub uid: Option<u32>,
+    /// From `NSpgid:`, for `-F g`.
+    pub pgid: Option<u32>,
+}
+
+/// The parsing half of [`read_one`]: the fields of the text
 /// of `/proc/<pid>/status`. Pure, so the fuzz target can drive it with arbitrary
 /// bytes, and it must never panic — `Name:` is set by the process itself
 /// (`prctl(PR_SET_NAME)`), which makes this the one parser in the backend whose
 /// input an unprivileged local user controls outright. Missing or malformed
 /// fields come back empty/`None`; nothing is guessed.
-pub fn parse_status(status: &str) -> (String, Option<u32>, Option<u32>) {
+pub fn parse_status(status: &str) -> Status {
     let mut command = String::new();
     let mut ppid = None;
     let mut uid = None;
+    let mut pgid = None;
     for line in status.lines() {
         if let Some(v) = line.strip_prefix("Name:") {
             // The kernel writes `Name:\t<comm>` — exactly one tab. The comm's
@@ -72,11 +86,21 @@ pub fn parse_status(status: &str) -> (String, Option<u32>, Option<u32>) {
                 .next()
                 .and_then(|s| s.parse::<u32>().ok());
         }
-        if !command.is_empty() && ppid.is_some() && uid.is_some() {
+        // `NSpgid` is the process group as seen in our own namespace, which
+        // is the number lsof's `-F g` reports. There is no `Pgid:` line.
+        else if let Some(v) = line.strip_prefix("NSpgid:") {
+            pgid = v.trim().parse::<u32>().ok();
+        }
+        if !command.is_empty() && ppid.is_some() && uid.is_some() && pgid.is_some() {
             break;
         }
     }
-    (command, ppid, uid)
+    Status {
+        command,
+        ppid,
+        uid,
+        pgid,
+    }
 }
 
 /// Undo the kernel's escaping of the command in `/proc/<pid>/status`.
@@ -137,27 +161,39 @@ pub fn is_root() -> bool {
 mod tests {
     use super::*;
 
+    /// The three fields a caller most often wants, as a tuple, so the asserts
+    /// below stay readable.
+    fn triple(s: &str) -> (String, Option<u32>, Option<u32>) {
+        let st = parse_status(s);
+        (st.command, st.ppid, st.uid)
+    }
+
     #[test]
-    fn well_formed_status_yields_all_three_fields() {
-        let s = "Name:\tsleep\nUmask:\t0022\nState:\tS (sleeping)\nPid:\t42\nPPid:\t7\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\n";
-        assert_eq!(parse_status(s), ("sleep".to_string(), Some(7), Some(1000)));
+    fn well_formed_status_yields_every_field() {
+        let s = "Name:\tsleep\nUmask:\t0022\nState:\tS (sleeping)\nPid:\t42\nPPid:\t7\nNSpgid:\t41\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\n";
+        assert_eq!(
+            parse_status(s),
+            Status {
+                command: "sleep".to_string(),
+                ppid: Some(7),
+                uid: Some(1000),
+                pgid: Some(41),
+            }
+        );
     }
 
     #[test]
     fn hostile_names_are_faithful_and_never_panic() {
         // The reason `status` was chosen over `stat`: a name containing ") " (or
         // anything else) is attacker-controlled via prctl(PR_SET_NAME). The
-        // parser must return it verbatim, trimmed, and must not panic.
+        // parser must return it verbatim and must not panic.
         let s = "Name:\t) ) :Uid: 0\nPPid:\t1\nUid:\t0\t0\t0\t0\n";
-        assert_eq!(
-            parse_status(s),
-            (") ) :Uid: 0".to_string(), Some(1), Some(0))
-        );
+        assert_eq!(triple(s), (") ) :Uid: 0".to_string(), Some(1), Some(0)));
         // The proc_status fuzz target's first finding, verbatim: one line, no
         // newline, a bare '\r' mid-value. lines() yields it whole; trim() keeps
         // the interior '\r'. Faithful is correct here (DIVERGENCES.md #10 is
         // about the renderer, not this).
-        let (cmd, ppid, uid) = parse_status("Name:PPid:\rd:Uid:");
+        let (cmd, ppid, uid) = triple("Name:PPid:\rd:Uid:");
         assert_eq!(cmd, "PPid:\rd:Uid:");
         assert_eq!((ppid, uid), (None, None));
     }
@@ -166,15 +202,15 @@ mod tests {
     fn the_kernels_status_escaping_is_undone_nothing_else_is_touched() {
         // What the kernel wrote for a comm of `a\b` (one backslash) and for one
         // holding a newline — observed on 6.x: `Name:\ta\\b`, `Name:\tx\ny`.
-        assert_eq!(parse_status("Name:\ta\\\\b\n").0, "a\\b");
-        assert_eq!(parse_status("Name:\tx\\ny\n").0, "x\ny");
+        assert_eq!(parse_status("Name:\ta\\\\b\n").command, "a\\b");
+        assert_eq!(parse_status("Name:\tx\\ny\n").command, "x\ny");
         // Raw controls and non-ASCII are not the kernel's to escape and come
         // through untouched; so does the comm's own trailing whitespace.
         assert_eq!(
-            parse_status("Name:\th\x1b[2J\r \x7f\t\u{e9}\u{9b}z\n").0,
+            parse_status("Name:\th\x1b[2J\r \x7f\t\u{e9}\u{9b}z\n").command,
             "h\x1b[2J\r \x7f\t\u{e9}\u{9b}z"
         );
-        assert_eq!(parse_status("Name:\ttrailing \n").0, "trailing ");
+        assert_eq!(parse_status("Name:\ttrailing \n").command, "trailing ");
         // Shapes the kernel never produces must be kept literally, not guessed.
         assert_eq!(unescape_comm("a\\tb"), "a\\tb");
         assert_eq!(unescape_comm("trailing\\"), "trailing\\");
@@ -184,23 +220,27 @@ mod tests {
 
     #[test]
     fn missing_or_malformed_fields_are_none_not_guesses() {
-        assert_eq!(parse_status(""), (String::new(), None, None));
-        assert_eq!(parse_status("Name:\n"), (String::new(), None, None));
+        assert_eq!(parse_status(""), Status::default());
+        assert_eq!(parse_status("Name:\n"), Status::default());
         assert_eq!(
-            parse_status("PPid:\tnotanumber\nUid:\t\n"),
+            triple("PPid:\tnotanumber\nUid:\t\n"),
             (String::new(), None, None)
         );
         // A uid line with only whitespace after the tag.
-        assert_eq!(parse_status("Uid:   \n"), (String::new(), None, None));
+        assert_eq!(triple("Uid:   \n"), (String::new(), None, None));
         // Numbers that overflow u32 are malformed, not clamped.
-        assert_eq!(parse_status("PPid:\t99999999999\n").1, None);
+        assert_eq!(parse_status("PPid:\t99999999999\n").ppid, None);
+        // There is no `Pgid:` line in /proc — only `NSpgid:` — so a `Pgid:`
+        // line must not be mistaken for one.
+        assert_eq!(parse_status("Pgid:\t9\n").pgid, None);
+        assert_eq!(parse_status("NSpgid:\t9\n").pgid, Some(9));
     }
 
     #[test]
     fn the_first_complete_set_wins_and_later_lines_are_ignored() {
-        // Once all three are seen the loop stops — a second `Name:` further
+        // Once every field is seen the loop stops — a second `Name:` further
         // down (impossible from the kernel, trivial from a fuzzer) is ignored.
-        let s = "Name:\tfirst\nPPid:\t1\nUid:\t2\t2\t2\t2\nName:\tsecond\n";
-        assert_eq!(parse_status(s).0, "first");
+        let s = "Name:\tfirst\nPPid:\t1\nNSpgid:\t1\nUid:\t2\t2\t2\t2\nName:\tsecond\n";
+        assert_eq!(parse_status(s).command, "first");
     }
 }

@@ -724,3 +724,62 @@ the emphasized half.
 - **Section amended:** lsof-rs `DIVERGENCES.md` (the `C-DEFECT` kind);
   PLAYBOOK Phase 2/4 candidates for the next kit retrospective, recorded here
   so they are not lost.
+
+## 024. Sweep the option's whole surface — the shape of the output is the contract, not just its content
+
+- **Date:** 2026-09-05
+- **Codebase:** lsof-rs — closing DIVERGENCES.md items 5 and 11 (the `-F`
+  machine-readable field set)
+- **What happened:** The plan was "add the six missing `-F` fields". Instead of
+  reading `print.c` and implementing what it says, the session ran a sweep:
+  every field letter, several combinations, and `-F0`, against the C oracle on
+  a fixture holding a locked file, a directory fd, a TCP listener, a UDP
+  socket, an AF_UNIX socket, a pipe, an eventfd, a deleted file and a character
+  device. **26 of 62 cases diverged**, and only two of the eight root causes
+  were the ones the plan named.
+
+  The other six were all about the *shape* of the stream, and every one of them
+  would have survived a careful read of the C:
+
+  * The field **order** was wrong — the `T` tokens belong after `n`, because
+    `print.c` calls `print_tcptpi()` once `printname()` has run. Reading the
+    function top to bottom shows this; reading it looking for "which fields
+    exist" does not.
+  * `-F0` **replaced** the last field's NUL with the set-closing newline
+    instead of appending it. The C emits `\0` then `\n`. A consumer splitting
+    the stream on NUL — the whole reason `-F0` exists — got one set's last
+    field glued to the next set's first. The port's own golden test asserted
+    the wrong rule in so many words ("the last field of a set is
+    NL-terminated, NOT NUL"), which is #019 again: a golden test pins what its
+    author believed.
+  * `i` and `P` are **one cell under two names**, chosen by a single
+    discriminant. Implementing them as two independent fields gave AF_UNIX rows
+    both a `P` they should not have and no `i` they should.
+  * An AF_UNIX socket's **state was baked into its NAME**, so `-F` reported it
+    in two fields at once — and, on the other backend, twice in the same table
+    cell.
+  * Selecting a field can have a **side effect on collection**: the C's field
+    table (`store.c`) gives `T` the entry `&Ftcptpi, TCPTPI_ALL`, which is why
+    bare `-F` prints `TQR=`/`TQS=` with no `-T` at all. Nothing in `print.c`
+    hints at this; it is a data table three files away.
+  * Two **backend** bugs surfaced only because `-F` names each value
+    separately: a common AF_UNIX state was missing entirely, and UDP carried
+    neither its queues nor its state. Both were invisible in the table, where
+    a missing parenthesised suffix reads as "this socket has no state".
+- **Kit change:** (1) For an option with an enumerable surface — a field list,
+  a format letter set, a sub-flag set — **sweep it against the oracle** rather
+  than implementing from the source. Cost here: one ~60-line script, one
+  minute per run. Yield: six findings that reading would not have produced.
+  (2) The fixture must hold **one row of every shape the option can render**,
+  not one row. Half the findings needed the AF_UNIX or UDP row specifically;
+  the first fixture had only a TCP socket and matched after two fixes.
+  (3) When the port's model splits a value the C keeps in one place (or joins
+  two the C keeps apart), that is where the divergences cluster — the C's
+  `inp_ty` and `Lf->lts` were each one cell that the port had modelled as two
+  and as part of the name.
+  (4) `cargo test --workspace` does **not** build `fuzz/`, so a model change
+  silently rots the fuzz targets; a target that no longer compiles is a target
+  that is not running. Add `cargo fuzz build` to the local verification sweep,
+  not only to CI. (Here `parse_status` had grown from a tuple into a struct and
+  `proc_status.rs` had not compiled since — caught locally only because the
+  sweep ran every target by hand.)

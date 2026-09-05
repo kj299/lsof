@@ -98,6 +98,8 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
     };
 
     Some(OpenFile {
+        fs_device: None,
+        file_flags: None,
         lock: None,
         fd: FdType::Cwd,
         access: AccessMode::Read,

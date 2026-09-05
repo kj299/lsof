@@ -66,6 +66,8 @@ fn try_enumerate(pid: u32) -> Result<Vec<OpenFile>, bool> {
             None
         };
         out.push(OpenFile {
+            fs_device: None,
+            file_flags: None,
             lock: None,
             fd: if is_image { FdType::Txt } else { FdType::Mem },
             access: AccessMode::Read,

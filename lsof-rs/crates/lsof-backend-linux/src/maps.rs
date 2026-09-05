@@ -90,6 +90,16 @@ pub fn parse_maps(text: &str) -> Vec<Mapping> {
     out
 }
 
+/// `254,0` → the kernel's packed `dev_t`, for the rows whose only source of
+/// truth is the maps line (a deleted mapping cannot be stat'd). The legacy
+/// 16-bit encoding is what lsof prints for `-F D`.
+fn dev_num(cell: &str) -> Option<u64> {
+    let (maj, min) = cell.split_once(',')?;
+    let maj = maj.parse::<u64>().ok()?;
+    let min = min.parse::<u64>().ok()?;
+    Some((maj << 8) | min)
+}
+
 /// `fe:00` → `254,0`. The maps file writes the device as hex `major:minor`;
 /// lsof prints it as decimal `major,minor`.
 fn parse_dev(s: &str) -> Option<String> {
@@ -118,6 +128,8 @@ pub fn rows_for(pid: u32, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
             // inode come from the maps line and SIZE stays blank, exactly as
             // the C prints it.
             out.push(OpenFile {
+                fs_device: dev_num(&m.device),
+                file_flags: None,
                 lock: None,
                 fd: FdType::Deleted,
                 access: AccessMode::Unknown,
@@ -144,6 +156,8 @@ pub fn rows_for(pid: u32, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
             continue;
         }
         out.push(OpenFile {
+            fs_device: Some(md.dev()),
+            file_flags: None,
             lock: None,
             fd: FdType::Mem,
             access: AccessMode::Unknown,

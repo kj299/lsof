@@ -43,6 +43,8 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
     while more != 0 {
         let pid = entry.th32ProcessID;
         out.push(Process {
+            uid: None,
+            pgid: None,
             pid,
             ppid: Some(entry.th32ParentProcessID),
             command: wide_to_string(&entry.szExeFile),

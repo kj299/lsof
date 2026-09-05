@@ -19,8 +19,10 @@ ledger — those are the kit's, on purpose.
              4 (a file whose NAME holds one of every hostile character class,
              read), 5 (directory, read) and 6 (FIFO, read/write); stdio on
              /dev/null
-  fixture B  a listening TCP socket, a bound UDP socket and a listening
-             AF_UNIX socket; stdio on /dev/null
+  fixture B  a listening TCP socket, a bound UDP socket, and four AF_UNIX
+             sockets covering every state lsof names — listening, the two
+             halves of a connected pair, and one never connected; stdio on
+             /dev/null
   fixture C  a sleeper whose COMMAND is hostile ASCII: an ANSI clear-screen,
              CR, space, backslash, DEL, TAB, ^A
   fixture D  the same plus é (printable) and U+009B (the 8-bit CSI) — the
@@ -319,15 +321,25 @@ def make_fixtures(
     # ({PORT}). An OR case is only deterministic when every one of its
     # selectors names a fixture, and "-iTCP:<port>" is the one file-level
     # selector that can (see linux-matrix.toml, or-semantics-*).
+    # The AF_UNIX socket states lsof can report are LISTEN (SO_ACCEPTCON, not a
+    # state at all), CONNECTED (the accepted pair) and UNCONNECTED (a socket
+    # that was never connected) — one fd each, because the C reads them from
+    # two different columns and a fixture with only a listener cannot tell a
+    # correct mapping from one that always says LISTEN.
     py = (
         "import socket,os,time\n"
         "t=socket.socket(); t.bind(('127.0.0.1',0)); t.listen(1)\n"
         "open(os.path.join(%r,'port'),'w').write(str(t.getsockname()[1]))\n"
         "u=socket.socket(socket.AF_UNIX); u.bind(os.path.join(%r,'u.sock')); u.listen(1)\n"
+        "cl=socket.socket(socket.AF_UNIX); cl.connect(os.path.join(%r,'u.sock'))\n"
+        "acc,_ = u.accept()\n"
+        "an=socket.socket(socket.AF_UNIX)\n"
         "g=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); g.bind(('127.0.0.1',0))\n"
-        "time.sleep(600)\n" % (sdir, sdir)
+        "time.sleep(600)\n" % (sdir, sdir, sdir)
     )
-    b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)  # 0,1,2 + 3 sockets
+    # 0,1,2 + TCP listener, unix listener, unix client, unix accepted,
+    # unix unconnected, UDP.
+    b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=9)
     c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
     d = hostile_sleeper("D", work, HOSTILE_UTF8_COMM)
     e = mapping_holder(work)

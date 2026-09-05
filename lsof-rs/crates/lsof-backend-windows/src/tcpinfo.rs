@@ -27,7 +27,7 @@ use std::mem::{size_of, zeroed};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::ptr::null_mut;
 
-use lsof_core::model::{OpenFile, Protocol, TcpExtInfo, TcpState};
+use lsof_core::model::{OpenFile, Protocol, SockState, TcpExtInfo, TcpState};
 use lsof_core::TcpInfoFlags;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetPerTcp6ConnectionEStats, GetPerTcpConnectionEStats, SetPerTcp6ConnectionEStats,
@@ -63,7 +63,7 @@ pub fn annotate(file: &mut OpenFile, flags: &TcpInfoFlags, elevated: bool) {
     // connection: TIME_WAIT and other closing states have no live TCB and
     // return ERROR_NOT_SUPPORTED (50). Skipping them avoids ~dozens of
     // doomed enable/read/disable round-trips on a busy host.
-    if sock.state != Some(TcpState::Established) {
+    if sock.state != Some(SockState::Tcp(TcpState::Established)) {
         return;
     }
     // EStats apply to a connected 4-tuple; listening rows have no remote.

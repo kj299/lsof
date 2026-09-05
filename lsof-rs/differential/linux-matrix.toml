@@ -3,13 +3,15 @@
 # Run by linux_diff.py, which stands up four fixture processes and substitutes
 # their PIDs for {A} (files: cwd, a regular file on fd 3, a hostile-named file
 # on fd 4, a directory on fd 5, a FIFO on fd 6), {B} (sockets: a TCP listener,
-# a UDP socket, an AF_UNIX listener), {C} (a sleeper whose COMMAND is hostile
-# ASCII) and {D} (hostile with non-ASCII), then hands the rendered matrix to
-# the porting kit's diff_run.py. Both binaries run against the SAME process at
-# the same instant, under LC_ALL=C.UTF-8, so PIDs, inodes, devices and sizes
-# are identical on both sides and the kit's default whitespace-only
-# normalization is sufficient. Numbers are never masked here: they are exactly
-# the cells this gate exists to compare.
+# a UDP socket, and four AF_UNIX sockets covering every state lsof names —
+# listening, both halves of a connected pair, and one never connected), {C}
+# (a sleeper whose COMMAND is hostile ASCII) and {D} (hostile with non-ASCII),
+# then hands the rendered matrix to the porting kit's diff_run.py. Both
+# binaries run against the SAME process at the same instant, under
+# LC_ALL=C.UTF-8, so PIDs, inodes, devices and sizes are identical on both
+# sides and the kit's default whitespace-only normalization is sufficient.
+# Numbers are never masked here: they are exactly the cells this gate exists
+# to compare.
 #
 # MOST CASES CARRY -a, and the two that do not are the whole point of
 # `or-semantics-*`. lsof ORs its list options unless -a ANDs them (Lsof.8:
@@ -52,9 +54,10 @@ name = "files-fd-4-hostile-name"
 args = ["-n", "-P", "-a", "-d", "4", "-p", "{A}"]
 
 [[case]]
-# The same name through -F n. `-Ffn`, not `-Fn`: lsof-rs emits the `f` marker
-# unconditionally, the C only when selected (DIVERGENCES.md #11), so `f` is
-# selected explicitly to compare the escaping and not the marker.
+# The same name through -F n. `-Ffn`, not `-Fn`: `f` is selected explicitly so
+# the case compares the escaping and nothing else. (It once compared the marker
+# rule too — lsof-rs emitted `f` unconditionally; see DIVERGENCES.md item 11,
+# resolved — and `files-fields-Fcn` now covers that on its own.)
 name = "files-fields-Ffn-hostile-name"
 args = ["-n", "-P", "-a", "-Ffn", "-d", "4", "-p", "{A}"]
 
@@ -83,11 +86,28 @@ name = "files-table-with-mem"
 args = ["-n", "-P", "-a", "-p", "{A}"]
 
 [[case]]
-# LEDGERED. -F field set: the C emits g (pgid), u (uid), G (flags), l (lock),
-# D (hex device) and empty a/l fields that lsof-rs does not; lsof-rs emits d
-# (maj,min) where the C emits D. Shared renderer/model, so a decision.
+# THE WHOLE DEFAULT FIELD SET, in the C's own order. Bare `-F` selects every
+# standard field (Lsof.8), so this one case pins the letters, their values and
+# the sequence `print.c` walks: f a l t G d/D s o i k P n, then the T tokens
+# *after* the name. Order is not cosmetic here — a `-F` consumer that treats
+# the first T after n as the end of a record parses a differently-ordered
+# stream wrongly.
 name = "files-fields-F"
 args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# `-F0`: NUL field terminators. The C *appends* the set-closing NL after the
+# last field's NUL (`…\0\n`) rather than replacing it, which is the whole
+# point of the flag — a consumer splitting the stream on NUL otherwise gets
+# one set's last field glued to the next set's first.
+name = "files-fields-F0"
+args = ["-n", "-P", "-F0", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# An explicit letter list, which is a different code path from bare `-F`: only
+# the named fields may appear, and `f` is NOT one of them unless asked for.
+name = "files-fields-Fcn"
+args = ["-n", "-P", "-Fcn", "-a", "-d", "^mem", "-p", "{A}"]
 
 [[case]]
 # THE OR RULE ITSELF, made deterministic. Both selectors name exactly one
@@ -150,6 +170,23 @@ args = ["-n", "-P", "-a", "-iUDP", "-p", "{B}"]
 name = "sockets-unix-U"
 args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
 
+[[case]]
+# Every socket row through the full field set. This is where the two halves of
+# lsof's NODE cell separate: an internet socket reports its protocol as `P`,
+# an AF_UNIX socket reports its inode as `i` — one discriminant (`inp_ty`),
+# never both and never neither. It also pins the `T` tokens for UDP, which
+# carries queues (and, when connected, ESTABLISHED) exactly as TCP does.
+name = "sockets-fields-F"
+args = ["-n", "-P", "-F", "-a", "-p", "{B}"]
+
+[[case]]
+# The AF_UNIX state, which is not in the NAME: the C keeps it in `Lf->lts` and
+# prints it from print_tcptpi(), so `-Fn` carries `… type=STREAM` and the state
+# arrives separately as `TST=`. Fixture B holds one socket in each state lsof
+# names, so a mapping that always answered LISTEN would fail here.
+name = "sockets-unix-fields-F"
+args = ["-n", "-P", "-a", "-U", "-FtiPnT", "-p", "{B}"]
+
 # ------------------------------------------------------------ mapped files
 # Rows that come from /proc/<pid>/maps rather than from an fd. Fixture E holds
 # one live mapped library and one deleted while still mapped.
@@ -162,6 +199,13 @@ args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
 # of the line and must never be split on whitespace.
 name = "mappings-mem-and-del"
 args = ["-n", "-P", "-a", "-p", "{E}"]
+
+[[case]]
+# The same rows through the full field set. A DEL row is the one row whose
+# device number cannot come from a stat — it is decoded from the maps line —
+# so `-F D` is the only place a wrong decoding shows.
+name = "mappings-fields-F"
+args = ["-n", "-P", "-F", "-a", "-p", "{E}"]
 
 # --------------------------------------------------------------- path arguments
 # lsof matches a path argument by what the file IS -- its (device, inode) --

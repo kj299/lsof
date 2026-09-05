@@ -122,8 +122,8 @@ pub mod fuzz_api {
     pub use crate::locks::parse_locks;
     pub use crate::maps::{parse_maps, Mapping};
     pub use crate::net::{
-        fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_suffix,
-        SocketTable,
+        fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_state,
+        unix_suffix, SocketTable,
     };
     pub use crate::process::parse_status;
     pub use crate::users::parse_passwd;

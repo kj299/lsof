@@ -15,7 +15,7 @@ lsof-rs's two inputs.
 | File | Role |
 |---|---|
 | `feature-inventory-lsof-rs.toml` | The **contract**: the C's full enumerated surface (45 option letters, 111 TYPE codes — extracted from `src/main.c` + `lib/print.c`) plus lsof-rs's 7 Windows-native TYPE codes, minus explicit waivers. |
-| `coverage-matrix.toml` | The **declaration**: one `[[case]]` per real test in lsof-rs's suite — golden tests, the socket differential, and the 59-case live smoke harness. |
+| `coverage-matrix.toml` | The **declaration**: one `[[case]]` per real test in lsof-rs's suite — golden tests, the socket differential, and the 61-case live smoke harness. |
 
 ### All three sources actually run in CI
 
