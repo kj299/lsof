@@ -11,7 +11,7 @@ It ships **two data-acquisition backends** behind one platform seam:
 | Backend | Status | Data source |
 |---|---|---|
 | **Windows** | complete — [v1.0.1](https://github.com/kj299/lsof/releases), field-validated | Win32/NT: Toolhelp, IP Helper, the NT handle table, ETW |
-| **Linux** | **phase L1** — processes, fds, `cwd`/`rtd`/`txt`, and sockets (`-i`, `-U`) | `/proc` |
+| **Linux** | **phase L2** — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files (`mem`/`DEL`), locks and anon-inode kinds | `/proc` |
 
 Everything above the seam — the selection engine, all three output formats, the
 argument parser — is shared and platform-agnostic, which is why adding Linux
@@ -102,7 +102,7 @@ in 1.0.1, on a build every automated gate had passed. The
 item is shipped or a documented closed gate — and the release criteria are in
 [`docs/road-to-1.0.md`](docs/road-to-1.0.md).
 
-### Linux backend — phase L1 of 4
+### Linux backend — phase L2 of 4
 
 - ✅ **L0** — processes and owners from `/proc/<pid>/status`; open files from
   `/proc/<pid>/fd` plus the `cwd`/`root`/`exe` links; types, DEVICE, SIZE,
@@ -112,14 +112,21 @@ item is shipped or a documented closed gate — and the release criteria are in
   once per gather and indexed by inode; an fd whose target is `socket:[N]`
   resolves by that key into a real TYPE, protocol, addresses and TCP state.
   **`-i` and `-U` work** in every form the core supports, as does `-T q`.
-- ⬜ **L2** — `mem` rows from `/proc/<pid>/maps`, the lock column from
-  `/proc/locks`, named `anon_inode` kinds, the mount-table options, and
-  per-network-namespace socket reads.
+- 🔶 **L2** — three of four parts done. ✅ `mem` and `DEL` rows from
+  `/proc/<pid>/maps`; ✅ the lock column (`3uW`) from `/proc/locks`; ✅ named
+  `anon_inode` kinds (`[eventpoll:4,6]`, `[eventfd:6]`, `[pidfd:N]`). ⬜ What
+  remains is one change wearing two hats: lsof matches a **path argument by
+  device and inode**, not by name, which is also why naming a mount point
+  selects everything on that filesystem — so `lsof /path/hardlink` finds the
+  file opened under its other name, and lsof-rs both misses that and
+  over-reports names that merely share a prefix ([`DIVERGENCES.md`](DIVERGENCES.md)
+  #14, #15). ⬜ Per-network-namespace socket reads (#16). Both are measured
+  against the C, with the exact commands in the ledger.
 - ✅ **L3** — the C-vs-Rust differential as a CI gate
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed
   through the porting kit's runner with [`DIVERGENCES.md`](DIVERGENCES.md) as
-  the ledger. 20 cases over four fixtures; every unledgered difference fails
+  the ledger. 26 cases over seven fixtures; every unledgered difference fails
   the build. On its first fixture it found two more fidelity gaps (the offset
   cell for devices and FIFOs, `pipe` in NAME), fixed the same day; its
   hostile-name fixtures then found a defect in the C itself (a signed-`char`
