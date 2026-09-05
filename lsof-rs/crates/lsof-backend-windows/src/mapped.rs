@@ -59,6 +59,7 @@ pub fn enumerate(pid: u32, dos_map: &[(String, String)]) -> Vec<OpenFile> {
                 let path = device_to_dos(&nt, dos_map);
                 if seen.insert(path.clone()) {
                     out.push(OpenFile {
+                        lock: None,
                         fd: FdType::Mem,
                         access: AccessMode::Read,
                         file_type: FileType::Regular,

@@ -29,6 +29,8 @@ ledger — those are the kit's, on purpose.
   fixture E  a process holding one live mapped library and one that has been
              deleted while still mapped — the `mem` and `DEL` rows that come
              from /proc/<pid>/maps rather than from an fd
+  fixture F  a process holding one of each lock character Linux can report:
+             whole-file and partial, read and write (`R r W w`)
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -224,7 +226,31 @@ def mapping_holder(work: str) -> Fixture:
     return Fixture("E(mappings)", [sys.executable, "-c", py], cwd=mdir, expect_fds=3)
 
 
-def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture, Fixture]:
+def lock_holder(work: str) -> Fixture:
+    """A process holding one of each lock character lsof can print on Linux.
+
+    /proc/locks reports only shared-vs-exclusive and the byte range, which is
+    exactly the four characters `R`, `r`, `W`, `w` -- whole-file read, partial
+    read, whole-file write, partial write. The partial locks are what separate
+    the lower-case characters from the upper-case ones, so both are held."""
+    ldir = os.path.join(work, "locks")
+    os.makedirs(ldir)
+    py = (
+        "import fcntl,os,time\n"
+        "def f(n):\n"
+        "    h=open(os.path.join(%r,n),'w+'); h.write('x'*100); h.flush(); return h\n"
+        "wf=f('write-full'); wp=f('write-part'); rf=f('read-full'); rp=f('read-part')\n"
+        "fcntl.lockf(wf, fcntl.LOCK_EX)\n"
+        "fcntl.lockf(wp, fcntl.LOCK_EX, 5, 10)\n"
+        "fcntl.lockf(rf, fcntl.LOCK_SH)\n"
+        "fcntl.lockf(rp, fcntl.LOCK_SH, 5, 10)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (ldir, ldir)
+    )
+    return Fixture("F(locks)", [sys.executable, "-c", py], cwd=ldir, expect_fds=7)
+
+
+def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture, Fixture, Fixture]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
     with open(os.path.join(fdir, "f.txt"), "w") as f:
@@ -261,7 +287,8 @@ def make_fixtures(work: str) -> tuple[Fixture, Fixture, Fixture, Fixture, Fixtur
     c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
     d = hostile_sleeper("D", work, HOSTILE_UTF8_COMM)
     e = mapping_holder(work)
-    return a, b, c, d, e
+    f = lock_holder(work)
+    return a, b, c, d, e, f
 
 
 # -------------------------------------------------------------------- matrix
@@ -333,7 +360,7 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e = fixtures
+    a, b, c, d, e, lk = fixtures
     try:
         for fx in fixtures:
             fx.start()
@@ -341,14 +368,15 @@ def run(args) -> int:
         # libraries are loaded and one is unlinked. Waiting on the marker
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
-        ready = os.path.join(e.cwd, "ready")
-        deadline = time.monotonic() + 5.0
-        while not os.path.exists(ready) and time.monotonic() < deadline:
-            if e.proc is not None and e.proc.poll() is not None:
-                infra(f"fixture {e.name} exited early (rc={e.proc.returncode})")
-            time.sleep(0.02)
-        if not os.path.exists(ready):
-            infra(f"fixture {e.name} did not finish mapping within 5s")
+        for fx in (e, lk):
+            ready = os.path.join(fx.cwd, "ready")
+            deadline = time.monotonic() + 5.0
+            while not os.path.exists(ready) and time.monotonic() < deadline:
+                if fx.proc is not None and fx.proc.poll() is not None:
+                    infra(f"fixture {fx.name} exited early (rc={fx.proc.returncode})")
+                time.sleep(0.02)
+            if not os.path.exists(ready):
+                infra(f"fixture {fx.name} was not ready within 5s")
         # {FILE} is a path only fixture A holds; {PORT} is fixture B's
         # listener. Both name exactly one fixture, which is what makes the
         # un-`-a`ed OR cases deterministic.
@@ -371,6 +399,7 @@ def run(args) -> int:
                 "C": str(c.pid),
                 "D": str(d.pid),
                 "E": str(e.pid),
+                "F": str(lk.pid),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "PORT": port,
             },

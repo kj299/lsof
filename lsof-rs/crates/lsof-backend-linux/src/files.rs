@@ -143,6 +143,7 @@ fn row(
                 None => e.info.display_name(false, false),
             };
             return Some(OpenFile {
+                lock: None,
                 fd,
                 access,
                 file_type: e.file_type.clone(),
@@ -192,6 +193,7 @@ fn row(
     };
 
     Some(OpenFile {
+        lock: None,
         fd,
         access,
         file_type,
@@ -212,7 +214,11 @@ fn row(
 /// exited, or it belongs to another user and we are not root. The caller
 /// distinguishes those (a vanished pid vs. a permission wall) only in aggregate,
 /// which is enough for the `-V` inaccessible count.
-pub fn for_pid(pid: u32, socks: &SocketTable) -> Option<Vec<OpenFile>> {
+pub fn for_pid(
+    pid: u32,
+    socks: &SocketTable,
+    locks: &crate::locks::LockTable,
+) -> Option<Vec<OpenFile>> {
     let mut out = Vec::new();
 
     // The specials. Unlike fds these have no access mode of their own.
@@ -249,7 +255,15 @@ pub fn for_pid(pid: u32, socks: &SocketTable) -> Option<Vec<OpenFile>> {
     for (num, name) in fds {
         let p = format!("/proc/{pid}/fd/{name}");
         let (access, pos) = fdinfo_for(pid, &name);
-        if let Some(f) = row(Path::new(&p), FdType::Handle(num), access, pos, socks) {
+        if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), access, pos, socks) {
+            // The lock character lsof appends to the FD cell (`8uW`). Only a
+            // numbered fd can hold one: the specials and the mapped-file rows
+            // are not open file descriptions.
+            if let (Some(dev), Some(node)) = (f.device.as_deref(), f.node.as_deref()) {
+                f.lock = locks
+                    .get(&(pid, dev.to_string(), node.to_string()))
+                    .copied();
+            }
             out.push(f);
         }
     }
@@ -313,8 +327,8 @@ mod tests {
             .next()
             .and_then(|s| s.parse().ok())
             .expect("pid parses");
-        let files =
-            for_pid(pid, &SocketTable::load(false)).expect("own /proc/<pid>/fd is readable");
+        let files = for_pid(pid, &SocketTable::load(false), &crate::locks::load())
+            .expect("own /proc/<pid>/fd is readable");
 
         assert!(
             files.iter().any(|f| f.fd == FdType::Cwd),

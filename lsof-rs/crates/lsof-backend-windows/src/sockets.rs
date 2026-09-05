@@ -172,6 +172,7 @@ fn make_file(
         tcp: None,
     };
     OpenFile {
+        lock: None,
         fd: FdType::Unknown,
         // Sockets are bidirectional; lsof shows them as `u` (read/write). The
         // concrete handle value (FD) isn't in the MIB table — see the research

@@ -64,6 +64,13 @@ bench = false
 # they pass through verbatim must leave here unable to drive a terminal.
 
 [[bin]]
+name = "proc_locks"
+path = "fuzz_targets/proc_locks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "proc_maps"
 path = "fuzz_targets/proc_maps.rs"
 test = false

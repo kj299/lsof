@@ -163,6 +163,15 @@ args = ["-n", "-P", "-a", "-U", "-p", "{B}"]
 name = "mappings-mem-and-del"
 args = ["-n", "-P", "-a", "-p", "{E}"]
 
+# ------------------------------------------------------------------- locks
+[[case]]
+# The lock character lsof appends to the FD cell: `3uW` for a whole-file write
+# lock, `4uw` for a partial one, and `R`/`r` for the read equivalents. Fixture
+# F holds one of each, which is every character /proc/locks can produce (it
+# reports only shared-vs-exclusive and the byte range).
+name = "locks-fd-suffix"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{F}"]
+
 # ---------------------------------------------------------- hostile COMMANDs
 # A process names itself, and until DIVERGENCES.md #10 was closed lsof-rs
 # printed the name raw — a comm holding ESC [2J cleared the screen of whoever

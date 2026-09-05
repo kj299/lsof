@@ -105,6 +105,7 @@ fn table_offset_with_dash_o() {
         user: None,
         endpoint_peer: false,
         files: vec![OpenFile {
+            lock: None,
             fd: FdType::Handle(3),
             access: AccessMode::Read,
             file_type: FileType::Regular,
@@ -143,6 +144,7 @@ fn table_command_width_caps() {
         user: None,
         endpoint_peer: false,
         files: vec![OpenFile {
+            lock: None,
             fd: FdType::Handle(3),
             access: AccessMode::Read,
             file_type: FileType::Regular,
@@ -190,6 +192,7 @@ fn fields_skips_empty_name() {
         user: None,
         endpoint_peer: false,
         files: vec![OpenFile {
+            lock: None,
             fd: FdType::Task,
             access: AccessMode::Unknown,
             file_type: FileType::Thread,
@@ -270,6 +273,7 @@ fn windows_object_types_render() {
     // their TYPE code in the table and `-F t` and carry their object-path NAME.
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let mk = |h: u64, ft: FileType, name: &str| OpenFile {
+        lock: None,
         fd: FdType::Handle(h),
         access: AccessMode::ReadWrite,
         file_type: ft,
@@ -385,6 +389,7 @@ fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
         user: Some(user.into()),
         endpoint_peer: false,
         files: vec![OpenFile {
+            lock: None,
             fd: FdType::Handle(4),
             access: AccessMode::Read,
             file_type: FileType::Regular,
@@ -572,6 +577,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         command: "server.exe".to_string(),
         user: Some("EXAMPLE\\alice".to_string()),
         files: vec![OpenFile {
+            lock: None,
             fd: FdType::Handle(77),
             access: AccessMode::ReadWrite,
             file_type: FileType::Ipv4,

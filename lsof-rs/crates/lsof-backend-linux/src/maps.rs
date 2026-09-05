@@ -118,6 +118,7 @@ pub fn rows_for(pid: u32, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
             // inode come from the maps line and SIZE stays blank, exactly as
             // the C prints it.
             out.push(OpenFile {
+                lock: None,
                 fd: FdType::Deleted,
                 access: AccessMode::Unknown,
                 file_type: FileType::Regular,
@@ -143,6 +144,7 @@ pub fn rows_for(pid: u32, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
             continue;
         }
         out.push(OpenFile {
+            lock: None,
             fd: FdType::Mem,
             access: AccessMode::Unknown,
             file_type: FileType::Regular,

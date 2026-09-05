@@ -44,6 +44,35 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by reading /proc/locks (2026-09-05)
+
+Item 7 below — the lock character on the FD cell — is closed on Linux. `lsof`
+prints `3uW` for an fd holding a whole-file write lock, and that column is the
+whole answer to "who has this file locked"; lsof-rs printed `3u`.
+
+`/proc/locks` is one table for the whole system with a pid column, so it is read
+once per gather and indexed by `(pid, device, inode)`. The kernel reports only
+shared-vs-exclusive and the byte range, which is exactly the four characters
+Linux can produce — `W`/`w` for a write lock on the whole file or part of it,
+`R`/`r` for a read lock. (The C also knows `u`/`U` and the Xenix `x`/`X`, which
+no Linux kernel can report; `LockKind` deliberately does not define them rather
+than defining values nothing ever produces.)
+
+Two details that would each have produced a *wrong* lock character, which is
+worse than none — it claims a process holds a lock it does not:
+
+- A line beginning `N: -> ` is a process **blocked waiting** for that lock, not
+  one holding it. Counting it would put a `W` on the waiter's fd.
+- An `OFDLCK` line reports pid `-1`: an open-file-description lock belongs to
+  the description, not to a process, so there is no row to attach it to.
+
+The device in `/proc/locks` is hex (`fe:00`) where every row in the backend
+renders decimal (`254,0`), so the key is converted on the way in. Verified
+against the C by a new fixture holding one of each of the four characters at
+once (`locks-fd-suffix`), and fuzzed by `proc_locks`, which asserts the parser
+invents nothing and that every key it emits is in the shape a built row can be
+looked up by.
+
 ## Fixed by reading /proc/<pid>/maps (2026-09-05)
 
 `files-mem-rows` is no longer ledgered debt: the Linux backend emits `mem` rows,
@@ -220,7 +249,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 4 | list options ORed unless `-a` | ~~file-level selectors always ANDed~~ **resolved 2026-09-05** | selection engine; see "Fixed by rebuilding the selection engine" above |
 | 5 | `-F` emits `g u G l D`, empty `a`/`l` | omits them; `d` for `D` | `-F` renderer + model · `files-fields-F` above |
 | 6 | `-o` → header `OFFSET`, blank when unknown | header unchanged, falls back to size | renderer · `files-offset-o` above |
-| 7 | `8uW` — `W` marks a write lock on the fd | `8u` | lock column; Linux source is `/proc/locks` (L2), Windows has byte-range locks |
+| 7 | `8uW` — `W` marks a write lock on the fd | ~~`8u`~~ **resolved on Linux 2026-09-05** | lock column, from `/proc/locks`. Windows still shows none: `FsRtlGetNextFileLock` is kernel-mode and nothing in user mode enumerates another process's locks (`docs/known-limitations.md`). |
 | 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | `unknown`, `anon_inode:[eventpoll]` | DEBT (L2), Linux: named anon_inode kinds |
 | 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
 | 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |

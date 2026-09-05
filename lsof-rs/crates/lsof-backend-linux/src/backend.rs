@@ -71,6 +71,9 @@ impl Backend for LinuxBackend {
         // rather than per process. `-T q` is the only reason to pay for queue
         // depths; see SocketTable::load.
         let socks = SocketTable::load(sel.tcp_info.is_some_and(|t| t.queue));
+        // /proc/locks is one table for the whole system, with a pid column, so
+        // it is read once here rather than per process.
+        let locks = crate::locks::load();
 
         for p in procs.iter_mut() {
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
@@ -79,7 +82,7 @@ impl Backend for LinuxBackend {
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid, &socks) {
+            if let Some(files) = files::for_pid(p.pid, &socks, &locks) {
                 p.files = files;
             }
         }

@@ -98,6 +98,7 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
     };
 
     Some(OpenFile {
+        lock: None,
         fd: FdType::Cwd,
         access: AccessMode::Read,
         file_type: FileType::Dir,

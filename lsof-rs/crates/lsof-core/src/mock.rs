@@ -23,6 +23,7 @@ pub fn sample_processes() -> Vec<Process> {
             endpoint_peer: false,
             files: vec![
                 OpenFile {
+                    lock: None,
                     fd: FdType::Cwd,
                     access: AccessMode::Read,
                     file_type: FileType::Dir,
@@ -35,6 +36,7 @@ pub fn sample_processes() -> Vec<Process> {
                     socket: None,
                 },
                 OpenFile {
+                    lock: None,
                     fd: FdType::Handle(220),
                     access: AccessMode::Read,
                     file_type: FileType::Regular,
@@ -56,6 +58,7 @@ pub fn sample_processes() -> Vec<Process> {
             endpoint_peer: false,
             files: vec![
                 OpenFile {
+                    lock: None,
                     fd: FdType::Handle(72),
                     access: AccessMode::ReadWrite,
                     file_type: FileType::Ipv4,
@@ -74,6 +77,7 @@ pub fn sample_processes() -> Vec<Process> {
                     }),
                 },
                 OpenFile {
+                    lock: None,
                     fd: FdType::Handle(88),
                     access: AccessMode::ReadWrite,
                     file_type: FileType::Ipv4,
@@ -92,6 +96,7 @@ pub fn sample_processes() -> Vec<Process> {
                     }),
                 },
                 OpenFile {
+                    lock: None,
                     fd: FdType::Handle(96),
                     access: AccessMode::ReadWrite,
                     file_type: FileType::Ipv6,
