@@ -1,30 +1,64 @@
 //! End-to-end renderer checks over the deterministic mock data set.
 
 use lsof_core::mock::sample_processes;
-use lsof_core::render::{fields, json, table};
-use lsof_core::Escaper;
+use lsof_core::render::{fields, json, table, TableOpts};
+use lsof_core::{Escaper, TcpInfoFlags};
 
 #[test]
 fn table_has_header_and_rows() {
-    let out = table::render(
-        &sample_processes(),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
-    );
+    // A plain run: `TableOpts::new` is `lsof` with no options, which includes
+    // the 9-character COMMAND cap. `explorer.exe` and `server.exe` are 12 and
+    // 10 characters, so both are cut — that IS the default output.
+    let out = table::render(&sample_processes(), TableOpts::new(Escaper::WINDOWS));
     let header = out.lines().next().unwrap();
     for col in ["COMMAND", "PID", "USER", "FD", "TYPE", "NODE", "NAME"] {
         assert!(header.contains(col), "header missing {col}: {header:?}");
     }
-    assert!(out.contains("explorer.exe"));
-    assert!(out.contains("server.exe"));
+    assert!(out.contains("explorer."), "{out:?}");
+    assert!(out.contains("server.ex"), "{out:?}");
+    assert!(!out.contains("explorer.exe"), "default cap is 9: {out:?}");
     assert!(out.contains("1500"));
     assert!(out.contains("(LISTEN)"));
     // cwd row renders the special FD code, not a number.
     assert!(out.contains("cwd"));
+    // The column is exactly the cap here, and the header floor does not widen
+    // it: `COMMAND` is 7, the capped rows are 9.
+    assert!(header.starts_with("COMMAND    PID"), "{header:?}");
+}
+
+#[test]
+fn the_command_column_defaults_to_nine_characters() {
+    // DIVERGENCES #3: lsof-rs printed the whole command where the C caps it at
+    // CMDL (9). Measured against lsof 4.99.6 with a 15-character command:
+    // the C prints `abcdefghi`, and `+c 0` is what asks for the full name.
+    let p = named("abcdefghijklmno", "u", "f");
+    let cell = |opts: TableOpts| -> String {
+        table::render(std::slice::from_ref(&p), opts)
+            .lines()
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(cell(TableOpts::new(Escaper::UNIX)), "abcdefghi");
+    assert_eq!(
+        cell(TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::UNIX)
+        }),
+        "abcdefghijklmno"
+    );
+    // A command shorter than the cap is untouched, and the column then falls
+    // back to the header width.
+    let short = named("sh0rt", "u", "f");
+    let out = table::render(std::slice::from_ref(&short), TableOpts::new(Escaper::UNIX));
+    assert!(out.starts_with("COMMAND "), "{out:?}");
+    assert!(
+        out.lines().nth(1).unwrap().starts_with("sh0rt  "),
+        "{out:?}"
+    );
 }
 
 #[test]
@@ -32,11 +66,24 @@ fn table_empty_when_nothing_matches() {
     // No matching processes -> no output at all (not even a bare header),
     // matching lsof. Regression guard for `lsof -a -p <pid> -c <nomatch>`.
     assert_eq!(
-        table::render(&[], false, false, false, None, false, Escaper::WINDOWS),
+        table::render(
+            &[],
+            TableOpts {
+                command_width: None,
+                ..TableOpts::new(Escaper::WINDOWS)
+            }
+        ),
         ""
     );
     assert_eq!(
-        table::render(&[], false, true, false, None, false, Escaper::WINDOWS),
+        table::render(
+            &[],
+            TableOpts {
+                show_ppid: true,
+                command_width: None,
+                ..TableOpts::new(Escaper::WINDOWS)
+            }
+        ),
         ""
     );
 }
@@ -45,19 +92,24 @@ fn table_empty_when_nothing_matches() {
 fn terse_lists_unique_pids() {
     let out = table::render(
         &sample_processes(),
-        true,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            terse: true,
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert_eq!(out, "1000\n1500\n");
 }
 
 #[test]
 fn fields_tokens() {
-    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    let out = fields::render(
+        &sample_processes(),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     assert!(out.contains("p1000\n"));
     assert!(out.contains("p1500\n"));
     assert!(out.contains("cexplorer.exe\n"));
@@ -70,7 +122,13 @@ fn fields_tokens() {
 #[test]
 fn fields_only_restricts_output() {
     // Request only the name field; structural p/f markers still appear.
-    let out = fields::render(&sample_processes(), false, Some(&['n']), Escaper::WINDOWS);
+    let out = fields::render(
+        &sample_processes(),
+        false,
+        Some(&['n']),
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     assert!(out.contains("p1000\n"));
     assert!(out.contains("f"));
     assert!(out.contains("nC:\\Users\\alice\n"));
@@ -83,12 +141,11 @@ fn fields_only_restricts_output() {
 fn table_ppid_column() {
     let out = table::render(
         &sample_processes(),
-        false,
-        true,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            show_ppid: true,
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert!(out.lines().next().unwrap().contains("PPID"));
     // explorer.exe's ppid (4) shows up.
@@ -125,17 +182,21 @@ fn table_offset_with_dash_o() {
     // Default prefers size; -o prefers the offset (0t<dec>).
     assert!(table::render(
         std::slice::from_ref(&p),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        }
     )
     .contains("100"));
-    assert!(
-        table::render(&[p], false, false, true, None, false, Escaper::WINDOWS).contains("0t42")
-    );
+    assert!(table::render(
+        &[p],
+        TableOpts {
+            show_offset: true,
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        }
+    )
+    .contains("0t42"));
 }
 
 #[test]
@@ -168,12 +229,10 @@ fn table_command_width_caps() {
     // +c 4: the COMMAND cell is truncated to 4 chars; the full name is gone.
     let capped = table::render(
         std::slice::from_ref(&p),
-        false,
-        false,
-        false,
-        Some(4),
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            command_width: Some(4),
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert!(
         capped.contains("very"),
@@ -184,7 +243,13 @@ fn table_command_width_caps() {
         "full command should be truncated: {capped:?}"
     );
     // Without the cap, the full name is present.
-    let full = table::render(&[p], false, false, false, None, false, Escaper::WINDOWS);
+    let full = table::render(
+        &[p],
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
+    );
     assert!(full.contains("verylongcommandname.exe"));
 }
 
@@ -217,7 +282,7 @@ fn fields_skips_empty_name() {
             socket: None,
         }],
     };
-    let out = fields::render(&[p], false, None, Escaper::WINDOWS);
+    let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
     assert!(out.contains("ftask\n"), "task FD field expected: {out:?}");
     assert!(
         out.contains("i4242\n"),
@@ -239,7 +304,13 @@ fn fields_nul_terminator() {
     // is what makes `-F0` usable at all — a consumer splitting the stream on
     // NUL, which is the whole point of the flag, otherwise gets the last field
     // of one set glued to the first field of the next.
-    let out = fields::render(&sample_processes(), true, None, Escaper::WINDOWS);
+    let out = fields::render(
+        &sample_processes(),
+        true,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     assert!(
         out.contains("p1000\0"),
         "fields within a set are NUL-terminated: {out:?}"
@@ -276,7 +347,13 @@ fn fields_no_inode_for_sockets() {
     // lsof leaves `-F i` empty for sockets — the protocol goes in `P`, not the
     // inode. (Regression guard: the socket `node` carries the protocol string
     // for the table's NODE column, which must not leak into `-F i`.)
-    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    let out = fields::render(
+        &sample_processes(),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     assert!(
         !out.contains("iTCP\n"),
         "socket protocol leaked into -Fi: {out:?}"
@@ -331,12 +408,10 @@ fn windows_object_types_render() {
     };
     let table = table::render(
         std::slice::from_ref(&p),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert!(table.contains("KEY"), "registry-key TYPE code: {table:?}");
     assert!(table.contains("SEM"), "Other object TYPE code: {table:?}");
@@ -344,7 +419,7 @@ fn windows_object_types_render() {
         table.contains("\\REGISTRY\\MACHINE\\SOFTWARE"),
         "key path in NAME"
     );
-    let f = fields::render(&[p], false, None, Escaper::WINDOWS);
+    let f = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
     assert!(f.contains("tKEY\n"), "-Ft KEY: {f:?}");
     assert!(f.contains("tSEM\n"), "-Ft SEM: {f:?}");
 }
@@ -452,12 +527,10 @@ fn hostile_names_are_escaped_the_way_the_c_prints_them() {
 
     let table = table::render(
         std::slice::from_ref(&p),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::UNIX,
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::UNIX)
+        },
     );
     let row = table.lines().nth(1).expect("one data row");
     assert!(
@@ -476,7 +549,13 @@ fn hostile_names_are_escaped_the_way_the_c_prints_them() {
 
     // `-F`: the values are text-mode (space kept), and the terminators cannot
     // be forged — a newline in a name is `\n`, so it is still one `n` field.
-    let f = fields::render(std::slice::from_ref(&p), false, None, Escaper::UNIX);
+    let f = fields::render(
+        std::slice::from_ref(&p),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
     assert!(
         f.contains("ch^[[2J\\r \\\\\\x7f\\t\u{e9}\\xc2\\x9bz\n"),
         "{f:?}"
@@ -487,7 +566,7 @@ fn hostile_names_are_escaped_the_way_the_c_prints_them() {
         "{f:?}"
     );
     let split = named("x", "u", "two\nlines");
-    let f0 = fields::render(&[split], true, None, Escaper::UNIX);
+    let f0 = fields::render(&[split], true, None, TcpInfoFlags::DEFAULT, Escaper::UNIX);
     // Under `-F0` the name's own newline is escaped, so the only real NUL and
     // the only real NL are the ones the renderer wrote: the value cannot forge
     // either boundary.
@@ -500,7 +579,13 @@ fn hostile_names_are_escaped_the_way_the_c_prints_them() {
 
     // The fuzz target's exact finding, in COMMAND.
     let q = named("PPid:\rd:Uid:", "u", "f");
-    let t = table::render(&[q], false, false, false, None, false, Escaper::UNIX);
+    let t = table::render(
+        &[q],
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
     assert!(t.contains("PPid:\\rd:Uid:"), "{t:?}");
 }
 
@@ -511,23 +596,19 @@ fn backslash_is_text_on_windows_and_escaped_on_unix() {
     // text. On Unix it is escaped so `\` `n` cannot pose as a newline.
     let win = table::render(
         &sample_processes(),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert!(win.contains("C:\\Windows\\System32\\config.dat"), "{win:?}");
     assert!(win.contains("EXAMPLE\\alice"), "{win:?}");
     let unix = table::render(
         &sample_processes(),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::UNIX,
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::UNIX)
+        },
     );
     assert!(
         unix.contains("C:\\\\Windows\\\\System32\\\\config.dat"),
@@ -545,19 +626,28 @@ fn backslash_is_text_on_windows_and_escaped_on_unix() {
 }
 
 #[test]
-fn command_width_is_counted_after_escaping() {
-    // `+c 3` on a command that prints as `a^[bcd`: the C's safestrprtn() emits
-    // an escape only if it fits whole, so 3 gives `a^[` and 2 gives `a`.
-    let p = named("a\x1bbcd", "u", "f");
-    let cell = |w: usize| -> String {
+fn the_command_cut_is_the_column_width_not_the_plus_c_number() {
+    // `+c` caps what each row CONTRIBUTES to the column width; the cut then
+    // happens at the width, which is never narrower than the `COMMAND` header.
+    // So a `+c` below 7 is effectively 7 — `print.c` starts `CmdColW` at
+    // `strlen("COMMAND")` and truncates with `safestrprtn(cp, CmdColW, …)`.
+    //
+    // Measured against lsof 4.99.6 on a process whose comm prints as
+    // `a^[bcdefgh` (10 columns from 9 bytes — the width is counted after
+    // escaping, and an escape is emitted only if it fits whole):
+    //
+    //   +c 2 / 3 / 6 -> a^[bcde     (7, the header floor)
+    //   +c 8         -> a^[bcdef
+    //   default (9)  -> a^[bcdefg
+    //   +c 0 / 10+   -> a^[bcdefgh
+    let p = named("a\x1bbcdefgh", "u", "f");
+    let cell = |w: Option<usize>| -> String {
         let out = table::render(
             std::slice::from_ref(&p),
-            false,
-            false,
-            false,
-            Some(w),
-            false,
-            Escaper::UNIX,
+            TableOpts {
+                command_width: w,
+                ..TableOpts::new(Escaper::UNIX)
+            },
         );
         out.lines()
             .nth(1)
@@ -567,9 +657,19 @@ fn command_width_is_counted_after_escaping() {
             .unwrap()
             .to_string()
     };
-    assert_eq!(cell(6), "a^[bcd");
-    assert_eq!(cell(3), "a^[");
-    assert_eq!(cell(2), "a");
+    for narrow in [2, 3, 6] {
+        assert_eq!(cell(Some(narrow)), "a^[bcde", "+c {narrow}");
+    }
+    assert_eq!(cell(Some(8)), "a^[bcdef");
+    assert_eq!(cell(Some(9)), "a^[bcdefg");
+    assert_eq!(cell(Some(10)), "a^[bcdefgh");
+    assert_eq!(cell(None), "a^[bcdefgh");
+    // The default is 9, so a plain run cuts here without being asked.
+    let plain = table::render(std::slice::from_ref(&p), TableOpts::new(Escaper::UNIX));
+    assert_eq!(
+        plain.lines().nth(1).unwrap().split(' ').next().unwrap(),
+        "a^[bcdefg"
+    );
 }
 
 #[test]
@@ -634,34 +734,131 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
 }
 
 #[test]
-fn tcp_info_table_suffix() {
-    // The exact v0.2.0-validated shape the live smoke cases assert: the info
-    // rides the NAME column, after the state.
+fn tcp_info_table_suffix_is_one_group() {
+    // ONE parenthesised group, space-separated, in `print_tcptpi()`'s fixed
+    // order — not one group per fact. Measured against lsof 4.99.6:
+    // `-T qs` gives `127.0.0.1:53431 (LISTEN QR=0 QS=0)`.
+    let all = TcpInfoFlags {
+        state: true,
+        queue: true,
+        window: true,
+        options: false,
+    };
     let out = table::render(
         &tcp_info_fixture(),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            command_width: None,
+            tcp_show: all,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert!(
-        out.contains("(ESTABLISHED) (Win=262144) (QR=0) (QS=12)"),
-        "table NAME must carry the (Win=)/(QR=)/(QS=) suffix: {out:?}"
+        out.contains("(ESTABLISHED Win=262144 QR=0 QS=12)"),
+        "one space-separated group expected: {out:?}"
     );
+}
+
+#[test]
+fn tcp_info_selects_rather_than_adds() {
+    // `-T q` is the queues *instead of* the state: the C zeroes `Ftcptpi`
+    // before ORing the letters in, so asking for one thing deselects the
+    // others. Measured: `lsof -T q` gives `(QR=0 QS=0)`, no state.
+    let cell = |show: TcpInfoFlags| -> String {
+        table::render(
+            &tcp_info_fixture(),
+            TableOpts {
+                command_width: None,
+                tcp_show: show,
+                ..TableOpts::new(Escaper::WINDOWS)
+            },
+        )
+    };
+    let queues = cell(TcpInfoFlags {
+        queue: true,
+        ..TcpInfoFlags::default()
+    });
+    assert!(queues.contains("(QR=0 QS=12)"), "{queues:?}");
+    assert!(
+        !queues.contains("ESTABLISHED"),
+        "-T q must not keep the state: {queues:?}"
+    );
+
+    let state = cell(TcpInfoFlags::DEFAULT);
+    assert!(state.contains("(ESTABLISHED)"), "{state:?}");
+    assert!(!state.contains("QR="), "{state:?}");
+
+    // A bare `-T` selects nothing, and then not even the separator is written.
+    let none = cell(TcpInfoFlags::default());
+    assert!(!none.contains("ESTABLISHED"), "{none:?}");
+    assert!(!none.contains("QR="), "{none:?}");
+    assert!(
+        none.lines().nth(1).is_some_and(|l| !l.ends_with(' ')),
+        "a bare -T leaves no separator: {none:?}"
+    );
+}
+
+#[test]
+fn a_selected_but_empty_tcp_group_still_writes_its_separator() {
+    // The C writes the separator space before it knows whether
+    // `print_tcptpi()` will print anything: `print.c` gates on `Ftcptpi` being
+    // non-zero and the row being a resolved socket, so `lsof -T f` on Linux
+    // leaves a trailing space on EVERY socket row. Reproduced deliberately —
+    // the differential's normalizer strips trailing whitespace, so this test is
+    // the only thing that holds it.
+    let options_only = TcpInfoFlags {
+        options: true,
+        ..TcpInfoFlags::default()
+    };
+    let out = table::render(
+        &tcp_info_fixture(),
+        TableOpts {
+            command_width: None,
+            tcp_show: options_only,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
+    );
+    let row = out.lines().nth(1).expect("a socket row");
+    assert!(
+        row.ends_with(' '),
+        "expected the dangling separator: {row:?}"
+    );
+    assert!(!row.contains('('), "nothing should have printed: {row:?}");
 }
 
 #[test]
 fn tcp_info_fields_tokens() {
     // Structured `T` tokens with lsof's own prefixes (QR/QS/WR), after ST=;
-    // the n (name) field stays clean of the table-only suffix.
-    let out = fields::render(&tcp_info_fixture(), false, None, Escaper::WINDOWS);
-    assert!(out.contains("TST=ESTABLISHED\nTQR=0\nTQS=12\nTWR=262144\n"));
+    // the n (name) field stays clean of the table-only suffix. `-T` gates these
+    // in `-F` exactly as it gates the table suffix — `print_tcptpi()` consults
+    // `Ftcptpi` in both modes — so the flags have to ask for them.
+    let all = TcpInfoFlags {
+        state: true,
+        queue: true,
+        window: true,
+        options: false,
+    };
+    let out = fields::render(&tcp_info_fixture(), false, None, all, Escaper::WINDOWS);
+    assert!(
+        out.contains("TST=ESTABLISHED\nTQR=0\nTQS=12\nTWR=262144\n"),
+        "{out:?}"
+    );
     assert!(
         !out.contains("(Win="),
         "-F must not leak the table suffix into the name field: {out:?}"
     );
+    // And `-T q` drops ST= from `-F` too, not just from the table.
+    let queues = fields::render(
+        &tcp_info_fixture(),
+        false,
+        None,
+        TcpInfoFlags {
+            queue: true,
+            ..TcpInfoFlags::default()
+        },
+        Escaper::WINDOWS,
+    );
+    assert!(queues.contains("TQR=0\n"), "{queues:?}");
+    assert!(!queues.contains("TST="), "{queues:?}");
 }
 
 #[test]
@@ -686,7 +883,13 @@ fn fields_follow_the_cs_order() {
     // after `n` as the end of a record mis-parses a differently ordered stream.
     // Measured against lsof 4.99.6 on a live fixture, one field per line:
     //   f a l t G d D s o i k P n  TST= TQR= TQS=
-    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    let out = fields::render(
+        &sample_processes(),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     let letters: Vec<char> = out.lines().filter_map(|l| l.chars().next()).collect();
     // The process set comes first and starts with `p`, the one field Lsof.8
     // calls "always selected".
@@ -719,7 +922,13 @@ fn fields_report_a_sockets_node_cell_as_p_never_as_i() {
     // protocol, so it comes out as `P` and never as `i`. (An AF_UNIX socket
     // takes the other branch — see the `sockets-unix-fields-F` differential
     // case, which has a real /proc to read.)
-    let out = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    let out = fields::render(
+        &sample_processes(),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     assert!(out.contains("PTCP\n"), "{out:?}");
     assert!(out.contains("PUDP\n"), "{out:?}");
     assert!(!out.contains("iTCP"), "protocol leaked into i: {out:?}");
@@ -736,17 +945,21 @@ fn a_sockets_state_is_reported_once_and_in_its_own_field() {
     // it: a table suffix, a `TST=` token, a JSON key.
     let t = table::render(
         &sample_processes(),
-        false,
-        false,
-        false,
-        None,
-        false,
-        Escaper::WINDOWS,
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::WINDOWS)
+        },
     );
     assert_eq!(t.matches("(LISTEN)").count(), 1, "{t:?}");
     assert_eq!(t.matches("(ESTABLISHED)").count(), 1, "{t:?}");
 
-    let f = fields::render(&sample_processes(), false, None, Escaper::WINDOWS);
+    let f = fields::render(
+        &sample_processes(),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::WINDOWS,
+    );
     assert!(f.contains("n*:445\n"), "state in the n field: {f:?}");
     assert!(f.contains("TST=LISTEN\n"), "{f:?}");
     assert_eq!(f.matches("LISTEN").count(), 1, "{f:?}");
@@ -797,13 +1010,14 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
             }),
         }],
     };
-    let out = fields::render(&[p], false, None, Escaper::WINDOWS);
+    let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
     assert!(out.contains("funk\n"), "{out:?}");
     // And a list that does not name `f` still has none, whatever the value.
     let only = fields::render(
         std::slice::from_ref(&sample_processes()[1]),
         false,
         Some(&['n']),
+        TcpInfoFlags::DEFAULT,
         Escaper::WINDOWS,
     );
     assert!(!only.lines().any(|l| l.starts_with('f')), "{only:?}");
@@ -818,6 +1032,7 @@ fn a_restricted_field_list_emits_only_those_letters() {
         &sample_processes(),
         false,
         Some(&['c', 'n']),
+        TcpInfoFlags::DEFAULT,
         Escaper::WINDOWS,
     );
     for line in out.lines().filter(|l| !l.is_empty()) {

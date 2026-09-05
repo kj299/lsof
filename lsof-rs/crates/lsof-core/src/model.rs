@@ -326,26 +326,6 @@ pub struct TcpExtInfo {
     pub send_queue: Option<u64>,
 }
 
-impl TcpExtInfo {
-    /// The table NAME suffix, e.g. `" (Win=262144) (QR=0) (QS=12)"` — exactly
-    /// the shape v0.2.0 shipped and the live smoke cases assert. Machine
-    /// formats never use this; they emit the structured `-F` `T` tokens /
-    /// JSON keys instead.
-    pub fn table_suffix(&self) -> String {
-        let mut s = String::new();
-        if let Some(w) = self.recv_window {
-            s.push_str(&format!(" (Win={w})"));
-        }
-        if let Some(q) = self.recv_queue {
-            s.push_str(&format!(" (QR={q})"));
-        }
-        if let Some(q) = self.send_queue {
-            s.push_str(&format!(" (QS={q})"));
-        }
-        s
-    }
-}
-
 impl SocketInfo {
     /// Render the lsof NAME field for a socket, honoring name/port resolution
     /// suppression. With both `numeric_*` flags set the output is purely
@@ -367,19 +347,6 @@ impl SocketInfo {
             }
         }
         s
-    }
-
-    /// The ` (LISTEN)` suffix the **table** appends to a socket's NAME.
-    ///
-    /// Deliberately not part of [`SocketInfo::display_name`]: the C reports the
-    /// state as a `TST=` token under `-F` and as its own key in JSON, and
-    /// baking it into the stored name put it in both places at once — `-F n`
-    /// carried `127.0.0.1:80 (LISTEN)` *and* `TST=LISTEN`.
-    pub fn table_state_suffix(&self) -> String {
-        match self.state {
-            Some(st) => format!(" ({})", st.as_str()),
-            None => String::new(),
-        }
     }
 }
 

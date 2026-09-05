@@ -12,6 +12,51 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **`-T` selects rather than adds, and its annotation is one group**
+  (`DIVERGENCES.md` items 1 and 2). The C keeps one bitset and `-T<letters>`
+  **zeroes it** before ORing the letters in, so `-T q` is the queues *instead
+  of* the state. The annotation is a single parenthesised, space-separated
+  group in `print_tcptpi()`'s own order — `(LISTEN QR=0 QS=0)`, not
+  `(LISTEN) (QR=0) (QS=0)` — and the order of the letters never reaches it.
+
+  **Breaking for anyone parsing the table's NAME column**, deliberately, on
+  both platforms. Four more `-T` rules came out of the same sweep:
+
+  * a bare **`-T` annotates nothing** — it is how lsof is told to stop, not
+    "`-T` with defaults" — and **`+T`** restores the state-only default. `+T`
+    was rejected outright before.
+  * **`-T` takes a value**, so `lsof -T q` with a space works. It used to read
+    `q` as a filename and exit 1.
+  * **`-T w` is a hard error on Linux**: the C compiles its letter list per
+    dialect and `HASTCPTPIW` is undefined there. It stays valid on Windows,
+    which reads the window from EStats.
+  * **`f` is the socket's options** (`SO=…`), not "follow" as the parser had it.
+
+  `-J` / `-j` are unchanged: JSON stays the full structured dump.
+
+- **The COMMAND column defaults to 9 characters** (`DIVERGENCES.md` item 3),
+  the C's `CMDL`; lsof-rs printed the whole name. `+c` turned out to carry two
+  more rules, both measured:
+
+  * `+c` caps each row's **contribution to the column width**, and the cut then
+    happens at that width — which is never narrower than the `COMMAND` header.
+    So **`+c 5` still prints seven characters**; lsof-rs cut at five. No test
+    had used a `+c` below the header width.
+  * `+c` wider than the longest command name the system can report is an
+    **error** (`MAXSYSCMDL`, 15 on Linux). Windows has no such ceiling and
+    keeps accepting.
+
+  `+c 0` remains "no cap", as in the C.
+
+### Changed
+- `render::table::render` now takes a `TableOpts` struct instead of six
+  positional `bool`/`Option` arguments. Adding the `-T` selection would have
+  made it eight positional parameters, where transposing two compiles and
+  silently renders the wrong table.
+- `Selection::tcp_info` and `Selection::command_width` gained types that can
+  say "unspecified" without overloading `None`: a bare `-T` and no `-T` are
+  different answers, as are `+c 0` and no `+c`.
+
 - **`-F` now emits the C's whole field set, in the C's order** (`DIVERGENCES.md`
   items 5 and 11). `-F` is lsof's scripting format — everything that consumes
   lsof programmatically parses this — so a missing field or a reordered stream

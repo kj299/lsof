@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use lsof_cli::args::{parse, Action};
-use lsof_core::render::{fields, json, table, Escaper, Format};
+use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::{Backend, Process, Selection};
 
 #[cfg(target_os = "linux")]
@@ -393,14 +393,19 @@ fn main() {
         let out = match &format {
             Format::Table => table::render(
                 &procs,
-                selection.terse,
-                show_ppid,
-                show_offset,
-                selection.command_width,
-                selection.show_links,
-                esc,
+                TableOpts {
+                    terse: selection.terse,
+                    show_ppid,
+                    show_offset,
+                    show_links: selection.show_links,
+                    command_width: selection.command_width.cap(),
+                    tcp_show: selection.tcp_info(),
+                    ..TableOpts::new(esc)
+                },
             ),
-            Format::Fields { nul, only } => fields::render(&procs, *nul, only.as_deref(), esc),
+            Format::Fields { nul, only } => {
+                fields::render(&procs, *nul, only.as_deref(), selection.tcp_info(), esc)
+            }
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);
                 s.push('\n');

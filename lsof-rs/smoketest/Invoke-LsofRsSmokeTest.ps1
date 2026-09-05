@@ -180,6 +180,14 @@ function Assert([bool]$cond, [string]$message) {
 function Assert-Contains([string]$hay, [string]$needle, [string]$what = 'output') {
     Assert (($null -ne $hay) -and $hay.Contains($needle)) "$what missing '$needle'"
 }
+# The COMMAND cell of a table's first data row. Split on LF: lsof-rs writes LF
+# only, on every platform, so this does not depend on the console's newline.
+function Get-CommandCell([string]$out) {
+    if ([string]::IsNullOrEmpty($out)) { return $null }
+    $rows = $out.Split([char]10) | Where-Object { $_ -ne '' }
+    if ($rows.Count -lt 2) { return $null }
+    return ($rows[1] -split ' ')[0]
+}
 function Assert-ContainsCI([string]$hay, [string]$needle, [string]$what = 'output') {
     Assert (($null -ne $hay) -and $hay.ToLowerInvariant().Contains($needle.ToLowerInvariant())) "$what missing '$needle' (ci)"
 }
@@ -527,6 +535,21 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Test-Case 'command-width-plus-c' 'render/+c' {
         $r = Invoke-Lsof @('+c', '4', '-p', "$self") 'plusc'
         Assert ($r.Exit -eq 0) "+c should be accepted (exit=$($r.Exit))"
+        # `+c` caps each row's CONTRIBUTION to the column width; the cut then
+        # happens at that width, which is never narrower than the `COMMAND`
+        # header. So `+c 4` yields at most seven characters, not four.
+        $narrow = Get-CommandCell $r.Out
+        Assert ($null -ne $narrow) 'expected at least one row'
+        Assert ($narrow.Length -le 7) "+c 4 should cut to the header width, got '$narrow'"
+
+        # The default is nine (the C's CMDL), and `+c 0` is no cap at all.
+        $d = Invoke-Lsof @('-p', "$self") 'plusc-default'
+        $full = Invoke-Lsof @('+c', '0', '-p', "$self") 'plusc-zero'
+        $dc = Get-CommandCell $d.Out
+        $fc = Get-CommandCell $full.Out
+        Assert ($dc.Length -le 9) "default COMMAND cap is 9, got '$dc'"
+        Assert ($fc.Length -ge $dc.Length) "+c 0 must not be narrower than the default ('$fc' vs '$dc')"
+        Assert ($fc.StartsWith($dc)) "the capped cell is a prefix of the full one ('$dc' vs '$fc')"
     }
     Test-Case 'help-alias-question' 'misc/-?' {
         $r = Invoke-Lsof @('-?') 'q-help'; Assert-Contains $r.Out 'USAGE'
@@ -561,6 +584,27 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert-Contains $r.Out 'TQR=' '-Tq should emit a TQR= (read queue) T field'
         Assert-Contains $r.Out 'TQS=' '-Tq should emit a TQS= (send queue) T field'
         Assert-NotContains $r.Out '(Win=' '-F name must stay clean of the table suffix'
+    }
+    Test-Case 'tcp-info-selects-not-adds-dash-T' 'render/-T' {
+        if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
+        # `-T`'s letters SELECT: the C zeroes Ftcptpi before ORing them in, so
+        # `-T q` is the queues INSTEAD of the state. And the annotation is ONE
+        # parenthesised group, space-separated, not one group per fact.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tq') 'T-selects'
+        Assert-Contains $r.Out 'QR=' '-Tq should report the read queue'
+        Assert-NotContains $r.Out 'ESTABLISHED' '-Tq must not keep the state'
+        Assert ($r.Out -match '\(QR=\d+ QS=\d+\)') "one space-separated group expected: $($r.Out)"
+        Assert-NotContains $r.Out ') (' 'the -T annotation is a single group'
+
+        # A bare `-T` selects nothing at all -- it is how lsof is told to stop
+        # annotating socket rows, not "-T with defaults".
+        $none = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-T') 'T-bare'
+        Assert ($none.Exit -eq 0) "bare -T should run cleanly (exit=$($none.Exit))"
+        Assert-NotContains $none.Out 'ESTABLISHED' 'a bare -T annotates nothing'
+        Assert-NotContains $none.Out 'QR=' 'a bare -T annotates nothing'
+        # ...and `+T` puts the state-only default back.
+        $plus = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '+T') 'T-plus'
+        Assert-Contains $plus.Out 'ESTABLISHED' '+T restores the state'
     }
     Test-Case 'tcp-info-json-dash-T' 'render/-T -J' {
         if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }

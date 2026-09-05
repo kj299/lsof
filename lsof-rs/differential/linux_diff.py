@@ -33,6 +33,8 @@ ledger — those are the kit's, on purpose.
              from /proc/<pid>/maps rather than from an fd
   fixture F  a process holding one of each lock character Linux can report:
              whole-file and partial, read and write (`R r W w`)
+  fixture H  a sleeper whose command name is 15 characters, so the COMMAND
+             column's default nine-character cap is visible at all
   fixture G  a process holding one of each anonymous-inode kind lsof names —
              eventpoll, eventfd, pidfd, inotify — which have no filesystem
              identity and are typed `a_inode`
@@ -283,9 +285,36 @@ def anon_inode_holder(work: str) -> Fixture:
     return Fixture("G(anon inodes)", [sys.executable, "-c", py], cwd=adir, expect_fds=3)
 
 
+LONG_COMM = "abcdefghijklmno"  # 15 chars, the Linux comm ceiling
+
+
+def long_command_holder(work: str) -> Fixture:
+    """A sleeper whose command name is longer than the COMMAND column's cap.
+
+    Every other fixture's command is `sleep`, `python3` or a hostile string, so
+    none of them can show what a plain command does at the default width -- the
+    first three are under the nine-character cap and the hostile ones are
+    ledgered for a different reason. Removing the cap left the whole suite green
+    until this fixture existed, which is the LESSONS #8 shape: a gate that
+    cannot fail is not a gate."""
+    cdir = os.path.join(work, "longcmd")
+    os.makedirs(cdir)
+    binary = os.path.join(cdir, LONG_COMM)
+    shutil.copy("/bin/sleep", binary)
+    return Fixture(
+        "H(long command)",
+        [binary.encode(), b"600"],
+        cwd=cdir,
+        expect_fds=3,  # 0,1,2
+        expect_comm=LONG_COMM.encode(),
+    )
+
+
 def make_fixtures(
     work: str,
-) -> tuple[Fixture, Fixture, Fixture, Fixture, Fixture, Fixture, Fixture]:
+) -> tuple[
+    Fixture, Fixture, Fixture, Fixture, Fixture, Fixture, Fixture, Fixture
+]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
     with open(os.path.join(fdir, "f.txt"), "w") as f:
@@ -345,7 +374,8 @@ def make_fixtures(
     e = mapping_holder(work)
     f = lock_holder(work)
     g = anon_inode_holder(work)
-    return a, b, c, d, e, f, g
+    h = long_command_holder(work)
+    return a, b, c, d, e, f, g, h
 
 
 # -------------------------------------------------------------------- matrix
@@ -417,7 +447,7 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e, lk, anon = fixtures
+    a, b, c, d, e, lk, anon, longcmd = fixtures
     try:
         for fx in fixtures:
             fx.start()
@@ -458,6 +488,7 @@ def run(args) -> int:
                 "E": str(e.pid),
                 "F": str(lk.pid),
                 "G": str(anon.pid),
+                "H": str(longcmd.pid),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "HARDLINK": os.path.join(work, "hardlink", "hard.txt"),
                 "ADIR": a.cwd,

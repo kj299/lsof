@@ -12,7 +12,9 @@
 
 use lsof_core::render::Format;
 use lsof_core::selection::StateFilter;
-use lsof_core::{EndpointMode, FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags};
+use lsof_core::{
+    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags,
+};
 
 /// What the CLI should do after parsing.
 #[derive(Debug)]
@@ -119,10 +121,26 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     let n: usize = value
                         .parse()
                         .map_err(|_| format!("invalid +c width: {value}"))?;
-                    // Lsof.8: "If w is zero (0), all command characters are
-                    // printed." The C tests `CmdLim && len > CmdLim`, so 0 is
-                    // no cap — not a cap of nothing.
-                    sel.command_width = (n != 0).then_some(n);
+                    // The C refuses a width wider than the longest command name
+                    // the system can report, rather than accepting a number it
+                    // could never fill.
+                    if let Some(max) = MAX_COMMAND_WIDTH {
+                        if n > max {
+                            return Err(format!("+c {n} > what system provides ({max})"));
+                        }
+                    }
+                    sel.command_width = if n == 0 {
+                        CommandWidth::Unlimited
+                    } else {
+                        CommandWidth::Chars(n)
+                    };
+                }
+                Some('T') => {
+                    // `+T` is `-T`'s inverse only in the no-letter case: with
+                    // letters, `main.c` reads them identically and the `+`/`-`
+                    // prefix is never consulted.
+                    let rest: String = chars.collect();
+                    sel.tcp_info_opt = Some(take_tcp_info(rest, &args, &mut i, true)?);
                 }
                 Some('w') => sel.suppress_warnings = false,
                 Some('E') => sel.endpoints = Some(EndpointMode::Files),
@@ -206,26 +224,8 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                      and document as a no-op for portability. */
                 }
                 'T' => {
-                    // `-T [fqsw]`: TCP info on socket rows. f=follow (no-op for
-                    // a snapshot), q=queue, s=state, w=window. Bare `-T`
-                    // defaults to queue+state, matching lsof.
                     let rest: String = chars[j + 1..].iter().collect();
-                    let mut flags = TcpInfoFlags::default();
-                    if rest.is_empty() {
-                        flags.queue = true;
-                        flags.state = true;
-                    } else {
-                        for ch in rest.chars() {
-                            match ch {
-                                'f' => {}
-                                'q' => flags.queue = true,
-                                's' => flags.state = true,
-                                'w' => flags.window = true,
-                                other => return Err(format!("invalid -T sub-option: {other}")),
-                            }
-                        }
-                    }
-                    sel.tcp_info = Some(flags);
+                    sel.tcp_info_opt = Some(take_tcp_info(rest, &args, &mut i, false)?);
                     j = chars.len();
                     continue;
                 }
@@ -253,7 +253,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     // `o`→offset) are no-ops here: those values are always
                     // gathered, so the field prints whenever it has one.
                     if only.is_empty() || only.contains(&'T') {
-                        let t = sel.tcp_info.get_or_insert_with(TcpInfoFlags::default);
+                        let t = sel.tcp_info_opt.get_or_insert(TcpInfoFlags::default());
                         t.state = true;
                         t.queue = true;
                     }
@@ -424,6 +424,81 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
         _ => unreachable!(),
     }
     Ok(())
+}
+
+/// The widest `+c` this platform accepts, mirroring the C's `MAXSYSCMDL` —
+/// "what system provides". Linux's dialect pins it to 15, the kernel's
+/// `char comm[16]` minus the NUL, and rejects anything wider. Windows has no
+/// such ceiling on an image name, so nothing is rejected there.
+#[cfg(target_os = "linux")]
+const MAX_COMMAND_WIDTH: Option<usize> = Some(15);
+#[cfg(not(target_os = "linux"))]
+const MAX_COMMAND_WIDTH: Option<usize> = None;
+
+/// Whether this platform can report a socket's receive window, which is what
+/// decides whether `-T w` is a valid letter.
+///
+/// The C compiles the letter in per dialect (`HASTCPTPIW`) and its Linux
+/// dialect does not define it, so `lsof -T w` there is a hard error rather
+/// than a request that quietly returns nothing. Windows reads the window from
+/// per-connection EStats, so it is real there.
+#[cfg(target_os = "linux")]
+const HAS_TCP_WINDOW: bool = false;
+#[cfg(not(target_os = "linux"))]
+const HAS_TCP_WINDOW: bool = true;
+
+/// Read a `-T` / `+T` option's value, from the same token or the next one.
+///
+/// The C declares `-T` as taking a value (`T:` in its option string), so
+/// `lsof -T q` consumes `q` — and `lsof -T /some/path` consumes the path and
+/// then rejects `/` as a sub-option letter. Its `GetOpt` falls back to the
+/// no-value meaning only when the value is absent or itself looks like an
+/// option, which is why `lsof -T -i` is a bare `-T` followed by `-i`.
+fn take_tcp_info(
+    attached: String,
+    args: &[String],
+    i: &mut usize,
+    plus: bool,
+) -> Result<TcpInfoFlags, String> {
+    if !attached.is_empty() {
+        return parse_tcp_info(&attached, plus);
+    }
+    match args.get(*i + 1) {
+        Some(next) if !next.starts_with('-') && !next.starts_with('+') => {
+            *i += 1;
+            parse_tcp_info(next, plus)
+        }
+        _ => parse_tcp_info("", plus),
+    }
+}
+
+/// Parse the letters of a `-T` / `+T` option.
+///
+/// The letters **select**: the C zeroes `Ftcptpi` before ORing them in, so
+/// `-T q` is queues *instead of* the state, not as well as it. With no letters
+/// the prefix decides — `-T` selects nothing, `+T` restores the state-only
+/// default.
+fn parse_tcp_info(letters: &str, plus: bool) -> Result<TcpInfoFlags, String> {
+    if letters.is_empty() {
+        return Ok(if plus {
+            TcpInfoFlags::DEFAULT
+        } else {
+            TcpInfoFlags::default()
+        });
+    }
+    let mut flags = TcpInfoFlags::default();
+    for ch in letters.chars() {
+        match ch {
+            'f' => flags.options = true,
+            'q' => flags.queue = true,
+            's' => flags.state = true,
+            'w' if HAS_TCP_WINDOW => flags.window = true,
+            other => {
+                return Err(format!("unsupported TCP/TPI info selection: {other}"));
+            }
+        }
+    }
+    Ok(flags)
 }
 
 /// Parse a `-s [proto:][state[,state...]]` value into a [`StateFilter`].

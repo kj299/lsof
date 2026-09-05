@@ -256,9 +256,12 @@ impl Backend for WindowsBackend {
                         sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
                     }
                     // `-T q/w`: attach extended TCP stats (window / queue) to
-                    // the row via per-connection EStats. Needs elevation.
-                    if let Some(t) = &sel.tcp_info {
-                        tcpinfo::annotate(&mut file, t, self.elevated);
+                    // the row via per-connection EStats. Needs elevation. The
+                    // resolved flags, so a bare `-T` (which selects nothing)
+                    // does not pay for the round-trips.
+                    let tcp_show = sel.tcp_info();
+                    if tcp_show.queue || tcp_show.window {
+                        tcpinfo::annotate(&mut file, &tcp_show, self.elevated);
                     }
                     attach(&mut procs, &mut idx, pid, file);
                 }
