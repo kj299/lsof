@@ -48,6 +48,20 @@ pub trait Backend {
     /// A short human-readable name (e.g. `"windows"`, `"mock"`).
     fn name(&self) -> &str;
 
+    /// The `(DEVICE, NODE)` identity of the file at `path`, rendered exactly as
+    /// this backend renders those cells on a row — so the comparison in
+    /// [`Selection::path_matches`](crate::selection::Selection) is a plain
+    /// equality test and the formatting lives with the code that produces it.
+    ///
+    /// This is what makes a path argument mean what lsof means by it: `lsof
+    /// /a/hardlink` finds the file even though it was opened under its other
+    /// name, and `lsof /some/dir` matches that directory and *not* the files
+    /// beneath it. A backend that cannot cheaply identify a path returns
+    /// `None`, and selection falls back to comparing names.
+    fn identify_path(&self, _path: &str) -> Option<(String, String)> {
+        None
+    }
+
     /// Gather processes and their open files, already narrowed by `sel` where
     /// the backend can do so cheaply. The portable [`selection`](crate::selection)
     /// engine applies the authoritative filtering afterwards, so a backend may

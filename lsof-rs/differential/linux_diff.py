@@ -292,6 +292,17 @@ def make_fixtures(
     hostile = os.path.join(fdir.encode(), HOSTILE_FILE.encode("utf-8"))
     with open(hostile, "wb") as f:
         f.write(b"x\n")
+    # A second name for f.txt, deliberately OUTSIDE the fixture's own
+    # directory. lsof matches a path argument by the file's identity, not its
+    # name, so querying this link must find the fd opened under the other one
+    # -- but leaving it inside `files/` would put two names for one inode into
+    # the `+d`/`+D` expansions, where the C binds a row to whichever name it
+    # matched first and reports the other as unlocated. That is its own
+    # divergence (DIVERGENCES.md #17); keeping the link out of the tree lets
+    # the `+d`/`+D` cases measure one-level-vs-recursive, which is their job.
+    linkdir = os.path.join(work, "hardlink")
+    os.makedirs(linkdir)
+    os.link(os.path.join(fdir, "f.txt"), os.path.join(linkdir, "hard.txt"))
     # exec keeps the pid stable (no bash parent lingering as the "process"), and
     # <> on the FIFO opens it read/write so the open cannot block. The hostile
     # file name travels as `$1`, outside the shell text.
@@ -436,6 +447,9 @@ def run(args) -> int:
                 "F": str(lk.pid),
                 "G": str(anon.pid),
                 "FILE": os.path.join(a.cwd, "f.txt"),
+                "HARDLINK": os.path.join(work, "hardlink", "hard.txt"),
+                "ADIR": a.cwd,
+                "ASUB": os.path.join(a.cwd, "sub"),
                 "PORT": port,
             },
         )

@@ -101,7 +101,9 @@ SELECTION:\n\
     -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
                   (q/w need Administrator; IPv4 + IPv6; bare -T = qs)\n\
     -a            AND the selectors together (default is OR)\n\
-    <path>        exact-file lookup; +D/+d <dir> = directory-tree lookup\n\
+    <path>        find who has this FILE open, matched by identity (a hard\n\
+                  link to it counts); +d <dir> = the dir and its entries,\n\
+                  +D <dir> = the whole tree beneath it\n\
 \n\
 OUTPUT:\n\
     -n            do not resolve host names\n\
@@ -184,7 +186,12 @@ fn strip_verbatim(s: &str) -> String {
 /// `-V` (and never under `-Q`), as before — but the count is returned
 /// regardless, because lsof exits 1 on an unlocated search item even when it
 /// prints nothing (so `lsof -t <file> && ...` and `if lsof ...; then` work).
-fn report_unmatched(sel: &Selection, located: &HashSet<u32>, procs: &[Process]) -> usize {
+fn report_unmatched(
+    sel: &Selection,
+    located: &HashSet<u32>,
+    search: &[(Option<(String, String)>, String)],
+    procs: &[Process],
+) -> usize {
     let print = sel.verbose && !sel.quiet;
     let mut unmatched = 0usize;
     for &pid in &sel.pids {
@@ -195,16 +202,33 @@ fn report_unmatched(sel: &Selection, located: &HashSet<u32>, procs: &[Process]) 
             }
         }
     }
-    for path in sel.paths.iter().chain(sel.dir_trees.iter()) {
-        let needle = path.to_ascii_lowercase();
-        let hit = procs.iter().flat_map(|p| &p.files).any(|f| {
-            let n = f.name.to_ascii_lowercase();
-            n == needle || n.starts_with(&needle)
-        });
+    // Every search item must turn up among the displayed rows or the run exits
+    // 1, and for `+d`/`+D` each expanded ENTRY is its own item — verified
+    // against the C: a directory whose every entry is open exits 0, and adding
+    // one unopened file makes it 1. Identity is what "turn up" means, so a
+    // file queried through a hard link counts as found under its other name.
+    let shown: HashSet<(&str, &str)> = procs
+        .iter()
+        .flat_map(|p| &p.files)
+        .filter_map(|f| Some((f.device.as_deref()?, f.node.as_deref()?)))
+        .collect();
+    for (id, display) in search {
+        let hit = match id {
+            Some((dev, node)) => shown.contains(&(dev.as_str(), node.as_str())),
+            // No identity for it (the backend could not resolve the path, or
+            // has no identities at all): fall back to the name comparison.
+            None => {
+                let needle = display.to_ascii_lowercase();
+                procs.iter().flat_map(|p| &p.files).any(|f| {
+                    let n = f.name.to_ascii_lowercase();
+                    n == needle || n.starts_with(&needle)
+                })
+            }
+        };
         if !hit {
             unmatched += 1;
             if print {
-                eprintln!("lsof: {path}: no process found with it open");
+                eprintln!("lsof: {display}: no process found with it open");
             }
         }
     }
@@ -267,6 +291,65 @@ fn main() {
     };
 
     let env = make_env();
+    // Resolve the path arguments to file identities, now that a backend exists
+    // to render them the way it renders a row. lsof matches a path by what the
+    // file IS: `lsof /a/hardlink` finds it under its other name, and naming a
+    // directory matches that directory, not everything beneath it. `+d` adds
+    // one level of entries, `+D` the whole tree.
+    let mut search: Vec<(Option<(String, String)>, String)> = Vec::new();
+    let selection = {
+        let mut sel = selection;
+        for p in &sel.paths {
+            let id = env.backend.identify_path(p);
+            if let Some(id) = id.clone() {
+                sel.path_ids.insert(id);
+            }
+            search.push((id, p.clone()));
+        }
+        let mut expand = |dir: &str, recursive: bool| {
+            let id = env.backend.identify_path(dir);
+            if let Some(id) = id.clone() {
+                sel.path_ids.insert(id);
+            }
+            search.push((id, dir.to_string()));
+            let mut stack = vec![std::path::PathBuf::from(dir)];
+            let mut budget = 200_000usize; // a tree walk is not a licence to hang
+            while let Some(d) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    if budget == 0 {
+                        return;
+                    }
+                    budget -= 1;
+                    let path = e.path();
+                    let shown = path.to_string_lossy().into_owned();
+                    let id = env.backend.identify_path(&shown);
+                    if let Some(id) = id.clone() {
+                        sel.path_ids.insert(id);
+                    }
+                    search.push((id, shown));
+                    // Only `+D` descends, and never through a symlink — a
+                    // symlinked directory loop would otherwise walk forever.
+                    if recursive && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        stack.push(path);
+                    }
+                }
+            }
+        };
+        {
+            // The closure borrows `sel`; the block ends the borrow so `sel`
+            // can be moved out below.
+            for d in sel.dirs_one_level.clone() {
+                expand(&d, false);
+            }
+            for d in sel.dir_trees.clone() {
+                expand(&d, true);
+            }
+        }
+        sel
+    };
     let _ = env.elevated; // read on all platforms; used for the hint on Windows.
     if let Some(note) = &env.note {
         eprintln!("lsof: {note}");
@@ -302,7 +385,7 @@ fn main() {
             .map(|p| p.pid)
             .collect();
         let procs = selection.apply(gathered);
-        let unmatched = report_unmatched(&selection, &located, &procs);
+        let unmatched = report_unmatched(&selection, &located, &search, &procs);
         // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
