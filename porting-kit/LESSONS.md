@@ -783,3 +783,52 @@ the emphasized half.
   not only to CI. (Here `parse_status` had grown from a tuple into a struct and
   `proc_status.rs` had not compiled since — caught locally only because the
   sweep ran every target by hand.)
+
+## 025. Triage the flaw scan early — its findings are mostly about the scanner
+
+- **Date:** 2026-09-07
+- **Codebase:** lsof-rs — closing the "127 findings, UNTRIAGED" entry that had
+  stood through three releases (LESSONS #019 found the absence)
+- **What happened:** The kit's rule is that every `scan_c_flaws.py` finding is
+  triaged into `DIVERGENCES.md` as "closed by the port" or "not applicable".
+  Doing it finally, on a 224-finding run, produced **no exploitable finding in
+  the code the port mirrors** — and two defects in the scanner.
+
+  The triage itself was mostly a *reachability* question, and that is the part
+  worth generalising. Of 224 findings, 128 were in code this port can never
+  execute: 98 in dialects it has no backend for, 30 in portable `lib/` files
+  that compile to **empty** in this configuration, 2 in test programs. The
+  30 were the interesting ones, because "portable `lib/`" reads like in-scope.
+  They were settled by measurement, not by reading `#ifdef`s: `lsof-rnam.o` and
+  its four siblings are 3.5 KB with **2 defined symbols** against `lsof-misc.o`'s
+  113 KB and 32. An object-size-and-symbol-count check answers "is this code
+  even built?" in one command, and no amount of `#if` reading is as convincing.
+
+  Of the 94 live findings, the categories collapsed under inspection:
+  `int-overflow-mul` had **zero** with runtime size math (25 were the regex
+  matching the `*` in a `(MALLOC_P *)` cast, 14 were `calloc(CONST, sizeof(T))`);
+  `toctou` had 20 of 47 matching `stat(2)` inside a **trailing comment**;
+  `format-string` had 2 of 4 matching macros that expand to literals. Four
+  `unbounded-copy` hits were read line by line and were all allocate-then-copy
+  or an explicit reservation.
+- **Kit change:** (1) `scan_c_flaws.py` now blanks comments before matching, not
+  just skipping comment-only lines. A trailing `/* … stat(2) … */` is the single
+  largest noise source in real C, and it took this tree's toctou count from 97 to
+  65. (2) A new **`signed-char-compare`** rule (CWE-195), the one LESSONS #023
+  said was missing: it collects the identifiers declared `char` in a file and
+  flags comparisons of them — or of a deref of them — against a numeric literal
+  with no `(unsigned char)` cast. On lsof it finds three, and the first is the
+  exact `safestrlen()` defect a hand-run differential had found and the scanner
+  had missed. A scanner that misses the bug the porter found by hand has a hole
+  in it, and the fix belongs in the kit, not in one port's notes.
+  (3) Both are pinned by `--self-test` cases, including the negatives: an
+  `(unsigned char)` cast is not flagged, a struct field sharing a `char`
+  variable's name is not flagged, and `stat(2)` in a comment is not flagged.
+  (4) **Triage the scan at Phase 0, as the playbook says, not at release three.**
+  Not because the findings were urgent — none was — but because the exercise's
+  real output is a calibrated scanner, and calibrating it after the port is
+  written means every hit is re-litigated against code that has already shipped.
+  The rule the scan was missing would have flagged, before a line of Rust was
+  written, the defect that later cost a differential round to find.
+- **Section amended:** lsof-rs `DIVERGENCES.md` (the scan section is now a
+  triage table); `porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py`.

@@ -577,22 +577,74 @@ tests, because a golden test pins what its author believed the C emits.
   libc's errno strings — DEBT (L2), tracked in the coverage inventory as the
   `UNKN*` TYPE codes.
 
-## The C-flaw scan — 127 findings, UNTRIAGED
+## The C-flaw scan — triaged (2026-09-07)
 
-`porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py ../src ../lib` reports, on
-this tree: 94 `int-overflow-mul`, 24 `unbounded-copy`, 8 `format-string`,
-1 `command-exec`. The kit's rule is that each is triaged into this file as
-"closed by the port" (Rust's checked arithmetic, bounded `Vec`s, no `printf`)
-or "not applicable". **That triage has not been done.** It is listed here so the
-gap is a line in the ledger rather than an absence — the retrospective found the
-absence had gone unnoticed through three releases (LESSONS #019). The Windows
-backend's 139 `unsafe` blocks are individually documented (`audit_unsafe.py`
-139/139) but have never been run under a sanitizer; the Linux backend and the
-core have none.
+`porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py ../src ../lib`. The kit's
+rule is that every finding is triaged into this file as "closed by the port" or
+"not applicable"; that had not been done, and the retrospective found the
+absence had gone unnoticed through three releases (LESSONS #019). It is done
+now, and it changed the scanner as well as this file.
 
-The scan has no pattern for the defect the differential found on 2026-09-04
-(`safestrlen()`: a signed `char` compared with `0x20`, so bytes ≥ 0x80 take the
-wrong branch). A `signed-char-compare` rule — `char` variables or `*p` derefs
-of `char *` compared against a numeric literal without an `(unsigned char)`
-cast — would have flagged it and its siblings; it is a candidate for the kit's
-next retrospective, recorded in LESSONS #023.
+### Reachability first: 224 findings, 94 of them live
+
+The scan covers every dialect lsof ships. This port has a **Linux** backend and
+a native **Windows** one, so a finding in `lib/dialects/sun/` is code that will
+never be ported. And several files in the portable `lib/` compile to *nothing*
+on Linux — verified rather than assumed, by object size and symbol count:
+`lsof-rnam.o`, `lsof-rnch.o`, `lsof-rnmh.o`, `lsof-dvch.o`, `lsof-rmnt.o` are
+3.5 KB with **2 defined symbols** each against `lsof-misc.o`'s 113 KB and 32,
+because `HASNCACHE` and the device cache are off in this configuration.
+
+| | count | verdict |
+|---|---|---|
+| other dialects (`sun`, `aix`, `hpux`, `darwin`, …) | 98 | **not applicable** — no such backend, and none planned |
+| `lib/` files that compile to empty on Linux | 30 | **not applicable** in the configuration this port mirrors |
+| dialect test programs | 2 | **not applicable** — not shipped |
+| **live** (`src/`, live `lib/`, `lib/dialects/linux/`) | **94** | triaged below |
+
+### The 94 live findings
+
+| category | live | triage |
+|---|---|---|
+| `toctou` | 47 | **20** are matches on `stat(2)` inside a *trailing comment or field declaration* — scanner noise, now fixed (below). The other 27 are real `stat`/`lstat`/`access` calls, and they are **inherent to what lsof is**: it stats `/proc` paths that can change under it. None is a stat-then-open-for-write, so a race yields a stale row, not a privilege bug. **Closed by the port** in the only sense available: lsof-rs treats a path that vanishes mid-scan as ordinary and reports nothing for it. |
+| `int-overflow-mul` | 39 | **Zero** have runtime size math. 25 are the regex matching the `*` in a `(MALLOC_P *)` cast on a two-argument `realloc`; the remaining 14 are `calloc(COMPILE-TIME-CONSTANT, sizeof(T))`, which cannot overflow. **Closed by the port** regardless: `Vec`/`String` growth is checked, and `lsof-core` and `lsof-backend-linux` are `#![forbid(unsafe_code)]`. |
+| `unbounded-copy` | 4 | All four read individually. `dmnt.c:307` and `dproc.c:1815` are allocate-then-copy with the allocation sized from the same string. `dsock.c:1091` copies a 6-byte literal. `dproc.c:1919` writes the `]`/`...]` postfix at `p + 11 + wl` — bounded because `snp_eventpoll()` **reserves** 11 for the prefix, the postfix length and the NUL before calling. Careful code, not luck. **Closed by the port**: no fixed buffers, and the same `[eventpoll:…]` name is built with `format!`. |
+| `format-string` | 4 | 2 are macros that expand to literals (`ACCESSERRFMT`). 2 are real non-literal formats — `InodeFmt_d`, `SzOffFmt_dv` — built at startup by `snpf` from compile-time constants (`INODEPSPEC`), so no input reaches the format. **Closed by the port**: no `printf`; `format!` takes a literal by construction. |
+| `command-exec` | 0 live | The single hit is in another dialect. lsof-rs spawns no process at all. |
+
+**No exploitable finding in the code this port mirrors.** That is the outcome,
+and it is worth stating as a measurement rather than a reassurance: the value of
+the exercise turned out to be in the two scanner defects it exposed.
+
+### What the triage found wrong with the scanner
+
+Both fixed in `porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py`, with
+self-test cases:
+
+* **Trailing comments were matched.** Comment-*only* lines were skipped, but
+  `unsigned char mnt_stat; /* mount point stat(2) status */` matched the
+  `toctou` rule. On this tree that was 20 of 47 live toctou hits — noise that
+  buries the real call sites. Comments are now blanked before matching, which
+  took the tree-wide toctou count from **97 to 65**.
+* **No rule for the defect the differential found by hand.** `safestrlen()`
+  compares `*sp` — a `char`, signed on x86-64 — with `0x20`, so every byte
+  ≥ 0x80 takes the wrong branch (the `hostile-comm-utf8-table` C-DEFECT above).
+  A scanner that misses the bug the porter found by hand has a hole in it. The
+  new **`signed-char-compare`** rule collects the identifiers declared `char`
+  in a file and flags comparisons of them, or of a deref of them, against a
+  numeric literal with no `(unsigned char)` cast.
+
+  It finds **3** hits on this tree, all in scope:
+  * `lib/misc.c:1369` — **the known defect**, caught. This is the rule earning
+    its place.
+  * `src/print.c:174` — `json_print_char(…, char val)` does `val < 0x20`, the
+    same shape. Not reachable with a high byte: the callers pass lsof's own
+    access and lock characters, which are ASCII. Measured to be sure — the C's
+    `-J` output prints a `café.txt` name raw, so the name field does not go
+    through this function. **Latent, not exploitable.**
+  * `lib/misc.c:1311` — a **false positive**. `safepup(unsigned int c, …)`
+    declares `c` as `unsigned int`, but another function in the same file
+    declares `char c`, and the identifier set is file-scoped. Function scoping
+    needs a real parser; the scanner's own doc says every hit is a question, and
+    this is the price of that. Recorded so the next reader does not re-derive it.
+

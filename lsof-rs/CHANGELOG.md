@@ -11,6 +11,28 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Verification
+- **The C-flaw scan is triaged** — the kit gate that had stood as "127 findings,
+  UNTRIAGED" through three releases. Outcome: **no exploitable finding in the
+  code this port mirrors.** 128 of 224 findings are in code lsof-rs can never
+  execute (other dialects, or `lib/` files that compile to *empty* on Linux —
+  checked by object size and symbol count, not by reading `#ifdef`s). Of the 94
+  live, `int-overflow-mul` has **zero** with runtime size math, the four
+  `unbounded-copy` hits are allocate-then-copy or an explicit reservation, and
+  the two real non-literal formats are built at startup from compile-time
+  constants. Full table in `DIVERGENCES.md`.
+
+- **Two scanner defects, fixed in the kit.** `scan_c_flaws.py` matched inside
+  *trailing* comments, so `/* … stat(2) … */` counted as a TOCTOU finding — 20
+  of 47 live hits here, and 97 → 65 tree-wide once comments are blanked. And it
+  had no rule for the defect the differential found by hand, so a new
+  **`signed-char-compare`** rule (CWE-195) flags a `char` compared with a
+  numeric literal without an `(unsigned char)` cast. It catches lsof's
+  `safestrlen()` — the C-DEFECT already ledgered — plus one latent instance of
+  the same shape in the C's JSON writer that is not reachable with a high byte.
+  Both rules are pinned by self-test cases, negatives included.
+
+
 ### Added
 - **`-f` and `+f`**: force a path argument to be read as a plain file (`-f`) or
   as a file system (`+f`). `+f` also accepts a mount source that is not a block
