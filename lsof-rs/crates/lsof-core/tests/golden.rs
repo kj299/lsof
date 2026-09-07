@@ -301,6 +301,66 @@ fn a_hostile_thread_name_is_escaped_in_taskcmd() {
 }
 
 #[test]
+fn a_task_row_is_distinguishable_from_a_thread_handle() {
+    // On Windows BOTH of these render TYPE `THRD`: `-K` emits a task row, and
+    // the all-handle scan types a thread HANDLE the same way (`handles.rs`
+    // maps the native "Thread" object type). So "the output contains THRD" is
+    // not a test of `-K` — the smoke suite asserted exactly that, and the case
+    // passed with the feature deleted while two suppression cases failed with
+    // it working. What separates them is the FD cell: `task` for the task row,
+    // a handle number for the handle.
+    //
+    // The smoke suite now keys on `task` followed by `THRD`, and this test is
+    // what keeps that discriminator honest on every push, from a platform that
+    // cannot run it.
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let file = |fd: FdType| OpenFile {
+        fs_device: None,
+        file_flags: None,
+        lock: None,
+        fd,
+        access: AccessMode::Unknown,
+        file_type: FileType::Thread,
+        name: String::new(),
+        device: None,
+        size: None,
+        offset: None,
+        node: Some("4242".into()),
+        links: None,
+        socket: None,
+    };
+    let p = Process {
+        tid: None,
+        task_command: None,
+        uid: None,
+        pgid: None,
+        pid: 1234,
+        ppid: None,
+        command: "pwsh.exe".into(),
+        user: Some("runneradmin".into()),
+        endpoint_peer: false,
+        files: vec![file(FdType::Task), file(FdType::Handle(180))],
+    };
+    let out = table::render(&[p], TableOpts::new(Escaper::WINDOWS));
+
+    // Both rows are THRD, so the substring cannot tell them apart.
+    assert_eq!(out.matches("THRD").count(), 2, "{out:?}");
+
+    // The FD cell can. `task` and `THRD` land in adjacent columns, which is
+    // what the smoke suite's `\btask\s+THRD\b` matches; the handle row puts a
+    // number there instead.
+    let rows: Vec<&str> = out.lines().skip(1).collect();
+    assert_eq!(rows.len(), 2, "{out:?}");
+    let cells = |r: &str| -> Vec<String> { r.split_whitespace().map(str::to_string).collect() };
+    let task = cells(rows[0]);
+    let handle = cells(rows[1]);
+    let fd_at = task.iter().position(|c| c == "task").expect("a task cell");
+    assert_eq!(task[fd_at + 1], "THRD", "{task:?}");
+    assert_eq!(handle[fd_at], "180", "{handle:?}");
+    assert_eq!(handle[fd_at + 1], "THRD", "{handle:?}");
+}
+
+#[test]
 fn table_command_width_caps() {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {

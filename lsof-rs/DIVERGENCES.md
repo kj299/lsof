@@ -104,7 +104,21 @@ would otherwise miss them; a Windows `THRD` row holds none — it is a thread
 inventory. Turning it on by default would put one contentless row per thread,
 hundreds on an idle box, into every bare `lsof.exe`, and pay for a system-wide
 `CreateToolhelp32Snapshot` to do it. Two smoke cases pin the choice so it stays
-a decision: a bare run must emit no `THRD`, and `-K i` must parse as one option.
+a decision: a bare run must emit no task row, and `-K i` must parse as one
+option.
+
+Those cases failed on their first Windows run, and the reason is the same
+lesson a third time. **`THRD` alone does not mean `-K`**: a thread HANDLE is an
+ordinary entry in a process's handle table, and the all-handle scan types it
+`THRD` too (`handles.rs` maps the native `"Thread"` object type). A PowerShell
+process holds several, so `THRD` is in a bare run's output whether or not `-K`
+did anything — which means the *pre-existing* `tasks-dash-K` case, asserting
+only that `THRD` appears, had been passing with the feature deleted. The marker
+that means `-K` is the FD cell `task` (`FdType::Task`, produced only by
+`threads.rs`) next to TYPE `THRD`; a handle carries a number there instead. All
+three cases key on that now, and a golden test renders the two rows side by
+side so the discriminator is checked on every push from a platform that cannot
+run the smoke suite.
 
 ### What the gate gained
 

@@ -30,6 +30,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `COMMAND` column sizes to — so a TASKCMD cut against the wrong column printed
   the right answer. The names are lopsided now (`taskname-long-1` and `t2`).
 
+  And so was the Windows smoke case, which had asserted only that `THRD` appears
+  under `-K`. A thread HANDLE is an ordinary handle-table entry and the
+  all-handle scan types it `THRD` as well, so that case passed with `-K` deleted
+  — a real Windows runner is what exposed it. The three `-K` cases now key on
+  the FD cell `task`, which only the task path produces, and a golden test
+  renders a task row beside a thread handle so the discriminator is checked on
+  every push from a platform that cannot run the smoke suite.
+
 - **The C-flaw scan is triaged** — the kit gate that had stood as "127 findings,
   UNTRIAGED" through three releases. Outcome: **no exploitable finding in the
   code this port mirrors.** 128 of 224 findings are in code lsof-rs can never

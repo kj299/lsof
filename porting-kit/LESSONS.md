@@ -882,5 +882,15 @@ the emphasized half.
   measure column width measured nothing. Make a fixture's values **lopsided and
   distinguishable from their neighbours'**: if two columns can be confused, no
   value common to both can tell them apart.
+
+  And it applies to the **marker you assert on**. The same work's Windows smoke
+  case asserted that `-K` output contains `THRD` — but a thread HANDLE is an
+  ordinary handle-table entry that the all-handle scan types `THRD` as well, so
+  the case passed with the feature deleted, and two new cases asserting the
+  ABSENCE of `THRD` failed with it working. A marker shared with something the
+  feature does not control is not evidence of the feature. Pick one the feature
+  alone produces (here the FD cell `task`), and where the marker lives on a
+  platform your CI cannot exercise, pin it with a portable test that renders
+  both shapes side by side.
 - **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases);
   lsof-rs `DIVERGENCES.md` (the `-K` section carries the kill table).

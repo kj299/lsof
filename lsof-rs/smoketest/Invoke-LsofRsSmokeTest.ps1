@@ -496,9 +496,21 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:^LISTEN') 's-not-listen'
         Assert-NotContains $r.Out 'LISTEN' '-sTCP:^LISTEN should exclude LISTEN'
     }
+    # `THRD` ALONE DOES NOT MEAN `-K`. A thread HANDLE is an ordinary entry in a
+    # process's handle table, and the all-handle scan types it `THRD` too
+    # (handles.rs maps the native "Thread" object type). A PowerShell process
+    # holds several, so `THRD` appears in a bare run whether or not `-K` did
+    # anything -- which made the first version of these three cases useless in
+    # both directions: the `-K` case passed with the feature deleted, and the
+    # two suppression cases failed with it working correctly.
+    #
+    # The marker that means `-K` is the FD cell `task` (FdType::Task, produced
+    # only by threads.rs), immediately followed by TYPE `THRD`. A handle-scan
+    # thread handle carries a handle NUMBER in that cell instead.
+    $taskRow = '(?m)\btask\s+THRD\b'
     Test-Case 'tasks-dash-K' 'selection/-K' {
         $r = Invoke-Lsof @('-K', '-p', "$self") 'K'
-        Assert-Contains $r.Out 'THRD' '-K should emit THRD task rows'
+        Assert ($r.Out -match $taskRow) '-K should emit `task THRD` rows'
     }
     Test-Case 'tasks-not-listed-by-default' 'selection/-K' {
         # DELIBERATELY narrower than Linux, where the C lists tasks whenever
@@ -506,9 +518,9 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         # skipping it would miss open files). A Windows THRD row holds no file,
         # so -K is opt-in here -- see the comment in the Windows backend. This
         # case is what makes that a decision rather than an accident: it fails
-        # if a bare run ever starts emitting thread rows.
+        # if a bare run ever starts emitting task rows.
         $r = Invoke-Lsof @('-p', "$self") 'no-K'
-        Assert-NotContains $r.Out 'THRD' 'a bare run should not emit THRD rows'
+        Assert (-not ($r.Out -match $taskRow)) 'a bare run should emit no `task` rows'
     }
     Test-Case 'tasks-dash-K-i-suppresses' 'selection/-K' {
         # `-K i` is the explicit off switch, and must parse as ONE option -- an
@@ -516,7 +528,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         # listing.
         $r = Invoke-Lsof @('-K', 'i', '-p', "$self") 'K-i'
         Assert ($r.Exit -eq 0) "-K i should run cleanly (exit=$($r.Exit))"
-        Assert-NotContains $r.Out 'THRD' '-K i should suppress THRD rows'
+        Assert (-not ($r.Out -match $taskRow)) '-K i should suppress `task` rows'
     }
     Test-Case 'link-count-dash-L' 'render/-L' {
         $r = Invoke-Lsof @('-L', '-p', "$self") 'L'
