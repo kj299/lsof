@@ -892,5 +892,17 @@ the emphasized half.
   alone produces (here the FD cell `task`), and where the marker lives on a
   platform your CI cannot exercise, pin it with a portable test that renders
   both shapes side by side.
+
+  The fourth instance was a **fuzz target's own assertion**, and it is the
+  sharpest: `proc_maps` asserted that no parsed path ends with ` (deleted)`,
+  and its header comment two screens above said, correctly, that "a name a user
+  controls can therefore end in that exact string". The assertion accused a
+  parser that was matching the C exactly. A fuzz target is code that has never
+  been reviewed against the oracle, so its invariants deserve the same "what
+  would a real input look like?" scrutiny as the parser's — and when one fires,
+  suspect the assertion before the code. Fuzz invariants belong at the level the
+  module actually promises (no panic, no invention, a flag that pairs with a
+  transformation); an exact-value claim belongs in a unit test, where it can be
+  written down next to the measurement that justifies it.
 - **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases);
   lsof-rs `DIVERGENCES.md` (the `-K` section carries the kill table).

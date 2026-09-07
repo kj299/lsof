@@ -12,6 +12,19 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Verification
+- **The `proc_maps` fuzz target was accusing a correct parser.** It asserted no
+  parsed path ever ends with ` (deleted)`, and fired on a ` (deleted) (deleted)`
+  input — but that shape is real, not adversarial: a file genuinely named
+  `lib (deleted)`, unlinked while mapped, reads back from the kernel as
+  `…/lib (deleted) (deleted)`, measured on a live process. The C strips exactly
+  one marker (`dproc.c`: a single NUL store, not a loop), the parser strips
+  exactly one, and both binaries print `…/lib (deleted)` for the `DEL` row. The
+  assertion now checks the pairing that is actually true — the marker survives
+  only when the parser reports having stripped one — and a unit test pins the
+  three cases (doubled, single, and a live file merely ending that way) against
+  mutants that strip greedily or not at all. The target's own header comment had
+  named this hazard in so many words; the assertion below it contradicted it.
+
 - **A multi-threaded differential fixture, and the nine `-K` cases it makes
   possible.** No fixture in the suite had a second thread, so removing thread
   listing entirely left the other 56 cases green — the same shape as the
