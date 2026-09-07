@@ -22,6 +22,13 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   the two real non-literal formats are built at startup from compile-time
   constants. Full table in `DIVERGENCES.md`.
 
+- **The scanner's own self-test is now a CI gate.** Four of the gates in the
+  Linux job are porting-kit harnesses, but nothing ran the flaw scanner's
+  `--self-test`, so its rules — including the negatives — were unverified; and
+  `porting-kit/harnesses/**` was not in the workflow's path filter at all, so
+  editing a harness ran nothing. Both fixed. This is the same "declared but
+  never run" shape the ledger exists to catch.
+
 - **Two scanner defects, fixed in the kit.** `scan_c_flaws.py` matched inside
   *trailing* comments, so `/* … stat(2) … */` counted as a TOCTOU finding — 20
   of 47 live hits here, and 97 → 65 tree-wide once comments are blanked. And it
