@@ -13,7 +13,8 @@
 use lsof_core::render::Format;
 use lsof_core::selection::StateFilter;
 use lsof_core::{
-    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, Protocol, Selection, TcpInfoFlags,
+    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol, Selection,
+    TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -142,6 +143,18 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     let rest: String = chars.collect();
                     sel.tcp_info_opt = Some(take_tcp_info(rest, &args, &mut i, true)?);
                 }
+                Some('f') => {
+                    // `+f` forces every path argument to be a file system, and
+                    // widens what counts as one to any mount source, not just
+                    // a block device. Same reservation about `+f[cfgGn]`.
+                    let rest: String = chars.collect();
+                    if !rest.is_empty() {
+                        return Err(format!(
+                            "unsupported kernel file structure selection: {rest}"
+                        ));
+                    }
+                    sel.filesystem_args = FilesystemArgs::AlwaysFilesystem;
+                }
                 Some('w') => sel.suppress_warnings = false,
                 Some('E') => sel.endpoints = Some(EndpointMode::Files),
                 Some('L') => {
@@ -220,6 +233,23 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 }
                 'Q' => sel.quiet = true,
                 'w' => sel.suppress_warnings = true,
+                'f' => {
+                    // `-f` alone forces every path argument to be a plain
+                    // file. The C also spells kernel-file-structure selection
+                    // `-f[cfgGn]`, which lsof-rs does not implement and which
+                    // is not what a bare `-f` means; a value here is a request
+                    // for that, so it is rejected rather than silently read as
+                    // the path-argument switch.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    if !rest.is_empty() {
+                        return Err(format!(
+                            "unsupported kernel file structure selection: {rest}"
+                        ));
+                    }
+                    sel.filesystem_args = FilesystemArgs::NeverFilesystem;
+                    j = chars.len();
+                    continue;
+                }
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
                      and document as a no-op for portability. */
                 }

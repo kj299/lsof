@@ -89,13 +89,13 @@ independent code and per-OS "dialect" backends:
 
 All planned phases (0–4) are implemented and **validated on real Windows 11
 hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
-62 cases covering every option, output format, and code path, differentially
+63 cases covering every option, output format, and code path, differentially
 cross-checked against native Windows oracles (no downloads). The few
 skips in any single pass are mode-specific (admin-only features unelevated, and
 vice versa) — running an unelevated **and** an elevated pass exercises
 everything. Latest field validation: the released **v1.0.1** `lsof.exe`, as
 downloaded, on Windows 11 (build 26200) — 51 PASS unelevated and 57 PASS
-elevated, zero failures, zero hangs, all 62 cases green in at least one mode.
+elevated, zero failures, zero hangs, all 63 cases green in at least one mode.
 That checkpoint is not a formality: it is what caught the elevated stall fixed
 in 1.0.1, on a build every automated gate had passed. The
 [research roadmap](docs/research-roadmap.md) is fully dispositioned — every
@@ -112,16 +112,15 @@ item is shipped or a documented closed gate — and the release criteria are in
   once per gather and indexed by inode; an fd whose target is `socket:[N]`
   resolves by that key into a real TYPE, protocol, addresses and TCP state.
   **`-i` and `-U` work** in every form the core supports, as does `-T q`.
-- 🔶 **L2** — three of four parts done. ✅ `mem` and `DEL` rows from
-  `/proc/<pid>/maps`; ✅ the lock column (`3uW`) from `/proc/locks`; ✅ named
-  `anon_inode` kinds (`[eventpoll:4,6]`, `[eventfd:6]`, `[pidfd:N]`). ⬜ What
-  remains is one change wearing two hats: lsof matches a **path argument by
-  device and inode**, not by name, which is also why naming a mount point
-  selects everything on that filesystem — so `lsof /path/hardlink` finds the
-  file opened under its other name, and lsof-rs both misses that and
-  over-reports names that merely share a prefix ([`DIVERGENCES.md`](DIVERGENCES.md)
-  #14, #15). ⬜ Per-network-namespace socket reads (#16). Both are measured
-  against the C, with the exact commands in the ledger.
+- 🔶 **L2** — ✅ `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock
+  column (`3uW`) from `/proc/locks`; ✅ named `anon_inode` kinds
+  (`[eventpoll:4,6]`, `[eventfd:6]`, `[pidfd:N]`); ✅ **path arguments matched
+  by device and inode** rather than by name, so `lsof /path/hardlink` finds the
+  file opened under its other name ([`DIVERGENCES.md`](DIVERGENCES.md) #14);
+  ✅ **naming a mount point selects everything open on that filesystem**, with
+  `-f`/`+f` to force the reading either way (#15). ⬜ What remains is
+  per-network-namespace socket reads (#16), measured against the C with the
+  exact commands in the ledger.
 - ✅ **L3** — the C-vs-Rust differential as a CI gate
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed

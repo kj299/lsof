@@ -11,7 +11,7 @@
 # Sources, all three real and maintained:
 #   golden/*      crates/lsof-core/tests/golden.rs   (portable, every CI push)
 #   diff/*        ../differential/capture.ps1        (windows CI, hard gate)
-#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (62-case live harness)
+#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (63-case live harness)
 #
 # Keep it truthful: a case belongs here only if a test really runs those args
 # and really asserts on that output. Declaring coverage you don't have converts
@@ -267,6 +267,10 @@ name = "smoke/field-output-nul-F0"
 args = ["-F0", "-p", "SELF"]
 
 [[case]]
+name = "smoke/filesystem-args-dash-f-plus-f"
+args = ["-f", "--", "PATH"]
+
+[[case]]
 name = "smoke/tcp-info-selects-not-adds-dash-T"
 args = ["-nP", "-iTCP:PORT", "-Tq"]
 
@@ -480,6 +484,19 @@ covers = ["type:IPv4"]
 name = "linux/differential-sockets-dash-T-bare-disables"
 args = ["-n", "-P", "-a", "-i", "-T", "-p", "PID"]
 covers = ["type:IPv4"]
+
+[[case]]
+name = "linux/differential-fs-arg-mount-point"
+args = ["-n", "-P", "-a", "-p", "PID", "/dev"]
+covers = ["type:CHR"]
+
+[[case]]
+name = "linux/differential-fs-arg-dash-f"
+args = ["-n", "-P", "-a", "-p", "PID", "-f", "--", "/"]
+
+[[case]]
+name = "linux/differential-fs-arg-plus-f"
+args = ["-n", "-P", "-a", "-p", "PID", "+f", "--", "SOURCE"]
 
 [[case]]
 name = "linux/differential-command-width-default"

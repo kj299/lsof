@@ -22,6 +22,28 @@ pub enum Privilege {
     SeDebug,
 }
 
+/// One row of the host's mount table.
+///
+/// Only what the file-system-argument rule needs: which directory the mount is
+/// on, what it was mounted from, and the device number every file on it
+/// carries in [`OpenFile::fs_device`](crate::model::OpenFile::fs_device).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountEntry {
+    /// The mounted-on directory, e.g. `/` or `/boot`.
+    pub dir: String,
+    /// What was mounted, symlink-resolved — a device path like `/dev/vda`, or
+    /// a name with no file behind it like `tmpfs` or `proc`. `None` when the
+    /// source could not be resolved.
+    pub source: Option<String>,
+    /// Whether [`Self::source`] names a block device. lsof accepts a mount's
+    /// *source* as a file-system argument only when it is one — `lsof /dev/vda`
+    /// means the root filesystem, while `lsof tmpfs` means nothing — unless
+    /// `+f` widens it to any source.
+    pub source_is_block: bool,
+    /// The device of the mounted filesystem: the `st_dev` every file on it has.
+    pub device: u64,
+}
+
 /// Errors a backend can report. Selection that simply yields no rows is *not*
 /// an error — it returns an empty `Vec`.
 #[derive(Debug)]
@@ -60,6 +82,30 @@ pub trait Backend {
     /// `None`, and selection falls back to comparing names.
     fn identify_path(&self, _path: &str) -> Option<(String, String)> {
         None
+    }
+
+    /// The host's mount table, as `mount(8)` reports it.
+    ///
+    /// lsof reads a path argument as a **file system name** when it matches a
+    /// mounted-on directory, and then selects every open file on that
+    /// filesystem rather than the directory alone (Lsof.8; `arg.c`'s
+    /// `ck_file_arg`). The rule itself is portable and lives in the CLI —
+    /// what a backend supplies is the table. A platform with no such table
+    /// returns an empty one, and every path argument is then a plain file.
+    fn mounts(&self) -> Vec<MountEntry> {
+        Vec::new()
+    }
+
+    /// Whether [`Backend::identify_path`] works on this platform.
+    ///
+    /// Selection needs this stated rather than inferred. "Did any path resolve
+    /// to an identity?" looks like the same question and is not: a run whose
+    /// only path argument names a *file system* resolves no identities at all,
+    /// and inferring from that put path matching back on the name-prefix
+    /// fallback, where `/` is a prefix of every absolute path and `lsof /`
+    /// listed files on every filesystem.
+    fn identifies_paths(&self) -> bool {
+        false
     }
 
     /// Gather processes and their open files, already narrowed by `sel` where

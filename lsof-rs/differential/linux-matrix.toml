@@ -290,6 +290,68 @@ args = ["-n", "-P", "+c", "15", "-a", "-d", "cwd", "-p", "{H}"]
 name = "command-width-plus-c-over-system-max"
 args = ["-n", "-P", "+c", "16", "-a", "-d", "cwd", "-p", "{H}"]
 
+# ------------------------------------------------- file-system path arguments
+# THE MOUNT-POINT RULE. A path argument that names a mounted-on directory is a
+# FILE SYSTEM name, and selects every open file on it rather than the directory
+# alone (Lsof.8; the C's `is_file_named` compares `s->dev == Lf->dev`). Fixture
+# A straddles two filesystems without anything having to be mounted for the
+# test: its stdio is on /dev/null (devtmpfs) and its other fds and mem rows are
+# on the root filesystem.
+#
+# The comparison must be against the FILESYSTEM device, never the DEVICE cell —
+# that cell is `st_rdev` for a device node — which is why the first attempt at
+# this rule over-reported and was backed out until the model carried both.
+
+[[case]]
+name = "fs-arg-dev-selects-devtmpfs"
+args = ["-n", "-P", "-a", "-p", "{A}", "/dev"]
+
+[[case]]
+# The complement: everything NOT on devtmpfs. A rule that leaked into name
+# matching would add the /dev/null rows here, because `/` prefixes every
+# absolute path — the exact over-report that made this DEBT rather than a fix.
+name = "fs-arg-root-excludes-devtmpfs"
+args = ["-n", "-P", "-a", "-p", "{A}", "/"]
+
+[[case]]
+# `-f` forbids the file-system reading: `lsof -f -- /` looks for open files
+# NAMED `/`, which is the rtd row alone.
+name = "fs-arg-dash-f-forces-plain-file"
+args = ["-n", "-P", "-a", "-p", "{A}", "-f", "--", "/"]
+
+[[case]]
+# `+f` forces it, and widens what counts as a file system to any mount source,
+# not just a block device — so the root filesystem can be named by whatever
+# this host mounted it from.
+name = "fs-arg-plus-f-by-mount-source"
+args = ["-n", "-P", "-a", "-p", "{A}", "+f", "--", "{ROOTSRC}"]
+
+[[case]]
+# The half of the source test the root filesystem usually cannot reach: /dev's
+# mount source is never a block device, so this case fails if `+f` does not
+# widen the test beyond one. Fixture A's stdio is on /dev/null, so the match
+# has rows to show.
+name = "fs-arg-plus-f-non-block-source"
+args = ["-n", "-P", "-a", "-p", "{A}", "+f", "--", "{DEVSRC}"]
+
+[[case]]
+# ...and without `+f` that same source names nothing: a non-block mount source
+# is not a file system argument by default.
+name = "fs-arg-non-block-source-needs-plus-f"
+args = ["-n", "-P", "-a", "-p", "{A}", "{DEVSRC}"]
+
+[[case]]
+# `+f` on something that names no mount: the C complains and exits 1 rather
+# than falling back to treating it as a plain file.
+name = "fs-arg-plus-f-not-a-file-system"
+args = ["-n", "-P", "-a", "-p", "{A}", "+f", "--", "{FILE}"]
+
+[[case]]
+# A file system with nothing open on it is an unlocated search item: exit 1,
+# no rows. /sys is mounted on every Linux host and nothing holds a file there.
+name = "fs-arg-empty-file-system-exits-1"
+args = ["-n", "-P", "-a", "-p", "{A}", "/sys"]
+
 # --------------------------------------------------------------- path arguments
 # lsof matches a path argument by what the file IS -- its (device, inode) --
 # not by what it is called, and `+d` (one level) is not `+D` (the tree). All

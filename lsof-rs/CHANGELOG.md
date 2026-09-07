@@ -11,7 +11,40 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`-f` and `+f`**: force a path argument to be read as a plain file (`-f`) or
+  as a file system (`+f`). `+f` also accepts a mount source that is not a block
+  device, and complains and exits 1 for an argument that names no mount.
+
 ### Fixed
+- **Naming a mount point selects every open file on that filesystem**
+  (`DIVERGENCES.md` #15) — `lsof /proc` listed 9 rows from the C and 0 here.
+  The rule is one line of the C (`s->dev == Lf->dev`); what made it debt was
+  that lsof-rs had nowhere to keep a row's *filesystem* device, since the
+  DEVICE cell is `st_rdev` for a device node. `OpenFile::fs_device` landed with
+  the `-F` work, so the comparison now has both halves.
+
+  A **block-device mount source** names its filesystem too, so `lsof /dev/vda`
+  means the root filesystem rather than the device node. One argument can name
+  several mounts (`+f -- tmpfs` names all of them) and each is its own search
+  item, so a run that finds files on one and nothing on the others prints rows
+  *and* exits 1. `+d`/`+D` are unaffected: they are directory expansions, so
+  `+d /` is still one level of `/`.
+
+- **A path argument no longer falls back to name-prefix matching on Linux.**
+  Selection chose between identity and name matching on whether any identity had
+  been resolved — and a file-system argument resolves none, so `lsof /` matched
+  every absolute path and reported files on other filesystems. The backend now
+  states whether it identifies paths (`Backend::identifies_paths`) instead of
+  having it inferred. The name fallback remains for Windows, which is the only
+  platform that needs it.
+
+- **A `\777` in `/proc/self/mounts` no longer panics.** The kernel escapes
+  space, tab, newline and backslash as `\OOO`; three octal digits reach 511 and
+  the decoder computed the byte in a `u8`. It now masks to a byte exactly as the
+  C does. Found by the new `proc_mounts` fuzz target on its first run — a mount
+  source is attacker-influenced on any host where users may mount.
+
 - **`-T` selects rather than adds, and its annotation is one group**
   (`DIVERGENCES.md` items 1 and 2). The C keeps one bitset and `-T<letters>`
   **zeroes it** before ORing the letters in, so `-T q` is the queues *instead
