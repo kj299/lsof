@@ -43,6 +43,8 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
     while more != 0 {
         let pid = entry.th32ProcessID;
         out.push(Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid,

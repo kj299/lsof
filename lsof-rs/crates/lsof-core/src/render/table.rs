@@ -185,9 +185,33 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         let len = esc.command(&p.command).len();
         w.max(command_width.map_or(len, |n| len.min(n)))
     });
+    // TASKCMD gets its OWN width by the same algorithm — `print.c` seeds
+    // `TaskCmdColW` from `strlen(TASKCMDTTL)` and grows it over `Lp->tcmd`,
+    // capped per entry by `TaskCmdLim`, which `+c` sets alongside `CmdLim`.
+    // Sharing `cmd_cut` truncated a thread name against the *command* column:
+    // a `python3` with a 22-character escaped thread name printed 6 characters
+    // of it under `+c 0`, where the C prints all 22.
+    let task_cut = procs
+        .iter()
+        .fold("TASKCMD".len(), |w, p| match &p.task_command {
+            Some(c) => {
+                let len = esc.command(c).len();
+                w.max(command_width.map_or(len, |n| len.min(n)))
+            }
+            None => w,
+        });
 
     // Build the column header set (PPID optional).
     let mut headers: Vec<&str> = vec!["COMMAND", "PID"];
+    // `-K`: TID and TASKCMD appear only when some entry is a task, which is
+    // how the C decides (`print.c` sets TaskPrtTid/TaskPrtCmd while sizing).
+    // A run that asked for tasks and found none — a single-threaded process —
+    // therefore looks exactly like a run that did not ask.
+    let show_tasks = procs.iter().any(|p| p.tid.is_some());
+    if show_tasks {
+        headers.push("TID");
+        headers.push("TASKCMD");
+    }
     if show_ppid {
         headers.push("PPID");
     }
@@ -196,7 +220,7 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         headers.push("NLINK");
     }
     headers.extend(["NODE", "NAME"]);
-    let right = ["PID", "PPID", "SIZE/OFF", "NLINK"];
+    let right = ["PID", "TID", "PPID", "SIZE/OFF", "NLINK"];
 
     let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
         // Escaped and cut the way the C's safestrprtn() does it:
@@ -205,6 +229,16 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         // pass one, not the `+c` number.
         let cmd = esc.command_truncated(&p.command, cmd_cut);
         let mut r = vec![cmd, p.pid.to_string()];
+        if show_tasks {
+            // The process's own row leaves both cells blank; only a task fills
+            // them. TASKCMD is a command name, so it is escaped and cut the
+            // same way COMMAND is — but at `task_cut`, its own column width.
+            r.push(p.tid.map(|t| t.to_string()).unwrap_or_default());
+            r.push(match &p.task_command {
+                Some(c) => esc.command_truncated(c, task_cut),
+                None => String::new(),
+            });
+        }
         if show_ppid {
             r.push(p.ppid.map(|v| v.to_string()).unwrap_or_default());
         }

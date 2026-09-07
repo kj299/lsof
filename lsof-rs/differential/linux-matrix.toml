@@ -449,6 +449,115 @@ args = ["-n", "-P", "+c", "0", "-a", "-d", "^mem", "-p", "{D}"]
 name = "hostile-comm-utf8-fields-Ffc"
 args = ["-n", "-P", "-a", "-Ffc", "-d", "^mem", "-p", "{D}"]
 
+# ------------------------------------------------------------- tasks (-K, I)
+# THREAD LISTING. lsof models a Linux task as a process of its own: `-K` adds
+# one entry per thread that repeats the WHOLE file set, because `CLONE_FS` and
+# `CLONE_FILES` are optional and a thread can hold its own cwd, root and fd
+# table. The entry carries the thread's tid and its own `comm`, which the table
+# shows in two extra columns (TID, TASKCMD) and `-F` in the `K` and `M` fields.
+# Fixture I is the only fixture with a second thread, which is why deleting the
+# feature left the rest of the suite green (LESSONS: a gate that cannot fail).
+# Its thread names are lopsided on purpose -- `taskname-long-1` (15 bytes, the
+# kernel's `comm` ceiling) and `t2` -- because TASKCMD has its OWN column width
+# in `print.c` and a port that reused COMMAND's would cut a thread name against
+# `python3`. Two 7-character names, the first draft, hid that exactly.
+#
+# The columns are the gate as much as the rows are: the runner collapses runs
+# of spaces, so a process row reads `python3 PID root cwd ...` and a task row
+# `python3 PID TID worker1 root cwd ...` -- two extra fields that no normalizer
+# can hide.
+
+[[case]]
+# Three entries (the process and its two threads), each repeating all seven
+# non-mem rows. TASKCMD is `worker1`/`worker2` from prctl(PR_SET_NAME) and
+# differs from COMMAND, so a column that echoed the command would still fail.
+name = "tasks-dash-K"
+args = ["-n", "-P", "-K", "-a", "-d", "^mem", "-p", "{I}"]
+
+[[case]]
+# mem rows repeat per task too -- the task is a whole process entry, not a
+# TID appended to the process's rows.
+name = "tasks-dash-K-repeats-mem-rows"
+args = ["-n", "-P", "-K", "-a", "-p", "{I}"]
+
+[[case]]
+# TASKCMD is sized and cut by its own width, not COMMAND's: `TaskCmdColW`
+# starts at `strlen("TASKCMD")` and grows over the task names, each capped by
+# `+c` (`TaskCmdLim`, which `+c` sets alongside `CmdLim`). Here that is 9 by
+# default against COMMAND's 7, so `taskname-long-1` prints nine characters.
+name = "tasks-taskcmd-has-its-own-column-width"
+args = ["-n", "-P", "-K", "-a", "-d", "cwd", "-p", "{I}"]
+
+[[case]]
+# `+c 0` lifts the cap on both columns, so the whole 15-character name prints.
+name = "tasks-taskcmd-width-plus-c-zero"
+args = ["-n", "-P", "-K", "+c", "0", "-a", "-d", "cwd", "-p", "{I}"]
+
+[[case]]
+# A `+c` between the two: TASKCMD takes 12 while COMMAND stays at its header.
+name = "tasks-taskcmd-width-plus-c-twelve"
+args = ["-n", "-P", "-K", "+c", "12", "-a", "-d", "cwd", "-p", "{I}"]
+
+[[case]]
+# `+c` BELOW the header, the TASKCMD twin of `command-width-plus-c-below-header`
+# and the only case that can see the column's seed: `+c` caps each name's
+# CONTRIBUTION, and the width still starts at `strlen("TASKCMD")`, so `+c 3`
+# prints seven characters of the long name rather than three. Seeding the width
+# from 0 instead is invisible to every other case here, because the longest
+# name exceeds seven whatever the cap.
+name = "tasks-taskcmd-width-plus-c-below-header"
+args = ["-n", "-P", "-K", "+c", "3", "-a", "-d", "cwd", "-p", "{I}"]
+
+[[case]]
+# THE DEFAULT. `-K` is not needed to see tasks -- the C lists them whenever
+# NOTHING selects (main.c leaves Selflags == SelAll). Give it any selector and
+# they go away, columns included. This is the case that pins the suppression:
+# same fixture, same fds, no TID/TASKCMD and one entry instead of three.
+name = "tasks-suppressed-by-a-selector"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{I}"]
+
+[[case]]
+# `-K i` turns listing off explicitly. Same output as the case above, reached
+# the other way -- so a `-K` that ignored its argument would fail here.
+name = "tasks-dash-K-i-separated"
+args = ["-n", "-P", "-K", "i", "-a", "-d", "^mem", "-p", "{I}"]
+
+[[case]]
+# The attached spelling of the same thing. The C's getopt entry for K takes an
+# optional argument, so both forms are legal and mean one flag, not two.
+name = "tasks-dash-K-i-attached"
+args = ["-n", "-P", "-Ki", "-a", "-d", "^mem", "-p", "{I}"]
+
+[[case]]
+# `i` is the ONLY argument `-K` accepts. Anything else is a usage error: exit
+# 1, nothing on stdout (the message and the usage banner go to stderr, which
+# the runner does not compare -- the exit code is the contract).
+name = "tasks-dash-K-rejects-other-arguments"
+args = ["-n", "-P", "-K", "x", "-a", "-p", "{I}"]
+
+[[case]]
+# `strcasecmp`, not `strcmp`: the C accepts `-K I` as `-K i`. lsof-rs compared
+# the byte exactly and rejected it.
+name = "tasks-dash-K-i-is-case-insensitive"
+args = ["-n", "-P", "-K", "I", "-a", "-d", "^mem", "-p", "{I}"]
+
+[[case]]
+# `-K` takes the next word WHATEVER it is unless that word opens an option
+# (main.c pushes back only on a leading `-` or `+`), so a path after `-K` is a
+# usage error, not a name to look up. Consuming only a literal `i` turned
+# `lsof -K /some/file` into a whole-host task listing where the C exits 1 —
+# which the `-K x` case above could not see, because `x` matches nothing and
+# the accidental exit 1 looked like the right answer.
+name = "tasks-dash-K-consumes-a-path-argument"
+args = ["-n", "-P", "-K", "{FILE}"]
+
+[[case]]
+# The field form: `K` is the tid and `M` the task's command, both emitted
+# right after `p` in the process set, and both absent from the process's own
+# entry. `f` keeps the file set small enough to read.
+name = "tasks-dash-K-fields"
+args = ["-n", "-P", "-K", "-a", "-d", "^mem", "-FpKMcf", "-p", "{I}"]
+
 # ------------------------------------------------------------- exit contract
 
 [[case]]

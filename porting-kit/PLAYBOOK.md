@@ -239,6 +239,15 @@ Then the loop — each step is a CI-enforced gate:
    **oracle-substitution** (diff against a native tool over self-owned fixtures)
    with a three-way exit contract — match / divergence / infra-error — so a
    broken harness can't read as a port bug. Both modes are in the matrix header.
+   Finally, **mutate the cases you just wrote** (LESSONS #26): for each one, name
+   the change it is meant to catch, make that change, and confirm the case turns
+   red — then record the result as a kill table, one row per case. A case no
+   mutant kills is a comment. This matters most for cases whose expected outcome
+   is *silence* (an error exit, an empty listing, a suppressed column), because
+   there are several ways to be silent and only one of them is the behavior under
+   test: lsof-rs's `lsof -K x` case compared an empty stdout and an exit 1 that
+   the two binaries reached for opposite reasons, and it took the mutant that
+   should have killed it to expose both the hollow case and a real bug behind it.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker. **This applies per backend crate, and "input" includes text

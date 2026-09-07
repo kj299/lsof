@@ -35,6 +35,9 @@ ledger — those are the kit's, on purpose.
              whole-file and partial, read and write (`R r W w`)
   fixture H  a sleeper whose command name is 15 characters, so the COMMAND
              column's default nine-character cap is visible at all
+  fixture I  a process with two extra threads, each with its own comm, so
+             `-K`'s task entries and the TID/TASKCMD columns have something
+             to show
   fixture G  a process holding one of each anonymous-inode kind lsof names —
              eventpoll, eventfd, pidfd, inotify — which have no filesystem
              identity and are typed `a_inode`
@@ -310,10 +313,60 @@ def long_command_holder(work: str) -> Fixture:
     )
 
 
+def thread_holder(work: str) -> Fixture:
+    """A process with two extra threads, each with its own `comm`.
+
+    `-K` lists every task as its own entry repeating the WHOLE file set, mapped
+    files included, so a three-thread process prints three times the rows. No
+    other fixture has a second thread, which is why removing the feature left
+    the whole suite green until this existed -- the same shape as fixture H.
+
+    The threads are named through prctl(PR_SET_NAME) so TASKCMD has something
+    to show that differs from COMMAND; without that the column could be wrong
+    and still look right.
+
+    The names are deliberately LOPSIDED and the long one is longer than both
+    the command and the `TASKCMD` header: `print.c` gives TASKCMD its own column
+    width (`TaskCmdColW`, seeded from `strlen(TASKCMDTTL)` and grown over
+    `Lp->tcmd`), and a port that reused the COMMAND width instead would cut a
+    thread name against `python3`. With two 7-character names -- the first
+    draft -- that bug is invisible, because 7 is also what `COMMAND` sizes to.
+    `taskname-long-1` is 15 bytes, the kernel's `comm` ceiling."""
+    tdir = os.path.join(work, "threads")
+    os.makedirs(tdir)
+    py = (
+        "import ctypes,os,threading,time\n"
+        "libc=ctypes.CDLL('libc.so.6')\n"
+        "h=open(os.path.join(%r,'held.txt'),'w')\n"
+        "def w(n):\n"
+        "    libc.prctl(15, n.encode(), 0,0,0)\n"
+        "    time.sleep(600)\n"
+        "for n in ('taskname-long-1','t2'):\n"
+        "    threading.Thread(target=w, args=(n,), daemon=True).start()\n"
+        "time.sleep(0.4)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (tdir, tdir)
+    )
+    # 4 fds: stdio on /dev/null plus held.txt. The fd count alone would go
+    # true before the threads exist (held.txt opens first), so the real gate is
+    # the `ready` marker in run(), written only after both are named.
+    return Fixture(
+        "I(threads)", [sys.executable, "-c", py], cwd=tdir, expect_fds=4
+    )
+
+
 def make_fixtures(
     work: str,
 ) -> tuple[
-    Fixture, Fixture, Fixture, Fixture, Fixture, Fixture, Fixture, Fixture
+    Fixture,
+    Fixture,
+    Fixture,
+    Fixture,
+    Fixture,
+    Fixture,
+    Fixture,
+    Fixture,
+    Fixture,
 ]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
@@ -375,7 +428,8 @@ def make_fixtures(
     f = lock_holder(work)
     g = anon_inode_holder(work)
     h = long_command_holder(work)
-    return a, b, c, d, e, f, g, h
+    i = thread_holder(work)
+    return a, b, c, d, e, f, g, h, i
 
 
 # -------------------------------------------------------------------- matrix
@@ -472,7 +526,7 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e, lk, anon, longcmd = fixtures
+    a, b, c, d, e, lk, anon, longcmd, threads = fixtures
     try:
         for fx in fixtures:
             fx.start()
@@ -480,7 +534,7 @@ def run(args) -> int:
         # libraries are loaded and one is unlinked. Waiting on the marker
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
-        for fx in (e, lk, anon):
+        for fx in (e, lk, anon, threads):
             ready = os.path.join(fx.cwd, "ready")
             deadline = time.monotonic() + 5.0
             while not os.path.exists(ready) and time.monotonic() < deadline:
@@ -514,6 +568,7 @@ def run(args) -> int:
                 "F": str(lk.pid),
                 "G": str(anon.pid),
                 "H": str(longcmd.pid),
+                "I": str(threads.pid),
                 "ROOTSRC": mount_source("/"),
                 "DEVSRC": mount_source("/dev"),
                 "FILE": os.path.join(a.cwd, "f.txt"),

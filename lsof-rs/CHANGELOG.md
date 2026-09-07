@@ -12,6 +12,24 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Verification
+- **A multi-threaded differential fixture, and the nine `-K` cases it makes
+  possible.** No fixture in the suite had a second thread, so removing thread
+  listing entirely left the other 56 cases green — the same shape as the
+  COMMAND-width cap before fixture H. Fixture I is a `python3` with two
+  `prctl(PR_SET_NAME)` threads, so `TASKCMD` shows something that differs from
+  `COMMAND` and a column echoing the command still fails.
+
+  Ten mutants were run against the new cases and every case is killed by at
+  least one, including two that kill exactly one case each — "tasks omit `mem`
+  rows" and "seed the TASKCMD width from 0" — so neither case is redundant with
+  its neighbours. Two of the mutants killed cases that had been passing
+  accidentally, which is how the `-K` argument bugs above were found at all.
+
+  The fixture's own first draft was the same kind of hollow: both its threads
+  were named `worker1`/`worker2`, seven characters, which is also what the
+  `COMMAND` column sizes to — so a TASKCMD cut against the wrong column printed
+  the right answer. The names are lopsided now (`taskname-long-1` and `t2`).
+
 - **The C-flaw scan is triaged** — the kit gate that had stood as "127 findings,
   UNTRIAGED" through three releases. Outcome: **no exploitable finding in the
   code this port mirrors.** 128 of 224 findings are in code lsof-rs can never
@@ -41,11 +59,42 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 
 ### Added
+- **Threads are listed the way the C decides to** (`DIVERGENCES.md` #18), with
+  the `TID` and `TASKCMD` columns and the `-F` `K`/`M` fields that go with them.
+  A Linux task is a **process entry of its own** — `CLONE_FS`/`CLONE_FILES` are
+  optional, so a thread can hold its own cwd, root and fd table — and lsof
+  repeats the whole file set for each. On a two-thread fixture that is 22 rows
+  against 8, or 49 against 17 with `mem` rows included.
+
+  **Breaking for a bare `lsof` on Linux**, deliberately: the C lists tasks
+  whenever *nothing at all* is selected, and lsof-rs now does too. Any selector
+  (`-p`, `-u`, `-c`, `-i`, `-d`, a path) suppresses them again, columns
+  included; `-K` forces them on, `-K i` off. Windows is narrower on purpose —
+  `-K` stays opt-in there, since a `THRD` row holds no file and a bare run
+  would otherwise gain one contentless row per thread.
+
 - **`-f` and `+f`**: force a path argument to be read as a plain file (`-f`) or
   as a file system (`+f`). `+f` also accepts a mount source that is not a block
   device, and complains and exits 1 for an argument that names no mount.
 
 ### Fixed
+- **TASKCMD is sized and cut by its own column, not COMMAND's.** `print.c` keeps
+  `TaskCmdColW` separate from `CmdColW` — seeded from `strlen("TASKCMD")`, grown
+  over the task names, each capped by `+c` — so a `python3` with a 22-character
+  escaped thread name prints all 22 under `+c 0`. lsof-rs reused the COMMAND
+  width and printed six. Found by naming a thread with control characters, which
+  a thread can do to itself through `prctl(PR_SET_NAME)`: the escaping held (no
+  raw `ESC` reaches the terminal), the column width did not.
+
+- **`-K` takes the next word whatever it is, and compares it case-insensitively.**
+  It had been read as "take the next word only if it is exactly `i`". The C
+  (`main.c` case `'K'`) pushes the token back only when it opens an option, so
+  `lsof -K /var/log` is a usage error — lsof-rs had left the path as a *name* to
+  look up and the bare `-K` then listed every task on the host. `-K I` was
+  rejected outright; the C uses `strcasecmp`. Neither was visible to the obvious
+  test: `-K x` passed for the wrong reason, since `x` matches nothing and the
+  accidental exit 1 looked correct.
+
 - **Naming a mount point selects every open file on that filesystem**
   (`DIVERGENCES.md` #15) — `lsof /proc` listed 9 rows from the C and 0 here.
   The rule is one line of the C (`s->dev == Lf->dev`); what made it debt was

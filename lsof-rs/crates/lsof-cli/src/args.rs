@@ -14,7 +14,7 @@ use lsof_core::render::Format;
 use lsof_core::selection::StateFilter;
 use lsof_core::{
     CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol, Selection,
-    TcpInfoFlags,
+    TaskMode, TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -260,12 +260,38 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     continue;
                 }
                 'K' => {
-                    // `-K [i]`: list each process's threads as `task` rows.
-                    // lsof's optional arg selects task mode; we always list
-                    // all threads of in-scope processes, so any attached value
-                    // is consumed and ignored (and `-Ki` doesn't misparse the
-                    // `i` as the `-i` inet flag).
-                    sel.list_tasks = true;
+                    // `-K` lists each process's threads as their own entries;
+                    // `-K i` is the opposite — it removes tasks from the
+                    // default selection, which is where they otherwise come
+                    // from. The value may be attached (`-Ki`) or separate
+                    // (`-K i`), like `-T`. Consuming it also keeps `-Ki` from
+                    // misparsing the `i` as the `-i` inet flag.
+                    //
+                    // The separate form takes the next word WHATEVER it is,
+                    // unless it opens an option (`main.c`: `if (!GOv || *GOv
+                    // == '-' || *GOv == '+')` pushes the token back, else it
+                    // must be `i`). So `-K x` and `-K /var/log` are usage
+                    // errors, not a bare `-K` plus a name — taking only a
+                    // literal `i` turned `lsof -K /var/log` into a whole-host
+                    // task listing where the C exits 1.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        Some(rest)
+                    } else {
+                        match args.get(i + 1) {
+                            Some(next) if !next.starts_with(['-', '+']) => {
+                                i += 1;
+                                Some(next.clone())
+                            }
+                            _ => None,
+                        }
+                    };
+                    match value {
+                        None => sel.tasks = TaskMode::Always,
+                        // `strcasecmp`, so `-K I` is `-K i`.
+                        Some(v) if v.eq_ignore_ascii_case("i") => sel.tasks = TaskMode::Never,
+                        Some(v) => return Err(format!("-K not followed by i (but by {v})")),
+                    }
                     j = chars.len();
                     continue;
                 }
@@ -655,6 +681,44 @@ mod tests {
         assert!(sel.and_mode);
         assert!(sel.inet.enabled);
         assert_eq!(sel.pids, vec![123]);
+    }
+
+    /// `-K`'s argument rule, measured against the C (`main.c` case 'K'):
+    /// the next word is taken as the argument UNLESS it opens an option, and
+    /// the comparison is `strcasecmp`. Both halves were wrong: lsof-rs took
+    /// only a literal `i`, so `-K I` was rejected and `-K /some/path` became a
+    /// bare `-K` plus a name — a whole-host task listing where the C exits 1.
+    #[test]
+    fn dash_k_argument_rule() {
+        let bare = |argv: &[&str]| run(argv).0.tasks;
+        // No argument at all, and an argument that opens an option: bare `-K`.
+        assert_eq!(bare(&["-K"]), TaskMode::Always);
+        assert_eq!(bare(&["-K", "-p", "1"]), TaskMode::Always);
+        assert_eq!(bare(&["-K", "+c", "0"]), TaskMode::Always);
+        // The `-p 1` after a bare `-K` is still parsed as an option, not eaten.
+        assert_eq!(run(&["-K", "-p", "1"]).0.pids, vec![1]);
+        // `i`, attached or separate, in either case.
+        for argv in [
+            &["-Ki"][..],
+            &["-K", "i"][..],
+            &["-KI"][..],
+            &["-K", "I"][..],
+        ] {
+            assert_eq!(bare(argv), TaskMode::Never, "{argv:?}");
+        }
+        // Anything else is a usage error — and is CONSUMED, so it never
+        // reaches `paths`. A path argument is the case that matters: it is
+        // the one that used to parse as a name and list the whole host.
+        for argv in [
+            &["-K", "x"][..],
+            &["-Kx"][..],
+            &["-K", "ii"][..],
+            &["-K", "/etc/passwd"][..],
+        ] {
+            let err = parse(argv.iter().map(|s| s.to_string()).collect())
+                .expect_err(&format!("{argv:?} must be rejected"));
+            assert!(err.contains("-K not followed by i"), "{argv:?}: {err}");
+        }
     }
 
     #[test]

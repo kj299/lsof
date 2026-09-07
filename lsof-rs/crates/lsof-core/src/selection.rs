@@ -61,6 +61,12 @@ impl SelKinds {
     pub const NM: Self = Self(1 << 7);
     /// `+L`, the C's `SELNLINK`.
     pub const NLINK: Self = Self(1 << 8);
+    /// `-K`, the C's `SELTASK`. Unlike every other kind this one is asymmetric:
+    /// it takes part in the OR, so a bare `lsof -K` lists tasks and nothing
+    /// else, but it is dropped from the `-a` requirement, so `lsof -K -a -p N`
+    /// still shows that process's own rows alongside its tasks. Measured, not
+    /// derived — see `Selection::apply`.
+    pub const TASK: Self = Self(1 << 9);
 
     /// The process selecters — the C's `SELPROC`. A file inherits these from
     /// its process; the rest it must match itself.
@@ -88,6 +94,10 @@ impl SelKinds {
     /// The kinds present in either.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+    /// This set with `other`'s kinds removed.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -179,6 +189,27 @@ impl TcpInfoFlags {
     pub fn any(self) -> bool {
         self.state || self.queue || self.window || self.options
     }
+}
+
+/// `-K` / `-K i`: whether a process's other threads are listed as entries of
+/// their own.
+///
+/// The C does not have a boolean here. Tasks are a *selector kind* (`SELTASK`),
+/// and `Selflags` defaults to `SelAll` — every kind — but only when no selector
+/// was given at all (`main.c`: `Selflags = SelAll`). So a bare `lsof` lists
+/// threads and `lsof -p 123` does not, without either being a special case:
+/// naming any selector replaces the "everything" set with that selector's bits,
+/// and `SELTASK` is not among them. `-K` puts it back explicitly; `-K i` takes
+/// it out of `SelAll` so even a bare run omits it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TaskMode {
+    /// No `-K`: tasks are listed only when nothing else was selected.
+    #[default]
+    WhenUnselected,
+    /// `-K`: list tasks, whatever else was selected.
+    Always,
+    /// `-K i`: never list tasks.
+    Never,
 }
 
 /// `-f` / `+f`: how a path argument is read.
@@ -425,12 +456,10 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
-    /// `-K`: list each in-scope process's threads as additional rows
-    /// (FD = `task`, TYPE = `THRD`, NODE = TID). Lsof's `-K` takes an
-    /// optional argument (`-Ki` for selection mode); the parser accepts
-    /// any value but the backend always emits all threads of in-scope
-    /// processes.
-    pub list_tasks: bool,
+    /// `-K` / `-K i`: whether thread entries are listed. See [`TaskMode`] —
+    /// the default is not "off", it is "on when nothing else was selected",
+    /// which is the C's rule and not an approximation of it.
+    pub tasks: TaskMode,
     /// `-T [fqsw]`: which TCP/TPI facts socket rows show. `None` means no `-T`
     /// was given, which is **not** the same as `-T` with no letters — see
     /// [`TcpInfoFlags`] — so ask [`Selection::tcp_info`] rather than reading
@@ -460,6 +489,18 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Whether tasks should be listed on this run, resolving the C's rule:
+    /// `SELTASK` is in the default "everything" set, so a run with **no
+    /// selector at all** lists them, and naming any selector drops them unless
+    /// `-K` asks explicitly.
+    pub fn lists_tasks(&self) -> bool {
+        match self.tasks {
+            TaskMode::Always => true,
+            TaskMode::Never => false,
+            TaskMode::WhenUnselected => self.specified().is_empty() && !self.has_path_filter(),
+        }
+    }
+
     /// Which TCP/TPI facts to show, resolving "no `-T` given" to the default.
     ///
     /// The distinction the `Option` carries is real: `None` is "the user said
@@ -474,6 +515,10 @@ impl Selection {
     /// [`Selection::specified`] can never appear here.
     fn proc_kinds(&self, p: &Process) -> SelKinds {
         let mut k = SelKinds::NONE;
+        // A task entry matches the `-K` kind; the process's own entry does not.
+        if p.tid.is_some() {
+            k.insert(SelKinds::TASK);
+        }
         if !self.pids.is_empty() && self.pids.contains(&p.pid) {
             k.insert(SelKinds::PID);
         }
@@ -695,6 +740,13 @@ impl Selection {
         if self.unix_only {
             k.insert(SelKinds::UNX);
         }
+        // Only an explicit `-K` specifies the kind. `TaskMode::WhenUnselected`
+        // is the *absence* of a selector — it lists tasks precisely because
+        // nothing was specified — so adding it here would turn every bare run
+        // into a selected one.
+        if self.tasks == TaskMode::Always {
+            k.insert(SelKinds::TASK);
+        }
         if self.has_path_filter() {
             k.insert(SelKinds::NM);
         }
@@ -745,7 +797,7 @@ impl Selection {
         }
     }
 
-    /// Whether any process-level selector    /// Whether any process-level selector (`-p` / `-u` / `-c`) was given.
+    /// Whether any process-level selector (`-p` / `-u` / `-c`) was given.
     pub fn has_process_selector(&self) -> bool {
         self.specified().intersects(SelKinds::PROC)
     }
@@ -807,15 +859,30 @@ impl Selection {
                 if sf.is_empty() {
                     return false;
                 }
-                !self.and_mode || sf.contains(specified)
+                // `-a` requires every specified kind EXCEPT `-K`'s. Measured:
+                // `lsof -K -a -p N` shows that process's own rows as well as
+                // its tasks, so TASK cannot be part of the AND requirement —
+                // while `lsof -K` alone shows tasks and nothing else, so it
+                // must still be part of the OR. Both hold only if it is
+                // dropped here and nowhere else.
+                !self.and_mode || sf.contains(specified.without(SelKinds::TASK))
             });
             if p.files.is_empty() {
                 // A process with no rows left is a result only when it was
                 // itself selected and no file selecter was given — the case
                 // where the renderer prints a bare process line.
+                // `-K` adds one more way to have no result: a run that
+                // specified tasks, on an entry that is not one and matched
+                // nothing else, is not selected at all — `lsof -K` prints the
+                // tasks and no line for the process. This lives here rather
+                // than in `proc_selected` because that predicate also scopes
+                // the backend's fd walk, and the process's own files still
+                // have to be read: `lsof -K -a -p N` shows them.
+                let task_only_miss = specified.contains(SelKinds::TASK) && inherited.is_empty();
                 if !self.proc_selected(inherited)
                     || specified.intersects(SelKinds::FILE)
                     || peer_only
+                    || task_only_miss
                 {
                     continue;
                 }
@@ -1249,6 +1316,8 @@ mod tests {
         };
         sel.path_fs_devices.insert(65024); // the root filesystem
         let p = Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid: 7,
@@ -1299,6 +1368,8 @@ mod tests {
         };
         sel.path_ids.insert(("C:".into(), "42".into()));
         let p = Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid: 7,
@@ -1445,6 +1516,8 @@ mod tests {
         // 9999 matches no selector but was marked by the backend as a `+E`
         // endpoint peer: it must survive apply() with ONLY its pipe rows.
         let peer = Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid: 9999,
@@ -1456,6 +1529,8 @@ mod tests {
         };
         // 8888 matches no selector and is no peer: dropped as usual.
         let stranger = Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid: 8888,

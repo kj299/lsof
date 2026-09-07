@@ -22,6 +22,8 @@ pub fn sample_processes() -> Vec<Process> {
     let addr = |s: &str| -> SocketAddr { s.parse().expect("valid test addr") };
     vec![
         Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid: 1000,
@@ -63,6 +65,8 @@ pub fn sample_processes() -> Vec<Process> {
             ],
         },
         Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid: 1500,

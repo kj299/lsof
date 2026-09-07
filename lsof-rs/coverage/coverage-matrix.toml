@@ -11,7 +11,7 @@
 # Sources, all three real and maintained:
 #   golden/*      crates/lsof-core/tests/golden.rs   (portable, every CI push)
 #   diff/*        ../differential/capture.ps1        (windows CI, hard gate)
-#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (63-case live harness)
+#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (65-case live harness)
 #
 # Keep it truthful: a case belongs here only if a test really runs those args
 # and really asserts on that output. Declaring coverage you don't have converts
@@ -298,6 +298,16 @@ args = ["-sTCP:LISTEN", "-nP", "-i"]
 name = "smoke/tasks-K"
 args = ["-K", "-p", "SELF"]
 covers = ["type:THRD"]
+
+[[case]]
+# Windows lists tasks on an explicit `-K` only, unlike Linux where the C lists
+# them whenever nothing is selected. These two pin that as a decision.
+name = "smoke/tasks-not-listed-by-default"
+args = ["-p", "SELF"]
+
+[[case]]
+name = "smoke/tasks-K-i-suppresses"
+args = ["-K", "i", "-p", "SELF"]
 
 [[case]]
 name = "smoke/link-count-L"

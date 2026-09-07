@@ -832,3 +832,55 @@ the emphasized half.
   written, the defect that later cost a differential round to find.
 - **Section amended:** lsof-rs `DIVERGENCES.md` (the scan section is now a
   triage table); `porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py`.
+
+## 026. A test that passes for the wrong reason is worse than no test — mutate the ones you just wrote
+
+- **Date:** 2026-09-07
+- **Codebase:** lsof-rs — closing DIVERGENCES.md item 18 (thread listing, `-K`)
+- **What happened:** Seven differential cases were written for `-K` and all
+  seven passed on the first run. Six were real. The seventh,
+  `tasks-dash-K-rejects-other-arguments` (`lsof -K x`), was measuring nothing:
+  the C rejects `x` as `-K`'s argument and exits 1, while the port did not
+  consume `x` at all, treated it as a *filename*, found no match, and also
+  exited 1 with no output. Same exit code, same empty stdout, MATCH — for
+  opposite reasons.
+
+  It surfaced only under a mutant that made `-K` accept any argument silently.
+  That mutant should have killed the case; it did not, which is the signal.
+  Chasing why produced the real bug: the C's `-K` takes the next word
+  **whatever it is**, pushing it back only when it opens an option, so
+  `lsof -K /var/log` is a usage error — and the port had been turning it into a
+  bare `-K` plus a name, printing a whole-host thread listing where the C prints
+  nothing. A one-character argument could never have shown that; a path could.
+  The same mutant round found a second bug (`strcasecmp`, so `-K I` is `-K i`).
+
+- **Why it matters:** The failure mode is specific and common. When a case's
+  expected outcome is *silence* — an error exit, an empty listing, a suppressed
+  column — there are usually several ways to be silent, and only one of them is
+  the behavior under test. Differential harnesses compare stdout and an exit
+  code; two wrong implementations agree on both far more often than they agree
+  on a populated table. So the cases most likely to be hollow are exactly the
+  negative ones the porter adds for completeness.
+
+  The mutant is what tells them apart, and it costs one build. The discipline is
+  not "mutation-test the codebase" — it is: **for each case you just wrote, name
+  the change it is supposed to catch, make that change, and confirm it goes
+  red.** A case no mutant kills is a comment.
+
+- **Kit change:** `PLAYBOOK.md` Phase 3 — when adding differential cases, record
+  a kill table alongside them: one row per case, naming the mutant that turns it
+  red. A case with an empty row is not done. The lsof-rs ledger now carries one
+  for the `-K` work; two of its ten mutants killed cases that had been passing
+  accidentally, which is a 25% hollow rate on cases written by someone who was
+  trying to be careful.
+
+  The same applies to the **fixture**, not just the case. That work's first
+  multi-threaded fixture named both threads `worker1`/`worker2` — seven
+  characters, which is exactly what the neighbouring `COMMAND` column sizes to.
+  A renderer bug that cut the new column against the wrong width therefore
+  printed the right seven characters, and three cases written specifically to
+  measure column width measured nothing. Make a fixture's values **lopsided and
+  distinguishable from their neighbours'**: if two columns can be confused, no
+  value common to both can tell them apart.
+- **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases);
+  lsof-rs `DIVERGENCES.md` (the `-K` section carries the kill table).

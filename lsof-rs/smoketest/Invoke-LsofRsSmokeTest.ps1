@@ -500,6 +500,24 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         $r = Invoke-Lsof @('-K', '-p', "$self") 'K'
         Assert-Contains $r.Out 'THRD' '-K should emit THRD task rows'
     }
+    Test-Case 'tasks-not-listed-by-default' 'selection/-K' {
+        # DELIBERATELY narrower than Linux, where the C lists tasks whenever
+        # nothing else is selected (a Linux task holds its own cwd/root/fds, so
+        # skipping it would miss open files). A Windows THRD row holds no file,
+        # so -K is opt-in here -- see the comment in the Windows backend. This
+        # case is what makes that a decision rather than an accident: it fails
+        # if a bare run ever starts emitting thread rows.
+        $r = Invoke-Lsof @('-p', "$self") 'no-K'
+        Assert-NotContains $r.Out 'THRD' 'a bare run should not emit THRD rows'
+    }
+    Test-Case 'tasks-dash-K-i-suppresses' 'selection/-K' {
+        # `-K i` is the explicit off switch, and must parse as ONE option -- an
+        # `i` read as the `-i` inet flag would silently turn this into a socket
+        # listing.
+        $r = Invoke-Lsof @('-K', 'i', '-p', "$self") 'K-i'
+        Assert ($r.Exit -eq 0) "-K i should run cleanly (exit=$($r.Exit))"
+        Assert-NotContains $r.Out 'THRD' '-K i should suppress THRD rows'
+    }
     Test-Case 'link-count-dash-L' 'render/-L' {
         $r = Invoke-Lsof @('-L', '-p', "$self") 'L'
         Assert-Contains $r.Out 'NLINK' '-L should add the NLINK column'
