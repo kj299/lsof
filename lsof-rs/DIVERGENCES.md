@@ -48,6 +48,131 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by listing tasks the way the C decides to (2026-09-07)
+
+Closes item 18. A Linux task is not a decoration on a process row: `CLONE_FS`
+and `CLONE_FILES` are optional, so a thread can hold its own cwd, root and fd
+table, and lsof models it as a **process entry of its own** that repeats the
+whole file set. On fixture I — a `python3` with two `prctl(PR_SET_NAME)`
+threads — `-K` is 22 rows against 8, and 49 against 17 with `mem` rows included.
+
+### The ledger entry was wrong about the rule
+
+Item 18 said the C "lists threads by default". It does not. The C lists them
+when **nothing at all** is selected (`main.c` leaves `Selflags == SelAll`); give
+it any selector — `-p`, `-u`, `-c`, `-i`, `-d`, or a path — and tasks disappear,
+`TID`/`TASKCMD` columns included. The whole-host count the entry was written
+from (1052 rows vs 261) is consistent with both readings, so it never tested
+the claim. Ten forms were measured this time, and the header's `TID` column is
+the tell:
+
+| form | C lists tasks |
+|---|---|
+| `lsof` (nothing selected) | yes |
+| `-d ^mem`, `-u root`, `-p N`, `-c name`, `-i`, a path argument | **no** |
+| `-K`, `-K -p N` | yes |
+| `-K i` | no |
+
+So the model is three-valued, not a flag: *when unselected* (the default),
+*always* (`-K`), *never* (`-K i`). `-K` also joins the OR — `lsof -K -p N`
+prints N's rows **and** every other process's tasks, because the two selectors
+are ORed — but it is dropped from the `-a` requirement, since `lsof -K -a -p N`
+still shows N's own entry alongside its tasks.
+
+### Two argument-parsing bugs the sweep found
+
+`-K` had been read as "take the next word only if it is exactly `i`". The C
+(`main.c` case `'K'`) takes the next word **whatever it is**, and pushes it back
+only when it opens an option (`*GOv == '-' || *GOv == '+'`):
+
+* **`lsof -K /var/log` listed the whole host** instead of exiting 1. The C
+  rejects the path as `-K`'s argument; lsof-rs left it as a *name* to look up,
+  and the bare `-K` then selected every task on the box.
+* **`-K I` was rejected.** The C compares with `strcasecmp`.
+
+Both were invisible to the first draft of the gate. `-K x` — the obvious case to
+write — passed for the wrong reason: `x` is a name that matches nothing, so
+lsof-rs also exited 1 with no output. It took a mutant that accepted any
+argument to show the case was measuring nothing, and a path argument to make the
+divergence visible at all.
+
+### Windows is deliberately narrower
+
+The Windows backend lists tasks on an explicit `-K` only, not on the C's
+"nothing selected" default. A Linux task holds files, so the default listing
+would otherwise miss them; a Windows `THRD` row holds none — it is a thread
+inventory. Turning it on by default would put one contentless row per thread,
+hundreds on an idle box, into every bare `lsof.exe`, and pay for a system-wide
+`CreateToolhelp32Snapshot` to do it. Two smoke cases pin the choice so it stays
+a decision: a bare run must emit no task row, and `-K i` must parse as one
+option.
+
+Those cases failed on their first Windows run, and the reason is the same
+lesson a third time. **`THRD` alone does not mean `-K`**: a thread HANDLE is an
+ordinary entry in a process's handle table, and the all-handle scan types it
+`THRD` too (`handles.rs` maps the native `"Thread"` object type). A PowerShell
+process holds several, so `THRD` is in a bare run's output whether or not `-K`
+did anything — which means the *pre-existing* `tasks-dash-K` case, asserting
+only that `THRD` appears, had been passing with the feature deleted. The marker
+that means `-K` is the FD cell `task` (`FdType::Task`, produced only by
+`threads.rs`) next to TYPE `THRD`; a handle carries a number there instead. All
+three cases key on that now, and a golden test renders the two rows side by
+side so the discriminator is checked on every push from a platform that cannot
+run the smoke suite.
+
+### What the gate gained
+
+Thirteen differential cases on fixture I, the first fixture in the suite with
+a second thread — which is exactly why deleting the whole feature left the
+other 56 cases green. Ten mutants were run; every case is killed by at least one:
+
+| mutant | cases it kills |
+|---|---|
+| never list tasks | `-K`, `-K` with mem, `-K` fields, the three width cases |
+| always list tasks | the three suppression cases |
+| `TASKCMD` echoes `COMMAND` | `-K`, `-K` with mem, `-K` fields |
+| tasks omit `mem` rows | `-K` with mem — and nothing else, so it is not redundant |
+| `-K` accepts any argument | the two argument cases |
+| `-K` consumes only a literal `i` | the case-insensitivity and path cases |
+| case-sensitive compare | the case-insensitivity case |
+| `TASKCMD` reuses the `COMMAND` width | all five task-row cases |
+| `TASKCMD` ignores `+c` | four of them (not `+c 0`, which caps nothing) |
+| `TASKCMD` width seeded from 0 | `+c` below the header — and only that one |
+
+The renderer's two columns need no mutant of their own: the runner collapses
+runs of spaces, so a process row reads `python3 PID root cwd …` and a task row
+`python3 PID TID taskname- root cwd …`. The extra fields are the diff.
+
+### A third bug, in the column the columns needed
+
+The sweep that found the two parsing bugs was run again against a fixture whose
+threads name themselves with control characters, because a thread's `comm` is
+attacker-controlled exactly as a process's is. The escaping held — no raw ESC
+reaches the terminal — but **TASKCMD was cut against the COMMAND column**: a
+`python3` with a 22-character escaped thread name printed six characters of it
+under `+c 0`, where the C prints all 22.
+
+`print.c` keeps `TaskCmdColW` separate from `CmdColW`, seeds it from
+`strlen("TASKCMD")`, grows it over `Lp->tcmd` with each name capped by
+`TaskCmdLim` (which `+c` sets alongside `CmdLim`), and cuts at that width. The
+port now does the same. The first draft of the fixture could not see any of
+this: both its threads were named `worker1`/`worker2`, and 7 is also what
+`COMMAND` sizes to, so the wrong width and the right one printed the same
+seven characters. The names are lopsided now — `taskname-long-1` (15 bytes, the
+kernel's `comm` ceiling) and `t2`.
+
+Two golden tests carry the portable half: the width rule, and that a
+`prctl(PR_SET_NAME)` of `\x1b[2J` reaches TASKCMD as `^[[2J` rather than
+clearing the reader's terminal. Both die under a mutant that drops the escaper
+and under one that reuses the COMMAND width.
+
+### One thing this did not fix
+
+The sweep turned up an unrelated divergence, now item 19: an unstattable path
+argument is fatal in the C (nothing printed, exit 1) and is not here. `-a` hides
+it, which is why every existing path case matches. It is recorded rather than
+folded in — it belongs to `ck_file_arg`, not to tasks, and needs its own sweep.
+
 ## Fixed by reading the mount table (2026-09-07)
 
 Closes item 15, the last **DEBT** entry that had a clear owner. Naming a mount
@@ -532,7 +657,7 @@ CI job that runs them was written:
 ## Recorded for decision — shared output, found by the Linux oracle
 
 These change what the **Windows** binary prints too, and each alters output the
-golden fixtures and the 63-case smoke suite assert. Matching the C is very
+golden fixtures and the 65-case smoke suite assert. Matching the C is very
 likely right; it is a compatibility decision, not a backend phase.
 
 | # | The C | lsof-rs | Where |
@@ -557,7 +682,9 @@ likely right; it is a compatibility decision, not a backend phase.
 | 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | ~~matches only the mount point itself, so it **under-reports**~~ **resolved 2026-09-07** | Waited for `OpenFile::fs_device`, since the DEVICE cell is `st_rdev` for a device node and matching on it over-reported. Also brought `-f`/`+f` and the block-device mount source; see "Fixed by reading the mount table" above. |
 | 16 | a socket in **another network namespace** resolves far enough to print `sock` / `protocol: TCP` | `SOCK` / `socket:[14902]`, and SIZE/OFF as a size rather than the offset | the socket table is read once from `/proc/net/*`, which is *this* namespace's view. The C reads the target's own `/proc/<pid>/net/*`. **DEBT (L2)**: making the read per-namespace changes the cost model, since the tables would be read once per distinct netns rather than once per run. |
 
-| 18 | on Linux the C lists **threads by default** — every task gets its own `cwd`/`rtd`/`txt` rows and the table grows `TID`/`TASKCMD` columns; `-K i` turns it off | lists processes only; `-K` opts in | Measured on this host: `lsof -w -n -P` is **1052** rows from the C, **279** with `-K i`, **261** from lsof-rs (the remainder is process churn between the two runs, not a systematic gap — an earlier count that looked like one was an artifact of keying on the C's 9-char-truncated COMMAND, item 3). **DEBT** — lsof-rs already has the machinery (`-K` renders `task` rows); what is missing is the default and the two extra columns. Not visible to any current differential case: every one of them names a fixture with `-p`, and the fixtures are single-threaded. |
+| 18 | on Linux each **task is a process entry of its own** — it repeats the whole file set and the table grows `TID`/`TASKCMD` columns — and the C lists them **whenever nothing else is selected**; `-K` forces it on, `-K i` off | ~~lists processes only; `-K` opts in, and the two columns do not exist~~ **resolved 2026-09-07** | see "Fixed by listing tasks the way the C decides to" above. This entry's own wording was **wrong**: it said the C lists threads "by default", full stop. It does not — give it any selector at all (`-p`, `-u`, `-c`, `-i`, `-d`, a path) and tasks disappear, columns included. The whole-host row count that made the claim (1052 vs 261) was consistent with either reading, which is why writing the ledger from one measurement is not enough. |
+
+| 19 | a path argument that cannot be `stat()`ed is **fatal**: the C prints nothing at all and exits 1, even when another selector matched | reports exit 1 but still prints what the other selectors matched | `lsof-cli`. Measured 2026-09-07: `lsof -p <live pid> /nonexistent` is 0 rows from the C and 17 from lsof-rs; same for `-u root`, `-d 3`, `-i`. `-a` hides it (the AND makes the other selector match nothing either), which is why every existing path case matches. **DEBT** — found while sweeping `-K`, where `lsof -K -- -a -p N` exposed it; unrelated to tasks and left for its own change rather than folded into one. Repro: `lsof -n -P -K -- -a -p <pid>`. |
 
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 

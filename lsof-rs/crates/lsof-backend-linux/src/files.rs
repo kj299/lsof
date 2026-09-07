@@ -65,8 +65,8 @@ fn type_from_mode(mode: u32) -> FileType {
 /// file without a meaningful size — a device node, a FIFO — and what `-o`
 /// asks for on every file; it was the first fidelity gap the C-vs-Rust
 /// differential found, on its first fixture.
-fn fdinfo_for(pid: u32, fd: &str) -> FdInfo {
-    match std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) {
+fn fdinfo_for(base: &str, fd: &str) -> FdInfo {
+    match std::fs::read_to_string(format!("{base}/fdinfo/{fd}")) {
         Ok(info) => parse_fdinfo(&info),
         Err(_) => FdInfo::default(),
     }
@@ -314,6 +314,25 @@ pub fn for_pid(
     socks: &SocketTable,
     locks: &crate::locks::LockTable,
 ) -> Option<Vec<OpenFile>> {
+    for_proc_dir(&format!("/proc/{pid}"), pid, socks, locks)
+}
+
+/// The rows under one `/proc` directory — either a process's own
+/// (`/proc/<pid>`) or a task's (`/proc/<pid>/task/<tid>`).
+///
+/// `-K` lists each task as its own entry repeating the whole file set, and the
+/// C reads that set from the task's directory rather than copying the
+/// process's: `CLONE_FS` and `CLONE_FILES` are optional, so a thread can hold
+/// its own cwd, root and fds. `pid` stays the process's, because the two
+/// system-wide tables this consults — `/proc/locks` and the mapped-file list —
+/// are keyed by process: a thread shares its `mm`, so its mappings are the
+/// process's mappings.
+pub fn for_proc_dir(
+    base: &str,
+    pid: u32,
+    socks: &SocketTable,
+    locks: &crate::locks::LockTable,
+) -> Option<Vec<OpenFile>> {
     let mut out = Vec::new();
 
     // The specials. Unlike fds these have no access mode of their own.
@@ -322,7 +341,7 @@ pub fn for_pid(
         ("root", FdType::Root),
         ("exe", FdType::Txt),
     ] {
-        let p = format!("/proc/{pid}/{name}");
+        let p = format!("{base}/{name}");
         if let Some(f) = row(Path::new(&p), fd, &FdInfo::default(), socks) {
             out.push(f);
         }
@@ -337,7 +356,7 @@ pub fn for_pid(
         .and_then(|f| Some((f.device.as_deref()?, f.node.as_deref()?)));
     out.extend(crate::maps::rows_for(pid, exe));
 
-    let dir = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+    let dir = std::fs::read_dir(format!("{base}/fd")).ok()?;
     let mut fds: Vec<(u64, String)> = dir
         .flatten()
         .filter_map(|e| {
@@ -348,8 +367,8 @@ pub fn for_pid(
     fds.sort_unstable_by_key(|(n, _)| *n);
 
     for (num, name) in fds {
-        let p = format!("/proc/{pid}/fd/{name}");
-        let info = fdinfo_for(pid, &name);
+        let p = format!("{base}/fd/{name}");
+        let info = fdinfo_for(base, &name);
         if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), &info, socks) {
             // The lock character lsof appends to the FD cell (`8uW`). Only a
             // numbered fd can hold one: the specials and the mapped-file rows
@@ -552,7 +571,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut f = std::fs::File::create(dir.join("five")).unwrap();
         f.write_all(b"12345").unwrap();
-        let info = fdinfo_for(self_pid(), &f.as_raw_fd().to_string());
+        let info = fdinfo_for(&format!("/proc/{}", self_pid()), &f.as_raw_fd().to_string());
         assert_eq!(info.access(), AccessMode::Write);
         assert_eq!(info.pos, Some(5), "pos: must track the write position");
         drop(f);
@@ -567,7 +586,7 @@ mod tests {
         let (reader, _writer) = std::io::pipe().expect("pipe(2)");
         let raw = reader.as_raw_fd();
         let link = format!("/proc/self/fd/{raw}");
-        let info = fdinfo_for(self_pid(), &raw.to_string());
+        let info = fdinfo_for(&format!("/proc/{}", self_pid()), &raw.to_string());
         let f = row(
             Path::new(&link),
             FdType::Handle(raw as u64),

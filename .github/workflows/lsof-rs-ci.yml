@@ -136,7 +136,7 @@ jobs:
         # and the one known data-source divergence (BOUND sockets) is ledgered.
         shell: pwsh
         run: ./differential/capture.ps1 -Bin target/release/lsof.exe
-      - name: live smoke test (55 cases over self-owned fixtures)
+      - name: live smoke test (65 cases over self-owned fixtures)
         # The end-to-end harness: stands up real fixtures (held file at a known
         # offset, named pipe with a connected client, mapped data file, TCP
         # v4/v6 + UDP sockets, child processes with a known cwd) and exercises

@@ -100,6 +100,8 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
             let entry = out.entry(pid).or_insert_with(|| {
                 let base = by_pid.get(&pid);
                 Process {
+                    tid: None,
+                    task_command: None,
                     uid: None,
                     pgid: None,
                     pid,

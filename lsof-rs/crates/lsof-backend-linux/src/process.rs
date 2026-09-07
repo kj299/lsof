@@ -38,6 +38,8 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<Process> {
     let st = parse_status(&status);
 
     Some(Process {
+        tid: None,
+        task_command: None,
         uid: st.uid,
         pgid: st.pgid,
         pid,
@@ -47,6 +49,47 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<Process> {
         files: Vec::new(),
         endpoint_peer: false,
     })
+}
+
+/// The other threads of `pid`, as lsof models them: each task is its **own**
+/// process entry, repeating the whole file set.
+///
+/// That is not redundancy — a Linux thread may hold its own cwd, root and fd
+/// table, since `CLONE_FS` and `CLONE_FILES` are separate flags — so the rows
+/// are read from `/proc/<pid>/task/<tid>/` rather than copied from the process.
+/// For the common case where the thread shares them, the answer comes out
+/// identical, which is what makes `lsof -K` look repetitive on ordinary
+/// programs.
+///
+/// The main thread (`tid == pid`) is **not** returned: it is the process, and
+/// the C shows it with blank TID and TASKCMD cells.
+pub fn tasks_of(parent: &Process) -> Vec<Process> {
+    let Ok(dir) = std::fs::read_dir(format!("/proc/{}/task", parent.pid)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Process> = dir
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let tid: u32 = name.to_str()?.parse().ok()?;
+            if tid == parent.pid {
+                return None;
+            }
+            // A thread that exits mid-scan is ordinary, not an error: its comm
+            // is simply gone, and the task is skipped rather than reported with
+            // a guessed name.
+            let comm =
+                std::fs::read_to_string(format!("/proc/{}/task/{tid}/comm", parent.pid)).ok()?;
+            Some(Process {
+                tid: Some(tid),
+                task_command: Some(comm.trim_end_matches('\n').to_string()),
+                files: Vec::new(),
+                ..parent.clone()
+            })
+        })
+        .collect();
+    out.sort_by_key(|p| p.tid);
+    out
 }
 
 /// What one `/proc/<pid>/status` yields.

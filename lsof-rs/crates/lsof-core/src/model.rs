@@ -425,6 +425,16 @@ pub struct Process {
     pub command: String,
     /// Owning account, e.g. `DOMAIN\\user` (lsof "USER").
     pub user: Option<String>,
+    /// `-K`: the thread id, when this entry is a **task** rather than the
+    /// process itself. lsof models a task as its own process — it repeats the
+    /// whole file set, because a Linux thread can hold its own cwd, root and
+    /// fd table (`CLONE_FS`/`CLONE_FILES` are optional) — so a task is another
+    /// `Process` with the same `pid` and this set. `None` for the main thread,
+    /// which is listed as the process and shows a blank TID cell.
+    pub tid: Option<u32>,
+    /// `-K`: the task's own `comm`, shown in the TASKCMD column and the `-F`
+    /// `M` field. `None` whenever [`Process::tid`] is.
+    pub task_command: Option<String>,
     /// Numeric owner id, for lsof's `-F u` field. The USER column shows
     /// [`Process::user`]; scripts asking for `u` want the number.
     pub uid: Option<u32>,

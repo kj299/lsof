@@ -136,6 +136,8 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
     } else {
         let i = procs.len();
         procs.push(Process {
+            tid: None,
+            task_command: None,
             uid: None,
             pgid: None,
             pid,
@@ -354,7 +356,18 @@ impl Backend for WindowsBackend {
         // `-K`: list each in-scope process's threads as `task` rows. Toolhelp's
         // thread snapshot needs no elevation, so this works regardless of the
         // `-i`/path scoping above.
-        if sel.list_tasks {
+        //
+        // `TaskMode::Always` (an explicit `-K`), NOT `Selection::lists_tasks()`
+        // — deliberately narrower than Linux. The C lists tasks by default
+        // because a Linux task IS a process entry with its own cwd, root and
+        // fd table, so the default listing would otherwise miss files that are
+        // genuinely open. A Windows thread holds no file: the `THRD` row is a
+        // thread inventory, not an open file. Listing it by default would put
+        // one contentless row per thread — hundreds on an idle box — into
+        // every bare `lsof.exe`, and pay for a system-wide thread snapshot to
+        // do it. So on Windows `-K` stays opt-in, and `-K i` remains its
+        // (already default) inverse.
+        if sel.tasks == lsof_core::TaskMode::Always {
             trace("gather: threads::enumerate start");
             let ts = threads::enumerate(restrict.as_ref());
             trace(&format!(

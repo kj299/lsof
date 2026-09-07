@@ -8,8 +8,8 @@
 //! `print.c`, which walks a fixed sequence and prints each selected field that
 //! has a value:
 //!
-//! * process set — `p` pid, `g` pgid, `R` ppid, `c` command, `u` uid,
-//!   `L` login/user;
+//! * process set — `p` pid, `K` task id and `M` task command (a `-K` task
+//!   entry only), `g` pgid, `R` ppid, `c` command, `u` uid, `L` login/user;
 //! * file set — `f` fd, `a` access, `l` lock, `t` type, `G` file flags,
 //!   `d` device character code, `D` device number, `s` size, `o` offset,
 //!   `i` node, `k` link count, `P` protocol, `n` name, then the `T` TCP/TPI
@@ -81,6 +81,18 @@ pub fn render(
     for p in procs {
         // `p` is the one field Lsof.8 calls "always selected".
         push!('p', &p.pid.to_string());
+        // `-K`: the task id and the task's own command, emitted right after
+        // `p` and only for a task entry (`print.c`'s HASTASKS block).
+        if want('K') {
+            if let Some(tid) = p.tid {
+                push!('K', &tid.to_string());
+            }
+        }
+        if want('M') {
+            if let Some(tc) = &p.task_command {
+                push!('M', &esc.text(tc));
+            }
+        }
         if want('g') {
             if let Some(pgid) = p.pgid {
                 push!('g', &pgid.to_string());

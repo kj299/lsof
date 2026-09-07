@@ -156,6 +156,8 @@ fn table_ppid_column() {
 fn table_offset_with_dash_o() {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 7,
@@ -199,10 +201,171 @@ fn table_offset_with_dash_o() {
     .contains("0t42"));
 }
 
+/// A task entry for the TASKCMD tests: one row, one file, its own `comm`.
+#[cfg(test)]
+fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    Process {
+        tid: Some(4242),
+        task_command: Some(task_command.into()),
+        uid: None,
+        pgid: None,
+        pid: 7,
+        ppid: None,
+        command: command.into(),
+        user: None,
+        endpoint_peer: false,
+        files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Cwd,
+            access: AccessMode::Read,
+            file_type: FileType::Dir,
+            name: "/tmp".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        }],
+    }
+}
+
+#[test]
+fn taskcmd_is_sized_by_its_own_column_not_by_command() {
+    // `print.c` keeps `TaskCmdColW` separate from `CmdColW`: it starts at
+    // `strlen("TASKCMD")` and grows over the task names, each capped by `+c`
+    // (`TaskCmdLim`). Reusing the COMMAND width cuts a long thread name against
+    // a short command — `python3` with a 15-character thread name printed
+    // seven characters of it, where the C prints all fifteen under `+c 0`.
+    let p = task_entry("py", "taskname-long-1");
+
+    // No cap: the whole name, even though COMMAND is two characters.
+    let full = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert!(full.contains("taskname-long-1"), "{full:?}");
+
+    // `+c 12` caps the contribution, so twelve characters print.
+    let capped = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            command_width: Some(12),
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert!(capped.contains("taskname-lon"), "{capped:?}");
+    assert!(!capped.contains("taskname-long-1"), "{capped:?}");
+
+    // BELOW the header: `+c` caps each name's contribution, but the column
+    // still starts at `strlen("TASKCMD")`, so three characters of `+c` yield
+    // seven of output — the one case that can see the seed.
+    let narrow = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            command_width: Some(3),
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert!(narrow.contains("tasknam"), "{narrow:?}");
+    assert!(!narrow.contains("taskname"), "{narrow:?}");
+}
+
+#[test]
+fn a_hostile_thread_name_is_escaped_in_taskcmd() {
+    // A thread names itself with `prctl(PR_SET_NAME)`, so TASKCMD is as
+    // attacker-controlled as COMMAND — and it is a NEW cell, not covered by
+    // the COMMAND escaping tests. `\x1b[2J` clears the terminal of whoever ran
+    // lsof; it must reach the column as the six printable characters
+    // `^[[2J` and never as the byte.
+    let p = task_entry("py", "h\x1b[2J\r x\\\x7f\ty");
+    let out = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            command_width: None,
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert!(!out.contains('\x1b'), "raw ESC reached TASKCMD: {out:?}");
+    assert!(!out.contains('\r'), "raw CR reached TASKCMD: {out:?}");
+    assert!(!out.contains('\x7f'), "raw DEL reached TASKCMD: {out:?}");
+    // The space becomes `\x20` so the column still splits on whitespace, and
+    // the row keeps the field count every other row has.
+    assert!(out.contains(r"h^[[2J\r\x20x\\\x7f\ty"), "{out:?}");
+}
+
+#[test]
+fn a_task_row_is_distinguishable_from_a_thread_handle() {
+    // On Windows BOTH of these render TYPE `THRD`: `-K` emits a task row, and
+    // the all-handle scan types a thread HANDLE the same way (`handles.rs`
+    // maps the native "Thread" object type). So "the output contains THRD" is
+    // not a test of `-K` — the smoke suite asserted exactly that, and the case
+    // passed with the feature deleted while two suppression cases failed with
+    // it working. What separates them is the FD cell: `task` for the task row,
+    // a handle number for the handle.
+    //
+    // The smoke suite now keys on `task` followed by `THRD`, and this test is
+    // what keeps that discriminator honest on every push, from a platform that
+    // cannot run it.
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let file = |fd: FdType| OpenFile {
+        fs_device: None,
+        file_flags: None,
+        lock: None,
+        fd,
+        access: AccessMode::Unknown,
+        file_type: FileType::Thread,
+        name: String::new(),
+        device: None,
+        size: None,
+        offset: None,
+        node: Some("4242".into()),
+        links: None,
+        socket: None,
+    };
+    let p = Process {
+        tid: None,
+        task_command: None,
+        uid: None,
+        pgid: None,
+        pid: 1234,
+        ppid: None,
+        command: "pwsh.exe".into(),
+        user: Some("runneradmin".into()),
+        endpoint_peer: false,
+        files: vec![file(FdType::Task), file(FdType::Handle(180))],
+    };
+    let out = table::render(&[p], TableOpts::new(Escaper::WINDOWS));
+
+    // Both rows are THRD, so the substring cannot tell them apart.
+    assert_eq!(out.matches("THRD").count(), 2, "{out:?}");
+
+    // The FD cell can. `task` and `THRD` land in adjacent columns, which is
+    // what the smoke suite's `\btask\s+THRD\b` matches; the handle row puts a
+    // number there instead.
+    let rows: Vec<&str> = out.lines().skip(1).collect();
+    assert_eq!(rows.len(), 2, "{out:?}");
+    let cells = |r: &str| -> Vec<String> { r.split_whitespace().map(str::to_string).collect() };
+    let task = cells(rows[0]);
+    let handle = cells(rows[1]);
+    let fd_at = task.iter().position(|c| c == "task").expect("a task cell");
+    assert_eq!(task[fd_at + 1], "THRD", "{task:?}");
+    assert_eq!(handle[fd_at], "180", "{handle:?}");
+    assert_eq!(handle[fd_at + 1], "THRD", "{handle:?}");
+}
+
 #[test]
 fn table_command_width_caps() {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 7,
@@ -259,6 +422,8 @@ fn fields_skips_empty_name() {
     // `n` field code (regression guard for the lone-`n`-line bug).
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 7,
@@ -390,6 +555,8 @@ fn windows_object_types_render() {
         socket: None,
     };
     let p = Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 7,
@@ -487,6 +654,8 @@ fn json_escapes_backslashes() {
 fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 7,
@@ -708,6 +877,8 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         }),
     };
     vec![Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 2000,
@@ -981,6 +1152,8 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
     // asserted in that suite and only a real Windows runner disproved it.
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process, Protocol, SocketInfo};
     let p = Process {
+        tid: None,
+        task_command: None,
         uid: None,
         pgid: None,
         pid: 7,

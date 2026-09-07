@@ -109,6 +109,41 @@ impl Backend for LinuxBackend {
             }
         }
 
+        // `-K`: every other thread becomes its own entry, repeating the whole
+        // file set from its own `/proc/<pid>/task/<tid>` — which is what makes
+        // `lsof -K` on a 3-thread process print three times the rows, mapped
+        // files included. The main thread is not among them: it IS the process,
+        // and shows blank TID/TASKCMD cells.
+        if sel.lists_tasks() {
+            let mut tasks = Vec::new();
+            // An explicit `-K` makes tasks a selector of their own, so EVERY
+            // process's tasks are candidates — `lsof -K -p N` lists N's rows
+            // and every other process's task rows, because the two selectors
+            // are ORed. Without `-K` the listing is the unselected default,
+            // where `restrict` is `None` anyway, so this costs nothing extra.
+            let task_scope = match sel.tasks {
+                lsof_core::TaskMode::Always => None,
+                _ => restrict.as_ref(),
+            };
+            for p in procs.iter() {
+                if task_scope.is_some_and(|s| !s.contains(&p.pid)) {
+                    continue;
+                }
+                for mut t in process::tasks_of(p) {
+                    let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
+                    if let Some(files) = files::for_proc_dir(&base, p.pid, &socks, &locks) {
+                        t.files = files;
+                    }
+                    tasks.push(t);
+                }
+            }
+            procs.extend(tasks);
+            // The C emits each process followed by its tasks in tid order; a
+            // stable sort on (pid, tid) reproduces that, with `None` — the
+            // process itself — sorting first.
+            procs.sort_by_key(|p| (p.pid, p.tid));
+        }
+
         Ok(procs)
     }
 }

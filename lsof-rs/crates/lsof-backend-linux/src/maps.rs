@@ -233,6 +233,35 @@ mod tests {
     }
 
     #[test]
+    fn exactly_one_deleted_marker_is_stripped() {
+        // A file whose real name ends in " (deleted)" is not a hypothetical.
+        // Created as `lib (deleted)`, mapped, then unlinked, the kernel reports
+        //
+        //     7f78...000 r--s 00000000 fe:00 1892464   /tmp/d/lib (deleted) (deleted)
+        //
+        // — its own marker appended to a name that already ended in one. The C
+        // strips ONE (`dproc.c`: a single NUL store at `len - 10`, not a loop),
+        // so the DEL row reads `/tmp/d/lib (deleted)`, and both binaries print
+        // exactly that. Stripping greedily would rename the user's file; not
+        // stripping at all would leak kernel metadata into it.
+        let m = parse_maps("0-1 r--s 0 fe:00 42 /tmp/d/lib (deleted) (deleted)\n");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].path, "/tmp/d/lib (deleted)");
+        assert!(m[0].deleted);
+
+        // The ordinary case: one marker, nothing left behind.
+        let m = parse_maps("0-1 r--s 0 fe:00 43 /tmp/d/lib.so (deleted)\n");
+        assert_eq!(m[0].path, "/tmp/d/lib.so");
+        assert!(m[0].deleted);
+
+        // A live file that merely ends that way keeps its whole name, and is
+        // not reported as deleted.
+        let m = parse_maps("0-1 r--s 0 fe:00 44 /tmp/d/lib (deleted)x\n");
+        assert_eq!(m[0].path, "/tmp/d/lib (deleted)x");
+        assert!(!m[0].deleted);
+    }
+
+    #[test]
     fn arbitrary_text_never_panics_and_invents_nothing() {
         for s in [
             "",
