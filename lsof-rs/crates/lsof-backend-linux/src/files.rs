@@ -443,11 +443,30 @@ mod tests {
                 >= 3,
             "expected at least stdin/stdout/stderr"
         );
-        // Every numbered fd should have been stat'd into a concrete type.
-        assert!(files
-            .iter()
-            .filter(|f| matches!(f.fd, FdType::Handle(_)))
-            .all(|f| f.file_type != FileType::Unknown));
+        // Our OWN stdio always stats, so those rows must be typed. This is the
+        // part of "the backend really types fds" that is actually guaranteed.
+        for n in [0u64, 1, 2] {
+            let row = files
+                .iter()
+                .find(|f| f.fd == FdType::Handle(n))
+                .unwrap_or_else(|| panic!("no row for fd {n}"));
+            assert_ne!(row.file_type, FileType::Unknown, "fd {n}: {row:?}");
+        }
+        // `Unknown` is reachable and legitimate: it is the stat-failure branch,
+        // for an fd whose target the process can see but cannot stat (the
+        // `UNKN*` debt in DIVERGENCES.md — the C prints `unknown` with the
+        // errno there). So the invariant is not "no row is Unknown" — that is
+        // stronger than true, and a GitHub runner disproved it after this
+        // container and earlier runners had all agreed — but that an Unknown
+        // row is *only ever* one that failed to stat, carrying none of the
+        // cells a stat would have filled. A typing gap that produced Unknown
+        // alongside a device and node would be a real bug, and this catches it.
+        for f in files.iter().filter(|f| f.file_type == FileType::Unknown) {
+            assert!(
+                f.device.is_none() && f.node.is_none() && f.links.is_none(),
+                "Unknown must mean the stat failed, not a typing gap: {f:?}"
+            );
+        }
     }
 
     fn self_pid() -> u32 {

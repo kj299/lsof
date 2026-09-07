@@ -19,6 +19,8 @@ Categories flagged (CWE in parens):
   command-exec      system/popen/exec* with composed strings     (CWE-78)
   unchecked-malloc  malloc/calloc/realloc result used w/o check   (CWE-690) [weak]
   toctou            access()/stat() then open()/fopen()          (CWE-367)
+  signed-char-compare  a char (signed on most ABIs) compared with a
+                    numeric literal without an (unsigned char) cast (CWE-195)
 
 Usage:
   scan_c_flaws.py PATH [PATH ...] [--json] [--self-test]
@@ -118,16 +120,80 @@ def _scan_format_strings(src):
     return hits
 
 
+# `char` is signed on x86-64, ARM64 Linux and most other ABIs, so a byte >= 0x80
+# read through a `char *` is NEGATIVE. Comparing it with a numeric literal then
+# takes the wrong branch, and the classic symptom is a length or width computed
+# differently from how the same bytes are printed.
+#
+# This rule exists because a hand-run differential found exactly that in lsof's
+# `safestrlen()` — `(*sp < 0x20)` with no cast, in a function that casts
+# `(unsigned char)` twice on adjacent lines — and no pattern here flagged it.
+# A scanner that misses the bug the porter found by hand is a scanner with a
+# hole in it (LESSONS #023).
+#
+# Types cannot be inferred by regex, so the identifiers declared `char` in the
+# same file are collected first and only those are flagged. `unsigned char` is
+# safe and excluded; `signed char` is explicitly signed and is not.
+_CHAR_DECL = re.compile(r"(?<!unsigned )\bchar\s+(\*\s*)*(\w+)\s*[;,)\[=]")
+# The operand must not be a STRUCT FIELD: `Lf->lts.type >= 0` is not the local
+# `char type` that happens to share the name, and matching it produced four
+# false positives on lsof's print.c alone.
+_CHAR_CMP = re.compile(
+    r"(?<![\w.])(?<!->)(\*\s*)?\b(\w+)\s*(<=|>=|<|>)\s*(0x[0-9A-Fa-f]+|\d+)"
+)
+_UCHAR_CAST = re.compile(r"\(\s*unsigned\s+char\s*\)\s*$")
+
+
+def _char_decls(src):
+    """Identifiers declared `char` (not `unsigned char`) anywhere in the file."""
+    return {m.group(2) for m in _CHAR_DECL.finditer(src)}
+
+
+def _scan_signed_char(code, char_names):
+    """Comparisons of a `char` (or a deref of a `char *`) with a numeric
+    literal, where that operand carries no `(unsigned char)` cast."""
+    out = []
+    for m in _CHAR_CMP.finditer(code):
+        name = m.group(2)
+        if name not in char_names:
+            continue
+        # An explicit cast on this operand is the fix, not the bug.
+        if _UCHAR_CAST.search(code[: m.start()]):
+            continue
+        out.append(("signed-char-compare", "CWE-195"))
+    return out
+
+
+_TRAILING_COMMENT = re.compile(r"/\*.*?\*/|//.*$")
+
+
+def _uncommented(line):
+    """`line` with its comments blanked out.
+
+    Comment-only lines were already skipped, but a TRAILING comment is the
+    larger noise source in real code: a doc reference like
+    `unsigned char mnt_stat; /* mount point stat(2) status */` matched the
+    toctou rule, and on lsof that was 20 of 47 live toctou hits — pure noise
+    that buries the real call sites. Blanked rather than removed so the text
+    the porter reads still lines up with the source.
+    """
+    return _TRAILING_COMMENT.sub(lambda m: " " * len(m.group(0)), line)
+
+
 def scan_text(src):
     hits = []
+    char_names = _char_decls(src)
     for lineno, line in enumerate(src.splitlines(), 1):
         # skip obvious comment-only lines to cut noise
         stripped = line.strip()
         if stripped.startswith(("*", "//", "/*")):
             continue
+        code = _uncommented(line)
         for cat, cwe, rx in CHECKS:
-            if rx.search(line):
+            if rx.search(code):
                 hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
+        for cat, cwe in _scan_signed_char(code, char_names):
+            hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
     hits.extend(_scan_format_strings(src))
     hits.sort(key=lambda h: h["line"])
     return hits
@@ -182,6 +248,24 @@ void bad(char *u, char *dynfmt) {
     if (access(path, R_OK)) {}          /* toctou */
     /* strcpy(x, y);  in a comment - should be ignored */
 }
+int len_of(char *sp) {
+    char c = ' ';
+    int n = 0;
+    for (; *sp; sp++) {
+        if (*sp < 0x20)                 /* signed-char-compare: no cast */
+            n += 2;
+        else if ((unsigned char)*sp == 0xff)  /* SAFE: cast to unsigned */
+            n += 4;
+        else if (c > 0x7e)              /* signed-char-compare: char var */
+            n += 1;
+    }
+    return n;
+}
+struct s { int type; };
+int field(struct s *lf) {
+    return lf->type >= 0;               /* SAFE: a field, not the char above */
+}
+int stat_doc;                           /* SAFE: stat(2) only in a comment */
 '''
 
 
@@ -209,6 +293,18 @@ def _self_test():
     check("format-string flags exactly the 2 non-literal calls", len(fmt_hits) == 2)
     check("literal-format fprintf/snprintf NOT flagged",
           not any("literal" in h["text"] or '"%d"' in h["text"] for h in fmt_hits))
+    # The rule added after a hand-run differential found lsof's safestrlen()
+    # defect that nothing here flagged (LESSONS #023).
+    sc = [h for h in hits if h["category"] == "signed-char-compare"]
+    check("flags the uncast char deref and the char variable", len(sc) == 2)
+    check("an (unsigned char) cast is NOT flagged",
+          not any("0xff" in h["text"] for h in sc))
+    check("a struct field sharing the name is NOT flagged",
+          not any("lf->type" in h["text"] for h in sc))
+    # A trailing comment must not feed the other rules: `stat(2)` in one was
+    # 20 of 47 live toctou hits on lsof.
+    check("stat(2) in a trailing comment is NOT flagged as toctou",
+          not any("stat_doc" in h["text"] for h in hits))
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

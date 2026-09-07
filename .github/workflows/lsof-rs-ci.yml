@@ -18,6 +18,10 @@ name: lsof-rs CI
 # code still runs everything, because the filter tests the union of changed
 # files. (A docs-only PR therefore shows no checks at all — correct, but worth
 # knowing before turning on required status checks.)
+#
+# `porting-kit/harnesses/**` is in the list because four of the gates below ARE
+# kit harnesses: a change to one of them changes what this workflow enforces,
+# and until it was added, editing a harness ran nothing at all.
 on:
   push:
     branches: [master]
@@ -25,12 +29,16 @@ on:
       - 'lsof-rs/**'
       - '!lsof-rs/**.md'
       - '!lsof-rs/docs/**'
+      - 'porting-kit/harnesses/**'
+      - '!porting-kit/harnesses/**.md'
       - '.github/workflows/lsof-rs-ci.yml'
   pull_request:
     paths:
       - 'lsof-rs/**'
       - '!lsof-rs/**.md'
       - '!lsof-rs/docs/**'
+      - 'porting-kit/harnesses/**'
+      - '!porting-kit/harnesses/**.md'
       - '.github/workflows/lsof-rs-ci.yml'
 
 permissions:
@@ -84,6 +92,17 @@ jobs:
               --matrix coverage/coverage-matrix.toml \
               --platform "$p"
           done
+
+      - name: c-flaw scanner self-test
+        # Four of the gates in this job are porting-kit harnesses, and a change
+        # to one of them changes what CI enforces — but nothing ran the flaw
+        # scanner's own `--self-test`, so its rules were unverified. It has
+        # negative cases too: an `(unsigned char)` cast must NOT flag, a struct
+        # field sharing a `char` variable's name must NOT flag, and `stat(2)` in
+        # a comment must NOT count as a TOCTOU finding. A scanner whose rules
+        # nothing checks is the "declared but never run" shape the ledger exists
+        # to catch (LESSONS #019, #025).
+        run: python3 ../porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
 
       - name: ledgers exist (progress, divergences, fuzz target, sanitizer job)
         # porting-kit LESSONS #19: the playbook names these as exit criteria and
