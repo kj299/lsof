@@ -9,7 +9,8 @@ use std::collections::HashSet;
 
 use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
-use lsof_core::{Backend, Process, Selection};
+use lsof_core::selection::filesystems_named;
+use lsof_core::{Backend, FilesystemArgs, Process, Selection};
 
 #[cfg(target_os = "linux")]
 use lsof_backend_linux::LinuxBackend;
@@ -104,6 +105,11 @@ SELECTION:\n\
     <path>        find who has this FILE open, matched by identity (a hard\n\
                   link to it counts); +d <dir> = the dir and its entries,\n\
                   +D <dir> = the whole tree beneath it\n\
+                  A path naming a MOUNT POINT (or a block device it was\n\
+                  mounted from) selects every open file on that filesystem.\n\
+    -f / +f       never / always read a path argument as a file system;\n\
+                  +f also accepts a non-block mount source, and complains\n\
+                  if an argument names no mount\n\
 \n\
 OUTPUT:\n\
     -n            do not resolve host names\n\
@@ -186,10 +192,21 @@ fn strip_verbatim(s: &str) -> String {
 /// `-V` (and never under `-Q`), as before — but the count is returned
 /// regardless, because lsof exits 1 on an unlocated search item even when it
 /// prints nothing (so `lsof -t <file> && ...` and `if lsof ...; then` work).
+/// One path search item, and what "found" means for it.
+struct SearchItem {
+    /// The file's `(DEVICE, NODE)` identity, when the backend resolved it.
+    id: Option<(String, String)>,
+    /// Set when the argument named a **file system**: the item is located by
+    /// any displayed row on that filesystem, not by an identity of its own.
+    fs_device: Option<u64>,
+    /// What to print when it is not found — what the user typed.
+    display: String,
+}
+
 fn report_unmatched(
     sel: &Selection,
     located: &HashSet<u32>,
-    search: &[(Option<(String, String)>, String)],
+    search: &[SearchItem],
     procs: &[Process],
 ) -> usize {
     let print = sel.verbose && !sel.quiet;
@@ -212,17 +229,32 @@ fn report_unmatched(
         .flat_map(|p| &p.files)
         .filter_map(|f| Some((f.device.as_deref()?, f.node.as_deref()?)))
         .collect();
-    for (id, display) in search {
-        let hit = match id {
-            Some((dev, node)) => shown.contains(&(dev.as_str(), node.as_str())),
-            // No identity for it (the backend could not resolve the path, or
-            // has no identities at all): fall back to the name comparison.
-            None => {
-                let needle = display.to_ascii_lowercase();
-                procs.iter().flat_map(|p| &p.files).any(|f| {
-                    let n = f.name.to_ascii_lowercase();
-                    n == needle || n.starts_with(&needle)
-                })
+    for item in search {
+        let SearchItem {
+            id,
+            fs_device,
+            display,
+        } = item;
+        // A file-system argument is located by ANY row on that filesystem —
+        // it has no identity, and the mount point's own directory may well not
+        // be open.
+        let hit = if let Some(dev) = fs_device {
+            procs
+                .iter()
+                .flat_map(|p| &p.files)
+                .any(|f| f.fs_device == Some(*dev))
+        } else {
+            match id {
+                Some((dev, node)) => shown.contains(&(dev.as_str(), node.as_str())),
+                // No identity for it (the backend could not resolve the path, or
+                // has no identities at all): fall back to the name comparison.
+                None => {
+                    let needle = display.to_ascii_lowercase();
+                    procs.iter().flat_map(|p| &p.files).any(|f| {
+                        let n = f.name.to_ascii_lowercase();
+                        n == needle || n.starts_with(&needle)
+                    })
+                }
             }
         };
         if !hit {
@@ -296,22 +328,62 @@ fn main() {
     // file IS: `lsof /a/hardlink` finds it under its other name, and naming a
     // directory matches that directory, not everything beneath it. `+d` adds
     // one level of entries, `+D` the whole tree.
-    let mut search: Vec<(Option<(String, String)>, String)> = Vec::new();
+    let mut search: Vec<SearchItem> = Vec::new();
     let selection = {
         let mut sel = selection;
+        // lsof reads a path argument as a FILE SYSTEM name when it matches a
+        // mounted-on directory — or a block-device mount source, which is why
+        // `lsof /dev/vda` means the root filesystem — and then selects every
+        // open file on it. `-f` forbids that reading, `+f` forces it and
+        // widens the source test to any mount source.
+        let mounts = match sel.filesystem_args {
+            FilesystemArgs::NeverFilesystem => Vec::new(),
+            _ => env.backend.mounts(),
+        };
+        sel.paths_identified = env.backend.identifies_paths();
+        let mut not_a_filesystem: Vec<String> = Vec::new();
         for p in &sel.paths {
+            let devs = filesystems_named(&mounts, p, sel.filesystem_args);
+            if !devs.is_empty() {
+                for dev in devs {
+                    sel.path_fs_devices.insert(dev);
+                    search.push(SearchItem {
+                        id: None,
+                        fs_device: Some(dev),
+                        display: p.clone(),
+                    });
+                }
+                continue;
+            }
+            if sel.filesystem_args == FilesystemArgs::AlwaysFilesystem {
+                // `+f` promised every argument is a file system; this one is
+                // not, and the C says so and exits 1 rather than falling back.
+                not_a_filesystem.push(p.clone());
+                continue;
+            }
             let id = env.backend.identify_path(p);
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
             }
-            search.push((id, p.clone()));
+            search.push(SearchItem {
+                id,
+                fs_device: None,
+                display: p.clone(),
+            });
         }
+        // `+d`/`+D` are directory expansions, not file-system arguments: the C
+        // reaches them through a different path and the mount table plays no
+        // part, so `+d /` is one level of `/`, not the whole root filesystem.
         let mut expand = |dir: &str, recursive: bool| {
             let id = env.backend.identify_path(dir);
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
             }
-            search.push((id, dir.to_string()));
+            search.push(SearchItem {
+                id,
+                fs_device: None,
+                display: dir.to_string(),
+            });
             let mut stack = vec![std::path::PathBuf::from(dir)];
             let mut budget = 200_000usize; // a tree walk is not a licence to hang
             while let Some(d) = stack.pop() {
@@ -329,7 +401,11 @@ fn main() {
                     if let Some(id) = id.clone() {
                         sel.path_ids.insert(id);
                     }
-                    search.push((id, shown));
+                    search.push(SearchItem {
+                        id,
+                        fs_device: None,
+                        display: shown,
+                    });
                     // Only `+D` descends, and never through a symlink — a
                     // symlinked directory loop would otherwise walk forever.
                     if recursive && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -347,6 +423,12 @@ fn main() {
             for d in sel.dir_trees.clone() {
                 expand(&d, true);
             }
+        }
+        if !not_a_filesystem.is_empty() {
+            for p in &not_a_filesystem {
+                eprintln!("lsof: not a file system: {p}");
+            }
+            std::process::exit(1);
         }
         sel
     };

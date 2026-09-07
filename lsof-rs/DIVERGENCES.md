@@ -48,6 +48,74 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by reading the mount table (2026-09-07)
+
+Closes item 15, the last **DEBT** entry that had a clear owner. Naming a mount
+point now selects every open file on that filesystem, as Lsof.8 says it should:
+`lsof /proc` listed 9 rows from the C and 0 from lsof-rs.
+
+The rule is one line of the C (`isfn.c`, `is_file_named`): a search argument
+flagged as a file system matches when `s->dev == Lf->dev`. What made it debt was
+the *left* side — the port had nowhere to keep a row's filesystem device,
+because the DEVICE cell is `st_rdev` for a device node. `OpenFile::fs_device`
+landed with the `-F` work, so the comparison finally has both halves.
+
+### What the sweep added to the one-line rule
+
+* **A block-device mount SOURCE names its filesystem too.** `lsof /dev/vda` is
+  the root filesystem, not the device node. `+f` widens that to *any* source,
+  which is how a filesystem whose source is not a block device (`devtmpfs`,
+  `overlay`, `tmpfs`) can be named.
+* **`-f` and `+f` force the question.** `-f --` makes every argument a plain
+  file — `lsof -f -- /` looks for files *named* `/` — and `+f` makes every
+  argument a file system, complaining and exiting 1 for one that names no
+  mount. Neither option existed here.
+* **One argument can name several mounts.** `+f -- tmpfs` names all of them, and
+  the C makes a separate search item of each: a run that finds files on one and
+  nothing on the others prints rows *and* exits 1.
+* **`+d`/`+D` are not affected.** They are directory expansions and reach the C
+  through a different path, so `+d /` is one level of `/`, not the root
+  filesystem.
+
+### The trap that had made this debt, hit again
+
+The first attempt over-reported `lsof /` and was backed out. So did this one, on
+the first run — for a different reason, and one worth recording: a file-system
+argument resolves **no identity**, and `path_matches` chose between "match by
+identity" and "match by name" on whether the identity set was empty. With only a
+file-system argument that set is empty, so selection fell through to the
+name-prefix fallback, where `/` is a prefix of every absolute path. `lsof / -a
+-p PID` returned 13 rows against the C's 10, the extra three being `/dev/null`
+on a different filesystem.
+
+The fix is to stop inferring: [`Backend::identifies_paths`] states the
+capability, so a backend that resolves identities never falls back to names,
+whatever any particular argument produced. The name fallback exists for Windows
+alone, and the C has no name-prefix matching for a bare path argument at all.
+
+### A panic, found in seconds
+
+`/proc/self/mounts` escapes space, tab, newline and backslash as `\OOO`, so the
+parser decodes them — and computed the byte in a `u8`. Three octal digits reach
+511, so `\777` overflowed and panicked. The C masks (`cur_ch = temp_ch & 0xff`,
+`dmnt.c`) and now so does this. A mount source is attacker-influenced on any
+host where users may mount, which is what the new `proc_mounts` fuzz target is
+for; it found this on its first run and is clean at 1.9M afterwards.
+
+### What the gate gained, and one thing it did not
+
+Eight differential cases, on `/dev` and `/` — separate filesystems on every
+Linux host, so nothing has to be mounted for the test — plus `-f`, `+f`, a
+non-block source, an argument that names no mount, and an empty filesystem.
+Seven mutants were run against them; six were caught by the case meant for them.
+
+The seventh, **taking only the first of several matching mounts**, is *not*
+caught by the differential: it needs two filesystems mounted from the same
+source, which a CI runner cannot create. It is caught by a unit test over
+`filesystems_named`, and end-to-end by a local probe that mounts two tmpfs
+filesystems. Recorded rather than papered over: the CI gate on that one rule is
+the unit test, not the oracle.
+
 ## Fixed by measuring `-T` and the COMMAND column (2026-09-05)
 
 Closes items 1, 2 and 3 of the decision table — the last of the "recorded for
@@ -464,7 +532,7 @@ CI job that runs them was written:
 ## Recorded for decision — shared output, found by the Linux oracle
 
 These change what the **Windows** binary prints too, and each alters output the
-golden fixtures and the 62-case smoke suite assert. Matching the C is very
+golden fixtures and the 63-case smoke suite assert. Matching the C is very
 likely right; it is a compatibility decision, not a backend phase.
 
 | # | The C | lsof-rs | Where |
@@ -486,7 +554,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 13 | `lsof -c ^name` **exits 1** even on a successful listing (1522 rows here), while `lsof -u ^name` exits 0 | both exit 0 | exit status. The C counts a negated `-c` as a search item it never located, and a negated `-u` not at all — an asymmetry between two options the man page describes identically, which is why this reads as an accident rather than a design. lsof-rs copies the half that is defensible: an *excluded* process does not count as a located `-p`, so `-c ^sleep -p <that sleep>` exits 1 in both. **C-DEFECT**, not reproduced. |
 
 | 14 | a **path argument matches by `(device, inode)`**, and `+d` is one directory level where `+D` is the tree | ~~one lowercased string-prefix match for all three~~ **resolved 2026-09-05** | see "Fixed by matching a path by what the file is" above |
-| 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | matches only the mount point itself, so it **under-reports** | Measured: `lsof /dev` lists a process's `cwd` and `rtd` — both named `/` — because they live on the devtmpfs mounted there; `lsof /proc` lists 9 rows to lsof-rs's 0. **DEBT**, and now precisely scoped: this is a match on the **filesystem** device, and the DEVICE cell a row carries is `st_rdev` for a device node, so the model has to carry the filesystem device separately before it can be done. Implementing it off the DEVICE cell was tried and backed out — it over-reported `lsof /`. |
+| 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | ~~matches only the mount point itself, so it **under-reports**~~ **resolved 2026-09-07** | Waited for `OpenFile::fs_device`, since the DEVICE cell is `st_rdev` for a device node and matching on it over-reported. Also brought `-f`/`+f` and the block-device mount source; see "Fixed by reading the mount table" above. |
 | 16 | a socket in **another network namespace** resolves far enough to print `sock` / `protocol: TCP` | `SOCK` / `socket:[14902]`, and SIZE/OFF as a size rather than the offset | the socket table is read once from `/proc/net/*`, which is *this* namespace's view. The C reads the target's own `/proc/<pid>/net/*`. **DEBT (L2)**: making the read per-namespace changes the cost model, since the tables would be read once per distinct netns rather than once per run. |
 
 | 18 | on Linux the C lists **threads by default** — every task gets its own `cwd`/`rtd`/`txt` rows and the table grows `TID`/`TASKCMD` columns; `-K i` turns it off | lists processes only; `-K` opts in | Measured on this host: `lsof -w -n -P` is **1052** rows from the C, **279** with `-K i`, **261** from lsof-rs (the remainder is process churn between the two runs, not a systematic gap — an earlier count that looked like one was an artifact of keying on the C's 9-char-truncated COMMAND, item 3). **DEBT** — lsof-rs already has the machinery (`-K` renders `task` rows); what is missing is the default and the two extra columns. Not visible to any current differential case: every one of them names a fixture with `-p`, and the fixtures are single-threaded. |

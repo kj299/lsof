@@ -10,7 +10,7 @@ use lsof_core::selection::Selection;
 use std::os::unix::fs::MetadataExt;
 
 use crate::net::SocketTable;
-use crate::{files, process};
+use crate::{files, mounts, process};
 
 /// lsof-rs's native Linux data source.
 pub struct LinuxBackend {
@@ -53,6 +53,14 @@ impl Backend for LinuxBackend {
         // else, and a row is built the same way — so `lsof /dev/null` must
         // compare 1,3 against 1,3, not against the devtmpfs it lives on.
         Some((files::dev_cell(&md), md.ino().to_string()))
+    }
+
+    fn mounts(&self) -> Vec<lsof_core::MountEntry> {
+        mounts::load()
+    }
+
+    fn identifies_paths(&self) -> bool {
+        true
     }
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {

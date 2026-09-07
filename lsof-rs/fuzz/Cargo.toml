@@ -77,6 +77,16 @@ test = false
 doc = false
 bench = false
 
+# The mount table decides which path arguments name a FILE SYSTEM, and one of
+# those selects every open file on it -- so a mis-parse silently widens or
+# narrows a query rather than failing closed.
+[[bin]]
+name = "proc_mounts"
+path = "fuzz_targets/proc_mounts.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "render_escape"
 path = "fuzz_targets/render_escape.rs"

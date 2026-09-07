@@ -28,6 +28,7 @@
 //! `-s` exclusion form, which is the C's `SELEXCLF` — an absolute veto that
 //! outranks the OR.
 
+use crate::backend::MountEntry;
 use crate::model::{FdType, FileType, OpenFile, Process, Protocol};
 
 /// A set of selector *kinds* — lsof's "list options", the ones that take part
@@ -178,6 +179,57 @@ impl TcpInfoFlags {
     pub fn any(self) -> bool {
         self.state || self.queue || self.window || self.options
     }
+}
+
+/// `-f` / `+f`: how a path argument is read.
+///
+/// Lsof.8: "Normally a path name argument is taken to be a file system name if
+/// it matches a mounted\-on directory name reported by `mount(8)`, or if it
+/// represents a block device, named in the `mount` output and associated with a
+/// mounted directory name." The two flags force the question either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilesystemArgs {
+    /// No flag: a mounted-on directory, or a **block-device** mount source, is
+    /// a file system; anything else is a plain file.
+    #[default]
+    Auto,
+    /// `-f`: every path argument is a plain file. `lsof -f -- /` looks for open
+    /// files *named* `/`, not for everything on the root filesystem.
+    NeverFilesystem,
+    /// `+f`: every path argument is a file system, and any source name is
+    /// accepted, not just a block device — "useful, for example, when the file
+    /// system name (mounted-on device) isn't a block device". lsof complains
+    /// and exits 1 for an argument that names no mount.
+    AlwaysFilesystem,
+}
+
+/// The devices of every mounted filesystem that `path` names, under `mode`.
+///
+/// lsof's rule, from `arg.c`'s `ck_file_arg`: the path names a file system when
+/// it equals a mount's mounted-on **directory**, or — when the mount's source
+/// is a block device, or `+f` widened the test to any source — the mount's
+/// **source**. Empty means "not a file system", and the caller then reads the
+/// argument as a plain file (or, under `+f`, refuses it).
+///
+/// **Every** match, not the first: one argument can name several mounts (`+f --
+/// tmpfs` names all of them), the C makes a separate search item of each, and
+/// a run that finds files on one and nothing on the others still exits 1.
+pub fn filesystems_named(mounts: &[MountEntry], path: &str, mode: FilesystemArgs) -> Vec<u64> {
+    if mode == FilesystemArgs::NeverFilesystem {
+        return Vec::new();
+    }
+    let any_source = mode == FilesystemArgs::AlwaysFilesystem;
+    let mut devs: Vec<u64> = mounts
+        .iter()
+        .filter(|m| {
+            m.dir == path
+                || ((any_source || m.source_is_block) && m.source.as_deref() == Some(path))
+        })
+        .map(|m| m.device)
+        .collect();
+    devs.sort_unstable();
+    devs.dedup();
+    devs
 }
 
 /// The C's `CMDL`: characters of the command name the COMMAND column shows
@@ -352,6 +404,16 @@ pub struct Selection {
     /// `-w` sets this, `+w` clears it (default `false` — warnings on):
     /// suppresses the privilege-hint and other non-fatal stderr warnings.
     pub suppress_warnings: bool,
+    /// `-f` / `+f`: whether a path argument may name a file system.
+    pub filesystem_args: FilesystemArgs,
+    /// Whether the backend identifies paths by `(device, node)`
+    /// ([`Backend::identifies_paths`](crate::backend::Backend::identifies_paths)).
+    /// When it does not, path selection compares names instead.
+    pub paths_identified: bool,
+    /// Devices of the filesystems named by path arguments. A file whose
+    /// [`OpenFile::fs_device`] is in here matches the `SELNM` kind, which is
+    /// how naming a mount point selects everything open on it.
+    pub path_fs_devices: std::collections::HashSet<u64>,
     /// `+c <n>`: how much of the command name the COMMAND column shows.
     /// Defaults to [`CommandWidth::Standard`] — a plain `lsof` run caps it.
     pub command_width: CommandWidth,
@@ -505,10 +567,27 @@ impl Selection {
     /// Whether `f`'s name is one of the path arguments or under one of the
     /// `+d`/`+D` trees. Only called when such an argument was given.
     fn path_matches(&self, f: &OpenFile) -> bool {
-        // Identity first: a path argument names a *file*, and lsof matches the
+        // A path argument that named a FILE SYSTEM matches every file on it —
+        // the C's `HbyFsd` branch in `is_file_named()`, a plain `s->dev ==
+        // Lf->dev`. It is tested first and independently: the argument has no
+        // identity of its own, and this must hold for a row the backend could
+        // not otherwise identify.
+        //
+        // The comparison is against the FILESYSTEM device, never the DEVICE
+        // cell: that cell shows `st_rdev` for a device node, so keying on it
+        // made `lsof /` match every character device on the host. This is why
+        // the rule waited for `OpenFile::fs_device` to exist.
+        if !self.path_fs_devices.is_empty() {
+            if let Some(dev) = f.fs_device {
+                if self.path_fs_devices.contains(&dev) {
+                    return true;
+                }
+            }
+        }
+        // Identity next: a path argument names a *file*, and lsof matches the
         // file it names however that file is reached. `+d`/`+D` were already
         // expanded into this set, so a directory tree is just more identities.
-        if !self.path_ids.is_empty() {
+        if self.paths_identified {
             if let (Some(dev), Some(node)) = (f.device.as_deref(), f.node.as_deref()) {
                 if self.path_ids.contains(&(dev.to_string(), node.to_string())) {
                     return true;
@@ -520,8 +599,10 @@ impl Selection {
             // its own on this row.
             return self.paths.contains(&f.name);
         }
-        // No identities: the backend cannot resolve paths, so fall back to
-        // matching names. This is the Windows path today.
+        // The backend cannot identify a path, so fall back to matching names.
+        // This is the Windows path today, and it is a fallback rather than a
+        // second rule: the C has no name-prefix matching for a bare path
+        // argument at all.
         let name = f.name.to_ascii_lowercase();
         let exact = self.paths.iter().any(|p| {
             let p = p.to_ascii_lowercase();
@@ -671,7 +752,10 @@ impl Selection {
 
     /// Whether any path / directory-tree filter was given.
     pub fn has_path_filter(&self) -> bool {
-        !self.paths.is_empty() || !self.dir_trees.is_empty() || !self.dirs_one_level.is_empty()
+        !self.paths.is_empty()
+            || !self.dir_trees.is_empty()
+            || !self.dirs_one_level.is_empty()
+            || !self.path_fs_devices.is_empty()
     }
 
     /// Whether a `+D`/`+d` directory filter was given — which forces full
@@ -1076,6 +1160,114 @@ mod tests {
     }
 
     #[test]
+    fn a_file_system_argument_names_every_mount_it_matches() {
+        // The C loops the whole mount table and makes a search item of each
+        // match. Taking only the first is invisible on a host whose mount
+        // table has no duplicate source, which is why this is a unit test and
+        // not only a differential case: two tmpfs mounts cannot be created on
+        // a CI runner without privileges.
+        let mount = |dir: &str, source: &str, block: bool, device: u64| MountEntry {
+            dir: dir.into(),
+            source: Some(source.into()),
+            source_is_block: block,
+            device,
+        };
+        let table = vec![
+            mount("/", "/dev/vda", true, 100),
+            mount("/dev", "devtmpfs", false, 6),
+            mount("/a", "tmpfs", false, 40),
+            mount("/b", "tmpfs", false, 41),
+            // A duplicate row for one mount, as /proc/self/mounts really does
+            // emit for /dev/shm and /dev/pts: one device, not two items.
+            mount("/dev/shm", "tmpfs", false, 42),
+            mount("/dev/shm", "tmpfs", false, 42),
+        ];
+        use FilesystemArgs::*;
+        // A mounted-on directory, under any mode that allows the reading.
+        assert_eq!(filesystems_named(&table, "/dev", Auto), vec![6]);
+        assert_eq!(filesystems_named(&table, "/dev", AlwaysFilesystem), vec![6]);
+        // `-f` refuses the reading outright.
+        assert_eq!(
+            filesystems_named(&table, "/dev", NeverFilesystem),
+            Vec::<u64>::new()
+        );
+        // A BLOCK-device source names its filesystem by default...
+        assert_eq!(filesystems_named(&table, "/dev/vda", Auto), vec![100]);
+        // ...a non-block source does not, until `+f` widens the test.
+        assert_eq!(
+            filesystems_named(&table, "devtmpfs", Auto),
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            filesystems_named(&table, "devtmpfs", AlwaysFilesystem),
+            vec![6]
+        );
+        // One source, several mounts: EVERY device, deduplicated.
+        assert_eq!(
+            filesystems_named(&table, "tmpfs", AlwaysFilesystem),
+            vec![40, 41, 42]
+        );
+        // Not a mount at all.
+        assert_eq!(
+            filesystems_named(&table, "/etc/passwd", Auto),
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            filesystems_named(&[], "/", AlwaysFilesystem),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn a_file_system_argument_matches_by_device_and_nothing_by_name() {
+        // DIVERGENCES #15. Naming a mount point selects every file on that
+        // filesystem — the C's `s->dev == Lf->dev`. The trap this guards is
+        // the one that made the first attempt over-report: a file-system
+        // argument resolves NO identity, so a rule that fell back to name
+        // matching whenever the identity set was empty matched every absolute
+        // path against `/`.
+        use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
+        let row = |name: &str, fs_device: u64| OpenFile {
+            fs_device: Some(fs_device),
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: name.into(),
+            device: Some("0,42".into()),
+            size: None,
+            offset: None,
+            node: Some("7".into()),
+            links: None,
+            socket: None,
+        };
+        let mut sel = Selection {
+            paths: vec!["/".into()],
+            paths_identified: true,
+            ..Default::default()
+        };
+        sel.path_fs_devices.insert(65024); // the root filesystem
+        let p = Process {
+            uid: None,
+            pgid: None,
+            pid: 7,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            files: vec![
+                row("/usr/bin/python3", 65024), // on the named filesystem
+                row("/dev/null", 6),            // NOT on it — a different mount
+            ],
+        };
+        let got = sel.apply(vec![p]);
+        assert_eq!(got.len(), 1);
+        let names: Vec<&str> = got[0].files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["/usr/bin/python3"], "{got:#?}");
+    }
+
+    #[test]
     fn a_path_argument_matches_identity_not_a_name_prefix() {
         // lsof matches a path by what the file IS. The identity set is filled
         // by the CLI from the backend, so here it stands in directly: a row
@@ -1099,6 +1291,10 @@ mod tests {
         };
         let mut sel = Selection {
             paths: vec!["C:\\dir".into()],
+            // The backend identifies paths, so identity is authoritative and
+            // the name fallback is off. Stating it is the point: inferring it
+            // from a non-empty identity set is what broke `lsof /`.
+            paths_identified: true,
             ..Default::default()
         };
         sel.path_ids.insert(("C:".into(), "42".into()));

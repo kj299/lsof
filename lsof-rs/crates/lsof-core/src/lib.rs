@@ -20,13 +20,13 @@ pub mod render;
 pub mod selection;
 pub mod service;
 
-pub use backend::{Backend, BackendError, Privilege};
+pub use backend::{Backend, BackendError, MountEntry, Privilege};
 pub use model::{
     AccessMode, FdType, FileType, OpenFile, Process, Protocol, SockState, SocketInfo, TcpState,
     UnixState,
 };
 pub use render::Escaper;
 pub use selection::{
-    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, InetFilter, Selection, StateFilter,
-    TcpInfoFlags, DEFAULT_COMMAND_WIDTH,
+    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, InetFilter, Selection,
+    StateFilter, TcpInfoFlags, DEFAULT_COMMAND_WIDTH,
 };

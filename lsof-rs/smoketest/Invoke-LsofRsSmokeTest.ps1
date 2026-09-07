@@ -554,6 +554,22 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Test-Case 'help-alias-question' 'misc/-?' {
         $r = Invoke-Lsof @('-?') 'q-help'; Assert-Contains $r.Out 'USAGE'
     }
+    Test-Case 'filesystem-args-dash-f-plus-f' 'selection/-f +f' {
+        # A path argument naming a MOUNT POINT selects every open file on that
+        # filesystem. Windows has no such table -- Backend::mounts() is empty
+        # there -- so every path argument is a plain file, which is what these
+        # assert: `-f` (never a file system) is indistinguishable from the
+        # default, and `+f` (always one) finds no mount for any path and
+        # complains, exactly as the C does for an argument that names none.
+        $plain = Invoke-Lsof @('--', $fx.FilePath) 'fsarg-plain'
+        $dashF = Invoke-Lsof @('-f', '--', $fx.FilePath) 'fsarg-dash-f'
+        Assert ($dashF.Exit -eq $plain.Exit) "-f should not change a plain path lookup"
+        Assert-Contains $dashF.Out "$self" '-f <file> is still a path lookup'
+
+        $plusF = Invoke-Lsof @('+f', '--', $fx.FilePath) 'fsarg-plus-f'
+        Assert ($plusF.Exit -ne 0) "+f on a non-file-system should fail (exit=$($plusF.Exit))"
+        Assert-Contains $plusF.Err 'not a file system'
+    }
     Test-Case 'end-of-options-dashdash' 'misc/--' {
         # `--` ends options; the path after it is looked up (RM finds our PID).
         $r = Invoke-Lsof @('--', $fx.FilePath) 'dashdash'

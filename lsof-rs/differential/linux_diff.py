@@ -381,6 +381,31 @@ def make_fixtures(
 # -------------------------------------------------------------------- matrix
 
 
+def mount_source(dir_: str) -> str:
+    """What `dir_` was mounted from, as `/proc/self/mounts` spells it.
+
+    lsof accepts a mount's SOURCE as a file-system argument, not only its
+    directory, so this is the other half of the rule. The value is whatever
+    this host uses -- `/dev/vda`, `overlay`, `devtmpfs`, a mapper name -- and
+    the cases that use it pass `+f`, which accepts any source rather than only
+    a block device, so they mean the same thing on every host.
+
+    `/dev`'s source in particular is never a block device, which is what makes
+    it the case that can tell `+f`'s widening from the default rule; `/`'s
+    usually is. Between them the two halves of the source test are covered
+    whichever way round this host happens to be.
+    """
+    try:
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                parts = line.split(" ")
+                if len(parts) >= 2 and parts[1] == dir_:
+                    return parts[0]
+    except OSError:
+        pass
+    return dir_
+
+
 def render_matrix(template_path: str, subs: dict[str, str]) -> list[dict]:
     """Load the TOML template and substitute {A}/{B} tokens in every arg."""
     try:
@@ -489,6 +514,8 @@ def run(args) -> int:
                 "F": str(lk.pid),
                 "G": str(anon.pid),
                 "H": str(longcmd.pid),
+                "ROOTSRC": mount_source("/"),
+                "DEVSRC": mount_source("/dev"),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "HARDLINK": os.path.join(work, "hardlink", "hard.txt"),
                 "ADIR": a.cwd,
