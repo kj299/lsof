@@ -192,6 +192,19 @@ fn strip_verbatim(s: &str) -> String {
 /// `-V` (and never under `-Q`), as before — but the count is returned
 /// regardless, because lsof exits 1 on an unlocated search item even when it
 /// prints nothing (so `lsof -t <file> && ...` and `if lsof ...; then` work).
+/// `strerror(errno)` as the C prints it, from a Rust `io::Error`.
+///
+/// `Display` for an OS error appends ` (os error N)`, which the C never
+/// prints. Trimming it keeps `lsof: status error on /nope: No such file or
+/// directory` byte-identical to the oracle's message.
+fn errno_text(e: std::io::Error) -> String {
+    let s = e.to_string();
+    match s.rfind(" (os error ") {
+        Some(i) if s.ends_with(')') => s[..i].to_string(),
+        _ => s,
+    }
+}
+
 /// One path search item, and what "found" means for it.
 struct SearchItem {
     /// The file's `(DEVICE, NODE)` identity, when the backend resolved it.
@@ -215,7 +228,12 @@ fn report_unmatched(
         if !located.contains(&pid) {
             unmatched += 1;
             if print {
-                eprintln!("lsof: PID {pid}: no matching open files");
+                // STDOUT, and the C's wording: every "not located" line in
+                // `main.c` is a `printf`, not an `fprintf(stderr, ...)`. The
+                // stream is the part that matters — `-V` output is meant to be
+                // read alongside the table, and a consumer redirecting stdout
+                // gets the whole story or none of it.
+                println!("lsof: process ID not located: {pid}");
             }
         }
     }
@@ -260,7 +278,7 @@ fn report_unmatched(
         if !hit {
             unmatched += 1;
             if print {
-                eprintln!("lsof: {display}: no process found with it open");
+                println!("lsof: no file use located: {display}");
             }
         }
     }
@@ -329,6 +347,10 @@ fn main() {
     // directory matches that directory, not everything beneath it. `+d` adds
     // one level of entries, `+D` the whole tree.
     let mut search: Vec<SearchItem> = Vec::new();
+    // Path arguments whose `stat()` failed, with the errno text, in argument
+    // order. Collected rather than reported inline because whether they are
+    // fatal depends on how many survived.
+    let mut unstattable: Vec<(String, String)> = Vec::new();
     let selection = {
         let mut sel = selection;
         // lsof reads a path argument as a FILE SYSTEM name when it matches a
@@ -364,6 +386,17 @@ fn main() {
             let id = env.backend.identify_path(p);
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
+            } else if sel.paths_identified {
+                // The C stats every path argument and DROPS the ones that
+                // fail, reporting the errno (`arg.c`, `ck_file_arg`:
+                // `statsafely()` fails -> message, `ErrStat = 1`, the sfile is
+                // freed). Only a backend that resolves identities at all can
+                // tell a failure from "this platform has no identities".
+                let why = std::fs::metadata(p)
+                    .err()
+                    .map(errno_text)
+                    .unwrap_or_else(|| "status error".to_string());
+                unstattable.push((p.clone(), why));
             }
             search.push(SearchItem {
                 id,
@@ -374,8 +407,22 @@ fn main() {
         // `+d`/`+D` are directory expansions, not file-system arguments: the C
         // reaches them through a different path and the mount table plays no
         // part, so `+d /` is one level of `/`, not the whole root filesystem.
+        let quiet = sel.quiet;
+        let identifies = sel.paths_identified;
         let mut expand = |dir: &str, recursive: bool| {
             let id = env.backend.identify_path(dir);
+            // A `+d`/`+D` argument that cannot be stat'ed is a WARNING here,
+            // not the fatal error a bare path gets: the C reaches these
+            // through `enter_dir()` rather than `ck_file_arg()`, so the run
+            // continues and only the exit status records it. Saying nothing
+            // at all made a typo'd `+d` path look like an empty directory.
+            if id.is_none() && identifies && !quiet {
+                let why = std::fs::metadata(dir)
+                    .err()
+                    .map(errno_text)
+                    .unwrap_or_else(|| "status error".to_string());
+                eprintln!("lsof: WARNING: can't stat({dir}): {why}");
+            }
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
             }
@@ -430,6 +477,26 @@ fn main() {
             }
             std::process::exit(1);
         }
+        // A stat failure is reported per argument, but it is FATAL only when
+        // no path argument survived: `ck_file_arg` returns non-zero on `!ss`
+        // and `main.c` answers with `Error()`, which exits before the listing
+        // runs. So `lsof /a/real/file /nope` still prints the first file's
+        // rows (and exits 1), while `lsof -p 123 /nope` prints nothing at all
+        // — the `-p` never gets a chance, because argument processing already
+        // gave up. `-Q` mutes the message and makes the whole set non-fatal.
+        if !unstattable.is_empty() {
+            if !sel.quiet {
+                for (p, why) in &unstattable {
+                    eprintln!("lsof: status error on {p}: {why}");
+                }
+            }
+            let none_survived = unstattable.len() == sel.paths.len()
+                && sel.dirs_one_level.is_empty()
+                && sel.dir_trees.is_empty();
+            if none_survived && !sel.quiet {
+                std::process::exit(1);
+            }
+        }
         sel
     };
     let _ = env.elevated; // read on all platforms; used for the hint on Windows.
@@ -447,6 +514,9 @@ fn main() {
     // The between-cycle separator `-r` prints is format-aware (see
     // `Format::repeat_marker`). Captured before `run_cycle` moves `format` in.
     let repeat_marker = format.repeat_marker();
+    // Captured before `run_cycle` takes `selection`: `-Q` decides the exit
+    // status, and the closure needs the selection itself.
+    let quiet = selection.quiet;
 
     let run_cycle = move || -> usize {
         let gathered = match env.backend.gather(&selection) {
@@ -514,7 +584,12 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_secs(delay));
         },
         None => {
-            let code = if run_cycle() > 0 { 1 } else { 0 };
+            // `-Q` suppresses the search-failure status as well as the
+            // message: `main.c` clears `ErrStat` under it and never sets
+            // `LSOF_SEARCH_FAILURE`, so `lsof -Q /nope` and `lsof -Q -p 999999`
+            // both exit 0. lsof-rs had muted the message alone and still
+            // exited 1, which is the half that scripts actually branch on.
+            let code = if run_cycle() > 0 && !quiet { 1 } else { 0 };
             #[cfg(windows)]
             lsof_backend_windows::exit_now(code);
             #[cfg(not(windows))]
@@ -539,6 +614,27 @@ mod tests {
             }) => (selection, format),
             other => panic!("expected Action::Run for {argv:?}, got {other:?}"),
         }
+    }
+
+    /// `errno_text` strips the ` (os error N)` that Rust appends and the C
+    /// never prints, so `lsof: status error on /nope: No such file or
+    /// directory` is byte-identical to the oracle's line. Portable: the
+    /// messages differ per platform, the SHAPE does not.
+    #[test]
+    fn errno_text_drops_the_rust_suffix() {
+        use super::errno_text;
+        use std::io::Error;
+        let e = Error::from_raw_os_error(2);
+        let t = errno_text(e);
+        assert!(!t.contains("os error"), "{t:?}");
+        assert!(!t.is_empty());
+        // A non-OS error has no suffix to strip and must survive whole.
+        let plain = errno_text(Error::other("handmade"));
+        assert_eq!(plain, "handmade");
+        // A message that merely mentions the words is not truncated: the
+        // suffix only counts at the very end, in parentheses.
+        let odd = errno_text(Error::other("no (os error 2) here"));
+        assert_eq!(odd, "no (os error 2) here");
     }
 
     /// The predicate behind the "re-run as Administrator" stderr hint. Hosted

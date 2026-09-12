@@ -11,7 +11,47 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`-Q` mutes the exit status, not just the message** (`DIVERGENCES.md` #19's
+  sweep). The C clears `ErrStat` and never sets `LSOF_SEARCH_FAILURE` under
+  `-Q`, so `lsof -Q /nope`, `lsof -Q /an/unopened/file` and
+  `lsof -Q -p 999999` all exit **0**. lsof-rs suppressed the message alone and
+  still exited 1 — the half that `if lsof -Q …; then` actually branches on.
+
+- **An unstattable path argument aborts the run when no argument survives**
+  (`DIVERGENCES.md` #19). `ck_file_arg` reports the errno, drops the argument,
+  and returns non-zero only when nothing was left; `main.c` answers that with
+  `Error()`, before any listing. So `lsof -p 123 /nope` prints **nothing** — the
+  `-p` never gets its turn. `lsof /a/real/file /nope` still prints the real
+  file's rows and exits 1, which lsof-rs already matched; the ledger entry had
+  said the failure was fatal full stop, and it is not.
+
+  lsof-rs now also prints the message the C prints —
+  `lsof: status error on <path>: <errno>` — having previously failed silently,
+  and warns on an unstattable `+d`/`+D` directory
+  (`lsof: WARNING: can't stat(<dir>): <errno>`) instead of letting a typo'd path
+  look like an empty directory.
+
+- **`-V` "not located" lines go to stdout, in the C's words.** Every one of them
+  in `main.c` is a `printf`: `lsof: no file use located: <path>`,
+  `lsof: process ID not located: <pid>`. lsof-rs wrote its own wording to
+  stderr, so a consumer redirecting stdout got the table and none of the
+  explanation.
+
 ### Verification
+- **Fifteen differential cases for the search-item contract — and the first
+  `-V` or `-Q` in any case at all.** The suite had 69 cases and exercised
+  neither option. Seven mutants; every new case is killed by at least one, two
+  of them by exactly one.
+
+  Two cases had to be rewritten before any mutant could kill them.
+  `all-paths-unstattable` began as `lsof {NOPE} {NOPE}x` — with no other
+  selector, "every path is bad" prints nothing whether or not the run aborts, so
+  it could not fail; `-p {A}` gave it something to lose. And
+  `plus-d-supplies-a-surviving-item` began by naming `{ADIR}`, where the C drops
+  four entry rows to the defect now ledgered as item 20, so it was measuring
+  that defect rather than the abort rule.
+
 - **The `proc_maps` fuzz target was accusing a correct parser.** It asserted no
   parsed path ever ends with ` (deleted)`, and fired on a ` (deleted) (deleted)`
   input — but that shape is real, not adversarial: a file genuinely named

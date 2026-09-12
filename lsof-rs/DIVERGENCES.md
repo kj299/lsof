@@ -48,6 +48,72 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by making the search-item contract the C's (2026-09-12)
+
+Closes item 19, and the sweep around it found three more things — two fixed
+here, two recorded as items 20 and 21.
+
+A path argument is `stat()`ed once, up front. The failure is reported with its
+errno and the argument is **dropped**; whether that is fatal depends on how many
+survived. `ck_file_arg` returns non-zero only on `!ss` — no search item was
+created at all — and `main.c` answers that with `Error()`, which exits *before*
+the listing runs. So:
+
+| command | C |
+|---|---|
+| `lsof /nope` | message, nothing listed, exit 1 |
+| `lsof /a/real/file /nope` | message, the real file's rows, exit 1 |
+| `lsof -p 123 /nope` | message, **nothing listed**, exit 1 |
+| `lsof -Q /nope` | silent, nothing listed, exit **0** |
+
+The third line is what item 19 named: the `-p` never gets its turn, because
+argument processing gave up first. lsof-rs had printed its rows. The second line
+is what the entry got wrong — it said the failure is fatal full stop, and
+lsof-rs already matched there.
+
+### `-Q` mutes the status, not just the message
+
+The bigger gap, and the one scripts actually feel. `-Q` clears `ErrStat` and
+never sets `LSOF_SEARCH_FAILURE`, so `lsof -Q /nope`, `lsof -Q /an/unopened/file`
+and `lsof -Q -p 999999` all exit **0**. lsof-rs had suppressed the message alone
+and still exited 1, which is the half that `if lsof -Q …; then` branches on.
+
+### `-V` narrates on stdout, in the C's words
+
+Every "not located" line in `main.c` is a `printf`, not an `fprintf(stderr, …)`:
+`lsof: no file use located: <path>`, `lsof: process ID not located: <pid>`.
+lsof-rs wrote its own wording to stderr, so a consumer redirecting stdout got
+the table and none of the explanation. And `+d`/`+D` reach the C through
+`enter_dir()` rather than `ck_file_arg()`, so an unstattable directory there is
+a `WARNING: can't stat(…)` on stderr and the run continues — the opposite of a
+bare path. lsof-rs had said nothing at all, which made a typo'd `+d` path look
+like an empty directory.
+
+### What the gate gained
+
+Fifteen differential cases, and the first `-V` or `-Q` in any of them: the suite
+had 69 cases and exercised neither option. Seven mutants; every case is killed by
+at least one:
+
+| mutant | cases it kills |
+|---|---|
+| never fatal (the old behaviour) | the `-p` case, and `-V` on a bad path |
+| fatal whenever ANY path fails | the two "one good path survives" cases |
+| only the FIRST failure recorded | `all-paths-unstattable` — and only that one |
+| `-V` messages back to stderr | the two `-V` reporting cases |
+| `-Q` stops muting the status | all four `-Q` cases |
+| an unlocated path stops counting | five, including `unlocated-path-exits-1` |
+| drop the `+d`/`+D` guard | `plus-d-supplies-a-surviving-item` — and only that |
+
+Two cases had to be rewritten before a mutant could kill them, which is
+LESSONS #026 again. `all-paths-unstattable` was first written as
+`lsof {NOPE} {NOPE}x`: with no other selector, "every path is bad" prints
+nothing whether or not the run aborts, so it could not fail. Adding `-p {A}`
+gave it something to lose. And `plus-d-supplies-a-surviving-item` first named
+`{ADIR}`, where the C drops four entry rows to the defect now ledgered as item
+20 — so it was measuring that defect, not the abort rule. It names `{ASUB}`
+now, which is open and empty.
+
 ## Fixed by listing tasks the way the C decides to (2026-09-07)
 
 Closes item 18. A Linux task is not a decoration on a process row: `CLONE_FS`
@@ -684,7 +750,11 @@ likely right; it is a compatibility decision, not a backend phase.
 
 | 18 | on Linux each **task is a process entry of its own** — it repeats the whole file set and the table grows `TID`/`TASKCMD` columns — and the C lists them **whenever nothing else is selected**; `-K` forces it on, `-K i` off | ~~lists processes only; `-K` opts in, and the two columns do not exist~~ **resolved 2026-09-07** | see "Fixed by listing tasks the way the C decides to" above. This entry's own wording was **wrong**: it said the C lists threads "by default", full stop. It does not — give it any selector at all (`-p`, `-u`, `-c`, `-i`, `-d`, a path) and tasks disappear, columns included. The whole-host row count that made the claim (1052 vs 261) was consistent with either reading, which is why writing the ledger from one measurement is not enough. |
 
-| 19 | a path argument that cannot be `stat()`ed is **fatal**: the C prints nothing at all and exits 1, even when another selector matched | reports exit 1 but still prints what the other selectors matched | `lsof-cli`. Measured 2026-09-07: `lsof -p <live pid> /nonexistent` is 0 rows from the C and 17 from lsof-rs; same for `-u root`, `-d 3`, `-i`. `-a` hides it (the AND makes the other selector match nothing either), which is why every existing path case matches. **DEBT** — found while sweeping `-K`, where `lsof -K -- -a -p N` exposed it; unrelated to tasks and left for its own change rather than folded into one. Repro: `lsof -n -P -K -- -a -p <pid>`. |
+| 19 | a path argument that cannot be `stat()`ed is reported and **dropped**, and if NO argument survived the run exits before listing anything; `-Q` mutes both the message and the status | ~~reported exit 1 but still printed what the other selectors matched, and `-Q` muted only the message~~ **resolved 2026-09-12** | see "Fixed by making the search-item contract the C's" above. This entry was also imprecise: it said the failure is fatal full stop. It is fatal only when EVERY path argument fails — `lsof /a/real/file /nope` prints the first file's rows and exits 1, and lsof-rs already matched there. |
+
+| 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. **C-DEFECT**, not reproduced; the `search-plus-d-supplies-a-surviving-item` case names `{ASUB}`, which is empty, precisely so it measures the abort rule and not this. |
+
+| 21 | `-c`, `-u` and `-g` are **search items**: a value that matches nothing exits 1, and `-V` says `command not located:` / `no user use located:` etc. | they select, but never counted as unlocated, so the run exits 0 | measured 2026-09-12: `lsof -c nosuchcmd`, `-u nosuchuser` and `-g 999999` are all exit 1 from the C and 0 here, while `-p` and `-i` already match. **DEBT** — found by the item-19 sweep. Doing it properly means auditing every search-item class the C keeps (`main.c` has ten `not located` messages) and deciding each against the negated-`-c` defect already ledgered as item 13, so it is recorded rather than folded into a path-argument change. |
 
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 

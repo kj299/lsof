@@ -386,6 +386,15 @@ def make_fixtures(
     # the `+d`/`+D` cases measure one-level-vs-recursive, which is their job.
     linkdir = os.path.join(work, "hardlink")
     os.makedirs(linkdir)
+    # An existing file that NOTHING opens, and a path that does not exist, both
+    # outside every fixture's directory so the `+d`/`+D` expansions do not see
+    # them. They are the two halves of the search-item contract: an argument
+    # that resolves but is never located (exit 1, `-V` says so) versus one that
+    # cannot be stat'ed at all (fatal before the listing runs).
+    quietdir = os.path.join(work, "search")
+    os.makedirs(quietdir)
+    with open(os.path.join(quietdir, "unopened.txt"), "w") as f:
+        f.write("nobody holds this\n")
     os.link(os.path.join(fdir, "f.txt"), os.path.join(linkdir, "hard.txt"))
     # exec keeps the pid stable (no bash parent lingering as the "process"), and
     # <> on the FIFO opens it read/write so the open cannot block. The hostile
@@ -573,6 +582,9 @@ def run(args) -> int:
                 "DEVSRC": mount_source("/dev"),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "HARDLINK": os.path.join(work, "hardlink", "hard.txt"),
+                "UNOPENED": os.path.join(work, "search", "unopened.txt"),
+                # Never created -- the point is that stat() fails on it.
+                "NOPE": os.path.join(work, "search", "absent.txt"),
                 "ADIR": a.cwd,
                 "ASUB": os.path.join(a.cwd, "sub"),
                 "PORT": port,
