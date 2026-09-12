@@ -58,6 +58,19 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   explanation.
 
 ### Verification
+- **The skipped-fixture path no longer cries wolf, and now has a test.** The
+  first CI run's differential log read
+  `linux_diff: INFRA: fixture J(netns) exited early (rc=1)` before its SKIP
+  line — and `INFRA` is this harness's word for "exit 2, something is broken",
+  so a perfectly green run looked like a breakage. An optional fixture now
+  raises `FixtureUnavailable` instead.
+
+  Exercising that path locally, with a deliberately broken `unshare`, found a
+  real bug in the handler I had just written: `except (…) as e` **shadowed
+  fixture E**, and Python unbinds the exception name at the end of the block,
+  so the next line died with `UnboundLocalError` — on the failure path only,
+  which is the path CI actually takes. The self-test now covers it (13 checks).
+
 - **miri caught an over-strong invariant in this PR's own test — the fifth of
   that shape here.** `errno_text_drops_the_rust_suffix` asserted its result
   never *contains* `os error`. Under miri that is false through no fault of the

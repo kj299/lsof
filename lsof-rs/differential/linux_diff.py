@@ -108,10 +108,31 @@ def infra(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 # ------------------------------------------------------------------ fixtures
 
 
+class FixtureUnavailable(Exception):
+    """An OPTIONAL fixture could not start, and that is not a harness failure.
+
+    Distinct from `infra()` on purpose: `INFRA` is this harness's word for
+    "exit 2, something is broken", and printing it for a fixture the runner
+    simply lacks the capability for made a perfectly green log read as though
+    the harness had fallen over.
+    """
+
+
 class Fixture:
     """One self-owned process whose open files are the thing under test."""
 
-    def __init__(self, name: str, argv: list, cwd: str, expect_fds: int, expect_comm: bytes | None = None):
+    def __init__(
+        self,
+        name: str,
+        argv: list,
+        cwd: str,
+        expect_fds: int,
+        expect_comm: bytes | None = None,
+        optional: bool = False,
+    ):
+        # When true, a failure to start raises FixtureUnavailable instead of
+        # ending the run: the cases naming this fixture are skipped by name.
+        self.optional = optional
         self.name = name
         self.argv = argv
         self.cwd = cwd
@@ -142,17 +163,22 @@ class Fixture:
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                infra(f"fixture {self.name} exited early (rc={self.proc.returncode})")
+                self._failed(f"exited early (rc={self.proc.returncode})")
             if fd_count(self.pid) >= self.expect_fds and (
                 self.expect_comm is None or comm(self.pid) == self.expect_comm
             ):
                 return
             time.sleep(0.02)
-        infra(
-            f"fixture {self.name} did not reach {self.expect_fds} fds"
+        self._failed(
+            f"did not reach {self.expect_fds} fds"
             + (f" as {self.expect_comm!r}" if self.expect_comm else "")
             + " within 3s"
         )
+
+    def _failed(self, why: str) -> "NoReturn":  # type: ignore[name-defined]
+        if self.optional:
+            raise FixtureUnavailable(f"{self.name}: {why}")
+        infra(f"fixture {self.name} {why}")
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -383,6 +409,7 @@ def netns_listener(work: str) -> Fixture:
         ["unshare", "--net", sys.executable, "-c", py],
         cwd=ndir,
         expect_fds=4,
+        optional=True,
     )
 
 
@@ -594,7 +621,15 @@ def run(args) -> int:
                 # divergence nor a broken harness.
                 try:
                     fx.start()
-                except (SystemExit, OSError):
+                except (FixtureUnavailable, OSError) as unavailable:
+                    # NOT `as e`: `e` is fixture E in this scope, and Python
+                    # unbinds the exception name at the end of the block — so
+                    # `as e` deletes the fixture and the next line dies with
+                    # UnboundLocalError, on the failure path only.
+                    print(
+                        f"linux_diff: optional fixture unavailable: {unavailable}",
+                        file=sys.stderr,
+                    )
                     netns = None
                 continue
             fx.start()
@@ -719,6 +754,22 @@ def self_test() -> int:
         check("fixture start waits for the expected fd count", fd_count(fx.pid) >= 4)
         fx.stop()
         check("fixture stop terminates it", fx.proc.poll() is not None)
+
+    # An OPTIONAL fixture that cannot start must raise rather than end the run
+    # — and must NOT print `INFRA`, which is this harness's word for "exit 2,
+    # something is broken" and made a perfectly green log read as a breakage.
+    # The failure path needs its own test because it is the one CI takes: the
+    # first version of the handler wrote `except ... as e`, shadowing fixture
+    # E and killing the run with UnboundLocalError three lines later, and only
+    # running this path with a deliberately broken `unshare` found it.
+    opt = Fixture("opt", ["/bin/false"], cwd="/tmp", expect_fds=99, optional=True)
+    try:
+        opt.start()
+        check("optional fixture failure raises", False)
+    except FixtureUnavailable as unavailable:
+        check("optional fixture raises FixtureUnavailable", "opt" in str(unavailable))
+    finally:
+        opt.stop()
 
         # The hostile comm really reaches the kernel, byte for byte: the
         # symlink route gives a comm equal to the basename, and the kernel
