@@ -282,6 +282,25 @@ fn report_unmatched(
             }
         }
     }
+    // `-i` is a search item in its own right: `main.c` keeps `Fnet` at 1 until
+    // some SAVED row carries `SELNET`, and `if (Fnet && Fnet < 2)` at the end
+    // is a search failure. So `lsof -a -i -p 1` exits 1 — pid 1 exists and was
+    // located, but no Internet file was listed. `-U` has no such rule, which
+    // is why this tests the inet selector alone.
+    if sel.inet.enabled
+        && !procs.iter().flat_map(|p| &p.files).any(|f| {
+            matches!(
+                f.file_type,
+                lsof_core::model::FileType::Ipv4 | lsof_core::model::FileType::Ipv6
+            )
+        })
+    {
+        unmatched += 1;
+        if print {
+            println!("lsof: no Internet files located");
+        }
+    }
+
     unmatched
 }
 

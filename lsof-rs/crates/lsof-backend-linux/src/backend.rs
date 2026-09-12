@@ -96,6 +96,10 @@ impl Backend for LinuxBackend {
         // /proc/locks is one table for the whole system, with a pid column, so
         // it is read once here rather than per process.
         let locks = crate::locks::load();
+        // Built empty and filled only if a socket turns up that this
+        // namespace's tables cannot explain — nothing is read on a host with
+        // one network namespace.
+        let nstab = crate::net::NetnsTables::new();
 
         for p in procs.iter_mut() {
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
@@ -104,7 +108,7 @@ impl Backend for LinuxBackend {
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid, &socks, &locks) {
+            if let Some(files) = files::for_pid(p.pid, &socks, &locks, &nstab) {
                 p.files = files;
             }
         }
@@ -131,7 +135,7 @@ impl Backend for LinuxBackend {
                 }
                 for mut t in process::tasks_of(p) {
                     let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
-                    if let Some(files) = files::for_proc_dir(&base, p.pid, &socks, &locks) {
+                    if let Some(files) = files::for_proc_dir(&base, p.pid, &socks, &locks, &nstab) {
                         t.files = files;
                     }
                     tasks.push(t);

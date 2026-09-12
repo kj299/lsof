@@ -355,6 +355,37 @@ def thread_holder(work: str) -> Fixture:
     )
 
 
+def netns_listener(work: str) -> Fixture:
+    """A TCP listener inside its OWN network namespace.
+
+    The only fixture whose sockets are invisible to `/proc/net/*` as this
+    process sees them, which is the whole point: an inode the main table misses
+    is the one case where lsof has to go looking in the owning process's
+    namespace. The C answers it from the `system.sockprotoname` xattr and shows
+    `sock … protocol: TCP` -- protocol, no address -- and this port reads the
+    namespace's own table to reach the same answer.
+
+    `unshare --net` needs CAP_SYS_ADMIN. Where that is not available the
+    fixture reports itself unsupported rather than failing: a runner without it
+    must skip these cases, not manufacture a divergence.
+    """
+    ndir = os.path.join(work, "netns")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
+        "s.bind(('127.0.0.1',0)); s.listen(1)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ndir
+    )
+    return Fixture(
+        "J(netns)",
+        ["unshare", "--net", sys.executable, "-c", py],
+        cwd=ndir,
+        expect_fds=4,
+    )
+
+
 def make_fixtures(
     work: str,
 ) -> tuple[
@@ -438,7 +469,8 @@ def make_fixtures(
     g = anon_inode_holder(work)
     h = long_command_holder(work)
     i = thread_holder(work)
-    return a, b, c, d, e, f, g, h, i
+    j = netns_listener(work)
+    return a, b, c, d, e, f, g, h, i, j
 
 
 # -------------------------------------------------------------------- matrix
@@ -523,6 +555,23 @@ def preflight_locale() -> None:
         infra(f"locale {LOCALE} is not installed (locale -a); the C oracle is compared under it")
 
 
+def _raw_args(matrix_path: str, name: str) -> list:
+    """The args of `name` as written in the matrix, before substitution.
+
+    Used to tell which cases mention `{J}` so they can be dropped when the
+    namespace fixture could not start. Reading the file again is cheap and
+    keeps `render_matrix` free of skip logic.
+    """
+    import tomllib
+
+    with open(matrix_path, "rb") as f:
+        doc = tomllib.load(f)
+    for case in doc.get("case", []):
+        if case.get("name") == name:
+            return [str(a) for a in case.get("args", [])]
+    return []
+
+
 # ---------------------------------------------------------------------- main
 
 
@@ -535,15 +584,25 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e, lk, anon, longcmd, threads = fixtures
+    a, b, c, d, e, lk, anon, longcmd, threads, netns = fixtures
     try:
         for fx in fixtures:
+            if fx is netns:
+                # `unshare --net` needs CAP_SYS_ADMIN. A runner without it must
+                # SKIP the namespace cases, not fail and not silently compare
+                # something else -- an unavailable capability is neither a
+                # divergence nor a broken harness.
+                try:
+                    fx.start()
+                except (SystemExit, OSError):
+                    netns = None
+                continue
             fx.start()
         # E's mappings land after its fds do; it writes `ready` once both
         # libraries are loaded and one is unlinked. Waiting on the marker
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
-        for fx in (e, lk, anon, threads):
+        for fx in [f for f in (e, lk, anon, threads, netns) if f is not None]:
             ready = os.path.join(fx.cwd, "ready")
             deadline = time.monotonic() + 5.0
             while not os.path.exists(ready) and time.monotonic() < deadline:
@@ -569,6 +628,9 @@ def run(args) -> int:
         cases = render_matrix(
             args.matrix,
             {
+                # `{J}` is only defined when the namespace fixture came up; the
+                # cases that name it are dropped below when it did not.
+                "J": str(netns.pid) if netns is not None else "0",
                 "A": str(a.pid),
                 "B": str(b.pid),
                 "C": str(c.pid),
@@ -590,6 +652,15 @@ def run(args) -> int:
                 "PORT": port,
             },
         )
+        if netns is None:
+            dropped = [c["name"] for c in cases if any("{J}" in a for a in _raw_args(args.matrix, c["name"]))]
+            cases = [c for c in cases if c["name"] not in dropped]
+            if dropped:
+                print(
+                    "linux_diff: SKIP (no CAP_SYS_ADMIN for `unshare --net`): "
+                    + ", ".join(dropped),
+                    file=sys.stderr,
+                )
         matrix_json = os.path.join(work, "matrix.json")
         with open(matrix_json, "w") as f:
             json.dump({"case": cases}, f, indent=1)

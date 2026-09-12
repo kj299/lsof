@@ -558,6 +558,40 @@ args = ["-n", "-P", "-K", "{FILE}"]
 name = "tasks-dash-K-fields"
 args = ["-n", "-P", "-K", "-a", "-d", "^mem", "-FpKMcf", "-p", "{I}"]
 
+# ------------------------------------------- sockets in another namespace (J)
+# `/proc/net/*` shows the CALLING process's network namespace, so a socket
+# inside a container is an inode no local table explains. The C answers it from
+# the `system.sockprotoname` extended attribute (`dsock.c`) and prints the
+# PROTOCOL with no address: `sock  0,9  0t0  <inode>  protocol: TCP`. Three
+# cells differ from an ordinary socket row -- a lowercase `sock` TYPE, the
+# OFFSET rather than a size, and that NAME.
+#
+# lsof-rs reaches the same answer by reading the owning process's own
+# `/proc/<pid>/net/*`, cached per namespace. It could print the address it
+# learns on the way; it deliberately does not, because matching the C is the
+# contract. See the ledger entry on AF_VSOCK for the families this cannot name
+# and the xattr can.
+#
+# SKIPPED, not failed, on a runner without CAP_SYS_ADMIN for `unshare --net`.
+
+[[case]]
+# The whole row for the namespaced listener, socket cell included.
+name = "netns-socket-shows-protocol-only"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{J}"]
+
+[[case]]
+# The same row through `-F`: `t` is the TYPE and `n` the NAME, so this pins
+# the two cells the table case could only show positionally.
+name = "netns-socket-fields"
+args = ["-n", "-P", "-a", "-d", "^mem", "-Ftn", "-p", "{J}"]
+
+[[case]]
+# `-i` selects internet sockets by protocol and state. An unresolved socket
+# has neither, so it must NOT be selected -- the C leaves it out, and a port
+# that resolved the address from the namespace table would wrongly include it.
+name = "netns-socket-is-not-selected-by-dash-i"
+args = ["-n", "-P", "-a", "-i", "-p", "{J}"]
+
 # ----------------------------------------------- the search-item contract
 # WHAT COUNTS AS A SEARCH ITEM, and what happens when one is not located.
 # Two different failures that look alike from the outside:

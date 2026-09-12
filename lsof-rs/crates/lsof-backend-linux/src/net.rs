@@ -8,12 +8,21 @@
 //!
 //! # Namespaces
 //!
-//! `/proc/net` resolves to the *calling* process's network namespace. A process
-//! inside a container has its sockets in a different namespace, so its inodes
-//! will not be found here. That is not a silent wrong answer: an unresolved
-//! inode falls back to the phase-L0 row (`SOCK` with the `socket:[inode]` name),
-//! which is exactly what shipped before this module existed. Reading
-//! `/proc/<pid>/net/*` per namespace is deferred to L2.
+//! `/proc/net` resolves to the *calling* process's network namespace, so a
+//! process inside a container has its sockets in tables this one cannot see.
+//! [`NetnsTables`] is the fallback: for an inode the main table misses, it
+//! reads the owning process's own `/proc/<pid>/net/*` and caches the result by
+//! namespace, so the cost is one extra table read per distinct namespace that
+//! actually holds an unresolved socket — nothing at all on a host with one.
+//!
+//! What it recovers is the **protocol name**, not the address, because that is
+//! all the C shows: `sock … protocol: TCP`. The C gets it from the
+//! `system.sockprotoname` extended attribute rather than from any table
+//! (`dsock.c`), which is why it can name families that have no `/proc/net`
+//! file at all — see the ledger entry on AF_VSOCK. Reading the namespace's
+//! table gives this port the same answer for every family that has one, in
+//! safe dependency-free Rust, and it deliberately does not print the address
+//! it happens to learn on the way: matching the C is the contract.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -67,6 +76,30 @@ impl SocketTable {
         t.load_raw("/proc/net/raw6", true);
         t.load_unix("/proc/net/unix");
         t
+    }
+
+    /// The same tables, read through `/proc/<pid>/net/` — that process's own
+    /// network namespace rather than this one's.
+    ///
+    /// `None` when the directory yields nothing at all (the process exited, or
+    /// its `/proc/<pid>/net` is unreadable), so the caller can cache the
+    /// failure instead of retrying per fd. Queue columns are never wanted
+    /// here: `-T` reports on sockets this process can see, and one it cannot
+    /// resolve has no queue to show.
+    pub fn load_for_pid(pid: u32) -> Option<Self> {
+        let base = format!("/proc/{pid}/net");
+        if std::fs::metadata(&base).is_err() {
+            return None;
+        }
+        let mut t = SocketTable::default();
+        t.load_inet(&format!("{base}/tcp"), Protocol::Tcp, false, false);
+        t.load_inet(&format!("{base}/tcp6"), Protocol::Tcp, true, false);
+        t.load_inet(&format!("{base}/udp"), Protocol::Udp, false, false);
+        t.load_inet(&format!("{base}/udp6"), Protocol::Udp, true, false);
+        t.load_raw(&format!("{base}/raw"), false);
+        t.load_raw(&format!("{base}/raw6"), true);
+        t.load_unix(&format!("{base}/unix"));
+        Some(t)
     }
 
     pub fn get(&self, inode: u64) -> Option<&SocketEntry> {
@@ -375,6 +408,73 @@ pub fn socket_inode(target: &str) -> Option<u64> {
         .strip_suffix(']')?
         .parse()
         .ok()
+}
+
+/// The per-namespace fallback for sockets the main table cannot see.
+///
+/// Keyed by the namespace itself (`readlink /proc/<pid>/ns/net`, e.g.
+/// `net:[4026532259]`) and not by pid, so a hundred processes sharing one
+/// container's namespace read its tables once. Built lazily: a host where
+/// every socket resolves from `/proc/net` never opens a single extra file.
+#[derive(Default)]
+pub struct NetnsTables {
+    /// `None` for a namespace whose tables could not be read at all — cached
+    /// so a permission error is paid once rather than per fd.
+    by_ns: std::cell::RefCell<HashMap<String, Option<SocketTable>>>,
+    /// pid -> its namespace, so a process holding many unresolved sockets
+    /// costs one `readlink` rather than one per fd. A proxy inside a container
+    /// is exactly that shape.
+    by_pid: std::cell::RefCell<HashMap<u32, Option<String>>>,
+    /// The calling process's own namespace. Its sockets are already in the
+    /// main table, so a process sharing it is skipped without any work.
+    own: Option<String>,
+}
+
+impl NetnsTables {
+    pub fn new() -> Self {
+        Self {
+            by_ns: std::cell::RefCell::new(HashMap::new()),
+            by_pid: std::cell::RefCell::new(HashMap::new()),
+            own: netns_of("self"),
+        }
+    }
+
+    /// The protocol name for `inode` as `pid`'s own namespace sees it —
+    /// `TCP`, `UDP`, `RAW`, `UNIX` — or `None` when this port cannot tell.
+    ///
+    /// `None` is not the same as "no such socket": a family with no
+    /// `/proc/net` table (AF_VSOCK, netlink, packet) lands here too, and the C
+    /// still names it from an xattr this crate has no safe way to read.
+    pub fn protocol_for(&self, pid: u32, inode: u64) -> Option<String> {
+        let ns = self
+            .by_pid
+            .borrow_mut()
+            .entry(pid)
+            .or_insert_with(|| netns_of(&pid.to_string()))
+            .clone()?;
+        // Same namespace as ours: the main table already had its chance, and
+        // re-reading the identical files would only cost time.
+        if self.own.as_deref() == Some(ns.as_str()) {
+            return None;
+        }
+        let mut cache = self.by_ns.borrow_mut();
+        let table = cache
+            .entry(ns)
+            .or_insert_with(|| SocketTable::load_for_pid(pid));
+        let e = table.as_ref()?.get(inode)?;
+        // The PROTOCOL name, which is what the C shows here -- never the
+        // address. `info.protocol` and not `node`, because `node` is the
+        // protocol only for internet sockets; an AF_UNIX row keeps its inode
+        // there.
+        Some(e.info.protocol.as_str().to_string())
+    }
+}
+
+/// `readlink /proc/<who>/ns/net`, the namespace's identity as a string.
+fn netns_of(who: &str) -> Option<String> {
+    std::fs::read_link(format!("/proc/{who}/ns/net"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

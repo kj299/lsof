@@ -12,6 +12,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A socket in another network namespace is named** (`DIVERGENCES.md` #16):
+  `sock  0,9  0t0  <inode>  protocol: TCP` rather than
+  `SOCK  0,9  0  <inode>  socket:[<inode>]` — three cells, all of them wrong
+  before. lsof-rs reads the owning process's own `/proc/<pid>/net/*`, cached by
+  namespace (and a pid cache so one process costs one `readlink`), and takes the
+  **protocol name only**: the C shows no address here, and matching it is the
+  contract.
+
+  The ledger entry's stated cause was wrong — it said the C reads
+  `/proc/<pid>/net/*` and framed the fix as a cost-model change. The C reads the
+  `system.sockprotoname` extended attribute instead. Measured cost of the real
+  fix: **+1.0 ms** on `lsof -i` and **+0.8 ms** whole-host on a two-namespace
+  host, nothing where every socket resolves locally, RSS unchanged.
+
+- **`-i` is a search item.** `main.c` holds `Fnet` at 1 until some listed row is
+  an Internet file, and ends with a search failure if it never rises — so
+  `lsof -a -i -p 1` exits **1** (`-V`: `no Internet files located`) even though
+  pid 1 exists. lsof-rs exited 0. `-U` has no equivalent rule.
+
 - **`-Q` mutes the exit status, not just the message** (`DIVERGENCES.md` #19's
   sweep). The C clears `ErrStat` and never sets `LSOF_SEARCH_FAILURE` under
   `-Q`, so `lsof -Q /nope`, `lsof -Q /an/unopened/file` and
@@ -39,6 +58,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   explanation.
 
 ### Verification
+- **Fixture J: a listener in its own network namespace**, the first fixture
+  whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs
+  `CAP_SYS_ADMIN`, so the harness **skips** its three cases where that is
+  unavailable rather than failing — a missing capability is neither a divergence
+  nor a broken harness. Five mutants, every case killed by at least one, two of
+  them by exactly one (including a mutant that prints the address the namespace
+  table reveals, which the C does not show).
+
 - **Fifteen differential cases for the search-item contract — and the first
   `-V` or `-Q` in any case at all.** The suite had 69 cases and exercised
   neither option. Seven mutants; every new case is killed by at least one, two
