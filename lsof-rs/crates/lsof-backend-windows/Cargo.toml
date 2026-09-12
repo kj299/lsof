@@ -34,5 +34,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Time",
 ] }
 
+[features]
+# Builds `tests/asan_canary.rs`, a test that reads past a heap allocation on
+# purpose. The AddressSanitizer CI job runs it FIRST and requires it to fail
+# with an ASan diagnostic; that is what distinguishes a sanitizer finding
+# nothing from a sanitizer that never ran. Never enabled by any other build.
+asan-canary = []
+
 [lints]
 workspace = true

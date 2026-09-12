@@ -48,6 +48,53 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## The Windows unsafe layer, under a sanitizer at last (2026-09-12)
+
+Not a divergence — the last of the four playbook exit criteria this port had
+never executed. The miri job covers `lsof-core` and `lsof-cli`, the two crates
+that forbid unsafe entirely; the Windows backend's ~150 `unsafe` blocks, each
+an FFI call handing Win32 a buffer this code sized itself, had never been under
+any sanitizer.
+
+`asan-windows` runs the backend's tests and one real run of the binary under
+`-Zsanitizer=address` on `x86_64-pc-windows-msvc`. The test that matters is
+`enumerates_real_kernel_object_types`: it creates an event, a mutex, a section
+and a token, then walks the live handle table through the same unsafe
+enumeration the binary uses — so the buffers those calls fill are the buffers
+ASan is watching.
+
+### The canary, and why the job has one
+
+A sanitizer job that reports nothing is indistinguishable from a job that never
+instrumented anything. A mistyped `RUSTFLAGS`, a missing `--target` (which would
+leave the sanitizer on the build scripts and off the code), an ASan runtime DLL
+that failed to load — every one of those ends in a green job that checked
+nothing. This project already knows that failure mode from the inside: it is
+exactly how the kit's sanitizer gate came to be declared-but-never-run
+(LESSONS #019).
+
+So the job's **first** step builds `tests/asan_canary.rs` — a test that reads
+one byte past a four-byte heap allocation, behind a feature nothing else sets —
+and requires the run to abort with an `AddressSanitizer` diagnostic. If the
+canary survives, the step fails with `CANARY SURVIVED` and the job stops before
+it can say anything reassuring about the real code.
+
+### Observe-first, and what is deliberately NOT claimed
+
+It lands non-blocking, on the kit's promotion rule (LESSONS #13): consecutive
+log-verified green runs, read from the step log rather than the job status,
+before it becomes a hard gate. This one could not be validated locally the way
+the miri job was — there is no Windows here, and every detail of it (the
+nightly's ASan support on the MSVC target, the `vswhere` path to
+`clang_rt.asan_dynamic-x86_64.dll`, GitHub's pwsh appending `exit
+$LASTEXITCODE` to a step whose command is *supposed* to fail) was written
+blind. Observe-first is doing real work here rather than ceremony.
+
+`progress.json` still reads `differential` for `lsof-backend-windows`, on
+purpose: a gate is not passed until it has actually run, and advancing the row
+on the strength of a job that has never executed would be the same bookkeeping
+this ledger exists to prevent.
+
 ## Fixed by asking the socket's own namespace (2026-09-12)
 
 Closes item 16, whose stated cause was wrong, and turns up two more things.

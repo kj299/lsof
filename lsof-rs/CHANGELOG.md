@@ -58,6 +58,28 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   explanation.
 
 ### Verification
+- **The Windows unsafe layer is under AddressSanitizer** — the last of the
+  playbook's four exit criteria this port had never executed. miri covers the
+  `forbid(unsafe_code)` crates; the ~150 `unsafe` blocks in the Windows backend,
+  every one an FFI call with a hand-sized buffer, had never been under a
+  sanitizer at all.
+
+  The job **carries its own proof**. A sanitizer that finds nothing looks
+  exactly like one that never instrumented anything — a mistyped `RUSTFLAGS`, a
+  missing `--target`, an ASan runtime DLL that did not load, and the job goes
+  green having checked nothing. That is how the kit's sanitizer gate came to be
+  "declared but never run" here in the first place (LESSONS #019). So the first
+  step runs `tests/asan_canary.rs`, which reads one byte past a heap
+  allocation, and **requires** an `AddressSanitizer` diagnostic; if the canary
+  survives, the job fails before reporting anything about the real code.
+
+  It lands **observe-first** (`continue-on-error`), on the kit's promotion rule
+  (LESSONS #13): consecutive log-verified green runs before it becomes a hard
+  gate. Unlike the miri job, this one could not be validated locally first —
+  there is no Windows here — so observe-first is doing real work rather than
+  ceremony, and `progress.json` deliberately still reads `differential` for
+  `lsof-backend-windows`: a gate is not passed until it has run.
+
 - **Fixture J: a listener in its own network namespace**, the first fixture
   whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs
   `CAP_SYS_ADMIN`, so the harness **skips** its three cases where that is
