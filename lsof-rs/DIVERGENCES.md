@@ -48,6 +48,210 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## The Windows unsafe layer, under a sanitizer at last (2026-09-12)
+
+Not a divergence — the last of the four playbook exit criteria this port had
+never executed. The miri job covers `lsof-core` and `lsof-cli`, the two crates
+that forbid unsafe entirely; the Windows backend's ~150 `unsafe` blocks, each
+an FFI call handing Win32 a buffer this code sized itself, had never been under
+any sanitizer.
+
+`asan-windows` runs the backend's tests and one real run of the binary under
+`-Zsanitizer=address` on `x86_64-pc-windows-msvc`. The test that matters is
+`enumerates_real_kernel_object_types`: it creates an event, a mutex, a section
+and a token, then walks the live handle table through the same unsafe
+enumeration the binary uses — so the buffers those calls fill are the buffers
+ASan is watching.
+
+### The canary, and why the job has one
+
+A sanitizer job that reports nothing is indistinguishable from a job that never
+instrumented anything. A mistyped `RUSTFLAGS`, a missing `--target` (which would
+leave the sanitizer on the build scripts and off the code), an ASan runtime DLL
+that failed to load — every one of those ends in a green job that checked
+nothing. This project already knows that failure mode from the inside: it is
+exactly how the kit's sanitizer gate came to be declared-but-never-run
+(LESSONS #019).
+
+So the job's **first** step builds `tests/asan_canary.rs` — a test that reads
+one byte past a four-byte heap allocation, behind a feature nothing else sets —
+and requires the run to abort with an `AddressSanitizer` diagnostic. If the
+canary survives, the step fails with `CANARY SURVIVED` and the job stops before
+it can say anything reassuring about the real code.
+
+### Observe-first, and what is deliberately NOT claimed
+
+It lands non-blocking, on the kit's promotion rule (LESSONS #13): consecutive
+log-verified green runs, read from the step log rather than the job status,
+before it becomes a hard gate. This one could not be validated locally the way
+the miri job was — there is no Windows here, and every detail of it (the
+nightly's ASan support on the MSVC target, the `vswhere` path to
+`clang_rt.asan_dynamic-x86_64.dll`, GitHub's pwsh appending `exit
+$LASTEXITCODE` to a step whose command is *supposed* to fail) was written
+blind. Observe-first is doing real work here rather than ceremony.
+
+`progress.json` still reads `differential` for `lsof-backend-windows`, on
+purpose: a gate is not passed until it has actually run, and advancing the row
+on the strength of a job that has never executed would be the same bookkeeping
+this ledger exists to prevent.
+
+### First run, read from the log
+
+    AddressSanitizer: heap-buffer-overflow on address 0x110bbc4a2050 at pc …
+    canary caught: ASan is live
+
+then both real steps clean. So the sanitizer is genuinely instrumenting, the
+runtime DLL resolved, and the gate has demonstrated it can fail — which is the
+only evidence that makes a clean run mean anything. One green run of the three
+the promotion rule asks for.
+
+## Fixed by asking the socket's own namespace (2026-09-12)
+
+Closes item 16, whose stated cause was wrong, and turns up two more things.
+
+`/proc/net/*` shows the **calling** process's network namespace, so a socket
+inside a container is an inode no local table explains. The C prints
+
+    python3 5753 root 3u  sock  0,9  0t0  34280  protocol: TCP
+
+— a lowercase `sock`, the OFFSET rather than a size, and a NAME that gives the
+protocol and no address. lsof-rs printed `SOCK  0,9  0  34280  socket:[34280]`,
+differing in all three cells.
+
+### Where the C gets that protocol, and why it matters
+
+Item 16 said "the C reads the target's own `/proc/<pid>/net/*`" and framed the
+fix as a cost-model change: tables read once per namespace instead of once per
+run. That is not what the C does. `dsock.c` falls back to a single
+
+    getxattr(path, "system.sockprotoname", …)
+
+on the fd — which is why it can name the protocol without knowing the address,
+and why it costs one syscall per unidentified socket rather than anything
+per-namespace. Reading the source after measuring the output is what caught
+it: an implementation that read the namespace's table would have had the
+address and printed it.
+
+lsof-rs now reads the owning process's own `/proc/<pid>/net/*`, cached by the
+namespace itself (`readlink /proc/<pid>/ns/net`) rather than by pid, so a
+hundred processes in one container read its tables once, and a pid cache keeps
+a process with many unresolved sockets to one `readlink`. It takes the
+**protocol name only** from that table and deliberately drops the address it
+learns on the way, because matching the C is the contract — a mutant that
+prints the address is one of the five that turn these cases red.
+
+### The cost, measured rather than feared
+
+| | before | after |
+|---|---|---|
+| `lsof -i`, whole host | 5.9 ms | 6.9 ms |
+| `lsof`, whole host | 19.2 ms | 20.0 ms |
+
+Nothing is read on a host where every socket resolves locally; the cost above
+is one namespace's seven table files on a host that has two. Peak RSS is
+unchanged at ~10.1 MB, and the port stays faster than the C (20.0 against
+22.1 ms).
+
+### Two more things
+
+**`-i` is a search item.** `main.c` holds `Fnet` at 1 until some saved row
+carries `SELNET`, and `if (Fnet && Fnet < 2)` at the end is a search failure —
+so `lsof -a -i -p 1` exits **1**, with `-V` saying `no Internet files located`,
+even though pid 1 exists and was located. lsof-rs exited 0. `-U` has no
+equivalent rule, which is what makes this about the inet selector and not about
+sockets generally. Ten shapes were measured, including `-iTCP:65533`, `-i6` and
+`-iUDP` against a host that has a v4 TCP listener and nothing else.
+
+**A family with no table at all stays unresolved** — item 22. This host holds an
+AF_VSOCK socket, which the C names from the xattr and no `/proc/net` file
+lists. It is in the **caller's own namespace**, so it is not what item 16 was
+about, and the namespace fallback cannot reach it. Closing it needs `getxattr`,
+which has no `std` API: that means `unsafe` FFI or a dependency in a crate
+documented as needing neither. Recorded for a decision rather than taken.
+
+### What the gate gained
+
+Fixture **J** — a listener inside its own network namespace, the first fixture
+whose sockets are invisible to the caller's `/proc/net`. It needs
+`CAP_SYS_ADMIN` for `unshare --net`, so the harness **skips** its three cases
+where that is unavailable rather than failing: a missing capability is neither
+a divergence nor a broken harness. Five mutants, every case killed by at least
+one, two of them by exactly one:
+
+| mutant | cases it kills |
+|---|---|
+| no namespace fallback (the old behaviour) | the table and `-F` cases |
+| TYPE stays `SOCK` | the table and `-F` cases |
+| a size instead of the offset | the table case — and only that |
+| drop the `-i` search-item rule | the `-i` case — and only that |
+| print the address the table reveals | the table and `-F` cases |
+
+## Fixed by making the search-item contract the C's (2026-09-12)
+
+Closes item 19, and the sweep around it found three more things — two fixed
+here, two recorded as items 20 and 21.
+
+A path argument is `stat()`ed once, up front. The failure is reported with its
+errno and the argument is **dropped**; whether that is fatal depends on how many
+survived. `ck_file_arg` returns non-zero only on `!ss` — no search item was
+created at all — and `main.c` answers that with `Error()`, which exits *before*
+the listing runs. So:
+
+| command | C |
+|---|---|
+| `lsof /nope` | message, nothing listed, exit 1 |
+| `lsof /a/real/file /nope` | message, the real file's rows, exit 1 |
+| `lsof -p 123 /nope` | message, **nothing listed**, exit 1 |
+| `lsof -Q /nope` | silent, nothing listed, exit **0** |
+
+The third line is what item 19 named: the `-p` never gets its turn, because
+argument processing gave up first. lsof-rs had printed its rows. The second line
+is what the entry got wrong — it said the failure is fatal full stop, and
+lsof-rs already matched there.
+
+### `-Q` mutes the status, not just the message
+
+The bigger gap, and the one scripts actually feel. `-Q` clears `ErrStat` and
+never sets `LSOF_SEARCH_FAILURE`, so `lsof -Q /nope`, `lsof -Q /an/unopened/file`
+and `lsof -Q -p 999999` all exit **0**. lsof-rs had suppressed the message alone
+and still exited 1, which is the half that `if lsof -Q …; then` branches on.
+
+### `-V` narrates on stdout, in the C's words
+
+Every "not located" line in `main.c` is a `printf`, not an `fprintf(stderr, …)`:
+`lsof: no file use located: <path>`, `lsof: process ID not located: <pid>`.
+lsof-rs wrote its own wording to stderr, so a consumer redirecting stdout got
+the table and none of the explanation. And `+d`/`+D` reach the C through
+`enter_dir()` rather than `ck_file_arg()`, so an unstattable directory there is
+a `WARNING: can't stat(…)` on stderr and the run continues — the opposite of a
+bare path. lsof-rs had said nothing at all, which made a typo'd `+d` path look
+like an empty directory.
+
+### What the gate gained
+
+Fifteen differential cases, and the first `-V` or `-Q` in any of them: the suite
+had 69 cases and exercised neither option. Seven mutants; every case is killed by
+at least one:
+
+| mutant | cases it kills |
+|---|---|
+| never fatal (the old behaviour) | the `-p` case, and `-V` on a bad path |
+| fatal whenever ANY path fails | the two "one good path survives" cases |
+| only the FIRST failure recorded | `all-paths-unstattable` — and only that one |
+| `-V` messages back to stderr | the two `-V` reporting cases |
+| `-Q` stops muting the status | all four `-Q` cases |
+| an unlocated path stops counting | five, including `unlocated-path-exits-1` |
+| drop the `+d`/`+D` guard | `plus-d-supplies-a-surviving-item` — and only that |
+
+Two cases had to be rewritten before a mutant could kill them, which is
+LESSONS #026 again. `all-paths-unstattable` was first written as
+`lsof {NOPE} {NOPE}x`: with no other selector, "every path is bad" prints
+nothing whether or not the run aborts, so it could not fail. Adding `-p {A}`
+gave it something to lose. And `plus-d-supplies-a-surviving-item` first named
+`{ADIR}`, where the C drops four entry rows to the defect now ledgered as item
+20 — so it was measuring that defect, not the abort rule. It names `{ASUB}`
+now, which is open and empty.
+
 ## Fixed by listing tasks the way the C decides to (2026-09-07)
 
 Closes item 18. A Linux task is not a decoration on a process row: `CLONE_FS`
@@ -680,11 +884,17 @@ likely right; it is a compatibility decision, not a backend phase.
 
 | 14 | a **path argument matches by `(device, inode)`**, and `+d` is one directory level where `+D` is the tree | ~~one lowercased string-prefix match for all three~~ **resolved 2026-09-05** | see "Fixed by matching a path by what the file is" above |
 | 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | ~~matches only the mount point itself, so it **under-reports**~~ **resolved 2026-09-07** | Waited for `OpenFile::fs_device`, since the DEVICE cell is `st_rdev` for a device node and matching on it over-reported. Also brought `-f`/`+f` and the block-device mount source; see "Fixed by reading the mount table" above. |
-| 16 | a socket in **another network namespace** resolves far enough to print `sock` / `protocol: TCP` | `SOCK` / `socket:[14902]`, and SIZE/OFF as a size rather than the offset | the socket table is read once from `/proc/net/*`, which is *this* namespace's view. The C reads the target's own `/proc/<pid>/net/*`. **DEBT (L2)**: making the read per-namespace changes the cost model, since the tables would be read once per distinct netns rather than once per run. |
+| 16 | a socket in **another network namespace** shows `sock` / `protocol: TCP`, with the OFFSET rather than a size | ~~`SOCK` / `socket:[14902]`, and a size~~ **resolved 2026-09-12** | see "Fixed by asking the socket's own namespace" above. This entry's stated cause was **wrong**: it said the C reads the target's own `/proc/<pid>/net/*`, and framed the fix as a cost-model change. The C reads the `system.sockprotoname` extended attribute instead (`dsock.c`), which is why it prints a protocol and no address. Reading the namespace's own table reaches the same answer in safe, dependency-free Rust; measured cost is **+1.0 ms** on `lsof -i` and **+0.8 ms** whole-host on a two-namespace host, and nothing at all where every socket resolves locally. |
+
+| 22 | a socket family with **no `/proc/net` table at all** is still named: `protocol: AF_VSOCK` | `SOCK` / `socket:[3467]` | the C's `system.sockprotoname` xattr names any socket, table or no table; item 16's namespace fallback can only name families that have one. Measured on this host, which holds one AF_VSOCK socket **in the same namespace as the caller** — so this is not a namespace problem and item 16 does not cover it. **DECISION PENDING** — `getxattr` has no `std` API, so closing it means adding `unsafe` FFI or a dependency to a crate whose doc says "nothing here needs FFI" and that carries `#![forbid(unsafe_code)]`. That is a posture change for one NAME cell, and it is the owner's call rather than a porting decision. |
 
 | 18 | on Linux each **task is a process entry of its own** — it repeats the whole file set and the table grows `TID`/`TASKCMD` columns — and the C lists them **whenever nothing else is selected**; `-K` forces it on, `-K i` off | ~~lists processes only; `-K` opts in, and the two columns do not exist~~ **resolved 2026-09-07** | see "Fixed by listing tasks the way the C decides to" above. This entry's own wording was **wrong**: it said the C lists threads "by default", full stop. It does not — give it any selector at all (`-p`, `-u`, `-c`, `-i`, `-d`, a path) and tasks disappear, columns included. The whole-host row count that made the claim (1052 vs 261) was consistent with either reading, which is why writing the ledger from one measurement is not enough. |
 
-| 19 | a path argument that cannot be `stat()`ed is **fatal**: the C prints nothing at all and exits 1, even when another selector matched | reports exit 1 but still prints what the other selectors matched | `lsof-cli`. Measured 2026-09-07: `lsof -p <live pid> /nonexistent` is 0 rows from the C and 17 from lsof-rs; same for `-u root`, `-d 3`, `-i`. `-a` hides it (the AND makes the other selector match nothing either), which is why every existing path case matches. **DEBT** — found while sweeping `-K`, where `lsof -K -- -a -p N` exposed it; unrelated to tasks and left for its own change rather than folded into one. Repro: `lsof -n -P -K -- -a -p <pid>`. |
+| 19 | a path argument that cannot be `stat()`ed is reported and **dropped**, and if NO argument survived the run exits before listing anything; `-Q` mutes both the message and the status | ~~reported exit 1 but still printed what the other selectors matched, and `-Q` muted only the message~~ **resolved 2026-09-12** | see "Fixed by making the search-item contract the C's" above. This entry was also imprecise: it said the failure is fatal full stop. It is fatal only when EVERY path argument fails — `lsof /a/real/file /nope` prints the first file's rows and exits 1, and lsof-rs already matched there. |
+
+| 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. **C-DEFECT**, not reproduced; the `search-plus-d-supplies-a-surviving-item` case names `{ASUB}`, which is empty, precisely so it measures the abort rule and not this. |
+
+| 21 | `-c`, `-u` and `-g` are **search items**: a value that matches nothing exits 1, and `-V` says `command not located:` / `no user use located:` etc. | they select, but never counted as unlocated, so the run exits 0 | measured 2026-09-12: `lsof -c nosuchcmd`, `-u nosuchuser` and `-g 999999` are all exit 1 from the C and 0 here, while `-p` and `-i` already match. **DEBT** — found by the item-19 sweep. Doing it properly means auditing every search-item class the C keeps (`main.c` has ten `not located` messages) and deciding each against the negated-`-c` defect already ledgered as item 13, so it is recorded rather than folded into a path-argument change. |
 
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 

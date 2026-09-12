@@ -558,6 +558,153 @@ args = ["-n", "-P", "-K", "{FILE}"]
 name = "tasks-dash-K-fields"
 args = ["-n", "-P", "-K", "-a", "-d", "^mem", "-FpKMcf", "-p", "{I}"]
 
+# ------------------------------------------- sockets in another namespace (J)
+# `/proc/net/*` shows the CALLING process's network namespace, so a socket
+# inside a container is an inode no local table explains. The C answers it from
+# the `system.sockprotoname` extended attribute (`dsock.c`) and prints the
+# PROTOCOL with no address: `sock  0,9  0t0  <inode>  protocol: TCP`. Three
+# cells differ from an ordinary socket row -- a lowercase `sock` TYPE, the
+# OFFSET rather than a size, and that NAME.
+#
+# lsof-rs reaches the same answer by reading the owning process's own
+# `/proc/<pid>/net/*`, cached per namespace. It could print the address it
+# learns on the way; it deliberately does not, because matching the C is the
+# contract. See the ledger entry on AF_VSOCK for the families this cannot name
+# and the xattr can.
+#
+# SKIPPED, not failed, on a runner without CAP_SYS_ADMIN for `unshare --net`.
+
+[[case]]
+# The whole row for the namespaced listener, socket cell included.
+name = "netns-socket-shows-protocol-only"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{J}"]
+
+[[case]]
+# The same row through `-F`: `t` is the TYPE and `n` the NAME, so this pins
+# the two cells the table case could only show positionally.
+name = "netns-socket-fields"
+args = ["-n", "-P", "-a", "-d", "^mem", "-Ftn", "-p", "{J}"]
+
+[[case]]
+# `-i` selects internet sockets by protocol and state. An unresolved socket
+# has neither, so it must NOT be selected -- the C leaves it out, and a port
+# that resolved the address from the namespace table would wrongly include it.
+name = "netns-socket-is-not-selected-by-dash-i"
+args = ["-n", "-P", "-a", "-i", "-p", "{J}"]
+
+# ----------------------------------------------- the search-item contract
+# WHAT COUNTS AS A SEARCH ITEM, and what happens when one is not located.
+# Two different failures that look alike from the outside:
+#
+#   * an argument that **cannot be stat'ed**. `ck_file_arg` reports the errno
+#     and DROPS it, and if no argument survived it returns non-zero, which
+#     `main.c` answers with `Error()` -- an exit BEFORE the listing runs. So
+#     another selector never gets its turn.
+#   * an argument that resolves but is **never located** among the rows. The
+#     listing prints normally and only the exit status records it.
+#
+# `-Q` mutes both, status included; `-V` narrates them, on STDOUT, because
+# every "not located" line in `main.c` is a `printf`.
+#
+# None of this was covered: 69 cases and neither `-V` nor `-Q` appeared in any
+# of them.
+
+[[case]]
+# THE FATAL CASE. A selector that would have matched plenty, and one path that
+# cannot be stat'ed: the C prints NOTHING. lsof-rs used to print the -p rows.
+name = "search-unstattable-path-is-fatal"
+args = ["-n", "-P", "-p", "{A}", "{NOPE}"]
+
+[[case]]
+# ... but only when NOTHING survived. One good path alongside the bad one and
+# the listing runs as usual, with exit 1 recording the failure.
+name = "search-one-good-path-survives-a-bad-one"
+args = ["-n", "-P", "{ADIR}", "{NOPE}"]
+
+[[case]]
+# Argument order does not change it.
+name = "search-bad-path-before-good"
+args = ["-n", "-P", "{NOPE}", "{ADIR}"]
+
+[[case]]
+# TWO bad arguments alongside a selector that would have matched. Written this
+# way on purpose: with no selector, "every path is bad" prints nothing whether
+# or not the run aborts, so the obvious spelling of this case cannot fail. The
+# `-p` gives it something to lose, and the second bad path is what a mutant
+# that only records the FIRST failure gets wrong.
+name = "search-all-paths-unstattable"
+args = ["-n", "-P", "-p", "{A}", "{NOPE}", "{NOPE}x"]
+
+[[case]]
+# `-a` does not save it -- argument processing has already given up.
+name = "search-unstattable-path-fatal-under-dash-a"
+args = ["-n", "-P", "-a", "-p", "{A}", "{NOPE}"]
+
+[[case]]
+# RESOLVES but is not located: exit 1, and nothing printed without `-V`.
+name = "search-unlocated-path-exits-1"
+args = ["-n", "-P", "{UNOPENED}"]
+
+[[case]]
+# `-V` narrates it, on STDOUT: `lsof: no file use located: <path>`. lsof-rs
+# wrote a differently-worded line to stderr, so a consumer redirecting stdout
+# saw the table and none of the explanation.
+name = "search-dash-V-reports-an-unlocated-path"
+args = ["-n", "-P", "-V", "{UNOPENED}"]
+
+[[case]]
+# The same for a PID: `lsof: process ID not located: <pid>`, stdout.
+name = "search-dash-V-reports-an-unlocated-pid"
+args = ["-n", "-P", "-V", "-p", "999999999"]
+
+[[case]]
+# `-V` on the unstattable path: the errno line is stderr (not compared), the
+# exit is still 1, and stdout stays empty.
+name = "search-dash-V-with-an-unstattable-path"
+args = ["-n", "-P", "-V", "{NOPE}"]
+
+[[case]]
+# `-Q` mutes the STATUS, not just the message: exit 0 where the same run
+# without it exits 1. This is the half scripts branch on, and lsof-rs had
+# muted the message alone.
+name = "search-dash-Q-mutes-the-unlocated-status"
+args = ["-n", "-P", "-Q", "{UNOPENED}"]
+
+[[case]]
+# `-Q` also makes an all-unstattable argument set non-fatal.
+name = "search-dash-Q-makes-a-bad-path-non-fatal"
+args = ["-n", "-P", "-Q", "{NOPE}"]
+
+[[case]]
+# ... and then the other selector DOES get its turn, exiting 0.
+name = "search-dash-Q-lets-another-selector-run"
+args = ["-n", "-P", "-Q", "-a", "-d", "cwd", "-p", "{A}", "{NOPE}"]
+
+[[case]]
+# `-Q` on a PID that does not exist: exit 0, where plain exits 1.
+name = "search-dash-Q-mutes-an-unlocated-pid"
+args = ["-n", "-P", "-Q", "-p", "999999999"]
+
+[[case]]
+# `+d` and `+D` reach the C through `enter_dir()`, NOT `ck_file_arg()`, so an
+# unstattable directory is a warning and the run continues -- the opposite of
+# a bare path. Exit 1, empty stdout, and the warning on stderr.
+name = "search-plus-d-unstattable-is-not-fatal"
+args = ["-n", "-P", "+d", "{NOPE}"]
+
+[[case]]
+# The other side of that: a `+d` that DOES resolve supplies search items, so a
+# bad bare path alongside it is no longer "nothing survived" and the listing
+# runs. Measured -- this is the case that decides whether the fatal test may
+# look at bare paths alone, and nothing else here can see it.
+#
+# `{ASUB}` and not `{ADIR}` on purpose: fixture A holds `sub` open on fd 5 and
+# `sub` is EMPTY, so there are no entry rows for the C to lose to the defect
+# ledgered as `plus-d-entries-lost-to-a-bare-path` -- which would otherwise
+# make this case about that defect instead of about the abort.
+name = "search-plus-d-supplies-a-surviving-item"
+args = ["-n", "-P", "{NOPE}", "+d", "{ASUB}"]
+
 # ------------------------------------------------------------- exit contract
 
 [[case]]

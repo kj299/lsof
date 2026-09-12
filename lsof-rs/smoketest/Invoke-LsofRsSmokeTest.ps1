@@ -453,7 +453,14 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
 
     # ===================== verbose / privilege =====================
     Test-Case 'verbose-pid-not-found' 'verbose/-V' {
-        $r = Invoke-Lsof @('-V', '-p', '4294967294') 'V-missing'; Assert-Contains $r.Err 'no matching'
+        # STDOUT, and the C's wording. Every "not located" line in the C's
+        # `main.c` is a `printf`, not an `fprintf(stderr, ...)`: `-V` output is
+        # meant to be read alongside the table, so a consumer redirecting
+        # stdout gets the whole story or none of it. This case asserted the
+        # port's own sentence on stderr until the Linux oracle said otherwise.
+        $r = Invoke-Lsof @('-V', '-p', '4294967294') 'V-missing'
+        Assert-Contains $r.Out 'process ID not located: 4294967294'
+        Assert-NotContains $r.Err 'not located' '-V narration belongs on stdout'
     }
     Test-Case 'privilege-hint-unelevated' 'privilege' {
         if ($IsAdmin) { Skip 'elevated: hint not expected' }
@@ -698,14 +705,28 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         # test). Same leniency as -U: a 2s window can't guarantee live ICMP
         # traffic, so assert the capture fired and the run exits cleanly.
         $r = Invoke-Lsof @('-nP', '-iICMP') 'i-icmp'
-        Assert ($r.Exit -eq 0) "-iICMP should run cleanly (exit=$($r.Exit))"
+        # `-i` is a SEARCH ITEM: the C holds `Fnet` at 1 until some listed row
+        # is an Internet file and ends in a search failure if it never rises,
+        # so a run that lists nothing exits 1 -- and the comment above already
+        # admits a 2s window may catch no traffic. Asserting exit 0 was a proxy
+        # for "did not blow up" that this rule invalidated, so assert the RULE:
+        # rows means 0, no rows means 1, and anything else is a real failure.
+        $want = if ([string]::IsNullOrWhiteSpace($r.Out)) { 1 } else { 0 }
+        Assert ($r.Exit -eq $want) "-iICMP exit should be $want with $(if ($want) { 'no' } else { 'some' }) rows (got $($r.Exit))"
         Assert-Contains $r.Err 'etw: captured' '-iICMP must imply the ETW capture'
         Assert-NotContains $r.Out ' TCP ' '-iICMP must not list TCP rows'
     }
     Test-Case 'inet-raw-family-dash-i' 'sockets/-iRAW' {
         if (-not $IsAdmin) { Skip 'RAW rows come from the ETW AFD capture (needs Administrator)' }
         $r = Invoke-Lsof @('-nP', '-iRAW') 'i-raw'
-        Assert ($r.Exit -eq 0) "-iRAW should run cleanly (exit=$($r.Exit))"
+        # `-i` is a SEARCH ITEM: the C holds `Fnet` at 1 until some listed row
+        # is an Internet file and ends in a search failure if it never rises,
+        # so a run that lists nothing exits 1 -- and the comment above already
+        # admits a 2s window may catch no traffic. Asserting exit 0 was a proxy
+        # for "did not blow up" that this rule invalidated, so assert the RULE:
+        # rows means 0, no rows means 1, and anything else is a real failure.
+        $want = if ([string]::IsNullOrWhiteSpace($r.Out)) { 1 } else { 0 }
+        Assert ($r.Exit -eq $want) "-iRAW exit should be $want with $(if ($want) { 'no' } else { 'some' }) rows (got $($r.Exit))"
         Assert-Contains $r.Err 'etw: captured' '-iRAW must imply the ETW capture'
         Assert-NotContains $r.Out ' UDP ' '-iRAW must not list UDP rows'
     }

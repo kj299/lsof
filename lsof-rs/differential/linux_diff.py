@@ -108,10 +108,31 @@ def infra(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 # ------------------------------------------------------------------ fixtures
 
 
+class FixtureUnavailable(Exception):
+    """An OPTIONAL fixture could not start, and that is not a harness failure.
+
+    Distinct from `infra()` on purpose: `INFRA` is this harness's word for
+    "exit 2, something is broken", and printing it for a fixture the runner
+    simply lacks the capability for made a perfectly green log read as though
+    the harness had fallen over.
+    """
+
+
 class Fixture:
     """One self-owned process whose open files are the thing under test."""
 
-    def __init__(self, name: str, argv: list, cwd: str, expect_fds: int, expect_comm: bytes | None = None):
+    def __init__(
+        self,
+        name: str,
+        argv: list,
+        cwd: str,
+        expect_fds: int,
+        expect_comm: bytes | None = None,
+        optional: bool = False,
+    ):
+        # When true, a failure to start raises FixtureUnavailable instead of
+        # ending the run: the cases naming this fixture are skipped by name.
+        self.optional = optional
         self.name = name
         self.argv = argv
         self.cwd = cwd
@@ -142,17 +163,22 @@ class Fixture:
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                infra(f"fixture {self.name} exited early (rc={self.proc.returncode})")
+                self._failed(f"exited early (rc={self.proc.returncode})")
             if fd_count(self.pid) >= self.expect_fds and (
                 self.expect_comm is None or comm(self.pid) == self.expect_comm
             ):
                 return
             time.sleep(0.02)
-        infra(
-            f"fixture {self.name} did not reach {self.expect_fds} fds"
+        self._failed(
+            f"did not reach {self.expect_fds} fds"
             + (f" as {self.expect_comm!r}" if self.expect_comm else "")
             + " within 3s"
         )
+
+    def _failed(self, why: str) -> "NoReturn":  # type: ignore[name-defined]
+        if self.optional:
+            raise FixtureUnavailable(f"{self.name}: {why}")
+        infra(f"fixture {self.name} {why}")
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -355,6 +381,38 @@ def thread_holder(work: str) -> Fixture:
     )
 
 
+def netns_listener(work: str) -> Fixture:
+    """A TCP listener inside its OWN network namespace.
+
+    The only fixture whose sockets are invisible to `/proc/net/*` as this
+    process sees them, which is the whole point: an inode the main table misses
+    is the one case where lsof has to go looking in the owning process's
+    namespace. The C answers it from the `system.sockprotoname` xattr and shows
+    `sock … protocol: TCP` -- protocol, no address -- and this port reads the
+    namespace's own table to reach the same answer.
+
+    `unshare --net` needs CAP_SYS_ADMIN. Where that is not available the
+    fixture reports itself unsupported rather than failing: a runner without it
+    must skip these cases, not manufacture a divergence.
+    """
+    ndir = os.path.join(work, "netns")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
+        "s.bind(('127.0.0.1',0)); s.listen(1)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ndir
+    )
+    return Fixture(
+        "J(netns)",
+        ["unshare", "--net", sys.executable, "-c", py],
+        cwd=ndir,
+        expect_fds=4,
+        optional=True,
+    )
+
+
 def make_fixtures(
     work: str,
 ) -> tuple[
@@ -386,6 +444,15 @@ def make_fixtures(
     # the `+d`/`+D` cases measure one-level-vs-recursive, which is their job.
     linkdir = os.path.join(work, "hardlink")
     os.makedirs(linkdir)
+    # An existing file that NOTHING opens, and a path that does not exist, both
+    # outside every fixture's directory so the `+d`/`+D` expansions do not see
+    # them. They are the two halves of the search-item contract: an argument
+    # that resolves but is never located (exit 1, `-V` says so) versus one that
+    # cannot be stat'ed at all (fatal before the listing runs).
+    quietdir = os.path.join(work, "search")
+    os.makedirs(quietdir)
+    with open(os.path.join(quietdir, "unopened.txt"), "w") as f:
+        f.write("nobody holds this\n")
     os.link(os.path.join(fdir, "f.txt"), os.path.join(linkdir, "hard.txt"))
     # exec keeps the pid stable (no bash parent lingering as the "process"), and
     # <> on the FIFO opens it read/write so the open cannot block. The hostile
@@ -429,7 +496,8 @@ def make_fixtures(
     g = anon_inode_holder(work)
     h = long_command_holder(work)
     i = thread_holder(work)
-    return a, b, c, d, e, f, g, h, i
+    j = netns_listener(work)
+    return a, b, c, d, e, f, g, h, i, j
 
 
 # -------------------------------------------------------------------- matrix
@@ -514,6 +582,23 @@ def preflight_locale() -> None:
         infra(f"locale {LOCALE} is not installed (locale -a); the C oracle is compared under it")
 
 
+def _raw_args(matrix_path: str, name: str) -> list:
+    """The args of `name` as written in the matrix, before substitution.
+
+    Used to tell which cases mention `{J}` so they can be dropped when the
+    namespace fixture could not start. Reading the file again is cheap and
+    keeps `render_matrix` free of skip logic.
+    """
+    import tomllib
+
+    with open(matrix_path, "rb") as f:
+        doc = tomllib.load(f)
+    for case in doc.get("case", []):
+        if case.get("name") == name:
+            return [str(a) for a in case.get("args", [])]
+    return []
+
+
 # ---------------------------------------------------------------------- main
 
 
@@ -526,15 +611,33 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e, lk, anon, longcmd, threads = fixtures
+    a, b, c, d, e, lk, anon, longcmd, threads, netns = fixtures
     try:
         for fx in fixtures:
+            if fx is netns:
+                # `unshare --net` needs CAP_SYS_ADMIN. A runner without it must
+                # SKIP the namespace cases, not fail and not silently compare
+                # something else -- an unavailable capability is neither a
+                # divergence nor a broken harness.
+                try:
+                    fx.start()
+                except (FixtureUnavailable, OSError) as unavailable:
+                    # NOT `as e`: `e` is fixture E in this scope, and Python
+                    # unbinds the exception name at the end of the block — so
+                    # `as e` deletes the fixture and the next line dies with
+                    # UnboundLocalError, on the failure path only.
+                    print(
+                        f"linux_diff: optional fixture unavailable: {unavailable}",
+                        file=sys.stderr,
+                    )
+                    netns = None
+                continue
             fx.start()
         # E's mappings land after its fds do; it writes `ready` once both
         # libraries are loaded and one is unlinked. Waiting on the marker
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
-        for fx in (e, lk, anon, threads):
+        for fx in [f for f in (e, lk, anon, threads, netns) if f is not None]:
             ready = os.path.join(fx.cwd, "ready")
             deadline = time.monotonic() + 5.0
             while not os.path.exists(ready) and time.monotonic() < deadline:
@@ -560,6 +663,9 @@ def run(args) -> int:
         cases = render_matrix(
             args.matrix,
             {
+                # `{J}` is only defined when the namespace fixture came up; the
+                # cases that name it are dropped below when it did not.
+                "J": str(netns.pid) if netns is not None else "0",
                 "A": str(a.pid),
                 "B": str(b.pid),
                 "C": str(c.pid),
@@ -573,11 +679,23 @@ def run(args) -> int:
                 "DEVSRC": mount_source("/dev"),
                 "FILE": os.path.join(a.cwd, "f.txt"),
                 "HARDLINK": os.path.join(work, "hardlink", "hard.txt"),
+                "UNOPENED": os.path.join(work, "search", "unopened.txt"),
+                # Never created -- the point is that stat() fails on it.
+                "NOPE": os.path.join(work, "search", "absent.txt"),
                 "ADIR": a.cwd,
                 "ASUB": os.path.join(a.cwd, "sub"),
                 "PORT": port,
             },
         )
+        if netns is None:
+            dropped = [c["name"] for c in cases if any("{J}" in a for a in _raw_args(args.matrix, c["name"]))]
+            cases = [c for c in cases if c["name"] not in dropped]
+            if dropped:
+                print(
+                    "linux_diff: SKIP (no CAP_SYS_ADMIN for `unshare --net`): "
+                    + ", ".join(dropped),
+                    file=sys.stderr,
+                )
         matrix_json = os.path.join(work, "matrix.json")
         with open(matrix_json, "w") as f:
             json.dump({"case": cases}, f, indent=1)
@@ -636,6 +754,22 @@ def self_test() -> int:
         check("fixture start waits for the expected fd count", fd_count(fx.pid) >= 4)
         fx.stop()
         check("fixture stop terminates it", fx.proc.poll() is not None)
+
+    # An OPTIONAL fixture that cannot start must raise rather than end the run
+    # — and must NOT print `INFRA`, which is this harness's word for "exit 2,
+    # something is broken" and made a perfectly green log read as a breakage.
+    # The failure path needs its own test because it is the one CI takes: the
+    # first version of the handler wrote `except ... as e`, shadowing fixture
+    # E and killing the run with UnboundLocalError three lines later, and only
+    # running this path with a deliberately broken `unshare` found it.
+    opt = Fixture("opt", ["/bin/false"], cwd="/tmp", expect_fds=99, optional=True)
+    try:
+        opt.start()
+        check("optional fixture failure raises", False)
+    except FixtureUnavailable as unavailable:
+        check("optional fixture raises FixtureUnavailable", "opt" in str(unavailable))
+    finally:
+        opt.stop()
 
         # The hostile comm really reaches the kernel, byte for byte: the
         # symlink route gives a comm equal to the basename, and the kernel

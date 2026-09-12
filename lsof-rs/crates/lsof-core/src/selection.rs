@@ -429,8 +429,13 @@ pub struct Selection {
     /// `-l`: render numeric IDs (raw SID string) instead of the resolved
     /// account name in the USER column.
     pub numeric_ids: bool,
-    /// `-Q`: suppress "no matching open files" stderr and treat an empty
-    /// result set as success.
+    /// `-Q`: mute every search failure, **status included**.
+    ///
+    /// The C clears `ErrStat` under it and never sets `LSOF_SEARCH_FAILURE`,
+    /// so `lsof -Q /nope`, `lsof -Q /an/unopened/file` and
+    /// `lsof -Q -p 999999` all exit 0, and an argument set where nothing could
+    /// be `stat()`ed stops being fatal. Suppressing the message alone — which
+    /// this did — leaves the half that `if lsof -Q …; then` branches on.
     pub quiet: bool,
     /// `-w` sets this, `+w` clears it (default `false` — warnings on):
     /// suppresses the privilege-hint and other non-fatal stderr warnings.

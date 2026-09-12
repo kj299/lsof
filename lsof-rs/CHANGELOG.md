@@ -11,7 +11,124 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A socket in another network namespace is named** (`DIVERGENCES.md` #16):
+  `sock  0,9  0t0  <inode>  protocol: TCP` rather than
+  `SOCK  0,9  0  <inode>  socket:[<inode>]` — three cells, all of them wrong
+  before. lsof-rs reads the owning process's own `/proc/<pid>/net/*`, cached by
+  namespace (and a pid cache so one process costs one `readlink`), and takes the
+  **protocol name only**: the C shows no address here, and matching it is the
+  contract.
+
+  The ledger entry's stated cause was wrong — it said the C reads
+  `/proc/<pid>/net/*` and framed the fix as a cost-model change. The C reads the
+  `system.sockprotoname` extended attribute instead. Measured cost of the real
+  fix: **+1.0 ms** on `lsof -i` and **+0.8 ms** whole-host on a two-namespace
+  host, nothing where every socket resolves locally, RSS unchanged.
+
+- **`-i` is a search item.** `main.c` holds `Fnet` at 1 until some listed row is
+  an Internet file, and ends with a search failure if it never rises — so
+  `lsof -a -i -p 1` exits **1** (`-V`: `no Internet files located`) even though
+  pid 1 exists. lsof-rs exited 0. `-U` has no equivalent rule.
+
+- **`-Q` mutes the exit status, not just the message** (`DIVERGENCES.md` #19's
+  sweep). The C clears `ErrStat` and never sets `LSOF_SEARCH_FAILURE` under
+  `-Q`, so `lsof -Q /nope`, `lsof -Q /an/unopened/file` and
+  `lsof -Q -p 999999` all exit **0**. lsof-rs suppressed the message alone and
+  still exited 1 — the half that `if lsof -Q …; then` actually branches on.
+
+- **An unstattable path argument aborts the run when no argument survives**
+  (`DIVERGENCES.md` #19). `ck_file_arg` reports the errno, drops the argument,
+  and returns non-zero only when nothing was left; `main.c` answers that with
+  `Error()`, before any listing. So `lsof -p 123 /nope` prints **nothing** — the
+  `-p` never gets its turn. `lsof /a/real/file /nope` still prints the real
+  file's rows and exits 1, which lsof-rs already matched; the ledger entry had
+  said the failure was fatal full stop, and it is not.
+
+  lsof-rs now also prints the message the C prints —
+  `lsof: status error on <path>: <errno>` — having previously failed silently,
+  and warns on an unstattable `+d`/`+D` directory
+  (`lsof: WARNING: can't stat(<dir>): <errno>`) instead of letting a typo'd path
+  look like an empty directory.
+
+- **`-V` "not located" lines go to stdout, in the C's words.** Every one of them
+  in `main.c` is a `printf`: `lsof: no file use located: <path>`,
+  `lsof: process ID not located: <pid>`. lsof-rs wrote its own wording to
+  stderr, so a consumer redirecting stdout got the table and none of the
+  explanation.
+
 ### Verification
+- **The skipped-fixture path no longer cries wolf, and now has a test.** The
+  first CI run's differential log read
+  `linux_diff: INFRA: fixture J(netns) exited early (rc=1)` before its SKIP
+  line — and `INFRA` is this harness's word for "exit 2, something is broken",
+  so a perfectly green run looked like a breakage. An optional fixture now
+  raises `FixtureUnavailable` instead.
+
+  Exercising that path locally, with a deliberately broken `unshare`, found a
+  real bug in the handler I had just written: `except (…) as e` **shadowed
+  fixture E**, and Python unbinds the exception name at the end of the block,
+  so the next line died with `UnboundLocalError` — on the failure path only,
+  which is the path CI actually takes. The self-test now covers it (13 checks).
+
+- **miri caught an over-strong invariant in this PR's own test — the fifth of
+  that shape here.** `errno_text_drops_the_rust_suffix` asserted its result
+  never *contains* `os error`. Under miri that is false through no fault of the
+  code: miri's `strerror` shim already ends the message with `(os error 2)`,
+  `Display` appends a second, and stripping exactly one — which is the rule,
+  the same "one, never greedily" the `/proc/maps` ` (deleted)` marker follows —
+  leaves one behind. The test now pins the transformation with constructed
+  strings (portable, and including the doubled case) and asks the live error
+  only whether the suffix `Display` added is gone. Verified failing, then
+  passing, under miri locally.
+
+- **The Windows unsafe layer is under AddressSanitizer** — the last of the
+  playbook's four exit criteria this port had never executed. miri covers the
+  `forbid(unsafe_code)` crates; the ~150 `unsafe` blocks in the Windows backend,
+  every one an FFI call with a hand-sized buffer, had never been under a
+  sanitizer at all.
+
+  The job **carries its own proof**. A sanitizer that finds nothing looks
+  exactly like one that never instrumented anything — a mistyped `RUSTFLAGS`, a
+  missing `--target`, an ASan runtime DLL that did not load, and the job goes
+  green having checked nothing. That is how the kit's sanitizer gate came to be
+  "declared but never run" here in the first place (LESSONS #019). So the first
+  step runs `tests/asan_canary.rs`, which reads one byte past a heap
+  allocation, and **requires** an `AddressSanitizer` diagnostic; if the canary
+  survives, the job fails before reporting anything about the real code.
+
+  It lands **observe-first** (`continue-on-error`), on the kit's promotion rule
+  (LESSONS #13): consecutive log-verified green runs before it becomes a hard
+  gate. Unlike the miri job, this one could not be validated locally first —
+  there is no Windows here — so observe-first is doing real work rather than
+  ceremony, and `progress.json` deliberately still reads `differential` for
+  `lsof-backend-windows`: a gate is not passed until it has run.
+
+  **First run, log-verified:** `AddressSanitizer: heap-buffer-overflow` on the
+  canary, then `canary caught: ASan is live`, then both real steps clean. The
+  gate works and has demonstrated it can fail — one green run of three.
+
+- **Fixture J: a listener in its own network namespace**, the first fixture
+  whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs
+  `CAP_SYS_ADMIN`, so the harness **skips** its three cases where that is
+  unavailable rather than failing — a missing capability is neither a divergence
+  nor a broken harness. Five mutants, every case killed by at least one, two of
+  them by exactly one (including a mutant that prints the address the namespace
+  table reveals, which the C does not show).
+
+- **Fifteen differential cases for the search-item contract — and the first
+  `-V` or `-Q` in any case at all.** The suite had 69 cases and exercised
+  neither option. Seven mutants; every new case is killed by at least one, two
+  of them by exactly one.
+
+  Two cases had to be rewritten before any mutant could kill them.
+  `all-paths-unstattable` began as `lsof {NOPE} {NOPE}x` — with no other
+  selector, "every path is bad" prints nothing whether or not the run aborts, so
+  it could not fail; `-p {A}` gave it something to lose. And
+  `plus-d-supplies-a-surviving-item` began by naming `{ADIR}`, where the C drops
+  four entry rows to the defect now ledgered as item 20, so it was measuring
+  that defect rather than the abort rule.
+
 - **The `proc_maps` fuzz target was accusing a correct parser.** It asserted no
   parsed path ever ends with ` (deleted)`, and fired on a ` (deleted) (deleted)`
   input — but that shape is real, not adversarial: a file genuinely named

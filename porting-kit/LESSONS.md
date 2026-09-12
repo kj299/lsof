@@ -904,5 +904,17 @@ the emphasized half.
   module actually promises (no panic, no invention, a flag that pairs with a
   transformation); an exact-value claim belongs in a unit test, where it can be
   written down next to the measurement that justifies it.
+
+  A fifth instance arrived from **miri**, on a unit test written the same day
+  this entry was: it asserted that a stripped errno message never *contains*
+  `os error`. Miri's `strerror` shim already ends the message with
+  `(os error 2)`, `Display` appends a second, and the function's actual rule —
+  strip exactly one, never greedily — correctly leaves one behind. Note the
+  shape: this is the `/proc/maps` ` (deleted) (deleted)` case again, in another
+  file, written by someone who had just finished writing that one up. Knowing
+  the pattern is not the same as applying it, so make the check mechanical:
+  **when an assertion says "never contains X", ask what legitimate input
+  contains X** — and prefer pinning a transformation with constructed inputs
+  over asserting an absolute about a live one.
 - **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases);
   lsof-rs `DIVERGENCES.md` (the `-K` section carries the kill table).

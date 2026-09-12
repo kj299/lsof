@@ -286,3 +286,105 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
+
+  asan-windows:
+    name: ASan (UB in the Windows unsafe layer)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # OBSERVE-FIRST, deliberately. This is the last of the playbook's four exit
+    # criteria that this port had never executed: miri covers the
+    # forbid(unsafe_code) crates, and the ~150 unsafe blocks in the Windows
+    # backend — every one of them an FFI call with a hand-sized buffer — have
+    # never been under a sanitizer at all (see the miri job's scope note).
+    #
+    # It lands non-blocking on the kit's own promotion rule (LESSONS #13):
+    # consecutive log-verified green runs, read from the step log rather than
+    # the job status, before it becomes a hard gate. Unlike the miri job, this
+    # one could not be validated locally first — there is no Windows here — so
+    # observe-first is doing real work, not ceremony.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # `-Zsanitizer` is nightly-only. Pinned for the same reason the miri
+          # job is: a hard gate must fail for the code's reasons, and a
+          # sanitizer's codegen can change on any given nightly.
+          toolchain: nightly-2026-08-31
+          components: rust-src
+      - name: locate the ASan runtime
+        # Rust links `clang_rt.asan_dynamic-x86_64.lib`; the matching DLL ships
+        # with the MSVC toolchain and is NOT on PATH by default, so the test
+        # binary dies with a loader error that looks nothing like a sanitizer
+        # finding. Resolve it through vswhere rather than hard-coding a VS
+        # version that will age out from under the job.
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $ver = Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt"
+          $bin = "$vs\VC\Tools\MSVC\$($ver.Trim())\bin\Hostx64\x64"
+          if (-not (Test-Path "$bin\clang_rt.asan_dynamic-x86_64.dll")) {
+            Write-Host "::warning::ASan runtime not found under $bin"
+            Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Filter "clang_rt.asan*" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 5 -ExpandProperty FullName
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          Write-Host "ASan runtime dir: $bin"
+      - name: canary — ASan must catch a deliberate overflow
+        # THE POINT OF THIS STEP. A sanitizer job that finds nothing is
+        # indistinguishable from one that never instrumented anything: a
+        # mistyped RUSTFLAGS, a missing --target, a runtime DLL that did not
+        # load, and the job still goes green while proving nothing. That is
+        # precisely how the kit's sanitizer gate came to be "declared but never
+        # run" here (LESSONS #019). So the job first runs a test that reads one
+        # byte past a heap allocation and REQUIRES it to abort with an ASan
+        # diagnostic. If the canary survives, the job fails before it says
+        # anything about the real code.
+        shell: pwsh
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+        run: |
+          $log = "canary.log"
+          cargo +nightly-2026-08-31 test --target x86_64-pc-windows-msvc `
+            -p lsof-backend-windows --features asan-canary `
+            --test asan_canary 2>&1 | Tee-Object -FilePath $log
+          $text = Get-Content $log -Raw
+          if ($text -match "CANARY SURVIVED") {
+            throw "ASan is not instrumenting this build: the out-of-bounds read completed."
+          }
+          if ($text -notmatch "AddressSanitizer") {
+            throw "no AddressSanitizer diagnostic in the canary run — the sanitizer did not report, so a clean run below would prove nothing."
+          }
+          Write-Host "canary caught: ASan is live."
+          # GitHub's pwsh appends `exit $LASTEXITCODE`, and cargo exited
+          # non-zero here BY DESIGN — the canary is supposed to die. Without
+          # this the step fails on the very outcome it requires.
+          exit 0
+      - name: ASan over the Windows backend
+        # The real run. `enumerates_real_kernel_object_types` is the one that
+        # matters: it creates an event, a mutex, a section and a token and
+        # walks the live handle table through the same unsafe enumeration the
+        # binary uses, so the buffers those FFI calls fill are the buffers ASan
+        # is watching.
+        shell: pwsh
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          # Symbolized frames need the MSVC symbolizer; without it a report is
+          # a list of addresses and the finding is unreadable.
+          ASAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cargo +nightly-2026-08-31 test --target x86_64-pc-windows-msvc `
+            -p lsof-backend-windows
+      - name: ASan over one real run of the binary
+        # The unit tests exercise the enumeration; only the binary exercises it
+        # against every process on the box, which is where a short buffer shows
+        # up. `-p $PID` keeps it to this process's own handles so the step stays
+        # bounded.
+        shell: pwsh
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cargo +nightly-2026-08-31 run --target x86_64-pc-windows-msvc `
+            -p lsof-cli --bin lsof -- -nP -p $PID

@@ -192,7 +192,14 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
 ///
 /// `offset` is the fd's file position from fdinfo (`None` for the `cwd`/
 /// `rtd`/`txt` specials, which have none).
-fn row(link: &Path, fd: FdType, info: &FdInfo, socks: &SocketTable) -> Option<OpenFile> {
+fn row(
+    link: &Path,
+    fd: FdType,
+    info: &FdInfo,
+    pid: u32,
+    socks: &SocketTable,
+    ns: &net::NetnsTables,
+) -> Option<OpenFile> {
     let access = info.access();
     let offset = info.pos;
     let target = std::fs::read_link(link).ok();
@@ -211,6 +218,32 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, socks: &SocketTable) -> Option<Op
     // exactly as it was, which is the honest result for a socket in another
     // network namespace.
     if let Some(inode) = net::socket_inode(&name) {
+        if socks.get(inode).is_none() {
+            // Not in this namespace's tables. Before falling back to the bare
+            // `socket:[inode]` row, ask the owning process's OWN namespace for
+            // the protocol name — which is all the C prints for such a socket
+            // (`sock … protocol: TCP`), and all this recovers.
+            if let Some(proto) = ns.protocol_for(pid, inode) {
+                return Some(OpenFile {
+                    fs_device: None,
+                    file_flags: info.flags,
+                    lock: None,
+                    fd,
+                    access,
+                    // Lowercase `sock`, the C's LSOF_FILE_SOCKET, and the
+                    // OFFSET rather than a size: an unidentified socket has no
+                    // size worth printing and the C shows `0t0`.
+                    file_type: FileType::Other("sock".into()),
+                    name: format!("protocol: {proto}"),
+                    device: meta.as_ref().map(dev_cell),
+                    size: None,
+                    offset: Some(offset.unwrap_or(0)),
+                    node: Some(inode.to_string()),
+                    links: None,
+                    socket: None,
+                });
+            }
+        }
         if let Some(e) = socks.get(inode) {
             // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
             // anonymous socket has no path and shows the tail alone.
@@ -313,8 +346,9 @@ pub fn for_pid(
     pid: u32,
     socks: &SocketTable,
     locks: &crate::locks::LockTable,
+    ns: &net::NetnsTables,
 ) -> Option<Vec<OpenFile>> {
-    for_proc_dir(&format!("/proc/{pid}"), pid, socks, locks)
+    for_proc_dir(&format!("/proc/{pid}"), pid, socks, locks, ns)
 }
 
 /// The rows under one `/proc` directory — either a process's own
@@ -332,6 +366,7 @@ pub fn for_proc_dir(
     pid: u32,
     socks: &SocketTable,
     locks: &crate::locks::LockTable,
+    ns: &net::NetnsTables,
 ) -> Option<Vec<OpenFile>> {
     let mut out = Vec::new();
 
@@ -342,7 +377,7 @@ pub fn for_proc_dir(
         ("exe", FdType::Txt),
     ] {
         let p = format!("{base}/{name}");
-        if let Some(f) = row(Path::new(&p), fd, &FdInfo::default(), socks) {
+        if let Some(f) = row(Path::new(&p), fd, &FdInfo::default(), pid, socks, ns) {
             out.push(f);
         }
     }
@@ -369,7 +404,7 @@ pub fn for_proc_dir(
     for (num, name) in fds {
         let p = format!("{base}/fd/{name}");
         let info = fdinfo_for(base, &name);
-        if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), &info, socks) {
+        if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), &info, pid, socks, ns) {
             // The lock character lsof appends to the FD cell (`8uW`). Only a
             // numbered fd can hold one: the specials and the mapped-file rows
             // are not open file descriptions.
@@ -426,7 +461,9 @@ mod tests {
                 access: Some(AccessMode::Read),
                 ..FdInfo::default()
             },
+            0,
             &SocketTable::default(),
+            &net::NetnsTables::default(),
         )
         .expect("/dev/null is stat-able");
         assert_eq!(f.file_type, FileType::Chr);
@@ -443,8 +480,13 @@ mod tests {
             .next()
             .and_then(|s| s.parse().ok())
             .expect("pid parses");
-        let files = for_pid(pid, &SocketTable::load(false), &crate::locks::load())
-            .expect("own /proc/<pid>/fd is readable");
+        let files = for_pid(
+            pid,
+            &SocketTable::load(false),
+            &crate::locks::load(),
+            &net::NetnsTables::new(),
+        )
+        .expect("own /proc/<pid>/fd is readable");
 
         assert!(
             files.iter().any(|f| f.fd == FdType::Cwd),
@@ -591,7 +633,9 @@ mod tests {
             Path::new(&link),
             FdType::Handle(raw as u64),
             &info,
+            self_pid(),
             &SocketTable::default(),
+            &net::NetnsTables::default(),
         )
         .expect("pipe fd is stat-able");
         assert_eq!(f.file_type, FileType::Fifo);
