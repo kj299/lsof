@@ -58,6 +58,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   explanation.
 
 ### Verification
+- **miri caught an over-strong invariant in this PR's own test — the fifth of
+  that shape here.** `errno_text_drops_the_rust_suffix` asserted its result
+  never *contains* `os error`. Under miri that is false through no fault of the
+  code: miri's `strerror` shim already ends the message with `(os error 2)`,
+  `Display` appends a second, and stripping exactly one — which is the rule,
+  the same "one, never greedily" the `/proc/maps` ` (deleted)` marker follows —
+  leaves one behind. The test now pins the transformation with constructed
+  strings (portable, and including the doubled case) and asks the live error
+  only whether the suffix `Display` added is gone. Verified failing, then
+  passing, under miri locally.
+
 - **The Windows unsafe layer is under AddressSanitizer** — the last of the
   playbook's four exit criteria this port had never executed. miri covers the
   `forbid(unsafe_code)` crates; the ~150 `unsafe` blocks in the Windows backend,
@@ -79,6 +90,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   there is no Windows here — so observe-first is doing real work rather than
   ceremony, and `progress.json` deliberately still reads `differential` for
   `lsof-backend-windows`: a gate is not passed until it has run.
+
+  **First run, log-verified:** `AddressSanitizer: heap-buffer-overflow` on the
+  canary, then `canary caught: ASan is live`, then both real steps clean. The
+  gate works and has demonstrated it can fail — one green run of three.
 
 - **Fixture J: a listener in its own network namespace**, the first fixture
   whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs

@@ -95,6 +95,16 @@ purpose: a gate is not passed until it has actually run, and advancing the row
 on the strength of a job that has never executed would be the same bookkeeping
 this ledger exists to prevent.
 
+### First run, read from the log
+
+    AddressSanitizer: heap-buffer-overflow on address 0x110bbc4a2050 at pc …
+    canary caught: ASan is live
+
+then both real steps clean. So the sanitizer is genuinely instrumenting, the
+runtime DLL resolved, and the gate has demonstrated it can fail — which is the
+only evidence that makes a clean run mean anything. One green run of the three
+the promotion rule asks for.
+
 ## Fixed by asking the socket's own namespace (2026-09-12)
 
 Closes item 16, whose stated cause was wrong, and turns up two more things.

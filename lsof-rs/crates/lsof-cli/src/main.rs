@@ -132,7 +132,7 @@ OUTPUT:\n\
     +c <n>        cap COMMAND column width at <n> characters\n\
 \n\
 MISCELLANEOUS:\n\
-    -Q            quiet: suppress 'no matching open files' on empty result\n\
+    -Q            quiet: mute search failures, exit status included\n\
     -w / +w       suppress / enable non-fatal stderr warnings (default on)\n\
     -O            no-op (Unix-specific perf hint; accepted for portability)\n\
     --            end of options; remaining args are paths\n\
@@ -637,23 +637,47 @@ mod tests {
 
     /// `errno_text` strips the ` (os error N)` that Rust appends and the C
     /// never prints, so `lsof: status error on /nope: No such file or
-    /// directory` is byte-identical to the oracle's line. Portable: the
-    /// messages differ per platform, the SHAPE does not.
+    /// directory` is byte-identical to the oracle's line.
+    ///
+    /// The rule is **strip exactly one, never greedily** — the same shape as
+    /// the `/proc/maps` ` (deleted)` marker. The first version of this test
+    /// asserted the result never *contains* `os error`, which is over-strong,
+    /// and miri said so: its `strerror` shim already ends the message with
+    /// `(os error 2)`, `Display` appends a second, and a correct single strip
+    /// leaves one behind. Constructed strings pin the rule portably; the live
+    /// error then only has to show that the suffix `Display` added is gone.
     #[test]
-    fn errno_text_drops_the_rust_suffix() {
+    fn errno_text_drops_one_rust_suffix() {
         use super::errno_text;
         use std::io::Error;
+
+        // `Error::other` Displays as the message alone, so these pin the
+        // transformation itself on every platform and under miri.
+        assert_eq!(
+            errno_text(Error::other("No such file or directory (os error 2)")),
+            "No such file or directory"
+        );
+        // Nothing to strip: survives whole.
+        assert_eq!(errno_text(Error::other("handmade")), "handmade");
+        // The suffix counts only at the very end, in parentheses.
+        assert_eq!(
+            errno_text(Error::other("no (os error 2) here")),
+            "no (os error 2) here"
+        );
+        // Exactly one. Greedy stripping would rename an errno message that
+        // legitimately ends that way — and it is the shape miri produces.
+        assert_eq!(
+            errno_text(Error::other("x (os error 2) (os error 2)")),
+            "x (os error 2)"
+        );
+
+        // On a live OS error, whatever the platform's message is, the suffix
+        // `Display` appended is gone and something is left.
         let e = Error::from_raw_os_error(2);
+        let raw = e.to_string();
         let t = errno_text(e);
-        assert!(!t.contains("os error"), "{t:?}");
+        assert_eq!(t, raw.strip_suffix(" (os error 2)").unwrap_or(&raw));
         assert!(!t.is_empty());
-        // A non-OS error has no suffix to strip and must survive whole.
-        let plain = errno_text(Error::other("handmade"));
-        assert_eq!(plain, "handmade");
-        // A message that merely mentions the words is not truncated: the
-        // suffix only counts at the very end, in parentheses.
-        let odd = errno_text(Error::other("no (os error 2) here"));
-        assert_eq!(odd, "no (os error 2) here");
     }
 
     /// The predicate behind the "re-run as Administrator" stderr hint. Hosted
