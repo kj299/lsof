@@ -649,8 +649,20 @@ the emphasized half.
   per platform and says a backend may itself be `forbid(unsafe_code)`.
 - **Section amended:** ARCHITECTURE-TEMPLATE · "If your port is
   cross-platform"; new PROMPTS/20-new-backend.md.
-
-## 022. Release mechanics II — a workflow that can fire twice will publish two truths
+- **Follow-up, 2026-09-13 — the gate this entry added does not check what the
+  entry is about.** `check_ledgers.py` *counts* fuzz targets. lsof-rs has nine,
+  so the ledger reads `present` and has done since the day this lesson landed —
+  while `lsof-backend-windows`, the crate the six-gate loop is supposed to apply
+  to in its own right, has **no** fuzz target at all and exposes no `fuzz_api`
+  to write one against. All nine targets cover the Linux backend, the CLI and
+  the core. The Windows backend does parse OS-supplied text (device paths to
+  drive letters, `\\?\` verbatim prefixes, `\Device\…` normalisation,
+  kernel object type names to lsof's codes), so the rule plainly reaches it.
+  Counting artifacts is not covering the thing they are artifacts *of* — the
+  same shape as LESSONS #019's "declared but never run", one level up. A gate
+  for a per-unit rule has to be per-unit: the check should map each crate that
+  parses external text to at least one target, and a port should have to waive
+  a crate by name to leave it uncovered. Release mechanics II — a workflow that can fire twice will publish two truths
 
 - **Date:** 2026-08-30
 - **Codebase:** lsof-rs — v1.0.1 release

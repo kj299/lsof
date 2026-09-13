@@ -79,31 +79,50 @@ and requires the run to abort with an `AddressSanitizer` diagnostic. If the
 canary survives, the step fails with `CANARY SURVIVED` and the job stops before
 it can say anything reassuring about the real code.
 
-### Observe-first, and what is deliberately NOT claimed
+### Observe-first, then promoted (2026-09-13)
 
-It lands non-blocking, on the kit's promotion rule (LESSONS #13): consecutive
-log-verified green runs, read from the step log rather than the job status,
-before it becomes a hard gate. This one could not be validated locally the way
-the miri job was — there is no Windows here, and every detail of it (the
-nightly's ASan support on the MSVC target, the `vswhere` path to
-`clang_rt.asan_dynamic-x86_64.dll`, GitHub's pwsh appending `exit
-$LASTEXITCODE` to a step whose command is *supposed* to fail) was written
-blind. Observe-first is doing real work here rather than ceremony.
+It landed non-blocking on the kit's promotion rule (LESSONS #13): consecutive
+green runs read from the **step log** rather than the job status. This one
+could not be validated locally the way the miri job was — there is no Windows
+here, and every detail of it (the nightly's ASan support on the MSVC target,
+the `vswhere` path to `clang_rt.asan_dynamic-x86_64.dll`, GitHub's pwsh
+appending `exit $LASTEXITCODE` to a step whose command is *supposed* to fail)
+was written blind. Observe-first was doing real work here rather than ceremony.
 
-`progress.json` still reads `differential` for `lsof-backend-windows`, on
-purpose: a gate is not passed until it has actually run, and advancing the row
-on the strength of a job that has never executed would be the same bookkeeping
-this ledger exists to prevent.
+Reading the log rather than the status is not pedantry on this job: its status
+is green in BOTH the working case and the silently-not-instrumenting case. That
+is the whole reason the canary step exists, and it means a promotion could
+never have been taken from the status alone.
 
-### First run, read from the log
+Three runs, on PR #77's heads `a29e4ff`, `0965875` and `e506b1a`, each showing:
 
-    AddressSanitizer: heap-buffer-overflow on address 0x110bbc4a2050 at pc …
-    canary caught: ASan is live
+    ASan runtime dir: …\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64
+    ==NNNN==ERROR: AddressSanitizer: heap-buffer-overflow … asan_canary.rs:33
+    canary caught: ASan is live.
+    test result: ok. 10 passed
 
-then both real steps clean. So the sanitizer is genuinely instrumenting, the
-runtime DLL resolved, and the gate has demonstrated it can fail — which is the
-only evidence that makes a clean run mean anything. One green run of the three
-the promotion rule asks for.
+`CANARY SURVIVED` appeared in none of them except as the echoed script source.
+`continue-on-error` is gone; the job blocks like every other.
+
+### What the promotion deliberately does NOT change
+
+`progress.json` still reads `differential` for `lsof-backend-windows`, and it
+has to. The kit's gate order is **ported → differential → fuzzed → sanitized →
+unsafe_audited**, and the `fuzzed` gate has never run for that crate: no fuzz
+target imports it, and unlike `lsof-backend-linux` it exposes no `fuzz_api` to
+import. Advancing the row to `sanitized` would assert a gate that was skipped.
+
+That gap is worth naming, because it is the one LESSONS #21 was written about.
+That entry's rule is the six-gate loop **per backend crate**, "one fuzz target
+per text-parsing module" — and the Windows backend does parse text the OS hands
+it: device paths mapped to drive letters, `\\?\` verbatim prefixes stripped,
+`\Device\…` names normalised, kernel object type names mapped to lsof's
+codes. None of it is fuzzed. `check_ledgers.py` counts fuzz targets and finds
+nine, which is why no gate has ever noticed: counting targets is not the same
+as covering crates.
+
+So the sanitizer gate is now real and enforced, and the module's progress row
+stays where the evidence puts it.
 
 ## Fixed by asking the socket's own namespace (2026-09-12)
 

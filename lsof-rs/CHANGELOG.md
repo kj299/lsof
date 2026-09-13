@@ -97,16 +97,30 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   allocation, and **requires** an `AddressSanitizer` diagnostic; if the canary
   survives, the job fails before reporting anything about the real code.
 
-  It lands **observe-first** (`continue-on-error`), on the kit's promotion rule
-  (LESSONS #13): consecutive log-verified green runs before it becomes a hard
-  gate. Unlike the miri job, this one could not be validated locally first —
-  there is no Windows here — so observe-first is doing real work rather than
-  ceremony, and `progress.json` deliberately still reads `differential` for
-  `lsof-backend-windows`: a gate is not passed until it has run.
+  It landed **observe-first** and is now a **hard gate**, promoted on the kit's
+  rule (LESSONS #13) after three green runs read from the step log — PR #77's
+  heads `a29e4ff`, `0965875` and `e506b1a`, each showing
+  `AddressSanitizer: heap-buffer-overflow` on the canary, then
+  `canary caught: ASan is live.`, then the real suite `10 passed`.
+  `CANARY SURVIVED` appeared in none of them.
 
-  **First run, log-verified:** `AddressSanitizer: heap-buffer-overflow` on the
-  canary, then `canary caught: ASan is live`, then both real steps clean. The
-  gate works and has demonstrated it can fail — one green run of three.
+  Reading the log rather than the job status matters on this job specifically:
+  its status is green in both the working case and the
+  silently-not-instrumenting case, which is why the canary exists and why the
+  promotion could not have been taken from the status alone. Unlike the miri
+  job, this one could not be validated locally first — there is no Windows
+  here — so those runs are the only evidence there has ever been that it works.
+
+  **`progress.json` still reads `differential` for `lsof-backend-windows`**, and
+  has to: the gate order is ported → differential → **fuzzed** → sanitized →
+  unsafe_audited, and `fuzzed` has never run for that crate — no fuzz target
+  imports it, and unlike `lsof-backend-linux` it exposes no `fuzz_api`.
+  Advancing the row would assert a skipped gate. The gap is the one LESSONS #21
+  was written about (the six-gate loop applies *per backend crate*), and the
+  Windows backend does parse OS-supplied text — device paths to drive letters,
+  `\\?\` prefixes, `\Device\…` normalisation, kernel type names to lsof
+  codes. `check_ledgers.py` counts nine fuzz targets and is satisfied, which is
+  why no gate has noticed: counting targets is not covering crates.
 
 - **Fixture J: a listener in its own network namespace**, the first fixture
   whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs
