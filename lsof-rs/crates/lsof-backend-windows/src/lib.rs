@@ -16,10 +16,13 @@ mod backend;
 mod etw;
 #[cfg(windows)]
 mod handles;
+// NOT `#[cfg(windows)]`: these are pure string transforms over text Windows
+// hands us, and the fuzz job that must cover them runs on Linux.
 #[cfg(windows)]
 mod mapped;
 #[cfg(windows)]
 mod modules;
+mod names;
 #[cfg(windows)]
 mod peb;
 #[cfg(windows)]
@@ -80,4 +83,23 @@ pub fn exit_now(code: u32) -> ! {
     }
     // Fallback if TerminateProcess somehow returned (it won't for self).
     std::process::exit(code as i32)
+}
+
+/// The crate's text parsers, exposed for `cargo-fuzz`.
+///
+/// Unlike the Linux backend's `fuzz_api` this is **not** `cfg(windows)`: the
+/// fuzz job runs on Linux, and the point of [`crate::names`] is that these
+/// functions need no Windows to run. Gated on the feature alone so an ordinary
+/// build still exposes nothing.
+///
+/// A panic here is a denial of service against the tool that is supposed to be
+/// diagnosing one (porting-kit LESSONS #021), and every input below is a
+/// string the operating system chose, not the user.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzz_api {
+    pub use crate::names::{
+        device_to_dos, drive_of, normalize_final, pipe_display, short_type_code, wide_to_string,
+        win_type_to_filetype,
+    };
 }

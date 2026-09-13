@@ -662,7 +662,17 @@ the emphasized half.
   same shape as LESSONS #019's "declared but never run", one level up. A gate
   for a per-unit rule has to be per-unit: the check should map each crate that
   parses external text to at least one target, and a port should have to waive
-  a crate by name to leave it uncovered. Release mechanics II — a workflow that can fire twice will publish two truths
+  a crate by name to leave it uncovered.
+
+  **Closed the same day.** The obstacle was never difficulty — it was that the
+  parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so
+  nobody could have written the target without moving them first. They are pure
+  string transforms; hoisting them into an ungated `names` module took an hour,
+  the target found two bugs *in its own assertions* within a minute, and the
+  crate's unit tests went from running on one platform to running on all of
+  them. When a per-unit gate has been unmet for months, check whether the unit
+  is simply unreachable from where the gate runs before concluding the work is
+  large. Release mechanics II — a workflow that can fire twice will publish two truths
 
 - **Date:** 2026-08-30
 - **Codebase:** lsof-rs — v1.0.1 release

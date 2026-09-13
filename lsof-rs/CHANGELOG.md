@@ -111,16 +111,35 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   job, this one could not be validated locally first — there is no Windows
   here — so those runs are the only evidence there has ever been that it works.
 
-  **`progress.json` still reads `differential` for `lsof-backend-windows`**, and
-  has to: the gate order is ported → differential → **fuzzed** → sanitized →
-  unsafe_audited, and `fuzzed` has never run for that crate — no fuzz target
-  imports it, and unlike `lsof-backend-linux` it exposes no `fuzz_api`.
-  Advancing the row would assert a skipped gate. The gap is the one LESSONS #21
-  was written about (the six-gate loop applies *per backend crate*), and the
-  Windows backend does parse OS-supplied text — device paths to drive letters,
-  `\\?\` prefixes, `\Device\…` normalisation, kernel type names to lsof
-  codes. `check_ledgers.py` counts nine fuzz targets and is satisfied, which is
-  why no gate has noticed: counting targets is not covering crates.
+- **The Windows backend has a fuzz target at last, and its progress row is
+  `unsafe_audited`.** The promotion above first landed with the row stuck at
+  `differential`, because the gate order is ported → differential → **fuzzed**
+  → sanitized → unsafe_audited and `fuzzed` had never run for that crate: no
+  target imported it, and unlike `lsof-backend-linux` it exposed no `fuzz_api`.
+  That was the gap LESSONS #21 exists to prevent — its rule is the six-gate
+  loop *per backend crate* — and `check_ledgers.py` counted nine targets and
+  reported the ledger `present` the whole time. Counting artifacts is not
+  covering the crates they are artifacts of.
+
+  `crate::names` now holds the crate's whole text-parsing surface —
+  `device_to_dos`, `drive_of`, `normalize_final`, `pipe_display`,
+  `win_type_to_filetype`, `short_type_code`, `wide_to_string` — in portable
+  safe Rust, **deliberately not `cfg(windows)`**, because `cargo fuzz` runs on
+  Linux and none of it needs Windows. The new `windows_names` target drives all
+  seven: 10M runs clean, plus 2.35M in the full-suite pass at CI's own budget.
+  Their unit tests now run on every platform rather than only the Windows job —
+  `cargo test` on Linux went from 0 tests in this crate to 8.
+
+  Every step of the row is a green CI gate: the Windows socket differential and
+  the 65-case smoke suite; `windows_names` in the fuzz job; `asan-windows`,
+  canary-verified; and `audit_unsafe.py` over the crate — 139 unsafe blocks,
+  139 documented.
+
+  The fuzzer refuted the **target's own** assertions twice in its first minute,
+  before saying anything about the crate: a `text[..len/2]` slice that panics
+  mid-code-point, and a `device_to_dos` invariant written against the first map
+  entry when the second one matched. Sixth over-strong invariant on this
+  project (LESSONS #26), and the first a machine caught before a human did.
 
 - **Fixture J: a listener in its own network namespace**, the first fixture
   whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs

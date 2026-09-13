@@ -48,6 +48,10 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcess
 
 use crate::privilege::PrivilegeGuard;
 use crate::util::{trace, wide_to_string, OwnedHandle};
+// The crate's pure text-parsing surface. It lives in a portable module so
+// the Linux-hosted fuzz job can reach it -- see `crate::names`.
+pub(crate) use crate::names::{device_to_dos, drive_of};
+use crate::names::{normalize_final, pipe_display, win_type_to_filetype};
 
 // --- NT functions (declared directly against ntdll to avoid binding churn) ---
 
@@ -545,51 +549,6 @@ fn classify(
     })
 }
 
-/// Map a Windows kernel object type name (from `NtQueryObject(TypeInformation)`)
-/// to a lsof TYPE. Common types get a named [`FileType`]; every other type is
-/// carried by [`FileType::Other`] with a short code, so no object is dropped.
-fn win_type_to_filetype(type_name: &str) -> FileType {
-    match type_name {
-        "Key" => FileType::Key,
-        "Event" => FileType::Event,
-        "Mutant" => FileType::Mutant,
-        "Section" => FileType::Section,
-        "Process" => FileType::Process,
-        "Thread" => FileType::Thread,
-        "Token" => FileType::Token,
-        "Semaphore" => FileType::Other("SEM".into()),
-        "Timer" | "IRTimer" => FileType::Other("TMR".into()),
-        "Job" => FileType::Other("JOB".into()),
-        "IoCompletion" => FileType::Other("IOCP".into()),
-        "TpWorkerFactory" => FileType::Other("TPWF".into()),
-        "ALPC Port" => FileType::Other("ALPC".into()),
-        "Directory" => FileType::Other("ODIR".into()),
-        "SymbolicLink" => FileType::Other("LINK".into()),
-        "Desktop" => FileType::Other("DESK".into()),
-        "WindowStation" => FileType::Other("WSTA".into()),
-        "KeyedEvent" => FileType::Other("KEVT".into()),
-        "WmiGuid" => FileType::Other("WMI".into()),
-        "EtwRegistration" => FileType::Other("ETW".into()),
-        other => FileType::Other(short_type_code(other)),
-    }
-}
-
-/// A short, upper-case TYPE code for an object type without a dedicated mapping
-/// (e.g. "Partition" -> "PARTITIO").
-fn short_type_code(name: &str) -> String {
-    let code: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .take(8)
-        .collect();
-    if code.is_empty() {
-        "OBJ".to_string()
-    } else {
-        code
-    }
-}
-
 struct Described {
     file_type: FileType,
     name: String,
@@ -777,15 +736,6 @@ fn file_offset(dup: HANDLE) -> Option<u64> {
     }
 }
 
-/// The drive-letter `DEVICE` prefix of a `X:\...` path, if present.
-pub(crate) fn drive_of(path: &str) -> Option<String> {
-    if path.len() >= 2 && path.as_bytes()[1] == b':' {
-        Some(path[..2].to_string())
-    } else {
-        None
-    }
-}
-
 /// `GetFinalPathNameByHandleW` → a clean DOS path (drops the `\\?\` prefix).
 fn final_path(dup: HANDLE) -> Option<String> {
     let mut buf = vec![0u16; 1024];
@@ -804,25 +754,6 @@ fn final_path(dup: HANDLE) -> Option<String> {
         }
     }
     Some(normalize_final(&wide_to_string(&buf)))
-}
-
-/// Strip the `\\?\` / `\\?\UNC\` prefixes from a final-path string.
-fn normalize_final(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
-        format!("\\\\{rest}")
-    } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
-        rest.to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// `\Device\NamedPipe\foo` → `\\.\pipe\foo`.
-fn pipe_display(nt_name: &str) -> String {
-    match nt_name.strip_prefix("\\Device\\NamedPipe") {
-        Some(rest) => format!("\\\\.\\pipe{rest}"),
-        None => nt_name.to_string(),
-    }
 }
 
 /// Read type/node/size/link-count for a disk file via
@@ -878,20 +809,6 @@ pub(crate) fn build_dos_map() -> Vec<(String, String)> {
     map
 }
 
-/// Replace a `\Device\HarddiskVolumeN` prefix with its drive letter, requiring
-/// the match to fall on a path boundary. Returns the input unchanged if no
-/// mapping applies.
-pub(crate) fn device_to_dos(nt_name: &str, dos_map: &[(String, String)]) -> String {
-    for (dos, dev) in dos_map {
-        if let Some(rest) = nt_name.strip_prefix(dev.as_str()) {
-            if rest.is_empty() || rest.starts_with('\\') {
-                return format!("{dos}{rest}");
-            }
-        }
-    }
-    nt_name.to_string()
-}
-
 /// Derive the lsof access letter from a granted-access mask.
 fn access_from_granted(granted: u32) -> AccessMode {
     let read = granted & (FILE_READ_DATA | GENERIC_READ) != 0;
@@ -908,36 +825,6 @@ fn access_from_granted(granted: u32) -> AccessMode {
 mod tests {
     use super::*;
 
-    fn map() -> Vec<(String, String)> {
-        vec![
-            ("C:".to_string(), "\\Device\\HarddiskVolume3".to_string()),
-            ("D:".to_string(), "\\Device\\HarddiskVolume33".to_string()),
-        ]
-    }
-
-    #[test]
-    fn maps_device_path_to_drive() {
-        assert_eq!(
-            device_to_dos("\\Device\\HarddiskVolume3\\Users\\me\\f.txt", &map()),
-            "C:\\Users\\me\\f.txt"
-        );
-    }
-
-    #[test]
-    fn respects_path_boundary() {
-        // Volume3 must not swallow the longer Volume33.
-        assert_eq!(
-            device_to_dos("\\Device\\HarddiskVolume33\\x", &map()),
-            "D:\\x"
-        );
-    }
-
-    #[test]
-    fn unmapped_device_passes_through() {
-        let s = "\\Device\\NamedPipe\\foo";
-        assert_eq!(device_to_dos(s, &map()), s);
-    }
-
     #[test]
     fn access_letters() {
         assert_eq!(access_from_granted(FILE_READ_DATA), AccessMode::Read);
@@ -947,27 +834,6 @@ mod tests {
             AccessMode::ReadWrite
         );
         assert_eq!(access_from_granted(0), AccessMode::Unknown);
-    }
-
-    #[test]
-    fn normalizes_final_paths() {
-        assert_eq!(normalize_final("\\\\?\\C:\\a\\b.txt"), "C:\\a\\b.txt");
-        assert_eq!(
-            normalize_final("\\\\?\\UNC\\srv\\share\\f"),
-            "\\\\srv\\share\\f"
-        );
-        assert_eq!(normalize_final("C:\\plain"), "C:\\plain");
-    }
-
-    #[test]
-    fn pipe_display_names() {
-        assert_eq!(pipe_display("\\Device\\NamedPipe\\foo"), "\\\\.\\pipe\\foo");
-    }
-
-    #[test]
-    fn drive_prefix() {
-        assert_eq!(drive_of("C:\\x"), Some("C:".to_string()));
-        assert_eq!(drive_of("\\\\srv\\share"), None);
     }
 
     #[test]
@@ -986,30 +852,6 @@ mod tests {
         );
         // Nothing resolved: no suffix at all.
         assert_eq!(endpoint_suffix(None, None, &cmds), None);
-    }
-
-    #[test]
-    fn maps_windows_type_names_to_lsof_codes() {
-        // The classification table the all-handle scan drives. Named variants
-        // and the `Other` long tail both have to produce a TYPE code.
-        for (name, code) in [
-            ("Key", "KEY"),
-            ("Event", "EVT"),
-            ("Mutant", "MUT"),
-            ("Section", "SECT"),
-            ("Process", "PROC"),
-            ("Thread", "THRD"),
-            ("Token", "TOKN"),
-            ("Semaphore", "SEM"),
-            ("Job", "JOB"),
-            ("IoCompletion", "IOCP"),
-            ("ALPC Port", "ALPC"),
-        ] {
-            assert_eq!(win_type_to_filetype(name).code(), code, "type {name}");
-        }
-        // An unmapped type still yields a usable, bounded code — never dropped.
-        assert_eq!(win_type_to_filetype("Partition").code(), "PARTITIO");
-        assert_eq!(win_type_to_filetype("!!!").code(), "OBJ");
     }
 
     /// End-to-end coverage for the all-handle scan: create real kernel objects

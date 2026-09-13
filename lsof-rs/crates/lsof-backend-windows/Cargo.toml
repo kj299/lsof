@@ -41,5 +41,11 @@ windows-sys = { version = "0.59", features = [
 # nothing from a sanitizer that never ran. Never enabled by any other build.
 asan-canary = []
 
+# Exposes the pure text parsers (`src/names.rs`) through `fuzz_api` so the
+# cargo-fuzz targets in ../../fuzz can reach them. Not `cfg(windows)`-gated,
+# because the fuzz job runs on Linux and those parsers need no Windows.
+# Never enabled by the CLI (porting-kit PLAYBOOK Phase 4 gate 3, LESSONS #021).
+fuzzing = []
+
 [lints]
 workspace = true

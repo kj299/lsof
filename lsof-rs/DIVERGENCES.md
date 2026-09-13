@@ -104,25 +104,54 @@ Three runs, on PR #77's heads `a29e4ff`, `0965875` and `e506b1a`, each showing:
 `CANARY SURVIVED` appeared in none of them except as the echoed script source.
 `continue-on-error` is gone; the job blocks like every other.
 
-### What the promotion deliberately does NOT change
+### The gate that was missing, and is now there (2026-09-13)
 
-`progress.json` still reads `differential` for `lsof-backend-windows`, and it
-has to. The kit's gate order is **ported → differential → fuzzed → sanitized →
-unsafe_audited**, and the `fuzzed` gate has never run for that crate: no fuzz
-target imports it, and unlike `lsof-backend-linux` it exposes no `fuzz_api` to
-import. Advancing the row to `sanitized` would assert a gate that was skipped.
+The promotion first landed with `progress.json` still reading `differential`
+for `lsof-backend-windows`, because the kit's order is **ported → differential
+→ fuzzed → sanitized → unsafe_audited** and the `fuzzed` gate had never run for
+that crate: no fuzz target imported it, and unlike `lsof-backend-linux` it
+exposed no `fuzz_api` to import.
 
-That gap is worth naming, because it is the one LESSONS #21 was written about.
-That entry's rule is the six-gate loop **per backend crate**, "one fuzz target
-per text-parsing module" — and the Windows backend does parse text the OS hands
-it: device paths mapped to drive letters, `\\?\` verbatim prefixes stripped,
-`\Device\…` names normalised, kernel object type names mapped to lsof's
-codes. None of it is fuzzed. `check_ledgers.py` counts fuzz targets and finds
-nine, which is why no gate has ever noticed: counting targets is not the same
-as covering crates.
+That gap was the one LESSONS #21 was written about — its rule is the six-gate
+loop **per backend crate**, "one fuzz target per text-parsing module" — and the
+Windows backend does parse text the OS hands it. `check_ledgers.py` counts fuzz
+targets, found nine, and reported the ledger `present` the whole time: counting
+artifacts is not covering the crates they are artifacts of.
 
-So the sanitizer gate is now real and enforced, and the module's progress row
-stays where the evidence puts it.
+It is closed now. `crate::names` holds the crate's whole text-parsing surface —
+`device_to_dos`, `drive_of`, `normalize_final`, `pipe_display`,
+`win_type_to_filetype`, `short_type_code`, `wide_to_string` — in portable safe
+Rust, **deliberately not `cfg(windows)`**, because the `cargo fuzz` job runs on
+Linux and none of those functions needs Windows to run. The `windows_names`
+target drives all seven; 10M runs clean, and 2.35M more in the full-suite pass
+at CI's own 45-second budget.
+
+Moving them also means their unit tests run on **every** platform instead of
+only the Windows job: `cargo test` on Linux went from 0 tests in this crate to
+8.
+
+With that gate real, the row is `unsafe_audited`, and every step of it is a
+green CI gate rather than a claim:
+
+| gate | evidence |
+|---|---|
+| differential | the Windows socket differential vs `Get-NetTCPConnection`, plus the 65-case smoke suite |
+| fuzzed | `windows_names`, in the `fuzz smoke (every target)` job |
+| sanitized | `asan-windows`, now a hard gate, canary-verified |
+| unsafe_audited | `audit_unsafe.py crates/lsof-backend-windows/src` — 139 blocks, 139 documented |
+
+### The harness needed the same scepticism as the code
+
+The fuzzer refuted the target's own assertions twice inside the first minute,
+before it ever said anything about the crate:
+
+* it sliced `text[..len/2]`, which panics mid-code-point on a `&str` from
+  `from_utf8_lossy`. A target that panics on its own input reports a false
+  positive forever.
+* its `device_to_dos` invariant compared the result against the tail of the
+  **first** map entry, and the fuzzer produced a string the **second** entry
+  matched instead. That is the sixth over-strong invariant on this project
+  (LESSONS #26) — and the first one a machine caught before a human did.
 
 ## Fixed by asking the socket's own namespace (2026-09-12)
 
