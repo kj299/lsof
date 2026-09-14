@@ -18,6 +18,9 @@ lsof-core = { path = "../crates/lsof-core" }
 # The `fuzzing` feature exposes the Linux backend's pure text parsers
 # (fuzz_api). The CLI never enables it; only these targets do.
 lsof-backend-linux = { path = "../crates/lsof-backend-linux", features = ["fuzzing"] }
+# The Windows backend's `names` module is portable on purpose, so this builds
+# and fuzzes on the Linux runner like every other target.
+lsof-backend-windows = { path = "../crates/lsof-backend-windows", features = ["fuzzing"] }
 
 [[bin]]
 name = "parse_args"
@@ -96,3 +99,9 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "windows_names"
+path = "fuzz_targets/windows_names.rs"
+test = false
+doc = false

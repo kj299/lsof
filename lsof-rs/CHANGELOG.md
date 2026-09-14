@@ -97,16 +97,49 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   allocation, and **requires** an `AddressSanitizer` diagnostic; if the canary
   survives, the job fails before reporting anything about the real code.
 
-  It lands **observe-first** (`continue-on-error`), on the kit's promotion rule
-  (LESSONS #13): consecutive log-verified green runs before it becomes a hard
-  gate. Unlike the miri job, this one could not be validated locally first —
-  there is no Windows here — so observe-first is doing real work rather than
-  ceremony, and `progress.json` deliberately still reads `differential` for
-  `lsof-backend-windows`: a gate is not passed until it has run.
+  It landed **observe-first** and is now a **hard gate**, promoted on the kit's
+  rule (LESSONS #13) after three green runs read from the step log — PR #77's
+  heads `a29e4ff`, `0965875` and `e506b1a`, each showing
+  `AddressSanitizer: heap-buffer-overflow` on the canary, then
+  `canary caught: ASan is live.`, then the real suite `10 passed`.
+  `CANARY SURVIVED` appeared in none of them.
 
-  **First run, log-verified:** `AddressSanitizer: heap-buffer-overflow` on the
-  canary, then `canary caught: ASan is live`, then both real steps clean. The
-  gate works and has demonstrated it can fail — one green run of three.
+  Reading the log rather than the job status matters on this job specifically:
+  its status is green in both the working case and the
+  silently-not-instrumenting case, which is why the canary exists and why the
+  promotion could not have been taken from the status alone. Unlike the miri
+  job, this one could not be validated locally first — there is no Windows
+  here — so those runs are the only evidence there has ever been that it works.
+
+- **The Windows backend has a fuzz target at last, and its progress row is
+  `unsafe_audited`.** The promotion above first landed with the row stuck at
+  `differential`, because the gate order is ported → differential → **fuzzed**
+  → sanitized → unsafe_audited and `fuzzed` had never run for that crate: no
+  target imported it, and unlike `lsof-backend-linux` it exposed no `fuzz_api`.
+  That was the gap LESSONS #21 exists to prevent — its rule is the six-gate
+  loop *per backend crate* — and `check_ledgers.py` counted nine targets and
+  reported the ledger `present` the whole time. Counting artifacts is not
+  covering the crates they are artifacts of.
+
+  `crate::names` now holds the crate's whole text-parsing surface —
+  `device_to_dos`, `drive_of`, `normalize_final`, `pipe_display`,
+  `win_type_to_filetype`, `short_type_code`, `wide_to_string` — in portable
+  safe Rust, **deliberately not `cfg(windows)`**, because `cargo fuzz` runs on
+  Linux and none of it needs Windows. The new `windows_names` target drives all
+  seven: 10M runs clean, plus 2.35M in the full-suite pass at CI's own budget.
+  Their unit tests now run on every platform rather than only the Windows job —
+  `cargo test` on Linux went from 0 tests in this crate to 8.
+
+  Every step of the row is a green CI gate: the Windows socket differential and
+  the 65-case smoke suite; `windows_names` in the fuzz job; `asan-windows`,
+  canary-verified; and `audit_unsafe.py` over the crate — 139 unsafe blocks,
+  139 documented.
+
+  The fuzzer refuted the **target's own** assertions twice in its first minute,
+  before saying anything about the crate: a `text[..len/2]` slice that panics
+  mid-code-point, and a `device_to_dos` invariant written against the first map
+  entry when the second one matched. Sixth over-strong invariant on this
+  project (LESSONS #26), and the first a machine caught before a human did.
 
 - **Fixture J: a listener in its own network namespace**, the first fixture
   whose sockets the caller's `/proc/net` cannot see. `unshare --net` needs

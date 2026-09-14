@@ -79,31 +79,79 @@ and requires the run to abort with an `AddressSanitizer` diagnostic. If the
 canary survives, the step fails with `CANARY SURVIVED` and the job stops before
 it can say anything reassuring about the real code.
 
-### Observe-first, and what is deliberately NOT claimed
+### Observe-first, then promoted (2026-09-13)
 
-It lands non-blocking, on the kit's promotion rule (LESSONS #13): consecutive
-log-verified green runs, read from the step log rather than the job status,
-before it becomes a hard gate. This one could not be validated locally the way
-the miri job was — there is no Windows here, and every detail of it (the
-nightly's ASan support on the MSVC target, the `vswhere` path to
-`clang_rt.asan_dynamic-x86_64.dll`, GitHub's pwsh appending `exit
-$LASTEXITCODE` to a step whose command is *supposed* to fail) was written
-blind. Observe-first is doing real work here rather than ceremony.
+It landed non-blocking on the kit's promotion rule (LESSONS #13): consecutive
+green runs read from the **step log** rather than the job status. This one
+could not be validated locally the way the miri job was — there is no Windows
+here, and every detail of it (the nightly's ASan support on the MSVC target,
+the `vswhere` path to `clang_rt.asan_dynamic-x86_64.dll`, GitHub's pwsh
+appending `exit $LASTEXITCODE` to a step whose command is *supposed* to fail)
+was written blind. Observe-first was doing real work here rather than ceremony.
 
-`progress.json` still reads `differential` for `lsof-backend-windows`, on
-purpose: a gate is not passed until it has actually run, and advancing the row
-on the strength of a job that has never executed would be the same bookkeeping
-this ledger exists to prevent.
+Reading the log rather than the status is not pedantry on this job: its status
+is green in BOTH the working case and the silently-not-instrumenting case. That
+is the whole reason the canary step exists, and it means a promotion could
+never have been taken from the status alone.
 
-### First run, read from the log
+Three runs, on PR #77's heads `a29e4ff`, `0965875` and `e506b1a`, each showing:
 
-    AddressSanitizer: heap-buffer-overflow on address 0x110bbc4a2050 at pc …
-    canary caught: ASan is live
+    ASan runtime dir: …\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64
+    ==NNNN==ERROR: AddressSanitizer: heap-buffer-overflow … asan_canary.rs:33
+    canary caught: ASan is live.
+    test result: ok. 10 passed
 
-then both real steps clean. So the sanitizer is genuinely instrumenting, the
-runtime DLL resolved, and the gate has demonstrated it can fail — which is the
-only evidence that makes a clean run mean anything. One green run of the three
-the promotion rule asks for.
+`CANARY SURVIVED` appeared in none of them except as the echoed script source.
+`continue-on-error` is gone; the job blocks like every other.
+
+### The gate that was missing, and is now there (2026-09-13)
+
+The promotion first landed with `progress.json` still reading `differential`
+for `lsof-backend-windows`, because the kit's order is **ported → differential
+→ fuzzed → sanitized → unsafe_audited** and the `fuzzed` gate had never run for
+that crate: no fuzz target imported it, and unlike `lsof-backend-linux` it
+exposed no `fuzz_api` to import.
+
+That gap was the one LESSONS #21 was written about — its rule is the six-gate
+loop **per backend crate**, "one fuzz target per text-parsing module" — and the
+Windows backend does parse text the OS hands it. `check_ledgers.py` counts fuzz
+targets, found nine, and reported the ledger `present` the whole time: counting
+artifacts is not covering the crates they are artifacts of.
+
+It is closed now. `crate::names` holds the crate's whole text-parsing surface —
+`device_to_dos`, `drive_of`, `normalize_final`, `pipe_display`,
+`win_type_to_filetype`, `short_type_code`, `wide_to_string` — in portable safe
+Rust, **deliberately not `cfg(windows)`**, because the `cargo fuzz` job runs on
+Linux and none of those functions needs Windows to run. The `windows_names`
+target drives all seven; 10M runs clean, and 2.35M more in the full-suite pass
+at CI's own 45-second budget.
+
+Moving them also means their unit tests run on **every** platform instead of
+only the Windows job: `cargo test` on Linux went from 0 tests in this crate to
+8.
+
+With that gate real, the row is `unsafe_audited`, and every step of it is a
+green CI gate rather than a claim:
+
+| gate | evidence |
+|---|---|
+| differential | the Windows socket differential vs `Get-NetTCPConnection`, plus the 65-case smoke suite |
+| fuzzed | `windows_names`, in the `fuzz smoke (every target)` job |
+| sanitized | `asan-windows`, now a hard gate, canary-verified |
+| unsafe_audited | `audit_unsafe.py crates/lsof-backend-windows/src` — 139 blocks, 139 documented |
+
+### The harness needed the same scepticism as the code
+
+The fuzzer refuted the target's own assertions twice inside the first minute,
+before it ever said anything about the crate:
+
+* it sliced `text[..len/2]`, which panics mid-code-point on a `&str` from
+  `from_utf8_lossy`. A target that panics on its own input reports a false
+  positive forever.
+* its `device_to_dos` invariant compared the result against the tail of the
+  **first** map entry, and the fuzzer produced a string the **second** entry
+  matched instead. That is the sixth over-strong invariant on this project
+  (LESSONS #26) — and the first one a machine caught before a human did.
 
 ## Fixed by asking the socket's own namespace (2026-09-12)
 

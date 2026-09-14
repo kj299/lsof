@@ -66,7 +66,4 @@ impl Drop for OwnedHandle {
 
 /// Convert a (possibly NUL-terminated) UTF-16 buffer to a `String`, stopping at
 /// the first NUL.
-pub fn wide_to_string(buf: &[u16]) -> String {
-    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    String::from_utf16_lossy(&buf[..end])
-}
+pub use crate::names::wide_to_string;

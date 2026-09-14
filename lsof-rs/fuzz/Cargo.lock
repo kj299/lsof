@@ -103,6 +103,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "lsof-backend-linux",
+ "lsof-backend-windows",
  "lsof-cli",
  "lsof-core",
 ]
