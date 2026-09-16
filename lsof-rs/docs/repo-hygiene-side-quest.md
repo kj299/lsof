@@ -1,163 +1,106 @@
 # Side quest — what in this repository is not part of the rewrite
 
-**This is a side quest.** It is not the porting objective, nothing in it closes
-a DIVERGENCES entry or a gate, and it should never preempt
-[`linux-l2-plan.md`](linux-l2-plan.md). Written 2026-09-15 by measuring the
-tree and building it, not by reading filenames.
+**Status: executed 2026-09-16.** This document is now a record, not a proposal.
+It was a side quest: it closed no DIVERGENCES entry and no gate, and it did not
+preempt [`linux-l2-plan.md`](linux-l2-plan.md).
 
-## The rule that governs the whole exercise
+## The rule that governed the exercise
 
 The instinct on seeing 218 files of C in a Rust rewrite is that they are the
 old thing being replaced. **They are not. They are the oracle.** The
 `differential (linux, vs the C)` job builds `lsof` from this tree on every run
-and diffs it against `lsof-rs` over 87 cases, and that is the strongest
-correctness signal this project has — the one the Windows backend structurally
-cannot have. Deleting the C to "clean up the rewrite" would destroy it.
+and diffs it against `lsof-rs` over 87 cases — the strongest correctness signal
+this project has, and the one the Windows backend structurally cannot have.
 
-So the boundary is not *C vs Rust*. It is: **does this file participate in
-building, testing, or documenting the oracle and the port on the two platforms
-this project targets?**
+So the boundary was never *C vs Rust*. It was: **does this file participate in
+building, testing, or documenting the oracle and the port?**
 
-## What the repository actually is
+## What was removed
 
-522 tracked files. The 1.8 GB on disk is **not** repository content — it is
-`lsof-rs/target` (1.1 GB) and `lsof-rs/fuzz` (725 MB), both correctly
-gitignored. Every autotools artefact at the root (`configure`, `Makefile.in`,
-`libtool`, `config.status`, `aclocal.m4` …) is untracked build residue.
-There is no upstream remote: `origin` is the fork, and the history has no
-upstream merges, so nothing here is protecting a future sync.
+128 files, 31,088 lines (523 → 395 tracked files).
 
-Two CI workflows are live over the C tree, and they constrain everything below:
-
-| workflow | what it does to the C | consequence |
+| Group | Files | Why it was unreachable |
 |---|---|---|
-| `lsof-rs-ci.yml` → `differential-linux` | `autoreconf && ./configure && make lsof` | needs the **Linux** dialect and the build system |
-| `build.yml` → `linux` | `make`, **`make check`**, **`make distcheck`** | needs every file in automake's DIST list — *including inactive conditional branches* |
-| `build.yml` → `macos` | `./Configure -n darwin`, `bash ./check.bash darwin` | needs the **legacy `Configure`**, `check.bash`, `tests/`, and `lib/dialects/darwin/` |
+| `lib/dialects/{hpux,osr,uw}` | 66 | In neither `configure.ac` nor `Makefile.am`; every other dialect has an `AM_CONDITIONAL` **and** a `LSOF_DIALECT_DIR` branch |
+| `support/` | 35 | Purdue's FTP/rdist release machinery — dead mirror URLs, an `install.log` for lsof 4.84, a 0-byte `.xls`. Zero inbound references |
+| `scripts/` | 13 | Contributed Perl/AWK field-output examples, not even in `EXTRA_DIST`. The two pointing sentences in `docs/{faq,tutorial}.md` went with them |
+| `00MANIFEST`, `Inventory`, `.ck00MAN`, `tests/Add2TestDB` | 4 | See below |
+| `AFSConfig`, `Customize`, `zipme`, `Doxyfile`, `HOW_TO_*.rst`, `0..README.BEFORE.README.FIRST` | 7 | Unreachable under `Configure -n` (what CI uses), or hardcoded to a maintainer's machine, or redirect stubs nothing links to |
+| `.travis.yml`, `.circleci/`, `.readthedocs.yaml` | 3 | CI and docs builds this fork does not own |
 
-That third row is why this is not a filename exercise. `make dist` pulls in
-sources from *all* `Makefile.am` conditionals, not just the active one.
+**The inventory triangle is worth singling out.** `00MANIFEST` is a literal file
+listing that still described the pre-autotools layout — `dialects/`, root-level
+`main.c`, `scripts/*.perl5`. **223 of its 280 entries already dangled** before
+anything was deleted. `Inventory` walks that list, so running it on the
+*unmodified* tree printed `SOME FILES OR DIRECTORIES MAY BE MISSING!`. A check
+that can only fail is not a check.
 
-## Tier 0 — never touch
+## Two things inspection would have condemned, and the build spared
 
-The oracle's sources (`lib/` non-dialect, `lib/dialects/linux/`, `src/`,
-`include/`), its build system (`configure.ac`, `Makefile.am`, `m4/`,
-`autotools/`, `version*`), `Lsof.8` (cited throughout the coverage inventory
-and every `-F`/`-T` measurement), the C test suite `tests/` (it is `make
-check`), and `lsof-rs/` + `porting-kit/` themselves.
+This is the argument for compiling the tree rather than reading filenames.
 
-**`COPYING`, `AUTHORS`, `00CREDITS` are not negotiable** — this is a fork of a
-licensed work, and attribution stays regardless of tidiness.
+- **`tests/{Makefile,TestDB,CkTestDB}`** look like a dead pre-autotools harness.
+  They are live: `tests/case-13-classic.bash` and `case-14-classic-opt.bash` do
+  `cd tests && make`, and `check.bash` runs both on the macOS job. Deleting them
+  flipped `case-14` to failing. **Kept.**
+- **`lib/ptti.c` is 0 bytes**, but `lib/Makefile.skel` names it three times, so
+  removing it breaks the legacy build (`No rule to make target 'ptti.c'`).
+  **Kept** — not worth two build-file edits for an empty file.
 
-## Tier 1 — safe to delete, proven by building it
+Relatedly: `AUTHORS` and `NEWS` are empty and **must stay**. `AM_INIT_AUTOMAKE`
+carries no `foreign`, so gnu strictness applies and `autoreconf` fails with
+`required file './AUTHORS' not found`. Same for `ChangeLog`, `INSTALL`,
+`README`, `COPYING`.
 
-`lib/dialects/hpux`, `lib/dialects/osr`, `lib/dialects/uw` — **66 files,
-21,634 lines.**
+## Verification
 
-They appear **nowhere** in `configure.ac` or `Makefile.am`. Every other dialect
-has an `AM_CONDITIONAL` and a `LSOF_DIALECT_DIR` branch; these three have
-neither. They are pre-autotools carry-over, unreachable by any build this repo
-performs.
-
-Evidence, on a scratch clone with all three deleted:
+Every row run on the resulting tree, with the unmodified tree as control:
 
 | check | result |
 |---|---|
 | `autoreconf -vif && ./configure` | rc=0 |
-| `make lsof` | rc=0, binary reports `revision: 4.99.6` |
-| `make dist` | rc=0, produced `lsof-4.99.6.tar.gz` |
-| the full 87-case differential against that oracle | **0 unexplained divergences** |
+| `make` | rc=0, binary reports `4.99.6` |
+| `make check` | 36 PASS / 3 SKIP / 2 FAIL — **identical case set to the control** |
+| `make dist` | rc=0 |
+| `make distcheck` | dist/unpack/reconfigure/rebuild clean; dies only at the same 2 cases |
+| `./Configure -n linux && make` (the legacy path `build.yml`'s macOS job uses) | rc=0; `check.bash` case-13/case-14 match control |
+| 17 `lsof` invocations, new binary vs control binary, same live process | **0 differ** |
 
-**One residual risk, stated plainly:** `make check` could not be evaluated
-here — it dies at `soelim: command not found` because this container has no
-groff. A control run on the *pristine* tree fails at the identical line, so the
-deletion is exonerated of causing it, but "no regression signal" is not the
-same as "passes". CI must close that, which it does for free on the first push.
+The 2 failures (`case-20-mmap`, `case-20-ux-socket-endpoint`) are pre-existing
+container-environment failures present on the unmodified tree.
 
-Deleting them makes stale: `00MANIFEST` (a literal file listing, and in
-`EXTRA_DIST`), `00DIALECTS`, `00DCACHE`, `00DIST`, `00FAQ`, `00PORTING`,
-`00README`, `00TEST`, `00XCONFIG`, `Configure`, `Lsof.8`, and five files under
-`docs/`. Most references are prose or `#ifdef HPUX` guards that are harmless to
-leave; **`00MANIFEST` is the one that must actually be edited**, because
-`Inventory` checks the tree against it.
-
-## Tier 2 — needs a decision, not just a deletion
+## Not taken, deliberately
 
 `lib/dialects/{aix,darwin,freebsd,netbsd,openbsd,sun}` — **81 files, 35,531
-lines.**
-
-`make lsof` succeeds without them and the differential still passes 87/87 — but
-**`make dist` fails**:
+lines** — are wired into `Makefile.am`. `make lsof` survives their deletion and
+the differential still passes 87/87, but **`make dist` does not**:
 
 ```
 make[2]: *** No rule to make target 'lib/dialects/darwin/ddev.c', needed by 'distdir-am'.
 ```
 
-So deleting them means editing `Makefile.am` and `configure.ac` to drop six
-conditionals, **and** deleting `build.yml`'s macOS job (it builds darwin),
-`.cirrus.yml` (FreeBSD) and `.builds/*` (NetBSD/OpenBSD).
+Removing them means editing `Makefile.am` and `configure.ac` to drop six
+conditionals **and** deleting `build.yml`'s macOS job, `.cirrus.yml` (FreeBSD)
+and `.builds/*` (NetBSD/OpenBSD). It converts the repo from *"lsof, forked,
+carrying a Rust port"* into *"a Linux/Windows lsof port with a Linux-only C
+oracle"*, and permanently forecloses diffing against the C on macOS or BSD.
+That is a product decision, not a tidiness one, and it remains open.
 
-That is a real decision and it is the owner's: it converts the repo from *"lsof,
-forked, carrying a Rust port"* into *"a Linux/Windows lsof port with a
-Linux-only C oracle."* The port targets two platforms, so nothing is lost
-functionally — but it forecloses ever diffing against the C on macOS or BSD,
-which is the only way those dialects could ever serve this project.
+Also untouched: the oracle itself (`lib/` non-dialect, `lib/dialects/linux/`,
+`src/`, `include/`), the build system, `Lsof.8`, `tests/`, and the licence and
+attribution files. **`COPYING`, `AUTHORS` and `00CREDITS` are not negotiable** —
+this is a fork of a licensed work.
 
-**Recommendation: do not do this yet.** Tier 1 gets 21,634 lines for no
-argument; Tier 2 gets 35,531 more in exchange for a door closing. Take Tier 1,
-see whether the repo still feels cluttered, and decide Tier 2 separately.
+## Not a deletion, and the highest-value item
 
-## Tier 3 — foreign CI, dead for this fork
+The root `README.md` was still upstream's: four CI badges pointing at
+*lsof-org's* CircleCI, Cirrus, sr.ht and ReadTheDocs — none of them this
+repository's CI — and no mention of the Rust rewrite that has been the
+repository's entire activity. Rewritten in its own commit, ahead of every
+deletion here.
 
-`.travis.yml`, `.circleci/config.yml`, `.cirrus.yml`, `.builds/netbsd.yml`,
-`.builds/openbsd.yml`, `.readthedocs.yaml` — 6 files. None runs; this fork uses
-GitHub Actions only. Note the last three pair with Tier 2 dialects, so if Tier 2
-is declined, `.cirrus.yml` and `.builds/*` are arguably still *documentation* of
-where those dialects get tested upstream. `.travis.yml` and `.circleci/` have no
-such defence — Travis is defunct and the CircleCI badge points at `lsof-org`.
+## Housekeeping note
 
-## Tier 4 — updates, which matter more than the deletions
-
-**The root `README.md` is the highest-value item in this document.** It is
-upstream's, it opens with four CI badges pointing at *lsof-org's* CircleCI,
-Cirrus, sr.ht and ReadTheDocs — none of which is this repo's CI — and it does
-not mention the Rust rewrite at all. It is the GitHub landing page for a
-repository whose entire activity for months has been `lsof-rs/`.
-
-Also stale, already noted in the L2 plan and repeated here so this side quest
-has one list:
-
-- `lsof-backend-linux/src/lib.rs` — header still opens "Phase L1" and lists five
-  shipping features as deferred
-- `docs/linux-backend-scope.md` — its L2 row is superseded by `linux-l2-plan.md`
-  and should say so
-- `00MANIFEST` — if anything in Tier 1 lands
-
-## Tier 5 — not repository content
-
-`lsof-rs/target` and `lsof-rs/fuzz/target` are 1.8 GB of gitignored build
-output. Irrelevant to the repo, relevant to this container's fixed disk
+`lsof-rs/target` and `lsof-rs/fuzz/target` are ~1.8 GB of gitignored build
+output. Irrelevant to the repository, relevant to a container's fixed disk
 allowance: `cargo clean` in both reclaims it when a session runs short.
-
-## Recommended execution order
-
-1. **Tier 4's README** on its own. One file, no build risk, largest visible
-   effect. Do it first and independently of every deletion below.
-2. **Tier 1 + its `00MANIFEST` edit**, in one PR, with the PR body carrying the
-   four build results above so a reviewer is not asked to take "unused" on
-   faith. Expect `build.yml` to run — this touches the C tree — and treat its
-   `make check` / `make distcheck` as the gate that closes the residual risk.
-3. **Tier 3's `.travis.yml` and `.circleci/`** — trivial, can ride with (2).
-4. **Tier 2 only on an explicit decision**, and if taken, in its own PR with
-   the `Makefile.am`, `configure.ac` and workflow edits together, because
-   splitting them leaves `make dist` broken in between.
-5. **Tier 4's remaining doc fixes** fold into the L2 plan's P1 pass; they are
-   the same edits and should not be done twice.
-
-## What this side quest should not do
-
-Touch the oracle, the Linux dialect, `tests/`, `Lsof.8`, the licence files, or
-anything under `lsof-rs/` and `porting-kit/` beyond the doc fixes named in
-Tier 4. And it should not run before P1 of the L2 plan — that pass ships a real
-feature (`-H`) and fixes a coverage gate that is currently wrong on both
-platforms. Tidiness does not outrank a live gap.
