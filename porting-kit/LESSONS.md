@@ -672,7 +672,9 @@ the emphasized half.
   crate's unit tests went from running on one platform to running on all of
   them. When a per-unit gate has been unmet for months, check whether the unit
   is simply unreachable from where the gate runs before concluding the work is
-  large. Release mechanics II — a workflow that can fire twice will publish two truths
+  large.
+
+## 022. Release mechanics II — a workflow that can fire twice will publish two truths
 
 - **Date:** 2026-08-30
 - **Codebase:** lsof-rs — v1.0.1 release
