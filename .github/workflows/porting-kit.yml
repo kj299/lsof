@@ -1,0 +1,55 @@
+name: porting-kit
+
+# The kit's own integrity gate.
+#
+# `make -C porting-kit check-kit` is what the retrospective skill tells every
+# port to run after editing the kit — and until this workflow existed, NOTHING
+# ran it. `grep -rn check-kit .github/workflows/` returned nothing, so the kit
+# asserted a control that no automation enforced, which is LESSONS #19's exact
+# shape turned on the kit itself.
+#
+# It was not hypothetical. Commit 15d7a03 deleted the heading line of LESSONS
+# entry 022 from an append-only file while leaving the body, splicing one
+# entry's text onto another and breaking PLAYBOOK's `(LESSONS #22)` citation.
+# That merged and sat in master for three days. PR #82 then merged a
+# PLAYBOOK + LESSONS change with zero checks of any kind, because the only
+# workflow watching porting-kit/ filtered on `harnesses/**` and excluded `.md`.
+#
+# So the trigger here is `porting-kit/**` with NO markdown exclusion: the
+# failure this gate exists for was markdown-only. This is deliberately its own
+# workflow rather than a job in lsof-rs-ci.yml, because that workflow's matrix
+# (the native Windows jobs, the memory-safety gates, the 87-case differential)
+# is far too heavy to fire on a prose edit to the playbook. check-kit is
+# python3 + bash with no toolchain, so this job is seconds.
+#
+# Note for anyone editing this comment: check_ledgers.py decides the
+# memory-safety ledger is satisfied by regex-matching the NAMES of those tools
+# against every workflow file, without distinguishing a comment from a job. An
+# earlier draft of this header named them in passing and thereby made THIS file
+# the reported evidence for that ledger — a workflow that runs none of them.
+# Do not name them here; lsof-rs-ci.yml is where they belong.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'porting-kit/**'
+      - '.github/workflows/porting-kit.yml'
+  pull_request:
+    paths:
+      - 'porting-kit/**'
+      - '.github/workflows/porting-kit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-kit:
+    name: kit integrity (harness self-tests, skills, lesson refs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      # No toolchain setup: check-kit is python3 + bash by design (see the
+      # comment at the top of porting-kit/Makefile) so it runs on any runner.
+      - name: make check-kit
+        run: make -C porting-kit check-kit

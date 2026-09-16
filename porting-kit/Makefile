@@ -22,6 +22,8 @@ check-kit:
 	@echo "== inventory parses =="; $(PY) -c "import tomllib; d = tomllib.load(open('$(H)/coverage/feature-inventory-lsof.toml','rb')); print('PASS  lsof inventory parses (%d options, %d types)' % (len(d['features']['options']), len(d['features']['types'])))"
 	@echo "== skills self-test =="; $(PY) skills/check_skills.py --self-test
 	@echo "== skills integrity =="; $(PY) skills/check_skills.py
+	@echo "== lesson refs self-test =="; $(PY) $(H)/lessons/check_lesson_refs.py --self-test
+	@echo "== lesson refs ==";          $(PY) $(H)/lessons/check_lesson_refs.py .
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 
