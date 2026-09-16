@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -107,12 +108,38 @@ def _self_test():
         check("replay same binary → match", replay(echo, matrix, corpus, False, False) == 0)
         check("replay divergent binary → fail", replay(printf, matrix, corpus, False, False) == 1)
 
-        # nondeterministic oracle must be flagged, not stored
+        # nondeterministic oracle must be flagged, not stored.
+        #
+        # The fixture counts its own invocations rather than drawing a random
+        # number. It used to be `awk 'BEGIN{srand(); print int(rand()*1e9)}'`,
+        # and awk's srand() with no argument is seeded from the clock at
+        # SECOND resolution on some implementations — so on a fast runner all
+        # five repeats landed in the same second, returned the identical
+        # number, and this "nondeterministic" oracle looked perfectly stable.
+        # capture() then correctly stored it and the check failed. Which awk is
+        # installed decided whether the kit's own gate passed.
         nd = os.path.join(d, "nd.sh")
-        open(nd, "w").write("#!/bin/sh\nawk 'BEGIN{srand(); print int(rand()*1e9)}'\n")
+        counter = os.path.join(d, "nd.count")
+        open(nd, "w").write(
+            "#!/bin/sh\n"
+            "# Emit a different line every invocation, with no dependence on an\n"
+            "# RNG seeding policy, the clock, or PID allocation.\n"
+            f"c='{counter}'\n"
+            "n=$(cat \"$c\" 2>/dev/null || echo 0)\n"
+            "n=$((n + 1))\n"
+            "printf '%s\\n' \"$n\" > \"$c\"\n"
+            "printf 'run %s\\n' \"$n\"\n")
         os.chmod(nd, 0o755)
         ndm = os.path.join(d, "nd.json")
         open(ndm, "w").write('[{"name": "rng", "args": []}]')
+
+        # Prove the fixture actually varies before trusting what it proves —
+        # otherwise this check can only ever pass for the wrong reason
+        # (LESSONS #26). A fixture that has gone constant must say so itself.
+        probe = [subprocess.run([nd], capture_output=True, text=True).stdout
+                 for _ in range(3)]
+        check("nondeterminism fixture really does vary", len(set(probe)) == 3)
+
         ndc = os.path.join(d, "ndcorpus")
         rc = capture(nd, ndm, ndc, repeats=5, sort=False, mask_numbers=False)
         check("nondeterministic oracle → flagged, not stored",
