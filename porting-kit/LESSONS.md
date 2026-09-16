@@ -1035,3 +1035,69 @@ the emphasized half.
   preserving it.
 - **Section amended:** `porting-kit/LESSONS.md` (this entry); cross-references
   `PLAYBOOK.md` · Phase 2 "Do"
+
+## 029. The kit's own integrity gate was never wired to CI — and it lost a lesson
+
+- **Date:** 2026-09-16
+- **Codebase:** lsof-rs (C `lsof` → Rust) — retrospective follow-up to PR #81/#82
+- **What happened:** This is the answer to the question
+  [`PROMPTS/90-retrospective.md`](PROMPTS/90-retrospective.md) ends with —
+  *the single failure that, in hindsight, the kit still would not have
+  prevented* — and it is about the kit rather than the port.
+
+  `make -C porting-kit check-kit` is the kit's integrity gate. The
+  retrospective skill's own Integrity section instructs every port to run it
+  after editing the kit. **No workflow ran it.** `grep -rn "check-kit"
+  .github/workflows/` returned nothing. So the kit asserted a control and
+  enforced it only by asking people to remember — which is LESSONS #19 ("a
+  control the kit asserts but never checks for does not exist") turned on the
+  kit itself, and is why that entry keeps recurring in different disguises.
+
+  It had already cost something. Commit `15d7a03`, whose subject is about
+  promoting a sanitizer job, also removed two lines from `LESSONS.md`: the
+  blank line before entry 022 and **the entry's heading**. The body stayed. Its
+  commit message never mentions `LESSONS.md`; the stat reads
+  `14 insertions(+), 2 deletions(-)`. The result sat in `master` for three days:
+  entry 021's closing sentence ran `…before concluding the work is large.
+  Release mechanics II — a workflow that can fire twice will publish two
+  truths`, entry 022's body (a v1.0.1 release incident) sat under entry 021 as
+  if it were 021's own, entry 021 carried two `- **Date:**` blocks, and
+  `PLAYBOOK.md`'s Phase 5 citation `(LESSONS #22)` resolved to nothing. In a
+  file whose first rule is **"Append only — never rewrite history."**
+
+  Then PR #82 — a retrospective that edited `PLAYBOOK.md` and `LESSONS.md` —
+  merged with **zero checks**, because the one workflow watching
+  `porting-kit/` filtered on `harnesses/**` and then excluded `**.md`. A
+  markdown-only path through the kit was unguarded end to end.
+
+  Three things this says that are worth carrying:
+
+  1. **A gate's trigger is part of the gate.** `check-kit` worked perfectly the
+     whole time; it simply was never invoked. Reviewing whether a control
+     exists and whether anything *runs* it are different reviews, and only the
+     second one would have caught this.
+  2. **Excluding docs from CI assumes docs cannot break.** For a kit whose
+     product *is* documents, the markdown exclusion removed exactly the files
+     that matter. The new workflow triggers on `porting-kit/**` with no
+     extension filter for that reason.
+  3. **A check that reads text cannot tell prose from code.** Writing the new
+     workflow, its header mentioned the memory-safety tools by name while
+     explaining what it was *not* doing, and `check_ledgers.py` — which
+     regex-matches those names across workflow files — immediately reported
+     that file as the evidence satisfying the memory-safety ledger, for a
+     workflow that runs none of them. The names were removed and the evidence
+     points back at `lsof-rs-ci.yml`. **The harness's comment-blindness is not
+     fixed**, and is the next candidate: a ledger should be satisfied by a job
+     that runs the thing, not by any file that says its name.
+- **Kit change:** new `.github/workflows/porting-kit.yml` running
+  `make -C porting-kit check-kit` on every `porting-kit/**` change including
+  markdown, as its own lightweight workflow rather than a job in
+  `lsof-rs-ci.yml` (whose Windows / memory-safety / differential matrix must not
+  fire on a prose edit). New harness
+  `harnesses/lessons/check_lesson_refs.py`, wired into `check-kit`, asserting
+  that every prose `LESSONS #NN` citation resolves and that entry numbers are
+  unique and contiguous — verified non-vacuous by running it against the
+  corrupted `master`, where it reports exactly the two real defects.
+- **Section amended:** `.github/workflows/porting-kit.yml` (new);
+  `porting-kit/Makefile` · `check-kit`;
+  `porting-kit/harnesses/lessons/check_lesson_refs.py` (new)
