@@ -134,6 +134,22 @@ lsof-rs's phase order was sound; its one miss was not spiking the hang first.
   reference, format fidelity is a claim, not a measurement — a golden test
   pins what its author *believed* the C emits — so say so in the release notes
   until a same-host diff exists somewhere in the port.
+- **The oracle lives in the tree and looks like legacy** (LESSONS #27). For the
+  whole port the reference implementation sits in the repo beside the Rust, and
+  every instinct — and every request to "clean up the rewrite" — reads it as the
+  old thing being replaced. lsof-rs's C tree *is* the Linux differential, so a
+  tidiness pass that deleted it would have destroyed the project's strongest
+  correctness signal while every Rust gate stayed green. Write the rule where a
+  cleanup pass will actually meet it (the repo README, not only this playbook),
+  and state the boundary as a question about participation — *does this file
+  build, test or document the oracle or the port?* — never as "C vs Rust".
+  Part of the reference tree usually IS dead (lsof-rs: 66 files of dialects for
+  OSes no build in the repo targets, plus a vendor's release machinery). Establish
+  that by **deleting it and running the build, not by searching for references**:
+  `cd tests && make` names no filename a grep can find, and a 0-byte file can
+  still be named three times in a build template. Prove every removal with the
+  reference tree's own gates — configure, build, test, dist — run against an
+  untouched control of the same commit.
 - Stand up an **intentional-divergence ledger** (`DIVERGENCES.md`, template in
   the skeleton): every place the Rust will *deliberately* differ from C —
   starting with the Phase-0 flaw scan's findings. **Its existence is checked**

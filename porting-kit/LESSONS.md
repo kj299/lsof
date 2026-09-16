@@ -940,3 +940,96 @@ the emphasized half.
   over asserting an absolute about a live one.
 - **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases);
   lsof-rs `DIVERGENCES.md` (the `-K` section carries the kill table).
+
+---
+
+## 027. Reachability is a build result, not a search result
+
+- **Date:** 2026-09-16
+- **Codebase:** lsof-rs (C `lsof` → Rust) — repository hygiene pass, PR #81
+- **What happened:** A side quest removed 128 files / 31,088 lines of inherited C
+  and vendor tooling from the port's repository. The deletions were chosen by
+  compiling the tree, and that choice is the whole lesson: **two candidates that
+  every reference search called dead were load-bearing, and both were caught only
+  by deleting them and running the build.**
+
+  1. **`tests/{Makefile,TestDB,CkTestDB}`** look exactly like the pre-autotools
+     harness the project migrated off. They are live, because two test cases
+     invoke them as `cd tests && make`. That reference contains no filename —
+     it is a directory change plus `make`'s implicit default — so **no textual
+     search for `tests/Makefile` can find it**, and the file's own content gives
+     no hint it is a target. Deleting them turned `case-14-classic-opt` red on
+     the legacy path.
+  2. **`lib/ptti.c` is 0 bytes.** Every content-based "is this used?" heuristic
+     says dead. It is named three times in `lib/Makefile.skel`, a template the
+     legacy generator consumes, so removing it broke the build with
+     `No rule to make target 'ptti.c'`.
+
+  The inverse trap sits right next to it: **`AUTHORS` and `NEWS` are also 0 bytes
+  and are mandatory.** `AM_INIT_AUTOMAKE` carries no `foreign`, so gnu strictness
+  applies and `autoreconf` fails with `required file './AUTHORS' not found`.
+  Zero bytes is evidence of nothing in either direction.
+
+  What made the local result *interpretable* was running an untouched control of
+  the same commit alongside. `make check` failed 2 of 41 cases on the trimmed
+  tree — meaningless on its own, and exonerating once the control failed the
+  identical two. CI later passed all 41 on clean runners, confirming both as
+  container artifacts.
+
+  One more, about proof standards: an earlier draft of this pass shipped a
+  **"residual risk — `make check` could not be evaluated here, CI must close it"**
+  note, because the container lacked `soelim`. Closing it cost one
+  `apt-get install groff-base`. **A gate you cannot run locally is often one
+  package away; reach for the package before writing the caveat.**
+
+  Measured outcome, for honesty about what a deletion buys: the kit's own
+  `scan_c_flaws.py` over the C tree went **195 → 172 potential flaw sites**
+  (−20 `int-overflow-mul`, −3 `toctou`), all inside the removed dialects. That is
+  a reduction in review and maintenance surface, **not** a security fix — the
+  code was never compiled by any build in the repo, so none of those sites was
+  ever reachable. Say which one you mean.
+- **Kit change:** `PLAYBOOK.md` Phase 2 gains a bullet stating that the oracle
+  lives in the tree and reads as legacy, that the boundary is participation
+  (*does this build, test or document the oracle or the port?*) rather than
+  "C vs Rust", and that the genuinely-dead subset is established by deleting and
+  building against an untouched control — not by searching for references.
+- **Section amended:** `porting-kit/PLAYBOOK.md` · Phase 2 "Do"
+
+## 028. A checked-in manifest of the tree is a control that inverts
+
+- **Date:** 2026-09-16
+- **Codebase:** lsof-rs (C `lsof` → Rust) — repository hygiene pass, PR #81
+- **What happened:** The inherited tree carried `00MANIFEST`, a literal listing of
+  every file in the distribution, and `Inventory`, a script that walks it and
+  reports anything missing. Audited against the tree as it actually stood,
+  **223 of `00MANIFEST`'s 280 entries were already dangling** — it still described
+  a pre-autotools layout with a `dialects/` directory, root-level `main.c` and
+  `arg.c`, and `scripts/*.perl5` filenames that had been renamed to `*.pl`.
+  Running `./Inventory` on untouched `master` printed:
+
+      +  SOME FILES OR DIRECTORIES MAY BE MISSING!  +
+
+  So the repository shipped, for however long since the autotools migration, a
+  self-check that could only ever fail. Nothing noticed, because the script is
+  interactive and no CI job runs it — and a control nothing runs is
+  indistinguishable from one that passes.
+
+  The general shape is worth naming: **a hand-maintained inventory of the tree
+  starts as a check and decays into a liar**, and its decay is silent because the
+  thing it checks (the file layout) is exactly the thing that changes underneath
+  it. This is LESSONS #19 ("a control the kit asserts but never checks for does
+  not exist") seen from the other end — there the control was absent, here it was
+  present, executable, and inverted. Both are invisible to a green CI board.
+
+  Either generate the manifest from the tree at build time so it cannot drift, or
+  delete it and let the build system be the single statement of what the project
+  contains. This pass took the second option: `00MANIFEST`, `Inventory` and the
+  `.ck00MAN` marker went together, since `Makefile.am`'s `EXTRA_DIST` already
+  enumerates what ships.
+- **Kit change:** none to a harness — the lesson is a review question, recorded
+  here and reachable from Phase 2's new bullet. When a port inherits a
+  tree-manifest file, treat it as **drift-prone state, not documentation**: check
+  whether anything executes it, and whether it is still true, before trusting or
+  preserving it.
+- **Section amended:** `porting-kit/LESSONS.md` (this entry); cross-references
+  `PLAYBOOK.md` · Phase 2 "Do"
