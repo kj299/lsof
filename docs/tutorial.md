@@ -588,16 +588,12 @@ working directory (`cwd`) files.
 
 The -F option allows you to specify that lsof should describe
 open files with a special form of output, called field output,
-that can be parsed easily by a subsequent program.  The lsof
-distribution comes with sample AWK, Perl 4, and Perl 5 scripts
-that post-process field output.  The lsof test suite has a C
-library that could be adapted for use by C programs that want to
-process lsof field output from an in-bound pipe.
+that can be parsed easily by a subsequent program.  The lsof test
+suite has a C library that could be adapted for use by C programs
+that want to process lsof field output from an in-bound pipe.
 
 The lsof manual page describes field output in detail in its
-OUTPUT FOR OTHER PROGRAMS section.  A quick look at a sample
-script in the scripts/ subdirectory of the lsof distribution will
-also give you an idea how field output works.
+OUTPUT FOR OTHER PROGRAMS section.
 
 The most important thing about field output is that it is relatively
 homogeneous across Unix dialects.  Thus, if you write a script

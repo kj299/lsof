@@ -1504,10 +1504,7 @@ tools like cut, grep, sed, and sort.
 
 You might also consider using use lsof's field output with
 +ff, selecting the file struct address with -FF, and
-processing the output with an AWK or Perl script.  See the
-list_fields.awk, list_fields.perl, and shared.perl5 scripts
-in the scripts/ subdirectory of the lsof distribution for
-hints on file struct post-processing filters.
+processing the output with an AWK or Perl script.
 
 ### Why doesn't lsof report file offset (position)?
 

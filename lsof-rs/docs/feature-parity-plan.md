@@ -1,6 +1,6 @@
 # lsof-rs — full lsof option-parity plan (Phase 5)
 
-The original [project plan](../../...) was explicit about being a **Core MVP
+The original project plan was explicit about being a **Core MVP
 first** rewrite: implement the canonical lsof options that map onto Windows
 data, validate end-to-end on real hardware, ship. That milestone landed as
 [v0.1.0](https://github.com/kj299/lsof/releases/tag/winlsof-v0.1.0). But a
