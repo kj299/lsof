@@ -1921,8 +1921,7 @@ warning -- and risk missing other warnings; 2) permanently
 disable the identity check by deleting the definition of
 HASKERNIDCK in the dialect's machine.h header file -- with
 the same risk; or 3) rebuild lsof on the system where it
-is to be run.  (Deleting HASKERNIDCK can be done with the
-Customize script or by editing machine.h.)
+is to be run.  (Delete HASKERNIDCK by editing machine.h.)
 
 Generally checking kernel identity is a quick operation
 for lsof.  However, it is potentially slow under AIX, where
@@ -1938,9 +1937,7 @@ definition.  When it is defined, most dialects (exclusion:
 identity with the run-time one.
 
 To disable the kernel identity check, disable the HASKERNIDCK
-definition in the dialect's machine.h header file.  The
-Customize script can be used to do that in its section
-about the kernel identity check.
+definition in the dialect's machine.h header file.
 
 Caution: while disabling the kernel identity check may
 result in smaller lsof startup overhead, it comes with the
