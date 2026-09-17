@@ -6,8 +6,6 @@ Now that you have the lsof distribution, I suggest:
    If you're too impatient for that, do this:
 
       $ ./Configure <put your UNIX dialect's abbreviation here>
-        (Do the inventory step, as you prefer.)
-        (Do the customization step, as you prefer.)
       $ make
       $ ./lsof -h
 

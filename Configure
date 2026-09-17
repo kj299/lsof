@@ -476,14 +476,9 @@ case $LSOF_TGT in	# {
 	      LSOF_AFS="yes"
 	    fi	# }
 	  else
-	    if test ! -x ./AFSConfig	# {
-	    then
-	      echo "Can't find or execute the AFSConfig script"
-	      rm -f $LSOF_HLP
-	      exit 1
-	    fi	# }
-	    ./AFSConfig
-	    if test $? -eq 0 -a -r ./AFSHeaders -a -r ./AFSVersion	# {
+	    # The AFSConfig probe went with the Purdue-era helper scripts. Supply
+	    # ./AFSHeaders and ./AFSVersion yourself, or set LSOF_AFS=yes.
+	    if test -r ./AFSHeaders -a -r ./AFSVersion	# {
 	    then
 	      LSOF_AFS="yes"
 	    fi	# }
@@ -2264,14 +2259,9 @@ struct xtcpcb pcb; pcb.t_maxseg = 0;
 	      LSOF_AFS="yes"
 	    fi	# }
 	  else
-	    if test ! -x ./AFSConfig	# {
-	    then
-	      echo "Can't find or execute the AFSConfig script"
-	      rm -f $LSOF_HLP
-	      exit 1
-	    fi	# }
-	    ./AFSConfig
-	    if test $? -eq 0 -a -r ./AFSHeaders -a -r ./AFSVersion	# {
+	    # The AFSConfig probe went with the Purdue-era helper scripts. Supply
+	    # ./AFSHeaders and ./AFSVersion yourself, or set LSOF_AFS=yes.
+	    if test -r ./AFSHeaders -a -r ./AFSVersion	# {
 	    then
 	      LSOF_AFS="yes"
 	    fi	# }
@@ -4479,14 +4469,9 @@ LOCKF4
 	  LSOF_AFS="yes"
 	fi	# }
       else
-	if test ! -x ./AFSConfig	# {
-	then
-	  echo "Can't find or execute the AFSConfig script"
-	  rm -f $LSOF_HLP
-	  exit 1
-	fi	# }
-	./AFSConfig
-	if test $? -eq 0 -a -r ./AFSHeaders -a -r ./AFSVersion	# {
+	# The AFSConfig probe went with the Purdue-era helper scripts. Supply
+	# ./AFSHeaders and ./AFSVersion yourself, or set LSOF_AFS=yes.
+	if test -r ./AFSHeaders -a -r ./AFSVersion	# {
 	then
 	    LSOF_AFS="yes"
 	fi	# }
@@ -4836,19 +4821,6 @@ LOCKF4
 
 esac	# }
 
-# Do an inventory of the distribution, as required.
-
-if test "X$LSOF_SCRIPT_CALL" = "Xyes" -a ! -r ./.neverInv	# {
-then
-  if test ! -f ./Inventory	# Want -x, but Ultrix doesn't grok it.	# {
-  then
-    echo "Can't find Inventory script."
-    rm -f $LSOF_HLP
-    exit 1
-  fi	# }
-  ./Inventory
-fi	# }
-
 # Make sure target directory exists.
 
 if test ! -d ./lib/dialects/$LSOF_DIALECT_DIR	# {
@@ -5187,18 +5159,6 @@ echo "$LSOF_TSTXO" > $LSOF_TSTXOC
 echo "$LSOF_TSTXOC created"
 
 rm -f $LSOF_HLP
-
-# Call Customize, as required.
-
-if test "X$LSOF_SCRIPT_CALL" = "Xyes" -a ! -r ./.neverCust	# {
-then
-  if test ! -f ./Customize	# {  Want -x, but Ultrix doesn't grok it.
-  then
-    echo "Can't find Customize script."
-    exit 1
-  fi	# }
-  ./Customize $LSOF_DIALECT_DIR
-fi	# }
 
 # Issue unsupported warnings, as appropriate.
 
