@@ -200,21 +200,23 @@ If you took a mistake, you can delete the tag like:
 
 ### Make the source archive for the release
 
-   $ ./Configure [dialect]
+   $ autoreconf -vif
+   $ ./configure
    $ make dist
 
-The archive is put at support/ directory.
+The archive is written to the top of the source tree as
+lsof-<version>.tar.gz.
 
 Checking whether you can build a lsof executable from the archive is
 good idea.
 
 e.g.
 
-   $ cp support/lsof_4.94.0.linux.tar.bz2 /tmp
+   $ cp lsof-4.99.6.tar.gz /tmp
    $ cd /tmp
-   $ tar jxvf lsof_4.94.0.linux.tar.bz2
-   $ cd lsof_4.94.0.linux
-   $ ./Configure linux
+   $ tar zxvf lsof-4.99.6.tar.gz
+   $ cd lsof-4.99.6
+   $ ./configure
    $ make
    $ make check (if your dialect support the target)
 
