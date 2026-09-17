@@ -27,6 +27,23 @@ jobs:
     - uses: actions/checkout@v5
     - name: install dependencies
       run: sudo apt install -y pkg-config
+    # The legacy Configure path WITHOUT -n, which is the flow 00.README.FIRST
+    # tells users to run. CI previously exercised Configure only via the macOS
+    # job's `./Configure -n darwin`, and -n skips the inventory, customization
+    # and AFS steps -- so when the Purdue-era helper scripts were deleted,
+    # every job stayed green while `./Configure <dialect>` died at
+    # "Can't find Inventory script." A -n-only gate cannot see a -n-only
+    # blind spot.
+    #
+    # stdin is closed deliberately: Configure must stay non-interactive, and
+    # a future prompt should fail here rather than hang the runner.
+    - name: legacy Configure, no -n
+      run: ./Configure linux </dev/null
+    - name: legacy make
+      run: make -j2
+    # Configure writes Makefiles the autotools build would otherwise inherit.
+    - name: reset the tree for the autotools build
+      run: git clean -fdx .
     - name: autoconf
       run: autoreconf -vif
     - name: configure
