@@ -11,6 +11,22 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **`lsof-cli` now carries `#![forbid(unsafe_code)]`** — on *both* of its crate
+  roots. It never contained an `unsafe` block, but it was the one portable crate
+  without the attribute, so nothing stopped one being added. `lsof-core`,
+  `lsof-cli` and `lsof-backend-linux` are now uniform; only
+  `lsof-backend-windows` has FFI, and its blocks are `// SAFETY`-documented and
+  audited in CI.
+
+  A bin and a lib in one package are **two crates** and the attribute does not
+  cross between them, so `main.rs` needs its own copy rather than inheriting
+  `lib.rs`'s. Proven rather than assumed: with an `unsafe` block added to
+  `main.rs` the build is rejected (`error: usage of an unsafe block`), and with
+  the same block left in place but `main.rs`'s attribute removed — `lib.rs`'s
+  still present — it **compiles clean**. The same mutation against the library
+  crate is rejected too.
+
 ### Fixed
 - **A socket in another network namespace is named** (`DIVERGENCES.md` #16):
   `sock  0,9  0t0  <inode>  protocol: TCP` rather than

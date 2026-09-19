@@ -52,7 +52,7 @@ independent code and per-OS "dialect" backends:
 | `lsof-core` | Platform-agnostic: data model (`Process`/`OpenFile` ≈ lsof's `lproc`/`lfile`), the selection/filter engine, the output renderers (table / `-F` / JSON), and the `Backend` trait (the "dialect" seam). **Zero dependencies, `#![forbid(unsafe_code)]`, fully unit-tested on any host.** |
 | `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper, file handles (Phase 3) via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows. |
 | `lsof-backend-linux` | The Linux "dialect": implements `Backend` over `/proc`. **Dependency-free and `#![forbid(unsafe_code)]`** — `/proc` is a filesystem and `std::os::unix::fs::MetadataExt` supplies every stat field, so no FFI is involved at all. Compiled only on Linux. |
-| `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). |
+| `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). **Dependency-free and `#![forbid(unsafe_code)]`** — on both of its crate roots, since a bin and a lib in one package are two crates and the attribute does not cross between them. |
 
 ### Mapping Unix concepts to Windows
 

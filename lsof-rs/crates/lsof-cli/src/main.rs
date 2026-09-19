@@ -4,6 +4,12 @@
 //! processes and their open files, applies the selection, and renders the
 //! chosen format. On Windows it uses the native backend; on other hosts it
 //! falls back to the mock backend so the pipeline runs anywhere.
+//!
+//! `#![forbid(unsafe_code)]`: the CLI only ever calls the backends, never the
+//! platform. A bin and a lib in one package are two crates and the attribute
+//! does not cross between them, so this is not a duplicate of `lib.rs`'s —
+//! drop it and the binary is unconstrained while the library still looks safe.
+#![forbid(unsafe_code)]
 
 use std::collections::HashSet;
 
