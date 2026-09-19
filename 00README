@@ -19,9 +19,6 @@
 	    Caches -- Name and Device
 	    Raw Sockets
 	    Other Compile-time Definitions
-	    The AFSConfig Script
-	    The Inventory Script
-	    The Customize Script
 	    Cautions
 	    Warranty
 	    License
@@ -119,24 +116,6 @@ want to look at them anyway.  Pay particular attention to the
 definitions that are discussed in the Security section of this
 file.  Please read that section.
 
-The Configure script calls three other scripts in the lsof
-distribution: AFSConfig; Inventory; and Customize.  The AFSConfig
-script is called for selected dialects (AIX, HP-UX, NEXTSTEP, and
-Solaris) to locate AFS header files and determine the AFS version.
-See The AFSConfig Script section of this file for more information.
-
-The Inventory script checks the completeness of the lsof distribution.
-Configure calls Inventory after it has accepted the dialect
-abbreviation, but before it configures the top-level directory for
-the dialect.  See The Inventory Script section of this file for
-more information.
-
-Configure calls the Customize script after it has configured the
-top-level lsof directory for the declared dialect.  Customize helps
-you modify some of the important compile-time definitions of
-machine.h.  See the The Customize Script section.
-
-You should also think about where you will install lsof and its
 man page, and whom you will let execute lsof.  Please read the
 Installing Lsof section of this file for information on installation
 considerations.
@@ -199,9 +178,8 @@ list, lsof may still work on your system.  I have no way of testing
 that myself.  Try configuring for the named dialect -- e.g., if
 you're using Solaris 2.1, try configuring for Solaris 2.5.1.
 
-After you have configured lsof for your UNIX dialect and have
-selected options via the Customize script (See the The Customize
-Script section.) , use the make command to build lsof -- e.g.,
+After you have configured lsof for your UNIX dialect, use the
+make command to build lsof -- e.g.,
 
 	$ make
 
@@ -221,11 +199,7 @@ the dialect abbreviation:
 			abbreviations.
 
 	-n              may be specified to stop the Configure
-			script from calling the Customize and
-			Inventory scripts.
-
-			Caution: -n also suppresses the AFSConfig
-			step.
+			script from probing for AFS.
 
 
 
@@ -266,9 +240,8 @@ mode by defining HASSECURITY in the Makefile or in the machine.h
 header file for the specific dialect you're using -- e.g.
 dialects/aix/machine.h.
 
-The Customize script, run by Configure when it has finished its
-work, gives you the opportunity to define HASSECURITY and
-HASNOSOCKSECURITY.  (See the The Customize Script section.)
+You can define HASSECURITY and HASNOSOCKSECURITY by editing the
+dialect's machine.h header file.
 
 The lsof -h output indicates the state HASSECURITY and HASNOSOCKSECURITY
 had when lsof was built, reporting:
@@ -305,10 +278,8 @@ from the dialect's machine.h file.  There is also information on
 the device cache file feature in the 00FAQ file.  (The 00DCACHE
 and 00FAQ files are part of the lsof distribution package.)
 
-The Customize script, run by Configure after it has finished its
-work, gives you the opportunity to change the compile-time options
-related to the device cache file.  (See The Customize Script
-section.)
+You can change the compile-time options related to the device cache
+file by editing the dialect's machine.h header file.
 
 Since lsof may need setgid or setuid-root permission (See the Setgid
 Lsof Dialects and Setuid-root Lsof Dialects sections.), its security
@@ -344,9 +315,7 @@ NFS file system, etc.  Issuance of warnings are enabled by default
 in the lsof distribution.
 
 Issuance or warnings may be disabled by default by defining
-WARNINGSTATE in the dialect's machine.h.  The Customize script may
-also be used to change the default warning message issuance state.
-(See The Customize Script section.)
+WARNINGSTATE in the dialect's machine.h.
 
 The ``-w'' option description of the ``-h'' option (help) output
 will indicate the default warning issuance state.  Whatever the
@@ -391,9 +360,8 @@ message will appear instead:
 
     /dev warnings = disabled
 
-The Customize script, run by Configure after it has finished its
-work, gives you the opportunity to change the WARNDEVACCESS
-definition.  (See The Customize Script section.)
+You can change the WARNDEVACCESS definition by editing the dialect's
+machine.h header file.
 
 
 NFS Blocks
@@ -490,111 +458,7 @@ Other Compile-time Definitions
 The machine.h and dlsof.h header files for each dialect contains
 definitions that affect the compilation of lsof.  Check the
 Definitions That Affect Compilation section of the 00PORTING file
-of the lsof distribution for their descriptions.  (Also see The
-Customize Script section.)
-
-
-The AFSConfig Script
-====================
-
-Lsof supports AFS on some combinations of UNIX dialect and AFS
-version.  See the AFS section of this document for a list of
-supported combinations.
-
-When configuring for dialects where AFS is supported, the Configure
-script calls the AFSConfig script to determine the location of AFS
-header files and the AFS version.  Configure will not call AFSConfig,
-even for the selected dialects, unless the file /usr/vice/etc/ThisCell
-exists.
-
-The AFS header file location is recorded in the AFSHeaders file;
-version, AFSVersion.  Once these values have been recorded, Configure
-can be told to skip the calling of AFSConfig by specifying its
-(Configure's) -n option.
-
-
-The Inventory Script
-====================
-
-The lsof distribution contains a script, called Inventory, that
-checks the distribution for completeness.  It uses the file 00MANIFEST
-in the distribution as a reference point.
-
-After the Configure script has accepted the dialect abbreviation,
-it normally calls the Inventory script to make sure the distribution
-is complete.
-
-After Inventory has run, it creates the file ".ck00MAN" in the
-top-level directory to record for itself the fact that the inventory
-has been check.  Should Inventory be called again, it senses this
-file and asks the caller if another check is in order, or if the
-check should be skipped.
-
-The -n option may be supplied to Configure to make it bypass the
-calling of the Inventory script.  (The option also causes Configure
-to avoid calling the Customize script.)
-
-The lsof power user may want to define (touch) the file ".neverInv".
-Configure avoids calling the Inventory script when ".neverInv"
-exists.
-
-
-The Customize Script
-====================
-
-Normally when the Configure script has finished its work, it calls
-another shell script in the lsof distribution called Customize.
-(You can tell Configure to bypass Customize with its -n option.)
-
-Customize leads you through the specification of these important
-compile-time definitions for the dialect's machine.h header file:
-
-	HASDCACHE		device cache file control
-	    HASENVDC		device cache file environment
-				variable name
-	    HASPERSDC		personal device cache file path
-				format
-	    HASPERSDCPATH	name of environment variable that
-				provides an additional component
-				of the personal device cache file
-				path
-	    HASSYSDC		system-wide device cache file path
-	HASKERNIDCK		the build-time to run-time kernel
-				identity check
-	HASSECURITY		the security option
-	HASNOSOCKSECURITY	the open socket listing option when
-				HASSECURITY is defined
-	WARNDEVACCESS		/dev (or /devices) warning message
-				control
-	WARNINGSTATE		warning message issuance state
-
-The Customize script accompanies its prompting for entry of new
-values for these definitions with brief descriptions of each of
-them.  More information on these definitions may be found in this
-file or in the 00DCACHE and 00FAQ files of the lsof distribution.
-
-You don't need to run Customize after Configure.  You can run it
-later or you can edit machine.h directly.
-
-The -n option may be supplied to Configure to make it bypass the
-calling of the Customize script.  (The option also causes Configure
-to avoid calling the Inventory script.)
-
-The lsof power user may want to define (touch) the file ".neverCust".
-Configure avoids calling the Customize script when ".neverCust"
-exists.
-
-Customize CAUTION: the Customize script works best when it is
-applied to a newly configured lsof source base -- i.e., the machine.h
-header file has not been previously modified by the Customize
-script.  If you have previously configured lsof, and want to rerun
-the Customize script, I recommend you clean out the previous
-configuration and create a new one:
-
-	$ Configure -clean
-	$ Configure <dialect_abbreviation>
-	...
-	Customize in response to the Customize script prompts.
+of the lsof distribution for their descriptions.
 
 
 Cautions
@@ -915,8 +779,7 @@ but if you use ``-X'', you should be alert to its possibly serious
 side effects.  Although readx() is normally disabled, its state is
 controlled with the HASXOPT, HASXOPT_ROOT, and HASXOPT_VALUE
 definitions in dialects/aix/machine.h, and you can change its
-default state by changing those definitions.  You can also change
-HASXOPT_ROOT via the Customize script.
+default state by changing those definitions.
 
 You can also compile lsof with readx() use permanently enabled or
 disabled -- see the comments about the definitions in the

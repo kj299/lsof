@@ -268,12 +268,6 @@ These are common files in lsof4/:
 
     Configure	the configuration script
 
-    Customize	does some customization of the selected lsof
-		dialect
-
-    Inventory	takes an inventory of the files in an lsof
-		distribution
-
     version	the version number
 
     dialects/	the dialects subdirectory
@@ -1371,18 +1365,6 @@ possibilities
     NEEDS_NETINET_TCPH	is defined when the Linux version needs to #include
 			<netinet/tcp.h> in place of <linux/tcp.h> in order to
 			have access to the TCP_* definitions.
-
-    NEVER_HASDCACHE	keeps the Customize script from offering to
-			change HASDCACHE by its presence anywhere
-			in a dialect's machine.h header file --
-			e.g., in a comment.  See the Customize
-			script or machine.h in dialects/linux/proc.
-
-    NEVER_WARNDEVACCESS	keeps the Customize script from offering to
-			change WARNDEVACCESS by its presence anywhere
-			in a dialect's machine.h header file --
-			including in a comment.  See the Customize
-			script or machine.h in dialects/linux/proc.
 
     NLIST_TYPE		is the type of the nlist table, Nl[], if it is
 			not nlist.  HASNLIST must be set for this

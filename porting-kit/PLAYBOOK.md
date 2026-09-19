@@ -149,7 +149,14 @@ lsof-rs's phase order was sound; its one miss was not spiking the hang first.
   `cd tests && make` names no filename a grep can find, and a 0-byte file can
   still be named three times in a build template. Prove every removal with the
   reference tree's own gates — configure, build, test, dist — run against an
-  untouched control of the same commit.
+  untouched control of the same commit, **and run them along the path that
+  reaches what you removed** (LESSONS #30). Building is not enough if you build
+  the way CI builds: lsof-rs verified a deletion with `./Configure -n linux`,
+  where `-n` is documented in that same script as "avoid AFS, customization,
+  and inventory checks" — the exact three helpers being deleted — so the one
+  build that proved it safe was the one build that could not see the break.
+  **A verification run carrying a flag documented as "skip X" proves nothing
+  about removing X.**
 - Stand up an **intentional-divergence ledger** (`DIVERGENCES.md`, template in
   the skeleton): every place the Rust will *deliberately* differ from C —
   starting with the Phase-0 flaw scan's findings. **Its existence is checked**
