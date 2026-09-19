@@ -74,10 +74,6 @@ id = "opt:C"
 reason = "kernel name cache — a BSD/Solaris construct; neither Windows nor /proc has one to disable"
 
 [[waive]]
-id = "opt:H"
-reason = "legacy \"headers\" toggle on certain dialects"
-
-[[waive]]
 id = "opt:k"
 reason = "kernel symbol file — for dialects that read kernel memory; both backends read a documented API instead"
 
@@ -121,14 +117,24 @@ reason = "mount-table concepts (exempt FS, FS detail, mtab supplement, cross-mou
 #     "we will never do this", and that would be untrue.
 
 [[waive]]
-ids = ["opt:e", "opt:f", "opt:m", "opt:x"]
+ids = ["opt:e", "opt:x"]
 platforms = ["linux"]
-reason = "DEBT (L2): needs /proc/mounts; unimplemented and untested"
+reason = "DEBT (L2): `-e` exempts a mount point from being stat'ed and `-x` crosses filesystems/symlinks under +d|+D. Unimplemented and untested. (`-f`/`+f` were waived here too until the mount table landed; they work now, so they are no longer excused.)"
 
 [[waive]]
-ids = ["opt:M", "opt:N"]
+id = "opt:m"
 platforms = ["linux"]
-reason = "DEBT (L2+): portmapper and NFS reporting; unimplemented and untested"
+reason = "NOT IN THE DIALECT — `lsof -m <file>` on this C answers `-m not supported`. Waived as absent upstream rather than as debt."
+
+[[waive]]
+id = "opt:N"
+platforms = ["linux"]
+reason = "DEBT (L2+): NFS-only selection; needs the mount table's fs type. Unimplemented and untested."
+
+[[waive]]
+id = "opt:M"
+platforms = ["linux"]
+reason = "NOT IN THE DIALECT — `lsof -M` on this C answers `illegal option character: M`. Waived as absent upstream rather than as debt: this port owes nothing the reference implementation does not do."
 
 [[waive]]
 id = "opt:X"
@@ -220,13 +226,18 @@ ids = [
 platforms = ["windows"]
 reason = "Unix object types with no Windows analogue"
 
+# `type:DEL` is NOT waived on Linux any more: mem rows, the `(deleted)` marking
+# and the named anon_inode kinds all ship, and the differential compares the
+# DEL row against the C directly (linux/differential-mappings-mem-and-del).
 [[waive]]
-ids = [
-  "type:DEL", "type:EVENTFD", "type:SHM", "type:UNKNdel", "type:UNKNmem",
-  "type:UNNM", "type:UNSP"
-]
+ids = ["type:EVENTFD", "type:SHM", "type:UNNM", "type:UNSP"]
 platforms = ["linux"]
-reason = "DEBT (L2): deleted-file marking, named anon_inode kinds, and mem rows from /proc/<pid>/maps"
+reason = "NOT IN THE DIALECT — these names live in lib/print.c's shared table and include/lsof.h's enum, but nothing under lib/dialects/linux/ ever sets them: an eventfd is typed `a_inode` here, /dev/shm is a plain `REG`. Waived as unreachable on this dialect rather than as debt."
+
+[[waive]]
+ids = ["type:UNKNdel", "type:UNKNmem"]
+platforms = ["linux"]
+reason = "DEBT (L2): the UNKN* family, same cause as the entry below — the C emits these with an errno on a link it cannot read, and lsof-rs omits the row. Grouped with the mem/deleted work until now, which hid that they are an error-reporting gap and not a mappings one."
 
 [[waive]]
 ids = ["type:UNKN", "type:UNKNcwd", "type:UNKNfd", "type:UNKNrtd", "type:UNKNtxt"]

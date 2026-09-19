@@ -51,6 +51,10 @@ name = "golden/offset-o"
 args = ["-o"]
 
 [[case]]
+name = "golden/human-size-H"
+args = ["-H"]
+
+[[case]]
 name = "golden/command-width-plus-c"
 args = ["+c", "4"]
 
@@ -448,6 +452,19 @@ covers = ["type:REG"]
 [[case]]
 name = "linux/differential-files-terse"
 args = ["-t", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
+# Fixture E maps two libraries and unlinks one, so this case compares the
+# `DEL` row the C emits for a deleted mapping. DEL is an FD code on Linux, not
+# a TYPE — the C puts it where `mem` would go — but the inventory files it
+# under types, so declare it here rather than re-taxonomise the C.
+name = "linux/differential-mappings-mem-and-del"
+args = ["-n", "-P", "-a", "-p", "PID"]
+covers = ["type:DEL"]
+
+[[case]]
+name = "linux/differential-files-human-size"
+args = ["-n", "-P", "-H", "-a", "-d", "7,8,9", "-p", "PID"]
 
 [[case]]
 name = "linux/differential-files-offset-o"

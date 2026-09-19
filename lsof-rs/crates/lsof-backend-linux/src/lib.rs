@@ -1,4 +1,4 @@
-//! Linux data-acquisition backend for lsof-rs — **Phase L1**.
+//! Linux data-acquisition backend for lsof-rs — **Phase L2**.
 //!
 //! Implements [`lsof_core::backend::Backend`] over `/proc`, which is the whole
 //! data source: process identity from `/proc/<pid>/status`, open files from
@@ -23,20 +23,29 @@
 //!   `unix`), protocol, addresses and TCP state. **`-i` and `-U` work**, in
 //!   every form the core supports (`-iTCP:443`, `-i@host`, `-i4`/`-i6`,
 //!   `-iUDP`, `-iICMP`, `-iRAW`), as does `-T q`.
+//! * **L2** — everything the scope document deferred, and it has all landed:
+//!   `mem` rows and the `DEL` marking from `/proc/<pid>/maps`, the lock column
+//!   from `/proc/locks`, named `anon_inode` kinds (`[eventfd:6]`, `[pidfd:N]`,
+//!   `[eventpoll]`, …), the mount table behind `-f`/`+f` and the mount-point
+//!   rule, and per-namespace socket reads so a container's socket is named
+//!   rather than left as a bare `socket:[inode]`.
 //!
 //! # What it does not cover yet
 //!
-//! Deferred to L2: `mem` rows from `/proc/<pid>/maps`, the lock column from
-//! `/proc/locks`, named `anon_inode` kinds, deleted-file marking, and the
-//! mount-table options (`-e`, `-m`, `+|-x`). See
-//! `lsof-rs/docs/linux-backend-scope.md`, and the `DEBT (L2)` entries in
-//! `lsof-rs/coverage/feature-inventory-lsof-rs.toml`, which the coverage gate
-//! prints on every run.
+//! Two object types the C names and this backend does not, and they are not
+//! the same problem. A **packet** socket is closeable here — its inode is in
+//! `/proc/net/packet` and `dsock.c` gives the column shape. A **netlink**
+//! socket usually is not: an unbound one never appears in `/proc/net/netlink`,
+//! and the C names it from the `system.sockprotoname` extended attribute
+//! instead, which has no `std` API — so it waits on the decision recorded as
+//! DIVERGENCES item 22, not on effort.
 //!
-//! **Network namespaces.** `/proc/net` is the *caller's* namespace, so a socket
-//! held by a process in a container will not be found. That degrades to the L0
-//! row — `SOCK` with the `socket:[inode]` name — rather than to a wrong answer.
-//! Reading per-namespace is L2.
+//! Also open: the `UNKN*` rows (the C reports an unreadable link with its
+//! errno where this backend omits the row), and the options `-e`, `-x`, `-X`,
+//! `-Z`, `-N`, `-S` and `-b`. `lsof-rs/docs/linux-l2-plan.md` measures each of
+//! them; the `DEBT` entries in
+//! `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are what the coverage
+//! gate prints on every run.
 //!
 //! **Inaccessible files are omitted, not reported.** Diffed against the C
 //! `lsof` 4.95.0, this is the one behavioural difference in rows L0 claims to

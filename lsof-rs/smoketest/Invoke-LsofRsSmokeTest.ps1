@@ -317,6 +317,13 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     # ===================== handles: file / offset / pipe / mapped =====================
     Test-Case 'open-file-listed' 'handles/file' { $r = Invoke-Lsof @('-p', "$self") 'p-self-file'; Assert-ContainsCI $r.Out "lsof_rs_file_$self" }
     Test-Case 'file-offset-dash-o' 'handles/offset' { $r = Invoke-Lsof @('-o', '-p', "$self") 'p-self-o'; Assert-Contains $r.Out '0t128' }
+    # -H is a SHARED renderer change (lsof-core), so it lands on Windows too.
+    # The fixture file is exactly 256 bytes, which is under 1024 and therefore
+    # the C's raw-count-with-a-B branch -- a fixed string, not a host-dependent
+    # one. The second case is the one that matters: -H scales the SIZE cell and
+    # must leave an offset alone, so `-o -H` still reads 0t128.
+    Test-Case 'human-size-dash-H' 'handles/file' { $r = Invoke-Lsof @('-H', '-p', "$self") 'p-self-H'; Assert-Contains $r.Out '256B' }
+    Test-Case 'human-size-leaves-offset' 'handles/offset' { $r = Invoke-Lsof @('-o', '-H', '-p', "$self") 'p-self-oH'; Assert-Contains $r.Out '0t128' }
     Test-Case 'named-pipe-listed' 'handles/pipe' { $r = Invoke-Lsof @('-p', "$self") 'p-self-pipe'; Assert-ContainsCI $r.Out "lsof_rs_pipe_$self" }
     Test-Case 'mapped-data-file-listed' 'handles/mapped' { $r = Invoke-Lsof @('-p', "$self") 'p-self-map'; Assert-ContainsCI $r.Out "lsof_rs_map_$self" }
 

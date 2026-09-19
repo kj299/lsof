@@ -48,6 +48,83 @@ disagreeing, and it names the C code so anyone can check the triage.
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
 
+## Fixed by implementing `-H`, which was never a headers toggle (2026-09-19)
+
+`-H` was not ledgered here. It was **waived**, in
+`coverage/feature-inventory-lsof-rs.toml`, as
+
+```toml
+id = "opt:H"
+reason = "legacy \"headers\" toggle on certain dialects"
+```
+
+with **no `platforms` key**, so it excused both backends. In lsof 4.99.6 `-H`
+is *human-readable sizes*, it works, and lsof-rs answered
+`lsof: unsupported option: -H` on every platform. The gate that exists to
+catch a missing feature had been green over this one since before Linux
+existed, because the waiver's reason was wrong rather than expired — nothing
+about the port changing could ever have falsified it.
+
+### What the C actually does
+
+`human_readable_size()` in `print.c`, measured on sparse files of exactly these
+lengths rather than read off the source:
+
+| bytes | C prints | why it is not the obvious answer |
+|---:|---|---|
+| `1023` | `1023B` | under 1024 is a raw count with a `B`, not `1.0K` |
+| `2125328` | `2.0M` | the divide **truncates before it scales** — `2075/1024`, not `2.0263` |
+| `25847420` | `24.6M` | same rule; plain `sz/unit` in floating point says `24.7M` |
+| `174336` | `170.2K` | exactly `170.25`, and `%.1lf` rounds half-to-**even** |
+| `1048575` | `1024.0K` | the **suffix is chosen before rounding**, so just under a boundary it prints 1024 of the smaller unit rather than `1.0M` |
+| `u64::MAX` | `16.0E` | the C's last loop step overflows and is never read; Rust must not panic there |
+
+Three of those six are rules a tidy-up would "fix". They are pinned by name in
+`golden.rs`, and all three survive as mutations only if the test is weak — the
+pure-floating-point mutation **did** survive the first draft, which is why
+`25847420`, `161533414` and `415288979` are in the table: they are the values
+that separate the two orders of operation, and the oracle was asked for each.
+
+### Scope, which is narrower than it looks
+
+`-H` scales the **SIZE cell and nothing else**. The C humanises inside the
+`sz_def` branch of `print.c` alone, so:
+
+* an **offset stays `0t<dec>`** — including the offset a row falls back to when
+  it has no size, and including `-o -H`;
+* **`-F` is untouched** (`lsof -H -Fs` is byte-identical to `lsof -Fs`);
+* **JSON is untouched** — the C's `-J` output with and without `-H` diffs
+  clean, so lsof-rs's `-J`/`-j` stay in raw bytes too. A machine-readable
+  format that silently switches to `1.5M` is a worse bug than the missing
+  option was.
+
+Three differential cases cover exactly these three claims against the C, on
+fixture A's new sparse fds 7/8/9. The Windows smoke suite gains the same pair,
+because this is a `lsof-core` change and lands on both backends.
+
+### What else the pass corrected
+
+Four waivers that asserted something untrue, found by reading each one against
+the oracle rather than against the port:
+
+* **`opt:m` and `opt:M`** were `DEBT (L2)`. This C answers `-m not supported`
+  and `illegal option character: M` on Linux — the port owes nothing the
+  reference implementation does not do. Rescoped as absent from the dialect.
+* **`opt:f` / `+f`** were waived as needing `/proc/mounts`. They have worked
+  since the mount table landed; the waiver outlived its reason.
+* **`type:EVENTFD`, `SHM`, `UNNM`, `UNSP`** were `DEBT (L2)`. They exist in
+  `lib/print.c`'s shared table and `include/lsof.h`'s enum, but **nothing under
+  `lib/dialects/linux/` ever sets them** — an eventfd is `a_inode` here and
+  `/dev/shm` is a plain `REG`. Unreachable, not owed.
+* **`type:DEL`** was in the same group and is simply done: measured identical
+  to the C on a deleted mapping, and now covered by the differential. Worth
+  noting it is an **FD** code on Linux, not a TYPE — the C puts `DEL` where
+  `mem` would go — though the inventory files it under types.
+
+`type:UNKNdel` and `type:UNKNmem` moved to the `UNKN*` entry below, where they
+belong: they are the error-reporting gap, not the mappings one, and grouping
+them with `mem` rows hid that for months.
+
 ## The Windows unsafe layer, under a sanitizer at last (2026-09-12)
 
 Not a divergence — the last of the four playbook exit criteria this port had

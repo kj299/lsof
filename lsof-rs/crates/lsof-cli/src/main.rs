@@ -575,6 +575,7 @@ fn main() {
                     show_ppid,
                     show_offset,
                     show_links: selection.show_links,
+                    human_size: selection.human_size,
                     command_width: selection.command_width.cap(),
                     tcp_show: selection.tcp_info(),
                     ..TableOpts::new(esc)
