@@ -1101,3 +1101,57 @@ the emphasized half.
 - **Section amended:** `.github/workflows/porting-kit.yml` (new);
   `porting-kit/Makefile` · `check-kit`;
   `porting-kit/harnesses/lessons/check_lesson_refs.py` (new)
+
+## 030. Building is not enough if you build the way CI builds
+
+- **Date:** 2026-09-19
+- **Codebase:** lsof-rs (C `lsof` → Rust) — the repository cleanup arc, PRs #81–#85
+- **What happened:** LESSONS #27, written four days earlier, says *reachability is
+  a build result, not a search result*. I followed it. I deleted the files, ran
+  the reference tree's gates against an untouched control, got clean results, and
+  **still shipped a broken `./Configure`.**
+
+  The deletion removed three helper scripts (`Inventory`, `Customize`,
+  `AFSConfig`) that `Configure` still called behind `exit 1` guards. Every
+  verification run used `./Configure -n linux`, because that is what CI runs —
+  and `-n` is documented, in the very script being edited, as **"avoid AFS,
+  customization, and inventory checks"**. The one build that proved the deletion
+  safe was the one build that could not observe the break. `./Configure linux`
+  went from rc=0 to rc=1, and that is the invocation `00.README.FIRST` hands a
+  new builder.
+
+  The rule this yields is mechanical, which is the point — #27's "run the build"
+  was not, and that is why it failed to fire:
+
+  > **A verification run carrying a flag documented as "skip X" proves nothing
+  > about removing X.** Enumerate the entry points that *reach* what you
+  > removed, and run those. The one CI happens to use is the least informative,
+  > because CI's coverage is exactly what was already true before your change.
+
+  Two things generalize past the specific flag.
+
+  **A green board after a deletion is a narrow claim.** It says the deletion did
+  not break what CI covers. It says nothing about what CI does not cover, and a
+  cleanup's whole purpose is to touch things nobody exercises — so a cleanup is
+  precisely the change for which CI's coverage is least representative.
+
+  **Budget for the audit of your own finished work.** This arc ran four passes,
+  and each one found the previous one's defect: the cleanup found `00MANIFEST`
+  had been lying for months; its retrospective found `check-kit` was never wired
+  to CI; acting on that found `LESSONS.md` silently corrupted and then, on the
+  new gate's first CI run, a harness fixture whose behaviour depended on which
+  `awk` was installed; and auditing the cleanup's own fallout found this
+  regression. Every one was invisible to a green board. Each pass looked
+  complete and verified when it shipped — including this one's parent, whose PR
+  body I wrote myself.
+
+  A smaller corollary, from the same pass: **fixing a script is not finishing
+  with it.** The repair that removed those call sites left `Configure`'s own
+  `-n` help text advertising "avoid AFS, customization, and inventory checks"
+  for another three days, describing two things that no longer existed. The
+  thing you edit describes itself, and that description is part of the edit.
+- **Kit change:** `PLAYBOOK.md` Phase 2's removal bullet (added by #27) now ends
+  with the entry-point rule and the `./Configure -n` worked example, so the
+  instruction to "prove every removal with the tree's own gates" carries the
+  qualifier that makes it real.
+- **Section amended:** `porting-kit/PLAYBOOK.md` · Phase 2 "Do"
