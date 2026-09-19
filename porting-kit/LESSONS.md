@@ -1105,7 +1105,7 @@ the emphasized half.
 ## 030. Building is not enough if you build the way CI builds
 
 - **Date:** 2026-09-19
-- **Codebase:** lsof-rs (C `lsof` → Rust) — the repository cleanup arc, PRs #81–#85
+- **Codebase:** lsof-rs (C `lsof` → Rust) — the repository cleanup arc, PRs #81–#84 and #86
 - **What happened:** LESSONS #27, written four days earlier, says *reachability is
   a build result, not a search result*. I followed it. I deleted the files, ran
   the reference tree's gates against an untouched control, got clean results, and
