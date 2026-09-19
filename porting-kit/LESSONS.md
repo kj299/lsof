@@ -1155,3 +1155,62 @@ the emphasized half.
   instruction to "prove every removal with the tree's own gates" carries the
   qualifier that makes it real.
 - **Section amended:** `porting-kit/PLAYBOOK.md` · Phase 2 "Do"
+
+## 031. A control that reads text cannot tell a claim from a fact
+
+- **Date:** 2026-09-19
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `check_ledgers.py`, the sanitizers ledger
+- **What happened:** LESSONS #19 built `check_ledgers.py` so the playbook's
+  asserted controls would be *checked* rather than assumed. Its sanitizers
+  ledger asks whether CI runs a sanitizer, and answered it by regex-searching
+  the raw text of every workflow file.
+
+  Those are different questions, and they came apart the first time something
+  pushed on them. A workflow added in PR #83 named the tools in a header
+  comment **while explaining that it ran none of them**, and that alone
+  satisfied the ledger. Reduced to its essence, this passed:
+
+      name: decoy
+      # runs no miri, no asan and no sanitizer of any kind
+      jobs:
+        n:
+          steps:
+            - run: echo hi
+
+  A control that reads text cannot distinguish a fact from a claim about a
+  fact, or from a denial of one. **Point the check at the position where the
+  thing would actually happen** — here, the values a workflow runs or
+  configures (`run:`, `env:`, `with:`, `uses:`) rather than its prose. Three
+  kinds of text are now excluded: comments; `name:` values, because
+  `lsof-rs-ci.yml` really does carry a step called *"ledgers exist (… sanitizer
+  job)"*; and bare mapping keys, because a job called `miri:` is a label too.
+  Stripping comments alone would have left the weaker two-thirds of the bug.
+
+  **Writing the test found the opposite defect in the same check.** A case
+  asserting that `RUSTFLAGS: -Zsanitizer=address` counts as evidence *failed*:
+  the pattern was `\b(miri|asan|ubsan|tsan|sanitizer)`, and `\b` cannot match
+  between the `Z` and the `s`. The ledger had been structurally blind to the
+  canonical way of enabling a sanitizer in Rust — a false negative sitting
+  beside the false positive, in a five-token regex, unnoticed since #19. The
+  check accepted workflows that ran nothing and would have rejected one that
+  ran ASan and nothing else.
+
+  So: **when a control is wrong in one direction, test the other direction in
+  the same pass.** The two failures share a cause — a pattern written to be
+  *lenient enough to pass the repo it was written in* — and finding one is the
+  cheapest moment to look for the other.
+
+  A third, smaller instance turned up while writing this entry, in a control I
+  added four days ago. `check_lesson_refs.py` matches `LESSONS\s+#(\d{1,3})`,
+  so in a citation list — `(LESSONS #29, #31)` — it validates the first number
+  and silently ignores the rest. It reported `0 problems` on a comment citing
+  an entry that did not exist. The citation here is written
+  `(LESSONS #29; LESSONS #31)` so that both resolve and the check can see both;
+  **teaching the checker to read a list is the next candidate**, and is left
+  undone rather than folded into a PR about a different harness.
+- **Kit change:** `harnesses/ledgers/check_ledgers.py` gains `executable_text()`
+  — a stdlib-only, quote-aware scanner that yields the configuring/running
+  parts of a workflow — and the sanitizers pattern now matches `-Zsanitizer`.
+  Eight self-test cases pin both directions, each one a shape taken from a real
+  workflow in this repository.
+- **Section amended:** `porting-kit/harnesses/ledgers/check_ledgers.py`
