@@ -109,7 +109,7 @@ LSOF_VF=version
 #	$LSOF_PL	    patch level
 #	$LSOF_RANLIB	    randomizing command for the lsof library
 #	$LSOF_RANLIB_SUP    if non-NULL $LSOF_RANLIB was supplied
-#	$LSOF_SCRIPT_CALL   Customize and Inventory scripts call status
+#	$LSOF_SCRIPT_CALL   AFS probe status
 #	$LSOF_SPMKF	    Special Makefile name
 #	$LSOF_TGT	    canonical target abbreviation (shortest)
 #	$LSOF_TMP	    internal temporary
@@ -234,7 +234,7 @@ Usage: Configure <options> <target-dialect>
   <options>:  -clean        : clean up previous configuration
               -d|-dialects  : display a list of supported dialect versions
               -h|-help      : display help information
-              -n            : avoid AFS, customization, and inventory checks
+              -n            : avoid the AFS probe
   <target-dialect> (****USE -d TO GET TESTED DIALECT VERSION NUMBERS****):
     aix|aixgcc              : IBM AIX xlc (aix) or gcc (aixgcc)
     darwin                  : Apple Darwin

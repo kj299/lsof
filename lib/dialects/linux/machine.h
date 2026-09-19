@@ -81,9 +81,6 @@
  * CAUTION!!!  Do not enable HASDCACHE for /proc-based Linux lsof.  The source
  *	       code cannot support it.
  *
- * The presence of NEVER_HASDCACHE in this comment prevents the Customize
- * script from offering to change HASDCACHE.
- *
  *
  * HASENVDC defined the name of an environment variable that contains the
  * device cache file path.  The HASENVDC environment variable is ignored when
@@ -558,9 +555,6 @@
  *
  * CAUTION!!!  Don't enable the WARNDEVACCESS definition for /proc-based Linux
  *	       lsof; it doesn't process /dev at all.
- *
- * The presence of NEVER_WARNDEVACCESS in this comment prevents the Customize
- * script from offering to change WARNDEVACCESS.
  */
 
 /* #define	WARNDEVACCESS	1  DON'T ENABLE!!! -- see above comment */

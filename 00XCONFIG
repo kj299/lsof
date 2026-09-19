@@ -401,8 +401,7 @@ AIX_HAS_AFS		specifies the state of AIX ADS support when the AIX
 			disables AFS support; and "yes", forces the enabling of
 			AFS support.
 
-			default: none (tested via presence of AFS files and the
-				 lsof AFSConfig shell script)
+			default: none (tested via presence of AFS files)
 
 AIX_KERNBITS		specifies the kernel bit size, 32 or 64, of the Power
 			architecture AIX 5.x kernel for which lsof was built.
