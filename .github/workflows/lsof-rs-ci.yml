@@ -273,7 +273,8 @@ jobs:
     # the pinned nightly below, 48 of its 50 tests pass; the two that do not
     # are miri shim artefacts, are `#[cfg_attr(miri, ignore)]` at the test with
     # the measurement that justifies it, and still run under plain `cargo test`.
-    # The lsof-backend-linux arm is the observe-first step below.
+    # The lsof-backend-linux arm is the separate miri-linux job below, and
+    # separate ON PURPOSE -- see the note there.
     #
     # The nightly is PINNED to the build that produced the green runs. miri
     # ships inside the nightly and its sysroot build can break on any given
@@ -293,30 +294,54 @@ jobs:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
 
-      # OBSERVE-FIRST (LESSONS #13): this step does not block, and
-      # progress.json is NOT advanced off `fuzzed` for lsof-backend-linux on
-      # the strength of a job that has never run here. It becomes a hard gate,
-      # and the row moves, in a later PR on consecutive log-verified greens —
-      # the same way the step above and the Windows ASan job were promoted.
-      #
-      # It is validated locally on THIS toolchain rather than written blind:
-      # clean it is `48 passed; 0 failed; 2 ignored`, and it has been shown to
-      # fail for the right reasons, which is the only thing that makes a clean
-      # run mean anything —
-      #
-      #   a leaked allocation in parse_mounts  -> `error: memory leaked`, exit 1
-      #   an out-of-bounds read, with the crate's forbid(unsafe_code) lifted
-      #                                        -> `error: Undefined Behavior:
-      #                                           in-bounds pointer arithmetic
-      #                                           failed`, exit 1
-      #
-      # The leak case is the one worth having: it is real, it is not covered by
-      # any other gate here, and this crate caches (`NetnsTables` holds a
-      # RefCell<HashMap> per namespace and per pid). The UB case only bites if
-      # someone lifts forbid(unsafe_code) — and note that attribute fires first,
-      # so miri is the second line, not the first.
-      - name: miri over lsof-backend-linux (observe-first, not a gate yet)
-        continue-on-error: true
+  miri-linux:
+    name: miri (Linux backend — observe-first)
+    runs-on: ubuntu-latest
+    # 60, not the 25 the job above uses: on the first attempt this arm shared
+    # that job and was killed by its timeout after 25m15s, having emitted no
+    # `test result:` line at all. The same command finishes in ~295s locally,
+    # so CI is far slower here -- miri prints a
+    # "files in `/proc` can bypass the Abstract Machine" warning, with a
+    # backtrace, for every access this crate makes. 60 is an upper bound chosen
+    # to stop guessing, not a measurement; the first completed run replaces it.
+    timeout-minutes: 60
+    # OBSERVE-FIRST (LESSONS #13), and A JOB RATHER THAN A STEP BECAUSE OF HOW
+    # THE FIRST ATTEMPT FAILED. `continue-on-error` is a step property;
+    # `timeout-minutes` is a job property. An observe-first STEP inside the
+    # hard-gate job therefore could — and did — turn that gate from success to
+    # cancelled, which is precisely what "does not block" was supposed to
+    # prevent. Any job-level failure mode (timeout, runner loss, cancellation)
+    # crosses a step-level exemption. Isolation is the only thing that actually
+    # makes a trial arm harmless.
+    #
+    # progress.json is NOT advanced off `fuzzed` for lsof-backend-linux while
+    # this is here; the row moves in a later PR on consecutive log-verified
+    # greens, like the job above and asan-windows before it.
+    #
+    # Validated locally on this exact toolchain rather than written blind:
+    # clean it is `48 passed; 0 failed; 2 ignored`, and it has been shown to
+    # fail for the right reasons, which is the only thing that makes a clean
+    # run mean anything —
+    #
+    #   a leaked allocation in parse_mounts  -> `error: memory leaked`, exit 1
+    #   an out-of-bounds read, with the crate's forbid(unsafe_code) lifted
+    #                                        -> `error: Undefined Behavior:
+    #                                           in-bounds pointer arithmetic
+    #                                           failed`, exit 1
+    #
+    # The leak case is the one worth having: it is real, it is not covered by
+    # any other gate here, and this crate caches (`NetnsTables` holds a
+    # RefCell<HashMap> per namespace and per pid). The UB case only bites if
+    # someone lifts forbid(unsafe_code) — and that attribute fires first, so
+    # miri is the second line there, not the first.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-31
+          components: miri
+      - name: miri over lsof-backend-linux
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly-2026-08-31 miri test -p lsof-backend-linux

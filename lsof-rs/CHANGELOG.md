@@ -12,9 +12,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **The Linux backend now runs under miri in CI** (observe-first; it does not
-  block yet, and `progress.json` stays at `fuzzed` until it has consecutive
-  log-verified greens — LESSONS #13). The job comment that explained its
+- **The Linux backend now runs under miri in CI**, in its **own job**
+  (observe-first; it does not block, and `progress.json` stays at `fuzzed`
+  until it has consecutive log-verified greens — LESSONS #13). Its own job
+  rather than a step, because the first attempt was a `continue-on-error` step
+  inside the promoted miri job and the job's 25-minute timeout killed it —
+  turning a hard gate from success to **cancelled** on the trial arm's first
+  run. `continue-on-error` exempts a step's failure; `timeout-minutes` is a
+  job property and crosses that boundary (LESSONS #032). The job comment that explained its
   absence said the crate "reads live `/proc`, which miri cannot interpose".
   That was false and nothing had tested it: with `-Zmiri-disable-isolation`,
   48 of its 50 tests pass on the pinned nightly. The two that do not are miri

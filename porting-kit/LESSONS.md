@@ -690,6 +690,40 @@ the emphasized half.
   different control from a presence ledger. The fuzz half of this follow-up —
   mapping each text-parsing crate to a target — is still open.
 
+---
+
+### #032 — `continue-on-error` is a step property; `timeout-minutes` is a job property
+
+**What happened.** The observe-first miri arm for `lsof-backend-linux` was
+added as a `continue-on-error: true` STEP inside the existing, promoted miri
+job. It ran long, the job's `timeout-minutes: 25` fired at 25m15s, and the
+**hard gate went from `success` to `cancelled`** — broken by a step explicitly
+marked as not blocking, on its first run.
+
+**Why the exemption did not hold.** `continue-on-error` exempts a step's own
+*failure*. It cannot exempt anything the runner does to the **job**: a
+timeout, a lost runner, a cancellation. Those cross the step boundary, so an
+observe-first step inside a gated job is not actually observe-first — it is a
+new way for the gate to fail, wearing a label that says it is not.
+
+**The rule.** *A trial arm gets its own job, never a step in a gated one.*
+Isolation is the only thing that makes "this does not block" true, because it
+is the only thing that puts the job-level failure modes on the trial arm's
+side of the fence. A generous `timeout-minutes` on that job is then free: the
+job cannot take anything else down with it.
+
+**Worth noticing about the cost, too.** The same command finishes in ~295s
+locally and had emitted no `test result:` line after ~24 minutes on the
+runner, because miri prints a
+`files in /proc can bypass the Abstract Machine` warning — with a backtrace —
+for every access a `/proc`-reading crate makes. A sanitizer arm over a crate
+whose whole job is reading `/proc` is not priced like one over a pure library,
+and that is a reason to isolate it rather than a reason to skip it.
+
+**Kit change:** PLAYBOOK Phase 4 — the observe-first promotion rule
+(LESSONS #013) now says *job*, not *step*, and says why.
+**Section amended:** PLAYBOOK · Phase 4 gate 4.
+
   **Closed the same day.** The obstacle was never difficulty — it was that the
   parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so
   nobody could have written the target without moving them first. They are pure

@@ -233,7 +233,10 @@ feature gap on both platforms.
 **P2 — close the gate row (½ day).** Add a miri arm over
 `lsof-backend-linux` with the two shim-bound tests excluded by name and each
 exclusion carrying its measured reason; land it observe-first per LESSONS #13,
-promote on consecutive log-verified greens. Then `unsafe_audited`. Fix the
+promote on consecutive log-verified greens. **As its own job, not a step** —
+the first attempt put it in the existing miri job and its 25-minute timeout
+cancelled that hard gate, because `continue-on-error` is a step property and
+`timeout-minutes` is a job one (LESSONS #032). Then `unsafe_audited`. Fix the
 `miri` job comment, which currently states a falsehood. Extend
 `check_ledgers.py` to check the sanitizer ledger **per crate** — it is
 satisfied today by any one job existing anywhere in the workflow, which is what
