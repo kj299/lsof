@@ -86,7 +86,21 @@ MAX_RANGE = 50
 # An entry heading: "## 022. <title>" at the start of a line.
 ENTRY_RE = re.compile(r"^## (\d{3})\.", re.M)
 
-SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs")
+# A heading that LOOKS like an entry but is not in the one form `ENTRY_RE`
+# reads -- "### #034 — ...", "## 34.", "#### 007:". Such a heading is invisible
+# here: its number is not an entry, so the duplicate and gap checks cannot see
+# it, while the file reads as though the lesson exists. That happened: two
+# sessions working this repository in parallel both wrote a lesson 032, one as
+# `## 032.` and one as `### #032`, and every `LESSONS #032` citation in the
+# tree silently resolved to the wrong one with this checker green.
+NEAR_ENTRY_RE = re.compile(r"^(#{1,6}\s*#?\d{1,3}[.:\s—-])", re.M)
+
+# `Makefile` is a suffix match too: the kit's check-kit target cites lessons in
+# its comments, and for as long as this list had no entry for it those
+# citations were checked by nothing — found when the collision resolver, which
+# walks with the same list, renumbered every scanned file and left the one it
+# never visited stale (LESSONS #057).
+SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs", "Makefile")
 SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
 
 
@@ -192,31 +206,62 @@ def scan_citations(kit_root, lessons_path, also=()):
                         yield (rel, lines[off], None, msg)
 
 
-def _flatten(text):
-    """Collapse whitespace runs to one space; return (flat, line_of_each_char).
+# A citation wrapped onto the next line INSIDE A COMMENT carries that line's
+# comment marker between the separator and the next member:
+#
+#     @# ... is where citations go stale (LESSONS #048,
+#     @# #0NN). The resolver ...
+#
+# Whitespace was collapsed but `@#` was not, so the second member was never one: not
+# checked here, and not renumbered by the collision resolver, which walks the
+# same flattened text — found on that tool's first live run, whose loose pass
+# listed the token the strict rules had not touched (LESSONS #057). A marker
+# that opens a continuation line and is followed by whitespace and `#<digit>` is
+# swallowed with the line break. `\n#8)` is NOT — there the hash is the member's
+# own, and swallowing it would lose the member instead.
+CONT_COMMENT_RE = re.compile(r"[ \t]*(?:@#|#|//+|\*|--|;+)[ \t]+(?=#\d)")
 
-    A run of whitespace is emitted as a single space carrying the line number of
-    its *first* character, so a citation broken after "LESSONS" is reported on
-    the line where it starts.
+
+def _flatten_map(text):
+    """Collapse whitespace runs to one space; return (flat, orig_offset_of_each_char).
+
+    A run of whitespace is emitted as a single space carrying the offset of its
+    *first* character, so a citation broken after "LESSONS" is reported on the
+    line where it starts, and a tool editing the original can find each member's
+    own digits. Shared with the collision resolver, so the two agree on what a
+    citation is.
     """
-    out, lines = [], []
-    lineno = 1
+    out, idx = [], []
     i, n = 0, len(text)
     while i < n:
-        ch = text[i]
-        if ch.isspace():
-            start_line = lineno
-            while i < n and text[i].isspace():
-                if text[i] == "\n":
-                    lineno += 1
-                i += 1
+        if text[i].isspace():
+            j, saw_newline = i, False
+            while j < n and text[j].isspace():
+                saw_newline = saw_newline or text[j] == "\n"
+                j += 1
+            if saw_newline:
+                m = CONT_COMMENT_RE.match(text, j)
+                if m:
+                    j = m.end()
             out.append(" ")
-            lines.append(start_line)
+            idx.append(i)
+            i = j
         else:
-            out.append(ch)
-            lines.append(lineno)
+            out.append(text[i])
+            idx.append(i)
             i += 1
-    return "".join(out), lines
+    return "".join(out), idx
+
+
+def _flatten(text):
+    """(flat, line_of_each_flat_char) — `_flatten_map` with lines for reporting."""
+    flat, idx = _flatten_map(text)
+    lines, lineno, last = [], 1, 0
+    for off in idx:
+        lineno += text.count("\n", last, off)
+        last = off
+        lines.append(lineno)
+    return flat, lines
 
 
 def run(kit_root, also=()):
@@ -239,6 +284,16 @@ def run(kit_root, also=()):
     dupes = sorted({n for n in nums if nums.count(n) > 1})
     for n in dupes:
         problems.append(f"LESSONS.md: entry {n:03d} appears {nums.count(n)} times")
+
+    # One heading style, or the checks above are reading half the file.
+    for m in NEAR_ENTRY_RE.finditer(open(lessons, encoding="utf-8").read()):
+        head = m.group(1).rstrip()
+        if ENTRY_RE.match(head + " x"):
+            continue
+        line = open(lessons, encoding="utf-8").read().count("\n", 0, m.start()) + 1
+        problems.append(
+            f"LESSONS.md:{line}: {head!r} looks like an entry heading but is "
+            f"not `## NNN.` — it would be invisible to this checker")
 
     if nums:
         expected = list(range(1, max(nums) + 1))
@@ -289,6 +344,14 @@ def _self_test():
 
     with tempfile.TemporaryDirectory() as root:
         open(os.path.join(root, "LESSONS.md"), "w").write(entries)
+        open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations here\n")
+        # a Makefile comment is a citation like any other; this file type was
+        # outside the walk for the kit's whole life
+        open(os.path.join(root, "Makefile"), "w").write("\t@# see LESSONS #22\n")
+        check("a citation in a Makefile is scanned", run(root) == 1)
+
+    with tempfile.TemporaryDirectory() as root:
+        open(os.path.join(root, "LESSONS.md"), "w").write(entries)
         # the real-world shape: the citation is split across a line break
         open(os.path.join(root, "PLAYBOOK.md"), "w").write(
             "a lesson about releases (LESSONS\n  #22): and the rest.\n")
@@ -306,6 +369,24 @@ def _self_test():
             entries + "\n## 002. duplicate\n\nbody\n")
         open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations here\n")
         check("duplicate entry number is caught", run(root) == 1)
+
+    # An entry written in a heading style this checker does not read is the
+    # accident that made a duplicate 032 undetectable: the number is not an
+    # entry, so neither the duplicate nor the gap check can see it, and the
+    # citations to it resolve to somebody else's lesson.
+    for stray in ("### #003 — a follow-up", "## 3. short", "#### 003: colon"):
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "LESSONS.md"), "w").write(
+                entries + f"\n{stray}\n\nbody\n")
+            open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations\n")
+            check(f"off-style entry heading is caught: {stray!r}", run(root) == 1)
+
+    with tempfile.TemporaryDirectory() as root:
+        # ...and an ordinary prose heading with a number in it is NOT flagged.
+        open(os.path.join(root, "LESSONS.md"), "w").write(
+            entries + "\n### Why 3 passes and not 2\n\nbody\n")
+        open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations\n")
+        check("a heading that merely contains a number is fine", run(root) == 0)
 
     # --- citation lists and ranges -------------------------------------------
     # The strings below are the ten multi-number citations that actually appear
@@ -334,6 +415,18 @@ def _self_test():
           cited("(LESSONS #2-#4)")[0] == [2, 3, 4])
     check("'and' joins a citation",
           cited("(LESSONS #6 and #8)")[0] == [6, 8])
+
+    # A continuation that lands on the next COMMENT line: the marker sits between
+    # the separator and the member. This exact shape shipped in the kit's own
+    # Makefile, unread by this checker for as long as it stood.
+    check("a member continued on the next Makefile comment line is read",
+          cited("\t@# stale (LESSONS #6,\n\t@# #8).")[0] == [6, 8])
+    check("...and on the next '#' comment line (shell, YAML)",
+          cited("    # see (LESSONS #6,\n    # #8)")[0] == [6, 8])
+    check("...and on the next '//' comment line",
+          cited("// (LESSONS #6,\n// #8)")[0] == [6, 8])
+    check("a hash that opens the next line is the member's own, not a marker",
+          cited("(LESSONS #1,\n#2)")[0] == [1, 2])
 
     # Both halves of the boundary. A gate that over-reads prose is a gate people
     # route around, so these matter as much as the cases above.

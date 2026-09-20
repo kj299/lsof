@@ -12,6 +12,90 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **AF_PACKET sockets are now `pack` rows** (P3 of `docs/linux-l2-plan.md`;
+  DIVERGENCES item 23). `/proc/net/packet` joins the seven tables `net.rs`
+  already reads, and the row takes the shape `dsock.c:3622` gives it: the
+  **inode** in DEVICE, the **ethernet protocol** in NODE, and `type=SOCK_RAW`
+  as the whole NAME, because a packet socket has no address to print. `-F`
+  reports the protocol as `P`, never `i`, which is the C's `Lf->inp_ty`
+  discriminant.
+
+  The 93-entry protocol table was transcribed from `ethernet_proto_to_str()`
+  and then **measured**: a fixture opened one packet socket per protocol, plus
+  seven the table does not carry, and all 100 NODE cells matched the C. Three
+  behaviours only that sweep would have caught — `ETH_P_LOOPBACK` is truncated
+  to **`LOOPBAC`** (`Lf->iproto` is `char[8]`, and the C's own table breaks the
+  7-character promise in its comment exactly once), an unnamed protocol prints
+  its number in **decimal** from a hex column, and `ETH_P_PPP_MP` puts a
+  **space inside the cell**.
+- **The kernel's protocol name for a socket resolved through its own namespace**
+  (DIVERGENCES item 24) — a latent defect in the item 16 fix, reachable as soon
+  as a packet socket could be held in a foreign namespace. The C reads
+  `system.sockprotoname`, which names the socket's `struct proto`: `UNIX-STREAM`
+  for a stream AF_UNIX socket, `UNIX` for dgram **and seqpacket**, and `PACKET`.
+  The fallback had been answering with this port's own `info.protocol`, which
+  agrees for TCP and UDP — the only families the netns fixture held — and not
+  for these. Now a field of its own, set per family.
+- **The Linux backend now runs under miri in CI**, in its **own job**
+  (observe-first; it does not block, and `progress.json` stays at `fuzzed`
+  until it has consecutive log-verified greens — LESSONS #13). Its own job
+  rather than a step, because the first attempt was a `continue-on-error` step
+  inside the promoted miri job and the job's 25-minute timeout killed it —
+  turning a hard gate from success to **cancelled** on the trial arm's first
+  run. `continue-on-error` exempts a step's failure; `timeout-minutes` is a
+  job property and crosses that boundary (LESSONS #055). **Three consecutive
+  log-verified greens** — `48 passed / 2 ignored` in 2557 s, then `55 / 2` in
+  1216 s and `55 / 2` in 1464 s. The last two run the identical suite 20 %
+  apart and the first runs *fewer* tests in twice the time, so runner variance
+  dominates rather than the suite; locally the same command is ~295 s, the gap
+  being ~5700 `/proc` warnings miri prints with a backtrace apiece. The
+  60-minute budget is measurement plus ~1.4× headroom over the slowest.
+  On those greens **`lsof-backend-linux` moves from `fuzzed` to
+  `unsafe_audited`** in `progress.json`, making every crate in the workspace
+  sanitizer-covered; the arm keeps `continue-on-error`, because what the greens
+  earned is the ledger row and not blocking authority. The job comment that explained its
+  absence said the crate "reads live `/proc`, which miri cannot interpose".
+  That was false and nothing had tested it: with `-Zmiri-disable-isolation`,
+  48 of its 50 tests pass on the pinned nightly. The two that do not are miri
+  shim artefacts — `st_rdev` reported as 0, and emulated fds that do not appear
+  in the host's `/proc` — and each is now `#[cfg_attr(miri, ignore)]` **at the
+  test**, with the measurement that justifies it, and still runs under plain
+  `cargo test`.
+
+  The gate was mutated before being trusted: a leaked allocation gives
+  `error: memory leaked` and exit 1, and an out-of-bounds read with
+  `forbid(unsafe_code)` lifted gives an explicit UB diagnostic and exit 1. The
+  leak case is not covered by any other gate here, which corrects this port's
+  own earlier claim that miri would add almost nothing to a `forbid`-ed crate.
+
+- **The kit gained a merge resolver for `LESSONS.md` number collisions**
+  (`porting-kit/harnesses/lessons/resolve_collision.py`; LESSONS #057). This
+  branch met master five times, and each time both sides had appended entries
+  under the same numbers. The procedure LESSONS #048 recorded was run by hand
+  each time; the fourth run repointed three of four citations to the wrong
+  entry with every checker green, because a wrong citation still resolves. The
+  resolver rebuilds the merge from git — the side that landed first keeps its
+  numbers, the other block is renumbered, and citations are repointed by *line
+  provenance*, the one input a reader cannot supply — and refuses what only a
+  human can decide. Replayed on this branch's real conflict it first
+  **refused**, and was right to: a nine-line paragraph of LESSONS #021 had been
+  cut out of its entry by an ordinary edit in this branch's P3 commit and
+  carried at the tail of the newest entry through four merges, and a follow-up
+  appended to #021 cited the continue-on-error lesson by a number two
+  renumberings stale. Both are repaired here. With the paragraph restored, the
+  resolver's output was byte-identical to the hand resolution on all four
+  files it touched; its self-test survived none of ten verdict mutants.
+
+- **`check_ledgers.py` gained a fifth ledger, `san-crates`:** every unit
+  `progress.json` tracks must be named by a CI step that runs a sanitizer.
+  Counting sanitizer jobs answered "is a sanitizer wired up"; the rule is per
+  unit, and `lsof-backend-linux` went months uncovered while the old check
+  stayed green. Run against this repository without the new miri step, it fails
+  and names that crate. Closes the sanitizer half of the LESSONS #21
+  follow-up; the fuzz half is still open.
+
+
+### Added
 - **`-H`, human-readable sizes** — the option lsof-rs answered
   `unsupported option` for on **both** platforms, because it was waived in the
   coverage inventory as a "legacy headers toggle on certain dialects". It is

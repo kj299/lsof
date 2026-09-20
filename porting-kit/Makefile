@@ -43,6 +43,11 @@ check-kit:
 	@# is checked by lsof-rs-ci.yml, which is where a real port's gate belongs.
 	@echo "== threat model ==";   $(PY) $(H)/threat-model/check_threat_model.py \
 	    skeleton/THREAT-MODEL.md --template
+	@# When two branches append to the log they take the same numbers, and the
+	@# renumber that follows the merge is where citations go stale (LESSONS #048,
+	@# #057). The resolver does that renumber from git, by line provenance. Its
+	@# real run needs a merge in progress, so check-kit runs the self-test only.
+	@echo "== collision resolver self-test =="; $(PY) $(H)/lessons/resolve_collision.py --self-test
 	@# A port far slower than the C is a specific bug, not "the cost of Rust".
 	@# Self-test only here: the real gate needs both binaries and a matrix.
 	@echo "== perf gate ==";       $(PY) $(H)/perf/perf_gate.py --self-test

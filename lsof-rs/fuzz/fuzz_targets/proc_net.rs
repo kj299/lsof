@@ -2,7 +2,8 @@
 
 // Fuzz the Linux backend's `/proc/net/*` parsers (lsof-backend-linux, `net`).
 //
-// These read kernel-written tables — tcp, tcp6, udp, udp6, raw, raw6, unix —
+// These read kernel-written tables — tcp, tcp6, udp, udp6, raw, raw6, packet,
+// unix —
 // and join them to fds by inode. The kernel is trusted to write well-formed
 // text, but the port must not *depend* on that: the AF_UNIX `Path` column is
 // whatever bytes a local process bound, a future kernel may add or reorder
@@ -14,8 +15,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_backend_linux::fuzz_api::{
-    fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_state, unix_suffix,
-    Protocol, SocketTable,
+    fields_with_rest, packet_node, parse_addr, parse_queues, socket_inode, socket_type_suffix,
+    tcp_state, unix_state, unix_suffix, Protocol, SocketTable,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -39,6 +40,36 @@ fuzz_target!(|data: &[u8]| {
     }
     let mut t = SocketTable::default();
     t.parse_unix(&text);
+    // /proc/net/packet twice. The bare input exercises the header check that
+    // drops a table whose columns moved; with the real header prepended it
+    // exercises the row parser behind it, which a corpus grown from empty
+    // would otherwise never reach — the check wants ~60 specific bytes before
+    // a single row is read, and libFuzzer is not going to guess them.
+    let mut t = SocketTable::default();
+    t.parse_packet(&text);
+    let mut t = SocketTable::default();
+    t.parse_packet(&format!(
+        "sk               RefCnt Type Proto  Iface R Rmem   User   Inode\n{text}"
+    ));
+    // A packet row's NODE is byte-truncated to 7, so the decoders that build
+    // it get the input's own bytes as well as the table's fields.
+    for n in text.as_bytes().chunks(4).take(64).map(|c| {
+        c.iter()
+            .fold(0u32, |acc, b| acc.wrapping_shl(8) | u32::from(*b))
+    }) {
+        let node = packet_node(n);
+        assert!(
+            node.len() <= 7,
+            "packet_node({n}) is {} bytes: {node:?}",
+            node.len()
+        );
+        assert!(!node.is_empty(), "packet_node({n}) produced an empty NODE");
+        let suffix = socket_type_suffix(n);
+        assert!(
+            suffix.starts_with("type="),
+            "socket_type_suffix({n}) = {suffix:?}"
+        );
+    }
 
     // Line- and field-level decoders, fed the input directly and line by line.
     let _ = socket_inode(&text);

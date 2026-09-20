@@ -16,7 +16,7 @@ Linux gap at all.**
 | `maps` → `mem` rows | **done** | `mem REG … /usr/lib/x86_64-linux-gnu/libc.so.6`, byte-identical to the C |
 | `/proc/locks` → lock column | **done** | DIVERGENCES item 7, closed 2026-09-05 |
 | named anon inodes | **done** | `[eventfd:6]`, `[eventpoll]`, `[timerfd]`, `[signalfd]`, `inotify`, `[pidfd:1153]` — all byte-identical |
-| raw / netlink | **partly — see §3** | raw is resolved; netlink and packet are the two remaining rows |
+| raw / netlink | **partly — see §3** | raw is resolved; packet landed 2026-09-20 (P3), netlink is the one remaining row |
 
 Plus two items L2 acquired later and also delivered: the mount table
 (`mounts.rs`, DIVERGENCES 15) and per-namespace socket reads (DIVERGENCES 16).
@@ -35,19 +35,23 @@ The two are the netlink and packet sockets (§3). Every anon-inode kind, the
 `(deleted)` marking, the memfd, `/dev/shm`, and all sixteen `mem` rows match
 the C character for character.
 
-## 1. The gate row — the one genuinely incomplete thing
+## 1. The gate row — **closed 2026-09-20**
 
-`progress.json` today:
+`progress.json` when this was written, and today:
 
 ```
-lsof-backend-linux   fuzzed              ← two gates short
-lsof-backend-windows unsafe_audited
-lsof-cli             unsafe_audited
-lsof-core            unsafe_audited
+                      then        now
+lsof-backend-linux    fuzzed      unsafe_audited   ← two gates short, then not
+lsof-backend-windows  unsafe_audited
+lsof-cli              unsafe_audited
+lsof-core             unsafe_audited
 ```
 
-The Linux backend is now the **only** crate not at `unsafe_audited`, and the
-reason recorded in CI for that is wrong. The `miri` job says:
+Every crate in the workspace is now sanitizer-covered. What follows is the
+measurement that got it there, kept as written.
+
+The Linux backend was then the **only** crate not at `unsafe_audited`, and the
+reason recorded in CI for that was wrong. The `miri` job says:
 
 > the Linux backend reads live `/proc`, which miri cannot interpose
 
@@ -67,13 +71,26 @@ Both failures are miri shim artefacts, not crate defects:
 Same class as the `strerror` shim that forced `errno_text`'s test to be
 rewritten — the interpreter is the odd one out, not the code.
 
-**Be honest about what this gate is worth.** `lsof-backend-linux` is
-`#![forbid(unsafe_code)]` with **0 unsafe blocks** and no dependencies, so miri
-has almost no UB surface to find. It is a *weak* gate. It is worth wiring
-anyway — it is the thing that would catch a future relaxation of
-`forbid(unsafe_code)`, and it costs one CI arm — but the evidence that actually
-carries this crate is the fuzz suite and the 87-case C differential, and the
-progress row should not be read as claiming more than that.
+**What this gate is worth — corrected 2026-09-20, by measuring it.** This
+section previously called it a *weak* gate, reasoning that a
+`#![forbid(unsafe_code)]` crate with 0 unsafe blocks gives miri almost no UB
+surface. That reasoning was sound and the conclusion was wrong, because UB is
+not all miri checks. Mutated against the real crate:
+
+| mutation | result |
+|---|---|
+| a leaked allocation in `parse_mounts` | `error: memory leaked`, **exit 1** |
+| an out-of-bounds read, with `forbid(unsafe_code)` lifted | `error: Undefined Behavior: in-bounds pointer arithmetic failed`, **exit 1** |
+| neither | exit 0 |
+
+The **leak** case is the one that matters, and no other gate here covers it:
+this crate caches, `NetnsTables` holding a `RefCell<HashMap>` per namespace and
+per pid. The UB case only bites if someone lifts the attribute — and the first
+attempt at that mutation was stopped by the attribute itself, so miri is the
+second line there, not the first.
+
+Still true: the fuzz suite and the C differential carry most of the weight for
+this crate. Not true, and withdrawn: that the miri arm adds almost nothing.
 
 `unsafe_audited` then follows immediately: `audit_unsafe.py` reports
 `unsafe blocks: 0  documented: 0  undocumented: 0`.
@@ -141,8 +158,11 @@ rs:    9u SOCK  0,9    0    11426  socket:[11426]
 
 These two look alike and are not.
 
-**Packet is closeable today, dependency-free.** The fixture's inode is in the
-table:
+**Packet is closeable today, dependency-free.** — **done 2026-09-20**, see
+DIVERGENCES item 23. What follows is the measurement that scoped it, kept as
+written. One thing it did not anticipate: closing it also exposed item 24, the
+*kernel's* name for a socket in a foreign namespace, because a packet socket
+could suddenly be held in one. The fixture's inode is in the table:
 
 ```
 $ awk 'NR>1 && $9==11426' /proc/net/packet
@@ -220,14 +240,44 @@ feature gap on both platforms.
 **P2 — close the gate row (½ day).** Add a miri arm over
 `lsof-backend-linux` with the two shim-bound tests excluded by name and each
 exclusion carrying its measured reason; land it observe-first per LESSONS #13,
-promote on consecutive log-verified greens. Then `unsafe_audited`. Fix the
+promote on consecutive log-verified greens. **As its own job, not a step** —
+the first attempt put it in the existing miri job and its 25-minute timeout
+cancelled that hard gate, because `continue-on-error` is a step property and
+`timeout-minutes` is a job one (LESSONS #055).
+
+| head | result | wall |
+|---|---|---:|
+| `8a4b2ea` | 48 passed, 0 failed, 2 ignored | 2557 s |
+| `22a9882` | 55 passed, 0 failed, 2 ignored | 1216 s |
+| `195d7eb` | 55 passed, 0 failed, 2 ignored | 1464 s |
+
+The last two run the identical suite 20 % apart; the first runs *fewer* tests
+in twice the time. Runner variance, not the suite — and a reminder that one
+timing is not a measurement. Locally the same command is ~295 s; the ~5700
+`/proc` warnings account for the gap. **Three consecutive log-verified greens,
+so the row is promoted: `lsof-backend-linux` is `unsafe_audited`** and this
+section's "the one genuinely incomplete thing" no longer is. Fix the
 `miri` job comment, which currently states a falsehood. Extend
 `check_ledgers.py` to check the sanitizer ledger **per crate** — it is
 satisfied today by any one job existing anywhere in the workflow, which is what
 let this row sit open unnoticed.
 
-**P3 — packet sockets (1 day).** `/proc/net/packet`, the `dsock.c:3626` column
-shape, a differential case built on the fixture in §3, and a fuzz seed.
+**P3 — packet sockets (1 day). DONE 2026-09-20.** `/proc/net/packet`, the
+`dsock.c:3622` column shape, differential cases, and the `proc_net` fuzz target
+extended. Four things the plan did not see coming, each recorded where it
+belongs:
+
+* the protocol table needed **measuring, not transcribing** — a 100-socket
+  sweep against the C found a 7-byte truncation, a decimal-from-hex fallback
+  and a name containing a space;
+* `-F P` was being read from `socket.protocol` rather than from the NODE cell,
+  which is indistinguishable for TCP and wrong for a packet row;
+* item 24 — the namespace fallback was answering with the port's own protocol
+  name, right for the two families the netns fixture held and wrong for the two
+  it did not. **No unit test kills that mutation**; only the new fixture L does;
+* the fuzz target's new arm was **unreachable** until the valid header was
+  prepended to the input — proved by planting a panic in the row loop
+  (LESSONS #056).
 
 **P4 — the small options (1–2 days).** `-Z`, `-N`, then `-x`, `-X`, `-e`.
 

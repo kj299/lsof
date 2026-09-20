@@ -1346,3 +1346,157 @@ fn human_size_is_table_only() {
         "JSON must stay in raw bytes"
     );
 }
+
+/// One AF_PACKET row exactly as the Linux backend builds it: the inode in
+/// DEVICE, the ethernet protocol in NODE, `type=SOCK_RAW` as the whole NAME.
+/// Measured against the C on a live fixture:
+///
+/// ```text
+/// python3 835 root 3u pack 1399 0t0 ALL type=SOCK_RAW
+/// ```
+fn packet_row() -> Vec<lsof_core::model::Process> {
+    use lsof_core::model::{Protocol, SocketInfo};
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    vec![Process {
+        tid: None,
+        task_command: None,
+        uid: Some(0),
+        pgid: None,
+        pid: 835,
+        ppid: None,
+        command: "python3".into(),
+        user: Some("root".into()),
+        endpoint_peer: false,
+        files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Other("pack".into()),
+            name: "type=SOCK_RAW".into(),
+            device: Some("1399".into()),
+            size: None,
+            offset: Some(0),
+            node: Some("ALL".into()),
+            links: None,
+            socket: Some(SocketInfo {
+                protocol: Protocol::Other("packet"),
+                local: None,
+                remote: None,
+                state: None,
+                tcp: None,
+            }),
+        }],
+    }]
+}
+
+#[test]
+fn a_packet_rows_node_reaches_dash_f_as_p_not_as_i() {
+    // The C picks between `i` and `P` on one discriminant and fills the chosen
+    // one from the NODE cell (`Lf->inp_ty`). For TCP that is indistinguishable
+    // from reading `socket.protocol`, because the two strings are equal. For
+    // AF_PACKET they are not: the protocol names the *family* and NODE names
+    // the ethernet protocol, and `PALL` is what the oracle emits.
+    let out = fields::render(
+        &packet_row(),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
+    assert!(
+        out.contains("PALL\n"),
+        "-FP should be the NODE cell: {out:?}"
+    );
+    assert!(
+        !out.contains("Ppacket\n"),
+        "-FP must not be socket.protocol: {out:?}"
+    );
+    assert!(
+        !out.contains("i1399\n") && !out.contains("iALL\n"),
+        "a socket row has no -Fi: {out:?}"
+    );
+    assert!(out.contains("tpack\n"), "TYPE: {out:?}");
+    assert!(out.contains("d1399\n"), "DEVICE is the inode: {out:?}");
+    assert!(out.contains("o0t0\n"), "SIZE/OFF is the offset: {out:?}");
+    assert!(out.contains("ntype=SOCK_RAW\n"), "NAME: {out:?}");
+}
+
+#[test]
+fn a_packet_row_renders_in_the_table_and_in_json() {
+    let t = table::render(&packet_row(), TableOpts::new(Escaper::UNIX));
+    let row = t
+        .lines()
+        .find(|l| l.contains("pack"))
+        .expect("a pack row in the table");
+    // NODE is the ethernet protocol; DEVICE is the inode. Both appear, and the
+    // inode must not also show up as NODE.
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(cells[4], "pack", "TYPE: {row:?}");
+    assert_eq!(cells[5], "1399", "DEVICE: {row:?}");
+    assert_eq!(cells[6], "0t0", "SIZE/OFF: {row:?}");
+    assert_eq!(cells[7], "ALL", "NODE: {row:?}");
+    assert_eq!(cells[8], "type=SOCK_RAW", "NAME: {row:?}");
+
+    let j = json::render_lines(&packet_row());
+    assert!(j.contains("\"type\":\"pack\""), "{j}");
+    assert!(j.contains("\"node\":\"ALL\""), "{j}");
+    // JSON is this port's own format, not the C's, and it keeps both: the
+    // family under `protocol`, the ethernet protocol under `node`.
+    assert!(j.contains("\"protocol\":\"packet\""), "{j}");
+}
+
+#[test]
+fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
+    // The other side of the `Lf->inp_ty` discriminant, and the one no fixture
+    // covered: AF_UNIX is the single socket family whose NODE is an inode, so
+    // it takes the `i` branch like a regular file. Measured against the C on a
+    // live fixture — `i3939`, `ntype=STREAM`, `TST=CONNECTED`, and no `P` line
+    // anywhere in the set.
+    use lsof_core::model::{Protocol, SocketInfo, UnixState};
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let procs = vec![Process {
+        tid: None,
+        task_command: None,
+        uid: Some(0),
+        pgid: None,
+        pid: 992,
+        ppid: None,
+        command: "python3".into(),
+        user: Some("root".into()),
+        endpoint_peer: false,
+        files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(0),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Unix,
+            name: "type=STREAM".into(),
+            device: Some("0x0000000077f6ffc1".into()),
+            size: None,
+            offset: Some(0),
+            node: Some("3939".into()),
+            links: None,
+            socket: Some(SocketInfo {
+                protocol: Protocol::Other("unix"),
+                local: None,
+                remote: None,
+                state: Some(UnixState::Connected.into()),
+                tcp: None,
+            }),
+        }],
+    }];
+    let out = fields::render(&procs, false, None, TcpInfoFlags::DEFAULT, Escaper::UNIX);
+    assert!(out.contains("i3939\n"), "unix NODE is its inode: {out:?}");
+    assert!(
+        !out.lines().any(|l| l.starts_with('P')),
+        "a unix row has no -FP field at all: {out:?}"
+    );
+    assert!(out.contains("tunix\n"), "{out:?}");
+    assert!(
+        out.contains("d0x0000000077f6ffc1\n"),
+        "DEVICE is the pcb: {out:?}"
+    );
+}

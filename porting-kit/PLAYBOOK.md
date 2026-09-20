@@ -376,7 +376,15 @@ next push and the lint surfaced only two commits later. And (c) **while a gate
 is in observe mode, job status is meaningless** — `continue-on-error` shows a
 green job over a failing step, so verdicts must be read from the step's own
 log or uploaded artifact (upload results with `if: always()`, or observing is
-theater). Promotion mechanics that worked (LESSONS #13): the bar is
+theater). And (d) **put the trial arm in its own JOB, never a step inside a
+gated one** — `continue-on-error` exempts a step's own failure, but
+`timeout-minutes`, runner loss and cancellation are *job* properties and cross
+that boundary. lsof-rs added an observe-first miri step to its promoted miri
+job; the step ran long, the job's 25-minute timeout fired, and the hard gate
+went from success to **cancelled** on the trial arm's first run — broken by
+something labelled as not blocking (LESSONS #055). Isolation is what makes
+"this does not block" true, and it makes a generous timeout on the trial arm
+free. Promotion mechanics that worked (LESSONS #13): the bar is
 *consecutive log-verified green runs*; flip the flag **in its own PR**, so the
 newly-hard gate must pass on the promotion PR itself before it can merge — the
 promotion is validated by the mechanism it enables.

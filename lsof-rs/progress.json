@@ -1,6 +1,6 @@
 {
   "modules": {
-    "lsof-backend-linux": "fuzzed",
+    "lsof-backend-linux": "unsafe_audited",
     "lsof-backend-windows": "unsafe_audited",
     "lsof-cli": "unsafe_audited",
     "lsof-core": "unsafe_audited"

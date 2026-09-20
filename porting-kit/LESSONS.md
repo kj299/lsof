@@ -673,6 +673,34 @@ the emphasized half.
   them. When a per-unit gate has been unmet for months, check whether the unit
   is simply unreachable from where the gate runs before concluding the work is
   large.
+- **Follow-up closed, 2026-09-20, for the sanitizer half.** `check_ledgers.py`
+  grew a fifth ledger, `san-crates`: every unit `progress.json` tracks must be
+  NAMED by a CI step that runs a sanitizer. It is per *step* rather than per
+  job, because a cache-warming `cargo build -p x` added to a sanitizer job
+  would otherwise mark `x` sanitized, and it requires a command that BEGINS
+  with `cargo`, because an `echo` naming the command is not the command. Run
+  against this repository before the matching CI step existed, it fails and
+  names `lsof-backend-linux` — while the older `sanitizers` ledger stays green,
+  which is the whole point.
+
+  Two things worth carrying:
+
+  **The narrowing rules were found by mutating the check, not by review.** The
+  first version accepted `echo "would run -p x under miri"`; the second, which
+  only asked whether the line contained "cargo", accepted
+  `echo "would run cargo miri test -p a"` — and it was this file's own new
+  self-test case that caught it, one commit after LESSONS #31 removed exactly
+  that defect from the sibling check. Writing the assertion first and the rule
+  second is what made the difference.
+
+  **One mutation still passes and is recorded in the docstring rather than
+  hidden:** swapping a step's `cargo miri test -p x` for `cargo build -p x`
+  while leaving the step's miri configuration in place still reads as covered.
+  No textual rule separates those; settling it needs the job's log, which is a
+  different control from a presence ledger. The fuzz half of this follow-up —
+  mapping each text-parsing crate to a target — is still open.
+
+**Follow-up, 2026-09-20:** landing that miri arm broke the hard gate it was added beside — an observe-first STEP cannot be observe-first inside a gated job. See **LESSONS #055**.
 
 ## 022. Release mechanics II — a workflow that can fire twice will publish two truths
 
@@ -2301,3 +2329,209 @@ the emphasized half.
   ledger instead of describing the procedure.
 - **Section amended:** `porting-kit/harnesses/platforms/`, `porting-kit/Makefile`,
   `porting-kit/skills/porting-kit-audit/SKILL.md`
+
+## 055. `continue-on-error` is a step property; `timeout-minutes` is a job property
+
+**What happened.** The observe-first miri arm for `lsof-backend-linux` was
+added as a `continue-on-error: true` STEP inside the existing, promoted miri
+job. It ran long, the job's `timeout-minutes: 25` fired at 25m15s, and the
+**hard gate went from `success` to `cancelled`** — broken by a step explicitly
+marked as not blocking, on its first run.
+
+**Why the exemption did not hold.** `continue-on-error` exempts a step's own
+*failure*. It cannot exempt anything the runner does to the **job**: a
+timeout, a lost runner, a cancellation. Those cross the step boundary, so an
+observe-first step inside a gated job is not actually observe-first — it is a
+new way for the gate to fail, wearing a label that says it is not.
+
+**The rule.** *A trial arm gets its own job, never a step in a gated one.*
+Isolation is the only thing that makes "this does not block" true, because it
+is the only thing that puts the job-level failure modes on the trial arm's
+side of the fence. A generous `timeout-minutes` on that job is then free: the
+job cannot take anything else down with it.
+
+**Worth noticing about the cost, too.** The same command finishes in ~295s
+locally and had emitted no `test result:` line after ~24 minutes on the
+runner, because miri prints a
+`files in /proc can bypass the Abstract Machine` warning — with a backtrace —
+for every access a `/proc`-reading crate makes. A sanitizer arm over a crate
+whose whole job is reading `/proc` is not priced like one over a pure library,
+and that is a reason to isolate it rather than a reason to skip it.
+
+**Kit change:** PLAYBOOK Phase 4 — the observe-first promotion rule
+(LESSONS #013) now says *job*, not *step*, and says why.
+**Section amended:** PLAYBOOK · Phase 4 gate 4.
+
+## 056. A fuzz target can name a parser it never reaches — plant a fault and watch
+
+**What happened.** `/proc/net/packet` got a parser, and the repository's
+`proc_net` fuzz target got a line calling it. Sixty seconds, 133,262 runs, no
+crashes. The target's header comment now listed `packet` among the tables it
+covers, CI ran it on every push, and the whole thing was worth nothing.
+
+The parser **validates the table's header line** before reading a row, because
+the C does (`get_pack()`) and because a table read by fixed column index needs
+it. That header is about sixty specific bytes. libFuzzer starts from an empty
+corpus and mutates; it is not going to produce
+`sk               RefCnt Type Proto  Iface R Rmem   User   Inode` by chance,
+and coverage feedback cannot help because nothing rewards getting the first
+four bytes right when the fifth still fails.
+
+Measured, by planting `assert!(inode == 0)` inside the row loop — a fault that
+fires the instant any row parses:
+
+```
+with the valid header prepended to the input    panic in seconds
+input passed bare, same budget                  81,567 runs / 46 s, never fired
+```
+
+**The general shape.** A parser with a *gate* at its entrance — a magic number,
+a version field, a checksum, a header line — is unreachable to a fuzzer that
+has to guess the gate. The target compiles, runs, reports coverage and finds
+nothing, and every signal you have says it is working. This is LESSONS #019
+(*a control the kit asserts but never checks for does not exist*) wearing the
+one costume that survives a code review: the call **is** there.
+
+**What to do.** Feed the gate, and keep the bare input too — they test
+different things:
+
+```rust
+t.parse_packet(&text);                       // the header check itself
+t.parse_packet(&format!("{HEADER}\n{text}")); // everything behind it
+```
+
+A seed corpus or a libFuzzer `-dict=` would also work where the corpus is
+checked in. This repository's is not — it is grown from empty and cached
+between nightly runs — so the fix has to live in the target, where it cannot
+be lost by a cache eviction.
+
+**How to know.** The only reliable check is the one above: **plant a panic at
+the deepest point the target claims to reach, and confirm the fuzzer finds it
+inside the CI time budget.** Not that the target compiles, not that coverage
+went up, not that the corpus grew. Do it once per target, when it is written.
+Same discipline as LESSONS #026 for tests and #027 for build reachability: a
+gate you have not seen fail is a gate you have not tested.
+
+- **Kit change, found while writing this entry and the same shape as it.** Two
+  sessions working this repository in parallel both wrote a lesson `032` — one
+  as `## 032.`, the canonical heading, and one as `### #032`, invented on the
+  spot for a follow-up placed inside an earlier section. Every `LESSONS #032`
+  citation in the tree then resolved to the wrong lesson, and
+  `check_lesson_refs.py` was **green throughout**.
+
+  It has a duplicate-number check. It could not fire: `ENTRY_RE` reads
+  `^## (\d{3})\.` and nothing else, so the off-style heading was never an
+  entry at all. The gap check could not fire either, for the same reason. **A
+  checker that recognises one form of the thing it counts is blind to every
+  other form, and blind in the direction that reads as success** — the file
+  looked like it held the lesson, the citations looked like they resolved, and
+  both were false.
+
+  So the checker now also rejects a heading that *looks* like an entry and is
+  not one: `### #034 —`, `## 34.`, `#### 007:`. Zero of those exist in the
+  current file, which is the only reason the rule can be strict. The stray
+  entry is renumbered and moved into the series, and the section it used to sit
+  under keeps a one-line pointer to it.
+
+  **Then it happened again, twice, on the merge that carried this entry.**
+  Master had meanwhile gained its own `034` and `035` from the parallel branch,
+  so the two numbers written here — one of them *this* entry — collided the
+  moment the branches met, and moved again at every merge with master since.
+  A number a branch assigns is provisional until the branch lands; an entry
+  does not know its own number. The next number in an append-only log is
+  shared mutable state that git cannot merge, and two sessions days apart
+  will take it twice; this is not a rare race.
+
+  What caught it was **git**, not a harness: both branches appended at the end
+  of the same file, so the merge conflicted. That defence is real but partial —
+  it works only because both wrote at the same place. The original `032` was
+  inserted *mid-file* and merged cleanly, which is exactly why it went
+  unnoticed. The checker is the part that covers that case: after this change
+  any duplicate number fails, in either heading style, wherever it sits.
+- **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`
+
+## 057. A procedure carried out by hand five times is a harness that was not written
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here — `LESSONS.md` itself, on a branch
+  that met master five times before landing
+- **What happened:** #048 recorded the collision procedure — the side that landed
+  first keeps its numbers, the other block shifts as a unit, every citation to it
+  is repointed — and chose procedure over tooling: *"the controls that enforce it
+  already exist."* They enforce *existence*. On one pull request the procedure
+  then ran five times by hand. The fourth run used `sed`, in two sequential
+  passes, and repointed three of four citations to the wrong entry with
+  `check_lesson_refs` green, because a wrong citation still resolves (#046).
+  Mechanising the fifth run, and then **replaying the real conflict through the
+  mechanism**, found two more things the four hand runs had carried unseen:
+
+  1. **A displaced paragraph.** Nine lines of #021 (*"Closed the same day…"*)
+     had been cut out of their entry by an ordinary edit in this branch's own P3
+     commit — not by a merge — and were riding at the tail of whatever the
+     branch's newest entry was, through four merges and a green board. Nothing
+     reads entry *content*: the duplicate and gap checks are satisfied by
+     headings, and a paragraph that moves leaves both intact.
+  2. **A stale in-log cross-reference.** The follow-up appended to #021 said
+     `See LESSONS #034` — the number this branch's continue-on-error lesson had
+     carried two renumberings earlier. It resolved, to an unrelated entry.
+     `check_lesson_refs` deliberately does not read the log as a *source* of
+     citations, and every hand repoint grepped for the number the lesson had
+     *just* left, never the one before that.
+
+  Both have #046's shape: text that is wrong resolves, so no existence check can
+  see it, and to a reader `#034` looks like any other citation.
+
+- **Why a tool and not a better checklist:** the procedure needs one input a
+  reader cannot supply reliably — **which side wrote each `#050`**. In a
+  collision the token is on both sides and means a different lesson on each;
+  nothing in the text tells them apart. git does. `resolve_collision.py` rebuilds
+  the merge from BASE, KEEP and MOVE: the shared entries three-way merged (a
+  conflict there is refused as an edit conflict, not a collision), KEEP's block
+  verbatim, MOVE's block renumbered — headings, citations and re-cited
+  destinations rewritten in one pass computed on the original text — and every
+  other file's citations repointed by **line provenance**: a line KEEP has is
+  KEEP's and stays, a line it lacks is MOVE's and moves, a line both sides added
+  that the fork lacked is refused. Then the strict-against-loose list #048 asked
+  for: every `#N` on a moving-side line that names a moved number and was not
+  rewritten is printed for a human. Finding 1 is now a refusal (text deleted
+  from a shared entry on the moving side that reappears in its block); finding 2
+  is what provenance repoints, pinned by a fixture that adds a moving-side
+  citation to an *old* entry.
+
+- **Proven on the real conflict, not only on fixtures:** replaying this branch
+  against master in a scratch clone, the tool first **refused**, naming #021 and
+  eight of its nine lines (the ninth, `large.`, is shorter than the check's
+  floor) — that is how finding 1 surfaced. With the moving side repaired it
+  produced `LESSONS.md`, `CHANGELOG.md`, the L2 plan and `PLAYBOOK.md`
+  **byte-identical** to the hand resolution plus the repair. Its 26-check
+  self-test was then mutated ten ways — provenance always-keep, ambiguity never
+  refused, displaced text never refused, split range never refused, contiguity
+  unchecked, prefix conflict taken silently, arrow destinations left alone,
+  range members unwalked, edits applied front-to-back, prefix tail unnormalised
+  — and every mutant failed it, none by Traceback. The first draft refused the
+  real conflict for a *wrong* reason: the three prefixes differed only in their
+  trailing bytes (`` `\n`` / `` `\n\n---\n\n`` / `` `\n\n``) and a line-based
+  merge called that both sides editing one line. That is why "replay the real
+  thing" is in this entry and not just "write fixtures".
+
+- **First live run, the same day** — the sixth collision: another branch had
+  landed on the very number this branch's first new entry carried, with two
+  more behind it. The plan was right on every file it scanned and silent about
+  one it never visited: the walk's suffix list had no entry for `Makefile`, so
+  the check-kit comment citing *this* entry was invisible to `check_lesson_refs`
+  and to the resolver alike. Scanned, the same comment surfaced a second
+  blindness in the REVIEW list: the citation wraps onto a second comment line,
+  and the `@#` between the separator and the member meant the member was never
+  read — by either tool, for as long as the kit has had that comment. The
+  flatten step both tools share now swallows a continuation line's comment
+  marker (and only that: `\n#8)` keeps its hash, which is the member's own).
+  It also offered to renumber a real-looking example `Local:` marker in the
+  tool's own comment — examples now read `#NNN`. Two findings the loose pass
+  made and the strict rules could not have: the list exists so that what the
+  rules do not recognise is seen rather than kept.
+- **Kit change:** `harnesses/lessons/resolve_collision.py` (new); `make check-kit`
+  runs its self-test; three rows in the gate-mutation table, one per verdict,
+  because one row would pin only their union (#050).
+- **Section amended:** README · harness table and the vendoring note; Makefile ·
+  check-kit; harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
+  OPERATING-GUIDE · closing note.

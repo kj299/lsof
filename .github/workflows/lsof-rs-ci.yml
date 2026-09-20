@@ -143,7 +143,7 @@ jobs:
         # to catch (LESSONS #019, #025).
         run: python3 ../porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
 
-      - name: ledgers exist (progress, divergences, fuzz target, sanitizer job)
+      - name: ledgers exist (progress, divergences, fuzz target, sanitizer per crate)
         # porting-kit LESSONS #19: the playbook names these as exit criteria and
         # this port reached 1.0 with three of the four absent while every gate
         # was green, because no gate looked. Now one does.
@@ -299,6 +299,43 @@ jobs:
           ./lsof -v 2>&1 | grep revision
       - name: build lsof-rs
         run: cargo build --release --bin lsof
+      - name: allow unprivileged user namespaces (fixture L)
+        # KEPT DELIBERATELY. This step relaxes a kernel security setting on the
+        # runner, so it was put to the repository's owner rather than left as a
+        # porting decision; the answer on 2026-09-20 was to keep it. Do not
+        # remove it as suspicious-looking CI: removing it silently un-gates
+        # DIVERGENCES item 24, whose two mutants pass every unit test.
+        #
+        # MEASURED, NOT ASSUMED: on head 195d7eb this runner skipped
+        #
+        #   SKIP (no unprivileged user namespaces for `unshare --user --net`):
+        #     userns-sockets-show-the-kernels-protocol-name,
+        #     userns-sockets-kernel-protocol-name-fields
+        #
+        # and those two cases are the ONLY thing in the repository that can
+        # fail for DIVERGENCES item 24 — no unit test kills either mutation,
+        # because naming a socket through its own namespace needs a live
+        # foreign namespace to execute. Skipped there, the fix ships ungated.
+        #
+        # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+        # which blocks `unshare --user` for an unconfined binary. Clearing it
+        # on an ephemeral runner VM restores a standard kernel feature for the
+        # length of one job; it is not a workaround for a missing privilege,
+        # and it does not make fixture K (real CAP_NET_RAW, host namespace)
+        # runnable — those three cases stay skipped and stay reported.
+        #
+        # NON-FATAL on purpose. The sysctl does not exist on 22.04 and may go
+        # away again; the authority on whether the cases ran is the harness's
+        # own SKIP line, printed by name, not this step. `|| true` here would
+        # hide the reason, so the status is echoed instead.
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 ||             echo "sysctl absent — nothing to relax on this kernel"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; fixture L will report itself unavailable"
+          if unshare --user --map-root-user --net true 2>&1; then
+            echo "probe OK: unprivileged user+net namespaces work, fixture L will run"
+          else
+            echo "probe FAILED: fixture L will skip, and the harness will name its cases"
+          fi
       - name: differential vs the C oracle
         run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
 
@@ -325,10 +362,17 @@ jobs:
     # job status. This PR itself is the third: a promotion is validated by the
     # mechanism it enables.
     #
-    # Scope: only the forbid(unsafe_code) crates. The Windows backend needs
-    # Windows, and the Linux backend reads live /proc, which miri cannot
-    # interpose — so this proves the *portable* core is UB-free, not the FFI
-    # layer. Those two are the open rows in progress.json.
+    # Scope: the forbid(unsafe_code) crates. The Windows backend needs Windows
+    # and has its own ASan job.
+    #
+    # This comment used to say the Linux backend "reads live /proc, which miri
+    # cannot interpose". That was FALSE, and nothing had ever tested it: with
+    # -Zmiri-disable-isolation miri runs that crate's suite fine. Measured on
+    # the pinned nightly below, 48 of its 50 tests pass; the two that do not
+    # are miri shim artefacts, are `#[cfg_attr(miri, ignore)]` at the test with
+    # the measurement that justifies it, and still run under plain `cargo test`.
+    # The lsof-backend-linux arm is the separate miri-linux job below, and
+    # separate ON PURPOSE -- see the note there.
     #
     # The nightly is PINNED to the build that produced the green runs. miri
     # ships inside the nightly and its sysroot build can break on any given
@@ -347,6 +391,88 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
+
+  miri-linux:
+    name: miri (Linux backend — observe-first)
+    runs-on: ubuntu-latest
+    # 60, not the 25 the job above uses: on the first attempt this arm shared
+    # that job and was killed by its timeout after 25m15s, having emitted no
+    # `test result:` line at all.
+    #
+    # MEASURED. Three completed runs, spanning better than 2x:
+    #
+    #   8a4b2ea  48 passed; 0 failed; 2 ignored   2557.15s  (42m37s)
+    #   22a9882  55 passed; 0 failed; 2 ignored   1216.62s  (20m17s)
+    #   195d7eb  55 passed; 0 failed; 2 ignored   1463.71s  (24m24s)
+    #
+    # The last two run the IDENTICAL suite and differ by 20%; the first runs
+    # seven FEWER tests and takes over twice as long as the fastest. So what
+    # dominates is runner variance, not what the suite does. One measurement
+    # would have read as a fact; it was the first number written into this
+    # comment and it was wrong as a characterisation.
+    #
+    # Locally the same command is ~295s, so CI is 4-9x slower, and the log says
+    # why itself: `warning: 5665 warnings emitted`. miri prints "files in
+    # `/proc` can bypass the Abstract Machine", WITH A BACKTRACE, for every
+    # access, and reading /proc is all this crate does.
+    #
+    # 60 stays. Against the SLOWER of the two observations that is ~1.4x
+    # headroom, not the ~3x the faster one would suggest -- thinner than it
+    # looks, and the reason not to trim it. It is free anyway: the job is
+    # isolated and blocks nothing, which is the whole point of it being a job.
+    #
+    # What it is NOT free of is wall time. At 20-43 min this is the longest job
+    # in the workflow either way (the fuzz smoke, next longest, is ~8), so the
+    # check suite stays yellow that long on every push. If that becomes worth
+    # fixing, the lever is NARROWING WHAT IT RUNS -- the live-/proc tests are
+    # what generate the ~5700 warnings, and the pure parsers are where the UB
+    # and leak surface actually is -- not raising this number again.
+    timeout-minutes: 60
+    # OBSERVE-FIRST (LESSONS #13), and A JOB RATHER THAN A STEP BECAUSE OF HOW
+    # THE FIRST ATTEMPT FAILED. `continue-on-error` is a step property;
+    # `timeout-minutes` is a job property. An observe-first STEP inside the
+    # hard-gate job therefore could — and did — turn that gate from success to
+    # cancelled, which is precisely what "does not block" was supposed to
+    # prevent. Any job-level failure mode (timeout, runner loss, cancellation)
+    # crosses a step-level exemption. Isolation is the only thing that actually
+    # makes a trial arm harmless.
+    #
+    # PROMOTED. progress.json moved lsof-backend-linux from `fuzzed` to
+    # `unsafe_audited` on the three consecutive log-verified greens above -- the
+    # same rule, and the same evidence standard (the step log's `test result:`
+    # line, never the job status), that promoted the job above and asan-windows
+    # before it. The arm KEEPS `continue-on-error`: what the greens earned is
+    # the ledger row, not blocking authority. Turning it into a hard gate is a
+    # separate decision, and on a 20-43 minute job with 2x variance it is not
+    # obviously the right one.
+    #
+    # Validated locally on this exact toolchain rather than written blind:
+    # clean it is `48 passed; 0 failed; 2 ignored`, and it has been shown to
+    # fail for the right reasons, which is the only thing that makes a clean
+    # run mean anything —
+    #
+    #   a leaked allocation in parse_mounts  -> `error: memory leaked`, exit 1
+    #   an out-of-bounds read, with the crate's forbid(unsafe_code) lifted
+    #                                        -> `error: Undefined Behavior:
+    #                                           in-bounds pointer arithmetic
+    #                                           failed`, exit 1
+    #
+    # The leak case is the one worth having: it is real, it is not covered by
+    # any other gate here, and this crate caches (`NetnsTables` holds a
+    # RefCell<HashMap> per namespace and per pid). The UB case only bites if
+    # someone lifts forbid(unsafe_code) — and that attribute fires first, so
+    # miri is the second line there, not the first.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-31
+          components: miri
+      - name: miri over lsof-backend-linux
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly-2026-08-31 miri test -p lsof-backend-linux
 
   asan-windows:
     name: ASan (UB in the Windows unsafe layer)

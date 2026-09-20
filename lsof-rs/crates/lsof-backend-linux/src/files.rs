@@ -246,8 +246,9 @@ fn row(
         }
         if let Some(e) = socks.get(inode) {
             // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
-            // anonymous socket has no path and shows the tail alone.
-            let name = match &e.unix_suffix {
+            // anonymous socket — and every AF_PACKET socket, which never has a
+            // path — shows the tail alone.
+            let name = match &e.type_suffix {
                 Some(suffix) => match &e.path {
                     Some(p) => format!("{p} {suffix}"),
                     None => suffix.clone(),
@@ -450,7 +451,13 @@ mod tests {
         assert_eq!(dev_string(0x0010_0800), "8,256");
     }
 
+    // Excluded from the miri job, not from `cargo test`. Measured under
+    // nightly-2026-08-31 (the pinned toolchain the job uses): miri's `stat`
+    // shim leaves `st_rdev` zero, so this reads DEVICE `0,0` where the host
+    // says `/dev/null` is `rdev=259` -> `1,3`. The code is right and the
+    // interpreter is the odd one out; a native run asserts the real number.
     #[test]
+    #[cfg_attr(miri, ignore = "miri's stat shim reports st_rdev as 0")]
     fn device_nodes_report_their_own_number_not_the_filesystem() {
         // The DEVICE column means st_rdev for a device node and st_dev for
         // everything else; /dev/null is the canonical check (1,3 not 0,6).
@@ -601,7 +608,14 @@ mod tests {
         assert_eq!(name.matches(',').count(), 31, "32 fds listed: {name}");
     }
 
+    // Excluded from the miri job, not from `cargo test`. This test correlates
+    // an in-process fd with the kernel's view of it through
+    // `/proc/<self>/fdinfo/<fd>`, and miri emulates its own fd table: the
+    // number `as_raw_fd()` returns does not name the same file in the host's
+    // /proc, so the read describes something else entirely. Same class as
+    // miri's `strerror` shim, which forced `errno_text`'s test to be rewritten.
     #[test]
+    #[cfg_attr(miri, ignore = "miri's emulated fds do not appear in the host's /proc")]
     fn fdinfo_reports_access_and_the_kernel_file_position() {
         use std::io::Write;
         use std::os::unix::io::AsRawFd;

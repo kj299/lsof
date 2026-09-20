@@ -253,6 +253,28 @@ MUTATIONS = [
      "new": "            if False:",
      "why": "a waiver becomes a mute button: CI may build what is waived as unbuilt",
      "cmd": ["harnesses/platforms/check_platforms.py", "--self-test"]},
+    # The collision resolver has THREE independent refusal/rewrite verdicts, so
+    # three rows: one fixture pins each, and one row would pin only their union.
+    {"gate": "collision-provenance",
+     "file": "harnesses/lessons/resolve_collision.py",
+     "old": '    if line not in keep_lines:\n        return "move"',
+     "new": '    if line not in keep_lines:\n        return "keep"',
+     "why": "no line is ever the moving side's: the block is renumbered and every citation to it stays stale",
+     "cmd": ["harnesses/lessons/resolve_collision.py", "--self-test"]},
+
+    {"gate": "collision-ambiguity",
+     "file": "harnesses/lessons/resolve_collision.py",
+     "old": '    return "ambiguous" if line in move_lines else "keep"',
+     "new": '    return "keep"',
+     "why": "a line both sides wrote is silently read as the kept side's",
+     "cmd": ["harnesses/lessons/resolve_collision.py", "--self-test"]},
+
+    {"gate": "collision-displaced",
+     "file": "harnesses/lessons/resolve_collision.py",
+     "old": "    if displaced:\n        raise Refuse(",
+     "new": "    if False:\n        raise Refuse(",
+     "why": "a paragraph cut from an old entry and carried in the new block merges without a word",
+     "cmd": ["harnesses/lessons/resolve_collision.py", "--self-test"]},
 ]
 
 _IGNORE = shutil.ignore_patterns(
