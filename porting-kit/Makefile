@@ -46,6 +46,9 @@ check-kit:
 	@# Toolchain-OPTIONAL: SKIPs cleanly with no cargo, so check-kit keeps its
 	@# python3+bash-only minimum. With cargo it runs the REAL fmt/clippy/build/
 	@# test against the skeleton every port starts by copying (LESSONS #044).
+	@# Documented commands are code: they get pasted. Every `--flag` the operative
+	@# docs attribute to a kit harness must exist in that harness's source.
+	@echo "== doc flags ==";       $(PY) $(H)/doc-check/check_doc_flags.py .
 	@echo "== skeleton ==";         bash  $(H)/skeleton-check/check_skeleton.sh --check
 	@echo "== gate-mutation self-test =="; $(PY) $(H)/gate-mutation/mutate_gates.py --self-test
 	@echo "== gate-mutation sweep =="; $(PY) $(H)/gate-mutation/mutate_gates.py .

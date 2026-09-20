@@ -117,7 +117,7 @@ def _self_test():
         # was pinned by nothing: deleting it outright left the suite green. A
         # fixture carrying N defects pins only their union, and any N-1 of the
         # checks can silently die (LESSONS #049). The gate-mutation sweep found
-        # this the first time it ran in this kit.
+        # this the first time it ran in this kit (LESSONS #052).
         name_bad = os.path.join(skills, "name-mismatch"); os.makedirs(name_bad)
         open(os.path.join(name_bad, "SKILL.md"), "w").write(
             "---\nname: WRONG\ndescription: d\n---\nsee porting-kit/PLAYBOOK.md\n")

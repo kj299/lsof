@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
+# Local: #052 (this kit's own first sweep with it).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#049, #21->#041, #22->#050,
 #          #25->#051; #36 by title (no entry in this log).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
@@ -162,6 +163,13 @@ MUTATIONS = [
     # These five are authored here, not imported. A table inherited from
     # another lineage covers that lineage's harnesses; the ones this kit grew
     # on its own would sit outside it, and `coverage_gaps()` is what says so.
+
+    {"gate": "doc-flags", "file": "harnesses/doc-check/check_doc_flags.py",
+     "old": '                if not re.search(r"(?<![\\w-])" + re.escape(flag) + r"(?![\\w-])",\n'
+            "                                 sources[script]):",
+     "new": "                if False:",
+     "why": "every documented flag counts as existing",
+     "cmd": ["harnesses/doc-check/check_doc_flags.py", "--self-test"]},
 
     {"gate": "skeleton-check", "file": "harnesses/skeleton-check/check_skeleton.sh",
      "old": 'skel_present() { test -d "$1" && test -f "$1/Cargo.toml"; }',

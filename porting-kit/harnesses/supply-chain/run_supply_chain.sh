@@ -18,7 +18,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # left-hand side of `&&` does not exit, so a MISSING policy file printed nothing
 # at all and the check went on to say `self-test: OK`. The gate that guards the
 # dependency policy passed when the policy was gone (LESSONS #051, and #036's
-# fail-open shape).
+# fail-open shape), found by the sweep's first run here (LESSONS #052).
 have_deny_template() { test -f "$1/deny.template.toml"; }
 
 if [[ "${1:-}" == "--check" ]]; then

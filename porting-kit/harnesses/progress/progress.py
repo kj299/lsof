@@ -133,7 +133,8 @@ def _self_test():
         # whether an unsafe-audit report is clean enough to advance a module to
         # its final state. Both directions are pinned below, because a check
         # that only ever sees a clean report proves detection and never refusal
-        # (LESSONS #036).
+        # (LESSONS #036). The missing test was found by the gate-mutation
+        # sweep's first run in this kit (LESSONS #052).
         q = os.path.join(d, "ingest.json")
         cmd_init(q, ["sockets", "handles", "process"])
         cmd_set(q, "sockets", "sanitized")
