@@ -38,6 +38,11 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# Structure of the SHIPPED TEMPLATE, in --template mode: placeholders are
+	@# expected there, a deleted section is not. The port's own filled-in copy
+	@# is checked by lsof-rs-ci.yml, which is where a real port's gate belongs.
+	@echo "== threat model ==";   $(PY) $(H)/threat-model/check_threat_model.py \
+	    skeleton/THREAT-MODEL.md --template
 	@# When two branches append to the log they take the same numbers, and the
 	@# renumber that follows the merge is where citations go stale (LESSONS #048,
 	@# #056). The resolver does that renumber from git, by line provenance. Its
