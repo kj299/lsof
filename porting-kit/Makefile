@@ -38,6 +38,11 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# Structure of the SHIPPED TEMPLATE, in --template mode: placeholders are
+	@# expected there, a deleted section is not. The port's own filled-in copy
+	@# is checked by lsof-rs-ci.yml, which is where a real port's gate belongs.
+	@echo "== threat model ==";   $(PY) $(H)/threat-model/check_threat_model.py \
+	    skeleton/THREAT-MODEL.md --template
 	@# A port far slower than the C is a specific bug, not "the cost of Rust".
 	@# Self-test only here: the real gate needs both binaries and a matrix.
 	@echo "== perf gate ==";       $(PY) $(H)/perf/perf_gate.py --self-test

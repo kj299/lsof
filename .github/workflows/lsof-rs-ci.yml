@@ -149,6 +149,14 @@ jobs:
         # was green, because no gate looked. Now one does.
         run: python3 ../porting-kit/harnesses/ledgers/check_ledgers.py . --ci-dir ../.github/workflows
 
+      - name: threat model filled in
+        # PLAYBOOK Phase 0 lists THREAT-MODEL.md among its required artifacts and
+        # CLAUDE.md names the threat model in the process line — and this port
+        # reached 1.0 without one, which nothing noticed because nothing looked.
+        # Hard fail on a missing file, a leftover placeholder or a deleted
+        # section: "no threat model" is the state this gate exists to catch.
+        run: python3 ../porting-kit/harnesses/threat-model/check_threat_model.py THREAT-MODEL.md
+
   windows:
     name: native backend (windows)
     runs-on: windows-latest

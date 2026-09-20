@@ -40,6 +40,7 @@ compiles and matches the oracle is at step 2 of 6, not done.
 | no UB | `harnesses/sanitizers/run_sanitizers.sh` (miri/asan/ubsan/tsan) |
 | no panic on input | `harnesses/fuzz/` (cargo-fuzz) |
 | clean deps | `harnesses/supply-chain/run_supply_chain.sh` |
+| threat model filled in | `harnesses/threat-model/check_threat_model.py THREAT-MODEL.md` — **hard fail** |
 | no silent drift | `harnesses/differential/diff_run.py` + `DIVERGENCES.md` |
 | matrix covers the C's surface | `harnesses/coverage/coverage_gate.py --platform X`, once per platform |
 | the mandated ledgers exist | `harnesses/ledgers/check_ledgers.py` — progress, divergences, fuzz target, sanitizer job |
