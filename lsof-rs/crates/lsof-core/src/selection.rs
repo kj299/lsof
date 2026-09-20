@@ -469,6 +469,18 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-Z [context]`: SELinux security contexts.
+    ///
+    /// `None` when not given; `Some(list)` when it was, with the optional
+    /// context arguments (the C globs them with `fnmatch`). The list being
+    /// empty means a bare `-Z`.
+    ///
+    /// The C gates the whole option on `is_selinux_enabled()`, which asks
+    /// whether **selinuxfs is mounted** — not whether `/sys/fs/selinux`
+    /// exists. That distinction is load-bearing: on this port's test host the
+    /// directory is there and empty while the file system is not mounted, so a
+    /// presence check would answer "enabled" where the C answers "disabled".
+    pub selinux: Option<Vec<String>>,
     /// `-N`: select files on an NFS file system.
     ///
     /// A **search item**, exactly like `-i`: `main.c` holds `Fnfs` at 1 until

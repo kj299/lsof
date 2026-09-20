@@ -404,6 +404,29 @@ fn main() {
             _ => env.backend.mounts(),
         };
         sel.paths_identified = env.backend.identifies_paths();
+        // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
+        // `is_selinux_enabled()` — a check for a mounted selinuxfs, not for
+        // the `/sys/fs/selinux` directory. On a host where the directory
+        // exists unmounted (this port's own test box) a presence check answers
+        // "enabled" where the C answers "disabled", so the mount table is what
+        // decides, using the type `-N` already taught it to read.
+        if sel.selinux.is_some() {
+            let enabled = mounts.iter().any(|m| m.fstype == "selinuxfs");
+            if !enabled {
+                // The C's exact line, and its status.
+                eprintln!("lsof: -Z limited to SELinux");
+                std::process::exit(1);
+            }
+            // SELinux IS enabled, and this port does not implement the column.
+            // Deliberately NOT written blind: `print.c:902` puts CONTEXT in the
+            // PROCESS columns with a width that grows to the longest value, and
+            // no host available to this port can show where it sits relative to
+            // USER and FD. Guessing produces silently misaligned output on
+            // exactly the hosts that use the option. A loud refusal is the
+            // honest failure; DIVERGENCES records it.
+            eprintln!("lsof: -Z (SELinux context) is not implemented");
+            std::process::exit(1);
+        }
         // `-N` selects on file-system TYPE, so the mount table is what turns
         // the flag into a set of devices a row can be compared against.
         // `nfs` and `nfs4` are the two Linux spells; a type that merely starts

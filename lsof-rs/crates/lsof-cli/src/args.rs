@@ -226,6 +226,23 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'H' => sel.human_size = true,
                 'X' => sel.skip_inet_tables = true,
                 'N' => sel.nfs_only = true,
+                'Z' => {
+                    // `-Z [context]`. The value is attached or the next word,
+                    // and a word that opens an option is not one — the same
+                    // rule `-K` uses (`main.c`: `*GOv != '-' && *GOv != '+'`).
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let list = sel.selinux.get_or_insert_with(Vec::new);
+                    if !rest.is_empty() {
+                        list.push(rest);
+                    } else if let Some(next) = args.get(i + 1) {
+                        if !next.starts_with(['-', '+']) {
+                            list.push(next.clone());
+                            i += 1;
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'e' => {
                     // `-e s` / `+e s`. The value may be attached or the next
                     // word, and the C takes that word WHATEVER it is — a
@@ -945,7 +962,18 @@ mod tests {
 
     #[test]
     fn unknown_option_errors() {
-        assert!(parse(vec!["-Z".into()]).is_err());
+        // `-y` and `-Y` are `illegal option character` to the C on this
+        // dialect too, so they are stable markers for "not an option at all".
+        // This test used to name `-Z`, which was unsupported until P4
+        // implemented its gate — a rejection test pinned to a letter is a
+        // rejection test that expires the day the letter is implemented.
+        for o in ["-y", "-Y", "-M"] {
+            assert!(parse(vec![o.into()]).is_err(), "{o} should be rejected");
+        }
+        // And the letters P4 added are NOT rejected any more.
+        for o in ["-X", "-N", "-Z"] {
+            assert!(parse(vec![o.into()]).is_ok(), "{o} should parse");
+        }
     }
 
     #[test]
@@ -1045,5 +1073,30 @@ mod tests {
         assert_eq!(flags(&["-xl", "+d", "/tmp"]), (false, true));
         assert_eq!(flags(&["-xfl", "+d", "/tmp"]), (true, true));
         assert_eq!(flags(&["+d", "/tmp"]), (false, false), "default is neither");
+    }
+    #[test]
+    fn dash_z_takes_an_optional_context_the_way_dash_k_does() {
+        let sel = |a: &[&str]| match parse(a.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { selection, .. } => selection.selinux,
+            other => panic!("unexpected action: {other:?}"),
+        };
+        // Bare -Z is Some(empty): given, with no context filter.
+        assert_eq!(sel(&["-Z"]), Some(vec![]));
+        // Attached and separate both take the value.
+        assert_eq!(sel(&["-Zunconfined_u"]), Some(vec!["unconfined_u".into()]));
+        assert_eq!(
+            sel(&["-Z", "unconfined_u"]),
+            Some(vec!["unconfined_u".into()])
+        );
+        // A word that opens an option is NOT the value (`main.c`'s rule), so
+        // `-Z -p 1` is a bare -Z plus a -p, not a context named "-p".
+        assert_eq!(sel(&["-Z", "-p", "1"]), Some(vec![]));
+        // Repeats accumulate, as the C's hash of context arguments does.
+        assert_eq!(
+            sel(&["-Z", "a", "-Z", "b"]),
+            Some(vec!["a".into(), "b".into()])
+        );
+        // Absent stays None — the gate must not fire on a run that never said -Z.
+        assert_eq!(sel(&["-p", "1"]), None);
     }
 }
