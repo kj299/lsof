@@ -66,6 +66,9 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting | Phase 0 |
 | `harnesses/progress/progress.py` | per-module status table incl. safety gates | tracking |
 | `harnesses/ledgers/check_ledgers.py` | the ledgers the playbook mandates actually exist (progress, divergences, fuzz target, sanitizer job) | CI |
+| `harnesses/probe/probe.py` | probe-then-port: generate a module's test expectations from a fingerprinted oracle transcript, and re-verify it | Phase 4 |
+| `harnesses/lessons/check_lesson_refs.py` | every `LESSONS #NN` citation resolves to an entry that exists | CI |
+| `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
 ```
