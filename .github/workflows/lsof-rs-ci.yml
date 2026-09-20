@@ -210,6 +210,10 @@ jobs:
           if-no-files-found: error
 
   supply-chain:
+    # control-coverage: exempt harnesses/supply-chain/run_supply_chain.sh -- runs `cargo deny check` against lsof-rs/deny.toml, this port's own policy, not the harness's template
+    # Same caveat as the miri exemption above: the capability runs, the harness
+    # does not, so the harness's own rot is this repo's to catch in check-kit
+    # (it is in the gate-mutation table for exactly that reason).
     name: supply-chain (cargo-deny)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -291,6 +295,16 @@ jobs:
         run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
 
   miri:
+    # control-coverage: exempt harnesses/sanitizers/run_sanitizers.sh -- runs miri directly, with a PINNED nightly the harness cannot express
+    # Deliberate, not an oversight. This job scopes to
+    # -p lsof-core -p lsof-cli, and sets MIRIFLAGS, none of which the harness
+    # decided. The capability this control names therefore does run and does gate
+    # CI. What did NOT run is the harness itself, and that is not free: because
+    # nothing invoked it, `run_sanitizers.sh ubsan` -- and `all`, its default mode
+    # -- shipped `-Zsanitizer=undefined`, a value rustc rejects, so those modes
+    # could never pass on any code. Months, unnoticed. An exemption that names
+    # what runs instead is a record; one that just silences the row is a mute
+    # button (LESSONS #043).
     name: miri (UB in the portable crates)
     runs-on: ubuntu-latest
     timeout-minutes: 25

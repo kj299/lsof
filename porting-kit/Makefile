@@ -38,6 +38,29 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# A port far slower than the C is a specific bug, not "the cost of Rust".
+	@# Self-test only here: the real gate needs both binaries and a matrix.
+	@echo "== perf gate ==";       $(PY) $(H)/perf/perf_gate.py --self-test
+	@# Every control CLAUDE.md DECLARES must actually be invoked by the port's gate
+	@# files, or exempted in writing with a reason. linux_diff.py is in the chain
+	@# because it is what invokes diff_run.py.
+	@echo "== control coverage =="; $(PY) $(H)/control-coverage/check_controls.py \
+	    --controls CLAUDE.md --gate ../.github/workflows/lsof-rs-ci.yml \
+	    --gate ../lsof-rs/differential/linux_diff.py
+	@# Documented commands are code: they get pasted. Every `--flag` the operative
+	@# docs attribute to a kit harness must exist in that harness's source.
+	@echo "== doc flags ==";        $(PY) $(H)/doc-check/check_doc_flags.py .
+	@# Toolchain-OPTIONAL: SKIPs cleanly with no cargo, so check-kit keeps its
+	@# python3+bash-only minimum. With cargo it runs the REAL fmt/clippy/build/
+	@# test against the skeleton every port starts by copying (LESSONS #044).
+	@echo "== skeleton ==";         bash  $(H)/skeleton-check/check_skeleton.sh --check
+	@# The gate above the gates: neutralize each gate's crown verdict in a scratch
+	@# copy and require its own self-test to go red. A self-test that stays green
+	@# over a dead verdict is pinning nothing. The sweep also AUDITS ITS OWN TABLE
+	@# — any harness with a self-test and no mutation entry fails the run, so the
+	@# survivor count cannot quietly describe a subset (LESSONS #050/#052).
+	@echo "== gate-mutation self-test =="; $(PY) $(H)/gate-mutation/mutate_gates.py --self-test
+	@echo "== gate-mutation sweep =="; $(PY) $(H)/gate-mutation/mutate_gates.py .
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 

@@ -91,6 +91,7 @@ def run(skills_dir):
 
 
 def _self_test():
+    import shutil
     import tempfile
     ok = True
 
@@ -109,11 +110,28 @@ def _self_test():
         open(os.path.join(good, "SKILL.md"), "w").write(
             "---\nname: good-skill\ndescription: ok\n---\nsee porting-kit/PLAYBOOK.md\n")
         check("clean suite passes", run(skills) == 0)
-        # bad skill: name mismatch + missing referenced path
-        bad = os.path.join(skills, "bad-skill"); os.makedirs(bad)
-        open(os.path.join(bad, "SKILL.md"), "w").write(
-            "---\nname: WRONG\ndescription: d\n---\nrun porting-kit/harnesses/gone.py\n")
-        check("name mismatch + missing path is caught", run(skills) == 1)
+
+        # ONE FIXTURE PER DEFECT. This was a single "bad-skill" carrying BOTH a
+        # name mismatch and a missing kit path, asserted with one `run(...) == 1`.
+        # The name mismatch alone drove that exit code, so the missing-path check
+        # was pinned by nothing: deleting it outright left the suite green. A
+        # fixture carrying N defects pins only their union, and any N-1 of the
+        # checks can silently die (LESSONS #050). The gate-mutation sweep found
+        # this the first time it ran in this kit (LESSONS #053).
+        name_bad = os.path.join(skills, "name-mismatch"); os.makedirs(name_bad)
+        open(os.path.join(name_bad, "SKILL.md"), "w").write(
+            "---\nname: WRONG\ndescription: d\n---\nsee porting-kit/PLAYBOOK.md\n")
+        check("a frontmatter name that isn't the directory is caught", run(skills) == 1)
+        shutil.rmtree(name_bad)
+        check("...and removing it restores green", run(skills) == 0)
+
+        path_bad = os.path.join(skills, "missing-path"); os.makedirs(path_bad)
+        open(os.path.join(path_bad, "SKILL.md"), "w").write(
+            "---\nname: missing-path\ndescription: d\n---\nrun porting-kit/harnesses/gone.py\n")
+        check("a reference to a kit path that does not exist is caught",
+              run(skills) == 1)
+        shutil.rmtree(path_bad)
+        check("...and removing that restores green too", run(skills) == 0)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

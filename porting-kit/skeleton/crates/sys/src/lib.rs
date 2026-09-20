@@ -22,7 +22,9 @@ impl OwnedResource {
     /// Acquire the resource. (Stand-in for `CreateFileW`, `socket()`, etc.)
     pub fn acquire(value: u64) -> Self {
         // Box::into_raw hands us a uniquely-owned, non-null, aligned pointer.
-        OwnedResource { ptr: Box::into_raw(Box::new(value)) }
+        OwnedResource {
+            ptr: Box::into_raw(Box::new(value)),
+        }
     }
 
     /// Read the resource's value through the raw pointer — the "safe wrapper over
@@ -41,7 +43,9 @@ impl Drop for OwnedResource {
             // SAFETY: `ptr` was produced by `Box::into_raw` in `acquire` and has
             // not been freed (this is the sole `Drop`, and no other method frees
             // it), so reconstituting the Box to free it exactly once is sound.
-            unsafe { drop(Box::from_raw(self.ptr)); }
+            unsafe {
+                drop(Box::from_raw(self.ptr));
+            }
             self.ptr = std::ptr::null_mut();
         }
     }

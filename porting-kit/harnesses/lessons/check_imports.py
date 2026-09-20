@@ -259,6 +259,12 @@ MARKER_BLOCK_LINES = 5
 # land in.
 FILEMAP_RE = re.compile(r"#(\d{1,3})\s*->\s*#(\d{1,3})")
 FILETITLE_RE = re.compile(r"#(\d{1,3})\s+by\s+title")
+# An imported file may later cite a lesson this log wrote ITSELF — one with no
+# source-lineage counterpart, so nothing to re-cite FROM. Those are declared
+# `Local: #052, #054` in the marker block. Without this an imported harness could
+# never cite a native lesson, which would either block the citation or push the
+# marker off the file; both are worse than naming them.
+FILELOCAL_RE = re.compile(r"Local:\s*((?:#\d{1,3}[,\s]*)+)")
 
 
 def _expand_citations(text):
@@ -302,6 +308,14 @@ def check_files(kit_root, lessons_path):
             block = "\n".join(lines[marked: marked + MARKER_BLOCK_LINES])
             dests = {int(b) for _a, b in FILEMAP_RE.findall(block)}
             by_title = {int(a) for a in FILETITLE_RE.findall(block)}
+            local = {int(n) for grp in FILELOCAL_RE.findall(block)
+                     for n in re.findall(r"#(\d{1,3})", grp)}
+            for n in sorted(local):
+                if n not in entry_nums:
+                    problems.append(
+                        f"{rel}: KIT-IMPORT declares #{n:03d} as a local lesson, "
+                        f"but there is no such entry in LESSONS.md.")
+            dests |= local
             for d in sorted(dests):
                 if d not in entry_nums:
                     problems.append(
@@ -559,6 +573,26 @@ def _self_test():
         "# Re-cited: #36 by title (no entry here).\n"
         "# the raw-byte gap; see the source lineage.\n"})
     chk("`by title` alone is a complete file mapping", (n, probs) == (1, []))
+
+    # A native lesson cited from an imported file: declared `Local:`, because
+    # there is no source number to re-cite FROM. Without this an imported harness
+    # could never cite a lesson THIS log wrote.
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "# Re-cited: #6->#034. Local: #004\n"
+        "# see LESSONS #034 and this log's own LESSONS #004\n"})
+    chk("a `Local:` native lesson may be cited from an imported file",
+        (n, probs) == (1, []))
+
+    # Assembled, not written literally: `check_lesson_refs` scans this file too,
+    # and a literal citation of a nonexistent entry is indistinguishable from a
+    # real one — the same reason `absent` is built above. Test data, not a claim.
+    gone = "0" + "77"
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        f"# Re-cited: #6->#034. Local: #{gone}\n# LESSONS #{gone}\n"})
+    chk("a `Local:` number with no such entry is refused",
+        any("local lesson" in p for p in probs))
 
     # An UNMARKED file is not this check's business, however it cites.
     n, probs = run_files({"harnesses/h/native.py": "# LESSONS #14 is fine here\n"})
