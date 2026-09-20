@@ -13,9 +13,29 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The crown verdict, extracted so mutation can bite and so a negative fixture can
+# aim at it. It was `test -f ... && echo PASS` inline: under `set -e` a failing
+# left-hand side of `&&` does not exit, so a MISSING policy file printed nothing
+# at all and the check went on to say `self-test: OK`. The gate that guards the
+# dependency policy passed when the policy was gone (LESSONS #052, and #036's
+# fail-open shape), found by the sweep's first run here (LESSONS #053).
+have_deny_template() { test -f "$1/deny.template.toml"; }
+
 if [[ "${1:-}" == "--check" ]]; then
   bash -n "$0" && echo "PASS  script syntax ok"
-  test -f "$HERE/deny.template.toml" && echo "PASS  deny.template.toml present"
+  if ! have_deny_template "$HERE"; then
+    echo "FAIL  deny.template.toml missing — the cargo-deny policy this gate applies is gone"
+    exit 1
+  fi
+  echo "PASS  deny.template.toml present"
+  # NEGATIVE fixture: an empty directory must be refused, or "present" is a
+  # statement about nothing.
+  _empty="$(mktemp -d)"
+  if have_deny_template "$_empty"; then
+    echo "FAIL  an empty config dir reports the deny policy as present"; rm -rf "$_empty"; exit 1
+  fi
+  rm -rf "$_empty"
+  echo "PASS  a missing deny.template.toml is refused"
   # tomllib validate the deny config if python is around
   if have python3; then
     python3 - "$HERE/deny.template.toml" <<'PY'

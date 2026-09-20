@@ -1780,6 +1780,17 @@ the emphasized half.
   README · harness table; PLAYBOOK · Phase 3 exit criteria. **Here:** not yet —
   `skeleton-check` is a later stage of this refresh; this entry is the standing
   reason to do it.
+- **Closed 2026-09-20** (appended, not rewritten — a forward-looking "not yet" in
+  an append-only log goes stale, and leaving it to read as current is the kind of
+  claim this kit exists to prevent). `skeleton-check` is imported and wired into
+  `make check-kit`. Its first real run failed: this lineage's skeleton was not
+  `cargo fmt`-clean (four files) **and** used `i + 1` in `crates/core/src/parser.rs`
+  and `crates/cli/src/main.rs`, tripping the `clippy::arithmetic_side_effects` that
+  the skeleton's own `[workspace.lints]` denies. Both defects this entry names,
+  verbatim, sitting here the whole time — every port that copied this skeleton
+  started red under the CI the skeleton itself configures. Fixed to a clean
+  exemplar with `i.saturating_add(1)`; the gate now reports `PASS  skeleton passes
+  the gates it ships`.
 
 ---
 
@@ -2042,7 +2053,186 @@ the emphasized half.
   built by some CI config or explicitly waived — named here, not built.
 - **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md`
 
-## 050. A harness written to enforce a lesson can contain the lesson it enforces
+---
+
+## 050. A multi-defect fixture pins only the union — mutate the gates to prove them
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #016. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Date:** 2026-07-25
+- **Codebase:** the Porting Kit itself (gate-mutation verification)
+- **What happened:** Every fail-open that lineage of the kit ever shipped — the
+  both-hang MATCH, LEDGER-STALE, the wrapped-path skip, the fenced-block harvest
+  — was a gate that *passed while checking nothing*, and every one was found by a
+  human probing by hand. The gate-mutation harness makes that probe mechanical:
+  neutralize each gate's crown verdict in a scratch copy (`is_match = True`,
+  `return []`, `if False:`) and require its own self-test to go red. **Its first
+  sweep found a survivor.** `check_skills.py`'s missing-path detection could be
+  deleted outright with the suite staying green, because its "bad skill" fixture
+  bundled TWO defects — a name mismatch and a missing path — into one
+  `exit == 1` assertion: the name mismatch alone drove the exit code, so the
+  path check was pinned by nothing. The general form: **a fixture that carries N
+  defects pins only their union — any N−1 of the checks can silently die.** The
+  sweep also showed diff-fuzz's self-test *crashing* (unguarded `findings[0]`)
+  instead of failing when findings vanish; crash-red is indistinguishable from
+  harness-broken-red, so the mutation harness treats a Traceback as a hard
+  error, not a catch.
+- **Kit change (source lineage):** `harnesses/gate-mutation/mutate_gates.py` — a
+  mutation table wired into `make check-kit`. Fail-closed at every joint: a stale
+  or ambiguous table entry, a syntax-breaking mutation, a Traceback under
+  mutation, or a red baseline are all hard errors, so the sweep can neither rot
+  silently nor claim fake coverage.
+- **Here:** the harness is imported and its table rebuilt against *this* kit's
+  harnesses — twelve rows dropped for harnesses this lineage does not have, five
+  authored for the ones it has that the source kit does not (`coverage_gate`,
+  `check_ledgers`, `check_lesson_refs`, and `check_imports` twice, because its
+  resolution and completeness verdicts are independent and one row would pin
+  only their union — this lesson applied to itself).
+- **Section amended:** harnesses/gate-mutation/mutate_gates.py (new here);
+  Makefile · check-kit; README · harness table.
+
+---
+
+## 051. A gate that can never pass is as broken as one that can never fail
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #022. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #15 -> by title “An inherited environment constraint is a dated observation, not a fact” (no entry in this log).
+- **Date:** 2026-08-22
+- **Codebase:** the kit itself — `harnesses/sanitizers/run_sanitizers.sh`,
+  `harnesses/gate-mutation/mutate_gates.py`
+- **What happened:** `run_sanitizers.sh ubsan` ran
+  `RUSTFLAGS=-Zsanitizer=undefined`. **rustc has no `undefined` sanitizer** —
+  Rust's UB detector is miri — so the mode exited 1 on every codebase in the
+  world, and `all` (which included it) was **permanently red no matter how clean
+  the code**. The kit's whole doctrine is fail-closed, but a gate that cannot go
+  green teaches its users to skip it, and a skipped control is a broken control.
+  It survived a 26-finding review, a whole foreign port, and **every
+  gate-mutation sweep**. Three reasons, each its own hole: (1) `--check`
+  validated bash *syntax* and printed `self-test: OK` — the identical root cause
+  as the original never-runnable sanitizer job (LESSONS #036), recurring inside
+  the very harness that lesson was about; (2) `mutate_gates._run` hardcoded
+  `sys.executable`, so **no bash harness could be in the mutation table at all**
+  while the sweep kept printing "15 gate(s) mutated, 0 survivor(s)" — a summary
+  that reads as the whole gate set and silently covered only the python half;
+  (3) the port that used it **hand-rolled its own `cargo +nightly miri test`**
+  instead of calling the harness, so in the kit's entire life this harness had
+  never once executed against real code. Found by running it — `--check` says OK,
+  the actual mode says rc=1.
+- **Kit change (source lineage):** modes map through `is_valid_san` against the
+  sanitizer list rustc accepts, `--check` pins that validator with a **negative
+  fixture** (it must reject `undefined`, the exact value that shipped);
+  `ubsan` delegates to miri; `all` = miri + asan. `mutate_gates._run` dispatches
+  by extension, making **bash gates sweep-able for the first time**.
+- **Here:** this kit's `run_sanitizers.sh` is its own, and its modes were checked
+  against this entry before the harness landed. The `_run` extension dispatch
+  comes across with the harness, so this lineage's three bash gates are in the
+  table from the start rather than added after a sweep missed them.
+- **Section amended:** harnesses/gate-mutation/mutate_gates.py (`_run` dispatch);
+  harnesses/sanitizers/run_sanitizers.sh (verified against this entry).
+
+---
+
+## 052. A hand-maintained coverage table reports on itself
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #025. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #22 -> #051 “A gate that can never pass is as broken as one that can never fail”.
+- **Date:** 2026-08-22
+- **Codebase:** the kit itself — `harnesses/gate-mutation/mutate_gates.py` and the
+  three bash harnesses it could not see
+- **What happened:** the gate-mutation sweep prints *"N gate(s) mutated, 0
+  survivor(s)"*, which reads as a statement about the gate set. It is a statement
+  about **the hand-written table**. Nothing required a harness to be in it, so
+  the count was silently partial — and because `_run` assumed python, the missing
+  ones were precisely the bash harnesses, one of which (LESSONS #051) was shipping
+  a mode that could never pass. Fixing the interpreter made them *sweepable*, not
+  *swept*: adding entries for the remaining three immediately produced **three
+  survivors**. All three self-tests only ever exercised the happy path — an
+  always-present template, an always-present config, an always-present skeleton
+  dir — so neutralizing each verdict changed nothing they observed. Proves
+  detection, never refusal: LESSONS #036's root cause, alive in three more places.
+- **Kit change:** `coverage_gaps()` walks `harnesses/` and `skills/` for anything
+  exposing a self-test and fails the sweep naming any harness with no mutation
+  entry; exemptions must be written down with a reason in `COVERAGE_EXEMPT`.
+- **Why it bites hardest on an IMPORTED table:** a table inherited from another
+  lineage describes *that* lineage's harnesses. Ported verbatim it would print a
+  confident survivor count over a gate set it was never written for, and the
+  harnesses this lineage grew on its own — the coverage gate, the ledger check,
+  both lesson checkers — would sit outside it. `coverage_gaps()` is what turns
+  that from a silent omission into a failed run, and it is the reason the table
+  had to be rebuilt rather than copied.
+- **Section amended:** harnesses/gate-mutation/mutate_gates.py (`coverage_gaps` +
+  the rebuilt table).
+
+---
+
+## 053. The first run of an imported gate measures the tree that imported it
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here (refresh stage 3 — `gate-mutation`)
+- **What happened:** importing the gate-mutation sweep was supposed to be a
+  transplant. It was an audit. The harness arrives with a hand-written table of
+  one crown verdict per gate, and that table describes the **source** lineage's
+  harnesses. Against this tree:
+
+  * **6 of 13** inherited entries were STALE — the target text does not exist in
+    this lineage's copy of the same harness. The shared harnesses have diverged
+    on both sides, so `golden.py`, `progress.py`, `scan_c_flaws.py` and all three
+    bash gates needed their crown verdict located here rather than copied. A
+    harness that fails closed on a stale entry is what made that visible instead
+    of silently mutating dead code and reporting a catch.
+  * **5 harnesses this lineage grew on its own** — the coverage gate, the ledger
+    check, and both lesson checkers — had no entry at all and would have sat
+    outside a confident "N gates mutated, 0 survivors". `check_imports` needed
+    two rows, not one, because its resolution and completeness verdicts are
+    independent: one row would have pinned only their union, which is #050
+    applied to the tool built for #046.
+
+- **What the first sweep found, in a kit that had been green for months:**
+  1. **A gate that could never pass.** `run_sanitizers.sh ubsan` ran
+     `-Zsanitizer=undefined`, and `all` — which is the **default mode** —
+     included it. Verified by running rustc, not by trusting the imported entry:
+     `-Zsanitizer=undefined` is rejected at option-parse time, rc=1, on any input.
+     So the default invocation of the memory-safety gate had never once been able
+     to go green. `--check` validated bash *syntax* and printed `self-test: OK`
+     over it. This is the whole of #051, sitting in this tree the entire time.
+  2. **Two survivors.** `check_skills.py`'s missing-path detection could be
+     deleted with the suite staying green — the same bundled two-defect fixture
+     #050 describes finding in the source lineage, never fixed here. And
+     `progress.py`'s `ingest` verdict could be inverted, because `ingest` had
+     **no self-test at all**: neutralized, it would advance a module to its final
+     gate on an audit report showing undocumented `unsafe`.
+  3. **A quieter fail-open.** `run_supply_chain.sh` checked its policy file with
+     `test -f ... && echo PASS` — under `set -e` a false left-hand side of `&&`
+     does not exit, so a MISSING cargo-deny policy printed nothing and the check
+     went on to say `self-test: OK`.
+
+- **The lesson:** a control imported from a sibling lineage is not "already
+  proven" — its proof belongs to the tree it was proven in. **What it reports on
+  arrival is a measurement of the importing tree**, and that is the reason to
+  import it, not an obstacle to doing so. Budget the import as an audit: expect
+  the inherited table to be wrong about your code, expect it to name things that
+  have been green for months, and re-derive rather than re-run. The corollary is
+  that a *clean* first run is the suspicious one — it more likely means the table
+  never pointed at your code at all.
+
+- **Kit change:** `harnesses/gate-mutation/mutate_gates.py` imported and its table
+  rebuilt against this kit (12 rows dropped for harnesses not here, 6 re-aimed at
+  this lineage's verdicts, 5 authored for harnesses the source kit lacks); wired
+  into `make check-kit` as self-test plus full sweep, ~20s. `run_sanitizers.sh`
+  now validates modes against the sanitizer list rustc accepts, with a negative
+  fixture pinning `undefined` and a live cross-check against nightly; `ubsan`
+  delegates to miri and `all` is miri + asan. `gen_fuzz_target.sh` and
+  `run_supply_chain.sh` had their crown verdicts extracted into predicates with
+  negative fixtures. `check_skills.py` now uses one fixture per defect and
+  `progress.py` has an `ingest` self-test covering refusal as well as detection.
+  Sweep: 18 gates, 0 survivors, 0 table gaps.
+- **Section amended:** harnesses/gate-mutation/mutate_gates.py (new here);
+  harnesses/sanitizers/run_sanitizers.sh; harnesses/fuzz/gen_fuzz_target.sh;
+  harnesses/supply-chain/run_supply_chain.sh; harnesses/progress/progress.py;
+  skills/check_skills.py; Makefile · check-kit; README · harness table.
+
+---
+
+## 054. A harness written to enforce a lesson can contain the lesson it enforces
 
 - **Date:** 2026-09-20
 - **Codebase:** lsof-rs / lsof — `harnesses/platforms/check_platforms.py`

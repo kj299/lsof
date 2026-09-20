@@ -142,8 +142,11 @@ audit → retrospective`.
 1. **`cando`-style function-level differential harness** for C-ABI libraries — the
    current differential is executable-shaped (argv/stdin→stdout+exit). Biggest gap.
 2. **Performance gate harness** — measure module runtime vs the C median, fail >1.3×.
-3. **Held-back vectors + C-baseline validation** in `golden.py` (`--holdout`, and
-   "a vector must pass on C before it may judge Rust").
+3. **Held-back vectors + C-baseline validation** in `golden.py`. Proposed, not
+   built: a `--holdout` option, plus the rule "a vector must pass on C before it
+   may judge Rust". (Written without the script and the flag on one line so the
+   doc-flag check does not read a *proposal* as a claim that the flag exists —
+   see `harnesses/doc-check/check_doc_flags.py`.)
 
 **P1 — materially stronger:**
 4. ~~**Differential fuzzing** harness (C vs Rust on shared fuzz inputs).~~ **Done**

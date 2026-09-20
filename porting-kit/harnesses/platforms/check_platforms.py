@@ -182,11 +182,17 @@ def run(manifest_path, repo=None):
                 f"waived (has {'both' if built_by else 'neither'})")
             continue
 
+        # Each verdict below is a single-line guard on purpose. The gate-mutation
+        # sweep neutralizes one verdict at a time and requires this file's own
+        # self-test to go red; a block whose reporting and deciding are tangled
+        # can only be mutated as a unit, and a single entry then pins nothing
+        # more than the union of what it covers (LESSONS #050).
         if built_by:
             hit = _search(ci_files, repo, built_by)
-            if hit:
-                rows.append(("built", name, f"{hit[0]}:{hit[1]}", hit[2][:58]))
-            else:
+            rows.append(("built", name, f"{hit[0]}:{hit[1]}", hit[2][:58]) if hit
+                        else ("UNBUILT", name, "—",
+                              f"no evidence in {len(ci_files)} CI config(s)"))
+            if hit is None:
                 problems.append(
                     f"'{name}' claims CI builds it, but none of {built_by} "
                     f"appears in any of the {len(ci_files)} CI config(s)")
@@ -194,13 +200,13 @@ def run(manifest_path, repo=None):
             # Property 2: a waiver is a falsifiable claim, not a mute button
             # (LESSONS #037). If CI mentions it, the waiver is stale.
             hit = _search(ci_files, repo, [rf"\b{re.escape(a)}\b" for a in aliases])
-            if hit:
+            rows.append(("waived", name, "—", waived[:58]) if hit is None
+                        else ("STALE", name, f"{hit[0]}:{hit[1]}", hit[2][:58]))
+            if hit is not None:
                 problems.append(
                     f"'{name}' is waived as unbuilt, but {hit[0]}:{hit[1]} "
                     f"mentions it: {hit[2][:60]!r} — stale waiver, or it is "
                     f"built after all")
-            else:
-                rows.append(("waived", name, "—", waived[:58]))
 
     width = max((len(r[1]) for r in rows), default=8)
     for state, name, where, note in rows:

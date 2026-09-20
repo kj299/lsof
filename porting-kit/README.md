@@ -76,12 +76,28 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/diff-fuzz/diff_fuzz.py` | differential FUZZING: same mutated input to C and Rust, every divergence triaged — finds what the fixed matrix never covered | CI (short) + nightly (long) |
 | `harnesses/probe/probe.py` | probe-then-port: generate a module's test expectations from a fingerprinted oracle transcript, and re-verify it | Phase 4 |
 | `harnesses/lessons/check_lesson_refs.py` | every `LESSONS #NN` citation resolves to an entry that exists | CI |
+| `harnesses/perf/perf_gate.py` | Rust vs C median runtime over the same matrix; fails past a ratio threshold, reports spawn-dominated cases as UNMEASURABLE | CI |
+| `harnesses/control-coverage/check_controls.py` | every control `CLAUDE.md` declares is actually invoked by the port's gates — or exempted in writing | **CI** |
+| `harnesses/doc-check/check_doc_flags.py` | every `--flag` the operative docs attribute to a harness exists in its source — documented commands are code | CI |
+| `harnesses/skeleton-check/check_skeleton.sh` | the shipped skeleton must pass the gates it configures (fmt/clippy/build/test); SKIPs without cargo | CI |
+| `harnesses/gate-mutation/mutate_gates.py` | break each gate's verdict on purpose and require its self-test to go red; audits its own table for uncovered harnesses | **CI** |
 | `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
 ```
 make check-kit      # smoke-test every harness (python3 + bash only, no toolchain)
 ```
+
+### Deliberately not vendored from the primary line
+
+Named rather than silently skipped, so the absence is a decision on the record:
+
+| Harness there | Why not here |
+|---|---|
+| `api-coverage`, `library-differential`, `cando` | All three answer "is every exported FUNCTION of a C library on the compared contract". This port's subject is a program: the contract is argv/stdin → stdout + exit code, which `differential/` already covers end to end. They become relevant the day this kit is used for a library. |
+| `oracle-sanitize` | It sanitizes the C **driver a port writes** around a vendored library so the differential has something to execute — code the port authored, compiled without sanitizers, whose memory errors change no stdout. This port writes no C at all: its oracle is real `lsof`, built from this repo's own upstream sources by autotools. There is no port-authored C here to sanitize. |
+| `threat-model` | **Applicable, and not yet wired — this one is a real gap, not an N/A.** `PLAYBOOK.md` Phase 0 lists `THREAT-MODEL.md` among its required artifacts and `CLAUDE.md` names the threat model in the process line, but lsof-rs has no such file; only `skeleton/THREAT-MODEL.md`, the template, exists. Wiring the checker would correctly go red. Writing the port's trust boundaries is content work about a real privileged program, not a mechanical refresh, so it is left for a deliberate pass. |
+| `doc-check/check_lessons_pinned` | Applicable. Currently reports 15 lesson→code links where a `Section amended` file does not cite its lesson — some pre-existing here, some inherited from entries whose amendments happened in the source lineage. Needs its own triage pass rather than being wired red. |
 
 ## Related
 

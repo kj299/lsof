@@ -27,14 +27,14 @@ oracle is at gate 2 of 6, not done.
 7. **Performance sanity** (synthesis): fail if a module is >1.3x the C median runtime —
    that's a specific bug (a copy, a missed release build, bounds checks in a hot loop),
    not "the cost of Rust".
-8. **CI hygiene** (LESSONS #5; LESSONS #035; LESSONS #049; LESSONS #050). Run the
+8. **CI hygiene** (LESSONS #5; LESSONS #035; LESSONS #049; LESSONS #054). Run the
    platform ledger — don't eyeball the providers:
    `python3 porting-kit/harnesses/platforms/check_platforms.py`. It discovers
    platforms from the tree and CI configs across **every** provider, and fails
    if one is neither built nor waived. Read its evidence column, not just its
    exit code: it prints the file and line that satisfied each platform, and a
    pattern matching a comment rather than a job step is exactly how this check
-   was wrong on its own first run (LESSONS #050). In this repo it is what shows
+   was wrong on its own first run (LESSONS #054). In this repo it is what shows
    that FreeBSD is gated on Cirrus and NetBSD/OpenBSD on sourcehut — three
    platform gates no GitHub check ever displays, which a deletion nearly cost.
    Then: confirm each language/subtree's CI is
