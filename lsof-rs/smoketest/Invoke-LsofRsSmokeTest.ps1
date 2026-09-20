@@ -301,7 +301,25 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     # ===================== CLI / parsing =====================
     Test-Case 'version' 'cli' { $r = Invoke-Lsof @('-v') 'version'; Assert-Contains $r.Out 'lsof-rs'; "exit=$($r.Exit)" }
     Test-Case 'help-usage' 'cli' { $r = Invoke-Lsof @('-h') 'help'; Assert-Contains $r.Out 'USAGE'; Assert-Contains $r.Out '-i' }
-    Test-Case 'unknown-option-errors' 'cli' { $r = Invoke-Lsof @('-Z') 'badopt'; Assert ($r.Exit -ne 0) 'expected nonzero exit'; Assert-Contains $r.Err 'unsupported' }
+    # A rejection test pinned to a letter expires the day the letter is
+    # implemented: this case named `-Z` and went red on the first Windows run
+    # after P4 gave -Z its gate (the unit test of the same name had expired the
+    # same way). `-y` is an `illegal option character` to the C on this dialect
+    # too, so it is a stable marker for "not an option at all".
+    Test-Case 'unknown-option-errors' 'cli' { $r = Invoke-Lsof @('-y') 'badopt'; Assert ($r.Exit -ne 0) 'expected nonzero exit'; Assert-Contains $r.Err 'unsupported' }
+
+    # ===================== P4 options on Windows: the blast radius =====================
+    # -X -x -e -N -Z are Linux-semantics options with no backend behind them here.
+    # Their ARGUMENT contracts live in the CLI and hold on every platform; the -Z
+    # gate reads the backend's mount table, which this backend leaves empty, so it
+    # must report the C's `limited to SELinux` line and never the unsupported-option
+    # one. -N with no NFS mount is a failed search item: the -V line on stdout,
+    # exit 1, exactly as on a Linux host without NFS.
+    Test-Case 'p4-dash-Z-gate-not-unsupported' 'cli/p4' { $r = Invoke-Lsof @('-Z') 'p4-Z'; Assert ($r.Exit -eq 1) 'expected exit 1'; Assert-Contains $r.Err 'limited to SELinux'; Assert-NotContains $r.Err 'unsupported' }
+    Test-Case 'p4-dash-x-needs-plus-d' 'cli/p4' { $r = Invoke-Lsof @('-x') 'p4-x'; Assert ($r.Exit -eq 1) 'expected exit 1'; Assert-Contains $r.Err 'must accompany +d or +D' }
+    Test-Case 'p4-dash-e-needs-path' 'cli/p4' { $r = Invoke-Lsof @('-e') 'p4-e'; Assert ($r.Exit -eq 1) 'expected exit 1'; Assert-Contains $r.Err 'not followed by a file system path' }
+    Test-Case 'p4-dash-X-with-i-fatal' 'cli/p4' { $r = Invoke-Lsof @('-X', '-i') 'p4-Xi'; Assert ($r.Exit -eq 1) 'expected exit 1'; Assert-Contains $r.Err 'useless when -X' }
+    Test-Case 'p4-dash-N-no-nfs-here' 'cli/p4' { $r = Invoke-Lsof @('-N', '-V') 'p4-NV'; Assert ($r.Exit -eq 1) 'expected exit 1'; Assert-Contains $r.Out 'no NFS files located' }
 
     # ===================== process / owner =====================
     Test-Case 'terse-lists-pids' 'process' { $r = Invoke-Lsof @('-t') 'terse'; Assert ($r.Out -match "(?m)^\d+\s*$") 'no PID lines' }

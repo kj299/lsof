@@ -16,6 +16,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   DIVERGENCES items 25–29). The plan called these "the small options" and every
   one was larger than that — two were live defects rather than missing
   features.
+  - **Windows blast radius, measured on the runner, not assumed.** None of the
+    five has a backend behind it there. The smoke suite now pins what does
+    hold on every platform — the argument contracts (`-x` without `+d`, `-e`
+    without a path, `-X -i`) and the `-Z` gate's `limited to SELinux` line,
+    which the empty Windows mount table makes deterministic — plus `-N -V` as
+    a failed search item. Found because the suite's `unknown-option-errors`
+    case had used `-Z` as its "unknown letter" and went red on the first
+    Windows run after P4 gave `-Z` a gate: a rejection test pinned to a letter
+    expires the day the letter is implemented. Re-pointed at `-y`.
   - **`-X` does not skip TCP and UDP files.** It degrades them to
     `sock … can't identify protocol (-X specified)`, suppressing the *lookup*
     and not the row. It gates `tcp`/`tcp6`/`udp`/`udp6`/`raw6` and, measured,
