@@ -614,6 +614,85 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-Ftn", "-p", "{J}"]
 name = "netns-socket-is-not-selected-by-dash-i"
 args = ["-n", "-P", "-a", "-i", "-p", "{J}"]
 
+# ------------------------------------------- P4's small options
+# Each was measured against the oracle before being written, and each was
+# larger than the L2 plan sized it.
+
+[[case]]
+# `-X` does NOT skip TCP and UDP files, whatever the man page says: the rows
+# stay and lose their identity — `sock … can't identify protocol (-X
+# specified)`. Fixture B holds a TCP listener, a UDP socket and an AF_UNIX
+# socket, and only the first two degrade.
+name = "opt-X-degrades-inet-rows-rather-than-skipping-them"
+args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-p", "{B}"]
+
+[[case]]
+# `-X` with `-i` is refused outright rather than silently selecting nothing.
+name = "opt-X-with-dash-i-is-fatal"
+args = ["-n", "-P", "-X", "-i", "-p", "{B}"]
+
+[[case]]
+# The `+d` symlink rule, on a directory whose ONLY entry is a link pointing out
+# of it at a file the fixture holds open under its real name. The C skips the
+# link, so this prints nothing; lsof-rs followed every link and printed the
+# target's row. `{ADIR}` cannot show this — there the link's target is already
+# in the expansion under its own name, so following it changes no selection.
+name = "opt-x-plus-d-skips-symlinks-by-default"
+args = ["-n", "-P", "-a", "-d", "^mem", "+d", "{AXDIR}", "-p", "{A}"]
+
+[[case]]
+# `-x` alone is a usage error, and an unknown cross-over letter names itself.
+name = "opt-x-without-plus-d-is-fatal"
+args = ["-n", "-P", "-x", "-p", "{A}"]
+
+[[case]]
+name = "opt-x-unknown-letter-is-fatal"
+args = ["-n", "-P", "-xq", "+d", "{ADIR}", "-p", "{A}"]
+
+[[case]]
+# `-e` means DO NOT STAT: every cell stat would have supplied disappears and
+# NAME gains ` (-e /)`. `/` exempts the whole fixture.
+name = "opt-e-exempts-a-mount-from-stat"
+args = ["-n", "-P", "-a", "-d", "^mem", "-e", "/", "-p", "{A}"]
+
+[[case]]
+# The same row through `-F`, which is the only way to see that the access
+# letter goes blank and that size, inode and link count are absent rather than
+# empty.
+name = "opt-e-exempted-row-fields"
+args = ["-n", "-P", "-a", "-d", "3", "-e", "/", "-Ftadsin", "-p", "{A}"]
+
+[[case]]
+name = "opt-e-non-mount-argument-is-fatal"
+args = ["-n", "-P", "-e", "/nosuch", "-p", "{A}"]
+
+[[case]]
+# `-N` is a SEARCH ITEM like `-i`: with no NFS mount it selects nothing and
+# exits 1, and without `-a` it still lists what the other selecter matched.
+name = "opt-N-ors-with-another-selecter-and-still-exits-1"
+args = ["-n", "-P", "-N", "-p", "{A}"]
+
+[[case]]
+name = "opt-N-with-dash-a-selects-nothing"
+args = ["-n", "-P", "-a", "-N", "-p", "{A}"]
+
+[[case]]
+# WHOLE HOST, no process selecter — the only shape that shows whether `-N` is
+# in the mask that drops a process with no surviving rows. With `-p` present
+# the process has files and the bug is invisible; without it, a port that
+# forgot the mask prints a bare `unk unknown` line per process. Output is
+# empty on a host with no NFS mount, so this is race-free despite naming no
+# pid: both binaries print nothing and exit 1.
+name = "opt-N-whole-host-selects-nothing-and-exits-1"
+args = ["-n", "-P", "-N"]
+
+[[case]]
+# `-Z` where SELinux is not enabled. The check is a MOUNTED-selinuxfs test, not
+# a `/sys/fs/selinux` presence test — this host has the directory and not the
+# mount, so the two answers differ here.
+name = "opt-Z-without-selinux-is-fatal"
+args = ["-n", "-P", "-Z", "-p", "{A}"]
+
 # ----------------------------------------------------- AF_PACKET sockets
 # The `pack` row. lsof spends its cells differently here than for any other
 # family (dsock.c:3622): the INODE goes in DEVICE, the ETHERNET PROTOCOL in

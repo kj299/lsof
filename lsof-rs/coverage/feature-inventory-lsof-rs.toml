@@ -103,7 +103,7 @@ reason = "\"avoid blocking kernel\" — superseded by lsof-rs's bounded-worker m
 [[waive]]
 ids = ["opt:X", "opt:Z"]
 platforms = ["windows"]
-reason = "epoll bridge / SELinux contexts — Linux kernel features with no Windows counterpart"
+reason = "/proc/net socket tables and SELinux contexts — Linux kernel features with no Windows counterpart. (This reason used to read \"epoll bridge\" for `-X`; that is not what `-X` is. `machine.h:502` defines HASXOPT as \"skip TCP&UDP* files\" on this dialect, and the option gates the inet socket tables.)"
 
 [[waive]]
 ids = ["opt:e", "opt:f", "opt:m", "opt:x"]
@@ -117,19 +117,9 @@ reason = "mount-table concepts (exempt FS, FS detail, mtab supplement, cross-mou
 #     "we will never do this", and that would be untrue.
 
 [[waive]]
-ids = ["opt:e", "opt:x"]
-platforms = ["linux"]
-reason = "DEBT (L2): `-e` exempts a mount point from being stat'ed and `-x` crosses filesystems/symlinks under +d|+D. Unimplemented and untested. (`-f`/`+f` were waived here too until the mount table landed; they work now, so they are no longer excused.)"
-
-[[waive]]
 id = "opt:m"
 platforms = ["linux"]
 reason = "NOT IN THE DIALECT — `lsof -m <file>` on this C answers `-m not supported`. Waived as absent upstream rather than as debt."
-
-[[waive]]
-id = "opt:N"
-platforms = ["linux"]
-reason = "DEBT (L2+): NFS-only selection; needs the mount table's fs type. Unimplemented and untested."
 
 [[waive]]
 id = "opt:M"
@@ -137,14 +127,9 @@ platforms = ["linux"]
 reason = "NOT IN THE DIALECT — `lsof -M` on this C answers `illegal option character: M`. Waived as absent upstream rather than as debt: this port owes nothing the reference implementation does not do."
 
 [[waive]]
-id = "opt:X"
-platforms = ["linux"]
-reason = "DEBT (L2): epoll bridge, needs anon_inode+fdinfo correlation; unimplemented"
-
-[[waive]]
 id = "opt:Z"
 platforms = ["linux"]
-reason = "DEBT (L2): SELinux contexts from /proc/<pid>/attr/current; unimplemented"
+reason = "DEBT (L2), NARROWED 2026-09-20: the gate ships and matches the C — `is_selinux_enabled()` is a MOUNTED-selinuxfs test, and lsof-rs answers `-Z limited to SELinux` with exit 1 exactly as the C does where it is not. What is missing is the CONTEXT column itself, and it is missing ON PURPOSE: `print.c:902` puts it among the PROCESS columns with a width grown to the longest value, and no host available to this port has SELinux enabled, so its position relative to USER and FD cannot be observed. Writing it from the source means guessing a layout whose errors would be silent. lsof-rs refuses loudly instead; see DIVERGENCES."
 
 [[waive]]
 id = "opt:S"

@@ -487,6 +487,18 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     with open(os.path.join(fdir, "f.txt"), "w") as f:
         f.write("fixture data\n")
     os.mkfifo(os.path.join(fdir, "fifo"))
+    # `xdir` holds NOTHING but a symlink pointing OUT of it, at a file the
+    # fixture keeps open under its real name. That shape is what makes the
+    # `+d` symlink rule observable: the C skips the link, so `+d xdir` finds
+    # nothing, while a port that follows links reports the target's row.
+    #
+    # A link pointing at a file INSIDE the same directory cannot show it — the
+    # target is already in the expansion under its own name, so following the
+    # link changes no selection. The first draft of this fixture did exactly
+    # that and the case passed against a deliberately broken build.
+    xdir = os.path.join(fdir, "xdir")
+    os.makedirs(xdir)
+    os.symlink(os.path.join(fdir, "f.txt"), os.path.join(xdir, "to-f.txt"))
     # Three sparse files whose lengths are the only interesting inputs to `-H`
     # (the C's human_readable_size, print.c). They cost no disk and they are
     # the cases a tidy-up of that routine would break:
@@ -780,6 +792,7 @@ def run(args) -> int:
                 "NOPE": os.path.join(work, "search", "absent.txt"),
                 "ADIR": a.cwd,
                 "ASUB": os.path.join(a.cwd, "sub"),
+                "AXDIR": os.path.join(a.cwd, "xdir"),
                 "PORT": port,
             },
         )

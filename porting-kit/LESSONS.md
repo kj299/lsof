@@ -2549,3 +2549,55 @@ gate you have not seen fail is a gate you have not tested.
   (self-test 28 → 31). Reasoned out before the first cherry-pick that could
   have hit it, which turned out to cite none of the moved entries — the first
   change to this tool made ahead of the failure instead of after it.
+
+## 058. A mutation that does not apply looks exactly like a mutation that is not caught
+
+**What happened.** Three times in one increment, the *instrument* failed and the
+failure read as a result. The worst was a mutation test on a differential case:
+
+```python
+s = s.replace(" | Self::NFS.0,\n    );", ",\n    );", 1)
+```
+
+`cargo fmt` had collapsed that constant onto one line an hour earlier, so the
+pattern no longer occurred. `str.replace` does not raise when its pattern is
+absent — it returns the string unchanged. The file was rewritten byte for byte
+identical, the build succeeded, the differential went green, and the green was
+read as **"this case cannot catch this mutation"**.
+
+I was one step from rewriting a correct test to chase a defect that was not
+there. Applied for real, the same mutation produces 78 rows where the C prints
+0, and **two** cases fail.
+
+The other two that day, same shape:
+
+| probe | why it could not fail |
+|---|---|
+| `lsof -xq +d DIR -p 1; echo $?` | `+d … -p 1` exits 1 anyway, so "rejected the letter" and "located nothing" are the same 1 |
+| `c=$(lsof … \| tr -s ' '; echo "rc=$?")` | `$?` after a pipe is `tr`'s status, never lsof's |
+
+**The rule.** A mutation test has two outcomes worth distinguishing — *the gate
+caught it* and *the gate missed it* — and a third that masquerades as the
+second: *the mutation never happened*. Before believing a survivor:
+
+- **assert the edit landed.** `assert old in s` before `replace`, or diff the
+  file afterwards. A rewrite that changes nothing must be loud.
+- **assert the mutant misbehaves on its own**, outside the gate. If the mutated
+  binary cannot be shown to do the wrong thing by hand, the gate was never
+  asked a question.
+- **probe the narrowest observable.** Exit status is the bluntest instrument in
+  a tool that exits 1 for a dozen unrelated reasons; prefer the stderr line,
+  the row count, the specific cell.
+
+This is LESSONS #026 turned on its own method. #026 says a test that passes for
+the wrong reason is worse than no test, and mutation testing is the answer. A
+mutation that silently no-ops is that same defect *inside the answer* — and it
+is more dangerous, because its output is indistinguishable from the only
+finding it is supposed to produce.
+
+- **Kit change:** none yet, and deliberately. The fix wants a mutation helper
+  that fails loudly on a non-matching pattern, which is worth writing when the
+  kit grows a mutation harness rather than bolting an assertion onto every
+  ad-hoc script. Recorded here so the next person writing one starts from the
+  requirement.
+- **Section amended:** none — this is a method entry.
