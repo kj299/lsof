@@ -2535,3 +2535,17 @@ gate you have not seen fail is a gate you have not tested.
 - **Section amended:** README · harness table and the vendoring note; Makefile ·
   check-kit; harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
   OPERATING-GUIDE · closing note.
+- **Follow-up, 2026-09-20 — the cherry-pick case.** A picked commit's base is a
+  *branch* commit, not a master one, so a citation in it means what the **fork**
+  called that number — and the fork's own appended lessons have since landed
+  under other numbers. Mapping only the appended block would leave such a
+  citation resolving, silently, to whatever KEEP holds at that number today:
+  the #046 shape, produced by the tool meant to prevent it. The resolver now
+  follows a fork entry into KEEP **by title** and repoints the picked commit's
+  citations with it; a fork entry KEEP no longer has under any title is
+  *orphaned*, and citations of it go to the review list rather than being
+  guessed. In a plain merge both sets are empty by construction — the fork is
+  a KEEP commit, and a landed entry never moves. Pinned by two fixtures
+  (self-test 28 → 31). Reasoned out before the first cherry-pick that could
+  have hit it, which turned out to cite none of the moved entries — the first
+  change to this tool made ahead of the failure instead of after it.

@@ -84,7 +84,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   appended to #021 cited the continue-on-error lesson by a number two
   renumberings stale. Both are repaired here. With the paragraph restored, the
   resolver's output was byte-identical to the hand resolution on all four
-  files it touched; its self-test survived none of ten verdict mutants.
+  files it touched; its self-test survived none of ten verdict mutants. In a
+  cherry-pick it also follows entries the fork numbered differently into
+  master by title, so a picked commit's citations mean what they meant when
+  written (LESSONS #057, follow-up).
 
 - **`check_ledgers.py` gained a fifth ledger, `san-crates`:** every unit
   `progress.json` tracks must be named by a CI step that runs a sanitizer.

@@ -167,7 +167,11 @@ def _line_of(text, off):
     return text.count("\n", 0, off) + 1
 
 
-def strict_edits(text, mapping, where=""):
+def _norm_title(s):
+    return " ".join(s.split()).casefold()
+
+
+def strict_edits(text, mapping, where="", headings=True):
     """Every rewrite the rules recognise, as (start, end, replacement, rule),
     on ORIGINAL offsets, so they can be applied in one pass from the end.
 
@@ -181,7 +185,7 @@ def strict_edits(text, mapping, where=""):
     def renum(digits, new):            # `#3` stays bare, `#003` stays padded
         return str(new).zfill(len(digits))
 
-    for m in ENTRY_RE.finditer(text):
+    for m in (ENTRY_RE.finditer(text) if headings else ()):
         n = int(m.group(1))
         if n in mapping:
             put(m.start(1), m.end(1), f"{mapping[n]:03d}", "heading")
@@ -247,7 +251,8 @@ def provenance(line, keep_lines, base_lines, move_lines):
     return "ambiguous" if line in move_lines else "keep"
 
 
-def plan_text(text, mapping, keep_txt, base_txt, move_txt, where, first_line=1):
+def plan_text(text, mapping, keep_txt, base_txt, move_txt, where, first_line=1,
+              headings=False, also_review=frozenset()):
     """(edits, ambiguous, review) for one file's merged text.
 
     `keep_txt`/`base_txt`/`move_txt` are that file at the three revisions (None
@@ -266,7 +271,7 @@ def plan_text(text, mapping, keep_txt, base_txt, move_txt, where, first_line=1):
         return bisect.bisect_right(starts, off) - 1
 
     edits, ambiguous, review, covered = [], [], [], set()
-    for s, e, new, rule in strict_edits(text, mapping, where):
+    for s, e, new, rule in strict_edits(text, mapping, where, headings=headings):
         i = line_index(s)
         ltxt = lines[i].rstrip("\r\n")
         verdict = provenance(ltxt, keep_lines, base_lines, move_lines)
@@ -283,7 +288,8 @@ def plan_text(text, mapping, keep_txt, base_txt, move_txt, where, first_line=1):
         if ltxt in keep_lines:
             continue
         for m in LOOSE_RE.finditer(ltxt):
-            if int(m.group(1)) in mapping and (starts[i] + m.start(1)) not in covered:
+            num = int(m.group(1))
+            if (num in mapping or num in also_review) and (starts[i] + m.start(1)) not in covered:
                 review.append(f"{where}:{first_line + i}: '#{m.group(1)}' was not "
                               f"rewritten — {ltxt.strip()}")
     return edits, ambiguous, review
@@ -361,6 +367,34 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
         k_max = base_max + len(k_added)
         mapping = {n: k_max + i + 1 for i, (n, _) in enumerate(m_added)}
 
+    # Entries renumbered BETWEEN the fork and KEEP. In a plain merge this is
+    # empty — the fork point is a KEEP commit, and a landed entry never moves.
+    # In a CHERRY-PICK it is not: the picked commit's base is a branch commit
+    # whose own appended lessons have since landed under other numbers, so a
+    # citation in the picked commit to `#050` means what the BASE called #050,
+    # which KEEP now holds elsewhere. Found by title. Without this the citation
+    # would resolve, silently, to whatever KEEP holds at #050 today — the #046
+    # shape, produced by the tool meant to prevent it. A base entry whose title
+    # KEEP no longer has anywhere is ORPHANED: nothing can say what a citation
+    # of it means now, so its number joins the review list instead.
+    keep_by_title = {}
+    for n, txt in ek:
+        h = HEAD_RE.match(txt)
+        if h:
+            keep_by_title.setdefault(_norm_title(h.group(2)), n)
+    renumbered, orphaned = {}, set()
+    for n, txt in eb:
+        h = HEAD_RE.match(txt)
+        if not h:
+            continue
+        dest = keep_by_title.get(_norm_title(h.group(2)))
+        if dest is None:
+            orphaned.add(n)
+        elif dest != n:
+            renumbered[n] = dest
+    assert not (set(renumbered) & set(mapping)), "appended and renumbered sets overlap"
+    mapping.update(renumbered)
+
     def prefix(pre, entries):
         return pre + "".join(t for n, t in entries if n <= base_max)
 
@@ -396,8 +430,11 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
                       f"block contains — {line}")
 
     p_edits = []
-    if mapping:   # the moving side may have cited its new entries from an old one
-        p_edits, amb, rev = plan_text(merged_prefix, mapping, K, B, M, lessons_rel)
+    # Run the passes whenever there is anything to rewrite OR to review: an
+    # orphaned fork entry with nothing renumbered must still reach the list.
+    if mapping or orphaned:   # the moving side may have cited its new entries from an old one
+        p_edits, amb, rev = plan_text(merged_prefix, mapping, K, B, M, lessons_rel,
+                                      also_review=orphaned)
         ambiguous += amb
         review += rev
     new_prefix = apply_edits(merged_prefix, p_edits)
@@ -409,17 +446,20 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
     if m_block:
         head = head.rstrip("\n") + "\n\n"
     m_edits = []
-    if mapping:
+    if m_block and (mapping or orphaned):
         m_edits, _, rev = plan_text(m_block, mapping, None, None, None, lessons_rel,
-                                    first_line=head.count("\n") + 1)
+                                    first_line=head.count("\n") + 1, headings=True,
+                                    also_review=orphaned)
         review += rev
     new_lessons = head + apply_edits(m_block, m_edits)
     if not new_lessons.endswith("\n"):
         new_lessons += "\n"
 
     titles = {n: (HEAD_RE.match(t) or [None, None, ""])[2] for n, t in m_added}
+    titles.update({n: (HEAD_RE.match(t) or [None, None, ""])[2]
+                   for n, t in eb if n in renumbered})
     file_changes = []
-    if mapping:
+    if mapping or orphaned:
         for rel in _walk(repo):
             if rel == lessons_rel:
                 continue
@@ -431,14 +471,15 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
                     text = fh.read()
             except (UnicodeDecodeError, OSError):
                 continue
-            if not any(int(h) in mapping for h in HASHNUM_RE.findall(text)):
+            if not any(int(h) in mapping or int(h) in orphaned
+                       for h in HASHNUM_RE.findall(text)):
                 continue
             if CONFLICT_RE.search(text):
                 raise Refuse(f"{rel} still carries conflict markers — resolve it, "
                              f"then re-run")
             edits, amb, rev = plan_text(
                 text, mapping, _show(repo, keep_rev, rel), _show(repo, base, rel),
-                _show(repo, move_rev, rel), rel)
+                _show(repo, move_rev, rel), rel, also_review=orphaned)
             ambiguous += amb
             review += rev
             if edits:
@@ -449,7 +490,8 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
 
     return Plan(base=base, keep_rev=keep_rev, move_rev=move_rev, base_max=base_max,
                 k_added=[n for n, _ in k_added], m_added=[n for n, _ in m_added],
-                mapping=mapping, titles=titles, lessons_rel=lessons_rel,
+                mapping=mapping, renumbered=renumbered, orphaned=sorted(orphaned),
+                titles=titles, lessons_rel=lessons_rel,
                 keep_lessons=K, new_lessons=new_lessons, prefix_edits=p_edits,
                 merged_prefix=merged_prefix,
                 block_edits=m_edits, file_changes=file_changes, review=review)
@@ -462,7 +504,11 @@ def describe(plan, out=print):
     if not plan.mapping:
         out("no collision: nothing to renumber")
     for old, new in plan.mapping.items():
-        out(f"  #{old:03d} -> #{new:03d}  {plan.titles.get(old, '')}")
+        tag = "  (renumbered since the fork; found in KEEP by title)" if old in plan.renumbered else ""
+        out(f"  #{old:03d} -> #{new:03d}  {plan.titles.get(old, '')}{tag}")
+    for n in plan.orphaned:
+        out(f"  #{n:03d} at the fork is not in KEEP under any number — citations of it "
+            f"are listed for review, not rewritten")
     if plan.block_edits:
         heads = sum(1 for *_x, rule, _l in plan.block_edits if rule == "heading")
         out(f"{plan.lessons_rel}: moved block — {heads} heading(s), "
@@ -840,6 +886,53 @@ def _self_test():
             apply_plan(r, plan)
         check("a CRLF file is repointed byte-for-byte, keeping its line endings",
               msg is None and read(r, "crlf.md") == "one\r\ncites LESSONS #004 here\r\nthree\r\n")
+
+    # --- a cherry-pick after a renumber: the fork's numbers are not KEEP's ---
+    # Branch A appends 003 and then a commit C that cites it. main lands its own
+    # 003 first and then A's lesson as 004. Cherry-picking C onto main, C's
+    # `#003` means A's lesson — #004 on main now — and C's own 004 must move too.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        g("checkout", "-q", "move")
+        w(r, "kit/LESSONS.md", "\n## 003. A lesson\n\nfrom branch A\n", append=True)
+        commit(g, "A lesson")
+        w(r, "kit/LESSONS.md", "\n## 004. C lesson\n\nsee LESSONS #003 for the A lesson\n",
+          append=True)
+        w(r, "cdoc.md", "C cites LESSONS #003 and LESSONS #004.\n")
+        commit(g, "C")
+        g("checkout", "-q", "main")
+        w(r, "kit/LESSONS.md", "\n## 003. M lesson\n\nlanded first\n\n## 004. A lesson\n\n"
+          "from branch A, renumbered on landing\n", append=True)
+        commit(g, "main: M first, then A as 004")
+        g("cherry-pick", "move", ok=False)
+        plan, msg = try_plan(r)
+        if msg is None:
+            apply_plan(r, plan)
+        L = read(r, "kit/LESSONS.md") if msg is None else ""
+        check("a cherry-pick maps the fork's numbers to KEEP's by title, and the picked "
+              "block after them",
+              msg is None and plan.mapping == {3: 4, 4: 5} and plan.renumbered == {3: 4})
+        check("the picked commit's citations follow the renumbered entry",
+              "see LESSONS #004 for the A lesson" in L and "## 005. C lesson" in L
+              and read(r, "cdoc.md") == "C cites LESSONS #004 and LESSONS #005.\n"
+              and "## 003. M lesson" in L and "## 004. A lesson" in L)
+
+    # --- ...and a fork entry KEEP no longer has anywhere is listed, not guessed
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        g("checkout", "-q", "move")
+        w(r, "kit/LESSONS.md", "\n## 003. Gone lesson\n\nnever landed\n", append=True)
+        commit(g, "gone")
+        w(r, "kit/LESSONS.md", "\n## 004. C lesson\n\nsee LESSONS #003\n", append=True)
+        commit(g, "C")
+        g("checkout", "-q", "main")
+        w(r, "kit/LESSONS.md", "\n## 003. M lesson\n\nlanded first, and different\n", append=True)
+        commit(g, "main")
+        g("cherry-pick", "move", ok=False)
+        plan, msg = try_plan(r)
+        check("a fork entry absent from KEEP is ORPHANED: its citation is reviewed, not rewritten",
+              msg is None and plan.orphaned == [3] and 3 not in plan.mapping
+              and any("'#003'" in x for x in plan.review))
 
     # --- widths: `#9` -> `#10` grows the text under the edit after it --------
     check("a replacement wider than its original does not corrupt the next edit",
