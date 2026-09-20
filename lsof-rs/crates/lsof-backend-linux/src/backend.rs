@@ -115,7 +115,7 @@ impl Backend for LinuxBackend {
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid, &socks, &locks, &nstab) {
+            if let Some(files) = files::for_pid(p.pid, &socks, &locks, &nstab, &sel.exempt_fs) {
                 p.files = files;
             }
         }
@@ -142,7 +142,9 @@ impl Backend for LinuxBackend {
                 }
                 for mut t in process::tasks_of(p) {
                     let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
-                    if let Some(files) = files::for_proc_dir(&base, p.pid, &socks, &locks, &nstab) {
+                    if let Some(files) =
+                        files::for_proc_dir(&base, p.pid, &socks, &locks, &nstab, &sel.exempt_fs)
+                    {
                         t.files = files;
                     }
                     tasks.push(t);

@@ -461,6 +461,26 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-e <fs>` / `+e <fs>`: mount points whose files must **not** be
+    /// `stat(2)`ed. The C's reason is a hung NFS server; the consequence is a
+    /// row built from the link target and fdinfo alone.
+    ///
+    /// Membership is decided by **path prefix**, never by a stat — that is the
+    /// point of the option. Measured against the C, an exempted row loses
+    /// every cell that comes from `stat`:
+    ///
+    /// ```text
+    ///   without        with -e /
+    ///   a r            a            (blank)
+    ///   t REG          t UNKNfd
+    ///   D 0xfe00       d UNKNOWN
+    ///   s 5            -            (no size)
+    ///   i 1908935      -            (no inode)
+    ///   k 1            -            (no link count)
+    ///   o 0t0          o 0t0        (fdinfo, kept)
+    ///   n <path>       n <path> (-e /)
+    /// ```
+    pub exempt_fs: Vec<String>,
     /// `-x f` (and bare `-x`): let a `+d`/`+D` expansion cross file-system
     /// mount points. Default off — `arg.c:1029` skips an entry whose `st_dev`
     /// differs from the directory's.

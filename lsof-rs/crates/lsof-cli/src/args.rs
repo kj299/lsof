@@ -225,6 +225,32 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'L' => sel.show_links = true,
                 'H' => sel.human_size = true,
                 'X' => sel.skip_inet_tables = true,
+                'e' => {
+                    // `-e s` / `+e s`. The value may be attached or the next
+                    // word, and the C takes that word WHATEVER it is — a
+                    // missing value is reported by quoting what it found:
+                    // `lsof: -e not followed by a file system path: "-p"`.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        match args.get(i + 1) {
+                            Some(next) if !next.starts_with(['-', '+']) => {
+                                i += 1;
+                                next.clone()
+                            }
+                            other => {
+                                return Err(format!(
+                                    "-e not followed by a file system path: {:?}",
+                                    other.map(String::as_str).unwrap_or("")
+                                ))
+                            }
+                        }
+                    };
+                    sel.exempt_fs.push(value);
+                    j = chars.len();
+                    continue;
+                }
                 'x' => {
                     // `-x [fl]`: bare is both (`main.c`'s XO_ALL), otherwise
                     // each letter adds one. An unknown letter is fatal, and

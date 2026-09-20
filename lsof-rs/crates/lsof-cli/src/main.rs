@@ -388,6 +388,27 @@ fn main() {
             _ => env.backend.mounts(),
         };
         sel.paths_identified = env.backend.identifies_paths();
+        // `-e`/`+e` name a MOUNT POINT, and the C checks that before it does
+        // anything else: `lsof: "-e /nosuch" is not a mounted file system.`,
+        // then exit 1. A trailing slash is tolerated (`-e /dev/shm/` was
+        // accepted), so the comparison is made on a normalised form.
+        for e in &sel.exempt_fs {
+            let want = {
+                let t = e.trim_end_matches('/');
+                if t.is_empty() {
+                    "/"
+                } else {
+                    t
+                }
+            };
+            if !mounts.iter().any(|m| {
+                m.dir.trim_end_matches('/') == want.trim_end_matches('/')
+                    || (want == "/" && m.dir == "/")
+            }) {
+                eprintln!("lsof: \"-e {e}\" is not a mounted file system.");
+                std::process::exit(1);
+            }
+        }
         let mut not_a_filesystem: Vec<String> = Vec::new();
         for p in &sel.paths {
             let devs = filesystems_named(&mounts, p, sel.filesystem_args);
