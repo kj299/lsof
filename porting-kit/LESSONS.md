@@ -1272,3 +1272,67 @@ the emphasized half.
   including three that assert the parser does *not* over-read: `PR #86`
   following a citation, a padded dash, and a following sentence.
 - **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`
+
+## 033. Writing a lesson does not put it in force; a check does
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `check_lesson_refs.py`, scan scope
+- **What happened:** The lesson cross-reference checker walked `porting-kit/`
+  and nothing else. But a citation is a claim that an entry exists, and that
+  claim is no weaker for being written outside the kit. Measured across this
+  repository:
+
+  | | citations |
+  |---|---|
+  | inside `porting-kit/` (checked) | 162 in 25 files |
+  | **outside it (checked by nothing)** | **52 in 25 files** |
+
+  A quarter of the repository's citations were unverified — in CI workflows, in
+  `lsof-rs/DIVERGENCES.md` and `CHANGELOG.md`, in backend sources, in Cargo
+  manifests, in fuzz targets. `--also-scan DIR` now widens the walk while
+  `LESSONS.md` still comes from KIT_ROOT, because that is what a citation
+  resolves *against*.
+
+  **The part worth keeping is how badly I described this gap before fixing it.**
+  When I named it as the next candidate I called it *"one citation, at
+  `lsof-rs-ci.yml:104`"* — because that is the single instance I had happened to
+  see in a grep. The real number was 52, in 25 files. LESSONS #032, written the
+  day before, says in as many words: *verify scope by running the old and new
+  implementations over the real corpus and diffing, not by grepping for what you
+  expect to find.* I had just written that sentence. I did not apply it to the
+  very next scoping claim I made, because that claim was made in prose, to a
+  person, and nothing checks prose.
+
+  So: **an entry in this file changes nothing by existing.** #032 did not stop
+  me repeating #032. What stops it is a harness that fails. Every lesson in this
+  arc that actually held — #019's ledgers, #022's cross-references, #026's
+  fixture probe — held because something executable enforced it, and every one
+  that did not was carried only by intention. When you write a lesson, the
+  question to answer before closing the PR is *what will fail if I forget this?*
+  If the answer is "nothing", you have written a note, not a control.
+
+  A second trap, caught in the same change: widening what a gate *inspects*
+  while leaving what *wakes* it alone. `porting-kit.yml` triggered on
+  `porting-kit/**`, which covered the whole gate while the gate only read the
+  kit. The moment it began reading `lsof-rs/**`, that trigger became a blind
+  spot — deleting an entry and breaking a citation in `lsof-rs/` would have been
+  two commits that each passed. **A gate's reach and its trigger have to move
+  together** (LESSONS #019). The filter is gone; check-kit is python3 + bash and
+  runs in seconds, so it costs nothing to run on everything.
+
+  The new gate then immediately caught a dangling `LESSONS #033` in the workflow
+  comment written for *this* entry, before the entry existed — the same mistake
+  as the fabricated `PRs #81–#85` citation, this time found by machine in a file
+  the old scan never opened.
+
+- **Kit change:** `harnesses/lessons/check_lesson_refs.py` gains `--also-scan`
+  (repeatable, may name a directory containing KIT_ROOT; files de-duplicated by
+  real path) and `report_base()`, so findings are reported from the roots'
+  common ancestor — `.github/workflows/ci.yml`, not a `../` walk out of the kit.
+  A `--also-scan` naming a missing directory is a hard failure rather than a
+  silent empty scan. The run line now prints the file count, so a scan that
+  quietly covered less than you think is visible without reading the code.
+  `make check-kit` passes `--also-scan ..`, and `.github/workflows/porting-kit.yml`
+  drops its path filter to match.
+- **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`,
+  `porting-kit/Makefile`, `.github/workflows/porting-kit.yml`
