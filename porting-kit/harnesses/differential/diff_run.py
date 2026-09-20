@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #1->#001, #4->#004, #6->#034, #8->#041, #9->#042, #11->#043,
-#          #14->#035; #36 by title (no entry in this log).
+# Re-cited: #1->#001, #4->#004, #6->#036, #8->#043, #9->#044, #11->#045,
+#          #14->#037; #36 by title (no entry in this log).
 """Differential harness — run the C oracle and the Rust rewrite over the same
 input matrix, normalize both, and diff. Divergences are *triaged*, not blindly
 failed: the C may itself be buggy (the prime directive), so a difference is a
@@ -121,7 +121,7 @@ def load_matrix(path, allow_empty=False):
     # A differential over ZERO cases is a misconfiguration (a mis-keyed matrix —
     # `[[cases]]` for `[[case]]` — an empty file, or a glob that matched nothing),
     # not a pass: it would report "0 cases, 0 divergences" and exit 0 over a
-    # totally wrong binary. Refuse it (LESSONS #034, gates fail closed). The fuzzer
+    # totally wrong binary. Refuse it (LESSONS #036, gates fail closed). The fuzzer
     # legitimately seeds from an empty matrix, so it opts in with allow_empty.
     if not cases and not allow_empty:
         sys.exit(f"error: matrix {path!r} loaded 0 cases — empty, mis-keyed "
@@ -186,7 +186,7 @@ def load_ledger(path):
             # shipped skeleton/DIVERGENCES.md shows the format in a fenced block
             # using `- [x]` — harvested literally, that gave a port three bogus
             # by-name suppressions (`fuzz` among them) the moment it copied the
-            # template: a template failing the gate it ships (LESSONS #042).
+            # template: a template failing the gate it ships (LESSONS #044).
             if s.startswith("```"):
                 in_fence = not in_fence
                 continue
@@ -227,7 +227,7 @@ def run_one(binary, case, default_timeout=15):
     # `stdin_bytes` (raw bytes) feeds the child EXACTLY those bytes — the fuzzer
     # uses it so 0x80-0xFF reach the program verbatim; a plain `stdin` str is
     # utf-8 encoded. (Before this, the fuzzer latin-1-decoded its bytes and
-    # run_one re-encoded utf-8, silently mangling every high byte — LESSONS #034:
+    # run_one re-encoded utf-8, silently mangling every high byte — LESSONS #036:
     # a fuzzer that can't feed the bytes it claims is a coverage hole.)
     sb = case.get("stdin_bytes")
     has_stdin = sb is not None or bool(case.get("stdin"))
@@ -236,7 +236,7 @@ def run_one(binary, case, default_timeout=15):
     # inherited stdin. A binary that reads stdin (the skeleton `port` does)
     # would otherwise block forever on an interactive/tty parent, turning a
     # differential/perf run into a hang that depends on who launched it. A test
-    # harness must be hermetic (the hostile-host rule, LESSONS #043); EOF is
+    # harness must be hermetic (the hostile-host rule, LESSONS #045); EOF is
     # deterministic.
     try:
         p = subprocess.run(
@@ -250,7 +250,7 @@ def run_one(binary, case, default_timeout=15):
         # `backslashreplace`, NOT `replace`: `replace` maps EVERY invalid byte to
         # the same U+FFFD, so a C tool emitting 0xFF and a Rust tool emitting 0xFE
         # decode identically and compare as MATCH — a binary-output divergence
-        # invisible to the whole differential (LESSONS #034). backslashreplace keeps
+        # invisible to the whole differential (LESSONS #036). backslashreplace keeps
         # distinct bytes distinct (\xff vs \xfe) and stays printable/hashable/JSON-safe.
         return (p.stdout.decode("utf-8", "backslashreplace"), p.returncode, False,
                 p.stderr.decode("utf-8", "backslashreplace"))
@@ -266,7 +266,7 @@ def compare_one(name, oracle_bin, rust_bin, case, known, sort, mask_numbers,
     single source of differential fidelity — the matrix runner (`compare`) and
     the differential FUZZER (`diff-fuzz/diff_fuzz.py`) both call it, so the
     stdout+exit-code rule (LESSONS #004), the fail-closed timeout handling
-    (LESSONS #034) and the ledger fingerprint (LESSONS #041) live in exactly one
+    (LESSONS #036) and the ledger fingerprint (LESSONS #043) live in exactly one
     place. `known` is a {name: pin} map from `load_ledger`."""
     o_out, o_rc, o_to, o_err = run_one(oracle_bin, case)
     r_out, r_rc, r_to, r_err = run_one(rust_bin, case)
@@ -314,7 +314,7 @@ def compare_one(name, oracle_bin, rust_bin, case, known, sort, mask_numbers,
         # point of the port stopped happening) or the C changed too. Silently
         # passing it as MATCH is the exact hole that let the adler32 exit test go
         # green after the overflow fix was reverted. An allow-list must ASSERT the
-        # accepted state, not merely SUPPRESS (LESSONS #035). Fails, never passes.
+        # accepted state, not merely SUPPRESS (LESSONS #037). Fails, never passes.
         verdict = "LEDGER-STALE"
         note += (f"ledgered case {name!r} no longer diverges from the oracle — the "
                  f"intentional divergence is GONE (fix reverted, or the C changed "
@@ -582,7 +582,7 @@ def _self_test():
         check("empty matrix allowed only when the caller opts in (fuzzer seeds)",
               load_matrix(empty, allow_empty=True) == [])
 
-    # LEDGER-STALE (LESSONS #035): a ledgered case that STOPS diverging must FAIL,
+    # LEDGER-STALE (LESSONS #037): a ledgered case that STOPS diverging must FAIL,
     # not silently MATCH — else a reverted fix hides. echo-vs-echo matches; a
     # ledger entry for it asserts a divergence that isn't there.
     with tempfile.TemporaryDirectory() as d:
@@ -604,7 +604,7 @@ def _self_test():
         check("0xFF vs 0xFE binary stdout → DIVERGE (not collapsed to U+FFFD MATCH)",
               res[0]["verdict"] == "DIVERGE")
 
-    # stdin_bytes feeds EXACT bytes (the fuzzer's high-byte path, LESSONS #034):
+    # stdin_bytes feeds EXACT bytes (the fuzzer's high-byte path, LESSONS #036):
     # a program that echoes stdin gets 0xFE back verbatim, not utf-8-mangled.
     catout, _rc, _to, _e = run_one(cat, {"name": "raw", "args": [], "stdin_bytes": b"\xfe\x00A"})
     check("stdin_bytes reaches the child verbatim (0xFE preserved)", "\\xfe" in catout)

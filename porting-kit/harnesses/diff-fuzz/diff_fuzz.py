@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #4->#004, #6->#034, #8->#041, #14->#035;
+# Re-cited: #4->#004, #6->#036, #8->#043, #14->#037;
 #          #16 and #36 by title (no entries in this log).
 """Differential fuzzing — feed the SAME generated input to the C oracle and the
 Rust rewrite and compare, over thousands of mutated inputs. The fixed matrix
@@ -17,7 +17,7 @@ committable reproducer.
 Fidelity and triage are NOT reimplemented here: every generated input is judged
 by `diff_run.compare_one`, so the stdout+exit-code verdict (LESSONS #004), the
 fail-closed timeout handling (a rust-side hang on some input is a finding, not a
-pass — LESSONS #034), and the ledger fingerprint (LESSONS #041) are exactly the same
+pass — LESSONS #036), and the ledger fingerprint (LESSONS #043) are exactly the same
 as the matrix differential. A divergence whose fingerprint is pinned in
 DIVERGENCES.md (`- [x] fuzz:<desc> [sha256:<hex>]: <why>`) is a known-intentional
 divergence and is suppressed — triage a fuzz finding the same way you triage a
@@ -131,7 +131,7 @@ def _case_for(data: bytes, args, timeout):
     # Feed the EXACT fuzz bytes via stdin_bytes — run_one writes them verbatim.
     # (The old latin-1-decode-then-run_one-utf-8-encode round-trip silently
     # mangled every 0x80-0xFF byte, so the fuzzer never actually exercised the
-    # high/invalid-byte inputs its threat model targets. LESSONS #034, #035.)
+    # high/invalid-byte inputs its threat model targets. LESSONS #036, #037.)
     return {"name": "fuzz", "args": list(args),
             "stdin_bytes": data, "timeout": timeout}
 
@@ -154,7 +154,7 @@ def _judge(data, oracle, rust, args, opts):
 def _suppressed(fp_full, known_fps):
     """A fuzz divergence is suppressed iff its fingerprint is pinned in the
     ledger (`- [x] fuzz:<desc> [sha256:<hex>]: <why>`). Prefix match so a short
-    pin locks a full fingerprint — same rule diff_run uses (LESSONS #041)."""
+    pin locks a full fingerprint — same rule diff_run uses (LESSONS #043)."""
     return any(fp_full.startswith(p) for p in known_fps)
 
 
@@ -328,7 +328,7 @@ def _self_test():
               [f["fingerprint"] for f in s2["findings"]] ==
               [f["fingerprint"] for f in summary["findings"]])
 
-        # ledger pin suppresses the whole class (reuses LESSONS #041 fingerprints):
+        # ledger pin suppresses the whole class (reuses LESSONS #043 fingerprints):
         # every '%' input minimizes to "%", so one pin covers them all.
         led = os.path.join(d, "DIVERGENCES.md")
         open(led, "w").write(f"- [x] fuzz:pct [sha256:{fp}]: intentional; C format bug\n")
@@ -350,7 +350,7 @@ def _self_test():
                   _judge(open(saved, "rb").read(), oracle, rust, [],
                          opts_f)["verdict"]))
 
-        # a rust-side HANG on some input is a finding, not a pass (LESSONS #034).
+        # a rust-side HANG on some input is a finding, not a pass (LESSONS #036).
         # Tight timeout + small minimize budget keep this cheap.
         hang = os.path.join(d, "hang.py")
         open(hang, "w").write(

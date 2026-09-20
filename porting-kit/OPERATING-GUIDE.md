@@ -60,7 +60,12 @@ The kit is designed so an agent reads *verdicts, not corpora*. Lean into that:
 ## 2. Efficiency considerations (compute, CI, wall-clock)
 
 - **Path-scope every workflow** (LESSONS #5) so a change runs only the pipeline it
-  can affect. The single biggest CI-waste fix.
+  can affect. The single biggest CI-waste fix. **Scope it to what the workflow
+  builds, not to the language its directory implies** (LESSONS #035): a
+  differential job builds the C oracle, so the C sources are an input to the
+  *Rust* pipeline too, and a filter that omits them lets the oracle move without
+  the gate re-running. The two failures are not symmetric — an extra run costs
+  minutes, a missing run costs the gate, so when in doubt include the path.
 - **Tier the slow gates:** fuzz = 60s smoke per target in CI, deep run nightly;
   Miri/ASan/UBSan on the `sys`/changed crates per-PR, full sweep nightly. Don't pay
   the whole safety matrix on every push.

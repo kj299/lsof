@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #6->#034, #13->#033, #14->#035, #17->#036, #18->#037, #19->#038,
-#          #21->#039, #23->#040; #15 by title (no entry in this log).
+# Re-cited: #6->#036, #13->#033, #14->#037, #17->#038, #18->#039, #19->#040,
+#          #21->#041, #23->#042; #15 by title (no entry in this log).
 """Probe-then-port harness — the C is a spec only the oracle can read, so the
 module's test expectations are GENERATED from an oracle transcript, never
-hand-written (LESSONS #036, mechanized; LESSONS #039).
+hand-written (LESSONS #038, mechanized; LESSONS #041).
 
 Why: on the cJSON port every substantive first-try mistake came from *reasoning*
 about the C instead of running it — a lossy `%1.15g` the C accepts, `Compare`
 rejecting a value's own duplicate, minify ignoring escape parity. The gates
 caught the wrong code, but only AFTER wrong unit tests had been written to agree
-with it. LESSONS #036 made probe-first a convention; conventions decay without a
+with it. LESSONS #038 made probe-first a convention; conventions decay without a
 control (LESSONS #033). This harness is the control:
 
   probes.json --run--> transcript.json --gen--> probes_gen.rs
@@ -18,7 +18,7 @@ control (LESSONS #033). This harness is the control:
     you write)          bytes, fingerprinted)    OBSERVED bytes, DO-NOT-EDIT)
 
   * `run`    executes every probe against the C oracle and pins the observed
-    (rc, stdout) — byte-faithfully (LESSONS #035) — under a fingerprint.
+    (rc, stdout) — byte-faithfully (LESSONS #037) — under a fingerprint.
   * `gen`    turns the transcript into a Rust test file: one `#[test]` per
     probe, expectations taken verbatim from the C's bytes. A hand-written
     expectation that contradicts the C cannot exist in this file, because no
@@ -30,8 +30,8 @@ control (LESSONS #033). This harness is the control:
     drifting (every probe is re-run and re-compared), and a hand-edited or
     stale generated file (byte-compare against a fresh regeneration).
 
-Fail-closed (LESSONS #034): zero probes is an error, not a pass (a transcript
-that pinned nothing is the 0-of-0 audit again — LESSONS #037); a probe that
+Fail-closed (LESSONS #036): zero probes is an error, not a pass (a transcript
+that pinned nothing is the 0-of-0 audit again — LESSONS #039); a probe that
 hangs the oracle is an error (a hang cannot be pinned); a missing oracle,
 transcript, or generated file is an error.
 
@@ -107,7 +107,7 @@ def load_probes(path):
     raw = doc.get("probes")
     if not isinstance(raw, list) or not raw:
         # a probe run over nothing pins nothing — the 0-of-0 audit again
-        # (LESSONS #037): NOTHING-TO-PROBE is a failure, never a pass
+        # (LESSONS #039): NOTHING-TO-PROBE is a failure, never a pass
         raise ValueError("NOTHING-TO-PROBE: `probes` must be a non-empty list")
     probes, seen = [], set()
     for i, p in enumerate(raw):
@@ -137,7 +137,7 @@ def probes_modules(path):
     """The port modules this probes file claims to cover.
 
     `modules: [...]` (defaulting to `[module]`) mirrors the corpus module-tagging
-    of LESSONS #038: one probes file may decide several modules, and `coverage`
+    of LESSONS #040: one probes file may decide several modules, and `coverage`
     uses these tags to answer "does every ported module have probes at all?"
     Coverage metadata, not pinned behavior — deliberately outside the transcript
     fingerprint, which covers only the C's observed bytes."""
@@ -154,11 +154,11 @@ def probes_modules(path):
 def cmd_coverage(a):
     """Fail unless EVERY named module is covered by some probes file.
 
-    The gate above the gate (LESSONS #040). `run`/`gen`/`verify` fail closed on a
+    The gate above the gate (LESSONS #042). `run`/`gen`/`verify` fail closed on a
     probes file that pins nothing — but WHICH probes files exist was, until this
     subcommand, a hand-edited line in the port's check script. A module could land
     with no probes at all and no gate would notice: the kit's characteristic
-    0-of-0 (LESSONS #034/#035/#037, and the source lineage's "a harness meets its
+    0-of-0 (LESSONS #036/#037/#039, and the source lineage's "a harness meets its
     real bugs only on a real port") displaced one level up, into the wiring.
     Point `--modules` at the port's real module list (or `--progress` at its
     progress.json, so the list cannot drift from the one the gates track)."""
@@ -176,7 +176,7 @@ def cmd_coverage(a):
         return _die("NOTHING-TO-COVER: no modules named "
                     "(--modules and/or --progress) — a coverage check over an "
                     "empty module list is the 0-of-0 pass this gate exists to "
-                    "refuse (LESSONS #037)")
+                    "refuse (LESSONS #039)")
     covered = {}
     for path in a.probes:
         try:
@@ -210,7 +210,7 @@ def run_oracle(oracle, probe, timeout):
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=timeout)
     except subprocess.TimeoutExpired:
-        # fail closed: a hang cannot be pinned as an expectation (LESSONS #034 —
+        # fail closed: a hang cannot be pinned as an expectation (LESSONS #036 —
         # the snapshot's both-hang→MATCH is exactly this class)
         raise RuntimeError(
             f"probe `{probe['id']}` TIMED OUT after {timeout}s — a hang is not "
@@ -266,7 +266,7 @@ def load_transcript(path):
         raise ValueError(f"{path}: not a v{TRANSCRIPT_VERSION} probe transcript")
     entries = doc.get("entries", [])
     if not entries:
-        raise ValueError(f"{path}: transcript pins NOTHING (LESSONS #037)")
+        raise ValueError(f"{path}: transcript pins NOTHING (LESSONS #039)")
     got, want = _fingerprint(entries), doc.get("fingerprint")
     if got != want:
         raise ValueError(
@@ -281,7 +281,7 @@ def _rust_ident(pid: str) -> str:
 
 
 def _rust_bytes(data: bytes) -> str:
-    """A Rust byte-string literal, byte-faithful (LESSONS #035): printable
+    """A Rust byte-string literal, byte-faithful (LESSONS #037): printable
     ASCII as-is, everything else \\xNN — no lossy decode step anywhere."""
     out = []
     for b in data:
@@ -313,7 +313,7 @@ def render_rust(doc, glue: str) -> str:
         "// @generated by the porting kit's probe harness "
         "(harnesses/probe/probe.py gen).",
         "// DO NOT EDIT. Every expectation below is the C oracle's OBSERVED",
-        "// behavior (probe-then-port, LESSONS #036/#039): to change one, change",
+        "// behavior (probe-then-port, LESSONS #038/#041): to change one, change",
         "// the probe and re-run `probe.py run` + `gen`. `probe.py verify`",
         "// byte-compares this file against a fresh regeneration, so a hand",
         "// edit here FAILS the gate instead of silently redefining the spec.",
@@ -491,7 +491,7 @@ def _self_test():
               e["up-1"]["rc"] == 0
               and base64.b64decode(e["up-1"]["stdout_b64"]) == b"ABC"
               and e["rejects"]["rc"] == 1)
-        check("non-UTF-8 stdout stored byte-faithfully (LESSONS #035)",
+        check("non-UTF-8 stdout stored byte-faithfully (LESSONS #037)",
               base64.b64decode(e["raw-bytes"]["stdout_b64"]) == b"\xff\x00A")
 
         # gen: expectations come from the transcript, marked DO NOT EDIT
@@ -504,10 +504,10 @@ def _self_test():
               "DO NOT EDIT" in rust and "#[rustfmt::skip]" in rust)
         check("clean verify passes", cmd_verify(V) == 0)
 
-        # zero probes / duplicate ids fail closed (LESSONS #037)
+        # zero probes / duplicate ids fail closed (LESSONS #039)
         empt = os.path.join(d, "empty.json")
         json.dump({"module": "demo", "probes": []}, open(empt, "w"))
-        check("zero probes is a FAILURE, not a pass (LESSONS #037)",
+        check("zero probes is a FAILURE, not a pass (LESSONS #039)",
               cmd_run(ns(probes=empt, oracle=oracle, transcript=transcript,
                          timeout=10)) == 1)
         dup = os.path.join(d, "dup.json")
@@ -564,7 +564,7 @@ def _self_test():
         cmd_gen(G)
         check("regeneration clears it", cmd_verify(V) == 0)
 
-        # LESSONS #040: coverage — the gate above the gate. A module with NO
+        # LESSONS #042: coverage — the gate above the gate. A module with NO
         # probes file at all must fail; nothing below this subcommand notices,
         # because `run`/`gen`/`verify` only ever see the files they are handed.
         prog = os.path.join(d, "progress.json")
@@ -575,7 +575,7 @@ def _self_test():
         json.dump({"modules": {"demo": "ported"}}, open(prog, "w"))
         check("coverage passes once every module has probes",
               cmd_coverage(ns(probes=[probes], modules="", progress=prog)) == 0)
-        # a probes file may cover several modules (LESSONS #038 tagging idiom)
+        # a probes file may cover several modules (LESSONS #040 tagging idiom)
         multi = os.path.join(d, "multi.json")
         pd = json.load(open(probes))
         pd["modules"] = ["demo", "second"]
@@ -584,14 +584,14 @@ def _self_test():
               cmd_coverage(ns(probes=[multi], modules="demo,second",
                               progress=None)) == 0)
         # and an EMPTY module list must not pass (0-of-0, one level up)
-        check("coverage over zero modules is a FAILURE (LESSONS #037)",
+        check("coverage over zero modules is a FAILURE (LESSONS #039)",
               cmd_coverage(ns(probes=[probes], modules="", progress=None)) == 1)
 
         # a hanging oracle fails closed — a hang is not a pinnable expectation
         hang = os.path.join(d, "hang.json")
         json.dump({"module": "demo", "probes": [
             {"id": "h", "args": ["hang"], "stdin": ""}]}, open(hang, "w"))
-        check("oracle hang fails closed (LESSONS #034)",
+        check("oracle hang fails closed (LESSONS #036)",
               cmd_run(ns(probes=hang, oracle=oracle,
                          transcript=os.path.join(d, "th.json"),
                          timeout=1)) == 1)

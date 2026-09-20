@@ -1337,7 +1337,118 @@ the emphasized half.
 - **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`,
   `porting-kit/Makefile`, `.github/workflows/porting-kit.yml`
 
-## 034. Gates fail open on "nothing ran" — self-test the degenerate case, not just detection
+## 034. A path filter fails in two directions and they look identical from outside
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `build.yml` / `lsof-rs-ci.yml` triggers
+- **What happened:** `build.yml` ignored `porting-kit/**` but not
+  `.github/workflows/porting-kit.yml`, so a PR whose four files were *all* kit
+  files ran the entire C matrix — macOS, `make distcheck`, twice over — because
+  one of them happened to be the kit's own workflow. Adding the missing entry is
+  a two-line fix, and the file's own header had already written the argument for
+  it about `lsof-rs-*.yml`.
+
+  That is the cheap direction. **Auditing it turned up the expensive one in the
+  same pass**, which is the point of this entry. `lsof-rs-ci.yml` builds the
+  differential oracle *from this tree*:
+
+      autoreconf -vif && ./configure && make -j lsof
+
+  and then diffs 87 cases against it. Its trigger is `lsof-rs/**`,
+  `porting-kit/harnesses/**`, and its own file. **The C tree is not in that
+  list.** A change to a C source, a dialect header, `configure.ac` or
+  `Makefile.am` can change what the oracle *is*, and the gate that compares the
+  port against the oracle does not re-run.
+
+  Not hypothetical: PR #86 edited `lib/dialects/linux/machine.h`, a header the
+  oracle compiles. It has four check runs and `differential (linux, vs the C)`
+  is not among them. That edit was safe because I preprocessed the translation
+  unit before and after by hand and got byte-identical output — **CI had no
+  opinion**. The port's specification can move without the gate that enforces
+  conformance to it firing.
+
+  So: **a path filter has two failure modes and a green board shows the same
+  thing for both.** Over-triggering wastes runner minutes and is obvious the
+  moment anyone looks at a PR's check list. Under-triggering removes a gate and
+  is invisible precisely when it matters — the absent job looks exactly like a
+  job that had nothing to complain about. When you touch one filter, enumerate
+  what each job actually *reads* and compare it against what wakes that job;
+  the two failures are found by one audit and fixed by opposite edits
+  (LESSONS #031: when a control is wrong in one direction, test the other
+  direction in the same pass).
+
+  **This entry does not close the second gap, and by LESSONS #033's own standard
+  that makes it a note rather than a control.** Widening `lsof-rs-ci.yml` to the
+  C tree makes the heavy Rust matrix fire on every oracle edit, which is a cost
+  the repository's owner should choose rather than one I should assume. It is
+  named here so the next person does not have to rediscover it, and it stays
+  unenforced until someone wires it.
+
+- **Kit change:** none — this is a host-repo CI fix. `.github/workflows/build.yml`
+  ignores `.github/workflows/porting-kit.yml`. The ignore list is enumerated
+  rather than generalised to "every workflow but this one", and `build.yml` is
+  deliberately absent from its own list: a gate that ignores edits to itself
+  cannot be re-verified when you change it.
+- **Section amended:** `.github/workflows/build.yml`
+
+## 035. A differential gate's trigger must cover both sides of the comparison
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `lsof-rs-ci.yml`, and the kit's own CI template
+- **What happened:** LESSONS #034 named this and left it unfixed. Fixing it found
+  that the kit was **teaching** it.
+
+  `lsof-rs-ci.yml`'s differential job builds the C oracle from this tree —
+  `autoreconf -vif && ./configure && make lsof` — and diffs 87 cases against it.
+  Its trigger listed `lsof-rs/**`, `porting-kit/harnesses/**` and its own file.
+  The C sources were not in it. So a change to `src/**`, `lib/**`, a dialect
+  header, `configure.ac` or `Makefile.am` could change **what the oracle is**
+  while the gate that enforces conformance to the oracle did not re-run: the
+  port drifts from its own specification and every check is green.
+
+  Verified against history rather than asserted. PR #86 edited
+  `lib/dialects/linux/machine.h`, a header the oracle compiles; it has four
+  check runs and the differential is not among them. Simulating GitHub's `paths`
+  matching — validated first against what GitHub actually did on five real PRs,
+  two of them negatives — #86's exact file set goes from not-triggering to
+  triggering under the corrected filter.
+
+  **The kit shipped the same defect as advice.** `harnesses/ci/porting-ci.template.yml`
+  has a `differential vs C oracle` job that builds the oracle, a trigger of
+  `['crates/**', 'Cargo.toml', 'Cargo.lock', ...]` with no C paths at all, and a
+  header telling the reader to
+
+  > *"Scope this Rust workflow to the Rust paths, and scope the C workflow to the
+  > C paths, so each change triggers only the pipeline that can be affected by it."*
+
+  That sentence is the bug stated as a principle. "The pipeline that can be
+  affected by it" is exactly right and the inference drawn from it is exactly
+  wrong: a C change **does** affect the Rust pipeline, because the Rust pipeline
+  compiles the C. Every port that copied this template inherited a differential
+  gate blind to its own reference. The same framing had spread to
+  `OPERATING-GUIDE.md` and the audit skill.
+
+  So: **scope a workflow to what it builds, not to the language its directory
+  implies.** For each job, list what it actually reads and confirm every one of
+  those paths wakes it. And the two directions of a path-filter bug are not
+  symmetric, which is why the audit has to be deliberate: over-triggering wastes
+  minutes and announces itself in every PR's check list, while under-triggering
+  removes a gate and is invisible, because **an absent job looks exactly like a
+  passing one**. When unsure, include the path.
+
+- **Kit change:** `harnesses/ci/porting-ci.template.yml` carries C source globs in
+  its trigger as a labelled, required part of the differential gate rather than
+  omitting them, and its header now says why. `OPERATING-GUIDE.md`'s path-scoping
+  bullet and `skills/porting-kit-audit/SKILL.md`'s CI-hygiene step both gained the
+  second direction: enumerate what each job reads and confirm it is in the trigger.
+- **Section amended:** `porting-kit/harnesses/ci/porting-ci.template.yml`,
+  `porting-kit/OPERATING-GUIDE.md`,
+  `porting-kit/skills/porting-kit-audit/SKILL.md`,
+  `.github/workflows/lsof-rs-ci.yml`
+
+---
+
+## 036. Gates fail open on "nothing ran" — self-test the degenerate case, not just detection
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #006. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Date:** 2026-07-19
@@ -1375,10 +1486,10 @@ the emphasized half.
 
 ---
 
-## 035. An allow-list must ASSERT the accepted state, not merely SUPPRESS it
+## 037. An allow-list must ASSERT the accepted state, not merely SUPPRESS it
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #014. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
-- **Re-cited:** source #6 -> #034 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #8 -> #041 “An acceptance list that matches by name becomes a permanent mute button”; source #13 -> #033 “Writing a lesson does not put it in force; a check does”.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #8 -> #043 “An acceptance list that matches by name becomes a permanent mute button”; source #13 -> #033 “Writing a lesson does not put it in force; a check does”.
 - **Date:** 2026-07-24
 - **Codebase:** the Porting Kit itself (comprehensive multi-lens audit → v1.x)
 - **What happened:** A six-lens adversarial audit found the deepest hole in the
@@ -1390,8 +1501,8 @@ the emphasized half.
   the adler32 overflow fix with `wrapping_add` (C-identical output — what a dev
   "matching C" writes) made the flagship exit test go **green, full success
   banner, exit 0**, in BOTH library differentials. The port's entire reason to
-  exist could be deleted and every gate stayed green. This is distinct from #041
-  (which pins a *changed* divergence): #041 caught a divergence that *mutated*; this
+  exist could be deleted and every gate stayed green. This is distinct from #043
+  (which pins a *changed* divergence): #043 caught a divergence that *mutated*; this
   is a divergence that *vanished*. The fingerprint pin never fires on a vanish,
   because there is no divergence left to fingerprint. Generalizes: any allow-list
   entry (a ledgered divergence, a suppressed lint, an ignored advisory, an
@@ -1404,7 +1515,7 @@ the emphasized half.
   `compare_call` (it has its own comparison path — the fix had to be applied
   twice, which is itself why the audit checked *both* differentials). Pinned in
   three self-tests and proven end-to-end: reverting the adler32 fix now fails the
-  exit test. **Same audit, recurrences of #034 (fail-closed) fixed and cited in
+  exit test. **Same audit, recurrences of #036 (fail-closed) fixed and cited in
   place, not minted as new lessons:** an empty/mis-keyed matrix made every
   differential exit 0 over a wrong binary (now refused); invalid-UTF-8 stdout
   collapsed to `MATCH` via `decode(replace)` → U+FFFD (now `backslashreplace`,
@@ -1432,7 +1543,7 @@ the emphasized half.
 
 ---
 
-## 036. The C is a SPEC, and only the oracle knows what it says
+## 038. The C is a SPEC, and only the oracle knows what it says
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #017. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Re-cited:** source #13 -> #033 “Writing a lesson does not put it in force; a check does”; source #15 -> by title “An inherited environment constraint is a dated observation, not a fact” (no entry in this log).
@@ -1476,7 +1587,7 @@ the emphasized half.
 
 ---
 
-## 037. A gate that has nothing to check is not a passing gate
+## 039. A gate that has nothing to check is not a passing gate
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #018. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Date:** 2026-07-25
@@ -1512,7 +1623,7 @@ the emphasized half.
 
 ---
 
-## 038. Scope each increment's differential to what it can decide
+## 040. Scope each increment's differential to what it can decide
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #019. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Re-cited:** source #2 -> #002 “A noisy Phase-0 scanner is worse than none — it gets ignored”.
@@ -1541,13 +1652,13 @@ the emphasized half.
 
 ---
 
-## 039. Generate test expectations from the oracle — a convention is not a control
+## 041. Generate test expectations from the oracle — a convention is not a control
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #021. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
-- **Re-cited:** source #17 -> #036 “The C is a SPEC, and only the oracle knows what it says”; source #13 -> #033 “Writing a lesson does not put it in force; a check does”.
+- **Re-cited:** source #17 -> #038 “The C is a SPEC, and only the oracle knows what it says”; source #13 -> #033 “Writing a lesson does not put it in force; a check does”.
 - **Date:** 2026-07-25
 - **Codebase:** the kit itself (post-cJSON), closing RETROSPECTIVE-cjson.md §6
-- **What happened:** LESSONS #036 established probe-then-port as a *convention*:
+- **What happened:** LESSONS #038 established probe-then-port as a *convention*:
   run the C on the module's edge cases, paste the transcript, write expectations
   from it. But every §2 mistake on the cJSON port had already shown what happens
   without enforcement — wrong unit tests written from reasoning happily agreed
@@ -1579,10 +1690,10 @@ the emphasized half.
 
 ---
 
-## 040. Verifying the artifacts that exist says nothing about the one that is missing
+## 042. Verifying the artifacts that exist says nothing about the one that is missing
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #023. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
-- **Re-cited:** source #6 -> #034 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #14 -> #035 “An allow-list must ASSERT the accepted state, not merely SUPPRESS it”; source #18 -> #037 “A gate that has nothing to check is not a passing gate”; source #19 -> #038 “Scope each increment's differential to what it can decide”; source #20 -> by title “A harness meets its real bugs only on a real port” (no entry in this log).
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #14 -> #037 “An allow-list must ASSERT the accepted state, not merely SUPPRESS it”; source #18 -> #039 “A gate that has nothing to check is not a passing gate”; source #19 -> #040 “Scope each increment's differential to what it can decide”; source #20 -> by title “A harness meets its real bugs only on a real port” (no entry in this log).
 - **Date:** 2026-08-22
 - **Codebase:** the kit itself — `harnesses/probe/probe.py` (one day old)
 - **What happened:** `probe.py` was built to fail closed everywhere: zero probes
@@ -1592,7 +1703,7 @@ the emphasized half.
   line in the port's `check.sh` naming one file. A module could land with **no
   probes whatsoever** and every gate stayed green, because `run`/`gen`/`verify`
   only ever see the files they are handed. The kit's characteristic 0-of-0
-  (LESSONS #034/#035/#037, and the source lineage's "a harness meets its real bugs
+  (LESSONS #036/#037/#039, and the source lineage's "a harness meets its real bugs
   only on a real port"), displaced one level up into the *wiring* — committed
   by me in the same change that mechanized the lesson about conventions decaying.
   A gate hardened against everything inside its input is still trusting whoever
@@ -1601,7 +1712,7 @@ the emphasized half.
   `progress.json` (so it cannot drift from the list the gates track) and fails
   naming any module with no probes file; an empty module list is itself a failure.
   Probes files carry `modules: [...]` tags, reusing the corpus tagging idiom of
-  LESSONS #038. Wired into `ports/cjson/check.sh`. Writing the missing probes for
+  LESSONS #040. Wired into `ports/cjson/check.sh`. Writing the missing probes for
   the two uncovered cJSON modules immediately pinned **four behaviors reasoning
   would have gotten wrong** — cJSON accepts a leading UTF-8 BOM, accepts trailing
   garbage after a complete value (`[1] xyz` → `[1]`), treats an **embedded NUL as
@@ -1614,7 +1725,7 @@ the emphasized half.
   PROMPTS/10-module-port.md · step 0; RETROSPECTIVE-probe-harness.md · §3.
 
 ---
-## 041. An acceptance list that matches by name becomes a permanent mute button
+## 043. An acceptance list that matches by name becomes a permanent mute button
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #008. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Date:** 2026-07-19
@@ -1639,10 +1750,10 @@ the emphasized half.
 
 ---
 
-## 042. A template must pass the gates it ships — or every copy starts red
+## 044. A template must pass the gates it ships — or every copy starts red
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #009. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
-- **Re-cited:** source #6 -> #034 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #7 -> by title “Documented commands are code — phantom flags and paste-broken examples drift silently” (no entry in this log).
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #7 -> by title “Documented commands are code — phantom flags and paste-broken examples drift silently” (no entry in this log).
 - **Date:** 2026-07-20
 - **Codebase:** the Porting Kit itself (installing real CI for the kit repo; PR #3)
 - **What happened:** Wiring meaningful CI meant running the kit's own gates, and
@@ -1654,7 +1765,7 @@ the emphasized half.
   a starting-point that fails the gates it configures. Nothing caught it because
   `make check-kit` is toolchain-free and never built or linted the skeleton — the
   one artifact every port begins by copying was the one artifact no gate checked.
-  Same family as #034 and the source lineage's "documented commands are code": the
+  Same family as #036 and the source lineage's "documented commands are code": the
   kit's own artifacts must satisfy the kit's own rules.
 - **Kit change:** (a) fixed the skeleton to a clean exemplar — fmt-clean, and
   `i.saturating_add(1)` (the checked/saturating idiom the playbook prescribes, so
@@ -1672,7 +1783,7 @@ the emphasized half.
 
 ---
 
-## 043. A process-driving harness must be hermetic — control stdin, don't inherit it
+## 045. A process-driving harness must be hermetic — control stdin, don't inherit it
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #011. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Re-cited:** source #1 -> #001 “The kit's own dry-run against lsof's failure inventory”.
@@ -1705,7 +1816,7 @@ the emphasized half.
 
 ---
 
-## 044. A re-cited number resolves, and still means another lesson
+## 046. A re-cited number resolves, and still means another lesson
 
 - **Date:** 2026-09-20
 - **Codebase:** the Porting Kit vendored here (refreshing it from the c2rust-port
@@ -1718,7 +1829,7 @@ the emphasized half.
   so, in those words.
 
   It re-cited the *heads* and missed the *members*. `(LESSONS #6/#14/#18/#20)`
-  became `(LESSONS #034/#14/#18/#20)`: one number translated, three carried over.
+  became `(LESSONS #036/#14/#18/#20)`: one number translated, three carried over.
   Two more entries kept a bare `#8` and `#6` from the source lineage. Five of the
   seven imported entries had at least one unaccounted cross-reference.
 
@@ -1727,7 +1838,7 @@ the emphasized half.
   simply a different lesson than the sentence means. A citation checker built
   around existence cannot see a *wrong* citation, and existence is the only thing
   a destination log knows. Worse, the checker's list/range expansion parsed
-  `#034/#14/#18/#20` correctly and then validated all four — the more capable the
+  `#036/#14/#18/#20` correctly and then validated all four — the more capable the
   parser, the more confidently it blessed the error.
 
 - **Why the obvious controls don't reach it:** the failing claim is *semantic* and
@@ -1739,7 +1850,7 @@ the emphasized half.
 
 - **What does reach it:** make the import carry its own truth-maker. An imported
   entry now records what each source citation was re-cited **to, and the title it
-  had** — `source #8 -> #041 "An acceptance list that matches by name…"`. That
+  had** — `source #8 -> #043 "An acceptance list that matches by name…"`. That
   turns an unverifiable cross-repo claim into a local one: the destination entry
   either has that title or it does not. Two properties are then checkable offline
   and mechanically — **resolution** (the destination exists and is the lesson
@@ -1769,17 +1880,17 @@ the emphasized half.
   The five entries stage 1 imported now carry their mappings, and their three bad
   cross-references are corrected.
 - **Section amended:** harnesses/lessons/check_imports.py (new); Makefile ·
-  check-kit; README · harness table; LESSONS.md · #035, #036, #038, #039, #040
+  check-kit; README · harness table; LESSONS.md · #037, #038, #040, #041, #042
   (mappings added, `#8`/`#6`/`#13`/`#15`/`#14`/`#18`/`#20` corrected).
 
 ---
 
-## 045. A marker a document can mention is a marker a document can claim
+## 047. A marker a document can mention is a marker a document can claim
 
 - **Date:** 2026-09-20
 - **Codebase:** the Porting Kit vendored here (refresh stage 2 — `diff-fuzz`, and
-  the control written one commit earlier in #044)
-- **What happened:** #044 made an imported *entry* record what it re-cited to.
+  the control written one commit earlier in #046)
+- **What happened:** #046 made an imported *entry* record what it re-cited to.
   Imported **files** — harnesses, skills — have the same hazard and no heading to
   hang a mapping on, so they carry a `KIT-IMPORT:` header declaring theirs. Two
   things went wrong building that, and both are about the marker being *text*.
@@ -1796,10 +1907,10 @@ the emphasized half.
   position, a delimiter. Without one, writing the docs breaks the tool.
 
 - **What the file-level check found immediately:** stage 1's `probe.py` import had
-  the same carry-over as the LESSONS entries — `(LESSONS #034/#14/#18/#20)` and
-  `LESSONS #036/#21`, heads re-cited, members not. One of those is emitted into
+  the same carry-over as the LESSONS entries — `(LESSONS #036/#14/#18/#20)` and
+  `LESSONS #038/#21`, heads re-cited, members not. One of those is emitted into
   *generated Rust test files*, so the wrong citation would have propagated into
-  port source. Porting `diff-fuzz` produced two more (`LESSONS #034, #14` and
+  port source. Porting `diff-fuzz` produced two more (`LESSONS #036, #14` and
   `LESSONS #001/#6`). Four of the six survivors this refresh has found were
   continuation members: **the failure lives in the part of a citation a grep for
   `LESSONS #14` cannot see.** What finds them is expanding each citation through

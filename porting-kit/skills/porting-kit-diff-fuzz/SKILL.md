@@ -6,7 +6,7 @@ description: Differential-fuzz a C-to-Rust port — feed the same mutated input 
 # Porting Kit — differential fuzzing (C vs Rust on shared inputs)
 
 <!-- KIT-IMPORT: from the c2rust-port lineage of this kit.
-     Re-cited: #1->#001, #4->#004, #6->#034, #8->#041;
+     Re-cited: #1->#001, #4->#004, #6->#036, #8->#043;
      #16, #28, #42 and #43 by title (no entries in this log). -->
 
 Wraps `porting-kit/harnesses/diff-fuzz/diff_fuzz.py`. Complements the fixed-matrix
@@ -41,7 +41,7 @@ Needs a runnable C oracle (or a golden-replay wrapper, `porting-kit/harnesses/go
    the minimized input to the golden/matrix so `diff_run.py` covers it forever, not
    just this fuzz seed.
 5. A **rust-side TIMEOUT** finding is a hang on some input — a design smell, not a
-   wrap-it target (LESSONS #001/#034); design the blocking path out.
+   wrap-it target (LESSONS #001/#036); design the blocking path out.
 6. **If you fuzz against a CORRECTED oracle, measure how wide the correction is.**
    *(This whole item comes from the c2rust-port lineage — its lessons "A
    predicate-defined intentional divergence can't be pinned", "A corrected
@@ -72,7 +72,7 @@ Needs a runnable C oracle (or a golden-replay wrapper, `porting-kit/harnesses/go
 ## Notes
 - Fidelity is shared, not reimplemented: every input is judged by
   `diff_run.compare_one`, so the stdout-AND-exit-code verdict (LESSONS #004), the
-  fail-closed timeout handling (LESSONS #034), and the ledger fingerprint (LESSONS #041)
+  fail-closed timeout handling (LESSONS #036), and the ledger fingerprint (LESSONS #043)
   are identical to the matrix differential.
 - Determinism: a finding always reproduces — re-run with the same `--seed`, or just
   feed the saved `<fp>.input` back through `diff_run.py`.

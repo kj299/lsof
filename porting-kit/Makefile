@@ -35,7 +35,7 @@ check-kit:
 	@# from a log that diverges from this one, so a number carried over verbatim
 	@# still resolves and still means a different lesson. check_imports answers
 	@# "is #14 the lesson this sentence means?" — the first import here shipped
-	@# `#034/#14/#18/#20` with only the head re-cited, green through every gate.
+	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
 	@echo ""

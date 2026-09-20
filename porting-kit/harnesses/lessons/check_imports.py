@@ -11,7 +11,7 @@ question here is "is #14 the lesson this sentence means?", which no amount of
 looking at the destination log alone can answer.
 
 It was not hypothetical. The first import into this log carried
-`(LESSONS #034/#14/#18/#20)`: the head was re-cited and the three continuation
+`(LESSONS #036/#14/#18/#20)`: the head was re-cited and the three continuation
 members were not, so the sentence silently pointed at three unrelated entries and
 every gate stayed green. Two more entries carried a bare `#8` and `#6` from the
 source lineage.
@@ -20,10 +20,10 @@ The fix travels with the import. An imported entry records what each source
 citation was re-cited TO, **and the title it had** — so the claim is checkable
 here, offline, without the source log:
 
-    ## 041. Some lesson
+    ## 043. Some lesson
 
     - **Imported:** from the c2rust-port lineage of this kit, where it is #008.
-    - **Re-cited:** source #6 -> #034 "Gates fail open on \"nothing ran\"";
+    - **Re-cited:** source #6 -> #036 "Gates fail open on \"nothing ran\"";
       source #15 -> by title "An inherited environment constraint is a dated
       observation, not a fact"
 
@@ -46,13 +46,13 @@ A harness or skill brought across from a sibling lineage has the same hazard and
 no heading to hang a mapping on, so it carries a one-line marker instead:
 
     # KIT-IMPORT: from the c2rust-port lineage.
-    # Re-cited: #1->#001, #4->#004, #6->#034, #8->#041; #36 by title.
+    # Re-cited: #1->#001, #4->#004, #6->#036, #8->#043; #36 by title.
 
 Every `LESSONS #N` in that file — expanded through the same list/range rules
-`check_lesson_refs` uses, so `#034, #14` and `#001/#6` are seen as TWO citations
+`check_lesson_refs` uses, so `#036, #14` and `#001/#6` are seen as TWO citations
 each — must land in that marker's destination set. That expansion is the point:
 the two survivors found while porting `diff-fuzz` were both continuation members
-(`LESSONS #034, #14` and `LESSONS #001/#6`), invisible to a `LESSONS #14` grep
+(`LESSONS #036, #14` and `LESSONS #001/#6`), invisible to a `LESSONS #14` grep
 and green under every existing check, because #14 and #6 do exist here.
 
 Usage:  check_imports.py [LESSONS.md]     (default: the kit this file is in)
@@ -76,7 +76,7 @@ RECITED_RE = re.compile(r"^\s*-\s+\*\*Re-cited:\*\*", re.M)
 # quoted so it may contain commas, dashes and the log's own `#`.
 #
 # BOTH quote styles are accepted, and that is not politeness. A lesson title in
-# this log may itself contain a straight-quoted phrase (#034 quotes "nothing
+# this log may itself contain a straight-quoted phrase (#036 quotes "nothing
 # ran"), so a straight-quoted mapping would end at the title's own quote and the
 # mapping would not parse. Curly quotes are the way to write those. The first cut
 # of this file required a straight pair and its self-test obligingly used one —
