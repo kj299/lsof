@@ -1,0 +1,698 @@
+{
+  "total": 98,
+  "by_category": {
+    "int-overflow-mul": 47,
+    "unbounded-copy": 19,
+    "toctou": 22,
+    "format-string": 7,
+    "signed-char-compare": 3
+  },
+  "hits": [
+    {
+      "line": 262,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "(mntsup_t **)calloc(HASHMNT, sizeof(mntsup_t *)))) {",
+      "file": "lib/dialects/linux/dmnt.c"
+    },
+    {
+      "line": 307,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(mpn->dir_name, path);",
+      "file": "lib/dialects/linux/dmnt.c"
+    },
+    {
+      "line": 202,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(Pinfo = (pxinfo_t **)calloc(PINFOBUCKS, sizeof(pxinfo_t *)))) {",
+      "file": "lib/dialects/linux/dnode.c"
+    },
+    {
+      "line": 248,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(PtyInfo = (pxinfo_t **)calloc(PINFOBUCKS, sizeof(pxinfo_t *)))) {",
+      "file": "lib/dialects/linux/dnode.c"
+    },
+    {
+      "line": 356,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "(pxinfo_t **)calloc(PINFOBUCKS, sizeof(pxinfo_t *)))) {",
+      "file": "lib/dialects/linux/dnode.c"
+    },
+    {
+      "line": 400,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "(pxinfo_t **)calloc(PINFOBUCKS, sizeof(pxinfo_t *)))) {",
+      "file": "lib/dialects/linux/dnode.c"
+    },
+    {
+      "line": 195,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "*cbf = (char *)realloc((MALLOC_P *)*cbf, len);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 315,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(pidpath = (char *)realloc((MALLOC_P *)pidpath, pidpathl))) {",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 327,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(pidpath, &sb))",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 380,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "(char *)realloc((MALLOC_P *)tidpath, tidpathl);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 642,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (!lstat(path, &sb)) {",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 701,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "cp = (char *)realloc((MALLOC_P *)cp, rl);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 967,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "sv = stat(Path, &sb);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1014,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "sv = stat(Path, &sb);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1066,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "sv = stat(Path, &sb);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1196,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "ls = lstat(Path, &lsb) ? 0 : SB_ALL;",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1198,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "ss = stat(Path, &sb) ? 0 : SB_ALL;",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1367,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(\"/proc/self/ns/mnt\", &sb_self))",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1378,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(nspath, &sb_target))",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1545,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "sv = stat(path, &sb);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1553,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "sv = stat(fp[6], &sb);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1805,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "cb = (char *)realloc((MALLOC_P *)cb, sz + 1);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1815,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(cb, p);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 1919,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "strcpy(p + 11 + wl, postfix);",
+      "file": "lib/dialects/linux/dproc.c"
+    },
+    {
+      "line": 723,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "AX25sin = (struct ax25sin **)calloc(INOBUCKS, sizeof(struct ax25sin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 1091,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(nma, \"->INO=\");",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 1558,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Icmpin = (struct icmpin **)calloc(INOBUCKS, sizeof(struct icmpin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 1689,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Ipxsin = (struct ipxsin **)calloc(INOBUCKS, sizeof(struct ipxsin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 1829,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Nlksin = (struct nlksin **)calloc(INOBUCKS, sizeof(struct nlksin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 1921,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Packin = (struct packin **)calloc(INOBUCKS, sizeof(struct packin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2022,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Rawsin = (struct rawsin **)calloc(INOBUCKS, sizeof(struct rawsin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2165,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "SCTPsin = (struct sctpsin **)calloc(INOBUCKS, sizeof(struct sctpsin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2251,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "a = (char *)realloc((MALLOC_P *)a, plen + len + 2);",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2281,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "id = (char *)realloc((MALLOC_P *)id, plen + len + 2);",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2313,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "lp = (char *)realloc((MALLOC_P *)lp, plen + len + 2);",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2343,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "rp = (char *)realloc((MALLOC_P *)rp, plen + len + 2);",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2383,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(la = (char *)realloc((MALLOC_P *)la,",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2414,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(ra = (char *)realloc((MALLOC_P *)ra,",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2476,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "cp = (char *)realloc((MALLOC_P *)cp, al + tl + 1);",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 2725,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Rawsin6 = (struct rawsin **)calloc(INOBUCKS, sizeof(struct rawsin *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 3088,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Uxsin = (uxsin_t **)calloc(INOBUCKS, sizeof(uxsin_t *));",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 3213,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "sr = stat(path, &sb);",
+      "file": "lib/dialects/linux/dsock.c"
+    },
+    {
+      "line": 34,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "snprintf(TEMPLATE",
+      "file": "lib/dialects/linux/tests/ux.c"
+    },
+    {
+      "line": 97,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "snprintf(TEMPLATE",
+      "file": "lib/dialects/linux/tests/ux.c"
+    },
+    {
+      "line": 400,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[i], p->pw_dir);",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 437,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[i], hn);",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 464,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[i], cp2);",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 516,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[i], p->pw_name);",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 529,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[i], hn);",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 623,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "fprintf(ACCESSERRFMT",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 639,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(DCpath[DCpathX], s) != 0) {",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 705,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(DCpath[DCpathX], s) != 0) {",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 751,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(DVCH_DEVPATH, &devsb) != 0) {",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 1057,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(Devtp[i].name, &sb) != 0",
+      "file": "lib/dvch.c"
+    },
+    {
+      "line": 462,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "return (lstat(path, (struct stat *)rbuf));",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 487,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "return (stat(path, (struct stat *)rbuf));",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 572,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(UdpSt = (char **)realloc((MALLOC_P *)UdpSt, len))) {",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 587,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(TcpSt = (char **)realloc((MALLOC_P *)TcpSt, len))) {",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 634,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(UdpSt = (char **)realloc((MALLOC_P *)UdpSt, len)))",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 638,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(TcpSt = (char **)realloc((MALLOC_P *)TcpSt, len)))",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 680,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "UdpSt = (char **)realloc((MALLOC_P *)UdpSt, len);",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 694,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "TcpSt = (char **)realloc((MALLOC_P *)TcpSt, len);",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 994,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (access(path, R_OK) < 0) {",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 996,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "fprintf(ACCESSERRFMT",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 1193,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "(char **)realloc((MALLOC_P *)Readlink_stk,",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 1311,
+      "category": "signed-char-compare",
+      "cwe": "CWE-195",
+      "text": "if (c < 0x20) {",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 1369,
+      "category": "signed-char-compare",
+      "cwe": "CWE-195",
+      "text": "if ((*sp < 0x20) || ((unsigned char)*sp == 0xff) ||",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 1543,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "Dstk = (char **)realloc((MALLOC_P *)Dstk, len);",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 1643,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "new_array = realloc((MALLOC_P *)*array_ptr, (MALLOC_S)new_size);",
+      "file": "lib/misc.c"
+    },
+    {
+      "line": 61,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "(char *)realloc((MALLOC_P *)Lf->nma, (MALLOC_S)(len + nl + 2));",
+      "file": "lib/proc.c"
+    },
+    {
+      "line": 185,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(mtp->MOUNTS_FSTYPE, mp->RMNT_FSTYPE);",
+      "file": "lib/rmnt.c"
+    },
+    {
+      "line": 232,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(buf, Lf->fsdir);",
+      "file": "lib/rnam.c"
+    },
+    {
+      "line": 235,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[len], cp);",
+      "file": "lib/rnam.c"
+    },
+    {
+      "line": 496,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(Nchash = (struct l_nch **)calloc(Nch + Nc, sizeof(struct l_nch *)))) {",
+      "file": "lib/rnam.c"
+    },
+    {
+      "line": 607,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(cp, lc->nm);",
+      "file": "lib/rnam.c"
+    },
+    {
+      "line": 265,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(buf, Lf->fsdir);",
+      "file": "lib/rnch.c"
+    },
+    {
+      "line": 268,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[len], cp);",
+      "file": "lib/rnch.c"
+    },
+    {
+      "line": 503,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "nb = (char *)realloc((MALLOC_P *)nb, na);",
+      "file": "lib/rnch.c"
+    },
+    {
+      "line": 633,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(Nchash = (struct l_nch **)calloc(Nch + Nc, sizeof(struct l_nch *)))) {",
+      "file": "lib/rnch.c"
+    },
+    {
+      "line": 748,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(cp, lc->nm);",
+      "file": "lib/rnch.c"
+    },
+    {
+      "line": 263,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(buf, Lf->fsdir);",
+      "file": "lib/rnmh.c"
+    },
+    {
+      "line": 266,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(&buf[len], cp);",
+      "file": "lib/rnmh.c"
+    },
+    {
+      "line": 380,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "khp = (struct NCACHE **)realloc((MALLOC_P *)khp, len);",
+      "file": "lib/rnmh.c"
+    },
+    {
+      "line": 579,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "if (!(Nchash = (struct l_nch **)calloc(len, sizeof(struct l_nch *)))) {",
+      "file": "lib/rnmh.c"
+    },
+    {
+      "line": 683,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "(void)strcpy(cp, lc->nm);",
+      "file": "lib/rnmh.c"
+    },
+    {
+      "line": 81,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "lnc = malloc(sizeof(*lnc));",
+      "file": "lib/rnmt.c"
+    },
+    {
+      "line": 216,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "mmp = (struct mounts **)realloc((MALLOC_P *)mmp, l);",
+      "file": "src/arg.c"
+    },
+    {
+      "line": 1479,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "sn = (char *)realloc((MALLOC_P *)sn, l + 1);",
+      "file": "src/arg.c"
+    },
+    {
+      "line": 1245,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(DEVDEV_PATH, &sb)) {",
+      "file": "src/main.c"
+    },
+    {
+      "line": 1248,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if ((ss = stat(\"/dev\", &sb)))",
+      "file": "src/main.c"
+    },
+    {
+      "line": 1354,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "slp = (struct lproc **)realloc((MALLOC_P *)slp, len);",
+      "file": "src/main.c"
+    },
+    {
+      "line": 174,
+      "category": "signed-char-compare",
+      "cwe": "CWE-195",
+      "text": "else if (val < 0x20)",
+      "file": "src/print.c"
+    },
+    {
+      "line": 531,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "hc = (struct hostcache *)realloc((MALLOC_P *)hc, len);",
+      "file": "src/print.c"
+    },
+    {
+      "line": 1114,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "printf(SzOffFmt_dv",
+      "file": "src/print.c"
+    },
+    {
+      "line": 1731,
+      "category": "toctou",
+      "cwe": "CWE-367",
+      "text": "if (stat(\"/etc/passwd\", &sb) != 0) {",
+      "file": "src/print.c"
+    },
+    {
+      "line": 2354,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "printf(InodeFmt_d",
+      "file": "src/print.c"
+    },
+    {
+      "line": 2414,
+      "category": "int-overflow-mul",
+      "cwe": "CWE-190",
+      "text": "*bp = (char *)realloc((MALLOC_P *)*bp, (MALLOC_S)sz);",
+      "file": "src/print.c"
+    },
+    {
+      "line": 408,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "fprintf(#    if defined(HASMOPT)\n#        if defined(HASMNTSUP)\n                      \" [+|-m [m]]\"\n#        else  /* !d",
+      "file": "src/usage.c"
+    }
+  ]
+}

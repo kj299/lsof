@@ -174,27 +174,131 @@ Stated so reviewers do not assume coverage that is not there.
 
 ## 6. C-defect inventory
 
+Two sources feed this: divergences the differential surfaced, and the Phase-0
+flaw scan. Both are now present; the scan was the gap this section used to name
+against itself.
+
+### 6a. Confirmed defects, already triaged
+
 The kit's rule is that the C is a specification which may itself be buggy, and
 that a defect found in it is triaged rather than faithfully re-implemented. Three
-are currently recorded in [`DIVERGENCES.md`](DIVERGENCES.md) as **`C-DEFECT`**,
-each with the C code named so the triage can be checked:
+are recorded in [`DIVERGENCES.md`](DIVERGENCES.md) as **`C-DEFECT`**, each naming
+the C code so the triage can be checked:
 
 - **`hostile-comm-utf8-table`** — the C mis-sizes a table column when a process
-  `comm` contains bytes ≥ 0x80, taking the wrong branch. This is the §4
-  "breaks the renderer, not the parser" capability, live, in the tool's most
-  attacker-reachable string. Not reproduced by lsof-rs.
+  `comm` contains bytes ≥ 0x80. The scan below independently re-finds this at its
+  root, `lib/misc.c:1369`. This is the §4 "breaks the renderer, not the parser"
+  capability, live, in the tool's most attacker-reachable string. Not reproduced.
 - **`lsof -c ^name` exits 1 on a successful listing** while `lsof -u ^name`
   exits 0, for two options the man page describes identically. lsof-rs copies
   the half that is defensible and not the asymmetry.
 - **A bare path argument alongside `+d`/`+D` makes the C silently lose the
-  expansion's entries.** Measured: 4 entry rows dropped on a fixture where a
-  correct result is discarded because of an unrelated argument. Silently
-  incomplete output, which §1 names as an asset in its own right. Not reproduced.
+  expansion's entries.** Measured: 4 entry rows dropped where a correct result is
+  discarded because of an unrelated argument. Silently incomplete output, which
+  §1 names as an asset in its own right. Not reproduced.
 
-**Gap: there is no checked-in `scan_c_flaws.py` report for this tree.** Phase 0
-prescribes one and the harness exists (`porting-kit/harnesses/c-flaw-scan/`), but
-no output is committed, so the three defects above are the ones the differential
-and hostile-input work happened to surface rather than the result of a systematic
-scan. Running it and triaging the findings into this section is outstanding work,
-named here rather than left implicit — a threat model that quietly omits its own
-gaps is the documentation theater this file's gate exists to prevent.
+### 6b. The Phase-0 flaw scan
+
+Report: [`coverage/c-flaw-scan.json`](coverage/c-flaw-scan.json), from
+`porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py src lib/*.c lib/dialects/linux`.
+
+The harness says of itself that it is "deliberately noisy: every hit is a
+*question* for the porter". So the raw count is not a finding; the triage is.
+
+The first run produced **113** hits. Triaging them found a fifth of the output was
+text that never executes, so the scanner was fixed before the numbers were written
+down (§6d) — the report above is the post-fix run, **98** hits.
+
+**26 of those are in code this platform does not compile.** Verified in the headers
+rather than assumed:
+
+- `lib/dvch.c` — the whole body is inside `#if defined(HASDCACHE)`, and
+  `lib/dialects/linux/machine.h` carries `/* #define HASDCACHE 1 !!!DON'T
+  ENABLE!!! */` with a caution paragraph. Dead on Linux. (This is also why the
+  device cache is a §5 non-goal: the port does not implement a feature the
+  reference build does not compile.)
+- `lib/rnam.c`, `lib/rnch.c`, `lib/rnmh.c` — each guarded by
+  `HASNCACHE && USE_LIB_RN{AM,CH,MH}`, all four commented out for Linux. Dead.
+- `lib/dialects/linux/tests/ux.c` — a test program, not linked into `lsof`.
+
+That leaves **72 in the binary the differential actually compares against**:
+
+| Category | Live | Triage |
+|---|---|---|
+| `int-overflow-mul` | 42 | **0 confirmed.** 14 are `calloc(n, sizeof(T))` with compile-time constants, and C11 requires `calloc` to detect the product overflowing. The rest are `realloc(ptr, len)` — one size argument, no multiplication at the call, so not the pattern this category describes. Whether the arithmetic *upstream* can overflow is a real question the scanner did not ask and this pass did not answer; the `dsock.c` address-assembly sites (`plen + len + 2`, from `/proc/net` data) are where I would start. |
+| `toctou` | 18 | **0 confirmed.** All 18 are now real `stat`/`lstat` calls on `/proc` paths — the 15 that were comments and string literals are gone with the scanner fix. A race there needs a PID recycled between the stat and the open; §4 already names it, and the consequence for a read-only reporter is a wrong or missing row, not a compromise. |
+| `unbounded-copy` | 5 | **0 confirmed.** The two in `dproc.c` are bounded three lines above the call, where the scanner cannot see: `:1815` copies into a buffer `malloc`'d to `strlen(p)+1` on the preceding line; `:1919` appends a postfix into space `snp_eventpoll` reserved up front (`len -= (tfd_count == EPOLL_MAX_TFDS) ? 4 : 1`, plus the NUL). `dsock.c:1091` copies a string literal. `dmnt.c:307` and `rmnt.c:185` copy into fields sized from the source length. |
+| `format-string` | 4 | **0 confirmed.** `ACCESSERRFMT` is a string-literal macro (`lib/common.h:273`). `SzOffFmt_dv` and `InodeFmt_d` are non-literal but program-constructed — built by `sv_fmt_str()` in `src/main.c` from compile-time `SZOFFTYPE` options, never from input. The `src/usage.c` hit is the scanner joining lines across an `#if`. |
+| `signed-char-compare` | 3 | **1 confirmed, 1 latent, 1 false.** Detail below — this is the category that earns the scan. |
+
+### 6c. The one category that paid for the whole scan
+
+Three hits, three different answers, which is the argument against reporting a
+count:
+
+- **`lib/misc.c:1311`, `if (c < 0x20)` — false positive.** `safepup` declares
+  `unsigned int c`. The comparison is unsigned; there is no sign bug.
+- **`lib/misc.c:1369`, `if ((*sp < 0x20) || ((unsigned char)*sp == 0xff) || …)`
+  — CONFIRMED, and it is the root of `hostile-comm-utf8-table`.** `safestrlen`
+  takes `char *sp`, and `char` is signed on x86-64 Linux, so `*sp < 0x20` is
+  **true for every byte 0x80–0xFF**. Those take the `len += 2` branch when
+  `safepup` will actually render them as `\xNN`, four characters — so the width
+  is under-counted by two per high byte, and the column is sized too small. The
+  tell is in the same expression: the author cast for `(unsigned char)*sp ==
+  0xff` and not for the `< 0x20` test beside it. Attacker-reachable through any
+  `comm` or filename. Already ledgered; the scan re-found it from the source
+  rather than from output, which is the stronger form of the same evidence.
+- **`src/print.c:174`, `else if (val < 0x20)` — latent, and benign here.**
+  `json_print_char` takes `char val`, so on x86-64 every byte 0x80–0xFF is
+  "< 0x20" and takes the `printf("\\u%04x", (unsigned int)(unsigned char)val)`
+  branch — which escapes it correctly. The accident produces the *safe* output.
+  On a platform where `char` is unsigned (AArch64 Linux, where lsof also builds)
+  the branch flips to `putchar(val)` and a raw high byte lands in the JSON
+  document, which is not valid UTF-8. Not reproduced by lsof-rs and not
+  reproducible by it: `render/escape.rs` and `render/json.rs` escape over UTF-8
+  `char`s via `\u{:04x}`, so there is no signed-byte branch to get wrong.
+
+### 6d. What the scan says about the scanner
+
+The first run's noise was not spread evenly — it was concentrated in two
+mechanical classes, which made it fixable rather than something to live with:
+
+- **10 `toctou` hits were the word `stat` inside a string literal**
+  (`"%s: WARNING: can't stat() "`), and **5 were inside a comment opened on a
+  code line and closed on a later one** (`int *ss /* stat(2) status result…`).
+  The scanner already blanked *trailing* comments — a previous pass had fixed
+  that after it accounted for 20 of 47 hits — but an unterminated `/*` needs
+  `*/` on the same line to match, so continuation lines were scanned as code,
+  and string literals were never considered at all.
+
+This is the same "a comment is not code" defect `control-coverage` had in this
+kit until it was fixed to search `executable_text` instead of raw bytes.
+`LESSONS #002` is why it matters rather than being cosmetic: a noisy Phase-0
+scanner gets ignored, and skimming is how the one real hit in this run would
+have been missed.
+
+So the scanner was fixed in the same change: `_uncommented` now carries block
+state across lines and blanks string and character literal *contents*, leaving
+the quotes so the format-string rule — which runs separately over the raw source
+and must see whether an argument starts with a quote — still works. Both
+directions of that rule are pinned, along with the two new cases and the real
+call that must still be caught.
+
+**And the fix found a blind spot, not just noise.** The old heuristic skipped any
+line starting with `*`, meaning to skip comment continuations. A pointer
+dereference assignment starts that way too, so `*bp = (char *)realloc(*bp, sz)`
+in `src/print.c:2414` and `*cbf = (char *)realloc(*cbf, len)` in
+`dproc.c:195` — both real, both executable — had never been scanned. Removing the
+heuristic brought them back. A filter tuned for quiet was also suppressing
+signal, which is the argument for fixing noise at the parser rather than by
+narrowing what gets looked at.
+
+Net on this tree: **113 → 98** hits, 17 of them text that never executes, minus 2
+recovered false negatives. Pinned by eight self-test checks so neither the noise
+nor the blind spot can come back.
+
+**Scope note.** This is a heuristic grep, and the harness says so — it does not
+replace a real SAST pass (clang analyzer, CodeQL, cppcheck). Nothing here should
+be read as "the C has one defect". It should be read as: the eight classes this
+scanner knows about, over the Linux-built sources, produced one confirmed defect,
+one platform-latent one, and a list of questions that are now written down.
