@@ -163,6 +163,12 @@ MUTATIONS = [
     # another lineage covers that lineage's harnesses; the ones this kit grew
     # on its own would sit outside it, and `coverage_gaps()` is what says so.
 
+    {"gate": "skeleton-check", "file": "harnesses/skeleton-check/check_skeleton.sh",
+     "old": 'skel_present() { test -d "$1" && test -f "$1/Cargo.toml"; }',
+     "new": "skel_present() { true; }",
+     "why": "a missing skeleton directory still reports present",
+     "cmd": ["harnesses/skeleton-check/check_skeleton.sh", "--check"]},
+
     {"gate": "coverage-gate", "file": "harnesses/coverage/coverage_gate.py",
      "old": "    uncovered = sorted(required - waived_ids - covered)",
      "new": "    uncovered = []",

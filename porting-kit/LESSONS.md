@@ -1780,6 +1780,17 @@ the emphasized half.
   README · harness table; PLAYBOOK · Phase 3 exit criteria. **Here:** not yet —
   `skeleton-check` is a later stage of this refresh; this entry is the standing
   reason to do it.
+- **Closed 2026-09-20** (appended, not rewritten — a forward-looking "not yet" in
+  an append-only log goes stale, and leaving it to read as current is the kind of
+  claim this kit exists to prevent). `skeleton-check` is imported and wired into
+  `make check-kit`. Its first real run failed: this lineage's skeleton was not
+  `cargo fmt`-clean (four files) **and** used `i + 1` in `crates/core/src/parser.rs`
+  and `crates/cli/src/main.rs`, tripping the `clippy::arithmetic_side_effects` that
+  the skeleton's own `[workspace.lints]` denies. Both defects this entry names,
+  verbatim, sitting here the whole time — every port that copied this skeleton
+  started red under the CI the skeleton itself configures. Fixed to a clean
+  exemplar with `i.saturating_add(1)`; the gate now reports `PASS  skeleton passes
+  the gates it ships`.
 
 ---
 

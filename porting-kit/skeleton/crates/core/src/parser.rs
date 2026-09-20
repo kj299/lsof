@@ -18,16 +18,21 @@ pub enum ParseError {
 pub fn parse(input: &str) -> Result<Vec<Record>, ParseError> {
     let mut out = Vec::new();
     for (i, raw) in input.lines().enumerate() {
+        // `saturating_add`, not `+`: the workspace this skeleton ships denies
+        // `clippy::arithmetic_side_effects`, and a template must pass the gates
+        // it configures or every copy starts red. The skeleton should MODEL its
+        // own lint, not violate it.
+        let lineno = i.saturating_add(1);
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let (key, value) = line
             .split_once('=')
-            .ok_or(ParseError::MissingSeparator { line: i + 1 })?;
+            .ok_or(ParseError::MissingSeparator { line: lineno })?;
         let key = key.trim();
         if key.is_empty() {
-            return Err(ParseError::EmptyKey { line: i + 1 });
+            return Err(ParseError::EmptyKey { line: lineno });
         }
         out.push(Record::new(key, value.trim()));
     }
