@@ -85,16 +85,26 @@ impl SocketTable {
     /// present, not when `-T` was asked for. Populating it unconditionally
     /// would therefore change the output of a plain `lsof -i`, so it stays
     /// gated on the flag.
-    pub fn load(want_queues: bool) -> Self {
+    pub fn load(want_queues: bool, skip_inet: bool) -> Self {
         let mut t = SocketTable::default();
-        // Absent files are normal, not an error: a host built without IPv6 has
-        // no /proc/net/tcp6 at all.
-        t.load_inet("/proc/net/tcp", Protocol::Tcp, false, want_queues);
-        t.load_inet("/proc/net/tcp6", Protocol::Tcp, true, want_queues);
-        t.load_inet("/proc/net/udp", Protocol::Udp, false, want_queues);
-        t.load_inet("/proc/net/udp6", Protocol::Udp, true, want_queues);
+        // `-X`. Which tables it actually gates was measured, not read from the
+        // man page, which says "skip the reporting of information on all open
+        // TCP and UDP files" — the rows are still reported, just unresolved.
+        // `dsock.c` guards tcp, tcp6, udp, udp6 and **raw6** with `Fxopt`, and
+        // leaves `/proc/net/raw`, `/proc/net/packet` and `/proc/net/unix`
+        // alone. The v4/v6 raw split is the C's, not a transcription slip:
+        // `:3530` has no guard where `:3761` does, and a live IPv4 raw socket
+        // does keep its `raw` row under `-X`.
+        if !skip_inet {
+            // Absent files are normal, not an error: a host built without IPv6
+            // has no /proc/net/tcp6 at all.
+            t.load_inet("/proc/net/tcp", Protocol::Tcp, false, want_queues);
+            t.load_inet("/proc/net/tcp6", Protocol::Tcp, true, want_queues);
+            t.load_inet("/proc/net/udp", Protocol::Udp, false, want_queues);
+            t.load_inet("/proc/net/udp6", Protocol::Udp, true, want_queues);
+            t.load_raw("/proc/net/raw6", true);
+        }
         t.load_raw("/proc/net/raw", false);
-        t.load_raw("/proc/net/raw6", true);
         t.load_packet("/proc/net/packet");
         t.load_unix("/proc/net/unix");
         t
@@ -558,15 +568,36 @@ pub struct NetnsTables {
     /// The calling process's own namespace. Its sockets are already in the
     /// main table, so a process sharing it is skipped without any work.
     own: Option<String>,
+    /// `-X`. The C reads `system.sockprotoname` in exactly the branch this
+    /// type stands in for, and `-X` replaces that read with a fixed string
+    /// (`dsock.c:4155`) — so under it there is nothing to look up and no
+    /// namespace to read.
+    skip_inet: bool,
 }
 
 impl NetnsTables {
-    pub fn new() -> Self {
+    pub fn new(skip_inet: bool) -> Self {
         Self {
             by_ns: std::cell::RefCell::new(HashMap::new()),
             by_pid: std::cell::RefCell::new(HashMap::new()),
             own: netns_of("self"),
+            skip_inet,
         }
+    }
+
+    /// The NAME cell for a socket the main table could not explain, or `None`
+    /// to leave the row as the bare `socket:[inode]` the link target gives.
+    ///
+    /// Two shapes, both the C's: `protocol: TCP` from the namespace lookup,
+    /// and under `-X` the fixed `can't identify protocol (-X specified)` —
+    /// which the C emits *instead of* reading the xattr, so the lookup is
+    /// skipped rather than performed and discarded.
+    pub fn unresolved_name(&self, pid: u32, inode: u64) -> Option<String> {
+        if self.skip_inet {
+            return Some("can't identify protocol (-X specified)".to_string());
+        }
+        self.protocol_for(pid, inode)
+            .map(|proto| format!("protocol: {proto}"))
     }
 
     /// The protocol name for `inode` as `pid`'s own namespace sees it —
@@ -897,7 +928,7 @@ mod tests {
         // Parses whatever this kernel actually has. Asserting a specific socket
         // exists would be host-dependent; asserting the parse survives the real
         // file is not, and it is what catches a format drift.
-        let t = SocketTable::load(false);
+        let t = SocketTable::load(false, false);
         for e in t.by_inode.values() {
             match &e.file_type {
                 FileType::Ipv4 | FileType::Ipv6 | FileType::Unix => {}
@@ -959,7 +990,7 @@ mod tests {
         // backwards is invisible without a real diff against the C:
         //   inet  DEVICE = inode, NODE = protocol
         //   unix  DEVICE = kernel socket pointer, NODE = inode
-        let t = SocketTable::load(false);
+        let t = SocketTable::load(false, false);
         for e in t.by_inode.values() {
             match &e.file_type {
                 FileType::Ipv4 | FileType::Ipv6 => {
@@ -1015,7 +1046,7 @@ mod tests {
     fn queues_are_absent_unless_asked_for() {
         // The renderer emits a (QR=)(QS=) suffix whenever the field is present,
         // so a plain run must not populate it.
-        let t = SocketTable::load(false);
+        let t = SocketTable::load(false, false);
         assert!(
             t.by_inode.values().all(|e| e.info.tcp.is_none()),
             "load(false) must leave TcpExtInfo unset"
@@ -1196,5 +1227,43 @@ sk               RefCnt Type Proto  Iface R Rmem   User   Inode
             "TCP",
             "for an internet socket the two names do agree"
         );
+    }
+    #[test]
+    fn dash_x_replaces_the_lookup_rather_than_performing_it() {
+        // `dsock.c:4155` is an if/else: under -X the C enters the fixed string
+        // INSTEAD of calling getxattr. So this must answer without consulting
+        // any namespace — a pid that cannot exist still gets the string.
+        let x = NetnsTables::new(true);
+        assert_eq!(
+            x.unresolved_name(u32::MAX, 1),
+            Some("can't identify protocol (-X specified)".to_string())
+        );
+        // And without -X the same impossible pid resolves to nothing, which is
+        // what leaves the row as the bare `socket:[inode]`.
+        let plain = NetnsTables::new(false);
+        assert_eq!(plain.unresolved_name(u32::MAX, 1), None);
+    }
+
+    #[test]
+    fn dash_x_gates_the_inet_tables_and_spares_the_rest() {
+        // Measured against the C: with -X a TCP row degrades to
+        // `sock … can't identify protocol (-X specified)` while `pack`, `unix`
+        // and — the asymmetry — IPv4 `raw` keep resolving.
+        let t = SocketTable::load(false, true);
+        for e in t.by_inode.values() {
+            match &e.file_type {
+                // Ipv4 survives only via /proc/net/raw, which -X does not gate
+                // (dsock.c:3530 has no guard where :3761 does). Ipv6 must not:
+                // raw6 IS gated, and tcp/tcp6/udp/udp6 are never loaded here.
+                FileType::Ipv4 => assert_eq!(
+                    e.node, "ICMP",
+                    "the only Ipv4 rows left under -X come from /proc/net/raw"
+                ),
+                FileType::Ipv6 => panic!("-X must gate every IPv6 inet table"),
+                FileType::Unix => {}
+                FileType::Other(c) if c == "pack" => {}
+                other => panic!("unexpected socket file type under -X: {other:?}"),
+            }
+        }
     }
 }

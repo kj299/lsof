@@ -224,6 +224,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'l' => sel.numeric_ids = true,
                 'L' => sel.show_links = true,
                 'H' => sel.human_size = true,
+                'X' => sel.skip_inet_tables = true,
                 'U' => sel.unix_only = true,
                 // `-E` after `+E` must not downgrade the "also show peer
                 // files" mode — lsof treats +E as a superset of -E.
@@ -384,6 +385,14 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     }
     if want_version {
         return Ok(Action::Version);
+    }
+    // `-X` stops the inet tables being read, so `-i` has nothing left to
+    // select on. The C refuses the pair outright rather than silently
+    // returning nothing — measured: `lsof -X -i` exits 1 with this text.
+    // Checked after the loop because the two may arrive in either order and
+    // in either clustering (`-Xi`, `-i -X`, `-aXi`).
+    if sel.skip_inet_tables && sel.inet.enabled {
+        return Err("-i is useless when -X is specified.".to_string());
     }
     Ok(Action::Run {
         selection: sel,
@@ -904,5 +913,39 @@ mod tests {
             vec!["alice", "EXAMPLE\\bob"]
         );
         assert!(run(&[]).0.users.is_empty());
+    }
+    #[test]
+    fn dash_x_and_dash_i_together_are_fatal_in_every_spelling() {
+        // Measured: `lsof -X -i` exits 1 with exactly this line. -X stops the
+        // inet tables being read, so -i would select against nothing; the C
+        // refuses rather than silently returning an empty set.
+        let want = "-i is useless when -X is specified.";
+        for argv in [
+            vec!["-X", "-i"],
+            vec!["-i", "-X"],
+            vec!["-Xi"],
+            vec!["-aXi"],
+            vec!["-X", "-iTCP"],
+        ] {
+            let got = parse(argv.iter().map(|s| s.to_string()).collect());
+            match got {
+                Err(e) => assert_eq!(e, want, "for {argv:?}"),
+                Ok(_) => panic!("{argv:?} should be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn dash_x_alone_is_accepted_and_selects_nothing() {
+        // The flag suppresses a lookup; it is not a selector, so it must not
+        // turn a whole-host run into a filtered one.
+        match parse(vec!["-X".to_string()]).unwrap() {
+            Action::Run { selection, .. } => {
+                assert!(selection.skip_inet_tables);
+                assert!(!selection.inet.enabled, "-X must not imply -i");
+                assert!(selection.pids.is_empty());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 }

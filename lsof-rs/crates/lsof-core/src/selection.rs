@@ -461,6 +461,23 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-X`: do not read the inet socket tables.
+    ///
+    /// The man page calls this "skip the reporting of information on all open
+    /// TCP and UDP files", and **that is not what it does** — measured against
+    /// the C, the rows are still printed, degraded:
+    ///
+    /// ```text
+    /// 6u IPv4 14197 0t0 TCP 127.0.0.1:58679 (LISTEN)     without
+    /// 6u sock  0,9  0t0 14197 can't identify protocol (-X specified)   with
+    /// ```
+    ///
+    /// So it suppresses the *lookup*, not the row. `dsock.c` gates
+    /// `/proc/net/{tcp,tcp6,udp,udp6,raw6}` on it — and, measured, **not**
+    /// `/proc/net/raw`, `/proc/net/packet` or `/proc/net/unix`, which keep
+    /// resolving. The IPv4/IPv6 raw split is an asymmetry in the C
+    /// (`dsock.c:3530` has no guard where `:3761` does); see DIVERGENCES.
+    pub skip_inet_tables: bool,
     /// `-H`: render the SIZE cell as a human-readable byte count in the table.
     /// A pure formatting flag — it selects nothing, and the C applies it to the
     /// table alone, leaving `-F` and JSON in raw bytes.

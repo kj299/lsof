@@ -220,10 +220,11 @@ fn row(
     if let Some(inode) = net::socket_inode(&name) {
         if socks.get(inode).is_none() {
             // Not in this namespace's tables. Before falling back to the bare
-            // `socket:[inode]` row, ask the owning process's OWN namespace for
-            // the protocol name — which is all the C prints for such a socket
-            // (`sock … protocol: TCP`), and all this recovers.
-            if let Some(proto) = ns.protocol_for(pid, inode) {
+            // `socket:[inode]` row, ask for the name the C would print here —
+            // the protocol from the owning process's OWN namespace
+            // (`sock … protocol: TCP`), or, under `-X`, the fixed string that
+            // replaces the lookup entirely.
+            if let Some(name) = ns.unresolved_name(pid, inode) {
                 return Some(OpenFile {
                     fs_device: None,
                     file_flags: info.flags,
@@ -234,7 +235,7 @@ fn row(
                     // OFFSET rather than a size: an unidentified socket has no
                     // size worth printing and the C shows `0t0`.
                     file_type: FileType::Other("sock".into()),
-                    name: format!("protocol: {proto}"),
+                    name,
                     device: meta.as_ref().map(dev_cell),
                     size: None,
                     offset: Some(offset.unwrap_or(0)),
@@ -489,9 +490,9 @@ mod tests {
             .expect("pid parses");
         let files = for_pid(
             pid,
-            &SocketTable::load(false),
+            &SocketTable::load(false, false),
             &crate::locks::load(),
-            &net::NetnsTables::new(),
+            &net::NetnsTables::new(false),
         )
         .expect("own /proc/<pid>/fd is readable");
 
