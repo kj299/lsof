@@ -12,6 +12,12 @@
 > inside it is re-cited to this log's numbering. `harnesses/lessons/check_imports.py`
 > enforces that; a file carrying a `KIT-IMPORT:` header must account for every
 > citation in it. Do not `cp -r` the other kit over this one.
+>
+> The same collision arrives from *inside* one repository whenever two branches
+> append to the log (LESSONS #048): the merge conflicts on `LESSONS.md`, and the
+> renumber that follows is where citations go stale. Resolve that with
+> `harnesses/lessons/resolve_collision.py` — run it during the conflicted merge,
+> read its plan, then re-run it with `--apply` — rather than by hand (LESSONS #056).
 
 A reusable set of playbooks, working harnesses, an architecture skeleton, and
 session prompts for **safety-first C→Rust rewrites**. Distilled from a real port
@@ -82,6 +88,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/skeleton-check/check_skeleton.sh` | the shipped skeleton must pass the gates it configures (fmt/clippy/build/test); SKIPs without cargo | CI |
 | `harnesses/gate-mutation/mutate_gates.py` | break each gate's verdict on purpose and require its self-test to go red; audits its own table for uncovered harnesses | **CI** |
 | `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |
+| `harnesses/lessons/resolve_collision.py` | two branches appended to the log and took the same numbers: rebuild the merge from git, renumber the block that landed second, repoint its citations by *line provenance*, and refuse what only a human can decide (an ambiguous line, a split range, a displaced paragraph) | merge-time |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
 ```

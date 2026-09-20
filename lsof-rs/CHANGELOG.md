@@ -68,6 +68,24 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   leak case is not covered by any other gate here, which corrects this port's
   own earlier claim that miri would add almost nothing to a `forbid`-ed crate.
 
+- **The kit gained a merge resolver for `LESSONS.md` number collisions**
+  (`porting-kit/harnesses/lessons/resolve_collision.py`; LESSONS #056). This
+  branch met master five times, and each time both sides had appended entries
+  under the same numbers. The procedure LESSONS #048 recorded was run by hand
+  each time; the fourth run repointed three of four citations to the wrong
+  entry with every checker green, because a wrong citation still resolves. The
+  resolver rebuilds the merge from git — the side that landed first keeps its
+  numbers, the other block is renumbered, and citations are repointed by *line
+  provenance*, the one input a reader cannot supply — and refuses what only a
+  human can decide. Replayed on this branch's real conflict it first
+  **refused**, and was right to: a nine-line paragraph of LESSONS #021 had been
+  cut out of its entry by an ordinary edit in this branch's P3 commit and
+  carried at the tail of the newest entry through four merges, and a follow-up
+  appended to #021 cited the continue-on-error lesson by a number two
+  renumberings stale. Both are repaired here. With the paragraph restored, the
+  resolver's output was byte-identical to the hand resolution on all four
+  files it touched; its self-test survived none of ten verdict mutants.
+
 - **`check_ledgers.py` gained a fifth ledger, `san-crates`:** every unit
   `progress.json` tracks must be named by a CI step that runs a sanitizer.
   Counting sanitizer jobs answered "is a sanitizer wired up"; the rule is per

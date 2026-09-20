@@ -2379,3 +2379,74 @@ gate you have not seen fail is a gate you have not tested.
   unnoticed. The checker is the part that covers that case: after this change
   any duplicate number fails, in either heading style, wherever it sits.
 - **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`
+
+## 056. A procedure carried out by hand five times is a harness that was not written
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here — `LESSONS.md` itself, on a branch
+  that met master five times before landing
+- **What happened:** #048 recorded the collision procedure — the side that landed
+  first keeps its numbers, the other block shifts as a unit, every citation to it
+  is repointed — and chose procedure over tooling: *"the controls that enforce it
+  already exist."* They enforce *existence*. On one pull request the procedure
+  then ran five times by hand. The fourth run used `sed`, in two sequential
+  passes, and repointed three of four citations to the wrong entry with
+  `check_lesson_refs` green, because a wrong citation still resolves (#046).
+  Mechanising the fifth run, and then **replaying the real conflict through the
+  mechanism**, found two more things the four hand runs had carried unseen:
+
+  1. **A displaced paragraph.** Nine lines of #021 (*"Closed the same day…"*)
+     had been cut out of their entry by an ordinary edit in this branch's own P3
+     commit — not by a merge — and were riding at the tail of whatever the
+     branch's newest entry was, through four merges and a green board. Nothing
+     reads entry *content*: the duplicate and gap checks are satisfied by
+     headings, and a paragraph that moves leaves both intact.
+  2. **A stale in-log cross-reference.** The follow-up appended to #021 said
+     `See LESSONS #034` — the number this branch's continue-on-error lesson had
+     carried two renumberings earlier. It resolved, to an unrelated entry.
+     `check_lesson_refs` deliberately does not read the log as a *source* of
+     citations, and every hand repoint grepped for the number the lesson had
+     *just* left, never the one before that.
+
+  Both have #046's shape: text that is wrong resolves, so no existence check can
+  see it, and to a reader `#034` looks like any other citation.
+
+- **Why a tool and not a better checklist:** the procedure needs one input a
+  reader cannot supply reliably — **which side wrote each `#050`**. In a
+  collision the token is on both sides and means a different lesson on each;
+  nothing in the text tells them apart. git does. `resolve_collision.py` rebuilds
+  the merge from BASE, KEEP and MOVE: the shared entries three-way merged (a
+  conflict there is refused as an edit conflict, not a collision), KEEP's block
+  verbatim, MOVE's block renumbered — headings, citations and re-cited
+  destinations rewritten in one pass computed on the original text — and every
+  other file's citations repointed by **line provenance**: a line KEEP has is
+  KEEP's and stays, a line it lacks is MOVE's and moves, a line both sides added
+  that the fork lacked is refused. Then the strict-against-loose list #048 asked
+  for: every `#N` on a moving-side line that names a moved number and was not
+  rewritten is printed for a human. Finding 1 is now a refusal (text deleted
+  from a shared entry on the moving side that reappears in its block); finding 2
+  is what provenance repoints, pinned by a fixture that adds a moving-side
+  citation to an *old* entry.
+
+- **Proven on the real conflict, not only on fixtures:** replaying this branch
+  against master in a scratch clone, the tool first **refused**, naming #021 and
+  eight of its nine lines (the ninth, `large.`, is shorter than the check's
+  floor) — that is how finding 1 surfaced. With the moving side repaired it
+  produced `LESSONS.md`, `CHANGELOG.md`, the L2 plan and `PLAYBOOK.md`
+  **byte-identical** to the hand resolution plus the repair. Its 26-check
+  self-test was then mutated ten ways — provenance always-keep, ambiguity never
+  refused, displaced text never refused, split range never refused, contiguity
+  unchecked, prefix conflict taken silently, arrow destinations left alone,
+  range members unwalked, edits applied front-to-back, prefix tail unnormalised
+  — and every mutant failed it, none by Traceback. The first draft refused the
+  real conflict for a *wrong* reason: the three prefixes differed only in their
+  trailing bytes (`` `\n`` / `` `\n\n---\n\n`` / `` `\n\n``) and a line-based
+  merge called that both sides editing one line. That is why "replay the real
+  thing" is in this entry and not just "write fixtures".
+
+- **Kit change:** `harnesses/lessons/resolve_collision.py` (new); `make check-kit`
+  runs its self-test; three rows in the gate-mutation table, one per verdict,
+  because one row would pin only their union (#050).
+- **Section amended:** README · harness table and the vendoring note; Makefile ·
+  check-kit; harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
+  OPERATING-GUIDE · closing note.

@@ -38,6 +38,11 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# When two branches append to the log they take the same numbers, and the
+	@# renumber that follows the merge is where citations go stale (LESSONS #048,
+	@# #056). The resolver does that renumber from git, by line provenance. Its
+	@# real run needs a merge in progress, so check-kit runs the self-test only.
+	@echo "== collision resolver self-test =="; $(PY) $(H)/lessons/resolve_collision.py --self-test
 	@# A port far slower than the C is a specific bug, not "the cost of Rust".
 	@# Self-test only here: the real gate needs both binaries and a matrix.
 	@echo "== perf gate ==";       $(PY) $(H)/perf/perf_gate.py --self-test

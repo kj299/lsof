@@ -182,3 +182,7 @@ record it). Nothing here is a redesign; all are additive to the proven spine.
 
 *This guide is itself subject to the compounding rule: when a port teaches a better
 way to spend tokens, compute, or risk, update it and log the lesson in `LESSONS.md`.*
+
+*When your branch's new entries collide with master's at merge time — they will,
+the next number is shared state — resolve that merge with
+`harnesses/lessons/resolve_collision.py`, not by hand (LESSONS #048, #056).*
