@@ -733,9 +733,26 @@ is the point of the message.
 
 **L(userns sockets)** holds a packet socket and two AF_UNIX sockets inside
 `unshare --user --map-root-user --net`, which grants `CAP_NET_RAW` *inside* the
-new user namespace and so needs no privilege on the host. Its two cases do run
-on an ordinary runner, and they are the only ones in the harness that reach the
-xattr-name path at all.
+new user namespace and so needs no privilege on the host. Its two cases are the
+only ones in the harness that reach the xattr-name path at all.
+
+**On the GitHub runner they skipped too**, which this section first claimed
+they would not. Measured on head `195d7eb`:
+
+```
+SKIP (no unprivileged user namespaces for `unshare --user --net`):
+  userns-sockets-show-the-kernels-protocol-name,
+  userns-sockets-kernel-protocol-name-fields
+87 cases, 0 unexplained divergence(s)
+```
+
+Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`, which
+blocks `unshare --user` for an unconfined binary. The differential job now
+clears it on the runner and probes the exact command before running, so the
+log says which way it went; the harness's own `SKIP` line, printed by name, is
+what decides — not the green board. Until a run shows those two cases as
+`MATCH`, **item 24 ships with no CI gate at all**, and the mutants that prove
+it are the two no unit test kills.
 
 Every new assertion was mutated. Six against the unit tests (no truncation,
 DEVICE/NODE swapped, hex instead of decimal, `type=SOCK_unknown`, no header

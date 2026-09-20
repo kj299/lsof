@@ -287,6 +287,37 @@ jobs:
           ./lsof -v 2>&1 | grep revision
       - name: build lsof-rs
         run: cargo build --release --bin lsof
+      - name: allow unprivileged user namespaces (fixture L)
+        # MEASURED, NOT ASSUMED: on head 195d7eb this runner skipped
+        #
+        #   SKIP (no unprivileged user namespaces for `unshare --user --net`):
+        #     userns-sockets-show-the-kernels-protocol-name,
+        #     userns-sockets-kernel-protocol-name-fields
+        #
+        # and those two cases are the ONLY thing in the repository that can
+        # fail for DIVERGENCES item 24 — no unit test kills either mutation,
+        # because naming a socket through its own namespace needs a live
+        # foreign namespace to execute. Skipped there, the fix ships ungated.
+        #
+        # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+        # which blocks `unshare --user` for an unconfined binary. Clearing it
+        # on an ephemeral runner VM restores a standard kernel feature for the
+        # length of one job; it is not a workaround for a missing privilege,
+        # and it does not make fixture K (real CAP_NET_RAW, host namespace)
+        # runnable — those three cases stay skipped and stay reported.
+        #
+        # NON-FATAL on purpose. The sysctl does not exist on 22.04 and may go
+        # away again; the authority on whether the cases ran is the harness's
+        # own SKIP line, printed by name, not this step. `|| true` here would
+        # hide the reason, so the status is echoed instead.
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 ||             echo "sysctl absent — nothing to relax on this kernel"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; fixture L will report itself unavailable"
+          if unshare --user --map-root-user --net true 2>&1; then
+            echo "probe OK: unprivileged user+net namespaces work, fixture L will run"
+          else
+            echo "probe FAILED: fixture L will skip, and the harness will name its cases"
+          fi
       - name: differential vs the C oracle
         run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
 
