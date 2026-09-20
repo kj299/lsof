@@ -35,19 +35,23 @@ The two are the netlink and packet sockets (§3). Every anon-inode kind, the
 `(deleted)` marking, the memfd, `/dev/shm`, and all sixteen `mem` rows match
 the C character for character.
 
-## 1. The gate row — the one genuinely incomplete thing
+## 1. The gate row — **closed 2026-09-20**
 
-`progress.json` today:
+`progress.json` when this was written, and today:
 
 ```
-lsof-backend-linux   fuzzed              ← two gates short
-lsof-backend-windows unsafe_audited
-lsof-cli             unsafe_audited
-lsof-core            unsafe_audited
+                      then        now
+lsof-backend-linux    fuzzed      unsafe_audited   ← two gates short, then not
+lsof-backend-windows  unsafe_audited
+lsof-cli              unsafe_audited
+lsof-core             unsafe_audited
 ```
 
-The Linux backend is now the **only** crate not at `unsafe_audited`, and the
-reason recorded in CI for that is wrong. The `miri` job says:
+Every crate in the workspace is now sanitizer-covered. What follows is the
+measurement that got it there, kept as written.
+
+The Linux backend was then the **only** crate not at `unsafe_audited`, and the
+reason recorded in CI for that was wrong. The `miri` job says:
 
 > the Linux backend reads live `/proc`, which miri cannot interpose
 
@@ -245,12 +249,14 @@ cancelled that hard gate, because `continue-on-error` is a step property and
 |---|---|---:|
 | `8a4b2ea` | 48 passed, 0 failed, 2 ignored | 2557 s |
 | `22a9882` | 55 passed, 0 failed, 2 ignored | 1216 s |
+| `195d7eb` | 55 passed, 0 failed, 2 ignored | 1464 s |
 
-Seven more tests in less than half the time — runner variance, not the suite,
-and a reminder that one timing is not a measurement. Locally the same command
-is ~295 s; the ~5700 `/proc` warnings account for the gap. **Two consecutive
-log-verified greens**, which is what the promotion rule asks for. Then
-`unsafe_audited`. Fix the
+The last two run the identical suite 20 % apart; the first runs *fewer* tests
+in twice the time. Runner variance, not the suite — and a reminder that one
+timing is not a measurement. Locally the same command is ~295 s; the ~5700
+`/proc` warnings account for the gap. **Three consecutive log-verified greens,
+so the row is promoted: `lsof-backend-linux` is `unsafe_audited`** and this
+section's "the one genuinely incomplete thing" no longer is. Fix the
 `miri` job comment, which currently states a falsehood. Extend
 `check_ledgers.py` to check the sanitizer ledger **per crate** — it is
 satisfied today by any one job existing anywhere in the workflow, which is what

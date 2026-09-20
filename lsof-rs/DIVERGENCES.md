@@ -736,7 +736,7 @@ is the point of the message.
 new user namespace and so needs no privilege on the host. Its two cases are the
 only ones in the harness that reach the xattr-name path at all.
 
-**On the GitHub runner they skipped too**, which this section first claimed
+**They skipped on the runner at first**, which this section originally claimed
 they would not. Measured on head `195d7eb`:
 
 ```
@@ -748,11 +748,29 @@ SKIP (no unprivileged user namespaces for `unshare --user --net`):
 
 Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`, which
 blocks `unshare --user` for an unconfined binary. The differential job now
-clears it on the runner and probes the exact command before running, so the
-log says which way it went; the harness's own `SKIP` line, printed by name, is
-what decides — not the green board. Until a run shows those two cases as
-`MATCH`, **item 24 ships with no CI gate at all**, and the mutants that prove
-it are the two no unit test kills.
+clears it on the ephemeral runner VM and probes the exact command before
+running. **Measured again on head `d8e2160`, it works:**
+
+```
+kernel.apparmor_restrict_unprivileged_userns = 1
+kernel.apparmor_restrict_unprivileged_userns = 0
+probe OK: unprivileged user+net namespaces work, fixture L will run
+[MATCH             ] userns-sockets-show-the-kernels-protocol-name
+[MATCH             ] userns-sockets-kernel-protocol-name-fields
+89 cases, 0 unexplained divergence(s)
+```
+
+89, up from 87: exactly the two cases fixture L contributes. **Item 24 is
+gated in CI**, which matters because both of its mutants pass all 160 unit
+tests. Fixtures J and K stay skipped — `unshare --net` wants real
+`CAP_SYS_ADMIN` and `AF_PACKET` wants real `CAP_NET_RAW`, and a user namespace
+grants neither — so the runner reaches 89 of the 95 cases this host runs, with
+the other six named on stderr every time.
+
+What decides is the harness's own `SKIP`/`MATCH` line, printed by name, and
+not the step that tries to enable the capability: a step reporting success and
+a gate actually running are different claims, which is the whole reason the
+87 above was caught at all.
 
 Every new assertion was mutated. Six against the unit tests (no truncation,
 DEVICE/NODE swapped, hex instead of decimal, `type=SOCK_unknown`, no header

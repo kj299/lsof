@@ -371,15 +371,17 @@ jobs:
     # that job and was killed by its timeout after 25m15s, having emitted no
     # `test result:` line at all.
     #
-    # MEASURED. Two completed runs, and they disagree by more than 2x:
+    # MEASURED. Three completed runs, spanning better than 2x:
     #
     #   8a4b2ea  48 passed; 0 failed; 2 ignored   2557.15s  (42m37s)
     #   22a9882  55 passed; 0 failed; 2 ignored   1216.62s  (20m17s)
+    #   195d7eb  55 passed; 0 failed; 2 ignored   1463.71s  (24m24s)
     #
-    # SEVEN MORE TESTS IN LESS THAN HALF THE TIME, so what dominates is runner
-    # variance, not what the suite does. One measurement would have read as a
-    # fact; it was the first number written into this comment and it was
-    # wrong as a characterisation.
+    # The last two run the IDENTICAL suite and differ by 20%; the first runs
+    # seven FEWER tests and takes over twice as long as the fastest. So what
+    # dominates is runner variance, not what the suite does. One measurement
+    # would have read as a fact; it was the first number written into this
+    # comment and it was wrong as a characterisation.
     #
     # Locally the same command is ~295s, so CI is 4-9x slower, and the log says
     # why itself: `warning: 5665 warnings emitted`. miri prints "files in
@@ -407,9 +409,14 @@ jobs:
     # crosses a step-level exemption. Isolation is the only thing that actually
     # makes a trial arm harmless.
     #
-    # progress.json is NOT advanced off `fuzzed` for lsof-backend-linux while
-    # this is here; the row moves in a later PR on consecutive log-verified
-    # greens, like the job above and asan-windows before it.
+    # PROMOTED. progress.json moved lsof-backend-linux from `fuzzed` to
+    # `unsafe_audited` on the three consecutive log-verified greens above -- the
+    # same rule, and the same evidence standard (the step log's `test result:`
+    # line, never the job status), that promoted the job above and asan-windows
+    # before it. The arm KEEPS `continue-on-error`: what the greens earned is
+    # the ledger row, not blocking authority. Turning it into a hard gate is a
+    # separate decision, and on a 20-43 minute job with 2x variance it is not
+    # obviously the right one.
     #
     # Validated locally on this exact toolchain rather than written blind:
     # clean it is `48 passed; 0 failed; 2 ignored`, and it has been shown to
