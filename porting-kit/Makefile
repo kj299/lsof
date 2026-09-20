@@ -45,7 +45,7 @@ check-kit:
 	    skeleton/THREAT-MODEL.md --template
 	@# When two branches append to the log they take the same numbers, and the
 	@# renumber that follows the merge is where citations go stale (LESSONS #048,
-	@# #056). The resolver does that renumber from git, by line provenance. Its
+	@# #057). The resolver does that renumber from git, by line provenance. Its
 	@# real run needs a merge in progress, so check-kit runs the self-test only.
 	@echo "== collision resolver self-test =="; $(PY) $(H)/lessons/resolve_collision.py --self-test
 	@# A port far slower than the C is a specific bug, not "the cost of Rust".
@@ -71,6 +71,16 @@ check-kit:
 	@# survivor count cannot quietly describe a subset (LESSONS #050/#052).
 	@echo "== gate-mutation self-test =="; $(PY) $(H)/gate-mutation/mutate_gates.py --self-test
 	@echo "== gate-mutation sweep =="; $(PY) $(H)/gate-mutation/mutate_gates.py .
+	@# The platform ledger. check_lesson_refs asks whether a cited entry exists;
+	@# this asks whether every platform the BUILD SYSTEM can select is actually
+	@# built by some CI provider, or waived on the record. It exists because
+	@# LESSONS #049 found four of six lsof dialects were live tested platforms
+	@# and three of them are tested by Cirrus and sourcehut — providers that
+	@# never appear in a GitHub check list, so deleting their trees would have
+	@# stayed green. The platform list is discovered from the tree, never read
+	@# from the ledger, so adding a dialect and forgetting the ledger fails.
+	@echo "== platform ledger self-test =="; $(PY) $(H)/platforms/check_platforms.py --self-test
+	@echo "== platform ledger ==";           $(PY) $(H)/platforms/check_platforms.py
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 

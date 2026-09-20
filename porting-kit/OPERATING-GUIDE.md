@@ -185,4 +185,4 @@ way to spend tokens, compute, or risk, update it and log the lesson in `LESSONS.
 
 *When your branch's new entries collide with master's at merge time — they will,
 the next number is shared state — resolve that merge with
-`harnesses/lessons/resolve_collision.py`, not by hand (LESSONS #048, #056).*
+`harnesses/lessons/resolve_collision.py`, not by hand (LESSONS #048, #057).*

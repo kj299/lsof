@@ -99,7 +99,7 @@ NEAR_ENTRY_RE = re.compile(r"^(#{1,6}\s*#?\d{1,3}[.:\s—-])", re.M)
 # its comments, and for as long as this list had no entry for it those
 # citations were checked by nothing — found when the collision resolver, which
 # walks with the same list, renumbered every scanned file and left the one it
-# never visited stale (LESSONS #056).
+# never visited stale (LESSONS #057).
 SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs", "Makefile")
 SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
 
@@ -215,7 +215,7 @@ def scan_citations(kit_root, lessons_path, also=()):
 # Whitespace was collapsed but `@#` was not, so the second member was never one: not
 # checked here, and not renumbered by the collision resolver, which walks the
 # same flattened text — found on that tool's first live run, whose loose pass
-# listed the token the strict rules had not touched (LESSONS #056). A marker
+# listed the token the strict rules had not touched (LESSONS #057). A marker
 # that opens a continuation line and is followed by whitespace and `#<digit>` is
 # swallowed with the line break. `\n#8)` is NOT — there the hash is the member's
 # own, and swallowing it would lose the member instead.

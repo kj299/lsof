@@ -231,6 +231,28 @@ MUTATIONS = [
      "why": "a number carried over from the source lineage is never accounted for",
      "cmd": ["harnesses/lessons/check_imports.py", "--self-test"]},
 
+    # The platform ledger has THREE independent verdicts. One row would pin only
+    # their union, so: one each, on the same reasoning as check_imports above.
+    {"gate": "platforms-completeness",
+     "file": "harnesses/platforms/check_platforms.py",
+     "old": "        if name not in ledger:",
+     "new": "        if False:",
+     "why": "a platform the build system can select need never appear in the ledger",
+     "cmd": ["harnesses/platforms/check_platforms.py", "--self-test"]},
+
+    {"gate": "platforms-evidence",
+     "file": "harnesses/platforms/check_platforms.py",
+     "old": "            if hit is None:",
+     "new": "            if False:",
+     "why": "a platform claiming CI builds it passes with no evidence anywhere",
+     "cmd": ["harnesses/platforms/check_platforms.py", "--self-test"]},
+
+    {"gate": "platforms-stale-waiver",
+     "file": "harnesses/platforms/check_platforms.py",
+     "old": "            if hit is not None:",
+     "new": "            if False:",
+     "why": "a waiver becomes a mute button: CI may build what is waived as unbuilt",
+     "cmd": ["harnesses/platforms/check_platforms.py", "--self-test"]},
     # The collision resolver has THREE independent refusal/rewrite verdicts, so
     # three rows: one fixture pins each, and one row would pin only their union.
     {"gate": "collision-provenance",

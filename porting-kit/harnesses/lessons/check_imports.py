@@ -278,7 +278,7 @@ def _expand_citations(text):
     # The checker's own flatten, not a bare whitespace collapse: a member that
     # continues on the next COMMENT line (`# (LESSONS #034,` / `# #14)`) has the
     # marker between separator and member, and a whitespace collapse leaves it
-    # there — the member is never read (LESSONS #056).
+    # there — the member is never read (LESSONS #057).
     flat, _offsets = C._flatten_map(text)
     out = []
     for head in C.CITE_RE.finditer(flat):

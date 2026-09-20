@@ -43,7 +43,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   inside the promoted miri job and the job's 25-minute timeout killed it —
   turning a hard gate from success to **cancelled** on the trial arm's first
   run. `continue-on-error` exempts a step's failure; `timeout-minutes` is a
-  job property and crosses that boundary (LESSONS #054). **Three consecutive
+  job property and crosses that boundary (LESSONS #055). **Three consecutive
   log-verified greens** — `48 passed / 2 ignored` in 2557 s, then `55 / 2` in
   1216 s and `55 / 2` in 1464 s. The last two run the identical suite 20 %
   apart and the first runs *fewer* tests in twice the time, so runner variance
@@ -69,7 +69,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   own earlier claim that miri would add almost nothing to a `forbid`-ed crate.
 
 - **The kit gained a merge resolver for `LESSONS.md` number collisions**
-  (`porting-kit/harnesses/lessons/resolve_collision.py`; LESSONS #056). This
+  (`porting-kit/harnesses/lessons/resolve_collision.py`; LESSONS #057). This
   branch met master five times, and each time both sides had appended entries
   under the same numbers. The procedure LESSONS #048 recorded was run by hand
   each time; the fourth run repointed three of four citations to the wrong

@@ -17,7 +17,7 @@
 > append to the log (LESSONS #048): the merge conflicts on `LESSONS.md`, and the
 > renumber that follows is where citations go stale. Resolve that with
 > `harnesses/lessons/resolve_collision.py` — run it during the conflicted merge,
-> read its plan, then re-run it with `--apply` — rather than by hand (LESSONS #056).
+> read its plan, then re-run it with `--apply` — rather than by hand (LESSONS #057).
 
 A reusable set of playbooks, working harnesses, an architecture skeleton, and
 session prompts for **safety-first C→Rust rewrites**. Distilled from a real port

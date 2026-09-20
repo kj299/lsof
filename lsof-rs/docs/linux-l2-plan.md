@@ -243,7 +243,7 @@ exclusion carrying its measured reason; land it observe-first per LESSONS #13,
 promote on consecutive log-verified greens. **As its own job, not a step** —
 the first attempt put it in the existing miri job and its 25-minute timeout
 cancelled that hard gate, because `continue-on-error` is a step property and
-`timeout-minutes` is a job one (LESSONS #054).
+`timeout-minutes` is a job one (LESSONS #055).
 
 | head | result | wall |
 |---|---|---:|
@@ -277,7 +277,7 @@ belongs:
   it did not. **No unit test kills that mutation**; only the new fixture L does;
 * the fuzz target's new arm was **unreachable** until the valid header was
   prepended to the input — proved by planting a panic in the row loop
-  (LESSONS #055).
+  (LESSONS #056).
 
 **P4 — the small options (1–2 days).** `-Z`, `-N`, then `-x`, `-X`, `-e`.
 
