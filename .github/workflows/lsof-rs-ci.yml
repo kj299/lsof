@@ -22,6 +22,25 @@ name: lsof-rs CI
 # `porting-kit/harnesses/**` is in the list because four of the gates below ARE
 # kit harnesses: a change to one of them changes what this workflow enforces,
 # and until it was added, editing a harness ran nothing at all.
+#
+# The C oracle's own sources are in the list for the same reason, one level
+# deeper. The differential job below builds the oracle FROM THIS TREE
+# (`autoreconf -vif && ./configure && make lsof`) and then diffs 87 cases
+# against it, so the C sources are an input to *this* pipeline, not only to
+# build.yml's. Scoping "the Rust workflow to the Rust paths and the C workflow
+# to the C paths" — which is how the kit phrased it — leaves the differential
+# comparing against an oracle whose definition can move without it re-running.
+# PR #86 edited lib/dialects/linux/machine.h, a header the oracle compiles, and
+# has four check runs with the differential not among them; that edit was safe
+# because its preprocessed output was compared by hand, not because CI said so.
+#
+# What is deliberately NOT here: Lsof.8 and the 00* docs (not compiled),
+# `Configure` (the legacy path — the oracle is built by autotools), tests/ and
+# check.bash (that is `make check`, not `make lsof`). What is here on purpose
+# despite not being oracle source: `lib/dialects/*/tests/**` rides along under
+# `lib/**`. A path filter fails in two directions and over-triggering is the
+# cheap one — an extra run costs minutes, a missing run costs the gate
+# (LESSONS #034; LESSONS #035).
 on:
   push:
     branches: [master]
@@ -32,6 +51,16 @@ on:
       - 'porting-kit/harnesses/**'
       - '!porting-kit/harnesses/**.md'
       - '.github/workflows/lsof-rs-ci.yml'
+      # the C oracle the differential job compares against
+      - 'src/**'
+      - 'lib/**'
+      - 'include/**'
+      - 'm4/**'
+      - 'autotools/**'
+      - 'configure.ac'
+      - 'Makefile.am'
+      - 'version'
+      - 'version.in'
   pull_request:
     paths:
       - 'lsof-rs/**'
@@ -40,6 +69,16 @@ on:
       - 'porting-kit/harnesses/**'
       - '!porting-kit/harnesses/**.md'
       - '.github/workflows/lsof-rs-ci.yml'
+      # the C oracle the differential job compares against
+      - 'src/**'
+      - 'lib/**'
+      - 'include/**'
+      - 'm4/**'
+      - 'autotools/**'
+      - 'configure.ac'
+      - 'Makefile.am'
+      - 'version'
+      - 'version.in'
 
 permissions:
   contents: read

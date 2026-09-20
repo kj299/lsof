@@ -1,21 +1,35 @@
 name: C/C++ CI
 
-# The Rust port's trees AND its workflow files are ignored: an edit to
-# lsof-rs's CI/release workflow can't affect the C build, but without these
-# entries it still kicked off all three heavyweight C jobs (the same waste the
-# tree-level ignores fixed — porting-kit LESSONS #005).
+# The Rust port's trees AND every workflow that cannot affect the C build are
+# ignored: an edit to lsof-rs's CI/release workflow, or to the porting kit's,
+# can't change what `./configure && make` produces, but without these entries it
+# still kicked off all three heavyweight C jobs — the macOS matrix and
+# `make distcheck` included (the same waste the tree-level ignores fixed —
+# porting-kit LESSONS #005).
+#
+# `porting-kit.yml` was the omission: `porting-kit/**` was ignored while the
+# kit's own workflow file was not, so PR #90 — four files, all of them kit —
+# ran the entire C matrix twice because one of them was `porting-kit.yml`.
+#
+# The list is enumerated rather than generalised to "every workflow but this
+# one", and `build.yml` is deliberately absent from it: a gate that ignores
+# edits to itself cannot be re-verified when you change it. Anything that can
+# alter the oracle — C sources, Configure, Makefile.am, the man pages, this
+# file — must still trigger these jobs.
 on:
   push:
     paths-ignore:
       - 'porting-kit/**'
       - 'lsof-rs/**'
       - '.github/workflows/lsof-rs-*.yml'
+      - '.github/workflows/porting-kit.yml'
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - 'porting-kit/**'
       - 'lsof-rs/**'
       - '.github/workflows/lsof-rs-*.yml'
+      - '.github/workflows/porting-kit.yml'
 
 jobs:
   linux:
