@@ -80,7 +80,9 @@ HEAD_RE = re.compile(r"^## (\d{3})\.\s*(.*?)\s*$", re.M)
 # `#6->#036` in a KIT-IMPORT marker. The number AFTER the arrow is this log's;
 # the one before it belongs to the source lineage and must never move.
 ARROW_RE = re.compile(r"->\s*#(\d{1,3})")
-# `# Local: #053, #054` in a KIT-IMPORT marker — this log's numbers.
+# `# Local: #NNN, #NNN` in a KIT-IMPORT marker — this log's numbers. (Written
+# with placeholders: a real-looking example here is a line the tool would
+# offer to renumber, and did, on its first live run.)
 LOCAL_RE = re.compile(r"\bLocal:\s*((?:#\d{1,3}[,\s]*)+)")
 HASHNUM_RE = re.compile(r"#(\d{1,3})")
 # The LOOSE pass: any `#N` at all. What this matches and the strict rules did
@@ -470,6 +472,7 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
                 k_added=[n for n, _ in k_added], m_added=[n for n, _ in m_added],
                 mapping=mapping, titles=titles, lessons_rel=lessons_rel,
                 keep_lessons=K, new_lessons=new_lessons, prefix_edits=p_edits,
+                merged_prefix=merged_prefix,
                 block_edits=m_edits, file_changes=file_changes, review=review)
 
 
@@ -481,9 +484,16 @@ def describe(plan, out=print):
         out("no collision: nothing to renumber")
     for old, new in plan.mapping.items():
         out(f"  #{old:03d} -> #{new:03d}  {plan.titles.get(old, '')}")
-    n_edits = len(plan.prefix_edits) + len(plan.block_edits)
-    if n_edits:
-        out(f"{plan.lessons_rel}: {n_edits} rewrite(s) inside the moved block")
+    if plan.block_edits:
+        heads = sum(1 for *_x, rule, _l in plan.block_edits if rule == "heading")
+        out(f"{plan.lessons_rel}: moved block — {heads} heading(s), "
+            f"{len(plan.block_edits) - heads} citation(s) rewritten")
+    # A rewrite in a SHARED entry is the moving side's own line inside an old
+    # lesson (a follow-up, a see-also). Listed one by one: these are exactly the
+    # citations a hand renumber misses, because nobody greps old entries.
+    for s, e, new, rule, line in plan.prefix_edits:
+        out(f"  {plan.lessons_rel}:{line}  #{plan.merged_prefix[s:e]} -> #{new}  "
+            f"({rule}, in a shared entry)")
     for rel, _old, _new, edits in plan.file_changes:
         for s, e, new, rule, line in edits:
             out(f"  {rel}:{line}  #{_old[s:e]} -> #{new}  ({rule})")
@@ -859,4 +869,10 @@ def _self_test():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        # `| head` closed the pipe: the reader has what it wanted. Redirect so
+        # the interpreter's own flush at exit does not print a second error.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)

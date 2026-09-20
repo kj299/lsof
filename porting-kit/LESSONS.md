@@ -2444,6 +2444,14 @@ gate you have not seen fail is a gate you have not tested.
   merge called that both sides editing one line. That is why "replay the real
   thing" is in this entry and not just "write fixtures".
 
+- **First live run, the same day** — the sixth collision, #96 having landed as
+  #054 while this branch held #054–#056. The plan was right on every file it
+  scanned and silent about one it never visited: the walk's suffix list had no
+  entry for `Makefile`, so the check-kit comment citing *this* entry was
+  invisible to `check_lesson_refs` and to the resolver alike. The loose pass
+  cannot list what the walk does not visit; Makefiles are scanned now, and the
+  checker's self-test pins it. It also offered to renumber a real-looking
+  example `Local:` marker in the tool's own comment — examples now read `#NNN`.
 - **Kit change:** `harnesses/lessons/resolve_collision.py` (new); `make check-kit`
   runs its self-test; three rows in the gate-mutation table, one per verdict,
   because one row would pin only their union (#050).

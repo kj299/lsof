@@ -95,7 +95,12 @@ ENTRY_RE = re.compile(r"^## (\d{3})\.", re.M)
 # tree silently resolved to the wrong one with this checker green.
 NEAR_ENTRY_RE = re.compile(r"^(#{1,6}\s*#?\d{1,3}[.:\s—-])", re.M)
 
-SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs")
+# `Makefile` is a suffix match too: the kit's check-kit target cites lessons in
+# its comments, and for as long as this list had no entry for it those
+# citations were checked by nothing — found when the collision resolver, which
+# walks with the same list, renumbered every scanned file and left the one it
+# never visited stale (LESSONS #056).
+SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs", "Makefile")
 SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
 
 
@@ -305,6 +310,14 @@ def _self_test():
         open(os.path.join(root, "PLAYBOOK.md"), "w").write(
             "cite (LESSONS #1) and (LESSONS #002).\n")
         check("resolving citations pass", run(root) == 0)
+
+    with tempfile.TemporaryDirectory() as root:
+        open(os.path.join(root, "LESSONS.md"), "w").write(entries)
+        open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations here\n")
+        # a Makefile comment is a citation like any other; this file type was
+        # outside the walk for the kit's whole life
+        open(os.path.join(root, "Makefile"), "w").write("\t@# see LESSONS #22\n")
+        check("a citation in a Makefile is scanned", run(root) == 1)
 
     with tempfile.TemporaryDirectory() as root:
         open(os.path.join(root, "LESSONS.md"), "w").write(entries)
