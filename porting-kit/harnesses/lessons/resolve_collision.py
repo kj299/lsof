@@ -443,7 +443,10 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
             if rel == lessons_rel:
                 continue
             try:
-                with open(os.path.join(repo, rel), encoding="utf-8") as fh:
+                # newline="" — no translation either way, so a CRLF file stays
+                # CRLF and an LF file stays LF on every platform (only digits
+                # change under an edit).
+                with open(os.path.join(repo, rel), encoding="utf-8", newline="") as fh:
                     text = fh.read()
             except (UnicodeDecodeError, OSError):
                 continue
@@ -507,10 +510,12 @@ def _span(nums):
 
 def apply_plan(repo, plan):
     written = [plan.lessons_rel]
-    with open(os.path.join(repo, plan.lessons_rel), "w", encoding="utf-8") as fh:
+    # newline="" here too: write exactly the bytes planned. LESSONS.md is rebuilt
+    # from git's blobs (LF as stored); git's own eol handling applies on add.
+    with open(os.path.join(repo, plan.lessons_rel), "w", encoding="utf-8", newline="") as fh:
         fh.write(plan.new_lessons)
     for rel, _old, new, _ in plan.file_changes:
-        with open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
+        with open(os.path.join(repo, rel), "w", encoding="utf-8", newline="") as fh:
             fh.write(new)
         written.append(rel)
     return written
@@ -599,11 +604,11 @@ def _self_test():
     def w(r, rel, text, append=False):
         p = os.path.join(r, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "a" if append else "w", encoding="utf-8") as fh:
+        with open(p, "a" if append else "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
 
     def read(r, rel):
-        with open(os.path.join(r, rel), encoding="utf-8") as fh:
+        with open(os.path.join(r, rel), encoding="utf-8", newline="") as fh:
             return fh.read()
 
     def commit(g, msg):
@@ -830,6 +835,19 @@ def _self_test():
         check("text the moving side cut from an old entry and carries in its block "
               "is refused as a displaced paragraph, naming the entry",
               msg is not None and "displaced" in msg and "from #002" in msg)
+
+    # --- line endings: a CRLF file keeps CRLF, only the digits change --------
+    # Python's default text mode on Windows translates newlines on read AND on
+    # write; a resolver that did that would rewrite every line of an LF file.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        collide(r, g, KEEP, "\n## 003. Move three\n\nmove body\n",
+                move_files=[("crlf.md", "one\r\ncites LESSONS #003 here\r\nthree\r\n")])
+        plan, msg = try_plan(r)
+        if msg is None:
+            apply_plan(r, plan)
+        check("a CRLF file is repointed byte-for-byte, keeping its line endings",
+              msg is None and read(r, "crlf.md") == "one\r\ncites LESSONS #004 here\r\nthree\r\n")
 
     # --- widths: `#9` -> `#10` grows the text under the edit after it --------
     check("a replacement wider than its original does not corrupt the next edit",
