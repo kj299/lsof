@@ -225,6 +225,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'L' => sel.show_links = true,
                 'H' => sel.human_size = true,
                 'X' => sel.skip_inet_tables = true,
+                'N' => sel.nfs_only = true,
                 'e' => {
                     // `-e s` / `+e s`. The value may be attached or the next
                     // word, and the C takes that word WHATEVER it is — a

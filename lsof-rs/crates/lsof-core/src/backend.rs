@@ -42,6 +42,9 @@ pub struct MountEntry {
     pub source_is_block: bool,
     /// The device of the mounted filesystem: the `st_dev` every file on it has.
     pub device: u64,
+    /// The file-system type as the host names it (`ext4`, `nfs4`, `tmpfs`).
+    /// Empty where the platform does not report one. `-N` selects on it.
+    pub fstype: String,
 }
 
 /// Errors a backend can report. Selection that simply yields no rows is *not*

@@ -41,6 +41,7 @@ pub fn load() -> Vec<MountEntry> {
                 source,
                 source_is_block,
                 device,
+                fstype: row.fstype,
             })
         })
         .collect()
@@ -51,6 +52,9 @@ pub fn load() -> Vec<MountEntry> {
 pub struct MountLine {
     pub source: String,
     pub dir: String,
+    /// Field 3 — the file-system type (`ext4`, `nfs4`, `tmpfs`). `-N` selects
+    /// on it, and nothing else here did, so it used to be discarded.
+    pub fstype: String,
 }
 
 /// The parsing half of [`load`]. Pure, so the fuzz target can drive it with
@@ -71,9 +75,15 @@ pub fn parse_mounts(text: &str) -> Vec<MountLine> {
         if dir.is_empty() {
             continue;
         }
+        // The type is field 3 and is NOT octal-escaped — the kernel writes it
+        // from the file system's own name, which cannot contain a space. A
+        // line truncated before it yields an empty type rather than dropping
+        // the mount, because the first two fields are still usable.
+        let fstype = f.next().unwrap_or_default().to_string();
         out.push(MountLine {
             source: unescape_octal(source),
             dir: unescape_octal(dir),
+            fstype,
         });
     }
     out
@@ -125,11 +135,13 @@ mod tests {
             vec![
                 MountLine {
                     source: "/dev/vda".into(),
-                    dir: "/".into()
+                    dir: "/".into(),
+                    fstype: "ext4".into()
                 },
                 MountLine {
                     source: "tmpfs".into(),
-                    dir: "/dev/shm".into()
+                    dir: "/dev/shm".into(),
+                    fstype: "tmpfs".into()
                 },
             ]
         );
@@ -181,5 +193,30 @@ mod tests {
                 assert_eq!(md.dev(), e.device, "device mismatch for {}", e.dir);
             }
         }
+    }
+    #[test]
+    fn the_file_system_type_is_field_three() {
+        // `-N` selects on it, and nothing else here did, so it was discarded.
+        // The type is NOT octal-escaped: the kernel writes the file system's
+        // own name, which cannot contain a space.
+        let t = "/dev/sda1 / ext4 rw,relatime 0 0\n\
+                 server:/export /mnt/nfs nfs4 rw 0 0\n\
+                 tmpfs /dev/shm tmpfs rw 0 0\n";
+        let m = parse_mounts(t);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].fstype, "ext4");
+        assert_eq!(m[1].fstype, "nfs4");
+        assert_eq!(m[1].dir, "/mnt/nfs");
+        assert_eq!(m[2].fstype, "tmpfs");
+        // A line cut short before field 3 still yields a usable mount — the
+        // first two fields are what every other caller needs.
+        let short = parse_mounts("/dev/sda1 /\n");
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].dir, "/");
+        assert_eq!(short[0].fstype, "");
+        // An escaped mount point keeps working alongside the new field.
+        let esc = parse_mounts("none /mnt/a\\040b nfs rw 0 0\n");
+        assert_eq!(esc[0].dir, "/mnt/a b");
+        assert_eq!(esc[0].fstype, "nfs");
     }
 }

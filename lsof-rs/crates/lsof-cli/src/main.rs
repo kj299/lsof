@@ -306,6 +306,22 @@ fn report_unmatched(
             println!("lsof: no Internet files located");
         }
     }
+    // `-N` is the same shape (`main.c`'s `Fnfs < 2`), and the message is the
+    // same sentence with the noun changed. Measured on a host with no NFS
+    // mount: `lsof -N` and `lsof -a -N -p 1` both exit 1, and so does
+    // `lsof -N -p 1`, which DOES list the pid's files — the `-N` item was
+    // still never located.
+    if sel.nfs_only
+        && !procs
+            .iter()
+            .flat_map(|p| &p.files)
+            .any(|f| f.fs_device.is_some_and(|d| sel.nfs_devices.contains(&d)))
+    {
+        unmatched += 1;
+        if print {
+            println!("lsof: no NFS files located");
+        }
+    }
 
     unmatched
 }
@@ -388,6 +404,17 @@ fn main() {
             _ => env.backend.mounts(),
         };
         sel.paths_identified = env.backend.identifies_paths();
+        // `-N` selects on file-system TYPE, so the mount table is what turns
+        // the flag into a set of devices a row can be compared against.
+        // `nfs` and `nfs4` are the two Linux spells; a type that merely starts
+        // with them (there is none today) is deliberately not matched.
+        if sel.nfs_only {
+            for m in &mounts {
+                if m.fstype == "nfs" || m.fstype == "nfs4" {
+                    sel.nfs_devices.insert(m.device);
+                }
+            }
+        }
         // `-e`/`+e` name a MOUNT POINT, and the C checks that before it does
         // anything else: `lsof: "-e /nosuch" is not a mounted file system.`,
         // then exit 1. A trailing slash is tolerated (`-e /dev/shm/` was
