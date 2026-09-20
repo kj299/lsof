@@ -20,6 +20,7 @@ repo-root `porting-kit/`; if you vendor it elsewhere, adjust the paths inside ea
 | `porting-kit-cflaw-scan` | 0 | once / per subsystem | low (tool + triage) | ∥ with oracle |
 | `porting-kit-oracle` | 2 | once, pre-Rust | medium (build corpus) | ∥ with cflaw-scan |
 | `porting-kit-module` | 4 | **per module (hot path)** | high (translate + iterate) | per-module ∥ (leaf order) |
+| `porting-kit-diff-fuzz` | 4 | per module (short) + nightly (long) | medium (budgeted wall-clock) | ∥ per module |
 | `porting-kit-audit` | 4–5 | per module + release | low (runs gates, reads verdicts) | — |
 | `porting-kit-retrospective` | end | once per phase — **never skip** | medium | — |
 

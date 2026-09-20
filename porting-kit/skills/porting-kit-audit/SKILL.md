@@ -27,7 +27,7 @@ oracle is at gate 2 of 6, not done.
 7. **Performance sanity** (synthesis): fail if a module is >1.3x the C median runtime —
    that's a specific bug (a copy, a missed release build, bounds checks in a hot loop),
    not "the cost of Rust".
-8. **CI hygiene** (LESSONS #5; LESSONS #035; LESSONS #036). Start by listing the CI
+8. **CI hygiene** (LESSONS #5; LESSONS #035; LESSONS #049). Start by listing the CI
    **providers**, not the check runs — the status list you habitually read covers
    one provider, and the checks below both assume you can see every job:
    `git ls-files | grep -E '^\.github/workflows/|^\.cirrus|^\.builds/|^\.travis|appveyor|gitlab-ci|woodpecker|\.drone'`,

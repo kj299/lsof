@@ -146,7 +146,9 @@ audit → retrospective`.
    "a vector must pass on C before it may judge Rust").
 
 **P1 — materially stronger:**
-4. **Differential fuzzing** harness (C vs Rust on shared fuzz inputs).
+4. ~~**Differential fuzzing** harness (C vs Rust on shared fuzz inputs).~~ **Done**
+   — `harnesses/diff-fuzz/diff_fuzz.py`, imported from the c2rust-port lineage.
+   Shares `diff_run.compare_one`, so the fuzzer and the matrix cannot disagree.
 5. **CI template hardening**: SHA-pin actions; split smoke/nightly for fuzz+sanitizers;
    add `cargo vet`, SBOM, `gitleaks` jobs.
 6. **`scan_c_flaws.py` depth**: add double-free / use-after-free / uninitialized-read
@@ -157,11 +159,16 @@ audit → retrospective`.
    aliasing reduction, `#ifdef` story) — currently prose only.
 
 **P2 — polish / breadth:**
-8. `normalize.py` rules as a per-project data file (currently code constants).
+8. ~~`normalize.py` rules as a per-project data file (currently code constants).~~
+   **Done** — `--rules FILE` (JSON/TOML) replaces the built-ins;
+   `--dump-default-rules` prints them as a starting point.
 9. `progress.py ingest` to parse harness JSON directly and auto-advance gates.
+   *(Partly prepared: `diff_run.py --json` now carries a `provenance` stamp for
+   ingest to verify. `ingest` does not read it yet, so it is a record, not a
+   control.)*
 10. Document the Windows/cross-platform caveats (sanitizers/Miri assume a Linux
     nightly toolchain).
-11. A `porting-kit-diff-fuzz` skill once #4 lands.
+11. ~~A `porting-kit-diff-fuzz` skill once #4 lands.~~ **Done** — `skills/porting-kit-diff-fuzz`.
 
 **How the kit closes these:** each is a candidate for a normal port's
 `porting-kit-retrospective` pass (the compounding loop is the delivery mechanism —
