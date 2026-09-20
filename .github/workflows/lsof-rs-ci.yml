@@ -371,25 +371,32 @@ jobs:
     # that job and was killed by its timeout after 25m15s, having emitted no
     # `test result:` line at all.
     #
-    # MEASURED, now that the first run has completed (head 8a4b2ea, job
-    # 106081061676):
+    # MEASURED. Two completed runs, and they disagree by more than 2x:
     #
-    #   test result: ok. 48 passed; 0 failed; 2 ignored; finished in 2557.15s
-    #   warning: 5666 warnings emitted
+    #   8a4b2ea  48 passed; 0 failed; 2 ignored   2557.15s  (42m37s)
+    #   22a9882  55 passed; 0 failed; 2 ignored   1216.62s  (20m17s)
     #
-    # 42m37s, against ~295s for the same command locally -- 8.7x. The warnings
-    # are the reason: miri prints "files in `/proc` can bypass the Abstract
-    # Machine", WITH A BACKTRACE, for every access, and reading /proc is all
-    # this crate does. 60 stands, at ~40% headroom over the measurement rather
-    # than as a guess; it is free, because the job is isolated and blocks
-    # nothing.
+    # SEVEN MORE TESTS IN LESS THAN HALF THE TIME, so what dominates is runner
+    # variance, not what the suite does. One measurement would have read as a
+    # fact; it was the first number written into this comment and it was
+    # wrong as a characterisation.
     #
-    # What it is NOT free of is wall time: this is now by far the longest job
-    # in the workflow (43 min against ~8 for the fuzz smoke), so the check
-    # suite stays yellow that long on every push. If that becomes the thing
-    # worth fixing, the lever is NARROWING WHAT IT RUNS -- the live-/proc tests
-    # are what generate the 5666 warnings, and the pure parsers are where the
-    # UB and leak surface actually is -- not raising this number again.
+    # Locally the same command is ~295s, so CI is 4-9x slower, and the log says
+    # why itself: `warning: 5665 warnings emitted`. miri prints "files in
+    # `/proc` can bypass the Abstract Machine", WITH A BACKTRACE, for every
+    # access, and reading /proc is all this crate does.
+    #
+    # 60 stays. Against the SLOWER of the two observations that is ~1.4x
+    # headroom, not the ~3x the faster one would suggest -- thinner than it
+    # looks, and the reason not to trim it. It is free anyway: the job is
+    # isolated and blocks nothing, which is the whole point of it being a job.
+    #
+    # What it is NOT free of is wall time. At 20-43 min this is the longest job
+    # in the workflow either way (the fuzz smoke, next longest, is ~8), so the
+    # check suite stays yellow that long on every push. If that becomes worth
+    # fixing, the lever is NARROWING WHAT IT RUNS -- the live-/proc tests are
+    # what generate the ~5700 warnings, and the pure parsers are where the UB
+    # and leak surface actually is -- not raising this number again.
     timeout-minutes: 60
     # OBSERVE-FIRST (LESSONS #13), and A JOB RATHER THAN A STEP BECAUSE OF HOW
     # THE FIRST ATTEMPT FAILED. `continue-on-error` is a step property;
