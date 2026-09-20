@@ -27,9 +27,14 @@ oracle is at gate 2 of 6, not done.
 7. **Performance sanity** (synthesis): fail if a module is >1.3x the C median runtime —
    that's a specific bug (a copy, a missed release build, bounds checks in a hot loop),
    not "the cost of Rust".
-8. **CI hygiene** (LESSONS #5): confirm each language/subtree's CI is path-scoped so
-   unrelated changes don't trigger heavyweight jobs or leave PRs misleadingly
-   "unstable"; see `porting-kit/harnesses/ci/porting-ci.template.yml`.
+8. **CI hygiene** (LESSONS #5; LESSONS #035): confirm each language/subtree's CI is
+   path-scoped so unrelated changes don't trigger heavyweight jobs or leave PRs
+   misleadingly "unstable"; see `porting-kit/harnesses/ci/porting-ci.template.yml`.
+   Then check the **other** direction, which a green board cannot show you: for
+   each job, list what it actually *reads* and confirm every one of those paths
+   wakes it. The differential job builds the C oracle, so the C sources belong in
+   the Rust workflow's trigger; omit them and the oracle can move without the gate
+   firing. An absent job looks exactly like a passing one.
 
 ## Report
 Emit a gate-status table via `python3 porting-kit/harnesses/progress/progress.py show`

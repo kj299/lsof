@@ -239,7 +239,7 @@ exclusion carrying its measured reason; land it observe-first per LESSONS #13,
 promote on consecutive log-verified greens. **As its own job, not a step** —
 the first attempt put it in the existing miri job and its 25-minute timeout
 cancelled that hard gate, because `continue-on-error` is a step property and
-`timeout-minutes` is a job one (LESSONS #034). Then `unsafe_audited`. Fix the
+`timeout-minutes` is a job one (LESSONS #036). Then `unsafe_audited`. Fix the
 `miri` job comment, which currently states a falsehood. Extend
 `check_ledgers.py` to check the sanitizer ledger **per crate** — it is
 satisfied today by any one job existing anywhere in the workflow, which is what
@@ -260,7 +260,7 @@ belongs:
   it did not. **No unit test kills that mutation**; only the new fixture L does;
 * the fuzz target's new arm was **unreachable** until the valid header was
   prepended to the input — proved by planting a panic in the row loop
-  (LESSONS #033).
+  (LESSONS #037).
 
 **P4 — the small options (1–2 days).** `-Z`, `-N`, then `-x`, `-X`, `-e`.
 

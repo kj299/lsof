@@ -10,15 +10,31 @@ name: porting-ci
 
 # LESSONS #5 — path-scope CI to what it actually builds. During a gradual port the
 # C tree and the Rust workspace coexist in one repo; an unscoped `on: [push]` runs
-# this whole safety pipeline on changes it cannot affect (docs, the C tree), wasting
-# CI and leaving PRs misleadingly "unstable" while unrelated jobs drain. Scope this
-# Rust workflow to the Rust paths, and scope the C workflow to the C paths, so each
-# change triggers only the pipeline that can be affected by it. Tune the globs.
+# this whole safety pipeline on changes it cannot affect (docs), wasting CI and
+# leaving PRs misleadingly "unstable" while unrelated jobs drain. Tune the globs.
+#
+# LESSONS #035 — but scope it to what it BUILDS, which is not the same as "the
+# Rust paths". The differential job below builds the C oracle and compares the
+# port against it, so **the C sources are an input to this workflow too**. An
+# earlier version of this template said "scope this Rust workflow to the Rust
+# paths, and scope the C workflow to the C paths"; follow that and a C change
+# moves the oracle while the gate that enforces conformance to it does not
+# re-run. The port can drift from its own specification with every check green.
+#
+# So the C source globs below are NOT optional decoration — they are the second
+# half of the differential gate. Replace them with your C tree's real layout
+# (what `make <binary>` actually compiles: sources, headers, build system), and
+# leave out what cannot change the binary: man pages, docs, the C test suite.
+# When unsure, include it. A path filter fails in two directions and they are
+# not symmetric — an extra run costs minutes, a missing run costs the gate
+# (LESSONS #034).
 on:
   push:
-    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml']
+    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml',
+            'src/**', 'lib/**', 'include/**', 'configure.ac', 'Makefile.am']
   pull_request:
-    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml']
+    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml',
+            'src/**', 'lib/**', 'include/**', 'configure.ac', 'Makefile.am']
 
 permissions:
   contents: read

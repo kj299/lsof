@@ -1355,7 +1355,116 @@ the emphasized half.
 - **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`,
   `porting-kit/Makefile`, `.github/workflows/porting-kit.yml`
 
-## 034. `continue-on-error` is a step property; `timeout-minutes` is a job property
+## 034. A path filter fails in two directions and they look identical from outside
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `build.yml` / `lsof-rs-ci.yml` triggers
+- **What happened:** `build.yml` ignored `porting-kit/**` but not
+  `.github/workflows/porting-kit.yml`, so a PR whose four files were *all* kit
+  files ran the entire C matrix — macOS, `make distcheck`, twice over — because
+  one of them happened to be the kit's own workflow. Adding the missing entry is
+  a two-line fix, and the file's own header had already written the argument for
+  it about `lsof-rs-*.yml`.
+
+  That is the cheap direction. **Auditing it turned up the expensive one in the
+  same pass**, which is the point of this entry. `lsof-rs-ci.yml` builds the
+  differential oracle *from this tree*:
+
+      autoreconf -vif && ./configure && make -j lsof
+
+  and then diffs 87 cases against it. Its trigger is `lsof-rs/**`,
+  `porting-kit/harnesses/**`, and its own file. **The C tree is not in that
+  list.** A change to a C source, a dialect header, `configure.ac` or
+  `Makefile.am` can change what the oracle *is*, and the gate that compares the
+  port against the oracle does not re-run.
+
+  Not hypothetical: PR #86 edited `lib/dialects/linux/machine.h`, a header the
+  oracle compiles. It has four check runs and `differential (linux, vs the C)`
+  is not among them. That edit was safe because I preprocessed the translation
+  unit before and after by hand and got byte-identical output — **CI had no
+  opinion**. The port's specification can move without the gate that enforces
+  conformance to it firing.
+
+  So: **a path filter has two failure modes and a green board shows the same
+  thing for both.** Over-triggering wastes runner minutes and is obvious the
+  moment anyone looks at a PR's check list. Under-triggering removes a gate and
+  is invisible precisely when it matters — the absent job looks exactly like a
+  job that had nothing to complain about. When you touch one filter, enumerate
+  what each job actually *reads* and compare it against what wakes that job;
+  the two failures are found by one audit and fixed by opposite edits
+  (LESSONS #031: when a control is wrong in one direction, test the other
+  direction in the same pass).
+
+  **This entry does not close the second gap, and by LESSONS #033's own standard
+  that makes it a note rather than a control.** Widening `lsof-rs-ci.yml` to the
+  C tree makes the heavy Rust matrix fire on every oracle edit, which is a cost
+  the repository's owner should choose rather than one I should assume. It is
+  named here so the next person does not have to rediscover it, and it stays
+  unenforced until someone wires it.
+
+- **Kit change:** none — this is a host-repo CI fix. `.github/workflows/build.yml`
+  ignores `.github/workflows/porting-kit.yml`. The ignore list is enumerated
+  rather than generalised to "every workflow but this one", and `build.yml` is
+  deliberately absent from its own list: a gate that ignores edits to itself
+  cannot be re-verified when you change it.
+- **Section amended:** `.github/workflows/build.yml`
+
+## 035. A differential gate's trigger must cover both sides of the comparison
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `lsof-rs-ci.yml`, and the kit's own CI template
+- **What happened:** LESSONS #034 named this and left it unfixed. Fixing it found
+  that the kit was **teaching** it.
+
+  `lsof-rs-ci.yml`'s differential job builds the C oracle from this tree —
+  `autoreconf -vif && ./configure && make lsof` — and diffs 87 cases against it.
+  Its trigger listed `lsof-rs/**`, `porting-kit/harnesses/**` and its own file.
+  The C sources were not in it. So a change to `src/**`, `lib/**`, a dialect
+  header, `configure.ac` or `Makefile.am` could change **what the oracle is**
+  while the gate that enforces conformance to the oracle did not re-run: the
+  port drifts from its own specification and every check is green.
+
+  Verified against history rather than asserted. PR #86 edited
+  `lib/dialects/linux/machine.h`, a header the oracle compiles; it has four
+  check runs and the differential is not among them. Simulating GitHub's `paths`
+  matching — validated first against what GitHub actually did on five real PRs,
+  two of them negatives — #86's exact file set goes from not-triggering to
+  triggering under the corrected filter.
+
+  **The kit shipped the same defect as advice.** `harnesses/ci/porting-ci.template.yml`
+  has a `differential vs C oracle` job that builds the oracle, a trigger of
+  `['crates/**', 'Cargo.toml', 'Cargo.lock', ...]` with no C paths at all, and a
+  header telling the reader to
+
+  > *"Scope this Rust workflow to the Rust paths, and scope the C workflow to the
+  > C paths, so each change triggers only the pipeline that can be affected by it."*
+
+  That sentence is the bug stated as a principle. "The pipeline that can be
+  affected by it" is exactly right and the inference drawn from it is exactly
+  wrong: a C change **does** affect the Rust pipeline, because the Rust pipeline
+  compiles the C. Every port that copied this template inherited a differential
+  gate blind to its own reference. The same framing had spread to
+  `OPERATING-GUIDE.md` and the audit skill.
+
+  So: **scope a workflow to what it builds, not to the language its directory
+  implies.** For each job, list what it actually reads and confirm every one of
+  those paths wakes it. And the two directions of a path-filter bug are not
+  symmetric, which is why the audit has to be deliberate: over-triggering wastes
+  minutes and announces itself in every PR's check list, while under-triggering
+  removes a gate and is invisible, because **an absent job looks exactly like a
+  passing one**. When unsure, include the path.
+
+- **Kit change:** `harnesses/ci/porting-ci.template.yml` carries C source globs in
+  its trigger as a labelled, required part of the differential gate rather than
+  omitting them, and its header now says why. `OPERATING-GUIDE.md`'s path-scoping
+  bullet and `skills/porting-kit-audit/SKILL.md`'s CI-hygiene step both gained the
+  second direction: enumerate what each job reads and confirm it is in the trigger.
+- **Section amended:** `porting-kit/harnesses/ci/porting-ci.template.yml`,
+  `porting-kit/OPERATING-GUIDE.md`,
+  `porting-kit/skills/porting-kit-audit/SKILL.md`,
+  `.github/workflows/lsof-rs-ci.yml`
+
+## 036. `continue-on-error` is a step property; `timeout-minutes` is a job property
 
 **What happened.** The observe-first miri arm for `lsof-backend-linux` was
 added as a `continue-on-error: true` STEP inside the existing, promoted miri
@@ -1397,7 +1506,7 @@ and that is a reason to isolate it rather than a reason to skip it.
   is simply unreachable from where the gate runs before concluding the work is
   large.
 
-## 035. A fuzz target can name a parser it never reaches — plant a fault and watch
+## 037. A fuzz target can name a parser it never reaches — plant a fault and watch
 
 **What happened.** `/proc/net/packet` got a parser, and the repository's
 `proc_net` fuzz target got a line calling it. Sixty seconds, 133,262 runs, no
@@ -1465,6 +1574,20 @@ gate you have not seen fail is a gate you have not tested.
   So the checker now also rejects a heading that *looks* like an entry and is
   not one: `### #034 —`, `## 34.`, `#### 007:`. Zero of those exist in the
   current file, which is the only reason the rule can be strict. The stray
-  entry is renumbered #034 and moved into the series, and the section it used
-  to sit under keeps a one-line pointer to it.
+  entry is renumbered and moved into the series, and the section it used to sit
+  under keeps a one-line pointer to it.
+
+  **Then it happened again, twice, on the merge that carried this entry.**
+  Master had meanwhile gained its own `034` and `035` from the parallel branch,
+  so the two numbers written here — one of them *this* entry — collided the
+  moment the branches met. They are now #036 and #037. The next number in an
+  append-only log is shared mutable state that git cannot merge, and two
+  sessions days apart will take it twice; this is not a rare race.
+
+  What caught it was **git**, not a harness: both branches appended at the end
+  of the same file, so the merge conflicted. That defence is real but partial —
+  it works only because both wrote at the same place. The original `032` was
+  inserted *mid-file* and merged cleanly, which is exactly why it went
+  unnoticed. The checker is the part that covers that case: after this change
+  any duplicate number fails, in either heading style, wherever it sits.
 - **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`
