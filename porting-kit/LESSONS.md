@@ -1214,3 +1214,61 @@ the emphasized half.
   Eight self-test cases pin both directions, each one a shape taken from a real
   workflow in this repository.
 - **Section amended:** `porting-kit/harnesses/ledgers/check_ledgers.py`
+
+## 032. The tool you scope a fix with can have the defect you are fixing
+
+- **Date:** 2026-09-19
+- **Codebase:** lsof-rs (C `lsof` → Rust) — `check_lesson_refs.py`, citation lists
+- **What happened:** LESSONS #31 named this as the next candidate: the lesson
+  cross-reference checker matched `LESSONS\s+#(\d{1,3})` and stopped, so a
+  citation *list* — `(LESSONS #29, #31)` — was validated on its first number
+  only. The kit writes citations three ways, and only the first was ever read:
+
+      LESSONS #6, #8    LESSONS #017, #019, #021      a list
+      LESSONS #9/#13                                  a list, slashed
+      LESSONS #6–#10    LESSONS #017–#021             a RANGE: 6,7,8,9,10
+
+  A range is the sharper case, because the number of entries it claims is not
+  the number of `#` tokens it contains: `#017–#021` asserts that five entries
+  exist and the checker confirmed one. Across the kit, **19 individual
+  citations were invisible to the gate** — a quarter of the 79 it reported.
+
+  The instructive part is how the scope was measured. I enumerated the citation
+  shapes with `grep -rnoE`, found ten, and predicted the fix would make 17 more
+  citations visible. It made 19. The two I missed were a range written
+
+      ... the kit's three post-ship dry-runs (LESSONS
+         #2–#4) each found a defect *in a harness* ...
+
+  **wrapped across a line break — the one shape `_flatten()` exists in this very
+  file to handle, and the one shape a line-oriented `grep` cannot see.** The
+  tool I scoped the fix with had the same blind spot as the code I was fixing,
+  so it under-reported the thing it was measuring, and it under-reported it
+  *silently* and *plausibly*. Had I trusted the survey instead of diffing the
+  two parsers over the real corpus, the PR would have shipped with a confident,
+  specific, wrong number in it.
+
+  So: **a survey that scopes a fix is itself a measurement, and it fails the
+  same way the target does.** Verify scope by running the old and new
+  implementations over the real corpus and diffing, not by grepping for what
+  you expect to find. The diff is cheap, it is exhaustive, and it does not
+  share the defect.
+
+  A second, smaller trap: this harness scans `.py` files inside the kit, so it
+  **scans its own source**, and a deliberately-malformed fixture written as a
+  string literal became a real finding against the kit — the gate failed on its
+  own test data. Then the *expected error message* (`"cites LESSONS #9–#2 — a
+  range that runs backwards"`) failed it a second time, because the message
+  describing a bad citation is itself a bad citation. The malformed fixtures
+  now assemble the keyword at run time; the valid ones stay literal, since they
+  resolve and cost nothing. This is LESSONS #31's shape from the other side:
+  there, prose was mistaken for a fact; here, a fixture was.
+
+- **Kit change:** `harnesses/lessons/check_lesson_refs.py` gains `expand()`,
+  which walks a citation's continuations and expands ranges, and `CONT_RE`,
+  which deliberately allows padding around a list separator but not around a
+  range dash — so the ordinary sentence `LESSONS #26 — #5 says otherwise` is
+  not read as a backwards range. Seventeen self-test cases pin both directions,
+  including three that assert the parser does *not* over-read: `PR #86`
+  following a citation, a padded dash, and a following sentence.
+- **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`
