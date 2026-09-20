@@ -2444,14 +2444,21 @@ gate you have not seen fail is a gate you have not tested.
   merge called that both sides editing one line. That is why "replay the real
   thing" is in this entry and not just "write fixtures".
 
-- **First live run, the same day** — the sixth collision, #96 having landed as
-  #054 while this branch held #054–#056. The plan was right on every file it
-  scanned and silent about one it never visited: the walk's suffix list had no
-  entry for `Makefile`, so the check-kit comment citing *this* entry was
-  invisible to `check_lesson_refs` and to the resolver alike. The loose pass
-  cannot list what the walk does not visit; Makefiles are scanned now, and the
-  checker's self-test pins it. It also offered to renumber a real-looking
-  example `Local:` marker in the tool's own comment — examples now read `#NNN`.
+- **First live run, the same day** — the sixth collision: another branch had
+  landed on the very number this branch's first new entry carried, with two
+  more behind it. The plan was right on every file it scanned and silent about
+  one it never visited: the walk's suffix list had no entry for `Makefile`, so
+  the check-kit comment citing *this* entry was invisible to `check_lesson_refs`
+  and to the resolver alike. Scanned, the same comment surfaced a second
+  blindness in the REVIEW list: the citation wraps onto a second comment line,
+  and the `@#` between the separator and the member meant the member was never
+  read — by either tool, for as long as the kit has had that comment. The
+  flatten step both tools share now swallows a continuation line's comment
+  marker (and only that: `\n#8)` keeps its hash, which is the member's own).
+  It also offered to renumber a real-looking example `Local:` marker in the
+  tool's own comment — examples now read `#NNN`. Two findings the loose pass
+  made and the strict rules could not have: the list exists so that what the
+  rules do not recognise is seen rather than kept.
 - **Kit change:** `harnesses/lessons/resolve_collision.py` (new); `make check-kit`
   runs its self-test; three rows in the gate-mutation table, one per verdict,
   because one row would pin only their union (#050).

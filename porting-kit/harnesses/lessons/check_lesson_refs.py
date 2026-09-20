@@ -206,31 +206,62 @@ def scan_citations(kit_root, lessons_path, also=()):
                         yield (rel, lines[off], None, msg)
 
 
-def _flatten(text):
-    """Collapse whitespace runs to one space; return (flat, line_of_each_char).
+# A citation wrapped onto the next line INSIDE A COMMENT carries that line's
+# comment marker between the separator and the next member:
+#
+#     @# ... is where citations go stale (LESSONS #048,
+#     @# #0NN). The resolver ...
+#
+# Whitespace was collapsed but `@#` was not, so the second member was never one: not
+# checked here, and not renumbered by the collision resolver, which walks the
+# same flattened text — found on that tool's first live run, whose loose pass
+# listed the token the strict rules had not touched (LESSONS #056). A marker
+# that opens a continuation line and is followed by whitespace and `#<digit>` is
+# swallowed with the line break. `\n#8)` is NOT — there the hash is the member's
+# own, and swallowing it would lose the member instead.
+CONT_COMMENT_RE = re.compile(r"[ \t]*(?:@#|#|//+|\*|--|;+)[ \t]+(?=#\d)")
 
-    A run of whitespace is emitted as a single space carrying the line number of
-    its *first* character, so a citation broken after "LESSONS" is reported on
-    the line where it starts.
+
+def _flatten_map(text):
+    """Collapse whitespace runs to one space; return (flat, orig_offset_of_each_char).
+
+    A run of whitespace is emitted as a single space carrying the offset of its
+    *first* character, so a citation broken after "LESSONS" is reported on the
+    line where it starts, and a tool editing the original can find each member's
+    own digits. Shared with the collision resolver, so the two agree on what a
+    citation is.
     """
-    out, lines = [], []
-    lineno = 1
+    out, idx = [], []
     i, n = 0, len(text)
     while i < n:
-        ch = text[i]
-        if ch.isspace():
-            start_line = lineno
-            while i < n and text[i].isspace():
-                if text[i] == "\n":
-                    lineno += 1
-                i += 1
+        if text[i].isspace():
+            j, saw_newline = i, False
+            while j < n and text[j].isspace():
+                saw_newline = saw_newline or text[j] == "\n"
+                j += 1
+            if saw_newline:
+                m = CONT_COMMENT_RE.match(text, j)
+                if m:
+                    j = m.end()
             out.append(" ")
-            lines.append(start_line)
+            idx.append(i)
+            i = j
         else:
-            out.append(ch)
-            lines.append(lineno)
+            out.append(text[i])
+            idx.append(i)
             i += 1
-    return "".join(out), lines
+    return "".join(out), idx
+
+
+def _flatten(text):
+    """(flat, line_of_each_flat_char) — `_flatten_map` with lines for reporting."""
+    flat, idx = _flatten_map(text)
+    lines, lineno, last = [], 1, 0
+    for off in idx:
+        lineno += text.count("\n", last, off)
+        last = off
+        lines.append(lineno)
+    return flat, lines
 
 
 def run(kit_root, also=()):
@@ -384,6 +415,18 @@ def _self_test():
           cited("(LESSONS #2-#4)")[0] == [2, 3, 4])
     check("'and' joins a citation",
           cited("(LESSONS #6 and #8)")[0] == [6, 8])
+
+    # A continuation that lands on the next COMMENT line: the marker sits between
+    # the separator and the member. This exact shape shipped in the kit's own
+    # Makefile, unread by this checker for as long as it stood.
+    check("a member continued on the next Makefile comment line is read",
+          cited("\t@# stale (LESSONS #6,\n\t@# #8).")[0] == [6, 8])
+    check("...and on the next '#' comment line (shell, YAML)",
+          cited("    # see (LESSONS #6,\n    # #8)")[0] == [6, 8])
+    check("...and on the next '//' comment line",
+          cited("// (LESSONS #6,\n// #8)")[0] == [6, 8])
+    check("a hash that opens the next line is the member's own, not a marker",
+          cited("(LESSONS #1,\n#2)")[0] == [1, 2])
 
     # Both halves of the boundary. A gate that over-reads prose is a gate people
     # route around, so these matter as much as the cases above.

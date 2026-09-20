@@ -275,7 +275,11 @@ def _expand_citations(text):
     slipped through here, twice."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import check_lesson_refs as C  # noqa: E402
-    flat = re.sub(r"\s+", " ", text)
+    # The checker's own flatten, not a bare whitespace collapse: a member that
+    # continues on the next COMMENT line (`# (LESSONS #034,` / `# #14)`) has the
+    # marker between separator and member, and a whitespace collapse leaves it
+    # there — the member is never read (LESSONS #056).
+    flat, _offsets = C._flatten_map(text)
     out = []
     for head in C.CITE_RE.finditer(flat):
         members, _errs = C.expand(flat, head)
@@ -535,6 +539,17 @@ def _self_test():
         "# Re-cited: #6->#034\n"
         "# the fail-closed rule (LESSONS #034, #14.)\n"})
     chk("a comma continuation member (`#034, #14`) is caught in a FILE",
+        any("#14" in p for p in probs))
+
+    # The same continuation, wrapped onto the next comment line — the shape the
+    # kit's own Makefile carried, unread by every checker until the collision
+    # resolver's loose pass listed the token.
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "# Re-cited: #6->#034\n"
+        "# the fail-closed rule (LESSONS #034,\n"
+        "#                      #14)\n"})
+    chk("a member continued on the next COMMENT line is caught in a FILE",
         any("#14" in p for p in probs))
 
     n, probs = run_files({"skills/s/SKILL.md":

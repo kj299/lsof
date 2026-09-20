@@ -70,7 +70,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from check_lesson_refs import (CITE_RE, CONT_RE, ENTRY_RE, SCAN_EXTS,  # noqa: E402
-                               SKIP_DIRS, run as check_refs)
+                               SKIP_DIRS, _flatten_map, run as check_refs)
 
 KIT_ROOT = os.path.dirname(os.path.dirname(HERE))
 
@@ -161,27 +161,6 @@ def split_entries(text):
         end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
         out.append((int(m.group(1)), text[m.start():end]))
     return text[:heads[0].start()], out
-
-
-def _flatten_map(text):
-    """Collapse whitespace runs to one space, keeping each flat character's
-    offset in the original — so a citation wrapped across lines is matched as
-    one and its digits are still edited in place."""
-    out, idx = [], []
-    i, n = 0, len(text)
-    while i < n:
-        if text[i].isspace():
-            j = i
-            while j < n and text[j].isspace():
-                j += 1
-            out.append(" ")
-            idx.append(i)
-            i = j
-        else:
-            out.append(text[i])
-            idx.append(i)
-            i += 1
-    return "".join(out), idx
 
 
 def _line_of(text, off):
@@ -671,7 +650,8 @@ def _self_test():
                             ("tool.py", "# Re-cited: #6->#003\n")],
                 move_files=[("mdoc.md", "move cites LESSONS #3, a list (LESSONS #003, "
                                         "#005), a range (LESSONS #003–#005).\n"),
-                            ("doc.md", "move adds LESSONS #004.\n")])
+                            ("doc.md", "move adds LESSONS #004.\n"),
+                            ("cdoc.py", "# see (LESSONS #003,\n# #005) here\n")])
         conflicted = read(r, "kit/LESSONS.md")
         check("the fixture really collides: git left markers", "<<<<<<<" in conflicted)
         plan, msg = try_plan(r)
@@ -702,6 +682,8 @@ def _self_test():
         check("the moving side's list and range are repointed member by member",
               read(r, "mdoc.md") == "move cites LESSONS #4, a list (LESSONS #004, #006), "
                                     "a range (LESSONS #004–#006).\n")
+        check("a citation wrapped onto a second comment line is repointed whole",
+              read(r, "cdoc.py") == "# see (LESSONS #004,\n# #006) here\n")
         check("in a SHARED file only the line the moving side added is repointed",
               read(r, "doc.md") == "cites (LESSONS #1).\nmove adds LESSONS #005.\n")
         check("a `#3` no rule recognised is listed for review, not rewritten",
