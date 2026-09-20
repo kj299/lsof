@@ -126,6 +126,44 @@ def _self_test():
         check("render marks the done module", "DONE" in out)
         check("render shows partial progress", "differential" in out)
         check("render counts 1/3 fully gated", "1/3 modules fully gated" in out)
+
+        # `ingest` had NO self-test at all — the gate-mutation sweep found it by
+        # neutralizing its verdict (`undocumented == 0` -> True) and watching
+        # this suite stay green. That verdict is the whole gate: it decides
+        # whether an unsafe-audit report is clean enough to advance a module to
+        # its final state. Both directions are pinned below, because a check
+        # that only ever sees a clean report proves detection and never refusal
+        # (LESSONS #036).
+        q = os.path.join(d, "ingest.json")
+        cmd_init(q, ["sockets", "handles", "process"])
+        cmd_set(q, "sockets", "sanitized")
+        cmd_set(q, "handles", "sanitized")
+        cmd_set(q, "process", "differential")
+
+        clean = os.path.join(d, "sockets.json")
+        open(clean, "w").write(json.dumps({"undocumented": 0, "total": 12}))
+        dirty = os.path.join(d, "handles.json")
+        open(dirty, "w").write(json.dumps({"undocumented": 3, "total": 9}))
+        silent = os.path.join(d, "process.json")
+        open(silent, "w").write(json.dumps({"total": 4}))  # no `undocumented` key
+
+        cmd_ingest(q, [clean, dirty, silent])
+        st = load(q)
+        check("ingest advances a sanitized module on a CLEAN audit report",
+              st["modules"]["sockets"] == "unsafe_audited")
+        check("ingest does NOT advance on a report with undocumented unsafe",
+              st["modules"]["handles"] == "sanitized")
+        check("a report missing `undocumented` is treated as dirty, not clean",
+              st["modules"]["process"] == "differential")
+
+        # Conservative by design: only `sanitized` advances. A module earlier in
+        # the chain must not jump the gates it has not passed.
+        cmd_set(q, "process", "ported")
+        p_clean = os.path.join(d, "process-clean.json")
+        open(p_clean, "w").write(json.dumps({"undocumented": 0}))
+        cmd_ingest(q, [p_clean])
+        check("ingest never skips gates: a `ported` module stays put",
+              load(q)["modules"]["process"] == "ported")
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

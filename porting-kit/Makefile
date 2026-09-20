@@ -38,6 +38,13 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# The gate above the gates: neutralize each gate's crown verdict in a scratch
+	@# copy and require its own self-test to go red. A self-test that stays green
+	@# over a dead verdict is pinning nothing. The sweep also AUDITS ITS OWN TABLE
+	@# — any harness with a self-test and no mutation entry fails the run, so the
+	@# survivor count cannot quietly describe a subset (LESSONS #049/#051).
+	@echo "== gate-mutation self-test =="; $(PY) $(H)/gate-mutation/mutate_gates.py --self-test
+	@echo "== gate-mutation sweep =="; $(PY) $(H)/gate-mutation/mutate_gates.py .
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 
