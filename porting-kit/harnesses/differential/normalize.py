@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# KIT-IMPORT: from the c2rust-port lineage of this kit. No LESSONS citations.
 """Output normalization for differential testing — importable + CLI.
 
 The C oracle and the Rust rewrite will differ in *nondeterministic* ways that are
@@ -12,13 +13,22 @@ Rules are data (REGEX list + flags), so a new port tunes them without editing
 logic. Keep them symmetric: whatever you erase from the oracle you erase from the
 Rust, or you manufacture a divergence.
 
+Per-project rules live in a file: `--rules FILE` (JSON/TOML — a list of objects
+with `name`, `regex`, `replacement`) REPLACES the built-in defaults, so a port
+masks its own tokens (session ids, request ids, temp paths) without editing this
+harness. `--dump-default-rules` prints the built-ins as such a file, so you start
+from them and tune rather than rewrite. No `--rules` → the defaults are the
+fallback (back-compatible).
+
 Usage:
-  normalize.py [--sort] [--strip-blank] [FILE]      # stdin if no FILE
+  normalize.py [--sort] [--strip-blank] [--mask-numbers] [--rules FILE] [FILE]
+  normalize.py --dump-default-rules
   normalize.py --self-test
 """
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 
@@ -34,6 +44,44 @@ DEFAULT_RULES = [
 
 # Rules that need an explicit opt-in because they are lossy for some tools.
 PID_RULE = ("pid-like", re.compile(r"\b\d{2,7}\b"), "<NUM>")
+
+
+def load_rules(path):
+    """Load normalization rules from a JSON or TOML file — a list of objects with
+    `regex`, `replacement`, and (optionally) `name` — into the same
+    [(name, compiled, replacement)] shape as DEFAULT_RULES. A malformed rule or a
+    bad regex is a HARD error: a silently dropped rule would let real noise through
+    and manufacture divergences, the one failure a normalizer must not have."""
+    if path.endswith(".json"):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data["rule"] if isinstance(data, dict) and "rule" in data else data
+    else:
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            sys.exit("error: TOML rules need Python 3.11+ (tomllib); use a .json file")
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        raw = data.get("rule", data if isinstance(data, list) else [])
+    if not isinstance(raw, list):
+        sys.exit(f"error: rules file {path} must be a list of {{name, regex, replacement}}")
+    rules = []
+    for i, r in enumerate(raw):
+        if not isinstance(r, dict) or "regex" not in r or "replacement" not in r:
+            sys.exit(f"error: rule {i} in {path} needs `regex` and `replacement`")
+        try:
+            rx = re.compile(r["regex"])
+        except re.error as e:
+            sys.exit(f"error: rule {r.get('name', i)!r} has a bad regex: {e}")
+        rules.append((r.get("name", f"rule{i}"), rx, str(r["replacement"])))
+    return rules
+
+
+def dump_default_rules():
+    """The built-in rules as a JSON rules file — a starting point to tune."""
+    return json.dumps([{"name": n, "regex": rx.pattern, "replacement": repl}
+                       for n, rx, repl in DEFAULT_RULES], indent=2)
 
 
 def normalize_text(text, rules=DEFAULT_RULES, sort=False, strip_blank=False,
@@ -77,8 +125,42 @@ def _self_test():
     # sort makes order-independent
     check("sort canonicalizes order",
           normalize_text("b\na", sort=True) == normalize_text("a\nb", sort=True))
+
+    # rules-as-data (--rules): a project-specific rule loaded from a file applies,
+    # and REPLACES the defaults (so a default-only pattern is left untouched); the
+    # dumped defaults round-trip back to the same behavior.
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        rf = os.path.join(td, "rules.json")
+        open(rf, "w").write(json.dumps(
+            [{"name": "token", "regex": "tok-[0-9a-f]+", "replacement": "<TOK>"}]))
+        custom = load_rules(rf)
+        check("a custom rule from a file masks a project-specific token",
+              normalize_text("auth tok-9f3a done", rules=custom) == "auth <TOK> done\n")
+        check("custom rules REPLACE the defaults (a default-only hex ptr is untouched)",
+              "0xdeadbeef12" in normalize_text("p 0xdeadbeef12", rules=custom))
+        check("a bad regex in a rules file is a hard error",
+              _rules_error(td, '[{"name":"x","regex":"(","replacement":"y"}]'))
+        rf2 = os.path.join(td, "defaults.json")
+        open(rf2, "w").write(dump_default_rules())
+        check("dumped defaults reload and still mask a hex pointer",
+              "0xPTR" in normalize_text("p 0xdeadbeef12", rules=load_rules(rf2)))
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
+
+
+def _rules_error(td, body):
+    """True iff load_rules rejects `body` with a SystemExit (a bad rules file
+    must fail loudly, never load a partial/empty rule set)."""
+    import os
+    p = os.path.join(td, "bad.json")
+    open(p, "w").write(body)
+    try:
+        load_rules(p)
+        return False
+    except SystemExit:
+        return True
 
 
 def main(argv=None):
@@ -87,12 +169,18 @@ def main(argv=None):
     ap.add_argument("--sort", action="store_true", help="sort lines (order-independent compare)")
     ap.add_argument("--strip-blank", action="store_true", help="drop blank lines")
     ap.add_argument("--mask-numbers", action="store_true", help="also mask bare 2-7 digit numbers (PIDs); lossy")
+    ap.add_argument("--rules", help="per-project rules file (.json/.toml); replaces the built-in defaults")
+    ap.add_argument("--dump-default-rules", action="store_true", help="print the built-in rules as a JSON rules file, then exit")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
         return _self_test()
+    if args.dump_default_rules:
+        print(dump_default_rules())
+        return 0
+    rules = load_rules(args.rules) if args.rules else DEFAULT_RULES
     text = open(args.file, encoding="utf-8", errors="replace").read() if args.file else sys.stdin.read()
-    sys.stdout.write(normalize_text(text, sort=args.sort, strip_blank=args.strip_blank,
+    sys.stdout.write(normalize_text(text, rules=rules, sort=args.sort, strip_blank=args.strip_blank,
                                     mask_numbers=args.mask_numbers))
     return 0
 

@@ -22,12 +22,22 @@ check-kit:
 	@echo "== inventory parses =="; $(PY) -c "import tomllib; d = tomllib.load(open('$(H)/coverage/feature-inventory-lsof.toml','rb')); print('PASS  lsof inventory parses (%d options, %d types)' % (len(d['features']['options']), len(d['features']['types'])))"
 	@echo "== skills self-test =="; $(PY) skills/check_skills.py --self-test
 	@echo "== skills integrity =="; $(PY) skills/check_skills.py
+	@echo "== probe ==";           $(PY) $(H)/probe/probe.py --self-test
+	@echo "== diff-fuzz ==";       $(PY) $(H)/diff-fuzz/diff_fuzz.py --self-test
 	@echo "== lesson refs self-test =="; $(PY) $(H)/lessons/check_lesson_refs.py --self-test
 	@# --also-scan .. : a citation is a claim wherever it is written, and the
 	@# host repo cites lessons from CI workflows, backend sources, Cargo
 	@# manifests and fuzz targets. Scanning only the kit left 52 of this repo's
 	@# 214 citations checked by nothing.
 	@echo "== lesson refs ==";          $(PY) $(H)/lessons/check_lesson_refs.py . --also-scan ..
+	@# check_lesson_refs answers "does #14 exist?". Where this log has IMPORTED
+	@# an entry from a sibling lineage of the kit, the numbers inside it came
+	@# from a log that diverges from this one, so a number carried over verbatim
+	@# still resolves and still means a different lesson. check_imports answers
+	@# "is #14 the lesson this sentence means?" — the first import here shipped
+	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
+	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
+	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 

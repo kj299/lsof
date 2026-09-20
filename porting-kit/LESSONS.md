@@ -1445,3 +1445,536 @@ the emphasized half.
   `porting-kit/OPERATING-GUIDE.md`,
   `porting-kit/skills/porting-kit-audit/SKILL.md`,
   `.github/workflows/lsof-rs-ci.yml`
+
+---
+
+## 036. Gates fail open on "nothing ran" — self-test the degenerate case, not just detection
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #006. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Date:** 2026-07-19
+- **Codebase:** the Porting Kit itself (full-repo code review + fix pass; PR #1
+  of the lifted `c2rust-port` repo, 26 findings, all fixed)
+- **What happened:** All six High findings were safety gates that *passed when
+  nothing meaningful ran* — and `make check-kit` was green through every one of
+  them. Both binaries timing out produced identical `<<TIMEOUT>>` sentinels and
+  a `MATCH` verdict (a faithfully re-ported hang — the kit's founding bug class
+  — sailed through the liveness backstop PLAYBOOK explicitly promised would
+  fail it). `golden.py` enshrined a hung oracle's `<<TIMEOUT>>` as golden truth
+  and dropped the exit-code half of the verdict on exactly the
+  oracle-substitution path it exists for. The scanner's skip-`*`-lines
+  heuristic silently never scanned `*out = malloc(a * b);`. The CI template's
+  fuzz job looped over an empty `cargo fuzz list` and reported green with zero
+  targets, and its sanitizer job could never succeed (no `rust-src` for
+  `-Zbuild-std`) — an always-red gate that would have been deleted, not fixed.
+  The pattern: every self-test proved its tool *detects* the bad case it was
+  built for; none proved the tool *refuses to pass* when its inputs degenerate
+  (a hang on both sides, an empty target list, a missing component). Detection
+  was tested; fail-closed was not.
+- **Kit change:** every hole fixed with the degenerate case pinned in the same
+  change: rust-side/both-side timeouts are a non-ledgerable `TIMEOUT` verdict;
+  capture refuses a timed-out golden; `.rc` sidecars restore exit-code
+  fidelity; real comment masking replaces the `*`-prefix skip; the fuzz CI job
+  fails on an empty target list; sanitizers install `rust-src`. The general
+  rule — **a gate that finds nothing to check must fail, not pass; add the
+  degenerate-input case to its self-test in the same change** — is now in the
+  playbook, and the retrospective prompt's step 0 requires probing each gate's
+  fail-closed behavior, not just its signal-to-noise.
+- **Section amended:** PLAYBOOK · cross-cutting controls ("Gates fail closed");
+  PROMPTS/90 · step 0; harnesses/differential/diff_run.py,
+  harnesses/golden/golden.py, harnesses/c-flaw-scan/scan_c_flaws.py,
+  harnesses/ci/porting-ci.template.yml (+ their self-tests).
+
+---
+
+## 037. An allow-list must ASSERT the accepted state, not merely SUPPRESS it
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #014. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #8 -> #043 “An acceptance list that matches by name becomes a permanent mute button”; source #13 -> #033 “Writing a lesson does not put it in force; a check does”.
+- **Date:** 2026-07-24
+- **Codebase:** the Porting Kit itself (comprehensive multi-lens audit → v1.x)
+- **What happened:** A six-lens adversarial audit found the deepest hole in the
+  whole kit, in the v1.0 exit test itself: **a ledgered divergence is pure
+  suppression — it never asserts the divergence still occurs.** A ledger entry
+  says "this case intentionally differs from C because we fixed a C bug," yet
+  `compare_one` evaluated `MATCH` *before* `name in known`, so if a ledgered case
+  *stopped* diverging it was silently downgraded to `MATCH` and passed. Reverting
+  the adler32 overflow fix with `wrapping_add` (C-identical output — what a dev
+  "matching C" writes) made the flagship exit test go **green, full success
+  banner, exit 0**, in BOTH library differentials. The port's entire reason to
+  exist could be deleted and every gate stayed green. This is distinct from #043
+  (which pins a *changed* divergence): #043 caught a divergence that *mutated*; this
+  is a divergence that *vanished*. The fingerprint pin never fires on a vanish,
+  because there is no divergence left to fingerprint. Generalizes: any allow-list
+  entry (a ledgered divergence, a suppressed lint, an ignored advisory, an
+  expected-failure test) that only *suppresses* rots into a blind spot — it must
+  also *assert* that the condition it accepts is still present, or accepting a
+  thing becomes not-looking-at it.
+- **Kit change:** a ledgered case that now MATCHes is a new **`LEDGER-STALE`**
+  verdict — a hard failure (never passes, never ledgerable), in the shared
+  `compare_one` (diff_run + cando + diff-fuzz) and independently in `lib_diff`'s
+  `compare_call` (it has its own comparison path — the fix had to be applied
+  twice, which is itself why the audit checked *both* differentials). Pinned in
+  three self-tests and proven end-to-end: reverting the adler32 fix now fails the
+  exit test. **Same audit, recurrences of #036 (fail-closed) fixed and cited in
+  place, not minted as new lessons:** an empty/mis-keyed matrix made every
+  differential exit 0 over a wrong binary (now refused); invalid-UTF-8 stdout
+  collapsed to `MATCH` via `decode(replace)` → U+FFFD (now `backslashreplace`,
+  bytes stay distinct); the fuzzer latin-1-decoded then utf-8-re-encoded its bytes,
+  never feeding the high bytes it targets (now `stdin_bytes`, verbatim); a
+  `SAFETY:` substring inside a string literal passed the unsafe gate (now checked
+  in a real comment span); and `scan_c_flaws` had no `memcpy`/`memmove` check and
+  missed pre-computed overflow (`t=n*w; malloc(t)`) and a UAF across a nested
+  block — a Phase-0 scanner reporting "0 flaws" on vulnerable C (all added). And
+  the pass tripped one more, in the gate that enforces *this very field*: the
+  lessons-pinned check (LESSONS #033) silently skipped any `Section amended` path a
+  markdown line-wrap split after a `/` (`harnesses/cando/`⏎`cando_diff.py`) —
+  matching neither half — so `audit_unsafe.py` here went unchecked until it too
+  was flagged. The extractor now rejoins wrapped paths (pinned self-test); the gate
+  meant to make pinning fail-closed had itself been failing open.
+- **Section amended:** harnesses/differential/diff_run.py (`compare_one`
+  LEDGER-STALE + `run_one` byte fidelity + `load_matrix` empty-guard);
+  harnesses/library-differential/lib_diff.py (`compare_call`);
+  harnesses/cando/cando_diff.py; harnesses/diff-fuzz/diff_fuzz.py;
+  harnesses/unsafe-audit/audit_unsafe.py;
+  harnesses/c-flaw-scan/scan_c_flaws.py;
+  harnesses/doc-check/check_lessons_pinned.py (rejoin wrapped paths + self-test);
+  and RETROSPECTIVE-kit-audit.md (the finding inventory + the v1.x backlog of
+  what was NOT fixed).
+
+---
+
+## 038. The C is a SPEC, and only the oracle knows what it says
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #017. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #13 -> #033 “Writing a lesson does not put it in force; a check does”; source #15 -> by title “An inherited environment constraint is a dated observation, not a fact” (no entry in this log).
+- **Date:** 2026-07-25
+- **Codebase:** cJSON v1.7.18 (C JSON parser → Rust) — the kit's first FOREIGN port
+- **What happened:** Every non-trivial behavior I got *wrong* on the first try, I
+  got wrong by **reasoning about what the C must do** instead of **running it**.
+  Four instances, all caught by executing the oracle, none findable by reading:
+  1. **`print(DBL_MAX)` is lossy.** I wrote the unit test asserting the reasoned
+     answer (15 digits can't round-trip DBL_MAX → the 17-digit fallback fires).
+     The oracle refuted it: the `%1.15g` form `1.79769313486232e+308` reparses as
+     **inf**, and cJSON's `compare_double(inf, d)` = `|inf−inf| ≤ inf·ε` =
+     `nan ≤ inf` = **true**, so the C *accepts* the failed round-trip and keeps
+     the lossy form — and `print → reparse → print` yields `null`.
+  2. **`cJSON_Compare` says a value ≠ its own duplicate** for an inf/nan number
+     (same `compare_double` quirk) and for any object with **duplicate keys** (the
+     O(n²) first-match lookup can't resolve the second key). Surfaced by the
+     `dup-eq` matrix's C-baseline validation, which *refused my vectors* because
+     they asserted `"true"`.
+  3. **`cJSON_Minify` doesn't track escape parity** — a `\` before a `"` escapes
+     that quote even when the backslash is itself escaped, so `"\\" "` keeps its
+     space. My "correct" escape-tracking implementation dropped it. Found by
+     differential fuzzing, not by reading `minify_string`.
+  4. **`parse_hex4` returns 0 on INVALID hex**, so `"\uZZZZ"` parses as a NUL
+     byte rather than failing; and the printer then truncates at that NUL.
+  The through-line: a mature C library's observable behavior is a **thicket of
+  accreted quirks**, several of which look like bugs and some of which *are* — and
+  a port that "cleans them up" silently is not safer, it is *differently wrong*.
+  Faithfulness is a decision to make per-quirk with the C's actual bytes in hand.
+- **Kit change:** `PROMPTS/40-port-module.md` and the module skill now open with
+  **probe-then-port**: before writing a module, run the oracle on its edge cases
+  and paste the observed bytes into the module's doc comment; write unit-test
+  expectations from that transcript, never from reasoning about the C source. The
+  kit already said "execution beats reading" for *harness* validation (LESSONS
+  #033, and the source lineage's "an inherited environment constraint is a dated
+  observation, not a fact"); this extends it to the **translation act itself**.
+  `PLAYBOOK.md` Phase
+  4 gains the same line as an entry criterion.
+- **Section amended:** PROMPTS/10-module-port.md · step 0; PLAYBOOK · Phase 4
+  entry criteria; skills/porting-kit-module/SKILL.md; RETROSPECTIVE-cjson.md · §2.
+
+---
+
+## 039. A gate that has nothing to check is not a passing gate
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #018. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Date:** 2026-07-25
+- **Codebase:** cJSON port — the `unsafe-audit` and `sanitized` gates
+- **What happened:** For six of the port's seven increments, `audit_unsafe.py`
+  reported **"unsafe blocks: 0, documented: 0, undocumented: 0" and exited 0** —
+  and I read that as the gate passing. It wasn't: the safe core is
+  `#![forbid(unsafe_code)]`, so there was **nothing for that gate to audit**, and
+  its green was structurally uninformative right up until the FFI crate landed
+  (33 blocks, all documented — the first run where the gate said anything). The
+  same shape, worse: I asserted "miri/asan need toolchains this environment
+  lacks" across five increments and left `sanitized` unset — **an inherited
+  environment claim I never re-tested**, which is precisely the "an inherited environment constraint is a dated observation" lesson, written
+  by me, in this same session. The retrospective's step-0 probe took one command:
+  `rustup toolchain install nightly --component miri` **succeeded**, miri ran
+  clean over the port, and the gate I'd written off as impossible was available
+  the whole time. The generalization is sharper than "re-verify claims": a gate
+  reporting **0 of 0** and a gate **not installed** are the same failure — a
+  *believed-covered* control that inspected nothing — and both render as green.
+- **Kit change:** `audit_unsafe.py` now reports `NOTHING-TO-AUDIT` when it finds
+  zero blocks across the scanned paths (still exit 0, but never silently
+  green-looking) and its `--json` carries `"blocks_found": 0`, so
+  `progress.py ingest` can refuse to advance `unsafe_audited` on a vacuous
+  report. The port's `check.sh` models the discipline for a gate that cannot run
+  here: miri is toolchain-OPTIONAL and **`sanitized` advances only when miri
+  actually ran** (never on a SKIP), with nightly+miri added to the CI job so it
+  runs for real. Verified fail-closed both ways: clean code passes; an injected
+  out-of-bounds read makes miri exit nonzero.
+- **Section amended:** harnesses/unsafe-audit/audit_unsafe.py (NOTHING-TO-AUDIT +
+  `blocks_found`); harnesses/progress/progress.py (`_clean_unsafe` refuses a
+  0-block report); ports/cjson/check.sh; .github/workflows/check-kit.yml;
+  RETROSPECTIVE-cjson.md · §3.
+
+---
+
+## 040. Scope each increment's differential to what it can decide
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #019. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #2 -> #002 “A noisy Phase-0 scanner is worse than none — it gets ignored”.
+- **Date:** 2026-07-25
+- **Codebase:** cJSON port — the module-tagged corpus
+- **What happened:** The kit's loop says "every module is diffed against the
+  oracle the moment it lands," but a 7-module port has a period where the Rust
+  **cannot parse most of the corpus** — module 2 lands and 60 of 79 vectors
+  involve strings, arrays, or objects that don't exist yet. Running the full
+  matrix would fail them all for "not ported yet," which is **schedule, not
+  divergence** — noise that trains you to ignore red, the LESSONS #002 failure mode
+  in a new place. Tagging each vector with the modules whose behavior determines
+  it (`mods: ["scalar"|"string"|"tree"|"minify"]`) and emitting
+  `matrix-ported.json` = "every case my ported modules fully decide" made each
+  increment's differential **meaningful and 100% green**, growing 25 → 44 → 69 →
+  79 as modules landed. The corpus is written ONCE against the C (all 86 vectors
+  validated up front); only the *filter* moves.
+- **Kit change:** `PLAYBOOK.md` Phase 2 now prescribes tagging corpus vectors by
+  the module(s) that decide them and running each increment against the
+  ported-subset filter, with the full matrix as the cutover gate;
+  `PROMPTS/20-oracle.md` and the oracle skill carry the recipe.
+  `ports/cjson/oracle/gen_corpus.py` is the worked reference implementation.
+- **Section amended:** PLAYBOOK · Phase 2 "Do"; PROMPTS/00-new-port-kickoff.md;
+  skills/porting-kit-oracle/SKILL.md; ports/cjson/oracle/gen_corpus.py (the worked
+  reference); RETROSPECTIVE-cjson.md · §4.
+
+---
+
+## 041. Generate test expectations from the oracle — a convention is not a control
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #021. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #17 -> #038 “The C is a SPEC, and only the oracle knows what it says”; source #13 -> #033 “Writing a lesson does not put it in force; a check does”.
+- **Date:** 2026-07-25
+- **Codebase:** the kit itself (post-cJSON), closing RETROSPECTIVE-cjson.md §6
+- **What happened:** LESSONS #038 established probe-then-port as a *convention*:
+  run the C on the module's edge cases, paste the transcript, write expectations
+  from it. But every §2 mistake on the cJSON port had already shown what happens
+  without enforcement — wrong unit tests written from reasoning happily agreed
+  with wrong Rust until a gate outside the tests disagreed — and LESSONS #033 is
+  explicit that conventions decay: two logged lessons recurred in code written
+  after them. Nothing stopped the *next* port's author from hand-writing an
+  expectation that contradicts the C, or from quietly editing a pasted
+  transcript to match their code.
+- **Kit change:** `harnesses/probe/probe.py` mechanizes the convention end to
+  end: `run` executes the probes against the C oracle and pins the observed
+  (rc, stdout) byte-faithfully under a fingerprint; `gen` **generates** the Rust
+  `#[test]` expectations from the transcript (one hand-written glue fn maps
+  driver modes to the crate's API — the expectations themselves are never
+  hand-written, so one that contradicts the C cannot exist); `verify` fails
+  closed on oracle drift (every probe re-run, behavior re-compared — never
+  hash-trusted), on a tampered transcript (fingerprint), and on a hand-edited
+  or stale generated file (byte-compare against a fresh regeneration).
+  Fail-closed per the kit's characteristic bug: zero probes, a hanging oracle,
+  and a missing artifact are all failures, never passes. Wired: `make check-kit`
+  self-test, a gate-mutation entry (neutralized drift-verdict → self-test red),
+  and the worked integration — the cJSON port's eight §2 quirks are now pinned
+  in `ports/cjson/oracle/probes-quirks.json`, generated into
+  `crates/core/tests/probes_quirks.rs`, and verified in `ports/cjson/check.sh`
+  step 1b.
+- **Section amended:** harnesses/probe/probe.py (the harness + self-test);
+  harnesses/gate-mutation/mutate_gates.py (probe entry); ports/cjson/check.sh
+  (step 1b); PLAYBOOK · Phase 4 entry criteria; PROMPTS/10-module-port.md ·
+  step 0; skills/porting-kit-module/SKILL.md · step 0.
+
+---
+
+## 042. Verifying the artifacts that exist says nothing about the one that is missing
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #023. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #14 -> #037 “An allow-list must ASSERT the accepted state, not merely SUPPRESS it”; source #18 -> #039 “A gate that has nothing to check is not a passing gate”; source #19 -> #040 “Scope each increment's differential to what it can decide”; source #20 -> by title “A harness meets its real bugs only on a real port” (no entry in this log).
+- **Date:** 2026-08-22
+- **Codebase:** the kit itself — `harnesses/probe/probe.py` (one day old)
+- **What happened:** `probe.py` was built to fail closed everywhere: zero probes
+  in a file is an error, a hanging oracle is an error, a tampered transcript or
+  hand-edited generated test is an error. All true — and all irrelevant to the
+  question nobody asked: *which probes files exist at all?* That was a hand-edited
+  line in the port's `check.sh` naming one file. A module could land with **no
+  probes whatsoever** and every gate stayed green, because `run`/`gen`/`verify`
+  only ever see the files they are handed. The kit's characteristic 0-of-0
+  (LESSONS #036/#037/#039, and the source lineage's "a harness meets its real bugs
+  only on a real port"), displaced one level up into the *wiring* — committed
+  by me in the same change that mechanized the lesson about conventions decaying.
+  A gate hardened against everything inside its input is still trusting whoever
+  chose the input.
+- **Kit change:** `probe.py coverage` takes the module list from the port's own
+  `progress.json` (so it cannot drift from the list the gates track) and fails
+  naming any module with no probes file; an empty module list is itself a failure.
+  Probes files carry `modules: [...]` tags, reusing the corpus tagging idiom of
+  LESSONS #040. Wired into `ports/cjson/check.sh`. Writing the missing probes for
+  the two uncovered cJSON modules immediately pinned **four behaviors reasoning
+  would have gotten wrong** — cJSON accepts a leading UTF-8 BOM, accepts trailing
+  garbage after a complete value (`[1] xyz` → `[1]`), treats an **embedded NUL as
+  whitespace** (`buffer_skip_whitespace` tests `<= 32`), and prints an empty
+  object as `{\n}` while an empty array prints `[]`. The port already matched all
+  four (the differential and fuzzer had driven it there); they are now *named*, so
+  a future "cleanup" of NUL-as-whitespace breaks a test instead of drop-in parity.
+- **Section amended:** harnesses/probe/probe.py (`cmd_coverage` + self-test);
+  ports/cjson/check.sh (step 1b coverage); PLAYBOOK · Phase 4 entry criteria;
+  PROMPTS/10-module-port.md · step 0; RETROSPECTIVE-probe-harness.md · §3.
+
+---
+## 043. An acceptance list that matches by name becomes a permanent mute button
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #008. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Date:** 2026-07-19
+- **Codebase:** the Porting Kit itself (same review pass)
+- **What happened:** The divergence ledger suppressed by *case name alone*:
+  once `json-format` was ledgered for an intentional fix-of-C-defect, any
+  future, unrelated regression in that case — wrong values, new crash output —
+  reported `DIVERGE(ledgered)` and exited 0, forever. The most-exercised cases
+  are the most likely to be ledgered, so the differential gate was weakest
+  exactly where behavior changes most. This generalizes: any allow-list entry
+  that names a *thing* rather than an *instance* (a case, a file, a finding
+  id) rots from "we accepted this divergence" into "we no longer look at this
+  case."
+- **Kit change:** ledger entries can pin the accepted divergence's fingerprint
+  — `- [x] <case> [sha256:<12-hex>]: <why>` — hashed over the normalized diff
+  text. A pinned case re-fails with an explicit "the divergence changed;
+  re-triage" when the diff no longer matches; unpinned (legacy) entries still
+  suppress but the tool prints the exact pin to add. Pin-accept and
+  stale-pin-refail are self-tested.
+- **Section amended:** harnesses/differential/diff_run.py (`load_ledger`,
+  `compare`, output hint, self-test); skeleton/DIVERGENCES.md · format.
+
+---
+
+## 044. A template must pass the gates it ships — or every copy starts red
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #009. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #7 -> by title “Documented commands are code — phantom flags and paste-broken examples drift silently” (no entry in this log).
+- **Date:** 2026-07-20
+- **Codebase:** the Porting Kit itself (installing real CI for the kit repo; PR #3)
+- **What happened:** Wiring meaningful CI meant running the kit's own gates, and
+  the shipped **skeleton did not pass them**. It was not `cargo fmt`-clean, and its
+  example parser/CLI used `i + 1` on loop indices — which trips the workspace's own
+  `clippy::arithmetic_side_effects` lint under `-D warnings`. Both `cargo fmt
+  --check` and `cargo clippy --all-targets -- -D warnings` are in the kit's CI
+  template, so a fresh copy of the skeleton started **red** under the kit's own CI:
+  a starting-point that fails the gates it configures. Nothing caught it because
+  `make check-kit` is toolchain-free and never built or linted the skeleton — the
+  one artifact every port begins by copying was the one artifact no gate checked.
+  Same family as #036 and the source lineage's "documented commands are code": the
+  kit's own artifacts must satisfy the kit's own rules.
+- **Kit change:** (a) fixed the skeleton to a clean exemplar — fmt-clean, and
+  `i.saturating_add(1)` (the checked/saturating idiom the playbook prescribes, so
+  the skeleton now *models* its own lint instead of violating it); (b) added
+  `harnesses/skeleton-check/check_skeleton.sh` to `make check-kit` — it runs the
+  real fmt/clippy/build/test when a Rust toolchain is present and SKIPs cleanly
+  otherwise, so a skeleton regression is caught locally even where CI can't run,
+  without breaking check-kit's python3+bash-only minimum; (c) Phase 3 exit criteria
+  now require the workspace/skeleton to pass the gates it configures.
+- **Section amended (source lineage):** skeleton/crates/{core,cli};
+  harnesses/skeleton-check/check_skeleton.sh (new) + Makefile · check-kit;
+  README · harness table; PLAYBOOK · Phase 3 exit criteria. **Here:** not yet —
+  `skeleton-check` is a later stage of this refresh; this entry is the standing
+  reason to do it.
+
+---
+
+## 045. A process-driving harness must be hermetic — control stdin, don't inherit it
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #011. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #1 -> #001 “The kit's own dry-run against lsof's failure inventory”.
+- **Date:** 2026-07-20
+- **Codebase:** the Porting Kit itself (found while validating the perf gate, #P0)
+- **What happened:** `run_one` — the shared runner behind the differential, golden,
+  diff-fuzz, perf, and cando harnesses — passed no stdin for a case without a
+  `stdin` key, so the child **inherited the parent's stdin**. A stdin-reading binary
+  (the skeleton `port` reads stdin unconditionally) then blocked forever on an
+  interactive/TTY parent: a differential/perf run that hangs or passes depending on
+  *who launched it*. Latent since the differential shipped; it only surfaced when
+  the new perf gate ran a real stdin-reading binary from an interactive shell. This
+  is the hostile-host rule (#001) extended from encoding/quoting to the
+  process-launch surface — inherited fds/stdin/env are ambient state a test harness
+  must not depend on.
+- **Confirmed here before porting the fix,** because a hazard read rather than run
+  is the one that turns out to be wrong. Two identical Python scripts that echo
+  their stdin, run through this repo's `diff_run.py` with no `stdin` key and the
+  parent's stdin a pipe carrying `PARENT-SECRET`: the ORACLE child consumed the
+  pipe and printed `b'PARENT-SECRET'`, the RUST child ran second, found it empty,
+  and printed `b''` — verdict **DIVERGE**. So the inherited-stdin bug is not only a
+  hang risk; on a pipe it manufactures a divergence between two copies of the same
+  program out of nothing but ambient parent state.
+- **Kit change:** `run_one` feeds `subprocess.DEVNULL` when a case provides no
+  stdin (deterministic EOF, hermetic), pinned in the diff_run self-test. Generalized
+  in the playbook: a harness that spawns processes controls stdin/env/cwd explicitly
+  and inherits nothing.
+- **Section amended:** harnesses/differential/diff_run.py (`run_one` + self-test);
+  PLAYBOOK · Phase 2 "harden the harness for its host".
+
+---
+
+## 046. A re-cited number resolves, and still means another lesson
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here (refreshing it from the c2rust-port
+  lineage — stage 1's own output, reviewed one stage later)
+- **What happened:** This kit's `LESSONS.md` and the one in the `c2rust-port`
+  lineage are both **append-only**. They share `#001`–`#005` and then diverge, so
+  from `#006` up the same number names a different lesson on each side. Importing
+  an entry therefore means rewriting every `#N` in its body to this log's
+  numbering, and stage 1 of the refresh set out to do exactly that — the PR said
+  so, in those words.
+
+  It re-cited the *heads* and missed the *members*. `(LESSONS #6/#14/#18/#20)`
+  became `(LESSONS #036/#14/#18/#20)`: one number translated, three carried over.
+  Two more entries kept a bare `#8` and `#6` from the source lineage. Five of the
+  seven imported entries had at least one unaccounted cross-reference.
+
+  **Every gate stayed green**, and not by accident — by construction.
+  `check_lesson_refs.py` asks "does `#14` resolve to an entry?" It does. It is
+  simply a different lesson than the sentence means. A citation checker built
+  around existence cannot see a *wrong* citation, and existence is the only thing
+  a destination log knows. Worse, the checker's list/range expansion parsed
+  `#036/#14/#18/#20` correctly and then validated all four — the more capable the
+  parser, the more confidently it blessed the error.
+
+- **Why the obvious controls don't reach it:** the failing claim is *semantic* and
+  its truth-maker lives in another repository. A checker in this tree has nothing
+  to compare against; a checker that fetches the source log only works where the
+  source log is checked out, which is not where CI runs. Review does not catch it
+  either: `#14` reads exactly like a correct citation, and there is no local
+  evidence it is wrong.
+
+- **What does reach it:** make the import carry its own truth-maker. An imported
+  entry now records what each source citation was re-cited **to, and the title it
+  had** — `source #8 -> #043 "An acceptance list that matches by name…"`. That
+  turns an unverifiable cross-repo claim into a local one: the destination entry
+  either has that title or it does not. Two properties are then checkable offline
+  and mechanically — **resolution** (the destination exists and is the lesson
+  named) and **completeness** (no number in the body escaped the mapping). The
+  second is the one that catches carry-over, and it is the one a human reviewer
+  cannot do by reading, because carried-over numbers look right.
+
+  The general form: **when a value is translated between two namespaces, the
+  translation must record the meaning, not just the new number — otherwise a
+  missed translation is indistinguishable from a correct one.** Any renumbering
+  across forks has this shape: issue ids, CVE aliases, error codes, test ids.
+
+- **Also found, and worth its own line:** the first cut of the new checker
+  required a *straight*-quoted title, and its self-test dutifully used one. Green
+  self-test, and `no parseable mapping` on every real entry — because a real
+  lesson title may quote a phrase of its own (`Gates fail open on "nothing ran"`),
+  so real mappings are written with curly quotes. A fixture written in a form the
+  real data does not use measures the fixture. Both quote styles are now accepted
+  and both are pinned.
+
+- **Kit change:** `harnesses/lessons/check_imports.py` (new) — enforces the
+  `- **Re-cited:**` mapping on every entry carrying `- **Imported:**`, with a
+  `by title` escape hatch for a source lesson that has no counterpart here (itself
+  refused if an entry with that title does exist). Wired into `make check-kit`,
+  self-test and real-log run both. Proven against the real file by mutation: the
+  stage-1 body text and a plausible wrong-destination re-cite each turn it red.
+  The five entries stage 1 imported now carry their mappings, and their three bad
+  cross-references are corrected.
+- **Section amended:** harnesses/lessons/check_imports.py (new); Makefile ·
+  check-kit; README · harness table; LESSONS.md · #037, #038, #040, #041, #042
+  (mappings added, `#8`/`#6`/`#13`/`#15`/`#14`/`#18`/`#20` corrected).
+
+---
+
+## 047. A marker a document can mention is a marker a document can claim
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here (refresh stage 2 — `diff-fuzz`, and
+  the control written one commit earlier in #046)
+- **What happened:** #046 made an imported *entry* record what it re-cited to.
+  Imported **files** — harnesses, skills — have the same hazard and no heading to
+  hang a mapping on, so they carry a `KIT-IMPORT:` header declaring theirs. Two
+  things went wrong building that, and both are about the marker being *text*.
+
+  **1. The checker marked itself.** Its docstring shows an example marker and its
+  fixtures contain more; scanning for the string anywhere in a file, it found 16
+  citations in its own examples and reported them as carried-over. The fix is that
+  a marker is a *position*, not a string: it must open its line, within the file's
+  header. Then, one commit later, the README gained a sentence explaining
+  `KIT-IMPORT:` — and the README was immediately counted as an imported file. The
+  same mistake, in a document *describing* the fix, minutes after making it.
+  Generalizes: **any in-band marker that documentation must be able to discuss
+  needs a rule that distinguishes using it from mentioning it** — a shape, a
+  position, a delimiter. Without one, writing the docs breaks the tool.
+
+- **What the file-level check found immediately:** stage 1's `probe.py` import had
+  the same carry-over as the LESSONS entries — `(LESSONS #036/#14/#18/#20)` and
+  `LESSONS #038/#21`, heads re-cited, members not. One of those is emitted into
+  *generated Rust test files*, so the wrong citation would have propagated into
+  port source. Porting `diff-fuzz` produced two more (`LESSONS #036, #14` and
+  `LESSONS #001/#6`). Four of the six survivors this refresh has found were
+  continuation members: **the failure lives in the part of a citation a grep for
+  `LESSONS #14` cannot see.** What finds them is expanding each citation through
+  `check_lesson_refs`'s own list/range rules — the same expansion that, asking
+  only "does it resolve?", had been blessing them.
+
+- **Kit change:** `check_imports.py` also checks `KIT-IMPORT`-marked files: every
+  citation, expanded, must land in the header's declared destination set; the
+  header is read only from the marker's own block, so a mapping written elsewhere
+  in the file cannot widen it. Six pinned self-tests, including both self-marking
+  cases. The five imported files carry markers and are clean.
+- **Section amended:** harnesses/lessons/check_imports.py (`check_files`, marker
+  rules, self-tests); harnesses/probe/probe.py (two carried-over members);
+  README · banner + harness table.
+
+---
+
+## 048. An append-only log is a shared counter, and two branches will take the same number
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here (refresh stage 2 meeting master)
+- **What happened:** `master` appended two lessons at `#034`/`#035` while the kit
+  refresh branch appended twelve at `#034`–`#045`. Neither side did anything
+  wrong; "append-only" is a rule about not *rewriting* entries, and both branches
+  obeyed it. But the next number is **shared mutable state**, and git cannot merge
+  a counter — it saw two different texts at the same offset and produced a
+  conflict. The real conflict is semantic: `#034` now names two different lessons
+  depending on which branch you read.
+
+  This is #046's cross-lineage collision arriving from inside one repository, and
+  it is more likely, not less: two branches of the same log diverge by days, not
+  by a fork.
+
+- **What `check_lesson_refs` would and would not have caught:** it detects a
+  duplicate `## NNN.` heading, so the crude "keep both" resolution fails loudly.
+  It cannot detect the subtler one — renumber the headings, miss a citation, and
+  every number still resolves, now to the wrong entry. The renumber is where the
+  damage happens, not the merge.
+
+- **Two non-obvious properties a renumber needs**, both load-bearing here:
+  1. **Simultaneous, not sequential.** Shifting `#034`→`#036` and then applying
+     `#036`→`#038` catches the entry just moved. One pass, one map.
+  2. **It must distinguish a reference to THIS log from a number that merely
+     looks like one.** The `Re-cited` and `KIT-IMPORT` mappings added in #046/#047
+     are full of *source-lineage* numbers, and `#36`, `#42` and `#43` sit inside
+     the shift range. Rewriting one of those turns a source number into a
+     destination number — the same corruption as a carried-over citation, arriving
+     from the opposite direction, and it would have read as correct. What saved it
+     was a shape rule that was already there for other reasons: this log writes
+     its own entries zero-padded to three digits (`#036`) and source numbers bare
+     (`#36`), so matching only `#\d{3}` separates them. That was luck as much as
+     design; the general rule is to **give the two namespaces different surface
+     forms before you need to tell them apart**, and to verify a renumber by
+     diffing a strict pass against a loose one rather than trusting either.
+
+- **Kit change:** none to the harnesses — `check_lesson_refs` (duplicate/missing
+  headings) plus `check_imports` (re-citation resolution and completeness) between
+  them cover the failure modes a merge can produce, and both ran green on the
+  resolved tree. What this entry buys is the *procedure*: when two branches of an
+  append-only log collide, the side that landed first keeps its numbers, the other
+  block shifts as a unit, and the shift is applied in one simultaneous pass under
+  a pattern that cannot match a foreign namespace. Recorded here because the next
+  refresh stage will hit this again.
+- **Section amended:** none — this is procedure, and the controls that enforce it
+  already exist (harnesses/lessons/check_lesson_refs.py, check_imports.py).
+
+---
