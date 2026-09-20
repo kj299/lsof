@@ -1,0 +1,67 @@
+# The platform ledger for this repository.
+#
+# Every directory the build system can select as a dialect must appear below,
+# with either `built_by` (regexes, at least one of which must appear in some CI
+# configuration) or `waived` (a reason, asserted to be true: if CI turns out to
+# mention the platform, the waiver is reported as stale).
+#
+# This file is the claim. `check_platforms.py` is what makes it a control —
+# the platform list is discovered from the tree, so adding a dialect and
+# forgetting this file is a failure, not a silent omission.
+#
+# Written after LESSONS #049: four of these six were live, tested platforms and
+# three are tested by providers that never appear in a GitHub check list. Had
+# this ledger existed, the deletion that entry describes would have been refused
+# by a gate rather than by an investigation.
+
+repo_root = "../../.."
+
+[discover]
+# What the build system can select. configure.ac's AS_CASE on $host_os maps each
+# host to one of these directories via LSOF_DIALECT_DIR, and Makefile.am gates
+# the sources on the matching AM_CONDITIONAL.
+dirs = ["lib/dialects/*"]
+
+[ci]
+# Providers, found by looking for their config files rather than by reading any
+# one provider's status list (LESSONS #049). Three of the entries below are the
+# whole point: .cirrus.yml and .builds/ never show up as GitHub check runs.
+globs = [
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml",
+    ".cirrus.yml",
+    ".builds/*.yml",
+    ".travis.yml",
+    "appveyor.yml",
+    ".gitlab-ci.yml",
+]
+
+[platforms.linux]
+# build.yml: the legacy Configure path and the autotools build, on two Ubuntu
+# releases. Also the oracle the 87-case differential compares lsof-rs against.
+built_by = ["Configure linux"]
+
+[platforms.darwin]
+# build.yml's macOS job: Configure -n darwin, make, check.bash, autotools, dist.
+built_by = ["Configure -n darwin", "check\\.bash darwin"]
+
+[platforms.freebsd]
+# .cirrus.yml — two FreeBSD images, and the only place make distcheck runs on a
+# BSD. Invisible to GitHub's check list.
+built_by = ["Configure -n freebsd", "freebsd-\\d"]
+
+[platforms.netbsd]
+# .builds/netbsd.yml — sourcehut, netbsd/9.x. Invisible to GitHub's check list.
+built_by = ["netbsd/"]
+
+[platforms.openbsd]
+# .builds/openbsd.yml — sourcehut, openbsd/7.2, Configure + make + check.bash.
+# Invisible to GitHub's check list.
+built_by = ["Configure -n openbsd", "openbsd/"]
+
+[platforms.aix]
+waived = "no AIX runner on any provider we use; kept as source, not gated"
+
+[platforms.sun]
+aliases = ["solaris"]
+waived = "no Solaris runner on any provider we use; kept as source, not gated"

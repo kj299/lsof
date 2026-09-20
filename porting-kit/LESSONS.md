@@ -2041,3 +2041,73 @@ the emphasized half.
   a ledger asserting that every platform the build system can select is either
   built by some CI config or explicitly waived — named here, not built.
 - **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md`
+
+## 050. A harness written to enforce a lesson can contain the lesson it enforces
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs / lsof — `harnesses/platforms/check_platforms.py`
+- **What happened:** LESSONS #049 ended by naming its own executable form and not
+  building it: *"a ledger asserting that every platform the build system can
+  select is either built by some CI config or explicitly waived — named here, not
+  built."* By #033's standard that made #049 a note. This entry is written after
+  building it, and the build is the interesting part.
+
+  `check_platforms.py` discovers platforms from the **tree** (`lib/dialects/*`),
+  discovers CI configs from the **filesystem** across every provider, and asserts
+  each platform is either matched by evidence in some config or waived. On the
+  real repository:
+
+      built  darwin   .github/workflows/build.yml:93   run: ... ./Configure -n darwin
+      built  freebsd  .cirrus.yml:5                    - image_family: freebsd-15-0-amd64-zfs
+      built  linux    .github/workflows/build.yml:55   run: ./Configure linux </dev/null
+      built  netbsd   .builds/netbsd.yml:1             image: netbsd/9.x
+      built  openbsd  .builds/openbsd.yml:1            image: openbsd/7.2
+      waived aix, sun
+
+  **The first run certified `darwin` from a COMMENT.** Not the job step at
+  `build.yml:93`, but the line 47 rows above it — a comment *about* `-n` that
+  quotes `./Configure -n darwin` while explaining what that flag skips. The
+  harness written to enforce "an absent job looks like a passing one" had, in its
+  own first execution, accepted prose as proof a job ran: LESSONS #031's defect
+  reproduced inside the control built to prevent #049's.
+
+  Two things made that visible rather than shipped:
+
+  1. **The harness prints its evidence, not a count.** `5 built by CI` would have
+     read as a clean pass. `build.yml:46 # job's ./Configure -n darwin` cannot.
+     **A gate that reports only a verdict cannot be audited by the person reading
+     it** — print what convinced you, and a wrong reason announces itself.
+  2. **The fix was to reuse, not to reimplement.** `executable_text()` already
+     existed in `check_ledgers.py`, written for exactly this after #031. Importing
+     it cost three lines; writing a second comment-stripper would have produced a
+     second thing to get wrong. A subtlety worth knowing: it strips the key from
+     `key: value`, so evidence patterns must match the VALUE — `netbsd/`, not
+     `image: netbsd`.
+
+  So: **when you build the harness for a lesson, check the harness against that
+  same lesson before trusting it.** The code written to stop a mistake is written
+  by someone currently thinking about that mistake, which feels like immunity and
+  is not.
+
+- **Mutation-tested rather than assumed** — three failure modes, each induced
+  against the real tree and then reverted:
+
+  | mutation | caught |
+  |---|---|
+  | `.cirrus.yml` removed | `'freebsd' claims CI builds it, but none of [...] appears in any of the 7 CI config(s)` |
+  | `lib/dialects/hpux/` added | `the build system can select 'hpux' and the ledger does not mention it` |
+  | `aix` given a CI job | `'aix' is waived as unbuilt, but .builds/aix.yml:1 mentions it — stale waiver` |
+
+  The third is the one that keeps a waiver honest: a waiver is a falsifiable
+  claim that nothing builds this, not permission to stop looking (LESSONS #037).
+  Zero discovered platforms and zero discovered CI configs are both hard
+  failures, because a glob that quietly stops matching is how this control would
+  rot into a green tick (LESSONS #036, #039).
+
+- **Kit change:** `harnesses/platforms/check_platforms.py` (14 self-tests, three
+  of which pin that a comment, a `name:` label and a bare key are NOT evidence
+  while the same string in a `run:` line IS) plus `harnesses/platforms/platforms.toml`,
+  wired into `make check-kit`. `skills/porting-kit-audit/SKILL.md` now runs the
+  ledger instead of describing the procedure.
+- **Section amended:** `porting-kit/harnesses/platforms/`, `porting-kit/Makefile`,
+  `porting-kit/skills/porting-kit-audit/SKILL.md`
