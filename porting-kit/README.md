@@ -76,6 +76,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/diff-fuzz/diff_fuzz.py` | differential FUZZING: same mutated input to C and Rust, every divergence triaged — finds what the fixed matrix never covered | CI (short) + nightly (long) |
 | `harnesses/probe/probe.py` | probe-then-port: generate a module's test expectations from a fingerprinted oracle transcript, and re-verify it | Phase 4 |
 | `harnesses/lessons/check_lesson_refs.py` | every `LESSONS #NN` citation resolves to an entry that exists | CI |
+| `harnesses/control-coverage/check_controls.py` | every control `CLAUDE.md` declares is actually invoked by the port's gates — or exempted in writing | **CI** |
 | `harnesses/doc-check/check_doc_flags.py` | every `--flag` the operative docs attribute to a harness exists in its source — documented commands are code | CI |
 | `harnesses/skeleton-check/check_skeleton.sh` | the shipped skeleton must pass the gates it configures (fmt/clippy/build/test); SKIPs without cargo | CI |
 | `harnesses/gate-mutation/mutate_gates.py` | break each gate's verdict on purpose and require its self-test to go red; audits its own table for uncovered harnesses | **CI** |

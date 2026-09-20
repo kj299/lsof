@@ -164,6 +164,13 @@ MUTATIONS = [
     # another lineage covers that lineage's harnesses; the ones this kit grew
     # on its own would sit outside it, and `coverage_gaps()` is what says so.
 
+    {"gate": "control-coverage", "file": "harnesses/control-coverage/check_controls.py",
+     "old": "    return any((control in executable_text(text)) or (base in executable_text(text))\n"
+            "               for text in gate_texts)",
+     "new": "    return True",
+     "why": "every declared control counts as wired: an unrun gate ships green",
+     "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
+
     {"gate": "doc-flags", "file": "harnesses/doc-check/check_doc_flags.py",
      "old": '                if not re.search(r"(?<![\\w-])" + re.escape(flag) + r"(?![\\w-])",\n'
             "                                 sources[script]):",
