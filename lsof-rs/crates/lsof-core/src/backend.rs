@@ -84,6 +84,20 @@ pub trait Backend {
         None
     }
 
+    /// The **filesystem** device a path lives on, without following a final
+    /// symlink — `lstat(2)`'s `st_dev`.
+    ///
+    /// Distinct from the device cell [`Self::identify_path`] returns, which is
+    /// `st_rdev` for a device node: `/dev/null` lives on devtmpfs but *is*
+    /// `1,3`. `+d`/`+D` needs the former, because the C's rule is "don't leave
+    /// the directory's file system unless `-x`/`-x f` says to".
+    ///
+    /// `None` where the platform has no such notion, which switches that rule
+    /// off rather than guessing at it.
+    fn path_fs_device(&self, _path: &str) -> Option<u64> {
+        None
+    }
+
     /// The host's mount table, as `mount(8)` reports it.
     ///
     /// lsof reads a path argument as a **file system name** when it matches a

@@ -434,6 +434,10 @@ fn main() {
         // part, so `+d /` is one level of `/`, not the whole root filesystem.
         let quiet = sel.quiet;
         let identifies = sel.paths_identified;
+        // Copied out before the closure so it does not borrow `sel`, which it
+        // already borrows mutably for `path_ids`.
+        let cross_filesystems = sel.cross_filesystems;
+        let cross_symlinks = sel.cross_symlinks;
         let mut expand = |dir: &str, recursive: bool| {
             let id = env.backend.identify_path(dir);
             // A `+d`/`+D` argument that cannot be stat'ed is a WARNING here,
@@ -456,6 +460,10 @@ fn main() {
                 fs_device: None,
                 display: dir.to_string(),
             });
+            // The directory's own file system, for the cross-over rule below.
+            // `None` on a backend with no such notion, which switches the rule
+            // off rather than guessing.
+            let dir_fs = env.backend.path_fs_device(dir);
             let mut stack = vec![std::path::PathBuf::from(dir)];
             let mut budget = 200_000usize; // a tree walk is not a licence to hang
             while let Some(d) = stack.pop() {
@@ -469,6 +477,33 @@ fn main() {
                     budget -= 1;
                     let path = e.path();
                     let shown = path.to_string_lossy().into_owned();
+                    // The two cross-over rules, in the C's order (`arg.c`):
+                    //
+                    //   1029  unless -x / -x f, skip an entry whose st_dev is
+                    //         not the directory's — do not leave this file
+                    //         system;
+                    //   1038  unless -x / -x l, skip a symbolic link outright.
+                    //         With it, the link is resolved and the TARGET is
+                    //         what gets searched for.
+                    //
+                    // lsof-rs had the second backwards: `identify_path` uses
+                    // `metadata()`, which follows, so every link was resolved
+                    // and `+d DIR` selected files only a link inside DIR
+                    // pointed at. Measured against the oracle on a directory
+                    // holding one symlink out of it: the C printed nothing,
+                    // lsof-rs printed the target's row.
+                    if !cross_filesystems {
+                        if let (Some(d), Some(e_dev)) = (dir_fs, env.backend.path_fs_device(&shown))
+                        {
+                            if d != e_dev {
+                                continue;
+                            }
+                        }
+                    }
+                    let is_link = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+                    if is_link && !cross_symlinks {
+                        continue;
+                    }
                     let id = env.backend.identify_path(&shown);
                     if let Some(id) = id.clone() {
                         sel.path_ids.insert(id);

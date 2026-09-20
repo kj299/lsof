@@ -225,6 +225,26 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'L' => sel.show_links = true,
                 'H' => sel.human_size = true,
                 'X' => sel.skip_inet_tables = true,
+                'x' => {
+                    // `-x [fl]`: bare is both (`main.c`'s XO_ALL), otherwise
+                    // each letter adds one. An unknown letter is fatal, and
+                    // the C names it — `lsof: unknown cross-over option: q`.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    if rest.is_empty() {
+                        sel.cross_filesystems = true;
+                        sel.cross_symlinks = true;
+                    } else {
+                        for c in rest.chars() {
+                            match c {
+                                'f' => sel.cross_filesystems = true,
+                                'l' => sel.cross_symlinks = true,
+                                other => return Err(format!("unknown cross-over option: {other}")),
+                            }
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'U' => sel.unix_only = true,
                 // `-E` after `+E` must not downgrade the "also show peer
                 // files" mode — lsof treats +E as a superset of -E.
@@ -393,6 +413,15 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     // in either clustering (`-Xi`, `-i -X`, `-aXi`).
     if sel.skip_inet_tables && sel.inet.enabled {
         return Err("-i is useless when -X is specified.".to_string());
+    }
+    // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
+    // alone rather than accepting a switch that would do nothing
+    // (`main.c:1122`). Checked here so the two may arrive in either order.
+    if (sel.cross_filesystems || sel.cross_symlinks)
+        && sel.dirs_one_level.is_empty()
+        && sel.dir_trees.is_empty()
+    {
+        return Err("-x must accompany +d or +D".to_string());
     }
     Ok(Action::Run {
         selection: sel,
@@ -947,5 +976,47 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+    #[test]
+    fn dash_x_needs_a_directory_argument_and_known_letters() {
+        // Both contracts measured against the C, message for message.
+        assert_eq!(
+            parse(vec!["-x".into(), "-p".into(), "1".into()]).unwrap_err(),
+            "-x must accompany +d or +D"
+        );
+        assert_eq!(
+            parse(vec!["-xq".into(), "+d".into(), "/tmp".into()]).unwrap_err(),
+            "unknown cross-over option: q"
+        );
+        // A known letter alongside an unknown one still fails, and names the
+        // unknown one — the C loops over the value rather than testing it whole.
+        assert_eq!(
+            parse(vec!["-xfz".into(), "+d".into(), "/tmp".into()]).unwrap_err(),
+            "unknown cross-over option: z"
+        );
+        // `+D` satisfies it too, and the check is order-independent.
+        assert!(parse(vec!["+D".into(), "/tmp".into(), "-x".into()]).is_ok());
+    }
+
+    #[test]
+    fn dash_x_letters_select_the_two_cross_overs_independently() {
+        // Bare -x is XO_ALL; each letter is one half. Measured: `-x f` does
+        // NOT follow a symlink (the oracle skipped the link either way), and
+        // `-x l` does.
+        let flags = |a: &[&str]| match parse(a.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { selection, .. } => {
+                (selection.cross_filesystems, selection.cross_symlinks)
+            }
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert_eq!(
+            flags(&["-x", "+d", "/tmp"]),
+            (true, true),
+            "bare -x is both"
+        );
+        assert_eq!(flags(&["-xf", "+d", "/tmp"]), (true, false));
+        assert_eq!(flags(&["-xl", "+d", "/tmp"]), (false, true));
+        assert_eq!(flags(&["-xfl", "+d", "/tmp"]), (true, true));
+        assert_eq!(flags(&["+d", "/tmp"]), (false, false), "default is neither");
     }
 }

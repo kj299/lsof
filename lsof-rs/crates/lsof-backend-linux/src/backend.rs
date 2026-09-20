@@ -55,6 +55,13 @@ impl Backend for LinuxBackend {
         Some((files::dev_cell(&md), md.ino().to_string()))
     }
 
+    fn path_fs_device(&self, path: &str) -> Option<u64> {
+        // lstat, not stat: `arg.c` tests the entry's OWN st_dev before it
+        // decides whether to resolve a symlink, so a link pointing at another
+        // file system is judged by where the link is, not where it goes.
+        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+    }
+
     fn mounts(&self) -> Vec<lsof_core::MountEntry> {
         mounts::load()
     }

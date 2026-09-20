@@ -461,6 +461,16 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-x f` (and bare `-x`): let a `+d`/`+D` expansion cross file-system
+    /// mount points. Default off — `arg.c:1029` skips an entry whose `st_dev`
+    /// differs from the directory's.
+    pub cross_filesystems: bool,
+    /// `-x l` (and bare `-x`): let a `+d`/`+D` expansion follow a symbolic
+    /// link. Default off, and this is the half lsof-rs had **backwards**: it
+    /// resolved every entry through `metadata()`, so `+d DIR` selected a file
+    /// that only a symlink inside DIR pointed at, where the C skips the link
+    /// entirely (`arg.c:1038` — "Otherwise skip symbolic links").
+    pub cross_symlinks: bool,
     /// `-X`: do not read the inet socket tables.
     ///
     /// The man page calls this "skip the reporting of information on all open
