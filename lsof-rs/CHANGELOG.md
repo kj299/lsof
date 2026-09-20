@@ -12,6 +12,30 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **AF_PACKET sockets are now `pack` rows** (P3 of `docs/linux-l2-plan.md`;
+  DIVERGENCES item 23). `/proc/net/packet` joins the seven tables `net.rs`
+  already reads, and the row takes the shape `dsock.c:3622` gives it: the
+  **inode** in DEVICE, the **ethernet protocol** in NODE, and `type=SOCK_RAW`
+  as the whole NAME, because a packet socket has no address to print. `-F`
+  reports the protocol as `P`, never `i`, which is the C's `Lf->inp_ty`
+  discriminant.
+
+  The 93-entry protocol table was transcribed from `ethernet_proto_to_str()`
+  and then **measured**: a fixture opened one packet socket per protocol, plus
+  seven the table does not carry, and all 100 NODE cells matched the C. Three
+  behaviours only that sweep would have caught — `ETH_P_LOOPBACK` is truncated
+  to **`LOOPBAC`** (`Lf->iproto` is `char[8]`, and the C's own table breaks the
+  7-character promise in its comment exactly once), an unnamed protocol prints
+  its number in **decimal** from a hex column, and `ETH_P_PPP_MP` puts a
+  **space inside the cell**.
+- **The kernel's protocol name for a socket resolved through its own namespace**
+  (DIVERGENCES item 24) — a latent defect in the item 16 fix, reachable as soon
+  as a packet socket could be held in a foreign namespace. The C reads
+  `system.sockprotoname`, which names the socket's `struct proto`: `UNIX-STREAM`
+  for a stream AF_UNIX socket, `UNIX` for dgram **and seqpacket**, and `PACKET`.
+  The fallback had been answering with this port's own `info.protocol`, which
+  agrees for TCP and UDP — the only families the netns fixture held — and not
+  for these. Now a field of its own, set per family.
 - **The Linux backend now runs under miri in CI**, in its **own job**
   (observe-first; it does not block, and `progress.json` stays at `fuzzed`
   until it has consecutive log-verified greens — LESSONS #13). Its own job
@@ -19,7 +43,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   inside the promoted miri job and the job's 25-minute timeout killed it —
   turning a hard gate from success to **cancelled** on the trial arm's first
   run. `continue-on-error` exempts a step's failure; `timeout-minutes` is a
-  job property and crosses that boundary (LESSONS #032). The job comment that explained its
+  job property and crosses that boundary (LESSONS #034). The job comment that explained its
   absence said the crate "reads live `/proc`, which miri cannot interpose".
   That was false and nothing had tested it: with `-Zmiri-disable-isolation`,
   48 of its 50 tests pass on the pinned nightly. The two that do not are miri

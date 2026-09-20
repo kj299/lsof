@@ -643,6 +643,150 @@ a hostile string — under the cap, or ledgered for another reason — so nothin
 could see it. H is a sleeper with a plain 15-character name. Seven mutants were
 then run against the 48-case suite and each was caught by the case meant for it.
 
+## Fixed by reading /proc/net/packet (2026-09-20)
+
+P3 of `docs/linux-l2-plan.md`. An `AF_PACKET` socket — what `tcpdump` opens —
+was the second of the two rows that measurably differed from the C on a
+thirteen-descriptor fixture. It is the one that needed no decision: the table
+exists, and reading it is one more parser alongside the seven `net.rs` already
+had.
+
+```
+C:   9u pack  11426  0t0  ALL  type=SOCK_RAW
+rs:  9u SOCK  0,9    0    11426  socket:[11426]        <- before
+rs:  9u pack  11426  0t0  ALL  type=SOCK_RAW           <- after
+```
+
+lsof spends the three cells differently here than for any other family
+(`dsock.c:3622`): DEVICE holds the **inode**, NODE holds the **ethernet
+protocol**, and NAME is only the socket type, because a packet socket has no
+address to print.
+
+### The protocol table was transcribed, then measured
+
+`ethernet_proto_to_str()` is 93 `#if defined(ETH_P_…)` arms. Rather than trust
+a transcription, a fixture opened **one packet socket per protocol** — all 93,
+plus seven values the table does not carry — and every NODE cell the C printed
+for the resulting 100 rows was compared against the port's:
+
+```
+checked 100 protocols against the C, 0 disagreements
+```
+
+Three things that reading alone would have got wrong, and the case that pins
+each:
+
+| | the C | why |
+|---|---|---|
+| `ETH_P_LOOPBACK` → `LOOPBAC` | **7 bytes, not 8** | `Lf->iproto` is `char[IPROTOL]`, `IPROTOL == 8`, written with `"%.*s", IPROTOL - 1`. The C's own comment above that function promises "should not exceed 7 characters" and its table breaks it exactly once. |
+| `0x1234` → `4660` | decimal, from a hex column | an unnamed protocol falls back to its number, and `/proc/net/packet` writes the column as `%04x` |
+| `ETH_P_PPP_MP` → `PPP MP` | a **space inside the cell** | one of the C's names contains one |
+
+The socket type has its own rule: `type=SOCK_RAW` for the seven the kernel
+defines, and `type=unknown` — not `type=SOCK_unknown` — for anything else,
+because the C picks the prefix on the same flag that picks the word.
+
+### The header line is checked, not skipped
+
+This table is read by fixed column index, and the C guards that with the
+labels (`get_pack()`). A kernel that reordered the columns would otherwise be
+read as if it had not — `Proto` in the `Type` slot is still a number, so it
+parses, and the row comes out wrong rather than absent. The whole table is
+dropped on a mismatch, as the C does; the C also prints
+`WARNING: unsupported format` on stderr, which this port has no channel for
+from inside a backend table read.
+
+One asymmetry is deliberate and matches the C: an unreadable **`Type`** keeps
+the row (the C reads it with `atoi()`, which cannot fail, yielding 0 and
+`type=unknown`), while an unreadable **`Proto`** drops it (`strtoul` with a
+full-consume guard).
+
+### Item 24 — the kernel's name, not ours
+
+Adding the packet parser made a second, older row reachable: a packet socket
+in a *foreign* network namespace, which neither binary can resolve from
+`/proc/net` and both name by falling back. Measured on five families at once:
+
+```
+3u sock … protocol: PACKET        4u sock … protocol: UNIX-STREAM
+5u sock … protocol: TCP           6u sock … protocol: UDP
+7u sock … protocol: NETLINK       <- still item 22
+```
+
+The fallback added for item 16 answered with `info.protocol`, which is `TCP`
+and `UDP` for the two families the netns fixture held — and `unix` and
+`packet` for the two it did not. The C reads `system.sockprotoname`, which is
+the kernel's name for the socket's `struct proto`, so a stream AF_UNIX socket
+is `UNIX-STREAM` while a dgram *and a seqpacket* one are both `UNIX`. That is
+now a separate field on the table entry rather than a reuse of the protocol,
+and each parser sets its own.
+
+### What the gate gained
+
+Two fixtures, because the capability split them:
+
+**K(packet)** holds four packet sockets in this namespace — one per branch of
+the NODE cell — and covers the `pack` row itself. `AF_PACKET` needs
+`CAP_NET_RAW`, which a GitHub runner does not have, so its three cases are
+**skipped there**, by name, on stderr. They are not gated in CI, and saying so
+is the point of the message.
+
+**L(userns sockets)** holds a packet socket and two AF_UNIX sockets inside
+`unshare --user --map-root-user --net`, which grants `CAP_NET_RAW` *inside* the
+new user namespace and so needs no privilege on the host. Its two cases do run
+on an ordinary runner, and they are the only ones in the harness that reach the
+xattr-name path at all.
+
+Every new assertion was mutated. Six against the unit tests (no truncation,
+DEVICE/NODE swapped, hex instead of decimal, `type=SOCK_unknown`, no header
+check, a strict `Type` parse) and each was caught by the test written for it.
+Three against the differential:
+
+| mutant | cases it kills |
+|---|---|
+| no 7-byte truncation | `packet-socket-row`, `packet-socket-fields` |
+| packet's kernel name lowercased | the two `userns-sockets-*` cases |
+| AF_UNIX loses its `-STREAM` | the two `userns-sockets-*` cases |
+
+The second and third are worth naming: **no unit test kills them.** Reverting
+the namespace fallback to `info.protocol` passes all 159 of them, because that
+path needs a live foreign namespace to execute. Fixture L is the only thing in
+the repository that can fail for it.
+
+### Cost
+
+One more `read_to_string` and one more parse per namespace, against the binary
+built from the commit before this change, 25 interleaved runs of each, minimum
+taken because this host's median moved by more than the effect being measured
+(the same binary spanned 38–57 ms across repeats):
+
+| | before | after | the C |
+|---|---:|---:|---:|
+| whole host, **no** packet sockets | 37.0 ms | 36.8 ms | 62.8 ms |
+| whole host, **100** packet sockets | 35.7 ms | 35.1 ms | 45.4 ms |
+| `-i` | 15.0 ms | 15.1 ms | — |
+
+Peak RSS is **identical** in every row (7.5 MB loaded, 8.6 MB idle; meter
+validated against a known 200 MB allocation at 207.7 MB). The protocol table
+is a `match` over `&'static str`, so it is in the binary and allocates
+nothing; a row costs the same three `String`s an AF_UNIX row costs.
+
+### And one hole in the fuzz target, found by mutating it
+
+`proc_net` gained `parse_packet`, and a panic planted in the row loop proved
+the arm was **unreachable**: the header check wants ~60 specific bytes before a
+single row is read, and a corpus grown from empty does not guess them.
+
+```
+with the header prepended     panic found in seconds
+without it                    81,567 runs / 46 s, never reached
+```
+
+The target now parses the input twice — bare, which exercises the header check,
+and with the real header prepended, which exercises everything behind it. A
+fuzz target that cannot reach the parser it names is LESSONS #019 in a new
+costume, and the only way to see it is to plant a fault and watch.
+
 ## Fixed by implementing the whole `-F` field set (2026-09-05)
 
 Retires ledger entries `files-fields-F` and item 11, and closes items 5 and 11
@@ -1020,6 +1164,10 @@ likely right; it is a compatibility decision, not a backend phase.
 | 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. **C-DEFECT**, not reproduced; the `search-plus-d-supplies-a-surviving-item` case names `{ASUB}`, which is empty, precisely so it measures the abort rule and not this. |
 
 | 21 | `-c`, `-u` and `-g` are **search items**: a value that matches nothing exits 1, and `-V` says `command not located:` / `no user use located:` etc. | they select, but never counted as unlocated, so the run exits 0 | measured 2026-09-12: `lsof -c nosuchcmd`, `-u nosuchuser` and `-g 999999` are all exit 1 from the C and 0 here, while `-p` and `-i` already match. **DEBT** — found by the item-19 sweep. Doing it properly means auditing every search-item class the C keeps (`main.c` has ten `not located` messages) and deciding each against the negated-`-c` defect already ledgered as item 13, so it is recorded rather than folded into a path-argument change. |
+
+| 23 | an **AF_PACKET** socket is a `pack` row: the inode in DEVICE, the ethernet protocol in NODE, `type=SOCK_RAW` as the whole NAME | ~~`SOCK` / `socket:[11426]`, with a size~~ **resolved 2026-09-20** | see "Fixed by reading /proc/net/packet" below |
+
+| 24 | a socket named through the **`system.sockprotoname` xattr** reports the KERNEL's name for it, which is not the family: `UNIX-STREAM`, `UNIX`, `PACKET` | ~~`unix`, `unix`, `packet`~~ **resolved 2026-09-20** | a latent defect in item 16's fix, which answered with the port's own `info.protocol`. That is right for TCP and UDP, where the two strings coincide, and wrong for the two families where they do not — and the netns fixture held only a TCP listener, so nothing measured it. Found while adding the packet fixture, because the same code path names a packet socket in a foreign namespace. |
 
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 

@@ -178,9 +178,17 @@ pub fn render(
             // `i` and `P` are the same cell under two names, and the C picks
             // between them with one discriminant (`Lf->inp_ty`): a row's NODE
             // either *is* an inode or *is* a protocol, never both and never
-            // neither. Only an internet socket takes the protocol branch — an
-            // AF_UNIX row reports its inode like a regular file does, which is
-            // the split `print_tcptpi()` makes on `Lf->type == LSOF_FILE_UNIX`.
+            // neither. An AF_UNIX row reports its inode like a regular file
+            // does, which is the split `print_tcptpi()` makes on
+            // `Lf->type == LSOF_FILE_UNIX`; every other socket takes the
+            // protocol branch, including AF_PACKET, whose NODE is an ethernet
+            // protocol rather than an IP one (`dsock.c` sets `inp_ty = 2`).
+            //
+            // So `P` is emitted from NODE, not from `socket.protocol`. For an
+            // internet row the two are the same string — the backends fill
+            // NODE from the protocol — but a packet row's protocol names its
+            // *family* and its NODE names the ethernet protocol, and it is the
+            // latter the C prints here.
             let node_is_protocol = f.socket.is_some() && f.file_type != FileType::Unix;
             if want('i') && !node_is_protocol {
                 if let Some(n) = &f.node {
@@ -193,8 +201,8 @@ pub fn render(
                 }
             }
             if want('P') && node_is_protocol {
-                if let Some(sock) = &f.socket {
-                    push!('P', sock.protocol.as_str());
+                if let Some(n) = &f.node {
+                    push!('P', n);
                 }
             }
             // Emit NAME only when there is one. Some rows (e.g. `-K` thread

@@ -27,18 +27,18 @@
 //!   `mem` rows and the `DEL` marking from `/proc/<pid>/maps`, the lock column
 //!   from `/proc/locks`, named `anon_inode` kinds (`[eventfd:6]`, `[pidfd:N]`,
 //!   `[eventpoll]`, …), the mount table behind `-f`/`+f` and the mount-point
-//!   rule, and per-namespace socket reads so a container's socket is named
-//!   rather than left as a bare `socket:[inode]`.
+//!   rule, per-namespace socket reads so a container's socket is named rather
+//!   than left as a bare `socket:[inode]`, and the `pack` row from
+//!   `/proc/net/packet`.
 //!
 //! # What it does not cover yet
 //!
-//! Two object types the C names and this backend does not, and they are not
-//! the same problem. A **packet** socket is closeable here — its inode is in
-//! `/proc/net/packet` and `dsock.c` gives the column shape. A **netlink**
-//! socket usually is not: an unbound one never appears in `/proc/net/netlink`,
-//! and the C names it from the `system.sockprotoname` extended attribute
-//! instead, which has no `std` API — so it waits on the decision recorded as
-//! DIVERGENCES item 22, not on effort.
+//! One object type the C names and this backend does not: a **netlink**
+//! socket. An unbound one never appears in `/proc/net/netlink` at all, so
+//! there is no table to read, and the C names it from the
+//! `system.sockprotoname` extended attribute instead — which has no `std`
+//! API. It waits on the decision recorded as DIVERGENCES item 22, not on
+//! effort. Packet sockets were the other half of that pair and are done.
 //!
 //! Also open: the `UNKN*` rows (the C reports an unreadable link with its
 //! errno where this backend omits the row), and the options `-e`, `-x`, `-X`,
@@ -134,8 +134,8 @@ pub mod fuzz_api {
     pub use crate::maps::{parse_maps, Mapping};
     pub use crate::mounts::{parse_mounts, MountLine};
     pub use crate::net::{
-        fields_with_rest, parse_addr, parse_queues, socket_inode, tcp_state, unix_state,
-        unix_suffix, SocketTable,
+        fields_with_rest, packet_node, parse_addr, parse_queues, socket_inode, socket_type_suffix,
+        tcp_state, unix_state, unix_suffix, SocketTable,
     };
     pub use crate::process::parse_status;
     pub use crate::users::parse_passwd;

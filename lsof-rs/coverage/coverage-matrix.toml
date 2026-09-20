@@ -492,6 +492,22 @@ name = "linux/differential-sockets-unix-U"
 args = ["-n", "-P", "-a", "-U", "-p", "PID"]
 covers = ["type:unix"]
 
+# AF_PACKET. Fixture K in the differential holds four packet sockets and these
+# two cases diff the whole `pack` row against the C -- the inode in DEVICE, the
+# ethernet protocol in NODE (named, 7-byte truncated, and numeric), and
+# `type=SOCK_RAW`/`type=SOCK_DGRAM` in NAME. SKIPPED where CAP_NET_RAW is not
+# available, which includes the GitHub runner; fixture L covers the part that
+# survives without it.
+[[case]]
+name = "linux/differential-sockets-packet"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:pack"]
+
+[[case]]
+name = "linux/differential-sockets-packet-fields-F"
+args = ["-n", "-P", "-a", "-d", "^mem", "-FtdoPin", "-p", "PID"]
+covers = ["type:pack"]
+
 [[case]]
 name = "linux/differential-sockets-fields-F"
 args = ["-n", "-P", "-F", "-a", "-p", "PID"]

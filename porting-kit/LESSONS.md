@@ -690,49 +690,7 @@ the emphasized half.
   different control from a presence ledger. The fuzz half of this follow-up —
   mapping each text-parsing crate to a target — is still open.
 
----
-
-### #032 — `continue-on-error` is a step property; `timeout-minutes` is a job property
-
-**What happened.** The observe-first miri arm for `lsof-backend-linux` was
-added as a `continue-on-error: true` STEP inside the existing, promoted miri
-job. It ran long, the job's `timeout-minutes: 25` fired at 25m15s, and the
-**hard gate went from `success` to `cancelled`** — broken by a step explicitly
-marked as not blocking, on its first run.
-
-**Why the exemption did not hold.** `continue-on-error` exempts a step's own
-*failure*. It cannot exempt anything the runner does to the **job**: a
-timeout, a lost runner, a cancellation. Those cross the step boundary, so an
-observe-first step inside a gated job is not actually observe-first — it is a
-new way for the gate to fail, wearing a label that says it is not.
-
-**The rule.** *A trial arm gets its own job, never a step in a gated one.*
-Isolation is the only thing that makes "this does not block" true, because it
-is the only thing that puts the job-level failure modes on the trial arm's
-side of the fence. A generous `timeout-minutes` on that job is then free: the
-job cannot take anything else down with it.
-
-**Worth noticing about the cost, too.** The same command finishes in ~295s
-locally and had emitted no `test result:` line after ~24 minutes on the
-runner, because miri prints a
-`files in /proc can bypass the Abstract Machine` warning — with a backtrace —
-for every access a `/proc`-reading crate makes. A sanitizer arm over a crate
-whose whole job is reading `/proc` is not priced like one over a pure library,
-and that is a reason to isolate it rather than a reason to skip it.
-
-**Kit change:** PLAYBOOK Phase 4 — the observe-first promotion rule
-(LESSONS #013) now says *job*, not *step*, and says why.
-**Section amended:** PLAYBOOK · Phase 4 gate 4.
-
-  **Closed the same day.** The obstacle was never difficulty — it was that the
-  parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so
-  nobody could have written the target without moving them first. They are pure
-  string transforms; hoisting them into an ungated `names` module took an hour,
-  the target found two bugs *in its own assertions* within a minute, and the
-  crate's unit tests went from running on one platform to running on all of
-  them. When a per-unit gate has been unmet for months, check whether the unit
-  is simply unreachable from where the gate runs before concluding the work is
-  large.
+**Follow-up, 2026-09-20:** landing that miri arm broke the hard gate it was added beside — an observe-first STEP cannot be observe-first inside a gated job. See **LESSONS #034**.
 
 ## 022. Release mechanics II — a workflow that can fire twice will publish two truths
 
@@ -1396,3 +1354,117 @@ and that is a reason to isolate it rather than a reason to skip it.
   drops its path filter to match.
 - **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`,
   `porting-kit/Makefile`, `.github/workflows/porting-kit.yml`
+
+## 034. `continue-on-error` is a step property; `timeout-minutes` is a job property
+
+**What happened.** The observe-first miri arm for `lsof-backend-linux` was
+added as a `continue-on-error: true` STEP inside the existing, promoted miri
+job. It ran long, the job's `timeout-minutes: 25` fired at 25m15s, and the
+**hard gate went from `success` to `cancelled`** — broken by a step explicitly
+marked as not blocking, on its first run.
+
+**Why the exemption did not hold.** `continue-on-error` exempts a step's own
+*failure*. It cannot exempt anything the runner does to the **job**: a
+timeout, a lost runner, a cancellation. Those cross the step boundary, so an
+observe-first step inside a gated job is not actually observe-first — it is a
+new way for the gate to fail, wearing a label that says it is not.
+
+**The rule.** *A trial arm gets its own job, never a step in a gated one.*
+Isolation is the only thing that makes "this does not block" true, because it
+is the only thing that puts the job-level failure modes on the trial arm's
+side of the fence. A generous `timeout-minutes` on that job is then free: the
+job cannot take anything else down with it.
+
+**Worth noticing about the cost, too.** The same command finishes in ~295s
+locally and had emitted no `test result:` line after ~24 minutes on the
+runner, because miri prints a
+`files in /proc can bypass the Abstract Machine` warning — with a backtrace —
+for every access a `/proc`-reading crate makes. A sanitizer arm over a crate
+whose whole job is reading `/proc` is not priced like one over a pure library,
+and that is a reason to isolate it rather than a reason to skip it.
+
+**Kit change:** PLAYBOOK Phase 4 — the observe-first promotion rule
+(LESSONS #013) now says *job*, not *step*, and says why.
+**Section amended:** PLAYBOOK · Phase 4 gate 4.
+
+  **Closed the same day.** The obstacle was never difficulty — it was that the
+  parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so
+  nobody could have written the target without moving them first. They are pure
+  string transforms; hoisting them into an ungated `names` module took an hour,
+  the target found two bugs *in its own assertions* within a minute, and the
+  crate's unit tests went from running on one platform to running on all of
+  them. When a per-unit gate has been unmet for months, check whether the unit
+  is simply unreachable from where the gate runs before concluding the work is
+  large.
+
+## 035. A fuzz target can name a parser it never reaches — plant a fault and watch
+
+**What happened.** `/proc/net/packet` got a parser, and the repository's
+`proc_net` fuzz target got a line calling it. Sixty seconds, 133,262 runs, no
+crashes. The target's header comment now listed `packet` among the tables it
+covers, CI ran it on every push, and the whole thing was worth nothing.
+
+The parser **validates the table's header line** before reading a row, because
+the C does (`get_pack()`) and because a table read by fixed column index needs
+it. That header is about sixty specific bytes. libFuzzer starts from an empty
+corpus and mutates; it is not going to produce
+`sk               RefCnt Type Proto  Iface R Rmem   User   Inode` by chance,
+and coverage feedback cannot help because nothing rewards getting the first
+four bytes right when the fifth still fails.
+
+Measured, by planting `assert!(inode == 0)` inside the row loop — a fault that
+fires the instant any row parses:
+
+```
+with the valid header prepended to the input    panic in seconds
+input passed bare, same budget                  81,567 runs / 46 s, never fired
+```
+
+**The general shape.** A parser with a *gate* at its entrance — a magic number,
+a version field, a checksum, a header line — is unreachable to a fuzzer that
+has to guess the gate. The target compiles, runs, reports coverage and finds
+nothing, and every signal you have says it is working. This is LESSONS #019
+(*a control the kit asserts but never checks for does not exist*) wearing the
+one costume that survives a code review: the call **is** there.
+
+**What to do.** Feed the gate, and keep the bare input too — they test
+different things:
+
+```rust
+t.parse_packet(&text);                       // the header check itself
+t.parse_packet(&format!("{HEADER}\n{text}")); // everything behind it
+```
+
+A seed corpus or a libFuzzer `-dict=` would also work where the corpus is
+checked in. This repository's is not — it is grown from empty and cached
+between nightly runs — so the fix has to live in the target, where it cannot
+be lost by a cache eviction.
+
+**How to know.** The only reliable check is the one above: **plant a panic at
+the deepest point the target claims to reach, and confirm the fuzzer finds it
+inside the CI time budget.** Not that the target compiles, not that coverage
+went up, not that the corpus grew. Do it once per target, when it is written.
+Same discipline as LESSONS #026 for tests and #027 for build reachability: a
+gate you have not seen fail is a gate you have not tested.
+
+- **Kit change, found while writing this entry and the same shape as it.** Two
+  sessions working this repository in parallel both wrote a lesson `032` — one
+  as `## 032.`, the canonical heading, and one as `### #032`, invented on the
+  spot for a follow-up placed inside an earlier section. Every `LESSONS #032`
+  citation in the tree then resolved to the wrong lesson, and
+  `check_lesson_refs.py` was **green throughout**.
+
+  It has a duplicate-number check. It could not fire: `ENTRY_RE` reads
+  `^## (\d{3})\.` and nothing else, so the off-style heading was never an
+  entry at all. The gap check could not fire either, for the same reason. **A
+  checker that recognises one form of the thing it counts is blind to every
+  other form, and blind in the direction that reads as success** — the file
+  looked like it held the lesson, the citations looked like they resolved, and
+  both were false.
+
+  So the checker now also rejects a heading that *looks* like an entry and is
+  not one: `### #034 —`, `## 34.`, `#### 007:`. Zero of those exist in the
+  current file, which is the only reason the rule can be strict. The stray
+  entry is renumbered #034 and moved into the series, and the section it used
+  to sit under keeps a one-line pointer to it.
+- **Section amended:** `porting-kit/harnesses/lessons/check_lesson_refs.py`

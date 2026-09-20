@@ -86,6 +86,15 @@ MAX_RANGE = 50
 # An entry heading: "## 022. <title>" at the start of a line.
 ENTRY_RE = re.compile(r"^## (\d{3})\.", re.M)
 
+# A heading that LOOKS like an entry but is not in the one form `ENTRY_RE`
+# reads -- "### #034 — ...", "## 34.", "#### 007:". Such a heading is invisible
+# here: its number is not an entry, so the duplicate and gap checks cannot see
+# it, while the file reads as though the lesson exists. That happened: two
+# sessions working this repository in parallel both wrote a lesson 032, one as
+# `## 032.` and one as `### #032`, and every `LESSONS #032` citation in the
+# tree silently resolved to the wrong one with this checker green.
+NEAR_ENTRY_RE = re.compile(r"^(#{1,6}\s*#?\d{1,3}[.:\s—-])", re.M)
+
 SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs")
 SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
 
@@ -240,6 +249,16 @@ def run(kit_root, also=()):
     for n in dupes:
         problems.append(f"LESSONS.md: entry {n:03d} appears {nums.count(n)} times")
 
+    # One heading style, or the checks above are reading half the file.
+    for m in NEAR_ENTRY_RE.finditer(open(lessons, encoding="utf-8").read()):
+        head = m.group(1).rstrip()
+        if ENTRY_RE.match(head + " x"):
+            continue
+        line = open(lessons, encoding="utf-8").read().count("\n", 0, m.start()) + 1
+        problems.append(
+            f"LESSONS.md:{line}: {head!r} looks like an entry heading but is "
+            f"not `## NNN.` — it would be invisible to this checker")
+
     if nums:
         expected = list(range(1, max(nums) + 1))
         for n in expected:
@@ -306,6 +325,24 @@ def _self_test():
             entries + "\n## 002. duplicate\n\nbody\n")
         open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations here\n")
         check("duplicate entry number is caught", run(root) == 1)
+
+    # An entry written in a heading style this checker does not read is the
+    # accident that made a duplicate 032 undetectable: the number is not an
+    # entry, so neither the duplicate nor the gap check can see it, and the
+    # citations to it resolve to somebody else's lesson.
+    for stray in ("### #003 — a follow-up", "## 3. short", "#### 003: colon"):
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "LESSONS.md"), "w").write(
+                entries + f"\n{stray}\n\nbody\n")
+            open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations\n")
+            check(f"off-style entry heading is caught: {stray!r}", run(root) == 1)
+
+    with tempfile.TemporaryDirectory() as root:
+        # ...and an ordinary prose heading with a number in it is NOT flagged.
+        open(os.path.join(root, "LESSONS.md"), "w").write(
+            entries + "\n### Why 3 passes and not 2\n\nbody\n")
+        open(os.path.join(root, "PLAYBOOK.md"), "w").write("no citations\n")
+        check("a heading that merely contains a number is fine", run(root) == 0)
 
     # --- citation lists and ranges -------------------------------------------
     # The strings below are the ten multi-number citations that actually appear

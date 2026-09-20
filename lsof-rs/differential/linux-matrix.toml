@@ -614,6 +614,59 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-Ftn", "-p", "{J}"]
 name = "netns-socket-is-not-selected-by-dash-i"
 args = ["-n", "-P", "-a", "-i", "-p", "{J}"]
 
+# ----------------------------------------------------- AF_PACKET sockets
+# The `pack` row. lsof spends its cells differently here than for any other
+# family (dsock.c:3622): the INODE goes in DEVICE, the ETHERNET PROTOCOL in
+# NODE, and NAME is only `type=SOCK_RAW` -- a packet socket has no address.
+#
+# The NODE cell has three branches and fixture K holds one socket for each:
+# a named protocol, one whose name is longer than the 7 bytes `Lf->iproto`
+# holds (ETH_P_LOOPBACK -> `LOOPBAC`), and one the C does not name, which it
+# prints as a decimal number.
+#
+# SKIPPED, not failed, on a runner without CAP_NET_RAW.
+
+[[case]]
+# The whole row, positionally: TYPE, DEVICE, SIZE/OFF, NODE and NAME at once.
+name = "packet-socket-row"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{K}"]
+
+[[case]]
+# The same cells through `-F`, which names them: `d` DEVICE, `o` SIZE/OFF and
+# `P` the protocol. `P` and not `i` is the point -- the C picks between those
+# two on `Lf->inp_ty`, and for a packet row it sets 2, so there is no `i`.
+name = "packet-socket-fields"
+args = ["-n", "-P", "-a", "-d", "^mem", "-FtdoPin", "-p", "{K}"]
+
+[[case]]
+# `-i` selects INTERNET files. A packet socket is not one, and the C does not
+# select it -- so this must print nothing and exit 1, from both binaries.
+name = "packet-socket-is-not-selected-by-dash-i"
+args = ["-n", "-P", "-a", "-i", "-p", "{K}"]
+
+# ------------------------------------- the kernel's name for a foreign socket
+# Fixture L holds a packet socket and two AF_UNIX sockets inside a user+net
+# namespace, so `/proc/net/*` misses all three and each binary has to fall
+# back: the C to the `system.sockprotoname` xattr, this port to the owning
+# process's own tables.
+#
+# That name is the kernel's, and for these families it is NOT the one either
+# program uses elsewhere -- `PACKET` where the table row says `pack` and NODE
+# says `ALL`, and `UNIX-STREAM`/`UNIX` where the table row says `unix`. The
+# stream/dgram split is the kernel's `struct proto` name, which is also why a
+# SOCK_SEQPACKET socket reports `UNIX`.
+#
+# This is the only case in the harness that reaches that code without needing
+# a privilege the runner may not have.
+
+[[case]]
+name = "userns-sockets-show-the-kernels-protocol-name"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{L}"]
+
+[[case]]
+name = "userns-sockets-kernel-protocol-name-fields"
+args = ["-n", "-P", "-a", "-d", "^mem", "-Ftn", "-p", "{L}"]
+
 # ----------------------------------------------- the search-item contract
 # WHAT COUNTS AS A SEARCH ITEM, and what happens when one is not located.
 # Two different failures that look alike from the outside:

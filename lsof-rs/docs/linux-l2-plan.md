@@ -16,7 +16,7 @@ Linux gap at all.**
 | `maps` → `mem` rows | **done** | `mem REG … /usr/lib/x86_64-linux-gnu/libc.so.6`, byte-identical to the C |
 | `/proc/locks` → lock column | **done** | DIVERGENCES item 7, closed 2026-09-05 |
 | named anon inodes | **done** | `[eventfd:6]`, `[eventpoll]`, `[timerfd]`, `[signalfd]`, `inotify`, `[pidfd:1153]` — all byte-identical |
-| raw / netlink | **partly — see §3** | raw is resolved; netlink and packet are the two remaining rows |
+| raw / netlink | **partly — see §3** | raw is resolved; packet landed 2026-09-20 (P3), netlink is the one remaining row |
 
 Plus two items L2 acquired later and also delivered: the mount table
 (`mounts.rs`, DIVERGENCES 15) and per-namespace socket reads (DIVERGENCES 16).
@@ -154,8 +154,11 @@ rs:    9u SOCK  0,9    0    11426  socket:[11426]
 
 These two look alike and are not.
 
-**Packet is closeable today, dependency-free.** The fixture's inode is in the
-table:
+**Packet is closeable today, dependency-free.** — **done 2026-09-20**, see
+DIVERGENCES item 23. What follows is the measurement that scoped it, kept as
+written. One thing it did not anticipate: closing it also exposed item 24, the
+*kernel's* name for a socket in a foreign namespace, because a packet socket
+could suddenly be held in one. The fixture's inode is in the table:
 
 ```
 $ awk 'NR>1 && $9==11426' /proc/net/packet
@@ -236,14 +239,28 @@ exclusion carrying its measured reason; land it observe-first per LESSONS #13,
 promote on consecutive log-verified greens. **As its own job, not a step** —
 the first attempt put it in the existing miri job and its 25-minute timeout
 cancelled that hard gate, because `continue-on-error` is a step property and
-`timeout-minutes` is a job one (LESSONS #032). Then `unsafe_audited`. Fix the
+`timeout-minutes` is a job one (LESSONS #034). Then `unsafe_audited`. Fix the
 `miri` job comment, which currently states a falsehood. Extend
 `check_ledgers.py` to check the sanitizer ledger **per crate** — it is
 satisfied today by any one job existing anywhere in the workflow, which is what
 let this row sit open unnoticed.
 
-**P3 — packet sockets (1 day).** `/proc/net/packet`, the `dsock.c:3626` column
-shape, a differential case built on the fixture in §3, and a fuzz seed.
+**P3 — packet sockets (1 day). DONE 2026-09-20.** `/proc/net/packet`, the
+`dsock.c:3622` column shape, differential cases, and the `proc_net` fuzz target
+extended. Four things the plan did not see coming, each recorded where it
+belongs:
+
+* the protocol table needed **measuring, not transcribing** — a 100-socket
+  sweep against the C found a 7-byte truncation, a decimal-from-hex fallback
+  and a name containing a space;
+* `-F P` was being read from `socket.protocol` rather than from the NODE cell,
+  which is indistinguishable for TCP and wrong for a packet row;
+* item 24 — the namespace fallback was answering with the port's own protocol
+  name, right for the two families the netns fixture held and wrong for the two
+  it did not. **No unit test kills that mutation**; only the new fixture L does;
+* the fuzz target's new arm was **unreachable** until the valid header was
+  prepended to the input — proved by planting a panic in the row loop
+  (LESSONS #033).
 
 **P4 — the small options (1–2 days).** `-Z`, `-N`, then `-x`, `-X`, `-e`.
 

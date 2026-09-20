@@ -43,11 +43,32 @@ pub struct SocketEntry {
     /// The NODE cell — the protocol name (`TCP`/`UDP`) for internet sockets,
     /// the inode for AF_UNIX. Again lsof's own split, not ours.
     pub node: String,
-    /// AF_UNIX only: the ` type=STREAM` tail lsof appends to NAME. The state
-    /// is **not** part of it — the C keeps that in `Lf->lts` and prints it from
-    /// `print_tcptpi()`, the same place a TCP row's state comes from, so it
-    /// lands in `info.state` here and reaches `-F` as a `TST=` token.
-    pub unix_suffix: Option<String>,
+    /// The `type=…` tail lsof puts in NAME, for the two families that have
+    /// one: AF_UNIX's ` type=STREAM` and AF_PACKET's `type=SOCK_RAW`. For a
+    /// unix row the state is **not** part of it — the C keeps that in
+    /// `Lf->lts` and prints it from `print_tcptpi()`, the same place a TCP
+    /// row's state comes from, so it lands in `info.state` here and reaches
+    /// `-F` as a `TST=` token. A packet socket has no state at all.
+    pub type_suffix: Option<String>,
+    /// The name the kernel would answer for this socket's
+    /// `system.sockprotoname` extended attribute — the *only* thing the C
+    /// prints for a socket its own `/proc/net` tables missed, which is what
+    /// [`NetnsTables::protocol_for`] reproduces (`sock … protocol: TCP`).
+    ///
+    /// It is deliberately not `info.protocol`, because for two families the
+    /// two differ, and both were measured against the C on sockets held inside
+    /// a foreign network namespace:
+    ///
+    /// | family | `system.sockprotoname` | `info.protocol` |
+    /// |---|---|---|
+    /// | AF_UNIX, `SOCK_STREAM` | `UNIX-STREAM` | `unix` |
+    /// | AF_UNIX, dgram or seqpacket | `UNIX` | `unix` |
+    /// | AF_PACKET | `PACKET` | `packet` |
+    ///
+    /// The kernel names these after the `struct proto` the socket uses rather
+    /// than after its family — `unix_stream_proto` and `unix_dgram_proto` —
+    /// which is why `SOCK_SEQPACKET` reports `UNIX` and not `UNIX-SEQPACKET`.
+    pub kernel_proto: &'static str,
 }
 
 #[derive(Default)]
@@ -74,6 +95,7 @@ impl SocketTable {
         t.load_inet("/proc/net/udp6", Protocol::Udp, true, want_queues);
         t.load_raw("/proc/net/raw", false);
         t.load_raw("/proc/net/raw6", true);
+        t.load_packet("/proc/net/packet");
         t.load_unix("/proc/net/unix");
         t
     }
@@ -98,6 +120,7 @@ impl SocketTable {
         t.load_inet(&format!("{base}/udp6"), Protocol::Udp, true, false);
         t.load_raw(&format!("{base}/raw"), false);
         t.load_raw(&format!("{base}/raw6"), true);
+        t.load_packet(&format!("{base}/packet"));
         t.load_unix(&format!("{base}/unix"));
         Some(t)
     }
@@ -159,7 +182,8 @@ impl SocketTable {
                     path: None,
                     device: inode.to_string(),
                     node: proto.as_str().to_string(),
-                    unix_suffix: None,
+                    type_suffix: None,
+                    kernel_proto: proto.as_str(),
                 },
             );
         }
@@ -210,7 +234,90 @@ impl SocketTable {
                     path: None,
                     device: inode.to_string(),
                     node: protocol.as_str().to_string(),
-                    unix_suffix: None,
+                    type_suffix: None,
+                    kernel_proto: protocol.as_str(),
+                },
+            );
+        }
+    }
+
+    /// `/proc/net/packet` — AF_PACKET sockets, the ones `tcpdump` opens.
+    ///
+    /// Unlike every other table here this one carries no address at all: a
+    /// packet socket is bound to an interface and an ethernet protocol, not to
+    /// an endpoint. lsof spends its three cells accordingly (`dsock.c:3622`):
+    /// the **inode** goes in DEVICE, the **ethernet protocol name** in NODE,
+    /// and NAME is only `type=SOCK_RAW`.
+    fn load_packet(&mut self, path: &str) {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            self.parse_packet(&text);
+        }
+    }
+
+    /// The parsing half of [`Self::load_packet`]. Pure; must never panic.
+    ///
+    /// The header line is **checked, not skipped**. The C reads this table by
+    /// fixed column index and guards that with the labels (`get_pack()`), and
+    /// a kernel that reordered the columns would otherwise be silently read as
+    /// if it had not: a `Proto` value landing in the `Type` slot is still a
+    /// number, so it parses, and the row comes out wrong rather than absent.
+    /// A mismatch drops the whole table, which is what the C does too — minus
+    /// its `WARNING: unsupported format` on stderr, which this port has no
+    /// channel for from inside a backend table read.
+    pub fn parse_packet(&mut self, text: &str) {
+        let mut lines = text.lines();
+        match lines.next() {
+            Some(h) => {
+                let f: Vec<&str> = h.split_whitespace().collect();
+                if f.len() < PACKET_INODE + 1
+                    || f[PACKET_TYPE] != "Type"
+                    || f[PACKET_PROTO] != "Proto"
+                    || f[PACKET_INODE] != "Inode"
+                {
+                    return;
+                }
+            }
+            None => return,
+        }
+        for line in lines {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < PACKET_INODE + 1 {
+                continue;
+            }
+            let Ok(inode) = f[PACKET_INODE].parse::<u64>() else {
+                continue;
+            };
+            // `Proto` is hex and `Type` is decimal, exactly as the kernel
+            // writes them (`%04x` and `%u`). An unreadable protocol drops the
+            // row, matching the C's `strtoul` guard; an unreadable type does
+            // not, because the C reads that one with `atoi()`, which cannot
+            // fail and yields 0 — a value no socket type has, so the row still
+            // prints, as `type=unknown`.
+            let Ok(proto) = u32::from_str_radix(f[PACKET_PROTO], 16) else {
+                continue;
+            };
+            let ty = leading_u32(f[PACKET_TYPE]);
+            self.by_inode.insert(
+                inode,
+                SocketEntry {
+                    // The C's LSOF_FILE_PACKET. Lowercase, like `unix` and
+                    // `sock` and unlike `IPv4` — lsof's own casing.
+                    file_type: FileType::Other("pack".into()),
+                    info: SocketInfo {
+                        // The family, not the ethernet protocol: the latter is
+                        // the NODE cell, and `-F P` reads it from there. Same
+                        // split `parse_unix` makes with `Protocol::Other`.
+                        protocol: Protocol::Other("packet"),
+                        local: None,
+                        remote: None,
+                        state: None,
+                        tcp: None,
+                    },
+                    path: None,
+                    device: inode.to_string(),
+                    node: packet_node(proto),
+                    type_suffix: Some(socket_type_suffix(ty)),
+                    kernel_proto: "PACKET",
                 },
             );
         }
@@ -253,10 +360,26 @@ impl SocketTable {
                     path: f.get(UNIX_PATH).map(|s| s.to_string()),
                     device,
                     node: inode.to_string(),
-                    unix_suffix: Some(unix_suffix(f[UNIX_TYPE])),
+                    type_suffix: Some(unix_suffix(f[UNIX_TYPE])),
+                    kernel_proto: unix_kernel_proto(f[UNIX_TYPE]),
                 },
             );
         }
+    }
+}
+
+/// What the kernel calls an AF_UNIX socket in `system.sockprotoname`, read
+/// from the same `Type` column as [`unix_suffix`].
+///
+/// `UNIX-STREAM` for a stream socket and `UNIX` for everything else, including
+/// `SOCK_SEQPACKET`: the name comes from the `struct proto` the socket uses,
+/// and seqpacket shares `unix_dgram_proto`. Measured against the C, which
+/// printed `protocol: UNIX-STREAM`, `protocol: UNIX` and `protocol: UNIX` for
+/// stream, dgram and seqpacket sockets held in a foreign namespace.
+pub fn unix_kernel_proto(ty: &str) -> &'static str {
+    match u32::from_str_radix(ty, 16) {
+        Ok(1) => "UNIX-STREAM",
+        _ => "UNIX",
     }
 }
 
@@ -306,6 +429,13 @@ const INET_STATE: usize = 3;
 const INET_QUEUES: usize = 4;
 const INET_INODE: usize = 9;
 //   Num RefCount Protocol Flags Type St Inode Path
+const PACKET_TYPE: usize = 2;
+const PACKET_PROTO: usize = 3;
+const PACKET_INODE: usize = 8;
+
+/// The NODE cell's width for a packet row — see [`packet_node`].
+const IPROTO_MAX: usize = 7;
+
 const UNIX_FLAGS: usize = 3;
 const UNIX_TYPE: usize = 4;
 const UNIX_STATE: usize = 5;
@@ -463,10 +593,11 @@ impl NetnsTables {
             .or_insert_with(|| SocketTable::load_for_pid(pid));
         let e = table.as_ref()?.get(inode)?;
         // The PROTOCOL name, which is what the C shows here -- never the
-        // address. `info.protocol` and not `node`, because `node` is the
-        // protocol only for internet sockets; an AF_UNIX row keeps its inode
-        // there.
-        Some(e.info.protocol.as_str().to_string())
+        // address, and never `node`, which is the protocol only for internet
+        // sockets. The C reads this from `system.sockprotoname`, so what has
+        // to be reproduced is the KERNEL's name for the socket, which is not
+        // always the port's own `info.protocol`: see `kernel_proto`.
+        Some(e.kernel_proto.to_string())
     }
 }
 
@@ -475,6 +606,178 @@ fn netns_of(who: &str) -> Option<String> {
     std::fs::read_link(format!("/proc/{who}/ns/net"))
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The NODE cell of an AF_PACKET row: the ethernet protocol's name, or its
+/// number when the table below has none.
+///
+/// **Seven bytes, not eight.** The C copies this into `Lf->iproto`, which is
+/// `char[IPROTOL]` with `IPROTOL == 8` (`lib/common.h:323`), through
+/// `snpf(…, "%.*s", IPROTOL - 1, cp)`. Its own table breaks the "should not
+/// exceed 7 characters" comment above `ethernet_proto_to_str()` exactly once —
+/// `ETH_P_LOOPBACK` is `"LOOPBACK"` — and the oracle prints `LOOPBAC`.
+///
+/// Both branches are ASCII by construction (a literal from the table, or
+/// decimal digits), so the byte truncation can never split a character.
+pub fn packet_node(proto: u32) -> String {
+    let mut s = match ethernet_proto(proto) {
+        Some(name) => name.to_string(),
+        None => proto.to_string(),
+    };
+    s.truncate(IPROTO_MAX);
+    s
+}
+
+/// The NAME cell of an AF_PACKET row — the whole of it, since a packet socket
+/// has no address to print. `type=SOCK_RAW` for the types the kernel defines,
+/// `type=unknown` for anything else: the C drops the `SOCK_` prefix in that
+/// branch rather than printing `SOCK_unknown` (`dsock.c:3631`).
+pub fn socket_type_suffix(ty: u32) -> String {
+    match socket_type(ty) {
+        Some(name) => format!("type=SOCK_{name}"),
+        None => "type=unknown".to_string(),
+    }
+}
+
+/// `<sys/socket.h>`'s `SOCK_*`, as `socket_type_to_str()` names them.
+fn socket_type(ty: u32) -> Option<&'static str> {
+    Some(match ty {
+        1 => "STREAM",
+        2 => "DGRAM",
+        3 => "RAW",
+        4 => "RDM",
+        5 => "SEQPACKET",
+        6 => "DCCP",
+        10 => "PACKET",
+        _ => return None,
+    })
+}
+
+/// `<linux/if_ether.h>`'s `ETH_P_*`, as `ethernet_proto_to_str()` names them.
+///
+/// Transcribed from that function and then **verified against the compiled
+/// oracle**: a fixture opened one `AF_PACKET` socket per protocol below, plus
+/// seven values absent from it, and every NODE cell the C printed for the
+/// resulting 100 rows matched this table — truncation, the digits-only
+/// fallback, and `ETH_P_PPP_MP`'s embedded space included.
+///
+/// The C's arms are each `#if defined(…)`, so its table is whatever the build
+/// host's headers carried; this one is fixed. These are UAPI constants and do
+/// not change value, but a C built against headers older than a given protocol
+/// prints that protocol's *number* where this prints its name.
+fn ethernet_proto(proto: u32) -> Option<&'static str> {
+    Some(match proto {
+        1 => "802.3",        // ETH_P_802_3
+        2 => "AX25",         // ETH_P_AX25
+        3 => "ALL",          // ETH_P_ALL
+        4 => "802.2",        // ETH_P_802_2
+        5 => "SNAP",         // ETH_P_SNAP
+        6 => "DDCMP",        // ETH_P_DDCMP
+        7 => "WAN_PPP",      // ETH_P_WAN_PPP
+        8 => "PPP MP",       // ETH_P_PPP_MP
+        9 => "LCLTALK",      // ETH_P_LOCALTALK
+        12 => "CAN",         // ETH_P_CAN
+        13 => "CANFD",       // ETH_P_CANFD
+        16 => "PPPTALK",     // ETH_P_PPPTALK
+        17 => "802.2",       // ETH_P_TR_802_2
+        21 => "MOBITEX",     // ETH_P_MOBITEX
+        22 => "CONTROL",     // ETH_P_CONTROL
+        23 => "IRDA",        // ETH_P_IRDA
+        24 => "ECONET",      // ETH_P_ECONET
+        25 => "HDLC",        // ETH_P_HDLC
+        26 => "ARCNET",      // ETH_P_ARCNET
+        27 => "DSA",         // ETH_P_DSA
+        28 => "TRAILER",     // ETH_P_TRAILER
+        96 => "LOOP",        // ETH_P_LOOP
+        245 => "PHONET",     // ETH_P_PHONET
+        246 => "802154",     // ETH_P_IEEE802154
+        247 => "CAIF",       // ETH_P_CAIF
+        248 => "XDSA",       // ETH_P_XDSA
+        249 => "MAP",        // ETH_P_MAP
+        512 => "PUP",        // ETH_P_PUP
+        513 => "PUPAT",      // ETH_P_PUPAT
+        2048 => "IP",        // ETH_P_IP
+        2053 => "X25",       // ETH_P_X25
+        2054 => "ARP",       // ETH_P_ARP
+        2303 => "BPQ",       // ETH_P_BPQ
+        2560 => "I3EPUP",    // ETH_P_IEEEPUP
+        2561 => "I3EPUPA",   // ETH_P_IEEEPUPAT
+        8939 => "ERSPAN2",   // ETH_P_ERSPAN2
+        8944 => "TSN",       // ETH_P_TSN
+        17157 => "BATMAN",   // ETH_P_BATMAN
+        24576 => "DEC",      // ETH_P_DEC
+        24577 => "DNA_DL",   // ETH_P_DNA_DL
+        24578 => "DNA_RC",   // ETH_P_DNA_RC
+        24579 => "DNA_RT",   // ETH_P_DNA_RT
+        24580 => "LAT",      // ETH_P_LAT
+        24581 => "DIAG",     // ETH_P_DIAG
+        24582 => "CUST",     // ETH_P_CUST
+        24583 => "SCA",      // ETH_P_SCA
+        25944 => "TEB",      // ETH_P_TEB
+        32821 => "RARP",     // ETH_P_RARP
+        32923 => "ATALK",    // ETH_P_ATALK
+        33011 => "AARP",     // ETH_P_AARP
+        33024 => "8021Q",    // ETH_P_8021Q
+        33079 => "IPX",      // ETH_P_IPX
+        34525 => "IPV6",     // ETH_P_IPV6
+        34824 => "PAUSE",    // ETH_P_PAUSE
+        34825 => "SLOW",     // ETH_P_SLOW
+        34878 => "WCCP",     // ETH_P_WCCP
+        34887 => "MPLS_UC",  // ETH_P_MPLS_UC
+        34888 => "MPLS_MC",  // ETH_P_MPLS_MC
+        34892 => "ATMMPOA",  // ETH_P_ATMMPOA
+        34915 => "PPP_DIS",  // ETH_P_PPP_DISC
+        34916 => "PPP_SES",  // ETH_P_PPP_SES
+        34924 => "LINKCTL",  // ETH_P_LINK_CTL
+        34948 => "ATMFATE",  // ETH_P_ATMFATE
+        34958 => "PAE",      // ETH_P_PAE
+        34978 => "AOE",      // ETH_P_AOE
+        34984 => "8021AD",   // ETH_P_8021AD
+        34997 => "802_EX1",  // ETH_P_802_EX1
+        35006 => "ERSPAN",   // ETH_P_ERSPAN
+        35015 => "PREAUTH",  // ETH_P_PREAUTH
+        35018 => "TIPC",     // ETH_P_TIPC
+        35020 => "LLDP",     // ETH_P_LLDP
+        35043 => "MRP",      // ETH_P_MRP
+        35045 => "MACSEC",   // ETH_P_MACSEC
+        35047 => "8021AH",   // ETH_P_8021AH
+        35061 => "MVRP",     // ETH_P_MVRP
+        35063 => "1588",     // ETH_P_1588
+        35064 => "NCSI",     // ETH_P_NCSI
+        35067 => "PRP",      // ETH_P_PRP
+        35078 => "FCOE",     // ETH_P_FCOE
+        35085 => "TDLS",     // ETH_P_TDLS
+        35092 => "FIP",      // ETH_P_FIP
+        35093 => "IBOE",     // ETH_P_IBOE
+        35095 => "802.21",   // ETH_P_80221
+        35119 => "HSR",      // ETH_P_HSR
+        35151 => "NSH",      // ETH_P_NSH
+        36864 => "LOOPBACK", // ETH_P_LOOPBACK
+        37120 => "QINQ1",    // ETH_P_QINQ1
+        37376 => "QINQ2",    // ETH_P_QINQ2
+        37632 => "QINQ3",    // ETH_P_QINQ3
+        56026 => "EDSA",     // ETH_P_EDSA
+        56027 => "DSAD1Q",   // ETH_P_DSA_8021Q
+        60734 => "IFE",      // ETH_P_IFE
+        64507 => "AF_IUCV",  // ETH_P_AF_IUCV
+        _ => return None,
+    })
+}
+
+/// C's `atoi()` on the `Type` column: leading digits, and 0 for anything else.
+///
+/// The C reads that column with `atoi()`, which has no failure to report, so a
+/// garbage value there still produces a row — one whose type is 0, which no
+/// socket has, so it prints `type=unknown`. Rejecting the line instead would
+/// drop a row the C emits. A `-` sign is not handled because `atoi` would make
+/// it negative and `socket_type_to_str()` takes a `uint32_t`: every negative
+/// value lands in the same `unknown` branch that 0 does.
+fn leading_u32(s: &str) -> u32 {
+    let digits = s.strip_prefix('+').unwrap_or(s);
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -598,6 +901,7 @@ mod tests {
         for e in t.by_inode.values() {
             match &e.file_type {
                 FileType::Ipv4 | FileType::Ipv6 | FileType::Unix => {}
+                FileType::Other(c) if c == "pack" => {}
                 other => panic!("unexpected socket file type {other:?}"),
             }
         }
@@ -681,7 +985,26 @@ mod tests {
                         "unix NODE should be the inode, got {:?}",
                         e.node
                     );
-                    assert!(e.unix_suffix.is_some(), "unix rows carry a type= tail");
+                    assert!(e.type_suffix.is_some(), "unix rows carry a type= tail");
+                }
+                FileType::Other(c) if c == "pack" => {
+                    // pack  DEVICE = inode, NODE = ethernet protocol
+                    assert!(
+                        e.device.parse::<u64>().is_ok(),
+                        "pack DEVICE should be the inode, got {:?}",
+                        e.device
+                    );
+                    assert!(
+                        !e.node.is_empty() && e.node.len() <= IPROTO_MAX,
+                        "pack NODE should be a <=7-byte protocol, got {:?}",
+                        e.node
+                    );
+                    assert!(
+                        e.type_suffix
+                            .as_deref()
+                            .is_some_and(|t| t.starts_with("type=")),
+                        "pack rows carry a type= tail"
+                    );
                 }
                 other => panic!("unexpected socket file type {other:?}"),
             }
@@ -696,6 +1019,182 @@ mod tests {
         assert!(
             t.by_inode.values().all(|e| e.info.tcp.is_none()),
             "load(false) must leave TcpExtInfo unset"
+        );
+    }
+
+    /// A `/proc/net/packet` exactly as this kernel writes it, with the header
+    /// the C validates. Column widths are the kernel's `%-*s`/`%04x`/`%u`.
+    const PACKET_TABLE: &str = "\
+sk               RefCnt Type Proto  Iface R Rmem   User   Inode
+0000000087b466aa 3      3    0003   0     1 16640  0      1399
+00000000bc7dcc98 3      2    0800   0     1 8320   0      1400
+00000000cddcb89a 3      3    9000   0     1 0      0      1401
+000000007573c627 3      3    1234   0     1 0      0      1403
+0000000052657e45 3      10   0003   0     1 16640  0      1406
+";
+
+    #[test]
+    fn packet_rows_spend_their_cells_the_way_lsof_does() {
+        // Measured against the C on a fixture holding these exact sockets:
+        //   python3 835 root 3u pack 1399 0t0 ALL type=SOCK_RAW
+        // DEVICE is the inode, NODE is the ethernet protocol, and NAME is only
+        // the type — a packet socket has no address to print.
+        let mut t = SocketTable::default();
+        t.parse_packet(PACKET_TABLE);
+        let e = t.get(1399).expect("inode 1399");
+        assert_eq!(e.file_type.code(), "pack");
+        assert_eq!(e.device, "1399", "DEVICE is the inode");
+        assert_eq!(e.node, "ALL", "NODE is the ethernet protocol");
+        assert_eq!(e.type_suffix.as_deref(), Some("type=SOCK_RAW"));
+        assert!(e.path.is_none(), "a packet socket is never bound to a path");
+        assert!(e.info.state.is_none(), "and has no state to print");
+        assert_eq!(t.get(1400).unwrap().node, "IP");
+        assert_eq!(
+            t.get(1400).unwrap().type_suffix.as_deref(),
+            Some("type=SOCK_DGRAM")
+        );
+        assert_eq!(
+            t.get(1406).unwrap().type_suffix.as_deref(),
+            Some("type=SOCK_PACKET"),
+            "SOCK_PACKET is 10, not a gap in the enum"
+        );
+    }
+
+    #[test]
+    fn a_protocol_name_is_truncated_to_seven_bytes() {
+        // `Lf->iproto` is char[8] and the C writes it with "%.*s", IPROTOL - 1.
+        // ETH_P_LOOPBACK is the one name in the C's own table that exceeds the
+        // 7 characters its comment promises, and the oracle prints LOOPBAC.
+        let mut t = SocketTable::default();
+        t.parse_packet(PACKET_TABLE);
+        assert_eq!(t.get(1401).expect("inode 1401").node, "LOOPBAC");
+        assert_eq!(packet_node(0x9000), "LOOPBAC");
+        // Nothing shorter is touched.
+        assert_eq!(packet_node(0x0806), "ARP");
+        assert_eq!(packet_node(0x8847), "MPLS_UC", "exactly 7 fits whole");
+    }
+
+    #[test]
+    fn an_unnamed_ethernet_protocol_prints_its_number_in_decimal() {
+        // The table column is hex; the cell the C prints is not.
+        let mut t = SocketTable::default();
+        t.parse_packet(PACKET_TABLE);
+        assert_eq!(t.get(1403).expect("inode 1403").node, "4660");
+        assert_eq!(packet_node(0), "0", "no ETH_P_* is zero");
+        assert_eq!(packet_node(0xFFFF), "65535");
+    }
+
+    #[test]
+    fn a_socket_type_with_no_name_drops_the_sock_prefix() {
+        // "type=unknown", not "type=SOCK_unknown": the C picks the prefix on
+        // the same flag that picks the word.
+        assert_eq!(socket_type_suffix(0), "type=unknown");
+        assert_eq!(socket_type_suffix(7), "type=unknown");
+        assert_eq!(socket_type_suffix(u32::MAX), "type=unknown");
+        for (ty, want) in [
+            (1, "type=SOCK_STREAM"),
+            (2, "type=SOCK_DGRAM"),
+            (3, "type=SOCK_RAW"),
+            (4, "type=SOCK_RDM"),
+            (5, "type=SOCK_SEQPACKET"),
+            (6, "type=SOCK_DCCP"),
+            (10, "type=SOCK_PACKET"),
+        ] {
+            assert_eq!(socket_type_suffix(ty), want);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_type_column_still_yields_a_row() {
+        // The C reads Type with atoi(), which cannot fail: garbage becomes 0
+        // and the row prints as type=unknown. Rejecting the line would lose a
+        // row the C emits. Proto is different — a bad one drops the line, as
+        // the C's strtoul guard does.
+        let mut t = SocketTable::default();
+        t.parse_packet(
+            "sk               RefCnt Type Proto  Iface R Rmem   User   Inode\n\
+             0000000087b466aa 3      xyz  0003   0     1 0      0      21\n\
+             0000000087b466aa 3      3    zzzz   0     1 0      0      22\n",
+        );
+        assert_eq!(
+            t.get(21).expect("a bad Type keeps the row").type_suffix,
+            Some("type=unknown".to_string())
+        );
+        assert!(t.get(22).is_none(), "a bad Proto drops the row");
+    }
+
+    #[test]
+    fn a_packet_table_whose_columns_moved_is_dropped_whole() {
+        // This table is read by fixed index, so the C checks the labels before
+        // trusting them (get_pack). Without that a reordered kernel format
+        // parses cleanly into wrong cells, because Proto in the Type slot is
+        // still a number.
+        let reordered = PACKET_TABLE.replacen(
+            "sk               RefCnt Type Proto  Iface R Rmem   User   Inode",
+            "sk               RefCnt Proto Type  Iface R Rmem   User   Inode",
+            1,
+        );
+        let mut t = SocketTable::default();
+        t.parse_packet(&reordered);
+        assert!(
+            t.by_inode.is_empty(),
+            "wrong labels means no rows, not bad rows"
+        );
+
+        // Same for a table with no header at all, or one truncated mid-header.
+        for text in ["", "sk RefCnt Type\n", "0000 3 3 0003 0 1 0 0 99\n"] {
+            let mut t = SocketTable::default();
+            t.parse_packet(text);
+            assert!(t.by_inode.is_empty(), "accepted {text:?}");
+        }
+    }
+    #[test]
+    fn the_kernels_protocol_name_is_not_always_this_ports_protocol() {
+        // What `protocol_for` reproduces is the C reading
+        // `system.sockprotoname`, and for two families that name is neither
+        // `info.protocol` nor the NODE cell. Measured against the C on five
+        // sockets held inside a foreign network namespace, where the main
+        // table misses them and this is the only path that answers:
+        //
+        //   3u sock … protocol: PACKET        4u sock … protocol: UNIX-STREAM
+        //   5u sock … protocol: TCP           6u sock … protocol: UDP
+        //
+        // A seqpacket AF_UNIX socket reports UNIX, not UNIX-SEQPACKET.
+        assert_eq!(unix_kernel_proto("0001"), "UNIX-STREAM");
+        assert_eq!(unix_kernel_proto("0002"), "UNIX");
+        assert_eq!(unix_kernel_proto("0005"), "UNIX", "seqpacket shares dgram");
+        assert_eq!(unix_kernel_proto("zz"), "UNIX", "unreadable is still UNIX");
+
+        let mut t = SocketTable::default();
+        t.parse_packet(PACKET_TABLE);
+        assert_eq!(
+            t.get(1399).unwrap().kernel_proto,
+            "PACKET",
+            "uppercase, and not the ethernet protocol in NODE"
+        );
+        assert_eq!(t.get(1399).unwrap().node, "ALL", "NODE is unaffected");
+
+        let mut t = SocketTable::default();
+        t.parse_unix(
+            "Num RefCount Protocol Flags Type St Inode Path\n\
+                      0000: 00000002 00000000 00010000 0001 01 184 /tmp/s\n\
+                      0000: 00000002 00000000 00000000 0002 01 185 /tmp/d\n",
+        );
+        assert_eq!(t.get(184).unwrap().kernel_proto, "UNIX-STREAM");
+        assert_eq!(t.get(185).unwrap().kernel_proto, "UNIX");
+
+        let mut t = SocketTable::default();
+        t.parse_inet(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000 100 0 0 10 0\n",
+            Protocol::Tcp,
+            false,
+            false,
+        );
+        assert_eq!(
+            t.get(4242).unwrap().kernel_proto,
+            "TCP",
+            "for an internet socket the two names do agree"
         );
     }
 }

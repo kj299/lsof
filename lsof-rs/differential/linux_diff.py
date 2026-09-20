@@ -413,19 +413,75 @@ def netns_listener(work: str) -> Fixture:
     )
 
 
-def make_fixtures(
-    work: str,
-) -> tuple[
-    Fixture,
-    Fixture,
-    Fixture,
-    Fixture,
-    Fixture,
-    Fixture,
-    Fixture,
-    Fixture,
-    Fixture,
-]:
+def packet_holder(work: str) -> Fixture:
+    """AF_PACKET sockets in THIS network namespace -- the `pack` row.
+
+    Four, chosen for the three branches of the NODE cell the C fills from
+    `ethernet_proto_to_str()`: a named protocol (ETH_P_ALL -> `ALL`), the one
+    name in the C's own table longer than the 7 bytes `Lf->iproto` holds
+    (ETH_P_LOOPBACK -> `LOOPBAC`), and a protocol it does not name at all
+    (0x1234 -> the decimal `4660`). SOCK_DGRAM is in there because the NAME
+    cell is `type=SOCK_DGRAM` where the others are `type=SOCK_RAW`.
+
+    `AF_PACKET` needs CAP_NET_RAW, which a GitHub runner does not have, so this
+    reports itself unsupported rather than failing -- and its cases are then
+    SKIPPED, which is not the same as passing. Fixture L covers the part of
+    this that survives without the capability.
+    """
+    pdir = os.path.join(work, "packet")
+    os.makedirs(pdir)
+    py = (
+        "import os,socket,time\n"
+        "S=[socket.socket(socket.AF_PACKET,t,socket.htons(p)) for t,p in (\n"
+        "  (socket.SOCK_RAW,0x0003),(socket.SOCK_DGRAM,0x0800),\n"
+        "  (socket.SOCK_RAW,0x9000),(socket.SOCK_RAW,0x1234))]\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % pdir
+    )
+    return Fixture(
+        "K(packet)",
+        [sys.executable, "-c", py],
+        cwd=pdir,
+        expect_fds=7,  # 0,1,2 + four packet sockets
+        optional=True,
+    )
+
+
+def userns_socket_holder(work: str) -> Fixture:
+    """A packet socket and two AF_UNIX sockets inside a foreign namespace.
+
+    `unshare --user --map-root-user` grants CAP_NET_RAW *inside* the new user
+    namespace, so this needs no privilege on the host -- which is the point:
+    unlike fixture K it runs on an ordinary CI runner. `--net` then puts the
+    sockets somewhere `/proc/net/*` cannot see them, so both binaries must fall
+    back: the C to the `system.sockprotoname` xattr, this port to the owning
+    process's own tables.
+
+    That fallback is the only path on which the KERNEL's name for a socket is
+    visible, and for these three it is not the name either program uses
+    elsewhere -- `PACKET`, `UNIX-STREAM` and `UNIX`, measured against the C.
+    Nothing else in this harness reaches that code.
+    """
+    udir = os.path.join(work, "userns")
+    os.makedirs(udir)
+    py = (
+        "import os,socket,time\n"
+        "p=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(3))\n"
+        "st=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+        "dg=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % udir
+    )
+    return Fixture(
+        "L(userns sockets)",
+        ["unshare", "--user", "--map-root-user", "--net", sys.executable, "-c", py],
+        cwd=udir,
+        expect_fds=6,  # 0,1,2 + packet, unix stream, unix dgram
+        optional=True,
+    )
+
+
+def make_fixtures(work: str) -> tuple[Fixture, ...]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
     with open(os.path.join(fdir, "f.txt"), "w") as f:
@@ -515,7 +571,9 @@ def make_fixtures(
     h = long_command_holder(work)
     i = thread_holder(work)
     j = netns_listener(work)
-    return a, b, c, d, e, f, g, h, i, j
+    k = packet_holder(work)
+    ln = userns_socket_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln
 
 
 # -------------------------------------------------------------------- matrix
@@ -629,14 +687,20 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e, lk, anon, longcmd, threads, netns = fixtures
+    a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns = fixtures
+    # Every fixture that needs a capability the runner may not have, with the
+    # matrix placeholder its cases use and the reason to print when it is
+    # missing. A missing capability is neither a divergence nor a broken
+    # harness: those cases are SKIPPED, by name, on stderr -- never silently
+    # compared against something else, and never counted as passing.
+    optional: dict[str, tuple[Fixture | None, str]] = {
+        "J": (netns, "no CAP_SYS_ADMIN for `unshare --net`"),
+        "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
+        "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
+    }
     try:
         for fx in fixtures:
-            if fx is netns:
-                # `unshare --net` needs CAP_SYS_ADMIN. A runner without it must
-                # SKIP the namespace cases, not fail and not silently compare
-                # something else -- an unavailable capability is neither a
-                # divergence nor a broken harness.
+            if fx.optional:
                 try:
                     fx.start()
                 except (FixtureUnavailable, OSError) as unavailable:
@@ -648,14 +712,24 @@ def run(args) -> int:
                         f"linux_diff: optional fixture unavailable: {unavailable}",
                         file=sys.stderr,
                     )
-                    netns = None
+                    for key, (cand, why) in optional.items():
+                        if cand is fx:
+                            optional[key] = (None, why)
                 continue
             fx.start()
         # E's mappings land after its fds do; it writes `ready` once both
         # libraries are loaded and one is unlinked. Waiting on the marker
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
-        for fx in [f for f in (e, lk, anon, threads, netns) if f is not None]:
+        started_optional = {k: v[0] for k, v in optional.items()}
+        netns, packet, userns = (
+            started_optional["J"],
+            started_optional["K"],
+            started_optional["L"],
+        )
+        for fx in [
+            f for f in (e, lk, anon, threads, netns, packet, userns) if f is not None
+        ]:
             ready = os.path.join(fx.cwd, "ready")
             deadline = time.monotonic() + 5.0
             while not os.path.exists(ready) and time.monotonic() < deadline:
@@ -681,9 +755,13 @@ def run(args) -> int:
         cases = render_matrix(
             args.matrix,
             {
-                # `{J}` is only defined when the namespace fixture came up; the
-                # cases that name it are dropped below when it did not.
-                "J": str(netns.pid) if netns is not None else "0",
+                # `{J}`, `{K}` and `{L}` are only defined when their optional
+                # fixture came up; the cases that name one are dropped below
+                # when it did not.
+                **{
+                    key: str(fx.pid) if fx is not None else "0"
+                    for key, (fx, _) in optional.items()
+                },
                 "A": str(a.pid),
                 "B": str(b.pid),
                 "C": str(c.pid),
@@ -705,13 +783,19 @@ def run(args) -> int:
                 "PORT": port,
             },
         )
-        if netns is None:
-            dropped = [c["name"] for c in cases if any("{J}" in a for a in _raw_args(args.matrix, c["name"]))]
+        for key, (fx, why) in optional.items():
+            if fx is not None:
+                continue
+            token = "{" + key + "}"
+            dropped = [
+                c["name"]
+                for c in cases
+                if any(token in a for a in _raw_args(args.matrix, c["name"]))
+            ]
             cases = [c for c in cases if c["name"] not in dropped]
             if dropped:
                 print(
-                    "linux_diff: SKIP (no CAP_SYS_ADMIN for `unshare --net`): "
-                    + ", ".join(dropped),
+                    f"linux_diff: SKIP ({why}): " + ", ".join(dropped),
                     file=sys.stderr,
                 )
         matrix_json = os.path.join(work, "matrix.json")

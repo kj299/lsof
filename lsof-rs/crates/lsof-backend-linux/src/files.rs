@@ -246,8 +246,9 @@ fn row(
         }
         if let Some(e) = socks.get(inode) {
             // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
-            // anonymous socket has no path and shows the tail alone.
-            let name = match &e.unix_suffix {
+            // anonymous socket — and every AF_PACKET socket, which never has a
+            // path — shows the tail alone.
+            let name = match &e.type_suffix {
                 Some(suffix) => match &e.path {
                     Some(p) => format!("{p} {suffix}"),
                     None => suffix.clone(),
