@@ -164,31 +164,85 @@ def _scan_signed_char(code, char_names):
     return out
 
 
-_TRAILING_COMMENT = re.compile(r"/\*.*?\*/|//.*$")
+def _uncommented(line, in_block=False):
+    """`(code, still_in_block)` — `line` with comments AND string/char literal
+    contents blanked out, so a rule matches only text that can execute.
 
+    Blanked rather than removed so the text the porter reads still lines up
+    with the source, and so column-sensitive rules keep working.
 
-def _uncommented(line):
-    """`line` with its comments blanked out.
+    Three noise sources, each found by running this on real C rather than by
+    reasoning about it, and each a fifth or more of a category:
 
-    Comment-only lines were already skipped, but a TRAILING comment is the
-    larger noise source in real code: a doc reference like
-    `unsigned char mnt_stat; /* mount point stat(2) status */` matched the
-    toctou rule, and on lsof that was 20 of 47 live toctou hits — pure noise
-    that buries the real call sites. Blanked rather than removed so the text
-    the porter reads still lines up with the source.
+      * a TRAILING comment — `unsigned char mnt_stat; /* mount point stat(2)
+        status */` matched the toctou rule. On lsof that was 20 of 47 live
+        toctou hits.
+      * a comment OPENED on a code line and closed later — `int *ss  /* stat(2)
+        status result -- i.e., SB_*` . The old rule needed `*/` on the same
+        line, so an unterminated `/*` was not stripped at all and every
+        continuation line was scanned as code. 5 more toctou hits on lsof.
+      * a STRING LITERAL naming the function — `fprintf(stderr, "%s: WARNING:
+        can't stat() ", Pn)`. 10 more, the single largest remaining source.
+
+    That last one is why the literal blanking stops at the quotes: the
+    format-string rule runs separately over the raw source and MUST still see
+    whether an argument starts with a quote, so `"…"` stays a quoted empty
+    string here rather than vanishing.
+
+    This is the same "a comment is not code" fix `control-coverage` needed, and
+    LESSONS #002 is the reason it matters rather than being cosmetic: a Phase-0
+    scanner whose noise is concentrated in one mechanical class trains its
+    reader to skim, and skimming is how the one real hit gets missed.
     """
-    return _TRAILING_COMMENT.sub(lambda m: " " * len(m.group(0)), line)
+    out, i, n = [], 0, len(line)
+    while i < n:
+        if in_block:
+            e = line.find("*/", i)
+            if e < 0:
+                out.append(" " * (n - i))
+                break
+            out.append(" " * (e + 2 - i))
+            i, in_block = e + 2, False
+            continue
+        if line.startswith("//", i):
+            out.append(" " * (n - i))
+            break
+        if line.startswith("/*", i):
+            in_block = True
+            continue
+        c = line[i]
+        if c == '"' or c == "'":
+            out.append(c)
+            i += 1
+            while i < n:
+                if line[i] == "\\" and i + 1 < n:
+                    out.append("  ")
+                    i += 2
+                    continue
+                if line[i] == c:
+                    out.append(c)
+                    i += 1
+                    break
+                out.append(" ")
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), in_block
 
 
 def scan_text(src):
     hits = []
     char_names = _char_decls(src)
+    in_block = False
     for lineno, line in enumerate(src.splitlines(), 1):
-        # skip obvious comment-only lines to cut noise
         stripped = line.strip()
-        if stripped.startswith(("*", "//", "/*")):
+        # `in_block` carries across lines, so a comment opened on a code line
+        # blanks its continuation lines too — the case the old `startswith`
+        # check could not see.
+        code, in_block = _uncommented(line, in_block)
+        if not code.strip():
             continue
-        code = _uncommented(line)
         for cat, cwe, rx in CHECKS:
             if rx.search(code):
                 hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
@@ -305,6 +359,50 @@ def _self_test():
     # 20 of 47 live toctou hits on lsof.
     check("stat(2) in a trailing comment is NOT flagged as toctou",
           not any("stat_doc" in h["text"] for h in hits))
+
+
+    # A comment OPENED on a code line and closed later. The old rule needed
+    # `*/` on the same line, so every continuation line was scanned as code.
+    multi = ("int f(int *ss  /* stat(2) status result -- i.e., SB_*\n"
+             " * more prose mentioning stat() and access()\n"
+             " */) { return 0; }\n")
+    check("stat(2) in a comment spanning lines is NOT flagged",
+          not [h for h in scan_text(multi) if h["category"] == "toctou"])
+
+    # The largest remaining source: the function name inside a STRING.
+    lit = 'void w(void) { fprintf(stderr, "%s: WARNING: can\'t stat() ", Pn); }\n'
+    check("stat() inside a string literal is NOT flagged as toctou",
+          not [h for h in scan_text(lit) if h["category"] == "toctou"])
+
+    # ...while the real call still is. Blanking must not blind the rule.
+    real = 'void r(void) { if (stat(p, &sb) == 0) { fd = open(p, 0); } }\n'
+    check("a real stat()-then-open() IS still flagged",
+          any(h["category"] == "toctou" for h in scan_text(real)))
+
+    # The format-string rule runs over the RAW source and depends on seeing
+    # whether an argument starts with a quote; blanking literal CONTENTS must
+    # leave the quotes in place. Both directions pinned.
+    lit_fmt = 'void a(void) { printf("%s ok", s); }\n'
+    check("a literal format is still NOT a format-string hit",
+          not [h for h in scan_text(lit_fmt) if h["category"] == "format-string"])
+    var_fmt = 'void b(char *f) { printf(f, s); }\n'
+    check("a variable format IS still a format-string hit",
+          any(h["category"] == "format-string" for h in scan_text(var_fmt)))
+
+    # strcpy with a literal destination-side argument still matches: blanking
+    # the contents leaves the call shape intact.
+    cp = 'void c(char *d) { (void)strcpy(d, "literal"); }\n'
+    check("strcpy is still flagged when its source is a literal",
+          any(h["category"] == "unbounded-copy" for h in scan_text(cp)))
+
+    # The noise heuristic this replaced skipped any line starting with `*`,
+    # meaning to skip comment continuations. A pointer-dereference assignment
+    # starts that way too, so real code was silently never scanned — the
+    # heuristic was a blind spot as well as a filter. Two live lsof lines came
+    # back when it went (`*bp = realloc(...)`, `*cbf = realloc(...)`).
+    deref = 'void d(char **bp, int sz) { *bp = (char *)realloc(*bp, sz); }\n'
+    check("a line STARTING with a pointer deref is scanned, not skipped",
+          any(h["category"] == "int-overflow-mul" for h in scan_text(deref)))
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
