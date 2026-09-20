@@ -1990,7 +1990,72 @@ the emphasized half.
 
 ---
 
-## 049. A multi-defect fixture pins only the union — mutate the gates to prove them
+## 049. The status list you read is one provider's view, not the set of gates
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs / lsof — the dialect-deletion near-miss
+- **What happened:** The cleanup arc's last deferred item was six "wired but
+  unused" C dialects — `aix`, `darwin`, `freebsd`, `netbsd`, `openbsd`, `sun`,
+  82 files and 35,637 lines, all reachable from `configure.ac`'s `AS_CASE` on
+  `$host_os`. The instruction was to delete them. Measuring first turned the
+  task inside out:
+
+  | dialect | built by | what actually runs |
+  |---|---|---|
+  | `darwin` | GitHub Actions | `Configure -n darwin`, `make`, `check.bash darwin`, autotools, dist |
+  | `freebsd` | **Cirrus CI** | two FreeBSD images, `check.bash freebsd`, autotools, `make check`, **`make distcheck`** |
+  | `netbsd` | **sourcehut** | netbsd/9.x, autoreconf, configure, make |
+  | `openbsd` | **sourcehut** | openbsd/7.2, `Configure`, `make`, `check.bash openbsd` |
+  | `aix` | — | nothing, on any provider |
+  | `sun` | — | nothing, on any provider |
+
+  **Four of the six were live, tested oracle platforms, and three of those are
+  tested by CI that never appears in this repository's GitHub check list.**
+  FreeBSD's Cirrus job is a more thorough C build than the Linux GitHub job —
+  it is the only place `make distcheck` runs on a BSD. Delete those trees and
+  every GitHub check stays green.
+
+  This is LESSONS #035 with the comfortable assumption removed. That entry says
+  an absent job looks exactly like a passing one. **The job need not be absent.
+  It can be running — passing or failing — on a provider whose results never
+  enter the list you are reading.** Nine PRs of this arc were judged safe by
+  reading GitHub check runs. That list is a *view over one provider*, and I had
+  been treating it as the set of gates for days.
+
+  The evidence was never hidden. `.cirrus.yml`, `.builds/netbsd.yml` and
+  `.builds/openbsd.yml` sit at the repository root, tracked, in plain sight —
+  and **no workflow, harness, document or skill in this kit references any of
+  them.** A gate that nothing points at is one you will not think to look for,
+  which is why finding it has to be a step rather than a hope.
+
+  So, before removing anything a build system can select: **enumerate CI
+  providers by finding their config files, not by reading a status list**, then
+  map each config to what it builds.
+
+      git ls-files | grep -E '^\.github/workflows/|^\.cirrus|^\.builds/|^\.travis|appveyor|gitlab-ci|woodpecker|\.drone'
+
+  A second thing worth recording: the deletion did not happen. The measurement
+  went to the repository's owner with the table above and the answer was to keep
+  all six — **untested is not the same as irrelevant.** `aix` and `sun` are
+  unbuilt here but they are functional source with a wired build path, not stale
+  files or dangling references, which is the boundary this whole arc worked to.
+  The investigation was the deliverable; the diff was empty and that was the
+  right outcome.
+
+- **Kit change:** `skills/porting-kit-audit/SKILL.md`'s CI-hygiene step now starts
+  by enumerating provider configs, because its previous two checks — is each
+  workflow path-scoped, and does each job's trigger cover what that job reads —
+  both silently assume you can see every job.
+- **Honest limit (LESSONS #033):** this is a procedure in a skill, not a harness.
+  Nothing fails if someone skips it, which by #033's own standard makes it a note
+  with a checklist attached rather than a control. The executable version would be
+  a ledger asserting that every platform the build system can select is either
+  built by some CI config or explicitly waived — named here, not built.
+- **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md`
+
+---
+
+## 050. A multi-defect fixture pins only the union — mutate the gates to prove them
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #016. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Date:** 2026-07-25
@@ -2027,7 +2092,7 @@ the emphasized half.
 
 ---
 
-## 050. A gate that can never pass is as broken as one that can never fail
+## 051. A gate that can never pass is as broken as one that can never fail
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #022. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
 - **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #15 -> by title “An inherited environment constraint is a dated observation, not a fact” (no entry in this log).
@@ -2066,10 +2131,10 @@ the emphasized half.
 
 ---
 
-## 051. A hand-maintained coverage table reports on itself
+## 052. A hand-maintained coverage table reports on itself
 
 - **Imported:** from the c2rust-port lineage of this kit, where it is #025. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
-- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #22 -> #050 “A gate that can never pass is as broken as one that can never fail”.
+- **Re-cited:** source #6 -> #036 “Gates fail open on \"nothing ran\" — self-test the degenerate case, not just detection”; source #22 -> #051 “A gate that can never pass is as broken as one that can never fail”.
 - **Date:** 2026-08-22
 - **Codebase:** the kit itself — `harnesses/gate-mutation/mutate_gates.py` and the
   three bash harnesses it could not see
@@ -2077,7 +2142,7 @@ the emphasized half.
   survivor(s)"*, which reads as a statement about the gate set. It is a statement
   about **the hand-written table**. Nothing required a harness to be in it, so
   the count was silently partial — and because `_run` assumed python, the missing
-  ones were precisely the bash harnesses, one of which (LESSONS #050) was shipping
+  ones were precisely the bash harnesses, one of which (LESSONS #051) was shipping
   a mode that could never pass. Fixing the interpreter made them *sweepable*, not
   *swept*: adding entries for the remaining three immediately produced **three
   survivors**. All three self-tests only ever exercised the happy path — an
@@ -2099,7 +2164,7 @@ the emphasized half.
 
 ---
 
-## 052. The first run of an imported gate measures the tree that imported it
+## 053. The first run of an imported gate measures the tree that imported it
 
 - **Date:** 2026-09-20
 - **Codebase:** the Porting Kit vendored here (refresh stage 3 — `gate-mutation`)
@@ -2118,7 +2183,7 @@ the emphasized half.
     check, and both lesson checkers — had no entry at all and would have sat
     outside a confident "N gates mutated, 0 survivors". `check_imports` needed
     two rows, not one, because its resolution and completeness verdicts are
-    independent: one row would have pinned only their union, which is #049
+    independent: one row would have pinned only their union, which is #050
     applied to the tool built for #046.
 
 - **What the first sweep found, in a kit that had been green for months:**
@@ -2128,10 +2193,10 @@ the emphasized half.
      `-Zsanitizer=undefined` is rejected at option-parse time, rc=1, on any input.
      So the default invocation of the memory-safety gate had never once been able
      to go green. `--check` validated bash *syntax* and printed `self-test: OK`
-     over it. This is the whole of #050, sitting in this tree the entire time.
+     over it. This is the whole of #051, sitting in this tree the entire time.
   2. **Two survivors.** `check_skills.py`'s missing-path detection could be
      deleted with the suite staying green — the same bundled two-defect fixture
-     #049 describes finding in the source lineage, never fixed here. And
+     #050 describes finding in the source lineage, never fixed here. And
      `progress.py`'s `ingest` verdict could be inverted, because `ingest` had
      **no self-test at all**: neutralized, it would advance a module to its final
      gate on an audit report showing undocumented `unsafe`.

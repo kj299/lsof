@@ -27,7 +27,7 @@ emit() {
 # aim a NEGATIVE fixture at it. It was three inline `grep -q ... || exit 1` lines
 # inside --check, which only ever saw a correctly generated target: deleting the
 # checks changed nothing the self-test observed, so they were pinned by nothing
-# (LESSONS #051). Found by the sweep's first run in this kit (LESSONS #052).
+# (LESSONS #052). Found by the sweep's first run in this kit (LESSONS #053).
 valid_target() {
   local f="$1" crate="$2"
   test -f "$f" || return 1

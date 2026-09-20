@@ -134,7 +134,7 @@ def _self_test():
         # its final state. Both directions are pinned below, because a check
         # that only ever sees a clean report proves detection and never refusal
         # (LESSONS #036). The missing test was found by the gate-mutation
-        # sweep's first run in this kit (LESSONS #052).
+        # sweep's first run in this kit (LESSONS #053).
         q = os.path.join(d, "ingest.json")
         cmd_init(q, ["sockets", "handles", "process"])
         cmd_set(q, "sockets", "sanitized")

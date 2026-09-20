@@ -116,8 +116,8 @@ def _self_test():
         # The name mismatch alone drove that exit code, so the missing-path check
         # was pinned by nothing: deleting it outright left the suite green. A
         # fixture carrying N defects pins only their union, and any N-1 of the
-        # checks can silently die (LESSONS #049). The gate-mutation sweep found
-        # this the first time it ran in this kit (LESSONS #052).
+        # checks can silently die (LESSONS #050). The gate-mutation sweep found
+        # this the first time it ran in this kit (LESSONS #053).
         name_bad = os.path.join(skills, "name-mismatch"); os.makedirs(name_bad)
         open(os.path.join(name_bad, "SKILL.md"), "w").write(
             "---\nname: WRONG\ndescription: d\n---\nsee porting-kit/PLAYBOOK.md\n")

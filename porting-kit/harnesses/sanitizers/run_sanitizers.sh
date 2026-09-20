@@ -24,8 +24,8 @@
 #     1
 #
 # A gate that can never go green teaches its users to skip it, and a skipped
-# control is a broken control — as bad as one that can never fail (LESSONS #050),
-# and this one was found by the gate-mutation sweep's first run here (LESSONS #052).
+# control is a broken control — as bad as one that can never fail (LESSONS #051),
+# and this one was found by the gate-mutation sweep's first run here (LESSONS #053).
 # `ubsan` now delegates to Miri, which is the tool that actually answers the
 # question, and `--check` carries a NEGATIVE FIXTURE pinning the validator
 # against `undefined`, the exact value that shipped. `--check` validating only

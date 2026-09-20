@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #052 (this kit's own first sweep with it).
-# Re-cited: #6->#036, #13->#033, #14->#037, #16->#049, #21->#041, #22->#050,
-#          #25->#051; #36 by title (no entry in this log).
+# Local: #053 (this kit's own first sweep with it).
+# Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
+#          #25->#052; #36 by title (no entry in this log).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
 suite goes red. The standing "failure the kit still would not prevent" since
 retro #1 (RETROSPECTIVE-kit-v1.md §5 item 2), sharpened by LESSONS #033/#037: the
@@ -19,7 +19,7 @@ A self-test that stays green over a neutralized verdict is a survivor: the
 naming it. The gate set becomes self-verifying — the next fail-open of the
 LEDGER-STALE class is caught by `make check-kit`, not by luck.
 
-A full sweep also audits the TABLE (LESSONS #051): any harness exposing a
+A full sweep also audits the TABLE (LESSONS #052): any harness exposing a
 self-test but carrying no mutation entry is reported as a coverage GAP and fails
 the run. "N gate(s) mutated, 0 survivor(s)" used to read as the whole gate set
 while silently covering only the python half — that blind spot hid a sanitizer
@@ -57,7 +57,7 @@ import tempfile
 # silent failure would let the gate pass while checking nothing. `old` must
 # appear EXACTLY ONCE in `file` (enforced), so a harness rewrite that moves the
 # verdict forces a table update instead of silently mutating dead code.
-# (LESSONS #049: this harness's first sweep found a survivor — a bundled
+# (LESSONS #050: this harness's first sweep found a survivor — a bundled
 # two-defect fixture that pinned only the union of its checks.)
 MUTATIONS = [
     {"gate": "diff_run", "file": "harnesses/differential/diff_run.py",
@@ -100,7 +100,7 @@ MUTATIONS = [
      "why": "a matrix case's raw bytes silently become empty stdin: the case still MATCHes",
      "cmd": ["harnesses/differential/diff_run.py", "--self-test"]},
 
-    # The BASH gates (LESSONS #050/#051). None could be here until `_run` stopped
+    # The BASH gates (LESSONS #051/#052). None could be here until `_run` stopped
     # assuming python — which is why a mode wired to a sanitizer rustc rejects
     # survived every sweep. `coverage_gaps()` now fails a full sweep if any
     # self-tested harness sits outside this table at all.
@@ -248,7 +248,7 @@ def _apply(kit_copy, m):
 
 
 # Harnesses allowed to have a self-test but NO mutation entry. Keep this tiny and
-# justified — an exemption is a hole somebody chose, in writing (LESSONS #051).
+# justified — an exemption is a hole somebody chose, in writing (LESSONS #052).
 COVERAGE_EXEMPT = {
     "harnesses/gate-mutation/mutate_gates.py":
         "the mutator itself — its own self-test mutates a fixture gate and "
@@ -259,7 +259,7 @@ COVERAGE_EXEMPT = {
 def coverage_gaps(kit_root, mutations=None):
     """Harnesses that expose a self-test but sit outside the mutation table.
 
-    The gate above this gate (LESSONS #051). The table is hand-maintained, so
+    The gate above this gate (LESSONS #052). The table is hand-maintained, so
     "N gate(s) mutated, 0 survivor(s)" says nothing about the harnesses nobody
     added — and for the kit's whole life that silently meant *every bash
     harness*, one of which was shipping a mode that could never pass. A harness
@@ -292,7 +292,7 @@ def _run(kit_copy, cmd, timeout=300):
     # Dispatch by extension. This used to hardcode `sys.executable`, which meant
     # the sweep could only ever cover PYTHON gates — while still printing
     # "N gate(s) mutated, 0 survivor(s)", which reads as the whole gate set
-    # (LESSONS #050). The kit's bash harnesses were structurally unreachable, and
+    # (LESSONS #051). The kit's bash harnesses were structurally unreachable, and
     # one of them (`run_sanitizers.sh`) was shipping a mode that could never run.
     path = os.path.join(kit_copy, cmd[0])
     argv = ([sys.executable, path] if cmd[0].endswith(".py")
@@ -305,7 +305,7 @@ def _run(kit_copy, cmd, timeout=300):
 def run_gates(kit_root, mutations, as_json=False, check_coverage=True):
     kit_root = os.path.abspath(kit_root)
     # A full sweep also audits the TABLE: a self-tested harness with no entry is
-    # a gate this sweep silently does not cover (LESSONS #051). Skipped for
+    # a gate this sweep silently does not cover (LESSONS #052). Skipped for
     # --only runs, which are deliberately partial.
     gaps = coverage_gaps(kit_root, mutations) if check_coverage else []
     results = []
@@ -347,7 +347,7 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True):
         if gaps:
             print(f"\nTABLE GAP: {len(gaps)} self-tested harness(es) have no "
                   f"mutation entry — the sweep's verdict does not cover them "
-                  f"(LESSONS #051):")
+                  f"(LESSONS #052):")
             for g in gaps:
                 print(f"  {g}")
             print("Add an entry neutralizing that gate's crown verdict, or an "
@@ -438,7 +438,7 @@ def _self_test():
         check("a red baseline is a hard error (red must be attributable)",
               exits(lambda: run_gates(kit, [good])))
 
-        # LESSONS #051: the TABLE itself is audited. A harness with a self-test
+        # LESSONS #052: the TABLE itself is audited. A harness with a self-test
         # and no mutation entry is a gate this sweep silently does not cover —
         # which is what hid the never-runnable sanitizer mode for a month.
         os.makedirs(os.path.join(kit, "harnesses", "lonely"))

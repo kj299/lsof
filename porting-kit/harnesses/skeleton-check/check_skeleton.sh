@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #9->#044, #25->#051.
+# Re-cited: #9->#044, #25->#052.
 # Skeleton gate — the shipped skeleton must PASS the gates it configures. It sets
 # strict workspace lints ([workspace.lints]: arithmetic_side_effects,
 # cast_possible_truncation, the unsafe docs) and the kit's CI runs `cargo fmt
@@ -22,7 +22,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 DEFAULT_SKEL="$HERE/../../skeleton"
 
 # THE verdict: is DIR a skeleton this gate can actually run against? Extracted
-# so `--check` can exercise it against a known-BAD path too (LESSONS #051): the
+# so `--check` can exercise it against a known-BAD path too (LESSONS #052): the
 # happy path alone proves nothing about whether the check would ever refuse.
 skel_present() { test -d "$1" && test -f "$1/Cargo.toml"; }
 
