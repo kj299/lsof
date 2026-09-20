@@ -338,11 +338,27 @@ jobs:
     runs-on: ubuntu-latest
     # 60, not the 25 the job above uses: on the first attempt this arm shared
     # that job and was killed by its timeout after 25m15s, having emitted no
-    # `test result:` line at all. The same command finishes in ~295s locally,
-    # so CI is far slower here -- miri prints a
-    # "files in `/proc` can bypass the Abstract Machine" warning, with a
-    # backtrace, for every access this crate makes. 60 is an upper bound chosen
-    # to stop guessing, not a measurement; the first completed run replaces it.
+    # `test result:` line at all.
+    #
+    # MEASURED, now that the first run has completed (head 8a4b2ea, job
+    # 106081061676):
+    #
+    #   test result: ok. 48 passed; 0 failed; 2 ignored; finished in 2557.15s
+    #   warning: 5666 warnings emitted
+    #
+    # 42m37s, against ~295s for the same command locally -- 8.7x. The warnings
+    # are the reason: miri prints "files in `/proc` can bypass the Abstract
+    # Machine", WITH A BACKTRACE, for every access, and reading /proc is all
+    # this crate does. 60 stands, at ~40% headroom over the measurement rather
+    # than as a guess; it is free, because the job is isolated and blocks
+    # nothing.
+    #
+    # What it is NOT free of is wall time: this is now by far the longest job
+    # in the workflow (43 min against ~8 for the fuzz smoke), so the check
+    # suite stays yellow that long on every push. If that becomes the thing
+    # worth fixing, the lever is NARROWING WHAT IT RUNS -- the live-/proc tests
+    # are what generate the 5666 warnings, and the pure parsers are where the
+    # UB and leak surface actually is -- not raising this number again.
     timeout-minutes: 60
     # OBSERVE-FIRST (LESSONS #13), and A JOB RATHER THAN A STEP BECAUSE OF HOW
     # THE FIRST ATTEMPT FAILED. `continue-on-error` is a step property;

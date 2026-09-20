@@ -43,7 +43,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   inside the promoted miri job and the job's 25-minute timeout killed it —
   turning a hard gate from success to **cancelled** on the trial arm's first
   run. `continue-on-error` exempts a step's failure; `timeout-minutes` is a
-  job property and crosses that boundary (LESSONS #036). The job comment that explained its
+  job property and crosses that boundary (LESSONS #036). Its first completed
+  run reports `48 passed; 0 failed; 2 ignored` in **2557 s** — 42m37s against
+  ~295 s locally, the 8.7× being 5666 `/proc` warnings miri prints with a
+  backtrace apiece; the 60-minute budget is now a measurement plus headroom
+  rather than a guess. The job comment that explained its
   absence said the crate "reads live `/proc`, which miri cannot interpose".
   That was false and nothing had tested it: with `-Zmiri-disable-isolation`,
   48 of its 50 tests pass on the pinned nightly. The two that do not are miri

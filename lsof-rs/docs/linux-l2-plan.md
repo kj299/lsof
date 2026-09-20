@@ -239,7 +239,10 @@ exclusion carrying its measured reason; land it observe-first per LESSONS #13,
 promote on consecutive log-verified greens. **As its own job, not a step** —
 the first attempt put it in the existing miri job and its 25-minute timeout
 cancelled that hard gate, because `continue-on-error` is a step property and
-`timeout-minutes` is a job one (LESSONS #036). Then `unsafe_audited`. Fix the
+`timeout-minutes` is a job one (LESSONS #036). **First completed run, head
+`8a4b2ea`: `48 passed; 0 failed; 2 ignored`, in 2557 s** — 42m37s against ~295 s
+locally, with 5666 `/proc` warnings to account for the 8.7×. That is green #1
+of the two the promotion rule wants. Then `unsafe_audited`. Fix the
 `miri` job comment, which currently states a falsehood. Extend
 `check_ledgers.py` to check the sanitizer ledger **per crate** — it is
 satisfied today by any one job existing anywhere in the workflow, which is what
