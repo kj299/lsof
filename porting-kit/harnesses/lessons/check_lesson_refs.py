@@ -34,7 +34,16 @@ citing an entry that did not exist. Lists
 numbers they claim; see CONT_RE for where the boundary is drawn and why it is
 drawn tighter for a range than for a list.
 
-Usage:  check_lesson_refs.py [KIT_ROOT]   (defaults to the kit this file is in)
+**A citation outside the kit is the same claim as one inside it**, and for a long
+while only the kit was walked. In this repository that left 52 citations — a
+quarter of all of them — validated by nothing: CI workflows, backend sources,
+Cargo manifests, fuzz targets and the port's own `DIVERGENCES.md` all cite
+lessons. `--also-scan DIR` widens the walk; `LESSONS.md` still comes from
+KIT_ROOT, since that is what a citation resolves *against*.
+
+Usage:  check_lesson_refs.py [KIT_ROOT] [--also-scan DIR]...
+            KIT_ROOT defaults to the kit this file is in. --also-scan may repeat
+            and may name a directory containing KIT_ROOT; files are read once.
         check_lesson_refs.py --self-test
 """
 from __future__ import annotations
@@ -119,40 +128,68 @@ def expand(flat, head):
     return members, errors
 
 
-def scan_citations(kit_root, lessons_path):
+def report_base(roots):
+    """The directory reported paths are relative to: the roots' common ancestor.
+
+    With one root that is the root itself, so single-root output is unchanged.
+    With `porting-kit` and the repo, it is the repo — so a finding reads
+    `porting-kit/PLAYBOOK.md` and `.github/workflows/ci.yml`, the paths a
+    contributor actually types, rather than a `../` walk out of the kit.
+    """
+    return roots[0] if len(roots) == 1 else os.path.commonpath(roots)
+
+
+def scan_citations(kit_root, lessons_path, also=()):
     """Yield (relpath, lineno, number, error) per number cited outside LESSONS.md.
 
     Exactly one of `number` and `error` is set: a citation that parses yields its
     number, a malformed range yields the complaint.
 
+    `also` names further directories to scan. A citation is a claim that an entry
+    exists, and that claim is no weaker for being written outside the kit — CI
+    workflows, backend sources and fuzz targets all cite lessons. Roots may nest
+    (passing the repo alongside the kit is the normal case), so files are
+    de-duplicated by real path and each is read once.
+
     LESSONS.md is skipped as a *source* of citations: entries legitimately refer
     to each other, and an entry citing a neighbour is not a kit-integrity claim.
     """
-    for dirpath, dirnames, filenames in os.walk(kit_root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for fn in filenames:
-            if not fn.endswith(SCAN_EXTS):
-                continue
-            path = os.path.join(dirpath, fn)
-            if os.path.abspath(path) == os.path.abspath(lessons_path):
-                continue
-            try:
-                text = open(path, encoding="utf-8", errors="replace").read()
-            except OSError:
-                continue
-            if "LESSONS" not in text:
-                continue
-            # Flatten whitespace so a citation wrapped across lines still
-            # matches, keeping a per-character map back to the original line so
-            # the reported location is the citation's own, not a guess.
-            flat, lines = _flatten(text)
-            rel = os.path.relpath(path, kit_root)
-            for m in CITE_RE.finditer(flat):
-                members, errors = expand(flat, m)
-                for off, num in members:
-                    yield (rel, lines[off], num, None)
-                for off, msg in errors:
-                    yield (rel, lines[off], None, msg)
+    roots = []
+    for r in (kit_root, *also):
+        real = os.path.realpath(r)
+        if real not in roots:
+            roots.append(real)
+    base = report_base(roots)
+    lessons_real = os.path.realpath(lessons_path)
+    seen = set()
+
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for fn in filenames:
+                if not fn.endswith(SCAN_EXTS):
+                    continue
+                path = os.path.realpath(os.path.join(dirpath, fn))
+                if path == lessons_real or path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    text = open(path, encoding="utf-8", errors="replace").read()
+                except OSError:
+                    continue
+                if "LESSONS" not in text:
+                    continue
+                # Flatten whitespace so a citation wrapped across lines still
+                # matches, keeping a per-character map back to the original line
+                # so the reported location is the citation's own, not a guess.
+                flat, lines = _flatten(text)
+                rel = os.path.relpath(path, base)
+                for m in CITE_RE.finditer(flat):
+                    members, errors = expand(flat, m)
+                    for off, num in members:
+                        yield (rel, lines[off], num, None)
+                    for off, msg in errors:
+                        yield (rel, lines[off], None, msg)
 
 
 def _flatten(text):
@@ -182,11 +219,19 @@ def _flatten(text):
     return "".join(out), lines
 
 
-def run(kit_root):
+def run(kit_root, also=()):
     lessons = os.path.join(kit_root, "LESSONS.md")
     if not os.path.isfile(lessons):
         print(f"FAIL  no LESSONS.md at {lessons}")
         return 1
+
+    # A mistyped --also-scan must not look like a clean run. Silently scanning
+    # nothing is the exact failure this checker exists to catch, so a directory
+    # that is not there is a hard failure, not a shrug.
+    for d in also:
+        if not os.path.isdir(d):
+            print(f"FAIL  --also-scan {d}: no such directory")
+            return 1
 
     nums = entry_numbers(lessons)
     problems = []
@@ -205,7 +250,9 @@ def run(kit_root):
 
     known = set(nums)
     cited = 0
-    for relpath, lineno, num, err in scan_citations(kit_root, lessons):
+    files = set()
+    for relpath, lineno, num, err in scan_citations(kit_root, lessons, also):
+        files.add(relpath)
         if err is not None:
             problems.append(f"{relpath}:{lineno}: {err}")
             continue
@@ -216,7 +263,10 @@ def run(kit_root):
 
     for p in problems:
         print("PROBLEM:", p)
-    print(f"\n{len(nums)} entr(ies), {cited} citation(s), {len(problems)} problem(s)")
+    # The file count is part of the result, not decoration: it is what makes a
+    # scan that silently covered less than you think visible at a glance.
+    print(f"\n{len(nums)} entr(ies), {cited} citation(s) in {len(files)} file(s), "
+          f"{len(problems)} problem(s)")
     return 1 if problems else 0
 
 
@@ -348,6 +398,50 @@ def _self_test():
         check("a wrapped list member is reported on its own line",
               (3, 1) in hits and (4, 22) in hits)
 
+    # --- scanning beyond the kit ---------------------------------------------
+    # A citation outside the kit is the same claim as one inside it. The real
+    # repo had 52 of them — in CI workflows, backend sources, Cargo manifests
+    # and fuzz targets — and the checker walked past every one.
+    def repo_fixture(stack):
+        """repo/{kit/{LESSONS.md,PLAYBOOK.md}, ci/build.yml}; ci cites a dangling #22."""
+        repo = stack.enter_context(tempfile.TemporaryDirectory())
+        kit = os.path.join(repo, "kit")
+        ci = os.path.join(repo, "ci")
+        os.makedirs(kit)
+        os.makedirs(ci)
+        open(os.path.join(kit, "LESSONS.md"), "w").write(entries)
+        open(os.path.join(kit, "PLAYBOOK.md"), "w").write("in-kit (LESSONS #1).\n")
+        open(os.path.join(ci, "build.yml"), "w").write("# gate (LESSONS #22)\n")
+        return repo, kit
+
+    import contextlib
+    with contextlib.ExitStack() as stack:
+        repo, kit = repo_fixture(stack)
+        check("a dangling citation outside the kit is invisible without --also-scan",
+              run(kit) == 0)
+        check("...and is caught with it", run(kit, [repo]) == 1)
+
+    with contextlib.ExitStack() as stack:
+        repo, kit = repo_fixture(stack)
+        hits = list(scan_citations(kit, os.path.join(kit, "LESSONS.md"), [repo]))
+        # The kit sits INSIDE the repo, so a naive second walk would read every
+        # kit file twice and double every count.
+        check("nested roots do not double-count",
+              sorted(h[2] for h in hits) == [1, 22])
+        check("paths are reported from the roots' common ancestor",
+              sorted(h[0] for h in hits) ==
+              [os.path.join("ci", "build.yml"), os.path.join("kit", "PLAYBOOK.md")])
+
+    with contextlib.ExitStack() as stack:
+        repo, kit = repo_fixture(stack)
+        check("a mistyped --also-scan fails loudly rather than scanning nothing",
+              run(kit, [os.path.join(repo, "no-such-dir")]) == 1)
+
+    check("single root still reports paths relative to itself",
+          report_base(["/a/b"]) == "/a/b")
+    check("two roots report from their common ancestor",
+          report_base(["/a/b/kit", "/a/b"]) == "/a/b")
+
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -356,13 +450,34 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--self-test":
         return _self_test()
-    if argv:
-        kit_root = argv[0]
-    else:
+
+    kit_root, also, i = None, [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--also-scan":
+            i += 1
+            if i >= len(argv):
+                print("FAIL  --also-scan needs a directory")
+                return 2
+            also.append(argv[i])
+        elif arg.startswith("--also-scan="):
+            also.append(arg.split("=", 1)[1])
+        elif arg.startswith("-"):
+            print(f"FAIL  unknown option {arg}\n\n{__doc__}")
+            return 2
+        elif kit_root is None:
+            kit_root = arg
+        else:
+            print(f"FAIL  unexpected argument {arg} (one KIT_ROOT only; "
+                  f"use --also-scan for extra directories)")
+            return 2
+        i += 1
+
+    if kit_root is None:
         # harnesses/lessons/ -> harnesses/ -> porting-kit/
         kit_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
-    return run(kit_root)
+    return run(kit_root, also)
 
 
 if __name__ == "__main__":

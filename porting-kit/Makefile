@@ -23,7 +23,11 @@ check-kit:
 	@echo "== skills self-test =="; $(PY) skills/check_skills.py --self-test
 	@echo "== skills integrity =="; $(PY) skills/check_skills.py
 	@echo "== lesson refs self-test =="; $(PY) $(H)/lessons/check_lesson_refs.py --self-test
-	@echo "== lesson refs ==";          $(PY) $(H)/lessons/check_lesson_refs.py .
+	@# --also-scan .. : a citation is a claim wherever it is written, and the
+	@# host repo cites lessons from CI workflows, backend sources, Cargo
+	@# manifests and fuzz targets. Scanning only the kit left 52 of this repo's
+	@# 214 citations checked by nothing.
+	@echo "== lesson refs ==";          $(PY) $(H)/lessons/check_lesson_refs.py . --also-scan ..
 	@echo ""
 	@echo "check-kit: ALL HARNESSES OK"
 

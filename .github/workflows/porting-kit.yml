@@ -28,16 +28,24 @@ name: porting-kit
 # earlier draft of this header named them in passing and thereby made THIS file
 # the reported evidence for that ledger — a workflow that runs none of them.
 # Do not name them here; lsof-rs-ci.yml is where they belong.
+# The path filter is GONE, and its absence is load-bearing.
+#
+# `check_lesson_refs.py` used to walk only `porting-kit/`, so a trigger of
+# `porting-kit/**` covered everything the gate could see. It now walks the whole
+# repository (`--also-scan ..`), because 52 of this repo's 214 lesson citations
+# live outside the kit — in the workflows beside this one, in backend sources,
+# Cargo manifests and fuzz targets. A gate that checks `lsof-rs/**` while firing
+# only on `porting-kit/**` is not a gate: deleting a lesson entry and breaking a
+# citation in `lsof-rs/` are two commits that would each pass.
+#
+# A gate's trigger is part of the gate (LESSONS #019; LESSONS #033). Widening
+# what it inspects without widening what wakes it just moves the blind spot.
+# check-kit is python3 + bash with no toolchain and runs in seconds, so it costs
+# nothing to run on everything.
 on:
   push:
     branches: [master]
-    paths:
-      - 'porting-kit/**'
-      - '.github/workflows/porting-kit.yml'
   pull_request:
-    paths:
-      - 'porting-kit/**'
-      - '.github/workflows/porting-kit.yml'
 
 permissions:
   contents: read
