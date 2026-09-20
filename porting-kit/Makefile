@@ -38,6 +38,9 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# A port far slower than the C is a specific bug, not "the cost of Rust".
+	@# Self-test only here: the real gate needs both binaries and a matrix.
+	@echo "== perf gate ==";       $(PY) $(H)/perf/perf_gate.py --self-test
 	@# Every control CLAUDE.md DECLARES must actually be invoked by the port's gate
 	@# files, or exempted in writing with a reason. linux_diff.py is in the chain
 	@# because it is what invokes diff_run.py.

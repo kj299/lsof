@@ -164,6 +164,12 @@ MUTATIONS = [
     # another lineage covers that lineage's harnesses; the ones this kit grew
     # on its own would sit outside it, and `coverage_gaps()` is what says so.
 
+    {"gate": "perf", "file": "harnesses/perf/perf_gate.py",
+     "old": '            verdict = "OK" if ratio <= threshold else "SLOW"',
+     "new": '            verdict = "OK"',
+     "why": "no ratio is ever SLOW",
+     "cmd": ["harnesses/perf/perf_gate.py", "--self-test"]},
+
     {"gate": "control-coverage", "file": "harnesses/control-coverage/check_controls.py",
      "old": "    return any((control in executable_text(text)) or (base in executable_text(text))\n"
             "               for text in gate_texts)",
