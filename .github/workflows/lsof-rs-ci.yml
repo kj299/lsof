@@ -399,13 +399,15 @@ jobs:
     # that job and was killed by its timeout after 25m15s, having emitted no
     # `test result:` line at all.
     #
-    # MEASURED. Three completed runs, spanning better than 2x:
+    # MEASURED. Five completed runs, spanning better than 2x:
     #
     #   8a4b2ea  48 passed; 0 failed; 2 ignored   2557.15s  (42m37s)
     #   22a9882  55 passed; 0 failed; 2 ignored   1216.62s  (20m17s)
     #   195d7eb  55 passed; 0 failed; 2 ignored   1463.71s  (24m24s)
+    #   0efabc8  55 passed; 0 failed; 2 ignored   2559.48s
+    #   bddd184  55 passed; 0 failed; 2 ignored   2593.72s  (43m51s)
     #
-    # The last two run the IDENTICAL suite and differ by 20%; the first runs
+    # Runs 2-5 run the IDENTICAL suite and span 1216-2594s; the first runs
     # seven FEWER tests and takes over twice as long as the fastest. So what
     # dominates is runner variance, not what the suite does. One measurement
     # would have read as a fact; it was the first number written into this
