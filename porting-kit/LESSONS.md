@@ -663,6 +663,32 @@ the emphasized half.
   for a per-unit rule has to be per-unit: the check should map each crate that
   parses external text to at least one target, and a port should have to waive
   a crate by name to leave it uncovered.
+- **Follow-up closed, 2026-09-20, for the sanitizer half.** `check_ledgers.py`
+  grew a fifth ledger, `san-crates`: every unit `progress.json` tracks must be
+  NAMED by a CI step that runs a sanitizer. It is per *step* rather than per
+  job, because a cache-warming `cargo build -p x` added to a sanitizer job
+  would otherwise mark `x` sanitized, and it requires a command that BEGINS
+  with `cargo`, because an `echo` naming the command is not the command. Run
+  against this repository before the matching CI step existed, it fails and
+  names `lsof-backend-linux` — while the older `sanitizers` ledger stays green,
+  which is the whole point.
+
+  Two things worth carrying:
+
+  **The narrowing rules were found by mutating the check, not by review.** The
+  first version accepted `echo "would run -p x under miri"`; the second, which
+  only asked whether the line contained "cargo", accepted
+  `echo "would run cargo miri test -p a"` — and it was this file's own new
+  self-test case that caught it, one commit after LESSONS #31 removed exactly
+  that defect from the sibling check. Writing the assertion first and the rule
+  second is what made the difference.
+
+  **One mutation still passes and is recorded in the docstring rather than
+  hidden:** swapping a step's `cargo miri test -p x` for `cargo build -p x`
+  while leaving the step's miri configuration in place still reads as covered.
+  No textual rule separates those; settling it needs the job's log, which is a
+  different control from a presence ledger. The fuzz half of this follow-up —
+  mapping each text-parsing crate to a target — is still open.
 
   **Closed the same day.** The obstacle was never difficulty — it was that the
   parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so

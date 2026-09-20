@@ -104,7 +104,7 @@ jobs:
         # to catch (LESSONS #019, #025).
         run: python3 ../porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
 
-      - name: ledgers exist (progress, divergences, fuzz target, sanitizer job)
+      - name: ledgers exist (progress, divergences, fuzz target, sanitizer per crate)
         # porting-kit LESSONS #19: the playbook names these as exit criteria and
         # this port reached 1.0 with three of the four absent while every gate
         # was green, because no gate looked. Now one does.
@@ -264,10 +264,16 @@ jobs:
     # job status. This PR itself is the third: a promotion is validated by the
     # mechanism it enables.
     #
-    # Scope: only the forbid(unsafe_code) crates. The Windows backend needs
-    # Windows, and the Linux backend reads live /proc, which miri cannot
-    # interpose — so this proves the *portable* core is UB-free, not the FFI
-    # layer. Those two are the open rows in progress.json.
+    # Scope: the forbid(unsafe_code) crates. The Windows backend needs Windows
+    # and has its own ASan job.
+    #
+    # This comment used to say the Linux backend "reads live /proc, which miri
+    # cannot interpose". That was FALSE, and nothing had ever tested it: with
+    # -Zmiri-disable-isolation miri runs that crate's suite fine. Measured on
+    # the pinned nightly below, 48 of its 50 tests pass; the two that do not
+    # are miri shim artefacts, are `#[cfg_attr(miri, ignore)]` at the test with
+    # the measurement that justifies it, and still run under plain `cargo test`.
+    # The lsof-backend-linux arm is the observe-first step below.
     #
     # The nightly is PINNED to the build that produced the green runs. miri
     # ships inside the nightly and its sysroot build can break on any given
@@ -286,6 +292,34 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
+
+      # OBSERVE-FIRST (LESSONS #13): this step does not block, and
+      # progress.json is NOT advanced off `fuzzed` for lsof-backend-linux on
+      # the strength of a job that has never run here. It becomes a hard gate,
+      # and the row moves, in a later PR on consecutive log-verified greens —
+      # the same way the step above and the Windows ASan job were promoted.
+      #
+      # It is validated locally on THIS toolchain rather than written blind:
+      # clean it is `48 passed; 0 failed; 2 ignored`, and it has been shown to
+      # fail for the right reasons, which is the only thing that makes a clean
+      # run mean anything —
+      #
+      #   a leaked allocation in parse_mounts  -> `error: memory leaked`, exit 1
+      #   an out-of-bounds read, with the crate's forbid(unsafe_code) lifted
+      #                                        -> `error: Undefined Behavior:
+      #                                           in-bounds pointer arithmetic
+      #                                           failed`, exit 1
+      #
+      # The leak case is the one worth having: it is real, it is not covered by
+      # any other gate here, and this crate caches (`NetnsTables` holds a
+      # RefCell<HashMap> per namespace and per pid). The UB case only bites if
+      # someone lifts forbid(unsafe_code) — and note that attribute fires first,
+      # so miri is the second line, not the first.
+      - name: miri over lsof-backend-linux (observe-first, not a gate yet)
+        continue-on-error: true
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly-2026-08-31 miri test -p lsof-backend-linux
 
   asan-windows:
     name: ASan (UB in the Windows unsafe layer)

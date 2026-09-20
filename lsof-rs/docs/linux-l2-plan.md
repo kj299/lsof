@@ -67,13 +67,26 @@ Both failures are miri shim artefacts, not crate defects:
 Same class as the `strerror` shim that forced `errno_text`'s test to be
 rewritten — the interpreter is the odd one out, not the code.
 
-**Be honest about what this gate is worth.** `lsof-backend-linux` is
-`#![forbid(unsafe_code)]` with **0 unsafe blocks** and no dependencies, so miri
-has almost no UB surface to find. It is a *weak* gate. It is worth wiring
-anyway — it is the thing that would catch a future relaxation of
-`forbid(unsafe_code)`, and it costs one CI arm — but the evidence that actually
-carries this crate is the fuzz suite and the 87-case C differential, and the
-progress row should not be read as claiming more than that.
+**What this gate is worth — corrected 2026-09-20, by measuring it.** This
+section previously called it a *weak* gate, reasoning that a
+`#![forbid(unsafe_code)]` crate with 0 unsafe blocks gives miri almost no UB
+surface. That reasoning was sound and the conclusion was wrong, because UB is
+not all miri checks. Mutated against the real crate:
+
+| mutation | result |
+|---|---|
+| a leaked allocation in `parse_mounts` | `error: memory leaked`, **exit 1** |
+| an out-of-bounds read, with `forbid(unsafe_code)` lifted | `error: Undefined Behavior: in-bounds pointer arithmetic failed`, **exit 1** |
+| neither | exit 0 |
+
+The **leak** case is the one that matters, and no other gate here covers it:
+this crate caches, `NetnsTables` holding a `RefCell<HashMap>` per namespace and
+per pid. The UB case only bites if someone lifts the attribute — and the first
+attempt at that mutation was stopped by the attribute itself, so miri is the
+second line there, not the first.
+
+Still true: the fuzz suite and the C differential carry most of the weight for
+this crate. Not true, and withdrawn: that the miri arm adds almost nothing.
 
 `unsafe_audited` then follows immediately: `audit_unsafe.py` reports
 `unsafe blocks: 0  documented: 0  undocumented: 0`.

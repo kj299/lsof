@@ -12,6 +12,33 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The Linux backend now runs under miri in CI** (observe-first; it does not
+  block yet, and `progress.json` stays at `fuzzed` until it has consecutive
+  log-verified greens — LESSONS #13). The job comment that explained its
+  absence said the crate "reads live `/proc`, which miri cannot interpose".
+  That was false and nothing had tested it: with `-Zmiri-disable-isolation`,
+  48 of its 50 tests pass on the pinned nightly. The two that do not are miri
+  shim artefacts — `st_rdev` reported as 0, and emulated fds that do not appear
+  in the host's `/proc` — and each is now `#[cfg_attr(miri, ignore)]` **at the
+  test**, with the measurement that justifies it, and still runs under plain
+  `cargo test`.
+
+  The gate was mutated before being trusted: a leaked allocation gives
+  `error: memory leaked` and exit 1, and an out-of-bounds read with
+  `forbid(unsafe_code)` lifted gives an explicit UB diagnostic and exit 1. The
+  leak case is not covered by any other gate here, which corrects this port's
+  own earlier claim that miri would add almost nothing to a `forbid`-ed crate.
+
+- **`check_ledgers.py` gained a fifth ledger, `san-crates`:** every unit
+  `progress.json` tracks must be named by a CI step that runs a sanitizer.
+  Counting sanitizer jobs answered "is a sanitizer wired up"; the rule is per
+  unit, and `lsof-backend-linux` went months uncovered while the old check
+  stayed green. Run against this repository without the new miri step, it fails
+  and names that crate. Closes the sanitizer half of the LESSONS #21
+  follow-up; the fuzz half is still open.
+
+
+### Added
 - **`-H`, human-readable sizes** — the option lsof-rs answered
   `unsupported option` for on **both** platforms, because it was waived in the
   coverage inventory as a "legacy headers toggle on certain dialects". It is
