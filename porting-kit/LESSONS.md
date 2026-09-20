@@ -1927,3 +1927,54 @@ the emphasized half.
   README · banner + harness table.
 
 ---
+
+## 048. An append-only log is a shared counter, and two branches will take the same number
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here (refresh stage 2 meeting master)
+- **What happened:** `master` appended two lessons at `#034`/`#035` while the kit
+  refresh branch appended twelve at `#034`–`#045`. Neither side did anything
+  wrong; "append-only" is a rule about not *rewriting* entries, and both branches
+  obeyed it. But the next number is **shared mutable state**, and git cannot merge
+  a counter — it saw two different texts at the same offset and produced a
+  conflict. The real conflict is semantic: `#034` now names two different lessons
+  depending on which branch you read.
+
+  This is #046's cross-lineage collision arriving from inside one repository, and
+  it is more likely, not less: two branches of the same log diverge by days, not
+  by a fork.
+
+- **What `check_lesson_refs` would and would not have caught:** it detects a
+  duplicate `## NNN.` heading, so the crude "keep both" resolution fails loudly.
+  It cannot detect the subtler one — renumber the headings, miss a citation, and
+  every number still resolves, now to the wrong entry. The renumber is where the
+  damage happens, not the merge.
+
+- **Two non-obvious properties a renumber needs**, both load-bearing here:
+  1. **Simultaneous, not sequential.** Shifting `#034`→`#036` and then applying
+     `#036`→`#038` catches the entry just moved. One pass, one map.
+  2. **It must distinguish a reference to THIS log from a number that merely
+     looks like one.** The `Re-cited` and `KIT-IMPORT` mappings added in #046/#047
+     are full of *source-lineage* numbers, and `#36`, `#42` and `#43` sit inside
+     the shift range. Rewriting one of those turns a source number into a
+     destination number — the same corruption as a carried-over citation, arriving
+     from the opposite direction, and it would have read as correct. What saved it
+     was a shape rule that was already there for other reasons: this log writes
+     its own entries zero-padded to three digits (`#036`) and source numbers bare
+     (`#36`), so matching only `#\d{3}` separates them. That was luck as much as
+     design; the general rule is to **give the two namespaces different surface
+     forms before you need to tell them apart**, and to verify a renumber by
+     diffing a strict pass against a loose one rather than trusting either.
+
+- **Kit change:** none to the harnesses — `check_lesson_refs` (duplicate/missing
+  headings) plus `check_imports` (re-citation resolution and completeness) between
+  them cover the failure modes a merge can produce, and both ran green on the
+  resolved tree. What this entry buys is the *procedure*: when two branches of an
+  append-only log collide, the side that landed first keeps its numbers, the other
+  block shifts as a unit, and the shift is applied in one simultaneous pass under
+  a pattern that cannot match a foreign namespace. Recorded here because the next
+  refresh stage will hit this again.
+- **Section amended:** none — this is procedure, and the controls that enforce it
+  already exist (harnesses/lessons/check_lesson_refs.py, check_imports.py).
+
+---
