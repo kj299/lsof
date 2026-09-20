@@ -461,6 +461,10 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-H`: render the SIZE cell as a human-readable byte count in the table.
+    /// A pure formatting flag — it selects nothing, and the C applies it to the
+    /// table alone, leaving `-F` and JSON in raw bytes.
+    pub human_size: bool,
     /// `-K` / `-K i`: whether thread entries are listed. See [`TaskMode`] —
     /// the default is not "off", it is "on when nothing else was selected",
     /// which is the C's rule and not an approximation of it.

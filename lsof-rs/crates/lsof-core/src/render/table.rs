@@ -91,11 +91,56 @@ fn fd_cell(f: &OpenFile) -> String {
     s
 }
 
+/// `-H`: a byte count the way the C's `human_readable_size()` writes it
+/// (`print.c`), which is not the same as any common `-h` implementation and is
+/// reproduced here rather than approximated.
+///
+/// Under 1024 the raw count gets a `B` suffix (`0B`, `1023B`). At or above it,
+/// the C walks powers of 1024 and formats `%.1lf` with a one-letter suffix.
+/// Two details of that walk are load-bearing:
+///
+/// * **The divide is integer, then floating.** `(sz / (unit / 1024)) / 1024.0`
+///   truncates before it scales, so `2125328` is `2.0M` rather than `2.03M`.
+/// * **The suffix is chosen before rounding**, so a size just under a boundary
+///   renders as `1024.0K` — not `1.0M`. `1048575`, `1073741823` and
+///   `1099511627775` all do this, and the oracle confirms it; rounding first
+///   would be tidier and wrong.
+///
+/// Ties round half-to-even, as C's `%.1lf` does under the default rounding
+/// mode: `174336` is exactly `170.25` KiB and prints `170.2K`.
+pub(crate) fn human_size(sz: u64) -> String {
+    const BASE: u64 = 1024;
+    const SUFFIX: [&str; 6] = ["K", "M", "G", "T", "P", "E"];
+    if sz < BASE {
+        return format!("{sz}B");
+    }
+    let (mut unit, mut upper, mut i) = (BASE, BASE * BASE, 0usize);
+    while i < SUFFIX.len() - 1 {
+        if sz < upper {
+            break;
+        }
+        unit = upper;
+        // The C lets this overflow on the last pass and never reads it; keep
+        // the same control flow without the panic.
+        upper = upper.saturating_mul(BASE);
+        i += 1;
+    }
+    let val = (sz / (unit / BASE)) as f64 / BASE as f64;
+    format!("{val:.1}{}", SUFFIX[i])
+}
+
 /// Render the SIZE/OFF cell. By default prefer size; with `prefer_offset`
 /// (lsof `-o`) prefer the file offset, shown as `0t<dec>`.
-fn size_off_cell(f: &OpenFile, prefer_offset: bool) -> String {
+///
+/// `human` is `-H`, and it scales **only the size**. The C humanises inside the
+/// `sz_def` branch alone (`print.c`), so an offset stays `0t<dec>` even under
+/// `-H` — including the offset this function falls back to when a row has no
+/// size.
+fn size_off_cell(f: &OpenFile, prefer_offset: bool, human: bool) -> String {
     let off = f.offset.map(|o| format!("0t{o}"));
-    let sz = f.size.map(|s| s.to_string());
+    let sz = f
+        .size
+        .map(|s| if human { human_size(s) } else { s.to_string() });
     if prefer_offset {
         off.or(sz).unwrap_or_default()
     } else {
@@ -130,6 +175,9 @@ pub struct TableOpts {
     pub show_ppid: bool,
     /// `-o`: SIZE/OFF prefers the file offset.
     pub show_offset: bool,
+    /// `-H`: render the SIZE cell as a human-readable byte count. Affects the
+    /// table only — the C leaves `-F` and its JSON untouched, and so does this.
+    pub human_size: bool,
     /// `-L`: an NLINK column.
     pub show_links: bool,
     /// `+c`: the COMMAND cap in printed characters, `None` for `+c 0` (no cap).
@@ -149,6 +197,7 @@ impl TableOpts {
             terse: false,
             show_ppid: false,
             show_offset: false,
+            human_size: false,
             show_links: false,
             command_width: Some(DEFAULT_COMMAND_WIDTH),
             tcp_show: TcpInfoFlags::DEFAULT,
@@ -171,6 +220,7 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         terse,
         show_ppid,
         show_offset,
+        human_size,
         show_links,
         command_width,
         tcp_show,
@@ -251,7 +301,7 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         r.push(fd_cell(f));
         r.push(f.file_type.code());
         r.push(f.device.clone().unwrap_or_default());
-        r.push(size_off_cell(f, show_offset));
+        r.push(size_off_cell(f, show_offset, human_size));
         if show_links {
             r.push(f.links.map(|n| n.to_string()).unwrap_or_default());
         }

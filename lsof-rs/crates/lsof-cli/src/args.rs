@@ -223,6 +223,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'h' | '?' => want_help = true,
                 'l' => sel.numeric_ids = true,
                 'L' => sel.show_links = true,
+                'H' => sel.human_size = true,
                 'U' => sel.unix_only = true,
                 // `-E` after `+E` must not downgrade the "also show peer
                 // files" mode — lsof treats +E as a superset of -E.

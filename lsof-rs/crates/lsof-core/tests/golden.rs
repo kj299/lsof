@@ -1218,3 +1218,131 @@ fn a_restricted_field_list_emits_only_those_letters() {
     assert!(out.contains("cserver.exe\n"), "{out:?}");
     assert!(out.contains("n*:445\n"), "{out:?}");
 }
+
+/// One regular-file row carrying `size` and `offset`, for the `-H` cases.
+fn sized(size: Option<u64>, offset: Option<u64>) -> lsof_core::model::Process {
+    let mut p = named("app", "root", "/tmp/f");
+    p.files[0].size = size;
+    p.files[0].offset = offset;
+    p
+}
+
+/// The SIZE/OFF cell of the first data row.
+fn size_cell(p: &lsof_core::model::Process, opts: TableOpts) -> String {
+    let out = table::render(std::slice::from_ref(p), opts);
+    let header = out.lines().next().unwrap();
+    let col = header.find("SIZE/OFF").expect("SIZE/OFF header");
+    let end = col + "SIZE/OFF".len();
+    out.lines().nth(1).unwrap()[..end]
+        .trim_end()
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn human_size_reproduces_the_cs_scale_exactly() {
+    // DIVERGENCES: `-H` was waived as a "legacy headers toggle on certain
+    // dialects". In lsof 4.99.6 it is human-readable sizes, and the C's
+    // `human_readable_size()` (print.c) is idiosyncratic in three ways this
+    // pins. Every pair below was READ OFF THE ORACLE on sparse files of that
+    // exact length, not derived from the source.
+    let h = |n: u64| {
+        let mut o = TableOpts::new(Escaper::UNIX);
+        o.human_size = true;
+        size_cell(&sized(Some(n), None), o)
+    };
+
+    // 1. Under 1024 is a raw count with a `B`, not `0.5K`.
+    for (n, want) in [(0u64, "0B"), (1, "1B"), (512, "512B"), (1023, "1023B")] {
+        assert_eq!(h(n), want, "{n}");
+    }
+
+    // 2. The divide truncates before it scales: 2125328 / 1024 = 2075 (not
+    //    2075.5), then / 1024.0 = 2.026 -> "2.0M".
+    for (n, want) in [
+        (1024u64, "1.0K"),
+        (1025, "1.0K"),
+        (1536, "1.5K"),
+        (10240, "10.0K"),
+        (27028, "26.4K"),
+        (2125328, "2.0M"),
+        (6639992, "6.3M"),
+        (1572864, "1.5M"),
+        // These three separate the C's order of operations from the obvious
+        // `sz as f64 / unit as f64`, which agrees everywhere else. A mutation
+        // to pure floating division survived this test until they were added:
+        // it would print 24.7M / 154.1M / 396.1M. Oracle-checked on sparse
+        // files of exactly these lengths.
+        (25847420, "24.6M"),
+        (161533414, "154.0M"),
+        (415288979, "396.0M"),
+    ] {
+        assert_eq!(h(n), want, "{n}");
+    }
+
+    // 3. The suffix is chosen BEFORE rounding, so just under a boundary the C
+    //    prints 1024.0 of the smaller unit rather than 1.0 of the larger. This
+    //    is the rule most likely to be "fixed" by someone tidying up.
+    for (n, want) in [
+        (1048575u64, "1024.0K"),
+        (1048576, "1.0M"),
+        (1073741823, "1024.0M"),
+        (1073741824, "1.0G"),
+        (1099511627775, "1024.0G"),
+        (1099511627776, "1.0T"),
+    ] {
+        assert_eq!(h(n), want, "{n}");
+    }
+
+    // Ties round half-to-even, as C's %.1lf does: 174336 is exactly 170.25 KiB.
+    assert_eq!(h(174336), "170.2K");
+    // The top of the range must not panic on the C's overflowing last step.
+    assert_eq!(h(u64::MAX), "16.0E");
+}
+
+#[test]
+fn human_size_scales_the_size_and_never_the_offset() {
+    // print.c humanises inside the `sz_def` branch alone. A row with only an
+    // offset falls back to `0t<dec>` under `-H` exactly as it does without it —
+    // measured on a FIFO, which the C renders `0t0` with and without `-H`.
+    let mut human = TableOpts::new(Escaper::UNIX);
+    human.human_size = true;
+    let mut plain = TableOpts::new(Escaper::UNIX);
+    plain.human_size = false;
+
+    let off_only = sized(None, Some(4096));
+    assert_eq!(size_cell(&off_only, plain), "0t4096");
+    assert_eq!(
+        size_cell(&off_only, human),
+        "0t4096",
+        "-H must not touch an offset"
+    );
+
+    // And with `-o` the offset wins even though a size is present, so `-H` has
+    // nothing to scale.
+    let both = sized(Some(1048576), Some(4096));
+    assert_eq!(size_cell(&both, human), "1.0M");
+    let mut human_o = human;
+    human_o.show_offset = true;
+    assert_eq!(size_cell(&both, human_o), "0t4096");
+}
+
+#[test]
+fn human_size_is_table_only() {
+    // The C's `-F` and JSON writers never consult Fhuman: `lsof -H -Fs` and
+    // `lsof -H -J` are byte-identical to the runs without `-H`. Nothing in this
+    // port may quietly humanise a machine-readable format either.
+    let p = sized(Some(1048576), None);
+    let procs = std::slice::from_ref(&p);
+    assert!(
+        fields::render(procs, false, None, TcpInfoFlags::DEFAULT, Escaper::UNIX)
+            .contains("s1048576"),
+        "-F must stay in raw bytes"
+    );
+    assert!(
+        json::render_aggregated(procs).contains("1048576"),
+        "JSON must stay in raw bytes"
+    );
+}

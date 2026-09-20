@@ -431,6 +431,17 @@ def make_fixtures(
     with open(os.path.join(fdir, "f.txt"), "w") as f:
         f.write("fixture data\n")
     os.mkfifo(os.path.join(fdir, "fifo"))
+    # Three sparse files whose lengths are the only interesting inputs to `-H`
+    # (the C's human_readable_size, print.c). They cost no disk and they are
+    # the cases a tidy-up of that routine would break:
+    #   1023     -- the sub-1024 branch, a raw count with a `B`
+    #   1048575  -- one byte under 1 MiB, which the C renders `1024.0K` because
+    #               it picks the suffix BEFORE rounding, not `1.0M`
+    #   25847420 -- separates the C's integer-then-float divide from the
+    #               obvious `sz / unit` in floating point (24.6M vs 24.7M)
+    for n in (1023, 1048575, 25847420):
+        with open(os.path.join(fdir, f"sz{n}"), "wb") as f:
+            f.truncate(n)
     hostile = os.path.join(fdir.encode(), HOSTILE_FILE.encode("utf-8"))
     with open(hostile, "wb") as f:
         f.write(b"x\n")
@@ -459,9 +470,16 @@ def make_fixtures(
     # file name travels as `$1`, outside the shell text.
     a = Fixture(
         "A(files)",
-        [b"bash", b"-c", b'exec 3>f.txt 4<"$1" 5<sub 6<>fifo && exec sleep 600', b"fixture-a", hostile],
+        [
+            b"bash",
+            b"-c",
+            b'exec 3>f.txt 4<"$1" 5<sub 6<>fifo 7<sz1023 8<sz1048575 9<sz25847420'
+            b" && exec sleep 600",
+            b"fixture-a",
+            hostile,
+        ],
         cwd=fdir,
-        expect_fds=7,  # 0,1,2 + 3,4,5,6
+        expect_fds=10,  # 0,1,2 + 3,4,5,6 + the three -H sizes on 7,8,9
         expect_comm=b"sleep",
     )
     sdir = os.path.join(work, "sockets")

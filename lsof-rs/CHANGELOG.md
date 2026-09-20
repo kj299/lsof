@@ -11,6 +11,39 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`-H`, human-readable sizes** — the option lsof-rs answered
+  `unsupported option` for on **both** platforms, because it was waived in the
+  coverage inventory as a "legacy headers toggle on certain dialects". It is
+  not: in lsof 4.99.6 it scales the SIZE cell, and the waiver had no
+  `platforms` key, so the gate that exists to catch a missing feature excused
+  it everywhere.
+
+  The C's `human_readable_size()` (`print.c`) is reproduced exactly, not
+  approximated, and three of its rules are counter-intuitive enough to pin by
+  name: the divide **truncates before it scales** (`2125328` is `2.0M`), the
+  **suffix is chosen before rounding** so a size one byte under a boundary
+  prints `1024.0K` rather than `1.0M`, and ties round **half-to-even**
+  (`174336` is exactly `170.25` KiB and prints `170.2K`).
+
+  Scope is narrow and deliberate: the SIZE cell only. An offset stays
+  `0t<dec>` even under `-o -H`, and `-F` and JSON stay in raw bytes — the C
+  leaves both alone, and a machine-readable format that silently emitted
+  `1.5M` would be a worse bug than the missing option.
+
+### Changed
+- **Four coverage waivers now say something true.** `opt:m`/`opt:M` claimed
+  debt this port does not owe (`lsof -m` answers `-m not supported` and `-M`
+  is `illegal option character` on this C); `opt:f`/`+f` were still waived as
+  needing `/proc/mounts` though they work; `type:EVENTFD`/`SHM`/`UNNM`/`UNSP`
+  are unreachable on the Linux dialect rather than deferred; and `type:DEL` is
+  done, now covered by the differential. `type:UNKNdel`/`UNKNmem` moved to the
+  `UNKN*` entry, where their real cause is.
+- `lsof-backend-linux`'s crate docs said **"Phase L1"** and listed five
+  shipping features as deferred. They now describe L2 as delivered and name
+  what is genuinely left: packet sockets (closeable), netlink (blocked on
+  DIVERGENCES 22), the `UNKN*` rows, and `-e`/`-x`/`-X`/`-Z`/`-N`/`-S`/`-b`.
+
 ### Security
 - **`lsof-cli` now carries `#![forbid(unsafe_code)]`** — on *both* of its crate
   roots. It never contained an `unsafe` block, but it was the one portable crate
