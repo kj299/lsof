@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# KIT-IMPORT: from the c2rust-port lineage of this kit.
+# Re-cited: #1->#001, #4->#004, #6->#034, #8->#041, #9->#042, #11->#043,
+#          #14->#035; #36 by title (no entry in this log).
 """Differential harness — run the C oracle and the Rust rewrite over the same
 input matrix, normalize both, and diff. Divergences are *triaged*, not blindly
 failed: the C may itself be buggy (the prime directive), so a difference is a

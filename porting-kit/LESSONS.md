@@ -1773,3 +1773,46 @@ the emphasized half.
   (mappings added, `#8`/`#6`/`#13`/`#15`/`#14`/`#18`/`#20` corrected).
 
 ---
+
+## 045. A marker a document can mention is a marker a document can claim
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here (refresh stage 2 — `diff-fuzz`, and
+  the control written one commit earlier in #044)
+- **What happened:** #044 made an imported *entry* record what it re-cited to.
+  Imported **files** — harnesses, skills — have the same hazard and no heading to
+  hang a mapping on, so they carry a `KIT-IMPORT:` header declaring theirs. Two
+  things went wrong building that, and both are about the marker being *text*.
+
+  **1. The checker marked itself.** Its docstring shows an example marker and its
+  fixtures contain more; scanning for the string anywhere in a file, it found 16
+  citations in its own examples and reported them as carried-over. The fix is that
+  a marker is a *position*, not a string: it must open its line, within the file's
+  header. Then, one commit later, the README gained a sentence explaining
+  `KIT-IMPORT:` — and the README was immediately counted as an imported file. The
+  same mistake, in a document *describing* the fix, minutes after making it.
+  Generalizes: **any in-band marker that documentation must be able to discuss
+  needs a rule that distinguishes using it from mentioning it** — a shape, a
+  position, a delimiter. Without one, writing the docs breaks the tool.
+
+- **What the file-level check found immediately:** stage 1's `probe.py` import had
+  the same carry-over as the LESSONS entries — `(LESSONS #034/#14/#18/#20)` and
+  `LESSONS #036/#21`, heads re-cited, members not. One of those is emitted into
+  *generated Rust test files*, so the wrong citation would have propagated into
+  port source. Porting `diff-fuzz` produced two more (`LESSONS #034, #14` and
+  `LESSONS #001/#6`). Four of the six survivors this refresh has found were
+  continuation members: **the failure lives in the part of a citation a grep for
+  `LESSONS #14` cannot see.** What finds them is expanding each citation through
+  `check_lesson_refs`'s own list/range rules — the same expansion that, asking
+  only "does it resolve?", had been blessing them.
+
+- **Kit change:** `check_imports.py` also checks `KIT-IMPORT`-marked files: every
+  citation, expanded, must land in the header's declared destination set; the
+  header is read only from the marker's own block, so a mapping written elsewhere
+  in the file cannot widen it. Six pinned self-tests, including both self-marking
+  cases. The five imported files carry markers and are clean.
+- **Section amended:** harnesses/lessons/check_imports.py (`check_files`, marker
+  rules, self-tests); harnesses/probe/probe.py (two carried-over members);
+  README · banner + harness table.
+
+---

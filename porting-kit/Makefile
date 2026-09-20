@@ -23,6 +23,7 @@ check-kit:
 	@echo "== skills self-test =="; $(PY) skills/check_skills.py --self-test
 	@echo "== skills integrity =="; $(PY) skills/check_skills.py
 	@echo "== probe ==";           $(PY) $(H)/probe/probe.py --self-test
+	@echo "== diff-fuzz ==";       $(PY) $(H)/diff-fuzz/diff_fuzz.py --self-test
 	@echo "== lesson refs self-test =="; $(PY) $(H)/lessons/check_lesson_refs.py --self-test
 	@# --also-scan .. : a citation is a claim wherever it is written, and the
 	@# host repo cites lessons from CI workflows, backend sources, Cargo

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# KIT-IMPORT: from the c2rust-port lineage of this kit. No LESSONS citations.
 """Output normalization for differential testing — importable + CLI.
 
 The C oracle and the Rust rewrite will differ in *nondeterministic* ways that are

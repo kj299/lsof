@@ -1,11 +1,17 @@
 # Porting Kit — rewrite C in Rust, safely, and get faster each time
 
-> **This kit has moved.** Active development happens in
-> [`kj299/c2rust-port`](https://github.com/kj299/c2rust-port), lifted from this
-> directory at master `c703f2b` (2026-07-18). This copy stays as the historical
-> source alongside the lsof-rs port it was distilled from and is no longer
-> updated — take fixes and new work to `c2rust-port`. The v1.0 backlog that was
-> staged here as issues #8–#19 lives there too.
+> **Primary line:** [`kj299/c2rust-port`](https://github.com/kj299/c2rust-port),
+> lifted from this directory at master `c703f2b` (2026-07-18). New kit work starts
+> there; the v1.0 backlog staged here as issues #8–#19 lives there too.
+>
+> **This copy is vendored, not abandoned.** It is what the lsof-rs port's gates
+> actually run, so it is refreshed *from* the primary line rather than left to rot.
+> The two `LESSONS.md` logs are both append-only and **collide** above `#005` — the
+> same number names a different lesson on each side — so a refresh is never a
+> wholesale copy: each harness is brought over one at a time and every `LESSONS #N`
+> inside it is re-cited to this log's numbering. `harnesses/lessons/check_imports.py`
+> enforces that; a file carrying a `KIT-IMPORT:` header must account for every
+> citation in it. Do not `cp -r` the other kit over this one.
 
 A reusable set of playbooks, working harnesses, an architecture skeleton, and
 session prompts for **safety-first C→Rust rewrites**. Distilled from a real port
@@ -46,6 +52,7 @@ any skill references a kit path that no longer exists, so they can't drift.
 | `porting-kit-cflaw-scan` | hunt C vulnerabilities before porting and triage them into the ledger |
 | `porting-kit-oracle` | establish the differential oracle + test-vector harness before translating |
 | `porting-kit-module` | port one module through the six safety gates |
+| `porting-kit-diff-fuzz` | fuzz the port against the C oracle on shared inputs and triage every divergence |
 | `porting-kit-audit` | run the full safety-gate suite and report a gate-status table |
 | `porting-kit-retrospective` | close a port and patch the kit (the compounding loop) |
 
@@ -66,6 +73,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting | Phase 0 |
 | `harnesses/progress/progress.py` | per-module status table incl. safety gates | tracking |
 | `harnesses/ledgers/check_ledgers.py` | the ledgers the playbook mandates actually exist (progress, divergences, fuzz target, sanitizer job) | CI |
+| `harnesses/diff-fuzz/diff_fuzz.py` | differential FUZZING: same mutated input to C and Rust, every divergence triaged — finds what the fixed matrix never covered | CI (short) + nightly (long) |
 | `harnesses/probe/probe.py` | probe-then-port: generate a module's test expectations from a fingerprinted oracle transcript, and re-verify it | Phase 4 |
 | `harnesses/lessons/check_lesson_refs.py` | every `LESSONS #NN` citation resolves to an entry that exists | CI |
 | `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |

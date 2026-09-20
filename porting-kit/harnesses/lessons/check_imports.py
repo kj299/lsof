@@ -40,10 +40,26 @@ This checker then enforces two things per imported entry:
 A `by title` mapping is the escape hatch for a source lesson with no counterpart
 here: it asserts there is no local number, so no number is invented.
 
+## Imported FILES, not just imported entries
+
+A harness or skill brought across from a sibling lineage has the same hazard and
+no heading to hang a mapping on, so it carries a one-line marker instead:
+
+    # KIT-IMPORT: from the c2rust-port lineage.
+    # Re-cited: #1->#001, #4->#004, #6->#034, #8->#041; #36 by title.
+
+Every `LESSONS #N` in that file — expanded through the same list/range rules
+`check_lesson_refs` uses, so `#034, #14` and `#001/#6` are seen as TWO citations
+each — must land in that marker's destination set. That expansion is the point:
+the two survivors found while porting `diff-fuzz` were both continuation members
+(`LESSONS #034, #14` and `LESSONS #001/#6`), invisible to a `LESSONS #14` grep
+and green under every existing check, because #14 and #6 do exist here.
+
 Usage:  check_imports.py [LESSONS.md]     (default: the kit this file is in)
         check_imports.py --self-test
 
-Exit: 0 = every imported entry's re-citations resolve and are complete.
+Exit: 0 = every imported entry's re-citations resolve and are complete, and every
+      KIT-IMPORT file's citations land in its declared destination set.
 """
 from __future__ import annotations
 
@@ -218,6 +234,99 @@ def check(lessons_path):
     return imported, problems
 
 
+# ---------------------------------------------------------------------------
+# Imported FILES (harnesses, skills) — the same hazard, no heading to hang a
+# mapping on, so the mapping is a marker comment in the file itself.
+
+# A real marker is a FILE HEADER: it sits above the module docstring in a .py
+# and just under the frontmatter in a skill's .md, so 20 lines covers both with
+# room to spare. Matching it anywhere would make THIS file mark itself on its own
+# documentation and fixtures (it did, 16 times), and would let a passing mention
+# in prose conscript an unrelated file into the check.
+#
+# The marker must also OPEN its line, after nothing but a comment or markup
+# opener. Prose that merely names it does not mark a file — which is not a
+# hypothetical either: the README gained a sentence explaining `KIT-IMPORT:` in
+# its banner and was immediately counted as an imported file.
+MARKER_RE = re.compile(r"^\s*(?:#+|//+|<!--|--|;+|\*)?\s*KIT-IMPORT:")
+MARKER_HEAD_LINES = 20
+# The mapping is read from the marker's own block — its line plus the few that
+# continue it — so a `#6->#034` written anywhere else in the file cannot widen
+# the declared destination set and quietly bless a carried-over citation.
+MARKER_BLOCK_LINES = 5
+# `#1->#001` / `#1 -> #001`, and `#36 by title` for a source lesson with no
+# counterpart here. The destinations are what every citation in the file must
+# land in.
+FILEMAP_RE = re.compile(r"#(\d{1,3})\s*->\s*#(\d{1,3})")
+FILETITLE_RE = re.compile(r"#(\d{1,3})\s+by\s+title")
+
+
+def _expand_citations(text):
+    """Every lesson number a file's `LESSONS #N` citations claim, as
+    [(offset, number)] — expanded through check_lesson_refs's own list/range
+    rules so `#034, #14` and `#001/#6` yield BOTH members, not just the head.
+    Sharing that expansion is the point: a continuation member is exactly what
+    slipped through here, twice."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import check_lesson_refs as C  # noqa: E402
+    flat = re.sub(r"\s+", " ", text)
+    out = []
+    for head in C.CITE_RE.finditer(flat):
+        members, _errs = C.expand(flat, head)
+        out.extend(members)
+    return out
+
+
+def check_files(kit_root, lessons_path):
+    """Check every KIT-IMPORT-marked file under kit_root. Returns (n, problems)."""
+    entry_nums = {n for n, _t, _b in parse_entries(
+        open(lessons_path, encoding="utf-8").read())}
+    problems, n_files = [], 0
+    for dirpath, dirnames, filenames in os.walk(kit_root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in sorted(filenames):
+            if not fn.endswith((".py", ".md", ".sh", ".yml", ".yaml", ".toml")):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                text = open(path, encoding="utf-8").read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            lines = text.split("\n")
+            marked = next((i for i, ln in enumerate(lines[:MARKER_HEAD_LINES])
+                           if MARKER_RE.search(ln)), None)
+            if marked is None:
+                continue
+            n_files += 1
+            rel = os.path.relpath(path, kit_root)
+            block = "\n".join(lines[marked: marked + MARKER_BLOCK_LINES])
+            dests = {int(b) for _a, b in FILEMAP_RE.findall(block)}
+            by_title = {int(a) for a in FILETITLE_RE.findall(block)}
+            for d in sorted(dests):
+                if d not in entry_nums:
+                    problems.append(
+                        f"{rel}: KIT-IMPORT maps a source citation to #{d:03d}, "
+                        f"which is not an entry in LESSONS.md.")
+            cites = _expand_citations(text)
+            if not dests and not by_title and cites:
+                problems.append(
+                    f"{rel}: marked KIT-IMPORT and cites "
+                    f"{', '.join('#%d' % n for _o, n in cites)}, but declares no "
+                    f"`Re-cited:` mapping. Its numbers came from the source "
+                    f"lineage, where they mean different lessons.")
+                continue
+            for _off, num in cites:
+                if num not in dests:
+                    problems.append(
+                        f"{rel}: cites LESSONS #{num} — not a destination of this "
+                        f"file's KIT-IMPORT mapping. Either it was carried over "
+                        f"from the source lineage (where #{num} is a different "
+                        f"lesson), or the mapping is missing it. Continuation "
+                        f"members count: `#034, #14` and `#001/#6` are two "
+                        f"citations each.")
+    return n_files, problems
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in argv:
@@ -228,15 +337,18 @@ def main(argv=None):
     if not os.path.exists(path):
         sys.exit(f"error: no LESSONS.md at {path}")
     imported, problems = check(path)
+    n_files, file_problems = check_files(kit, path)
+    problems += file_problems
     for p in problems:
         print("PROBLEM  " + p)
-    print(f"{imported} imported entr(ies), {len(problems)} problem(s)")
-    if not imported:
+    print(f"{imported} imported entr(ies), {n_files} KIT-IMPORT file(s), "
+          f"{len(problems)} problem(s)")
+    if not imported and not n_files:
         # Nothing imported is a legitimate state for a kit that never forked —
         # but say so, rather than printing a green line that reads like a pass
         # over entries that were checked. (A gate with nothing to check is not a
         # passing gate; this one reports which it is.)
-        print("note: no `- **Imported:**` entries — nothing to re-cite here.")
+        print("note: nothing marked `Imported` or `KIT-IMPORT` — nothing to re-cite.")
     return 1 if problems else 0
 
 
@@ -384,6 +496,100 @@ def _self_test():
     n, probs = run(self_approve)
     chk("the mapping bullet does not launder a stray body number",
         any("#18" in p for p in probs))
+
+    # ---- imported FILES (KIT-IMPORT markers) -------------------------------
+    def run_files(files, md=base):
+        with tempfile.TemporaryDirectory() as td:
+            lp = os.path.join(td, "LESSONS.md")
+            open(lp, "w", encoding="utf-8").write(md)
+            for name, body in files.items():
+                fp = os.path.join(td, name)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                open(fp, "w", encoding="utf-8").write(body)
+            return check_files(td, lp)
+
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "# Re-cited: #6->#034, #4->#004\n"
+        "# see LESSONS #034 and LESSONS #004\n"})
+    chk("a KIT-IMPORT file whose citations are all mapped passes", (n, probs) == (1, []))
+
+    # THE bug this half exists for: a continuation member, invisible to a grep
+    # for `LESSONS #14` because it is written `LESSONS #034, #14`.
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "# Re-cited: #6->#034\n"
+        "# the fail-closed rule (LESSONS #034, #14.)\n"})
+    chk("a comma continuation member (`#034, #14`) is caught in a FILE",
+        any("#14" in p for p in probs))
+
+    n, probs = run_files({"skills/s/SKILL.md":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "Re-cited: #4->#004\n"
+        "a design smell (LESSONS #004/#6); design it out.\n"})
+    chk("a slash continuation member (`#004/#6`) is caught in a FILE",
+        any("#6" in p for p in probs))
+
+    # The number is assembled rather than written, because `check_lesson_refs`
+    # scans this file too, and a literal citation of a nonexistent entry is
+    # indistinguishable from a real citation to a lesson that does not exist —
+    # which is precisely what that check is for. Test data, not a citation.
+    absent = "9" * 3
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        f"# Re-cited: #6->#{absent}\n# LESSONS #{absent}\n"})
+    chk("a KIT-IMPORT mapping to a non-existent entry is caught",
+        any(absent in p and "not an entry" in p for p in probs))
+
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n# see LESSONS #034\n"})
+    chk("a KIT-IMPORT file that cites but declares no mapping is refused",
+        any("declares no" in p for p in probs))
+
+    # An imported file with no citations at all needs no mapping — normalize.py
+    # is exactly this, and refusing it would push the marker off the file.
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage. No LESSONS citations.\n"})
+    chk("a KIT-IMPORT file with no citations needs no mapping", (n, probs) == (1, []))
+
+    # `by title` on its own is a complete declaration for a file whose only
+    # source citation has no counterpart here.
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "# Re-cited: #36 by title (no entry here).\n"
+        "# the raw-byte gap; see the source lineage.\n"})
+    chk("`by title` alone is a complete file mapping", (n, probs) == (1, []))
+
+    # An UNMARKED file is not this check's business, however it cites.
+    n, probs = run_files({"harnesses/h/native.py": "# LESSONS #14 is fine here\n"})
+    chk("a file with no KIT-IMPORT marker is not checked", (n, probs) == (0, []))
+
+    # The marker is a HEADER. A file that merely TALKS about KIT-IMPORT — this
+    # very file, its docstring and its fixtures — must not conscript itself, and
+    # a `#6->#034` written in prose must not widen the declared set. Without the
+    # header rule this check flagged itself 16 times on its own examples.
+    n, probs = run_files({"harnesses/h/doc.py":
+        "#!/usr/bin/env python3\n\"\"\"Explains things.\n" + "\n" * 25 +
+        "A marker looks like `KIT-IMPORT: ...` with `Re-cited: #6->#034`.\n"
+        "\"\"\"\n# LESSONS #14\n"})
+    chk("a KIT-IMPORT mention below the header does not mark the file",
+        (n, probs) == (0, []))
+
+    # Prose that NAMES the marker, inside the header, still does not mark the
+    # file — the marker must open its line. The README did exactly this.
+    n, probs = run_files({"README.md":
+        "# Kit\n\n> A file carrying a `KIT-IMPORT:` header must account for every\n"
+        "> citation in it. Re-cited: #6->#034.\n\nLESSONS #14 is cited here.\n"})
+    chk("prose naming KIT-IMPORT mid-line does not mark the file",
+        (n, probs) == (0, []))
+
+    n, probs = run_files({"harnesses/h/x.py":
+        "# KIT-IMPORT: from the c2rust-port lineage.\n"
+        "# Re-cited: #4->#004\n" + "#\n" * 6 +
+        "# prose further down that says #6->#034 must not widen the set\n"
+        "# LESSONS #034\n"})
+    chk("a mapping written below the marker block does not widen the set",
+        any("#34" in p for p in probs))
 
     print("\nself-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
