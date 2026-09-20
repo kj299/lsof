@@ -164,6 +164,12 @@ MUTATIONS = [
     # another lineage covers that lineage's harnesses; the ones this kit grew
     # on its own would sit outside it, and `coverage_gaps()` is what says so.
 
+    {"gate": "threat-model", "file": "harnesses/threat-model/check_threat_model.py",
+     "old": "    if problems:",
+     "new": "    if False:",
+     "why": "an unfilled or sectionless threat model passes: the gate reports nothing",
+     "cmd": ["harnesses/threat-model/check_threat_model.py", "--self-test"]},
+
     {"gate": "perf", "file": "harnesses/perf/perf_gate.py",
      "old": '            verdict = "OK" if ratio <= threshold else "SLOW"',
      "new": '            verdict = "OK"',
