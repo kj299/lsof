@@ -13,8 +13,26 @@ and ship it as a release note. Seed this from the Phase-0 C-flaw scan.
 Format — one bullet per case name, ticked when reviewed and accepted:
 
 ```
-- [x] <matrix-case-name>: <why the Rust intentionally differs; CWE if a security fix>
+- [x] <matrix-case-name> [sha256:<12-hex>]: <why the Rust intentionally differs; CWE if a security fix>
 ```
+
+**Pin the fingerprint.** Without the `[sha256:…]` the entry suppresses by case
+*name*, forever — any future, unrelated regression in that case reports
+`DIVERGE(ledgered)` and exits 0. The most-exercised cases are the most likely to
+be ledgered, so an unpinned ledger makes the gate weakest exactly where behavior
+changes most. `diff_run.py` prints the exact pin to paste for every unpinned
+entry; with it, a divergence that *changes shape* fails again and asks for
+re-triage.
+
+A ledger entry **asserts** a divergence, it does not merely suppress one: a
+ledgered case that stops diverging is reported `LEDGER-STALE` and fails, because
+the likeliest cause is that the fix the port exists for got reverted.
+
+If a case name contains a `:`, backtick-quote it — ``- [x] `parse:header`
+[sha256:…]: why`` — or it truncates at the colon and silences the wrong case.
+
+Lines inside a ``` fence (like the one above) are format documentation and are
+not harvested as entries.
 
 ## Security fixes (C defect closed by the port)
 

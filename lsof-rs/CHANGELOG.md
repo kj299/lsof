@@ -43,7 +43,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   inside the promoted miri job and the job's 25-minute timeout killed it —
   turning a hard gate from success to **cancelled** on the trial arm's first
   run. `continue-on-error` exempts a step's failure; `timeout-minutes` is a
-  job property and crosses that boundary (LESSONS #036). **Three consecutive
+  job property and crosses that boundary (LESSONS #049). **Three consecutive
   log-verified greens** — `48 passed / 2 ignored` in 2557 s, then `55 / 2` in
   1216 s and `55 / 2` in 1464 s. The last two run the identical suite 20 %
   apart and the first runs *fewer* tests in twice the time, so runner variance
