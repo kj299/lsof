@@ -1445,3 +1445,66 @@ the emphasized half.
   `porting-kit/OPERATING-GUIDE.md`,
   `porting-kit/skills/porting-kit-audit/SKILL.md`,
   `.github/workflows/lsof-rs-ci.yml`
+
+## 036. The status list you read is one provider's view, not the set of gates
+
+- **Date:** 2026-09-20
+- **Codebase:** lsof-rs / lsof — the dialect-deletion near-miss
+- **What happened:** The cleanup arc's last deferred item was six "wired but
+  unused" C dialects — `aix`, `darwin`, `freebsd`, `netbsd`, `openbsd`, `sun`,
+  82 files and 35,637 lines, all reachable from `configure.ac`'s `AS_CASE` on
+  `$host_os`. The instruction was to delete them. Measuring first turned the
+  task inside out:
+
+  | dialect | built by | what actually runs |
+  |---|---|---|
+  | `darwin` | GitHub Actions | `Configure -n darwin`, `make`, `check.bash darwin`, autotools, dist |
+  | `freebsd` | **Cirrus CI** | two FreeBSD images, `check.bash freebsd`, autotools, `make check`, **`make distcheck`** |
+  | `netbsd` | **sourcehut** | netbsd/9.x, autoreconf, configure, make |
+  | `openbsd` | **sourcehut** | openbsd/7.2, `Configure`, `make`, `check.bash openbsd` |
+  | `aix` | — | nothing, on any provider |
+  | `sun` | — | nothing, on any provider |
+
+  **Four of the six were live, tested oracle platforms, and three of those are
+  tested by CI that never appears in this repository's GitHub check list.**
+  FreeBSD's Cirrus job is a more thorough C build than the Linux GitHub job —
+  it is the only place `make distcheck` runs on a BSD. Delete those trees and
+  every GitHub check stays green.
+
+  This is LESSONS #035 with the comfortable assumption removed. That entry says
+  an absent job looks exactly like a passing one. **The job need not be absent.
+  It can be running — passing or failing — on a provider whose results never
+  enter the list you are reading.** Nine PRs of this arc were judged safe by
+  reading GitHub check runs. That list is a *view over one provider*, and I had
+  been treating it as the set of gates for days.
+
+  The evidence was never hidden. `.cirrus.yml`, `.builds/netbsd.yml` and
+  `.builds/openbsd.yml` sit at the repository root, tracked, in plain sight —
+  and **no workflow, harness, document or skill in this kit references any of
+  them.** A gate that nothing points at is one you will not think to look for,
+  which is why finding it has to be a step rather than a hope.
+
+  So, before removing anything a build system can select: **enumerate CI
+  providers by finding their config files, not by reading a status list**, then
+  map each config to what it builds.
+
+      git ls-files | grep -E '^\.github/workflows/|^\.cirrus|^\.builds/|^\.travis|appveyor|gitlab-ci|woodpecker|\.drone'
+
+  A second thing worth recording: the deletion did not happen. The measurement
+  went to the repository's owner with the table above and the answer was to keep
+  all six — **untested is not the same as irrelevant.** `aix` and `sun` are
+  unbuilt here but they are functional source with a wired build path, not stale
+  files or dangling references, which is the boundary this whole arc worked to.
+  The investigation was the deliverable; the diff was empty and that was the
+  right outcome.
+
+- **Kit change:** `skills/porting-kit-audit/SKILL.md`'s CI-hygiene step now starts
+  by enumerating provider configs, because its previous two checks — is each
+  workflow path-scoped, and does each job's trigger cover what that job reads —
+  both silently assume you can see every job.
+- **Honest limit (LESSONS #033):** this is a procedure in a skill, not a harness.
+  Nothing fails if someone skips it, which by #033's own standard makes it a note
+  with a checklist attached rather than a control. The executable version would be
+  a ledger asserting that every platform the build system can select is either
+  built by some CI config or explicitly waived — named here, not built.
+- **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md`

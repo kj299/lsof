@@ -27,7 +27,15 @@ oracle is at gate 2 of 6, not done.
 7. **Performance sanity** (synthesis): fail if a module is >1.3x the C median runtime —
    that's a specific bug (a copy, a missed release build, bounds checks in a hot loop),
    not "the cost of Rust".
-8. **CI hygiene** (LESSONS #5; LESSONS #035): confirm each language/subtree's CI is
+8. **CI hygiene** (LESSONS #5; LESSONS #035; LESSONS #036). Start by listing the CI
+   **providers**, not the check runs — the status list you habitually read covers
+   one provider, and the checks below both assume you can see every job:
+   `git ls-files | grep -E '^\.github/workflows/|^\.cirrus|^\.builds/|^\.travis|appveyor|gitlab-ci|woodpecker|\.drone'`,
+   then map each config to what it builds. In this repo that surfaced three
+   platform gates (FreeBSD on Cirrus, NetBSD and OpenBSD on sourcehut) that no
+   GitHub check ever shows, and nearly cost four tested platforms to a deletion
+   that would have stayed green throughout.
+   Then: confirm each language/subtree's CI is
    path-scoped so unrelated changes don't trigger heavyweight jobs or leave PRs
    misleadingly "unstable"; see `porting-kit/harnesses/ci/porting-ci.template.yml`.
    Then check the **other** direction, which a green board cannot show you: for
