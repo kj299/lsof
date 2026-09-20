@@ -382,7 +382,7 @@ gated one** — `continue-on-error` exempts a step's own failure, but
 that boundary. lsof-rs added an observe-first miri step to its promoted miri
 job; the step ran long, the job's 25-minute timeout fired, and the hard gate
 went from success to **cancelled** on the trial arm's first run — broken by
-something labelled as not blocking (LESSONS #050). Isolation is what makes
+something labelled as not blocking (LESSONS #054). Isolation is what makes
 "this does not block" true, and it makes a generous timeout on the trial arm
 free. Promotion mechanics that worked (LESSONS #13): the bar is
 *consecutive log-verified green runs*; flip the flag **in its own PR**, so the

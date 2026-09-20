@@ -23,14 +23,42 @@ emit() {
   echo "wrote $out/fuzz_targets/${module}.rs"
 }
 
+# The crown verdict, extracted so it can be neutralized and so the self-test can
+# aim a NEGATIVE fixture at it. It was three inline `grep -q ... || exit 1` lines
+# inside --check, which only ever saw a correctly generated target: deleting the
+# checks changed nothing the self-test observed, so they were pinned by nothing
+# (LESSONS #052). Found by the sweep's first run in this kit (LESSONS #053).
+valid_target() {
+  local f="$1" crate="$2"
+  test -f "$f" || return 1
+  grep -q "fuzz_target!" "$f" || return 1
+  grep -q "$crate" "$f" || return 1
+  return 0
+}
+
 if [[ "${1:-}" == "--check" ]]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   emit "parser" "mycrate" "$tmp" >/dev/null
-  test -f "$tmp/fuzz_targets/parser.rs" || { echo "FAIL: no target generated"; exit 1; }
-  grep -q "fuzz_target!" "$tmp/fuzz_targets/parser.rs" || { echo "FAIL: template not expanded"; exit 1; }
-  grep -q "mycrate" "$tmp/fuzz_targets/parser.rs" || { echo "FAIL: crate not substituted"; exit 1; }
+  valid_target "$tmp/fuzz_targets/parser.rs" "mycrate" || {
+    echo "FAIL: generated target is not valid (missing, unexpanded, or crate not substituted)"; exit 1; }
   echo "PASS  fuzz scaffolder generates a valid target"
+
+  # NEGATIVE fixtures: each thing valid_target is supposed to catch, actually
+  # present, so the predicate has to refuse rather than merely not-object.
+  if valid_target "$tmp/fuzz_targets/nonexistent.rs" "mycrate"; then
+    echo "FAIL: a missing target file counts as valid"; exit 1; fi
+  echo "PASS  a missing target file is refused"
+
+  printf 'fn main() {}\n' > "$tmp/unexpanded.rs"
+  if valid_target "$tmp/unexpanded.rs" "mycrate"; then
+    echo "FAIL: a file with no fuzz_target! counts as valid"; exit 1; fi
+  echo "PASS  an unexpanded template is refused"
+
+  if valid_target "$tmp/fuzz_targets/parser.rs" "some_other_crate"; then
+    echo "FAIL: an unsubstituted crate name counts as valid"; exit 1; fi
+  echo "PASS  a target naming the wrong crate is refused"
+
   echo "self-test: OK"
   exit 0
 fi

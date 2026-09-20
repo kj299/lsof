@@ -16,7 +16,11 @@ fn main() {
         println!("port {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let json = matches!(args.iter().position(|a| a == "--format"), Some(i) if args.get(i + 1).map(String::as_str) == Some("json"));
+    // `saturating_add` rather than `+`, here and below: this workspace denies
+    // `clippy::arithmetic_side_effects`, and the skeleton has to pass the gates
+    // it configures — see crates/core/src/parser.rs.
+    let json = matches!(args.iter().position(|a| a == "--format"),
+        Some(i) if args.get(i.saturating_add(1)).map(String::as_str) == Some("json"));
 
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -25,8 +29,15 @@ fn main() {
         Ok(records) if json => {
             println!("[");
             for (i, r) in records.iter().enumerate() {
-                let comma = if i + 1 < records.len() { "," } else { "" };
-                println!("  {{\"key\": {:?}, \"value\": {:?}}}{}", r.key, r.value, comma);
+                let comma = if i.saturating_add(1) < records.len() {
+                    ","
+                } else {
+                    ""
+                };
+                println!(
+                    "  {{\"key\": {:?}, \"value\": {:?}}}{}",
+                    r.key, r.value, comma
+                );
             }
             println!("]");
         }
