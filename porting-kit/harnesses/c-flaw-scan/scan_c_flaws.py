@@ -171,6 +171,9 @@ def _uncommented(line, in_block=False):
     Blanked rather than removed so the text the porter reads still lines up
     with the source, and so column-sensitive rules keep working.
 
+    Blanking at all — rather than skipping lines that are *only* a comment —
+    is LESSONS #025's kit change; on its tree it took toctou from 97 to 65.
+
     Three noise sources, each found by running this on real C rather than by
     reasoning about it, and each a fifth or more of a category:
 

@@ -89,6 +89,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/skeleton-check/check_skeleton.sh` | the shipped skeleton must pass the gates it configures (fmt/clippy/build/test); SKIPs without cargo | CI |
 | `harnesses/gate-mutation/mutate_gates.py` | break each gate's verdict on purpose and require its self-test to go red; audits its own table for uncovered harnesses | **CI** |
 | `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |
+| `harnesses/doc-check/check_lessons_pinned.py` | the other direction: every file a lesson's `Section amended` names must cite that lesson back, so `check-kit` is the lessons' regression suite. `--also-scan ..` reaches the host repo, because a vendored kit's lessons amend workflows that live outside it | CI |
 | `harnesses/lessons/resolve_collision.py` | two branches appended to the log and took the same numbers: rebuild the merge from git, renumber the block that landed second, repoint its citations by *line provenance*, and refuse what only a human can decide (an ambiguous line, a split range, a displaced paragraph) | merge-time |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
@@ -104,7 +105,6 @@ Named rather than silently skipped, so the absence is a decision on the record:
 |---|---|
 | `api-coverage`, `library-differential`, `cando` | All three answer "is every exported FUNCTION of a C library on the compared contract". This port's subject is a program: the contract is argv/stdin → stdout + exit code, which `differential/` already covers end to end. They become relevant the day this kit is used for a library. |
 | `oracle-sanitize` | It sanitizes the C **driver a port writes** around a vendored library so the differential has something to execute — code the port authored, compiled without sanitizers, whose memory errors change no stdout. This port writes no C at all: its oracle is real `lsof`, built from this repo's own upstream sources by autotools. There is no port-authored C here to sanitize. |
-| `doc-check/check_lessons_pinned` | Applicable. Currently reports 15 lesson→code links where a `Section amended` file does not cite its lesson — some pre-existing here, some inherited from entries whose amendments happened in the source lineage. Needs its own triage pass rather than being wired red. |
 
 ## Related
 
