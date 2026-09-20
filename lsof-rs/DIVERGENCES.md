@@ -772,6 +772,13 @@ not the step that tries to enable the capability: a step reporting success and
 a gate actually running are different claims, which is the whole reason the
 87 above was caught at all.
 
+**DECISION, 2026-09-20.** Clearing that sysctl is CI relaxing a kernel security
+setting, which is not a porting call, so it went to the repository's owner:
+*keep it*. Recorded here and in the workflow because two other sessions are
+working this tree, and a step that lowers an AppArmor restriction is exactly
+the kind of thing a later reader removes on sight — silently un-gating item 24
+in the process.
+
 Every new assertion was mutated. Six against the unit tests (no truncation,
 DEVICE/NODE swapped, hex instead of decimal, `type=SOCK_unknown`, no header
 check, a strict `Type` parse) and each was caught by the test written for it.

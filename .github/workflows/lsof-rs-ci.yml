@@ -288,6 +288,12 @@ jobs:
       - name: build lsof-rs
         run: cargo build --release --bin lsof
       - name: allow unprivileged user namespaces (fixture L)
+        # KEPT DELIBERATELY. This step relaxes a kernel security setting on the
+        # runner, so it was put to the repository's owner rather than left as a
+        # porting decision; the answer on 2026-09-20 was to keep it. Do not
+        # remove it as suspicious-looking CI: removing it silently un-gates
+        # DIVERGENCES item 24, whose two mutants pass every unit test.
+        #
         # MEASURED, NOT ASSUMED: on head 195d7eb this runner skipped
         #
         #   SKIP (no unprivileged user namespaces for `unshare --user --net`):
