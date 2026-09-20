@@ -663,6 +663,16 @@ the emphasized half.
   for a per-unit rule has to be per-unit: the check should map each crate that
   parses external text to at least one target, and a port should have to waive
   a crate by name to leave it uncovered.
+
+  **Closed the same day.** The obstacle was never difficulty — it was that the
+  parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so
+  nobody could have written the target without moving them first. They are pure
+  string transforms; hoisting them into an ungated `names` module took an hour,
+  the target found two bugs *in its own assertions* within a minute, and the
+  crate's unit tests went from running on one platform to running on all of
+  them. When a per-unit gate has been unmet for months, check whether the unit
+  is simply unreachable from where the gate runs before concluding the work is
+  large.
 - **Follow-up closed, 2026-09-20, for the sanitizer half.** `check_ledgers.py`
   grew a fifth ledger, `san-crates`: every unit `progress.json` tracks must be
   NAMED by a CI step that runs a sanitizer. It is per *step* rather than per
@@ -690,7 +700,7 @@ the emphasized half.
   different control from a presence ledger. The fuzz half of this follow-up —
   mapping each text-parsing crate to a target — is still open.
 
-**Follow-up, 2026-09-20:** landing that miri arm broke the hard gate it was added beside — an observe-first STEP cannot be observe-first inside a gated job. See **LESSONS #034**.
+**Follow-up, 2026-09-20:** landing that miri arm broke the hard gate it was added beside — an observe-first STEP cannot be observe-first inside a gated job. See **LESSONS #054**.
 
 ## 022. Release mechanics II — a workflow that can fire twice will publish two truths
 
@@ -2282,16 +2292,6 @@ and that is a reason to isolate it rather than a reason to skip it.
 (LESSONS #013) now says *job*, not *step*, and says why.
 **Section amended:** PLAYBOOK · Phase 4 gate 4.
 
-  **Closed the same day.** The obstacle was never difficulty — it was that the
-  parsers sat inside `#[cfg(windows)]` while the fuzz job runs on Linux, so
-  nobody could have written the target without moving them first. They are pure
-  string transforms; hoisting them into an ungated `names` module took an hour,
-  the target found two bugs *in its own assertions* within a minute, and the
-  crate's unit tests went from running on one platform to running on all of
-  them. When a per-unit gate has been unmet for months, check whether the unit
-  is simply unreachable from where the gate runs before concluding the work is
-  large.
-
 ## 055. A fuzz target can name a parser it never reaches — plant a fault and watch
 
 **What happened.** `/proc/net/packet` got a parser, and the repository's
@@ -2366,9 +2366,11 @@ gate you have not seen fail is a gate you have not tested.
   **Then it happened again, twice, on the merge that carried this entry.**
   Master had meanwhile gained its own `034` and `035` from the parallel branch,
   so the two numbers written here — one of them *this* entry — collided the
-  moment the branches met. They are now #036 and #037. The next number in an
-  append-only log is shared mutable state that git cannot merge, and two
-  sessions days apart will take it twice; this is not a rare race.
+  moment the branches met, and moved again at every merge with master since.
+  A number a branch assigns is provisional until the branch lands; an entry
+  does not know its own number. The next number in an append-only log is
+  shared mutable state that git cannot merge, and two sessions days apart
+  will take it twice; this is not a rare race.
 
   What caught it was **git**, not a harness: both branches appended at the end
   of the same file, so the merge conflicted. That defence is real but partial —
