@@ -400,15 +400,26 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
 
     # The three prefixes legitimately differ in their TRAILING bytes — one side
     # ends the last shared entry with `\n`, another adds a `---` separator
-    # before its block — and a line-based merge reads that as both sides editing
-    # the same last line. Normalize the tail before merging; when the merge
+    # line before its block (two sessions, two conventions) — and a line-based
+    # merge reads that as both sides editing the same last line. The seventh
+    # collision made it bite for real: master had appended `---` to the last
+    # shared entry and this branch had appended a follow-up bullet to it, and
+    # the tool refused an "edit conflict" that was a joint. Trailing whitespace
+    # AND a trailing separator line are the JOINT, not content: strip both
+    # before merging and re-add KEEP's style when rebuilding. When the merge
     # comes back as KEEP's prefix, use KEEP's original bytes so a merge that
     # adds nothing to the shared entries reproduces KEEP's file exactly.
-    norm = lambda s: s.rstrip("\n") + "\n"
+    def norm(s):
+        s = s.rstrip("\n")
+        while s.endswith("\n---"):
+            s = s[:-4].rstrip("\n")
+        return s + "\n"
     prefix_k = prefix(pre_k, ek)
+    keep_sep = prefix_k.rstrip("\n").endswith("\n---")
+    verbatim_k = False
     merged_prefix = _merge3(norm(prefix(pre_m, em)), norm(prefix(pre_b, eb)), norm(prefix_k))
     if merged_prefix is not None and merged_prefix == norm(prefix_k):
-        merged_prefix = prefix_k
+        merged_prefix, verbatim_k = prefix_k, True
     if merged_prefix is None:
         raise Refuse(f"{lessons_rel} conflicts INSIDE the shared entries "
                      f"(001..{base_max:03d}) — that is an edit conflict, not a "
@@ -442,7 +453,10 @@ def build_plan(repo, kit_rel, base, keep_rev, move_rev):
     m_block = "".join(t for _, t in m_added)
     head = new_prefix
     if k_block:
-        head = head.rstrip("\n") + "\n\n" + k_block
+        # KEEP's own prefix already carries its joint (separator or not); a
+        # merged prefix lost it to `norm` and gets KEEP's style back.
+        joint = "\n\n" if verbatim_k else ("\n\n---\n\n" if keep_sep else "\n\n")
+        head = head.rstrip("\n") + joint + k_block
     if m_block:
         head = head.rstrip("\n") + "\n\n"
     m_edits = []
@@ -831,6 +845,25 @@ def _self_test():
               "and KEEP's bytes come through verbatim",
               msg is None and plan.new_lessons ==
               BASE_LOG + "\n---\n\n## 003. Keep three\n\nkeep body\n\n---\n\n"
+                         "## 004. Move three\n\nmove body\n")
+
+    # --- both sides touch the tail of the last shared entry: KEEP appends its
+    # `---` separator, MOVE appends a follow-up bullet. A joint, not an edit
+    # conflict — the seventh collision, refused by the tool until this fixture.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        g("checkout", "-q", "keep")
+        w(r, "kit/LESSONS.md", "\n---\n\n## 003. Keep three\n\nkeep body\n\n---\n", append=True)
+        commit(g, "keep")
+        g("checkout", "-q", "move")
+        w(r, "kit/LESSONS.md", "  follow-up on two\n\n## 003. Move three\n\nmove body\n", append=True)
+        commit(g, "move")
+        g("merge", "--no-edit", "keep", ok=False)
+        plan, msg = try_plan(r)
+        check("KEEP's trailing separator and MOVE's follow-up on the same last entry are a "
+              "joint, not an edit conflict; the follow-up stays and KEEP's separator style is kept",
+              msg is None and plan.new_lessons ==
+              BASE_LOG + "  follow-up on two\n\n---\n\n## 003. Keep three\n\nkeep body\n\n---\n\n"
                          "## 004. Move three\n\nmove body\n")
 
     # --- a moving-side line added to an OLD entry (the #021 follow-up case) --
