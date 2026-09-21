@@ -224,6 +224,71 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 'l' => sel.numeric_ids = true,
                 'L' => sel.show_links = true,
                 'H' => sel.human_size = true,
+                'X' => sel.skip_inet_tables = true,
+                'N' => sel.nfs_only = true,
+                'Z' => {
+                    // `-Z [context]`. The value is attached or the next word,
+                    // and a word that opens an option is not one — the same
+                    // rule `-K` uses (`main.c`: `*GOv != '-' && *GOv != '+'`).
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let list = sel.selinux.get_or_insert_with(Vec::new);
+                    if !rest.is_empty() {
+                        list.push(rest);
+                    } else if let Some(next) = args.get(i + 1) {
+                        if !next.starts_with(['-', '+']) {
+                            list.push(next.clone());
+                            i += 1;
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
+                'e' => {
+                    // `-e s` / `+e s`. The value may be attached or the next
+                    // word, and the C takes that word WHATEVER it is — a
+                    // missing value is reported by quoting what it found:
+                    // `lsof: -e not followed by a file system path: "-p"`.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        rest
+                    } else {
+                        match args.get(i + 1) {
+                            Some(next) if !next.starts_with(['-', '+']) => {
+                                i += 1;
+                                next.clone()
+                            }
+                            other => {
+                                return Err(format!(
+                                    "-e not followed by a file system path: {:?}",
+                                    other.map(String::as_str).unwrap_or("")
+                                ))
+                            }
+                        }
+                    };
+                    sel.exempt_fs.push(value);
+                    j = chars.len();
+                    continue;
+                }
+                'x' => {
+                    // `-x [fl]`: bare is both (`main.c`'s XO_ALL), otherwise
+                    // each letter adds one. An unknown letter is fatal, and
+                    // the C names it — `lsof: unknown cross-over option: q`.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    if rest.is_empty() {
+                        sel.cross_filesystems = true;
+                        sel.cross_symlinks = true;
+                    } else {
+                        for c in rest.chars() {
+                            match c {
+                                'f' => sel.cross_filesystems = true,
+                                'l' => sel.cross_symlinks = true,
+                                other => return Err(format!("unknown cross-over option: {other}")),
+                            }
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'U' => sel.unix_only = true,
                 // `-E` after `+E` must not downgrade the "also show peer
                 // files" mode — lsof treats +E as a superset of -E.
@@ -384,6 +449,23 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
     }
     if want_version {
         return Ok(Action::Version);
+    }
+    // `-X` stops the inet tables being read, so `-i` has nothing left to
+    // select on. The C refuses the pair outright rather than silently
+    // returning nothing — measured: `lsof -X -i` exits 1 with this text.
+    // Checked after the loop because the two may arrive in either order and
+    // in either clustering (`-Xi`, `-i -X`, `-aXi`).
+    if sel.skip_inet_tables && sel.inet.enabled {
+        return Err("-i is useless when -X is specified.".to_string());
+    }
+    // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
+    // alone rather than accepting a switch that would do nothing
+    // (`main.c:1122`). Checked here so the two may arrive in either order.
+    if (sel.cross_filesystems || sel.cross_symlinks)
+        && sel.dirs_one_level.is_empty()
+        && sel.dir_trees.is_empty()
+    {
+        return Err("-x must accompany +d or +D".to_string());
     }
     Ok(Action::Run {
         selection: sel,
@@ -880,7 +962,18 @@ mod tests {
 
     #[test]
     fn unknown_option_errors() {
-        assert!(parse(vec!["-Z".into()]).is_err());
+        // `-y` and `-Y` are `illegal option character` to the C on this
+        // dialect too, so they are stable markers for "not an option at all".
+        // This test used to name `-Z`, which was unsupported until P4
+        // implemented its gate — a rejection test pinned to a letter is a
+        // rejection test that expires the day the letter is implemented.
+        for o in ["-y", "-Y", "-M"] {
+            assert!(parse(vec![o.into()]).is_err(), "{o} should be rejected");
+        }
+        // And the letters P4 added are NOT rejected any more.
+        for o in ["-X", "-N", "-Z"] {
+            assert!(parse(vec![o.into()]).is_ok(), "{o} should parse");
+        }
     }
 
     #[test]
@@ -904,5 +997,106 @@ mod tests {
             vec!["alice", "EXAMPLE\\bob"]
         );
         assert!(run(&[]).0.users.is_empty());
+    }
+    #[test]
+    fn dash_x_and_dash_i_together_are_fatal_in_every_spelling() {
+        // Measured: `lsof -X -i` exits 1 with exactly this line. -X stops the
+        // inet tables being read, so -i would select against nothing; the C
+        // refuses rather than silently returning an empty set.
+        let want = "-i is useless when -X is specified.";
+        for argv in [
+            vec!["-X", "-i"],
+            vec!["-i", "-X"],
+            vec!["-Xi"],
+            vec!["-aXi"],
+            vec!["-X", "-iTCP"],
+        ] {
+            let got = parse(argv.iter().map(|s| s.to_string()).collect());
+            match got {
+                Err(e) => assert_eq!(e, want, "for {argv:?}"),
+                Ok(_) => panic!("{argv:?} should be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn dash_x_alone_is_accepted_and_selects_nothing() {
+        // The flag suppresses a lookup; it is not a selector, so it must not
+        // turn a whole-host run into a filtered one.
+        match parse(vec!["-X".to_string()]).unwrap() {
+            Action::Run { selection, .. } => {
+                assert!(selection.skip_inet_tables);
+                assert!(!selection.inet.enabled, "-X must not imply -i");
+                assert!(selection.pids.is_empty());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+    #[test]
+    fn dash_x_needs_a_directory_argument_and_known_letters() {
+        // Both contracts measured against the C, message for message.
+        assert_eq!(
+            parse(vec!["-x".into(), "-p".into(), "1".into()]).unwrap_err(),
+            "-x must accompany +d or +D"
+        );
+        assert_eq!(
+            parse(vec!["-xq".into(), "+d".into(), "/tmp".into()]).unwrap_err(),
+            "unknown cross-over option: q"
+        );
+        // A known letter alongside an unknown one still fails, and names the
+        // unknown one — the C loops over the value rather than testing it whole.
+        assert_eq!(
+            parse(vec!["-xfz".into(), "+d".into(), "/tmp".into()]).unwrap_err(),
+            "unknown cross-over option: z"
+        );
+        // `+D` satisfies it too, and the check is order-independent.
+        assert!(parse(vec!["+D".into(), "/tmp".into(), "-x".into()]).is_ok());
+    }
+
+    #[test]
+    fn dash_x_letters_select_the_two_cross_overs_independently() {
+        // Bare -x is XO_ALL; each letter is one half. Measured: `-x f` does
+        // NOT follow a symlink (the oracle skipped the link either way), and
+        // `-x l` does.
+        let flags = |a: &[&str]| match parse(a.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { selection, .. } => {
+                (selection.cross_filesystems, selection.cross_symlinks)
+            }
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert_eq!(
+            flags(&["-x", "+d", "/tmp"]),
+            (true, true),
+            "bare -x is both"
+        );
+        assert_eq!(flags(&["-xf", "+d", "/tmp"]), (true, false));
+        assert_eq!(flags(&["-xl", "+d", "/tmp"]), (false, true));
+        assert_eq!(flags(&["-xfl", "+d", "/tmp"]), (true, true));
+        assert_eq!(flags(&["+d", "/tmp"]), (false, false), "default is neither");
+    }
+    #[test]
+    fn dash_z_takes_an_optional_context_the_way_dash_k_does() {
+        let sel = |a: &[&str]| match parse(a.iter().map(|s| s.to_string()).collect()).unwrap() {
+            Action::Run { selection, .. } => selection.selinux,
+            other => panic!("unexpected action: {other:?}"),
+        };
+        // Bare -Z is Some(empty): given, with no context filter.
+        assert_eq!(sel(&["-Z"]), Some(vec![]));
+        // Attached and separate both take the value.
+        assert_eq!(sel(&["-Zunconfined_u"]), Some(vec!["unconfined_u".into()]));
+        assert_eq!(
+            sel(&["-Z", "unconfined_u"]),
+            Some(vec!["unconfined_u".into()])
+        );
+        // A word that opens an option is NOT the value (`main.c`'s rule), so
+        // `-Z -p 1` is a bare -Z plus a -p, not a context named "-p".
+        assert_eq!(sel(&["-Z", "-p", "1"]), Some(vec![]));
+        // Repeats accumulate, as the C's hash of context arguments does.
+        assert_eq!(
+            sel(&["-Z", "a", "-Z", "b"]),
+            Some(vec!["a".into(), "b".into()])
+        );
+        // Absent stays None — the gate must not fire on a run that never said -Z.
+        assert_eq!(sel(&["-p", "1"]), None);
     }
 }

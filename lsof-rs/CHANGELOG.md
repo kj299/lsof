@@ -12,6 +12,44 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`-X`, `-x`, `-e`, `-N` and `-Z`** (P4 of `docs/linux-l2-plan.md`;
+  DIVERGENCES items 25–29). The plan called these "the small options" and every
+  one was larger than that — two were live defects rather than missing
+  features.
+  - **Windows blast radius, measured on the runner, not assumed.** None of the
+    five has a backend behind it there. The smoke suite now pins what does
+    hold on every platform — the argument contracts (`-x` without `+d`, `-e`
+    without a path, `-X -i`) and the `-Z` gate's `limited to SELinux` line,
+    which the empty Windows mount table makes deterministic — plus `-N -V` as
+    a failed search item. Found because the suite's `unknown-option-errors`
+    case had used `-Z` as its "unknown letter" and went red on the first
+    Windows run after P4 gave `-Z` a gate: a rejection test pinned to a letter
+    expires the day the letter is implemented. Re-pointed at `-y`.
+  - **`-X` does not skip TCP and UDP files.** It degrades them to
+    `sock … can't identify protocol (-X specified)`, suppressing the *lookup*
+    and not the row. It gates `tcp`/`tcp6`/`udp`/`udp6`/`raw6` and, measured,
+    **not** `/proc/net/{raw,packet,unix}` — an asymmetry that is the C's own
+    and is reproduced. `-X -i` is fatal, as in the C.
+  - **`-x` is the switch for a `+d`/`+D` rule this port had backwards.** The C
+    skips a symbolic link in a directory expansion unless `-x`/`-x l`, and
+    skips an entry on another file system unless `-x`/`-x f`. lsof-rs followed
+    every link, so `+d DIR` selected files that only a link inside DIR pointed
+    at. **`+d` had been over-selecting since the path work landed.**
+  - **`-e <fs>` means do not `stat`.** The exempted row keeps its name, flags
+    and offset and loses its access letter, TYPE, DEVICE, size, inode and link
+    count, gaining ` (-e <fs>)` — which lands part of the `UNKN*` debt.
+  - **`-N` is a search item**, like `-i`: it ORs with other selecters and the
+    run exits 1 unless an NFS file was located. Its positive path has no oracle
+    on any host available here, and `DIVERGENCES.md` says so rather than
+    implying coverage.
+  - **`-Z`'s gate** matches — `is_selinux_enabled()` is a *mounted*-selinuxfs
+    test, not a `/sys/fs/selinux` presence test. The CONTEXT column is
+    deliberately **not** implemented: its position among the process columns
+    cannot be observed on any host here, and a guessed layout fails silently.
+    lsof-rs refuses loudly instead.
+
+  Differential 95 → **107** cases. `opt:X`'s coverage waiver was also wrong
+  from birth — its reason described an "epoll bridge", which is not `-X`.
 - **AF_PACKET sockets are now `pack` rows** (P3 of `docs/linux-l2-plan.md`;
   DIVERGENCES item 23). `/proc/net/packet` joins the seven tables `net.rs`
   already reads, and the row takes the shape `dsock.c:3622` gives it: the
@@ -84,7 +122,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   appended to #021 cited the continue-on-error lesson by a number two
   renumberings stale. Both are repaired here. With the paragraph restored, the
   resolver's output was byte-identical to the hand resolution on all four
-  files it touched; its self-test survived none of ten verdict mutants.
+  files it touched; its self-test survived none of ten verdict mutants. In a
+  cherry-pick it also follows entries the fork numbered differently into
+  master by title, so a picked commit's citations mean what they meant when
+  written (LESSONS #057, follow-up).
 
 - **`check_ledgers.py` gained a fifth ledger, `san-crates`:** every unit
   `progress.json` tracks must be named by a CI step that runs a sanitizer.

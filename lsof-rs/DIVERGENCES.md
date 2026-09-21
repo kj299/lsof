@@ -643,6 +643,115 @@ a hostile string — under the cap, or ledgered for another reason — so nothin
 could see it. H is a sleeper with a plain 15-character name. Seven mutants were
 then run against the 48-case suite and each was caught by the case meant for it.
 
+## Fixed by measuring the five small options (2026-09-20)
+
+P4 of `docs/linux-l2-plan.md`: `-Z`, `-N`, `-x`, `-X`, `-e`. The plan sized
+them S/S/M/M/M and called them "the small options". **Every one was larger than
+that, and two were live defects rather than missing features.** Each was
+measured against the oracle before a line was written.
+
+### `-X` does not do what it is documented to do
+
+`machine.h:502` defines its usage text as "skip TCP&UDP* files". It skips
+nothing:
+
+```
+6u IPv4 14197 0t0 TCP 127.0.0.1:58679 (LISTEN)              without
+6u sock  0,9  0t0 14197 can't identify protocol (-X specified)   with
+```
+
+It suppresses the **lookup**. `dsock.c:4155` is an if/else — under `-X` the C
+enters that fixed string *instead of* reading `system.sockprotoname` — so the
+port skips the namespace fallback rather than performing it and discarding the
+answer. Which tables it gates was measured, not read: `tcp`, `tcp6`, `udp`,
+`udp6` and `raw6` yes; `/proc/net/{raw,packet,unix}` no. The v4/v6 raw split is
+the C's own (`:3530` has no guard where `:3761` does) and is reproduced.
+
+`lsof -X -i` is fatal in both, same line and status.
+
+### `-x` is the switch for a `+d` rule this port had backwards
+
+`arg.c` lstats each directory entry and applies two tests: skip an entry whose
+`st_dev` is not the directory's unless `-x`/`-x f` (`:1029`), and **skip a
+symbolic link outright** unless `-x`/`-x l` (`:1038`). lsof-rs did neither —
+`identify_path` uses `metadata()`, which follows. On a directory holding one
+link pointing out of it, at a file open under its real name:
+
+```
+C:   (nothing)
+rs:  python3 6241 root 3r REG 254,0 4 1908956 .../outside/target.txt
+```
+
+`+d` had been over-selecting since the path work landed. The filesystem half
+needed a new `Backend::path_fs_device` hook, because the device cell
+`identify_path` returns is `st_rdev` for a device node — `/dev/null` is `1,3`,
+not the devtmpfs it sits on.
+
+### `-e` is a row shape, not argument validation
+
+Pinned through `-F`, because the table hides half of it:
+
+| | without | with `-e /` |
+|---|---|---|
+| `a` access | `r` | **blank** |
+| `t` TYPE | `REG` | `UNKNfd` |
+| DEVICE | `D 0xfe00` | `d UNKNOWN` |
+| `s` size, `i` inode, `k` links | present | **absent** |
+| `o` offset, `n` name | present | present, name + ` (-e /)` |
+
+`-e` means **do not stat**. Membership is therefore a path-prefix test costing
+a readlink and no stat, which is the whole point of an option whose reason is a
+hung NFS server. Two bugs the oracle caught and reading would not: `cwd`/`rtd`/
+`txt` have no fdinfo position and must print an empty cell, not `0t0`; and an
+fd whose target is `socket:[N]` is on no file system, so `-e /` must not
+swallow it.
+
+### `-N` and `-Z`: what this host cannot prove
+
+`-N` is a search item (`main.c:1768`, `Fnfs < 2`), and all four shapes match —
+including `lsof -N -p P`, which lists P's files *and* exits 1. Finding it
+exposed that `SelKinds::FILE`, the mask deciding a process with no surviving
+rows is not a result, did not contain `NFS`: selection was correct and 78
+processes still printed a bare `unk unknown` line.
+
+**There is no NFS mount here or on a GitHub runner**, so the positive path has
+no oracle. It is not unexercised, though: pointing the same filter at `ext4`
+makes 276 rows appear, so the device matching, row selection and emptiness rule
+all run. What is unverified is narrow — that the strings `nfs`/`nfs4` match a
+real NFS mount.
+
+`-Z`'s gate matches, and the check is not the obvious one:
+`is_selinux_enabled()` asks whether **selinuxfs is mounted**, not whether
+`/sys/fs/selinux` exists. Here the directory exists, empty, unmounted — so a
+presence check answers "enabled" where the C answers "disabled". The CONTEXT
+column is **not** implemented and that is a decision, not an omission: it lives
+among the process columns with a width grown to the longest value
+(`print.c:902`), no available host can show its position, and a guessed layout
+fails silently on exactly the hosts that use it. lsof-rs exits 1 with
+`-Z (SELinux context) is not implemented` instead.
+
+### A waiver that described a different option
+
+`opt:X`'s coverage reason read *"epoll bridge, needs anon_inode+fdinfo
+correlation"*. That is not `-X`. Like `opt:H` before it, the entry was wrong
+from birth and no code change could ever have falsified it.
+
+### What the gate gained, and the two cases that could not fail
+
+Eleven differential cases, 95 → **107**. Three mutants were run against them,
+and **two survived on the first attempt because the cases were wrong**:
+
+* the `+d` symlink case used a link pointing at a file *inside* the same
+  directory. The target is then already in the expansion under its own name,
+  so following the link changes no selection. Rebuilt against a directory whose
+  only entry is a link pointing **out** of it, it kills the mutant.
+* the `-N` case looked unable to fail too — and that diagnosis was **wrong**.
+  The mutation had silently not applied: `cargo fmt` had reformatted the
+  constant, and `str.replace` returns the input unchanged when its pattern is
+  absent. Applied for real it produces 78 rows against the C's 0 and **two**
+  cases fail. Recorded as LESSONS #059, because a mutation that does not happen
+  is indistinguishable from a gate that does not catch.
+
 ## Fixed by reading /proc/net/packet (2026-09-20)
 
 P3 of `docs/linux-l2-plan.md`. An `AF_PACKET` socket — what `tcpdump` opens —
@@ -1206,6 +1315,16 @@ likely right; it is a compatibility decision, not a backend phase.
 | 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. **C-DEFECT**, not reproduced; the `search-plus-d-supplies-a-surviving-item` case names `{ASUB}`, which is empty, precisely so it measures the abort rule and not this. |
 
 | 21 | `-c`, `-u` and `-g` are **search items**: a value that matches nothing exits 1, and `-V` says `command not located:` / `no user use located:` etc. | they select, but never counted as unlocated, so the run exits 0 | measured 2026-09-12: `lsof -c nosuchcmd`, `-u nosuchuser` and `-g 999999` are all exit 1 from the C and 0 here, while `-p` and `-i` already match. **DEBT** — found by the item-19 sweep. Doing it properly means auditing every search-item class the C keeps (`main.c` has ten `not located` messages) and deciding each against the negated-`-c` defect already ledgered as item 13, so it is recorded rather than folded into a path-argument change. |
+
+| 25 | `-X` does **not** skip TCP and UDP files — it degrades them to `sock … can't identify protocol (-X specified)` | ~~option unsupported~~ **resolved 2026-09-20** | see "Fixed by measuring the five small options" below |
+
+| 26 | a `+d`/`+D` expansion **skips a symbolic link** unless `-x`/`-x l`, and skips an entry on another file system unless `-x`/`-x f` | ~~followed every link, and never checked the device~~ **resolved 2026-09-20** | a live over-report, not a missing feature: `+d DIR` selected a file that only a link inside DIR pointed at. `identify_path` uses `metadata()`, which follows. |
+
+| 27 | `-e <fs>` means **do not `stat`**: the row keeps name, flags and offset and loses access, TYPE, DEVICE, size, inode and link count, gaining ` (-e <fs>)` | ~~option unsupported~~ **resolved 2026-09-20** | part of the `UNKN*` DEBT closed by a deterministic trigger; the other half (an unreadable link reported with its errno) is unchanged |
+
+| 28 | `-N` is a **search item** like `-i`: it ORs with other selecters, and the run exits 1 unless an NFS file was located | ~~option unsupported~~ **resolved 2026-09-20** (negative path) | the positive path has no oracle here — see below |
+
+| 29 | `-Z` is gated on `is_selinux_enabled()`, a **mounted-selinuxfs** test, and prints `-Z limited to SELinux` with exit 1 where it is not | ~~option unsupported~~ **gate resolved 2026-09-20; the CONTEXT column is DEBT, deliberately** | `print.c:902` puts CONTEXT among the process columns with a grown width, and no host here has SELinux enabled, so its position cannot be observed. lsof-rs refuses loudly rather than guessing a layout. |
 
 | 23 | an **AF_PACKET** socket is a `pack` row: the inode in DEVICE, the ethernet protocol in NODE, `type=SOCK_RAW` as the whole NAME | ~~`SOCK` / `socket:[11426]`, with a size~~ **resolved 2026-09-20** | see "Fixed by reading /proc/net/packet" below |
 

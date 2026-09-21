@@ -67,13 +67,21 @@ impl SelKinds {
     /// still shows that process's own rows alongside its tasks. Measured, not
     /// derived — see `Selection::apply`.
     pub const TASK: Self = Self(1 << 9);
+    /// `-N`, the C's `SELNFS`.
+    pub const NFS: Self = Self(1 << 10);
 
     /// The process selecters — the C's `SELPROC`. A file inherits these from
     /// its process; the rest it must match itself.
     pub const PROC: Self = Self(Self::PID.0 | Self::UID.0 | Self::CMD.0 | Self::PGID.0);
     /// The file and network selecters — the C's `SELFILE | SELNW`.
+    ///
+    /// This mask is what decides that a process with no surviving rows is not
+    /// a result. Leaving a file-level kind out of it is silent: `-N` selected
+    /// correctly and still printed a bare `unk unknown` line for every process
+    /// on the host, because the emptiness rule did not know `-N` was a file
+    /// selecter. Any new kind added below belongs here too.
     pub const FILE: Self =
-        Self(Self::FD.0 | Self::NET.0 | Self::UNX.0 | Self::NM.0 | Self::NLINK.0);
+        Self(Self::FD.0 | Self::NET.0 | Self::UNX.0 | Self::NM.0 | Self::NLINK.0 | Self::NFS.0);
 
     /// No selector of any kind — the run selects everything (`AllProc`).
     pub const fn is_empty(self) -> bool {
@@ -461,6 +469,79 @@ pub struct Selection {
     /// `-L`: add the NLINK (link count) column to table output. Implies the
     /// renderer pulls `OpenFile::links` into a new column.
     pub show_links: bool,
+    /// `-Z [context]`: SELinux security contexts.
+    ///
+    /// `None` when not given; `Some(list)` when it was, with the optional
+    /// context arguments (the C globs them with `fnmatch`). The list being
+    /// empty means a bare `-Z`.
+    ///
+    /// The C gates the whole option on `is_selinux_enabled()`, which asks
+    /// whether **selinuxfs is mounted** — not whether `/sys/fs/selinux`
+    /// exists. That distinction is load-bearing: on this port's test host the
+    /// directory is there and empty while the file system is not mounted, so a
+    /// presence check would answer "enabled" where the C answers "disabled".
+    pub selinux: Option<Vec<String>>,
+    /// `-N`: select files on an NFS file system.
+    ///
+    /// A **search item**, exactly like `-i`: `main.c` holds `Fnfs` at 1 until
+    /// a saved row carries `SELNFS` and `if (Fnfs && Fnfs < 2)` at the end is
+    /// a search failure. Measured — on a host with no NFS mount, `lsof -N`
+    /// prints nothing and exits **1**, `lsof -a -N -p P` prints nothing and
+    /// exits 1, and `lsof -N -p P` prints all of P's files and still exits 1,
+    /// because the `-N` item was never located. `-V` says
+    /// `lsof: no NFS files located`.
+    pub nfs_only: bool,
+    /// Devices of the NFS file systems in the mount table, filled by the CLI
+    /// from [`Backend::mounts`](crate::backend::Backend::mounts). A file whose
+    /// [`OpenFile::fs_device`] is in here is an NFS file.
+    pub nfs_devices: std::collections::HashSet<u64>,
+    /// `-e <fs>` / `+e <fs>`: mount points whose files must **not** be
+    /// `stat(2)`ed. The C's reason is a hung NFS server; the consequence is a
+    /// row built from the link target and fdinfo alone.
+    ///
+    /// Membership is decided by **path prefix**, never by a stat — that is the
+    /// point of the option. Measured against the C, an exempted row loses
+    /// every cell that comes from `stat`:
+    ///
+    /// ```text
+    ///   without        with -e /
+    ///   a r            a            (blank)
+    ///   t REG          t UNKNfd
+    ///   D 0xfe00       d UNKNOWN
+    ///   s 5            -            (no size)
+    ///   i 1908935      -            (no inode)
+    ///   k 1            -            (no link count)
+    ///   o 0t0          o 0t0        (fdinfo, kept)
+    ///   n <path>       n <path> (-e /)
+    /// ```
+    pub exempt_fs: Vec<String>,
+    /// `-x f` (and bare `-x`): let a `+d`/`+D` expansion cross file-system
+    /// mount points. Default off — `arg.c:1029` skips an entry whose `st_dev`
+    /// differs from the directory's.
+    pub cross_filesystems: bool,
+    /// `-x l` (and bare `-x`): let a `+d`/`+D` expansion follow a symbolic
+    /// link. Default off, and this is the half lsof-rs had **backwards**: it
+    /// resolved every entry through `metadata()`, so `+d DIR` selected a file
+    /// that only a symlink inside DIR pointed at, where the C skips the link
+    /// entirely (`arg.c:1038` — "Otherwise skip symbolic links").
+    pub cross_symlinks: bool,
+    /// `-X`: do not read the inet socket tables.
+    ///
+    /// The man page calls this "skip the reporting of information on all open
+    /// TCP and UDP files", and **that is not what it does** — measured against
+    /// the C, the rows are still printed, degraded:
+    ///
+    /// ```text
+    /// 6u IPv4 14197 0t0 TCP 127.0.0.1:58679 (LISTEN)     without
+    /// 6u sock  0,9  0t0 14197 can't identify protocol (-X specified)   with
+    /// ```
+    ///
+    /// So it suppresses the *lookup*, not the row. `dsock.c` gates
+    /// `/proc/net/{tcp,tcp6,udp,udp6,raw6}` on it — and, measured, **not**
+    /// `/proc/net/raw`, `/proc/net/packet` or `/proc/net/unix`, which keep
+    /// resolving. The IPv4/IPv6 raw split is an asymmetry in the C
+    /// (`dsock.c:3530` has no guard where `:3761` does); see DIVERGENCES.
+    pub skip_inet_tables: bool,
     /// `-H`: render the SIZE cell as a human-readable byte count in the table.
     /// A pure formatting flag — it selects nothing, and the C applies it to the
     /// table alone, leaving `-F` and JSON in raw bytes.
@@ -565,6 +646,9 @@ impl Selection {
         }
         if self.unix_only && f.file_type == FileType::Unix {
             k.insert(SelKinds::UNX);
+        }
+        if self.nfs_only && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d)) {
+            k.insert(SelKinds::NFS);
         }
         if self.inet.enabled && self.inet_matches(f) {
             k.insert(SelKinds::NET);
@@ -748,6 +832,9 @@ impl Selection {
         }
         if self.unix_only {
             k.insert(SelKinds::UNX);
+        }
+        if self.nfs_only {
+            k.insert(SelKinds::NFS);
         }
         // Only an explicit `-K` specifies the kind. `TaskMode::WhenUnselected`
         // is the *absence* of a selector — it lists tasks precisely because
@@ -1247,6 +1334,7 @@ mod tests {
             source: Some(source.into()),
             source_is_block: block,
             device,
+            fstype: String::new(),
         };
         let table = vec![
             mount("/", "/dev/vda", true, 100),
@@ -1589,5 +1677,22 @@ mod tests {
             .iter()
             .flat_map(|p| &p.files)
             .all(|f| f.fd != FdType::Handle(72)));
+    }
+    #[test]
+    fn nfs_is_a_file_selecter_and_a_search_item() {
+        // The bug the oracle caught: `-N` selected correctly but every process
+        // on the host still printed a bare `unk unknown` line, because the
+        // emptiness rule reads SelKinds::FILE and NFS was not in it.
+        assert!(
+            SelKinds::FILE.contains(SelKinds::NFS),
+            "a fileless process must be dropped under -N, as it is under -U"
+        );
+        // And it is a kind of its own, not an alias for another selecter.
+        for other in [SelKinds::FD, SelKinds::NET, SelKinds::UNX, SelKinds::NM] {
+            assert!(
+                !other.contains(SelKinds::NFS),
+                "NFS collides with {other:?}"
+            );
+        }
     }
 }

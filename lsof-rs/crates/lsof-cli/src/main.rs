@@ -306,6 +306,22 @@ fn report_unmatched(
             println!("lsof: no Internet files located");
         }
     }
+    // `-N` is the same shape (`main.c`'s `Fnfs < 2`), and the message is the
+    // same sentence with the noun changed. Measured on a host with no NFS
+    // mount: `lsof -N` and `lsof -a -N -p 1` both exit 1, and so does
+    // `lsof -N -p 1`, which DOES list the pid's files — the `-N` item was
+    // still never located.
+    if sel.nfs_only
+        && !procs
+            .iter()
+            .flat_map(|p| &p.files)
+            .any(|f| f.fs_device.is_some_and(|d| sel.nfs_devices.contains(&d)))
+    {
+        unmatched += 1;
+        if print {
+            println!("lsof: no NFS files located");
+        }
+    }
 
     unmatched
 }
@@ -388,6 +404,61 @@ fn main() {
             _ => env.backend.mounts(),
         };
         sel.paths_identified = env.backend.identifies_paths();
+        // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
+        // `is_selinux_enabled()` — a check for a mounted selinuxfs, not for
+        // the `/sys/fs/selinux` directory. On a host where the directory
+        // exists unmounted (this port's own test box) a presence check answers
+        // "enabled" where the C answers "disabled", so the mount table is what
+        // decides, using the type `-N` already taught it to read.
+        if sel.selinux.is_some() {
+            let enabled = mounts.iter().any(|m| m.fstype == "selinuxfs");
+            if !enabled {
+                // The C's exact line, and its status.
+                eprintln!("lsof: -Z limited to SELinux");
+                std::process::exit(1);
+            }
+            // SELinux IS enabled, and this port does not implement the column.
+            // Deliberately NOT written blind: `print.c:902` puts CONTEXT in the
+            // PROCESS columns with a width that grows to the longest value, and
+            // no host available to this port can show where it sits relative to
+            // USER and FD. Guessing produces silently misaligned output on
+            // exactly the hosts that use the option. A loud refusal is the
+            // honest failure; DIVERGENCES records it.
+            eprintln!("lsof: -Z (SELinux context) is not implemented");
+            std::process::exit(1);
+        }
+        // `-N` selects on file-system TYPE, so the mount table is what turns
+        // the flag into a set of devices a row can be compared against.
+        // `nfs` and `nfs4` are the two Linux spells; a type that merely starts
+        // with them (there is none today) is deliberately not matched.
+        if sel.nfs_only {
+            for m in &mounts {
+                if m.fstype == "nfs" || m.fstype == "nfs4" {
+                    sel.nfs_devices.insert(m.device);
+                }
+            }
+        }
+        // `-e`/`+e` name a MOUNT POINT, and the C checks that before it does
+        // anything else: `lsof: "-e /nosuch" is not a mounted file system.`,
+        // then exit 1. A trailing slash is tolerated (`-e /dev/shm/` was
+        // accepted), so the comparison is made on a normalised form.
+        for e in &sel.exempt_fs {
+            let want = {
+                let t = e.trim_end_matches('/');
+                if t.is_empty() {
+                    "/"
+                } else {
+                    t
+                }
+            };
+            if !mounts.iter().any(|m| {
+                m.dir.trim_end_matches('/') == want.trim_end_matches('/')
+                    || (want == "/" && m.dir == "/")
+            }) {
+                eprintln!("lsof: \"-e {e}\" is not a mounted file system.");
+                std::process::exit(1);
+            }
+        }
         let mut not_a_filesystem: Vec<String> = Vec::new();
         for p in &sel.paths {
             let devs = filesystems_named(&mounts, p, sel.filesystem_args);
@@ -434,6 +505,10 @@ fn main() {
         // part, so `+d /` is one level of `/`, not the whole root filesystem.
         let quiet = sel.quiet;
         let identifies = sel.paths_identified;
+        // Copied out before the closure so it does not borrow `sel`, which it
+        // already borrows mutably for `path_ids`.
+        let cross_filesystems = sel.cross_filesystems;
+        let cross_symlinks = sel.cross_symlinks;
         let mut expand = |dir: &str, recursive: bool| {
             let id = env.backend.identify_path(dir);
             // A `+d`/`+D` argument that cannot be stat'ed is a WARNING here,
@@ -456,6 +531,10 @@ fn main() {
                 fs_device: None,
                 display: dir.to_string(),
             });
+            // The directory's own file system, for the cross-over rule below.
+            // `None` on a backend with no such notion, which switches the rule
+            // off rather than guessing.
+            let dir_fs = env.backend.path_fs_device(dir);
             let mut stack = vec![std::path::PathBuf::from(dir)];
             let mut budget = 200_000usize; // a tree walk is not a licence to hang
             while let Some(d) = stack.pop() {
@@ -469,6 +548,33 @@ fn main() {
                     budget -= 1;
                     let path = e.path();
                     let shown = path.to_string_lossy().into_owned();
+                    // The two cross-over rules, in the C's order (`arg.c`):
+                    //
+                    //   1029  unless -x / -x f, skip an entry whose st_dev is
+                    //         not the directory's — do not leave this file
+                    //         system;
+                    //   1038  unless -x / -x l, skip a symbolic link outright.
+                    //         With it, the link is resolved and the TARGET is
+                    //         what gets searched for.
+                    //
+                    // lsof-rs had the second backwards: `identify_path` uses
+                    // `metadata()`, which follows, so every link was resolved
+                    // and `+d DIR` selected files only a link inside DIR
+                    // pointed at. Measured against the oracle on a directory
+                    // holding one symlink out of it: the C printed nothing,
+                    // lsof-rs printed the target's row.
+                    if !cross_filesystems {
+                        if let (Some(d), Some(e_dev)) = (dir_fs, env.backend.path_fs_device(&shown))
+                        {
+                            if d != e_dev {
+                                continue;
+                            }
+                        }
+                    }
+                    let is_link = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+                    if is_link && !cross_symlinks {
+                        continue;
+                    }
                     let id = env.backend.identify_path(&shown);
                     if let Some(id) = id.clone() {
                         sel.path_ids.insert(id);

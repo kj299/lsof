@@ -55,6 +55,13 @@ impl Backend for LinuxBackend {
         Some((files::dev_cell(&md), md.ino().to_string()))
     }
 
+    fn path_fs_device(&self, path: &str) -> Option<u64> {
+        // lstat, not stat: `arg.c` tests the entry's OWN st_dev before it
+        // decides whether to resolve a symlink, so a link pointing at another
+        // file system is judged by where the link is, not where it goes.
+        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+    }
+
     fn mounts(&self) -> Vec<lsof_core::MountEntry> {
         mounts::load()
     }
@@ -92,14 +99,14 @@ impl Backend for LinuxBackend {
         // /proc/net is system-wide, so it is read once for the whole gather
         // rather than per process. `-T q` is the only reason to pay for queue
         // depths; see SocketTable::load.
-        let socks = SocketTable::load(sel.tcp_info().queue);
+        let socks = SocketTable::load(sel.tcp_info().queue, sel.skip_inet_tables);
         // /proc/locks is one table for the whole system, with a pid column, so
         // it is read once here rather than per process.
         let locks = crate::locks::load();
         // Built empty and filled only if a socket turns up that this
         // namespace's tables cannot explain — nothing is read on a host with
         // one network namespace.
-        let nstab = crate::net::NetnsTables::new();
+        let nstab = crate::net::NetnsTables::new(sel.skip_inet_tables);
 
         for p in procs.iter_mut() {
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
@@ -108,7 +115,7 @@ impl Backend for LinuxBackend {
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid, &socks, &locks, &nstab) {
+            if let Some(files) = files::for_pid(p.pid, &socks, &locks, &nstab, &sel.exempt_fs) {
                 p.files = files;
             }
         }
@@ -135,7 +142,9 @@ impl Backend for LinuxBackend {
                 }
                 for mut t in process::tasks_of(p) {
                     let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
-                    if let Some(files) = files::for_proc_dir(&base, p.pid, &socks, &locks, &nstab) {
+                    if let Some(files) =
+                        files::for_proc_dir(&base, p.pid, &socks, &locks, &nstab, &sel.exempt_fs)
+                    {
                         t.files = files;
                     }
                     tasks.push(t);

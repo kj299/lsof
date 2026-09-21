@@ -279,7 +279,21 @@ belongs:
   prepended to the input — proved by planting a panic in the row loop
   (LESSONS #056).
 
-**P4 — the small options (1–2 days).** `-Z`, `-N`, then `-x`, `-X`, `-e`.
+**P4 — the small options (1–2 days). DONE 2026-09-20 — and they were not
+small.** `-Z`, `-N`, `-x`, `-X`, `-e`, each measured against the oracle before
+being written, and each larger than this table sized it:
+
+| option | sized | what it was |
+|---|---|---|
+| `-X` | M, "measure what it suppresses" | it suppresses **nothing** — it degrades the rows, and gates raw6 but not raw4 |
+| `-x` | M, "pairs with the path work already done" | the path work was **wrong**; `+d` had been over-selecting through symlinks |
+| `-e` | M, "validates the argument" | a whole row shape, and part of the `UNKN*` debt |
+| `-N` | S, "filter on fs type" | a **search item**, and it exposed a hole in `SelKinds::FILE` |
+| `-Z` | S, "one read of `attr/current`" | the gate is a *mounted*-selinuxfs test; the column is deliberately unwritten |
+
+Two of the five were live defects rather than missing features. The oracle
+caught four bugs that reading could not, and two of the eleven new differential
+cases could not fail until they were rebuilt (LESSONS #059).
 
 **P5 — the `-i` profiling pass**, and a resource gate if one is wanted: peak
 RSS and wall time on a whole-host scan, asserted against a ceiling. Nothing

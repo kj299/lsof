@@ -498,6 +498,30 @@ covers = ["type:unix"]
 # `type=SOCK_RAW`/`type=SOCK_DGRAM` in NAME. SKIPPED where CAP_NET_RAW is not
 # available, which includes the GitHub runner; fixture L covers the part that
 # survives without it.
+# P4's small options. Each was measured against the oracle before it was
+# written, and each turned out to be larger than the plan sized it — `-X` does
+# not skip TCP/UDP files, `-x` is the switch for a `+d` rule lsof-rs had
+# backwards, and `-e` is a whole row shape rather than argument validation.
+[[case]]
+name = "linux/differential-opt-X-degrades-inet-rows"
+args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-p", "PID"]
+covers = ["opt:X"]
+
+[[case]]
+name = "linux/differential-opt-x-symlink-rule"
+args = ["-n", "-P", "-a", "-d", "^mem", "+d", "DIR", "-p", "PID"]
+covers = ["opt:x"]
+
+[[case]]
+name = "linux/differential-opt-e-exempts-a-mount"
+args = ["-n", "-P", "-a", "-d", "^mem", "-e", "/", "-p", "PID"]
+covers = ["opt:e"]
+
+[[case]]
+name = "linux/differential-opt-N-is-a-search-item"
+args = ["-n", "-P", "-N", "-p", "PID"]
+covers = ["opt:N"]
+
 [[case]]
 name = "linux/differential-sockets-packet"
 args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]

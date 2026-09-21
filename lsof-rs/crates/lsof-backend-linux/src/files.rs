@@ -187,6 +187,43 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
 /// * `metadata` *follows* the magic link, so the kernel reports the underlying
 ///   file object's stat even for sockets and pipes that have no path.
 ///
+/// The exempted mount point a path falls under, if any (`-e`).
+///
+/// Prefix matching, not `stat`: `/` covers everything, and `/dev/shm` covers
+/// `/dev/shm/x` but not `/dev/shmx`. A trailing slash on the argument is
+/// tolerated, as the C tolerates `-e /dev/shm/`.
+fn exempt_match<'a>(path: &str, exempt: &'a [String]) -> Option<&'a str> {
+    exempt.iter().find_map(|e| {
+        let trimmed = e.trim_end_matches('/');
+        let mp = if trimmed.is_empty() { "/" } else { trimmed };
+        // An fd whose link target is not an absolute path -- `socket:[14197]`,
+        // `pipe:[…]`, `anon_inode:…` -- lives on no file system and is exempt
+        // from nothing. Measured: under `-e /` the C still resolves sockets to
+        // their `IPv4 … TCP` rows. Testing `mp == "/"` alone swallowed them.
+        if !path.starts_with('/') {
+            return None;
+        }
+        let hit = mp == "/"
+            || path == mp
+            || (path.len() > mp.len() && path.starts_with(mp) && path.as_bytes()[mp.len()] == b'/');
+        hit.then_some(e.as_str())
+    })
+}
+
+/// The C's `UNKN*` TYPE code for an fd kind — `UNKNfd`, `UNKNcwd`, `UNKNrtd`,
+/// `UNKNtxt`, `UNKNmem`, `UNKNdel`. Measured: an exempted numeric fd is
+/// `UNKNfd`, the cwd is `UNKNcwd`, the executable is `UNKNtxt`.
+fn unkn_suffix(fd: &FdType) -> &'static str {
+    match fd {
+        FdType::Cwd => "cwd",
+        FdType::Root => "rtd",
+        FdType::Txt => "txt",
+        FdType::Mem => "mem",
+        FdType::Deleted => "del",
+        _ => "fd",
+    }
+}
+
 /// A row is emitted if either succeeds; an fd we can see but cannot stat is
 /// still worth showing.
 ///
@@ -199,10 +236,45 @@ fn row(
     pid: u32,
     socks: &SocketTable,
     ns: &net::NetnsTables,
+    exempt: &[String],
 ) -> Option<OpenFile> {
     let access = info.access();
     let offset = info.pos;
     let target = std::fs::read_link(link).ok();
+    // `-e <fs>`: never `stat(2)` a file on an exempted file system — that is
+    // the whole option, whose reason is a hung NFS server. Membership is a
+    // PATH PREFIX test on the link target, which costs a readlink and no stat.
+    //
+    // Measured against the C, field by field through `-F`: the row keeps what
+    // the link and fdinfo give (name, flags, offset) and loses everything
+    // `stat` would have supplied — the access letter goes blank, TYPE becomes
+    // `UNKN<fd kind>`, DEVICE the literal `UNKNOWN`, and size, inode and link
+    // count are absent. NAME gains ` (-e <fs>)`.
+    if let Some(t) = target.as_ref() {
+        let shown = t.to_string_lossy();
+        if let Some(fs) = exempt_match(&shown, exempt) {
+            let kind = unkn_suffix(&fd);
+            return Some(OpenFile {
+                fs_device: None,
+                file_flags: info.flags,
+                lock: None,
+                fd,
+                access: AccessMode::Unknown,
+                file_type: FileType::Other(format!("UNKN{kind}")),
+                name: format!("{shown} (-e {fs})"),
+                device: Some("UNKNOWN".to_string()),
+                size: None,
+                // Pass the fdinfo position through rather than defaulting it:
+                // a numeric fd has one (`o0t0`), and cwd/rtd/txt have none, so
+                // the C leaves their SIZE/OFF cell empty. `unwrap_or(0)` here
+                // printed `0t0` on all three.
+                offset,
+                node: None,
+                links: None,
+                socket: None,
+            });
+        }
+    }
     let meta = std::fs::metadata(link).ok();
     if target.is_none() && meta.is_none() {
         return None;
@@ -220,10 +292,11 @@ fn row(
     if let Some(inode) = net::socket_inode(&name) {
         if socks.get(inode).is_none() {
             // Not in this namespace's tables. Before falling back to the bare
-            // `socket:[inode]` row, ask the owning process's OWN namespace for
-            // the protocol name — which is all the C prints for such a socket
-            // (`sock … protocol: TCP`), and all this recovers.
-            if let Some(proto) = ns.protocol_for(pid, inode) {
+            // `socket:[inode]` row, ask for the name the C would print here —
+            // the protocol from the owning process's OWN namespace
+            // (`sock … protocol: TCP`), or, under `-X`, the fixed string that
+            // replaces the lookup entirely.
+            if let Some(name) = ns.unresolved_name(pid, inode) {
                 return Some(OpenFile {
                     fs_device: None,
                     file_flags: info.flags,
@@ -234,7 +307,7 @@ fn row(
                     // OFFSET rather than a size: an unidentified socket has no
                     // size worth printing and the C shows `0t0`.
                     file_type: FileType::Other("sock".into()),
-                    name: format!("protocol: {proto}"),
+                    name,
                     device: meta.as_ref().map(dev_cell),
                     size: None,
                     offset: Some(offset.unwrap_or(0)),
@@ -348,8 +421,9 @@ pub fn for_pid(
     socks: &SocketTable,
     locks: &crate::locks::LockTable,
     ns: &net::NetnsTables,
+    exempt: &[String],
 ) -> Option<Vec<OpenFile>> {
-    for_proc_dir(&format!("/proc/{pid}"), pid, socks, locks, ns)
+    for_proc_dir(&format!("/proc/{pid}"), pid, socks, locks, ns, exempt)
 }
 
 /// The rows under one `/proc` directory — either a process's own
@@ -368,6 +442,7 @@ pub fn for_proc_dir(
     socks: &SocketTable,
     locks: &crate::locks::LockTable,
     ns: &net::NetnsTables,
+    exempt: &[String],
 ) -> Option<Vec<OpenFile>> {
     let mut out = Vec::new();
 
@@ -378,7 +453,15 @@ pub fn for_proc_dir(
         ("exe", FdType::Txt),
     ] {
         let p = format!("{base}/{name}");
-        if let Some(f) = row(Path::new(&p), fd, &FdInfo::default(), pid, socks, ns) {
+        if let Some(f) = row(
+            Path::new(&p),
+            fd,
+            &FdInfo::default(),
+            pid,
+            socks,
+            ns,
+            exempt,
+        ) {
             out.push(f);
         }
     }
@@ -405,7 +488,15 @@ pub fn for_proc_dir(
     for (num, name) in fds {
         let p = format!("{base}/fd/{name}");
         let info = fdinfo_for(base, &name);
-        if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), &info, pid, socks, ns) {
+        if let Some(mut f) = row(
+            Path::new(&p),
+            FdType::Handle(num),
+            &info,
+            pid,
+            socks,
+            ns,
+            exempt,
+        ) {
             // The lock character lsof appends to the FD cell (`8uW`). Only a
             // numbered fd can hold one: the specials and the mapped-file rows
             // are not open file descriptions.
@@ -471,6 +562,7 @@ mod tests {
             0,
             &SocketTable::default(),
             &net::NetnsTables::default(),
+            &[],
         )
         .expect("/dev/null is stat-able");
         assert_eq!(f.file_type, FileType::Chr);
@@ -489,9 +581,10 @@ mod tests {
             .expect("pid parses");
         let files = for_pid(
             pid,
-            &SocketTable::load(false),
+            &SocketTable::load(false, false),
             &crate::locks::load(),
-            &net::NetnsTables::new(),
+            &net::NetnsTables::new(false),
+            &[],
         )
         .expect("own /proc/<pid>/fd is readable");
 
@@ -650,6 +743,7 @@ mod tests {
             self_pid(),
             &SocketTable::default(),
             &net::NetnsTables::default(),
+            &[],
         )
         .expect("pipe fd is stat-able");
         assert_eq!(f.file_type, FileType::Fifo);
@@ -688,5 +782,40 @@ mod tests {
             parse_fdinfo("tfd: nope events: 1\n").tfds,
             Vec::<i64>::new()
         );
+    }
+    #[test]
+    fn an_exempt_match_is_a_path_prefix_and_never_a_socket() {
+        let root = vec!["/".to_string()];
+        let shm = vec!["/dev/shm".to_string()];
+        let shm_slash = vec!["/dev/shm/".to_string()];
+
+        assert_eq!(exempt_match("/usr/bin/python3", &root), Some("/"));
+        assert_eq!(exempt_match("/", &root), Some("/"));
+        assert_eq!(exempt_match("/dev/shm/x", &shm), Some("/dev/shm"));
+        assert_eq!(exempt_match("/dev/shm", &shm), Some("/dev/shm"));
+        // A trailing slash on the argument is tolerated, as the C tolerates it.
+        assert_eq!(exempt_match("/dev/shm/x", &shm_slash), Some("/dev/shm/"));
+        // Prefix, not substring: /dev/shmx is a different directory.
+        assert_eq!(exempt_match("/dev/shmx", &shm), None);
+        assert_eq!(exempt_match("/usr/bin/python3", &shm), None);
+
+        // The bug the oracle caught: an fd whose target is not a path lives on
+        // no file system, and `-e /` must not swallow it. Under `-e /` the C
+        // still resolves sockets to their `IPv4 … TCP` rows.
+        for target in ["socket:[14197]", "pipe:[99]", "anon_inode:[eventfd]"] {
+            assert_eq!(exempt_match(target, &root), None, "{target} is not a path");
+        }
+    }
+
+    #[test]
+    fn the_unkn_type_code_names_the_fd_kind() {
+        // Measured: an exempted numeric fd is UNKNfd, the cwd UNKNcwd, the
+        // executable UNKNtxt.
+        assert_eq!(unkn_suffix(&FdType::Handle(3)), "fd");
+        assert_eq!(unkn_suffix(&FdType::Cwd), "cwd");
+        assert_eq!(unkn_suffix(&FdType::Root), "rtd");
+        assert_eq!(unkn_suffix(&FdType::Txt), "txt");
+        assert_eq!(unkn_suffix(&FdType::Mem), "mem");
+        assert_eq!(unkn_suffix(&FdType::Deleted), "del");
     }
 }
