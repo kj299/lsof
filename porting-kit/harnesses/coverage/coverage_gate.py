@@ -250,7 +250,9 @@ def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
     Scanning a cluster STOPS after a value-taking option, because everything
     after it is that option's argument, not more options: `-iTCP:80` is `-i`
     with the value `TCP:80`, and crediting T/C/P would be *false coverage* —
-    a gate that over-credits hides exactly the gaps it exists to find."""
+    a gate that over-credits hides exactly the gaps it exists to find
+    (LESSONS #012 — on lsof-rs's real suite this inflated coverage by three
+    options; the fix was already in the C's optstring, as `takes_value`)."""
     takes_value = takes_value or set()
     data = load_toml_or_json(path)
     covered: set[str] = set()
@@ -438,7 +440,7 @@ def self_test() -> int:
         check("--long and bare - are not option coverage", "opt:j" not in covered and "opt:-" not in covered)
         check("covers= declares fixture-borne TYPE coverage", "type:REG" in covered)
         check(
-            "no false coverage: `-iTCP:80` is opt:i, not T/C/P",
+            "LESSONS #012: no false coverage — `-iTCP:80` is opt:i, not T/C/P",
             not ({"opt:T", "opt:C", "opt:P"} & covered),
         )
         check("grouped `ids = [...]` waiver expands", {"opt:C", "opt:P", "opt:T"} <= {w["id"] for w in waives})

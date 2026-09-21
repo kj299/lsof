@@ -5,7 +5,9 @@ name: C/C++ CI
 # can't change what `./configure && make` produces, but without these entries it
 # still kicked off all three heavyweight C jobs — the macOS matrix and
 # `make distcheck` included (the same waste the tree-level ignores fixed —
-# porting-kit LESSONS #005).
+# porting-kit LESSONS #005). The `paths-ignore` lists below are what porting-kit
+# LESSONS #013 added: unrelated changes were making these jobs — and therefore
+# every PR touching them — look unstable.
 #
 # `porting-kit.yml` was the omission: `porting-kit/**` was ignored while the
 # kit's own workflow file was not, so PR #90 — four files, all of them kit —
@@ -13,9 +15,11 @@ name: C/C++ CI
 #
 # The list is enumerated rather than generalised to "every workflow but this
 # one", and `build.yml` is deliberately absent from it: a gate that ignores
-# edits to itself cannot be re-verified when you change it. Anything that can
-# alter the oracle — C sources, Configure, Makefile.am, the man pages, this
-# file — must still trigger these jobs.
+# edits to itself cannot be re-verified when you change it (porting-kit
+# LESSONS #034 — a path filter fails in two directions, and too-wide and
+# too-narrow look identical from outside the run). Anything that can alter the
+# oracle — C sources, Configure, Makefile.am, the man pages, this file — must
+# still trigger these jobs.
 on:
   push:
     paths-ignore:

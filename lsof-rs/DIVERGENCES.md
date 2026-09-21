@@ -749,7 +749,7 @@ and **two survived on the first attempt because the cases were wrong**:
   The mutation had silently not applied: `cargo fmt` had reformatted the
   constant, and `str.replace` returns the input unchanged when its pattern is
   absent. Applied for real it produces 78 rows against the C's 0 and **two**
-  cases fail. Recorded as LESSONS #058, because a mutation that does not happen
+  cases fail. Recorded as LESSONS #059, because a mutation that does not happen
   is indistinguishable from a gate that does not catch.
 
 ## Fixed by reading /proc/net/packet (2026-09-20)

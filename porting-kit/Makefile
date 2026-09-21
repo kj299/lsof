@@ -38,6 +38,15 @@ check-kit:
 	@# `#036/#14/#18/#20` with only the head re-cited, green through every gate.
 	@echo "== imported lessons self-test =="; $(PY) $(H)/lessons/check_imports.py --self-test
 	@echo "== imported lessons ==";           $(PY) $(H)/lessons/check_imports.py
+	@# check_lesson_refs asks whether a cited entry exists; check_imports asks
+	@# whether it is the entry the sentence means; this asks the other direction
+	@# — does the FILE a lesson says it amended cite that lesson back? A lesson
+	@# nothing pins is a note, not a control (LESSONS #033). --also-scan .. is
+	@# not optional here: this kit is VENDORED, so the workflows lessons amend
+	@# live one level up, and resolving only against the kit filed six live host
+	@# files under "aged path(s) skipped" — four of them genuinely unpinned.
+	@echo "== lessons pinned self-test =="; $(PY) $(H)/doc-check/check_lessons_pinned.py --self-test
+	@echo "== lessons pinned ==";           $(PY) $(H)/doc-check/check_lessons_pinned.py . --also-scan ..
 	@# Structure of the SHIPPED TEMPLATE, in --template mode: placeholders are
 	@# expected there, a deleted section is not. The port's own filled-in copy
 	@# is checked by lsof-rs-ci.yml, which is where a real port's gate belongs.

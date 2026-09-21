@@ -116,6 +116,9 @@ jobs:
         # silently dropped (porting-kit LESSONS #8). HARD gate: the C's full
         # surface minus explicit, reasoned waivers must all be exercised, so a
         # newly dropped or newly untested feature fails CI. See coverage/README.md.
+        # The inventory is the C's WHOLE surface and waivers subtract from it
+        # (porting-kit LESSONS #012): listing only the in-scope subset makes a
+        # feature the C gains later invisible rather than uncovered.
         #
         # Run once PER PLATFORM. A waiver's reason is usually platform-specific
         # ("Unix-only", "no Windows equivalent"), and such a reason expires

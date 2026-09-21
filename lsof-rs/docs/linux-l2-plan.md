@@ -293,7 +293,7 @@ being written, and each larger than this table sized it:
 
 Two of the five were live defects rather than missing features. The oracle
 caught four bugs that reading could not, and two of the eleven new differential
-cases could not fail until they were rebuilt (LESSONS #058).
+cases could not fail until they were rebuilt (LESSONS #059).
 
 **P5 — the `-i` profiling pass**, and a resource gate if one is wanted: peak
 RSS and wall time on a whole-host scan, asserted against a ceiling. Nothing

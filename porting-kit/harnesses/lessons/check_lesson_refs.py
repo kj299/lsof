@@ -39,7 +39,9 @@ while only the kit was walked. In this repository that left 52 citations — a
 quarter of all of them — validated by nothing: CI workflows, backend sources,
 Cargo manifests, fuzz targets and the port's own `DIVERGENCES.md` all cite
 lessons. `--also-scan DIR` widens the walk; `LESSONS.md` still comes from
-KIT_ROOT, since that is what a citation resolves *against*.
+KIT_ROOT, since that is what a citation resolves *against* (LESSONS #033 —
+and note that the gap was described as "one citation" from a grep before it
+was measured; a gate's reach and its CI trigger have to move together).
 
 Usage:  check_lesson_refs.py [KIT_ROOT] [--also-scan DIR]...
             KIT_ROOT defaults to the kit this file is in. --also-scan may repeat
@@ -92,7 +94,9 @@ ENTRY_RE = re.compile(r"^## (\d{3})\.", re.M)
 # it, while the file reads as though the lesson exists. That happened: two
 # sessions working this repository in parallel both wrote a lesson 032, one as
 # `## 032.` and one as `### #032`, and every `LESSONS #032` citation in the
-# tree silently resolved to the wrong one with this checker green.
+# tree silently resolved to the wrong one with this checker green. A checker
+# that recognises one form of the thing it counts is blind to every other
+# form, and blind in the direction that reads as success (LESSONS #056).
 NEAR_ENTRY_RE = re.compile(r"^(#{1,6}\s*#?\d{1,3}[.:\s—-])", re.M)
 
 # `Makefile` is a suffix match too: the kit's check-kit target cites lessons in
