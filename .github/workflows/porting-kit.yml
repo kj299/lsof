@@ -6,7 +6,8 @@ name: porting-kit
 # port to run after editing the kit — and until this workflow existed, NOTHING
 # ran it. `grep -rn check-kit .github/workflows/` returned nothing, so the kit
 # asserted a control that no automation enforced, which is LESSONS #19's exact
-# shape turned on the kit itself.
+# shape turned on the kit itself. This workflow IS the kit change of
+# LESSONS #029; delete it and the kit's integrity gate is unwired again.
 #
 # It was not hypothetical. Commit 15d7a03 deleted the heading line of LESSONS
 # entry 022 from an append-only file while leaving the body, splicing one

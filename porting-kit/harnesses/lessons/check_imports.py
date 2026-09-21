@@ -10,7 +10,7 @@ this log's numbering — and a number that is merely *wrong* still resolves, so
 question here is "is #14 the lesson this sentence means?", which no amount of
 looking at the destination log alone can answer.
 
-It was not hypothetical. The first import into this log carried
+It was not hypothetical (LESSONS #046). The first import into this log carried
 `(LESSONS #036/#14/#18/#20)`: the head was re-cited and the three continuation
 members were not, so the sentence silently pointed at three unrelated entries and
 every gate stayed green. Two more entries carried a bare `#8` and `#6` from the
@@ -248,6 +248,9 @@ def check(lessons_path):
 # opener. Prose that merely names it does not mark a file — which is not a
 # hypothetical either: the README gained a sentence explaining `KIT-IMPORT:` in
 # its banner and was immediately counted as an imported file.
+#
+# A marker is therefore a POSITION, not a string: a document that can mention
+# it is a document that can claim it (LESSONS #047).
 MARKER_RE = re.compile(r"^\s*(?:#+|//+|<!--|--|;+|\*)?\s*KIT-IMPORT:")
 MARKER_HEAD_LINES = 20
 # The mapping is read from the marker's own block — its line plus the few that

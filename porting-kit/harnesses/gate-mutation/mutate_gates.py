@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053 (this kit's own first sweep with it).
+# Local: #053, #057, #058 (this kit's first sweep; the resolver and the pinned-
+#          lessons rows it grew afterwards).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052; #36 by title (no entry in this log).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
@@ -59,6 +60,13 @@ import tempfile
 # verdict forces a table update instead of silently mutating dead code.
 # (LESSONS #050: this harness's first sweep found a survivor — a bundled
 # two-defect fixture that pinned only the union of its checks.)
+#
+# The table below was REBUILT against this kit, not copied with the harness: an
+# inherited row names the source lineage's text, and 6 of 13 no longer matched
+# here while 5 of this lineage's own harnesses had no row at all. A control
+# imported from a sibling lineage carries its proof only for the tree it was
+# proven in, so the first sweep is an audit of the importing tree — and a CLEAN
+# first run is the suspicious one (LESSONS #053).
 MUTATIONS = [
     {"gate": "diff_run", "file": "harnesses/differential/diff_run.py",
      "old": "    is_match = stdout_match and exit_match and stderr_match",
@@ -231,6 +239,25 @@ MUTATIONS = [
      "why": "a number carried over from the source lineage is never accounted for",
      "cmd": ["harnesses/lessons/check_imports.py", "--self-test"]},
 
+    # Two rows, same reasoning as check_imports: the "is this lesson pinned in
+    # the file it amends" verdict and the "which roots is an amended path
+    # resolved against" verdict are independent, and the second is the one that
+    # was failing open — six live host-repo paths counted as aged history
+    # (LESSONS #058).
+    {"gate": "lessons-pinned",
+     "file": "harnesses/doc-check/check_lessons_pinned.py",
+     "old": "    return 1 if problems else 0",
+     "new": "    return 0",
+     "why": "a lesson may amend a file that never cites it; the log's links go stale silently",
+     "cmd": ["harnesses/doc-check/check_lessons_pinned.py", "--self-test"]},
+
+    {"gate": "lessons-pinned-scope",
+     "file": "harnesses/doc-check/check_lessons_pinned.py",
+     "old": "    roots = [kit_root, *also]",
+     "new": "    roots = [kit_root]",
+     "why": "a vendored kit's host-repo paths are unreachable again and report as aged, not unpinned",
+     "cmd": ["harnesses/doc-check/check_lessons_pinned.py", "--self-test"]},
+
     # The platform ledger has THREE independent verdicts. One row would pin only
     # their union, so: one each, on the same reasoning as check_imports above.
     {"gate": "platforms-completeness",
@@ -255,6 +282,9 @@ MUTATIONS = [
      "cmd": ["harnesses/platforms/check_platforms.py", "--self-test"]},
     # The collision resolver has THREE independent refusal/rewrite verdicts, so
     # three rows: one fixture pins each, and one row would pin only their union.
+    # Those three rows are the price of LESSONS #057 — the renumber had been done
+    # by hand five times before it became a harness, and a harness this table
+    # does not cover is a harness whose verdicts nothing holds.
     {"gate": "collision-provenance",
      "file": "harnesses/lessons/resolve_collision.py",
      "old": '    if line not in keep_lines:\n        return "move"',

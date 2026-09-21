@@ -1507,7 +1507,7 @@ the emphasized half.
   degenerate-input case to its self-test in the same change** — is now in the
   playbook, and the retrospective prompt's step 0 requires probing each gate's
   fail-closed behavior, not just its signal-to-noise.
-- **Section amended:** PLAYBOOK · cross-cutting controls ("Gates fail closed");
+- **Section amended (source lineage):** PLAYBOOK · cross-cutting controls ("Gates fail closed");
   PROMPTS/90 · step 0; harnesses/differential/diff_run.py,
   harnesses/golden/golden.py, harnesses/c-flaw-scan/scan_c_flaws.py,
   harnesses/ci/porting-ci.template.yml (+ their self-tests).
@@ -1559,7 +1559,7 @@ the emphasized half.
   matching neither half — so `audit_unsafe.py` here went unchecked until it too
   was flagged. The extractor now rejoins wrapped paths (pinned self-test); the gate
   meant to make pinning fail-closed had itself been failing open.
-- **Section amended:** harnesses/differential/diff_run.py (`compare_one`
+- **Section amended (source lineage):** harnesses/differential/diff_run.py (`compare_one`
   LEDGER-STALE + `run_one` byte fidelity + `load_matrix` empty-guard);
   harnesses/library-differential/lib_diff.py (`compare_call`);
   harnesses/cando/cando_diff.py; harnesses/diff-fuzz/diff_fuzz.py;
@@ -1610,7 +1610,7 @@ the emphasized half.
   observation, not a fact"); this extends it to the **translation act itself**.
   `PLAYBOOK.md` Phase
   4 gains the same line as an entry criterion.
-- **Section amended:** PROMPTS/10-module-port.md · step 0; PLAYBOOK · Phase 4
+- **Section amended (source lineage):** PROMPTS/10-module-port.md · step 0; PLAYBOOK · Phase 4
   entry criteria; skills/porting-kit-module/SKILL.md; RETROSPECTIVE-cjson.md · §2.
 
 ---
@@ -1644,7 +1644,7 @@ the emphasized half.
   actually ran** (never on a SKIP), with nightly+miri added to the CI job so it
   runs for real. Verified fail-closed both ways: clean code passes; an injected
   out-of-bounds read makes miri exit nonzero.
-- **Section amended:** harnesses/unsafe-audit/audit_unsafe.py (NOTHING-TO-AUDIT +
+- **Section amended (source lineage):** harnesses/unsafe-audit/audit_unsafe.py (NOTHING-TO-AUDIT +
   `blocks_found`); harnesses/progress/progress.py (`_clean_unsafe` refuses a
   0-block report); ports/cjson/check.sh; .github/workflows/check-kit.yml;
   RETROSPECTIVE-cjson.md · §3.
@@ -1674,7 +1674,7 @@ the emphasized half.
   ported-subset filter, with the full matrix as the cutover gate;
   `PROMPTS/20-oracle.md` and the oracle skill carry the recipe.
   `ports/cjson/oracle/gen_corpus.py` is the worked reference implementation.
-- **Section amended:** PLAYBOOK · Phase 2 "Do"; PROMPTS/00-new-port-kickoff.md;
+- **Section amended (source lineage):** PLAYBOOK · Phase 2 "Do"; PROMPTS/00-new-port-kickoff.md;
   skills/porting-kit-oracle/SKILL.md; ports/cjson/oracle/gen_corpus.py (the worked
   reference); RETROSPECTIVE-cjson.md · §4.
 
@@ -1711,7 +1711,7 @@ the emphasized half.
   in `ports/cjson/oracle/probes-quirks.json`, generated into
   `crates/core/tests/probes_quirks.rs`, and verified in `ports/cjson/check.sh`
   step 1b.
-- **Section amended:** harnesses/probe/probe.py (the harness + self-test);
+- **Section amended (source lineage):** harnesses/probe/probe.py (the harness + self-test);
   harnesses/gate-mutation/mutate_gates.py (probe entry); ports/cjson/check.sh
   (step 1b); PLAYBOOK · Phase 4 entry criteria; PROMPTS/10-module-port.md ·
   step 0; skills/porting-kit-module/SKILL.md · step 0.
@@ -1748,7 +1748,7 @@ the emphasized half.
   object as `{\n}` while an empty array prints `[]`. The port already matched all
   four (the differential and fuzzer had driven it there); they are now *named*, so
   a future "cleanup" of NUL-as-whitespace breaks a test instead of drop-in parity.
-- **Section amended:** harnesses/probe/probe.py (`cmd_coverage` + self-test);
+- **Section amended (source lineage):** harnesses/probe/probe.py (`cmd_coverage` + self-test);
   ports/cjson/check.sh (step 1b coverage); PLAYBOOK · Phase 4 entry criteria;
   PROMPTS/10-module-port.md · step 0; RETROSPECTIVE-probe-harness.md · §3.
 
@@ -1773,7 +1773,7 @@ the emphasized half.
   re-triage" when the diff no longer matches; unpinned (legacy) entries still
   suppress but the tool prints the exact pin to add. Pin-accept and
   stale-pin-refail are self-tested.
-- **Section amended:** harnesses/differential/diff_run.py (`load_ledger`,
+- **Section amended (source lineage):** harnesses/differential/diff_run.py (`load_ledger`,
   `compare`, output hint, self-test); skeleton/DIVERGENCES.md · format.
 
 ---
@@ -1850,7 +1850,7 @@ the emphasized half.
   stdin (deterministic EOF, hermetic), pinned in the diff_run self-test. Generalized
   in the playbook: a harness that spawns processes controls stdin/env/cwd explicitly
   and inherits nothing.
-- **Section amended:** harnesses/differential/diff_run.py (`run_one` + self-test);
+- **Section amended (source lineage):** harnesses/differential/diff_run.py (`run_one` + self-test);
   PLAYBOOK · Phase 2 "harden the harness for its host".
 
 ---
@@ -2115,7 +2115,7 @@ the emphasized half.
   `check_ledgers`, `check_lesson_refs`, and `check_imports` twice, because its
   resolution and completeness verdicts are independent and one row would pin
   only their union — this lesson applied to itself).
-- **Section amended:** harnesses/gate-mutation/mutate_gates.py (new here);
+- **Section amended (source lineage):** harnesses/gate-mutation/mutate_gates.py (new here);
   Makefile · check-kit; README · harness table.
 
 ---
@@ -2154,7 +2154,7 @@ the emphasized half.
   against this entry before the harness landed. The `_run` extension dispatch
   comes across with the harness, so this lineage's three bash gates are in the
   table from the start rather than added after a sweep missed them.
-- **Section amended:** harnesses/gate-mutation/mutate_gates.py (`_run` dispatch);
+- **Section amended (source lineage):** harnesses/gate-mutation/mutate_gates.py (`_run` dispatch);
   harnesses/sanitizers/run_sanitizers.sh (verified against this entry).
 
 ---
@@ -2187,7 +2187,7 @@ the emphasized half.
   both lesson checkers — would sit outside it. `coverage_gaps()` is what turns
   that from a silent omission into a failed run, and it is the reason the table
   had to be rebuilt rather than copied.
-- **Section amended:** harnesses/gate-mutation/mutate_gates.py (`coverage_gaps` +
+- **Section amended (source lineage):** harnesses/gate-mutation/mutate_gates.py (`coverage_gaps` +
   the rebuilt table).
 
 ---
@@ -2535,3 +2535,88 @@ gate you have not seen fail is a gate you have not tested.
 - **Section amended:** README · harness table and the vendoring note; Makefile ·
   check-kit; harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
   OPERATING-GUIDE · closing note.
+
+---
+
+## 058. A skip counter is where a gate hides
+
+- **Date:** 2026-09-20
+- **Codebase:** the Porting Kit vendored here — importing
+  `doc-check/check_lessons_pinned.py`, the last harness the refresh had left on
+  the "applicable, not vendored" list
+- **What happened:** the harness enforces the direction the other two lesson
+  checks do not. `check_lesson_refs` asks *does the entry #NN cite exist*;
+  `check_imports` asks *is #NN the entry this sentence means*; this one asks the
+  reverse — every file an entry's `Section amended` names must cite that entry
+  back. A lesson nothing pins is a note (#033), and this is what makes
+  `check-kit` the lessons' regression suite rather than a smoke test beside them.
+
+  Imported and run, it reported **16 unpinned links and "6 aged path(s)
+  skipped"**. The 16 were the work; the 6 were the finding.
+
+  The triage of the 16 was ordinary and is worth one sentence: 12 belonged to
+  entries imported from the sibling lineage, whose amendments happened *there*,
+  so they were relabelled `Section amended (source lineage)` — and that exemption,
+  which until then existed by accident (the regex simply never matched the
+  parenthesised field, so renaming it silenced the gate), was made a **designed**
+  one: counted, printed, and permitted only on an entry carrying `Imported:`.
+  The other 9 were native, every cited change was confirmed present in the file
+  before a citation was added, and the citation went where the changed logic is.
+
+- **The six.** `aged path(s) skipped` reads like benign history, and the harness
+  says so in as many words: LESSONS is append-only, and an entry that amended a
+  file since renamed should not fail forever. That is true. It was also, here,
+  false about every one of the six. Resolved against the host repo instead of
+  the kit, all six exist:
+
+  | | |
+  |---|---|
+  | filed as aged | 6 |
+  | actually renamed or deleted | **0** |
+  | live files, resolvable one directory up | 6 |
+  | of those, genuinely unpinned | **4** |
+
+  The kit is **vendored** — it sits at `porting-kit/` inside the host repo — and
+  after the harnesses themselves, the files lessons amend most often are
+  `.github/workflows/*.yml`, which live in the host. Every one of them resolved
+  against `KIT_ROOT` to nothing and was counted as history.
+
+- **Why nothing caught it:** the counter was not a bug, it was a *category*. The
+  run line was accurate — six paths were skipped — and the number was small
+  enough to read as noise. Nothing in the output distinguished "this file was
+  renamed in 2026" from "this file is right there and you did not look". A
+  skipped item is the one thing a gate reports about work it did not do, and
+  reporting it under a name that explains it away is worse than not reporting it:
+  it converts an unknown into a settled fact. **Every skip bucket needs a reason
+  that is verified, not assumed** — and if it cannot be verified, it belongs in
+  the failing column, not the exculpatory one.
+
+  This is #033 a second time, in a second harness, with the same shape: a claim
+  written outside the kit is the same claim, and a walk that stops at the kit
+  boundary validates a subset while reporting a whole. `check_lesson_refs` grew
+  `--also-scan` for exactly this and the fix here is the same flag, deliberately
+  spelled the same way, with the same rule that a mistyped root is a hard failure
+  rather than a silent empty scan.
+
+- **Kit change:** `check_lessons_pinned.py` imported, re-cited, and given
+  `--also-scan DIR` (repeatable; a path is tried against `KIT_ROOT` first, then
+  each extra root). The run line now separates `aged` from `resolved outside the
+  kit`, so the two can never again be one number. `make check-kit` runs it as
+  self-test plus a real run with `--also-scan ..`; four self-tests pin the new
+  behaviour in both directions, including that **without** the flag the host file
+  is silently skipped — the fail-open itself is a fixture, so removing the flag
+  from the Makefile shows up as a behaviour change rather than as silence. Two
+  rows in the gate-mutation table, one for the unpinned verdict and one for the
+  root list, because a single row would pin only their union (#050). Sweep: 31
+  gates, 0 survivors. The kit's README no longer lists this harness as
+  applicable-but-unvendored; it is in the table with the rest.
+  The nine native links were pinned into the coverage gate, the C-flaw scanner,
+  both lesson checkers, the probe harness, the gate-mutation table and three host
+  workflows (`build.yml`, `lsof-rs-ci.yml`, `porting-kit.yml`) — named in prose
+  deliberately. Each of those files gained a citation to the entry that *owns*
+  the change in it; `Section amended` below lists only what #058 itself changed.
+  A triage pass that filed every file it touched would spray its own number
+  across the tree, and every file would end up citing the entry that last read it.
+- **Section amended:** harnesses/doc-check/check_lessons_pinned.py (new here);
+  harnesses/gate-mutation/mutate_gates.py · MUTATIONS; Makefile · check-kit;
+  README · harness table and the not-vendored list.
