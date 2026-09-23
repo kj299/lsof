@@ -107,6 +107,17 @@ impl Backend for LinuxBackend {
         // namespace's tables cannot explain — nothing is read on a host with
         // one network namespace.
         let nstab = crate::net::NetnsTables::new(sel.skip_inet_tables);
+        // When nothing but a socket can reach the output, collect nothing but
+        // sockets. The big one is the mapped-file walk: under `-i` the C opens
+        // no `/proc/<pid>/maps` at all, and this port was opening one per
+        // process and parsing every mapping, to drop the rows at selection.
+        let ctx = files::GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &nstab,
+            exempt: &sel.exempt_fs,
+            sockets_only: sel.socket_rows_only(),
+        };
 
         for p in procs.iter_mut() {
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
@@ -115,7 +126,7 @@ impl Backend for LinuxBackend {
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid, &socks, &locks, &nstab, &sel.exempt_fs) {
+            if let Some(files) = files::for_pid(p.pid, &ctx) {
                 p.files = files;
             }
         }
@@ -142,9 +153,7 @@ impl Backend for LinuxBackend {
                 }
                 for mut t in process::tasks_of(p) {
                     let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
-                    if let Some(files) =
-                        files::for_proc_dir(&base, p.pid, &socks, &locks, &nstab, &sel.exempt_fs)
-                    {
+                    if let Some(files) = files::for_proc_dir(&base, p.pid, &ctx) {
                         t.files = files;
                     }
                     tasks.push(t);
@@ -200,6 +209,69 @@ mod tests {
             procs.iter().all(|p| p.files.is_empty()),
             "terse gather must not populate files"
         );
+    }
+
+    #[test]
+    fn socket_only_selection_collects_only_sockets() {
+        use lsof_core::model::FdType;
+        // `-i` can print nothing but sockets, so the backend must not build
+        // the rows that would only be dropped: the cwd/rtd/txt specials and,
+        // the expensive one, every mapped file from /proc/<pid>/maps. Measured
+        // at 577 processes: this port opened 578 maps files for `lsof -i`
+        // where the C opened none.
+        let sel = Selection {
+            inet: lsof_core::selection::InetFilter {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            sel.socket_rows_only(),
+            "the fixture must engage the fast path"
+        );
+        let procs = LinuxBackend::new().gather(&sel).unwrap();
+        // A socket fd whose protocol nothing could identify still yields a
+        // row -- `socket` is None and the NAME stays the kernel's
+        // `socket:[<inode>]` (DIVERGENCES item 22: netlink, AF_VSOCK). It IS a
+        // socket, so the test asks what the fast path actually promises: the
+        // link was `socket:[...]`, not that the row resolved.
+        let non_socket: Vec<String> = procs
+            .iter()
+            .flat_map(|p| p.files.iter())
+            .filter(|f| f.socket.is_none() && !f.name.starts_with("socket:["))
+            .map(|f| format!("{:?} {}", f.fd, f.name))
+            .collect();
+        assert!(
+            non_socket.is_empty(),
+            "socket-only gather produced non-socket rows: {non_socket:?}"
+        );
+        let specials: Vec<String> = procs
+            .iter()
+            .flat_map(|p| p.files.iter())
+            .filter(|f| !matches!(f.fd, FdType::Handle(_)))
+            .map(|f| format!("{:?}", f.fd))
+            .collect();
+        assert!(
+            specials.is_empty(),
+            "socket-only gather kept specials/mapped rows: {specials:?}"
+        );
+
+        // ...and the control, so the assertion above cannot pass merely
+        // because this host has nothing to collect. The same walk without the
+        // flag must produce exactly the kinds that were skipped.
+        let all = LinuxBackend::new().gather(&Selection::default()).unwrap();
+        let kinds: Vec<&FdType> = all
+            .iter()
+            .flat_map(|p| p.files.iter())
+            .map(|f| &f.fd)
+            .collect();
+        for want in [FdType::Cwd, FdType::Txt, FdType::Mem] {
+            assert!(
+                kinds.contains(&&want),
+                "control gather should still produce {want:?} rows"
+            );
+        }
     }
 
     #[test]

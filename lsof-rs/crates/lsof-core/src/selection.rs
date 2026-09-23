@@ -898,6 +898,36 @@ impl Selection {
         self.specified().intersects(SelKinds::PROC)
     }
 
+    /// Whether the only rows this run can print are sockets — so a backend may
+    /// skip collecting everything else instead of collecting it to be dropped.
+    ///
+    /// Derived from [`Selection::apply`]'s rule, not guessed at: a row survives
+    /// when `inherited ∪ file_kinds(f)` is non-empty. A socket satisfies `-i`
+    /// and `-U`; a mapped file, a cwd, a root, an executable and a plain fd
+    /// satisfy neither, and can only come back through one of the other kinds.
+    /// So every one of these has to be absent:
+    ///
+    /// * a **process** selecter (`-p`/`-u`/`-c`/`-g`) — a process it matches
+    ///   contributes `inherited`, which selects *every* file it holds. This is
+    ///   the OR rule, measured in P4: `lsof -N -p P` prints all of P's files.
+    /// * `-d` (FD), a path/`+d`/`+D` argument (NM), `+L` (NLINK), `-N` (NFS) —
+    ///   each is a file kind a non-socket row can match.
+    /// * `-K` (TASK) — a task entry inherits it and brings its whole file set.
+    /// * `-E`/`+E`, which is not a `SelKinds` at all: a peer process's **pipe**
+    ///   rows are force-selected past the OR (`Lf->sf = Selflags`), so pipes
+    ///   survive a run that specified only `-i`.
+    ///
+    /// An empty specified set is `AllProc` — everything prints — so it is not
+    /// socket-only either. `-a` only makes the test stricter, so it needs no
+    /// clause: anything this predicate allows to be skipped under the OR is
+    /// still dropped under the AND.
+    pub fn socket_rows_only(&self) -> bool {
+        let spec = self.specified();
+        !spec.is_empty()
+            && spec.without(SelKinds::NET.union(SelKinds::UNX)).is_empty()
+            && self.endpoints.is_none()
+    }
+
     /// Whether any path / directory-tree filter was given.
     pub fn has_path_filter(&self) -> bool {
         !self.paths.is_empty()
@@ -1195,6 +1225,144 @@ mod tests {
         let any = filt(None, None);
         for r in [&icmp4, &icmp6, &raw4, &tcp4] {
             assert!(any.file_kinds(r).intersects(SelKinds::NET));
+        }
+    }
+
+    #[test]
+    fn socket_rows_only_needs_every_clause() {
+        // One row per clause, each asserted on its own line: a single fixture
+        // carrying all of them would pin only their union, and any one clause
+        // could then be deleted silently (LESSONS #050).
+        let inet = InetFilter {
+            enabled: true,
+            ..Default::default()
+        };
+        let base = Selection {
+            inet: inet.clone(),
+            ..Default::default()
+        };
+
+        assert!(base.socket_rows_only(), "-i alone: only sockets can print");
+        assert!(
+            Selection {
+                unix_only: true,
+                ..Default::default()
+            }
+            .socket_rows_only(),
+            "-U alone: only sockets can print"
+        );
+        assert!(
+            Selection {
+                inet: inet.clone(),
+                unix_only: true,
+                ..Default::default()
+            }
+            .socket_rows_only(),
+            "-i -U: both kinds are socket kinds"
+        );
+
+        // Nothing specified is AllProc: every row prints, so nothing may be
+        // skipped. This is the degenerate case a "subset of {NET,UNX}" test
+        // passes by accident if it forgets that the empty set is a subset.
+        assert!(
+            !Selection::default().socket_rows_only(),
+            "no selecter at all is AllProc, not socket-only"
+        );
+
+        // A process selecter makes every file of a matching process selected
+        // (the OR rule), so non-socket rows come back.
+        for (what, sel) in [
+            (
+                "-p",
+                Selection {
+                    pids: vec![1],
+                    ..base.clone()
+                },
+            ),
+            (
+                "-u",
+                Selection {
+                    users: vec!["root".into()],
+                    ..base.clone()
+                },
+            ),
+            (
+                "-c",
+                Selection {
+                    commands: vec!["x".into()],
+                    ..base.clone()
+                },
+            ),
+            (
+                "-g",
+                Selection {
+                    ppid_filter: vec![1],
+                    ..base.clone()
+                },
+            ),
+        ] {
+            assert!(
+                !sel.socket_rows_only(),
+                "{what} with -i: its processes contribute every file they hold"
+            );
+        }
+
+        // Each remaining file kind is one a NON-socket row can match.
+        assert!(
+            !Selection {
+                fd_filter: Some(FdFilter {
+                    include: vec![FdSpec::Named(FdKind::Mem)],
+                    exclude: vec![],
+                }),
+                ..base.clone()
+            }
+            .socket_rows_only(),
+            "-d with -i: a mapped file matches FD"
+        );
+        assert!(
+            !Selection {
+                paths: vec!["/etc".into()],
+                ..base.clone()
+            }
+            .socket_rows_only(),
+            "a path argument with -i: a regular file matches NM"
+        );
+        assert!(
+            !Selection {
+                max_links: Some(1),
+                ..base.clone()
+            }
+            .socket_rows_only(),
+            "+L with -i: a regular file matches NLINK"
+        );
+        assert!(
+            !Selection {
+                nfs_only: true,
+                ..base.clone()
+            }
+            .socket_rows_only(),
+            "-N with -i: a file on NFS matches NFS"
+        );
+        assert!(
+            !Selection {
+                tasks: TaskMode::Always,
+                ..base.clone()
+            }
+            .socket_rows_only(),
+            "-K with -i: a task entry inherits TASK and brings its whole file set"
+        );
+
+        // `+E`/`-E` is not a SelKinds at all, which is exactly why it needs its
+        // own clause: a peer process's PIPE rows are force-selected past the OR.
+        for mode in [EndpointMode::Info, EndpointMode::Files] {
+            assert!(
+                !Selection {
+                    endpoints: Some(mode),
+                    ..base.clone()
+                }
+                .socket_rows_only(),
+                "endpoint mode with -i: peer pipe rows survive the OR"
+            );
         }
     }
 

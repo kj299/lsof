@@ -341,6 +341,26 @@ jobs:
           fi
       - name: differential vs the C oracle
         run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
+      - name: resource gate (peak RSS and wall, under a load it creates)
+        # P5. The differential above proves the OUTPUT is right and can say
+        # nothing about what it cost: delete the socket-only collection path
+        # and all 109 cases still MATCH, because the rows it skips are rows
+        # selection was going to drop anyway. This is the only control that
+        # fails on that.
+        #
+        # It spawns 400 synthetic processes because the cost is invisible at
+        # ambient scale (LESSONS #061): on an idle runner the `-i` difference
+        # is ~0.1 MB and any honest ceiling would pass either binary. At 400 it
+        # is 3.27 MB against 7.14 MB, and the pre-P5 binary goes OVER (2.36x on
+        # a 2.00x ceiling) every run.
+        #
+        # --warn-wall: the RSS half blocks, the wall half reports. Measured,
+        # not cautious -- against that same pre-P5 binary the wall half read
+        # 1.58x, 1.47x and 1.43x on a 1.60x ceiling across runs and never once
+        # caught the regression, while RSS caught it every time. Peak RSS is a
+        # property of the program; wall clock on a shared runner is a property
+        # of the rest of the machine.
+        run: python3 differential/resource_gate.py --oracle ../lsof --rust target/release/lsof --warn-wall
 
   miri:
     # control-coverage: exempt harnesses/sanitizers/run_sanitizers.sh -- runs miri directly, with a PINNED nightly the harness cannot express

@@ -155,6 +155,27 @@ name = "or-semantics-path-and-inet"
 args = ["-n", "-P", "-a", "-iTCP:{PORT}", "{FILE}"]
 
 [[case]]
+# ---- the socket-only collection path (P5) --------------------------------
+# `-iTCP:<port>` alone specifies nothing but NET, so nothing but a socket can
+# reach the output and the Linux backend stops collecting the rest: no cwd,
+# rtd or txt, and no /proc/<pid>/maps walk at all. Measured at 577 processes,
+# this port opened 578 maps files for `lsof -i` where the C opened none.
+# THIS is the case that runs the fast path -- every other `-i` case in this
+# matrix pairs it with `-p`, which by design switches the path off, so before
+# this case the whole thing was ungated.
+name = "inet-alone-collects-only-sockets"
+args = ["-n", "-P", "-iTCP:{PORT}"]
+
+[[case]]
+# The other side of the same rule, and the one that fails loudly if the
+# predicate forgets that selection ORs: a process selecter contributes EVERY
+# file of a process it matches (measured in P4 for -N). So `-iTCP:<port> -p A`
+# must print all of A's files -- cwd, txt and mapped rows included -- plus B's
+# listener. A socket-only fast path that ignored `-p` would print one row.
+name = "inet-with-a-pid-still-lists-that-pids-other-files"
+args = ["-n", "-P", "-iTCP:{PORT}", "-p", "{A}"]
+
+[[case]]
 # A `^` negation is neither ORed nor ANDed: Lsof.8 says it "is applied before
 # all other selections and absolutely excludes the listing of the files of the
 # process". Fixture A is a `sleep`, so `-c ^sleep` kills it even though `-p`

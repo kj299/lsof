@@ -12,6 +12,50 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`-i` and `-U` now collect only sockets** (P5 of `docs/linux-l2-plan.md`).
+  When the selection can print nothing but sockets — `-i`/`-U` with no process
+  selecter, no `-d`, no path argument, no `+L`, no `-N`, no `-K` and no
+  `+E`/`-E`, the exact set `Selection::socket_rows_only` tests — the Linux
+  backend stops building the rows that selection was going to drop: the
+  `cwd`/`rtd`/`txt` specials, every non-socket fd, and above all the
+  `/proc/<pid>/maps` walk. `strace -c` at 577 processes: **this port opened 578
+  maps files under `lsof -i` and the C opened none**, 27,604 `read` calls
+  against 2,949.
+
+  Measured at 1075 processes, against the C: `-i` wall **1.87x -> 1.18x**
+  (202.6 -> 127.7 ms) and `-i` peak RSS **4.32x -> 1.41x** (14.21 -> 4.65 MB).
+  Output is unchanged by construction and by test: every one of the 109
+  differential cases still MATCHes, and an A/B of the two binaries over fifteen
+  argument combinations — including `-i -p`, `-i -d mem`, `+E -i`, `-i +L`,
+  `-i -N`, `-K -i` — is byte-identical on every case whose own noise floor
+  allows a verdict.
+- **A resource gate** (`differential/resource_gate.py`), wired into the
+  differential CI job. P5 asked for one as optional; it turned out to be the
+  only control that can fail on the change above, since the rows the fast path
+  skips are rows selection drops anyway and the differential therefore cannot
+  see it. It **spawns its own 400-process load** (the difference is ~0.1 MB on
+  an idle host and 9.6 MB at 1000 processes — a gate measuring the ambient
+  machine would pass either binary), **validates its meter at both ends**
+  before believing any number, and blocks on the RSS ceiling while reporting
+  the wall one. Run against the pre-P5 binary it exits 1 naming `-i` at 2.36x
+  on a 2.00x ceiling; the wall half read 1.58x, 1.47x and 1.43x on a 1.60x
+  ceiling across runs and never once caught it, which is why only RSS blocks.
+  LESSONS #060, #061.
+
+### Fixed
+- **Every "peak RSS" number this project has published was the measuring
+  harness's own memory.** The meter was validated against a known 200 MB
+  allocation and passed; it reads **8.68 MB for `/bin/true`**, because a fork
+  child's RSS is its parent's until it execs and `ru_maxrss` is a high-water
+  mark. `posix_spawn` reads 11.3 MB for the same thing. So "RSS 5.4 MB both,
+  identical and flat" in `docs/linux-l2-plan.md` §5 measured the Python
+  interpreter twice. Re-measured with a 16 KB C meter validated at both ends
+  (1.29 MB for `/bin/true`, 207.5 MB for the 200 MB fixture): whole-host RSS is
+  **3.41 MB for the C against 4.64 MB for lsof-rs**, a gap that grows to 9.8 vs
+  29.1 MB at 1075 processes. §5 carries the correction; the remaining
+  whole-host cost is **DIVERGENCES item 30**, open and now ceilinged rather
+  than silently drifting. LESSONS #060.
+
 - **`-X`, `-x`, `-e`, `-N` and `-Z`** (P4 of `docs/linux-l2-plan.md`;
   DIVERGENCES items 25–29). The plan called these "the small options" and every
   one was larger than that — two were live defects rather than missing

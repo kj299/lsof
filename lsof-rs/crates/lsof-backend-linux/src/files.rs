@@ -229,18 +229,43 @@ fn unkn_suffix(fd: &FdType) -> &'static str {
 ///
 /// `offset` is the fd's file position from fdinfo (`None` for the `cwd`/
 /// `rtd`/`txt` specials, which have none).
-fn row(
-    link: &Path,
-    fd: FdType,
-    info: &FdInfo,
-    pid: u32,
-    socks: &SocketTable,
-    ns: &net::NetnsTables,
-    exempt: &[String],
-) -> Option<OpenFile> {
+/// Everything a row needs that is the same for every row in one gather: the
+/// system-wide tables read once, the `-e` exemptions, and whether this run can
+/// print anything but sockets. Threading these as separate parameters put
+/// `row` at eight arguments; they travel together because they are one thing —
+/// the context the walk was started with.
+pub struct GatherCtx<'a> {
+    pub socks: &'a SocketTable,
+    pub locks: &'a crate::locks::LockTable,
+    pub ns: &'a net::NetnsTables,
+    pub exempt: &'a [String],
+    /// `Selection::socket_rows_only`: nothing but a socket can reach the
+    /// output, so nothing but a socket is collected.
+    pub sockets_only: bool,
+}
+
+/// The kernel's name for a socket fd: `socket:[<inode>]`, for every family.
+fn is_socket_link(target: &Path) -> bool {
+    target
+        .to_str()
+        .is_some_and(|s| s.starts_with("socket:[") && s.ends_with(']'))
+}
+
+fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) -> Option<OpenFile> {
+    let (socks, ns, exempt, sockets_only) = (ctx.socks, ctx.ns, ctx.exempt, ctx.sockets_only);
     let access = info.access();
     let offset = info.pos;
     let target = std::fs::read_link(link).ok();
+    // `sockets_only`: this run can print nothing but sockets
+    // (`Selection::socket_rows_only`), so a row that is not one is built only
+    // to be dropped. The kernel names every socket fd `socket:[<inode>]` —
+    // AF_INET and AF_UNIX alike, which is why one test covers `-i` and `-U` —
+    // so the link text decides it, before the `stat` that is the expensive
+    // half. The `-e` exemption below cannot resurrect such a row: it matches
+    // an absolute path prefix and `socket:[…]` is not a path.
+    if sockets_only && !target.as_deref().is_some_and(is_socket_link) {
+        return None;
+    }
     // `-e <fs>`: never `stat(2)` a file on an exempted file system — that is
     // the whole option, whose reason is a hung NFS server. Membership is a
     // PATH PREFIX test on the link target, which costs a readlink and no stat.
@@ -416,14 +441,8 @@ fn row(
 /// exited, or it belongs to another user and we are not root. The caller
 /// distinguishes those (a vanished pid vs. a permission wall) only in aggregate,
 /// which is enough for the `-V` inaccessible count.
-pub fn for_pid(
-    pid: u32,
-    socks: &SocketTable,
-    locks: &crate::locks::LockTable,
-    ns: &net::NetnsTables,
-    exempt: &[String],
-) -> Option<Vec<OpenFile>> {
-    for_proc_dir(&format!("/proc/{pid}"), pid, socks, locks, ns, exempt)
+pub fn for_pid(pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
+    for_proc_dir(&format!("/proc/{pid}"), pid, ctx)
 }
 
 /// The rows under one `/proc` directory — either a process's own
@@ -436,32 +455,28 @@ pub fn for_pid(
 /// system-wide tables this consults — `/proc/locks` and the mapped-file list —
 /// are keyed by process: a thread shares its `mm`, so its mappings are the
 /// process's mappings.
-pub fn for_proc_dir(
-    base: &str,
-    pid: u32,
-    socks: &SocketTable,
-    locks: &crate::locks::LockTable,
-    ns: &net::NetnsTables,
-    exempt: &[String],
-) -> Option<Vec<OpenFile>> {
+pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
+    let sockets_only = ctx.sockets_only;
     let mut out = Vec::new();
 
     // The specials. Unlike fds these have no access mode of their own.
-    for (name, fd) in [
-        ("cwd", FdType::Cwd),
-        ("root", FdType::Root),
-        ("exe", FdType::Txt),
-    ] {
+    // None of the three can be a socket, so a socket-only run skips them —
+    // and with them the mapped-file walk below, which is the one that costs:
+    // `/proc/<pid>/maps` is a read per process and a parse per mapping, and
+    // under `-i` the C opens it zero times. Measured at 577 processes:
+    // lsof-rs opened 578 maps files for `lsof -i`, the C none.
+    for (name, fd) in if sockets_only {
+        [].as_slice()
+    } else {
+        [
+            ("cwd", FdType::Cwd),
+            ("root", FdType::Root),
+            ("exe", FdType::Txt),
+        ]
+        .as_slice()
+    } {
         let p = format!("{base}/{name}");
-        if let Some(f) = row(
-            Path::new(&p),
-            fd,
-            &FdInfo::default(),
-            pid,
-            socks,
-            ns,
-            exempt,
-        ) {
+        if let Some(f) = row(Path::new(&p), fd.clone(), &FdInfo::default(), pid, ctx) {
             out.push(f);
         }
     }
@@ -469,11 +484,13 @@ pub fn for_proc_dir(
     // Mapped files, after the specials and before the numbered fds — the
     // order the C emits them in. The txt row, if there is one, identifies the
     // executable's own mapping so it is not listed a second time as `mem`.
-    let exe = out
-        .iter()
-        .find(|f| f.fd == FdType::Txt)
-        .and_then(|f| Some((f.device.as_deref()?, f.node.as_deref()?)));
-    out.extend(crate::maps::rows_for(pid, exe));
+    if !sockets_only {
+        let exe = out
+            .iter()
+            .find(|f| f.fd == FdType::Txt)
+            .and_then(|f| Some((f.device.as_deref()?, f.node.as_deref()?)));
+        out.extend(crate::maps::rows_for(pid, exe));
+    }
 
     let dir = std::fs::read_dir(format!("{base}/fd")).ok()?;
     let mut fds: Vec<(u64, String)> = dir
@@ -488,20 +505,13 @@ pub fn for_proc_dir(
     for (num, name) in fds {
         let p = format!("{base}/fd/{name}");
         let info = fdinfo_for(base, &name);
-        if let Some(mut f) = row(
-            Path::new(&p),
-            FdType::Handle(num),
-            &info,
-            pid,
-            socks,
-            ns,
-            exempt,
-        ) {
+        if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), &info, pid, ctx) {
             // The lock character lsof appends to the FD cell (`8uW`). Only a
             // numbered fd can hold one: the specials and the mapped-file rows
             // are not open file descriptions.
             if let (Some(dev), Some(node)) = (f.device.as_deref(), f.node.as_deref()) {
-                f.lock = locks
+                f.lock = ctx
+                    .locks
                     .get(&(pid, dev.to_string(), node.to_string()))
                     .copied();
             }
@@ -513,6 +523,33 @@ pub fn for_proc_dir(
 
 #[cfg(test)]
 mod tests {
+    /// `row` with the socket-only fast path off — what every case below wants,
+    /// and what the parameter meant before it existed.
+    fn row_all(
+        link: &Path,
+        fd: FdType,
+        info: &FdInfo,
+        pid: u32,
+        socks: &SocketTable,
+        ns: &net::NetnsTables,
+        exempt: &[String],
+    ) -> Option<OpenFile> {
+        let locks = crate::locks::LockTable::default();
+        super::row(
+            link,
+            fd,
+            info,
+            pid,
+            &GatherCtx {
+                socks,
+                locks: &locks,
+                ns,
+                exempt,
+                sockets_only: false,
+            },
+        )
+    }
+
     use super::*;
 
     #[test]
@@ -552,7 +589,7 @@ mod tests {
     fn device_nodes_report_their_own_number_not_the_filesystem() {
         // The DEVICE column means st_rdev for a device node and st_dev for
         // everything else; /dev/null is the canonical check (1,3 not 0,6).
-        let f = row(
+        let f = row_all(
             Path::new("/dev/null"),
             FdType::Handle(0),
             &FdInfo {
@@ -581,10 +618,13 @@ mod tests {
             .expect("pid parses");
         let files = for_pid(
             pid,
-            &SocketTable::load(false, false),
-            &crate::locks::load(),
-            &net::NetnsTables::new(false),
-            &[],
+            &GatherCtx {
+                socks: &SocketTable::load(false, false),
+                locks: &crate::locks::load(),
+                ns: &net::NetnsTables::new(false),
+                exempt: &[],
+                sockets_only: false,
+            },
         )
         .expect("own /proc/<pid>/fd is readable");
 
@@ -736,7 +776,7 @@ mod tests {
         let raw = reader.as_raw_fd();
         let link = format!("/proc/self/fd/{raw}");
         let info = fdinfo_for(&format!("/proc/{}", self_pid()), &raw.to_string());
-        let f = row(
+        let f = row_all(
             Path::new(&link),
             FdType::Handle(raw as u64),
             &info,
