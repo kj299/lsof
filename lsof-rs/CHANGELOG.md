@@ -40,7 +40,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   the wall one. Run against the pre-P5 binary it exits 1 naming `-i` at 2.36x
   on a 2.00x ceiling; the wall half read 1.58x, 1.47x and 1.43x on a 1.60x
   ceiling across runs and never once caught it, which is why only RSS blocks.
-  LESSONS #060, #061.
+  LESSONS #061, #062.
 
 ### Fixed
 - **Every "peak RSS" number this project has published was the measuring
@@ -54,7 +54,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   **3.41 MB for the C against 4.64 MB for lsof-rs**, a gap that grows to 9.8 vs
   29.1 MB at 1075 processes. §5 carries the correction; the remaining
   whole-host cost is **DIVERGENCES item 30**, open and now ceilinged rather
-  than silently drifting. LESSONS #060.
+  than silently drifting. LESSONS #061.
 
 - **`-X`, `-x`, `-e`, `-N` and `-Z`** (P4 of `docs/linux-l2-plan.md`;
   DIVERGENCES items 25–29). The plan called these "the small options" and every

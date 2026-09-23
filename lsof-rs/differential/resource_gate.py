@@ -20,7 +20,7 @@ meter below is a ~16 KB C program, and it is validated from BOTH ends — a
 `/bin/true` that must read under 3 MB and a known 200 MB allocation that must
 read near 200 — before any measurement is believed. Failing either is an error,
 not a warning (LESSONS #036: a gate that cannot fail is not a gate; LESSONS
-#060: a meter validated at one end has a floor at the other).
+#061: a meter validated at one end has a floor at the other).
 
 **2. The regression it exists to catch is invisible at CI scale.**
 `-i` collects only sockets since P5; before that it walked every process's
@@ -32,7 +32,7 @@ pass whether or not the optimization existed — 0-of-0 wearing a green tick
 holding `--fds` descriptors and a bound socket each, which is the axis the cost
 scales on. The load is torn down in a `finally`, and a run that cannot reach
 at least `--procs` processes is an error rather than a quiet measurement of
-something smaller (LESSONS #061).
+something smaller (LESSONS #062).
 
 **3. Wall clock on a shared runner cannot support a blocking verdict, and RSS
 can.** Peak RSS is a property of the program; wall time on a GitHub runner is a

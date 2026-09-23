@@ -349,7 +349,7 @@ jobs:
         # fails on that.
         #
         # It spawns 400 synthetic processes because the cost is invisible at
-        # ambient scale (LESSONS #061): on an idle runner the `-i` difference
+        # ambient scale (LESSONS #062): on an idle runner the `-i` difference
         # is ~0.1 MB and any honest ceiling would pass either binary. At 400 it
         # is 3.27 MB against 7.14 MB, and the pre-P5 binary goes OVER (2.36x on
         # a 2.00x ceiling) every run.

@@ -2687,7 +2687,76 @@ finding it is supposed to produce.
   requirement.
 - **Section amended:** none — this is a method entry.
 
-## 060. A meter validated at one end has a floor at the other
+---
+
+## 060. "Designed exemption" described one spelling; every other spelling still worked
+
+- **Date:** 2026-09-23
+- **Codebase:** the Porting Kit vendored here — backporting from the primary
+  line, which had fixed in `check_lessons_pinned.py` what this copy had not
+- **What happened:** #058 said this gate's `(source lineage)` exemption "used to
+  be exempt by ACCIDENT" and that it "is a designed exemption now: counted,
+  reported, and allowed ONLY on an entry that carries `Imported:`". Every word
+  of that was true about `(source lineage)`. It was **false about the defect**,
+  which was never that one spelling — it was that `AMENDED_RE` matched the bare
+  field and nothing else, so *any* parenthesised variant was not an unrecognised
+  field but **no field**, and the entry's obligations simply ceased to exist.
+
+  Measured on a fixture, after #058 landed here:
+
+  | field as written | result |
+  |---|---|
+  | bare `Section amended` | 1 link checked, 1 unpinned — rc 1 |
+  | `(source lineage)`, native entry | 1 problem — rc 1 (#058's fix) |
+  | `(anything at all)` | **0 links checked, 0 unpinned — rc 0** |
+
+  A word in parentheses still turned the gate off, and the run line still
+  announced it as `0 lesson→code link(s) checked` — this kit's own 0-of-0
+  signature (#039) printed as a pass.
+
+- **The part worth keeping is the shape of the miss.** #058 met one instance of
+  a class, fixed the instance, and wrote up the class. Fixing what you saw is
+  correct; *describing* it as the general fix is what makes the remainder
+  invisible, because the next reader has a sentence saying it is handled. The
+  question that separates them is mechanical and takes one minute: **enumerate
+  the inputs the rule admits, not the one that prompted it.** `(source lineage)`
+  is a member of `\(.*\)`; the fix addressed the member and the write-up claimed
+  the set.
+
+  Same family as #019 (a control the kit asserts but never checks for does not
+  exist), except the assertion here was mine and it was half-true, which is the
+  harder version: a wholly absent control gets noticed, a control that works on
+  the example you tried does not.
+
+- **What it costs to do properly.** A parser over a human-written format needs a
+  **total function** — known keys handled, unknown keys REPORTED. So: the bare
+  field carries the obligation, `(source lineage)` is the one exemption and only
+  on an `- **Imported:**` entry, and every other spelling fails with the
+  spelling quoted back. Writing this entry then tripped the check twice, because
+  it quotes the field it describes, inline and in the table above. That is #047
+  arriving in a second harness — a marker a document must be able to discuss
+  needs a rule separating use from mention — so a field is now a POSITION: it
+  opens its line, and fenced blocks are stripped before parsing.
+
+- **And the row that survived.** The new mutation row's first draft was caught
+  by nothing: every fixture with an unknown spelling was also a non-imported
+  entry, so the *neighbouring* verdict failed them all and the spelling check
+  could be deleted with the suite green. The isolating case is an entry that is
+  imported **and** misspelled. Writing a check is not the work; finding the
+  input that distinguishes it from the check beside it is (#050, from the other
+  side — there one row pinned two verdicts, here two fixtures pinned one).
+
+- **Kit change:** `check_lessons_pinned.py` reads every `Section amended`
+  variant and fails on any it does not know; the field must open its line and
+  fenced blocks are stripped first. Five new self-tests, including the isolating
+  case and both use-vs-mention forms. A third gate-mutation row for the variant
+  verdict — the harness's `old`-appears-exactly-once rule is what keeps all
+  three honest, which is #059's requirement already met here. Sweep: 32 gates,
+  0 survivors. `check-kit` green; 33 links, 0 unpinned.
+- **Section amended:** harnesses/doc-check/check_lessons_pinned.py;
+  harnesses/gate-mutation/mutate_gates.py · MUTATIONS; README · harness table.
+
+## 061. A meter validated at one end has a floor at the other
 
 - **Date:** 2026-09-23
 - **Codebase:** lsof-rs — the P5 performance pass, and every RSS number this
@@ -2743,7 +2812,7 @@ finding it is supposed to produce.
 
 ---
 
-## 061. A gate that runs at ambient scale cannot see a cost that scales
+## 062. A gate that runs at ambient scale cannot see a cost that scales
 
 - **Date:** 2026-09-23
 - **Codebase:** lsof-rs — P5's resource gate

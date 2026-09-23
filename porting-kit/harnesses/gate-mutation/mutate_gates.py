@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058 (this kit's first sweep; the resolver and the pinned-
-#          lessons rows it grew afterwards).
+# Local: #053, #057, #058, #059, #060 (this kit's first sweep; the resolver and
+#          the pinned-lessons rows it grew afterwards).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052; #36 by title (no entry in this log).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
@@ -239,16 +239,27 @@ MUTATIONS = [
      "why": "a number carried over from the source lineage is never accounted for",
      "cmd": ["harnesses/lessons/check_imports.py", "--self-test"]},
 
-    # Two rows, same reasoning as check_imports: the "is this lesson pinned in
-    # the file it amends" verdict and the "which roots is an amended path
-    # resolved against" verdict are independent, and the second is the one that
-    # was failing open — six live host-repo paths counted as aged history
-    # (LESSONS #058).
+    # THREE rows, same reasoning as check_imports: the "is this lesson pinned in
+    # the file it amends" verdict, the "is this field's spelling one we know"
+    # verdict and the "which roots is an amended path resolved against" verdict
+    # are independent. The latter two are the ones that were failing open — six
+    # live host-repo paths counted as aged history (LESSONS #058), and any
+    # parenthesised field spelling voiding an entry in silence (LESSONS #060).
+    # The `old`-appears-exactly-once rule this harness enforces is what keeps
+    # these rows honest: a pattern that no longer occurs would otherwise no-op
+    # and read as a survivor (LESSONS #059).
     {"gate": "lessons-pinned",
      "file": "harnesses/doc-check/check_lessons_pinned.py",
      "old": "    return 1 if problems else 0",
      "new": "    return 0",
      "why": "a lesson may amend a file that never cites it; the log's links go stale silently",
+     "cmd": ["harnesses/doc-check/check_lessons_pinned.py", "--self-test"]},
+
+    {"gate": "lessons-pinned-variant",
+     "file": "harnesses/doc-check/check_lessons_pinned.py",
+     "old": "            if variant != ELSEWHERE_VARIANT:",
+     "new": "            if False:",
+     "why": "any parenthesised `Section amended (...)` spelling silently drops the entry's obligations",
      "cmd": ["harnesses/doc-check/check_lessons_pinned.py", "--self-test"]},
 
     {"gate": "lessons-pinned-scope",

@@ -24,7 +24,7 @@ oracle is at gate 2 of 6, not done.
    (`diff_run.py ... --ledger DIVERGENCES.md`).
 6. **Least privilege / no secrets / signed build / current threat model** — walk the
    per-release section of `SECURITY-CHECKLIST.md`.
-7. **Performance sanity** (synthesis; LESSONS #060, LESSONS #061): fail if a module is
+7. **Performance sanity** (synthesis; LESSONS #061, LESSONS #062): fail if a module is
    >1.3x the C median runtime — that's a specific bug (a copy, a missed release build,
    bounds checks in a hot loop), not "the cost of Rust". Two questions before any number
    is quoted, both of which this kit has answered wrongly in the field:
