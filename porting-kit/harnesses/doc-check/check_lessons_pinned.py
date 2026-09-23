@@ -2,7 +2,8 @@
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #6->#036, #13->#033, #14->#037, #18->#039, #19->#040;
 #          #26 by title (no entry in this log).
-# Local: #058 (this kit's own first run of it).
+# Local: #047, #058, #060 (the use-vs-mention rule; this kit's own first run of
+#          it; and what that run's fix left open).
 """Lessons-pinned check — the smoke tests must track the lessons. Every LESSONS
 entry that amends kit CODE (a harness, a workflow, an example runner) must be
 cited in that file — and the kit's convention is that the citation sits next to
@@ -43,6 +44,14 @@ claim written outside the kit is the same claim, and the walk has to reach it.
 `aged` and `resolved outside the kit` are reported separately for that reason —
 one number covering both is how the four stayed invisible.
 
+**The FIELD NAME is the other place it hid** (LESSONS #060). A parenthesised
+spelling was not an unrecognised field but *no field*, so the entry's
+obligations vanished and the run said `0 lesson→code link(s) checked`. #058
+made `(source lineage)` a designed exemption and left every other spelling
+voiding the entry in silence. Now: the bare field is the obligation,
+`(source lineage)` is the one exemption and only on an `- **Imported:**` entry,
+and **any other spelling fails** — known keys handled, unknown keys reported.
+
 Usage:  check_lessons_pinned.py [KIT_ROOT] [--also-scan DIR]...
             KIT_ROOT defaults to this file's ../../. --also-scan may repeat; a
             path is tried against KIT_ROOT first, then each extra root in turn.
@@ -56,23 +65,34 @@ import re
 import sys
 
 ENTRY_RE = re.compile(r"(?m)^## (\d{3})\. ")
-# An IMPORTED entry's amendments happened in the lineage it came from, not here:
-# its `Section amended` names that kit's files, several of which do not exist in
-# this one. Attributing them locally would be a false claim, so such an entry
-# writes `- **Section amended (source lineage):**` instead.
-#
-# That variant used to be exempt by ACCIDENT — AMENDED_RE matches the plain field
-# exactly, so the parenthesised one was simply never seen, and anyone could
-# silence this gate by renaming the field. It is a designed exemption now:
-# counted, reported, and allowed ONLY on an entry that carries `Imported:`. A
-# native lesson may not attribute its own amendments somewhere else.
-IMPORTED_RE = re.compile(r"^\s*-\s+\*\*Imported:\*\*", re.M)
-AMENDED_ELSEWHERE_RE = re.compile(
-    r"- \*\*Section amended \(source lineage\):\*\*(.*?)(?=^-\s\*\*|^##\s|\Z)",
-    re.S | re.M)
 
-AMENDED_RE = re.compile(r"- \*\*Section amended:\*\*(.*?)(?=^-\s\*\*|^##\s|\Z)",
-                        re.S | re.M)
+# Every `Section amended` field, whatever parenthesised variant it carries. The
+# variant is CAPTURED rather than required to be empty, because a field spelling
+# this file does not recognise must be REPORTED, not skipped. Matching the bare
+# form exactly meant `(source lineage)` was not an unrecognised field — it was
+# *no field*, so the entry's obligations ceased to exist and the run printed
+# `0 lesson→code link(s) checked`, this kit's own 0-of-0 signature
+# (LESSONS #039), as a pass. That held for `(anything at all)` just as well, so
+# the gate could be silenced by typing a word, and LESSONS #058 closed only the
+# one spelling it had met (LESSONS #060).
+#
+# A field is also a POSITION, not a string: it must OPEN its line, after nothing
+# but whitespace, and the entry is read with fenced code blocks removed. Both
+# rules are here because #060's own entry quotes the field it describes, inline
+# and in a worked example, and its first draft was flagged twice by the check it
+# was documenting — the same use-vs-mention rule `check_imports.py` needed for
+# its `KIT-IMPORT:` marker (LESSONS #047).
+AMENDED_ANY_RE = re.compile(
+    r"^[ \t]*- \*\*Section amended(?P<variant>[^:*\n]*)\:\*\*(?P<field>.*?)"
+    r"(?=^[ \t]*-\s\*\*|^##\s|\Z)", re.S | re.M)
+FENCE_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.S | re.M)
+# The one recognised variant, and the only one that lifts the obligation. An
+# IMPORTED entry's amendments happened in the lineage it came from: its field
+# names that kit's files, several of which do not exist here, so attributing
+# them locally would be a false claim. Allowed ONLY on an entry that carries
+# `- **Imported:**` — a native lesson may not attribute its own work elsewhere.
+ELSEWHERE_VARIANT = " (source lineage)"
+IMPORTED_RE = re.compile(r"^\s*-\s+\*\*Imported:\*\*", re.M)
 # `ports/` is in the list because a real port's own gate scripts and corpus
 # generators ARE kit code a lesson can amend — the cJSON retrospective found
 # LESSONS #040 naming `ports/cjson/oracle/gen_corpus.py` and this gate silently
@@ -107,9 +127,22 @@ def amended_code_paths(entry_body):
     recurrence). Rejoin any whitespace that immediately follows a `/` before
     extracting, so a wrapped path is checked, not dropped."""
     paths = []
-    for m in AMENDED_RE.finditer(entry_body):
-        paths.extend(_paths_in(m.group(1)))
+    for variant, field in amended_fields(entry_body):
+        if variant:
+            continue  # a variant field is classified by `run`
+        paths.extend(_paths_in(field))
     return list(dict.fromkeys(paths))
+
+
+def amended_fields(entry_body):
+    """Yield (variant, field_text) for every `Section amended` field, variant
+    normalised to `` for the bare form and e.g. ` (source lineage)` otherwise.
+
+    Fenced code blocks are removed first: an entry may show the field inside a
+    worked example without thereby declaring one."""
+    for m in AMENDED_ANY_RE.finditer(FENCE_RE.sub("", entry_body)):
+        v = m.group("variant")
+        yield (v if v.strip() else ""), m.group("field")
 
 
 def _paths_in(field):
@@ -152,15 +185,24 @@ def run(kit_root, also=()):
     text = open(lessons_path, encoding="utf-8").read()
     problems, checked, aged, elsewhere, outside = [], 0, 0, 0, 0
     for num, body in parse_lessons(text):
-        m = AMENDED_ELSEWHERE_RE.search(body)
-        if m:
-            if not IMPORTED_RE.search(body):
+        for variant, field in amended_fields(body):
+            if not variant:
+                continue
+            if variant != ELSEWHERE_VARIANT:
                 problems.append(
-                    f"LESSONS #{num} uses `Section amended (source lineage)` but is "
-                    f"not an imported entry — a native lesson's amendments happened "
-                    f"HERE, and attributing them elsewhere silences this gate")
+                    f"LESSONS #{num} writes `Section amended{variant}:` — this "
+                    f"gate knows only the bare field and `{ELSEWHERE_VARIANT}`, "
+                    f"so an unrecognised spelling drops the entry's obligations "
+                    f"silently. Use one of the two, or teach this harness the "
+                    f"new one")
+            elif not IMPORTED_RE.search(body):
+                problems.append(
+                    f"LESSONS #{num} uses `Section amended{ELSEWHERE_VARIANT}` "
+                    f"but is not an imported entry — a native lesson's "
+                    f"amendments happened HERE, and attributing them elsewhere "
+                    f"silences this gate")
             else:
-                elsewhere += len([x for x in _paths_in(m.group(1))])
+                elsewhere += len(_paths_in(field))
         for rel in amended_code_paths(body):
             full, found_in = resolve(roots, rel)
             if full is None:
@@ -283,6 +325,61 @@ def _self_test():
         check("a .c amended path is checked too", run(root) == 1)
         open(cfile, "w").write(f"/* pinned (LESSONS #{F14}) */\n")
         check("citing it clears the .c link", run(root) == 0)
+
+        # LESSONS #060: the FIELD NAME is a key. Matching the bare spelling
+        # exactly meant a parenthesised one was not an unknown field but no
+        # field, so the entry's obligations vanished and the run line said
+        # "0 links checked" — a 0-of-0 pass (LESSONS #039) reachable by typing
+        # a word. #058 closed the one spelling it had met and left the rest.
+        F16, F17 = "0" + "1" + "6", "0" + "1" + "7"
+        stray = os.path.join(root, "harnesses", "x", "stray.py")
+        open(stray, "w").write("# no citation\n")
+        with open(os.path.join(root, "LESSONS.md"), "a") as f:
+            f.write(f"\n## {F16}. variant field\n"
+                    "- **Section amended (whatever I like):** "
+                    "harnesses/x/stray.py.\n")
+        check("an UNRECOGNISED `Section amended (...)` variant is a failure, "
+              "not a silent exemption", run(root) == 1)
+        # the one recognised variant, on a NATIVE entry, is still a failure
+        s = open(os.path.join(root, "LESSONS.md")).read().replace(
+            "(whatever I like)", "(source lineage)")
+        open(os.path.join(root, "LESSONS.md"), "w").write(s)
+        check("`(source lineage)` on a non-imported entry is still a failure",
+              run(root) == 1)
+        # ...and is allowed, and COUNTED, once the entry declares the import
+        s = s.replace("- **Section amended (source lineage):**",
+                      "- **Imported:** from a sibling lineage.\n"
+                      "- **Section amended (source lineage):**")
+        open(os.path.join(root, "LESSONS.md"), "w").write(s)
+        check("`(source lineage)` on an IMPORTED entry is the designed exemption",
+              run(root) == 0)
+        # The variant verdict ISOLATED from the imported-entry verdict. Without
+        # this case the two are only pinned together: an entry that is imported
+        # AND uses an unknown spelling is where a "known variants only" check
+        # can be neutralized with every other fixture staying green — which is
+        # what the gate-mutation sweep reported on the first draft of this.
+        s2 = s.replace("(source lineage)", "(source lineage, mostly)")
+        open(os.path.join(root, "LESSONS.md"), "w").write(s2)
+        check("an unknown variant fails even on an IMPORTED entry",
+              run(root) == 1)
+        open(os.path.join(root, "LESSONS.md"), "w").write(s)
+
+        # A field is a POSITION: an entry that DISCUSSES the field — inline in
+        # prose, or in a fenced worked example — declares nothing. Both cases
+        # are real, and #060's own entry does each once (LESSONS #047's
+        # use-vs-mention rule, arriving in a second harness).
+        with open(os.path.join(root, "LESSONS.md"), "a") as f:
+            f.write(f"\n## {F17}. an entry that quotes the field\n"
+                    "- **What happened:** a copy wrote\n"
+                    "  `- **Section amended (source lineage):**` and it passed.\n"
+                    "  Worked example:\n\n"
+                    "```\n"
+                    "- **Section amended:** harnesses/x/bad.sh\n"
+                    "- **Section amended (whatever):** harnesses/x/bad.sh\n"
+                    "```\n\n"
+                    "- **Section amended:** PLAYBOOK · one line.\n")
+        check("a field quoted inline or fenced is a MENTION, not a declaration",
+              run(root) == 0)
 
         # LESSONS #033, a second time and in a second harness: the kit is
         # VENDORED, so the workflows a lesson amends live in the HOST repo. A

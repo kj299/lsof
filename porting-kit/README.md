@@ -89,7 +89,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/skeleton-check/check_skeleton.sh` | the shipped skeleton must pass the gates it configures (fmt/clippy/build/test); SKIPs without cargo | CI |
 | `harnesses/gate-mutation/mutate_gates.py` | break each gate's verdict on purpose and require its self-test to go red; audits its own table for uncovered harnesses | **CI** |
 | `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |
-| `harnesses/doc-check/check_lessons_pinned.py` | the other direction: every file a lesson's `Section amended` names must cite that lesson back, so `check-kit` is the lessons' regression suite. `--also-scan ..` reaches the host repo, because a vendored kit's lessons amend workflows that live outside it | CI |
+| `harnesses/doc-check/check_lessons_pinned.py` | the other direction: every file a lesson's `Section amended` names must cite that lesson back, so `check-kit` is the lessons' regression suite. An unrecognised `Section amended (…)` spelling fails rather than voiding the entry, and `--also-scan ..` reaches the host repo, because a vendored kit's lessons amend workflows that live outside it | CI |
 | `harnesses/lessons/resolve_collision.py` | two branches appended to the log and took the same numbers: rebuild the merge from git, renumber the block that landed second, repoint its citations by *line provenance*, and refuse what only a human can decide (an ambiguous line, a split range, a displaced paragraph) | merge-time |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
