@@ -256,11 +256,43 @@ mod tests {
             specials.is_empty(),
             "socket-only gather kept specials/mapped rows: {specials:?}"
         );
+    }
 
-        // ...and the control, so the assertion above cannot pass merely
-        // because this host has nothing to collect. The same walk without the
-        // flag must produce exactly the kinds that were skipped.
-        let all = LinuxBackend::new().gather(&Selection::default()).unwrap();
+    /// The control for `socket_only_selection_collects_only_sockets`, and the
+    /// reason that test cannot pass vacuously: the same backend, with the fast
+    /// path OFF, must still produce exactly the kinds it skips. Delete this and
+    /// that one would hold on a host where there was nothing to collect.
+    ///
+    /// Scoped to this process, not the host. It proves the same thing — `-p`
+    /// switches the socket-only path off, so the walk that runs is the full one
+    /// — and a whole-host control is the most expensive thing this backend can
+    /// do: under miri it measured **227 s on its own**, and it is where the
+    /// 60-minute budget of the observe-first miri job went the first time this
+    /// was written. `process_selector_scopes_the_fd_walk` pins that only the
+    /// named pid pays for an fd walk, so one process is all this needs.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri's stat shim reports st_dev as 0, so maps::rows_for drops                   every live mapping on the device check: measured on the same                   process, 12132 bytes of /proc/<pid>/maps read and 30 mappings                   parsed, 0 mem rows built (natively: 4 parsed, 4 rows). Same                   shim as device_nodes_report_their_own_number_not_the_filesystem"
+    )]
+    fn default_selection_still_collects_specials_and_mapped_rows() {
+        use lsof_core::model::FdType;
+        let me: u32 = std::fs::read_to_string("/proc/self/stat")
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let control = Selection {
+            pids: vec![me],
+            ..Default::default()
+        };
+        assert!(
+            !control.socket_rows_only(),
+            "a -p selection must NOT take the socket-only path"
+        );
+        let all = LinuxBackend::new().gather(&control).unwrap();
         let kinds: Vec<&FdType> = all
             .iter()
             .flat_map(|p| p.files.iter())
