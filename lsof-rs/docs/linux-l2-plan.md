@@ -229,6 +229,44 @@ so the cost is the whole-host fd walk, and it scales with process count. Not a
 blocker at 77 processes; worth one profiling pass before it is measured on a
 host with thousands.
 
+> **CORRECTED 2026-09-23, by P5. Both halves of the paragraph above were
+> wrong, in opposite directions.**
+>
+> **The memory claim was the meter.** "RSS 5.4 MB both" came from a `wait4`
+> meter written in Python and validated against a known 200 MB allocation. It
+> passed that check and still reported the *interpreter*: a fork child inherits
+> its parent's RSS until it execs, so every child came back at Python's floor.
+> The same meter reads **8.68 MB for `/bin/true`**. Re-measured with a small C
+> meter validated at BOTH ends (1.29 MB for `/bin/true`, 207 MB for the 200 MB
+> fixture), memory was never identical — 3.41 MB for the C against 4.64 MB for
+> lsof-rs whole-host, and the gap *grows with the host*.
+>
+> **The `-i` time claim had reversed sign by the time it was acted on.** On
+> this 75-process host `-i` measured **0.64x the C**, not 1.65x. Had P5 stopped
+> at re-measuring the documented case it would have closed as "no longer a
+> problem" — and been wrong, because the regression is real and simply not
+> visible at this size. Measured against process count:
+>
+> | processes | `-i` wall (C / rs) | ratio | `-i` peak RSS (C / rs) | ratio |
+> |---:|---|---:|---|---:|
+> | 75 | 10.2 / 6.2 ms | 0.61x | 2.79 / 2.52 MB | 0.90x |
+> | 275 | 27.1 / 43.8 ms | 1.61x | 2.91 / 4.89 MB | 1.68x |
+> | 575 | 72.4 / 116.3 ms | 1.61x | 3.04 / 8.36 MB | 2.75x |
+> | 1075 | 108.4 / 202.6 ms | 1.87x | 3.29 / 14.21 MB | **4.32x** |
+>
+> The C's `-i` RSS is flat across a 14x change in host size; lsof-rs's grew
+> 5.6x. `strace -c` at 577 processes said why in one line: **lsof-rs opened 578
+> `/proc/<pid>/maps` files under `-i` and the C opened none** — 27,604 `read`
+> calls against 2,949. Every mapped file of every process was parsed into a
+> `mem` row that selection then dropped, because a mapping can never satisfy
+> `-i`.
+>
+> Fixed in P5 by collecting only what the selection can print
+> (`Selection::socket_rows_only`). At 1075 processes `-i` went 202.6 -> 127.7 ms
+> and 14.21 -> 4.65 MB. What remains, and is now item 30 rather than a
+> paragraph here, is **whole-host RSS: 2.9x the C and growing**, because this
+> port retains every row where the C streams.
+
 ## 6. Recommended order
 
 **P1 — make the bookkeeping true (½ day).** Fix `opt:H`'s reason and implement
@@ -295,9 +333,20 @@ Two of the five were live defects rather than missing features. The oracle
 caught four bugs that reading could not, and two of the eleven new differential
 cases could not fail until they were rebuilt (LESSONS #059).
 
-**P5 — the `-i` profiling pass**, and a resource gate if one is wanted: peak
-RSS and wall time on a whole-host scan, asserted against a ceiling. Nothing
-gates either today.
+**P5 — the `-i` profiling pass (1 day). DONE 2026-09-23 — and the paragraph
+it was based on was wrong twice over; see the correction in §5.** The pass
+found that `-i` walked every process's `/proc/<pid>/maps` to build rows
+selection could never keep, and closed it with a socket-only collection path
+predicated on `Selection::socket_rows_only`. The resource gate §5 called
+optional turned out to be the only control that can fail on it: the 109-case
+differential still MATCHes with the fast path deleted, because the rows it
+skips are rows selection was going to drop. `differential/resource_gate.py`
+spawns its own 400-process load — at ambient scale the difference is ~0.1 MB
+and any honest ceiling passes either binary — validates its meter at both
+ends, and blocks on the RSS ceiling while reporting the wall one. Against the
+pre-P5 binary the wall half read 1.58x, 1.47x and 1.43x on a 1.60x ceiling
+across runs and never once caught the regression, while the RSS half caught it
+every time at 2.34–2.44x on 2.00x; that is why the split is where it is.
 
 **Not scheduled, and deliberately:** `-S`/`-b` (§4), the `UNKN*` errno rows
 (DIVERGENCES, still real debt), DIVERGENCES 21 (`-c`/`-u`/`-g` as search

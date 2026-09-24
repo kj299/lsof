@@ -24,9 +24,20 @@ oracle is at gate 2 of 6, not done.
    (`diff_run.py ... --ledger DIVERGENCES.md`).
 6. **Least privilege / no secrets / signed build / current threat model** — walk the
    per-release section of `SECURITY-CHECKLIST.md`.
-7. **Performance sanity** (synthesis): fail if a module is >1.3x the C median runtime —
-   that's a specific bug (a copy, a missed release build, bounds checks in a hot loop),
-   not "the cost of Rust".
+7. **Performance sanity** (synthesis; LESSONS #061, LESSONS #062): fail if a module is
+   >1.3x the C median runtime — that's a specific bug (a copy, a missed release build,
+   bounds checks in a hot loop), not "the cost of Rust". Two questions before any number
+   is quoted, both of which this kit has answered wrongly in the field:
+   - **What was the instrument validated against, at BOTH ends?** lsof-rs published
+     "RSS identical, 5.4 MB both" from a meter validated only against a 200 MB
+     allocation; it read 8.68 MB for `/bin/true` and was reporting the Python
+     interpreter for every process. A large fixture cannot detect a floor.
+   - **What does the measurement read with the fix reverted?** If the answer is "about
+     the same", the ceiling is scenery: lsof-rs's `-i` regression is 0.13 MB on an idle
+     host and 9.6 MB at 1000 processes, so the gate has to create the load it measures
+     rather than measure the machine it happens to run on. PLAYBOOK Phase 5 already
+     records the manual form of this (LESSONS #15's field checkpoint); a gate that
+     manufactures the dimension gets it on every push.
 8. **CI hygiene** (LESSONS #5; LESSONS #035; LESSONS #049; LESSONS #054). Run the
    platform ledger — don't eyeball the providers:
    `python3 porting-kit/harnesses/platforms/check_platforms.py`. It discovers

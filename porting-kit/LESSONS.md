@@ -2755,3 +2755,123 @@ finding it is supposed to produce.
   0 survivors. `check-kit` green; 33 links, 0 unpinned.
 - **Section amended:** harnesses/doc-check/check_lessons_pinned.py;
   harnesses/gate-mutation/mutate_gates.py · MUTATIONS; README · harness table.
+
+## 061. A meter validated at one end has a floor at the other
+
+- **Date:** 2026-09-23
+- **Codebase:** lsof-rs — the P5 performance pass, and every RSS number this
+  port had published before it
+- **What happened:** The port's measurements were taken with a `wait4`-based
+  meter written in Python, and the meter was validated — deliberately, and
+  recorded in the plan — against **a known 200 MB allocation**, which it read
+  as 207.4 MB. On that strength it reported, repeatedly and in a merged PR
+  body, *"RSS 5.4 MB both"* and *"memory is identical and flat"*.
+
+  It was measuring **Python**. A `fork` child's RSS is its parent's until it
+  `exec`s, and `ru_maxrss` is a high-water mark, so every child came back at
+  the interpreter's footprint. The probe that settles it takes one line: the
+  same meter reads **8.68 MB for `/bin/true`**. Switching to `posix_spawn` did
+  not help — glibc uses `CLONE_VM|CLONE_VFORK`, so the child shares the
+  parent's address space and reads 11.3 MB, the interpreter again.
+
+  **The 200 MB validation could not have caught this and neither could a
+  bigger one.** An offset is invisible to any fixture much larger than the
+  offset. The instrument was checked at 200 MB and used at 3–5 MB — the one
+  range it had never been checked in.
+
+  Re-measured with a 16 KB C meter (`/bin/true` 1.29 MB, the 200 MB fixture
+  207.5 MB), memory was never identical: 3.41 MB for the C against 4.64 MB for
+  the port whole-host, a gap that **grows with host size** to 9.8 against 29.1
+  MB at 1075 processes. A real, documented, ungated 3x — sitting under a claim
+  of parity for as long as the claim existed.
+
+- **The general form:** *validate an instrument at the magnitude you will use
+  it at, and validate the LOW end explicitly — a large fixture passes any
+  instrument with an additive floor.* It generalises past memory: a timer with
+  fixed overhead looks perfect on a long benchmark, a counter that starts at N
+  looks right on a big population.
+
+- **Also found, and the same disease:** the A/B that proves the P5 optimization
+  changes no output compared `lsof-base` against `lsof-new`, and one case came
+  back different — a COMMAND column one character narrower. It was not the
+  change. **lsof lists itself**, the COMMAND column is as wide as the widest
+  command printed, and `lsof-base` is nine characters where `lsof-new` is
+  eight. The apparatus was in the measurement. Re-run with both binaries named
+  `lsof` in different directories, every case was byte-identical. When the
+  subject observes its own environment, the experiment is part of the input —
+  give the two arms identical names, not descriptive ones.
+
+- **Kit change:** none to a harness — this is a rule about fixtures, and the
+  port's new `differential/resource_gate.py` enforces it for itself by refusing
+  to run unless its meter passes BOTH a `/bin/true` floor check and the 200 MB
+  scale check, with a negative fixture for each (a stand-in meter that reports
+  9 MB for everything is refused by name).
+- **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md` · item 7
+  (performance sanity) — a measurement now has to say what its instrument was
+  validated against, at both ends.
+
+---
+
+## 062. A gate that runs at ambient scale cannot see a cost that scales
+
+- **Date:** 2026-09-23
+- **Codebase:** lsof-rs — P5's resource gate
+- **What happened:** P5 found that `lsof -i` walked every process's
+  `/proc/<pid>/maps`, parsing every mapping into a row that selection then
+  dropped, because a mapped file can never satisfy `-i`. Measured with
+  `strace -c` at 577 processes: **578 maps files opened by this port, none by
+  the C.** Fixing it took the `-i` peak RSS from 4.32x the C to 1.41x at 1075
+  processes.
+
+  Then the question that mattered: **what catches it coming back?** Nothing
+  did. All 109 differential cases still MATCH with the fast path deleted — of
+  course they do, since the rows it skips are exactly the rows selection was
+  going to drop. The unit tests pass. The output is byte-identical by
+  construction. The only observable is cost.
+
+  So the gate had to be a resource gate, and the first draft of it was
+  useless: run on the host as found (75 processes) the `-i` difference is
+  **0.13 MB**, inside the noise of any ceiling anyone would dare to set. A
+  ceiling loose enough to be safe there passes the un-optimized binary too.
+  The gate ran, measured a real thing, reported a real number, and **could not
+  fail** — #039's 0-of-0 with actual data in it, which is harder to notice
+  because nothing looks empty.
+
+  The fix is that **the gate creates the conditions it measures**: it spawns
+  400 synthetic processes holding fds and a socket each, because process count
+  is the axis the cost scales on. At 400 the two binaries read 3.27 MB and
+  7.14 MB, and the ceiling separates them every run.
+
+- **This log already knew half of it.** LESSONS #15's field checkpoint exists
+  because lsof-rs 1.0.0 passed every automated gate and then took 214 s on one
+  case, *"from a defect present since Phase 4 that a runner's small idle
+  process set can never express"* (PLAYBOOK, Phase 5). Same root cause, six
+  months earlier, and the remedy recorded then was **manual**: run the real
+  artifact on real hardware before cutover. What P5 adds is that the remedy can
+  be mechanical — the gate does not have to wait for a big machine, it can
+  *manufacture* the dimension. A field checkpoint still catches what a
+  synthetic load cannot model; a synthetic load catches it on every push.
+
+- **The general form:** *a cost that grows with a dimension is only gated by a
+  gate that varies that dimension.* Before writing the ceiling, ask what the
+  measurement reads with the fix reverted — if the answer is "about the same",
+  the gate is scenery whatever it prints. That check is cheap and it is the
+  whole difference between a resource gate and a resource report.
+
+- **And which half may block:** both wall and RSS are measured; only RSS
+  blocks. Not caution — measurement. Against the pre-fix binary the wall half
+  read **1.58x, 1.47x and 1.43x on a 1.60x ceiling across repeated runs and
+  never once caught the regression**, while RSS read 2.34–2.44x on 2.00x and
+  caught it every time. Raising the wall ceiling's sensitivity is not the
+  answer either: the run-to-run spread on the noisy half is wider than the
+  effect, which is the definition of a measurement that cannot support a
+  verdict. Peak RSS is a property of
+  the program; wall clock on a shared runner is a property of whoever else is
+  on the machine. A gate whose blocking half is the noisy one gets disabled,
+  and then neither half exists.
+- **Kit change:** none — `harnesses/perf/perf_gate.py` stays the generic
+  ratio-over-the-matrix gate. What is port-specific here is the *load*, which
+  has to be built out of the thing the port measures (processes with open
+  files), so it lives in `lsof-rs/differential/resource_gate.py`.
+- **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md` · item 7
+  (performance sanity).
