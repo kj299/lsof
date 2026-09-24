@@ -88,13 +88,13 @@ pub fn sample_processes() -> Vec<Process> {
                     offset: None,
                     node: Some("TCP".into()),
                     links: None,
-                    socket: Some(SocketInfo {
+                    socket: Some(Box::new(SocketInfo {
                         protocol: Protocol::Tcp,
                         local: Some(addr("0.0.0.0:445")),
                         remote: None,
                         state: Some(TcpState::Listen.into()),
                         tcp: None,
-                    }),
+                    })),
                 },
                 OpenFile {
                     fs_device: None,
@@ -109,13 +109,13 @@ pub fn sample_processes() -> Vec<Process> {
                     offset: None,
                     node: Some("TCP".into()),
                     links: None,
-                    socket: Some(SocketInfo {
+                    socket: Some(Box::new(SocketInfo {
                         protocol: Protocol::Tcp,
                         local: Some(addr("127.0.0.1:445")),
                         remote: Some(addr("127.0.0.1:51000")),
                         state: Some(TcpState::Established.into()),
                         tcp: None,
-                    }),
+                    })),
                 },
                 OpenFile {
                     fs_device: None,
@@ -130,13 +130,13 @@ pub fn sample_processes() -> Vec<Process> {
                     offset: None,
                     node: Some("UDP".into()),
                     links: None,
-                    socket: Some(SocketInfo {
+                    socket: Some(Box::new(SocketInfo {
                         protocol: Protocol::Udp,
                         local: Some(addr("[::]:53")),
                         remote: None,
                         state: None,
                         tcp: None,
-                    }),
+                    })),
                 },
             ],
         },

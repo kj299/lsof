@@ -134,22 +134,34 @@ ALLOC_PY = (
     "    b[i] = 1\n"
 )
 
-# Ratio ceilings, rust/C medians. Measured on this host at 1075 processes and
-# given headroom; the comment is the measurement, so a later reader can tell a
-# number that was taken from one that was hoped for.
+# Ratio ceilings, rust/C medians. Each is a measurement plus headroom, and the
+# comment IS the measurement, so a later reader can tell a number that was taken
+# from one that was hoped for.
 #
-#   case         wall measured   RSS measured    before P5's socket-only path
-#   -i           1.18x           1.41x           1.87x wall, 4.34x RSS
-#   whole host   0.99x           2.97x           1.00x wall, 2.92x RSS
+# `-i` (P5). Measured at 1075 processes: 1.18x wall, 1.41x RSS; before P5's
+# socket-only collection path, 1.87x wall and 4.34x RSS. Deleting that path puts
+# the RSS half over.
 #
-# The `-i` ceilings are the ones that bite: deleting the socket-only collection
-# path puts both over. The whole-host RSS ceiling pins the CURRENT cost rather
-# than endorsing it — every row of every process is retained where the C
-# streams, and that is open debt recorded in DIVERGENCES, not something this
-# gate is claiming is fine.
+# whole host (DIVERGENCES 30). Under this gate's own load (400 synthetic
+# processes plus the ambient host), the RSS ratio of the final build and of each
+# of its three fixes reverted on its own:
+#
+#   final (all three)                    0.85x
+#   without the per-process trim         1.06x   pinned by a capacity==len test
+#   without the boxed socket             1.00x   pinned by a size_of test
+#   without the streaming table          1.89x   caught HERE
+#   master before all three              2.33x   caught here
+#
+# 1.30x is the final build's 0.85x plus headroom for a runner — which read the
+# same gate ~19% higher than this container in P5 — and it sits well under the
+# 1.89x a reverted renderer produces. The two smaller fixes are ~0.15-0.2x each,
+# inside what a shared runner can separate, so they are pinned by deterministic
+# unit tests instead of by this ceiling. Before DIVERGENCES 30 closed, this
+# ceiling was 3.50x and pinned a cost that grew with the host; the cost is now
+# proportional (0.84x, 0.85x, 0.87x of the C at 76, 575 and 1075 processes).
 CEILINGS = {
     "-i": {"wall": 1.60, "rss": 2.00},
-    "whole-host": {"wall": 1.40, "rss": 3.50},
+    "whole-host": {"wall": 1.40, "rss": 1.30},
 }
 CASES = {"-i": ["-i"], "whole-host": []}
 

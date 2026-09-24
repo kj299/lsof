@@ -234,7 +234,7 @@ pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
         offset: None,
         node: Some(protocol.as_str().to_string()),
         links: None,
-        socket: Some(info),
+        socket: Some(Box::new(info)),
     }
 }
 

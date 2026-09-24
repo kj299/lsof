@@ -1182,13 +1182,13 @@ mod tests {
             offset: None,
             node: Some(proto.as_str().to_string()),
             links: None,
-            socket: Some(SocketInfo {
+            socket: Some(Box::new(SocketInfo {
                 protocol: proto,
                 local: None,
                 remote: Some("127.0.0.1:0".parse().unwrap()),
                 state: None,
                 tcp: None,
-            }),
+            })),
         };
         let icmp4 = sock_row(FileType::Ipv4, Protocol::Other("ICMP"));
         let icmp6 = sock_row(FileType::Ipv6, Protocol::Other("ICMPV6"));

@@ -266,6 +266,11 @@ host with thousands.
 > and 14.21 -> 4.65 MB. What remains, and is now item 30 rather than a
 > paragraph here, is **whole-host RSS: 2.9x the C and growing**, because this
 > port retains every row where the C streams.
+>
+> **CORRECTED AGAIN 2026-09-24: the C does not stream.** `main.c` gathers every
+> process into `Lproc[]`, sorts it, then prints. The cost was per-row size and
+> a renderer that held the table three times over; item 30 is closed at 0.85x
+> of the C, flat across host sizes. See DIVERGENCES 30.
 
 ## 6. Recommended order
 

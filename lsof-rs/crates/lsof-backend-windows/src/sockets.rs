@@ -194,7 +194,7 @@ fn make_file(
         offset: None,
         node: Some(proto.as_str().to_string()),
         links: None,
-        socket: Some(sock),
+        socket: Some(Box::new(sock)),
     }
 }
 
