@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashSet;
+use std::io::Write;
 
 use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
@@ -324,6 +325,28 @@ fn report_unmatched(
     }
 
     unmatched
+}
+
+/// What a failed write to stdout means (LESSONS #063).
+///
+/// **A closed pipe is not an error for lsof.** `lsof | head -1` is ordinary
+/// use, and the C dies of `SIGPIPE` silently; the shell reports 141 for it.
+/// This port had been ending the same pipeline with a panic —
+/// `failed printing to stdout: Broken pipe (os error 32)`, exit 101 — because
+/// `print!` panics on any write error, and the whole table went out in one
+/// `print!`. Re-raising the signal needs `unsafe` and this crate forbids it,
+/// so the port exits with the status the shell shows for the C, 141, which is
+/// the same `$?` and the same verdict under `set -o pipefail`, and says
+/// nothing. Any other write failure — a full disk under `lsof > file` — is a
+/// real error and is reported as one, not as a panic.
+fn exit_on_write_error(r: std::io::Result<()>) {
+    if let Err(e) = r {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(141);
+        }
+        eprintln!("lsof: write error: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn main() {
@@ -673,8 +696,15 @@ fn main() {
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
         let esc = Escaper::for_host();
-        let out = match &format {
-            Format::Table => table::render(
+        // Written as it is formatted rather than built into one String and
+        // printed: the table was being held three times over at the end of a
+        // run (the rows, every cell, then the text), and it grows with the
+        // host (DIVERGENCES 30). `-F` and JSON still build their text first.
+        let stdout = std::io::stdout();
+        let mut sink = std::io::BufWriter::new(stdout.lock());
+        let written = match &format {
+            Format::Table => table::render_to(
+                &mut sink,
                 &procs,
                 TableOpts {
                     terse: selection.terse,
@@ -687,17 +717,17 @@ fn main() {
                     ..TableOpts::new(esc)
                 },
             ),
-            Format::Fields { nul, only } => {
-                fields::render(&procs, *nul, only.as_deref(), selection.tcp_info(), esc)
-            }
+            Format::Fields { nul, only } => sink.write_all(
+                fields::render(&procs, *nul, only.as_deref(), selection.tcp_info(), esc).as_bytes(),
+            ),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);
                 s.push('\n');
-                s
+                sink.write_all(s.as_bytes())
             }
-            Format::JsonLines => json::render_lines(&procs),
+            Format::JsonLines => sink.write_all(json::render_lines(&procs).as_bytes()),
         };
-        print!("{out}");
+        exit_on_write_error(written.and_then(|()| sink.flush()));
         unmatched
     };
 
@@ -708,11 +738,13 @@ fn main() {
     // exit status is 1 when a specified `-p`/path search item was not located.
     match repeat {
         Some(delay) => loop {
-            use std::io::Write;
             run_cycle();
-            print!("{repeat_marker}");
             // lsof flushes each cycle so a piped consumer sees output promptly.
-            let _ = std::io::stdout().flush();
+            let mut out = std::io::stdout();
+            exit_on_write_error(
+                out.write_all(repeat_marker.as_bytes())
+                    .and_then(|()| out.flush()),
+            );
             std::thread::sleep(std::time::Duration::from_secs(delay));
         },
         None => {

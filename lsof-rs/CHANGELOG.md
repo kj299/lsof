@@ -43,6 +43,39 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **Whole-host peak memory is now below the C's** (DIVERGENCES item 30).
+  At 1075 processes lsof-rs peaked at 29.0 MB against the C's 9.8 MB, and the
+  gap grew with the host. It is now **8.5 MB — 0.87x the C — and 0.84x/0.85x
+  at 76 and 575 processes**: proportional, where it was growing. Wall time is
+  unchanged. Three fixes, each measured on its own with a heap profiler before
+  it was written:
+  - **The table is written as it is formatted.** The renderer used to build
+    every cell of every row into a `Vec<Vec<String>>`, then the whole output
+    into one `String`, then print it — the table held three times over at the
+    end of the run. Columns are now sized in one pass and each line written in
+    a second, which is how the C does it. 22.95 -> 8.57 MB on its own.
+  - **Each process's rows are trimmed after the walk.** A `Vec`'s growth slack
+    was kept for the whole run: 13.8 MB of capacity held 5.9 MB of rows.
+  - **The socket fields are boxed.** Every row carried a 136-byte `SocketInfo`
+    inline, and about one row in eighteen is a socket; `OpenFile` is 192 bytes
+    instead of 320.
+
+  Output is byte-identical: all 109 differential cases, and an A/B of the old
+  and new binaries over 17,000 rows in every table option and output format.
+  The cause the P5 entry gave for this gap — that the C streams rows and this
+  port does not — was wrong, and would have sized the fix as a redesign: the C
+  gathers every process into `Lproc[]`, sorts it and then prints. The resource
+  gate's whole-host ceiling drops from 3.50x to 1.30x; a reverted renderer
+  reads 1.92x and fails it.
+- **`lsof | head` no longer ends in a panic.** Any closed pipe on stdout —
+  `head`, `grep -m1`, quitting `less` — printed
+  `failed printing to stdout: Broken pipe (os error 32)` and exited 101,
+  because the table went out in one `print!` and `print!` panics on a failed
+  write. The C dies of SIGPIPE silently and the shell reports 141; lsof-rs now
+  exits 141 and says nothing. Any other write failure (`lsof > file` on a full
+  disk) is one line on stderr and exit 1. The kit's skeleton CLI had the same
+  defect and is fixed alongside (LESSONS #063).
+
 - **Every "peak RSS" number this project has published was the measuring
   harness's own memory.** The meter was validated against a known 200 MB
   allocation and passed; it reads **8.68 MB for `/bin/true`**, because a fork
@@ -54,7 +87,8 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   **3.41 MB for the C against 4.64 MB for lsof-rs**, a gap that grows to 9.8 vs
   29.1 MB at 1075 processes. §5 carries the correction; the remaining
   whole-host cost is **DIVERGENCES item 30**, open and now ceilinged rather
-  than silently drifting. LESSONS #061.
+  than silently drifting — closed later in this release; see "Whole-host peak
+  memory" below. LESSONS #061.
 
 - **`-X`, `-x`, `-e`, `-N` and `-Z`** (P4 of `docs/linux-l2-plan.md`;
   DIVERGENCES items 25–29). The plan called these "the small options" and every

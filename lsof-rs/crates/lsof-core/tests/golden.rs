@@ -89,6 +89,35 @@ fn table_empty_when_nothing_matches() {
 }
 
 #[test]
+fn a_process_with_no_files_still_gets_one_blank_row() {
+    // The renderer's own contract, whichever selection path hands it such a
+    // process: one row, FD `unk`, TYPE `unknown`, every file cell empty, the
+    // row padded like any other. Pinned because the table renderer was
+    // rewritten to stream (two passes over the rows, nothing retained), and
+    // the blank row is the one row that is not in `p.files` — a rewrite that
+    // iterates the files alone drops it silently, and nothing else covered it.
+    let mut idle = sample_processes().remove(0);
+    idle.files.clear();
+    let out = table::render(std::slice::from_ref(&idle), TableOpts::new(Escaper::UNIX));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "a header and exactly one row: {out:?}");
+    let cells: Vec<&str> = lines[1].split_whitespace().collect();
+    assert_eq!(cells[1], idle.pid.to_string(), "{out:?}");
+    assert!(
+        cells.ends_with(&["unk", "unknown"]),
+        "FD unk, TYPE unknown, nothing after: {out:?}"
+    );
+    // ...and it is sized like every other row: the header and the row are
+    // the same width up to NAME, so the columns still line up.
+    let name_at = lines[0].find("NAME").unwrap();
+    assert_eq!(
+        lines[1].len(),
+        name_at,
+        "row padded to the NAME column: {out:?}"
+    );
+}
+
+#[test]
 fn terse_lists_unique_pids() {
     let out = table::render(
         &sample_processes(),
@@ -898,7 +927,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
             offset: None,
             node: Some("TCP".to_string()),
             links: None,
-            socket: Some(sock),
+            socket: Some(Box::new(sock)),
         }],
         endpoint_peer: false,
     }]
@@ -1174,13 +1203,13 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
             offset: None,
             node: Some("TCP".into()),
             links: None,
-            socket: Some(SocketInfo {
+            socket: Some(Box::new(SocketInfo {
                 protocol: Protocol::Tcp,
                 local: None,
                 remote: None,
                 state: None,
                 tcp: None,
-            }),
+            })),
         }],
     };
     let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
@@ -1380,13 +1409,13 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
             offset: Some(0),
             node: Some("ALL".into()),
             links: None,
-            socket: Some(SocketInfo {
+            socket: Some(Box::new(SocketInfo {
                 protocol: Protocol::Other("packet"),
                 local: None,
                 remote: None,
                 state: None,
                 tcp: None,
-            }),
+            })),
         }],
     }]
 }
@@ -1479,13 +1508,13 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
             offset: Some(0),
             node: Some("3939".into()),
             links: None,
-            socket: Some(SocketInfo {
+            socket: Some(Box::new(SocketInfo {
                 protocol: Protocol::Other("unix"),
                 local: None,
                 remote: None,
                 state: Some(UnixState::Connected.into()),
                 tcp: None,
-            }),
+            })),
         }],
     }];
     let out = fields::render(&procs, false, None, TcpInfoFlags::DEFAULT, Escaper::UNIX);

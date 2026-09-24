@@ -406,7 +406,14 @@ pub struct OpenFile {
     /// unknown.
     pub file_flags: Option<u32>,
     /// Present iff this is a network socket.
-    pub socket: Option<SocketInfo>,
+    ///
+    /// Boxed because it is the largest field by far and absent from almost
+    /// every row: inline, a `SocketInfo` is 136 bytes carried by each of the
+    /// ~18,000 rows of a 1079-process host, of which about a thousand are
+    /// sockets. Every row is held until the whole host has been walked (the C
+    /// does that too), so the row's size is paid per row for the whole run.
+    /// Boxing took `OpenFile` from 320 bytes to 192 (DIVERGENCES 30).
+    pub socket: Option<Box<SocketInfo>>,
 }
 
 impl OpenFile {
@@ -447,4 +454,26 @@ pub struct Process {
     /// engine keeps such a process (its pipe rows only) even though it matches
     /// no process selector — lsof's "endpoint files are also displayed".
     pub endpoint_peer: bool,
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::OpenFile;
+
+    #[test]
+    fn a_row_stays_small() {
+        // Every row of every process is held until the whole host has been
+        // walked, so this size is paid per row for the entire run. Boxing the
+        // socket took it from 320 bytes to 192 (DIVERGENCES 30); the resource
+        // gate cannot see a regression this small on a shared runner — an
+        // unboxed socket reads 1.00x the C against 0.85x, inside a runner's
+        // noise — so the size itself is the control. `<=`, because a 32-bit
+        // target is smaller still.
+        assert!(
+            std::mem::size_of::<OpenFile>() <= 192,
+            "OpenFile grew to {} bytes; a field added inline is paid by every \
+             row on the host — box it if most rows leave it empty",
+            std::mem::size_of::<OpenFile>()
+        );
+    }
 }

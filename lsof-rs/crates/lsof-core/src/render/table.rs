@@ -10,6 +10,8 @@
 //! runs lsof. Column widths are computed on the escaped text, so a `^[` counts
 //! as the two columns it occupies.
 
+use std::io::{self, Write};
+
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
 use crate::render::Escaper;
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
@@ -149,16 +151,55 @@ fn size_off_cell(f: &OpenFile, prefer_offset: bool, human: bool) -> String {
 }
 
 /// `-t`: unique PIDs, ascending, one per line.
-fn render_terse(procs: &[Process]) -> String {
+fn render_terse(w: &mut dyn Write, procs: &[Process]) -> io::Result<()> {
     let mut pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
     pids.sort_unstable();
     pids.dedup();
-    let mut s = String::new();
     for pid in pids {
-        s.push_str(&pid.to_string());
-        s.push('\n');
+        writeln!(w, "{pid}")?;
     }
-    s
+    Ok(())
+}
+
+/// Every row the table prints, in order: each file of each process, and one
+/// blank row for a selected process with no displayed files (it still gets a
+/// line, NAME left blank, as lsof prints it).
+fn rows_of<'a>(
+    procs: &'a [Process],
+    blank: &'a OpenFile,
+) -> impl Iterator<Item = (&'a Process, &'a OpenFile)> + 'a {
+    procs.iter().flat_map(move |p| {
+        let files: &'a [OpenFile] = if p.files.is_empty() {
+            std::slice::from_ref(blank)
+        } else {
+            &p.files
+        };
+        files.iter().map(move |f| (p, f))
+    })
+}
+
+/// One padded line. NAME, the last column, is never padded; numeric columns
+/// are right-aligned. Written straight to `w` — `format!` per cell would
+/// allocate a string only to copy it into the output.
+fn emit_line<S: AsRef<str>>(
+    w: &mut dyn Write,
+    cells: &[S],
+    widths: &[usize],
+    headers: &[&str],
+    right: &[&str],
+) -> io::Result<()> {
+    let ncols = headers.len();
+    for (i, cell) in cells.iter().enumerate() {
+        let cell = cell.as_ref();
+        if i == ncols - 1 {
+            w.write_all(cell.as_bytes())?; // NAME: no trailing padding
+        } else if right.contains(&headers[i]) {
+            write!(w, "{cell:>width$} ", width = widths[i])?;
+        } else {
+            write!(w, "{cell:<width$} ", width = widths[i])?;
+        }
+    }
+    w.write_all(b"\n")
 }
 
 /// How the table is drawn. Every field is one lsof option, named, because the
@@ -216,6 +257,24 @@ impl TableOpts {
 /// `CmdColW` starts at `strlen("COMMAND")` and `safestrprtn(cp, CmdColW, …)`
 /// is what truncates.
 pub fn render(procs: &[Process], opts: TableOpts) -> String {
+    let mut buf = Vec::new();
+    render_to(&mut buf, procs, opts).expect("writing to a Vec cannot fail");
+    String::from_utf8(buf).expect("every cell is a String, so the table is UTF-8")
+}
+
+/// [`render`], written to `w` as it goes.
+///
+/// Two passes over the rows, and neither keeps them: the first sizes every
+/// column, the second formats each line again and writes it. That is how the
+/// C does it — `print.c` sizes its columns over `Lproc[]` and then prints each
+/// line with `printf` — and it is not how this function used to: it built a
+/// `Vec<Vec<String>>` of every cell of every row, then a `String` of the whole
+/// output, and only then printed. At 1079 processes that was a second and a
+/// third full copy of the table held beside the rows themselves — 7 MB of cell
+/// headers alone, plus 2 MB of text and the per-cell allocator overhead
+/// (DIVERGENCES 30). Formatting a row twice costs CPU; holding it costs memory
+/// for the rest of the run, and a table grows with the host.
+pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::Result<()> {
     let TableOpts {
         terse,
         show_ppid,
@@ -227,7 +286,7 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         esc,
     } = opts;
     if terse {
-        return render_terse(procs);
+        return render_terse(w, procs);
     }
 
     // Pass one over the COMMAND column: the width every cell is then cut to.
@@ -318,64 +377,44 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
         r
     };
 
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for p in procs {
-        if p.files.is_empty() {
-            // A selected process with no displayed files still gets a line so it
-            // shows up (NAME left blank), mirroring lsof.
-            let blank = OpenFile {
-                fs_device: None,
-                file_flags: None,
-                lock: None,
-                fd: FdType::Unknown,
-                access: AccessMode::Unknown,
-                file_type: FileType::Unknown,
-                name: String::new(),
-                device: None,
-                size: None,
-                offset: None,
-                node: None,
-                links: None,
-                socket: None,
-            };
-            rows.push(row_for(p, &blank));
-        }
-        for f in &p.files {
-            rows.push(row_for(p, f));
-        }
-    }
+    // A selected process with no displayed files still gets a line so it
+    // shows up (NAME left blank), mirroring lsof.
+    let blank = OpenFile {
+        fs_device: None,
+        file_flags: None,
+        lock: None,
+        fd: FdType::Unknown,
+        access: AccessMode::Unknown,
+        file_type: FileType::Unknown,
+        name: String::new(),
+        device: None,
+        size: None,
+        offset: None,
+        node: None,
+        links: None,
+        socket: None,
+    };
 
-    // Nothing matched: emit nothing at all (no bare header), like lsof.
-    if rows.is_empty() {
-        return String::new();
-    }
-
-    let ncols = headers.len();
+    // Pass two: size every column. Each row is formatted, measured and
+    // dropped; nothing here outlives its own iteration.
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for r in &rows {
-        for (i, cell) in r.iter().enumerate() {
+    let mut any = false;
+    for (p, f) in rows_of(procs, &blank) {
+        any = true;
+        for (i, cell) in row_for(p, f).iter().enumerate() {
             widths[i] = widths[i].max(cell.len());
         }
     }
-
-    let mut out = String::new();
-    let mut emit = |cells: &[String]| {
-        for (i, cell) in cells.iter().enumerate() {
-            if i == ncols - 1 {
-                out.push_str(cell); // NAME: no trailing padding
-            } else if right.contains(&headers[i]) {
-                out.push_str(&format!("{cell:>width$} ", width = widths[i]));
-            } else {
-                out.push_str(&format!("{cell:<width$} ", width = widths[i]));
-            }
-        }
-        out.push('\n');
-    };
-
-    let header_cells: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
-    emit(&header_cells);
-    for r in &rows {
-        emit(r);
+    // Nothing matched: emit nothing at all (no bare header), like lsof.
+    if !any {
+        return Ok(());
     }
-    out
+
+    // Pass three: print. The same `row_for`, so a line cannot disagree with
+    // the width it was measured at.
+    emit_line(w, &headers, &widths, &headers, &right)?;
+    for (p, f) in rows_of(procs, &blank) {
+        emit_line(w, &row_for(p, f), &widths, &headers, &right)?;
+    }
+    Ok(())
 }

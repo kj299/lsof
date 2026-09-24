@@ -371,7 +371,7 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) ->
                 offset: Some(0),
                 node: Some(e.node.clone()),
                 links: None,
-                socket: Some(e.info.clone()),
+                socket: Some(Box::new(e.info.clone())),
             });
         }
     }
@@ -518,6 +518,13 @@ pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<Ope
             out.push(f);
         }
     }
+    // Every process's rows are held until the whole host has been walked and
+    // sorted — the C does the same (`gather_proc_info()` fills `Lproc[]`,
+    // `main.c` qsorts it, then prints) — so the growth slack a `Vec` keeps
+    // for pushes that will never come is paid once per process for the whole
+    // run. Measured at 1079 processes it was the largest single cost: 13.8 MB
+    // of `Vec<OpenFile>` capacity holding 5.9 MB of rows (DIVERGENCES 30).
+    out.shrink_to_fit();
     Some(out)
 }
 
@@ -627,6 +634,17 @@ mod tests {
             },
         )
         .expect("own /proc/<pid>/fd is readable");
+
+        // The rows are held for the rest of the run, so growth slack is paid
+        // for the rest of the run too: 13.8 MB of capacity held 5.9 MB of rows
+        // at 1079 processes before this was trimmed (DIVERGENCES 30). Too
+        // small an effect on its own for the resource gate to separate on a
+        // shared runner, so the capacity itself is the control.
+        assert_eq!(
+            files.capacity(),
+            files.len(),
+            "a process's rows keep no spare capacity"
+        );
 
         assert!(
             files.iter().any(|f| f.fd == FdType::Cwd),
