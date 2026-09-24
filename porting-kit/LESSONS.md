@@ -2875,3 +2875,49 @@ finding it is supposed to produce.
   files), so it lives in `lsof-rs/differential/resource_gate.py`.
 - **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md` · item 7
   (performance sanity).
+
+## 063. The C dies of SIGPIPE and Rust ignores it — so `println!` turns `| head` into a panic
+
+- **Date:** 2026-09-24
+- **Codebase:** lsof-rs (found while making the table stream, DIVERGENCES 30),
+  and the kit's own skeleton, which had the same defect
+- **What happened:** `lsof | head -1` — the most ordinary way to use lsof —
+  ended with
+  `thread 'main' panicked … failed printing to stdout: Broken pipe (os error 32)`
+  and exit 101. The C ends the same pipeline silently, and the shell reports
+  141. It had been that way for the whole life of the port, and no gate saw it.
+
+  The cause is a difference between the languages, not a bug in any line. A C
+  program's default disposition for SIGPIPE is to terminate: when the reader
+  goes away the next `write` kills the process, silently. **The Rust runtime
+  sets SIGPIPE to ignored at startup**, so the same `write` returns `EPIPE`
+  instead — and `print!`/`println!` panic on any write error. Every port that
+  prints with `print!` inherits it. The kit's skeleton CLI, the file every port
+  starts by copying, printed with `println!` on every path: measured, it exits
+  101 with a panic on `--help`, on `--version` and on real output alike.
+
+  **Why nothing caught it:** every test of a CLI reads *all* of its output.
+  The differential captures stdout to the end; the smoke suites capture it;
+  the goldens compare whole strings. The one situation no test reaches by
+  accident is the reader leaving early — which is the one situation a shell
+  user produces constantly.
+
+- **What to do in a port:** write output through a buffered, locked stdout and
+  route every write result through one function that treats
+  `ErrorKind::BrokenPipe` as "the reader is gone" — exit 141 and say nothing,
+  which gives the same `$?` and the same `set -o pipefail` verdict as the C
+  (re-raising the signal would be exact, and needs `unsafe`) — and reports any
+  other write failure in one line with exit 1. If the C you are porting ignores
+  SIGPIPE itself, mirror that instead; the default is what C programs get.
+- **And test it the way it happens:** spawn the binary with its stdout read end
+  already closed, and assert 141 and an empty stderr. Plus a control that a
+  normal run exits 0 — in lsof-rs a mutation that sent *every* run down the
+  write-error path passed both failure tests, because each one only ever looks
+  at a failing write.
+- **Kit change:** `skeleton/crates/cli/src/main.rs` writes through
+  `exit_on_write_error` instead of `println!`, and
+  `skeleton/crates/cli/tests/stdout.rs` pins all three cases (normal run, closed
+  pipe, `/dev/full`); reverting the skeleton to a panic fails one of them.
+  `check_skeleton.sh` runs them.
+- **Section amended:** `porting-kit/skeleton/crates/cli/src/main.rs`,
+  `porting-kit/skeleton/crates/cli/tests/stdout.rs`.
