@@ -17,6 +17,10 @@ fn self_pid() -> String {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
 fn a_normal_run_writes_its_table_and_exits_0() {
     // The control for the two tests below, and not a formality: a mutation
     // that sent EVERY run down the write-error path — table printed, then
@@ -47,6 +51,10 @@ fn a_normal_run_writes_its_table_and_exits_0() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
 fn a_closed_pipe_exits_141_and_says_nothing() {
     // The read end is dropped before lsof has written a byte — it spends
     // milliseconds reading /proc first — so the first write meets EPIPE.
@@ -72,6 +80,10 @@ fn a_closed_pipe_exits_141_and_says_nothing() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
 fn any_other_write_error_is_reported_not_panicked() {
     // /dev/full accepts the open and fails every write with ENOSPC — the
     // `lsof > file` on a full disk case. That IS an error, and it is one line

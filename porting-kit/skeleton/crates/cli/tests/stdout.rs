@@ -10,6 +10,10 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
 fn a_normal_run_prints_and_exits_0() {
     let out = Command::new(env!("CARGO_BIN_EXE_port"))
         .arg("--version")
@@ -21,6 +25,10 @@ fn a_normal_run_prints_and_exits_0() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
 fn a_closed_pipe_exits_141_and_says_nothing() {
     // The read end is gone before the first write, so that write meets EPIPE.
     let mut child = Command::new(env!("CARGO_BIN_EXE_port"))
@@ -49,6 +57,10 @@ fn a_closed_pipe_exits_141_and_says_nothing() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
 fn any_other_write_error_is_reported_not_panicked() {
     // /dev/full fails every write with ENOSPC: a real error, one line, exit 1.
     let full = std::fs::OpenOptions::new()
