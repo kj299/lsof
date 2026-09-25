@@ -41,8 +41,17 @@ fn run(args: &[String], out: &mut impl Write) -> io::Result<i32> {
     let json = matches!(args.iter().position(|a| a == "--format"),
         Some(i) if args.get(i.saturating_add(1)).map(String::as_str) == Some("json"));
 
-    let mut input = String::new();
-    let _ = io::stdin().read_to_string(&mut input);
+    // Bytes first, then text. `read_to_string` fails on the first byte that
+    // is not UTF-8, and discarding its error made one such byte an EMPTY
+    // input: every good line around it silently gone, exit 0 (LESSONS #065).
+    // Decode lossily — the bad byte costs itself, not the input — and treat a
+    // real read failure as the error it is.
+    let mut raw = Vec::new();
+    if let Err(e) = io::stdin().read_to_end(&mut raw) {
+        eprintln!("read error: {e}");
+        return Ok(1);
+    }
+    let input = String::from_utf8_lossy(&raw);
 
     match core::parse(&input) {
         Ok(records) if json => {
