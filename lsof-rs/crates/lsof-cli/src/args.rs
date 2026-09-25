@@ -10,11 +10,11 @@
 //! path argument is an exact-file lookup; `+D`/`+d <dir>` is a directory-tree
 //! lookup.
 
-use lsof_core::render::Format;
+use lsof_core::render::{Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
-    CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol, Selection,
-    TaskMode, TcpInfoFlags,
+    CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol,
+    Selection, TaskMode, TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -29,20 +29,70 @@ pub enum Action {
         selection: Selection,
         format: Format,
         repeat: Option<u64>,
-        show_ppid: bool,
-        show_offset: bool,
+        columns: Columns,
     },
 }
 
+/// What the table's columns show. Pure presentation: nothing here selects a
+/// row, which is why it lives beside the [`Selection`] rather than in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Columns {
+    /// `-R`: a PPID column after PID.
+    pub ppid: bool,
+    /// `-g` on a platform with process groups: a PGID column after PPID.
+    pub pgid: bool,
+    /// `-o`: the SIZE/OFF column shows offsets and only offsets, headed
+    /// `OFFSET` — a row with no offset leaves it blank rather than falling
+    /// back to its size.
+    pub offset: bool,
+    /// `-s` with no value: sizes and only sizes, headed `SIZE`.
+    pub size: bool,
+    /// `-o <digits>`: how many decimal digits an offset may have before it is
+    /// printed in hex instead (the C's `OffDecDig`); 0 means no limit.
+    pub offset_digits: usize,
+}
+
+impl Default for Columns {
+    fn default() -> Self {
+        Self {
+            ppid: false,
+            pgid: false,
+            offset: false,
+            size: false,
+            offset_digits: DEFAULT_OFFSET_DIGITS,
+        }
+    }
+}
+
+/// A run of ASCII digits as a count, saturating rather than wrapping. The C
+/// accumulates `-o`'s digits in an `int` and overflows it (undefined
+/// behaviour); any limit past the 20 digits a 64-bit offset can have means
+/// "never hex", and so does the saturated value.
+fn digits_value(digits: &str) -> usize {
+    digits.bytes().fold(0usize, |n, b| {
+        n.saturating_mul(10).saturating_add(usize::from(b - b'0'))
+    })
+}
+
 /// Parse the argument list (excluding argv[0]).
-pub fn parse(args: Vec<String>) -> Result<Action, String> {
+pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     let mut sel = Selection::default();
     let mut format = Format::Table;
     let mut want_help = false;
     let mut want_version = false;
     let mut repeat: Option<u64> = None;
-    let mut show_ppid = false;
-    let mut show_offset = false;
+    let mut columns = Columns::default();
+    // `-F` with an explicit `o` letter switches the C's `Foffset` on too
+    // (`main.c`, `if (i == LSOF_FIX_OFFSET) Foffset = 1`) — so it collides
+    // with a bare `-s` exactly as `-o` does. A bare `-F` selects the field
+    // without that side effect.
+    let mut fields_offset = false;
+    // `-c`'s comparison. The C's case-sensitive prefix everywhere it has an
+    // oracle; the Windows port keeps the forgiving match its image names were
+    // designed around (see `CommandMatch`).
+    if cfg!(windows) {
+        sel.command_match = CommandMatch::Forgiving;
+    }
 
     let mut i = 0;
     while i < args.len() {
@@ -216,8 +266,52 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                 }
                 'J' => format = Format::Json,
                 'j' => format = Format::JsonLines,
-                'R' => show_ppid = true,
-                'o' => show_offset = true,
+                'R' => columns.ppid = true,
+                'o' => {
+                    // `-o [digits]`. The value is optional and only ever
+                    // digits (`main.c`): digits set the offset digit limit,
+                    // and anything else means there was no value — bare `-o`,
+                    // with the text given back to be parsed again. So `-ot`
+                    // is `-o -t`, `-o3t` is `-o3 -t`, and `-o /file` is `-o`
+                    // and a file name. Note that a limit does NOT switch the
+                    // offset column on: `-o 5` keeps SIZE/OFF.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    if !rest.is_empty() {
+                        let digits: String =
+                            rest.chars().take_while(char::is_ascii_digit).collect();
+                        if digits.is_empty() {
+                            columns.offset = true;
+                        } else {
+                            columns.offset_digits = digits_value(&digits);
+                            // The letters after the digits are options again.
+                            j += 1 + digits.len();
+                            continue;
+                        }
+                    } else if let Some(next) = args.get(i + 1) {
+                        let digits: String =
+                            next.chars().take_while(char::is_ascii_digit).collect();
+                        if digits.is_empty() {
+                            // Not a value — including `-x`-style words, which
+                            // are the next option.
+                            columns.offset = true;
+                        } else {
+                            columns.offset_digits = digits_value(&digits);
+                            let leftover = next[digits.len()..].to_string();
+                            if leftover.is_empty() {
+                                i += 1;
+                            } else {
+                                // `-o 3t`: the C resumes option scanning in
+                                // the middle of the word, so what follows the
+                                // digits is read as option letters.
+                                args[i + 1] = format!("-{leftover}");
+                            }
+                        }
+                        j = chars.len();
+                        continue;
+                    } else {
+                        columns.offset = true;
+                    }
+                }
                 'v' => want_version = true,
                 'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
@@ -365,6 +459,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     let rest: Vec<char> = chars[j + 1..].to_vec();
                     let nul = rest.contains(&'0');
                     let only: Vec<char> = rest.into_iter().filter(|c| *c != '0').collect();
+                    fields_offset |= only.contains(&'o');
                     // The C's field table gives some letters a side effect:
                     // selecting one also switches on the collection it needs
                     // (`store.c` — `T` carries `Ftcptpi |= TCPTPI_ALL`). That is
@@ -387,8 +482,23 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     continue;
                 }
                 'i' => {
+                    // `-i [spec]`: the spec is attached or the next word, and
+                    // a word that opens an option is not one (`main.c`). So
+                    // `-i :80` is the spec `:80` — lsof-rs had read it as a
+                    // bare `-i` and a file called `:80`.
                     let rest: String = chars[j + 1..].iter().collect();
-                    parse_inet(&mut sel, &rest)?;
+                    let spec = if !rest.is_empty() {
+                        rest
+                    } else {
+                        match args.get(i + 1) {
+                            Some(next) if !next.starts_with(['-', '+']) => {
+                                i += 1;
+                                next.clone()
+                            }
+                            _ => String::new(),
+                        }
+                    };
+                    parse_inet(&mut sel, &spec)?;
                     j = chars.len();
                     continue;
                 }
@@ -407,7 +517,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     j = chars.len();
                     continue;
                 }
-                'p' | 'u' | 'c' | 'g' => {
+                'p' | 'u' | 'c' => {
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
@@ -422,18 +532,53 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
                     j = chars.len();
                     continue;
                 }
-                's' => {
+                'g' => {
+                    // `-g [pgids]`: the value is optional, attached or the
+                    // next word, and a word that opens an option is not one
+                    // (`main.c`). With or without it, `-g` adds the PGID
+                    // column; with it, it also selects by process group.
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
-                        rest
+                        Some(rest)
                     } else {
-                        i += 1;
-                        if i >= args.len() {
-                            return Err("option -s requires a [proto:state] value".to_string());
+                        match args.get(i + 1) {
+                            Some(next) if !next.starts_with(['-', '+']) => {
+                                i += 1;
+                                Some(next.clone())
+                            }
+                            _ => None,
                         }
-                        args[i].clone()
                     };
-                    sel.state_filter = Some(parse_state_filter(&value)?);
+                    apply_g(&mut sel, &mut columns, value.as_deref())?;
+                    j = chars.len();
+                    continue;
+                }
+                's' => {
+                    // `-s [p:s]`: with a value it is a TCP/UDP state filter;
+                    // without one it is the SIZE column (`main.c`: `if (!GOv
+                    // || *GOv == '-' || *GOv == '+') Fsize = 1`). The value is
+                    // attached or the next word, and a word that opens an
+                    // option is not one — so `-s -o` is a bare `-s` and a
+                    // `-o`, not a state filter spelled `-o`. lsof-rs had taken
+                    // the next word unconditionally: `lsof -s -p 1` looked for
+                    // a file called `1`, and `lsof -s -o` silently filtered
+                    // every socket out by a state named `-o`.
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if !rest.is_empty() {
+                        Some(rest)
+                    } else {
+                        match args.get(i + 1) {
+                            Some(next) if !next.starts_with(['-', '+']) => {
+                                i += 1;
+                                Some(next.clone())
+                            }
+                            _ => None,
+                        }
+                    };
+                    match value {
+                        Some(v) => sel.state_filter = Some(parse_state_filter(&v)?),
+                        None => columns.size = true,
+                    }
                     j = chars.len();
                     continue;
                 }
@@ -444,6 +589,16 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
         i += 1;
     }
 
+    // The C refuses a PID or PGID that is both selected and excluded
+    // (`lib/lsof.c`), and enters each only once — `-p 5,5` is one search
+    // item, reported once if it is not found.
+    dedup_ids(&mut sel.pids, &sel.pid_excludes, "PID")?;
+    dedup_ids(&mut sel.pgids, &sel.pgid_excludes, "PGID")?;
+    // Checked after the loop because the two may come in either order. `-o 5`
+    // is only a digit limit and does not count; `-Fo` does (see above).
+    if (columns.offset || fields_offset) && columns.size {
+        return Err("-o and -s are mutually exclusive".to_string());
+    }
     if want_help {
         return Ok(Action::Help);
     }
@@ -471,8 +626,7 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
         selection: sel,
         format,
         repeat,
-        show_ppid,
-        show_offset,
+        columns,
     })
 }
 
@@ -517,21 +671,51 @@ fn parse_fd_filter(value: &str) -> Result<FdFilter, String> {
     Ok(filter)
 }
 
+/// A `-p`/`-g` list: comma- or space-separated IDs, each optionally `^`
+/// for an exclusion. `what` names the list in the error.
+fn parse_id_list(value: &str, what: &str) -> Result<Vec<(bool, u32)>, String> {
+    value
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|t| {
+            let (excl, id) = match t.strip_prefix('^') {
+                Some(rest) => (true, rest),
+                None => (false, t),
+            };
+            id.parse::<u32>()
+                .map(|n| (excl, n))
+                .map_err(|_| format!("invalid {what}: {t}"))
+        })
+        .collect()
+}
+
+/// Order-preserving de-duplication of an inclusion list, and the C's refusal
+/// of an ID that is also excluded: `lsof: PID 1 has been included and
+/// excluded.`, measured.
+fn dedup_ids(ids: &mut Vec<u32>, excludes: &[u32], what: &str) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(*id));
+    match ids.iter().find(|id| excludes.contains(id)) {
+        Some(id) => Err(format!("{what} {id} has been included and excluded.")),
+        None => Ok(()),
+    }
+}
+
 fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String> {
     match opt {
         'p' => {
-            for t in value
-                .split(|ch: char| ch == ',' || ch.is_whitespace())
-                .filter(|s| !s.is_empty())
-            {
-                match t.parse::<u32>() {
-                    Ok(p) => sel.pids.push(p),
-                    Err(_) => return Err(format!("invalid pid: {t}")),
+            for (excl, pid) in parse_id_list(value, "pid")? {
+                if excl {
+                    sel.pid_excludes.push(pid);
+                } else {
+                    sel.pids.push(pid);
                 }
             }
         }
         // `-u ^name` and `-c ^name` are negations, not selections: they
         // exclude absolutely and take no part in the OR/AND rule (Lsof.8).
+        // Names are resolved to IDs after parsing, by the backend that knows
+        // how (see `main.rs`); here they are only split.
         'u' => {
             for t in value.split(',').filter(|s| !s.is_empty()) {
                 match t.strip_prefix('^') {
@@ -541,26 +725,79 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                 }
             }
         }
-        'c' => match value.strip_prefix('^') {
-            Some("") => return Err("option -c^ requires a name".to_string()),
-            Some(name) => sel.command_excludes.push(name.to_string()),
-            None => sel.commands.push(value.to_string()),
-        },
-        'g' => {
-            // Windows extension: `-g <ppid>[,<ppid>...]` selects processes
-            // whose PPID is in the list (no PGID on Windows). See
-            // docs/feature-parity-plan.md.
-            for t in value
-                .split(|ch: char| ch == ',' || ch.is_whitespace())
-                .filter(|s| !s.is_empty())
-            {
-                match t.parse::<u32>() {
-                    Ok(p) => sel.ppid_filter.push(p),
-                    Err(_) => return Err(format!("invalid -g ppid: {t}")),
+        'c' => {
+            // `enter_cmd()`: a value that opens an option is a missing value,
+            // and one that opens with `/` is a regular expression
+            // (`main.c`: `if (GOv && (*GOv == '/'))`). lsof-rs has no regex
+            // engine, and reading `/re/` as a literal command name matched
+            // nothing, silently — so it is refused, loudly, instead.
+            if value.starts_with(['-', '+']) {
+                return Err("missing -c option value".to_string());
+            }
+            if value.starts_with('/') {
+                return Err(format!(
+                    "-c {value}: regular expressions (-c /RE/) are not implemented"
+                ));
+            }
+            let (excl, name) = match value.strip_prefix('^') {
+                Some("") => return Err("option -c^ requires a name".to_string()),
+                Some(name) => (true, name),
+                None => (false, value),
+            };
+            // A name longer than the kernel keeps can never match, and the C
+            // says so rather than accepting it (`lsof_select_process()`).
+            if let Some(max) = MAX_COMMAND_WIDTH {
+                if name.len() > max {
+                    return Err(format!(
+                        "\"-c {name}\" length ({}) > what system provides ({max})",
+                        name.len()
+                    ));
                 }
             }
+            let (this, other) = if excl {
+                (&mut sel.command_excludes, &sel.commands)
+            } else {
+                (&mut sel.commands, &sel.command_excludes)
+            };
+            if other.iter().any(|o| o == name) {
+                return Err(format!("-c^{name} and -c{name} conflict."));
+            }
+            this.push(name.to_string());
         }
         _ => unreachable!(),
+    }
+    Ok(())
+}
+
+/// `-g`, with or without its value.
+///
+/// Where processes have groups this is the C's option: the PGID column, and
+/// with a value, selection by process group — `-g 42` lists group 42, `-g ^42`
+/// excludes it, and an unmatched group is a search item (`process group ID
+/// not located`). lsof-rs had read it as a *parent* PID on every platform,
+/// so on Linux `-g <pgid>` selected the wrong processes, `-g ^N` was an error,
+/// and a bare `-g` was refused. Windows has no process groups and keeps the
+/// PPID reading, which is its own extension (`docs/feature-parity-plan.md`).
+fn apply_g(sel: &mut Selection, columns: &mut Columns, value: Option<&str>) -> Result<(), String> {
+    if cfg!(windows) {
+        let Some(value) = value else {
+            return Err("option -g requires a value".to_string());
+        };
+        for (excl, ppid) in parse_id_list(value, "-g ppid")? {
+            if excl {
+                return Err(format!("invalid -g ppid: ^{ppid}"));
+            }
+            sel.ppid_filter.push(ppid);
+        }
+        return Ok(());
+    }
+    columns.pgid = true;
+    for (excl, pgid) in parse_id_list(value.unwrap_or(""), "process group ID")? {
+        if excl {
+            sel.pgid_excludes.push(pgid);
+        } else {
+            sel.pgids.push(pgid);
+        }
     }
     Ok(())
 }
@@ -672,67 +909,124 @@ fn parse_state_filter(value: &str) -> Result<StateFilter, String> {
     Ok(filter)
 }
 
-/// Parse an `-i` spec: `[46][tcp|udp][@host][:port]`. An empty spec means "all
-/// Internet files".
+/// Parse an `-i` spec: `[46][proto][@host][:ports]`. An empty one, or one
+/// that is only `4` or `6`, is the bare form — every Internet file — and
+/// anything else is an address specification of its own (see
+/// [`lsof_core::InetFilter`]).
+///
+/// What the C resolves and lsof-rs does not is refused, not guessed: a host
+/// NAME (`@localhost`) and a service NAME (`:http`). lsof-rs never resolves
+/// names (DIVERGENCES, "Deliberate, and staying"), and it had been reading
+/// both as a pattern that matched nothing (a host) or as no constraint at all
+/// (a service, and a port range) — so `-i:http` listed every Internet file,
+/// measured, where the C lists port 80.
 fn parse_inet(sel: &mut Selection, spec: &str) -> Result<(), String> {
-    sel.inet.enabled = true;
+    let text = spec.to_string();
     let mut s = spec;
-
+    let mut family = None;
     match s.chars().next() {
         Some('4') => {
-            sel.inet.family = Some(4);
+            family = Some(4);
             s = &s[1..];
         }
         Some('6') => {
-            sel.inet.family = Some(6);
+            family = Some(6);
             s = &s[1..];
         }
         _ => {}
     }
+    if s.is_empty() {
+        sel.inet.add_all(family);
+        return Ok(());
+    }
+    sel.inet.enabled = true;
+    // An address spec with no version of its own takes the bare form's, if
+    // one came before it (`arg.c`: `else if (Fnet) ft = FnetTy`).
+    if family.is_none() && sel.inet.all {
+        family = sel.inet.all_family;
+    }
 
     let low = s.to_ascii_lowercase();
-    if low.starts_with("tcp") {
-        sel.inet.proto = Some(Protocol::Tcp);
-        s = &s[3..];
-    } else if low.starts_with("udp") {
-        sel.inet.proto = Some(Protocol::Udp);
-        s = &s[3..];
-    } else if low.starts_with("icmp") {
-        // ETW-only family (no IP Helper table): the filter implies the AFD
+    let mut proto = None;
+    for (name, p) in [
+        ("tcp", Protocol::Tcp),
+        ("udp", Protocol::Udp),
+        // ETW-only families (no IP Helper table): the filter implies the AFD
         // capture — see InetFilter::needs_etw. `-iICMP` covers v4 + v6 ICMP;
         // narrow with the `[46]` prefix (`-i6ICMP`), like TCP/UDP.
-        sel.inet.proto = Some(Protocol::Other("ICMP"));
-        s = &s[4..];
-    } else if low.starts_with("raw") {
-        sel.inet.proto = Some(Protocol::Other("RAW"));
-        s = &s[3..];
+        ("icmp", Protocol::Other("ICMP")),
+        ("raw", Protocol::Other("RAW")),
+    ] {
+        if low.starts_with(name) {
+            proto = Some(p);
+            s = &s[name.len()..];
+            break;
+        }
     }
 
-    let (host, port) = if let Some(at) = s.find('@') {
-        let after = &s[at + 1..];
-        match after.find(':') {
-            Some(colon) => (Some(&after[..colon]), Some(&after[colon + 1..])),
-            None => (Some(after), None),
-        }
-    } else if let Some(colon) = s.find(':') {
-        (None, Some(&s[colon + 1..]))
-    } else {
-        (None, None)
-    };
-
-    if let Some(h) = host {
+    let mut host = None;
+    if let Some(after) = s.strip_prefix('@') {
+        // `[::1]` brackets an IPv6 address, whose colons are not the port's.
+        let (h, rest) = if let Some(inner) = after.strip_prefix('[') {
+            let close = inner
+                .find(']')
+                .ok_or_else(|| format!("unterminated [ in: -i {text}"))?;
+            (&inner[..close], &inner[close + 1..])
+        } else {
+            match after.find(':') {
+                Some(c) => (&after[..c], &after[c..]),
+                None => (after, ""),
+            }
+        };
         if !h.is_empty() {
-            sel.inet.host = Some(h.to_string());
-        }
-    }
-    if let Some(p) = port {
-        if !p.is_empty() {
-            // Numeric ports only in the MVP; named services are ignored.
-            if let Ok(n) = p.parse::<u16>() {
-                sel.inet.port = Some(n);
+            let ip: std::net::IpAddr = h.parse().map_err(|_| {
+                format!("host names are not resolved: -i {text} (give the address)")
+            })?;
+            // An all-zero address is no constraint at all to the C
+            // (`is_nw_addr()` skips the comparison when every byte is 0).
+            if !ip.is_unspecified() {
+                host = Some(ip);
             }
         }
+        s = rest;
     }
+
+    let mut ports = Vec::new();
+    if let Some(list) = s.strip_prefix(':') {
+        for part in list.split(',').filter(|p| !p.is_empty()) {
+            let num = |t: &str| -> Result<u16, String> {
+                if t.bytes().all(|b| b.is_ascii_digit()) {
+                    t.parse::<u16>()
+                        .map_err(|_| format!("port out of range in: -i {text}"))
+                } else {
+                    Err(format!(
+                        "service names are not resolved: -i {text} (give the port number)"
+                    ))
+                }
+            };
+            let range = match part.split_once('-') {
+                Some((lo, hi)) => (num(lo)?, num(hi)?),
+                None => {
+                    let p = num(part)?;
+                    (p, p)
+                }
+            };
+            if range.0 > range.1 {
+                return Err(format!("bad port range in: -i {text}"));
+            }
+            ports.push(range);
+        }
+    } else if !s.is_empty() {
+        return Err(format!("unknown protocol name ({s}) in: -i {text}"));
+    }
+
+    sel.inet.specs.push(lsof_core::InetSpec {
+        text,
+        proto,
+        family,
+        ports,
+        host,
+    });
     Ok(())
 }
 
@@ -747,6 +1041,170 @@ mod tests {
             } => (selection, format),
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    /// Parse and hand back the column choices, or the error.
+    fn columns(argv: &[&str]) -> Result<(Columns, Selection), String> {
+        match parse(argv.iter().map(|s| s.to_string()).collect())? {
+            Action::Run {
+                columns, selection, ..
+            } => Ok((columns, selection)),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// `-o [digits]`, every spelling measured against the C (DIVERGENCES 6).
+    /// The value is only ever digits; anything else is given back to be
+    /// parsed again, which is what makes `-ot` and `-o /file` work.
+    #[test]
+    fn dash_o_takes_only_digits_and_gives_the_rest_back() {
+        let (c, _) = columns(&["-o"]).unwrap();
+        assert!(c.offset && c.offset_digits == 8);
+        // A digit limit alone does NOT switch the OFFSET column on.
+        for argv in [&["-o5"][..], &["-o", "5"][..]] {
+            let (c, _) = columns(argv).unwrap();
+            assert!(!c.offset && c.offset_digits == 5, "{argv:?}");
+        }
+        let (c, _) = columns(&["-o0", "-o"]).unwrap();
+        assert!(c.offset && c.offset_digits == 0, "-o0 is no limit");
+        // What follows the digits is option letters again, attached or not.
+        for argv in [&["-o3t"][..], &["-o", "3t"][..], &["-ot"][..]] {
+            let (_, sel) = columns(argv).unwrap();
+            assert!(sel.terse, "{argv:?}");
+        }
+        // A word that is not digits is not the value.
+        let (c, sel) = columns(&["-o", "/tmp/x"]).unwrap();
+        assert!(c.offset && sel.paths == ["/tmp/x"]);
+        let (c, sel) = columns(&["-o", "-p", "1"]).unwrap();
+        assert!(c.offset && sel.pids == [1]);
+        // The C overflows an int here; this saturates, which means "no hex".
+        let (c, _) = columns(&["-o", "99999999999999999999999999"]).unwrap();
+        assert_eq!(c.offset_digits, usize::MAX);
+    }
+
+    /// `-s` is the SIZE column without a value and a state filter with one —
+    /// and a word that opens an option is not a value.
+    #[test]
+    fn dash_s_alone_is_the_size_column() {
+        let (c, sel) = columns(&["-s"]).unwrap();
+        assert!(c.size && sel.state_filter.is_none());
+        // lsof-rs had read `-p` as the state and `1` as a file name.
+        let (c, sel) = columns(&["-s", "-p", "1"]).unwrap();
+        assert!(c.size && sel.pids == [1] && sel.paths.is_empty());
+        for argv in [&["-sTCP:LISTEN"][..], &["-s", "TCP:LISTEN"][..]] {
+            let (c, sel) = columns(argv).unwrap();
+            assert!(!c.size && sel.state_filter.is_some(), "{argv:?}");
+        }
+    }
+
+    /// `main.c:1091`: `-o` and `-s` cannot both be given, in either order —
+    /// and `-Fo` counts as `-o`, because selecting the `o` field sets the same
+    /// flag. A bare `-F` and a digit limit do not.
+    #[test]
+    fn dash_o_and_dash_s_are_mutually_exclusive() {
+        for argv in [
+            &["-o", "-s"][..],
+            &["-s", "-o"][..],
+            &["-os"][..],
+            &["-Fo", "-s"][..],
+            &["-s", "-Ffo"][..],
+        ] {
+            assert_eq!(
+                columns(argv).err().as_deref(),
+                Some("-o and -s are mutually exclusive"),
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            &["-F", "-s"][..],
+            &["-o5", "-s"][..],
+            &["-o", "-sTCP:LISTEN"][..],
+        ] {
+            assert!(columns(argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    /// `-c`'s argument rules, each measured against the C: a value that opens
+    /// an option is missing, one that opens with `/` is a regex (refused, not
+    /// read literally), a name the kernel could never hold is refused, and the
+    /// same name selected and excluded is a conflict.
+    #[test]
+    fn dash_c_refuses_what_could_never_match() {
+        let err = |argv: &[&str]| parse(argv.iter().map(|s| s.to_string()).collect()).err();
+        assert_eq!(
+            err(&["-c", "-p"]).as_deref(),
+            Some("missing -c option value")
+        );
+        assert!(err(&["-c", "/pyt/"]).is_some_and(|e| e.contains("not implemented")));
+        assert_eq!(
+            err(&["-c", "sleep", "-c", "^sleep"]).as_deref(),
+            Some("-c^sleep and -csleep conflict.")
+        );
+        assert_eq!(
+            err(&["-c", "^sleep", "-c", "sleep"]).as_deref(),
+            Some("-c^sleep and -csleep conflict.")
+        );
+        // A prefix of the other is not the same name, and is no conflict.
+        assert!(err(&["-c", "sle", "-c", "^sleep"]).is_none());
+        if cfg!(target_os = "linux") {
+            // `comm` holds 15 bytes; the C refuses 16 with this text, for an
+            // exclusion too (and names it without the `^`).
+            for argv in [
+                &["-c", "abcdefghijklmnop"][..],
+                &["-c", "^abcdefghijklmnop"][..],
+            ] {
+                assert_eq!(
+                    err(argv).as_deref(),
+                    Some("\"-c abcdefghijklmnop\" length (16) > what system provides (15)")
+                );
+            }
+            assert!(err(&["-c", "abcdefghijklmno"]).is_none(), "15 is fine");
+        }
+    }
+
+    /// `-p ^N` excludes, a repeated PID is one item, and one both selected and
+    /// excluded is refused — `lsof: PID 1 has been included and excluded.`
+    #[test]
+    fn dash_p_takes_exclusions_and_refuses_contradictions() {
+        let (sel, _) = run(&["-p", "^1,2", "-p", "2,3"]);
+        assert_eq!(sel.pid_excludes, [1]);
+        assert_eq!(sel.pids, [2, 3], "the repeat is dropped, order kept");
+        let err = parse(vec!["-p".into(), "1".into(), "-p".into(), "^1".into()]).err();
+        assert_eq!(
+            err.as_deref(),
+            Some("PID 1 has been included and excluded.")
+        );
+    }
+
+    /// `-g` is the C's process-group option wherever there are process groups:
+    /// the PGID column always, and with a value, selection (`^` excludes).
+    #[cfg(not(windows))]
+    #[test]
+    fn dash_g_selects_process_groups_and_adds_the_column() {
+        let (c, sel) = columns(&["-g"]).unwrap();
+        assert!(c.pgid && sel.pgids.is_empty() && sel.ppid_filter.is_empty());
+        // A word that opens an option is not the value.
+        let (c, sel) = columns(&["-g", "-p", "1"]).unwrap();
+        assert!(c.pgid && sel.pgids.is_empty() && sel.pids == [1]);
+        let (c, sel) = columns(&["-g", "5,^6"]).unwrap();
+        assert!(c.pgid && sel.pgids == [5] && sel.pgid_excludes == [6]);
+        assert!(sel.ppid_filter.is_empty(), "not the Windows PPID extension");
+        let (_, sel) = columns(&["-g7"]).unwrap();
+        assert_eq!(sel.pgids, [7]);
+        let err = parse(vec!["-g".into(), "1,^1".into()]).err();
+        assert_eq!(
+            err.as_deref(),
+            Some("PGID 1 has been included and excluded.")
+        );
+    }
+
+    /// Windows has no process groups; `-g` there is its PPID extension.
+    #[cfg(windows)]
+    #[test]
+    fn dash_g_on_windows_selects_children_of_a_ppid() {
+        let (c, sel) = columns(&["-g", "4"]).unwrap();
+        assert!(!c.pgid && sel.ppid_filter == [4] && sel.pgids.is_empty());
+        assert!(columns(&["-g"]).is_err());
     }
 
     #[test]
@@ -807,17 +1265,71 @@ mod tests {
     #[test]
     fn inet_spec() {
         let (sel, _) = run(&["-iTCP@127.0.0.1:443"]);
-        assert!(sel.inet.enabled);
-        assert_eq!(sel.inet.proto, Some(Protocol::Tcp));
-        assert_eq!(sel.inet.host.as_deref(), Some("127.0.0.1"));
-        assert_eq!(sel.inet.port, Some(443));
+        assert!(sel.inet.enabled && !sel.inet.all);
+        let s = &sel.inet.specs[0];
+        assert_eq!(s.text, "TCP@127.0.0.1:443");
+        assert_eq!(s.proto, Some(Protocol::Tcp));
+        assert_eq!(s.host, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(s.ports, [(443, 443)]);
     }
 
     #[test]
     fn inet_family_and_port_only() {
+        // A bare `-i6`, then a spec that inherits its version, as the C's
+        // `enter_network_address()` has it.
         let (sel, _) = run(&["-i6", "-i:53"]);
-        assert!(sel.inet.enabled);
-        assert_eq!(sel.inet.port, Some(53));
+        assert!(sel.inet.all && sel.inet.all_family == Some(6));
+        assert_eq!(sel.inet.specs.len(), 1);
+        assert_eq!(sel.inet.specs[0].family, Some(6));
+        assert_eq!(sel.inet.specs[0].ports, [(53, 53)]);
+    }
+
+    /// Every `-i` is kept, not just the last: `-i :80 -i :443` is two
+    /// specifications, ORed — lsof-rs had let each overwrite the one before.
+    /// And the spec may be the next word, unless that word opens an option.
+    #[test]
+    fn every_dash_i_is_its_own_specification() {
+        let (sel, _) = run(&["-i", ":80", "-i:443", "-i", "-p", "1"]);
+        let texts: Vec<&str> = sel.inet.specs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, [":80", ":443"]);
+        assert!(sel.inet.all, "the last -i was bare");
+        assert_eq!(sel.pids, [1]);
+        let (sel, _) = run(&["-i:22,80,1000-2000"]);
+        assert_eq!(sel.inet.specs[0].ports, [(22, 22), (80, 80), (1000, 2000)]);
+        let (sel, _) = run(&["-i6@[::1]:80"]);
+        assert_eq!(sel.inet.specs[0].host, Some("::1".parse().unwrap()));
+        assert_eq!(sel.inet.specs[0].family, Some(6));
+        // An all-zero address constrains nothing, to the C.
+        assert_eq!(run(&["-i@0.0.0.0:80"]).0.inet.specs[0].host, None);
+    }
+
+    /// `-i4`, `-i6` and a bare `-i` combine the C's asymmetric way.
+    #[test]
+    fn bare_dash_i_versions_combine_as_the_cs_do() {
+        for (argv, want) in [
+            (&["-i4"][..], Some(4)),
+            (&["-i4", "-i6"][..], None),
+            (&["-i4", "-i"][..], None),
+            (&["-i", "-i4"][..], Some(4)),
+            (&["-i6", "-i6"][..], Some(6)),
+        ] {
+            let (sel, _) = run(argv);
+            assert!(sel.inet.all, "{argv:?}");
+            assert_eq!(sel.inet.all_family, want, "{argv:?}");
+        }
+    }
+
+    /// What the C resolves and lsof-rs does not is refused rather than
+    /// matched wrongly: `-i:http` had listed every Internet file.
+    #[test]
+    fn names_the_c_would_resolve_are_refused() {
+        let err = |a: &str| parse(vec![a.to_string()]).err().unwrap_or_default();
+        assert!(err("-i:http").contains("service names are not resolved"));
+        assert!(err("-i@localhost").contains("host names are not resolved"));
+        assert!(err("-i:70000").contains("out of range"));
+        assert!(err("-i:9-1").contains("bad port range"));
+        assert!(err("-iSCTP").contains("unknown protocol"));
+        assert!(err("-i@[::1").contains("unterminated"));
     }
 
     #[test]
@@ -826,15 +1338,15 @@ mod tests {
         // them like tcp/udp (case-insensitive, family prefix composes) and
         // the parsed filter reports that it implies the ETW capture.
         let (sel, _) = run(&["-iICMP"]);
-        assert_eq!(sel.inet.proto, Some(Protocol::Other("ICMP")));
+        assert_eq!(sel.inet.specs[0].proto, Some(Protocol::Other("ICMP")));
         assert!(sel.inet.needs_etw());
 
         let (sel, _) = run(&["-i6icmp"]);
-        assert_eq!(sel.inet.family, Some(6));
-        assert_eq!(sel.inet.proto, Some(Protocol::Other("ICMP")));
+        assert_eq!(sel.inet.specs[0].family, Some(6));
+        assert_eq!(sel.inet.specs[0].proto, Some(Protocol::Other("ICMP")));
 
         let (sel, _) = run(&["-iRAW"]);
-        assert_eq!(sel.inet.proto, Some(Protocol::Other("RAW")));
+        assert_eq!(sel.inet.specs[0].proto, Some(Protocol::Other("RAW")));
         assert!(sel.inet.needs_etw());
 
         // TCP/UDP/plain -i never imply the capture.
@@ -950,7 +1462,7 @@ mod tests {
     #[test]
     fn ppid_and_verbose() {
         let show_ppid = match parse(vec!["-R".into()]).unwrap() {
-            Action::Run { show_ppid, .. } => show_ppid,
+            Action::Run { columns, .. } => columns.ppid,
             other => panic!("expected Run, got {other:?}"),
         };
         assert!(show_ppid);

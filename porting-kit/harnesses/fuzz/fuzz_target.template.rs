@@ -19,12 +19,20 @@ fuzz_target!(|data: &[u8]| {
     // with the real call. The parser must return a Result/Option and never
     // panic — no unwrap()/expect()/indexing that can go out of bounds on
     // hostile input.
-    if let Ok(text) = std::str::from_utf8(data) {
-        let _ = __CRATE__::__MODULE__::parse(text);
-    }
+    //
+    // Feed it the bytes the PRODUCTION READER sees, decoded the way that
+    // reader decodes them — never `if let Ok(text) = from_utf8(data)`, which
+    // silently skips every input that is not UTF-8 and so fuzzes a parser the
+    // reader may never reach. In lsof-rs the reader was `read_to_string`: one
+    // such byte failed the read, the whole table was dropped, and any process
+    // could hide from the tool (LESSONS #067). If the reader decodes lossily,
+    // do the same here; if it rejects, the rejection is behaviour to assert,
+    // not input to skip.
+    let text = String::from_utf8_lossy(data);
+    let _ = __CRATE__::__MODULE__::parse(&text);
 
     // If the parser has a round-trip invariant, assert it (parse->render->parse):
-    //   if let Ok(v) = __CRATE__::__MODULE__::parse(text) {
+    //   if let Ok(v) = __CRATE__::__MODULE__::parse(&text) {
     //       let rendered = __CRATE__::__MODULE__::render(&v);
     //       assert_eq!(Ok(v), __CRATE__::__MODULE__::parse(&rendered));
     //   }

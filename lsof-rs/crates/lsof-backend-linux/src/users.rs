@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 static PASSWD: OnceLock<HashMap<u32, String>> = OnceLock::new();
 
 fn passwd_map() -> &'static HashMap<u32, String> {
-    PASSWD.get_or_init(|| match std::fs::read_to_string("/etc/passwd") {
-        Ok(text) => parse_passwd(&text),
-        Err(_) => HashMap::new(),
+    PASSWD.get_or_init(|| match crate::text::read_lossy("/etc/passwd") {
+        Some(text) => parse_passwd(&text),
+        None => HashMap::new(),
     })
 }
 
@@ -38,6 +38,61 @@ pub fn parse_passwd(text: &str) -> HashMap<u32, String> {
     m
 }
 
+/// A `-u` value as the C's `enter_uid()` reads it: all digits is a UID as it
+/// stands, anything else is a login name looked up in the password file —
+/// the first entry with that name, as `getpwnam(3)` returns it.
+///
+/// Two departures, both deliberate:
+///
+/// * **No wrap-around.** The C accumulates the digits in a `uid_t` and never
+///   checks for overflow, so `-u 4294967296` is UID 0 and lists root's
+///   processes — measured. Here a number that does not fit is not a UID, is
+///   then looked up as a name, and is almost certainly `Unknown` (fatal).
+/// * **`/etc/passwd` only.** Without libc there is no `getpwnam`, so an account
+///   served only by NSS (LDAP, SSSD, systemd-homed) cannot be named here and
+///   is reported as unknown; its numeric UID still works. The USER column has
+///   the same limit, and shows the number for such an account.
+pub fn lookup(value: &str) -> lsof_core::UserLookup {
+    use lsof_core::UserLookup;
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(uid) = value.parse::<u32>() {
+            return UserLookup::Uid(uid);
+        }
+    }
+    match names_map().get(value) {
+        Some(&uid) => UserLookup::Uid(uid),
+        None => UserLookup::Unknown,
+    }
+}
+
+/// name → uid, read once. Its own map rather than a search of [`PASSWD`]
+/// (uid → name), which keeps only the first name for each UID and so could
+/// not find a second account sharing one.
+static NAMES: OnceLock<HashMap<String, u32>> = OnceLock::new();
+
+fn names_map() -> &'static HashMap<String, u32> {
+    NAMES.get_or_init(|| match crate::text::read_lossy("/etc/passwd") {
+        Some(text) => parse_passwd_names(&text),
+        None => HashMap::new(),
+    })
+}
+
+/// name → uid, the first line for each name winning, as `getpwnam()` scans.
+/// Pure; the same malformed-line rules as [`parse_passwd`].
+pub fn parse_passwd_names(text: &str) -> HashMap<String, u32> {
+    let mut m = HashMap::new();
+    for line in text.lines() {
+        let mut f = line.split(':');
+        let (Some(name), Some(_), Some(uid)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        if let Ok(uid) = uid.parse::<u32>() {
+            m.entry(name.to_string()).or_insert(uid);
+        }
+    }
+    m
+}
+
 /// Resolve `uid` to an account name, or its decimal form when unknown.
 /// `numeric` (`-l`) skips the lookup entirely, matching lsof.
 pub fn name_for(uid: u32, numeric: bool) -> String {
@@ -53,6 +108,29 @@ pub fn name_for(uid: u32, numeric: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_resolve_to_the_first_matching_line_like_getpwnam() {
+        let m = parse_passwd_names("root:x:0:0:::\ntoor:x:0:0:::\nalice:x:1000:1000:::\nalice:x:1001:1001:::\nbad:x:nope:1:::\n");
+        assert_eq!(m.get("root"), Some(&0));
+        // A second account on the same UID is still found by its name.
+        assert_eq!(m.get("toor"), Some(&0));
+        // A repeated name keeps its FIRST line, as getpwnam scans.
+        assert_eq!(m.get("alice"), Some(&1000));
+        assert_eq!(m.get("bad"), None);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn a_numeric_value_is_a_uid_and_never_wraps() {
+        use lsof_core::UserLookup;
+        assert_eq!(lookup("0"), UserLookup::Uid(0));
+        assert_eq!(lookup("12345"), UserLookup::Uid(12345));
+        // The C wraps this to 0 and lists root's processes. It is not a UID,
+        // so it is looked up as a name instead — and no account is called that.
+        assert_eq!(lookup("4294967296"), UserLookup::Unknown);
+        assert_eq!(lookup(""), UserLookup::Unknown);
+    }
 
     #[test]
     fn well_formed_lines_map_uid_to_name() {

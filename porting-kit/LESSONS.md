@@ -3037,3 +3037,88 @@ finding it is supposed to produce.
   .github/workflows/lsof-rs-ci.yml · core + lints; harnesses/gate-mutation/mutate_gates.py
   · MUTATIONS; CLAUDE.md · control table; Makefile · check-kit; README · harness
   table; skills/porting-kit-audit/SKILL.md · step 1.
+
+## 066. A mutation that is not reverted looks exactly like a gate that caught it
+
+- **Date:** 2026-09-25
+- **Codebase:** lsof-rs (the gates for DIVERGENCES 6, 13, 21 and 31)
+- **What happened:** the mirror image of #059. Two ad-hoc mutation drivers
+  mutated a source file in place, rebuilt, ran the gate, and restored the file
+  by moving a backup copy back over it. The restored file then carried the
+  backup's mtime — OLDER than the build that had just compiled the mutant — so
+  cargo judged the mutated artifact current and never rebuilt it. Every later
+  mutant ran on top of every earlier one.
+
+  It showed only because one case, `offsets-the-limit-applies-to-the-o-field`,
+  began failing under mutants that had nothing to do with it (a zombie filter,
+  a unix-socket reader): the `-F o` mutant three rows up was still in the
+  binary. Had the stale mutant broken no case of its own, nothing would have
+  looked wrong — and the damage is not only false KILLs: a later mutant that the
+  gate genuinely misses is reported KILLED by the earlier one's failure, so a
+  real survivor is masked. The first run of the unit-test batch had the same
+  flaw and was re-run; it happened to hold.
+- **The rule.** A mutation run must isolate each mutant: mutate a fresh copy
+  (as `harnesses/gate-mutation/mutate_gates.py` does — it was never affected),
+  or, mutating in place, **touch the restored file** so the build system sees
+  it change, and **re-run the unmutated baseline after the batch** on a forced
+  rebuild. Read each kill's *cause* as well as its verdict: a case killing
+  mutants it has no business seeing is the signature of a mutant still alive.
+  And a "fatal" case must be able to fail: a fatal error and an unlocated
+  search item both print nothing and exit 1, so those cases carry `-V`, the one
+  observable only the non-fatal run produces (#059's narrowest-observable rule).
+- **Kit change:** none — `mutate_gates.py` already isolates mutants by copying
+  the kit per mutation. Recorded so the next hand-rolled driver starts from the
+  requirement, as #059 asked for its twin.
+- **Section amended:** none — a method entry.
+
+---
+
+## 067. One byte that is not UTF-8 blinded a whole kernel table — and the fuzz target could not see it
+
+- **Date:** 2026-09-25
+- **Codebase:** lsof-rs (Linux backend), and the kit's skeleton and fuzz
+  template, which taught the same shape
+- **What happened:** the Linux backend read every kernel table — `status`,
+  `maps`, `/proc/net/*`, `/proc/locks`, the mount table, `/etc/passwd` — with
+  `read_to_string`, and treated its failure the way it treats a vanished
+  process: the table was empty. `read_to_string` fails on the first byte that
+  is not UTF-8, and most of those tables hold text an unprivileged user writes.
+  Measured against the C:
+
+  | written by any user | lsof-rs | the C |
+  |---|---|---|
+  | `prctl(PR_SET_NAME, "\xff\xfe…")` | the process is not listed; `-p` says it does not exist | listed as `\xff\xfe` |
+  | a unix socket bound to `…/sock\xff` | `lsof -U` lists **nothing, host-wide** | every socket, that one as `…/sock\xff` |
+  | a mapped library named with such a byte | every `mem` row of that process gone | all listed |
+
+  A forensic tool that anyone can hide from — or blind for everyone — with one
+  byte. And `std::env::args()` panicked outright on such an argument (`lsof
+  /tmp/$'\xff'`, exit 101): the same class on the one input that is not a
+  kernel table.
+
+  **Why the fuzz targets did not find it:** they fed the parsers
+  `String::from_utf8_lossy(data)` — text that had already survived a decode the
+  production reader never did. The parser was fuzzed; the read in front of it,
+  which is where the byte actually bit, was not. The kit's own fuzz template
+  went further and skipped non-UTF-8 input altogether (`if let Ok(text) =
+  from_utf8(data)`), and the kit's skeleton CLI read stdin with
+  `let _ = read_to_string(..)` — measured: `a=1`, a line holding `\xff`, `b=3`
+  printed nothing and exited 0.
+- **What to do in a port:** decide what an undecodable byte costs, per input,
+  and make it cost *that byte*: read bytes, decode lossily (or reject loudly),
+  never let a decode failure empty the input. Where the bytes are an identity —
+  a path you will `stat` — keep the raw bytes for the syscall and decode only
+  for display (lsof-rs's `maps` parser now carries `raw_path`; stat'ing the
+  lossily decoded name found no file and dropped the row). Fuzz at the read
+  boundary: the target should see what the reader sees, decoded as the reader
+  decodes it. And test the hostile input end to end: a process named
+  `sl\xffeep`, a socket bound to `sock\xff`, with a control that the strict
+  read really does fail.
+- **Kit change:** `harnesses/fuzz/fuzz_target.template.rs` decodes lossily
+  instead of skipping, with the reason; the skeleton CLI reads stdin as bytes,
+  decodes lossily, and reports a real read error; `skeleton/crates/cli/tests/
+  input.rs` pins it (reverting the skeleton to `let _ = read_to_string` fails
+  it), and `check_skeleton.sh` runs it.
+- **Section amended:** `porting-kit/harnesses/fuzz/fuzz_target.template.rs`,
+  `porting-kit/skeleton/crates/cli/src/main.rs`,
+  `porting-kit/skeleton/crates/cli/tests/input.rs`.

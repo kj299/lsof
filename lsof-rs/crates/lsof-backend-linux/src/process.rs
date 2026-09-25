@@ -1,19 +1,41 @@
 //! Process enumeration from `/proc`.
 
+use std::collections::HashSet;
+
 use lsof_core::model::Process;
 
 use crate::users;
+
+/// Every process in `/proc`, and which of them are zombies.
+pub struct Enumerated {
+    /// Every process, zombies included, sorted by pid.
+    pub procs: Vec<Process>,
+    /// The pids whose `State:` is `Z`.
+    ///
+    /// The C never lists one: `read_id_stat()` returns 1 for state `Z` and
+    /// `dproc.c` skips the process entry on that (`if ((prv >= 0) && (prv !=
+    /// 1))`), so `lsof -p <zombie>` prints nothing, exits 1, and `-V` says
+    /// `process ID not located`. lsof-rs printed a bare `unk unknown` row for
+    /// it and exited 0 (DIVERGENCES 31). They are reported here rather than
+    /// dropped because a zombie's **tasks** are still walked — `prv == 1` is
+    /// not `< 0` — so a process whose main thread has exited while another
+    /// thread runs on is listed through that live task, and only through it.
+    pub zombies: HashSet<u32>,
+}
 
 /// Every process currently in `/proc`, with pid, ppid, command and owner.
 ///
 /// A pid that vanishes mid-scan is skipped, not reported: `/proc` is a live
 /// view, and a process exiting while we walk it is normal operation rather
 /// than an error. Every read here is therefore best-effort.
-pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
-    let Ok(dir) = std::fs::read_dir("/proc") else {
-        return Vec::new();
+pub fn enumerate(numeric_ids: bool) -> Enumerated {
+    let mut out = Enumerated {
+        procs: Vec::new(),
+        zombies: HashSet::new(),
     };
-    let mut out = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return out;
+    };
     for entry in dir.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -21,23 +43,37 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
         let Ok(pid) = name.parse::<u32>() else {
             continue;
         };
-        if let Some(p) = read_one(pid, numeric_ids) {
-            out.push(p);
+        if let Some((p, zombie)) = read_one(pid, numeric_ids) {
+            if zombie {
+                out.zombies.insert(pid);
+            }
+            out.procs.push(p);
         }
     }
-    out.sort_by_key(|p| p.pid);
+    out.procs.sort_by_key(|p| p.pid);
     out
 }
 
-fn read_one(pid: u32, numeric_ids: bool) -> Option<Process> {
+/// `/proc/<pid>/status` (or a task's), as text — decoded **lossily**, through
+/// [`crate::text::read_lossy`]. `Name:` is whatever the process set with
+/// `prctl(PR_SET_NAME)` and need not be UTF-8; read strictly, the first byte
+/// that was not made the read fail and the process vanish from every listing,
+/// so any process could hide from lsof-rs by naming itself `\xff`.
+fn read_status(path: &str) -> Option<String> {
+    crate::text::read_lossy(path)
+}
+
+/// One process, and whether it is a zombie.
+fn read_one(pid: u32, numeric_ids: bool) -> Option<(Process, bool)> {
     // `status` rather than `stat`: `stat`'s second field is the command in
     // parentheses, and a command containing ") " defeats naive splitting — a
     // real and exploitable parsing trap, since process names are attacker-
     // controlled. `status` is line-oriented and has no such ambiguity.
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let status = read_status(&format!("/proc/{pid}/status"))?;
     let st = parse_status(&status);
+    let zombie = st.state == Some('Z');
 
-    Some(Process {
+    let p = Process {
         tid: None,
         task_command: None,
         uid: st.uid,
@@ -48,7 +84,8 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<Process> {
         user: st.uid.map(|u| users::name_for(u, numeric_ids)),
         files: Vec::new(),
         endpoint_peer: false,
-    })
+    };
+    Some((p, zombie))
 }
 
 /// The other threads of `pid`, as lsof models them: each task is its **own**
@@ -63,6 +100,12 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<Process> {
 ///
 /// The main thread (`tid == pid`) is **not** returned: it is the process, and
 /// the C shows it with blank TID and TASKCMD cells.
+///
+/// Nor is a **zombie** task — the C reads each task's `stat` and skips one in
+/// state `Z` (`dproc.c`, `if ((rv < 0) || (rv == 1)) continue`). The name
+/// and the state come from the task's own `status` in one read, decoded the
+/// same lossy way as the process's, so a thread cannot hide itself with a
+/// non-UTF-8 name either (it had been skipped the same way, reading `comm`).
 pub fn tasks_of(parent: &Process) -> Vec<Process> {
     let Ok(dir) = std::fs::read_dir(format!("/proc/{}/task", parent.pid)) else {
         return Vec::new();
@@ -75,14 +118,19 @@ pub fn tasks_of(parent: &Process) -> Vec<Process> {
             if tid == parent.pid {
                 return None;
             }
-            // A thread that exits mid-scan is ordinary, not an error: its comm
-            // is simply gone, and the task is skipped rather than reported with
-            // a guessed name.
-            let comm =
-                std::fs::read_to_string(format!("/proc/{}/task/{tid}/comm", parent.pid)).ok()?;
+            // A thread that exits mid-scan is ordinary, not an error: its
+            // status is simply gone, and the task is skipped rather than
+            // reported with a guessed name.
+            let st = parse_status(&read_status(&format!(
+                "/proc/{}/task/{tid}/status",
+                parent.pid
+            ))?);
+            if st.state == Some('Z') {
+                return None;
+            }
             Some(Process {
                 tid: Some(tid),
-                task_command: Some(comm.trim_end_matches('\n').to_string()),
+                task_command: Some(st.command),
                 files: Vec::new(),
                 ..parent.clone()
             })
@@ -99,8 +147,11 @@ pub struct Status {
     pub ppid: Option<u32>,
     /// The **real** uid — the owner lsof shows, and its `-F u` value.
     pub uid: Option<u32>,
-    /// From `NSpgid:`, for `-F g`.
+    /// From `NSpgid:`, for `-F g` and `-g`.
     pub pgid: Option<u32>,
+    /// The one-letter scheduler state from `State:` (`R`, `S`, `Z`, …). A
+    /// `Z` is a zombie, which the C never lists.
+    pub state: Option<char>,
 }
 
 /// The parsing half of [`read_one`]: the fields of the text
@@ -114,12 +165,16 @@ pub fn parse_status(status: &str) -> Status {
     let mut ppid = None;
     let mut uid = None;
     let mut pgid = None;
+    let mut state = None;
     for line in status.lines() {
         if let Some(v) = line.strip_prefix("Name:") {
             // The kernel writes `Name:\t<comm>` — exactly one tab. The comm's
             // own whitespace (a trailing space is legal) is part of the name
             // and is kept; the renderer decides how to show it.
             command = unescape_comm(v.strip_prefix('\t').unwrap_or(v));
+        } else if let Some(v) = line.strip_prefix("State:") {
+            // `State:\tZ (zombie)` — the letter is all lsof reads.
+            state = v.trim_start().chars().next();
         } else if let Some(v) = line.strip_prefix("PPid:") {
             ppid = v.trim().parse::<u32>().ok();
         } else if let Some(v) = line.strip_prefix("Uid:") {
@@ -131,10 +186,23 @@ pub fn parse_status(status: &str) -> Status {
         }
         // `NSpgid` is the process group as seen in our own namespace, which
         // is the number lsof's `-F g` reports. There is no `Pgid:` line.
+        //
+        // It is a LIST — one pgid per nested pid namespace, outermost (ours)
+        // first — so a process in a container reads `NSpgid:\t4242\t1`.
+        // Parsing the whole value as one number made every such process's
+        // pgid `None`, which `-g` would have been unable to select.
         else if let Some(v) = line.strip_prefix("NSpgid:") {
-            pgid = v.trim().parse::<u32>().ok();
+            pgid = v
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u32>().ok());
         }
-        if !command.is_empty() && ppid.is_some() && uid.is_some() && pgid.is_some() {
+        if !command.is_empty()
+            && state.is_some()
+            && ppid.is_some()
+            && uid.is_some()
+            && pgid.is_some()
+        {
             break;
         }
     }
@@ -143,6 +211,7 @@ pub fn parse_status(status: &str) -> Status {
         ppid,
         uid,
         pgid,
+        state,
     }
 }
 
@@ -188,7 +257,7 @@ pub fn unescape_comm(s: &str) -> String {
 /// backend's elevation check. Read from `/proc/self/status` rather than
 /// `geteuid()` to stay free of `libc`.
 pub fn is_root() -> bool {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+    let Some(status) = crate::text::read_lossy("/proc/self/status") else {
         return false;
     };
     status
@@ -221,8 +290,36 @@ mod tests {
                 ppid: Some(7),
                 uid: Some(1000),
                 pgid: Some(41),
+                state: Some('S'),
             }
         );
+    }
+
+    #[test]
+    fn a_zombie_is_recognised_by_its_state_letter() {
+        // What the kernel writes for a zombie, and for a stopped process —
+        // lsof skips the first and lists the second.
+        assert_eq!(
+            parse_status("Name:\tz\nState:\tZ (zombie)\n").state,
+            Some('Z')
+        );
+        assert_eq!(
+            parse_status("Name:\tt\nState:\tT (stopped)\n").state,
+            Some('T')
+        );
+        assert_eq!(parse_status("State:\n").state, None);
+        assert_eq!(parse_status("").state, None);
+    }
+
+    #[test]
+    fn nspgid_is_a_list_and_the_first_entry_is_ours() {
+        // A process in a nested pid namespace — a container seen from the
+        // host — has one pgid per level, outermost first. The first is the
+        // one lsof reports (it is `stat`'s field 5 for the same reader).
+        assert_eq!(parse_status("NSpgid:\t4242\t1\n").pgid, Some(4242));
+        assert_eq!(parse_status("NSpgid:\t4242\n").pgid, Some(4242));
+        assert_eq!(parse_status("NSpgid:\tx\t1\n").pgid, None);
+        assert_eq!(parse_status("NSpgid:\n").pgid, None);
     }
 
     #[test]
@@ -283,7 +380,7 @@ mod tests {
     fn the_first_complete_set_wins_and_later_lines_are_ignored() {
         // Once every field is seen the loop stops — a second `Name:` further
         // down (impossible from the kernel, trivial from a fuzzer) is ignored.
-        let s = "Name:\tfirst\nPPid:\t1\nNSpgid:\t1\nUid:\t2\t2\t2\t2\nName:\tsecond\n";
+        let s = "Name:\tfirst\nState:\tS (sleeping)\nPPid:\t1\nNSpgid:\t1\nUid:\t2\t2\t2\t2\nName:\tsecond\n";
         assert_eq!(parse_status(s).command, "first");
     }
 }

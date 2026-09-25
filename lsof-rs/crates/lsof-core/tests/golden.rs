@@ -230,6 +230,199 @@ fn table_offset_with_dash_o() {
     .contains("0t42"));
 }
 
+/// The SIZE/OFF column's three modes, as `print.c` chooses them (DIVERGENCES
+/// 6). The rows are the shapes that tell the modes apart: a regular file with
+/// both a size and an offset, a `cwd` with a size and no offset (no fdinfo),
+/// and a pipe with an offset and no size.
+#[test]
+fn the_size_off_column_has_three_modes() {
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let file = |fd: FdType, ty: FileType, size: Option<u64>, offset: Option<u64>| OpenFile {
+        fs_device: None,
+        file_flags: None,
+        lock: None,
+        fd,
+        access: AccessMode::Read,
+        file_type: ty,
+        name: "n".into(),
+        device: Some("8,1".into()),
+        size,
+        offset,
+        node: Some("1".into()),
+        links: None,
+        socket: None,
+    };
+    let p = Process {
+        tid: None,
+        task_command: None,
+        uid: None,
+        pgid: Some(77),
+        pid: 7,
+        ppid: Some(1),
+        command: "x".into(),
+        user: None,
+        endpoint_peer: false,
+        files: vec![
+            file(FdType::Handle(3), FileType::Regular, Some(100), Some(42)),
+            file(FdType::Cwd, FileType::Dir, Some(4096), None),
+            file(FdType::Handle(4), FileType::Fifo, None, Some(9)),
+        ],
+    };
+    let render = |opts: TableOpts| table::render(std::slice::from_ref(&p), opts);
+    let cells = |out: &str| -> Vec<String> {
+        // The SIZE/OFF cell is the sixth whitespace field of every row
+        // (COMMAND PID USER FD TYPE DEVICE ...) — USER is blank here, so the
+        // fifth. Blank cells collapse, so compare whole lines instead.
+        out.lines()
+            .skip(1)
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    let base = TableOpts {
+        command_width: None,
+        ..TableOpts::new(Escaper::UNIX)
+    };
+
+    // Default: prefer the size, fall back to the offset.
+    let out = render(base);
+    assert!(out.lines().next().unwrap().contains("SIZE/OFF"), "{out}");
+    assert_eq!(
+        cells(&out),
+        [
+            "x 7 3r REG 8,1 100 1 n",
+            "x 7 cwd DIR 8,1 4096 1 n",
+            "x 7 4r FIFO 8,1 0t9 1 n"
+        ]
+    );
+
+    // -o: offsets ONLY. The cwd has no offset and stays blank — it does not
+    // fall back to its size, which is what lsof-rs did under a SIZE/OFF header.
+    let out = render(TableOpts {
+        show_offset: true,
+        ..base
+    });
+    let header = out.lines().next().unwrap();
+    assert!(
+        header.contains("OFFSET") && !header.contains("SIZE"),
+        "{out}"
+    );
+    assert_eq!(
+        cells(&out),
+        [
+            "x 7 3r REG 8,1 0t42 1 n",
+            "x 7 cwd DIR 8,1 1 n",
+            "x 7 4r FIFO 8,1 0t9 1 n"
+        ]
+    );
+
+    // -s: sizes ONLY; the pipe's offset is not shown.
+    let out = render(TableOpts {
+        show_size: true,
+        ..base
+    });
+    let header = out.lines().next().unwrap();
+    assert!(
+        header.contains(" SIZE ") && !header.contains("SIZE/OFF"),
+        "{out}"
+    );
+    assert_eq!(
+        cells(&out),
+        [
+            "x 7 3r REG 8,1 100 1 n",
+            "x 7 cwd DIR 8,1 4096 1 n",
+            "x 7 4r FIFO 8,1 1 n"
+        ]
+    );
+
+    // -g: a PGID column, after PPID when -R is also given, as print.c orders them.
+    let out = render(TableOpts {
+        show_ppid: true,
+        show_pgid: true,
+        ..base
+    });
+    assert!(
+        out.lines().next().unwrap().contains("PID PPID PGID USER"),
+        "{out}"
+    );
+    assert!(
+        out.lines().nth(1).unwrap().contains(" 7    1   77 "),
+        "{out}"
+    );
+}
+
+/// Past `-o`'s digit limit (8 by default) an offset prints in hex — in the
+/// table and in `-F`'s `o` field alike. Measured on an fd seeked to 123456789:
+/// the C prints `0x75bcd15`; `-o 9` or `-o 0` bring back `0t123456789`.
+#[test]
+fn a_long_offset_prints_in_hex_past_the_digit_limit() {
+    use lsof_core::render::{offset_text, DEFAULT_OFFSET_DIGITS};
+    assert_eq!(DEFAULT_OFFSET_DIGITS, 8);
+    assert_eq!(offset_text(12_345_678, 8), "0t12345678");
+    assert_eq!(offset_text(123_456_789, 8), "0x75bcd15");
+    assert_eq!(offset_text(123_456_789, 9), "0t123456789");
+    assert_eq!(offset_text(123_456_789, 0), "0t123456789", "0 is no limit");
+    assert_eq!(offset_text(0, 1), "0t0");
+    assert_eq!(offset_text(10, 1), "0xa");
+    assert_eq!(
+        offset_text(u64::MAX, usize::MAX),
+        format!("0t{}", u64::MAX),
+        "no overflow"
+    );
+
+    use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+    let p = Process {
+        tid: None,
+        task_command: None,
+        uid: None,
+        pgid: None,
+        pid: 7,
+        ppid: None,
+        command: "x".into(),
+        user: None,
+        endpoint_peer: false,
+        files: vec![OpenFile {
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "n".into(),
+            device: None,
+            size: Some(1),
+            offset: Some(123_456_789),
+            node: None,
+            links: None,
+            socket: None,
+        }],
+    };
+    let f = fields::render(
+        std::slice::from_ref(&p),
+        false,
+        Some(&['o']),
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
+    assert!(f.contains("o0x75bcd15\n"), "{f:?}");
+    let f = fields::render_with_offset_digits(
+        std::slice::from_ref(&p),
+        false,
+        Some(&['o']),
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+        0,
+    );
+    assert!(f.contains("o0t123456789\n"), "{f:?}");
+    let t = table::render(
+        &[p],
+        TableOpts {
+            show_offset: true,
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert!(t.contains("0x75bcd15"), "{t}");
+}
+
 /// A task entry for the TASKCMD tests: one row, one file, its own `comm`.
 #[cfg(test)]
 fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
@@ -1256,12 +1449,16 @@ fn sized(size: Option<u64>, offset: Option<u64>) -> lsof_core::model::Process {
     p
 }
 
-/// The SIZE/OFF cell of the first data row.
+/// The SIZE/OFF cell of the first data row — under whichever of the column's
+/// three headers the options chose (`SIZE/OFF`, `-o`'s `OFFSET`, `-s`'s `SIZE`).
 fn size_cell(p: &lsof_core::model::Process, opts: TableOpts) -> String {
     let out = table::render(std::slice::from_ref(p), opts);
     let header = out.lines().next().unwrap();
-    let col = header.find("SIZE/OFF").expect("SIZE/OFF header");
-    let end = col + "SIZE/OFF".len();
+    let (col, name) = ["SIZE/OFF", "OFFSET", "SIZE"]
+        .iter()
+        .find_map(|h| header.find(h).map(|c| (c, *h)))
+        .expect("a size/offset header");
+    let end = col + name.len();
     out.lines().nth(1).unwrap()[..end]
         .trim_end()
         .rsplit(' ')

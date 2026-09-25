@@ -140,7 +140,7 @@ impl SocketTable {
     }
 
     fn load_inet(&mut self, path: &str, proto: Protocol, v6: bool, queues: bool) {
-        if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(text) = crate::text::read_lossy(path) {
             self.parse_inet(&text, proto, v6, queues);
         }
     }
@@ -203,7 +203,7 @@ impl SocketTable {
     /// the local address's second half is **not** a port, it is the IP protocol
     /// number. That is how ICMP is identified — there is no `/proc/net/icmp`.
     fn load_raw(&mut self, path: &str, v6: bool) {
-        if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(text) = crate::text::read_lossy(path) {
             self.parse_raw(&text, v6);
         }
     }
@@ -259,7 +259,7 @@ impl SocketTable {
     /// the **inode** goes in DEVICE, the **ethernet protocol name** in NODE,
     /// and NAME is only `type=SOCK_RAW`.
     fn load_packet(&mut self, path: &str) {
-        if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(text) = crate::text::read_lossy(path) {
             self.parse_packet(&text);
         }
     }
@@ -334,7 +334,7 @@ impl SocketTable {
     }
 
     fn load_unix(&mut self, path: &str) {
-        if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(text) = crate::text::read_lossy(path) {
             self.parse_unix(&text);
         }
     }
@@ -1040,6 +1040,53 @@ mod tests {
                 other => panic!("unexpected socket file type {other:?}"),
             }
         }
+    }
+
+    /// One unix socket bound to a path that is not UTF-8, anywhere on the
+    /// host, made `/proc/net/unix` unreadable as a `String` — and lsof-rs
+    /// resolved **no** unix socket at all: `lsof -U` printed nothing for any
+    /// process, where the C listed every one. Binding such a path needs no
+    /// privilege (see `crate::text`).
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri's socket shim allows only AF_INET and AF_INET6 (measured: `socket: domain 0x1 is unsupported`); this test needs an AF_UNIX socket"
+    )]
+    fn a_non_utf8_socket_path_does_not_blind_the_unix_table() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("lsof-rs-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain_path = dir.join("plain");
+        let hostile_path = dir.join(std::ffi::OsStr::from_bytes(b"sock\xff"));
+        let plain = UnixListener::bind(&plain_path).expect("bind plain");
+        let hostile = UnixListener::bind(&hostile_path).expect("bind hostile");
+        let inode_of = |l: &UnixListener| -> u64 {
+            use std::os::fd::AsRawFd;
+            let link = std::fs::read_link(format!("/proc/self/fd/{}", l.as_raw_fd())).unwrap();
+            socket_inode(&link.to_string_lossy()).expect("a socket:[inode] link")
+        };
+        let (plain_ino, hostile_ino) = (inode_of(&plain), inode_of(&hostile));
+        let strict = std::fs::read_to_string("/proc/net/unix");
+        let t = SocketTable::load(false, false);
+        drop((plain, hostile));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            strict.is_err(),
+            "control: the strict read must fail while the hostile path is bound"
+        );
+        assert!(
+            t.get(plain_ino).is_some(),
+            "the ordinary socket must still resolve"
+        );
+        let e = t.get(hostile_ino).expect("and so must the hostile one");
+        assert!(
+            e.path
+                .as_deref()
+                .is_some_and(|p| p.ends_with("sock\u{FFFD}")),
+            "its path keeps everything but the undecodable byte: {:?}",
+            e.path
+        );
     }
 
     #[test]

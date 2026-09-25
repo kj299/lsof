@@ -17,7 +17,7 @@ use std::io::Write;
 use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
-use lsof_core::{Backend, FilesystemArgs, Process, Selection};
+use lsof_core::{Backend, FilesystemArgs, Located, Process, Selection, UidSel, UserLookup};
 
 #[cfg(target_os = "linux")]
 use lsof_backend_linux::LinuxBackend;
@@ -95,14 +95,19 @@ USAGE:\n\
     lsof [options]\n\
 \n\
 SELECTION:\n\
-    -p <pids>     select by PID (comma/space separated)\n\
-    -u <users>    select by owning user (comma separated)\n\
-    -c <cmd>      select by command/image name (prefix/substring)\n\
-    -g <ppids>    select children of these PPIDs (Windows extension of -g)\n\
+    -p <pids>     select by PID (comma/space separated; ^pid excludes)\n\
+    -u <users>    select by owning user, login name or UID (^ excludes)\n\
+    -c <cmd>      select by command name: a prefix (case-insensitive substring\n\
+                  on Windows); ^cmd excludes. -c /regex/ is not supported\n\
+    -g [pgids]    process groups: the PGID column, and with pgids, selection\n\
+                  (^ excludes). On Windows: select children of these PPIDs\n\
     -d <fds>      filter by FD: cwd,rtd,txt,mem, numbers, a-b ranges, ^exclude\n\
-    -i [spec]     only Internet sockets; spec = [46][tcp|udp|icmp|raw][@host][:port]\n\
+    -i [spec]     Internet sockets; spec = [46][tcp|udp|icmp|raw][@addr][:ports]\n\
+                  ports may be a list and ranges (:22,80,1000-2000); each -i\n\
+                  is its own item, ORed. Host and service names are not resolved\n\
                   (icmp/raw come from the ETW capture; needs Admin)\n\
-    -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN\n\
+    -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN;\n\
+                  a bare -s shows only sizes, in a SIZE column\n\
                   (comma-separated, `^` prefix excludes)\n\
     -U            list UNIX-domain (AF_UNIX) sockets (via ETW; needs Admin)\n\
     -K            list each process's threads as `task` rows (TID in NODE)\n\
@@ -122,7 +127,8 @@ OUTPUT:\n\
     -n            do not resolve host names\n\
     -P            do not resolve port names (show numeric ports)\n\
     -R            add a PPID (parent PID) column\n\
-    -o            show file offset in SIZE/OFF (0t<decimal>)\n\
+    -o [n]        an OFFSET column (0t<decimal>, 0x<hex> past n digits, default 8);\n\
+                  -o <n> alone sets the digit limit and keeps SIZE/OFF\n\
     -t            terse: PIDs only\n\
     -E            pipe endpoint info: append peer server/client PID+command\n\
                   to pipe NAMEs (GetNamedPipe*ProcessId)\n\
@@ -223,25 +229,39 @@ struct SearchItem {
     display: String,
 }
 
-fn report_unmatched(
+/// Every search item this run did not locate, as the lines `-V` prints for
+/// them — in the C's order and its words (`main.c`, the block after the
+/// listing): commands, files, Internet addresses, `-i`, NFS, PIDs, process
+/// groups, users. Every line is a `printf` there, so they go to stdout, and
+/// they come **after** the listing; lsof-rs had printed them before it, which
+/// no case caught because no case printed both.
+///
+/// The count is what matters when nothing is printed: lsof exits 1 on any
+/// unlocated item, `-V` or not, so `lsof -t <file> && …` and `if lsof …;
+/// then` work. `-Q` mutes both, which the caller decides.
+///
+/// What "located" means differs by kind, and each is the C's:
+///
+/// * `-p`/`-g`/`-u`/`-c` — a gathered process matched it, before any file is
+///   selected ([`Selection::locate`]): `lsof -a -p P -d 999` still exits 0.
+/// * a path — a **displayed** row is that file, by identity, or (for a file
+///   system argument) is on it.
+/// * `-i` (the bare form, and each specification) and `-N` — a file KEPT for
+///   a process that passed selection, printed or not, as the C sets `Fnet`
+///   and `Fnfs` when it links the file ([`Selection::locate`]).
+fn unlocated(
     sel: &Selection,
-    located: &HashSet<u32>,
+    located: &Located,
     search: &[SearchItem],
     procs: &[Process],
-) -> usize {
-    let print = sel.verbose && !sel.quiet;
-    let mut unmatched = 0usize;
-    for &pid in &sel.pids {
-        if !located.contains(&pid) {
-            unmatched += 1;
-            if print {
-                // STDOUT, and the C's wording: every "not located" line in
-                // `main.c` is a `printf`, not an `fprintf(stderr, ...)`. The
-                // stream is the part that matters — `-V` output is meant to be
-                // read alongside the table, and a consumer redirecting stdout
-                // gets the whole story or none of it.
-                println!("lsof: process ID not located: {pid}");
-            }
+    esc: Escaper,
+) -> Vec<String> {
+    let mut miss = Vec::new();
+    // `-c`. The C keeps these in a list it PREPENDS to (`Cmdl = lpt`), so it
+    // reports them last-given first.
+    for (c, hit) in sel.commands.iter().zip(&located.commands).rev() {
+        if !hit {
+            miss.push(format!("lsof: command not located: {}", esc.text(c)));
         }
     }
     // Every search item must turn up among the displayed rows or the run exits
@@ -283,48 +303,139 @@ fn report_unmatched(
             }
         };
         if !hit {
-            unmatched += 1;
-            if print {
-                println!("lsof: no file use located: {display}");
-            }
+            // `sfp->type ? "" : " system"` — a file-system argument has its
+            // own wording, measured: `no file system use located: /mnt/x`.
+            let kind = if fs_device.is_some() {
+                "file system"
+            } else {
+                "file"
+            };
+            miss.push(format!(
+                "lsof: no {kind} use located: {}",
+                esc.text(display)
+            ));
         }
     }
-    // `-i` is a search item in its own right: `main.c` keeps `Fnet` at 1 until
-    // some SAVED row carries `SELNET`, and `if (Fnet && Fnet < 2)` at the end
-    // is a search failure. So `lsof -a -i -p 1` exits 1 — pid 1 exists and was
-    // located, but no Internet file was listed. `-U` has no such rule, which
-    // is why this tests the inet selector alone.
-    if sel.inet.enabled
-        && !procs.iter().flat_map(|p| &p.files).any(|f| {
-            matches!(
-                f.file_type,
-                lsof_core::model::FileType::Ipv4 | lsof_core::model::FileType::Ipv6
-            )
-        })
-    {
-        unmatched += 1;
-        if print {
-            println!("lsof: no Internet files located");
+    // Each `-i` address specification. The C keeps them in a list it
+    // prepends to, so it reports the last given first, and a text given twice
+    // is one item — found if either copy was (`main.c`: "If any Internet
+    // address derived from the same argument was found, consider all
+    // derivations found").
+    let mut reported: Vec<&str> = Vec::new();
+    for spec in sel.inet.specs.iter().rev() {
+        let text = spec.text.as_str();
+        if reported.contains(&text) {
+            continue;
         }
+        reported.push(text);
+        let found = sel
+            .inet
+            .specs
+            .iter()
+            .zip(&located.inet)
+            .any(|(s, hit)| s.text == text && *hit);
+        if !found {
+            miss.push(format!(
+                "lsof: Internet address not located: {}",
+                esc.text(text)
+            ));
+        }
+    }
+    // A bare `-i`/`-i4`/`-i6` is a search item of its own: `main.c` keeps
+    // `Fnet` at 1 until some file it KEEPS for a selected process carries
+    // `SELNET`, and `if (Fnet && Fnet < 2)` at the end is a search failure.
+    // So `lsof -a -i -p 1` exits 1 — pid 1 exists and was located, but has no
+    // Internet file at all. `-U` has no such rule, which is why this tests
+    // the inet selector alone. See `Selection::locate` for "keeps".
+    if sel.inet.bare() && !located.inet_all {
+        miss.push("lsof: no Internet files located".to_string());
     }
     // `-N` is the same shape (`main.c`'s `Fnfs < 2`), and the message is the
     // same sentence with the noun changed. Measured on a host with no NFS
     // mount: `lsof -N` and `lsof -a -N -p 1` both exit 1, and so does
     // `lsof -N -p 1`, which DOES list the pid's files — the `-N` item was
     // still never located.
-    if sel.nfs_only
-        && !procs
-            .iter()
-            .flat_map(|p| &p.files)
-            .any(|f| f.fs_device.is_some_and(|d| sel.nfs_devices.contains(&d)))
-    {
-        unmatched += 1;
-        if print {
-            println!("lsof: no NFS files located");
+    if sel.nfs_only && !located.nfs {
+        miss.push("lsof: no NFS files located".to_string());
+    }
+    for (pid, hit) in sel.pids.iter().zip(&located.pids) {
+        if !hit {
+            miss.push(format!("lsof: process ID not located: {pid}"));
         }
     }
+    for (pgid, hit) in sel.pgids.iter().zip(&located.pgids) {
+        if !hit {
+            miss.push(format!("lsof: process group ID not located: {pgid}"));
+        }
+    }
+    // A user given by name is reported by name AND ID, one given by number
+    // by number: `login name (UID 1000) not located: alice`, `user ID not
+    // located: 12345` — both measured.
+    for (u, hit) in sel.uids.iter().zip(&located.uids) {
+        if !hit {
+            miss.push(match &u.login {
+                Some(login) => format!(
+                    "lsof: login name (UID {}) not located: {}",
+                    u.uid,
+                    esc.text(login)
+                ),
+                None => format!("lsof: user ID not located: {}", u.uid),
+            });
+        }
+    }
+    // Where users are matched by name (Windows) there is no ID to report.
+    for (u, hit) in sel.users.iter().zip(&located.users) {
+        if !hit {
+            miss.push(format!("lsof: login name not located: {}", esc.text(u)));
+        }
+    }
+    miss
+}
 
-    unmatched
+/// `-u`, resolved the way the platform names users ([`Backend::lookup_user`]):
+/// on Linux each value becomes a numeric ID, and a name the password file
+/// does not have is an error, as it is to the C (`can't get UID for X`, then
+/// the usage message, exit 1). The C enters each UID once and refuses one
+/// that is both selected and excluded — `UID 0 has been included and
+/// excluded.` — so `-u root,^0` is an error, not an empty listing.
+fn resolve_users(sel: &mut Selection, backend: &dyn Backend) -> Result<(), Vec<String>> {
+    let esc = Escaper::for_host();
+    let mut errors = Vec::new();
+    let mut by_name = Vec::new();
+    for v in std::mem::take(&mut sel.users) {
+        match backend.lookup_user(&v) {
+            UserLookup::Uid(uid) => {
+                if !sel.uids.iter().any(|s| s.uid == uid) {
+                    let login = (!v.bytes().all(|b| b.is_ascii_digit())).then(|| v.clone());
+                    sel.uids.push(UidSel { uid, login });
+                }
+            }
+            UserLookup::Unknown => errors.push(format!("can't get UID for {}", esc.text(&v))),
+            UserLookup::ByName => by_name.push(v),
+        }
+    }
+    sel.users = by_name;
+    let mut by_name = Vec::new();
+    for v in std::mem::take(&mut sel.user_excludes) {
+        match backend.lookup_user(&v) {
+            UserLookup::Uid(uid) => {
+                if !sel.uid_excludes.contains(&uid) {
+                    sel.uid_excludes.push(uid);
+                }
+            }
+            UserLookup::Unknown => errors.push(format!("can't get UID for {}", esc.text(&v))),
+            UserLookup::ByName => by_name.push(v),
+        }
+    }
+    sel.user_excludes = by_name;
+    if let Some(s) = sel.uids.iter().find(|s| sel.uid_excludes.contains(&s.uid)) {
+        errors.push(format!("UID {} has been included and excluded.", s.uid));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// What a failed write to stdout means (LESSONS #063).
@@ -350,7 +461,25 @@ fn exit_on_write_error(r: std::io::Result<()>) {
 }
 
 fn main() {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
+    // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —
+    // `lsof /tmp/$'\xff'` exited 101 with a panic message. lsof-rs keeps
+    // arguments as `String`s, so such an argument cannot be looked up yet;
+    // it is refused, in one line, rather than crashing on (DIVERGENCES).
+    let argv: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<_, _>>()
+    {
+        Ok(argv) => argv,
+        Err(bad) => {
+            eprintln!(
+                "lsof: an argument is not valid UTF-8, which lsof-rs cannot take: {}",
+                Escaper::for_host().text(&bad.to_string_lossy())
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Default output is ASCII (safe on PowerShell 5.1 / cmd.exe whose console
     // is Windows-1252). Users on modern terminals can pass `--unicode` to
@@ -370,7 +499,7 @@ fn main() {
         }
     };
 
-    let (selection, format, repeat, show_ppid, show_offset) = match action {
+    let (selection, format, repeat, columns) = match action {
         Action::Help => {
             print!("{}", usage());
             return;
@@ -386,9 +515,8 @@ fn main() {
             selection,
             format,
             repeat,
-            show_ppid,
-            show_offset,
-        } => (selection, format, repeat, show_ppid, show_offset),
+            columns,
+        } => (selection, format, repeat, columns),
     };
     let selection = {
         let mut sel = selection;
@@ -405,6 +533,17 @@ fn main() {
     };
 
     let env = make_env();
+    let selection = {
+        let mut sel = selection;
+        if let Err(errors) = resolve_users(&mut sel, env.backend.as_ref()) {
+            for e in errors {
+                eprintln!("lsof: {e}");
+            }
+            eprintln!("Try 'lsof -h' for usage.");
+            std::process::exit(1);
+        }
+        sel
+    };
     // Resolve the path arguments to file identities, now that a backend exists
     // to render them the way it renders a row. lsof matches a path by what the
     // file IS: `lsof /a/hardlink` finds it under its other name, and naming a
@@ -680,22 +819,16 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        // PIDs the backend actually located, captured before selection filtering
-        // so a PID dropped by e.g. `-a` isn't misreported as "not found". A
-        // process killed by a `^` negation is the exception: the C marks a PID
-        // search item found only if the process survives exclusion, so
-        // `lsof -c ^sleep -p <a sleep>` exits 1 there, and now here.
-        let located: HashSet<u32> = gathered
-            .iter()
-            .filter(|p| !selection.excludes_process(p))
-            .map(|p| p.pid)
-            .collect();
+        // The process-level search items, marked from what the backend
+        // gathered BEFORE any file is selected, so a PID whose files `-a`
+        // drops is still located; see `Selection::locate`.
+        let located = selection.locate(&gathered);
         let procs = selection.apply(gathered);
-        let unmatched = report_unmatched(&selection, &located, &search, &procs);
         // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
         let esc = Escaper::for_host();
+        let misses = unlocated(&selection, &located, &search, &procs, esc);
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
@@ -708,8 +841,11 @@ fn main() {
                 &procs,
                 TableOpts {
                     terse: selection.terse,
-                    show_ppid,
-                    show_offset,
+                    show_ppid: columns.ppid,
+                    show_pgid: columns.pgid,
+                    show_offset: columns.offset,
+                    show_size: columns.size,
+                    offset_digits: columns.offset_digits,
                     show_links: selection.show_links,
                     human_size: selection.human_size,
                     command_width: selection.command_width.cap(),
@@ -718,7 +854,15 @@ fn main() {
                 },
             ),
             Format::Fields { nul, only } => sink.write_all(
-                fields::render(&procs, *nul, only.as_deref(), selection.tcp_info(), esc).as_bytes(),
+                fields::render_with_offset_digits(
+                    &procs,
+                    *nul,
+                    only.as_deref(),
+                    selection.tcp_info(),
+                    esc,
+                    columns.offset_digits,
+                )
+                .as_bytes(),
             ),
             Format::Json => {
                 let mut s = json::render_aggregated(&procs);
@@ -727,8 +871,17 @@ fn main() {
             }
             Format::JsonLines => sink.write_all(json::render_lines(&procs).as_bytes()),
         };
-        exit_on_write_error(written.and_then(|()| sink.flush()));
-        unmatched
+        // `-V`'s lines follow the listing, on the same stream, as the C's do.
+        let written = written.and_then(|()| {
+            if selection.verbose && !selection.quiet {
+                for m in &misses {
+                    writeln!(sink, "{m}")?;
+                }
+            }
+            sink.flush()
+        });
+        exit_on_write_error(written);
+        misses.len()
     };
 
     // `-r`: repeat until interrupted, printing the format-aware cycle marker.

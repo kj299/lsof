@@ -70,14 +70,25 @@ impl Backend for LinuxBackend {
         true
     }
 
+    fn lookup_user(&self, value: &str) -> lsof_core::UserLookup {
+        crate::users::lookup(value)
+    }
+
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
-        let mut procs = process::enumerate(sel.numeric_ids);
+        let process::Enumerated { mut procs, zombies } = process::enumerate(sel.numeric_ids);
 
         // `-t` prints PIDs only, and the renderer emits a process's PID whether
         // or not it has files. When no file-level filter needs per-file data,
         // skip the entire fd walk — identical output, none of the work. Mirrors
         // the Windows backend's terse fast-path.
         if sel.terse && !sel.inet.enabled && sel.fd_filter.is_none() && !sel.has_path_filter() {
+            // A zombie is never listed (DIVERGENCES 31) — except through a
+            // task that outlived its main thread, when tasks are listed at
+            // all. Its entry stands in for that task here: the pid is the same
+            // and `-t` prints nothing else.
+            procs.retain(|p| {
+                !zombies.contains(&p.pid) || (sel.lists_tasks() && !process::tasks_of(p).is_empty())
+            });
             return Ok(procs);
         }
 
@@ -123,6 +134,11 @@ impl Backend for LinuxBackend {
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
                 continue;
             }
+            // A zombie holds nothing — its fd table and `mm` are gone — and it
+            // is dropped below; reading its empty directories would be waste.
+            if zombies.contains(&p.pid) {
+                continue;
+            }
             // `None` here is a process we cannot read: it exited during the
             // scan, or it belongs to another user and we are not root. Both are
             // ordinary; the process still appears, just without its files.
@@ -164,6 +180,17 @@ impl Backend for LinuxBackend {
             // stable sort on (pid, tid) reproduces that, with `None` — the
             // process itself — sorting first.
             procs.sort_by_key(|p| (p.pid, p.tid));
+        }
+
+        // The C never lists a zombie: `read_id_stat()` says `Z` and the
+        // process entry is skipped (`dproc.c`, `prv != 1`). Its live tasks,
+        // gathered above, stay — that is how a process whose main thread has
+        // exited is still listed, and only when tasks are. Everything else
+        // about the zombie is gone: `lsof -p <zombie>` prints nothing and
+        // exits 1 because the pid is no longer located, rather than printing
+        // the bare `unk unknown` row the renderer draws for a fileless entry.
+        if !zombies.is_empty() {
+            procs.retain(|p| p.tid.is_some() || !zombies.contains(&p.pid));
         }
 
         Ok(procs)
@@ -304,6 +331,148 @@ mod tests {
                 "control gather should still produce {want:?} rows"
             );
         }
+    }
+
+    /// A child that has exited and not been waited for: a zombie, until the
+    /// returned [`std::process::Child`] is waited on.
+    // Leaving a child unwaited is what this helper is FOR; every caller reaps
+    // the one it returns, which is more than the lint can follow.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the helper exists to make a zombie; its caller waits on the child"
+    )]
+    fn zombie() -> std::process::Child {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // `stat`'s state is the first field after the LAST `)`.
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if stat
+                .rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+            {
+                return child;
+            }
+            if std::time::Instant::now() >= deadline {
+                // Reap it rather than leave the zombie this was waiting for.
+                let _ = child.wait();
+                panic!("pid {pid} never became a zombie");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// DIVERGENCES 31: the C never lists a zombie, even one `-p` names —
+    /// `lsof -p <zombie>` prints nothing and exits 1. lsof-rs gathered it,
+    /// fileless, and the renderer drew its bare `unk unknown` row.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test needs a real zombie"
+    )]
+    fn a_zombie_is_not_gathered_even_when_named() {
+        let mut child = zombie();
+        let pid = child.id();
+        let named = Selection {
+            pids: vec![pid],
+            ..Default::default()
+        };
+        let gathered = LinuxBackend::new().gather(&named).unwrap();
+        let terse = LinuxBackend::new()
+            .gather(&Selection {
+                terse: true,
+                ..named.clone()
+            })
+            .unwrap();
+        // The control: the process is there to be found, and known for what it is.
+        let seen = process::enumerate(false);
+        child.wait().expect("reap the zombie");
+        assert!(
+            seen.procs.iter().any(|p| p.pid == pid) && seen.zombies.contains(&pid),
+            "control: enumerate must find pid {pid} and know it is a zombie"
+        );
+        assert!(
+            !gathered.iter().any(|p| p.pid == pid),
+            "a zombie must not be gathered"
+        );
+        assert!(
+            !terse.iter().any(|p| p.pid == pid),
+            "nor through -t's fast path, which never walks files"
+        );
+    }
+
+    /// A process could hide from lsof-rs by naming itself with a byte that is
+    /// not UTF-8: `/proc/<pid>/status` then failed `read_to_string` and the
+    /// process was skipped outright — `lsof -p` said it did not exist. And a
+    /// mapped file with such a name emptied its process's `mem` rows the same
+    /// way. The kernel takes `comm` from the exec'd file's name, so exec'ing a
+    /// copy of `sleep` named `sl\xffeep` does both at once, with no `prctl`
+    /// (the differential's fixtures C and D use the same trick).
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test needs a process named with a non-UTF-8 byte"
+    )]
+    fn a_process_named_with_a_non_utf8_byte_is_still_gathered() {
+        use lsof_core::model::FdType;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("lsof-rs-comm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(std::ffi::OsStr::from_bytes(b"sl\xffeep"));
+        std::fs::copy("/bin/sleep", &exe).expect("copy /bin/sleep");
+        // `ETXTBSY` is a race, not a failure: a test on another thread that
+        // forks while the copy is still open for writing hands its child a
+        // duplicate of that fd until the child execs, and exec'ing a file
+        // someone holds open for writing is refused. It clears on its own.
+        let mut tries = 0;
+        let mut child = loop {
+            match std::process::Command::new(&exe).arg("30").spawn() {
+                Ok(child) => break child,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("spawn the renamed sleep: {e}"),
+            }
+        };
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read(format!("/proc/{pid}/comm")).ok().as_deref() != Some(b"sl\xffeep\n") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exec'd"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let strict = std::fs::read_to_string(format!("/proc/{pid}/status"));
+        let procs = LinuxBackend::new()
+            .gather(&Selection {
+                pids: vec![pid],
+                ..Default::default()
+            })
+            .unwrap();
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            strict.is_err(),
+            "control: the strict read must fail on this name"
+        );
+        let p = procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .expect("a non-UTF-8 name must not hide the process");
+        assert_eq!(p.command, "sl\u{FFFD}eep");
+        // /bin/sleep is dynamically linked, so libc is mapped: `mem` rows exist
+        // only if `maps` survived the executable's own undecodable path.
+        assert!(
+            p.files.iter().any(|f| f.fd == FdType::Mem),
+            "the mem rows must survive a mapping whose path is not UTF-8"
+        );
     }
 
     #[test]

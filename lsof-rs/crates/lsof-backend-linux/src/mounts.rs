@@ -13,7 +13,7 @@ use lsof_core::MountEntry;
 /// Read and stat the host's mount table. Unreadable or unstattable rows are
 /// dropped rather than guessed at: a mount we cannot measure cannot be matched.
 pub fn load() -> Vec<MountEntry> {
-    let Ok(text) = std::fs::read_to_string("/proc/self/mounts") else {
+    let Some(text) = crate::text::read_lossy("/proc/self/mounts") else {
         return Vec::new();
     };
     parse_mounts(&text)

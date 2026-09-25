@@ -13,7 +13,7 @@
 use std::io::{self, Write};
 
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
-use crate::render::Escaper;
+use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 
 /// The `-T` annotation the table appends to a socket's NAME: **one**
@@ -131,22 +131,51 @@ pub(crate) fn human_size(sz: u64) -> String {
     format!("{val:.1}{}", SUFFIX[i])
 }
 
-/// Render the SIZE/OFF cell. By default prefer size; with `prefer_offset`
-/// (lsof `-o`) prefer the file offset, shown as `0t<dec>`.
+/// The one column lsof spends on size **or** offset, in its three modes —
+/// `print.c`'s header choice and cell test, measured against the C:
 ///
-/// `human` is `-H`, and it scales **only the size**. The C humanises inside the
-/// `sz_def` branch alone (`print.c`), so an offset stays `0t<dec>` even under
-/// `-H` — including the offset this function falls back to when a row has no
-/// size.
-fn size_off_cell(f: &OpenFile, prefer_offset: bool, human: bool) -> String {
-    let off = f.offset.map(|o| format!("0t{o}"));
-    let sz = f
-        .size
-        .map(|s| if human { human_size(s) } else { s.to_string() });
-    if prefer_offset {
-        off.or(sz).unwrap_or_default()
-    } else {
-        sz.or(off).unwrap_or_default()
+/// | mode | header | a row with a size | a row with only an offset | neither |
+/// |---|---|---|---|---|
+/// | default | `SIZE/OFF` | the size | the offset | blank |
+/// | `-o` | `OFFSET` | **its offset**, or blank | the offset | blank |
+/// | `-s` | `SIZE` | the size | **blank** | blank |
+///
+/// The `-o` column is not "prefer the offset": `cwd`, `rtd`, `txt` and `mem`
+/// have a size and no offset (there is no fdinfo behind them), and the C
+/// leaves them blank rather than falling back. lsof-rs fell back and kept the
+/// `SIZE/OFF` header, which read as a size column (DIVERGENCES 6).
+///
+/// `human` is `-H`, and it scales **only the size**: the C humanises inside
+/// the `sz_def` branch alone, so an offset stays `0t<dec>` under `-H`.
+fn size_off_cell(f: &OpenFile, mode: SizeOff, human: bool, digits: usize) -> String {
+    if mode != SizeOff::Offset {
+        if let Some(s) = f.size {
+            return if human { human_size(s) } else { s.to_string() };
+        }
+    }
+    if mode != SizeOff::Size {
+        if let Some(o) = f.offset {
+            return offset_text(o, digits);
+        }
+    }
+    String::new()
+}
+
+/// Which of the three SIZE/OFF modes a run is in — `-o`, `-s`, or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SizeOff {
+    Both,
+    Offset,
+    Size,
+}
+
+impl SizeOff {
+    fn header(self) -> &'static str {
+        match self {
+            SizeOff::Both => "SIZE/OFF",
+            SizeOff::Offset => "OFFSET",
+            SizeOff::Size => "SIZE",
+        }
     }
 }
 
@@ -214,8 +243,16 @@ pub struct TableOpts {
     pub terse: bool,
     /// `-R`: a PPID column after PID.
     pub show_ppid: bool,
-    /// `-o`: SIZE/OFF prefers the file offset.
+    /// `-g`: a PGID column, after PPID when both are shown (`print.c`).
+    pub show_pgid: bool,
+    /// `-o`: the column shows offsets only, headed `OFFSET`. Wins over
+    /// [`TableOpts::show_size`], though the parser never lets both through.
     pub show_offset: bool,
+    /// `-s` with no value: the column shows sizes only, headed `SIZE`.
+    pub show_size: bool,
+    /// `-o <digits>`: offsets longer than this many decimal digits print in
+    /// hex; 0 is no limit. [`DEFAULT_OFFSET_DIGITS`] otherwise.
+    pub offset_digits: usize,
     /// `-H`: render the SIZE cell as a human-readable byte count. Affects the
     /// table only — the C leaves `-F` and its JSON untouched, and so does this.
     pub human_size: bool,
@@ -237,7 +274,10 @@ impl TableOpts {
         Self {
             terse: false,
             show_ppid: false,
+            show_pgid: false,
             show_offset: false,
+            show_size: false,
+            offset_digits: DEFAULT_OFFSET_DIGITS,
             human_size: false,
             show_links: false,
             command_width: Some(DEFAULT_COMMAND_WIDTH),
@@ -278,7 +318,10 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     let TableOpts {
         terse,
         show_ppid,
+        show_pgid,
         show_offset,
+        show_size,
+        offset_digits,
         human_size,
         show_links,
         command_width,
@@ -324,12 +367,24 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     if show_ppid {
         headers.push("PPID");
     }
-    headers.extend(["USER", "FD", "TYPE", "DEVICE", "SIZE/OFF"]);
+    if show_pgid {
+        headers.push("PGID");
+    }
+    let size_off = if show_offset {
+        SizeOff::Offset
+    } else if show_size {
+        SizeOff::Size
+    } else {
+        SizeOff::Both
+    };
+    headers.extend(["USER", "FD", "TYPE", "DEVICE", size_off.header()]);
     if show_links {
         headers.push("NLINK");
     }
     headers.extend(["NODE", "NAME"]);
-    let right = ["PID", "TID", "PPID", "SIZE/OFF", "NLINK"];
+    let right = [
+        "PID", "TID", "PPID", "PGID", "SIZE/OFF", "OFFSET", "SIZE", "NLINK",
+    ];
 
     let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
         // Escaped and cut the way the C's safestrprtn() does it:
@@ -351,6 +406,9 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         if show_ppid {
             r.push(p.ppid.map(|v| v.to_string()).unwrap_or_default());
         }
+        if show_pgid {
+            r.push(p.pgid.map(|v| v.to_string()).unwrap_or_default());
+        }
         r.push(
             p.user
                 .as_deref()
@@ -360,7 +418,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         r.push(fd_cell(f));
         r.push(f.file_type.code());
         r.push(f.device.clone().unwrap_or_default());
-        r.push(size_off_cell(f, show_offset, human_size));
+        r.push(size_off_cell(f, size_off, human_size, offset_digits));
         if show_links {
             r.push(f.links.map(|n| n.to_string()).unwrap_or_default());
         }

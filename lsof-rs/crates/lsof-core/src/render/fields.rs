@@ -38,7 +38,7 @@
 //! `\0` under `-F0`) cannot appear inside a value.
 
 use crate::model::{AccessMode, FdType, FileType, Process};
-use crate::render::Escaper;
+use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::TcpInfoFlags;
 
 /// Render `procs` in `-F` format. `nul` selects NUL line termination (`-F0`);
@@ -51,6 +51,20 @@ pub fn render(
     only: Option<&[char]>,
     tcp_show: TcpInfoFlags,
     esc: Escaper,
+) -> String {
+    render_with_offset_digits(procs, nul, only, tcp_show, esc, DEFAULT_OFFSET_DIGITS)
+}
+
+/// [`render`] with `-o <digits>`'s limit, which the `o` field obeys exactly as
+/// the table does: `0t<dec>` up to that many digits, `0x<hex>` past it
+/// (`print.c` applies `OffDecDig` in both printers).
+pub fn render_with_offset_digits(
+    procs: &[Process],
+    nul: bool,
+    only: Option<&[char]>,
+    tcp_show: TcpInfoFlags,
+    esc: Escaper,
+    offset_digits: usize,
 ) -> String {
     let term = if nul { '\0' } else { '\n' };
     let want = |c: char| only.is_none_or(|s| s.contains(&c));
@@ -172,7 +186,7 @@ pub fn render(
             }
             if want('o') {
                 if let Some(o) = f.offset {
-                    push!('o', &format!("0t{o}"));
+                    push!('o', &offset_text(o, offset_digits));
                 }
             }
             // `i` and `P` are the same cell under two names, and the C picks

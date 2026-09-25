@@ -53,10 +53,12 @@ granted-access mask, which is accurate but coarser than lsof's lock state.
 
 ### `OFF` is best-effort
 
-`SIZE/OFF` under `-o` uses `NtQueryInformationFile(FilePositionInformation)` on
-a duplicated handle (which shares the owner's file object). It works for
+The `OFFSET` column (`-o`) uses `NtQueryInformationFile(FilePositionInformation)`
+on a duplicated handle (which shares the owner's file object). It works for
 seekable files; non-seekable handles (pipes, sockets, character devices)
-report blank, which matches lsof's behavior.
+report blank, which matches lsof's behavior. Since 2026-09-25 `-o` is lsof's
+column on every platform — headed `OFFSET`, blank where there is no offset
+rather than falling back to the size (DIVERGENCES 6).
 
 ## Visibility
 

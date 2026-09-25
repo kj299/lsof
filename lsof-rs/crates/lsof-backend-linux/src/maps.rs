@@ -24,6 +24,7 @@
 //! emits these in maps order (ascending address), so the dedup below preserves
 //! first-seen order rather than sorting.
 
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
@@ -35,43 +36,66 @@ pub struct Mapping {
     /// way lsof prints DEVICE (`254,0`).
     pub device: String,
     pub inode: u64,
-    /// The mapped path, with any ` (deleted)` marker removed.
+    /// The mapped path, with any ` (deleted)` marker removed — decoded for
+    /// display, with U+FFFD for any byte sequence that is not UTF-8.
     pub path: String,
     /// The kernel appended ` (deleted)`: the file is unlinked but still mapped.
     pub deleted: bool,
+    /// The path's bytes, kept only when [`Mapping::path`] could not hold them
+    /// exactly — the name that has to be `stat`ed, because the decoded one
+    /// names no file.
+    pub raw_path: Option<Vec<u8>>,
 }
 
 /// The distinct file-backed mappings in `text`, in first-seen (address) order.
+/// See [`parse_maps_bytes`], which this is over UTF-8 input — the shape the
+/// unit tests and the fuzz target's cross-check are written in.
+#[cfg(any(test, feature = "fuzzing"))]
+pub fn parse_maps(text: &str) -> Vec<Mapping> {
+    parse_maps_bytes(text.as_bytes())
+}
+
+/// The distinct file-backed mappings in a `/proc/<pid>/maps` file, in
+/// first-seen (address) order.
 ///
 /// Pure, so the fuzz target can drive it with arbitrary bytes; it must never
-/// panic. A maps line is
-/// `address perms offset dev inode path`, and the path is the only field that
-/// may contain spaces — so it is taken as "the rest of the line", never split.
-pub fn parse_maps(text: &str) -> Vec<Mapping> {
+/// panic. A maps line is `address perms offset dev inode path`, and the path
+/// is the only field that may contain spaces — so it is taken as "the rest of
+/// the line", never split. It is read as BYTES: a path may hold any byte but
+/// `/` and NUL, and one that is not UTF-8 is still a file the process has
+/// mapped — decoding the file as text first and stat'ing the decoded name
+/// found nothing and dropped the row, so a library with such a name was
+/// missing from `mem` where the C lists it.
+pub fn parse_maps_bytes(data: &[u8]) -> Vec<Mapping> {
     let mut out: Vec<Mapping> = Vec::new();
     let mut seen: Vec<(String, u64)> = Vec::new();
-    for line in text.lines() {
+    for line in data.split(|&b| b == b'\n') {
+        // What `str::lines` did: a trailing CR is not part of the line.
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
         // splitn(6) leaves the path whole: `/usr/lib/my lib.so` is one field.
-        let mut f = line.splitn(6, ' ').filter(|s| !s.is_empty());
+        let mut f = line.splitn(6, |&b| b == b' ').filter(|s| !s.is_empty());
         let (Some(_addr), Some(_perms), Some(_off), Some(dev), Some(inode)) =
             (f.next(), f.next(), f.next(), f.next(), f.next())
         else {
             continue;
         };
-        let Some(path) = f.next().map(str::trim) else {
+        let Some(path) = f.next().map(<[u8]>::trim_ascii) else {
             continue; // anonymous mapping: no path field at all
         };
         // `[heap]`, `[stack]`, `[vdso]`, `[vvar]`, `[anon:...]` — not files.
-        if !path.starts_with('/') {
+        if !path.starts_with(b"/") {
             continue;
         }
-        let Some(device) = parse_dev(dev) else {
+        let Some(device) = std::str::from_utf8(dev).ok().and_then(parse_dev) else {
             continue;
         };
-        let Ok(inode) = inode.parse::<u64>() else {
+        let Some(inode) = std::str::from_utf8(inode)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        else {
             continue;
         };
-        let (path, deleted) = match path.strip_suffix(" (deleted)") {
+        let (path, deleted) = match path.strip_suffix(b" (deleted)") {
             Some(p) => (p, true),
             None => (path, false),
         };
@@ -80,11 +104,19 @@ pub fn parse_maps(text: &str) -> Vec<Mapping> {
             continue;
         }
         seen.push((device.clone(), inode));
+        let (path, raw_path) = match std::str::from_utf8(path) {
+            Ok(p) => (p.to_string(), None),
+            Err(_) => (
+                String::from_utf8_lossy(path).into_owned(),
+                Some(path.to_vec()),
+            ),
+        };
         out.push(Mapping {
             device,
             inode,
-            path: path.to_string(),
+            path,
             deleted,
+            raw_path,
         });
     }
     out
@@ -109,16 +141,28 @@ fn parse_dev(s: &str) -> Option<String> {
     Some(format!("{maj},{min}"))
 }
 
-/// The `mem` and `DEL` rows for one process.
+/// The `mem` and `DEL` rows under one `/proc` directory — a process's
+/// (`/proc/<pid>`) or a task's (`/proc/<pid>/task/<tid>`).
+///
+/// A task's are read from **its own** `maps`, as the C reads them. They are
+/// the process's mappings — threads share an `mm` — right up until the main
+/// thread exits while another runs on: then `/proc/<pid>/maps` is empty (the
+/// leader's `mm` is gone) and only the task's own file still lists them.
+/// Reading the process's for every task dropped the live task's `mem` rows
+/// in exactly that case, the zombie leader of DIVERGENCES 31.
 ///
 /// `exe` is the `(device, inode)` of the `txt` row when it is known, so the
 /// executable's own mapping is not listed twice.
-pub fn rows_for(pid: u32, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
-    let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+pub fn rows_for(base: &str, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
+    // Bytes, not text: a mapped file's path holds any byte but `/` and NUL,
+    // and one that is not UTF-8 made the strict read fail — taking every
+    // `mem` row of the process with it (see `crate::text`) — and then, read
+    // lossily, named no file that could be stat'ed.
+    let Ok(bytes) = std::fs::read(format!("{base}/maps")) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for m in parse_maps(&text) {
+    for m in parse_maps_bytes(&bytes) {
         let node = m.inode.to_string();
         if exe == Some((m.device.as_str(), node.as_str())) {
             continue; // already the txt row
@@ -149,7 +193,11 @@ pub fn rows_for(pid: u32, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
         // the row with a `(stat: ...)` or `(path inode=...)` name addition;
         // lsof-rs omits rows it cannot describe, the same deliberate choice it
         // makes for an unreadable /proc link (DIVERGENCES.md, "Deliberate").
-        let Ok(md) = std::fs::metadata(&m.path) else {
+        let stat = match &m.raw_path {
+            Some(raw) => std::fs::metadata(std::ffi::OsStr::from_bytes(raw)),
+            None => std::fs::metadata(&m.path),
+        };
+        let Ok(md) = stat else {
             continue;
         };
         if super::files::dev_string(md.dev()) != m.device || md.ino() != m.inode {

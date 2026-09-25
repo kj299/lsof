@@ -10,19 +10,27 @@
 // exact string. Contract: no panic on arbitrary bytes, and no invention.
 
 use libfuzzer_sys::fuzz_target;
-use lsof_backend_linux::fuzz_api::parse_maps;
+use lsof_backend_linux::fuzz_api::{parse_maps, parse_maps_bytes};
 
 fuzz_target!(|data: &[u8]| {
-    let text = String::from_utf8_lossy(data);
-    let maps = parse_maps(&text);
+    // The BYTE parser, fed the raw input: that is what the backend runs now.
+    // It used to decode the file as text first, and a mapped path that was not
+    // UTF-8 then named no file and lost its row — which this target could
+    // never have seen, because it decoded its input lossily before parsing it.
+    let maps = parse_maps_bytes(data);
 
     // Never more rows than lines: the parser only ever drops or dedups.
+    let lines = data.split(|&b| b == b'\n').count();
     assert!(
-        maps.len() <= text.lines().count(),
+        maps.len() <= lines,
         "parser invented rows: {} from {} lines",
         maps.len(),
-        text.lines().count()
+        lines
     );
+    // On text, the two entry points are the same parser.
+    if let Ok(text) = std::str::from_utf8(data) {
+        assert_eq!(parse_maps(text), maps, "the text and byte parsers disagree");
+    }
 
     let mut seen = Vec::new();
     for m in &maps {
@@ -58,6 +66,13 @@ fuzz_target!(|data: &[u8]| {
             "device is not decimal: {:?}",
             m.device
         );
+        // The raw bytes are kept exactly when the display form could not
+        // hold them, and they decode to it — so a stat of `raw_path` is a stat
+        // of the file the display names.
+        if let Some(raw) = &m.raw_path {
+            assert!(std::str::from_utf8(raw).is_err(), "raw kept for UTF-8: {raw:?}");
+            assert_eq!(String::from_utf8_lossy(raw), m.path.as_str());
+        }
         // One row per file: (device, inode) is the identity, and it is unique
         // across the result however many segments the input mapped.
         let key = (m.device.clone(), m.inode);

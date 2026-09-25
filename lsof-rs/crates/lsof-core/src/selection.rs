@@ -69,6 +69,12 @@ impl SelKinds {
     pub const TASK: Self = Self(1 << 9);
     /// `-N`, the C's `SELNFS`.
     pub const NFS: Self = Self(1 << 10);
+    /// An `-i` address specification (`-iTCP`, `-i:80`), the C's `SELNA` —
+    /// a kind of its own, apart from [`SelKinds::NET`] (a bare `-i`). Under
+    /// `-a` the two are separate requirements: `lsof -a -p P -i -i:9` lists
+    /// only P's Internet files on port 9, measured, where one shared kind
+    /// listed every Internet file of P.
+    pub const NA: Self = Self(1 << 11);
 
     /// The process selecters — the C's `SELPROC`. A file inherits these from
     /// its process; the rest it must match itself.
@@ -80,8 +86,15 @@ impl SelKinds {
     /// correctly and still printed a bare `unk unknown` line for every process
     /// on the host, because the emptiness rule did not know `-N` was a file
     /// selecter. Any new kind added below belongs here too.
-    pub const FILE: Self =
-        Self(Self::FD.0 | Self::NET.0 | Self::UNX.0 | Self::NM.0 | Self::NLINK.0 | Self::NFS.0);
+    pub const FILE: Self = Self(
+        Self::FD.0
+            | Self::NET.0
+            | Self::NA.0
+            | Self::UNX.0
+            | Self::NM.0
+            | Self::NLINK.0
+            | Self::NFS.0,
+    );
 
     /// No selector of any kind — the run selects everything (`AllProc`).
     pub const fn is_empty(self) -> bool {
@@ -113,39 +126,144 @@ impl SelKinds {
 }
 
 /// Parsed `-i` Internet filter.
+/// Everything `-i` asked for — which is two different kinds of thing, and
+/// the C keeps them apart (`main.c`, `arg.c`):
+///
+/// * a bare `-i`, `-i4` or `-i6` selects **every** Internet file (of one IP
+///   version, or both). It is one search item, `Fnet`: the run exits 1 unless
+///   such a file is *listed*, and `-V` says `no Internet files located`.
+/// * each address specification — `-iTCP`, `-i:80`, `-i@10.0.0.1:22` — is
+///   its **own** search item, `Nwad`, ORed with the others: `-V` names the
+///   one nobody matched (`Internet address not located: :80`).
+///
+/// lsof-rs had one set of fields that every `-i` overwrote, so
+/// `lsof -i :80 -i :443` selected port 443 alone, and every unmatched spec
+/// was reported as `no Internet files located`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InetFilter {
-    /// `-i` was given (with or without further narrowing).
+    /// `-i` was given in any form.
     pub enabled: bool,
-    /// Restrict to TCP or UDP.
+    /// A bare `-i`, `-i4` or `-i6` was given — the C's `Fnet`.
+    pub all: bool,
+    /// Which IP version the bare form selects — the C's `FnetTy`: `Some(4)`,
+    /// `Some(6)`, or `None` for both. See [`InetFilter::add_all`] for how
+    /// repeated forms combine.
+    pub all_family: Option<u8>,
+    /// The address specifications, in the order given.
+    pub specs: Vec<InetSpec>,
+}
+
+/// One `-i` address specification: `[46][proto][@host][:ports]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InetSpec {
+    /// The specification as given, for `-V`.
+    pub text: String,
+    /// Restrict to one protocol.
     pub proto: Option<Protocol>,
-    /// Restrict to IP version: `Some(4)` or `Some(6)`.
+    /// Restrict to IP version `4` or `6`.
     pub family: Option<u8>,
-    /// Restrict to a port (local or remote).
-    pub port: Option<u16>,
-    /// Restrict to a host substring (matched against the numeric address text).
-    pub host: Option<String>,
+    /// Restrict to these port ranges (inclusive), local or remote; empty is
+    /// any port. `:22,80` and `:1-1024` are both lists of ranges here, as in
+    /// the C's `sport`/`eport`.
+    pub ports: Vec<(u16, u16)>,
+    /// Restrict to this address, local or remote. The C compares the address
+    /// bytes, so this is an exact comparison — never a substring match, which
+    /// let `@127.0.0.1` match `127.0.0.10`.
+    pub host: Option<std::net::IpAddr>,
 }
 
 impl InetFilter {
-    /// True when the requested protocol is only visible through the ETW AFD
+    /// True when a requested protocol is only visible through the ETW AFD
     /// capture — RAW and ICMP have no IP Helper table — so `-iRAW`/`-iICMP`
     /// must imply the (Administrator-only) capture the way `-U` does, or the
     /// filter would silently match nothing.
     pub fn needs_etw(&self) -> bool {
-        matches!(self.proto, Some(Protocol::Other(_)))
+        self.specs
+            .iter()
+            .any(|s| matches!(s.proto, Some(Protocol::Other(_))))
     }
 
-    /// Protocol test for `-i`. Protocol names are family-agnostic (like
-    /// TCP/UDP): `-iICMP` matches both the v4 `ICMP` and v6 `ICMPV6` codes,
-    /// with the `[46]` prefix as the family narrower.
-    fn proto_matches(&self, actual: Protocol) -> bool {
-        match self.proto {
-            None => true,
-            Some(p) if p == actual => true,
-            Some(Protocol::Other("ICMP")) => actual == Protocol::Other("ICMPV6"),
-            Some(_) => false,
+    /// A bare `-i` (`family` `None`), `-i4` or `-i6`. The C's rule for
+    /// combining them (`arg.c`, `enter_network_address()`), which is not
+    /// symmetric: a bare `-i` resets to both versions, while a `-i4` or `-i6`
+    /// after it narrows to that version, and two different versions widen
+    /// back to both. So `-i4 -i6` and `-i4 -i` select both, `-i -i4` IPv4.
+    pub fn add_all(&mut self, family: Option<u8>) {
+        self.enabled = true;
+        match family {
+            None => self.all_family = None,
+            Some(ft) if !self.all => self.all_family = Some(ft),
+            Some(ft) => match self.all_family {
+                Some(cur) if cur != ft => self.all_family = None,
+                Some(_) => {}
+                None => self.all_family = Some(ft),
+            },
         }
+        self.all = true;
+    }
+
+    /// Whether the bare form is in effect: given as such, or — for a filter
+    /// built by hand as `InetFilter { enabled: true, .. }`, which is what
+    /// `enabled` alone meant before specifications were a list — implied by
+    /// `-i` with no specification at all.
+    pub fn bare(&self) -> bool {
+        self.all || (self.enabled && self.specs.is_empty())
+    }
+
+    /// Whether `f` is selected by the bare form.
+    pub fn all_matches(&self, f: &OpenFile) -> bool {
+        self.bare() && f.is_internet() && family_matches(self.all_family, f)
+    }
+}
+
+impl InetSpec {
+    /// Whether `f` satisfies this specification (`lib/misc.c`, `is_nw_addr()`).
+    pub fn matches(&self, f: &OpenFile) -> bool {
+        let Some(sock) = &f.socket else {
+            return false;
+        };
+        if !f.is_internet() || !family_matches(self.family, f) {
+            return false;
+        }
+        // Protocol names are family-agnostic (like TCP/UDP): `-iICMP` matches
+        // both the v4 `ICMP` and v6 `ICMPV6` codes, with the `[46]` prefix as
+        // the family narrower.
+        let proto_ok = match self.proto {
+            None => true,
+            Some(p) if p == sock.protocol => true,
+            Some(Protocol::Other("ICMP")) => sock.protocol == Protocol::Other("ICMPV6"),
+            Some(_) => false,
+        };
+        if !proto_ok {
+            return false;
+        }
+        // The C tests each end of the connection in turn, and the address and
+        // the port must match on the SAME end (`is_nw_addr()` per address).
+        let end_matches = |a: Option<std::net::SocketAddr>| -> bool {
+            let Some(a) = a else { return false };
+            if let Some(h) = self.host {
+                if a.ip() != h {
+                    return false;
+                }
+            }
+            self.ports.is_empty()
+                || self
+                    .ports
+                    .iter()
+                    .any(|&(lo, hi)| (lo..=hi).contains(&a.port()))
+        };
+        if self.host.is_none() && self.ports.is_empty() {
+            return true;
+        }
+        end_matches(sock.local) || end_matches(sock.remote)
+    }
+}
+
+/// `-i4`/`-i6` narrowing: `None` is either version.
+fn family_matches(family: Option<u8>, f: &OpenFile) -> bool {
+    match family {
+        None => true,
+        Some(fam) => (fam == 6) == (f.file_type == crate::model::FileType::Ipv6),
     }
 }
 
@@ -372,12 +490,83 @@ impl FdFilter {
     }
 }
 
+/// How `-c` compares its value with a command name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandMatch {
+    /// The C's rule, and the default: the value is a **case-sensitive
+    /// prefix** of the command — `is_cmd_excl()`'s `strncmp(sp->str, cmd,
+    /// sp->len)`. So `-c py` finds `python3`, while `-c ytho` and `-c PYTHON`
+    /// find nothing. lsof-rs had matched case-insensitively and by substring
+    /// on every platform, so on Linux both of those listed `python3` where the
+    /// C exited 1.
+    #[default]
+    Prefix,
+    /// The Windows port's rule: case-insensitive, and a substring counts.
+    /// Image names are case-insensitive there (`Explorer.EXE`) and carry an
+    /// extension, so the C's rule would be a poorer fit; there is no oracle
+    /// to hold it to either way.
+    Forgiving,
+}
+
+/// One `-u` value the platform resolved to a numeric user ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UidSel {
+    pub uid: u32,
+    /// The login name it was given as, if it was given as one — `-V` reports
+    /// the two differently: `login name (UID 1000) not located: alice`
+    /// against `user ID not located: 1000`.
+    pub login: Option<String>,
+}
+
+/// Which process-level search items some process located — each vector
+/// parallel to the [`Selection`] list of the same name. See
+/// [`Selection::locate`] for the rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Located {
+    pub pids: Vec<bool>,
+    pub pgids: Vec<bool>,
+    pub uids: Vec<bool>,
+    pub users: Vec<bool>,
+    pub commands: Vec<bool>,
+    /// Parallel to `sel.inet.specs`.
+    pub inet: Vec<bool>,
+    /// The bare `-i`/`-i4`/`-i6` item (the C's `Fnet == 2`).
+    pub inet_all: bool,
+    /// The `-N` item (the C's `Fnfs == 2`).
+    pub nfs: bool,
+}
+
 /// The full set of user-specified filters for one run.
 #[derive(Clone, Debug, Default)]
 pub struct Selection {
     pub pids: Vec<u32>,
+    /// `-p ^pid`: never list this process. An absolute exclusion like the
+    /// other `^` forms, and not a search item — the C reports only the PIDs
+    /// it was asked to *include* (`if (Spid[i].f || Spid[i].x) continue`).
+    pub pid_excludes: Vec<u32>,
+    /// `-g pgid`, on a platform with process groups: select by process group
+    /// (the C's `SELPGID`). Windows has none and reads `-g` as
+    /// [`Selection::ppid_filter`] instead.
+    pub pgids: Vec<u32>,
+    /// `-g ^pgid`: never list a process in this group.
+    pub pgid_excludes: Vec<u32>,
+    /// `-u` values matched by **name** — the Windows port's way, where an
+    /// account is a SID and the comparison is against the rendered
+    /// `DOMAIN\user`. On Linux every value is resolved to a numeric ID
+    /// instead and lands in [`Selection::uids`].
     pub users: Vec<String>,
+    /// `-u` values resolved to user IDs, as the C resolves them while it
+    /// parses: a number is the ID, a name goes through the password file. The
+    /// process's real UID is what is compared, so `-u 0` and `-u root` are the
+    /// same selection — `-u 0` had matched nothing on Linux, because it was
+    /// compared with the name `root`.
+    pub uids: Vec<UidSel>,
+    /// `-u ^value`, resolved the same way.
+    pub uid_excludes: Vec<u32>,
     pub commands: Vec<String>,
+    /// How [`Selection::commands`] and [`Selection::command_excludes`]
+    /// compare — the C's case-sensitive prefix unless the CLI says otherwise.
+    pub command_match: CommandMatch,
     /// `-u ^name` / `-u ^uid`: accounts whose processes are never listed.
     ///
     /// Lsof.8: "A negated login name or user ID selection is neither ANDed nor
@@ -612,17 +801,18 @@ impl Selection {
         if !self.pids.is_empty() && self.pids.contains(&p.pid) {
             k.insert(SelKinds::PID);
         }
-        if !self.users.is_empty()
-            && self
-                .users
-                .iter()
-                .any(|u| user_matches(u, p.user.as_deref()))
-        {
+        if self.users_match(p) {
             k.insert(SelKinds::UID);
         }
-        if !self.commands.is_empty() && self.commands.iter().any(|c| command_matches(c, &p.command))
+        if self
+            .commands
+            .iter()
+            .any(|c| self.command_matches(c, &p.command))
         {
             k.insert(SelKinds::CMD);
+        }
+        if p.pgid.is_some_and(|g| self.pgids.contains(&g)) {
+            k.insert(SelKinds::PGID);
         }
         // `-g` Windows extension: select processes whose parent is in the PPID
         // list (the closest analog to PGID selection on Unix).
@@ -650,8 +840,11 @@ impl Selection {
         if self.nfs_only && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d)) {
             k.insert(SelKinds::NFS);
         }
-        if self.inet.enabled && self.inet_matches(f) {
+        if self.inet.all_matches(f) {
             k.insert(SelKinds::NET);
+        }
+        if self.inet.specs.iter().any(|s| s.matches(f)) {
+            k.insert(SelKinds::NA);
         }
         if self.has_path_filter() && self.path_matches(f) {
             k.insert(SelKinds::NM);
@@ -664,42 +857,6 @@ impl Selection {
             }
         }
         k
-    }
-
-    /// Whether `f` satisfies the `-i` narrowing (protocol / family / port /
-    /// host). Only called when `-i` was given.
-    fn inet_matches(&self, f: &OpenFile) -> bool {
-        let Some(sock) = &f.socket else {
-            return false;
-        };
-        if !f.is_internet() {
-            return false;
-        }
-        let i = &self.inet;
-        if !i.proto_matches(sock.protocol) {
-            return false;
-        }
-        if let Some(fam) = i.family {
-            let is_v6 = f.file_type == crate::model::FileType::Ipv6;
-            if (fam == 6) != is_v6 {
-                return false;
-            }
-        }
-        if let Some(port) = i.port {
-            let lp = sock.local.map(|a| a.port());
-            let rp = sock.remote.map(|a| a.port());
-            if lp != Some(port) && rp != Some(port) {
-                return false;
-            }
-        }
-        if let Some(host) = &i.host {
-            let l = sock.local.map(|a| a.ip().to_string()).unwrap_or_default();
-            let r = sock.remote.map(|a| a.ip().to_string()).unwrap_or_default();
-            if !l.contains(host.as_str()) && !r.contains(host.as_str()) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Whether `f`'s name is one of the path arguments or under one of the
@@ -791,7 +948,8 @@ impl Selection {
                 .any(|i| state_name.eq_ignore_ascii_case(i))
     }
 
-    /// Whether `p` is absolutely excluded by a `^` negation on `-u` or `-c`.
+    /// Whether `p` is absolutely excluded by a `^` negation on `-u`, `-c`,
+    /// `-g` or `-p`.
     ///
     /// Applied before everything else and never ORed or ANDed, per Lsof.8.
     /// Verified against the C: `lsof -c ^sleep -p <a sleep's pid>` prints
@@ -800,11 +958,124 @@ impl Selection {
     pub fn excludes_process(&self, p: &Process) -> bool {
         self.command_excludes
             .iter()
-            .any(|c| command_matches(c, &p.command))
+            .any(|c| self.command_matches(c, &p.command))
             || self
                 .user_excludes
                 .iter()
                 .any(|u| user_matches(u, p.user.as_deref()))
+            || p.uid.is_some_and(|u| self.uid_excludes.contains(&u))
+            || self.pid_excludes.contains(&p.pid)
+            || p.pgid.is_some_and(|g| self.pgid_excludes.contains(&g))
+    }
+
+    /// Whether `p`'s owner is one of the `-u` inclusions, by name or by ID.
+    fn users_match(&self, p: &Process) -> bool {
+        self.users
+            .iter()
+            .any(|u| user_matches(u, p.user.as_deref()))
+            || p.uid.is_some_and(|u| self.uids.iter().any(|s| s.uid == u))
+    }
+
+    /// `-c`'s comparison, under this run's [`CommandMatch`].
+    fn command_matches(&self, needle: &str, command: &str) -> bool {
+        match self.command_match {
+            CommandMatch::Prefix => command.starts_with(needle),
+            CommandMatch::Forgiving => {
+                let c = command.to_ascii_lowercase();
+                let n = needle.to_ascii_lowercase();
+                c.starts_with(&n) || c.contains(&n)
+            }
+        }
+    }
+
+    /// Which `-p`, `-g`, `-u` and `-c` values some process **located** — the
+    /// C's search-item marks (`Spid[i].f`, `Spgid[i].f`, `Suid[i].f`,
+    /// `str->f`), from the processes the backend gathered, before any file is
+    /// selected: `lsof -a -p P -d 999` lists nothing and still exits 0.
+    ///
+    /// * A process an exclusion drops locates nothing. The C tests the
+    ///   `-u ^`/`-g ^`/`-p ^` exclusions before it marks anything; it tests
+    ///   `-c ^` *after* marking `-p`/`-g`/`-u`, so there `-c ^sleep -p <a
+    ///   sleep>` does count the pid as located. lsof-rs does not follow that
+    ///   ordering artefact, and loses nothing by it: under the C the same run
+    ///   exits 1 anyway, because a `-c ^` value is itself never marked
+    ///   (DIVERGENCES 13).
+    /// * `-p`, `-g` and `-u` are located by a matching process whatever else
+    ///   the run asked for — under `-a` too (`is_proc_excl()` marks each list
+    ///   in turn before it decides the AND).
+    /// * `-c` is located only by a process that got as far as the command
+    ///   test: under `-a`, one that also matched every `-p`/`-g`/`-u` kind the
+    ///   run specified (`dproc.c`: `is_proc_excl(…) || is_cmd_excl(…)`).
+    /// * **Every** matching `-c` value is located, not only the first. The C
+    ///   stops at the first match (`sp->f = 1; return (0);`), so `lsof -c py
+    ///   -c python` exits 1 with `command not located: py` although python3
+    ///   matched both — and `-c x -c x` can never succeed. That is ledgered as
+    ///   a C defect and not reproduced (DIVERGENCES 13).
+    /// * An `-i` address specification is located by a matching file of any
+    ///   process that got past the process tests — a file-level selector that
+    ///   later drops the row does not undo it (`is_nw_addr()` marks while the
+    ///   file is being built). Every matching specification, again, where the
+    ///   C marks only the first (`n->f = 1; return (1);`): `-i:80 -iTCP` on a
+    ///   TCP port-80 socket exits 1 there.
+    /// * The bare `-i` and `-N` items the same way: the C sets `Fnet = 2` and
+    ///   `Fnfs = 2` in `link_lfile()`, for every file it keeps while building
+    ///   the process, and `-a` is only applied at print time. So `lsof -a -p P
+    ///   -i -d 3` lists nothing and exits **0** when P has a socket on another
+    ///   fd — measured; judging by the listed rows had made it 1.
+    /// * A socket that `-s` vetoes locates nothing: the C drops it by state
+    ///   before it is linked or matched (`-a -p P -i:80 -s TCP:ESTABLISHED`
+    ///   on a listener exits 1 with `Internet address not located: :80`).
+    pub fn locate(&self, gathered: &[Process]) -> Located {
+        let mut found = Located {
+            pids: vec![false; self.pids.len()],
+            pgids: vec![false; self.pgids.len()],
+            uids: vec![false; self.uids.len()],
+            users: vec![false; self.users.len()],
+            commands: vec![false; self.commands.len()],
+            inet: vec![false; self.inet.specs.len()],
+            inet_all: false,
+            nfs: false,
+        };
+        let and_kinds = self
+            .specified()
+            .intersection(SelKinds::PID.union(SelKinds::UID).union(SelKinds::PGID));
+        for p in gathered {
+            if self.excludes_process(p) {
+                continue;
+            }
+            for (hit, &pid) in found.pids.iter_mut().zip(&self.pids) {
+                *hit |= p.pid == pid;
+            }
+            for (hit, &g) in found.pgids.iter_mut().zip(&self.pgids) {
+                *hit |= p.pgid == Some(g);
+            }
+            for (hit, s) in found.uids.iter_mut().zip(&self.uids) {
+                *hit |= p.uid == Some(s.uid);
+            }
+            for (hit, u) in found.users.iter_mut().zip(&self.users) {
+                *hit |= user_matches(u, p.user.as_deref());
+            }
+            if self.and_mode && !self.proc_kinds(p).contains(and_kinds) {
+                continue;
+            }
+            for (hit, c) in found.commands.iter_mut().zip(&self.commands) {
+                *hit |= self.command_matches(c, &p.command);
+            }
+            // Its files are examined only if the process passed the command
+            // test as well.
+            if self.and_mode && !self.proc_selected(self.proc_kinds(p)) {
+                continue;
+            }
+            for f in p.files.iter().filter(|f| self.state_matches(f)) {
+                for (hit, spec) in found.inet.iter_mut().zip(&self.inet.specs) {
+                    *hit = *hit || spec.matches(f);
+                }
+                found.inet_all |= self.inet.all_matches(f);
+                found.nfs |=
+                    self.nfs_only && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d));
+            }
+        }
+        found
     }
 
     /// The set of selector kinds this run specified — the C's `Selflags`
@@ -815,20 +1086,23 @@ impl Selection {
         if !self.pids.is_empty() {
             k.insert(SelKinds::PID);
         }
-        if !self.users.is_empty() {
+        if !self.users.is_empty() || !self.uids.is_empty() {
             k.insert(SelKinds::UID);
         }
         if !self.commands.is_empty() {
             k.insert(SelKinds::CMD);
         }
-        if !self.ppid_filter.is_empty() {
+        if !self.pgids.is_empty() || !self.ppid_filter.is_empty() {
             k.insert(SelKinds::PGID);
         }
         if self.fd_filter.is_some() {
             k.insert(SelKinds::FD);
         }
-        if self.inet.enabled {
+        if self.inet.bare() {
             k.insert(SelKinds::NET);
+        }
+        if !self.inet.specs.is_empty() {
+            k.insert(SelKinds::NA);
         }
         if self.unix_only {
             k.insert(SelKinds::UNX);
@@ -893,7 +1167,7 @@ impl Selection {
         }
     }
 
-    /// Whether any process-level selector (`-p` / `-u` / `-c`) was given.
+    /// Whether any process-level selector (`-p` / `-u` / `-c` / `-g`) was given.
     pub fn has_process_selector(&self) -> bool {
         self.specified().intersects(SelKinds::PROC)
     }
@@ -924,7 +1198,9 @@ impl Selection {
     pub fn socket_rows_only(&self) -> bool {
         let spec = self.specified();
         !spec.is_empty()
-            && spec.without(SelKinds::NET.union(SelKinds::UNX)).is_empty()
+            && spec
+                .without(SelKinds::NET.union(SelKinds::NA).union(SelKinds::UNX))
+                .is_empty()
             && self.endpoints.is_none()
     }
 
@@ -953,7 +1229,7 @@ impl Selection {
         let mut out = Vec::new();
         for mut p in procs {
             if self.excludes_process(&p) {
-                continue; // `-u ^root` / `-c ^name`: before all other selection
+                continue; // any `^` negation: before all other selection
             }
             // The kinds this process matched. A file inherits them only if the
             // process matched something, the C's `PS_PRI` gate on
@@ -1042,14 +1318,6 @@ fn under_dir(name: &str, dir: &str) -> bool {
     }
     let dir = dir.trim_end_matches('\\');
     name.starts_with(dir) && name.as_bytes().get(dir.len()) == Some(&b'\\')
-}
-
-/// `-c` match: case-insensitive prefix or substring (lsof matches a leading
-/// substring; we accept either to be forgiving).
-fn command_matches(needle: &str, command: &str) -> bool {
-    let c = command.to_ascii_lowercase();
-    let n = needle.to_ascii_lowercase();
-    c.starts_with(&n) || c.contains(&n)
 }
 
 /// `-u` match: case-insensitive, against either the full `DOMAIN\user` string
@@ -1149,7 +1417,11 @@ mod tests {
     fn inet_port_filter() {
         let mut sel = Selection::default();
         sel.inet.enabled = true;
-        sel.inet.port = Some(445);
+        sel.inet.specs.push(InetSpec {
+            text: ":445".into(),
+            ports: vec![(445, 445)],
+            ..Default::default()
+        });
         let got = sel.apply(mock::sample_processes());
         assert!(got.iter().flat_map(|p| &p.files).all(|f| {
             f.socket
@@ -1197,34 +1469,43 @@ mod tests {
 
         let filt = |proto: Option<Protocol>, family: Option<u8>| {
             let mut sel = Selection::default();
-            sel.inet.enabled = true;
-            sel.inet.proto = proto;
-            sel.inet.family = family;
+            if proto.is_none() && family.is_none() {
+                sel.inet.add_all(None);
+            } else {
+                sel.inet.enabled = true;
+                sel.inet.specs.push(InetSpec {
+                    proto,
+                    family,
+                    ..Default::default()
+                });
+            }
             sel
         };
+        // A spec is the NA kind, the bare form NET; either counts as "matches -i".
+        let net = SelKinds::NET.union(SelKinds::NA);
 
         // -iICMP matches both the v4 and v6 ICMP codes, nothing else.
         let icmp = filt(Some(Protocol::Other("ICMP")), None);
-        assert!(icmp.file_kinds(&icmp4).intersects(SelKinds::NET));
-        assert!(icmp.file_kinds(&icmp6).intersects(SelKinds::NET));
-        assert!(!icmp.file_kinds(&raw4).intersects(SelKinds::NET));
-        assert!(!icmp.file_kinds(&tcp4).intersects(SelKinds::NET));
+        assert!(icmp.file_kinds(&icmp4).intersects(net));
+        assert!(icmp.file_kinds(&icmp6).intersects(net));
+        assert!(!icmp.file_kinds(&raw4).intersects(net));
+        assert!(!icmp.file_kinds(&tcp4).intersects(net));
 
         // -i6ICMP narrows by family.
         let icmp_v6 = filt(Some(Protocol::Other("ICMP")), Some(6));
-        assert!(!icmp_v6.file_kinds(&icmp4).intersects(SelKinds::NET));
-        assert!(icmp_v6.file_kinds(&icmp6).intersects(SelKinds::NET));
+        assert!(!icmp_v6.file_kinds(&icmp4).intersects(net));
+        assert!(icmp_v6.file_kinds(&icmp6).intersects(net));
 
         // -iRAW matches RAW only — never ICMP (exact, not substring/prefix).
         let raw = filt(Some(Protocol::Other("RAW")), None);
-        assert!(raw.file_kinds(&raw4).intersects(SelKinds::NET));
-        assert!(!raw.file_kinds(&icmp4).intersects(SelKinds::NET));
-        assert!(!raw.file_kinds(&tcp4).intersects(SelKinds::NET));
+        assert!(raw.file_kinds(&raw4).intersects(net));
+        assert!(!raw.file_kinds(&icmp4).intersects(net));
+        assert!(!raw.file_kinds(&tcp4).intersects(net));
 
         // Plain -i still matches every internet family.
         let any = filt(None, None);
         for r in [&icmp4, &icmp6, &raw4, &tcp4] {
-            assert!(any.file_kinds(r).intersects(SelKinds::NET));
+            assert!(any.file_kinds(r).intersects(net));
         }
     }
 
@@ -1856,11 +2137,302 @@ mod tests {
             "a fileless process must be dropped under -N, as it is under -U"
         );
         // And it is a kind of its own, not an alias for another selecter.
-        for other in [SelKinds::FD, SelKinds::NET, SelKinds::UNX, SelKinds::NM] {
+        for other in [
+            SelKinds::FD,
+            SelKinds::NET,
+            SelKinds::NA,
+            SelKinds::UNX,
+            SelKinds::NM,
+        ] {
             assert!(
                 !other.contains(SelKinds::NFS),
                 "NFS collides with {other:?}"
             );
         }
+    }
+
+    /// A process with the identity fields `locate` and the `^` exclusions read.
+    fn who(pid: u32, command: &str, uid: u32, pgid: u32) -> Process {
+        Process {
+            tid: None,
+            task_command: None,
+            uid: Some(uid),
+            pgid: Some(pgid),
+            pid,
+            ppid: Some(1),
+            command: command.into(),
+            user: Some(format!("u{uid}")),
+            files: Vec::new(),
+            endpoint_peer: false,
+        }
+    }
+
+    #[test]
+    fn the_cs_command_match_is_a_case_sensitive_prefix() {
+        // Measured: `-c py` finds python3; `-c ytho`, `-c PYTHON` and
+        // `-c python3.11` find nothing and exit 1.
+        let procs = [who(10, "python3", 0, 10)];
+        let hits = |c: &str, m: CommandMatch| {
+            Selection {
+                commands: vec![c.into()],
+                command_match: m,
+                ..Default::default()
+            }
+            .locate(&procs)
+            .commands[0]
+        };
+        assert!(hits("py", CommandMatch::Prefix));
+        assert!(hits("python3", CommandMatch::Prefix));
+        for miss in ["ytho", "PYTHON", "python3.11"] {
+            assert!(!hits(miss, CommandMatch::Prefix), "{miss}");
+        }
+        // The Windows port's rule, kept there on purpose.
+        assert!(hits("ytho", CommandMatch::Forgiving));
+        assert!(hits("PYTHON", CommandMatch::Forgiving));
+        assert_eq!(CommandMatch::default(), CommandMatch::Prefix);
+    }
+
+    #[test]
+    fn every_matching_command_is_located_not_only_the_first() {
+        // The C marks the first match only, so `-c py -c python` exits 1 with
+        // `command not located: py` — ledgered as a defect (DIVERGENCES 13).
+        let sel = Selection {
+            commands: vec!["py".into(), "python".into(), "py".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            sel.locate(&[who(10, "python3", 0, 10)]).commands,
+            [true, true, true]
+        );
+    }
+
+    #[test]
+    fn pid_pgid_and_uid_are_located_by_any_matching_process() {
+        let sel = Selection {
+            pids: vec![10, 99],
+            pgids: vec![7, 98],
+            uids: vec![
+                UidSel {
+                    uid: 1000,
+                    login: Some("alice".into()),
+                },
+                UidSel {
+                    uid: 97,
+                    login: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let found = sel.locate(&[who(10, "a", 0, 1), who(11, "b", 1000, 7)]);
+        assert_eq!(found.pids, [true, false]);
+        assert_eq!(found.pgids, [true, false]);
+        assert_eq!(found.uids, [true, false]);
+        // And selection agrees: -g and numeric -u select the same processes.
+        assert!(sel.selects_process(&who(12, "c", 1000, 3)));
+        assert!(sel.selects_process(&who(13, "d", 5, 7)));
+        assert!(!sel.selects_process(&who(14, "e", 5, 3)));
+    }
+
+    #[test]
+    fn under_and_a_command_is_located_only_past_the_other_process_kinds() {
+        // `is_proc_excl() || is_cmd_excl()`: under -a, a process failing the
+        // -p part never reaches the command test — while -p itself is marked
+        // by a process whatever its command.
+        let sel = Selection {
+            pids: vec![10],
+            commands: vec!["foo".into()],
+            and_mode: true,
+            ..Default::default()
+        };
+        let found = sel.locate(&[who(10, "bar", 0, 1), who(11, "foo", 0, 1)]);
+        assert_eq!(found.pids, [true]);
+        assert_eq!(found.commands, [false]);
+        // Without -a both are located, by different processes.
+        let or = Selection {
+            and_mode: false,
+            ..sel
+        };
+        assert_eq!(
+            or.locate(&[who(10, "bar", 0, 1), who(11, "foo", 0, 1)])
+                .commands,
+            [true]
+        );
+    }
+
+    #[test]
+    fn an_excluded_process_locates_nothing() {
+        for sel in [
+            Selection {
+                command_excludes: vec!["sle".into()],
+                ..Default::default()
+            },
+            Selection {
+                uid_excludes: vec![1000],
+                ..Default::default()
+            },
+            Selection {
+                pgid_excludes: vec![7],
+                ..Default::default()
+            },
+            Selection {
+                pid_excludes: vec![10],
+                ..Default::default()
+            },
+        ] {
+            let sel = Selection {
+                pids: vec![10],
+                commands: vec!["sleep".into()],
+                ..sel
+            };
+            let p = who(10, "sleep", 1000, 7);
+            assert!(sel.excludes_process(&p), "{sel:?}");
+            let found = sel.locate(&[p]);
+            assert_eq!(
+                (found.pids[0], found.commands[0]),
+                (false, false),
+                "{sel:?}"
+            );
+        }
+    }
+
+    /// A TCP socket row, local `127.0.0.1:<lport>`, remote `<raddr>` if any.
+    fn tcp(fd: u64, lport: u16, remote: Option<&str>, state: crate::TcpState) -> OpenFile {
+        use crate::model::{AccessMode, SockState, SocketInfo};
+        OpenFile {
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(fd),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Ipv4,
+            name: String::new(),
+            device: None,
+            size: None,
+            offset: Some(0),
+            node: Some("TCP".into()),
+            links: None,
+            socket: Some(Box::new(SocketInfo {
+                protocol: Protocol::Tcp,
+                local: Some(format!("127.0.0.1:{lport}").parse().unwrap()),
+                remote: remote.map(|r| r.parse().unwrap()),
+                state: Some(SockState::Tcp(state)),
+                tcp: None,
+            })),
+        }
+    }
+
+    fn spec(text: &str, ports: &[(u16, u16)], host: Option<&str>) -> InetSpec {
+        InetSpec {
+            text: text.into(),
+            ports: ports.to_vec(),
+            host: host.map(|h| h.parse().unwrap()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inet_specs_are_ored_and_each_is_its_own_search_item() {
+        // `-i :80 -i :443 -i :9`: the first two each match a file, the third
+        // nothing. lsof-rs had kept only the LAST spec, so :80 selected
+        // nothing at all.
+        let mut sel = Selection::default();
+        sel.inet.enabled = true;
+        sel.inet.specs = vec![
+            spec(":80", &[(80, 80)], None),
+            spec(":443", &[(443, 443)], None),
+            spec(":9", &[(9, 9)], None),
+        ];
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![
+            tcp(3, 80, None, crate::TcpState::Listen),
+            tcp(4, 443, None, crate::TcpState::Listen),
+            tcp(5, 5000, None, crate::TcpState::Listen),
+        ];
+        assert_eq!(
+            sel.locate(std::slice::from_ref(&p)).inet,
+            [true, true, false]
+        );
+        let kept: Vec<u16> = sel
+            .apply(vec![p])
+            .iter()
+            .flat_map(|p| &p.files)
+            .map(|f| f.socket.as_ref().unwrap().local.unwrap().port())
+            .collect();
+        assert_eq!(kept, [80, 443]);
+        assert!(!sel.inet.bare(), "specs only: no `no Internet files` item");
+    }
+
+    #[test]
+    fn a_host_and_port_must_match_on_the_same_end() {
+        // Local 127.0.0.1:5000, remote 10.0.0.1:80. `@127.0.0.1:80` names an
+        // end that does not exist; `is_nw_addr()` tests each end whole.
+        let f = tcp(3, 5000, Some("10.0.0.1:80"), crate::TcpState::Established);
+        assert!(!spec("@127.0.0.1:80", &[(80, 80)], Some("127.0.0.1")).matches(&f));
+        assert!(spec("@10.0.0.1:80", &[(80, 80)], Some("10.0.0.1")).matches(&f));
+        assert!(spec("@127.0.0.1", &[], Some("127.0.0.1")).matches(&f));
+        // Exact, never a substring: 127.0.0.1 is not 127.0.0.10.
+        assert!(!spec("@127.0.0.10", &[], Some("127.0.0.10")).matches(&f));
+        assert!(
+            spec(":1-100", &[(1, 100)], None).matches(&f),
+            "the remote end is in range"
+        );
+    }
+
+    #[test]
+    fn under_and_a_bare_i_and_a_spec_are_separate_requirements() {
+        // The C's SELNET and SELNA: `-a -p P -i -i:9` needs both, so P's
+        // Internet file on another port is not listed — measured.
+        let mut sel = Selection {
+            pids: vec![10],
+            and_mode: true,
+            ..Default::default()
+        };
+        sel.inet.add_all(None);
+        sel.inet.specs.push(spec(":9", &[(9, 9)], None));
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![
+            tcp(3, 5000, None, crate::TcpState::Listen),
+            tcp(4, 9, None, crate::TcpState::Listen),
+        ];
+        let kept: Vec<u16> = sel
+            .apply(vec![p])
+            .iter()
+            .flat_map(|p| &p.files)
+            .map(|f| f.socket.as_ref().unwrap().local.unwrap().port())
+            .collect();
+        assert_eq!(kept, [9]);
+    }
+
+    #[test]
+    fn a_kept_file_locates_even_when_a_file_selector_hides_it() {
+        // `-a -p P -i -d 3`, P's only socket on fd 9: nothing is listed and
+        // the C exits 0 — Fnet is set when the file is linked, -a is applied
+        // at print time. And a socket `-s` vetoes locates nothing.
+        let mut sel = Selection {
+            pids: vec![10],
+            and_mode: true,
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(3)],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        };
+        sel.inet.add_all(None);
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![tcp(9, 5000, None, crate::TcpState::Listen)];
+        assert!(sel.locate(std::slice::from_ref(&p)).inet_all);
+        assert!(sel
+            .apply(vec![p.clone()])
+            .iter()
+            .all(|q| q.files.is_empty()));
+        let vetoed = Selection {
+            state_filter: Some(StateFilter {
+                proto: Some(Protocol::Tcp),
+                include: vec!["ESTABLISHED".into()],
+                exclude: vec![],
+            }),
+            ..sel
+        };
+        assert!(!vetoed.locate(&[p]).inet_all);
     }
 }

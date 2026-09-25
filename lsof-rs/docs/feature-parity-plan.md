@@ -53,7 +53,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-f [cfgGn]` | misc | ❌ mostly N/A | Filesystem-detail sub-flags; Unix-specific internals |
 | `+f [cfgGn]` | misc | ❌ mostly N/A | Same |
 | `-F [f]` | out | ✅ shipped | Field output (with `-F0` for NUL) |
-| `-g [s]` | sel | ✅ shipped (5A) | Process *group* filter. Windows has no PGID — map to PPID (select children of PPID) and document as a Windows extension of `-g` semantics. |
+| `-g [s]` | sel | ✅ shipped (5A) | Process *group* filter. Windows has no PGID — map to PPID (select children of PPID) and document as a Windows extension of `-g` semantics. On Linux it is the C's option since 2026-09-25: PGID selection, `^` exclusion, and the PGID column (DIVERGENCES 21). |
 | `-h` | misc | ✅ shipped | Help |
 | `-?` | misc | ✅ shipped (5A) | Alias for `-h` — one-line add |
 | `-H` | out | ❌ N/A | Legacy "headers" toggle on certain dialects |
@@ -70,7 +70,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `+|-M` | misc | ❌ N/A | Portmapper — Unix RPC |
 | `-n` | out | ✅ shipped | No host name resolution |
 | `-N` | sel | ❌ N/A | NFS-file listing |
-| `-o [o]` | out | ✅ shipped | File offset in SIZE/OFF |
+| `-o [o]` | out | ✅ shipped | The `OFFSET` column, and `-o <digits>`'s hex limit (DIVERGENCES 6) |
 | `-O` | prec | ✅ shipped (5A) | "Avoid fork" — Unix-specific perf flag; safe to accept as a documented no-op for portability |
 | `-p s` | sel | ✅ shipped | PID filter (comma-separated, accepts `^excl`) |
 | `-P` | out | ✅ shipped | Numeric port instead of service name |

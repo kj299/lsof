@@ -108,6 +108,8 @@ mod net;
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
+mod text;
+#[cfg(target_os = "linux")]
 mod users;
 
 #[cfg(target_os = "linux")]
@@ -131,7 +133,7 @@ pub use backend::LinuxBackend;
 pub mod fuzz_api {
     pub use crate::files::{name_for_target, parse_fdinfo, FdInfo};
     pub use crate::locks::parse_locks;
-    pub use crate::maps::{parse_maps, Mapping};
+    pub use crate::maps::{parse_maps, parse_maps_bytes, Mapping};
     pub use crate::mounts::{parse_mounts, MountLine};
     pub use crate::net::{
         fields_with_rest, packet_node, parse_addr, parse_queues, socket_inode, socket_type_suffix,
