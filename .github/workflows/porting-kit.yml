@@ -41,8 +41,9 @@ name: porting-kit
 #
 # A gate's trigger is part of the gate (LESSONS #019; LESSONS #033). Widening
 # what it inspects without widening what wakes it just moves the blind spot.
-# check-kit is python3 + bash with no toolchain and runs in seconds, so it costs
-# nothing to run on everything.
+# check-kit is python3 + bash with no toolchain. It ran in seconds until the
+# gate-mutation sweep began forcing every decision in every verdict function
+# (LESSONS #068); it is a few minutes now, still cheap enough for everything.
 on:
   push:
     branches: [master]
