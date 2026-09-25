@@ -71,6 +71,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | Harness | Purpose | Gate |
 |---|---|---|
 | `harnesses/unsafe-audit/audit_unsafe.py` | every `unsafe {}` needs a `// SAFETY:` | **hard-fail CI** |
+| `harnesses/unsafe-audit/check_forbid_unsafe.py` | the portable crates forbid `unsafe_code` on every target root, in a form rustc applies — not in a comment, not `deny`, not under `cfg_attr` | **hard-fail CI** |
 | `harnesses/differential/diff_run.py` (+`normalize.py`) | diff Rust vs C oracle; triage divergences via a ledger; timeout = liveness backstop | CI |
 | `harnesses/golden/golden.py` | capture/version/replay the oracle; flag oracle nondeterminism | CI |
 | `harnesses/fuzz/gen_fuzz_target.sh` | scaffold a cargo-fuzz target per module | CI smoke + nightly |

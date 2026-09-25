@@ -34,11 +34,23 @@ import os
 import re
 import sys
 
+# `scanf("%s")` is unbounded only BECAUSE of what its format string says, so its
+# evidence is inside a literal. The literal blanking `_uncommented` does for the
+# name-matching checks (a syscall named in an error message is not a call) would
+# erase that `%s` and silence this check — and it did: from the commit that
+# introduced the blanking until LESSONS #064, this scanner reported NO
+# `scanf("%s", buf)` at all, while its own regex matched the raw line. The
+# primary line, porting the same blanking, carved this exemption out first and
+# recorded that this scanner had no such regex; it had one, silenced. The regex
+# is also widened to the family — `\bscanf` alone never matched `sscanf` or
+# `fscanf`, since the word boundary sits before the prefix.
+_SCANF_PCT_S = re.compile(r"\b(scanf|fscanf|sscanf|vscanf|vfscanf|vsscanf)\s*\([^)]*%s")
+READS_LITERALS = {_SCANF_PCT_S}
+
 CHECKS = [
     ("unbounded-copy", "CWE-120",
      re.compile(r"\b(strcpy|strcat|sprintf|vsprintf|gets)\s*\(")),
-    ("unbounded-copy", "CWE-120",
-     re.compile(r"\bscanf\s*\([^)]*%s")),
+    ("unbounded-copy", "CWE-120", _SCANF_PCT_S),
     ("stack-vla-alloca", "CWE-770",
      re.compile(r"\balloca\s*\(")),
     ("int-overflow-mul", "CWE-190",
@@ -164,9 +176,11 @@ def _scan_signed_char(code, char_names):
     return out
 
 
-def _uncommented(line, in_block=False):
+def _uncommented(line, in_block=False, blank_literals=True):
     """`(code, still_in_block)` — `line` with comments AND string/char literal
     contents blanked out, so a rule matches only text that can execute.
+    `blank_literals=False` blanks comments only, for the checks whose evidence
+    IS a literal (READS_LITERALS).
 
     Blanked rather than removed so the text the porter reads still lines up
     with the source, and so column-sensitive rules keep working.
@@ -219,14 +233,14 @@ def _uncommented(line, in_block=False):
             i += 1
             while i < n:
                 if line[i] == "\\" and i + 1 < n:
-                    out.append("  ")
+                    out.append("  " if blank_literals else line[i:i + 2])
                     i += 2
                     continue
                 if line[i] == c:
                     out.append(c)
                     i += 1
                     break
-                out.append(" ")
+                out.append(" " if blank_literals else line[i])
                 i += 1
             continue
         out.append(c)
@@ -243,11 +257,22 @@ def scan_text(src):
         # `in_block` carries across lines, so a comment opened on a code line
         # blanks its continuation lines too — the case the old `startswith`
         # check could not see.
+        was_in_block = in_block
         code, in_block = _uncommented(line, in_block)
         if not code.strip():
             continue
+        code_lit = None
         for cat, cwe, rx in CHECKS:
-            if rx.search(code):
+            if rx in READS_LITERALS:
+                if code_lit is None:
+                    code_lit = _uncommented(line, was_in_block, blank_literals=False)[0]
+                # The format may be a literal; the CALL may not. Offsets are
+                # aligned, so a name that was inside a literal is blank in `code`.
+                hit = any(code[m.start(1):m.end(1)] == m.group(1)
+                          for m in rx.finditer(code_lit))
+            else:
+                hit = rx.search(code) is not None
+            if hit:
                 hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
         for cat, cwe in _scan_signed_char(code, char_names):
             hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
@@ -406,6 +431,24 @@ def _self_test():
     deref = 'void d(char **bp, int sz) { *bp = (char *)realloc(*bp, sz); }\n'
     check("a line STARTING with a pointer deref is scanned, not skipped",
           any(h["category"] == "int-overflow-mul" for h in scan_text(deref)))
+
+    # LESSONS #064: `scanf("%s")`'s evidence is the literal, so the literal
+    # blanking must not reach it. This scanner reported none of these three
+    # from the day the blanking landed. A name inside a literal must still be
+    # ignored — both directions, on lines that start inside a block comment
+    # too, since the literal-keeping pass must see the same comment state.
+    sc = ('void f(char *b){\n'
+          '  scanf("%s", b);\n'
+          '  fscanf(stdin, "%s", b);\n'
+          '  sscanf(b, "%s", b);\n'
+          '  puts("scanf(%s) in a message is prose");\n'
+          '  /* sscanf(b, "%s", b); commented out */\n'
+          '  /* opened here\n'
+          '     sscanf(b, "%s", b); still comment */\n'
+          '}\n')
+    lines = sorted(h["line"] for h in scan_text(sc) if h["category"] == "unbounded-copy")
+    check("scanf/fscanf/sscanf(\"%s\") are ALL flagged; the literal and the "
+          "comments are not", lines == [2, 3, 4])
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
