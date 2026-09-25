@@ -10,7 +10,13 @@ Nothing here is optional for a "safe" verdict; a module that compiles and matche
 oracle is at gate 2 of 6, not done.
 
 ## Procedure — run each gate, collect results
-1. **Unsafe contained + documented** (toolchain-free hard gate):
+1. **Unsafe contained + documented** (toolchain-free hard gates — two of them, because
+   they answer different questions):
+   `python3 porting-kit/harnesses/unsafe-audit/check_forbid_unsafe.py crates/<core>` → the
+   core crate forbids `unsafe_code` on every target root (lsof-rs: `lsof-core`,
+   `lsof-cli`, `lsof-backend-linux`). Until LESSONS #065 this step was titled
+   "contained" and ran only the documentation check below, which passes on `unsafe`
+   in core as long as it carries a `// SAFETY:`.
    `python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/`  → must be 0
    undocumented. (On a real backend this found 51/131 undocumented — exactly what a
    gate catches.) Plus `cargo clippy --all-targets -- -D warnings -D

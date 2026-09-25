@@ -2921,3 +2921,119 @@ finding it is supposed to produce.
   `check_skeleton.sh` runs them.
 - **Section amended:** `porting-kit/skeleton/crates/cli/src/main.rs`,
   `porting-kit/skeleton/crates/cli/tests/stdout.rs`.
+
+---
+
+## 064. The fix this copy sent to the primary was a false negative here
+
+- **Date:** 2026-09-25
+- **Codebase:** the Porting Kit vendored here — bringing back what the primary
+  line's retrospective (its entries 45 and 46) found and fixed
+- **What happened:** the primary line's retrospective diffed its harnesses
+  against this copy and found three of its four fail-opens already fixed HERE.
+  It took the fixes. One was this scanner's literal blanking — a syscall named in
+  an error message is prose, not a call — and porting it, the primary noticed
+  that blanking every check would silence `scanf("%s")`, whose evidence is the
+  `%s` INSIDE a literal. It carved that check out, and recorded that this copy's
+  scanner "has no such regex".
+
+  It has one. Probed before importing anything back:
+
+  | fixture | this scanner | its regex on the raw line |
+  |---|---|---|
+  | `scanf("%s", b);` | **no hit** | matches |
+  | `fscanf(stdin, "%s", b);` | **no hit** | — (`\bscanf` never matched the family) |
+  | `sscanf(b, "%s", b);` | **no hit** | — |
+
+  From the commit that introduced the blanking — written in this copy, in this
+  arc — the scanner reported no `scanf("%s")` at all. The fix this copy EXPORTED
+  was a false negative in the copy it came from, and the one repository that
+  noticed the hazard wrote down the opposite of the truth about the other.
+  Nothing was hidden: the only `scanf`-family call in lsof's C is
+  `sscanf(fp[0], "%" SCNx64 …)`, which has no `%s`, so THREAT-MODEL §6 stands —
+  checked by running the primary's scanner over the tree (398 hits, 47 files),
+  not by reasoning about what it would find.
+
+- **The general form.** A fix is a claim about a SHAPE, and the two copies of
+  this kit are different shapes. The primary blanks literals in one whole-file
+  pass; this copy blanks them per line, inside the comment stripper. The same
+  fix was safe in one and silenced a check in the other — and the check it
+  silenced was the one whose evidence the fix removes. "Probe what you bring back
+  against the destination's own structure" is now retrospective step 4c, and it
+  applies to what you send out as much as to what you take in.
+
+- **And the fix to the fix.** Keeping literals for that one check re-admitted
+  function names inside literals: `puts("scanf(%s) is prose")` was flagged, by
+  both scanners. The precise rule is that the CALL must be code while its format
+  may be a literal — both passes keep byte offsets aligned, so the matched name
+  must still be present in the fully-blanked text. The primary line carries the
+  same false positive and gets the same fix.
+
+- **What else came back.** control-coverage now reports a gate-table row that
+  names no harness instead of dropping it — here, as in the primary, it was the
+  first row of the table, `#![forbid(unsafe_code)]` on `core` (enforced by
+  #065). The lesson-ref checker, which the primary took from here with ONE of
+  its four verdicts pinned, comes back with all four. Every copy of this kit is
+  both a source and a destination; neither direction was being checked.
+
+- **Kit change:** c-flaw-scan: literal-keeping pass for `READS_LITERALS`, the
+  family regex, and the call-must-be-code rule, with a fixture pinning all three
+  forms, a literal and two comment shapes. control-coverage: unreadable rows
+  reported, headers excluded in any number of tables. Four mutation rows
+  (scanner reads-literals, control-coverage-unreadable, lesson-refs duplicate,
+  gap, off-style) and one re-aimed (the scanner's crown verdict moved). Step 4c
+  in the retrospective prompt and skill, written from this copy's side.
+- **Section amended:** harnesses/c-flaw-scan/scan_c_flaws.py;
+  harnesses/control-coverage/check_controls.py;
+  harnesses/gate-mutation/mutate_gates.py · MUTATIONS; PROMPTS/90-retrospective.md
+  · step 4c; skills/porting-kit-retrospective/SKILL.md · 4c.
+
+---
+
+## 065. "Contained + documented" ran one check — the one that passes on unsafe in core
+
+- **Imported:** from the c2rust-port lineage of this kit, where it is #046. Renumbered here because the two logs are append-only and diverge from #006; internal cross-references are re-cited to this log's numbering.
+- **Re-cited:** source #45 -> #064 “The fix this copy sent to the primary was a false negative here”.
+- **Date:** 2026-09-25
+- **Codebase:** the Porting Kit vendored here, and lsof-rs's CI
+- **What happened:** the first row of this kit's control table,
+  `#![forbid(unsafe_code)]` on `core`, was checked by nothing. `audit_unsafe.py`
+  checks that `unsafe` is DOCUMENTED, not that it is ABSENT — so deleting the
+  attribute and adding an `unsafe` block with a `// SAFETY:` comment would have
+  passed every gate. The audit skill's step 1 was titled "Unsafe contained +
+  documented" and ran only the documentation check. control-coverage did not see
+  the gap because the row named no harness (#064).
+
+- **Here it mattered more than in the primary.** lsof-rs-ci.yml's miri job is
+  scoped to "the forbid(unsafe_code) crates", and argues that the UB case "only
+  bites if someone lifts forbid(unsafe_code) — and that attribute fires first".
+  A safety argument in CI resting on an attribute nothing checked. So the gate
+  here covers all three portable crates, not only core:
+
+  | crate | target roots | forbid by |
+  |---|---|---|
+  | `lsof-core` | `lib.rs` | attribute **and** manifest lint |
+  | `lsof-cli` | `lib.rs`, `main.rs` | attribute, in **each** root |
+  | `lsof-backend-linux` | `lib.rs` (attribute at line 94) | attribute |
+
+  `lsof-cli` is the case the every-root rule exists for: a binary beside a
+  library is its own crate, and a `forbid` in `lib.rs` does nothing for
+  `main.rs`. It forbids in both today; nothing required it to until now.
+
+- **The grep trap is live here too.** `lsof-core` and the skeleton's core both
+  quote the attribute in their `//!` header, so a grep finds it with the real
+  line deleted. The gate reads the crate head the way rustc does. Its "does not
+  count" list — `deny` beside a local `#[allow]`, the attribute inside a nested
+  block comment, only in a doc comment, under `cfg_attr(test, …)` — was checked
+  against rustc in the primary line, which compiles `unsafe` under every one.
+
+- **Kit change:** `harnesses/unsafe-audit/check_forbid_unsafe.py` imported and
+  re-cited. The CLAUDE.md row now names it, so control-coverage REQUIRES
+  lsof-rs-ci.yml to call it — 7 controls invoked where it was 6, with "unsafe
+  contained" RUN instead of dropped. Wired into the core+lints job over all three
+  crates, into `make check-kit` against the skeleton's core, and into the audit
+  skill's step 1. Five mutation rows, one per verdict that fails open alone.
+- **Section amended:** harnesses/unsafe-audit/check_forbid_unsafe.py;
+  .github/workflows/lsof-rs-ci.yml · core + lints; harnesses/gate-mutation/mutate_gates.py
+  · MUTATIONS; CLAUDE.md · control table; Makefile · check-kit; README · harness
+  table; skills/porting-kit-audit/SKILL.md · step 1.

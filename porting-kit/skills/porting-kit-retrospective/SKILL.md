@@ -33,6 +33,11 @@ A port that ships without this wastes its most valuable output.
 4. **Append to `porting-kit/LESSONS.md`** — one entry per lesson in the required format
    (date, codebase, lesson, section amended). If the kit had the lesson but it didn't
    fire, say why (friction? unclear? not wired to CI?).
+4c. **Diff this vendored kit against the primary line** (LESSONS #064): `cmp` each
+   shared file under `harnesses/` and `skills/`; for each difference that is not just
+   renumbered citations, import the fix (re-cited) or send this copy's fix out, and
+   re-probe it against the destination's own structure. Full procedure:
+   `PROMPTS/90-retrospective.md` step 4c.
 5. **Commit the kit changes separately** from the port, each message explaining which
    failure it prevents next time.
 

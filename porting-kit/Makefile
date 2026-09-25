@@ -8,6 +8,11 @@ H  := harnesses
 .PHONY: check-kit
 check-kit:
 	@echo "== unsafe-audit ==";     $(PY) $(H)/unsafe-audit/audit_unsafe.py --self-test
+	@# Contained, not just documented (LESSONS #065): the skeleton every port
+	@# copies must itself forbid unsafe in core. lsof-rs's own crates are
+	@# checked by lsof-rs-ci.yml, which control-coverage requires to call it.
+	@echo "== forbid-unsafe self-test =="; $(PY) $(H)/unsafe-audit/check_forbid_unsafe.py --self-test
+	@echo "== forbid-unsafe: the skeleton's core =="; $(PY) $(H)/unsafe-audit/check_forbid_unsafe.py skeleton/crates/core
 	@echo "== normalize ==";        $(PY) $(H)/differential/normalize.py --self-test
 	@echo "== diff_run ==";         $(PY) $(H)/differential/diff_run.py --self-test
 	@echo "== golden ==";           $(PY) $(H)/golden/golden.py --self-test

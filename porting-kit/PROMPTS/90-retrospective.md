@@ -42,6 +42,26 @@ retrospective and **patch the Porting Kit** with what you learned.
    (date, codebase, lesson, playbook section amended). If the kit already had
    the lesson but it didn't fire, say why (friction? unclear? not wired to CI?).
 
+4c. **Diff every shared harness against the primary line** (LESSONS #064). This
+   copy is vendored from `kj299/c2rust-port`; fixes land on both sides and flow
+   to neither unless someone compares the trees. At one cutover, three of four
+   fail-opens the primary had were already fixed HERE, one of them for months —
+   and the primary then fixed two things here that this copy had not. With both
+   trees checked out (`$PRIMARY` = the c2rust-port root):
+
+       for f in $(find harnesses skills -name '*.py' -o -name '*.sh'); do
+         cmp -s "$f" "$PRIMARY/$f" || echo "$f"; done
+
+   Most differences are renumbered `LESSONS #N` citations — the logs diverge.
+   For each that is not: a fix the primary has (import it: `KIT-IMPORT:`
+   header, every citation re-cited, `check_imports.py` enforces it), a fix this
+   copy has (send it), or a deliberate divergence (say so in the README).
+   **Re-probe anything carried in either direction against the destination's
+   own structure.** The literal-blanking fix this copy sent the primary was a
+   false negative HERE the whole time — it silenced `scanf("%s")` — and the
+   primary recorded that this scanner had no such check. A fix is only as good
+   as the shape it lands in, in both repositories.
+
 5. **Commit the kit changes separately** from the port, with a message explaining
    which failure each edit prevents next time.
 

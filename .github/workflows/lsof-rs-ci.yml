@@ -103,6 +103,19 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test (portable core + CLI via mock backend)
         run: cargo test --all
+      - name: unsafe contained (forbid(unsafe_code) on every portable crate)
+        # Contained first, then documented. The unsafe-audit step below checks
+        # that every unsafe block is JUSTIFIED — it passes on unsafe in core as
+        # long as it carries a // SAFETY:. Only forbid keeps it out, and until
+        # porting-kit LESSONS #065 nothing failed when that line was deleted.
+        # All three portable crates, not just core: the miri job below is
+        # scoped to "the forbid(unsafe_code) crates" and argues the UB case
+        # "only bites if someone lifts forbid(unsafe_code)" — an argument that
+        # needs this step to be true. lsof-core forbids by attribute and by
+        # manifest lint; lsof-cli and lsof-backend-linux by attribute alone, and
+        # lsof-cli has two target roots (lib.rs, main.rs), each its own crate,
+        # each needing its own. The gate rejects `deny`, `cfg_attr` and comments.
+        run: python3 ../porting-kit/harnesses/unsafe-audit/check_forbid_unsafe.py crates/lsof-core crates/lsof-cli crates/lsof-backend-linux
       - name: unsafe-audit (// SAFETY on every unsafe block)
         # Toolchain-free text scan from the porting kit. HARD gate: every unsafe
         # block in the backend carries a // SAFETY: justification (131/131), so
