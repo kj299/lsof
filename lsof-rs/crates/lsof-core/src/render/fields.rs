@@ -152,7 +152,7 @@ pub fn render_with_offset_digits(
                 let l = f.lock.map_or(' ', |k| k.code());
                 push!('l', &l.to_string());
             }
-            if want('t') {
+            if want('t') && f.file_type.has_code() {
                 push!('t', &f.file_type.code());
             }
             if want('G') {
@@ -234,7 +234,7 @@ pub fn render_with_offset_digits(
             if want('T') {
                 if let Some(sock) = &f.socket {
                     if tcp_show.state {
-                        if let Some(st) = sock.state {
+                        if let Some(st) = sock.shown_state() {
                             push!('T', &format!("ST={}", st.as_str()));
                         }
                     }

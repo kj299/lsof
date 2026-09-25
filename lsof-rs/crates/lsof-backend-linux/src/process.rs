@@ -84,6 +84,7 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<(Process, bool)> {
         user: st.uid.map(|u| users::name_for(u, numeric_ids)),
         files: Vec::new(),
         endpoint_peer: false,
+        unlisted: false,
     };
     Some((p, zombie))
 }

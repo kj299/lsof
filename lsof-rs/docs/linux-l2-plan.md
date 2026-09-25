@@ -358,3 +358,9 @@ every time at 2.34–2.44x on 2.00x; that is why the split is where it is.
 items), DIVERGENCES 9 (`opendir` access `u`), and DIVERGENCES 22 — which now
 carries netlink as well as AF_VSOCK, and is the one item on this page that
 needs a decision from the owner before any of it can be written.
+
+> **2026-09-25:** the `UNKN*` errno rows are done, and were misnamed. An
+> unreadable link is TYPE `unknown`; `UNKN*` is `-e`'s. See DIVERGENCES,
+> "Fixed by reporting what could not be read". DIVERGENCES 21 closed the same
+> day, and so did 32, the `-s` filter, which the 21 audit found. What `-e`
+> still owes on mapped files is DIVERGENCES 40.

@@ -45,7 +45,7 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
     }
     let mut parts: Vec<String> = Vec::new();
     if show.state {
-        if let Some(st) = sock.state {
+        if let Some(st) = sock.shown_state() {
             parts.push(st.as_str().to_string());
         }
     }

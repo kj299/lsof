@@ -48,6 +48,14 @@ ledger — those are the kit's, on purpose.
              UTF-8 -- each had hidden something from lsof-rs
   fixture Z  a main thread that has exited while another runs on, and a
              child never reaped: the two kinds of zombie ({Z}, {ZC})
+  fixture U  a process that made itself unreadable (`PR_SET_DUMPABLE` 0):
+             the rows the C prints for what it cannot read, and `-w`/`-t`,
+             which print none. Its cases carry LSOF_DIFF_UNPRIVILEGED and
+             run as a user who cannot read it -- the runner itself when it is
+             not root, `nobody` through `setpriv` when it is.
+  fixture S  a TCP listener, an established TCP pair, an unconnected and a
+             connected UDP socket, a unix socket and a file: every shape the
+             `-s TCP:` filter treats differently
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -94,6 +102,7 @@ import argparse
 import json
 import os
 import pwd
+import shlex
 import shutil
 import signal
 import subprocess
@@ -490,6 +499,108 @@ def zombie_holder(work: str) -> Fixture:
     return Fixture("Z(zombies)", [sys.executable, "-c", py], cwd=zdir, expect_fds=0)
 
 
+def unreadable_holder(work: str) -> Fixture:
+    """A process no one without CAP_SYS_PTRACE can read.
+
+    `PR_SET_DUMPABLE` 0 makes the kernel hand `/proc/<pid>/{cwd,root,exe,fd}`
+    to root and refuse the ptrace-read check behind every one of them -- to
+    the process's own user too, measured. So the C, run as that user, prints
+    what the fixture's cases compare: `cwd`/`rtd`/`txt` rows ending
+    `(readlink: Permission denied)` and a `NOFD` row ending `(opendir:
+    Permission denied)` -- and under `-w` or `-t`, nothing. lsof-rs printed
+    one bare `unk unknown` line and, under `-t`, the pid.
+
+    A ready marker, not an fd count, says when it is set up: the fd count is
+    exactly what an unprivileged harness cannot read.
+
+    Until this fixture existed the gate could read every process it compared,
+    so no case had ever held a file the tool could not read -- the path most
+    of a non-root user's output takes (porting-kit LESSONS #068)."""
+    udir = os.path.join(work, "unreadable")
+    os.makedirs(udir)
+    py = (
+        "import ctypes,os,time\n"
+        "held=open(os.path.join(%r,'held'),'w')\n"
+        "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (udir, udir)
+    )
+    return Fixture(
+        "U(unreadable)", [sys.executable, "-c", py], cwd=udir, expect_fds=0, optional=True
+    )
+
+
+def state_holder(work: str) -> Fixture:
+    """One socket in each shape `-s TCP:` treats differently, and a file.
+
+    On Linux the C tests every socket in the TCP and UDP tables against the
+    TCP state lists, by the kernel's number -- and the kernel numbers UDP with
+    TCP's states: 7 (`CLOSE`) for an unconnected socket, 1 (`ESTABLISHED`)
+    for a connected one. So `-sTCP:CLOSE` lists the unconnected UDP socket
+    and `-sTCP:LISTEN` drops both UDP sockets, while the unix socket and the
+    file are never touched. A TCP socket that is bound but neither listening
+    nor connected is deliberately absent: `/proc/net/tcp` does not list it,
+    and naming it is DIVERGENCES 22's open decision."""
+    sdir = os.path.join(work, "states")
+    os.makedirs(sdir)
+    py = (
+        "import os,socket,time\n"
+        "l=socket.socket(); l.bind(('127.0.0.1',0)); l.listen(1)\n"
+        "c=socket.create_connection(l.getsockname()); a,_=l.accept()\n"
+        "uu=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); uu.bind(('127.0.0.1',0))\n"
+        "uc=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); uc.connect(uu.getsockname())\n"
+        "x=socket.socket(socket.AF_UNIX); x.bind(os.path.join(%r,'s.sock')); x.listen(1)\n"
+        "f=open(os.path.join(%r,'held'),'w')\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (sdir, sdir, sdir)
+    )
+    # 0,1,2 + listener, the TCP pair, two UDP, the unix socket and the file.
+    return Fixture("S(states)", [sys.executable, "-c", py], cwd=sdir, expect_fds=10)
+
+
+def unprivileged_prefix() -> list | None:
+    """The argv prefix that runs a command as a user who cannot read fixture U.
+
+    Not root: none -- this user cannot read its own non-dumpable process.
+    Root (CAP_SYS_PTRACE reads anything): drop to `nobody` with `setpriv`,
+    which clears the capabilities with the uid. `None` when root has no way
+    down, and U's cases are skipped."""
+    if os.getuid() != 0:
+        return []
+    setpriv = shutil.which("setpriv")
+    try:
+        nobody = pwd.getpwnam("nobody")
+    except KeyError:
+        return None
+    if not setpriv:
+        return None
+    return [
+        setpriv,
+        f"--reuid={nobody.pw_uid}",
+        f"--regid={nobody.pw_gid}",
+        "--clear-groups",
+        "--",
+    ]
+
+
+def unprivileged_wrapper(work: str, name: str, binary: str, prefix: list) -> str:
+    """A script that runs `binary` through `prefix` when the case's
+    environment sets LSOF_DIFF_UNPRIVILEGED, and directly otherwise. The kit
+    runner takes one path per side for every case and only its environment
+    varies per case, so this is how one case runs as another user. It `exec`s
+    either way: the process lsof runs as is the binary itself."""
+    path = os.path.join(work, name)
+    argv = " ".join(shlex.quote(a) for a in [*prefix, binary])
+    with open(path, "w") as f:
+        f.write(
+            "#!/bin/sh\n"
+            f'if [ -n "$LSOF_DIFF_UNPRIVILEGED" ]; then exec {argv} "$@"; fi\n'
+            f'exec {shlex.quote(binary)} "$@"\n'
+        )
+    os.chmod(path, 0o755)
+    return path
+
+
 def stat_state(pid: int) -> str:
     """The one-letter state in `/proc/<pid>/stat` (after the LAST `)`)."""
     try:
@@ -726,7 +837,9 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     o = offset_holder(work)
     x = non_utf8_holder(work)
     z = zombie_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z
+    u = unreadable_holder(work)
+    st = state_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st
 
 
 # -------------------------------------------------------------------- matrix
@@ -842,7 +955,7 @@ def run(args) -> int:
     fixtures = make_fixtures(work)
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
-        offsets, nonutf8, zombies,
+        offsets, nonutf8, zombies, unreadable, states,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -853,7 +966,11 @@ def run(args) -> int:
         "J": (netns, "no CAP_SYS_ADMIN for `unshare --net`"),
         "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
         "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
+        "U": (unreadable, "no user here that cannot read a non-dumpable process"),
     }
+    # How fixture U's cases run as a user who cannot read it; see
+    # `unprivileged_prefix`. Root with no way down skips them.
+    prefix = unprivileged_prefix()
     try:
         for fx in fixtures:
             if fx.optional:
@@ -878,14 +995,18 @@ def run(args) -> int:
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
         started_optional = {k: v[0] for k, v in optional.items()}
-        netns, packet, userns = (
+        netns, packet, userns, unreadable = (
             started_optional["J"],
             started_optional["K"],
             started_optional["L"],
+            started_optional["U"],
         )
         for fx in [
             f
-            for f in (e, lk, anon, threads, netns, packet, userns, offsets, nonutf8)
+            for f in (
+                e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
+                unreadable, states,
+            )
             if f is not None
         ]:
             ready = os.path.join(fx.cwd, "ready")
@@ -897,6 +1018,24 @@ def run(args) -> int:
             if not os.path.exists(ready):
                 infra(f"fixture {fx.name} was not ready within 5s")
         zchild = zombies_ready(zombies)
+        # U is only worth comparing if the user its cases run as really cannot
+        # read it -- a runner with CAP_SYS_PTRACE could, and both binaries
+        # would then MATCH on a readable process, a green that measured
+        # nothing. Asked the way the cases will ask.
+        if unreadable is not None:
+            probe = None if prefix is None else subprocess.run(
+                [*prefix, "readlink", f"/proc/{unreadable.pid}/cwd"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if probe is None or probe.returncode == 0:
+                print(
+                    "linux_diff: optional fixture unavailable: U(unreadable): "
+                    + ("root, and no setpriv/nobody to drop to" if probe is None
+                       else "readable to the user its cases run as"),
+                    file=sys.stderr,
+                )
+                optional["U"] = (None, optional["U"][1])
         # {FILE} is a path only fixture A holds; {PORT} is fixture B's
         # listener. Both name exactly one fixture, which is what makes the
         # un-`-a`ed OR cases deterministic.
@@ -934,6 +1073,7 @@ def run(args) -> int:
                 "X": str(nonutf8.pid),
                 "Z": str(zombies.pid),
                 "ZC": str(zchild),
+                "S": str(states.pid),
                 # Who the fixtures run as, for `-u` -- by number and by name.
                 "UID": str(os.getuid()),
                 "USER": pwd.getpwuid(os.getuid()).pw_name,
@@ -968,10 +1108,14 @@ def run(args) -> int:
         matrix_json = os.path.join(work, "matrix.json")
         with open(matrix_json, "w") as f:
             json.dump({"case": cases}, f, indent=1)
+        oracle, rust = args.oracle, args.rust
+        if prefix:
+            oracle = unprivileged_wrapper(work, "oracle.sh", os.path.abspath(oracle), prefix)
+            rust = unprivileged_wrapper(work, "rust.sh", os.path.abspath(rust), prefix)
         cmd = [
             sys.executable, KIT_RUNNER,
-            "--oracle", args.oracle,
-            "--rust", args.rust,
+            "--oracle", oracle,
+            "--rust", rust,
             "--matrix", matrix_json,
             "--ledger", args.ledger,
         ]

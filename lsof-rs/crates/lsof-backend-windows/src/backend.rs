@@ -145,6 +145,7 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
             command: "<unknown>".to_string(),
             user: None,
             endpoint_peer: false,
+            unlisted: false,
             files: vec![file],
         });
         idx.insert(pid, i);
@@ -169,7 +170,14 @@ impl Backend for WindowsBackend {
         // needs per-file data, skip *all* handle/socket/module enumeration — it
         // would be gathered only to be discarded. Pure optimization (identical
         // output) that keeps `lsof -t` from doing system-wide work it never uses.
-        if sel.terse && !sel.inet.enabled && sel.fd_filter.is_none() && !sel.has_path_filter() {
+        // Not under `-s`: each state it names is a search item, located only by
+        // enumerating the sockets (DIVERGENCES 32).
+        if sel.terse
+            && !sel.inet.enabled
+            && sel.fd_filter.is_none()
+            && !sel.has_path_filter()
+            && sel.state_filter.is_none()
+        {
             trace("gather: terse fast-path (PIDs only)");
             return Ok(procs);
         }

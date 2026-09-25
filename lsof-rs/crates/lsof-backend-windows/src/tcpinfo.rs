@@ -88,10 +88,12 @@ pub fn annotate(file: &mut OpenFile, flags: &TcpInfoFlags, elevated: bool) {
 /// Map our [`TcpState`] to the `MIB_TCP_STATE` number for the row key.
 fn mib_state(s: TcpState) -> u32 {
     match s {
-        TcpState::Closed => 1,
+        // `Close` and `SynRecv` are Linux's names for these two states; the
+        // Windows backend never produces them, but they mean the same thing.
+        TcpState::Closed | TcpState::Close => 1,
         TcpState::Listen => 2,
         TcpState::SynSent => 3,
-        TcpState::SynReceived => 4,
+        TcpState::SynReceived | TcpState::SynRecv => 4,
         TcpState::Established => 5,
         TcpState::FinWait1 => 6,
         TcpState::FinWait2 => 7,

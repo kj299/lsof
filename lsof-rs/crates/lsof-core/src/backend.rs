@@ -9,6 +9,26 @@
 use crate::model::Process;
 use crate::selection::Selection;
 
+/// `strerror(errno)` as the C prints it, from a Rust `io::Error`.
+///
+/// `Display` for an OS error is the C library's own message — std asks libc's
+/// `strerror_r`, the library the C's `strerror` reads — followed by
+/// ` (os error N)`, which the C never prints. Trimming that one suffix gives
+/// the C's words byte for byte: `lsof: status error on /nope: No such file or
+/// directory`, and the `(readlink: Permission denied)` a backend writes into
+/// NAME for a file it could not read. An error that is not an OS error has no
+/// suffix and is kept whole.
+///
+/// It lives here, beside the seam, because both sides need it: the CLI for
+/// its argument errors and a backend for the files it cannot examine.
+pub fn errno_text(e: &std::io::Error) -> String {
+    let s = e.to_string();
+    match s.rfind(" (os error ") {
+        Some(i) if s.ends_with(')') => s[..i].to_string(),
+        _ => s,
+    }
+}
+
 /// An OS privilege that a particular query may require. Used to implement the
 /// least-privilege model: the CLI/back end only ever requests a privilege when
 /// the switches in use actually need it, and never holds it longer than the
@@ -153,4 +173,53 @@ pub trait Backend {
     /// engine applies the authoritative filtering afterwards, so a backend may
     /// also return a superset.
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::errno_text;
+
+    /// `errno_text` strips the ` (os error N)` that Rust appends and the C
+    /// never prints, so `lsof: status error on /nope: No such file or
+    /// directory` is byte-identical to the oracle's line.
+    ///
+    /// The rule is **strip exactly one, never greedily** — the same shape as
+    /// the `/proc/maps` ` (deleted)` marker. The first version of this test
+    /// asserted the result never *contains* `os error`, which is over-strong,
+    /// and miri said so: its `strerror` shim already ends the message with
+    /// `(os error 2)`, `Display` appends a second, and a correct single strip
+    /// leaves one behind. Constructed strings pin the rule portably; the live
+    /// error then only has to show that the suffix `Display` added is gone.
+    #[test]
+    fn errno_text_drops_one_rust_suffix() {
+        use std::io::Error;
+
+        // `Error::other` Displays as the message alone, so these pin the
+        // transformation itself on every platform and under miri.
+        assert_eq!(
+            errno_text(&Error::other("No such file or directory (os error 2)")),
+            "No such file or directory"
+        );
+        // Nothing to strip: survives whole.
+        assert_eq!(errno_text(&Error::other("handmade")), "handmade");
+        // The suffix counts only at the very end, in parentheses.
+        assert_eq!(
+            errno_text(&Error::other("no (os error 2) here")),
+            "no (os error 2) here"
+        );
+        // Exactly one. Greedy stripping would rename an errno message that
+        // legitimately ends that way — and it is the shape miri produces.
+        assert_eq!(
+            errno_text(&Error::other("x (os error 2) (os error 2)")),
+            "x (os error 2)"
+        );
+
+        // On a live OS error, whatever the platform's message is, the suffix
+        // `Display` appended is gone and something is left.
+        let e = Error::from_raw_os_error(2);
+        let raw = e.to_string();
+        let t = errno_text(&e);
+        assert_eq!(t, raw.strip_suffix(" (os error 2)").unwrap_or(&raw));
+        assert!(!t.is_empty());
+    }
 }

@@ -219,15 +219,22 @@ ids = ["type:EVENTFD", "type:SHM", "type:UNNM", "type:UNSP"]
 platforms = ["linux"]
 reason = "NOT IN THE DIALECT — these names live in lib/print.c's shared table and include/lsof.h's enum, but nothing under lib/dialects/linux/ ever sets them: an eventfd is typed `a_inode` here, /dev/shm is a plain `REG`. Waived as unreachable on this dialect rather than as debt."
 
+# The UNKN* codes are `-e`'s, not an unreadable link's (2026-09-25). Both
+# waivers here had said the C emits them "with an errno on a link it cannot
+# read": it does not — that row is TYPE `unknown`, now emitted and compared
+# (linux/differential-unreadable-rows-say-what-could-not-be-read). The C types
+# a row `UNKN<fd kind>` when `-e` exempts it from stat (`isefsys()`,
+# dproc.c), and lsof-rs has done that for cwd/rtd/txt/fd since 2026-09-20;
+# those four are covered by linux/differential-opt-e-exempts-a-mount.
 [[waive]]
 ids = ["type:UNKNdel", "type:UNKNmem"]
 platforms = ["linux"]
-reason = "DEBT (L2): the UNKN* family, same cause as the entry below — the C emits these with an errno on a link it cannot read, and lsof-rs omits the row. Grouped with the mem/deleted work until now, which hid that they are an error-reporting gap and not a mappings one."
+reason = "DEBT: `-e` does not yet exempt MAPPED files. Under `-e /` the C types each `mem` row UNKNmem (a deleted one UNKNdel) from the maps line alone, never stat'ing it; lsof-rs still stats and prints REG. DIVERGENCES 40."
 
 [[waive]]
-ids = ["type:UNKN", "type:UNKNcwd", "type:UNKNfd", "type:UNKNrtd", "type:UNKNtxt"]
+ids = ["type:UNKN"]
 platforms = ["linux"]
-reason = "DEBT (L2): the C emits these on an unreadable link, with the errno; L0 omits the row entirely (see lsof-backend-linux crate docs)"
+reason = "NOT IN THE DIALECT — `isefsys()` prints UNKN only when it LINKS a row with no type, and every Linux call that links one passes a real type (UNKNcwd, UNKNrtd, UNKNtxt, UNKNfd); the one call with none, for mapped files, only reports."
 
 # type:FIFO and type:BLK are NOT waived on Linux: L0 emits both today
 # (S_IFIFO -> FIFO, S_IFBLK -> BLK), so they are covered, not excused.

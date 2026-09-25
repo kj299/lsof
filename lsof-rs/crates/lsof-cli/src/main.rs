@@ -17,7 +17,9 @@ use std::io::Write;
 use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
-use lsof_core::{Backend, FilesystemArgs, Located, Process, Selection, UidSel, UserLookup};
+use lsof_core::{
+    errno_text, Backend, FilesystemArgs, Located, Process, Selection, UidSel, UserLookup,
+};
 
 #[cfg(target_os = "linux")]
 use lsof_backend_linux::LinuxBackend;
@@ -101,14 +103,15 @@ SELECTION:\n\
                   on Windows); ^cmd excludes. -c /regex/ is not supported\n\
     -g [pgids]    process groups: the PGID column, and with pgids, selection\n\
                   (^ excludes). On Windows: select children of these PPIDs\n\
-    -d <fds>      filter by FD: cwd,rtd,txt,mem, numbers, a-b ranges, ^exclude\n\
+    -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD, numbers, a-b ranges,\n\
+                  ^exclude\n\
     -i [spec]     Internet sockets; spec = [46][tcp|udp|icmp|raw][@addr][:ports]\n\
                   ports may be a list and ranges (:22,80,1000-2000); each -i\n\
                   is its own item, ORed. Host and service names are not resolved\n\
                   (icmp/raw come from the ETW capture; needs Admin)\n\
-    -s [p:s]      filter sockets by protocol+state, e.g. TCP:LISTEN;\n\
-                  a bare -s shows only sizes, in a SIZE column\n\
-                  (comma-separated, `^` prefix excludes)\n\
+    -s [p:s]      TCP and UDP sockets by TCP state: TCP:LISTEN,ESTABLISHED\n\
+                  lists only those, TCP:^TIME_WAIT excludes one; each listed\n\
+                  state is a search item. A bare -s shows sizes, in a SIZE column\n\
     -U            list UNIX-domain (AF_UNIX) sockets (via ETW; needs Admin)\n\
     -K            list each process's threads as `task` rows (TID in NODE)\n\
     -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
@@ -146,7 +149,8 @@ OUTPUT:\n\
 \n\
 MISCELLANEOUS:\n\
     -Q            quiet: mute search failures, exit status included\n\
-    -w / +w       suppress / enable non-fatal stderr warnings (default on)\n\
+    -w / +w       leave out / report files that cannot be read, and suppress /\n\
+                  enable non-fatal stderr warnings (default: report, on)\n\
     -O            no-op (Unix-specific perf hint; accepted for portability)\n\
     --            end of options; remaining args are paths\n\
 \n\
@@ -194,27 +198,6 @@ fn strip_verbatim(s: &str) -> String {
         rest.to_string()
     } else {
         s.to_string()
-    }
-}
-
-/// Report `-p` PIDs and path/dir search items that could not be located, and
-/// return how many. `-p` PIDs are checked against the *located* set (the PIDs
-/// the backend gathered, before selection filtering): a PID that exists but is
-/// filtered out by e.g. `-a` was still located, so it is not "unmatched". Paths
-/// are checked against the selected result. The message is printed only under
-/// `-V` (and never under `-Q`), as before — but the count is returned
-/// regardless, because lsof exits 1 on an unlocated search item even when it
-/// prints nothing (so `lsof -t <file> && ...` and `if lsof ...; then` work).
-/// `strerror(errno)` as the C prints it, from a Rust `io::Error`.
-///
-/// `Display` for an OS error appends ` (os error N)`, which the C never
-/// prints. Trimming it keeps `lsof: status error on /nope: No such file or
-/// directory` byte-identical to the oracle's message.
-fn errno_text(e: std::io::Error) -> String {
-    let s = e.to_string();
-    match s.rfind(" (os error ") {
-        Some(i) if s.ends_with(')') => s[..i].to_string(),
-        _ => s,
     }
 }
 
@@ -349,6 +332,22 @@ fn unlocated(
     // the inet selector alone. See `Selection::locate` for "keeps".
     if sel.inet.bare() && !located.inet_all {
         miss.push("lsof: no Internet files located".to_string());
+    }
+    // Each `-s TCP:` state included: `main.c` walks its state TABLE and names
+    // every entry still at 1, so the order is the table's (the kernel's
+    // numbering on Linux: `CLOSED` before `SYN_SENT` before `LISTEN`), not
+    // the order given, and the name is the table's spelling, not the user's.
+    if let Some(filter) = &sel.state_filter {
+        for state in lsof_core::model::tcp_state_table() {
+            let missed = filter
+                .include
+                .iter()
+                .zip(&located.states)
+                .any(|(want, hit)| want == state && !hit);
+            if missed {
+                miss.push(format!("lsof: TCP state not located: {}", state.as_str()));
+            }
+        }
     }
     // `-N` is the same shape (`main.c`'s `Fnfs < 2`), and the message is the
     // same sentence with the noun changed. Measured on a host with no NFS
@@ -652,7 +651,7 @@ fn main() {
                 // tell a failure from "this platform has no identities".
                 let why = std::fs::metadata(p)
                     .err()
-                    .map(errno_text)
+                    .map(|e| errno_text(&e))
                     .unwrap_or_else(|| "status error".to_string());
                 unstattable.push((p.clone(), why));
             }
@@ -681,7 +680,7 @@ fn main() {
             if id.is_none() && identifies && !quiet {
                 let why = std::fs::metadata(dir)
                     .err()
-                    .map(errno_text)
+                    .map(|e| errno_text(&e))
                     .unwrap_or_else(|| "status error".to_string());
                 eprintln!("lsof: WARNING: can't stat({dir}): {why}");
             }
@@ -931,51 +930,6 @@ mod tests {
             }) => (selection, format),
             other => panic!("expected Action::Run for {argv:?}, got {other:?}"),
         }
-    }
-
-    /// `errno_text` strips the ` (os error N)` that Rust appends and the C
-    /// never prints, so `lsof: status error on /nope: No such file or
-    /// directory` is byte-identical to the oracle's line.
-    ///
-    /// The rule is **strip exactly one, never greedily** — the same shape as
-    /// the `/proc/maps` ` (deleted)` marker. The first version of this test
-    /// asserted the result never *contains* `os error`, which is over-strong,
-    /// and miri said so: its `strerror` shim already ends the message with
-    /// `(os error 2)`, `Display` appends a second, and a correct single strip
-    /// leaves one behind. Constructed strings pin the rule portably; the live
-    /// error then only has to show that the suffix `Display` added is gone.
-    #[test]
-    fn errno_text_drops_one_rust_suffix() {
-        use super::errno_text;
-        use std::io::Error;
-
-        // `Error::other` Displays as the message alone, so these pin the
-        // transformation itself on every platform and under miri.
-        assert_eq!(
-            errno_text(Error::other("No such file or directory (os error 2)")),
-            "No such file or directory"
-        );
-        // Nothing to strip: survives whole.
-        assert_eq!(errno_text(Error::other("handmade")), "handmade");
-        // The suffix counts only at the very end, in parentheses.
-        assert_eq!(
-            errno_text(Error::other("no (os error 2) here")),
-            "no (os error 2) here"
-        );
-        // Exactly one. Greedy stripping would rename an errno message that
-        // legitimately ends that way — and it is the shape miri produces.
-        assert_eq!(
-            errno_text(Error::other("x (os error 2) (os error 2)")),
-            "x (os error 2)"
-        );
-
-        // On a live OS error, whatever the platform's message is, the suffix
-        // `Display` appended is gone and something is left.
-        let e = Error::from_raw_os_error(2);
-        let raw = e.to_string();
-        let t = errno_text(e);
-        assert_eq!(t, raw.strip_suffix(" (os error 2)").unwrap_or(&raw));
-        assert!(!t.is_empty());
     }
 
     /// The predicate behind the "re-run as Administrator" stderr hint. Hosted

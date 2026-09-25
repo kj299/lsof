@@ -159,16 +159,15 @@ impl SocketTable {
             };
             let local = parse_addr(f[INET_LOCAL], v6);
             let remote = parse_addr(f[INET_REMOTE], v6);
-            // Linux's `/proc/net/udp` reuses the TCP state numbers, but lsof
-            // registers exactly one name for UDP — `ESTABLISHED` (1), for a
-            // connected socket. Every other value, `TCP_CLOSE` (7) for the
-            // usual unconnected socket included, prints no state at all. That
-            // one-entry table is `build_IPstates()` verbatim, not a
-            // simplification.
+            // Linux's `/proc/net/udp` reuses the TCP state numbers — 1,
+            // `ESTABLISHED`, for a connected socket, 7, `CLOSE`, for the usual
+            // unconnected one — and the C keeps that number for UDP too: `-s
+            // TCP:` filters a UDP socket by it. What it PRINTS is another
+            // table, which for UDP registers `ESTABLISHED` alone
+            // (`build_IPstates()`), so the model holds the number and
+            // `SocketInfo::shown_state` hides every value but that one.
             let state = match proto {
-                Protocol::Tcp => Some(tcp_state(f[INET_STATE]).into()),
-                Protocol::Udp => (u32::from_str_radix(f[INET_STATE], 16) == Ok(0x01))
-                    .then(|| TcpState::Established.into()),
+                Protocol::Tcp | Protocol::Udp => Some(tcp_state(f[INET_STATE]).into()),
                 _ => None,
             };
             // Both tables carry `tx_queue:rx_queue`, and lsof reports the
@@ -512,16 +511,20 @@ pub fn parse_addr(s: &str, v6: bool) -> Option<SocketAddr> {
 }
 
 /// The `st` column's hex code. These are the kernel's `TCP_*` enum values, not
-/// the wire states, so the mapping is fixed by include/net/tcp_states.h.
+/// the wire states, so the mapping is fixed by include/net/tcp_states.h — and
+/// the names are the C's for them (`build_IPstates()`), which call 3
+/// `SYN_RECV` and 7 `CLOSE` where Windows says `SYN_RCVD` and `CLOSED`. A
+/// number past `TCP_CLOSING` (`NEW_SYN_RECV`, `BOUND_INACTIVE`) is outside
+/// the C's table: `UNKNOWN`, and never filtered by `-s`.
 pub fn tcp_state(hex: &str) -> TcpState {
     match u8::from_str_radix(hex, 16) {
         Ok(0x01) => TcpState::Established,
         Ok(0x02) => TcpState::SynSent,
-        Ok(0x03) => TcpState::SynReceived,
+        Ok(0x03) => TcpState::SynRecv,
         Ok(0x04) => TcpState::FinWait1,
         Ok(0x05) => TcpState::FinWait2,
         Ok(0x06) => TcpState::TimeWait,
-        Ok(0x07) => TcpState::Closed,
+        Ok(0x07) => TcpState::Close,
         Ok(0x08) => TcpState::CloseWait,
         Ok(0x09) => TcpState::LastAck,
         Ok(0x0a) => TcpState::Listen,
@@ -879,10 +882,50 @@ mod tests {
         assert_eq!(tcp_state("01").as_str(), "ESTABLISHED");
         assert_eq!(tcp_state("06").as_str(), "TIME_WAIT");
         assert_eq!(tcp_state("08").as_str(), "CLOSE_WAIT");
+        // The two the C names differently from Windows (`build_IPstates()`):
+        // lsof-rs printed `SYN_RCVD` and `CLOSED` here, and `-s TCP:CLOSE`
+        // could not have matched anything.
+        assert_eq!(tcp_state("03").as_str(), "SYN_RECV");
+        assert_eq!(tcp_state("07").as_str(), "CLOSE");
+        // Every number the C's table has, and only those, is a -s state.
+        for n in 1..=11u8 {
+            let st = tcp_state(&format!("{n:02X}"));
+            assert!(
+                lsof_core::model::LINUX_TCP_STATES.contains(&st),
+                "state {n} ({}) must be one -s can name",
+                st.as_str()
+            );
+        }
+        // Past TCP_CLOSING the C's table ends: NEW_SYN_RECV is 0x0c.
+        assert_eq!(tcp_state("0C").as_str(), "UNKNOWN");
         // Lowercase is what the kernel actually writes for 0x0a in some files.
         assert_eq!(tcp_state("0a").as_str(), "LISTEN");
         assert_eq!(tcp_state("ff").as_str(), "UNKNOWN");
         assert_eq!(tcp_state("").as_str(), "UNKNOWN");
+    }
+
+    #[test]
+    fn a_udp_socket_keeps_its_state_for_dash_s_and_shows_only_established() {
+        // Measured against the C: an unconnected UDP socket (st 07) prints no
+        // state but is listed by `-sTCP:CLOSE` and dropped by `-sTCP:LISTEN`;
+        // a connected one (st 01) prints `(ESTABLISHED)` and is listed by
+        // `-sTCP:ESTABLISHED`. lsof-rs had kept no state for the first, so
+        // no `-s` could tell it from a TCP socket in any state.
+        let mut t = SocketTable::default();
+        t.parse_inet(
+            "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+   1: 0100007F:DF0A 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 5101 2 0000000000000000 0\n\
+   2: 0100007F:9164 0100007F:DF0A 01 00000000:00000000 00:00000000 00000000     0        0 5102 2 0000000000000000 0\n",
+            Protocol::Udp,
+            false,
+            false,
+        );
+        let idle = &t.get(5101).expect("unconnected").info;
+        assert_eq!(idle.filter_state(), Some(TcpState::Close));
+        assert_eq!(idle.shown_state(), None, "prints no state");
+        let conn = &t.get(5102).expect("connected").info;
+        assert_eq!(conn.filter_state(), Some(TcpState::Established));
+        assert_eq!(conn.shown_state().map(|s| s.as_str()), Some("ESTABLISHED"));
     }
 
     #[test]

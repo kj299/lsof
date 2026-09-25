@@ -44,6 +44,26 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 - **`-i` host and service names are refused, not guessed at**: `-i:http` had
   listed every Internet file and `-i@localhost` nothing. Port lists and ranges
   (`:22,80,1000-2000`) now work; a numeric host is matched exactly.
+- **`-s TCP:<states>` is checked, and every state it includes is a search
+  item** (DIVERGENCES 32). An unknown or duplicated state, an empty list, and
+  a state both included and excluded are fatal, in the C's words; a state that
+  nothing was in exits 1, and `-V` says `TCP state not located: <STATE>`.
+  Several `-s` options make one filter (the last one had won). The names are
+  the platform's own. On Linux those are the C's: `CLOSE` and `SYN_RECV`,
+  where lsof-rs had printed Windows' `CLOSED` and `SYN_RCVD` for a socket in
+  either state. `-s UDP:<state>` is refused. The C segfaults on it.
+- **`-s TCP:` filters sockets that have a TCP state, and only those.** On Linux
+  that includes UDP, by the TCP number the kernel gives it: `-sTCP:CLOSE`
+  lists the unconnected UDP sockets, and `-sTCP:LISTEN` drops them, as the C
+  does. A unix socket, a raw socket or a file is never touched. lsof-rs had
+  dropped every non-TCP socket under any `-s TCP:`. On **Windows**, where UDP
+  has no state, `-s TCP:` no longer drops UDP and AF_UNIX sockets; use
+  `-iTCP -sTCP:LISTEN` for TCP alone, as Lsof.8 advises.
+- **`-w`, and `-t` (which sets it), leave out the files that cannot be read**
+  (DIVERGENCES 37). A process with nothing else to show is then not listed,
+  though a `-p` naming it is still found. So `lsof -t` prints the pids of
+  processes that have a readable file, as the C does, not every pid on the
+  host. `+w` after `-t` restores the rows.
 
 ### Added
 - **`-i` and `-U` now collect only sockets** (P5 of `docs/linux-l2-plan.md`).
@@ -77,6 +97,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **A file that cannot be read is a row saying why, not a blank line.** For a
+  process it cannot read, the C prints `cwd`, `rtd` and `txt` rows of TYPE
+  `unknown` naming the `/proc` path and the reason, `/proc/1/cwd (readlink:
+  Permission denied)`, and a `NOFD` row for an fd table it cannot open.
+  lsof-rs printed one bare `unk unknown` line — for every other user's
+  process, on every run without root. Whole-host as an unprivileged user the
+  two now print the same lines. A link that reads but will not `stat` gains
+  `(stat: <reason>)`. `-d NOFD` and `-d DEL` select those rows. The reason is
+  the C library's own text. The "deliberate" entry that had kept this out
+  said matching it meant reproducing libc's messages, which Rust's
+  `io::Error` already prints. LESSONS #068.
 - **`-o` is an OFFSET column** (DIVERGENCES 6): header `OFFSET`, and a row with
   no offset (`cwd`, `rtd`, `txt`, `mem`) is blank instead of showing its size.
   Offsets past `-o <digits>` decimal digits — 8 by default — print in hex, in
