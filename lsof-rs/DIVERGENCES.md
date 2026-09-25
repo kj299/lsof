@@ -67,6 +67,172 @@ disagreeing, and it names the C code so anyone can check the triage.
   prints the same text. `hostile-comm-utf8-fields-Ffc` on the same comm
   MATCHes — `-F` has no column, so no width to get wrong. Platform-dependent
   in the C (an unsigned-`char` target such as aarch64 sizes correctly).
+- [x] states-udp-names-crash-the-c [sha256:ca9e69cbd288]: C-DEFECT, not
+  reproduced — item 32. Every `-s UDP:<state>` is a segfault in the C (exit
+  139, measured): `enter_state_spec()` `strcasecmp()`s each slot of `UdpSt[]`,
+  and the Linux dialect enters its one UDP name, `ESTABLISHED`, under
+  `TCP_ESTABLISHED` (1), so slot 0 is NULL (`build_IPstates()`). lsof-rs
+  refuses the value with the message the man page promises for a protocol
+  whose state names are unavailable — `no UDP state names available:
+  UDP:Idle` — and exits 1. The same empty stdout; the exit differs.
+- [x] options-after-a-name-are-still-options-in-lsof-rs [sha256:40e9ee00f613]:
+  DECISION — item 12. The C's `GetOpt()` returns EOF at the first argument
+  that is not an option, so in `lsof FILE -a -p PID` the last three are file
+  names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
+  options wherever they appear, lists the same row, and exits 0.
+
+## Fixed by reporting what could not be read (2026-09-25)
+
+Items 37 and "Inaccessible files are omitted", which sat under "Deliberate,
+and staying". Measured with a process that made itself unreadable
+(`prctl(PR_SET_DUMPABLE, 0)`), from a user who cannot read it:
+
+```
+python3 478 root  cwd   unknown   /proc/478/cwd (readlink: Permission denied)
+python3 478 root  rtd   unknown   /proc/478/root (readlink: Permission denied)
+python3 478 root  txt   unknown   /proc/478/exe (readlink: Permission denied)
+python3 478 root NOFD      0000   /proc/478/fd (opendir: Permission denied)
+```
+
+The C does not drop what it cannot read (`dproc.c`, `process_id()`). Each of
+cwd, rtd and txt is a row of TYPE `unknown` naming the `/proc` path it tried and
+why that failed. An fd directory that will not open is one `NOFD` row, and the
+fds under it are not listed; an fd whose link will not read is a row under its
+number. lsof-rs printed one bare `unk unknown` line for all of it — and that is
+what a non-root user sees of **every other user's process**. Whole-host, as
+`nobody`, the two binaries now print the same 425 lines; as root on this
+host, the same 1131, apart from items 9 and 22.
+
+The details, each measured:
+
+* **The reason is libc's own text.** The obstacle the "deliberate" entry gave —
+  "matching it means reproducing libc's errno strings" — was never tested.
+  Rust's `io::Error` already prints `strerror`'s text, plus ` (os error N)`;
+  the CLI already had the function that strips it (`errno_text`, now in
+  `lsof-core` for both sides).
+* **`NOFD`'s TYPE is `0000`.** The row never gets a type, and the C's fallback
+  prints the raw number, `%04o`. Under `-F` the row has no `t` field at all.
+  `-d NOFD` selects it: the C compares any `-d` name with the FD cell, so `-d
+  DEL` works the same way, and lsof-rs now accepts both.
+* **A kernel thread's executable has no reason.** `(errno != ENOENT) || uid`:
+  a root-owned process whose `exe` is simply not there prints `/proc/2/exe`
+  alone. Not reachable on either test host, so pinned by unit test.
+* **A link that reads but will not `stat`** keeps its name and gains
+  `(stat: <reason>)` — a dead FUSE mount, say. lsof-rs showed the name alone.
+  The C also `lstat`s an fd's link and can add `(lstat: …)`; that call fails
+  only in a race, and costs a syscall per fd on every run, so lsof-rs does not
+  make it.
+* **Under `-w` none of these rows is made**, and a process left with nothing is
+  not listed — but it was found: `lsof -w -p P` prints nothing and exits 0, and
+  `-V` says nothing. The C's `-t` sets `-w`, so `lsof -t -p P` prints no pid;
+  `-t +w` does, `+w -t` does not. lsof-rs printed the pid from a fast path that
+  never looked at the files. It still does not walk them: it asks whether any
+  link reads, which a readable process answers on its first `readlink`.
+  `Selection::omit_unreadable` carries this, apart from `suppress_warnings`,
+  because `-t` must not silence the Windows privilege hint.
+* **Task rows name their own directory**: `/proc/85/task/86/cwd (readlink: …)`.
+
+Windows is unchanged. A process with no rows is marked `unlisted` only by the
+Linux backend; the Windows backend keeps its bare line for a process whose
+handles it could not read.
+
+### What the gate gained
+
+Fixture U is a process with `PR_SET_DUMPABLE` 0, which the kernel makes
+unreadable even to its own user without CAP_SYS_PTRACE — measured, `dr-x------
+root` on its fd directory while it runs as `nobody`. Its ten cases set
+`LSOF_DIFF_UNPRIVILEGED`. An unprivileged CI runner runs them as itself; a
+root harness runs them as `nobody`, through a wrapper per binary, since the kit
+runner takes one path per side for every case. Before trusting them, the
+harness checks from that same user that U really cannot be read. If it can,
+the cases are SKIPPED, because they would otherwise MATCH on a readable
+process and prove nothing (porting-kit LESSONS #068). Eighteen mutants, all
+killed: fourteen by the differential, four by unit tests alone. Those four
+are the kernel-thread rule, `(stat: …)`, fd rows under an fd directory that
+opens, and rows under a socket-only run, which selection drops anyway.
+
+### What it corrected in the coverage ledger
+
+The `UNKN*` TYPE codes had been waived on Linux as "the C emits these on an
+unreadable link, with the errno". That is not what they are. An unreadable
+link is TYPE `unknown`. `UNKNcwd`, `UNKNrtd`, `UNKNtxt` and `UNKNfd` are what
+`-e` prints for a row it exempts from `stat` (`isefsys()`), which lsof-rs has
+done since 2026-09-20. They are covered now, by the `-e` case that was
+already comparing them. Measuring them found **item 40**: `-e` does not yet
+exempt mapped files, which the C prints as `UNKNmem`. Plain `UNKN` is
+unreachable on this dialect.
+
+## Fixed by making `-s` the C's state filter (2026-09-25)
+
+Item 32. lsof-rs had three faults here. It took any text as a state, so a
+typo listed nothing and exited 0. It kept only the last `-s`. And it applied
+`-s TCP:` to TCP sockets alone while **dropping every other socket**, the unix
+ones included. Measured against the C, on a process holding one socket of each
+kind:
+
+| `-s` | the C lists |
+|---|---|
+| `TCP:LISTEN` | the listener, the unix socket, the file |
+| `TCP:CLOSE` | the **unconnected UDP** socket, the unix socket, the file |
+| `TCP:ESTABLISHED` | both TCP ends, the **connected UDP** socket, the unix socket, the file |
+| `TCP:^CLOSE` | everything but the unconnected UDP socket |
+
+On Linux the C runs one path for every socket in the TCP and UDP tables
+(`process_proc_sock()`), and that path checks the TCP lists against the
+kernel's state number. The kernel numbers UDP with TCP's states: 7, `CLOSE`,
+for an unconnected socket and 1, `ESTABLISHED`, for a connected one. So a UDP
+socket is included or dropped by the state it never prints. **This item's own
+entry was wrong about that**: it said a TCP filter "leaves UDP … alone". It
+had been read off the source and not measured, and measuring corrected it
+before any code was written.
+
+Now:
+
+* **Every TCP and UDP socket that carries a state is tested; nothing else
+  is.** The Linux backend keeps UDP's number, and `SocketInfo::shown_state`
+  still prints only `ESTABLISHED` for UDP, as the C's one-entry UDP table
+  does. A state beyond the C's table (`NEW_SYN_RECV`) is neither required nor
+  excluded, as `i < TcpNstates` says.
+* **The names are the platform's.** On Linux they are the C's
+  (`build_IPstates()`): `CLOSE` and `SYN_RECV` where lsof-rs had used Windows'
+  `CLOSED` and `SYN_RCVD`, which changes the NAME of a socket in either state
+  too. `CLOSED`, state 0, is accepted and never located. Windows keeps
+  `MIB_TCP_STATE`'s names.
+* **Every one of the C's errors**, in its words: `unknown -s protocol:
+  "<value>"`, `no TCP state names in:`, `NULL TCP state name in:`, `unknown TCP
+  state name:`, `duplicate TCP inclusion:`, and `can't include and exclude TCP
+  state:`. A duplicate counts across two `-s` options, since the C's tables are
+  global.
+* **Each included state is a search item.** `TCP state not located: <STATE>`,
+  in the C's table order rather than the order given, and exit 1. A state is
+  located by any socket in it that the C reads, before `-d`, `-i` or `-a` has
+  decided the row. Which processes it reads matters. With two process
+  selecters and no `-a` it reads every process (`is_proc_excl` skips only when
+  `Selflags == SELPID` and its like), so `lsof -p A -c x -sTCP:LISTEN` is
+  located by a listener anywhere. lsof-rs widens its walk to match only when
+  `-s` names a state, because nothing else can tell. `-t`'s fast path, which
+  reads no sockets, is not taken under `-s`.
+* **`-s UDP:` with names is refused**, with the man page's message for a
+  protocol whose state names are unavailable: `no UDP state names available:
+  UDP:Idle`. The C **segfaults** on every such value, ledgered as
+  `states-udp-names-crash-the-c`. `-s UDP:` alone is the C's own `no UDP state
+  names in:`.
+
+Windows shares the filter, the validation and the search items. The one
+visible change there: `-s TCP:` no longer drops UDP and AF_UNIX sockets, as
+Windows gives UDP no state. That is also what the C does on macOS, the other
+platform without UDP states (`darwin/dsock.c` filters `SOCKINFO_TCP` alone).
+The Windows `-t` fast path steps aside under `-s`, as the Linux one does.
+
+### What the gate gained
+
+Fixture S holds one socket of each kind above, and twenty-five cases compare
+it. They cover the four filters, inclusion with exclusion, accumulation, case,
+a value given as its own word, the report order, the walk rule, `-t`, `-F`,
+and every fatal error; the fatal cases carry `-V` so that a run which accepted
+the value could not match. Sixteen mutants, all killed: fourteen by the
+differential, two by unit tests alone. Those two are a state beyond the table,
+and the exact `UDP:` message, which exits 1 either way.
 
 ## Fixed by making every search item one (2026-09-25)
 
@@ -293,6 +459,11 @@ the oracle rather than against the port:
 `type:UNKNdel` and `type:UNKNmem` moved to the `UNKN*` entry below, where they
 belong: they are the error-reporting gap, not the mappings one, and grouping
 them with `mem` rows hid that for months.
+
+> **Corrected 2026-09-25:** they are neither. Every `UNKN*` code is what `-e`
+> prints for a row it exempts from `stat`; an unreadable link is TYPE
+> `unknown`. See "Fixed by reporting what could not be read" above, and item
+> 40 for the two that are still owed.
 
 ## The Windows unsafe layer, under a sanitizer at last (2026-09-12)
 
@@ -1467,7 +1638,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |
 | 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | ~~`f` on every file, whatever the selection~~ **resolved 2026-09-05** | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. Windows `-F` output loses an `f` line per file when the selection omits it — which is the point. |
 
-| 12 | option parsing **stops at the first non-option argument**, so `lsof FILE -iTCP:N` reads `-iTCP:N` as a second *filename*, does not find it, and exits 1 | permutes: `-iTCP:N` is an option wherever it appears | `lsof-cli`'s argument parser. Found by the `or-semantics-*` cases, whose first draft put the path first and diverged for this reason rather than the one they test. **DECISION** — matching the C would make command lines that work today stop working, so it is recorded rather than changed alongside the selection fix. |
+| 12 | option parsing **stops at the first non-option argument**, so `lsof FILE -iTCP:N` reads `-iTCP:N` as a second *filename*, does not find it, and exits 1 | permutes: `-iTCP:N` is an option wherever it appears | `lsof-cli`'s argument parser. Found by the `or-semantics-*` cases, whose first draft put the path first and diverged for this reason rather than the one they test. **DECISION** — matching the C would make command lines that work today stop working, so it is recorded rather than changed alongside the selection fix. Since 2026-09-25 a case holds it (`options-after-a-name-are-still-options-in-lsof-rs`, ledgered and pinned); every other case puts its names last, so nothing had. Item 34 recorded this same behaviour again as open, and is folded in here. |
 
 | 13 | `lsof -c ^name` **exits 1** even on a successful listing (1522 rows here), while `lsof -u ^name` exits 0 | both exit 0 | exit status. The C enters a `-c ^` value in the list it reports on and never marks it (`main.c` checks `str->f`, never `str->x`), which reads as an accident, not a design. **C-DEFECT, not reproduced — confirmed and widened 2026-09-25**: the same bookkeeping marks only the **first** matching `-c` value (`is_cmd_excl()` returns on it), and `is_nw_addr()` does the same for `-i`, so `-c py -c python` and `-iTCP:80 -iTCP` exit 1 for a process that matches both. Three ledgered cases pin the three. The reason this row used to give for `-c ^sleep -p <that sleep>` exiting 1 in both was wrong about the C: it counts that pid as located (it marks `-p` before it tests `-c ^`) and exits 1 only because of the `^` value — `-V` names the command, not the pid. See "Fixed by making every search item one" above. |
 
@@ -1475,7 +1646,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | ~~matches only the mount point itself, so it **under-reports**~~ **resolved 2026-09-07** | Waited for `OpenFile::fs_device`, since the DEVICE cell is `st_rdev` for a device node and matching on it over-reported. Also brought `-f`/`+f` and the block-device mount source; see "Fixed by reading the mount table" above. |
 | 16 | a socket in **another network namespace** shows `sock` / `protocol: TCP`, with the OFFSET rather than a size | ~~`SOCK` / `socket:[14902]`, and a size~~ **resolved 2026-09-12** | see "Fixed by asking the socket's own namespace" above. This entry's stated cause was **wrong**: it said the C reads the target's own `/proc/<pid>/net/*`, and framed the fix as a cost-model change. The C reads the `system.sockprotoname` extended attribute instead (`dsock.c`), which is why it prints a protocol and no address. Reading the namespace's own table reaches the same answer in safe, dependency-free Rust; measured cost is **+1.0 ms** on `lsof -i` and **+0.8 ms** whole-host on a two-namespace host, and nothing at all where every socket resolves locally. |
 
-| 22 | a socket family with **no `/proc/net` table at all** is still named: `protocol: AF_VSOCK` | `SOCK` / `socket:[3467]` | the C's `system.sockprotoname` xattr names any socket, table or no table; item 16's namespace fallback can only name families that have one. Measured on this host, which holds one AF_VSOCK socket **in the same namespace as the caller** — so this is not a namespace problem and item 16 does not cover it. **DECISION PENDING** — `getxattr` has no `std` API, so closing it means adding `unsafe` FFI or a dependency to a crate whose doc says "nothing here needs FFI" and that carries `#![forbid(unsafe_code)]`. That is a posture change for one NAME cell, and it is the owner's call rather than a porting decision. |
+| 22 | a socket family with **no `/proc/net` table at all** is still named: `protocol: AF_VSOCK` | `SOCK` / `socket:[3467]` | the C's `system.sockprotoname` xattr names any socket, table or no table; item 16's namespace fallback can only name families that have one. Measured on this host, which holds one AF_VSOCK socket **in the same namespace as the caller** — so this is not a namespace problem and item 16 does not cover it. **DECISION PENDING** — `getxattr` has no `std` API, so closing it means adding `unsafe` FFI or a dependency to a crate whose doc says "nothing here needs FFI" and that carries `#![forbid(unsafe_code)]`. That is a posture change for one NAME cell, and it is the owner's call rather than a porting decision. **Wider than one family, measured 2026-09-25:** a TCP socket that is bound but neither listening nor connected is in no `/proc/net` table either, so the C names it `sock … protocol: TCP` and lsof-rs prints `SOCK socket:[N]` — any server between `bind()` and `listen()`. |
 
 | 18 | on Linux each **task is a process entry of its own** — it repeats the whole file set and the table grows `TID`/`TASKCMD` columns — and the C lists them **whenever nothing else is selected**; `-K` forces it on, `-K i` off | ~~lists processes only; `-K` opts in, and the two columns do not exist~~ **resolved 2026-09-07** | see "Fixed by listing tasks the way the C decides to" above. This entry's own wording was **wrong**: it said the C lists threads "by default", full stop. It does not — give it any selector at all (`-p`, `-u`, `-c`, `-i`, `-d`, a path) and tasks disappear, columns included. The whole-host row count that made the claim (1052 vs 261) was consistent with either reading, which is why writing the ledger from one measurement is not enough. |
 
@@ -1501,14 +1672,15 @@ likely right; it is a compatibility decision, not a backend phase.
 
 | 30 | whole-host **peak RSS** was ~2.9x the C and grew with the host (9.8 MB against 29.0 MB at 1075 processes) | ~~2.9x and growing~~ **resolved 2026-09-24: 0.84x, 0.85x, 0.87x of the C at 76, 575 and 1075 processes** | **The cause recorded here in P5 was wrong.** It said the C streams each row and forgets it, and that closing the gap meant a streaming redesign of the `Backend` seam. It never read the C, which does not stream: `main.c` gathers every process into `Lproc[]` (`gather_proc_info()`, line 1343), `qsort`s it (1365) and only then prints and frees (1515–1522) — LESSONS #038's "only the oracle knows", ignored by the entry that closed P5. Both programs hold every row. A heap profile (massif, 1079 processes) put the real cost in three places, and none needed a redesign: the renderer held the table **three times** — the rows, a `Vec<Vec<String>>` of every cell (7 MB of `String` headers alone), and the whole output as one `String` — fixed by sizing the columns in one pass and writing each line in a second (22.95 → 8.57 MB); each process's `Vec<OpenFile>` kept its growth slack for the whole run (13.8 MB of capacity for 5.9 MB of rows) — trimmed after the walk (29.5 → 25.3 MB); and every row carried a 136-byte `SocketInfo` inline, used by about one row in eighteen — boxed, `OpenFile` 320 → 192 bytes (25.3 → 23.0 MB). Output byte-identical. The resource gate's whole-host ceiling drops from 3.50x to 1.30x. |
 | 31 | a selected process with **no readable files** (a zombie) is **not listed**: `lsof -p <zombie>` prints nothing and exits 1, and `-V` says `lsof: process ID not located: <pid>` | ~~prints a bare `unk unknown` row and exits 0~~ **resolved 2026-09-25** | the C skips a process in state `Z` but still walks its tasks; lsof-rs now does both, and reads a task's mapped files from the task. See "Fixed by not listing zombies" above. |
-| 32 | `-s TCP:<state>` is a **search item** (`TCP state not located: X`); an unknown state or protocol is fatal (`unknown TCP state name: X`, `unknown -s protocol: "x"`); and a TCP state filter leaves UDP and unix sockets alone | none of the three: any text is accepted as a state, and `-sTCP:…` **also drops every non-TCP socket** (measured: a unix socket the C lists is gone) | **OPEN — found 2026-09-25 by the item-21 audit.** The dropped sockets make it a functional bug, not only bookkeeping, and only one protocol's filter is kept. The C has its own defect here, which lsof-rs must never copy: **every `-s UDP:<state>` segfaults** (exit 139, measured). `enter_state_spec()` `strcasecmp`s each slot of `UdpSt[]`, and Linux fills only slot 1 (`dsock.c` enters UDP `ESTABLISHED` under `TCP_ESTABLISHED`), so slot 0 is NULL. |
-| 33 | `-K` is a search item (`no tasks located`), and `-K -a -p <a single-threaded process>` lists **nothing** — the main process is entered as a task only when it has one of its own (`dproc.c`: `Fand && ht && pidts`) | lists the process's own rows and exits 0 | **OPEN — found 2026-09-25 by the item-21 audit.** The measurement behind `SelKinds::TASK`'s `-a` exemption was made on a multi-threaded process, where the two agree. |
-| 34 | option parsing **stops at the first file name**: `lsof /x -p 1` reads `-p` and `1` as two more names (`GetOpt()` returns EOF at the first non-option) | keeps parsing options after a name | **OPEN — found 2026-09-25.** Every matrix case puts its names last, so the gate cannot see it. |
+| 32 | `-s TCP:<state>` is a **search item** (`TCP state not located: X`); an unknown state or protocol is fatal (`unknown TCP state name: X`, `unknown -s protocol: "x"`); and on Linux the TCP list tests every TCP **and UDP** socket by the kernel's number, UDP's being `CLOSE` or `ESTABLISHED`, and nothing else | ~~none of the three: any text accepted, the last `-s` kept, and `-sTCP:…` drops every non-TCP socket~~ **resolved 2026-09-25** | see "Fixed by making `-s` the C's state filter" above. This row had said a TCP filter "leaves UDP and unix sockets alone": **wrong about UDP**, which it filters, and corrected by measuring before the fix. The C's own defect is not copied: every `-s UDP:<state>` segfaults it (ledgered, `states-udp-names-crash-the-c`), and lsof-rs refuses the value. |
+| 33 | `-K` is a search item (`no tasks located`), and `-K -a -p <a single-threaded process>` lists **nothing** — the main process is entered as a task only when it has one of its own (`dproc.c`: `Fand && ht && pidts`) | lists the process's own rows and exits 0 | **OPEN — found 2026-09-25 by the item-21 audit.** The measurement behind `SelKinds::TASK`'s `-a` exemption was made on a multi-threaded process, where the two agree. Seen again 2026-09-25: `lsof -K -w -p P`, P multi-threaded and unreadable, prints nothing in both and exits **1** in the C — `-w` leaves no task a row, so no task is located. |
+| 34 | ~~option parsing stops at the first file name~~ | — | **a duplicate of item 12**, recorded 2026-09-25 by an audit that had not read the table it was adding to. Folded into 12, which now has the case this row said was missing. |
 | 35 | FD, TYPE, DEVICE and NODE are **right-aligned** in the table (`print.c`: `%*s`) | left-aligned | **OPEN — found 2026-09-25.** Invisible to the differential, whose normalization collapses whitespace; only a golden test can hold it. Shared renderer — changes Windows output. |
 | 36 | `-F L` for a UID with no password entry: no `L` field, and `lsof: no pwd entry for UID N` on stderr | prints `L<uid>` | **OPEN — found 2026-09-25.** |
-| 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed: `lsof -t -p 1` prints nothing on this host | the blank row, and `-t` prints the pid | **OPEN — found 2026-09-25**, beside "Inaccessible files are omitted" below. `-t`'s fast path skips the file walk, so matching this costs that path. |
+| 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed — yet still located: `lsof -t -p 1` prints nothing on this host, and exits 0 | ~~the blank row, and `-t` prints the pid~~ **resolved 2026-09-25** | see "Fixed by reporting what could not be read" above. The fast path still skips the file walk; it asks whether one link reads. |
 | 38 | `-c /regex/`, and `-i` host names (`@localhost`) and service names (`:http`), which the C resolves | refused, with an error | **DEBT — recorded 2026-09-25.** Refusing replaced a silent wrong answer: `-c /re/` was a literal that matched nothing, and `-i:http` matched every Internet file. A regex engine is new attack surface; a resolver contradicts "No hostname or service resolution" below. |
 | 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. |
+| 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | stats the mapped file and prints `REG` | **DEBT — found 2026-09-25**, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it. The cwd/rtd/txt/fd half of `-e` has matched since 2026-09-20. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
@@ -1521,11 +1693,9 @@ tests, because a golden test pins what its author believed the C emits.
   always given; both flags are accepted as no-ops. Resolution costs DNS traffic
   from a diagnostic tool, which is a poor default for where this runs. The
   differential passes `-n -P` to the C for parity.
-- **Inaccessible files are omitted, not reported with an errno.** The C emits a
-  row such as `txt unknown /proc/2/exe (readlink: Permission denied)`; lsof-rs
-  emits nothing for a link it cannot read. Matching it means reproducing
-  libc's errno strings — DEBT (L2), tracked in the coverage inventory as the
-  `UNKN*` TYPE codes.
+- ~~**Inaccessible files are omitted, not reported with an errno.**~~ Not
+  deliberate, and not staying: fixed 2026-09-25 — see "Fixed by reporting
+  what could not be read". The obstacle this entry gave was never real.
 
 ## The C-flaw scan — triaged (2026-09-07)
 

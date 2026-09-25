@@ -254,7 +254,12 @@ Then the loop — each step is a CI-enforced gate:
    differential only checks the inputs in the matrix: a green run over a matrix
    that omits a feature class proves nothing about that class (lsof-rs's socket
    diff was green while every non-File handle type was silently dropped — no
-   fixture ever created one). Enumerate the C's feature surface and give each a
+   fixture ever created one). **What the tool can see is such a class**: a
+   harness that can read every fixture never compares what the tool prints
+   when it cannot read one, and for a tool that reports on system state that
+   path is output. Give the matrix a fixture the tool cannot read, and run those
+   cases as a user who cannot read it; probe that from the demoted side, and
+   SKIP when it does not hold (LESSONS #068). Enumerate the C's feature surface and give each a
    case — **enforced by `harnesses/coverage/coverage_gate.py`**: bootstrap the
    inventory from the C (`--extract-options`/`--extract-types`), curate it, and
    the gate exits 1 on any feature no matrix case exercises (waivers carry

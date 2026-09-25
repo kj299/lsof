@@ -3,6 +3,7 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use lsof_core::errno_text;
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
 
 use crate::net::{self, SocketTable};
@@ -178,15 +179,6 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
     target.to_string()
 }
 
-/// Build one row from a path under `/proc` that is a magic symlink (an fd, or
-/// `cwd`/`root`/`exe`).
-///
-/// Both halves are best-effort and independently fallible:
-/// * `read_link` gives the NAME — a real path for files, or a synthetic target
-///   like `socket:[12345]`, `pipe:[12345]`, `anon_inode:[eventfd]`.
-/// * `metadata` *follows* the magic link, so the kernel reports the underlying
-///   file object's stat even for sockets and pipes that have no path.
-///
 /// The exempted mount point a path falls under, if any (`-e`).
 ///
 /// Prefix matching, not `stat`: `/` covers everything, and `/dev/shm` covers
@@ -224,11 +216,6 @@ fn unkn_suffix(fd: &FdType) -> &'static str {
     }
 }
 
-/// A row is emitted if either succeeds; an fd we can see but cannot stat is
-/// still worth showing.
-///
-/// `offset` is the fd's file position from fdinfo (`None` for the `cwd`/
-/// `rtd`/`txt` specials, which have none).
 /// Everything a row needs that is the same for every row in one gather: the
 /// system-wide tables read once, the `-e` exemptions, and whether this run can
 /// print anything but sockets. Threading these as separate parameters put
@@ -242,6 +229,9 @@ pub struct GatherCtx<'a> {
     /// `Selection::socket_rows_only`: nothing but a socket can reach the
     /// output, so nothing but a socket is collected.
     pub sockets_only: bool,
+    /// `Selection::omit_unreadable` — `-w`, or `-t`: make no row for a file
+    /// that cannot be read, rather than one saying why.
+    pub omit_unreadable: bool,
 }
 
 /// The kernel's name for a socket fd: `socket:[<inode>]`, for every family.
@@ -251,11 +241,28 @@ fn is_socket_link(target: &Path) -> bool {
         .is_some_and(|s| s.starts_with("socket:[") && s.ends_with(']'))
 }
 
-fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) -> Option<OpenFile> {
+/// One row from a path under `/proc` that is a magic symlink (an fd, or
+/// `cwd`/`root`/`exe`), whose target has been read: `target` is what
+/// `read_link` returned for `link`, and gives the NAME — a real path, or a
+/// synthetic target like `socket:[12345]`, `pipe:[12345]`,
+/// `anon_inode:[eventfd]`. `metadata` then *follows* the magic link, so the
+/// kernel reports the underlying object's stat even for a socket or pipe with
+/// no path; when that fails the row stays, saying why (see below). A link
+/// that could not be read is [`unreadable`]'s, never this function's — the C
+/// does not `stat` a file it could not name. `info.pos` is the fd's position
+/// (`None` for the specials, which have none).
+fn row(
+    link: &Path,
+    target: std::path::PathBuf,
+    fd: FdType,
+    info: &FdInfo,
+    pid: u32,
+    ctx: &GatherCtx<'_>,
+) -> Option<OpenFile> {
     let (socks, ns, exempt, sockets_only) = (ctx.socks, ctx.ns, ctx.exempt, ctx.sockets_only);
     let access = info.access();
     let offset = info.pos;
-    let target = std::fs::read_link(link).ok();
+    let target = Some(target);
     // `sockets_only`: this run can print nothing but sockets
     // (`Selection::socket_rows_only`), so a row that is not one is built only
     // to be dropped. The kernel names every socket fd `socket:[<inode>]` —
@@ -300,10 +307,18 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) ->
             });
         }
     }
-    let meta = std::fs::metadata(link).ok();
-    if target.is_none() && meta.is_none() {
-        return None;
-    }
+    let meta = std::fs::metadata(link);
+    // What `stat` could not say is said in NAME, as the C says it: the link
+    // is named but the file behind it cannot be examined — a dead FUSE mount
+    // (`Transport endpoint is not connected`), a file gone between the two
+    // calls. The C `lstat`s an fd's link as well and can add `(lstat: …)`;
+    // that call fails only in the same race, and costs a syscall per fd on
+    // every run, so lsof-rs makes the one call.
+    let stat_failure = match &meta {
+        Err(e) if !ctx.omit_unreadable => Some(format!(" (stat: {})", errno_text(e))),
+        _ => None,
+    };
+    let meta = meta.ok();
 
     let name = target
         .map(|t| t.to_string_lossy().into_owned())
@@ -417,6 +432,10 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) ->
         None => (FileType::Unknown, None, None, None, None),
     };
 
+    let mut name = name_for_target(&name, info);
+    if let Some(why) = stat_failure {
+        name.push_str(&why);
+    }
     Some(OpenFile {
         fs_device,
         file_flags: info.flags,
@@ -424,7 +443,7 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) ->
         fd,
         access,
         file_type,
-        name: name_for_target(&name, info),
+        name,
         device,
         size,
         offset,
@@ -434,15 +453,55 @@ fn row(link: &Path, fd: FdType, info: &FdInfo, pid: u32, ctx: &GatherCtx<'_>) ->
     })
 }
 
-/// Every open file of one process: the `cwd`/`rtd`/`txt` specials plus each
-/// numbered fd.
+/// The row for a file that is there but could not be read: TYPE `unknown`,
+/// every cell a `stat` would fill left blank, and NAME saying what was tried
+/// and why it failed — `/proc/1/cwd (readlink: Permission denied)`.
 ///
-/// Returns `None` when `/proc/<pid>/fd` cannot be opened at all — the process
-/// exited, or it belongs to another user and we are not root. The caller
-/// distinguishes those (a vanished pid vs. a permission wall) only in aggregate,
-/// which is enough for the `-V` inaccessible count.
-pub fn for_pid(pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
-    for_proc_dir(&format!("/proc/{pid}"), pid, ctx)
+/// This is what the C prints for another user's process when it is not root
+/// (`dproc.c`, `process_id()`): lsof-rs printed one bare `unk unknown` line
+/// instead, so a process nothing could read looked like a process with
+/// nothing open. `info` is what fdinfo gave for a numbered fd — nothing, in
+/// every case but a race, since the same permission guards both.
+fn unreadable(name: String, fd: FdType, info: &FdInfo) -> OpenFile {
+    OpenFile {
+        fs_device: None,
+        file_flags: info.flags,
+        lock: None,
+        fd,
+        access: info.access(),
+        file_type: FileType::Unknown,
+        name,
+        device: None,
+        size: None,
+        offset: info.pos,
+        node: None,
+        links: None,
+        socket: None,
+    }
+}
+
+/// NAME for a link that could not be read: the path, then the call and the C
+/// library's reason for it (see [`lsof_core::errno_text`]).
+///
+/// One exception, the C's (`(errno != ENOENT) || uid`): the executable link
+/// of a process owned by root that is simply not there is shown as the path
+/// alone. That is a kernel thread, which has no executable — `kthreadd 2 root
+/// txt unknown /proc/2/exe` — and saying `No such file or directory` on
+/// every one of them would be noise.
+fn unreadable_name(link: &str, fd: &FdType, err: &std::io::Error, root_owned: bool) -> String {
+    if *fd == FdType::Txt && err.kind() == std::io::ErrorKind::NotFound && root_owned {
+        link.to_string()
+    } else {
+        format!("{link} (readlink: {})", errno_text(err))
+    }
+}
+
+/// Every open file of one process: the `cwd`/`rtd`/`txt` specials plus each
+/// numbered fd — and, for any of them that could not be read, the row that
+/// says so (see [`unreadable`]), unless `-w`/`-t` asked for none. `uid` is the
+/// process's owner, which decides one of those rows' wording.
+pub fn for_pid(pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>) -> Vec<OpenFile> {
+    for_proc_dir(&format!("/proc/{pid}"), pid, uid, ctx)
 }
 
 /// The rows under one `/proc` directory — either a process's own
@@ -453,9 +512,13 @@ pub fn for_pid(pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
 /// process's: `CLONE_FS` and `CLONE_FILES` are optional, so a thread can hold
 /// its own cwd, root and fds — and its mapped files come from its own `maps`
 /// too (see [`crate::maps::rows_for`]). `pid` stays the process's, because
-/// `/proc/locks` is keyed by process.
-pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
+/// `/proc/locks` is keyed by process. The paths an unreadable row names are
+/// this directory's, as the C's are: `/proc/85/task/86/cwd (readlink: …)`.
+pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>) -> Vec<OpenFile> {
     let sockets_only = ctx.sockets_only;
+    // A row for what could not be read is never a socket row, so a run that
+    // can print only sockets makes none — the C makes them and drops them.
+    let report_unreadable = !ctx.omit_unreadable && !sockets_only;
     let mut out = Vec::new();
 
     // The specials. Unlike fds these have no access mode of their own.
@@ -475,14 +538,32 @@ pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<Ope
         .as_slice()
     } {
         let p = format!("{base}/{name}");
-        if let Some(f) = row(Path::new(&p), fd.clone(), &FdInfo::default(), pid, ctx) {
-            out.push(f);
+        match std::fs::read_link(&p) {
+            Ok(target) => {
+                if let Some(f) = row(
+                    Path::new(&p),
+                    target,
+                    fd.clone(),
+                    &FdInfo::default(),
+                    pid,
+                    ctx,
+                ) {
+                    out.push(f);
+                }
+            }
+            Err(e) if report_unreadable => {
+                let name = unreadable_name(&p, fd, &e, uid == Some(0));
+                out.push(unreadable(name, fd.clone(), &FdInfo::default()));
+            }
+            Err(_) => {}
         }
     }
 
     // Mapped files, after the specials and before the numbered fds — the
     // order the C emits them in. The txt row, if there is one, identifies the
     // executable's own mapping so it is not listed a second time as `mem`.
+    // A `maps` that cannot be read adds nothing, and says nothing: the C
+    // returns from `process_proc_map()` without a row.
     if !sockets_only {
         let exe = out
             .iter()
@@ -491,7 +572,26 @@ pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<Ope
         out.extend(crate::maps::rows_for(base, exe));
     }
 
-    let dir = std::fs::read_dir(format!("{base}/fd")).ok()?;
+    let dir = match std::fs::read_dir(format!("{base}/fd")) {
+        Ok(dir) => dir,
+        Err(e) => {
+            // `NOFD`: the fd table could not be listed at all. One row says
+            // so, and the walk ends — the C `return`s after it.
+            if report_unreadable {
+                out.push(OpenFile {
+                    fd: FdType::NoFd,
+                    file_type: FileType::NoType,
+                    ..unreadable(
+                        format!("{base}/fd (opendir: {})", errno_text(&e)),
+                        FdType::NoFd,
+                        &FdInfo::default(),
+                    )
+                });
+            }
+            out.shrink_to_fit();
+            return out;
+        }
+    };
     let mut fds: Vec<(u64, String)> = dir
         .flatten()
         .filter_map(|e| {
@@ -504,7 +604,18 @@ pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<Ope
     for (num, name) in fds {
         let p = format!("{base}/fd/{name}");
         let info = fdinfo_for(base, &name);
-        if let Some(mut f) = row(Path::new(&p), FdType::Handle(num), &info, pid, ctx) {
+        let target = match std::fs::read_link(&p) {
+            Ok(target) => target,
+            Err(e) => {
+                if report_unreadable {
+                    let fd = FdType::Handle(num);
+                    let name = unreadable_name(&p, &fd, &e, uid == Some(0));
+                    out.push(unreadable(name, fd, &info));
+                }
+                continue;
+            }
+        };
+        if let Some(mut f) = row(Path::new(&p), target, FdType::Handle(num), &info, pid, ctx) {
             // The lock character lsof appends to the FD cell (`8uW`). Only a
             // numbered fd can hold one: the specials and the mapped-file rows
             // are not open file descriptions.
@@ -524,7 +635,32 @@ pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<Ope
     // run. Measured at 1079 processes it was the largest single cost: 13.8 MB
     // of `Vec<OpenFile>` capacity holding 5.9 MB of rows (DIVERGENCES 30).
     out.shrink_to_fit();
-    Some(out)
+    out
+}
+
+/// Whether the walk of `base` would find anything to show when unreadable
+/// files make no rows: a link that reads, or a mapped file.
+///
+/// `-t`'s fast path asks this instead of walking. The C lists a process only
+/// through its files, and `-t` sets `-w`, under which it makes no row for a
+/// file it cannot read — so `lsof -t -p 1`, run by a user who cannot read
+/// pid 1, prints nothing (DIVERGENCES 37). A process that can be read at all
+/// answers on its first `readlink`; one that cannot costs three failed
+/// `readlink`s and a failed `opendir`, and never reaches `maps`, which the
+/// same permission guards.
+pub fn has_readable_file(base: &str) -> bool {
+    ["cwd", "root", "exe"]
+        .iter()
+        .any(|n| std::fs::read_link(format!("{base}/{n}")).is_ok())
+        || std::fs::read_dir(format!("{base}/fd")).is_ok_and(|dir| {
+            dir.flatten().any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.parse::<u64>().is_ok())
+                    && std::fs::read_link(e.path()).is_ok()
+            })
+        })
+        || !crate::maps::rows_for(base, None).is_empty()
 }
 
 #[cfg(test)]
@@ -541,8 +677,11 @@ mod tests {
         exempt: &[String],
     ) -> Option<OpenFile> {
         let locks = crate::locks::LockTable::default();
+        // A path that is not a link (`/dev/null` itself) names its own target.
+        let target = std::fs::read_link(link).unwrap_or_else(|_| link.to_path_buf());
         super::row(
             link,
+            target,
             fd,
             info,
             pid,
@@ -552,6 +691,7 @@ mod tests {
                 ns,
                 exempt,
                 sockets_only: false,
+                omit_unreadable: false,
             },
         )
     }
@@ -624,15 +764,20 @@ mod tests {
             .expect("pid parses");
         let files = for_pid(
             pid,
+            None,
             &GatherCtx {
                 socks: &SocketTable::load(false, false),
                 locks: &crate::locks::load(),
                 ns: &net::NetnsTables::new(false),
                 exempt: &[],
                 sockets_only: false,
+                omit_unreadable: false,
             },
-        )
-        .expect("own /proc/<pid>/fd is readable");
+        );
+        assert!(
+            files.iter().all(|f| f.fd != FdType::NoFd),
+            "own /proc/<pid>/fd is readable: {files:?}"
+        );
 
         // The rows are held for the rest of the run, so growth slack is paid
         // for the rest of the run too: 13.8 MB of capacity held 5.9 MB of rows
@@ -670,10 +815,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("no row for fd {n}"));
             assert_ne!(row.file_type, FileType::Unknown, "fd {n}: {row:?}");
         }
-        // `Unknown` is reachable and legitimate: it is the stat-failure branch,
-        // for an fd whose target the process can see but cannot stat (the
-        // `UNKN*` debt in DIVERGENCES.md — the C prints `unknown` with the
-        // errno there). So the invariant is not "no row is Unknown" — that is
+        // `Unknown` is reachable and legitimate: it is the row for an fd whose
+        // target cannot be read or cannot be `stat`ed, which says why in NAME
+        // as the C does (DIVERGENCES, "Fixed by reporting what could not be
+        // read"). So the invariant is not "no row is Unknown" — that is
         // stronger than true, and a GitHub runner disproved it after this
         // container and earlier runners had all agreed — but that an Unknown
         // row is *only ever* one that failed to stat, carrying none of the
@@ -874,5 +1019,208 @@ mod tests {
         assert_eq!(unkn_suffix(&FdType::Txt), "txt");
         assert_eq!(unkn_suffix(&FdType::Mem), "mem");
         assert_eq!(unkn_suffix(&FdType::Deleted), "del");
+    }
+    /// A `/proc/<pid>`-shaped directory built from ordinary files, so the
+    /// rows for what cannot be read are pinned without needing a process that
+    /// cannot be read: `readlink` on a regular file fails (`EINVAL`), on a
+    /// missing entry fails (`ENOENT`), and a link to nowhere reads but will
+    /// not `stat`. The differential covers the real thing — a process made
+    /// unreadable with `PR_SET_DUMPABLE` — on the paths a host can reach.
+    fn fake_proc(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lsof_rs_unreadable_{tag}_{}", self_pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn walk(
+        base: &Path,
+        uid: Option<u32>,
+        omit_unreadable: bool,
+        sockets_only: bool,
+    ) -> Vec<OpenFile> {
+        let locks = crate::locks::LockTable::default();
+        for_proc_dir(
+            base.to_str().unwrap(),
+            0,
+            uid,
+            &GatherCtx {
+                socks: &SocketTable::default(),
+                locks: &locks,
+                ns: &net::NetnsTables::default(),
+                exempt: &[],
+                sockets_only,
+                omit_unreadable,
+            },
+        )
+    }
+
+    fn why(errno: i32) -> String {
+        // The C library's text, computed the way the rows compute it, so the
+        // expectation holds under miri's strerror too.
+        errno_text(&std::io::Error::from_raw_os_error(errno))
+    }
+
+    const ENOENT: i32 = 2;
+    const EINVAL: i32 = 22;
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_a_row_that_says_why() {
+        // Measured, run as a user who cannot read the process:
+        //   python3 478 root  cwd  unknown   /proc/478/cwd (readlink: Permission denied)
+        //   python3 478 root NOFD     0000   /proc/478/fd (opendir: Permission denied)
+        // lsof-rs printed one bare `unk unknown` line for such a process.
+        let dir = fake_proc("rows");
+        std::fs::write(dir.join("cwd"), b"not a link").unwrap(); // EINVAL
+        std::os::unix::fs::symlink("/", dir.join("root")).unwrap(); // readable
+        let base = dir.to_str().unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let cells: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|f| (f.fd.code(), f.file_type.code(), f.name.clone()))
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                (
+                    "cwd".into(),
+                    "unknown".into(),
+                    format!("{base}/cwd (readlink: {})", why(EINVAL))
+                ),
+                ("rtd".into(), "DIR".into(), "/".into()),
+                (
+                    "txt".into(),
+                    "unknown".into(),
+                    format!("{base}/exe (readlink: {})", why(ENOENT))
+                ),
+                (
+                    "NOFD".into(),
+                    "0000".into(),
+                    format!("{base}/fd (opendir: {})", why(ENOENT))
+                ),
+            ]
+        );
+        for f in rows.iter().filter(|f| f.file_type != FileType::Dir) {
+            assert!(
+                f.device.is_none() && f.size.is_none() && f.node.is_none() && f.offset.is_none(),
+                "nothing was examined, so nothing is shown: {f:?}"
+            );
+            assert_eq!(f.access, AccessMode::Unknown);
+        }
+        // `-F` writes no `t` for the NOFD row, and a `t` for the others.
+        assert!(!rows[3].file_type.has_code() && rows[0].file_type.has_code());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_root_process_missing_its_executable_is_named_without_a_reason() {
+        // The C's `(errno != ENOENT) || uid`: a kernel thread has no
+        // executable, and `kthreadd 2 root txt unknown /proc/2/exe` says so
+        // without a reason. Any other failure, or any other owner, gets one.
+        let dir = fake_proc("kthread");
+        std::os::unix::fs::symlink("/", dir.join("cwd")).unwrap();
+        std::os::unix::fs::symlink("/", dir.join("root")).unwrap();
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        let base = dir.to_str().unwrap();
+        let txt = |uid| {
+            walk(&dir, uid, false, false)
+                .into_iter()
+                .find(|f| f.fd == FdType::Txt)
+                .expect("a txt row")
+                .name
+        };
+        assert_eq!(txt(Some(0)), format!("{base}/exe"));
+        assert_eq!(
+            txt(Some(1000)),
+            format!("{base}/exe (readlink: {})", why(ENOENT))
+        );
+        assert_eq!(txt(None), format!("{base}/exe (readlink: {})", why(ENOENT)));
+        // Not ENOENT: a root process still gets the reason.
+        std::fs::write(dir.join("exe"), b"x").unwrap();
+        assert_eq!(
+            txt(Some(0)),
+            format!("{base}/exe (readlink: {})", why(EINVAL))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_fd_that_cannot_be_read_is_a_row_under_its_number() {
+        // What root sees of a process in another user namespace here: the fd
+        // directory lists, every link refuses. `3 unknown /proc/1/fd/3
+        // (readlink: Permission denied)`.
+        let dir = fake_proc("fds");
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::fs::write(dir.join("fd").join("3"), b"x").unwrap();
+        std::fs::write(dir.join("fd").join("junk"), b"x").unwrap();
+        let base = dir.to_str().unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let fd3 = rows
+            .iter()
+            .find(|f| f.fd == FdType::Handle(3))
+            .expect("fd 3");
+        assert_eq!(fd3.name, format!("{base}/fd/3 (readlink: {})", why(EINVAL)));
+        assert_eq!(fd3.file_type, FileType::Unknown);
+        assert!(
+            rows.iter().all(|f| f.fd != FdType::NoFd),
+            "the directory opened"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_link_that_reads_but_will_not_stat_says_so_in_name() {
+        // A dead FUSE mount is the real case: the link names the file, `stat`
+        // fails. The C appends `(stat: <reason>)`; lsof-rs had shown the
+        // name alone, as though nothing had gone wrong.
+        let dir = fake_proc("stat");
+        std::os::unix::fs::symlink("/nonexistent/lsof-rs", dir.join("cwd")).unwrap();
+        let cwd = walk(&dir, Some(1000), false, false)
+            .into_iter()
+            .find(|f| f.fd == FdType::Cwd)
+            .expect("a cwd row");
+        assert_eq!(
+            cwd.name,
+            format!("/nonexistent/lsof-rs (stat: {})", why(ENOENT))
+        );
+        assert_eq!(cwd.file_type, FileType::Unknown);
+        // Under -w the row stays, without the reason — the C's `!Fwarn`.
+        let quiet = walk(&dir, Some(1000), true, false)
+            .into_iter()
+            .find(|f| f.fd == FdType::Cwd)
+            .expect("still a row");
+        assert_eq!(quiet.name, "/nonexistent/lsof-rs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn under_dash_w_or_for_sockets_only_nothing_unreadable_is_a_row() {
+        // `-w` and `-t`: the C makes no row for what it cannot read, so a
+        // process with nothing else has none (DIVERGENCES 37). A socket-only
+        // run (`-i`, `-U`) makes none either: they could never be printed.
+        let dir = fake_proc("quiet");
+        std::fs::write(dir.join("cwd"), b"x").unwrap();
+        assert!(walk(&dir, Some(1000), true, false).is_empty());
+        assert!(walk(&dir, Some(1000), false, true).is_empty());
+        assert!(!walk(&dir, Some(1000), false, false).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_terse_probe_finds_any_readable_file_and_nothing_else() {
+        // `-t`'s fast path asks this instead of walking: `lsof -t -p 1`
+        // prints nothing for a process nothing of which can be read.
+        let dir = fake_proc("probe");
+        let base = dir.to_str().unwrap().to_string();
+        assert!(!has_readable_file(&base), "an empty directory");
+        std::fs::write(dir.join("cwd"), b"x").unwrap();
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::fs::write(dir.join("fd").join("0"), b"x").unwrap();
+        assert!(!has_readable_file(&base), "links that will not read");
+        std::os::unix::fs::symlink("/dev/null", dir.join("fd").join("1")).unwrap();
+        assert!(has_readable_file(&base), "one fd that reads is enough");
+        let _ = std::fs::remove_dir_all(&dir);
+        // And a live process that can be read, itself.
+        assert!(has_readable_file(&format!("/proc/{}", self_pid())));
     }
 }

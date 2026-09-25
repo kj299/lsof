@@ -111,6 +111,7 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
                         .unwrap_or_else(|| "<unknown>".to_string()),
                     user: base.and_then(|p| p.user.clone()),
                     endpoint_peer: false,
+                    unlisted: false,
                     files: Vec::new(),
                 }
             });

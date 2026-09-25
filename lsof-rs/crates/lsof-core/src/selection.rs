@@ -29,7 +29,7 @@
 //! outranks the OR.
 
 use crate::backend::MountEntry;
-use crate::model::{FdType, FileType, OpenFile, Process, Protocol};
+use crate::model::{tcp_state_table, FdType, FileType, OpenFile, Process, Protocol, TcpState};
 
 /// A set of selector *kinds* — lsof's "list options", the ones that take part
 /// in its OR-by-default / `-a`-ANDs rule. Mirrors the C's `SEL*` bits and their
@@ -119,6 +119,10 @@ impl SelKinds {
     /// This set with `other`'s kinds removed.
     pub const fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
+    }
+    /// How many kinds are present.
+    pub const fn count(self) -> u32 {
+        self.0.count_ones()
     }
     fn insert(&mut self, other: Self) {
         self.0 |= other.0;
@@ -427,16 +431,42 @@ impl CommandWidth {
 /// TCP/UDP sockets only; rows without a recognized state are passed through
 /// when only TCP filters are set. Multiple includes are OR-ed; an exclude
 /// kills the row even if it also matches an include.
+/// `-s TCP:<states>`: the C's `TcpStI` and `TcpStX` — every state any `-s`
+/// named, each list kept once, in the order given.
+///
+/// There is one filter, not one per `-s`: the C's tables are global, so
+/// `-sTCP:LISTEN -sTCP:ESTABLISHED` is one inclusion list of two (lsof-rs kept
+/// only the last `-s` until 2026-09-25). It is a TCP filter only — `-s UDP:`
+/// is refused where the C crashes (DIVERGENCES 32) — but on Linux it filters
+/// UDP sockets too, by the TCP number the kernel reuses for them (see
+/// [`SocketInfo::filter_state`](crate::model::SocketInfo::filter_state)).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateFilter {
-    /// Restrict to one protocol, e.g. `TCP`. `None` if `-s` was given without
-    /// a `proto:` prefix (which we treat as "any socket protocol").
-    pub proto: Option<Protocol>,
-    /// State names to include (case-insensitive match against
-    /// `TcpState::as_str`). Empty means "any state for this proto".
-    pub include: Vec<String>,
-    /// State names to exclude (the `^` prefix in lsof's syntax).
-    pub exclude: Vec<String>,
+    /// States a TCP or UDP socket must be in to be listed at all — and each
+    /// one is a **search item**: a state no examined socket was in makes the
+    /// run exit 1, and `-V` says `TCP state not located: <STATE>`.
+    pub include: Vec<TcpState>,
+    /// States that exclude a socket absolutely, before any other selection.
+    pub exclude: Vec<TcpState>,
+}
+
+impl StateFilter {
+    /// Whether `-s` lets `f` through. Only a socket carrying a TCP state is
+    /// tested; every other file passes. A state outside the platform's table
+    /// passes too — the C checks `i < TcpNstates` before either list — which
+    /// on Linux is a kernel state newer than the C's table (`NEW_SYN_RECV`).
+    pub fn admits(&self, f: &OpenFile) -> bool {
+        let Some(state) = f.socket.as_ref().and_then(|s| s.filter_state()) else {
+            return true;
+        };
+        if !tcp_state_table().contains(&state) {
+            return true;
+        }
+        if self.exclude.contains(&state) {
+            return false;
+        }
+        self.include.is_empty() || self.include.contains(&state)
+    }
 }
 
 /// A `-d` file-descriptor filter: which FD slots to include / exclude.
@@ -464,6 +494,10 @@ pub enum FdKind {
     Rtd,
     Txt,
     Mem,
+    /// `DEL`: a mapped file that has been deleted.
+    Del,
+    /// `NOFD`: the row for an fd directory that could not be opened.
+    NoFd,
 }
 
 impl FdSpec {
@@ -473,6 +507,8 @@ impl FdSpec {
             (FdSpec::Named(FdKind::Rtd), FdType::Root) => true,
             (FdSpec::Named(FdKind::Txt), FdType::Txt) => true,
             (FdSpec::Named(FdKind::Mem), FdType::Mem) => true,
+            (FdSpec::Named(FdKind::Del), FdType::Deleted) => true,
+            (FdSpec::Named(FdKind::NoFd), FdType::NoFd) => true,
             (FdSpec::Num(n), FdType::Handle(h)) => h == n,
             (FdSpec::Range(a, b), FdType::Handle(h)) => h >= a && h <= b,
             _ => false,
@@ -534,6 +570,8 @@ pub struct Located {
     pub inet_all: bool,
     /// The `-N` item (the C's `Fnfs == 2`).
     pub nfs: bool,
+    /// Parallel to `sel.state_filter`'s `include` (the C's `TcpStI[i] == 2`).
+    pub states: Vec<bool>,
 }
 
 /// The full set of user-specified filters for one run.
@@ -615,9 +653,10 @@ pub struct Selection {
     pub path_ids: std::collections::HashSet<(String, String)>,
     /// `-d`: file-descriptor filter.
     pub fd_filter: Option<FdFilter>,
-    /// `-s [proto:state[,state]]`: TCP socket state filter, e.g.
-    /// `TCP:LISTEN`, `TCP:^TIME_WAIT`, `TCP:LISTEN,ESTABLISHED`. Applies
-    /// only to sockets; non-socket rows are unaffected.
+    /// `-s TCP:<states>`: the socket state filter, e.g. `TCP:LISTEN`,
+    /// `TCP:^TIME_WAIT`, `TCP:LISTEN,ESTABLISHED`. Only sockets carrying a TCP
+    /// state are tested; every other row is unaffected. `None` when no `-s`
+    /// named a state.
     pub state_filter: Option<StateFilter>,
     /// `-g <ppid>[,<ppid>...]`: Windows-extension semantics — select
     /// processes whose PPID is in this list (the closest analog to lsof's
@@ -637,6 +676,17 @@ pub struct Selection {
     /// `-w` sets this, `+w` clears it (default `false` — warnings on):
     /// suppresses the privilege-hint and other non-fatal stderr warnings.
     pub suppress_warnings: bool,
+    /// The C's `Fwarn` as it bears on ROWS: set by `-w` and by `-t` (the C's
+    /// `-t` sets `Fwarn` too), cleared by `+w`, the last one winning —
+    /// measured: `-t +w` lists an unreadable process and `+w -t` does not.
+    ///
+    /// When set, a backend makes no row for a file it cannot read, where it
+    /// would otherwise report it with the reason (`/proc/1/cwd (readlink:
+    /// Permission denied)`) — and a process left with none is not listed
+    /// (DIVERGENCES 37). Kept apart from [`Selection::suppress_warnings`]
+    /// because `-t` must not silence the Windows privilege hint: that hint is
+    /// on stderr, and `kill $(lsof -t …)` reads stdout.
+    pub omit_unreadable: bool,
     /// `-f` / `+f`: whether a path argument may name a file system.
     pub filesystem_args: FilesystemArgs,
     /// Whether the backend identifies paths by `(device, node)`
@@ -914,38 +964,13 @@ impl Selection {
                 .any(|d| directly_in_dir(&name, &d.to_ascii_lowercase()))
     }
 
-    /// Whether `f`'s socket state matches the `-s [proto:state]` filter.
-    /// Non-sockets and "no `-s`" always pass; sockets with `^excluded`
-    /// states are always dropped; positive states act as a whitelist.
+    /// Whether `f` survives `-s`. An exclusion, applied before every other
+    /// selection rule and never ORed or ANDed (Lsof.8's list of `^` items) —
+    /// see [`StateFilter::admits`].
     fn state_matches(&self, f: &OpenFile) -> bool {
-        let Some(filter) = &self.state_filter else {
-            return true;
-        };
-        let Some(sock) = &f.socket else {
-            // Non-sockets are passed through unchanged — `-s` is socket-only.
-            return true;
-        };
-        if let Some(proto) = filter.proto {
-            if sock.protocol != proto {
-                return false;
-            }
-        }
-        let state_name = sock
-            .state
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_default();
-        if filter
-            .exclude
-            .iter()
-            .any(|e| state_name.eq_ignore_ascii_case(e))
-        {
-            return false;
-        }
-        filter.include.is_empty()
-            || filter
-                .include
-                .iter()
-                .any(|i| state_name.eq_ignore_ascii_case(i))
+        self.state_filter
+            .as_ref()
+            .is_none_or(|filter| filter.admits(f))
     }
 
     /// Whether `p` is absolutely excluded by a `^` negation on `-u`, `-c`,
@@ -1035,6 +1060,7 @@ impl Selection {
             inet: vec![false; self.inet.specs.len()],
             inet_all: false,
             nfs: false,
+            states: vec![false; self.state_filter.as_ref().map_or(0, |f| f.include.len())],
         };
         let and_kinds = self
             .specified()
@@ -1065,6 +1091,19 @@ impl Selection {
             // test as well.
             if self.and_mode && !self.proc_selected(self.proc_kinds(p)) {
                 continue;
+            }
+            // A state is located by a socket in it, whatever else happens to
+            // the row: the C marks `TcpStI` while it reads the socket, before
+            // `-d`, `-i` or `-a` have had a say — measured, `lsof -a -p P -d
+            // 10 -sTCP:LISTEN` exits 0 on a P whose listener is fd 4.
+            if let Some(filter) = &self.state_filter {
+                for f in &p.files {
+                    if let Some(state) = f.socket.as_ref().and_then(|s| s.filter_state()) {
+                        for (hit, want) in found.states.iter_mut().zip(&filter.include) {
+                            *hit |= state == *want;
+                        }
+                    }
+                }
             }
             for f in p.files.iter().filter(|f| self.state_matches(f)) {
                 for (hit, spec) in found.inet.iter_mut().zip(&self.inet.specs) {
@@ -1137,6 +1176,15 @@ impl Selection {
     /// process failing any specified process selecter can contribute nothing.
     /// The C gets the same effect from `is_proc_excl`'s `Selflags == SELPID`
     /// equality tests (`lib/proc.c:684-720`) — "is this the *only* selecter".
+    ///
+    /// One case walks more than it needs to print, because the C does and a
+    /// search item can see it: with two or more process selecters and no
+    /// `-a`, `is_proc_excl` skips nothing (only `Selflags == SELPID` and its
+    /// like skip), so the C reads every process — and a `-s` state is located
+    /// by a socket in ANY process it read. Measured: `lsof -p P -u X
+    /// -sTCP:LISTEN` exits 0 on a host with a listener elsewhere, where
+    /// `-p P` or `-u X` alone exits 1. Nothing else a walk locates can differ
+    /// there, so the wider walk is taken only when `-s` names a state.
     pub fn selects_process(&self, p: &Process) -> bool {
         if self.excludes_process(p) {
             return false;
@@ -1146,6 +1194,16 @@ impl Selection {
             return true;
         }
         if !self.and_mode && specified.intersects(SelKinds::FILE) {
+            return true;
+        }
+        let locates_states = self
+            .state_filter
+            .as_ref()
+            .is_some_and(|f| !f.include.is_empty());
+        // `-K` is one of `is_proc_excl`'s kinds too: `-K -p P` reads every
+        // process in the C, not P and the other processes' threads.
+        let walked_kinds = specified.intersection(SelKinds::PROC.union(SelKinds::TASK));
+        if locates_states && !self.and_mode && walked_kinds.count() > 1 {
             return true;
         }
         self.proc_selected(self.proc_kinds(p))
@@ -1281,7 +1339,11 @@ impl Selection {
                 // the backend's fd walk, and the process's own files still
                 // have to be read: `lsof -K -a -p N` shows them.
                 let task_only_miss = specified.contains(SelKinds::TASK) && inherited.is_empty();
-                if !self.proc_selected(inherited)
+                // And a process its backend read and found nothing to show
+                // in is not a bare line either: where the C lists a process
+                // only through its files, it has no line at all.
+                if p.unlisted
+                    || !self.proc_selected(inherited)
                     || specified.intersects(SelKinds::FILE)
                     || peer_only
                     || task_only_miss
@@ -1730,8 +1792,7 @@ mod tests {
         // the run still selects everything, minus the sockets it vetoes.
         let sel = Selection {
             state_filter: Some(StateFilter {
-                proto: None,
-                include: vec!["LISTEN".into()],
+                include: vec![TcpState::Listen],
                 exclude: vec![],
             }),
             ..Default::default()
@@ -1739,12 +1800,19 @@ mod tests {
         assert!(sel.specified().is_empty(), "-s is not a specified kind");
         let got = sel.apply(mock::sample_processes());
         assert_eq!(got.len(), 2, "non-socket rows are untouched");
-        let states: usize = got
+        let sockets: Vec<&str> = got
             .iter()
             .flat_map(|p| &p.files)
-            .filter(|f| f.socket.is_some())
-            .count();
-        assert_eq!(states, 1, "only the LISTEN socket survives");
+            .filter_map(|f| f.socket.as_ref())
+            .map(|s| s.protocol.as_str())
+            .collect();
+        // The ESTABLISHED socket is vetoed. The sample's UDP socket carries
+        // no state — Windows' shape — so no TCP state list can touch it.
+        assert_eq!(
+            sockets,
+            ["TCP", "UDP"],
+            "the LISTEN socket and the stateless UDP one"
+        );
     }
 
     #[test]
@@ -1871,6 +1939,7 @@ mod tests {
             command: "x".into(),
             user: None,
             endpoint_peer: false,
+            unlisted: false,
             files: vec![
                 row("/usr/bin/python3", 65024), // on the named filesystem
                 row("/dev/null", 6),            // NOT on it — a different mount
@@ -1923,6 +1992,7 @@ mod tests {
             command: "x".into(),
             user: None,
             endpoint_peer: false,
+            unlisted: false,
             files: vec![
                 // The file itself, open under a DIFFERENT name (a hard link).
                 row("C:\\other\\name.txt", "C:", "42"),
@@ -2071,6 +2141,7 @@ mod tests {
             command: "b.exe".into(),
             user: None,
             endpoint_peer: true,
+            unlisted: false,
             files: vec![pipe.clone(), reg.clone()],
         };
         // 8888 matches no selector and is no peer: dropped as usual.
@@ -2084,6 +2155,7 @@ mod tests {
             command: "c.exe".into(),
             user: None,
             endpoint_peer: false,
+            unlisted: false,
             files: vec![pipe, reg],
         };
         let sel = Selection {
@@ -2164,6 +2236,7 @@ mod tests {
             user: Some(format!("u{uid}")),
             files: Vec::new(),
             endpoint_peer: false,
+            unlisted: false,
         }
     }
 
@@ -2427,12 +2500,182 @@ mod tests {
             .all(|q| q.files.is_empty()));
         let vetoed = Selection {
             state_filter: Some(StateFilter {
-                proto: Some(Protocol::Tcp),
-                include: vec!["ESTABLISHED".into()],
+                include: vec![TcpState::Established],
                 exclude: vec![],
             }),
             ..sel
         };
         assert!(!vetoed.locate(&[p]).inet_all);
+    }
+    fn udp(fd: u64, lport: u16, state: Option<TcpState>) -> OpenFile {
+        use crate::model::{SockState, SocketInfo};
+        let mut f = tcp(fd, lport, None, TcpState::Listen);
+        f.node = Some("UDP".into());
+        f.socket = Some(Box::new(SocketInfo {
+            protocol: Protocol::Udp,
+            local: Some(format!("127.0.0.1:{lport}").parse().unwrap()),
+            remote: None,
+            state: state.map(SockState::Tcp),
+            tcp: None,
+        }));
+        f
+    }
+
+    fn states(include: &[TcpState], exclude: &[TcpState]) -> Selection {
+        Selection {
+            state_filter: Some(StateFilter {
+                include: include.to_vec(),
+                exclude: exclude.to_vec(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    // Linux's rule, on Linux's table: `CLOSE` is not a Windows state name, and
+    // the Windows backend gives UDP no state, so on Windows the unconnected
+    // socket here would be outside the table and pass. The platform-neutral
+    // half — a TCP list vetoes TCP sockets and nothing else — is
+    // `a_state_filter_can_only_veto_never_select`.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_tcp_state_list_filters_udp_by_its_reused_state_and_nothing_else() {
+        // Measured against the C on a process holding every shape: a TCP
+        // listener, an established TCP socket, an unconnected UDP socket
+        // (kernel state 7, CLOSE), a connected one (1, ESTABLISHED), a unix
+        // socket and a regular file. lsof-rs had applied `-sTCP:` to TCP
+        // sockets alone and dropped every other socket outright — the unix
+        // socket included, which the C keeps.
+        use crate::model::{SockState, SocketInfo, UnixState};
+        let mut unix = tcp(9, 1, None, TcpState::Listen);
+        unix.file_type = FileType::Unix;
+        unix.socket = Some(Box::new(SocketInfo {
+            protocol: Protocol::Other("unix"),
+            local: None,
+            remote: None,
+            state: Some(SockState::Unix(UnixState::Listen)),
+            tcp: None,
+        }));
+        let mut file = tcp(10, 1, None, TcpState::Listen);
+        file.socket = None;
+        file.file_type = FileType::Regular;
+        let files = [
+            tcp(4, 80, None, TcpState::Listen),
+            tcp(5, 81, Some("127.0.0.1:9"), TcpState::Established),
+            udp(7, 82, Some(TcpState::Close)),
+            udp(8, 83, Some(TcpState::Established)),
+            unix,
+            file,
+        ];
+        let kept = |sel: Selection| -> Vec<u64> {
+            let mut p = who(10, "srv", 0, 10);
+            p.files = files.to_vec();
+            sel.apply(vec![p])
+                .iter()
+                .flat_map(|p| &p.files)
+                .map(|f| match f.fd {
+                    FdType::Handle(n) => n,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        assert_eq!(kept(states(&[TcpState::Listen], &[])), [4, 9, 10]);
+        assert_eq!(kept(states(&[TcpState::Close], &[])), [7, 9, 10]);
+        assert_eq!(kept(states(&[TcpState::Established], &[])), [5, 8, 9, 10]);
+        assert_eq!(kept(states(&[], &[TcpState::Close])), [4, 5, 8, 9, 10]);
+        assert_eq!(
+            kept(states(&[TcpState::Listen], &[TcpState::Established])),
+            [4, 9, 10]
+        );
+    }
+
+    #[test]
+    fn a_state_outside_the_table_is_never_filtered() {
+        // The C checks `i < TcpNstates` before either list, so a kernel state
+        // newer than its table is neither required nor excluded.
+        let sel = states(&[TcpState::Listen], &[]);
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![tcp(4, 80, None, TcpState::Unknown)];
+        assert_eq!(sel.apply(vec![p])[0].files.len(), 1);
+    }
+
+    #[test]
+    fn a_state_is_located_by_any_socket_in_it_whatever_hides_the_row() {
+        // `lsof -a -p P -d 10 -sTCP:SYN_SENT,CLOSED,LISTEN`, P's listener on
+        // fd 4: the C marks LISTEN while it reads the socket, before `-d` or
+        // `-a` decide the row, and reports the other two — measured.
+        let mut sel = states(
+            &[TcpState::SynSent, TcpState::Closed, TcpState::Listen],
+            &[],
+        );
+        sel.pids = vec![10];
+        sel.and_mode = true;
+        sel.fd_filter = Some(FdFilter {
+            include: vec![FdSpec::Num(10)],
+            exclude: vec![],
+        });
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![tcp(4, 80, None, TcpState::Listen)];
+        assert_eq!(sel.locate(&[p]).states, [false, false, true]);
+        // An unconnected UDP socket locates CLOSE, as it is filtered by it.
+        let sel = states(&[TcpState::Close], &[]);
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![udp(7, 82, Some(TcpState::Close))];
+        assert_eq!(sel.locate(&[p]).states, [true]);
+    }
+
+    #[test]
+    fn two_process_selecters_without_dash_a_walk_every_process_for_states() {
+        // `lsof -p P -c nosuch -sTCP:LISTEN`: the C reads every process when
+        // more than one process selecter is given and there is no `-a`, so a
+        // listener anywhere locates LISTEN — measured, `-V` names only the
+        // command. With one selecter, or `-a`, it reads the selected alone.
+        let other = who(20, "other", 0, 20);
+        let mut sel = states(&[TcpState::Listen], &[]);
+        sel.pids = vec![10];
+        assert!(!sel.selects_process(&other), "-p alone reads P alone");
+        sel.commands = vec!["nosuch".into()];
+        assert!(sel.selects_process(&other), "-p and -c read everything");
+        sel.and_mode = true;
+        assert!(!sel.selects_process(&other), "-a reads what passes both");
+        // Without a state to locate, the wider walk would only cost.
+        let mut plain = Selection {
+            pids: vec![10],
+            commands: vec!["nosuch".into()],
+            ..Default::default()
+        };
+        assert!(!plain.selects_process(&other));
+        // `-K` counts among the C's process kinds.
+        plain = states(&[TcpState::Listen], &[]);
+        plain.pids = vec![10];
+        plain.tasks = TaskMode::Always;
+        assert!(plain.selects_process(&other), "-K -p reads everything");
+    }
+
+    #[test]
+    fn an_unlisted_process_has_no_line_but_is_still_located() {
+        // `lsof -w -p P` on a P nothing of which can be read: the C prints
+        // nothing and exits 0 — P was found, it just has no row. Windows'
+        // bare line for a fileless process is untouched: `unlisted` is set
+        // only by a backend that lists processes through their files.
+        let sel = Selection {
+            pids: vec![10],
+            ..Default::default()
+        };
+        let mut p = who(10, "srv", 0, 10);
+        assert_eq!(sel.apply(vec![p.clone()]).len(), 1, "the bare line");
+        p.unlisted = true;
+        assert!(sel.apply(vec![p.clone()]).is_empty(), "no line at all");
+        assert_eq!(sel.locate(&[p]).pids, [true], "and still located");
+    }
+
+    #[test]
+    fn nofd_and_del_are_fd_names_dash_d_selects() {
+        // The C compares a `-d` name with the FD cell, so both select the
+        // rows that print them.
+        let nofd = FdSpec::Named(FdKind::NoFd);
+        let del = FdSpec::Named(FdKind::Del);
+        assert!(nofd.matches(&FdType::NoFd) && !nofd.matches(&FdType::Handle(0)));
+        assert!(del.matches(&FdType::Deleted) && !del.matches(&FdType::Mem));
+        assert_eq!(FdType::NoFd.code(), "NOFD");
     }
 }

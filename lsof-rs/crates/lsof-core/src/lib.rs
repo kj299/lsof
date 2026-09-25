@@ -20,7 +20,7 @@ pub mod render;
 pub mod selection;
 pub mod service;
 
-pub use backend::{Backend, BackendError, MountEntry, Privilege, UserLookup};
+pub use backend::{errno_text, Backend, BackendError, MountEntry, Privilege, UserLookup};
 pub use model::{
     AccessMode, FdType, FileType, OpenFile, Process, Protocol, SockState, SocketInfo, TcpState,
     UnixState,

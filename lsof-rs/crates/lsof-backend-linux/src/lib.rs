@@ -40,22 +40,19 @@
 //! API. It waits on the decision recorded as DIVERGENCES item 22, not on
 //! effort. Packet sockets were the other half of that pair and are done.
 //!
-//! Also open: the `UNKN*` rows (the C reports an unreadable link with its
-//! errno where this backend omits the row), and the options `-e`, `-x`, `-X`,
-//! `-Z`, `-N`, `-S` and `-b`. `lsof-rs/docs/linux-l2-plan.md` measures each of
-//! them; the `DEBT` entries in
-//! `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are what the coverage
-//! gate prints on every run.
+//! Also open: `-e` on mapped files (DIVERGENCES 40 — the C prints them as
+//! `UNKNmem` without `stat`ing them; the cwd/rtd/txt/fd half is done), and
+//! the options `-S` and `-b`. `lsof-rs/docs/linux-l2-plan.md` measures each;
+//! the `DEBT` entries in `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are
+//! what the coverage gate prints on every run.
 //!
-//! **Inaccessible files are omitted, not reported.** Diffed against the C
-//! `lsof` 4.95.0, this is the one behavioural difference in rows L0 claims to
-//! cover: where a link cannot be read, the C still emits a row carrying the
-//! reason — a kernel thread shows
-//! `txt unknown /proc/2/exe (readlink: Permission denied)` — whereas this
-//! backend emits nothing. Nothing we *do* report disagrees with the C; the
-//! difference is only in these error rows. Matching them means reproducing
-//! libc's errno strings, so it is deliberately left to a later phase rather
-//! than approximated.
+//! **A file that cannot be read is a row saying why**, as it is in the C: a
+//! link that will not read is TYPE `unknown` with NAME `/proc/1/cwd (readlink:
+//! Permission denied)`, an fd table that will not open is one `NOFD` row, and
+//! under `-w` or `-t` there is none of either (see `files::for_proc_dir`).
+//! This backend left all of it out until 2026-09-25, in the belief that
+//! matching it meant reproducing libc's error strings — which Rust's
+//! `io::Error` already prints.
 //!
 //! # Differential
 //!
@@ -67,8 +64,8 @@
 //! lsof -p <pid>   (C)   vs   lsof -p <pid>   (this backend)
 //! ```
 //!
-//! That comparison is what found the error-row difference above on the first
-//! run, and in L1 it caught four more before any of it shipped: the DEVICE and
+//! That comparison found the error-row difference on its first run (closed
+//! 2026-09-25, once a fixture the gate could not read existed), and in L1 it caught four more before any of it shipped: the DEVICE and
 //! NODE cells are filled differently per socket family (inet shows inode and
 //! protocol, AF_UNIX shows the kernel socket pointer and inode — getting them
 //! backwards is invisible without the diff), `-U` was never enforced in the

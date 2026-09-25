@@ -10,6 +10,7 @@
 //! path argument is an exact-file lookup; `+D`/`+d <dir>` is a directory-tree
 //! lookup.
 
+use lsof_core::model::tcp_state_table;
 use lsof_core::render::{Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
@@ -82,6 +83,9 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     let mut want_version = false;
     let mut repeat: Option<u64> = None;
     let mut columns = Columns::default();
+    // Every `-s TCP:` state, across all the `-s` options: the C's tables are
+    // global, so two `-s` make one filter (lsof-rs kept the last one).
+    let mut states = StateFilter::default();
     // `-F` with an explicit `o` letter switches the C's `Foffset` on too
     // (`main.c`, `if (i == LSOF_FIX_OFFSET) Foffset = 1`) — so it collides
     // with a bare `-s` exactly as `-o` does. A bare `-F` selects the field
@@ -205,7 +209,10 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     }
                     sel.filesystem_args = FilesystemArgs::AlwaysFilesystem;
                 }
-                Some('w') => sel.suppress_warnings = false,
+                Some('w') => {
+                    sel.suppress_warnings = false;
+                    sel.omit_unreadable = false;
+                }
                 Some('E') => sel.endpoints = Some(EndpointMode::Files),
                 Some('L') => {
                     // `+L <count>`: drop files whose link count is >= <count>.
@@ -250,7 +257,13 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                 'a' => sel.and_mode = true,
                 'n' => sel.no_host_resolve = true,
                 'P' => sel.no_port_resolve = true,
-                't' => sel.terse = true,
+                // The C's `-t` sets `Fwarn` as well, which is what makes an
+                // unreadable file leave no row — and a process with nothing
+                // else, no PID (DIVERGENCES 37). `+w` after it undoes that.
+                't' => {
+                    sel.terse = true;
+                    sel.omit_unreadable = true;
+                }
                 'r' => {
                     let rest: String = chars[j + 1..].iter().collect();
                     repeat = Some(if rest.is_empty() {
@@ -392,7 +405,10 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     }
                 }
                 'Q' => sel.quiet = true,
-                'w' => sel.suppress_warnings = true,
+                'w' => {
+                    sel.suppress_warnings = true;
+                    sel.omit_unreadable = true;
+                }
                 'f' => {
                     // `-f` alone forces every path argument to be a plain
                     // file. The C also spells kernel-file-structure selection
@@ -576,7 +592,7 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                         }
                     };
                     match value {
-                        Some(v) => sel.state_filter = Some(parse_state_filter(&v)?),
+                        Some(v) => parse_state_spec(&mut states, &v)?,
                         None => columns.size = true,
                     }
                     j = chars.len();
@@ -594,6 +610,21 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     // item, reported once if it is not found.
     dedup_ids(&mut sel.pids, &sel.pid_excludes, "PID")?;
     dedup_ids(&mut sel.pgids, &sel.pgid_excludes, "PGID")?;
+    // A state both included and excluded, from any two `-s` options. The C
+    // checks this once every option is read and names the state as its table
+    // spells it, first by table order.
+    if let Some(both) = tcp_state_table()
+        .iter()
+        .find(|st| states.include.contains(st) && states.exclude.contains(st))
+    {
+        return Err(format!(
+            "can't include and exclude TCP state: {}",
+            both.as_str()
+        ));
+    }
+    if !states.include.is_empty() || !states.exclude.is_empty() {
+        sel.state_filter = Some(states);
+    }
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
@@ -645,6 +676,11 @@ fn parse_fd_filter(value: &str) -> Result<FdFilter, String> {
             "rtd" => FdSpec::Named(FdKind::Rtd),
             "txt" => FdSpec::Named(FdKind::Txt),
             "mem" => FdSpec::Named(FdKind::Mem),
+            // The C takes ANY name here and compares it with the FD cell, so
+            // these two select the rows that carry them: a deleted mapping,
+            // and a process whose fd directory could not be opened.
+            "DEL" => FdSpec::Named(FdKind::Del),
+            "NOFD" => FdSpec::Named(FdKind::NoFd),
             _ => {
                 if let Some((a, b)) = body.split_once('-') {
                     let a = a
@@ -877,36 +913,60 @@ fn parse_tcp_info(letters: &str, plus: bool) -> Result<TcpInfoFlags, String> {
     Ok(flags)
 }
 
-/// Parse a `-s [proto:][state[,state...]]` value into a [`StateFilter`].
-/// Accepts `TCP:LISTEN`, `TCP:LISTEN,ESTABLISHED`, `TCP:^TIME_WAIT`, or a
-/// bare proto like `TCP:` (proto-only filter, any state).
-fn parse_state_filter(value: &str) -> Result<StateFilter, String> {
-    let (proto, states_part) = match value.find(':') {
-        Some(idx) => {
-            let p = &value[..idx];
-            let s = &value[idx + 1..];
-            let proto = match p.to_ascii_lowercase().as_str() {
-                "" => None,
-                "tcp" => Some(Protocol::Tcp),
-                "udp" => Some(Protocol::Udp),
-                other => return Err(format!("invalid -s protocol: {other}")),
-            };
-            (proto, s)
-        }
-        None => (None, value),
+/// Add one `-s <protocol>:<states>` value to `filter`, as the C's
+/// `enter_state_spec()` (`src/arg.c`) does, with its messages.
+///
+/// * The protocol is `TCP:` or `UDP:`, in any case, colon included; anything
+///   else is `unknown -s protocol: "<value>"`.
+/// * A state is a name from [`tcp_state_table`] in any case, `^` excluding
+///   it. An unknown name, an empty one (`TCP:A,,B`) and the same name twice
+///   in one list — across `-s` options too, since the C's tables are global
+///   — are each fatal.
+/// * `UDP:` with names is refused with the message the man page promises for
+///   a protocol whose states are unavailable. The C on Linux has a UDP table
+///   whose first slot is empty and `strcasecmp`s it: every `-s UDP:<state>`
+///   is a segfault, measured (DIVERGENCES 32). Windows has no UDP states.
+fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String> {
+    let lower = value.get(..4).map(str::to_ascii_lowercase);
+    let proto = match lower.as_deref() {
+        Some("tcp:") => "TCP",
+        Some("udp:") => "UDP",
+        _ => return Err(format!("unknown -s protocol: \"{value}\"")),
     };
-    let mut filter = StateFilter {
-        proto,
-        ..Default::default()
-    };
-    for term in states_part.split(',').filter(|s| !s.is_empty()) {
-        if let Some(rest) = term.strip_prefix('^') {
-            filter.exclude.push(rest.to_string());
-        } else {
-            filter.include.push(term.to_string());
-        }
+    let names = &value[4..];
+    if names.is_empty() {
+        return Err(format!("no {proto} state names in: {value}"));
     }
-    Ok(filter)
+    if proto == "UDP" {
+        return Err(format!("no UDP state names available: {value}"));
+    }
+    for term in names.split(',') {
+        let (exclude, name) = match term.strip_prefix('^') {
+            Some(rest) => (true, rest),
+            None => (false, term),
+        };
+        if name.is_empty() {
+            return Err(format!("NULL TCP state name in: {value}"));
+        }
+        let Some(state) = tcp_state_table()
+            .iter()
+            .copied()
+            .find(|st| st.as_str().eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("unknown TCP state name: {name}"));
+        };
+        let list = if exclude {
+            &mut filter.exclude
+        } else {
+            &mut filter.include
+        };
+        if list.contains(&state) {
+            let which = if exclude { "exclusion" } else { "inclusion" };
+            return Err(format!("duplicate TCP {which}: {name}"));
+        }
+        list.push(state);
+    }
+    Ok(())
 }
 
 /// Parse an `-i` spec: `[46][proto][@host][:ports]`. An empty one, or one
@@ -1095,6 +1155,88 @@ mod tests {
             let (c, sel) = columns(argv).unwrap();
             assert!(!c.size && sel.state_filter.is_some(), "{argv:?}");
         }
+    }
+
+    /// `-s TCP:<states>`, every message measured against the C
+    /// (`enter_state_spec()`, and `main.c`'s include/exclude check). lsof-rs
+    /// had taken any text as a state and kept only the last `-s`, so a typo
+    /// listed nothing and exited 0.
+    #[test]
+    fn dash_s_takes_the_cs_state_names_and_refuses_the_rest() {
+        use lsof_core::TcpState::{Close, Established, Listen, TimeWait};
+        let states = |argv: &[&str]| columns(argv).map(|(_, sel)| sel.state_filter);
+        // Case is unimportant; lists and repeated options accumulate.
+        let f = states(&["-stcp:listen,^Time_Wait", "-sTCP:ESTABLISHED"])
+            .unwrap()
+            .expect("a filter");
+        assert_eq!(f.include, [Listen, Established]);
+        assert_eq!(f.exclude, [TimeWait]);
+        if cfg!(not(windows)) {
+            // The Linux names, which are not Windows': CLOSE and SYN_RECV.
+            assert_eq!(states(&["-sTCP:close"]).unwrap().unwrap().include, [Close]);
+            assert_eq!(
+                states(&["-sTCP:SYN_RCVD"]).err().as_deref(),
+                Some("unknown TCP state name: SYN_RCVD")
+            );
+        }
+        for (argv, err) in [
+            (&["-sXYZ:LISTEN"][..], "unknown -s protocol: \"XYZ:LISTEN\""),
+            (&["-s", "LISTEN"][..], "unknown -s protocol: \"LISTEN\""),
+            (
+                &["-s", "/etc/hostname"][..],
+                "unknown -s protocol: \"/etc/hostname\"",
+            ),
+            (&["-sTCP:"][..], "no TCP state names in: TCP:"),
+            (&["-sUDP:"][..], "no UDP state names in: UDP:"),
+            (
+                &["-sTCP:LISTEN,,CLOSING"][..],
+                "NULL TCP state name in: TCP:LISTEN,,CLOSING",
+            ),
+            (&["-sTCP:NOPE"][..], "unknown TCP state name: NOPE"),
+            (
+                &["-sTCP:LISTEN,listen"][..],
+                "duplicate TCP inclusion: listen",
+            ),
+            (
+                &["-sTCP:^LISTEN", "-sTCP:^LISTEN"][..],
+                "duplicate TCP exclusion: LISTEN",
+            ),
+            (
+                &["-sTCP:listen", "-sTCP:^LISTEN"][..],
+                "can't include and exclude TCP state: LISTEN",
+            ),
+            // Where the C segfaults (DIVERGENCES 32): the man page's message
+            // for a protocol whose states are unavailable.
+            (
+                &["-sUDP:Idle"][..],
+                "no UDP state names available: UDP:Idle",
+            ),
+            (&["-sudp:^x"][..], "no UDP state names available: udp:^x"),
+        ] {
+            assert_eq!(states(argv).err().as_deref(), Some(err), "{argv:?}");
+        }
+    }
+
+    /// The C's `-t` sets `Fwarn`, `-w` sets it and `+w` clears it, the last
+    /// one winning — measured: `-t +w` lists an unreadable process, `+w -t`
+    /// does not (DIVERGENCES 37). `-t` must not silence the Windows privilege
+    /// hint, which is the other thing `-w` does.
+    #[test]
+    fn dash_t_and_dash_w_leave_unreadable_files_out_and_plus_w_after_restores() {
+        let omit = |argv: &[&str]| columns(argv).unwrap().1.omit_unreadable;
+        assert!(!omit(&[]));
+        assert!(omit(&["-w"]) && omit(&["-t"]) && omit(&["+w", "-t"]));
+        assert!(!omit(&["-t", "+w"]) && !omit(&["-w", "+w"]));
+        let (_, sel) = columns(&["-t"]).unwrap();
+        assert!(!sel.suppress_warnings, "-t keeps the privilege hint");
+    }
+
+    #[test]
+    fn dash_d_names_the_rows_the_c_names() {
+        let (_, sel) = columns(&["-d", "NOFD,^DEL"]).unwrap();
+        let fd = sel.fd_filter.expect("a filter");
+        assert_eq!(fd.include, [FdSpec::Named(FdKind::NoFd)]);
+        assert_eq!(fd.exclude, [FdSpec::Named(FdKind::Del)]);
     }
 
     /// `main.c:1091`: `-o` and `-s` cannot both be given, in either order —

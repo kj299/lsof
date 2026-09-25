@@ -74,7 +74,7 @@ fn file_members(f: &OpenFile) -> Vec<String> {
         if let Some(a) = sock.remote {
             m.push(format!("\"remote\":{}", qs(&a.to_string())));
         }
-        if let Some(st) = sock.state {
+        if let Some(st) = sock.shown_state() {
             m.push(format!("\"state\":{}", qs(st.as_str())));
         }
         // `-T q/w` extended TCP info, flat like the rest of the shape. Keys
