@@ -3122,3 +3122,47 @@ finding it is supposed to produce.
 - **Section amended:** `porting-kit/harnesses/fuzz/fuzz_target.template.rs`,
   `porting-kit/skeleton/crates/cli/src/main.rs`,
   `porting-kit/skeleton/crates/cli/tests/input.rs`.
+
+---
+
+## 068. A gate that could read everything never compared what the tool prints when it cannot
+
+- **Date:** 2026-09-25
+- **Codebase:** lsof-rs (Linux backend and its differential)
+- **What happened:** lsof does not drop a file it cannot read. It prints a
+  row saying so — `cwd unknown /proc/1/cwd (readlink: Permission denied)`, one
+  per link, and `NOFD … /proc/1/fd (opendir: Permission denied)` for the fd
+  table — and for a user without root that is most of the output, since it is
+  every other user's process. lsof-rs printed one bare `unk unknown` line for
+  each such process, and under `-t` its pid, where the C prints nothing. It
+  stayed that way through 170 differential cases, a resource gate and every
+  CI run, because every fixture was the harness's own process and the harness
+  could read all of them: root locally, the fixtures' owner in CI. No case had
+  ever compared a file the tool could not read.
+
+  The gap was not unknown. It sat in DIVERGENCES under "Deliberate, and
+  staying", with a reason: matching it "means reproducing libc's errno
+  strings". Nobody had tested that reason. Rust's `io::Error` prints libc's
+  own `strerror` text, followed by ` (os error N)`, and the project already
+  had the one-line function that strips the suffix, for its argument errors.
+  The coverage ledger had the same gap under a third name: its `UNKN*`
+  waivers blamed "an unreadable link", when those codes are what `-e` prints.
+- **The rule.** For a tool that reports on state it may not be allowed to see,
+  the permission-denied path is output, and the gate must compare it. Give the
+  matrix a fixture the tool cannot read, and run those cases as a user who
+  cannot read it. On Linux, `prctl(PR_SET_DUMPABLE, 0)` makes a process
+  unreadable even to its own user unless that user has CAP_SYS_PTRACE, so an
+  unprivileged CI runner needs no second account; a root harness drops
+  privilege with `setpriv`. Before trusting those cases, check from the
+  demoted side that the fixture really cannot be read. A runner that CAN read
+  it turns every such case into a MATCH that measured nothing, so it must SKIP.
+  And the obstacle a deferral names is a claim like any other: test it before
+  filing the entry as permanent.
+- **Kit change:** PLAYBOOK · Phase 4's coverage paragraph gains the visibility
+  dimension. The harness pattern lives in
+  `lsof-rs/differential/linux_diff.py`: the kit runner takes one binary path
+  per side for every case, so each side gets a wrapper script that drops
+  privilege when a case sets an environment variable, plus a readability
+  probe run through the same wrapper.
+- **Section amended:** PLAYBOOK · Phase 4.
+
