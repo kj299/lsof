@@ -43,7 +43,7 @@ fn run(args: &[String], out: &mut impl Write) -> io::Result<i32> {
 
     // Bytes first, then text. `read_to_string` fails on the first byte that
     // is not UTF-8, and discarding its error made one such byte an EMPTY
-    // input: every good line around it silently gone, exit 0 (LESSONS #065).
+    // input: every good line around it silently gone, exit 0 (LESSONS #067).
     // Decode lossily — the bad byte costs itself, not the input — and treat a
     // real read failure as the error it is.
     let mut raw = Vec::new();

@@ -131,7 +131,7 @@ cases written for it. One survived the first run — "`-c` ignores the `-a`
 rule" — and `search-c-under-a-is-located-only-past-the-other-kinds` was
 written to kill it. The first pass of that run was itself wrong: its driver
 restored each mutated file with an older mtime, cargo kept the mutant, and
-later mutants ran on top of earlier ones (porting-kit LESSONS #064). Re-run
+later mutants ran on top of earlier ones (porting-kit LESSONS #066). Re-run
 from a forced rebuild, the results above are the clean ones.
 
 ## Fixed by measuring the SIZE/OFF column's three modes (2026-09-25)
@@ -204,7 +204,7 @@ mapped file is `stat`ed by its raw name (the decoded one names no file), and a
 non-UTF-8 argument is refused in one line. The fuzz targets had not found any
 of it because they decoded their input *before* the parser, so the read — the
 part that failed — was never fuzzed; `proc_maps` now drives the byte parser
-directly. Porting-kit LESSONS #065, which also fixes the kit's fuzz template
+directly. Porting-kit LESSONS #067, which also fixes the kit's fuzz template
 and skeleton, both of which taught the same shape.
 
 **DECISION — what an undecodable byte looks like.** lsof-rs's model holds a

@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
     // silently skips every input that is not UTF-8 and so fuzzes a parser the
     // reader may never reach. In lsof-rs the reader was `read_to_string`: one
     // such byte failed the read, the whole table was dropped, and any process
-    // could hide from the tool (LESSONS #065). If the reader decodes lossily,
+    // could hide from the tool (LESSONS #067). If the reader decodes lossily,
     // do the same here; if it rejects, the rejection is behaviour to assert,
     // not input to skip.
     let text = String::from_utf8_lossy(data);

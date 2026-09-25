@@ -23,7 +23,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   tables are now read as bytes and decoded lossily (`text::read_lossy`), and a
   mapped file is `stat`ed by its raw name; an undecodable byte displays as
   U+FFFD where the C prints `\xff`. The fuzz targets had not seen it because
-  they decoded their input before parsing it. LESSONS #065.
+  they decoded their input before parsing it. LESSONS #067.
 - **A non-UTF-8 argument no longer panics.** `std::env::args()` panics on one,
   so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
 

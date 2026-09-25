@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #18->#039, #25->#052; #31 by title (no entry in this log).
+# Local: #064 (the table rows it used to drop).
 """Control-coverage — the gate above the gates: every control the kit DECLARES
 must actually be INVOKED by the port's gate script.
 
@@ -57,23 +58,42 @@ CONTROL_RE = re.compile(r"harnesses/[A-Za-z0-9_./-]+\.(?:py|sh)\b")
 # A control naming a bare harness directory — declared but not a command.
 DIRONLY_RE = re.compile(r"harnesses/[A-Za-z0-9_-]+/(?![A-Za-z0-9_.-]*\.(?:py|sh)\b)")
 EXEMPT_RE = re.compile(r"control-coverage:\s*exempt\s+(\S+)\s*--\s*(.+)")
+# A separator (`|---|---|`) — and the row above one is a header, not a control.
+_SEPARATOR = re.compile(r"^\s*\|[\s:|-]*\|\s*$")
 
 
 def declared_controls(controls_path):
-    """(runnable, dir_only) control paths declared in the doc's gate table."""
+    """(runnable, dir_only, unreadable) controls declared in the gate table.
+
+    `unreadable` is every data row naming neither a harness script nor a harness
+    directory, returned as its first cell so the caller can REPORT it. Until
+    LESSONS #064 such a row fell through both regexes and vanished — and in
+    this kit's own table it was the first row, `#![forbid(unsafe_code)]` on
+    `core`. A parser over a human-written format reports what it cannot read.
+    A header (the row directly above a separator, in any number of tables)
+    declares nothing."""
     with open(controls_path, encoding="utf-8") as fh:
-        rows = [ln for ln in fh if TABLE_ROW.match(ln)]
-    runnable, dir_only = [], []
+        lines = fh.read().splitlines()
+    headers = {i - 1 for i, ln in enumerate(lines)
+               if i and _SEPARATOR.match(ln) and TABLE_ROW.match(lines[i - 1])}
+    rows = [ln for i, ln in enumerate(lines)
+            if TABLE_ROW.match(ln) and not _SEPARATOR.match(ln) and i not in headers]
+    runnable, dir_only, unreadable = [], [], []
     for row in rows:
         found = CONTROL_RE.findall(row)
         for m in CONTROL_RE.finditer(row):
             if m.group(0) not in runnable:
                 runnable.append(m.group(0))
         if not found:
-            for m in DIRONLY_RE.finditer(row):
-                if m.group(0) not in dir_only:
-                    dir_only.append(m.group(0))
-    return runnable, dir_only
+            dirs = DIRONLY_RE.findall(row)
+            for d in dirs:
+                if d not in dir_only:
+                    dir_only.append(d)
+            if not dirs:
+                name = row.strip().strip("|").split("|")[0].strip()
+                if name and name not in unreadable:
+                    unreadable.append(name)
+    return runnable, dir_only, unreadable
 
 
 def control_is_wired(control, gate_texts):
@@ -122,7 +142,7 @@ def check(controls_path, gate_paths, as_json=False):
         with open(g, encoding="utf-8") as fh:
             texts.append(fh.read())
 
-    runnable, dir_only = declared_controls(controls_path)
+    runnable, dir_only, unreadable = declared_controls(controls_path)
     if not runnable:
         # 0-of-0 proves nothing and must not pass (LESSONS #039).
         print(f"error: no runnable controls found in {controls_path}'s table — "
@@ -144,7 +164,7 @@ def check(controls_path, gate_paths, as_json=False):
         json.dump({"tool": "control-coverage", "controls": runnable,
                    "wired": wired, "unwired": unwired,
                    "exempt": [{"control": c, "why": w} for c, w in skipped],
-                   "uncheckable": dir_only,
+                   "uncheckable": dir_only, "not_a_harness": unreadable,
                    "gates": gate_paths, "ok": not unwired}, sys.stdout, indent=1)
         print()
     else:
@@ -156,6 +176,8 @@ def check(controls_path, gate_paths, as_json=False):
             print(f"  NOT RUN  {c}", file=sys.stderr)
         for d in dir_only:
             print(f"  (uncheckable, names no script: {d})")
+        for r in unreadable:
+            print(f"  (uncheckable, names no harness — enforced by nothing here: {r})")
         if unwired:
             print(f"\ncontrol-coverage FAILED: {len(unwired)} declared control(s) "
                   f"never invoked by {', '.join(gate_paths)}.\n"
@@ -165,7 +187,8 @@ def check(controls_path, gate_paths, as_json=False):
                   "in the gate with the reason.", file=sys.stderr)
         else:
             print(f"\ncontrol coverage: {len(wired)} control(s) invoked, "
-                  f"{len(skipped)} exempted, {len(dir_only)} uncheckable")
+                  f"{len(skipped)} exempted, "
+                  f"{len(dir_only) + len(unreadable)} uncheckable")
     return 1 if unwired else 0
 
 
@@ -185,13 +208,23 @@ def _self_test():
                      "| Control | Command |\n|---|---|\n"
                      "| a | `harnesses/alpha/a.py` |\n"
                      "| b | `harnesses/beta/b.sh` |\n"
-                     "| c | `harnesses/fuzz/` (cargo-fuzz) |\n")
+                     "| c | `harnesses/fuzz/` (cargo-fuzz) |\n"
+                     "| d | `#![forbid(unsafe_code)]` on `core` |\n")
 
-        runnable, dir_only = declared_controls(controls)
+        runnable, dir_only, unreadable = declared_controls(controls)
         check_case("table rows parsed, prose ignored",
                    runnable == ["harnesses/alpha/a.py", "harnesses/beta/b.sh"])
         check_case("a directory-only control is reported, not dropped",
                    dir_only == ["harnesses/fuzz/"])
+        # LESSONS #064: a row naming NO harness used to vanish without a word.
+        check_case("a row naming no harness is REPORTED, not dropped (header excluded)",
+                   unreadable == ["d"])
+        two = os.path.join(d, "two-tables.md")
+        with open(two, "w", encoding="utf-8") as fh:
+            fh.write("| Control | Command |\n|---|---|\n| a | `harnesses/alpha/a.py` |\n\n"
+                     "| Other | Table |\n|:--|--:|\n| x | `harnesses/beta/b.sh` |\n")
+        check_case("every table's header is excluded, not just the first",
+                   declared_controls(two)[2] == [])
 
         full = os.path.join(d, "full.sh")
         with open(full, "w", encoding="utf-8") as fh:

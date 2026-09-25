@@ -1,4 +1,4 @@
-//! What the binary does with input that is not all text (LESSONS #065).
+//! What the binary does with input that is not all text (LESSONS #067).
 //!
 //! A C tool reads bytes; a Rust port that reads a `String` fails on the first
 //! byte that is not UTF-8. This skeleton had thrown that error away, so one

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060 (this kit's first sweep; the resolver and
-#          the pinned-lessons rows it grew afterwards).
+# Local: #053, #057, #058, #059, #060, #064, #065 (this kit's first sweep; the
+#          resolver, pinned-lessons, lesson-refs and forbid rows since).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052; #36 by title (no entry in this log).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
@@ -90,10 +90,51 @@ MUTATIONS = [
      "why": "every unsafe block counts as documented",
      "cmd": ["harnesses/unsafe-audit/audit_unsafe.py", "--self-test"]},
 
+    # Unsafe CONTAINED (LESSONS #065) — five verdicts, each of which lets a
+    # crate that does not forbid unsafe pass on its own, so one row each
+    # (LESSONS #050). Every "does not count" was checked against rustc.
+    {"gate": "forbid-unsafe-deny", "file": "harnesses/unsafe-audit/check_forbid_unsafe.py",
+     "old": '    return level == "forbid" and not conditional',
+     "new": '    return level in ("forbid", "deny") and not conditional',
+     "why": '`deny(unsafe_code)` counts as contained; a local #[allow] then admits unsafe',
+     "cmd": ["harnesses/unsafe-audit/check_forbid_unsafe.py", "--self-test"]},
+
+    {"gate": "forbid-unsafe-cfg-attr", "file": "harnesses/unsafe-audit/check_forbid_unsafe.py",
+     "old": '    return level == "forbid" and not conditional',
+     "new": '    return level == "forbid"',
+     "why": '`cfg_attr(test, forbid(unsafe_code))` counts: every non-test build admits unsafe',
+     "cmd": ["harnesses/unsafe-audit/check_forbid_unsafe.py", "--self-test"]},
+
+    {"gate": "forbid-unsafe-nesting", "file": "harnesses/unsafe-audit/check_forbid_unsafe.py",
+     "old": '        if text.startswith("/*", i):\n            depth += 1',
+     "new": '        if text.startswith("/*", i):\n            depth = 1',
+     "why": 'C comment rules: an attribute commented out inside `/* /* */ … */` reads as live',
+     "cmd": ["harnesses/unsafe-audit/check_forbid_unsafe.py", "--self-test"]},
+
+    {"gate": "forbid-unsafe-every-root", "file": "harnesses/unsafe-audit/check_forbid_unsafe.py",
+     "old": '    for rel in roots:',
+     "new": '    for rel in roots[:1]:',
+     "why": "a forbidding lib.rs certifies lsof-cli's main.rs beside it, which is its own crate",
+     "cmd": ["harnesses/unsafe-audit/check_forbid_unsafe.py", "--self-test"]},
+
+    {"gate": "forbid-unsafe-no-roots", "file": "harnesses/unsafe-audit/check_forbid_unsafe.py",
+     "old": '    if not roots:',
+     "new": '    if False:',
+     "why": 'a crate with no target root passes a containment check over nothing',
+     "cmd": ["harnesses/unsafe-audit/check_forbid_unsafe.py", "--self-test"]},
+
     {"gate": "c-flaw-scan", "file": "harnesses/c-flaw-scan/scan_c_flaws.py",
-     "old": "            if rx.search(code):",
+     "old": "            if hit:",
      "new": "            if False:",
      "why": "the Phase-0 scanner reports 0 flaws on any C",
+     "cmd": ["harnesses/c-flaw-scan/scan_c_flaws.py", "--self-test"]},
+
+    # The literal blanking this scanner does must not reach `scanf("%s")`,
+    # whose evidence IS the literal. It did, silently, until LESSONS #064.
+    {"gate": "c-flaw-scan-reads-literals", "file": "harnesses/c-flaw-scan/scan_c_flaws.py",
+     "old": '            if rx in READS_LITERALS:',
+     "new": '            if False:',
+     "why": 'scanf("%s") stops being flagged: a false negative in a security scanner',
      "cmd": ["harnesses/c-flaw-scan/scan_c_flaws.py", "--self-test"]},
 
     # Not a verdict — an INPUT path, and that is the point. If the
@@ -191,6 +232,15 @@ MUTATIONS = [
      "why": "every declared control counts as wired: an unrun gate ships green",
      "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
 
+    # A table row naming no harness used to vanish from the report; it was
+    # `#![forbid(unsafe_code)]` on `core`, the table's first row (LESSONS #064).
+    {"gate": "control-coverage-unreadable",
+     "file": "harnesses/control-coverage/check_controls.py",
+     "old": "                if name and name not in unreadable:",
+     "new": "                if False:",
+     "why": "a gate-table row naming no harness vanishes from the report without a word",
+     "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
+
     {"gate": "doc-flags", "file": "harnesses/doc-check/check_doc_flags.py",
      "old": '                if not re.search(r"(?<![\\w-])" + re.escape(flag) + r"(?![\\w-])",\n'
             "                                 sources[script]):",
@@ -220,6 +270,27 @@ MUTATIONS = [
      "old": "        if num not in known:",
      "new": "        if False:",
      "why": "a citation of a lesson that does not exist resolves silently",
+     "cmd": ["harnesses/lessons/check_lesson_refs.py", "--self-test"]},
+
+    # That row pinned ONE of this checker's four verdicts; each of the other
+    # three fails open alone. The primary line pinned all four when it took
+    # the checker from here (LESSONS #064), so this is the fix coming back.
+    {"gate": "lesson-refs-duplicate", "file": "harnesses/lessons/check_lesson_refs.py",
+     "old": '    dupes = sorted({n for n in nums if nums.count(n) > 1})',
+     "new": '    dupes = []',
+     "why": 'two entries with one number: every citation of it resolves, to whichever',
+     "cmd": ["harnesses/lessons/check_lesson_refs.py", "--self-test"]},
+
+    {"gate": "lesson-refs-gap", "file": "harnesses/lessons/check_lesson_refs.py",
+     "old": '            if n not in nums:',
+     "new": '            if False:',
+     "why": 'a deleted heading splices its body onto the entry above, unseen',
+     "cmd": ["harnesses/lessons/check_lesson_refs.py", "--self-test"]},
+
+    {"gate": "lesson-refs-offstyle", "file": "harnesses/lessons/check_lesson_refs.py",
+     "old": '        if ENTRY_RE.match(head + " x"):\n            continue',
+     "new": '        continue',
+     "why": 'an entry written `### #032` is no entry at all, and nothing says so',
      "cmd": ["harnesses/lessons/check_lesson_refs.py", "--self-test"]},
 
     # check_imports has TWO independent verdicts and one entry would pin only

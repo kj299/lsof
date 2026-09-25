@@ -20,7 +20,7 @@
 //!   with it.
 //!
 //! A forensic tool that anyone can hide from is worse than a slow one
-//! (porting-kit LESSONS #065). So the
+//! (porting-kit LESSONS #067). So the
 //! read goes through [`read_lossy`], which decodes what is not UTF-8 as U+FFFD
 //! and keeps everything else. Only the undecodable bytes are lost, and only
 //! their display: the C prints each as `\xNN`, lsof-rs as `�`, which is the
