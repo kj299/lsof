@@ -470,6 +470,38 @@ args = ["-n", "-P", "-H", "-a", "-d", "7,8,9", "-p", "PID"]
 name = "linux/differential-files-offset-o"
 args = ["-n", "-P", "-o", "-a", "-d", "^mem", "-p", "PID"]
 
+# DIVERGENCES 6, 13, 21 and 31 (2026-09-25). These are the Linux differential
+# cases that exercise options which, until now, only a Windows smoke case
+# credited here: `-g` was covered by `smoke/ppid-select-g`, which is the
+# Windows PPID extension and not the C's process-group option at all.
+[[case]]
+name = "linux/differential-files-size-s"
+args = ["-n", "-P", "-s", "-a", "-d", "^mem", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-offsets-a-digit-limit-hexes-a-short-offset"
+args = ["-n", "-P", "-o", "-o", "1", "-a", "-d", "3,4", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-search-g-selects-a-process-group"
+args = ["-n", "-P", "-a", "-g", "PID", "-d", "0"]
+
+[[case]]
+name = "linux/differential-search-u-numeric-uid-selects"
+args = ["-n", "-P", "-a", "-p", "PID", "-u", "UID", "-d", "3"]
+
+[[case]]
+name = "linux/differential-search-dash-V-reports-an-unlocated-command"
+args = ["-n", "-P", "-V", "-c", "zzznosuchcmd"]
+
+[[case]]
+name = "linux/differential-zombie-leader-lists-its-live-task"
+args = ["-n", "-P", "-K", "-a", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-inet-every-spec-is-ored"
+args = ["-n", "-P", "-a", "-p", "PID", "-i:PORT", "-i:9"]
+
 [[case]]
 name = "linux/differential-files-fields-F"
 args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "PID"]

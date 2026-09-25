@@ -66,9 +66,9 @@ fn type_from_mode(mode: u32) -> FileType {
 /// asks for on every file; it was the first fidelity gap the C-vs-Rust
 /// differential found, on its first fixture.
 fn fdinfo_for(base: &str, fd: &str) -> FdInfo {
-    match std::fs::read_to_string(format!("{base}/fdinfo/{fd}")) {
-        Ok(info) => parse_fdinfo(&info),
-        Err(_) => FdInfo::default(),
+    match crate::text::read_lossy(format!("{base}/fdinfo/{fd}")) {
+        Some(info) => parse_fdinfo(&info),
+        None => FdInfo::default(),
     }
 }
 
@@ -451,10 +451,9 @@ pub fn for_pid(pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
 /// `-K` lists each task as its own entry repeating the whole file set, and the
 /// C reads that set from the task's directory rather than copying the
 /// process's: `CLONE_FS` and `CLONE_FILES` are optional, so a thread can hold
-/// its own cwd, root and fds. `pid` stays the process's, because the two
-/// system-wide tables this consults — `/proc/locks` and the mapped-file list —
-/// are keyed by process: a thread shares its `mm`, so its mappings are the
-/// process's mappings.
+/// its own cwd, root and fds — and its mapped files come from its own `maps`
+/// too (see [`crate::maps::rows_for`]). `pid` stays the process's, because
+/// `/proc/locks` is keyed by process.
 pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<OpenFile>> {
     let sockets_only = ctx.sockets_only;
     let mut out = Vec::new();
@@ -489,7 +488,7 @@ pub fn for_proc_dir(base: &str, pid: u32, ctx: &GatherCtx<'_>) -> Option<Vec<Ope
             .iter()
             .find(|f| f.fd == FdType::Txt)
             .and_then(|f| Some((f.device.as_deref()?, f.node.as_deref()?)));
-        out.extend(crate::maps::rows_for(pid, exe));
+        out.extend(crate::maps::rows_for(base, exe));
     }
 
     let dir = std::fs::read_dir(format!("{base}/fd")).ok()?;

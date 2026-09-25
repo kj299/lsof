@@ -16,6 +16,28 @@ pub mod table;
 pub use escape::Escaper;
 pub use table::TableOpts;
 
+/// How many decimal digits an offset may have before it is printed in hex —
+/// the C's `OFFDECDIG` (`lib/common.h`), which `-o <digits>` overrides.
+pub const DEFAULT_OFFSET_DIGITS: usize = 8;
+
+/// An offset as lsof writes it: `0t<decimal>`, or `0x<hex>` once the decimal
+/// form has more than `digits` digits (`print.c`: `if (OffDecDig && len >
+/// (OffDecDig + 2))`, the 2 being the `0t`). `digits == 0` is `-o 0`, which
+/// the C reads as "no limit" because the test is `OffDecDig &&`.
+///
+/// Measured on an fd seeked to 123456789: `0x75bcd15` by default, `0t123456789`
+/// under `-o 9` or `-o 0`. Zero never reaches the hex branch (`0t0` is three
+/// characters, and a limit of 0 is no limit), so the C's `%#x` printing a bare
+/// `0` for zero needs no mirror here.
+pub fn offset_text(offset: u64, digits: usize) -> String {
+    let dec = format!("0t{offset}");
+    if digits != 0 && dec.len() > digits.saturating_add(2) {
+        format!("{offset:#x}")
+    } else {
+        dec
+    }
+}
+
 /// Selected output format.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Format {

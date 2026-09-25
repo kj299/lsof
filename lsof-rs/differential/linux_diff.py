@@ -34,13 +34,20 @@ ledger — those are the kit's, on purpose.
   fixture F  a process holding one of each lock character Linux can report:
              whole-file and partial, read and write (`R r W w`)
   fixture H  a sleeper whose command name is 15 characters, so the COMMAND
-             column's default nine-character cap is visible at all
+             column's default nine-character cap is visible at all -- in a
+             session (so a process group) of its own, the one `-g` can name
   fixture I  a process with two extra threads, each with its own comm, so
              `-K`'s task entries and the TID/TASKCMD columns have something
              to show
   fixture G  a process holding one of each anonymous-inode kind lsof names —
              eventpoll, eventfd, pidfd, inotify — which have no filesystem
              identity and are typed `a_inode`
+  fixture O  two files open at offsets the `-o` digit rule tells apart
+             (123456789 and 12)
+  fixture X  a process whose name, unix socket path and mapped file are not
+             UTF-8 -- each had hidden something from lsof-rs
+  fixture Z  a main thread that has exited while another runs on, and a
+             child never reaped: the two kinds of zombie ({Z}, {ZC})
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -86,6 +93,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import shutil
 import signal
 import subprocess
@@ -129,6 +137,7 @@ class Fixture:
         expect_fds: int,
         expect_comm: bytes | None = None,
         optional: bool = False,
+        new_session: bool = False,
     ):
         # When true, a failure to start raises FixtureUnavailable instead of
         # ending the run: the cases naming this fixture are skipped by name.
@@ -142,6 +151,11 @@ class Fixture:
         # can declare a bash-that-has-not-exec'd-yet ready. When set, the comm
         # must match too.
         self.expect_comm = expect_comm
+        # A session of its own makes the fixture its own process GROUP, the
+        # only way a `-g` case can name exactly one process: every other
+        # fixture shares this harness's group -- and so does each lsof the
+        # runner starts, under a pid that differs between the two runs.
+        self.new_session = new_session
         self.proc: subprocess.Popen | None = None
 
     @property
@@ -156,6 +170,7 @@ class Fixture:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=self.new_session,
         )
         # Wait until the kernel shows the fds we expect rather than sleeping and
         # hoping: a fixture that is not yet set up would make BOTH binaries
@@ -336,6 +351,9 @@ def long_command_holder(work: str) -> Fixture:
         cwd=cdir,
         expect_fds=3,  # 0,1,2
         expect_comm=LONG_COMM.encode(),
+        # Its own process group, so `-g {H}` selects H and nothing else, and
+        # a comm no other process on the host has, so `-c` can name it too.
+        new_session=True,
     )
 
 
@@ -379,6 +397,126 @@ def thread_holder(work: str) -> Fixture:
     return Fixture(
         "I(threads)", [sys.executable, "-c", py], cwd=tdir, expect_fds=4
     )
+
+
+def offset_holder(work: str) -> Fixture:
+    """Two regular files open at offsets that the `-o` rules tell apart.
+
+    Every other fixture opens its files at offset 0, which prints `0t0` under
+    every rule there is. The C prints an offset in hex once its decimal form
+    has more than `OffDecDig` digits -- 8 unless `-o <digits>` says otherwise
+    (`print.c`) -- so fd 3 sits at 123456789 (nine digits: `0x75bcd15` by
+    default) and fd 4 at 12 (decimal by default, hex under `-o 1`). Seeking
+    past the end is legal and allocates nothing."""
+    odir = os.path.join(work, "offsets")
+    os.makedirs(odir)
+    py = (
+        "import os,time\n"
+        "b=open(os.path.join(%r,'big'),'wb'); b.seek(123456789)\n"
+        "s=open(os.path.join(%r,'small'),'wb'); s.write(b'x'*20); s.flush(); s.seek(12)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (odir, odir, odir)
+    )
+    return Fixture("O(offsets)", [sys.executable, "-c", py], cwd=odir, expect_fds=5)
+
+
+# `\xff` and `\xfe` are never UTF-8 on their own.
+NON_UTF8_COMM = b"x\xff\xfename"
+
+
+def non_utf8_holder(work: str) -> Fixture:
+    """A process whose name, socket path and mapped file are not UTF-8.
+
+    Each of these hid something from lsof-rs, which read the kernel's tables
+    as UTF-8 and dropped a table whole when one byte was not: the process
+    itself (`/proc/<pid>/status`), every unix socket on the host
+    (`/proc/net/unix`), and every `mem` row of this process (`maps`). The C
+    lists all of them. All three need no privilege, which is why they matter.
+    The cases compare what does not depend on how the byte is DISPLAYED --
+    the C prints `\\xff`, lsof-rs U+FFFD, a ledgered difference."""
+    xdir = os.path.join(work, "nonutf8")
+    os.makedirs(xdir)
+    py = (
+        "import ctypes,mmap,os,socket,time\n"
+        "d=%r.encode()\n"
+        "s=socket.socket(socket.AF_UNIX); s.bind(os.path.join(d,b'sock\\xff')); s.listen(1)\n"
+        "f=open(os.path.join(d,b'map\\xfe'),'wb+'); f.write(b'x'*4096); f.flush()\n"
+        "m=mmap.mmap(f.fileno(),4096)\n"
+        "ctypes.CDLL(None).prctl(15, %r, 0, 0, 0)\n"
+        "open(os.path.join(d,b'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (xdir, NON_UTF8_COMM)
+    )
+    return Fixture(
+        "X(non-UTF-8)",
+        [sys.executable, "-c", py],
+        cwd=xdir,
+        expect_fds=5,  # 0,1,2 + the socket and the mapped file
+        expect_comm=NON_UTF8_COMM,
+    )
+
+
+def zombie_holder(work: str) -> Fixture:
+    """Two zombies: a main thread that has exited while another thread runs
+    on, and a child that has exited and is never reaped.
+
+    The C lists neither (`read_id_stat()` returns 1 for state `Z` and the
+    process entry is skipped), so `-p` on either is a search item not
+    located. But it still walks a zombie's TASKS, so the live thread is
+    listed under `-K` -- with its mapped files, which only the task's own
+    `maps` still has once the main thread is gone.
+
+    `pthread_exit()` on the main thread through ctypes: ctypes releases the
+    GIL around a foreign call, so the thread leaves without holding it. The
+    harness waits for the kernel to show both zombies (see `zombies_ready`)."""
+    zdir = os.path.join(work, "zombies")
+    os.makedirs(zdir)
+    py = (
+        "import ctypes,os,threading,time\n"
+        "libc=ctypes.CDLL(None)\n"
+        "up=threading.Event()\n"
+        "def live():\n"
+        "    libc.prctl(15, b'zombie-live', 0,0,0)\n"
+        "    up.set()\n"
+        "    time.sleep(600)\n"
+        "threading.Thread(target=live).start()\n"
+        "up.wait()\n"
+        "pid=os.fork()\n"
+        "if pid == 0:\n"
+        "    os._exit(0)\n"
+        "open(os.path.join(%r,'zchild'),'w').write(str(pid))\n"
+        "libc.pthread_exit(None)\n" % zdir
+    )
+    # No fd count to wait for: the main thread's fd table goes with it.
+    return Fixture("Z(zombies)", [sys.executable, "-c", py], cwd=zdir, expect_fds=0)
+
+
+def stat_state(pid: int) -> str:
+    """The one-letter state in `/proc/<pid>/stat` (after the LAST `)`)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            return f.read().rsplit(b")", 1)[1].split()[0].decode()
+    except (OSError, IndexError):
+        return ""
+
+
+def zombies_ready(z: Fixture) -> int:
+    """Wait until fixture Z's main thread and its child are both zombies, and
+    return the child's pid. Reading them before that would compare two
+    binaries against a process that is still changing shape (LESSONS #6)."""
+    zchild = os.path.join(z.cwd, "zchild")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if z.proc is not None and z.proc.poll() is not None:
+            infra(f"fixture {z.name} exited early (rc={z.proc.returncode})")
+        try:
+            with open(zchild) as f:
+                child = int(f.read().strip() or "0")
+        except (OSError, ValueError):
+            child = 0
+        if child and stat_state(z.pid) == "Z" and stat_state(child) == "Z":
+            return child
+        time.sleep(0.02)
+    infra(f"fixture {z.name} did not become a zombie leader with a zombie child within 5s")
 
 
 def netns_listener(work: str) -> Fixture:
@@ -585,7 +723,10 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     j = netns_listener(work)
     k = packet_holder(work)
     ln = userns_socket_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln
+    o = offset_holder(work)
+    x = non_utf8_holder(work)
+    z = zombie_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z
 
 
 # -------------------------------------------------------------------- matrix
@@ -699,7 +840,10 @@ def run(args) -> int:
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
     fixtures = make_fixtures(work)
-    a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns = fixtures
+    (
+        a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
+        offsets, nonutf8, zombies,
+    ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
     # missing. A missing capability is neither a divergence nor a broken
@@ -740,7 +884,9 @@ def run(args) -> int:
             started_optional["L"],
         )
         for fx in [
-            f for f in (e, lk, anon, threads, netns, packet, userns) if f is not None
+            f
+            for f in (e, lk, anon, threads, netns, packet, userns, offsets, nonutf8)
+            if f is not None
         ]:
             ready = os.path.join(fx.cwd, "ready")
             deadline = time.monotonic() + 5.0
@@ -750,6 +896,7 @@ def run(args) -> int:
                 time.sleep(0.02)
             if not os.path.exists(ready):
                 infra(f"fixture {fx.name} was not ready within 5s")
+        zchild = zombies_ready(zombies)
         # {FILE} is a path only fixture A holds; {PORT} is fixture B's
         # listener. Both name exactly one fixture, which is what makes the
         # un-`-a`ed OR cases deterministic.
@@ -783,6 +930,13 @@ def run(args) -> int:
                 "G": str(anon.pid),
                 "H": str(longcmd.pid),
                 "I": str(threads.pid),
+                "O": str(offsets.pid),
+                "X": str(nonutf8.pid),
+                "Z": str(zombies.pid),
+                "ZC": str(zchild),
+                # Who the fixtures run as, for `-u` -- by number and by name.
+                "UID": str(os.getuid()),
+                "USER": pwd.getpwuid(os.getuid()).pw_name,
                 "ROOTSRC": mount_source("/"),
                 "DEVSRC": mount_source("/dev"),
                 "FILE": os.path.join(a.cwd, "f.txt"),

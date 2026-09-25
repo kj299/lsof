@@ -84,7 +84,7 @@ pub fn parse_locks(text: &str) -> LockTable {
 
 /// Read the system lock table, or an empty one if `/proc/locks` is unreadable.
 pub fn load() -> LockTable {
-    std::fs::read_to_string("/proc/locks")
+    crate::text::read_lossy("/proc/locks")
         .map(|t| parse_locks(&t))
         .unwrap_or_default()
 }

@@ -68,6 +68,19 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+/// What a platform makes of one `-u` value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserLookup {
+    /// A numeric user ID: the value was one, or it named an account.
+    Uid(u32),
+    /// The value names no account this platform knows. The C treats that as
+    /// an option error while it parses — `lsof: can't get UID for nosuchuser`,
+    /// then the usage message, exit 1 — so nothing is listed.
+    Unknown,
+    /// This platform selects users by name, and has no ID to resolve to.
+    ByName,
+}
+
 /// A platform data source for lsof-rs.
 pub trait Backend {
     /// A short human-readable name (e.g. `"windows"`, `"mock"`).
@@ -123,6 +136,16 @@ pub trait Backend {
     /// listed files on every filesystem.
     fn identifies_paths(&self) -> bool {
         false
+    }
+
+    /// Resolve a `-u` value the way the platform names users.
+    ///
+    /// The C does it with `getpwnam(3)` while it parses its options: a number
+    /// is a UID as it stands, a name is looked up, and a name that resolves to
+    /// nothing is fatal. A backend without numeric user IDs keeps matching by
+    /// name, which is the default here.
+    fn lookup_user(&self, _value: &str) -> UserLookup {
+        UserLookup::ByName
     }
 
     /// Gather processes and their open files, already narrowed by `sel` where

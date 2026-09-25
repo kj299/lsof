@@ -88,11 +88,24 @@ name = "files-terse"
 args = ["-t", "-a", "-d", "^mem", "-p", "{A}"]
 
 [[case]]
-# LEDGERED. The C prints OFFSET as the column header and an empty cell for the
-# cwd/rtd/txt specials; lsof-rs keeps SIZE/OFF and falls back to size. Shared
-# renderer behavior (affects Windows), so a decision, not a backend fix.
+# `-o` is an OFFSET column, not "prefer the offset": the header says OFFSET,
+# and cwd/rtd/txt -- which have a size and no offset, there being no fdinfo
+# behind them -- print an EMPTY cell. lsof-rs kept SIZE/OFF and fell back to
+# the size, ledgered as a decision until DIVERGENCES 6 was closed.
 name = "files-offset-o"
 args = ["-n", "-P", "-o", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# `-s` alone is the other half: a SIZE column, and the FIFO -- an offset and
+# no size -- prints an empty cell.
+name = "files-size-s"
+args = ["-n", "-P", "-s", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+# A word that opens an option is not `-s`'s value. lsof-rs had taken `-p` as
+# a state filter and the pid as a file name, and exited on "status error".
+name = "opt-s-before-another-option-is-the-size-column"
+args = ["-n", "-P", "-a", "-s", "-p", "{A}", "-d", "^mem"]
 
 [[case]]
 # The `mem` rows themselves, one per distinct mapped file. Ledgered as DEBT
@@ -179,8 +192,11 @@ args = ["-n", "-P", "-iTCP:{PORT}", "-p", "{A}"]
 # A `^` negation is neither ORed nor ANDed: Lsof.8 says it "is applied before
 # all other selections and absolutely excludes the listing of the files of the
 # process". Fixture A is a `sleep`, so `-c ^sleep` kills it even though `-p`
-# names it — both binaries print nothing and exit 1, the 1 because an excluded
-# process never counts as a located `-p` search item.
+# names it — both binaries print nothing and exit 1, but NOT for the same
+# reason, which `-V` would show: the C counts the pid as located (it marks
+# `-p` before it tests `-c ^`) and exits 1 because a `-c ^` value is itself a
+# search item it can never mark (DIVERGENCES 13, a defect lsof-rs does not
+# copy); lsof-rs exits 1 because the excluded pid was not located.
 name = "negation-excludes-absolutely"
 args = ["-n", "-P", "-c", "^sleep", "-p", "{A}"]
 
@@ -879,6 +895,321 @@ args = ["-n", "-P", "+d", "{NOPE}"]
 # make this case about that defect instead of about the abort.
 name = "search-plus-d-supplies-a-surviving-item"
 args = ["-n", "-P", "{NOPE}", "+d", "{ASUB}"]
+
+# ------------------------------------------------ the -o digit limit (item 6)
+# Fixture O holds fd 3 at offset 123456789 and fd 4 at 12. The C prints an
+# offset in hex once its decimal form has more than `OffDecDig` digits -- 8
+# by default, `-o <digits>` otherwise, 0 for no limit -- in the table and in
+# `-F`'s `o` field alike.
+
+[[case]]
+name = "offsets-past-eight-digits-print-in-hex"
+args = ["-n", "-P", "-o", "-a", "-d", "3,4", "-p", "{O}"]
+
+[[case]]
+# `-o -o 1`: the first `-o` is bare (its next word opens an option), the
+# second sets the limit to 1 digit, so even `0t12` becomes `0xc`.
+name = "offsets-a-digit-limit-hexes-a-short-offset"
+args = ["-n", "-P", "-o", "-o", "1", "-a", "-d", "3,4", "-p", "{O}"]
+
+[[case]]
+name = "offsets-a-zero-limit-is-no-limit"
+args = ["-n", "-P", "-o0", "-o", "-a", "-d", "3,4", "-p", "{O}"]
+
+[[case]]
+# A digit limit alone does NOT switch the OFFSET column on, and its digits are
+# its value -- not a file called `1`. lsof-rs had said `status error on 1`.
+name = "offsets-a-limit-alone-keeps-size-off"
+args = ["-n", "-P", "-o", "1", "-a", "-d", "3,4", "-p", "{O}"]
+
+[[case]]
+name = "offsets-hex-in-the-o-field"
+args = ["-n", "-P", "-Ffo", "-a", "-d", "3,4", "-p", "{O}"]
+
+[[case]]
+name = "offsets-the-limit-applies-to-the-o-field"
+args = ["-n", "-P", "-Ffo", "-o1", "-a", "-d", "3,4", "-p", "{O}"]
+
+[[case]]
+# What follows the digits is options again: `-o 1t` is `-o1 -t`.
+name = "offsets-letters-after-the-digits-are-options"
+args = ["-n", "-P", "-o", "1t", "-a", "-d", "3", "-p", "{O}"]
+
+[[case]]
+# main.c:1091 -- in either order, and `-Fo` counts as `-o`.
+name = "opt-o-and-s-are-mutually-exclusive"
+args = ["-n", "-P", "-o", "-s", "-p", "{A}"]
+
+[[case]]
+name = "opt-s-and-o-are-mutually-exclusive"
+args = ["-n", "-P", "-s", "-o", "-p", "{A}"]
+
+[[case]]
+name = "opt-F-o-counts-as-o-against-s"
+args = ["-n", "-P", "-Ffo", "-s", "-p", "{A}"]
+
+# -------------------------------------------------------- zombies (item 31)
+# Fixture Z: a main thread that has exited while another thread (`zombie-live`)
+# runs on, and {ZC}, a child that exited and is never reaped. The C lists
+# neither -- a process in state Z is skipped before selection -- so naming
+# one is a search item not located. It still walks a zombie's tasks, so the
+# live thread is listed under -K, WITH its mapped files, which only the
+# task's own `maps` still has. lsof-rs printed a bare `unk unknown` row for
+# each zombie and exited 0.
+
+[[case]]
+name = "zombie-is-not-listed"
+args = ["-n", "-P", "-p", "{ZC}"]
+
+[[case]]
+name = "zombie-dash-V-says-not-located"
+args = ["-n", "-P", "-V", "-p", "{ZC}"]
+
+[[case]]
+name = "zombie-leader-is-not-listed"
+args = ["-n", "-P", "-p", "{Z}"]
+
+[[case]]
+name = "zombie-terse"
+args = ["-t", "-p", "{Z},{ZC}"]
+
+[[case]]
+name = "zombie-leader-lists-its-live-task"
+args = ["-n", "-P", "-K", "-a", "-p", "{Z}"]
+
+[[case]]
+name = "zombie-leader-live-task-terse"
+args = ["-t", "-K", "-a", "-p", "{Z}"]
+
+# ----------------------------------------------- bytes that are not UTF-8
+# Fixture X names itself, binds a unix socket and maps a file with bytes that
+# are not UTF-8. Each hid something from lsof-rs, which dropped a whole kernel
+# table when one byte in it failed to decode. These compare what does not
+# depend on how the byte is shown (the C `\xff`, lsof-rs U+FFFD -- ledgered).
+
+[[case]]
+# lsof-rs said the process did not exist.
+name = "nonutf8-name-does-not-hide-the-process"
+args = ["-t", "-p", "{X}"]
+
+[[case]]
+# X's socket makes /proc/net/unix undecodable as a whole; lsof-rs then
+# resolved NO unix socket anywhere, so B's four vanished from `-U`.
+name = "nonutf8-socket-path-does-not-blind-dash-U"
+args = ["-n", "-P", "-a", "-p", "{B}", "-U"]
+
+[[case]]
+# X's mapped file made its `maps` undecodable, and every `mem` row went.
+# Fields without the name, which is where the display differs.
+name = "nonutf8-mapped-file-keeps-the-mem-rows"
+args = ["-n", "-P", "-a", "-p", "{X}", "-d", "mem", "-Ffi"]
+
+# ------------------------------------------ search items: -c, -u, -g, -p (item 21)
+# Fixture H's command, `abcdefghijklmno`, is the only one on the host with
+# that prefix, and H is its own process group, so `-c` and `-g` can name it
+# and nothing else.
+
+[[case]]
+name = "search-c-unlocated-exits-1"
+args = ["-n", "-P", "-c", "zzznosuchcmd"]
+
+[[case]]
+name = "search-dash-V-reports-an-unlocated-command"
+args = ["-n", "-P", "-V", "-c", "zzznosuchcmd"]
+
+[[case]]
+# The C prepends each -c to its list, so it reports them last-given first.
+name = "search-dash-V-reports-commands-last-given-first"
+args = ["-n", "-P", "-V", "-c", "zzzfirst", "-c", "zzzsecond"]
+
+[[case]]
+# A prefix of the command...
+name = "search-c-is-a-prefix"
+args = ["-n", "-P", "-a", "-c", "abcdefghij", "-d", "0"]
+
+[[case]]
+# ...compared case-sensitively (lsof-rs matched case-insensitively)...
+name = "search-c-is-case-sensitive"
+args = ["-n", "-P", "-a", "-c", "ABCDEFGHIJ", "-d", "0"]
+
+[[case]]
+# ...and only at the start (lsof-rs matched substrings too).
+name = "search-c-a-substring-does-not-match"
+args = ["-n", "-P", "-a", "-c", "bcdefghijklmno", "-d", "0"]
+
+[[case]]
+# `comm` holds 15 bytes; a 16-byte -c could never match, and the C refuses it.
+# Every "fatal" case in this block carries -V, and that is what lets it fail:
+# a fatal error and a merely unlocated item both print nothing and exit 1, and
+# only -V -- the fatal run never gets to report anything -- tells them apart.
+name = "search-c-longer-than-comm-is-fatal"
+args = ["-n", "-P", "-V", "-c", "abcdefghijklmnop"]
+
+[[case]]
+name = "search-c-selected-and-excluded-is-fatal"
+args = ["-n", "-P", "-V", "-c", "abc", "-c", "^abc"]
+
+[[case]]
+# Under -a a command is located only by a process that got past the -p test
+# (`is_proc_excl() || is_cmd_excl()`): H matches the -c but is not {A}, and A
+# is {A} but not the command -- so neither locates it, nothing is listed, and
+# the exit is 1. Found by a mutant that let any matching process locate it.
+name = "search-c-under-a-is-located-only-past-the-other-kinds"
+args = ["-n", "-P", "-a", "-p", "{A}", "-c", "abcdefghij", "-d", "0"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 13). H matches both values; the C marks only
+# the first one in its list and reports the other as not located, exit 1.
+name = "search-c-first-match-only-in-the-c"
+args = ["-n", "-P", "-a", "-c", "abcde", "-c", "abcdefgh", "-d", "0"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 13). A `-c ^` value is a search item to the
+# C that nothing can ever mark, so every run that uses one exits 1.
+name = "search-c-negated-is-a-search-item-in-the-c"
+args = ["-n", "-P", "-a", "-p", "{A}", "-c", "^zzznosuchcmd", "-d", "3"]
+
+[[case]]
+name = "search-u-numeric-uid-selects"
+args = ["-n", "-P", "-a", "-p", "{A}", "-u", "{UID}", "-d", "3"]
+
+[[case]]
+name = "search-u-login-name-selects"
+args = ["-n", "-P", "-a", "-p", "{A}", "-u", "{USER}", "-d", "3"]
+
+[[case]]
+name = "search-u-negation-excludes"
+args = ["-n", "-P", "-a", "-p", "{A}", "-u", "^{UID}", "-d", "3"]
+
+[[case]]
+# The C resolves a login name while it parses; one it cannot is fatal.
+name = "search-u-unknown-login-is-fatal"
+args = ["-n", "-P", "-V", "-u", "zzznosuchuser"]
+
+[[case]]
+name = "search-dash-V-reports-an-unlocated-uid"
+args = ["-n", "-P", "-V", "-u", "4000000001"]
+
+[[case]]
+name = "search-u-selected-and-excluded-is-fatal"
+args = ["-n", "-P", "-V", "-u", "{UID},^{UID}"]
+
+[[case]]
+# LEDGERED (C-DEFECT). The C accumulates the digits in a uid_t and never
+# checks for overflow: 4294967296 is UID 0, and it selects root's processes.
+# lsof-rs refuses the value (no account has that name).
+name = "search-u-overflow-wraps-to-root-in-the-c"
+args = ["-n", "-P", "-a", "-p", "{A}", "-u", "4294967296", "-d", "3"]
+
+[[case]]
+# -g is the process GROUP. lsof-rs had read it as a parent PID.
+name = "search-g-selects-a-process-group"
+args = ["-n", "-P", "-a", "-g", "{H}", "-d", "0"]
+
+[[case]]
+# A bare -g is the PGID column (lsof-rs refused it).
+name = "search-g-alone-adds-the-pgid-column"
+args = ["-n", "-P", "-g", "-a", "-p", "{H}", "-d", "0"]
+
+[[case]]
+# PPID first, then PGID, as print.c orders them.
+name = "search-g-with-dash-R"
+args = ["-n", "-P", "-R", "-g", "{H}", "-a", "-d", "0"]
+
+[[case]]
+name = "search-g-negation-excludes"
+args = ["-n", "-P", "-a", "-p", "{H}", "-g", "^{H}"]
+
+[[case]]
+name = "search-dash-V-reports-an-unlocated-pgid"
+args = ["-n", "-P", "-V", "-g", "999999999"]
+
+[[case]]
+name = "search-g-fields"
+args = ["-n", "-P", "-Fpg", "-a", "-g", "{H}", "-d", "0"]
+
+[[case]]
+# -p ^N excludes (lsof-rs refused the `^`); the only process -c names is
+# then gone, so the command is not located either.
+name = "search-p-negation-excludes"
+args = ["-n", "-P", "-a", "-p", "^{H}", "-c", "abcdefghij", "-d", "0"]
+
+[[case]]
+name = "search-p-selected-and-excluded-is-fatal"
+args = ["-n", "-P", "-V", "-p", "{A},^{A}"]
+
+[[case]]
+name = "search-dash-V-reports-a-repeated-pid-once"
+args = ["-n", "-P", "-V", "-p", "999999999,999999999"]
+
+[[case]]
+# Every kind at once, none located: `-V` in the C's order -- commands, files,
+# Internet addresses, PIDs, process groups, users.
+name = "search-dash-V-follows-the-cs-order"
+args = ["-n", "-P", "-V", "-c", "zzznosuchcmd", "-p", "999999999", "-g", "999999998", "-u", "4000000001", "-i:9", "{UNOPENED}"]
+
+[[case]]
+# ...and after the listing, not before it: every line is a printf to stdout
+# at the end of main.c. No case printed both until this one.
+name = "search-dash-V-follows-the-listing"
+args = ["-n", "-P", "-V", "-a", "-p", "{A},999999999", "-d", "3"]
+
+[[case]]
+# A file-system argument has its own wording: `no file system use located`.
+name = "search-dash-V-file-system-wording"
+args = ["-n", "-P", "-V", "-a", "-p", "{A}", "/proc"]
+
+# ----------------------------------------------- -i specifications (item 21)
+# Each -i address is its own search item, and they are ORed; a bare -i is
+# another. lsof-rs kept only the LAST -i, so `-i :80 -i :443` lost :80.
+
+[[case]]
+name = "inet-every-spec-is-ored"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i:{PORT}", "-i:9"]
+
+[[case]]
+name = "inet-dash-V-names-each-spec-last-given-first"
+args = ["-n", "-P", "-V", "-a", "-p", "{B}", "-i:9", "-i:10"]
+
+[[case]]
+name = "inet-dash-V-address-not-located"
+args = ["-n", "-P", "-V", "-a", "-p", "{B}", "-i:9"]
+
+[[case]]
+# `-i :PORT` -- lsof-rs had read `:PORT` as a file name.
+name = "inet-spec-may-be-the-next-word"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":{PORT}"]
+
+[[case]]
+# Under -a a bare -i and a spec are two requirements (SELNET and SELNA).
+name = "inet-bare-and-spec-are-both-required-under-a"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "-i:9"]
+
+[[case]]
+name = "inet-port-range"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:1-65535"]
+
+[[case]]
+# lsof-rs ignored a range and matched every Internet file.
+name = "inet-port-range-that-misses"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i:1-2"]
+
+[[case]]
+name = "inet-port-list"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:9,{PORT}"]
+
+[[case]]
+# The bare -i is located by a socket B keeps even though `-d 0` hides it:
+# Fnet is set when the file is linked, -a is applied at print time. Nothing
+# is listed, and the exit is 0.
+name = "inet-bare-located-by-a-hidden-row"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "-d", "0"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 13). B's listener matches both specs; the
+# C marks only the first in its list and reports the other, exit 1.
+name = "inet-first-match-only-in-the-c"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:{PORT}", "-iTCP"]
 
 # ------------------------------------------------------------- exit contract
 

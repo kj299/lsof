@@ -11,6 +11,40 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **A process could hide from lsof-rs — and blind it for everyone — with one
+  byte.** The Linux backend read every kernel table with `read_to_string` and
+  dropped a table whole when one byte in it was not UTF-8, and those bytes are
+  an unprivileged user's to write. Measured against the C: a process that named
+  itself `\xff…` with `prctl` was **missing from every listing** (`lsof -p`
+  said it did not exist); one unix socket bound to a path holding `\xff`,
+  anywhere on the host, made **`lsof -U` list nothing for any process**; and a
+  mapped file with such a name took every `mem` row of its process with it. All
+  tables are now read as bytes and decoded lossily (`text::read_lossy`), and a
+  mapped file is `stat`ed by its raw name; an undecodable byte displays as
+  U+FFFD where the C prints `\xff`. The fuzz targets had not seen it because
+  they decoded their input before parsing it. LESSONS #065.
+- **A non-UTF-8 argument no longer panics.** `std::env::args()` panics on one,
+  so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
+
+### Changed
+- **`-c` is the C's match on Linux**: a case-sensitive prefix. lsof-rs matched
+  case-insensitively and by substring, so `-c ytho` and `-c PYTHON` listed
+  `python3` where the C lists nothing. Windows keeps its forgiving match. A name
+  longer than the kernel's 15-byte `comm` is refused, as is `-c x -c ^x`, and a
+  regular expression (`-c /re/`, which the C supports and lsof-rs does not)
+  is refused rather than read as a literal command.
+- **`-g` is the process group on Linux** — selection, `^` exclusion, and the
+  PGID column (bare `-g` gives the column alone). It had meant *parent* PID on
+  every platform; Windows, which has no process groups, keeps that extension.
+- **`-u` resolves to a UID on Linux**, numbers and login names alike, so `-u 0`
+  works (it had matched nothing) and `-u ROOT` no longer matches `root`. An
+  unknown name is fatal, as it is to the C; a number too large for a UID is not
+  wrapped around to root, which the C does.
+- **`-i` host and service names are refused, not guessed at**: `-i:http` had
+  listed every Internet file and `-i@localhost` nothing. Port lists and ranges
+  (`:22,80,1000-2000`) now work; a numeric host is matched exactly.
+
 ### Added
 - **`-i` and `-U` now collect only sockets** (P5 of `docs/linux-l2-plan.md`).
   When the selection can print nothing but sockets — `-i`/`-U` with no process
@@ -43,6 +77,29 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **`-o` is an OFFSET column** (DIVERGENCES 6): header `OFFSET`, and a row with
+  no offset (`cwd`, `rtd`, `txt`, `mem`) is blank instead of showing its size.
+  Offsets past `-o <digits>` decimal digits — 8 by default — print in hex, in
+  the table and in `-F`'s `o` field; `-o <digits>` alone sets that limit and
+  keeps `SIZE/OFF`. A bare `-s` is now the SIZE column (it had read the next
+  word as a state filter, so `lsof -s -p 1` looked for a file called `1`), and
+  `-o` with `-s` is refused, as the C refuses it.
+- **Zombies are not listed** (DIVERGENCES 31). `lsof -p <zombie>` printed a
+  bare `unk unknown` row and exited 0; the C prints nothing and exits 1, and
+  now so does lsof-rs. A process whose main thread has exited while another
+  runs on is listed through that live task under `-K`, with its mapped files,
+  which are now read from the task's own `maps`.
+- **`-c`, `-u`, `-g` and each `-i` specification are search items**
+  (DIVERGENCES 21): a value nothing matched makes the run exit 1, and `-V`
+  names it in the C's words and order — **after** the listing, where lsof-rs
+  had printed its lines before it. Every `-i` specification is now kept and
+  ORed; lsof-rs had kept only the last, so `-i :80 -i :443` lost port 80. `-i
+  :80` takes the next word as the specification, and `-p ^N` excludes. Two
+  defects of the C in this bookkeeping are ledgered and not copied: a `-c ^x`
+  value makes every run exit 1, and only the first of two matching `-c` (or
+  `-i`) values is counted (DIVERGENCES 13).
+- **A process in a container keeps its PGID** — `NSpgid:` is a list, one entry
+  per nested pid namespace, and parsing it as one number made it `None`.
 - **Whole-host peak memory is now below the C's** (DIVERGENCES item 30).
   At 1075 processes lsof-rs peaked at 29.0 MB against the C's 9.8 MB, and the
   gap grew with the host. It is now **8.5 MB — 0.87x the C — and 0.84x/0.85x
