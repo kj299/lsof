@@ -3125,7 +3125,48 @@ finding it is supposed to produce.
 
 ---
 
-## 068. "One row per verdict" was a convention, and this kit is where it broke
+## 068. A gate that could read everything never compared what the tool prints when it cannot
+
+- **Date:** 2026-09-25
+- **Codebase:** lsof-rs (Linux backend and its differential)
+- **What happened:** lsof does not drop a file it cannot read. It prints a
+  row saying so — `cwd unknown /proc/1/cwd (readlink: Permission denied)`, one
+  per link, and `NOFD … /proc/1/fd (opendir: Permission denied)` for the fd
+  table — and for a user without root that is most of the output, since it is
+  every other user's process. lsof-rs printed one bare `unk unknown` line for
+  each such process, and under `-t` its pid, where the C prints nothing. It
+  stayed that way through 170 differential cases, a resource gate and every
+  CI run, because every fixture was the harness's own process and the harness
+  could read all of them: root locally, the fixtures' owner in CI. No case had
+  ever compared a file the tool could not read.
+
+  The gap was not unknown. It sat in DIVERGENCES under "Deliberate, and
+  staying", with a reason: matching it "means reproducing libc's errno
+  strings". Nobody had tested that reason. Rust's `io::Error` prints libc's
+  own `strerror` text, followed by ` (os error N)`, and the project already
+  had the one-line function that strips the suffix, for its argument errors.
+  The coverage ledger had the same gap under a third name: its `UNKN*`
+  waivers blamed "an unreadable link", when those codes are what `-e` prints.
+- **The rule.** For a tool that reports on state it may not be allowed to see,
+  the permission-denied path is output, and the gate must compare it. Give the
+  matrix a fixture the tool cannot read, and run those cases as a user who
+  cannot read it. On Linux, `prctl(PR_SET_DUMPABLE, 0)` makes a process
+  unreadable even to its own user unless that user has CAP_SYS_PTRACE, so an
+  unprivileged CI runner needs no second account; a root harness drops
+  privilege with `setpriv`. Before trusting those cases, check from the
+  demoted side that the fixture really cannot be read. A runner that CAN read
+  it turns every such case into a MATCH that measured nothing, so it must SKIP.
+  And the obstacle a deferral names is a claim like any other: test it before
+  filing the entry as permanent.
+- **Kit change:** PLAYBOOK · Phase 4's coverage paragraph gains the visibility
+  dimension. The harness pattern lives in
+  `lsof-rs/differential/linux_diff.py`: the kit runner takes one binary path
+  per side for every case, so each side gets a wrapper script that drops
+  privilege when a case sets an environment variable, plus a readability
+  probe run through the same wrapper.
+- **Section amended:** PLAYBOOK · Phase 4.
+
+## 069. "One row per verdict" was a convention, and this kit is where it broke
 
 - **Date:** 2026-09-25
 - **Codebase:** the Porting Kit vendored here — the primary line's decision sweep
@@ -3168,17 +3209,29 @@ finding it is supposed to produce.
 
 - **What the import met here.** The KIT-IMPORT header grew past the five lines
   `check_imports.py` reads, so the last two `Re-cited:` lines — `#25->#052`,
-  `#48->#068` — fell outside it, and every citation they covered was flagged.
+  `#48->#069` — fell outside it, and every citation they covered was flagged.
   That is the fail-closed direction; the header now fits. And a resolver mutant
   compiles with a SyntaxWarning (`((True))[2]`) that the sweep's own compile
   check printed into check-kit's output; it is silenced now, in both kits.
+
+- **And the first collision found the ledger unread.** Another branch took
+  #068 while this one held it, and `resolve_collision.py` moved this block to
+  #069 and repointed every citation to it in every file the citation checker
+  scans. The ledger was not one of them. `check_lesson_refs.py` had no
+  `.jsonl` in its list, so the 204 lines citing this entry were checked by
+  nothing and would have kept #068 — the other branch's lesson — while every
+  check stayed green. #057's Makefile, in a new file type. `.jsonl` is scanned
+  now, with a fixture, and the resolver repointed all 205 citations in the
+  ledger.
 
 - **Where it stops.** Helpers a verdict function calls are plumbing and are not
   enumerated; a verdict moved into one escapes unless its call site is itself a
   decision. Bash harnesses keep hand rows only.
 
 - **Kit change:** gate-mutation: the primary's decision sweep and ledger,
-  re-cited (#48->#068, #44->#060; #066 local; the primary's #20 by title);
+  re-cited (#48->#069, #44->#060; #066 local; the primary's #20 by title);
   `unpinned.jsonl` holds this kit's own 204-line baseline; README row.
+  lesson-refs: `.jsonl` scanned, pinned by a fixture.
 - **Section amended:** harnesses/gate-mutation/mutate_gates.py;
-  harnesses/gate-mutation/unpinned.jsonl; README.md · harness table.
+  harnesses/gate-mutation/unpinned.jsonl; harnesses/lessons/check_lesson_refs.py
+  · SCAN_EXTS; README.md · harness table.

@@ -2,7 +2,7 @@
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Local: #053, #057, #058, #059, #060, #064, #065, #066 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
-#          #25->#052, #44->#060, #48->#068; #20 by title, #36 by title (no
+#          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
 # Those local lessons: this kit's first sweep, the resolver, pinned-lessons,
 # lesson-refs and forbid rows, and the drivers behind the one-copy rule (#066).
@@ -28,7 +28,7 @@ the run. "N gate(s) mutated, 0 survivor(s)" used to read as the whole gate set
 while silently covering only the python half — that blind spot hid a sanitizer
 mode wired to a value rustc rejects, which could never pass, for a month.
 
-And it audits every DECISION in a verdict function (LESSONS #068). The table is
+And it audits every DECISION in a verdict function (LESSONS #069). The table is
 one row per verdict by convention (LESSONS #050), and the table audit counts rows
 per HARNESS, so a verdict added beside one that already had a row was invisible.
 The sweep now finds the verdicts itself: each decision in a function that holds
@@ -453,7 +453,7 @@ COVERAGE_EXEMPT = {
     "harnesses/gate-mutation/mutate_gates.py":
         "the mutator itself — its own self-test mutates fixture gates and "
         "asserts caught, survived, unpinned and stale; the decision sweep "
-        "(LESSONS #068), run over its own verdict functions, leaves only report "
+        "(LESSONS #069), run over its own verdict functions, leaves only report "
         "text, worker counts and unreachable guards unpinned",
 }
 
@@ -490,7 +490,7 @@ def coverage_gaps(kit_root, mutations=None):
     return sorted(gaps)
 
 
-# ------------------------------------------ one row per verdict (LESSONS #068) --
+# ------------------------------------------ one row per verdict (LESSONS #069) --
 #
 # The table audit above counts rows per harness. In this kit (LESSONS #064) a
 # call-must-be-code rule landed in the scanner's verdict function with a
@@ -782,7 +782,7 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True,
         swept = sweep_decisions(kit_root, files, table, tmp, durations,
                                 min_timeout=decision_timeout)
 
-    # LESSONS #068: an unpinned decision passes only if the ledger names it, and
+    # LESSONS #069: an unpinned decision passes only if the ledger names it, and
     # a ledger line passes only if it still names an unpinned decision. On a
     # partial run, lines for harnesses outside the run are not judged.
     unpinned = {_key(k): k for k, outcome in swept if outcome == "survived"}
@@ -809,7 +809,7 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True,
                   f"{len(stale)} stale ledger entr(ies)")
         if new:
             print(f"\nUNPINNED: {len(new)} decision mutant(s) in a verdict function "
-                  f"leave the self-test green (LESSONS #068). Add a fixture that "
+                  f"leave the self-test green (LESSONS #069). Add a fixture that "
                   f"fails under each, or a line in {LEDGER} with a non-empty "
                   f"\"why\" saying why it stays:")
             for k in new:
@@ -856,7 +856,7 @@ if __name__ == "__main__":
     sys.exit(self_test())
 '''
 
-# LESSONS #068: a verdict function with five decisions. `x is None` and `x < 0`
+# LESSONS #069: a verdict function with five decisions. `x is None` and `x < 0`
 # are pinned both ways (forcing `x is None` False CRASHES on None — caught, not
 # survived); nothing exercises `strict`, so five of its mutants survive.
 # `plumbing` holds no row and is never enumerated.
@@ -1011,7 +1011,7 @@ def _self_test():
               exits(lambda: run_gates(kit, [broken])))
 
         # a row whose mutation CRASHES the self-test proves crash detection,
-        # not the verdict → hard error. Unpinned until LESSONS #068's sweep was
+        # not the verdict → hard error. Unpinned until LESSONS #069's sweep was
         # run over this file.
         crash = dict(base, old="    return x > 0", new="    return x.no_such_attr")
         check("a row whose mutation crashes the self-test is a hard error",
@@ -1042,7 +1042,7 @@ def _self_test():
               coverage_gaps(kit, [good, dict(good, file="harnesses/lonely/ungated.sh")])
               == [])
         # ...and the SWEEP acts on it. The checks above call coverage_gaps
-        # directly; run over this file, LESSONS #068's decision sweep found that
+        # directly; run over this file, LESSONS #069's decision sweep found that
         # dropping the gap from run_gates' exit code left them all green.
         open(gate, "w").write(_TOY_GATE)
         check("a full sweep FAILS on a table gap",
@@ -1050,7 +1050,7 @@ def _self_test():
         check("a partial (--only) run does not audit the table",
               run_gates(kit, [good], check_coverage=False) == 0)
 
-    # LESSONS #068: one row per verdict, enforced. Every decision in a verdict
+    # LESSONS #069: one row per verdict, enforced. Every decision in a verdict
     # function is mutated both ways; one the self-test misses fails the sweep
     # unless the ledger names it with a reason, and a ledger line that names
     # nothing unpinned fails it too.

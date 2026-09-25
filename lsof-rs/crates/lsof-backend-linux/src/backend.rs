@@ -80,8 +80,14 @@ impl Backend for LinuxBackend {
         // `-t` prints PIDs only, and the renderer emits a process's PID whether
         // or not it has files. When no file-level filter needs per-file data,
         // skip the entire fd walk — identical output, none of the work. Mirrors
-        // the Windows backend's terse fast-path.
-        if sel.terse && !sel.inet.enabled && sel.fd_filter.is_none() && !sel.has_path_filter() {
+        // the Windows backend's terse fast-path. Not under `-s`: a state it
+        // names is a search item, located only by reading the sockets.
+        if sel.terse
+            && !sel.inet.enabled
+            && sel.fd_filter.is_none()
+            && !sel.has_path_filter()
+            && sel.state_filter.is_none()
+        {
             // A zombie is never listed (DIVERGENCES 31) — except through a
             // task that outlived its main thread, when tasks are listed at
             // all. Its entry stands in for that task here: the pid is the same
@@ -89,6 +95,24 @@ impl Backend for LinuxBackend {
             procs.retain(|p| {
                 !zombies.contains(&p.pid) || (sel.lists_tasks() && !process::tasks_of(p).is_empty())
             });
+            // `-t` sets `-w`, under which a file that cannot be read has no
+            // row, and a process with no row is not printed — so the fast path
+            // still has to know whether there is anything to read. Asked of
+            // the processes that can be printed at all, and answered on the
+            // first `readlink` for any process that can be read.
+            if sel.omit_unreadable {
+                for p in procs.iter_mut().filter(|p| sel.selects_process(p)) {
+                    let readable = if zombies.contains(&p.pid) {
+                        process::tasks_of(p).iter().any(|t| {
+                            let tid = t.tid.unwrap_or(p.pid);
+                            files::has_readable_file(&format!("/proc/{}/task/{tid}", p.pid))
+                        })
+                    } else {
+                        files::has_readable_file(&format!("/proc/{}", p.pid))
+                    };
+                    p.unlisted = !readable;
+                }
+            }
             return Ok(procs);
         }
 
@@ -128,6 +152,7 @@ impl Backend for LinuxBackend {
             ns: &nstab,
             exempt: &sel.exempt_fs,
             sockets_only: sel.socket_rows_only(),
+            omit_unreadable: sel.omit_unreadable,
         };
 
         for p in procs.iter_mut() {
@@ -139,12 +164,12 @@ impl Backend for LinuxBackend {
             if zombies.contains(&p.pid) {
                 continue;
             }
-            // `None` here is a process we cannot read: it exited during the
-            // scan, or it belongs to another user and we are not root. Both are
-            // ordinary; the process still appears, just without its files.
-            if let Some(files) = files::for_pid(p.pid, &ctx) {
-                p.files = files;
-            }
+            // A process we cannot read — another user's, when we are not root
+            // — comes back with the rows that say what could not be read, as
+            // the C's do; under `-w` or `-t`, with none, and then it has no
+            // line at all (it is still found: `-p` naming it is located).
+            p.files = files::for_pid(p.pid, p.uid, &ctx);
+            p.unlisted = p.files.is_empty();
         }
 
         // `-K`: every other thread becomes its own entry, repeating the whole
@@ -169,9 +194,8 @@ impl Backend for LinuxBackend {
                 }
                 for mut t in process::tasks_of(p) {
                     let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
-                    if let Some(files) = files::for_proc_dir(&base, p.pid, &ctx) {
-                        t.files = files;
-                    }
+                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
+                    t.unlisted = t.files.is_empty();
                     tasks.push(t);
                 }
             }

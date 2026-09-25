@@ -31,6 +31,7 @@ pub fn sample_processes() -> Vec<Process> {
             command: "explorer.exe".into(),
             user: Some("EXAMPLE\\alice".into()),
             endpoint_peer: false,
+            unlisted: false,
             files: vec![
                 OpenFile {
                     fs_device: None,
@@ -74,6 +75,7 @@ pub fn sample_processes() -> Vec<Process> {
             command: "server.exe".into(),
             user: Some("EXAMPLE\\alice".into()),
             endpoint_peer: false,
+            unlisted: false,
             files: vec![
                 OpenFile {
                     fs_device: None,

@@ -1211,6 +1211,206 @@ args = ["-n", "-P", "-a", "-p", "{B}", "-i", "-d", "0"]
 name = "inet-first-match-only-in-the-c"
 args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:{PORT}", "-iTCP"]
 
+# ------------------------------------------------------- unreadable fixture
+# Fixture U made itself unreadable (PR_SET_DUMPABLE 0), and every case here
+# runs as a user who cannot read it (LSOF_DIFF_UNPRIVILEGED; see
+# linux_diff.py). The C does not drop what it cannot read: each of cwd, rtd
+# and txt is a row ending `(readlink: Permission denied)`, and the fd table a
+# `NOFD` row ending `(opendir: Permission denied)` -- TYPE `0000`, and no `t`
+# field under -F. lsof-rs printed one bare `unk unknown` line. Under -w, and
+# under -t (which sets it), the C makes none of those rows, so U is not
+# listed at all -- but it was found: -p exits 0 and -V says nothing.
+# DIVERGENCES 37 and "Inaccessible files".
+
+[[case]]
+name = "unreadable-rows-say-what-could-not-be-read"
+args = ["-n", "-P", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+name = "unreadable-rows-as-fields"
+args = ["-n", "-P", "-F", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+name = "unreadable-offset-column-is-blank"
+args = ["-n", "-P", "-o", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# Nothing listed, exit 0, and -V silent: the pid was located.
+name = "unreadable-dash-w-makes-no-rows"
+args = ["-n", "-P", "-V", "-w", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# -t sets -w: no row, so no pid. lsof-rs printed the pid, from a fast path
+# that never looked at the files.
+name = "unreadable-dash-t-prints-no-pid"
+args = ["-t", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# +w after -t clears it again, and the rows -- so the pid -- come back.
+name = "unreadable-dash-t-then-plus-w-prints-the-pid"
+args = ["-t", "+w", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+name = "unreadable-plus-w-then-dash-t-prints-no-pid"
+args = ["+w", "-t", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# The C takes any FD name in -d, so NOFD selects the row that carries it.
+name = "unreadable-dash-d-nofd"
+args = ["-n", "-P", "-a", "-d", "NOFD", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+name = "unreadable-dash-d-cwd"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# A socket-only run: the rows for what could not be read are not sockets, so
+# nothing is listed and the bare -i is not located.
+name = "unreadable-socket-only-run"
+args = ["-n", "-P", "-V", "-a", "-p", "{U}", "-i"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+# ----------------------------------------------------------- states fixture
+# Fixture S: a TCP listener, an established TCP pair, an unconnected and a
+# connected UDP socket, a unix socket and a file. On Linux the C tests every
+# socket in the TCP and UDP tables against the -s TCP lists, by the kernel's
+# number, and the kernel gives UDP TCP's numbers: 7 (CLOSE) unconnected, 1
+# (ESTABLISHED) connected. Nothing else is touched. lsof-rs applied a TCP
+# list to TCP sockets alone and DROPPED every other socket -- the unix one
+# included -- took any text as a state, and kept only the last -s.
+# DIVERGENCES 32.
+
+[[case]]
+name = "states-listen-keeps-every-other-file"
+args = ["-n", "-P", "-a", "-p", "{S}", "-sTCP:LISTEN"]
+
+[[case]]
+name = "states-exclusion"
+args = ["-n", "-P", "-a", "-p", "{S}", "-sTCP:^LISTEN"]
+
+[[case]]
+# The unconnected UDP socket is CLOSE, though it prints no state.
+name = "states-close-is-the-unconnected-udp-socket"
+args = ["-n", "-P", "-a", "-p", "{S}", "-sTCP:CLOSE"]
+
+[[case]]
+name = "states-established-includes-connected-udp"
+args = ["-n", "-P", "-a", "-p", "{S}", "-sTCP:ESTABLISHED"]
+
+[[case]]
+name = "states-excluding-close-drops-unconnected-udp"
+args = ["-n", "-P", "-a", "-p", "{S}", "-sTCP:^CLOSE"]
+
+[[case]]
+name = "states-inclusion-and-exclusion-with-dash-i"
+args = ["-n", "-P", "-a", "-p", "{S}", "-i", "-sTCP:LISTEN,^ESTABLISHED"]
+
+[[case]]
+# The C's tables are global: two -s make one list.
+name = "states-accumulate-across-options"
+args = ["-n", "-P", "-a", "-p", "{S}", "-sTCP:LISTEN", "-sTCP:CLOSE"]
+
+[[case]]
+name = "states-names-ignore-case"
+args = ["-n", "-P", "-a", "-p", "{S}", "-stcp:listen,Established"]
+
+[[case]]
+name = "states-value-as-its-own-word"
+args = ["-n", "-P", "-a", "-p", "{S}", "-s", "TCP:LISTEN"]
+
+[[case]]
+# Each included state is a search item. -d 99 lists nothing, yet LISTEN is
+# located -- the C marks a state while it reads the socket -- and the other
+# two are reported in the C's TABLE order, CLOSED before SYN_SENT.
+name = "states-not-located-in-table-order"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-d", "99", "-sTCP:SYN_SENT,CLOSED,LISTEN"]
+
+[[case]]
+# A has no socket, and -p alone reads A alone.
+name = "states-located-only-in-the-processes-read"
+args = ["-n", "-P", "-V", "-p", "{A}", "-sTCP:LISTEN"]
+
+[[case]]
+# Two process selecters and no -a: the C reads EVERY process, so B's and S's
+# listeners locate LISTEN and -V names only the command.
+name = "states-two-process-selecters-read-everything"
+args = ["-n", "-P", "-V", "-p", "{A}", "-c", "nosuchcmd", "-sTCP:LISTEN"]
+
+[[case]]
+name = "states-terse"
+args = ["-V", "-t", "-p", "{S}", "-sTCP:LISTEN,SYN_SENT"]
+
+[[case]]
+name = "states-fields"
+args = ["-n", "-P", "-a", "-p", "{S}", "-F", "-sTCP:ESTABLISHED"]
+
+# Fatal -s errors: each prints nothing and exits 1. They carry -V so a run
+# that ACCEPTED the value -- and listed S -- could not match.
+
+[[case]]
+name = "states-unknown-name-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sTCP:NOPE"]
+
+[[case]]
+# Windows' spelling; the Linux C's table says SYN_RECV.
+name = "states-windows-name-is-unknown-here"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sTCP:SYN_RCVD"]
+
+[[case]]
+name = "states-duplicate-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sTCP:LISTEN,listen"]
+
+[[case]]
+name = "states-included-and-excluded-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sTCP:LISTEN", "-sTCP:^LISTEN"]
+
+[[case]]
+name = "states-empty-list-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sTCP:"]
+
+[[case]]
+name = "states-empty-name-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sTCP:LISTEN,,CLOSE"]
+
+[[case]]
+name = "states-unknown-protocol-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sXYZ:LISTEN"]
+
+[[case]]
+name = "states-no-protocol-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-s", "LISTEN"]
+
+[[case]]
+name = "states-empty-udp-list-is-fatal"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sUDP:"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 32): every -s UDP:<state> is a segfault in
+# the C, which strcasecmp()s the NULL first slot of its UDP state table.
+# lsof-rs refuses it with the man page's words for a protocol whose state
+# names are unavailable, and exits 1.
+name = "states-udp-names-crash-the-c"
+args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sUDP:Idle"]
+
+# ------------------------------------------------------------- argument order
+
+[[case]]
+# LEDGERED (DECISION, DIVERGENCES 12). The C stops reading options at the
+# first file name, so `-a -p A` after {FILE} are three more names that do not
+# exist: it lists A's row for the file and exits 1. lsof-rs reads them as
+# options, lists the same row, and exits 0.
+name = "options-after-a-name-are-still-options-in-lsof-rs"
+args = ["-n", "-P", "{FILE}", "-a", "-p", "{A}"]
+
 # ------------------------------------------------------------- exit contract
 
 [[case]]

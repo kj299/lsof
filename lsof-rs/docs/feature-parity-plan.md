@@ -77,7 +77,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-Q` | misc | ✅ shipped (5A) | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
 | `+|-r [t]` | misc | ✅ shipped | Repeat (default 15s) |
 | `-R` | out | ✅ shipped | PPID column |
-| `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. |
+| `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. Since 2026-09-25 the C's: names checked against the platform's table, each included state a search item, and TCP lists applied to every socket with a TCP state — UDP too on Linux (DIVERGENCES 32). |
 | `-S [t]` | prec | ❌ N/A | `lstat`/`readlink` timeout — Unix; we have our own bounded model |
 | `-t` | out | ✅ shipped | Terse PIDs only |
 | `-T [t]` | out | ✅ shipped | TCP/TPI info: `-Tfqsw` = follow / queue lengths / state / TCP window. Windows: state is free; queue/window via `GetPerTcp{,6}ConnectionEStats` (per-connection extended stats, IPv4 + IPv6, ESTABLISHED-only, queue/window need admin). `f` (follow) accepted as no-op. |

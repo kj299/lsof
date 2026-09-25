@@ -43,7 +43,7 @@ name: porting-kit
 # what it inspects without widening what wakes it just moves the blind spot.
 # check-kit is python3 + bash with no toolchain. It ran in seconds until the
 # gate-mutation sweep began forcing every decision in every verdict function
-# (LESSONS #068); it is a few minutes now, still cheap enough for everything.
+# (LESSONS #069); it is a few minutes now, still cheap enough for everything.
 on:
   push:
     branches: [master]

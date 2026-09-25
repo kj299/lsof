@@ -545,9 +545,32 @@ args = ["-n", "-P", "-a", "-d", "^mem", "+d", "DIR", "-p", "PID"]
 covers = ["opt:x"]
 
 [[case]]
+# Every numbered fd, cwd, rtd and txt of fixture A, exempted: the C's
+# UNKN<fd kind> TYPE for each.
 name = "linux/differential-opt-e-exempts-a-mount"
 args = ["-n", "-P", "-a", "-d", "^mem", "-e", "/", "-p", "PID"]
-covers = ["opt:e"]
+covers = ["opt:e", "type:UNKNcwd", "type:UNKNrtd", "type:UNKNtxt", "type:UNKNfd"]
+
+[[case]]
+# Fixture U, which cannot be read by the user lsof runs as: the `unknown` rows
+# the C prints for each link and the NOFD row for the fd table.
+name = "linux/differential-unreadable-rows-say-what-could-not-be-read"
+args = ["-n", "-P", "-p", "PID"]
+covers = ["type:unknown"]
+
+[[case]]
+name = "linux/differential-unreadable-dash-w-makes-no-rows"
+args = ["-n", "-P", "-V", "-w", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-unreadable-dash-t-prints-no-pid"
+args = ["-t", "-p", "PID"]
+
+[[case]]
+# Fixture S: -s TCP lists, over TCP and UDP sockets by the kernel's number.
+name = "linux/differential-states-close-is-the-unconnected-udp-socket"
+args = ["-n", "-P", "-a", "-p", "PID", "-sTCP:CLOSE"]
+covers = ["type:IPv4"]
 
 [[case]]
 name = "linux/differential-opt-N-is-a-search-item"

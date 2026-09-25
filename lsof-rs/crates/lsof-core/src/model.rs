@@ -28,6 +28,11 @@ pub enum FdType {
     /// A thread (`task`) row emitted under `-K`. The TID lives in
     /// [`OpenFile::node`] and the thread state / start in `name`.
     Task,
+    /// `NOFD`: the process's fd directory could not be opened, so its fds
+    /// could not be listed. The C makes one row of it, naming the directory
+    /// and the reason (`/proc/1/fd (opendir: Permission denied)`), and `-d
+    /// NOFD` selects it like any other FD name.
+    NoFd,
     /// Type could not be determined.
     Unknown,
 }
@@ -43,6 +48,7 @@ impl FdType {
             FdType::Mem => "mem".to_string(),
             FdType::Deleted => "DEL".to_string(),
             FdType::Task => "task".to_string(),
+            FdType::NoFd => "NOFD".to_string(),
             FdType::Unknown => "unk".to_string(),
         }
     }
@@ -144,7 +150,15 @@ pub enum FileType {
     /// Any other Windows object type, carrying its short TYPE code (e.g. `SEM`,
     /// `JOB`, `IOCP`, `ALPC`, or an uppercased/truncated type name).
     Other(String),
+    /// `unknown`: a file that is there but could not be examined — its link
+    /// could not be read, or what it names could not be `stat`ed. The C's
+    /// `LSOF_FILE_UNKNOWN_STAT`.
     Unknown,
+    /// No type was ever set: the C's `LSOF_FILE_NONE`, which only its `NOFD`
+    /// row carries. The table prints what the C's fallback formats for it —
+    /// the raw type number in octal, `%04o`, so `0000` — and `-F` omits the
+    /// `t` field altogether (measured), which [`FileType::has_code`] says.
+    NoType,
 }
 
 impl FileType {
@@ -169,7 +183,15 @@ impl FileType {
             FileType::Token => "TOKN".into(),
             FileType::Other(code) => code.clone(),
             FileType::Unknown => "unknown".into(),
+            FileType::NoType => "0000".into(),
         }
+    }
+
+    /// Whether `-F` prints a `t` field for this type. Every type but
+    /// [`FileType::NoType`] does; the C writes `t` only for a row whose type
+    /// was set.
+    pub fn has_code(&self) -> bool {
+        !matches!(self, FileType::NoType)
     }
 }
 
@@ -194,7 +216,14 @@ impl Protocol {
     }
 }
 
-/// TCP connection state (mirrors `MIB_TCP_STATE` / lsof's state names).
+/// TCP connection state, by the name the platform's own lsof uses for it.
+///
+/// Windows' names are `MIB_TCP_STATE`'s. Linux's are the C's
+/// (`build_IPstates()`, `lib/dialects/linux/dsock.c`), which differ in two:
+/// the kernel's `TCP_CLOSE` is `CLOSE` and `TCP_SYN_RECV` is `SYN_RECV`, where
+/// Windows says `CLOSED` and `SYN_RCVD`. Both spellings are variants here, and
+/// each backend produces only its own; `-s TCP:` accepts exactly the names of
+/// [`tcp_state_table`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpState {
     Closed,
@@ -209,6 +238,11 @@ pub enum TcpState {
     LastAck,
     TimeWait,
     DeleteTcb,
+    /// Linux's `TCP_CLOSE` (7) — also the state the kernel gives an
+    /// unconnected UDP socket, which is why `-s TCP:CLOSE` selects those.
+    Close,
+    /// Linux's `TCP_SYN_RECV` (3).
+    SynRecv,
     Unknown,
 }
 
@@ -228,8 +262,58 @@ impl TcpState {
             TcpState::LastAck => "LAST_ACK",
             TcpState::TimeWait => "TIME_WAIT",
             TcpState::DeleteTcb => "DELETE_TCB",
+            TcpState::Close => "CLOSE",
+            TcpState::SynRecv => "SYN_RECV",
             TcpState::Unknown => "UNKNOWN",
         }
+    }
+}
+
+/// The TCP state names `-s TCP:` accepts on Linux, in the C's table order:
+/// `build_IPstates()` enters each under the kernel's own number, `TCP_CLOSE`
+/// through `TCP_CLOSING`, with 0 named `CLOSED` — a number `/proc/net/tcp`
+/// never shows, so `-s TCP:CLOSED` is accepted and never located. The order
+/// matters: it is the order the C reports unlocated states in.
+pub const LINUX_TCP_STATES: [TcpState; 12] = [
+    TcpState::Closed,
+    TcpState::Established,
+    TcpState::SynSent,
+    TcpState::SynRecv,
+    TcpState::FinWait1,
+    TcpState::FinWait2,
+    TcpState::TimeWait,
+    TcpState::Close,
+    TcpState::CloseWait,
+    TcpState::LastAck,
+    TcpState::Listen,
+    TcpState::Closing,
+];
+
+/// The same for Windows: the states a Windows row can show, in
+/// `MIB_TCP_STATE`'s numbering (`CLOSED` = 1 … `DELETE_TCB` = 12).
+pub const WINDOWS_TCP_STATES: [TcpState; 12] = [
+    TcpState::Closed,
+    TcpState::Listen,
+    TcpState::SynSent,
+    TcpState::SynReceived,
+    TcpState::Established,
+    TcpState::FinWait1,
+    TcpState::FinWait2,
+    TcpState::CloseWait,
+    TcpState::Closing,
+    TcpState::LastAck,
+    TcpState::TimeWait,
+    TcpState::DeleteTcb,
+];
+
+/// The state table of the platform this binary was built for — the names its
+/// rows print, so the only names `-s TCP:` can mean. Anything but Windows
+/// takes Linux's, the C's own.
+pub fn tcp_state_table() -> &'static [TcpState] {
+    if cfg!(windows) {
+        &WINDOWS_TCP_STATES
+    } else {
+        &LINUX_TCP_STATES
     }
 }
 
@@ -305,7 +389,11 @@ pub struct SocketInfo {
     pub protocol: Protocol,
     pub local: Option<SocketAddr>,
     pub remote: Option<SocketAddr>,
-    /// `None` for connectionless protocols (UDP); always `Some` for AF_UNIX.
+    /// `Some` for every TCP and AF_UNIX socket. A UDP socket has one where the
+    /// platform numbers it: Linux gives UDP the TCP numbering — `CLOSE` for
+    /// the usual unconnected socket, `ESTABLISHED` for a connected one — and
+    /// `-s TCP:` filters on it, though only `ESTABLISHED` is ever printed (see
+    /// [`SocketInfo::shown_state`]). Windows has no UDP state: `None`.
     pub state: Option<SockState>,
     /// `-T q/w` extended TCP info. A backend populates this only when the run
     /// requested it and the per-connection stats were readable; `None`
@@ -327,6 +415,34 @@ pub struct TcpExtInfo {
 }
 
 impl SocketInfo {
+    /// The state lsof prints for this socket. A UDP socket shows one only when
+    /// it is `ESTABLISHED`: the C's UDP state table on Linux registers that
+    /// one name (`build_IPstates()`), so an unconnected socket — whose
+    /// [`SocketInfo::state`] is `CLOSE` — prints none. Every renderer asks this,
+    /// never the field.
+    pub fn shown_state(&self) -> Option<SockState> {
+        match (self.protocol, self.state) {
+            (Protocol::Udp, Some(SockState::Tcp(t))) if t != TcpState::Established => None,
+            (_, state) => state,
+        }
+    }
+
+    /// The state `-s TCP:` tests this socket by, if it is one it tests at all.
+    ///
+    /// The C on Linux runs one path for every socket it finds in the TCP and
+    /// UDP tables (`process_proc_sock()`), and that path checks the TCP lists
+    /// against the kernel's number — so a UDP socket is included or excluded
+    /// by its reused TCP state, measured: `-s TCP:CLOSE` lists the unconnected
+    /// UDP socket and `-s TCP:LISTEN` drops it. Everything else — an AF_UNIX,
+    /// raw or ICMP socket, a regular file, a Windows UDP socket (no state) —
+    /// is never touched by `-s`.
+    pub fn filter_state(&self) -> Option<TcpState> {
+        match self.state {
+            Some(SockState::Tcp(t)) => Some(t),
+            _ => None,
+        }
+    }
+
     /// Render the lsof NAME field for a socket, honoring name/port resolution
     /// suppression. With both `numeric_*` flags set the output is purely
     /// numeric (the `-n -P` behavior).
@@ -454,6 +570,14 @@ pub struct Process {
     /// engine keeps such a process (its pipe rows only) even though it matches
     /// no process selector — lsof's "endpoint files are also displayed".
     pub endpoint_peer: bool,
+    /// Set by a backend that read this process and has no file to show for it,
+    /// on a platform where — as in the C — a process is listed only through
+    /// its files. It gets no line, not a bare one; it is still *found*, so a
+    /// `-p` naming it is located. On Linux that is a process whose every file
+    /// is unreadable under `-w` or `-t` (which sets `-w`): the C makes no row
+    /// for a file it cannot read then (DIVERGENCES 37). Windows never sets it,
+    /// and keeps the bare line for a process whose handles it could not read.
+    pub unlisted: bool,
 }
 
 #[cfg(test)]

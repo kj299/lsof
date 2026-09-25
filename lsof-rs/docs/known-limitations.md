@@ -71,6 +71,12 @@ results. The CLI prints a one-line hint about re-running as Administrator
 when a system-wide switch is used; `-V` reports how many processes were
 inaccessible. This mirrors Unix `lsof` without root.
 
+On **Linux** a process the user cannot read is listed as the C lists it: a row
+for each of `cwd`, `rtd` and `txt` saying what could not be read and why
+(`/proc/1/cwd (readlink: Permission denied)`), and a `NOFD` row for its fd
+table. `-w`, and `-t`, leave those rows out, and then a process with nothing
+readable is not listed at all (DIVERGENCES 37).
+
 ### `cwd` / `txt` / `mem` collection is time-bounded
 
 Gathering a process's working directory, loaded modules and mapped files means
