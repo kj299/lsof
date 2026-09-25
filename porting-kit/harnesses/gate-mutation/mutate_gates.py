@@ -137,6 +137,14 @@ MUTATIONS = [
      "why": 'scanf("%s") stops being flagged: a false negative in a security scanner',
      "cmd": ["harnesses/c-flaw-scan/scan_c_flaws.py", "--self-test"]},
 
+    # The call-must-be-code rule (LESSONS #064) removes a false positive; its
+    # dangerous direction is judging EVERY match prose, which silences the check.
+    {"gate": "c-flaw-scan-call-is-code", "file": "harnesses/c-flaw-scan/scan_c_flaws.py",
+     "old": "                hit = any(code[m.start(1):m.end(1)] == m.group(1)",
+     "new": "                hit = any(False",
+     "why": 'every scanf match is judged prose and skipped: scanf("%s") goes silent',
+     "cmd": ["harnesses/c-flaw-scan/scan_c_flaws.py", "--self-test"]},
+
     # Not a verdict — an INPUT path, and that is the point. If the
     # `stdin_b64` resolution is dropped, a case carrying raw bytes feeds the
     # child NOTHING, both sides answer identically to empty input, and the case
