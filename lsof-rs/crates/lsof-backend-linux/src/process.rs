@@ -81,7 +81,7 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<(Process, bool)> {
         pid,
         ppid: st.ppid,
         command: st.command,
-        user: st.uid.map(|u| users::name_for(u, numeric_ids)),
+        user: st.uid.and_then(|u| users::name_for(u, numeric_ids)),
         files: Vec::new(),
         endpoint_peer: false,
         unlisted: false,

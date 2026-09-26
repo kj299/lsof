@@ -546,7 +546,10 @@ pub struct Process {
     pub ppid: Option<u32>,
     /// The process image name (lsof "COMMAND").
     pub command: String,
-    /// Owning account, e.g. `DOMAIN\\user` (lsof "USER").
+    /// The owning account's name (lsof "USER"), e.g. `alice` or
+    /// `DOMAIN\\user`. `None` where there is no name to show — on Linux under
+    /// `-l`, or for a UID no account has — and then the USER column shows
+    /// [`Process::uid`] as the C does, and `-F` writes no `L` field.
     pub user: Option<String>,
     /// `-K`: the thread id, when this entry is a **task** rather than the
     /// process itself. lsof models a task as its own process — it repeats the

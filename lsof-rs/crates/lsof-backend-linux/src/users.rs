@@ -93,21 +93,32 @@ pub fn parse_passwd_names(text: &str) -> HashMap<String, u32> {
     m
 }
 
-/// Resolve `uid` to an account name, or its decimal form when unknown.
-/// `numeric` (`-l`) skips the lookup entirely, matching lsof.
-pub fn name_for(uid: u32, numeric: bool) -> String {
+/// The login name for `uid`, or `None` where the C shows the number instead:
+/// under `-l` (`numeric`, which skips the lookup), and for a UID no account
+/// has. The difference is not cosmetic — the C prints a number right-aligned
+/// in eight columns (`printuid()`'s `"%*lu"`) and writes no `-F L` field for
+/// it, where it writes one for a name (DIVERGENCES 36).
+pub fn name_for(uid: u32, numeric: bool) -> Option<String> {
     if numeric {
-        return uid.to_string();
+        return None;
     }
-    passwd_map()
-        .get(&uid)
-        .cloned()
-        .unwrap_or_else(|| uid.to_string())
+    passwd_map().get(&uid).cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_is_shown_where_there_is_no_name() {
+        // `-l`, and a UID no account has, both leave USER to the number —
+        // which the table then prints eight wide and `-F` writes no `L` for.
+        assert_eq!(name_for(0, true), None, "-l never looks the name up");
+        assert_eq!(name_for(u32::MAX - 1, false), None, "no account has it");
+        if let Some(root) = passwd_map().get(&0) {
+            assert_eq!(name_for(0, false).as_deref(), Some(root.as_str()));
+        }
+    }
 
     #[test]
     fn names_resolve_to_the_first_matching_line_like_getpwnam() {

@@ -68,9 +68,11 @@ consulted on the way in.
 
 All four are stable for the run's duration and hold nothing that changes size,
 so the two binaries see identical state. Because PIDs, inodes and devices are
-then identical on both sides, the kit's default normalization (whitespace only)
-is all that is needed; `--mask-numbers` is deliberately NOT used — it would hide
-exactly the cells this gate exists to compare.
+then identical on both sides, the kit's default masking rules are all that is
+needed; `--mask-numbers` is deliberately NOT used — it would hide exactly the
+cells this gate exists to compare. Whitespace is compared too, on every case
+(`keep_whitespace`, set by `render_matrix`): until 2026-09-26 it was collapsed,
+and the table's whole layout went unchecked (DIVERGENCES 35).
 
 Both binaries run with LC_ALL=C.UTF-8. The C calls setlocale(LC_CTYPE, "") and
 its safestrprt() passes a printable multibyte character through only in a
@@ -886,6 +888,11 @@ def render_matrix(template_path: str, subs: dict[str, str]) -> list[dict]:
         args = [substitute(str(a), subs) for a in c.get("args", [])]
         rendered = dict(c)
         rendered["args"] = args
+        # Every case compares its whitespace too, unless it says otherwise:
+        # lsof's table layout is output, and collapsing blanks hid a column
+        # that was left-aligned in lsof-rs and right-aligned in the C for as
+        # long as this gate has existed (DIVERGENCES 35; LESSONS #070).
+        rendered.setdefault("keep_whitespace", True)
         out.append(rendered)
     return out
 
@@ -1160,6 +1167,14 @@ def self_test() -> int:
         cases = render_matrix(tpl, {"A": "11", "B": "22"})
         check("render_matrix substitutes per case", [c["args"] for c in cases] == [["-a", "-p", "11"], ["-p", "22"]])
         check("render_matrix keeps names", [c["name"] for c in cases] == ["x", "y"])
+        # Every case compares its whitespace unless it opts out (DIVERGENCES
+        # 35): without it a layout regression MATCHes in every case.
+        check("render_matrix compares every case's whitespace by default",
+              all(c.get("keep_whitespace") is True for c in cases))
+        with open(tpl, "w") as f:
+            f.write('[[case]]\nname="z"\nargs=[]\nkeep_whitespace=false\n')
+        check("render_matrix leaves a case's own keep_whitespace alone",
+              render_matrix(tpl, {})[0]["keep_whitespace"] is False)
 
         # A fixture that really comes up: fd_count sees the expected fds.
         fx = Fixture("t", ["bash", "-c", "exec 3</dev/null && exec sleep 5"], cwd=td, expect_fds=4)
