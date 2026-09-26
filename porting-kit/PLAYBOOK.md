@@ -103,6 +103,10 @@ lsof-rs's phase order was sound; its one miss was not spiking the hang first.
   and flags fields that vary (PIDs, timestamps, addresses, ordering). Those feed
   the normalization rules (`harnesses/differential/normalize.py`), so a real
   regression isn't masked by noise and noise isn't mistaken for a regression.
+  Normalize only what varies. The runner's default also collapses whitespace,
+  which is noise for some tools and **output** for a tabular one: a column
+  aligned the other way collapses to the same line. Once the port's output
+  matches, compare it byte for byte (`keep_whitespace`, LESSONS #070).
 - If the reference binary **cannot run on your dev/target environment** (lsof-rs:
   C lsof doesn't run on Windows), substitute:
   - **structural golden tests** for output *format* (columns, field codes, JSON
