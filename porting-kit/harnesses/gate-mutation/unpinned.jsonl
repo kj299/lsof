@@ -26,7 +26,6 @@
 {"file": "harnesses/control-coverage/check_controls.py", "func": "declared_controls", "line": "if name and name not in unreadable:", "expr": "name and name not in unreadable", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/control-coverage/check_controls.py", "func": "declared_controls", "line": "if name and name not in unreadable:", "expr": "name not in unreadable", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/coverage/coverage_gate.py", "func": "run_gate", "line": "if as_json:", "expr": "as_json", "to": "False", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
-{"file": "harnesses/coverage/coverage_gate.py", "func": "run_gate", "line": "if as_json:", "expr": "as_json", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/coverage/coverage_gate.py", "func": "run_gate", "line": "if w[\"id\"] in required:", "expr": "w[\"id\"] in required", "to": "False", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/coverage/coverage_gate.py", "func": "run_gate", "line": "if w[\"id\"] in required:", "expr": "w[\"id\"] in required", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/coverage/coverage_gate.py", "func": "run_gate", "line": "scope = f\" [platform: {platform}]\" if platform else \"\"", "expr": "platform", "to": "False", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
