@@ -28,6 +28,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
 
 ### Changed
+- **The table is laid out as the C lays it out**, byte for byte (DIVERGENCES
+  35). Every column is right-aligned but COMMAND and TASKCMD; lsof-rs had
+  left-aligned USER, FD, TYPE, DEVICE and NODE. FD is the descriptor
+  right-aligned, followed by its access and lock characters in two fixed
+  places (`  4wW`, ` 18r `, `cwd  `). A numeric USER (under `-l`, or a UID
+  with no account) is eight wide, NLINK counts its leading space, and a
+  packet-socket NAME no longer ends in a space. This is the shared renderer,
+  so the Windows table changes the same way. Every differential case now
+  compares whitespace too.
+- **`-F L` is omitted for a user with no name**, as the C omits it: under
+  `-l`, and for a UID with no account (DIVERGENCES 36). lsof-rs wrote `L0`.
 - **`-c` is the C's match on Linux**: a case-sensitive prefix. lsof-rs matched
   case-insensitively and by substring, so `-c ytho` and `-c PYTHON` listed
   `python3` where the C lists nothing. Windows keeps its forgiving match. A name

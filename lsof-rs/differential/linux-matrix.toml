@@ -9,9 +9,10 @@
 # then hands the rendered matrix to the porting kit's diff_run.py. Both
 # binaries run against the SAME process at the same instant, under
 # LC_ALL=C.UTF-8, so PIDs, inodes, devices and sizes are identical on both
-# sides and the kit's default whitespace-only normalization is sufficient.
-# Numbers are never masked here: they are exactly the cells this gate exists
-# to compare.
+# sides. Numbers are never masked here: they are exactly the cells this gate
+# exists to compare. Nor is whitespace collapsed: linux_diff.py gives every
+# case `keep_whitespace = true`, so the table's alignment is compared byte for
+# byte (DIVERGENCES 35). A case may set it to false, and none does.
 #
 # MOST CASES CARRY -a, and the two that do not are the whole point of
 # `or-semantics-*`. lsof ORs its list options unless -a ANDs them (Lsof.8:
@@ -1410,6 +1411,24 @@ args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sUDP:Idle"]
 # options, lists the same row, and exits 0.
 name = "options-after-a-name-are-still-options-in-lsof-rs"
 args = ["-n", "-P", "{FILE}", "-a", "-p", "{A}"]
+
+# ------------------------------------------------------------------- layout
+# Every case compares its whitespace (linux_diff.py), so every case checks the
+# table's layout: each column right-aligned but COMMAND, FD the descriptor
+# right-aligned with its access and lock characters after it, and the `FD`
+# title overrunning a one-character field (every `-d 3` case). These add the
+# one shape nothing else reaches: USER as a number (DIVERGENCES 35, 36).
+
+[[case]]
+# `-l`: the C prints the UID with printuid()'s "%*lu", eight wide, so the
+# column is too. lsof-rs printed a bare `0`, left-aligned.
+name = "layout-numeric-user-is-eight-wide"
+args = ["-n", "-P", "-l", "-a", "-d", "cwd,3", "-p", "{A}"]
+
+[[case]]
+# ...and writes no `L` field for a number, where lsof-rs wrote `L0`.
+name = "fields-no-login-field-for-a-number"
+args = ["-n", "-P", "-l", "-FpuL", "-p", "{A}"]
 
 # ------------------------------------------------------------- exit contract
 

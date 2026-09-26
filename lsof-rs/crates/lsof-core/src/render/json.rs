@@ -103,8 +103,10 @@ fn proc_members(p: &Process) -> Vec<String> {
     if let Some(ppid) = p.ppid {
         m.push(format!("\"ppid\":{ppid}"));
     }
-    if let Some(u) = &p.user {
-        m.push(format!("\"user\":{}", qs(u)));
+    // The name, or the number where there is none: JSON has no separate uid
+    // key, and `-l` has always put the number here.
+    if let Some(u) = p.user.clone().or_else(|| p.uid.map(|u| u.to_string())) {
+        m.push(format!("\"user\":{}", qs(&u)));
     }
     m
 }

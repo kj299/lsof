@@ -1,8 +1,11 @@
 //! Default human-readable table renderer.
 //!
-//! Columns match classic lsof: `COMMAND PID [PPID] USER FD TYPE DEVICE SIZE/OFF
-//! NODE NAME` (PPID only with `-R`). Numeric columns are right-aligned; the rest
-//! are left-aligned; columns are padded to the widest cell.
+//! Columns match classic lsof: `COMMAND PID [TID TASKCMD] [PPID] [PGID] USER FD
+//! TYPE DEVICE SIZE/OFF [NLINK] NODE NAME`, and so does their layout, which is
+//! `print.c`'s byte for byte (DIVERGENCES 35): every column is right-aligned
+//! except COMMAND and TASKCMD, NAME is not padded at all, one space separates
+//! each pair, and the FD cell is the descriptor right-aligned with its access
+//! and lock characters after it — see [`Col`].
 //!
 //! COMMAND, USER and NAME are escaped through [`Escaper`] before they are
 //! measured or printed, as lsof's `print.c` does with `safestrprt()`: a process
@@ -12,7 +15,7 @@
 
 use std::io::{self, Write};
 
-use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
+use crate::model::{AccessMode, FdType, FileType, OpenFile, Process, Protocol};
 use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 
@@ -41,6 +44,16 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
         return String::new();
     };
     if !show.any() {
+        return String::new();
+    }
+    // Only a row the C keeps a TCP/TPI record for: `Lf->lts.type >= 0`, which
+    // the Linux dialect sets for TCP, UDP and AF_UNIX sockets and for nothing
+    // else. A packet, raw or ICMP row gets no separator — measured once the
+    // differential compared whitespace (DIVERGENCES 35): lsof-rs had ended
+    // every packet-socket NAME with a space the C does not print.
+    let annotated =
+        matches!(sock.protocol, Protocol::Tcp | Protocol::Udp) || f.file_type == FileType::Unix;
+    if !annotated {
         return String::new();
     }
     let mut parts: Vec<String> = Vec::new();
@@ -74,23 +87,34 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
     out
 }
 
-/// Render the FD cell, e.g. `cwd`, `txt`, `3u`, or `3uW` — handle value,
-/// access character, then the lock character when the file is locked.
-fn fd_cell(f: &OpenFile) -> String {
-    let mut s = match f.fd {
-        FdType::Handle(n) => {
-            if f.access == AccessMode::Unknown {
-                n.to_string()
-            } else {
-                format!("{}{}", n, f.access.code())
-            }
-        }
+/// The FD cell's name part: `cwd`, `txt`, `NOFD`, or the descriptor number.
+fn fd_name(f: &OpenFile) -> String {
+    match f.fd {
+        FdType::Handle(n) => n.to_string(),
         _ => f.fd.code(),
-    };
-    if let Some(lock) = f.lock {
-        s.push(lock.code());
     }
-    s
+}
+
+/// The FD cell's two trailing characters, always both present: the access
+/// letter and the lock letter, each a space when there is none — `print.c`'s
+/// `%c%c` after the descriptor. A lock on a file whose access is unknown shows
+/// `-` in the access place, as the C does, so the lock is never read as one.
+///
+/// Only a numbered descriptor shows an access letter. The C prints the field
+/// for every row, but no named one (`cwd`, `txt`, `mem`, …) ever has an
+/// access mode there; a backend that records one for them is not shown it.
+fn fd_mode(f: &OpenFile) -> String {
+    let access = match (&f.fd, f.access) {
+        (FdType::Handle(_), mode) if mode != AccessMode::Unknown => mode.code(),
+        _ => ' ',
+    };
+    match f.lock {
+        None => format!("{access} "),
+        Some(lock) => {
+            let access = if access == ' ' { '-' } else { access };
+            format!("{access}{}", lock.code())
+        }
+    }
 }
 
 /// `-H`: a byte count the way the C's `human_readable_size()` writes it
@@ -207,25 +231,90 @@ fn rows_of<'a>(
     })
 }
 
-/// One padded line. NAME, the last column, is never padded; numeric columns
-/// are right-aligned. Written straight to `w` — `format!` per cell would
+/// How one column is laid out — its `print.c` format.
+///
+/// Every column the C prints is `%*s` or `%*d`, right-aligned, except COMMAND
+/// and TASKCMD, which `safestrprtn()` pads on the right. Each is preceded by
+/// one space, NAME included, and none is followed by one: a row whose NAME is
+/// empty ends in that space. Two columns bend the rule, and the C's output
+/// shows both:
+///
+/// * **FD** is two cells glued together: the descriptor right-aligned in the
+///   width of the longest one, then its two mode characters (see [`fd_mode`]).
+///   The C sizes it as `FdColW = max(strlen("FD"), len(fd) + 2)` and prints
+///   the title in `FdColW - 2`, so the title does not widen the column: when
+///   every descriptor is one character the `FD` title overruns its field by
+///   one and pushes the rest of the header right, measured with `-d 0-9`.
+/// * **NLINK**'s cell is formatted `" %ld"`, leading space included, before it
+///   is measured and right-aligned — so the column is one wider than its
+///   widest count whenever that count is five digits or more.
+#[derive(Clone, Copy)]
+struct Col {
+    title: &'static str,
+    right: bool,
+    /// Whether the title counts toward the width (the C's `strlen(TTL)` seed).
+    seeded: bool,
+    /// Printed straight after the previous cell, with no separating space.
+    glued: bool,
+}
+
+impl Col {
+    const fn right(title: &'static str) -> Self {
+        Self {
+            title,
+            right: true,
+            seeded: true,
+            glued: false,
+        }
+    }
+    const fn left(title: &'static str) -> Self {
+        Self {
+            title,
+            right: false,
+            seeded: true,
+            glued: false,
+        }
+    }
+}
+
+/// The descriptor half of FD: right-aligned, and not widened by its title.
+const FD_NAME: Col = Col {
+    title: "FD",
+    right: true,
+    seeded: false,
+    glued: false,
+};
+
+/// The mode half of FD: two characters, glued to the descriptor, untitled —
+/// its two header spaces are the two it takes in every row.
+const FD_MODE: Col = Col {
+    title: "",
+    right: false,
+    seeded: false,
+    glued: true,
+};
+
+/// One line: every cell but NAME padded to its column's width the column's
+/// way, NAME written as it is. Straight to `w` — `format!` per cell would
 /// allocate a string only to copy it into the output.
 fn emit_line<S: AsRef<str>>(
     w: &mut dyn Write,
     cells: &[S],
     widths: &[usize],
-    headers: &[&str],
-    right: &[&str],
+    cols: &[Col],
 ) -> io::Result<()> {
-    let ncols = headers.len();
+    let last = cols.len() - 1;
     for (i, cell) in cells.iter().enumerate() {
         let cell = cell.as_ref();
-        if i == ncols - 1 {
-            w.write_all(cell.as_bytes())?; // NAME: no trailing padding
-        } else if right.contains(&headers[i]) {
-            write!(w, "{cell:>width$} ", width = widths[i])?;
+        if i > 0 && !cols[i].glued {
+            w.write_all(b" ")?;
+        }
+        if i == last {
+            w.write_all(cell.as_bytes())?; // NAME: never padded
+        } else if cols[i].right {
+            write!(w, "{cell:>width$}", width = widths[i])?;
         } else {
-            write!(w, "{cell:<width$} ", width = widths[i])?;
+            write!(w, "{cell:<width$}", width = widths[i])?;
         }
     }
     w.write_all(b"\n")
@@ -353,22 +442,22 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
             None => w,
         });
 
-    // Build the column header set (PPID optional).
-    let mut headers: Vec<&str> = vec!["COMMAND", "PID"];
+    // The columns, in `print.c`'s order.
+    let mut cols: Vec<Col> = vec![Col::left("COMMAND"), Col::right("PID")];
     // `-K`: TID and TASKCMD appear only when some entry is a task, which is
     // how the C decides (`print.c` sets TaskPrtTid/TaskPrtCmd while sizing).
     // A run that asked for tasks and found none — a single-threaded process —
     // therefore looks exactly like a run that did not ask.
     let show_tasks = procs.iter().any(|p| p.tid.is_some());
     if show_tasks {
-        headers.push("TID");
-        headers.push("TASKCMD");
+        cols.push(Col::right("TID"));
+        cols.push(Col::left("TASKCMD"));
     }
     if show_ppid {
-        headers.push("PPID");
+        cols.push(Col::right("PPID"));
     }
     if show_pgid {
-        headers.push("PGID");
+        cols.push(Col::right("PGID"));
     }
     let size_off = if show_offset {
         SizeOff::Offset
@@ -377,14 +466,18 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     } else {
         SizeOff::Both
     };
-    headers.extend(["USER", "FD", "TYPE", "DEVICE", size_off.header()]);
+    cols.extend([
+        Col::right("USER"),
+        FD_NAME,
+        FD_MODE,
+        Col::right("TYPE"),
+        Col::right("DEVICE"),
+        Col::right(size_off.header()),
+    ]);
     if show_links {
-        headers.push("NLINK");
+        cols.push(Col::right("NLINK"));
     }
-    headers.extend(["NODE", "NAME"]);
-    let right = [
-        "PID", "TID", "PPID", "PGID", "SIZE/OFF", "OFFSET", "SIZE", "NLINK",
-    ];
+    cols.extend([Col::right("NODE"), Col::left("NAME")]);
 
     let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
         // Escaped and cut the way the C's safestrprtn() does it:
@@ -409,18 +502,23 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         if show_pgid {
             r.push(p.pgid.map(|v| v.to_string()).unwrap_or_default());
         }
-        r.push(
-            p.user
-                .as_deref()
-                .map(|u| esc.text(u).into_owned())
-                .unwrap_or_default(),
-        );
-        r.push(fd_cell(f));
+        // A name, escaped; or, where there is none, the number the way the
+        // C's `printuid()` writes it — right-aligned in `USERPRTL` (8) columns
+        // before the column's own alignment, so a numeric USER column is
+        // never narrower than eight.
+        r.push(match (&p.user, p.uid) {
+            (Some(u), _) => esc.text(u).into_owned(),
+            (None, Some(uid)) => format!("{uid:>8}"),
+            (None, None) => String::new(),
+        });
+        r.push(fd_name(f));
+        r.push(fd_mode(f));
         r.push(f.file_type.code());
         r.push(f.device.clone().unwrap_or_default());
         r.push(size_off_cell(f, size_off, human_size, offset_digits));
         if show_links {
-            r.push(f.links.map(|n| n.to_string()).unwrap_or_default());
+            // `" %ld"`: the C measures the count with a space in front of it.
+            r.push(f.links.map(|n| format!(" {n}")).unwrap_or_default());
         }
         r.push(f.node.clone().unwrap_or_default());
         // `-T q/w` extended TCP info renders as a NAME suffix in the table
@@ -454,8 +552,13 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     };
 
     // Pass two: size every column. Each row is formatted, measured and
-    // dropped; nothing here outlives its own iteration.
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    // dropped; nothing here outlives its own iteration. A column starts at its
+    // title's width, as the C's `print_init()` seeds it — except FD's two
+    // halves, which only their cells size.
+    let mut widths: Vec<usize> = cols
+        .iter()
+        .map(|c| if c.seeded { c.title.len() } else { 0 })
+        .collect();
     let mut any = false;
     for (p, f) in rows_of(procs, &blank) {
         any = true;
@@ -470,9 +573,10 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
 
     // Pass three: print. The same `row_for`, so a line cannot disagree with
     // the width it was measured at.
-    emit_line(w, &headers, &widths, &headers, &right)?;
+    let titles: Vec<&str> = cols.iter().map(|c| c.title).collect();
+    emit_line(w, &titles, &widths, &cols)?;
     for (p, f) in rows_of(procs, &blank) {
-        emit_line(w, &row_for(p, f), &widths, &headers, &right)?;
+        emit_line(w, &row_for(p, f), &widths, &cols)?;
     }
     Ok(())
 }

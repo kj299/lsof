@@ -1739,3 +1739,302 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
         "DEVICE is the pcb: {out:?}"
     );
 }
+
+/// One row, spelled out: every golden below is laid out from real `lsof`
+/// output, so its cells are the ones the C printed.
+#[allow(clippy::too_many_arguments)]
+fn row(
+    fd: lsof_core::FdType,
+    access: lsof_core::AccessMode,
+    lock: Option<lsof_core::model::LockKind>,
+    ty: lsof_core::FileType,
+    device: &str,
+    size: Option<u64>,
+    offset: Option<u64>,
+    node: &str,
+    name: &str,
+) -> lsof_core::OpenFile {
+    lsof_core::OpenFile {
+        fs_device: None,
+        file_flags: None,
+        lock,
+        fd,
+        access,
+        file_type: ty,
+        name: name.into(),
+        device: Some(device.into()),
+        size,
+        offset,
+        node: Some(node.into()),
+        links: None,
+        socket: None,
+    }
+}
+
+fn python3(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
+    lsof_core::Process {
+        tid: None,
+        task_command: None,
+        uid: Some(0),
+        pgid: Some(496),
+        pid: 496,
+        ppid: Some(493),
+        command: "python3".into(),
+        user: Some("root".into()),
+        files,
+        endpoint_peer: false,
+        unlisted: false,
+    }
+}
+
+/// The table's layout is `print.c`'s, byte for byte (DIVERGENCES 35). These
+/// four lines are the C's own output for the process they describe, copied
+/// with `cat -A`: every column right-aligned but COMMAND; FD the descriptor
+/// right-aligned, then an access character and a lock character that are
+/// always there (a space when there is none); NAME after one space, unpadded.
+/// lsof-rs had left-aligned USER, FD, TYPE, DEVICE and NODE — which the
+/// differential could not see, because it collapsed whitespace until then.
+#[test]
+fn the_table_is_laid_out_the_way_print_c_lays_it_out() {
+    use lsof_core::model::LockKind;
+    use lsof_core::{AccessMode as A, FdType as Fd, FileType as T};
+    let p = python3(vec![
+        row(
+            Fd::Cwd,
+            A::Unknown,
+            None,
+            T::Dir,
+            "254,0",
+            Some(4096),
+            None,
+            "475157",
+            "/home/user/lsof",
+        ),
+        row(
+            Fd::Handle(0),
+            A::ReadWrite,
+            None,
+            T::Unix,
+            "0x00000000b83b321e",
+            None,
+            Some(0),
+            "281",
+            "type=STREAM (CONNECTED)",
+        ),
+        row(
+            Fd::Handle(4),
+            A::Write,
+            Some(LockKind::WriteFull),
+            T::Regular,
+            "254,0",
+            Some(0),
+            Some(0),
+            "1884552",
+            "/tmp/locked",
+        ),
+        row(
+            Fd::Handle(18),
+            A::Read,
+            None,
+            T::Fifo,
+            "0,15",
+            None,
+            Some(0),
+            "3757",
+            "pipe",
+        ),
+    ]);
+    let out = table::render(std::slice::from_ref(&p), TableOpts::new(Escaper::UNIX));
+    assert_eq!(
+        out,
+        "COMMAND PID USER  FD   TYPE             DEVICE SIZE/OFF    NODE NAME\n\
+         python3 496 root cwd    DIR              254,0     4096  475157 /home/user/lsof\n\
+         python3 496 root   0u  unix 0x00000000b83b321e      0t0     281 type=STREAM (CONNECTED)\n\
+         python3 496 root   4wW  REG              254,0        0 1884552 /tmp/locked\n\
+         python3 496 root  18r  FIFO               0,15      0t0    3757 pipe\n"
+    );
+}
+
+/// Two details of the C's FD column, both reproduced.
+///
+/// * FD is sized by its descriptors and not its title: `FdColW` starts at
+///   `strlen("FD")` and the descriptor is printed in `FdColW - 2`. When every
+///   descriptor is one character, the `FD` title overruns its one-character
+///   field and the rest of the HEADER sits one column right of the rows.
+///   Measured, `lsof -d 0-9`.
+/// * A lock with no access mode shows `-` in the access place. Read from
+///   `print.c`, not measured: no host here holds a lock on an fd whose
+///   access its fdinfo cannot report.
+#[test]
+fn a_one_character_fd_field_lets_the_title_overrun_it() {
+    use lsof_core::model::LockKind;
+    use lsof_core::{AccessMode as A, FdType as Fd, FileType as T};
+    let p = python3(vec![
+        row(
+            Fd::Handle(1),
+            A::Write,
+            None,
+            T::Regular,
+            "254,0",
+            Some(436),
+            Some(0),
+            "1884511",
+            "/tmp/out",
+        ),
+        row(
+            Fd::Handle(5),
+            A::Unknown,
+            Some(LockKind::ReadFull),
+            T::Fifo,
+            "0,15",
+            None,
+            Some(0),
+            "3757",
+            "pipe",
+        ),
+    ]);
+    let out = table::render(std::slice::from_ref(&p), TableOpts::new(Escaper::UNIX));
+    assert_eq!(
+        out,
+        "COMMAND PID USER FD   TYPE DEVICE SIZE/OFF    NODE NAME\n\
+         python3 496 root 1w   REG  254,0      436 1884511 /tmp/out\n\
+         python3 496 root 5-R FIFO   0,15      0t0    3757 pipe\n"
+    );
+}
+
+/// USER when there is no name to show — `-l`, or a UID no account has. The
+/// C prints the number with `printuid()`'s `"%*lu"`, eight wide, so the column
+/// is never narrower than that; and `-F` writes no `L` field for it, where it
+/// does for a name (DIVERGENCES 36). JSON keeps the number, as it always had.
+#[test]
+fn a_numeric_user_is_eight_wide_and_has_no_login_field() {
+    use lsof_core::{AccessMode as A, FdType as Fd, FileType as T};
+    let mut p = python3(vec![row(
+        Fd::Cwd,
+        A::Unknown,
+        None,
+        T::Dir,
+        "254,0",
+        Some(4096),
+        None,
+        "475157",
+        "/home/user/lsof",
+    )]);
+    p.user = None;
+    let out = table::render(std::slice::from_ref(&p), TableOpts::new(Escaper::UNIX));
+    assert_eq!(
+        out,
+        "COMMAND PID     USER  FD   TYPE DEVICE SIZE/OFF   NODE NAME\n\
+         python3 496        0 cwd    DIR  254,0     4096 475157 /home/user/lsof\n"
+    );
+    let only = ['p', 'L'];
+    let f = fields::render(
+        std::slice::from_ref(&p),
+        false,
+        Some(&only),
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
+    assert_eq!(f, "p496\n", "no L field for a number");
+    let j = json::render_lines(std::slice::from_ref(&p));
+    assert!(j.contains("\"user\":\"0\""), "{j}");
+}
+
+/// NLINK's cell is formatted `" %ld"` — with its leading space — before it is
+/// measured, so a five-digit count makes the column six wide. Measured on a
+/// directory holding 12343 subdirectories (12345 links).
+#[test]
+fn a_five_digit_link_count_widens_nlink_by_its_leading_space() {
+    use lsof_core::{AccessMode as A, FdType as Fd, FileType as T};
+    let mut cwd = row(
+        Fd::Cwd,
+        A::Unknown,
+        None,
+        T::Dir,
+        "254,0",
+        Some(245760),
+        None,
+        "1884285",
+        "/d",
+    );
+    cwd.links = Some(12345);
+    let mut txt = row(
+        Fd::Txt,
+        A::Unknown,
+        None,
+        T::Regular,
+        "254,0",
+        Some(35336),
+        None,
+        "151615",
+        "/usr/bin/sleep",
+    );
+    txt.links = Some(1);
+    let mut p = python3(vec![cwd, txt]);
+    p.command = "sleep".into();
+    p.pid = 7258;
+    let out = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            show_links: true,
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert_eq!(
+        out,
+        "COMMAND  PID USER  FD   TYPE DEVICE SIZE/OFF  NLINK    NODE NAME\n\
+         sleep   7258 root cwd    DIR  254,0   245760  12345 1884285 /d\n\
+         sleep   7258 root txt    REG  254,0    35336      1  151615 /usr/bin/sleep\n"
+    );
+}
+
+/// The `-T` separator goes on a row the C keeps a TCP/TPI record for — TCP,
+/// UDP and AF_UNIX — even when there is nothing after it, and on no other.
+/// A packet socket's NAME ended in a space the C does not print; comparing
+/// whitespace found it.
+#[test]
+fn only_tcp_udp_and_unix_rows_carry_the_dash_t_separator() {
+    use lsof_core::model::{SocketInfo, TcpState};
+    use lsof_core::{AccessMode as A, FdType as Fd, FileType as T, Protocol};
+    let sock = |fd: u64, ty: T, proto: Protocol, state: Option<TcpState>, name: &str| {
+        let mut f = row(
+            Fd::Handle(fd),
+            A::ReadWrite,
+            None,
+            ty,
+            "1",
+            None,
+            Some(0),
+            "x",
+            name,
+        );
+        f.socket = Some(Box::new(SocketInfo {
+            protocol: proto,
+            local: None,
+            remote: None,
+            state: state.map(Into::into),
+            tcp: None,
+        }));
+        f
+    };
+    let p = python3(vec![
+        sock(
+            3,
+            T::Other("pack".into()),
+            Protocol::Other("packet"),
+            None,
+            "type=SOCK_RAW",
+        ),
+        sock(
+            4,
+            T::Ipv4,
+            Protocol::Udp,
+            Some(TcpState::Close),
+            "127.0.0.1:1",
+        ),
+    ]);
+    let out = table::render(std::slice::from_ref(&p), TableOpts::new(Escaper::UNIX));
+    let rows: Vec<&str> = out.lines().skip(1).collect();
+    assert!(rows[0].ends_with("type=SOCK_RAW"), "{out:?}");
+    assert!(rows[1].ends_with("127.0.0.1:1 "), "{out:?}");
+}

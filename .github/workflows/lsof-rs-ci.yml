@@ -352,6 +352,13 @@ jobs:
           else
             echo "probe FAILED: fixture L will skip, and the harness will name its cases"
           fi
+      - name: differential harness self-test
+        # The harness's own switches, checked before it is trusted with a
+        # verdict — above all that every case compares its whitespace. Taking
+        # that default away fails no case: each would collapse its blanks and
+        # MATCH, which is how the table's layout went unchecked until
+        # DIVERGENCES 35 (porting-kit LESSONS #070). Only this step can see it.
+        run: python3 differential/linux_diff.py --self-test
       - name: differential vs the C oracle
         run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
       - name: resource gate (peak RSS and wall, under a load it creates)

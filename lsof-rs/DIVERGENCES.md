@@ -81,6 +81,88 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by laying the table out as `print.c` does (2026-09-26)
+
+Item 35, found by reading, and what comparing whitespace found once it could.
+Every table lsof-rs printed was laid out differently from the C's. The
+differential could not see it, because the kit runner collapses runs of blanks
+before it compares.
+
+`print.c` prints every column right-aligned (`" %*s"`) except COMMAND and
+TASKCMD, which `safestrprtn()` pads on the right, and NAME, which is not padded
+at all. lsof-rs right-aligned only the numbers. USER, FD, TYPE, DEVICE and NODE
+were left-aligned; the item had listed four of the five. The rest, all
+measured with `cat -A` against a process holding a listener, a locked file and
+a dozen pipe fds:
+
+```
+COMMAND PID USER  FD   TYPE             DEVICE SIZE/OFF    NODE NAME
+python3 496 root cwd    DIR              254,0     4096  475157 /home/user/lsof
+python3 496 root   0u  unix 0x00000000b83b321e      0t0     281 type=STREAM (CONNECTED)
+python3 496 root   4wW  REG              254,0        0 1884552 /tmp/…/locked.txt
+python3 496 root  18r  FIFO               0,15      0t0    3757 pipe
+```
+
+* **FD is two cells.** The descriptor is right-aligned in the width of the
+  longest one, followed by the access character and the lock character, both
+  always printed (a space when there is none). A lock with no access mode
+  shows `-` in the access place. The column is sized as `FdColW = max(2,
+  len(fd) + 2)`, and the title is printed in `FdColW - 2`. So when every
+  descriptor is one digit, as in any `-d 3` case, the `FD` title overruns its
+  field and the rest of the header sits one column right of the rows.
+* **NLINK** formats its cell as `" %ld"`, leading space included, before
+  measuring it. A five-digit count therefore makes the column six wide.
+  Measured on a directory with 12345 links.
+* **A numeric USER is eight wide.** Under `-l`, and for a UID with no
+  account, `printuid()` returns `"%*lu"` padded to `USERPRTL` (8). So the
+  column is `    USER` over `       0`. That is item 36's visible half: the C
+  also writes no `-F L` field for a number, where lsof-rs wrote `L0`.
+  `Process::user` now holds a login name only, and the renderers print the
+  number where there is none. JSON keeps it as the user, as before. The
+  `no pwd entry for UID N` line the C writes to stderr is not reproduced.
+* **The `-T` separator** goes only on a row the C keeps a TCP/TPI record for
+  (`Lf->lts.type >= 0`): TCP, UDP and AF_UNIX. lsof-rs ended every
+  packet-socket NAME with a space. This was the one case that still diverged
+  once the renderer was fixed and whitespace was compared.
+
+All of it is the shared renderer, so the Windows table changes the same way:
+USER, FD, TYPE, DEVICE and NODE right-aligned, and the access letter in its
+own fixed place. The smoke suite reads the COMMAND cell and matches content,
+not columns, so none of its assertions depend on the old spacing.
+
+### What the gate gained
+
+**Every case now compares its whitespace.** The kit runner takes a per-case
+`keep_whitespace` (porting-kit LESSONS #070), and `linux_diff.py` sets it on
+every case, so all 207 compare byte for byte. The harness's self-test checks
+that default and now runs in CI. Taking the default away fails no case, since
+every case would still match once its blanks were collapsed.
+
+Two new cases cover the one shape nothing else reached, USER as a number:
+`layout-numeric-user-is-eight-wide` and `fields-no-login-field-for-a-number`.
+
+Five goldens pin the measured layouts: the table above, the FD title overrun,
+the numeric USER, the five-digit NLINK, and the `-T` separator.
+
+Sixteen mutants, all killed, twelve of them by the differential. Four only by
+the goldens, because no fixture reaches them:
+* the `-` for a lock without an access mode;
+* an access letter on a named FD;
+* NLINK's leading space;
+* the JSON user for a number.
+
+The `-T` separator is killed locally by `packet-socket-row`. CI skips that
+fixture (no CAP_NET_RAW), so there the golden holds it.
+
+### What it found next to it
+
+The same byte-for-byte look found three differences in what the rows say,
+recorded as items 41–43 rather than folded in:
+* `-L` adds the NLINK column in lsof-rs and removes it in the C.
+* `+L` alone is refused, and `+L1` keeps rows whose link count was never
+  read.
+* A `-F` field list given as its own word is read as a file name.
+
 ## Fixed by reporting what could not be read (2026-09-25)
 
 Items 37 and "Inaccessible files are omitted", which sat under "Deliberate,
@@ -1675,12 +1757,15 @@ likely right; it is a compatibility decision, not a backend phase.
 | 32 | `-s TCP:<state>` is a **search item** (`TCP state not located: X`); an unknown state or protocol is fatal (`unknown TCP state name: X`, `unknown -s protocol: "x"`); and on Linux the TCP list tests every TCP **and UDP** socket by the kernel's number, UDP's being `CLOSE` or `ESTABLISHED`, and nothing else | ~~none of the three: any text accepted, the last `-s` kept, and `-sTCP:…` drops every non-TCP socket~~ **resolved 2026-09-25** | see "Fixed by making `-s` the C's state filter" above. This row had said a TCP filter "leaves UDP and unix sockets alone": **wrong about UDP**, which it filters, and corrected by measuring before the fix. The C's own defect is not copied: every `-s UDP:<state>` segfaults it (ledgered, `states-udp-names-crash-the-c`), and lsof-rs refuses the value. |
 | 33 | `-K` is a search item (`no tasks located`), and `-K -a -p <a single-threaded process>` lists **nothing** — the main process is entered as a task only when it has one of its own (`dproc.c`: `Fand && ht && pidts`) | lists the process's own rows and exits 0 | **OPEN — found 2026-09-25 by the item-21 audit.** The measurement behind `SelKinds::TASK`'s `-a` exemption was made on a multi-threaded process, where the two agree. Seen again 2026-09-25: `lsof -K -w -p P`, P multi-threaded and unreadable, prints nothing in both and exits **1** in the C — `-w` leaves no task a row, so no task is located. |
 | 34 | ~~option parsing stops at the first file name~~ | — | **a duplicate of item 12**, recorded 2026-09-25 by an audit that had not read the table it was adding to. Folded into 12, which now has the case this row said was missing. |
-| 35 | FD, TYPE, DEVICE and NODE are **right-aligned** in the table (`print.c`: `%*s`) | left-aligned | **OPEN — found 2026-09-25.** Invisible to the differential, whose normalization collapses whitespace; only a golden test can hold it. Shared renderer — changes Windows output. |
-| 36 | `-F L` for a UID with no password entry: no `L` field, and `lsof: no pwd entry for UID N` on stderr | prints `L<uid>` | **OPEN — found 2026-09-25.** |
+| 35 | every column is **right-aligned** but COMMAND and TASKCMD (`print.c`: `" %*s"`), FD is the descriptor right-aligned plus its access and lock characters, and NAME follows one space unpadded | ~~USER, FD, TYPE, DEVICE and NODE left-aligned~~ **resolved 2026-09-26** | see "Fixed by laying the table out as `print.c` does" above. The item named four of the five columns. Every case now compares whitespace, and that found one more difference, a space after every packet-socket NAME. |
+| 36 | a UID with no password entry, or any UID under `-l`: no `-F L` field, the number eight wide in USER, and `lsof: no pwd entry for UID N` on stderr | ~~prints `L<uid>`, and a bare number~~ **resolved 2026-09-26, but for the stderr line** | the table and `-F` now match (measured with UID 65000 and with `-l`). The C writes the stderr warning once per row it prints, unless `-w`; lsof-rs writes none. |
 | 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed — yet still located: `lsof -t -p 1` prints nothing on this host, and exits 0 | ~~the blank row, and `-t` prints the pid~~ **resolved 2026-09-25** | see "Fixed by reporting what could not be read" above. The fast path still skips the file walk; it asks whether one link reads. |
 | 38 | `-c /regex/`, and `-i` host names (`@localhost`) and service names (`:http`), which the C resolves | refused, with an error | **DEBT — recorded 2026-09-25.** Refusing replaced a silent wrong answer: `-c /re/` was a literal that matched nothing, and `-i:http` matched every Internet file. A regex engine is new attack surface; a resolver contradicts "No hostname or service resolution" below. |
 | 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. |
 | 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | stats the mapped file and prints `REG` | **DEBT — found 2026-09-25**, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it. The cwd/rtd/txt/fd half of `-e` has matched since 2026-09-20. |
+| 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | `-L` **shows** the column, and a bare `+L` is refused: `option +L requires a count`, or, followed by another option, `invalid +L count: -a` | **OPEN — found 2026-09-26** by the layout work. Lsof.8: "enables (`+`) or disables (`-`)". The Windows smoke case `link-count-dash-L` asserts lsof-rs's reading, so fixing it changes Windows too. |
+| 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). A socket's inode reports 1, so no socket is selected | a row whose count lsof-rs never read (every socket built from `/proc/net`) passes the filter | **OPEN — found 2026-09-26.** `lsof +L1 -a -p P` on a process holding two deleted files: the C lists those two, and lsof-rs lists them plus its unix socket. |
+| 43 | `-F` takes its field list as the **next word** too: `lsof -F pL -p P` prints `p` and `L` | reads `pL` as a file name: `status error on pL` | **OPEN — found 2026-09-26.** The same shape as `-s`'s and `-i`'s optional values, fixed for those two in DIVERGENCES 6 and 21. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of

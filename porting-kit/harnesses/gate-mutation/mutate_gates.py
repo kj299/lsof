@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
@@ -91,6 +91,15 @@ MUTATIONS = [
      "cmd": ["harnesses/differential/diff_run.py", "--self-test"]},
 
 
+
+    # A layout case asks for its spacing to be compared (LESSONS #070). If the
+    # key is ignored, every such case collapses its whitespace like any other
+    # and MATCHes whatever the alignment — the gate the key exists to be.
+    {"gate": "diff-keep-whitespace", "file": "harnesses/differential/diff_run.py",
+     "old": '    trim = not case.get("keep_whitespace", False)',
+     "new": "    trim = True",
+     "why": "keep_whitespace is ignored: a layout case MATCHes whatever the spacing",
+     "cmd": ["harnesses/differential/diff_run.py", "--self-test"]},
 
     {"gate": "diff_fuzz", "file": "harnesses/diff-fuzz/diff_fuzz.py",
      "old": '    return verdict in ("DIVERGE", "TIMEOUT")',

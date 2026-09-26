@@ -3235,3 +3235,43 @@ finding it is supposed to produce.
 - **Section amended:** harnesses/gate-mutation/mutate_gates.py;
   harnesses/gate-mutation/unpinned.jsonl; harnesses/lessons/check_lesson_refs.py
   · SCAN_EXTS; README.md · harness table.
+
+---
+
+## 070. The normalizer that made the differential usable was blind to the table's layout
+
+- **Date:** 2026-09-26
+- **Codebase:** lsof-rs (the shared table renderer, and its Linux differential)
+- **What happened:** the kit runner normalizes both outputs before comparing
+  them: masking rules, and runs of blanks collapsed with trailing ones
+  stripped. The collapse is what lets content be compared across two
+  formatters, and it hides every difference of layout. For as long as the
+  gate had existed, lsof-rs left-aligned USER, FD, TYPE, DEVICE and NODE where
+  the C right-aligns them. That is every line of every table it printed, and
+  205 cases matched through it. The gap was found by reading `print.c`
+  (DIVERGENCES 35), not by the gate.
+
+  With the renderer fixed, comparing whitespace in every case showed 204 of
+  205 byte-identical. The last was a real bug the collapse had hidden: every
+  packet-socket NAME ended in a space the C does not print. The same
+  byte-for-byte look found three further differences in the rows themselves.
+  `-L` adds the NLINK column in lsof-rs and removes it in the C. `+L` alone
+  is refused. `-l` printed the UID where the C prints it eight wide and
+  writes no `-F L` for it.
+- **The rule.** Normalize what varies between runs, and nothing else. For a
+  tool whose output is a table, spacing is output, so once the port matches,
+  compare it byte for byte and give only a case that needs it the old
+  collapse. Test the switch that makes the comparison strict separately:
+  taking it away fails no case, because every case goes back to matching
+  after the collapse.
+- **Kit change:** `harnesses/differential/diff_run.py` takes a per-case
+  `keep_whitespace = true`, which compares that case's output with its
+  spacing intact. The self-test shows spacing matching without it and
+  diverging with it, and refuses a non-boolean value. A `mutate_gates.py` row
+  makes the key's removal a survivor. PLAYBOOK Phase 2 says to normalize only
+  what varies. lsof-rs's `differential/linux_diff.py` sets the key on every
+  case, its self-test checks that default, and CI runs that self-test.
+- **Section amended:** PLAYBOOK · Phase 2;
+  `harnesses/differential/diff_run.py`;
+  `harnesses/gate-mutation/mutate_gates.py`.
+
