@@ -26,7 +26,6 @@ import sys
 # A referenced kit path: porting-kit/<something with an extension or a dir>.
 # Skip placeholders (<...>, *) and trailing punctuation/backticks.
 PATH_RE = re.compile(r"porting-kit/[A-Za-z0-9_./-]+")
-PLACEHOLDER = re.compile(r"[<>*`]")
 
 
 def parse_frontmatter(text):
@@ -62,11 +61,13 @@ def check_skill(skill_dir, kit_root):
         if not fm.get("description"):
             problems.append(f"{name}: frontmatter missing `description`")
 
-    # Every referenced kit path must exist.
+    # Every referenced kit path must exist. A placeholder such as
+    # `porting-kit/harnesses/<name>.py` is read only up to the `<` — PATH_RE
+    # stops there — so it checks the directory, which must exist. (A skip for
+    # placeholders stood here and could never fire: PATH_RE cannot match the
+    # characters it looked for. LESSONS #069/#071's decision sweep found it.)
     for m in dict.fromkeys(PATH_RE.findall(text)):  # dedupe, keep order
         rel = m[len("porting-kit/"):].rstrip(".,);:")
-        if not rel or PLACEHOLDER.search(m):
-            continue
         if not os.path.exists(os.path.join(kit_root, rel)):
             problems.append(f"{name}: references missing kit path '{m}'")
     return problems
@@ -132,6 +133,23 @@ def _self_test():
               run(skills) == 1)
         shutil.rmtree(path_bad)
         check("...and removing that restores green too", run(skills) == 0)
+
+        # The same rule for every other check (LESSONS #069/#071's decision sweep
+        # found each of these unreached: a missing description passed outright).
+        bad = os.path.join(skills, "bad-skill"); os.makedirs(bad)
+        for label, body in [
+                ("no frontmatter", "no frontmatter here\n"),
+                ("frontmatter without `name`", "---\ndescription: d\n---\n"),
+                ("frontmatter without `description`", "---\nname: bad-skill\n---\n")]:
+            open(os.path.join(bad, "SKILL.md"), "w").write(body)
+            check(f"{label} ALONE is caught", run(skills) == 1)
+        os.remove(os.path.join(bad, "SKILL.md"))
+        check("a skill directory with no SKILL.md is caught", run(skills) == 1)
+        open(os.path.join(bad, "SKILL.md"), "w").write(
+            "---\nname: bad-skill\ndescription: d\n---\n"
+            "see porting-kit/harnesses/<name>.py and porting-kit/.\n")
+        check("a placeholder path is read up to the placeholder, and passes",
+              run(skills) == 0)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

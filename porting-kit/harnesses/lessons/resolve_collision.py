@@ -45,7 +45,9 @@ shifts), auto-detected from the merge or cherry-pick in progress:
 
 Every refusal is exit 1 and writes nothing: an ambiguous line, a split range,
 an edit conflict inside the shared entries, a non-contiguous block on either
-side, or a conflict marker left in any other file.
+side, or a conflict marker left in another file that cites a moved number. (A
+conflicted file that cites none is the merge's business, not the renumber's:
+it is left alone and does not block it.)
 
 Usage:
   resolve_collision.py [--base REV] [--ours REV] [--theirs REV]
@@ -983,6 +985,139 @@ def _self_test():
         check("a fork entry absent from KEEP is ORPHANED: its citation is reviewed, not rewritten",
               msg is None and plan.orphaned == [3] and 3 not in plan.mapping
               and any("'#003'" in x for x in plan.review))
+
+    # --- shapes no fixture above reached (LESSONS #069/#071's decision sweep) --
+    # A kit at the repository root: main() passes kit_rel ".", and the log is
+    # then `LESSONS.md`, not `./LESSONS.md`, which the file walk would take for
+    # another file and refuse for its conflict markers.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = repo(tmp)
+        w(r, "LESSONS.md", BASE_LOG)
+        commit(g, "base")
+        g("branch", "keep")
+        g("branch", "move")
+        g("checkout", "-q", "keep")
+        w(r, "LESSONS.md", KEEP, append=True)
+        commit(g, "keep")
+        g("checkout", "-q", "move")
+        w(r, "LESSONS.md", MOVE, append=True)   # its block cites its own entries
+        w(r, "mdoc.md", "cites LESSONS #003.\n")
+        commit(g, "move")
+        g("merge", "--no-edit", "keep", ok=False)
+        try:
+            plan, msg = build_plan(r, ".", *detect_sides(r)), None
+        except Refuse as e:
+            plan, msg = None, str(e)
+        check("a kit at the repository root (kit path '.') is planned like any other",
+              msg is None and plan.mapping == {3: 4, 4: 5, 5: 6}
+              and [c[0] for c in plan.file_changes] == ["mdoc.md"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        head = g("rev-parse", "HEAD").stdout.strip()
+        try:
+            build_plan(r, "nokit", head, head, head)
+            msg = None
+        except Refuse as e:
+            msg = str(e)
+        check("a log missing at a revision is refused, naming the side",
+              msg is not None and "does not exist at base" in msg)
+
+    # KEEP's bytes, when the shared entries merge to KEEP's own: a joint KEEP
+    # wrote its own way (two blank lines before its separator) is kept as
+    # written, not rebuilt in the tool's style.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        collide(r, g, "\n\n---\n\n## 003. Keep three\n\nkeep body\n",
+                "\n## 003. Move three\n\nmove body\n")
+        keep_log = g("show", "keep:kit/LESSONS.md").stdout
+        plan, msg = try_plan(r)
+        check("KEEP's log comes through byte for byte, its own joint included",
+              msg is None and plan.new_lessons.startswith(keep_log)
+              and plan.new_lessons.endswith("\n\n## 004. Move three\n\nmove body\n"))
+
+    # No block on a side adds nothing for it: no joint, no blank line.
+    for keep_adds in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, g = fork(tmp)
+            base = g("rev-parse", "HEAD").stdout.strip()
+            g("checkout", "-q", "keep")
+            if keep_adds:
+                w(r, "kit/LESSONS.md", KEEP, append=True)
+            w(r, "kdoc.md", "keep\n")
+            commit(g, "keep")
+            keep = g("rev-parse", "HEAD").stdout.strip()
+            g("checkout", "-q", "move")
+            w(r, "mdoc.md", "move\n")
+            commit(g, "move")
+            move = g("rev-parse", "HEAD").stdout.strip()
+            plan = build_plan(r, "kit", base, keep, move)
+            want = BASE_LOG + (KEEP if keep_adds else "")
+            check("with no block appended on the moving side"
+                  + (" (KEEP appends one)" if keep_adds else " or the kept one")
+                  + ", the log is KEEP's exactly", plan.new_lessons == want)
+
+    # ...and when the prefix is REBUILT (MOVE amended a shared entry), the joint
+    # is KEEP's style: no separator where KEEP wrote none.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        g("checkout", "-q", "keep")
+        w(r, "kit/LESSONS.md", KEEP, append=True)
+        commit(g, "keep")
+        g("checkout", "-q", "move")
+        w(r, "kit/LESSONS.md", read(r, "kit/LESSONS.md").replace(
+            "body one\n", "body one\n  a follow-up\n") + "\n## 003. Move three\n\nmove body\n")
+        commit(g, "move")
+        g("merge", "--no-edit", "keep", ok=False)
+        plan, msg = try_plan(r)
+        check("a rebuilt prefix joins KEEP's block the way KEEP does: no `---` it never wrote",
+              msg is None and "a follow-up" in plan.new_lessons
+              and "## 003. Keep three" in plan.new_lessons and "---" not in plan.new_lessons)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        collide(r, g, KEEP, "\n## 003. Move three\n\nmove body")
+        plan, msg = try_plan(r)
+        check("a moved block with no final newline still ends the log with one",
+              msg is None and plan.new_lessons.endswith("## 004. Move three\n\nmove body\n"))
+
+    # An ORPHANED number is reviewed wherever the moving side cites it: in an
+    # old entry and in another file, not only in its own appended block.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        g("checkout", "-q", "move")
+        w(r, "kit/LESSONS.md", "\n## 003. Gone lesson\n\nnever landed\n", append=True)
+        commit(g, "gone")
+        w(r, "kit/LESSONS.md", read(r, "kit/LESSONS.md").replace(
+            "body one\n", "body one\n  see also LESSONS #003\n"))
+        w(r, "kit/LESSONS.md", "\n## 004. C lesson\n\nC body\n", append=True)
+        w(r, "odoc.md", "cites LESSONS #003.\n")
+        commit(g, "C")
+        g("checkout", "-q", "main")
+        w(r, "kit/LESSONS.md", "\n## 003. M lesson\n\nlanded first, and different\n",
+          append=True)
+        commit(g, "main")
+        g("cherry-pick", "move", ok=False)
+        plan, msg = try_plan(r)
+        check("an orphaned number is reviewed in an old entry and in another file too",
+              msg is None and plan.orphaned == [3] and plan.mapping == {}
+              and any(x.startswith("odoc.md:1:") for x in plan.review)
+              and any("see also LESSONS #003" in x for x in plan.review))
+
+    # A conflicted file that cites no moved number is the merge's to finish,
+    # and must not block the renumber.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        collide(r, g, KEEP, "\n## 003. Move three\n\nmove body\n",
+                keep_files=[("notes.md", "keep: see issue #7\n")],
+                move_files=[("notes.md", "move: see issue #8\n")])
+        conflicted = "<<<<<<<" in read(r, "notes.md")
+        plan, msg = try_plan(r)
+        check("a conflict in a file citing no moved number does not block the renumber",
+              conflicted and msg is None and plan.mapping == {3: 4})
+
+    check("a line already there at the fork is KEEP's, even when MOVE has it too",
+          provenance("x", {"x"}, {"x"}, {"x"}) == "keep")
 
     # --- widths: `#9` -> `#10` grows the text under the edit after it --------
     check("a replacement wider than its original does not corrupt the next edit",

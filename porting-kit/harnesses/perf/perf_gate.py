@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# KIT-IMPORT: from the c2rust-port lineage of this kit. No LESSONS citations.
+# KIT-IMPORT: from the c2rust-port lineage of this kit.
+# Re-cited: #48->#069, #50->#071.
 """Performance gate — a Rust port that is far slower than the C is a *specific
 bug*, not "the cost of Rust": a needless copy, a missed `--release` build, bounds
 checks in a hot loop, an accidental O(n^2). This gate measures the Rust rewrite
@@ -172,6 +173,13 @@ def _self_test():
         res = measure(fast, hang, [{"name": "h", "args": [], "timeout": 0.3}],
                       repeats=1, threshold=1.3, floor_ms=3)
         check("rust timeout → TIMEOUT (a hang is not 'slow')", res[0]["verdict"] == "TIMEOUT")
+        # ...and an ORACLE timeout too. Its median is the timeout itself, so a
+        # fast Rust looks fast beside it and would read OK. Only the Rust side
+        # was pinned; LESSONS #069/#071's decision sweep forced `o_to` off unnoticed.
+        res = measure(hang, fast, [{"name": "h", "args": [], "timeout": 0.3}],
+                      repeats=1, threshold=1.3, floor_ms=3)
+        check("oracle timeout → TIMEOUT (a hung C is not a fast Rust)",
+              res[0]["verdict"] == "TIMEOUT")
 
         # spawn-dominated case is UNMEASURABLE, not a false OK
         res = measure(tiny, tiny, matrix, repeats=3, threshold=1.3, floor_ms=50)

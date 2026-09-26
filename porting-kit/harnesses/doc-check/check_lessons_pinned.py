@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #6->#036, #13->#033, #14->#037, #18->#039, #19->#040;
-#          #26 by title (no entry in this log).
+# Re-cited: #6->#036, #13->#033, #14->#037, #18->#039, #19->#040,
+#          #48->#069, #50->#071; #26 by title (no entry in this log).
 # Local: #047, #058, #060 (the use-vs-mention rule; this kit's own first run of
 #          it; and what that run's fix left open).
 """Lessons-pinned check — the smoke tests must track the lessons. Every LESSONS
@@ -258,6 +258,23 @@ def _self_test():
             "- **Kit change:** ...\n"
             "- **Section amended:** harnesses/x/good.py (self-test); PLAYBOOK · X.\n")
         check("cited lesson→harness link passes", run(root) == 0)
+        # The summary's counters are how a skip stays visible (the docstring's
+        # "a skip counter is where a gate hides"): none here, all three at the
+        # end. LESSONS #069/#071's decision sweep found every one unpinned.
+        import contextlib
+        import io
+
+        def said(*args):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = run(*args)
+            return rc, buf.getvalue()
+        rc, out = said(root)
+        check("a run with nothing skipped shows no skip counters",
+              rc == 0 and "aged" not in out and "outside the kit" not in out
+              and "source lineage" not in out)
+        with tempfile.TemporaryDirectory() as bare:
+            check("a kit with no LESSONS.md fails", run(bare) == 1)
 
         # a second lesson amends a file that does NOT cite it → fail
         bad = os.path.join(root, "harnesses", "x", "bad.sh")
@@ -269,6 +286,9 @@ def _self_test():
         # citing the WRONG number must not satisfy the link
         open(bad, "w").write(f"#!/bin/sh\n# (LESSONS #{F7}) wrong entry\n")
         check("citing a different lesson number still fails", run(root) == 1)
+        open(bad, "w").write(f"#!/bin/sh\n# fixed in PR #{F8}\n")
+        check("a bare #N with no `LESSONS` on the line is not a citation",
+              run(root) == 1)
         open(bad, "w").write(f"#!/bin/sh\n# pinned (LESSONS #{F8})\n")
         check("correct citation clears it", run(root) == 0)
 
@@ -402,6 +422,12 @@ def _self_test():
             open(wf, "w").write(f"name: ci\n# pinned (LESSONS #{F15})\njobs: {{}}\n")
             check("citing it in the host file clears the link",
                   run(root, [hostdir]) == 0)
+            rc, out = said(root, [hostdir])
+            check("the summary counts the aged path, the host link and the "
+                  "source-lineage paths",
+                  "(1 aged path(s) skipped)" in out
+                  and "1 resolved outside the kit" in out
+                  and "attributed to the source lineage" in out)
             # a mistyped root must be loud, not a silent return to the fail-open
             check("a mistyped --also-scan fails rather than scanning nothing",
                   run(root, [os.path.join(hostdir, "no-such-dir")]) == 1)

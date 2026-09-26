@@ -303,6 +303,12 @@ def run(kit_root, also=()):
             f"LESSONS.md:{line}: {head!r} looks like an entry heading but is "
             f"not `## NNN.` — it would be invisible to this checker")
 
+    # 0-of-0: a log with no entries this checker can read, and nothing citing
+    # it, used to report a clean run over nothing (LESSONS #069/#071's sweep, forcing
+    # the guard below, is what reached this case at all).
+    if not nums:
+        problems.append("LESSONS.md: no `## NNN.` entries — nothing to check "
+                        "citations against")
     if nums:
         expected = list(range(1, max(nums) + 1))
         for n in expected:
@@ -542,6 +548,20 @@ def _self_test():
         repo, kit = repo_fixture(stack)
         check("a mistyped --also-scan fails loudly rather than scanning nothing",
               run(kit, [os.path.join(repo, "no-such-dir")]) == 1)
+
+    # "...and is caught with it" above passes just as well if every --also-scan
+    # is refused, so a clean one must pass (LESSONS #069/#071's decision sweep).
+    with contextlib.ExitStack() as stack:
+        repo, kit = repo_fixture(stack)
+        open(os.path.join(repo, "ci", "build.yml"), "w").write("# gate (LESSONS #1)\n")
+        check("a clean --also-scan passes: it scans, it does not just refuse",
+              run(kit, [repo]) == 0)
+
+    with tempfile.TemporaryDirectory() as root:
+        check("a kit with no LESSONS.md fails", run(root) == 1)
+        open(os.path.join(root, "LESSONS.md"), "w").write("# LESSONS\n\nnothing yet\n")
+        check("a log with no entries fails: a clean run over nothing is not clean",
+              run(root) == 1)
 
     check("single root still reports paths relative to itself",
           report_base(["/a/b"]) == "/a/b")

@@ -518,6 +518,26 @@ def _self_test():
     chk("the mapping bullet does not launder a stray body number",
         any("#18" in p for p in probs))
 
+    # Three more outcomes, each reached by no fixture until LESSONS #069/#071's
+    # decision sweep: a bullet that maps nothing, a `by title` mapping that is
+    # honest, and a number that is not an entry at all. Each body cites
+    # nothing, so no other check can answer for them (LESSONS #050).
+    for label, bullet, want in [
+            ("a `Re-cited` bullet with no parseable mapping is refused",
+             "the numbers were all re-cited", "no parseable mapping"),
+            ("a re-cite to a number that is not an entry is refused",
+             'source #6 -> #099 "Gates fail open on nothing ran"',
+             "not an entry in this log"),
+            ("an honest `by title` mapping (no such entry here) passes",
+             'source #6 -> by title "A lesson this log never had"', None)]:
+        n, probs = run(base + (
+            "## 041. Something\n\n"
+            "- **Imported:** from the c2rust-port lineage, where it is #008.\n"
+            f"- **Re-cited:** {bullet}\n"
+            "- **What happened:** body.\n\n---\n"))
+        chk(label, (n, probs) == (1, []) if want is None
+            else (len(probs) == 1 and want in probs[0]))
+
     # ---- imported FILES (KIT-IMPORT markers) -------------------------------
     def run_files(files, md=base):
         with tempfile.TemporaryDirectory() as td:

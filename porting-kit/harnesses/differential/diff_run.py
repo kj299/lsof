@@ -2,7 +2,8 @@
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Local: #070.
 # Re-cited: #1->#001, #4->#004, #6->#036, #8->#043, #9->#044, #11->#045,
-#          #14->#037; #36 by title (no entry in this log).
+#          #14->#037, #16->#050, #48->#069, #50->#071; #36 by title (no
+#          entry in this log).
 """Differential harness — run the C oracle and the Rust rewrite over the same
 input matrix, normalize both, and diff. Divergences are *triaged*, not blindly
 failed: the C may itself be buggy (the prime directive), so a difference is a
@@ -462,6 +463,23 @@ def _self_test():
     diff_case = [{"name": "diverging", "args": ["%s", "hi"]}]
     res = compare(echo, printf, diff_case, ledger=None, sort=False, mask_numbers=False)
     check("different output → DIVERGE", res[0]["verdict"] == "DIVERGE")
+    # The report's shape is read by other tools: diff_fuzz buckets findings by
+    # `fingerprint_full`, and the fingerprint hashes note + body, so what goes
+    # INTO it decides what a ledger pin accepts. LESSONS #069/#071's decision sweep
+    # found each of these unpinned — stdout could drop out of the fingerprint.
+    div = res[0]
+    ddiff = div["diff"] or ""
+    check("a DIVERGE carries its fingerprint, short and full",
+          bool(div["fingerprint"] and div["fingerprint_full"]
+               and div["fingerprint_full"].startswith(div["fingerprint"])))
+    check("a DIVERGE's diff (and so its fingerprint) includes the stdout diff",
+          "--- oracle:diverging" in ddiff)
+    check("...and no note for a timeout or an exit code that did not happen",
+          bool(ddiff) and "timed out" not in ddiff and "exit code differs" not in ddiff)
+    ok_res = compare(echo, echo, same, ledger=None, sort=False, mask_numbers=False)[0]
+    check("a MATCH carries no fingerprint and no diff",
+          ok_res["fingerprint"] is None and ok_res["fingerprint_full"] is None
+          and ok_res["diff"] is None)
 
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write("- [x] diverging: printf drops the trailing newline; intentional\n")
@@ -475,6 +493,7 @@ def _self_test():
     open(ledger_path, "w").write(f"- [x] diverging [sha256:{fp}]: printf drops the newline\n")
     res = compare(echo, printf, diff_case, ledger=ledger_path, sort=False, mask_numbers=False)
     check("pinned fingerprint matches → suppressed", res[0]["verdict"] == "DIVERGE(ledgered)")
+    check("...and the report says it is pinned", res[0]["pinned"] is True)
     # ...and re-fails when the divergence changes shape (stale pin ≠ observed)
     open(ledger_path, "w").write("- [x] diverging [sha256:000000000000]: stale acceptance\n")
     res = compare(echo, printf, diff_case, ledger=ledger_path, sort=False, mask_numbers=False)
@@ -564,6 +583,15 @@ def _self_test():
         check("ledger cannot excuse a rust-side hang", res[0]["verdict"] == "TIMEOUT")
         res = compare(slow, fast, tc, ledger=None, sort=False, mask_numbers=False)
         check("oracle-only hang → DIVERGE (triaged, ledgerable)", res[0]["verdict"] == "DIVERGE")
+        # The note names the side that hung; it is part of the fingerprint an
+        # oracle-only hang is ledgered under (unpinned until LESSONS #069/#071's
+        # sweep).
+        says = lambda o, r: compare(o, r, tc, ledger=None, sort=False,
+                                    mask_numbers=False)[0]["diff"] or ""
+        check("the timeout note names the side that hung: both",
+              "timed out: both" in says(slow, slow))
+        check("...rust", "timed out: rust" in says(fast, slow))
+        check("...oracle", "timed out: oracle" in says(slow, fast))
 
     # Whitespace: collapsed by default, which is what makes a layout difference
     # invisible; compared as it stands for a case that sets `keep_whitespace`.
@@ -598,6 +626,21 @@ def _self_test():
         res = compare(o, r, sc, ledger=None, sort=False, mask_numbers=False, with_stderr=True)
         check("--with-stderr catches stderr drift → DIVERGE",
               res[0]["verdict"] == "DIVERGE" and "stderr" in (res[0]["diff"] or ""))
+        res = compare(o, o, sc, ledger=None, sort=False, mask_numbers=False, with_stderr=True)
+        check("--with-stderr on identical stderr → MATCH", res[0]["verdict"] == "MATCH")
+
+    # Case names become corpus file names. Each rejection alone (LESSONS #050):
+    # none but the separator was reached until LESSONS #069/#071's decision sweep.
+    with tempfile.TemporaryDirectory() as d:
+        for label, name in [("an empty name", ""), ("a non-string name", 7),
+                            ("`..` as a name", ".."), ("`.` as a name", ".")]:
+            bad = os.path.join(d, "n.json")
+            open(bad, "w").write(json.dumps([{"name": name, "args": []}]))
+            check(f"{label} is refused", _exits(lambda: load_matrix(bad)))
+        good = os.path.join(d, "g.json")
+        open(good, "w").write('[{"name": "plain", "args": [], "stdin": "x"}]')
+        check("a plain case with `stdin` (and no `stdin_b64`) loads",
+              [c["name"] for c in load_matrix(good)] == ["plain"])
 
     # hostile case names must be rejected, not become corpus file paths
     with tempfile.TemporaryDirectory() as d:

@@ -453,6 +453,26 @@ def self_test() -> int:
         check("gate exits 1 on uncovered", rc == 1)
         rc = run_gate(inv, mat, warn=True, as_json=False)
         check("--warn exits 0", rc == 0)
+        # --json is the report a tool reads, text is the one a person reads, and
+        # each was only ever asked for its exit code (LESSONS #069/#071's sweep).
+        import contextlib
+        import io
+        for as_json in (True, False):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                run_gate(inv, mat, warn=True, as_json=as_json)
+            out = buf.getvalue()
+            if as_json:
+                try:
+                    rep = json.loads(out)
+                except ValueError:
+                    rep = {}
+                check("--json prints the report as JSON, uncovered ids and all",
+                      rep.get("uncovered") == ["type:KEY"]
+                      and rep.get("required") == len(required))
+            else:
+                check("the text report names each uncovered id, and is not JSON",
+                      "UNCOVERED type:KEY" in out and not out.lstrip().startswith("{"))
 
         # a waive without a reason must be an infra error (exit 2 via sys.exit)
         bad = os.path.join(td, "bad.json")

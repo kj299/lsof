@@ -3275,3 +3275,88 @@ finding it is supposed to produce.
   `harnesses/differential/diff_run.py`;
   `harnesses/gate-mutation/mutate_gates.py`.
 
+---
+
+## 071. This ledger held fail-opens as well, and the worst was one the primary's copy could not have
+
+- **Date:** 2026-09-26
+- **Codebase:** the Porting Kit vendored here. It triages #069's decision
+  ledger line by line, after the primary line triaged its own (its entry 50).
+- **What happened:** #069 took in 204 unpinned decisions as a dated baseline
+  and read two of them. For each one now there is either a fixture that fails
+  under its mutant or a reason it stays. Of the 204, 137 are pinned (one by
+  #070's fixtures, one by the resolver's conflict-marker fixture, the rest
+  here) and 6 went with code that changed. The 61 left, and one added since,
+  give reasons of the kinds the ledger header now defines: 36 equivalent, 26
+  report. None is a verdict, an exit code or a field another tool reads.
+
+  First the primary's fixtures and fixes were brought across, 3-way merged
+  onto this copy's divergent files with the primary's pre-triage text as the
+  base. That pinned 88 lines here at once: the normalizer, diff_run's
+  fingerprint, lessons-pinned's counters and a bare `#N`, check_skills' dead
+  placeholder skip and missing description, the threat model's length check,
+  control-coverage's empty-first-cell row, forbid-unsafe's comment close,
+  probe's exit-code drift and lesson-refs' 0-of-0. Four of the primary's files
+  had nothing to land on: this copy's golden.py predates exit-code sidecars,
+  its progress.py has no report ingest, and lib_diff and sanitize_oracle are
+  not vendored.
+
+- **The form feed failed OPEN here.** The unsafe audit split lines where
+  rustc does not, as the primary's did. There the symptom was a block judged
+  by the wrong line's text. Here, the audit accepts only a SAFETY comment
+  ABOVE a block (#007), and one `\f` moved every later line up by one. The
+  upward scan then skipped the line directly above a block and read the one
+  above that. The block after a documented block was credited with its
+  neighbour's comment, and the documented block itself was flagged. So an
+  undocumented `unsafe` passed the gate. The C scanner had the same split
+  between two passes. Its line-based rules put a hit one line late, while
+  the format-string pass, which counts "\n", did not.
+
+- **This copy's own harnesses:**
+  - **the scanner**: routing every rule through the literal-keeping text
+    loses a real `malloc(n * strlen(";"))`, because the `;` ends
+    `[^;)]*`. The alloca rule had no fixture at all.
+  - **golden**: forced off, the `missing` count let replay pass a case that
+    has no golden.
+  - **check_ledgers and coverage_gate**: CI runs the text report. Every
+    fixture asked for JSON and read only the exit code, so neither the report
+    CI prints nor the JSON a tool reads was checked.
+  - **check_platforms**: a one-string `dirs`, a manifest missing `dirs` or
+    `globs`, and both repo defaults without `--repo` were each reached by
+    nothing. Forced, they crash or read the wrong tree.
+  - **check_imports**: a Re-cited bullet that maps nothing, a re-cite to a
+    number that is not an entry, and an honest `by title` mapping.
+  - **the resolver** (17 lines): the kit-at-root path (`kit_rel` "."), which
+    is the primary's layout. Also KEEP's bytes kept verbatim, a side with no
+    block, a log with no final newline, an orphaned number cited outside its
+    block, and the provenance rule that a fork line is KEEP's. Its docstring
+    promised to refuse a conflict marker in ANY other file. The code refuses
+    one only in a file that cites a moved number, and that is the right
+    design. The docstring now says so, and a fixture holds it: a conflict in
+    an unrelated file does not block the renumber.
+
+- **Behaviour changed, each with a fixture that fails on the old code:** the
+  audit and the scanner split on "\n" only. From the primary: lesson-refs
+  fails a log with no entries, control-coverage reports a row with an empty
+  first cell, and check_skills loses its dead skip.
+- **Found, not fixed:** this copy's golden.py ignores exit codes and treats a
+  hang as output (#004's shape). No gate here runs it except its own
+  self-test, so it is recorded rather than rebuilt.
+- **Kit change:** fixtures in eighteen harnesses' self-tests, each seen failing
+  under its mutant (or crashing, which the sweep counts); the behaviour changes
+  above; the ledger at 62 lines with a header that defines the three kinds;
+  KIT-IMPORT headers re-cite the primary's entries 48 and 50 as #069 and #071.
+- **Section amended:** harnesses/unsafe-audit/audit_unsafe.py;
+  harnesses/c-flaw-scan/scan_c_flaws.py; harnesses/differential/normalize.py;
+  harnesses/differential/diff_run.py; harnesses/golden/golden.py;
+  harnesses/probe/probe.py; harnesses/perf/perf_gate.py;
+  harnesses/lessons/check_lesson_refs.py;
+  harnesses/lessons/check_imports.py;
+  harnesses/lessons/resolve_collision.py;
+  harnesses/doc-check/check_lessons_pinned.py;
+  harnesses/control-coverage/check_controls.py;
+  harnesses/threat-model/check_threat_model.py;
+  harnesses/unsafe-audit/check_forbid_unsafe.py;
+  harnesses/coverage/coverage_gate.py; harnesses/ledgers/check_ledgers.py;
+  harnesses/platforms/check_platforms.py; skills/check_skills.py;
+  harnesses/gate-mutation/unpinned.jsonl.

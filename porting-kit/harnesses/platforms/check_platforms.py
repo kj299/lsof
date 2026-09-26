@@ -362,6 +362,42 @@ def _self_test():
     with tempfile.TemporaryDirectory() as t:
         check("a missing manifest fails", run(os.path.join(t, "nope.toml"), t) == 1)
 
+    # --- manifest shapes the docstring allows, and none of the fixtures above
+    # used (LESSONS #069/#071's decision sweep reached none of them) ---------
+    import contextlib
+    import io
+
+    def said(*args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run(*args)
+        return rc, buf.getvalue()
+
+    with tempfile.TemporaryDirectory() as t:
+        m = build(t, ["linux"], {"gh.yml": "run: ./Configure linux\n"},
+                  '[platforms.linux]\nbuilt_by = ["Configure linux"]\n')
+        body = open(m).read()
+        open(m, "w").write(body.replace('dirs = ["dialects/*"]', 'dirs = "dialects/*"'))
+        check("`dirs` given as one string works as a one-item list", run(m, t) == 0)
+        open(m, "w").write(body.replace('dirs = ["dialects/*"]\n', ""))
+        rc, out = said(m, t)
+        check("a manifest with no `dirs` discovers nothing, and fails saying so",
+              rc == 1 and "discovered no platforms" in out)
+        open(m, "w").write(body.replace('globs = ["ci/*.yml"]\n', ""))
+        rc, out = said(m, t)
+        check("a manifest with no CI `globs` finds no CI config, and fails saying so",
+              rc == 1 and "found no CI configuration" in out)
+        # Without --repo: the manifest's repo_root, relative to the manifest...
+        open(m, "w").write('repo_root = "."\n' + body)
+        check("repo_root is read relative to the manifest when --repo is omitted",
+              run(m) == 0)
+        # ...and without that either, the kit's parent: the host repo.
+        open(m, "w").write(body.replace("dialects/*", "no-such-dir-for-this-test/*"))
+        rc, out = said(m)
+        check("with no --repo and no repo_root, the kit's parent is the repo",
+              rc == 1 and f"under {os.path.dirname(os.path.dirname(_HERE))} via"
+              in out)
+
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

@@ -252,7 +252,9 @@ def scan_text(src):
     hits = []
     char_names = _char_decls(src)
     in_block = False
-    for lineno, line in enumerate(src.splitlines(), 1):
+    # Lines are what "\n" ends, as the format-string pass counts them and as an
+    # editor numbers them: splitlines() also breaks on a form feed (LESSONS #071).
+    for lineno, line in enumerate(src.split("\n"), 1):
         stripped = line.strip()
         # `in_block` carries across lines, so a comment opened on a code line
         # blanks its continuation lines too — the case the old `startswith`
@@ -449,6 +451,26 @@ def _self_test():
     lines = sorted(h["line"] for h in scan_text(sc) if h["category"] == "unbounded-copy")
     check("scanf/fscanf/sscanf(\"%s\") are ALL flagged; the literal and the "
           "comments are not", lines == [2, 3, 4])
+
+    # A form feed (a page break, common in old C) is not a line. splitlines()
+    # broke on it, so every line-based hit after one was a line late, while the
+    # format-string pass, which counts "\n", was not (LESSONS #069/#071).
+    ff = scan_text("int a;\x0cint b;\nvoid f(char *d, char *s) {\n"
+                   "  strcpy(d, s);\n  printf(d);\n}\n")
+    check("after a form feed, every hit is on its own line, whichever pass found it",
+          [(h["line"], h["category"]) for h in ff]
+          == [(3, "unbounded-copy"), (4, "format-string")])
+
+    # Only scanf reads the literal-keeping text. Sent through it, the other
+    # rules see literal contents: a `;` in a string argument ends malloc's
+    # `[^;)]*` early, and a real multiplication goes unreported. And alloca,
+    # a rule of its own, had no fixture at all (LESSONS #069/#071's sweep).
+    mul = 'void m(int n) { char *p = malloc(n * strlen(";")); }\n'
+    check("a malloc multiplication is flagged even with a `;` in a string argument",
+          [h["category"] for h in scan_text(mul)] == ["int-overflow-mul"])
+    check("alloca is flagged",
+          [h["category"] for h in scan_text("void g(int n) { char *b = alloca(n); }\n")]
+          == ["stack-vla-alloca"])
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# KIT-IMPORT: from the c2rust-port lineage of this kit. No LESSONS citations.
+# KIT-IMPORT: from the c2rust-port lineage of this kit.
+# Re-cited: #48->#069, #50->#071.
 """Output normalization for differential testing — importable + CLI.
 
 The C oracle and the Rust rewrite will differ in *nondeterministic* ways that are
@@ -125,6 +126,24 @@ def _self_test():
     # sort makes order-independent
     check("sort canonicalizes order",
           normalize_text("b\na", sort=True) == normalize_text("a\nb", sort=True))
+    # Every option masks something, so each must mask ONLY when asked — forced
+    # on, it hides a real difference in every comparison. LESSONS #069/#071's
+    # decision sweep found all of them unpinned; strip_blank's test forced True
+    # dropped every line, so any two outputs compared equal.
+    check("numbers are NOT masked unless asked",
+          normalize_text("pid 1234") != normalize_text("pid 9999"))
+    check("order is NOT canonicalized unless asked",
+          normalize_text("b\na") != normalize_text("a\nb"))
+    check("trim collapses runs of spaces and trailing blanks by default",
+          normalize_text("a  b \t") == normalize_text("a b"))
+    check("...and only by default: trim=False keeps whitespace differences",
+          normalize_text("a  b ", trim=False) != normalize_text("a b", trim=False))
+    check("strip_blank drops blank lines and ONLY blank lines",
+          normalize_text("a\n\n  \nb", strip_blank=True) == "a\nb\n")
+    check("without strip_blank a blank line is a line",
+          normalize_text("a\n\nb") == "a\n\nb\n")
+    check("an empty text normalizes to empty, not a lone newline",
+          normalize_text("") == "")
 
     # rules-as-data (--rules): a project-specific rule loaded from a file applies,
     # and REPLACES the defaults (so a default-only pattern is left untouched); the
