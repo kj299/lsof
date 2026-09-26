@@ -793,6 +793,23 @@ def _self_test():
         check("a range the renumbering would SPLIT is refused",
               msg is not None and "SPLIT" in msg and "mdoc.md" in msg)
 
+    # A file other than the log that git left conflicted, citing a moved number:
+    # rewriting citations inside an unresolved merge edits both halves of a
+    # conflict nobody has decided yet. The docstring promised this refusal and
+    # no fixture reached it; LESSONS #069's decision sweep forced it off and the
+    # self-test stayed green.
+    with tempfile.TemporaryDirectory() as tmp:
+        r, g = fork(tmp)
+        collide(r, g, KEEP, "\n## 003. Move three\n\nmove body\n",
+                keep_files=[("doc.md", "keep says LESSONS #003.\n")],
+                move_files=[("doc.md", "move says LESSONS #003.\n")])
+        before = read(r, "doc.md")
+        msg = refusal(r)
+        check("a conflict marker left in another file is refused, naming the file",
+              "<<<<<<<" in before and msg is not None and "doc.md" in msg
+              and "conflict markers" in msg)
+        check("...and that refusal writes nothing", read(r, "doc.md") == before)
+
     # --- no collision: nothing renumbered, the merge is still a merge ----
     with tempfile.TemporaryDirectory() as tmp:
         r, g = fork(tmp)
