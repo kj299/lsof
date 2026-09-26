@@ -1220,6 +1220,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri supports only AF_INET and AF_INET6 sockets")]
     fn a_socket_no_table_names_has_no_link_count() {
         // The C hands every socket inode to `process_proc_sock()`, which
         // records no link count, so `+L` never selects one and NLINK is blank
@@ -1251,6 +1252,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "miri's stat shim reports st_rdev as 0")]
     fn a_device_node_carries_the_raw_number_it_names() {
         // `-F r` prints `st_rdev` for a character or block special and for
         // nothing else (DIVERGENCES 47): `/dev/null` is 1,3, which the kernel
