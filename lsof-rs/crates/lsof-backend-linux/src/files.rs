@@ -421,12 +421,22 @@ fn row(
                 FileType::Chr | FileType::Block | FileType::Fifo => None,
                 _ => Some(m.size()),
             };
+            // No link count for a socket: the C hands a socket inode to
+            // `process_proc_sock()` before `process_proc_node()` records one,
+            // so `+L` never selects it and NLINK stays blank (DIVERGENCES 42).
+            // This is the socket no table named; the rows the tables do name
+            // carry none either.
+            let links = if m.mode() & S_IFMT == S_IFSOCK {
+                None
+            } else {
+                u32::try_from(m.nlink()).ok()
+            };
             (
                 ty,
                 Some(dev_string(dev)),
                 size,
                 Some(m.ino().to_string()),
-                u32::try_from(m.nlink()).ok(),
+                links,
             )
         }
         None => (FileType::Unknown, None, None, None, None),
@@ -1190,6 +1200,37 @@ mod tests {
             .find(|f| f.fd == FdType::Cwd)
             .expect("still a row");
         assert_eq!(quiet.name, "/nonexistent/lsof-rs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_socket_no_table_names_has_no_link_count() {
+        // The C hands every socket inode to `process_proc_sock()`, which
+        // records no link count, so `+L` never selects one and NLINK is blank
+        // (DIVERGENCES 42). lsof-rs's fallback row for a socket the tables do
+        // not name (on the test host, an AF_VSOCK one) kept the `stat` count,
+        // 1. A bound AF_UNIX socket's path stats as a socket too, which
+        // reaches the same row without a namespace or a vsock module.
+        let dir = fake_proc("sock");
+        let sock = dir.join("bound.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let file = dir.join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::os::unix::fs::symlink(&sock, dir.join("fd").join("3")).unwrap();
+        std::os::unix::fs::symlink(&file, dir.join("cwd")).unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let s = rows
+            .iter()
+            .find(|f| f.fd == FdType::Handle(3))
+            .expect("a row for fd 3");
+        assert_eq!(s.file_type, FileType::Other("SOCK".into()), "{s:?}");
+        assert_eq!(s.links, None, "a socket has no link count: {s:?}");
+        let cwd = rows
+            .iter()
+            .find(|f| f.fd == FdType::Cwd)
+            .expect("a cwd row");
+        assert_eq!(cwd.links, Some(1), "anything else keeps its count: {cwd:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

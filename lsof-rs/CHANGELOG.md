@@ -28,6 +28,32 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
 
 ### Changed
+- **`-L` hides the NLINK column and `+L` shows it**, as in the C (DIVERGENCES
+  41). lsof-rs had read `-L` as "show" and refused a bare `+L`. Only `+L`
+  takes a count: `-L 1` is refused (`no number may follow -L`), `+L n` shows
+  the column and also selects files with fewer than n links, the count may be
+  the next word (`+L 1`), and the letters after it are options again (`+L1a`
+  is `+L1 -a`). **This changes Windows too:** a script that used `-L` for the
+  column must now use `+L`.
+- **`+L n` selects only a file whose link count was read** (DIVERGENCES 42).
+  A row with no count, such as every socket or a file that could not be read,
+  had passed the filter, so `+L1` listed a process's sockets beside its
+  deleted files. The one Linux socket row that still carried a count from
+  `stat` no longer does.
+- **An option's value may be the next word for every option that takes one**
+  (DIVERGENCES 43): `-F pn`, `+L 1`, `-r 2`, `-x f`, and `-f` (whose values
+  lsof-rs refuses, now including `lsof -f /dev/null`, as the C refuses it). A
+  word that opens an option is still not a value. `lsof -r 2` had looked for a
+  file called `2`, and `lsof -F pn` for one called `pn`.
+- **`-F` is the C's**: a letter outside its field table is fatal (`unknown
+  field: x`; lsof-rs had printed `-Fpx` as `-Fp`), `-F ?` lists the letters on
+  stderr, and repeated `-F` options add up (`-Fn -Fp` is both fields, and a
+  `0` anywhere keeps NUL terminators). lsof-rs kept the last `-F` alone.
+- **A `+` word is a cluster, as a `-` word is.** lsof-rs read one letter per
+  `+` word and silently dropped the rest, so `lsof +wa -p P -d 3` ORed where
+  the C ANDs. A letter the C reads the same under either prefix now means the
+  same under `+`, and one whose `+` meaning lsof-rs does not implement (`+n`,
+  `+P`, `+r`, `+e`) is refused rather than read as its `-` meaning.
 - **The table is laid out as the C lays it out**, byte for byte (DIVERGENCES
   35). Every column is right-aligned but COMMAND and TASKCMD; lsof-rs had
   left-aligned USER, FD, TYPE, DEVICE and NODE. FD is the descriptor
@@ -108,6 +134,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **`lsof -t +L1` and `lsof -t -U` print the PIDs**, where they printed none.
+  `-t` skips the file walk when only the process table can matter, and both
+  backends checked for that by hand, missing `+L`, `-U` and `-N`, whose
+  files it then never read. The condition now comes from the same list of
+  file selecters that decides a process with no rows is no result.
 - **A file that cannot be read is a row saying why, not a blank line.** For a
   process it cannot read, the C prints `cwd`, `rtd` and `txt` rows of TYPE
   `unknown` naming the `/proc` path and the reason, `/proc/1/cwd (readlink:

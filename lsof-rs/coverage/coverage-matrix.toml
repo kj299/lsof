@@ -89,6 +89,14 @@ name = "core/inet-etw-families"
 args = ["-iICMP"]
 
 [[case]]
+name = "core/repeat-delay-as-the-next-word"
+# args::tests::dash_r_takes_its_delay_as_the_next_word: `-r 2` repeats every two
+# seconds, `-r abc` is `-r` and a file, and the C's `c`/`m` suffixes are
+# refused. Repeat mode never exits, so no differential or smoke case can run
+# this spelling to completion; smoke/repeat runs the attached `-r1`.
+args = ["-r", "2"]
+
+[[case]]
 name = "core/privilege-hint-predicate"
 # main.rs tests::privilege_hint_* over the extracted wants_privilege_hint():
 # both elevation branches through the real argv parser (`-w` suppression,
@@ -259,6 +267,16 @@ name = "smoke/field-output-Fpn"
 args = ["-Fpn", "-p", "SELF"]
 
 [[case]]
+# The same case's second run: the list as the next word.
+name = "smoke/field-output-F-pn-as-the-next-word"
+args = ["-nP", "-iTCP:PORT", "-F", "pn"]
+
+[[case]]
+# tcp4-established-state's second run: the spec as the next word.
+name = "smoke/inet-spec-as-the-next-word"
+args = ["-nP", "-i", "TCP:PORT"]
+
+[[case]]
 name = "smoke/field-output-bare-F"
 args = ["-F", "-p", "SELF"]
 
@@ -297,6 +315,11 @@ args = ["-r1", "-nP", "-iTCP:PORT"]
 [[case]]
 name = "smoke/state-filter-listen"
 args = ["-sTCP:LISTEN", "-nP", "-i"]
+
+[[case]]
+# The same case's second run: the states as the next word.
+name = "smoke/state-filter-listen-as-the-next-word"
+args = ["-nP", "-iTCP:PORT", "-s", "TCP:LISTEN"]
 
 [[case]]
 name = "smoke/tasks-K"
@@ -632,3 +655,37 @@ args = ["-n", "-P", "+c", "3", "-a", "-d", "cwd", "-p", "PID"]
 name = "linux/differential-sockets-unix-fields-F"
 args = ["-n", "-P", "-a", "-U", "-FtiPnT", "-p", "PID"]
 covers = ["type:unix"]
+
+# ------------------------------- linux differential: values as the next word
+# getopt offers every value-taking option the next word as its value, and the
+# gate requires each spelled that way (porting-kit LESSONS #071). lsof-rs took
+# attached values only for -F, -L, -f, -r and -x until 2026-09-26, and for -i
+# and -s before items 21 and 6; these are the cases that pin the spellings
+# against the C.
+
+[[case]]
+name = "linux/differential-fields-list-as-the-next-word"
+args = ["-n", "-P", "-F", "pfn", "-a", "-d", "3", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-links-plus-L-count-as-the-next-word"
+args = ["-n", "-P", "+L", "2", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:REG", "type:CHR", "type:FIFO"]
+
+[[case]]
+name = "linux/differential-opt-f-value-as-the-next-word"
+args = ["-n", "-P", "-f", "FILE"]
+
+[[case]]
+name = "linux/differential-opt-x-letters-as-the-next-word"
+args = ["-n", "-P", "-a", "-d", "^mem", "+d", "DIR", "-x", "f", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-inet-spec-may-be-the-next-word"
+args = ["-n", "-P", "-a", "-p", "PID", "-i", ":PORT"]
+covers = ["type:IPv4"]
+
+[[case]]
+name = "linux/differential-states-value-as-its-own-word"
+args = ["-n", "-P", "-a", "-p", "PID", "-s", "TCP:LISTEN"]
+covers = ["type:IPv4"]

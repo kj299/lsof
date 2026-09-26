@@ -170,14 +170,10 @@ impl Backend for WindowsBackend {
         // needs per-file data, skip *all* handle/socket/module enumeration — it
         // would be gathered only to be discarded. Pure optimization (identical
         // output) that keeps `lsof -t` from doing system-wide work it never uses.
-        // Not under `-s`: each state it names is a search item, located only by
-        // enumerating the sockets (DIVERGENCES 32).
-        if sel.terse
-            && !sel.inet.enabled
-            && sel.fd_filter.is_none()
-            && !sel.has_path_filter()
-            && sel.state_filter.is_none()
-        {
+        // Not under any file selecter, which `+L` and `-U` are too, nor under
+        // `-s`: each state it names is a search item, located only by
+        // enumerating the sockets (DIVERGENCES 32). See `terse_skips_files`.
+        if sel.terse_skips_files() {
             trace("gather: terse fast-path (PIDs only)");
             return Ok(procs);
         }

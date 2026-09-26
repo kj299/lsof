@@ -41,6 +41,65 @@ use crate::model::{AccessMode, FdType, FileType, Process};
 use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::TcpInfoFlags;
 
+/// The C's field table (`store.c`'s `FieldSel[]`, in its order): every letter
+/// `-F` accepts, what `-F ?` calls it, and whether `-F ?` lists it.
+///
+/// The C accepts every letter here, and refuses any other with `lsof: unknown
+/// field: x`. Its list leaves out what its Linux build compiles away — the
+/// file structure's share count, address and node ID, and zones — and the
+/// security context unless SELinux is on. lsof-rs lists the same letters on
+/// every platform. A letter it accepts need not print anything: `C`, `F`,
+/// `N`, `z` and `Z` never do here, as none does on a Linux host without
+/// SELinux, and `r` does not yet (DIVERGENCES 47).
+pub const FIELD_TABLE: &[(char, &str, bool)] = &[
+    ('a', "access: r = read; w = write; u = read/write", true),
+    ('c', "command name", true),
+    ('C', "file struct share count", false),
+    ('d', "device character code", true),
+    ('D', "major/minor device number as 0x<hex>", true),
+    ('f', "file descriptor", true),
+    ('F', "file struct address as 0x<hex>", false),
+    ('G', "file flaGs", true),
+    ('i', "inode number", true),
+    ('k', "link count", true),
+    ('K', "task ID (TID)", true),
+    ('l', "lock: r/R = read; w/W = write; u = read/write", true),
+    ('L', "login name", true),
+    ('m', "marker between repeated output", true),
+    ('M', "task comMand name", true),
+    ('n', "comment, name, Internet addresses", true),
+    ('N', "file struct node ID as 0x<hex>", false),
+    ('o', "file offset as 0t<dec> or 0x<hex>", true),
+    ('p', "process ID (PID)", true),
+    ('g', "process group ID (PGID)", true),
+    ('P', "protocol name", true),
+    ('r', "raw device number as 0x<hex>", true),
+    ('R', "paRent PID", true),
+    ('s', "file size", true),
+    ('S', "stream module and device names", true),
+    ('t', "file type", true),
+    ('T', "TCP/TPI info", true),
+    ('u', "user ID (UID)", true),
+    ('z', "zone name", false),
+    ('Z', "security context", false),
+    ('0', "(zero) use NUL field terminator instead of NL", true),
+];
+
+/// Whether `-F` accepts `c` as a field letter.
+pub fn field_known(c: char) -> bool {
+    FIELD_TABLE.iter().any(|(f, _, _)| *f == c)
+}
+
+/// What `-F ?` writes, which the C writes to stderr (`usage.c`): a heading,
+/// then one line per listed letter.
+pub fn field_help() -> String {
+    let mut out = String::from("lsof:\tID    field description\n");
+    for (f, what, _) in FIELD_TABLE.iter().filter(|(_, _, listed)| *listed) {
+        out.push_str(&format!("\t {f}    {what}\n"));
+    }
+    out
+}
+
 /// Render `procs` in `-F` format. `nul` selects NUL line termination (`-F0`);
 /// `only` restricts the emitted fields; `tcp_show` is `-T`'s selection, which
 /// gates the `T` tokens the same way it gates the table's suffix; `esc` chooses
@@ -262,4 +321,58 @@ pub fn render_with_offset_digits(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `-F ?` is the C's text to the byte, as `lsof -F ?` wrote it to stderr
+    /// on the Linux test host (no SELinux): the table's letters less the five
+    /// its build does not list.
+    #[test]
+    fn field_help_is_the_cs_text() {
+        let measured = concat!(
+            "lsof:\tID    field description\n",
+            "\t a    access: r = read; w = write; u = read/write\n",
+            "\t c    command name\n",
+            "\t d    device character code\n",
+            "\t D    major/minor device number as 0x<hex>\n",
+            "\t f    file descriptor\n",
+            "\t G    file flaGs\n",
+            "\t i    inode number\n",
+            "\t k    link count\n",
+            "\t K    task ID (TID)\n",
+            "\t l    lock: r/R = read; w/W = write; u = read/write\n",
+            "\t L    login name\n",
+            "\t m    marker between repeated output\n",
+            "\t M    task comMand name\n",
+            "\t n    comment, name, Internet addresses\n",
+            "\t o    file offset as 0t<dec> or 0x<hex>\n",
+            "\t p    process ID (PID)\n",
+            "\t g    process group ID (PGID)\n",
+            "\t P    protocol name\n",
+            "\t r    raw device number as 0x<hex>\n",
+            "\t R    paRent PID\n",
+            "\t s    file size\n",
+            "\t S    stream module and device names\n",
+            "\t t    file type\n",
+            "\t T    TCP/TPI info\n",
+            "\t u    user ID (UID)\n",
+            "\t 0    (zero) use NUL field terminator instead of NL\n",
+        );
+        assert_eq!(field_help(), measured);
+    }
+
+    /// The C accepts every letter of its table and nothing else.
+    #[test]
+    fn a_field_letter_is_one_the_cs_table_has() {
+        for c in "0CDFGKLMNPRSTZacdfgiklmnoprstuz".chars() {
+            assert!(field_known(c), "{c}");
+        }
+        assert_eq!(FIELD_TABLE.len(), 31);
+        for c in "xyqQ?/1-+ ".chars() {
+            assert!(!field_known(c), "{c:?}");
+        }
+    }
 }

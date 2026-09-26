@@ -137,11 +137,12 @@ OUTPUT:\n\
                   to pipe NAMEs (GetNamedPipe*ProcessId)\n\
     +E            same, and also list the peer processes' own pipe rows\n\
     -l            numeric USER (show SID string instead of resolved name)\n\
-    -L            show NLINK (link count) column\n\
-    +L <count>    keep only files with link count < <count>; implies -L\n\
-                  (`+L 1` = unlinked-but-still-open files; security check)\n\
+    +L [count]    an NLINK (link count) column; with a count, also select the\n\
+                  files with fewer links (`+L 1` = unlinked but still open).\n\
+                  -L: no NLINK column (the default)\n\
     -V            verbose: report inaccessible / unmatched search items\n\
-    -F[fields]    field (machine-readable) output; -F0 uses NUL terminators\n\
+    -F [fields]   field (machine-readable) output; 0 = NUL terminators;\n\
+                  -F ? lists the field letters\n\
     -J            aggregated JSON object\n\
     -j            JSON Lines (one object per file)\n\
     -r [delay]    repeat every <delay>s (default 15) until interrupted\n\
@@ -503,6 +504,11 @@ fn main() {
             print!("{}", usage());
             return;
         }
+        // To stderr, as the C writes it, and exit 0.
+        Action::FieldHelp => {
+            eprint!("{}", fields::field_help());
+            return;
+        }
         Action::Version => {
             println!(
                 "lsof-rs {} (memory-safe lsof for Windows)",
@@ -845,7 +851,7 @@ fn main() {
                     show_offset: columns.offset,
                     show_size: columns.size,
                     offset_digits: columns.offset_digits,
-                    show_links: selection.show_links,
+                    show_links: columns.nlink,
                     human_size: selection.human_size,
                     command_width: selection.command_width.cap(),
                     tcp_show: selection.tcp_info(),

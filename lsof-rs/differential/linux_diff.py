@@ -560,6 +560,33 @@ def state_holder(work: str) -> Fixture:
     return Fixture("S(states)", [sys.executable, "-c", py], cwd=sdir, expect_fds=10)
 
 
+def unlinked_holder(work: str) -> Fixture:
+    """Files of every link count `+L` tells apart, and the rows that have none.
+
+    `+L n` selects a file whose link count `stat` recorded and found below n
+    (`dnode.c`), so the fixture holds one of each count that decides it: a
+    deleted file (0 -- the case `+L1` exists for), a file with one name, and
+    one with two. The socket pair and the pipe are the rows around them: the C
+    hands a socket to `process_proc_sock()`, which records no count, so `+L`
+    never selects one however high n is, while a pipe's inode counts 1 and is
+    selected by `+L2`. lsof-rs had let every row with no count through."""
+    ndir = os.path.join(work, "unlinked")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "d=os.path.join(%r,'deleted'); g=open(d,'w'); g.write('x'); g.flush(); os.unlink(d)\n"
+        "one=open(os.path.join(%r,'one'),'w')\n"
+        "two=open(os.path.join(%r,'two'),'w')\n"
+        "os.link(os.path.join(%r,'two'),os.path.join(%r,'two.second'))\n"
+        "a,b=socket.socketpair()\n"
+        "r,w=os.pipe()\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (ndir, ndir, ndir, ndir, ndir, ndir)
+    )
+    # 0,1,2 + the three files, the socket pair and the pipe's two ends.
+    return Fixture("N(unlinked)", [sys.executable, "-c", py], cwd=ndir, expect_fds=10)
+
+
 def unprivileged_prefix() -> list | None:
     """The argv prefix that runs a command as a user who cannot read fixture U.
 
@@ -841,7 +868,8 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     z = zombie_holder(work)
     u = unreadable_holder(work)
     st = state_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st
+    nl = unlinked_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl
 
 
 # -------------------------------------------------------------------- matrix
@@ -962,7 +990,7 @@ def run(args) -> int:
     fixtures = make_fixtures(work)
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
-        offsets, nonutf8, zombies, unreadable, states,
+        offsets, nonutf8, zombies, unreadable, states, unlinked,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -1012,7 +1040,7 @@ def run(args) -> int:
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
-                unreadable, states,
+                unreadable, states, unlinked,
             )
             if f is not None
         ]:
@@ -1081,6 +1109,7 @@ def run(args) -> int:
                 "Z": str(zombies.pid),
                 "ZC": str(zchild),
                 "S": str(states.pid),
+                "N": str(unlinked.pid),
                 # Who the fixtures run as, for `-u` -- by number and by name.
                 "UID": str(os.getuid()),
                 "USER": pwd.getpwuid(os.getuid()).pw_name,
