@@ -116,6 +116,7 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
                 }
             });
             entry.files.push(OpenFile {
+                rdev: None,
                 fs_device: None,
                 file_flags: None,
                 lock: None,

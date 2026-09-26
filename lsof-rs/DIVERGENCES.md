@@ -81,6 +81,64 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by making `-X` a toggle and printing `-F r` (2026-09-26)
+
+Items 45 and 47, both measured against the C.
+
+**`-X` toggles** (item 45). `main.c` flips it, `Fxopt = Fxopt ? 0 : 1`, under
+either prefix, and `initialize()` checks it against `-i` once every option has
+been read, on the value the last `-X` left. So `-X -X` is off again, and
+`lsof -X -i -X` lists the Internet files where lsof-rs refused the pair.
+lsof-rs set the flag however many times it was given. Measured on a process
+holding a TCP listener and a UDP socket: nine spellings, five of which
+differed.
+
+**`-F r` is the raw device number** (item 47). The C records `st_rdev` for a
+character or block special and for nothing else (`dnode.c`, `N_CHR` and
+`N_BLK`), and prints it in hex after `D`: `r0x103` for `/dev/null`, `r0x8800`
+for `/dev/pts/0`, `r0x700` for `/dev/loop0`. A bare `-F` leaves it out, "for
+compatibility" (`select_default_fields()`), and `-F -Fr` is the default set
+with it. lsof-rs accepted the letter and printed nothing. Rows under `-e`
+carry none, measured with `-e /` and `-e /dev`, although `dproc.c` would take
+one from the mount table there. A socket's is set only for a moment, to match
+a path argument, and restored before anything is printed.
+
+The number rides on the row as `OpenFile::rdev`, an `Option<NonZeroU32>`, so
+the row stays at 192 bytes: the niche fits in the padding, and every Linux
+`st_rdev` fits in 32 bits, a 12-bit major and a 20-bit minor. The one number it
+cannot carry is 0, device 0,0, which no driver answers, so only an `O_PATH` fd
+could hold it. On Windows, which has no such number, `-F r` prints nothing, as
+before.
+
+Once a letter prints that the default set leaves out, "no list" can no longer
+mean "every letter". The renderer now reads no list as the C's default set,
+and the parser spells the set out when a letter outside it is added to it.
+
+### What the gate gained
+
+Fixture **V** holds device nodes of four majors (`/dev/null`, `/dev/urandom`
+and a pty pair), and a block device where one can be opened, which takes root:
+this host's run has one, and an unprivileged CI runner does not. Seven cases
+were added, 235 in all: three on `-X` (twice is off; toggled off around `-i`;
+`+X`), and four on `r` (device rows only; not in the default set; `-F -Fr`;
+the table). A golden pins the field and its default-set rule, which Windows
+shares; a parser test pins `-F -Fr`; and a backend test pins `/dev/null`'s
+0x103.
+
+Six mutants, each killed by the differential and by a unit test: `-X` set
+rather than toggled; no rdev recorded; `r` in the default set; no list meaning
+every letter; `-F -Fr` dropping `r`; `r` in decimal. A seventh was not run,
+because it is equivalent: recording `st_rdev` on every row changes nothing,
+since it is 0 for every file that is not a device, and 0 is the value
+`NonZeroU32` leaves out.
+
+### What it found next to it
+
+Item 48: a mapped device file, such as a GPU driver maps, is a `mem` row. The
+C types it `CHR`, from its `stat`, with the device's number in DEVICE and in
+`r`. lsof-rs types every live mapping `REG`. Found by reading `maps.rs`. No
+device on this host can be mapped, so it is not measured.
+
 ## Fixed by reading every option the way getopt offers it (2026-09-26)
 
 Items 41, 42 and 43, and the rest of the family 43 belonged to. All of it was
@@ -1908,9 +1966,10 @@ likely right; it is a compatibility decision, not a backend phase.
 | 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). ~~A socket's inode reports 1~~ A socket never has a count: `process_proc_node()` hands it to `process_proc_sock()` first | ~~a row whose count lsof-rs never read passes the filter~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. The reason this row first gave was wrong, and `+L2` shows it: no socket is selected there either. |
 | 43 | `-F` takes its field list as the **next word** too: `lsof -F pL -p P` prints `p` and `L` | ~~reads `pL` as a file name~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above: `-L`, `-f`, `-r` and `-x` had the same gap, `-F` refused no letter, and a `+` word was never a cluster. |
 | 44 | an `O_PATH` fd's access letter is `u`: `dnode.c` takes it from the fd link's own mode (`l->st_mode & (S_IRUSR \| S_IWUSR)`), which is 0 for `O_PATH`, and reads neither-bit as read/write | `r`, from fdinfo's flags (`O_RDONLY` is 0 too) | **OPEN — found 2026-09-26** comparing `+L` tables across the host: this session's harness holds an `O_PATH \| O_DIRECTORY` fd. Every other fd agreed, since a link's mode mirrors its open mode. |
-| 45 | `-X` **toggles** (`Fxopt = Fxopt ? 0 : 1`), so `-X -X` is off: `lsof -X -X -i` lists the Internet files | sets it: `-X -X -i` is refused, `-i is useless when -X is specified.` | **OPEN — found 2026-09-26.** |
+| 45 | `-X` **toggles** (`Fxopt = Fxopt ? 0 : 1`), so `-X -X` is off: `lsof -X -X -i` lists the Internet files | ~~sets it: `-X -X -i` is refused~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. |
 | 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g` | **OPEN — recorded 2026-09-26.** lsof-rs has refused it since `-f`/`+f` were implemented, without a row here. It prints `G` in `-F` already. |
-| 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | accepts the letter and prints nothing | **OPEN — found 2026-09-26** while checking `-F`'s letters against the C's table. |
+| 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | ~~accepts the letter and prints nothing~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. Windows has no such number and prints none. |
+| 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | types every live mapping `REG`, with the filesystem's device | **OPEN — found 2026-09-26** by reading `maps.rs` while adding `r`. Not measured: no device on this host can be mapped. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of

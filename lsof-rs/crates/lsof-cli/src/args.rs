@@ -11,7 +11,7 @@
 //! lookup.
 
 use lsof_core::model::tcp_state_table;
-use lsof_core::render::fields::field_known;
+use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
 use lsof_core::render::{Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
@@ -78,8 +78,8 @@ impl Default for Columns {
 /// it.
 #[derive(Debug, Default)]
 struct FieldChoice {
-    /// A bare `-F`, or `-F0`: the C's default set, which holds every letter
-    /// lsof-rs prints.
+    /// A bare `-F`, or `-F0`: the C's default set, every letter lsof-rs
+    /// prints but `r`.
     defaults: bool,
     /// The letters named, less `0`.
     letters: Vec<char>,
@@ -89,9 +89,26 @@ struct FieldChoice {
 
 impl FieldChoice {
     fn format(&self) -> Format {
+        let only = if !self.defaults {
+            Some(self.letters.clone())
+        } else if self.letters.iter().all(|&c| field_is_default(c)) {
+            None
+        } else {
+            // The default set and a letter it leaves out (`-F -Fr`, which the
+            // C prints with the raw device number): spell the set out, since
+            // no list means the default set alone.
+            Some(
+                FIELD_TABLE
+                    .iter()
+                    .filter(|f| f.default)
+                    .map(|f| f.id)
+                    .chain(self.letters.iter().copied())
+                    .collect(),
+            )
+        };
         Format::Fields {
             nul: self.nul,
-            only: (!self.defaults).then(|| self.letters.clone()),
+            only,
         }
     }
 }
@@ -343,7 +360,11 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     continue;
                 }
                 'H' => sel.human_size = true,
-                'X' => sel.skip_inet_tables = true,
+                // `-X` toggles (`main.c`: `Fxopt = Fxopt ? 0 : 1`), under
+                // either prefix, so `-X -X` is off again and `-X -X -i` is
+                // no conflict (DIVERGENCES 45): the C judges `-i` against
+                // the value every `-X` leaves.
+                'X' => sel.skip_inet_tables = !sel.skip_inet_tables,
                 'N' => sel.nfs_only = true,
                 'Z' => {
                     // `-Z [context]`. The value is attached or the next word,
@@ -1733,6 +1754,29 @@ mod tests {
         }
     }
 
+    /// `-X` toggles, as the C's `Fxopt` does, whatever the prefix (DIVERGENCES
+    /// 45), and `-i` is refused only when the last `-X` left it on. Measured:
+    /// `lsof -X -X -i` lists the Internet files and exits 0.
+    #[test]
+    fn dash_x_upper_toggles_and_dash_i_is_judged_on_the_final_value() {
+        let skip = |argv: &[&str]| columns(argv).unwrap().1.skip_inet_tables;
+        assert!(!skip(&[]));
+        assert!(skip(&["-X"]) && skip(&["+X"]));
+        assert!(!skip(&["-X", "-X"]) && !skip(&["-XX"]) && !skip(&["-X", "+X"]));
+        assert!(skip(&["-X", "-X", "-X"]) && skip(&["-XXX"]));
+        for argv in [
+            &["-X", "-X", "-i"][..],
+            &["-X", "-i", "-X"][..],
+            &["-aXXi"][..],
+        ] {
+            assert!(columns(argv).is_ok(), "{argv:?}: -X was toggled off");
+        }
+        assert_eq!(
+            columns(&["-X", "-X", "-X", "-i"]).unwrap_err(),
+            "-i is useless when -X is specified."
+        );
+    }
+
     #[test]
     fn dash_x_alone_is_accepted_and_selects_nothing() {
         // The flag suppresses a lookup; it is not a selector, so it must not
@@ -1970,6 +2014,26 @@ mod tests {
                 want
             );
         }
+        // `r` is outside the default set (DIVERGENCES 47): `-F -Fr` is the set
+        // spelt out with `r` added, in either order, and `-Fr` is `r` alone.
+        let with_r = |argv: &[&str]| match run(argv).1 {
+            Format::Fields { only: Some(l), .. } => l,
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        for argv in [&["-F", "-Fr"][..], &["-Fr", "-F"][..]] {
+            let l = with_r(argv);
+            assert!(
+                l.contains(&'r') && l.contains(&'n') && l.contains(&'D'),
+                "{argv:?}: {l:?}"
+            );
+            assert!(!l.contains(&'Z') && !l.contains(&'z'), "{argv:?}: {l:?}");
+        }
+        assert_eq!(with_r(&["-Fr"]), vec!['r']);
+        assert_eq!(
+            fields(&["-F", "-Fk"]),
+            only(false, None),
+            "k is a default letter"
+        );
         // Every letter the C accepts is accepted, including the ones that
         // print nothing here.
         assert!(parse(vec!["-F0CDFGKLMNPRSTZacdfgiklmnoprstuz".into()]).is_ok());

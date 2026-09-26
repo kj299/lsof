@@ -517,6 +517,14 @@ pub struct OpenFile {
     /// filesystem) needs this one as well. `None` where the platform does not
     /// supply it.
     pub fs_device: Option<u64>,
+    /// The device a character or block special *names*: `st_rdev` as the
+    /// kernel encodes it, which `-F r` prints in hex (`r0x103` for
+    /// `/dev/null`). `None` on every other row, and on Windows, which has no
+    /// such number. It is a `NonZeroU32` so the row keeps its size, the niche
+    /// fitting the padding: Linux encodes a 12-bit major and a 20-bit minor in
+    /// 32 bits, and the one number that cannot be carried is 0 — device 0,0,
+    /// which no driver answers, so only an `O_PATH` fd could hold it.
+    pub rdev: Option<std::num::NonZeroU32>,
     /// The open file's flags, as the kernel reports them (`O_RDWR`,
     /// `O_CLOEXEC`, …). lsof's `-F G` field prints them in hex. `None` where
     /// unknown.

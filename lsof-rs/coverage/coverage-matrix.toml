@@ -689,3 +689,16 @@ covers = ["type:IPv4"]
 name = "linux/differential-states-value-as-its-own-word"
 args = ["-n", "-P", "-a", "-p", "PID", "-s", "TCP:LISTEN"]
 covers = ["type:IPv4"]
+
+# ------------------- linux differential: -X toggles, -F r (DIVERGENCES 45, 47)
+
+[[case]]
+name = "linux/differential-opt-X-twice-is-off"
+args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-X", "-p", "PID"]
+covers = ["type:IPv4"]
+
+[[case]]
+# Fixture V: /dev/null, /dev/urandom and a pty pair; `r` on each.
+name = "linux/differential-fields-raw-device-on-device-nodes"
+args = ["-n", "-P", "-FfrDt", "-a", "-p", "PID"]
+covers = ["type:CHR"]

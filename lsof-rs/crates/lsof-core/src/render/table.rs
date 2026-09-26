@@ -536,6 +536,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     // A selected process with no displayed files still gets a line so it
     // shows up (NAME left blank), mirroring lsof.
     let blank = OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock: None,

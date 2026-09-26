@@ -28,6 +28,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
 
 ### Changed
+- **`-X` toggles, as in the C** (DIVERGENCES 45): `-X -X` is off again, and
+  `-i` is refused only when the last `-X` left it on. lsof-rs set it however
+  many times it was given, so `lsof -X -X -i` was refused.
 - **`-L` hides the NLINK column and `+L` shows it**, as in the C (DIVERGENCES
   41). lsof-rs had read `-L` as "show" and refused a bare `+L`. Only `+L`
   takes a count: `-L 1` is refused (`no number may follow -L`), `+L n` shows
@@ -134,6 +137,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **`-F r` prints the raw device number** of a character or block device, in
+  hex after `D` (`r0x103` for `/dev/null`), as the C does (DIVERGENCES 47).
+  lsof-rs accepted the letter and printed nothing. A bare `-F` still leaves it
+  out, as the C's does; `-F -Fr` adds it. Windows has no such number.
 - **`lsof -t +L1` and `lsof -t -U` print the PIDs**, where they printed none.
   `-t` skips the file walk when only the process table can matter, and both
   backends checked for that by hand, missing `+L`, `-U` and `-N`, whose

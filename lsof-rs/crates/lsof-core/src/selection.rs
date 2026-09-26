@@ -761,7 +761,8 @@ pub struct Selection {
     /// that only a symlink inside DIR pointed at, where the C skips the link
     /// entirely (`arg.c:1038` — "Otherwise skip symbolic links").
     pub cross_symlinks: bool,
-    /// `-X`: do not read the inet socket tables.
+    /// `-X`: do not read the inet socket tables. Every `-X` flips it, as the
+    /// C's `Fxopt` flips, so an even number leaves it off.
     ///
     /// The man page calls this "skip the reporting of information on all open
     /// TCP and UDP files", and **that is not what it does** — measured against
@@ -1498,6 +1499,7 @@ mod tests {
     fn plus_l_selects_only_a_recorded_count_below_the_limit() {
         use crate::model::{AccessMode, FdType, OpenFile};
         let row = |links: Option<u32>| OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1645,6 +1647,7 @@ mod tests {
         // "matches -i" is now "contributes the NET selecter kind" — the bit the
         // OR/AND rule then tests.
         let sock_row = |ft: FileType, proto: Protocol| OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -2050,6 +2053,7 @@ mod tests {
         // path against `/`.
         use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
         let row = |name: &str, fs_device: u64| OpenFile {
+            rdev: None,
             fs_device: Some(fs_device),
             file_flags: None,
             lock: None,
@@ -2100,6 +2104,7 @@ mod tests {
         // and a row merely *named* under the query does not.
         use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
         let row = |name: &str, dev: &str, node: &str| OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -2248,6 +2253,7 @@ mod tests {
     fn endpoint_peer_kept_with_pipe_rows_only() {
         use crate::model::{AccessMode, FdType, OpenFile};
         let pipe = OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -2513,6 +2519,7 @@ mod tests {
     fn tcp(fd: u64, lport: u16, remote: Option<&str>, state: crate::TcpState) -> OpenFile {
         use crate::model::{AccessMode, SockState, SocketInfo};
         OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,

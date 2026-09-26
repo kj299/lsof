@@ -670,6 +670,24 @@ name = "opt-X-with-dash-i-is-fatal"
 args = ["-n", "-P", "-X", "-i", "-p", "{B}"]
 
 [[case]]
+# `-X` TOGGLES (`main.c`: `Fxopt = Fxopt ? 0 : 1`): a second one turns the
+# lookup back on, and B's TCP and UDP rows are whole again. lsof-rs set it on
+# however many times it was given (DIVERGENCES 45).
+name = "opt-X-twice-is-off"
+args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-X", "-p", "{B}"]
+
+[[case]]
+# The conflict with `-i` is judged on the final value, so this lists B's
+# Internet files where lsof-rs refused the pair.
+name = "opt-X-toggled-off-around-dash-i-is-no-conflict"
+args = ["-n", "-P", "-X", "-a", "-i", "-X", "-p", "{B}"]
+
+[[case]]
+# `+X` toggles too: the C's case never looks at the prefix.
+name = "opt-plus-X-toggles-as-dash-X-does"
+args = ["-n", "-P", "-a", "-d", "^mem", "+X", "-p", "{B}"]
+
+[[case]]
 # The `+d` symlink rule, on a directory whose ONLY entry is a link pointing out
 # of it at a file the fixture holds open under its real name. The C skips the
 # link, so this prints nothing; lsof-rs followed every link and printed the
@@ -1429,6 +1447,30 @@ args = ["-n", "-P", "-l", "-a", "-d", "cwd,3", "-p", "{A}"]
 # ...and writes no `L` field for a number, where lsof-rs wrote `L0`.
 name = "fields-no-login-field-for-a-number"
 args = ["-n", "-P", "-l", "-FpuL", "-p", "{A}"]
+
+# ------------------------------------------- the raw device number (DIVERGENCES 47)
+# Fixture V holds device nodes of four majors. The C prints `r0x<hex>` for a
+# character or block special only, and leaves `r` out of the default set.
+
+[[case]]
+# `r` on every device row and no other, after `D`. lsof-rs printed none.
+name = "fields-raw-device-on-device-nodes"
+args = ["-n", "-P", "-FfrDt", "-a", "-p", "{V}"]
+
+[[case]]
+# A bare `-F` leaves the raw device number out, "for compatibility"...
+name = "fields-default-set-leaves-raw-device-out"
+args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "{V}"]
+
+[[case]]
+# ...and `-F -Fr` is the default set with it.
+name = "fields-default-set-plus-raw-device"
+args = ["-n", "-P", "-F", "-Fr", "-a", "-d", "^mem", "-p", "{V}"]
+
+[[case]]
+# The same rows as a table: DEVICE is the major and minor the node names.
+name = "devices-table"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{V}"]
 
 # ------------------------------------------------ link counts (DIVERGENCES 41, 42)
 # Fixture N holds a deleted file (no links), a file with one name and one with

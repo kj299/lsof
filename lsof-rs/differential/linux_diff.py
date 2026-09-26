@@ -587,6 +587,33 @@ def unlinked_holder(work: str) -> Fixture:
     return Fixture("N(unlinked)", [sys.executable, "-c", py], cwd=ndir, expect_fds=10)
 
 
+def device_holder(work: str) -> Fixture:
+    """Device nodes of four majors, so `-F r` has something to print.
+
+    The C records a raw device number for a character or block special and
+    prints it as `r0x<hex>` (DIVERGENCES 47): `/dev/null` is 1,3, `/dev/urandom`
+    1,9, and a pty pair adds `/dev/ptmx` (5,2) and a `/dev/pts` slave (136,n),
+    which is where a major outgrows one hex digit. Every fixture's stdio is
+    `/dev/null` already. A block device is added when one can be opened, which
+    takes root: this host's differential has one and an unprivileged CI runner
+    does not, and both binaries always read the same process either way."""
+    vdir = os.path.join(work, "devices")
+    os.makedirs(vdir)
+    py = (
+        "import os,time\n"
+        "u=open('/dev/urandom','rb')\n"
+        "m,s=os.openpty()\n"
+        "try:\n"
+        "    b=open('/dev/loop0','rb')\n"
+        "except OSError:\n"
+        "    b=None\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (vdir,)
+    )
+    # 0,1,2 + urandom and the pty pair; loop0 only where it opens.
+    return Fixture("V(devices)", [sys.executable, "-c", py], cwd=vdir, expect_fds=6)
+
+
 def unprivileged_prefix() -> list | None:
     """The argv prefix that runs a command as a user who cannot read fixture U.
 
@@ -869,7 +896,8 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     u = unreadable_holder(work)
     st = state_holder(work)
     nl = unlinked_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl
+    v = device_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v
 
 
 # -------------------------------------------------------------------- matrix
@@ -990,7 +1018,7 @@ def run(args) -> int:
     fixtures = make_fixtures(work)
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
-        offsets, nonutf8, zombies, unreadable, states, unlinked,
+        offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -1040,7 +1068,7 @@ def run(args) -> int:
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
-                unreadable, states, unlinked,
+                unreadable, states, unlinked, devices,
             )
             if f is not None
         ]:
@@ -1110,6 +1138,7 @@ def run(args) -> int:
                 "ZC": str(zchild),
                 "S": str(states.pid),
                 "N": str(unlinked.pid),
+                "V": str(devices.pid),
                 # Who the fixtures run as, for `-u` -- by number and by name.
                 "UID": str(os.getuid()),
                 "USER": pwd.getpwuid(os.getuid()).pw_name,
