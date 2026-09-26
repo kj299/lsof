@@ -82,12 +82,7 @@ impl Backend for LinuxBackend {
         // skip the entire fd walk — identical output, none of the work. Mirrors
         // the Windows backend's terse fast-path. Not under `-s`: a state it
         // names is a search item, located only by reading the sockets.
-        if sel.terse
-            && !sel.inet.enabled
-            && sel.fd_filter.is_none()
-            && !sel.has_path_filter()
-            && sel.state_filter.is_none()
-        {
+        if sel.terse_skips_files() {
             // A zombie is never listed (DIVERGENCES 31) — except through a
             // task that outlived its main thread, when tasks are listed at
             // all. Its entry stands in for that task here: the pid is the same

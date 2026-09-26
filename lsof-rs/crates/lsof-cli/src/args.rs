@@ -11,6 +11,7 @@
 //! lookup.
 
 use lsof_core::model::tcp_state_table;
+use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
 use lsof_core::render::{Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
@@ -25,6 +26,8 @@ use lsof_core::{
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
     Help,
+    /// `-F ?`: the field letters, and nothing else.
+    FieldHelp,
     Version,
     Run {
         selection: Selection,
@@ -51,6 +54,9 @@ pub struct Columns {
     /// `-o <digits>`: how many decimal digits an offset may have before it is
     /// printed in hex instead (the C's `OffDecDig`); 0 means no limit.
     pub offset_digits: usize,
+    /// `+L`: an NLINK column after SIZE/OFF. `-L` turns it off again — the
+    /// C's `Fnlink`, which the prefix sets and nothing else does.
+    pub nlink: bool,
 }
 
 impl Default for Columns {
@@ -61,6 +67,48 @@ impl Default for Columns {
             offset: false,
             size: false,
             offset_digits: DEFAULT_OFFSET_DIGITS,
+            nlink: false,
+        }
+    }
+}
+
+/// What every `-F` chose, accumulated as the C accumulates it: its
+/// `FieldSel[].st` flags are only ever set and its `Terminator` only ever
+/// set to NUL, so a later `-F` adds to an earlier one rather than replacing
+/// it.
+#[derive(Debug, Default)]
+struct FieldChoice {
+    /// A bare `-F`, or `-F0`: the C's default set, every letter lsof-rs
+    /// prints but `r`.
+    defaults: bool,
+    /// The letters named, less `0`.
+    letters: Vec<char>,
+    /// A `0` somewhere: NUL terminators.
+    nul: bool,
+}
+
+impl FieldChoice {
+    fn format(&self) -> Format {
+        let only = if !self.defaults {
+            Some(self.letters.clone())
+        } else if self.letters.iter().all(|&c| field_is_default(c)) {
+            None
+        } else {
+            // The default set and a letter it leaves out (`-F -Fr`, which the
+            // C prints with the raw device number): spell the set out, since
+            // no list means the default set alone.
+            Some(
+                FIELD_TABLE
+                    .iter()
+                    .filter(|f| f.default)
+                    .map(|f| f.id)
+                    .chain(self.letters.iter().copied())
+                    .collect(),
+            )
+        };
+        Format::Fields {
+            nul: self.nul,
+            only,
         }
     }
 }
@@ -91,6 +139,8 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     // with a bare `-s` exactly as `-o` does. A bare `-F` selects the field
     // without that side effect.
     let mut fields_offset = false;
+    let mut fields = FieldChoice::default();
+    let mut field_help = false;
     // `-c`'s comparison. The C's case-sensitive prefix everywhere it has an
     // oracle; the Windows port keeps the forgiving match its image names were
     // designed around (see `CommandMatch`).
@@ -137,16 +187,49 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
             break;
         }
 
-        if let Some(plus) = tok.strip_prefix('+') {
-            // `+d` / `+D <path>`: directory / path lookup.
-            // `+c <n>`: cap COMMAND column width to <n>.
-            // `+w`: enable warnings (the default; inverse of `-w`).
-            let mut chars = plus.chars();
-            match chars.next() {
+        // An option word is a cluster of letters under one prefix, `-` or `+`,
+        // and the C's `GetOpt` treats the prefix as no more than a flag it
+        // hands each letter: `+wa` is `+w` then `+a`, and a letter whose case
+        // never consults the prefix means under `+` what it means under `-`.
+        // lsof-rs read one letter per `+` word and dropped the rest, so
+        // `lsof +wa -p P -d 3` ORed where the C ANDs: 28 rows where the C
+        // lists one, measured.
+        let (plus, body) = match (tok.strip_prefix('+'), tok.strip_prefix('-')) {
+            (Some(body), _) => (true, body),
+            (None, Some(body)) => (false, body),
+            (None, None) => {
+                // A bare argument is a path/name to look up.
+                sel.paths.push(tok.clone());
+                i += 1;
+                continue;
+            }
+        };
+        if body.is_empty() {
+            return Err(if plus {
+                "unsupported option: +".to_string()
+            } else {
+                "a lone '-' is not a valid option".to_string()
+            });
+        }
+        let prefix = if plus { '+' } else { '-' };
+
+        let chars: Vec<char> = body.chars().collect();
+        let mut j = 0;
+        while j < chars.len() {
+            let c = chars[j];
+            match c {
+                // The C gives these a `+` meaning lsof-rs does not implement
+                // (`+n`/`+P` resolve names, `+r` repeats until nothing is
+                // open, `+e` still reads links, and `+J`/`+j` are errors there
+                // too), so the `+` spelling is refused rather than read as the
+                // `-` one.
+                'n' | 'P' | 'r' | 'e' | 'J' | 'j' if plus => {
+                    return Err(format!("unsupported option: +{c}"))
+                }
                 // `+d` is ONE level (the directory and its immediate entries);
                 // `+D` descends the whole tree. lsof distinguishes them.
-                Some(c @ ('d' | 'D')) => {
-                    let rest: String = chars.collect();
+                'd' | 'D' if plus => {
+                    let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
                     } else {
@@ -161,9 +244,12 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     } else {
                         sel.dir_trees.push(value);
                     }
+                    j = chars.len();
+                    continue;
                 }
-                Some('c') => {
-                    let rest: String = chars.collect();
+                // `+c <n>`: cap the COMMAND column at n characters.
+                'c' if plus => {
+                    let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
                     } else {
@@ -189,71 +275,9 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     } else {
                         CommandWidth::Chars(n)
                     };
+                    j = chars.len();
+                    continue;
                 }
-                Some('T') => {
-                    // `+T` is `-T`'s inverse only in the no-letter case: with
-                    // letters, `main.c` reads them identically and the `+`/`-`
-                    // prefix is never consulted.
-                    let rest: String = chars.collect();
-                    sel.tcp_info_opt = Some(take_tcp_info(rest, &args, &mut i, true)?);
-                }
-                Some('f') => {
-                    // `+f` forces every path argument to be a file system, and
-                    // widens what counts as one to any mount source, not just
-                    // a block device. Same reservation about `+f[cfgGn]`.
-                    let rest: String = chars.collect();
-                    if !rest.is_empty() {
-                        return Err(format!(
-                            "unsupported kernel file structure selection: {rest}"
-                        ));
-                    }
-                    sel.filesystem_args = FilesystemArgs::AlwaysFilesystem;
-                }
-                Some('w') => {
-                    sel.suppress_warnings = false;
-                    sel.omit_unreadable = false;
-                }
-                Some('E') => sel.endpoints = Some(EndpointMode::Files),
-                Some('L') => {
-                    // `+L <count>`: drop files whose link count is >= <count>.
-                    // Implies the NLINK column, mirroring lsof.
-                    let rest: String = chars.collect();
-                    let value = if !rest.is_empty() {
-                        rest
-                    } else {
-                        i += 1;
-                        if i >= args.len() {
-                            return Err("option +L requires a count".to_string());
-                        }
-                        args[i].clone()
-                    };
-                    let n: u32 = value
-                        .parse()
-                        .map_err(|_| format!("invalid +L count: {value}"))?;
-                    sel.max_links = Some(n);
-                    sel.show_links = true;
-                }
-                _ => return Err(format!("unsupported option: {tok}")),
-            }
-            i += 1;
-            continue;
-        }
-
-        let Some(body) = tok.strip_prefix('-') else {
-            // A bare argument is a path/name to look up.
-            sel.paths.push(tok.clone());
-            i += 1;
-            continue;
-        };
-        if body.is_empty() {
-            return Err("a lone '-' is not a valid option".to_string());
-        }
-
-        let chars: Vec<char> = body.chars().collect();
-        let mut j = 0;
-        while j < chars.len() {
-            let c = chars[j];
-            match c {
                 'a' => sel.and_mode = true,
                 'n' => sel.no_host_resolve = true,
                 'P' => sel.no_port_resolve = true,
@@ -265,16 +289,27 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     sel.omit_unreadable = true;
                 }
                 'r' => {
-                    let rest: String = chars[j + 1..].iter().collect();
-                    repeat = Some(if rest.is_empty() {
-                        15
-                    } else {
-                        match rest.parse::<u64>() {
-                            Ok(n) => n,
-                            Err(_) => return Err(format!("invalid -r delay: {rest}")),
+                    // `-r [t]`: the delay is attached or the next word, and a
+                    // word that opens an option is not one (`main.c`) — so
+                    // `lsof -r 2 -p P` repeats every two seconds. lsof-rs had
+                    // taken only an attached delay, and looked for a file
+                    // called `2`. Only the leading digits are the delay; the C
+                    // then reads `c<count>` and `m<format>`, which lsof-rs
+                    // refuses rather than half-reads, and gives anything else
+                    // back as options, the way `-o` does.
+                    if let Some((word, _)) = value_word(&chars, j, &args, i) {
+                        let digits = word.chars().take_while(char::is_ascii_digit).count();
+                        if word[digits..]
+                            .trim_start_matches(' ')
+                            .starts_with(['c', 'm'])
+                        {
+                            return Err(format!(
+                                "-r {word}: a repeat count (c) and marker format (m) are not supported"
+                            ));
                         }
-                    });
-                    j = chars.len();
+                    }
+                    let delay = take_digits(&chars, &mut j, &mut args, &mut i, prefix);
+                    repeat = Some(delay.map_or(15, |d| digits_value(&d) as u64));
                     continue;
                 }
                 'J' => format = Format::Json,
@@ -288,65 +323,56 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // is `-o -t`, `-o3t` is `-o3 -t`, and `-o /file` is `-o`
                     // and a file name. Note that a limit does NOT switch the
                     // offset column on: `-o 5` keeps SIZE/OFF.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    if !rest.is_empty() {
-                        let digits: String =
-                            rest.chars().take_while(char::is_ascii_digit).collect();
-                        if digits.is_empty() {
-                            columns.offset = true;
-                        } else {
-                            columns.offset_digits = digits_value(&digits);
-                            // The letters after the digits are options again.
-                            j += 1 + digits.len();
-                            continue;
-                        }
-                    } else if let Some(next) = args.get(i + 1) {
-                        let digits: String =
-                            next.chars().take_while(char::is_ascii_digit).collect();
-                        if digits.is_empty() {
-                            // Not a value — including `-x`-style words, which
-                            // are the next option.
-                            columns.offset = true;
-                        } else {
-                            columns.offset_digits = digits_value(&digits);
-                            let leftover = next[digits.len()..].to_string();
-                            if leftover.is_empty() {
-                                i += 1;
-                            } else {
-                                // `-o 3t`: the C resumes option scanning in
-                                // the middle of the word, so what follows the
-                                // digits is read as option letters.
-                                args[i + 1] = format!("-{leftover}");
-                            }
-                        }
-                        j = chars.len();
-                        continue;
-                    } else {
-                        columns.offset = true;
+                    match take_digits(&chars, &mut j, &mut args, &mut i, prefix) {
+                        Some(digits) => columns.offset_digits = digits_value(&digits),
+                        None => columns.offset = true,
                     }
+                    continue;
                 }
                 'v' => want_version = true,
                 'V' => sel.verbose = true,
                 'h' | '?' => want_help = true,
                 'l' => sel.numeric_ids = true,
-                'L' => sel.show_links = true,
+                'L' => {
+                    // `-L` / `+L [n]` (`main.c`, DIVERGENCES 41). The prefix
+                    // switches the NLINK column — `-L` OFF, which is the
+                    // default, and `+L` on — and only `+L` takes a count:
+                    // `+L n` also selects files with fewer than n links. lsof-rs
+                    // had read `-L` as "show" and refused a bare `+L`.
+                    columns.nlink = plus;
+                    if !plus
+                        && value_word(&chars, j, &args, i)
+                            .is_some_and(|(word, _)| word.starts_with(|d: char| d.is_ascii_digit()))
+                    {
+                        return Err("no number may follow -L".to_string());
+                    }
+                    match take_digits(&chars, &mut j, &mut args, &mut i, prefix) {
+                        Some(digits) => sel.max_links = Some(digits_value(&digits) as u64),
+                        // With no count the C sets `Nlink = 0` and leaves the
+                        // selection flag an earlier `+L n` raised, so `+L1 -L`
+                        // selects nothing at all rather than everything.
+                        None => {
+                            if let Some(limit) = sel.max_links.as_mut() {
+                                *limit = 0;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 'H' => sel.human_size = true,
-                'X' => sel.skip_inet_tables = true,
+                // `-X` toggles (`main.c`: `Fxopt = Fxopt ? 0 : 1`), under
+                // either prefix, so `-X -X` is off again and `-X -X -i` is
+                // no conflict (DIVERGENCES 45): the C judges `-i` against
+                // the value every `-X` leaves.
+                'X' => sel.skip_inet_tables = !sel.skip_inet_tables,
                 'N' => sel.nfs_only = true,
                 'Z' => {
                     // `-Z [context]`. The value is attached or the next word,
                     // and a word that opens an option is not one — the same
                     // rule `-K` uses (`main.c`: `*GOv != '-' && *GOv != '+'`).
-                    let rest: String = chars[j + 1..].iter().collect();
+                    let context = optional_value(&chars, j, &args, &mut i);
                     let list = sel.selinux.get_or_insert_with(Vec::new);
-                    if !rest.is_empty() {
-                        list.push(rest);
-                    } else if let Some(next) = args.get(i + 1) {
-                        if !next.starts_with(['-', '+']) {
-                            list.push(next.clone());
-                            i += 1;
-                        }
-                    }
+                    list.extend(context);
                     j = chars.len();
                     continue;
                 }
@@ -380,16 +406,23 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // `-x [fl]`: bare is both (`main.c`'s XO_ALL), otherwise
                     // each letter adds one. An unknown letter is fatal, and
                     // the C names it — `lsof: unknown cross-over option: q`.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    if rest.is_empty() {
-                        sel.cross_filesystems = true;
-                        sel.cross_symlinks = true;
-                    } else {
-                        for c in rest.chars() {
-                            match c {
-                                'f' => sel.cross_filesystems = true,
-                                'l' => sel.cross_symlinks = true,
-                                other => return Err(format!("unknown cross-over option: {other}")),
+                    // The letters may be the next word (`-x f`), and a word
+                    // that opens an option is not one, so `-x /tmp` is that
+                    // error rather than a bare `-x` and a file name.
+                    match optional_value(&chars, j, &args, &mut i) {
+                        None => {
+                            sel.cross_filesystems = true;
+                            sel.cross_symlinks = true;
+                        }
+                        Some(letters) => {
+                            for c in letters.chars() {
+                                match c {
+                                    'f' => sel.cross_filesystems = true,
+                                    'l' => sel.cross_symlinks = true,
+                                    other => {
+                                        return Err(format!("unknown cross-over option: {other}"))
+                                    }
+                                }
                             }
                         }
                     }
@@ -397,41 +430,58 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     continue;
                 }
                 'U' => sel.unix_only = true,
-                // `-E` after `+E` must not downgrade the "also show peer
-                // files" mode — lsof treats +E as a superset of -E.
+                // `+E` also lists the peers' own files. `-E` after `+E` must
+                // not downgrade that — lsof treats +E as a superset of -E.
                 'E' => {
-                    if sel.endpoints != Some(EndpointMode::Files) {
+                    if plus {
+                        sel.endpoints = Some(EndpointMode::Files);
+                    } else if sel.endpoints != Some(EndpointMode::Files) {
                         sel.endpoints = Some(EndpointMode::Info);
                     }
                 }
                 'Q' => sel.quiet = true,
+                // `-w` leaves out what cannot be read and mutes the warnings;
+                // `+w` restores both (the default).
                 'w' => {
-                    sel.suppress_warnings = true;
-                    sel.omit_unreadable = true;
+                    sel.suppress_warnings = !plus;
+                    sel.omit_unreadable = !plus;
                 }
                 'f' => {
                     // `-f` alone forces every path argument to be a plain
-                    // file. The C also spells kernel-file-structure selection
-                    // `-f[cfgGn]`, which lsof-rs does not implement and which
-                    // is not what a bare `-f` means; a value here is a request
-                    // for that, so it is rejected rather than silently read as
-                    // the path-argument switch.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    if !rest.is_empty() {
-                        return Err(format!(
-                            "unsupported kernel file structure selection: {rest}"
-                        ));
+                    // file; `+f` forces it to be a file system, and widens
+                    // what counts as one to any mount source, not just a block
+                    // device. The C also spells kernel-file-structure
+                    // selection `-f[cfgGn]`, which lsof-rs does not implement
+                    // and which is not what a bare `-f` means; a value here is
+                    // a request for that, so it is rejected rather than
+                    // silently read as the path-argument switch. The value may
+                    // be the next word, and a word that opens an option is not
+                    // one (`main.c`) — so `lsof -f /dev/null` is refused, as
+                    // the C refuses it (`unknown file struct option: /`), and
+                    // the path goes after `--`.
+                    if let Some(value) = optional_value(&chars, j, &args, &mut i) {
+                        return Err(match value.chars().find(|c| !matches!(c, 'g' | 'G')) {
+                            Some(other) => format!("unknown file struct option: {other}"),
+                            None => format!("unsupported kernel file structure selection: {value}"),
+                        });
                     }
-                    sel.filesystem_args = FilesystemArgs::NeverFilesystem;
+                    sel.filesystem_args = if plus {
+                        FilesystemArgs::AlwaysFilesystem
+                    } else {
+                        FilesystemArgs::NeverFilesystem
+                    };
                     j = chars.len();
                     continue;
                 }
                 'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
                      and document as a no-op for portability. */
                 }
+                // `+T` is `-T`'s inverse only in the no-letter case: with
+                // letters, `main.c` reads them identically and the prefix is
+                // never consulted.
                 'T' => {
-                    let rest: String = chars[j + 1..].iter().collect();
-                    sel.tcp_info_opt = Some(take_tcp_info(rest, &args, &mut i, false)?);
+                    let letters = optional_value(&chars, j, &args, &mut i).unwrap_or_default();
+                    sel.tcp_info_opt = Some(parse_tcp_info(&letters, plus)?);
                     j = chars.len();
                     continue;
                 }
@@ -450,19 +500,7 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // errors, not a bare `-K` plus a name — taking only a
                     // literal `i` turned `lsof -K /var/log` into a whole-host
                     // task listing where the C exits 1.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        Some(rest)
-                    } else {
-                        match args.get(i + 1) {
-                            Some(next) if !next.starts_with(['-', '+']) => {
-                                i += 1;
-                                Some(next.clone())
-                            }
-                            _ => None,
-                        }
-                    };
-                    match value {
+                    match optional_value(&chars, j, &args, &mut i) {
                         None => sel.tasks = TaskMode::Always,
                         // `strcasecmp`, so `-K I` is `-K i`.
                         Some(v) if v.eq_ignore_ascii_case("i") => sel.tasks = TaskMode::Never,
@@ -472,10 +510,39 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     continue;
                 }
                 'F' => {
-                    let rest: Vec<char> = chars[j + 1..].to_vec();
-                    let nul = rest.contains(&'0');
-                    let only: Vec<char> = rest.into_iter().filter(|c| *c != '0').collect();
-                    fields_offset |= only.contains(&'o');
+                    // `-F [f]`: the list is attached or the next word, and a
+                    // word that opens an option is not one (`main.c`) — so
+                    // `lsof -F pn` selects `p` and `n`, where lsof-rs had
+                    // looked for a file called `pn` (DIVERGENCES 43). `?`
+                    // alone lists the letters; any other letter the C's table
+                    // lacks is fatal, where lsof-rs had printed `-Fpx` as
+                    // `-Fp`. Every `-F` adds to the one choice, as the C's
+                    // `FieldSel[].st` flags do: `-Fn -Fp` is `p` and `n`, and
+                    // a `0` anywhere keeps NUL terminators.
+                    let value = optional_value(&chars, j, &args, &mut i);
+                    let this_defaults = match value.as_deref() {
+                        Some("?") => {
+                            field_help = true;
+                            j = chars.len();
+                            continue;
+                        }
+                        // Bare, or `0` alone: the C's default set.
+                        None | Some("0") => true,
+                        Some(list) => {
+                            if let Some(bad) = list.chars().find(|f| !field_known(*f)) {
+                                return Err(format!("unknown field: {bad}"));
+                            }
+                            false
+                        }
+                    };
+                    let letters = value.as_deref().unwrap_or("");
+                    fields.nul |= letters.contains('0');
+                    if this_defaults {
+                        fields.defaults = true;
+                    } else {
+                        fields.letters.extend(letters.chars().filter(|f| *f != '0'));
+                        fields_offset |= letters.contains('o');
+                    }
                     // The C's field table gives some letters a side effect:
                     // selecting one also switches on the collection it needs
                     // (`store.c` — `T` carries `Ftcptpi |= TCPTPI_ALL`). That is
@@ -484,16 +551,16 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // and rejects `-T w`, so "all" is state + queues there.
                     // The other side effects (`k`→nlink, `g`/`R`→pgid/ppid,
                     // `o`→offset) are no-ops here: those values are always
-                    // gathered, so the field prints whenever it has one.
-                    if only.is_empty() || only.contains(&'T') {
+                    // gathered, so the field prints whenever it has one. The
+                    // effect belongs to the `-F` that names the letter: a
+                    // `-T q` between two `-F`s narrows what the first chose,
+                    // and a later `-Fn` must not widen it back.
+                    if this_defaults || letters.contains('T') {
                         let t = sel.tcp_info_opt.get_or_insert(TcpInfoFlags::default());
                         t.state = true;
                         t.queue = true;
                     }
-                    format = Format::Fields {
-                        nul,
-                        only: (!only.is_empty()).then_some(only),
-                    };
+                    format = fields.format();
                     j = chars.len();
                     continue;
                 }
@@ -502,18 +569,7 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // a word that opens an option is not one (`main.c`). So
                     // `-i :80` is the spec `:80` — lsof-rs had read it as a
                     // bare `-i` and a file called `:80`.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let spec = if !rest.is_empty() {
-                        rest
-                    } else {
-                        match args.get(i + 1) {
-                            Some(next) if !next.starts_with(['-', '+']) => {
-                                i += 1;
-                                next.clone()
-                            }
-                            _ => String::new(),
-                        }
-                    };
+                    let spec = optional_value(&chars, j, &args, &mut i).unwrap_or_default();
                     parse_inet(&mut sel, &spec)?;
                     j = chars.len();
                     continue;
@@ -553,18 +609,7 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // next word, and a word that opens an option is not one
                     // (`main.c`). With or without it, `-g` adds the PGID
                     // column; with it, it also selects by process group.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        Some(rest)
-                    } else {
-                        match args.get(i + 1) {
-                            Some(next) if !next.starts_with(['-', '+']) => {
-                                i += 1;
-                                Some(next.clone())
-                            }
-                            _ => None,
-                        }
-                    };
+                    let value = optional_value(&chars, j, &args, &mut i);
                     apply_g(&mut sel, &mut columns, value.as_deref())?;
                     j = chars.len();
                     continue;
@@ -579,26 +624,14 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // the next word unconditionally: `lsof -s -p 1` looked for
                     // a file called `1`, and `lsof -s -o` silently filtered
                     // every socket out by a state named `-o`.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        Some(rest)
-                    } else {
-                        match args.get(i + 1) {
-                            Some(next) if !next.starts_with(['-', '+']) => {
-                                i += 1;
-                                Some(next.clone())
-                            }
-                            _ => None,
-                        }
-                    };
-                    match value {
+                    match optional_value(&chars, j, &args, &mut i) {
                         Some(v) => parse_state_spec(&mut states, &v)?,
                         None => columns.size = true,
                     }
                     j = chars.len();
                     continue;
                 }
-                other => return Err(format!("unsupported option: -{other}")),
+                other => return Err(format!("unsupported option: {prefix}{other}")),
             }
             j += 1;
         }
@@ -632,6 +665,9 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     }
     if want_help {
         return Ok(Action::Help);
+    }
+    if field_help {
+        return Ok(Action::FieldHelp);
     }
     if want_version {
         return Ok(Action::Version);
@@ -859,29 +895,74 @@ const HAS_TCP_WINDOW: bool = false;
 #[cfg(not(target_os = "linux"))]
 const HAS_TCP_WINDOW: bool = true;
 
-/// Read a `-T` / `+T` option's value, from the same token or the next one.
+/// The word an option's optional value would be, as the C's `GetOpt` offers
+/// it to every option whose rule letter carries a `:` — the rest of this
+/// word, or else the next word — and whether it is the next word. Nothing is
+/// consumed.
 ///
-/// The C declares `-T` as taking a value (`T:` in its option string), so
-/// `lsof -T q` consumes `q` — and `lsof -T /some/path` consumes the path and
-/// then rejects `/` as a sub-option letter. Its `GetOpt` falls back to the
-/// no-value meaning only when the value is absent or itself looks like an
-/// option, which is why `lsof -T -i` is a bare `-T` followed by `-i`.
-fn take_tcp_info(
-    attached: String,
-    args: &[String],
+/// The next word is not offered when it opens an option, because every such
+/// option gives it back (`main.c`: `if (!GOv || *GOv == '-' || *GOv == '+')`).
+/// That is the whole rule: `lsof -T q` takes `q`, `lsof -T /some/path` takes
+/// the path and then rejects `/` as a letter, and `lsof -T -i` is a bare `-T`
+/// followed by `-i`. `--` opens an option too, and ends the options after.
+fn value_word(chars: &[char], j: usize, args: &[String], i: usize) -> Option<(String, bool)> {
+    if j + 1 < chars.len() {
+        return Some((chars[j + 1..].iter().collect(), false));
+    }
+    args.get(i + 1)
+        .filter(|next| !next.starts_with(['-', '+']))
+        .map(|next| (next.clone(), true))
+}
+
+/// [`value_word`], taken: the next word is consumed when it is the value.
+fn optional_value(chars: &[char], j: usize, args: &[String], i: &mut usize) -> Option<String> {
+    let (word, next) = value_word(chars, j, args, *i)?;
+    if next {
+        *i += 1;
+    }
+    Some(word)
+}
+
+/// An optional value whose meaning is its leading digits — `-o`, `-r` and
+/// `+L` each read theirs digit by digit and stop at the first that is not one
+/// (`main.c`) — taken, with what follows the digits given back, and the scan
+/// left where the C's `GetOpt` resumes:
+///
+/// * attached (`-o3t`), the letters after the digits are options again, so
+///   the cluster goes on at the first of them — at the value's first letter
+///   when there are no digits at all (`-ot` is `-o -t`);
+/// * the next word (`-o 3t`) is taken only when it opens with a digit, and
+///   what follows its digits is read as option letters under the same
+///   prefix, as the C resumes in the middle of the word. A next word with no
+///   digits is not consumed at all: `-o /file` is `-o` and a file name.
+fn take_digits(
+    chars: &[char],
+    j: &mut usize,
+    args: &mut [String],
     i: &mut usize,
-    plus: bool,
-) -> Result<TcpInfoFlags, String> {
-    if !attached.is_empty() {
-        return parse_tcp_info(&attached, plus);
+    prefix: char,
+) -> Option<String> {
+    if *j + 1 < chars.len() {
+        let digits: String = chars[*j + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        *j += 1 + digits.len();
+        return (!digits.is_empty()).then_some(digits);
     }
-    match args.get(*i + 1) {
-        Some(next) if !next.starts_with('-') && !next.starts_with('+') => {
-            *i += 1;
-            parse_tcp_info(next, plus)
-        }
-        _ => parse_tcp_info("", plus),
+    *j = chars.len();
+    let next = args.get(*i + 1)?;
+    let digits: String = next.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
     }
+    let leftover = next[digits.len()..].to_string();
+    if leftover.is_empty() {
+        *i += 1;
+    } else {
+        args[*i + 1] = format!("{prefix}{leftover}");
+    }
+    Some(digits)
 }
 
 /// Parse the letters of a `-T` / `+T` option.
@@ -1673,6 +1754,29 @@ mod tests {
         }
     }
 
+    /// `-X` toggles, as the C's `Fxopt` does, whatever the prefix (DIVERGENCES
+    /// 45), and `-i` is refused only when the last `-X` left it on. Measured:
+    /// `lsof -X -X -i` lists the Internet files and exits 0.
+    #[test]
+    fn dash_x_upper_toggles_and_dash_i_is_judged_on_the_final_value() {
+        let skip = |argv: &[&str]| columns(argv).unwrap().1.skip_inet_tables;
+        assert!(!skip(&[]));
+        assert!(skip(&["-X"]) && skip(&["+X"]));
+        assert!(!skip(&["-X", "-X"]) && !skip(&["-XX"]) && !skip(&["-X", "+X"]));
+        assert!(skip(&["-X", "-X", "-X"]) && skip(&["-XXX"]));
+        for argv in [
+            &["-X", "-X", "-i"][..],
+            &["-X", "-i", "-X"][..],
+            &["-aXXi"][..],
+        ] {
+            assert!(columns(argv).is_ok(), "{argv:?}: -X was toggled off");
+        }
+        assert_eq!(
+            columns(&["-X", "-X", "-X", "-i"]).unwrap_err(),
+            "-i is useless when -X is specified."
+        );
+    }
+
     #[test]
     fn dash_x_alone_is_accepted_and_selects_nothing() {
         // The flag suppresses a lookup; it is not a selector, so it must not
@@ -1752,5 +1856,259 @@ mod tests {
         );
         // Absent stays None — the gate must not fire on a run that never said -Z.
         assert_eq!(sel(&["-p", "1"]), None);
+    }
+
+    /// `-L` / `+L [n]`, every spelling measured against the C (DIVERGENCES
+    /// 41): the prefix switches the column, only `+` takes a count, and a word
+    /// that is not a count is given back.
+    #[test]
+    fn dash_l_hides_the_nlink_column_and_plus_l_shows_it() {
+        let links = |argv: &[&str]| {
+            let (cols, sel) = columns(argv).unwrap();
+            (cols.nlink, sel.max_links)
+        };
+        assert_eq!(links(&[]), (false, None), "off by default");
+        assert_eq!(links(&["-L"]), (false, None), "-L is the default, OFF");
+        assert_eq!(links(&["+L"]), (true, None), "+L alone shows it");
+        assert_eq!(links(&["+L1"]), (true, Some(1)));
+        assert_eq!(
+            links(&["+L", "1"]),
+            (true, Some(1)),
+            "the count may be the next word"
+        );
+        assert_eq!(
+            links(&["+L", "-a"]),
+            (true, None),
+            "an option is not a count"
+        );
+        assert_eq!(links(&["+L", "--", "/x"]), (true, None));
+        assert_eq!(links(&["+L", "99999999999999999999999"]).1, Some(u64::MAX));
+        // A count, then more: the letters after the digits are options again,
+        // under the same prefix — `+L1a` is `+L1 -a`, and so is `+L 1a`.
+        for argv in [&["+L1a"][..], &["+L", "1a"][..]] {
+            let (cols, sel) = columns(argv).unwrap();
+            assert!(cols.nlink && sel.and_mode, "{argv:?}");
+            assert_eq!(sel.max_links, Some(1), "{argv:?}");
+            assert!(sel.paths.is_empty(), "{argv:?}");
+        }
+        // A word that is no count is not consumed: a file name, or letters.
+        // ...under the prefix the count came with: `+L 1w` is `+L1 +w`, which
+        // restores the warnings `-w` muted, where `-w` would mute them again.
+        let (_, sel) = columns(&["-w", "+L", "1w"]).unwrap();
+        assert!(
+            !sel.suppress_warnings && !sel.omit_unreadable,
+            "+L 1w is +L1 +w"
+        );
+        assert_eq!(sel.max_links, Some(1));
+        assert_eq!(columns(&["+L", "foo"]).unwrap().1.paths, vec!["foo"]);
+        assert_eq!(columns(&["-L", "foo"]).unwrap().1.paths, vec!["foo"]);
+        assert!(columns(&["-La"]).unwrap().1.and_mode, "-La is -L -a");
+        // Only `+` takes a count, attached or not.
+        for argv in [&["-L1"][..], &["-L", "1"][..], &["-L", "1a"][..]] {
+            assert_eq!(
+                columns(argv).unwrap_err(),
+                "no number may follow -L",
+                "{argv:?}"
+            );
+        }
+        // A count-less `-L`/`+L` after a count sets it to 0 and keeps the
+        // selection: `+L1 -L` selects nothing, it does not select everything.
+        assert_eq!(links(&["+L1", "-L"]), (false, Some(0)));
+        assert_eq!(links(&["+L1", "+L"]), (true, Some(0)));
+        assert_eq!(
+            links(&["+L1", "+L2"]),
+            (true, Some(2)),
+            "the last count wins"
+        );
+        assert_eq!(links(&["-L", "+L3"]), (true, Some(3)));
+    }
+
+    /// A `+` word is a cluster, as a `-` word is, and a letter the C reads the
+    /// same under either prefix means the same thing (`+wa` is `+w -a`).
+    /// lsof-rs had read one letter per `+` word and dropped the rest.
+    #[test]
+    fn a_plus_word_is_a_cluster_of_options() {
+        let (_, sel) = columns(&["+wa"]).unwrap();
+        assert!(sel.and_mode && !sel.suppress_warnings && !sel.omit_unreadable);
+        let (_, sel) = columns(&["-w", "+aw"]).unwrap();
+        assert!(sel.and_mode && !sel.suppress_warnings, "+aw is -a +w");
+        let (_, sel) = columns(&["+Ea"]).unwrap();
+        assert_eq!(sel.endpoints, Some(EndpointMode::Files));
+        assert!(sel.and_mode);
+        assert_eq!(columns(&["+p", "1"]).unwrap().1.pids, vec![1]);
+        // `+E` then `-E` keeps the wider mode (the C's `FeptE` only grows).
+        assert_eq!(
+            columns(&["+E", "-E"]).unwrap().1.endpoints,
+            Some(EndpointMode::Files)
+        );
+        // What the C gives a `+` meaning lsof-rs lacks is refused, never read
+        // as the `-` meaning — and the refusal names the `+` spelling.
+        for (o, want) in [
+            ("+n", "unsupported option: +n"),
+            ("+P", "unsupported option: +P"),
+            ("+r", "unsupported option: +r"),
+            ("+e", "unsupported option: +e"),
+            ("+J", "unsupported option: +J"),
+            ("+aq", "unsupported option: +q"),
+            ("+", "unsupported option: +"),
+        ] {
+            assert_eq!(columns(&[o]).unwrap_err(), want, "{o}");
+        }
+        assert_eq!(columns(&["-q"]).unwrap_err(), "unsupported option: -q");
+    }
+
+    /// `-F [f]` (DIVERGENCES 43): the list may be the next word, only the C's
+    /// letters are fields, `?` lists them, and every `-F` adds to one choice.
+    #[test]
+    fn dash_f_takes_its_list_as_the_next_word_and_accumulates() {
+        let fields = |argv: &[&str]| run(argv).1;
+        let only = |nul: bool, letters: Option<&str>| Format::Fields {
+            nul,
+            only: letters.map(|l| l.chars().collect()),
+        };
+        assert_eq!(fields(&["-F", "pL"]), only(false, Some("pL")));
+        assert!(run(&["-F", "pL"]).0.paths.is_empty(), "not a file name");
+        assert_eq!(
+            fields(&["-F", "0"]),
+            only(true, None),
+            "`0` alone is the default set"
+        );
+        assert_eq!(
+            fields(&["-F", "-a"]),
+            only(false, None),
+            "an option is not a list"
+        );
+        assert!(run(&["-F", "-a"]).0.and_mode);
+        assert_eq!(
+            fields(&["-F00"]),
+            only(true, Some("")),
+            "NUL, and `p` alone"
+        );
+        assert_eq!(fields(&["-F0p"]), only(true, Some("p")));
+        // Accumulated, as `FieldSel[].st` is.
+        assert_eq!(fields(&["-Fn", "-Fp"]), only(false, Some("np")));
+        assert_eq!(fields(&["-F", "-Fn"]), only(false, None));
+        assert_eq!(fields(&["-Fn", "-F"]), only(false, None));
+        assert_eq!(fields(&["-F0", "-Fn"]), only(true, None));
+        assert_eq!(fields(&["-Fn", "-F0"]), only(true, None));
+        assert_eq!(fields(&["-Fn", "-J"]), Format::Json, "the last format wins");
+        // `?` lists the letters, attached or not, and nothing else happens.
+        for argv in [&["-F?"][..], &["-F", "?"][..], &["-F", "?", "-p", "1"][..]] {
+            assert!(
+                matches!(
+                    parse(argv.iter().map(|s| s.to_string()).collect()),
+                    Ok(Action::FieldHelp)
+                ),
+                "{argv:?}"
+            );
+        }
+        // A letter the C's table lacks is fatal and named, first one first.
+        for (argv, want) in [
+            (&["-Fpx"][..], "unknown field: x"),
+            (&["-F", "/tmp"][..], "unknown field: /"),
+            (&["-F", "p677"][..], "unknown field: 6"),
+            (&["-Fp?"][..], "unknown field: ?"),
+        ] {
+            assert_eq!(
+                parse(argv.iter().map(|s| s.to_string()).collect()).unwrap_err(),
+                want
+            );
+        }
+        // `r` is outside the default set (DIVERGENCES 47): `-F -Fr` is the set
+        // spelt out with `r` added, in either order, and `-Fr` is `r` alone.
+        let with_r = |argv: &[&str]| match run(argv).1 {
+            Format::Fields { only: Some(l), .. } => l,
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        for argv in [&["-F", "-Fr"][..], &["-Fr", "-F"][..]] {
+            let l = with_r(argv);
+            assert!(
+                l.contains(&'r') && l.contains(&'n') && l.contains(&'D'),
+                "{argv:?}: {l:?}"
+            );
+            assert!(!l.contains(&'Z') && !l.contains(&'z'), "{argv:?}: {l:?}");
+        }
+        assert_eq!(with_r(&["-Fr"]), vec!['r']);
+        assert_eq!(
+            fields(&["-F", "-Fk"]),
+            only(false, None),
+            "k is a default letter"
+        );
+        // Every letter the C accepts is accepted, including the ones that
+        // print nothing here.
+        assert!(parse(vec!["-F0CDFGKLMNPRSTZacdfgiklmnoprstuz".into()]).is_ok());
+        // `T`'s side effect belongs to the `-F` that names it: a later `-Fn`
+        // must not widen a `-T q` back to the state as well.
+        let tcp = |argv: &[&str]| {
+            let t = run(argv).0.tcp_info_opt.unwrap();
+            (t.state, t.queue)
+        };
+        assert_eq!(tcp(&["-F"]), (true, true));
+        assert_eq!(tcp(&["-F", "-Tq"]), (false, true));
+        assert_eq!(tcp(&["-Tq", "-F"]), (true, true));
+        assert_eq!(tcp(&["-FT", "-Tq", "-Fn"]), (false, true));
+        assert!(run(&["-Fn"]).0.tcp_info_opt.is_none());
+    }
+
+    /// `-r [t]`: the delay may be the next word, only its leading digits are
+    /// the delay, and what follows them is given back — `lsof -r 2` had looked
+    /// for a file called `2`.
+    #[test]
+    fn dash_r_takes_its_delay_as_the_next_word() {
+        assert_eq!(repeat(&["-r", "2"]), Some(2));
+        assert!(paths(&["-r", "2"]).is_empty());
+        assert_eq!(repeat(&["-r", "-p", "1"]), Some(15));
+        assert_eq!(repeat(&["-r", "abc"]), Some(15));
+        assert_eq!(
+            paths(&["-r", "abc"]),
+            vec!["abc"],
+            "no digits: not consumed"
+        );
+        for argv in [&["-r2a"][..], &["-r", "2a"][..]] {
+            let (_, sel) = columns(argv).unwrap();
+            assert!(sel.and_mode, "{argv:?} is -r2 -a");
+            assert_eq!(repeat(argv), Some(2), "{argv:?}");
+        }
+        // The C's count and marker suffixes are refused, never half-read.
+        for argv in [&["-r5c3"][..], &["-r", "5m%T"][..], &["-r", "c3"][..]] {
+            assert!(
+                parse(argv.iter().map(|s| s.to_string()).collect())
+                    .unwrap_err()
+                    .contains("not supported"),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// `-x [fl]` and `-f`/`+f`: a value may be the next word, and one that
+    /// opens an option is not one — so `-x /tmp` and `-f /dev/null` are the
+    /// C's errors, not a bare switch and a file name.
+    #[test]
+    fn dash_x_and_dash_f_take_their_value_as_the_next_word() {
+        let xover = |argv: &[&str]| {
+            let (_, sel) = columns(argv).unwrap();
+            (sel.cross_filesystems, sel.cross_symlinks)
+        };
+        assert_eq!(xover(&["+d", "/tmp", "-x", "f"]), (true, false));
+        assert_eq!(xover(&["+d", "/tmp", "-x", "l"]), (false, true));
+        assert_eq!(xover(&["-x", "+d", "/tmp"]), (true, true));
+        assert_eq!(
+            columns(&["+d", "/tmp", "-x", "/tmp"]).unwrap_err(),
+            "unknown cross-over option: /"
+        );
+        assert_eq!(
+            columns(&["-f", "/dev/null"]).unwrap_err(),
+            "unknown file struct option: /"
+        );
+        assert_eq!(
+            columns(&["+f", "/dev/null"]).unwrap_err(),
+            "unknown file struct option: /"
+        );
+        assert!(columns(&["-f", "g"]).unwrap_err().contains("unsupported"));
+        let (_, sel) = columns(&["-f", "--", "/dev/null"]).unwrap();
+        assert_eq!(sel.filesystem_args, FilesystemArgs::NeverFilesystem);
+        assert_eq!(sel.paths, vec!["/dev/null"]);
+        let (_, sel) = columns(&["+f", "--", "/dev/null"]).unwrap();
+        assert_eq!(sel.filesystem_args, FilesystemArgs::AlwaysFilesystem);
     }
 }

@@ -267,7 +267,10 @@ Then the loop — each step is a CI-enforced gate:
    case — **enforced by `harnesses/coverage/coverage_gate.py`**: bootstrap the
    inventory from the C (`--extract-options`/`--extract-types`), curate it, and
    the gate exits 1 on any feature no matrix case exercises (waivers carry
-   reasons). When the reference binary can't run on the target platform, switch to
+   reasons). A value-taking option counts twice, because getopt offers it two
+   spellings and a port can parse one of them: the gate requires a case that
+   gives it the value as the next word (`-F pn`) as well as one naming the
+   letter at all (LESSONS #071). When the reference binary can't run on the target platform, switch to
    **oracle-substitution** (diff against a native tool over self-owned fixtures)
    with a three-way exit contract — match / divergence / infra-error — so a
    broken harness can't read as a port bug. Both modes are in the matrix header.

@@ -41,6 +41,240 @@ use crate::model::{AccessMode, FdType, FileType, Process};
 use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::TcpInfoFlags;
 
+/// One letter of the C's field table (`store.c`'s `FieldSel[]`).
+#[derive(Clone, Copy, Debug)]
+pub struct Field {
+    /// The letter.
+    pub id: char,
+    /// What `-F ?` calls it.
+    pub what: &'static str,
+    /// Whether `-F ?` lists it.
+    pub listed: bool,
+    /// Whether a bare `-F` selects it (`select_default_fields()`).
+    pub default: bool,
+}
+
+/// The C's field table, in its order: every letter `-F` accepts, and
+/// how `-F ?` and a bare `-F` treat it.
+///
+/// The C accepts every letter here, and refuses any other with `lsof: unknown
+/// field: x`. Its list leaves out what its Linux build compiles away — the
+/// file structure's share count, address and node ID, and zones — and the
+/// security context unless SELinux is on. lsof-rs lists the same letters on
+/// every platform. The default set is every letter but the raw device number
+/// (left out "for compatibility"), the security context and the zone. A
+/// letter the C accepts need not print anything: `C`, `F`, `N`, `z` and `Z`
+/// never do here, as none does on a Linux host without SELinux.
+pub const FIELD_TABLE: &[Field] = &[
+    Field {
+        id: 'a',
+        what: "access: r = read; w = write; u = read/write",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'c',
+        what: "command name",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'C',
+        what: "file struct share count",
+        listed: false,
+        default: true,
+    },
+    Field {
+        id: 'd',
+        what: "device character code",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'D',
+        what: "major/minor device number as 0x<hex>",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'f',
+        what: "file descriptor",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'F',
+        what: "file struct address as 0x<hex>",
+        listed: false,
+        default: true,
+    },
+    Field {
+        id: 'G',
+        what: "file flaGs",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'i',
+        what: "inode number",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'k',
+        what: "link count",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'K',
+        what: "task ID (TID)",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'l',
+        what: "lock: r/R = read; w/W = write; u = read/write",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'L',
+        what: "login name",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'm',
+        what: "marker between repeated output",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'M',
+        what: "task comMand name",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'n',
+        what: "comment, name, Internet addresses",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'N',
+        what: "file struct node ID as 0x<hex>",
+        listed: false,
+        default: true,
+    },
+    Field {
+        id: 'o',
+        what: "file offset as 0t<dec> or 0x<hex>",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'p',
+        what: "process ID (PID)",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'g',
+        what: "process group ID (PGID)",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'P',
+        what: "protocol name",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'r',
+        what: "raw device number as 0x<hex>",
+        listed: true,
+        default: false,
+    },
+    Field {
+        id: 'R',
+        what: "paRent PID",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 's',
+        what: "file size",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'S',
+        what: "stream module and device names",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 't',
+        what: "file type",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'T',
+        what: "TCP/TPI info",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'u',
+        what: "user ID (UID)",
+        listed: true,
+        default: true,
+    },
+    Field {
+        id: 'z',
+        what: "zone name",
+        listed: false,
+        default: false,
+    },
+    Field {
+        id: 'Z',
+        what: "security context",
+        listed: false,
+        default: false,
+    },
+    Field {
+        id: '0',
+        what: "(zero) use NUL field terminator instead of NL",
+        listed: true,
+        default: true,
+    },
+];
+
+/// Whether `-F` accepts `c` as a field letter.
+pub fn field_known(c: char) -> bool {
+    FIELD_TABLE.iter().any(|f| f.id == c)
+}
+
+/// Whether a bare `-F` selects `c`. Of the letters lsof-rs prints, only `r`
+/// is left out, so `-F` alone prints no raw device number and `-F -Fr` does.
+pub fn field_is_default(c: char) -> bool {
+    FIELD_TABLE.iter().any(|f| f.id == c && f.default)
+}
+
+/// What `-F ?` writes, which the C writes to stderr (`usage.c`): a heading,
+/// then one line per listed letter.
+pub fn field_help() -> String {
+    let mut out = String::from("lsof:\tID    field description\n");
+    for f in FIELD_TABLE.iter().filter(|f| f.listed) {
+        out.push_str(&format!("\t {}    {}\n", f.id, f.what));
+    }
+    out
+}
+
 /// Render `procs` in `-F` format. `nul` selects NUL line termination (`-F0`);
 /// `only` restricts the emitted fields; `tcp_show` is `-T`'s selection, which
 /// gates the `T` tokens the same way it gates the table's suffix; `esc` chooses
@@ -67,7 +301,10 @@ pub fn render_with_offset_digits(
     offset_digits: usize,
 ) -> String {
     let term = if nul { '\0' } else { '\n' };
-    let want = |c: char| only.is_none_or(|s| s.contains(&c));
+    // No list is the C's default set, which is every letter but a few; a
+    // list is exactly those letters (the parser spells out the default set
+    // when a letter outside it is added to it, `-F -Fr`).
+    let want = |c: char| only.map_or_else(|| field_is_default(c), |s| s.contains(&c));
     let mut out = String::new();
     // Field emitter (macro, not a closure, so `end_set!` can also touch `out`).
     macro_rules! push {
@@ -179,6 +416,13 @@ pub fn render_with_offset_digits(
                     push!('D', &format!("0x{dev:x}"));
                 }
             }
+            // The device a character or block special names, in hex, after `D`
+            // where `print.c` puts it (DIVERGENCES 47).
+            if want('r') {
+                if let Some(rdev) = f.rdev {
+                    push!('r', &format!("0x{:x}", rdev.get()));
+                }
+            }
             if want('s') {
                 if let Some(s) = f.size {
                     push!('s', &s.to_string());
@@ -262,4 +506,58 @@ pub fn render_with_offset_digits(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `-F ?` is the C's text to the byte, as `lsof -F ?` wrote it to stderr
+    /// on the Linux test host (no SELinux): the table's letters less the five
+    /// its build does not list.
+    #[test]
+    fn field_help_is_the_cs_text() {
+        let measured = concat!(
+            "lsof:\tID    field description\n",
+            "\t a    access: r = read; w = write; u = read/write\n",
+            "\t c    command name\n",
+            "\t d    device character code\n",
+            "\t D    major/minor device number as 0x<hex>\n",
+            "\t f    file descriptor\n",
+            "\t G    file flaGs\n",
+            "\t i    inode number\n",
+            "\t k    link count\n",
+            "\t K    task ID (TID)\n",
+            "\t l    lock: r/R = read; w/W = write; u = read/write\n",
+            "\t L    login name\n",
+            "\t m    marker between repeated output\n",
+            "\t M    task comMand name\n",
+            "\t n    comment, name, Internet addresses\n",
+            "\t o    file offset as 0t<dec> or 0x<hex>\n",
+            "\t p    process ID (PID)\n",
+            "\t g    process group ID (PGID)\n",
+            "\t P    protocol name\n",
+            "\t r    raw device number as 0x<hex>\n",
+            "\t R    paRent PID\n",
+            "\t s    file size\n",
+            "\t S    stream module and device names\n",
+            "\t t    file type\n",
+            "\t T    TCP/TPI info\n",
+            "\t u    user ID (UID)\n",
+            "\t 0    (zero) use NUL field terminator instead of NL\n",
+        );
+        assert_eq!(field_help(), measured);
+    }
+
+    /// The C accepts every letter of its table and nothing else.
+    #[test]
+    fn a_field_letter_is_one_the_cs_table_has() {
+        for c in "0CDFGKLMNPRSTZacdfgiklmnoprstuz".chars() {
+            assert!(field_known(c), "{c}");
+        }
+        assert_eq!(FIELD_TABLE.len(), 31);
+        for c in "xyqQ?/1-+ ".chars() {
+            assert!(!field_known(c), "{c:?}");
+        }
+    }
 }

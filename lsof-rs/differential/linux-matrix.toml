@@ -670,6 +670,24 @@ name = "opt-X-with-dash-i-is-fatal"
 args = ["-n", "-P", "-X", "-i", "-p", "{B}"]
 
 [[case]]
+# `-X` TOGGLES (`main.c`: `Fxopt = Fxopt ? 0 : 1`): a second one turns the
+# lookup back on, and B's TCP and UDP rows are whole again. lsof-rs set it on
+# however many times it was given (DIVERGENCES 45).
+name = "opt-X-twice-is-off"
+args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-X", "-p", "{B}"]
+
+[[case]]
+# The conflict with `-i` is judged on the final value, so this lists B's
+# Internet files where lsof-rs refused the pair.
+name = "opt-X-toggled-off-around-dash-i-is-no-conflict"
+args = ["-n", "-P", "-X", "-a", "-i", "-X", "-p", "{B}"]
+
+[[case]]
+# `+X` toggles too: the C's case never looks at the prefix.
+name = "opt-plus-X-toggles-as-dash-X-does"
+args = ["-n", "-P", "-a", "-d", "^mem", "+X", "-p", "{B}"]
+
+[[case]]
 # The `+d` symlink rule, on a directory whose ONLY entry is a link pointing out
 # of it at a file the fixture holds open under its real name. The C skips the
 # link, so this prints nothing; lsof-rs followed every link and printed the
@@ -1429,6 +1447,167 @@ args = ["-n", "-P", "-l", "-a", "-d", "cwd,3", "-p", "{A}"]
 # ...and writes no `L` field for a number, where lsof-rs wrote `L0`.
 name = "fields-no-login-field-for-a-number"
 args = ["-n", "-P", "-l", "-FpuL", "-p", "{A}"]
+
+# ------------------------------------------- the raw device number (DIVERGENCES 47)
+# Fixture V holds device nodes of four majors. The C prints `r0x<hex>` for a
+# character or block special only, and leaves `r` out of the default set.
+
+[[case]]
+# `r` on every device row and no other, after `D`. lsof-rs printed none.
+name = "fields-raw-device-on-device-nodes"
+args = ["-n", "-P", "-FfrDt", "-a", "-p", "{V}"]
+
+[[case]]
+# A bare `-F` leaves the raw device number out, "for compatibility"...
+name = "fields-default-set-leaves-raw-device-out"
+args = ["-n", "-P", "-F", "-a", "-d", "^mem", "-p", "{V}"]
+
+[[case]]
+# ...and `-F -Fr` is the default set with it.
+name = "fields-default-set-plus-raw-device"
+args = ["-n", "-P", "-F", "-Fr", "-a", "-d", "^mem", "-p", "{V}"]
+
+[[case]]
+# The same rows as a table: DEVICE is the major and minor the node names.
+name = "devices-table"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{V}"]
+
+# ------------------------------------------------ link counts (DIVERGENCES 41, 42)
+# Fixture N holds a deleted file (no links), a file with one name and one with
+# two, a socket pair and a pipe. `+L` shows the NLINK column and `-L` hides it,
+# and `+L n` selects a file whose link count `stat` recorded and found below n,
+# which a socket never has: the C hands it to `process_proc_sock()` first.
+
+[[case]]
+# `-L` is the default, no column. lsof-rs had read it as "show".
+name = "links-dash-L-hides-the-column"
+args = ["-n", "-P", "-L", "-a", "-d", "^mem", "-p", "{N}"]
+
+[[case]]
+# `+L` alone shows it, blank on the socket rows. lsof-rs refused a bare `+L`.
+name = "links-plus-L-shows-the-column"
+args = ["-n", "-P", "+L", "-a", "-d", "^mem", "-p", "{N}"]
+
+[[case]]
+# `+L1` is the deleted file alone. lsof-rs added both sockets of the pair,
+# whose count it never read.
+name = "links-plus-L1-is-the-deleted-file"
+args = ["-n", "-P", "+L1", "-a", "-p", "{N}"]
+
+[[case]]
+# The count as its own word: the one-name files, the pipe and stdio, and still
+# no socket however high the count goes.
+name = "links-plus-L-count-as-the-next-word"
+args = ["-n", "-P", "+L", "2", "-a", "-d", "^mem", "-p", "{N}"]
+
+[[case]]
+# The letters after the count are options again, so `+L1a` is `+L1 -a`.
+name = "links-plus-L-count-then-options"
+args = ["-n", "-P", "+L1a", "-p", "{N}"]
+
+[[case]]
+# Only `+` takes a count: exit 1, and nothing on stdout.
+name = "links-dash-L-refuses-a-count"
+args = ["-n", "-P", "-L", "1", "-p", "{N}"]
+
+[[case]]
+# A count-less `-L` after `+L1` sets the count to 0 and keeps the selection,
+# so it selects nothing at all: no output, and exit 0, as N was found.
+name = "links-count-less-dash-L-selects-nothing"
+args = ["-n", "-P", "+L1", "-L", "-a", "-p", "{N}"]
+
+[[case]]
+# The count through `-F k`, which prints only a count that was recorded.
+name = "links-fields-k"
+args = ["-n", "-P", "+L3", "-Ffkn", "-a", "-d", "^mem", "-p", "{N}"]
+
+[[case]]
+# `-t` has to read the files when a file selecter needs them. It skipped them
+# unless `-i`, `-d`, a path or `-s` was given, so `-t +L1` printed no PID at
+# all where the C prints N's.
+name = "links-terse-reads-the-files"
+args = ["-t", "+L1", "-a", "-p", "{N}"]
+
+[[case]]
+# ...and `-U` is a file selecter too: `-t -U` printed nothing either.
+name = "terse-dash-U-reads-the-files"
+args = ["-t", "-U", "-a", "-p", "{B}"]
+
+[[case]]
+# A `+` word is a cluster, as a `-` word is, and `a` means the same under either
+# prefix: `+wa` is `+w -a`, so this is fd 3 alone. lsof-rs read one letter per
+# `+` word and dropped the rest, and ORed.
+name = "plus-word-is-a-cluster"
+args = ["-n", "-P", "+wa", "-d", "3", "-p", "{A}"]
+
+# ------------------------------------- optional values as the next word (DIVERGENCES 43)
+# The C's GetOpt offers every option whose rule letter carries `:` the next
+# word as its value, and each such option gives back a word that opens an
+# option. lsof-rs honoured that for `-i`, `-s`, `-g`, `-K`, `-Z`, `-T` and
+# `-o`, and not for `-F`, `-L`, `-f`, `-r` or `-x`. (`-r` never exits, so its
+# spellings are pinned by unit tests instead.)
+
+[[case]]
+# `-F pfn`, the list as its own word. lsof-rs looked for a file called `pfn`.
+name = "fields-list-as-the-next-word"
+args = ["-n", "-P", "-F", "pfn", "-a", "-d", "3", "-p", "{A}"]
+
+[[case]]
+# Every `-F` adds to one choice, as the C's `FieldSel[].st` flags do: this is
+# `p`, `f` and `n`, where lsof-rs kept the last `-F` alone.
+name = "fields-accumulate-across-options"
+args = ["-n", "-P", "-Fp", "-Ff", "-Fn", "-a", "-d", "3", "-p", "{A}"]
+
+[[case]]
+# A `0` anywhere keeps NUL terminators, and a bare or `0`-only `-F` anywhere
+# keeps the default set.
+name = "fields-nul-then-letters-keeps-the-default-set"
+args = ["-n", "-P", "-F0", "-Fn", "-a", "-d", "3", "-p", "{A}"]
+
+[[case]]
+# `T`'s side effect (the TCP state and queues) belongs to the `-F` that names
+# it: `-T q` after `-FT` narrows it to the queues, and a later `-Fn` must not
+# widen it back. Measured: queues only, no `TST=`.
+name = "fields-T-effect-belongs-to-its-own-dash-F"
+args = ["-n", "-P", "-FT", "-Tq", "-Fn", "-a", "-i", "-p", "{B}"]
+
+[[case]]
+# `00` is two terminators and no letter: `p` alone, NUL-terminated. lsof-rs
+# read an empty letter list as the default set.
+name = "fields-zero-zero-is-the-pid-alone"
+args = ["-n", "-P", "-F00", "-a", "-d", "3", "-p", "{A}"]
+
+[[case]]
+# A letter the C's table lacks is fatal: exit 1, nothing on stdout. lsof-rs
+# printed `-Fpx` as `-Fp`.
+name = "fields-unknown-letter-is-fatal"
+args = ["-n", "-P", "-Fpx", "-p", "{A}"]
+
+[[case]]
+# `-F ?` lists the letters, on stderr, and exits 0.
+name = "fields-help"
+args = ["-F", "?"]
+
+[[case]]
+# `-f` reads the next word too, and `/` is no file-structure letter: the C's
+# error, not a bare `-f` and a file name.
+name = "opt-f-value-as-the-next-word"
+args = ["-n", "-P", "-f", "{FILE}"]
+
+[[case]]
+# `-x f`, the file-system half, with its letter as its own word. lsof-rs took
+# a bare `-x` and then failed to stat a file called `f`. `{ASUB}` and not
+# `{ADIR}`: `sub` is empty and A holds it, so every search item is located and
+# the C exits 0. Under `{ADIR}` nobody holds `xdir`, the C exits 1, and so did
+# the port that read `f` as a file, for its own reason: the case could not
+# fail (the mutation sweep found it).
+name = "opt-x-letters-as-the-next-word"
+args = ["-n", "-P", "-a", "-d", "^mem", "+d", "{ASUB}", "-x", "f", "-p", "{A}"]
+
+[[case]]
+# ...and a word of the wrong letters is the C's error.
+name = "opt-x-word-of-unknown-letters-is-fatal"
+args = ["-n", "-P", "+d", "{ADIR}", "-x", "{ADIR}", "-p", "{A}"]
 
 # ------------------------------------------------------------- exit contract
 

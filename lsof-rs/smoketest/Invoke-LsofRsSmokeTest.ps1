@@ -355,6 +355,8 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     }
     Test-Case 'tcp4-established-state' 'sockets/state' {
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)") 'i-tcp4-estab'; Assert-Contains $r.Out 'ESTABLISHED'
+        # The spec may be the next word too (DIVERGENCES 21): getopt offers it.
+        $r = Invoke-Lsof @('-nP', '-i', "TCP:$($fx.Port4)") 'i-tcp4-estab-word'; Assert-Contains $r.Out 'ESTABLISHED'
     }
     Test-Case 'tcp6-listen' 'sockets/tcp6' {
         if (-not $fx.Port6) { Skip 'no IPv6 loopback' }
@@ -422,6 +424,12 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert-Contains $r.Out "p$self"; Assert ($r.Out -match "(?m)^n") 'no n field'
         Assert-NotContains $r.Out 'tIPv4' 'type field should be suppressed by -Fpn'
         Assert (-not ($r.Out -match "(?m)^f")) '-Fpn must not emit the f marker'
+        # The list may be the next word too, and reads the same (DIVERGENCES
+        # 43): lsof-rs had looked for a file called `pn`.
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-F', 'pn') 'F-pn'
+        Assert ($r.Exit -eq 0) "-F pn should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Out "p$self"; Assert ($r.Out -match "(?m)^n") 'no n field from -F pn'
+        Assert (-not ($r.Out -match "(?m)^f")) '-F pn must not emit the f marker'
     }
     Test-Case 'field-output-bare-F' 'render/-F' {
         # Bare -F selects every standard field, in print.c's order. On Windows
@@ -523,6 +531,10 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:LISTEN') 's-listen'
         Assert-Contains $r.Out 'LISTEN'
         Assert-NotContains $r.Out 'ESTABLISHED' '-sTCP:LISTEN should exclude ESTABLISHED'
+        # ...and with the states as the next word (DIVERGENCES 6).
+        $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-s', 'TCP:LISTEN') 's-listen-word'
+        Assert-Contains $r.Out 'LISTEN'
+        Assert-NotContains $r.Out 'ESTABLISHED' '-s TCP:LISTEN should exclude ESTABLISHED'
     }
     Test-Case 'state-filter-exclude' 'selection/-s^' {
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:^LISTEN') 's-not-listen'
@@ -563,13 +575,38 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert (-not ($r.Out -match $taskRow)) '-K i should suppress `task` rows'
     }
     Test-Case 'link-count-dash-L' 'render/-L' {
+        # The prefix decides, as in the C (DIVERGENCES 41): +L shows the NLINK
+        # column and -L leaves it out, which is also the default. This case
+        # asserted the opposite reading of -L until 2026-09-26.
+        $r = Invoke-Lsof @('+L', '-p', "$self") 'plusL-column'
+        Assert-Contains $r.Out 'NLINK' '+L should add the NLINK column'
         $r = Invoke-Lsof @('-L', '-p', "$self") 'L'
-        Assert-Contains $r.Out 'NLINK' '-L should add the NLINK column'
+        Assert ($r.Exit -eq 0) "-L should run cleanly (exit=$($r.Exit))"
+        Assert-NotContains $r.Out 'NLINK' '-L should leave the NLINK column out'
+        $r = Invoke-Lsof @('-L', '1', '-p', "$self") 'L-number'
+        Assert ($r.Exit -eq 1) "-L takes no number (exit=$($r.Exit))"
+        Assert-Contains $r.Err 'no number may follow -L' '-L 1 stderr'
     }
     Test-Case 'link-filter-plus-L' 'selection/+L' {
-        # +L 1 keeps only link-count-0 files; deterministic content varies, so
-        # just assert it parses and runs cleanly (implies -L).
-        $r = Invoke-Lsof @('-a', '+L', '1', '-p', "$self") 'plusL'
+        # +L n selects the files whose recorded link count is below n, and a
+        # row with no count -- a socket, a pipe -- never (DIVERGENCES 42). The
+        # held-open fixture file has one link, so +L 2 finds it, and every
+        # file it selects carries a count: an f record without a k field is a
+        # row +L must not have selected.
+        $r = Invoke-Lsof @('-a', '+L', '2', '-p', "$self", '-Ffkn') 'plusL2'
+        Assert ($r.Exit -eq 0) "+L 2 should run cleanly (exit=$($r.Exit))"
+        Assert-Contains $r.Out (Split-Path $fx.FilePath -Leaf) '+L 2 should select the one-link fixture file'
+        $records = @(($r.Out -split '(?m)^f') | Select-Object -Skip 1)
+        Assert ($records.Count -ge 1) '+L 2 should select at least one file'
+        foreach ($rec in $records) {
+            Assert ($rec -match '(?m)^k[01]$') "every +L 2 row must carry a count below 2: f$rec"
+        }
+        # -t must read the files +L needs: it skipped them, and printed no PID.
+        $r = Invoke-Lsof @('-t', '+L', '2', '-a', '-p', "$self") 'plusL2-terse'
+        Assert ($r.Exit -eq 0) "-t +L 2 should run cleanly (exit=$($r.Exit))"
+        Assert ("$($r.Out)".Trim() -eq "$self") "-t +L 2 should print this PID alone, got: $($r.Out)"
+        # +L 1 is link count 0 alone, which none of the harness's files has.
+        $r = Invoke-Lsof @('-a', '+L', '1', '-p', "$self") 'plusL1'
         Assert ($r.Exit -eq 0) "+L 1 should run cleanly (exit=$($r.Exit))"
     }
     Test-Case 'numeric-ids-dash-l' 'render/-l' {

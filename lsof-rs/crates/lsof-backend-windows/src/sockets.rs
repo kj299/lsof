@@ -175,6 +175,7 @@ fn make_file(
         tcp: None,
     };
     OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock: None,

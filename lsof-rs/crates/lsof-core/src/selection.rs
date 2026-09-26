@@ -705,9 +705,6 @@ pub struct Selection {
     /// pure ASCII output, which is the safe choice for legacy terminals like
     /// PowerShell 5.1 / cmd.exe whose default code page is Windows-1252.
     pub unicode_output: bool,
-    /// `-L`: add the NLINK (link count) column to table output. Implies the
-    /// renderer pulls `OpenFile::links` into a new column.
-    pub show_links: bool,
     /// `-Z [context]`: SELinux security contexts.
     ///
     /// `None` when not given; `Some(list)` when it was, with the optional
@@ -764,7 +761,8 @@ pub struct Selection {
     /// that only a symlink inside DIR pointed at, where the C skips the link
     /// entirely (`arg.c:1038` — "Otherwise skip symbolic links").
     pub cross_symlinks: bool,
-    /// `-X`: do not read the inet socket tables.
+    /// `-X`: do not read the inet socket tables. Every `-X` flips it, as the
+    /// C's `Fxopt` flips, so an even number leaves it off.
     ///
     /// The man page calls this "skip the reporting of information on all open
     /// TCP and UDP files", and **that is not what it does** — measured against
@@ -806,11 +804,16 @@ pub struct Selection {
     /// pipe rows; `Files` additionally shows the peer processes' pipe rows
     /// (see [`Process::endpoint_peer`]).
     pub endpoints: Option<EndpointMode>,
-    /// `+L <count>`: keep only files whose link count is **less than** `count`
-    /// (lsof convention). `+L 1` keeps link-count-zero files — the
-    /// "unlinked but still open" security case. Files with unknown links
-    /// (sockets, non-disk handles) pass through.
-    pub max_links: Option<u32>,
+    /// `+L <count>`: select files whose link count is **less than** `count`
+    /// — `+L 1` is the "unlinked but still open" case. A file selecter, so it
+    /// ORs with the others unless `-a`.
+    ///
+    /// Only a count `stat` recorded counts (`dnode.c`: `SB_NLINK && nlink <
+    /// Nlink`): a socket, whose inode the C never asks for one, or a file that
+    /// could not be read, is never selected by it. `Some(0)` selects nothing,
+    /// and is what a count-less `-L` or `+L` leaves after a `+L n` — the C
+    /// resets `Nlink` to 0 and keeps the selection flag.
+    pub max_links: Option<u64>,
     /// `--etw`: opt-in ETW realtime capture for socket families IP Helper
     /// doesn't enumerate (raw/ICMP/AF_UNIX). Off by default; needs elevation.
     /// See `docs/research-roadmap.md` §5.
@@ -900,9 +903,10 @@ impl Selection {
             k.insert(SelKinds::NM);
         }
         if let Some(max) = self.max_links {
-            // `+L count`: keep links < count. Unknown links (sockets etc.)
-            // pass, as they always have.
-            if !matches!(f.links, Some(n) if n >= max) {
+            // `+L count`: a recorded count below the limit. A row with no
+            // count is not selected — lsof-rs had let one through, so `+L1`
+            // listed every socket of the process (DIVERGENCES 42).
+            if f.links.is_some_and(|n| u64::from(n) < max) {
                 k.insert(SelKinds::NLINK);
             }
         }
@@ -1262,6 +1266,18 @@ impl Selection {
             && self.endpoints.is_none()
     }
 
+    /// Whether `-t` can be answered from the process table alone, skipping
+    /// every file: nothing it prints may depend on one. That rules out every
+    /// file selecter — [`SelKinds::FILE`], the mask that also decides a
+    /// process with no rows is no result, so the two cannot drift apart — and
+    /// `-s`, whose states are search items only a socket can locate
+    /// (DIVERGENCES 32). Both backends had spelt the condition out by hand and
+    /// missed `+L`, `-U` and `-N`, so `lsof -t +L1` and `lsof -t -U` printed
+    /// no PID at all where the C prints every process holding such a file.
+    pub fn terse_skips_files(&self) -> bool {
+        self.terse && !self.specified().intersects(SelKinds::FILE) && self.state_filter.is_none()
+    }
+
     /// Whether any path / directory-tree filter was given.
     pub fn has_path_filter(&self) -> bool {
         !self.paths.is_empty()
@@ -1475,6 +1491,133 @@ mod tests {
         );
     }
 
+    /// `+L n` (DIVERGENCES 42): a link count `stat` recorded, and below `n`.
+    /// A row with none — a socket, a file that could not be read — is not
+    /// selected, which lsof-rs had let through; and a limit of 0, which is
+    /// what a count-less `-L`/`+L` leaves after `+L n`, selects nothing.
+    #[test]
+    fn plus_l_selects_only_a_recorded_count_below_the_limit() {
+        use crate::model::{AccessMode, FdType, OpenFile};
+        let row = |links: Option<u32>| OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "/f".to_string(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links,
+            socket: None,
+        };
+        let selects = |limit: u64, links: Option<u32>| {
+            Selection {
+                max_links: Some(limit),
+                ..Default::default()
+            }
+            .file_kinds(&row(links))
+            .contains(SelKinds::NLINK)
+        };
+        assert!(selects(1, Some(0)), "unlinked but open");
+        assert!(!selects(1, Some(1)));
+        assert!(selects(3, Some(2)) && !selects(3, Some(3)));
+        assert!(!selects(1, None), "no recorded count is never selected");
+        assert!(!selects(u64::MAX, None));
+        assert!(selects(u64::MAX, Some(u32::MAX)), "no overflow at the top");
+        assert!(!selects(0, Some(0)), "a zero limit selects nothing");
+        assert!(
+            !Selection::default()
+                .file_kinds(&row(Some(0)))
+                .contains(SelKinds::NLINK),
+            "no +L, no NLINK selecter"
+        );
+    }
+
+    /// `-t` may skip the files only when no file selecter and no `-s` state
+    /// is present. The backends had checked `-i`, `-d`, paths and `-s` by
+    /// hand, so `-t +L1` and `-t -U` skipped the files those selecters need
+    /// and printed no PID at all.
+    #[test]
+    fn terse_skips_files_only_when_no_file_can_matter() {
+        let terse = Selection {
+            terse: true,
+            ..Default::default()
+        };
+        assert!(terse.terse_skips_files(), "-t alone");
+        assert!(!Selection::default().terse_skips_files(), "not -t");
+        for (what, sel) in [
+            (
+                "-t -p",
+                Selection {
+                    pids: vec![1],
+                    ..terse.clone()
+                },
+            ),
+            (
+                "-t -K",
+                Selection {
+                    tasks: TaskMode::Always,
+                    ..terse.clone()
+                },
+            ),
+        ] {
+            assert!(sel.terse_skips_files(), "{what}: only processes select");
+        }
+        let mut inet = terse.clone();
+        inet.inet.enabled = true;
+        for (what, sel) in [
+            (
+                "-t +L1",
+                Selection {
+                    max_links: Some(1),
+                    ..terse.clone()
+                },
+            ),
+            (
+                "-t -U",
+                Selection {
+                    unix_only: true,
+                    ..terse.clone()
+                },
+            ),
+            (
+                "-t -N",
+                Selection {
+                    nfs_only: true,
+                    ..terse.clone()
+                },
+            ),
+            (
+                "-t -d 3",
+                Selection {
+                    fd_filter: Some(FdFilter::default()),
+                    ..terse.clone()
+                },
+            ),
+            (
+                "-t PATH",
+                Selection {
+                    paths: vec!["/x".into()],
+                    ..terse.clone()
+                },
+            ),
+            (
+                "-t -s",
+                Selection {
+                    state_filter: Some(StateFilter::default()),
+                    ..terse.clone()
+                },
+            ),
+            ("-t -i", inet),
+        ] {
+            assert!(!sel.terse_skips_files(), "{what} needs the files");
+        }
+    }
+
     #[test]
     fn inet_port_filter() {
         let mut sel = Selection::default();
@@ -1504,6 +1647,7 @@ mod tests {
         // "matches -i" is now "contributes the NET selecter kind" — the bit the
         // OR/AND rule then tests.
         let sock_row = |ft: FileType, proto: Protocol| OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1909,6 +2053,7 @@ mod tests {
         // path against `/`.
         use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
         let row = |name: &str, fs_device: u64| OpenFile {
+            rdev: None,
             fs_device: Some(fs_device),
             file_flags: None,
             lock: None,
@@ -1959,6 +2104,7 @@ mod tests {
         // and a row merely *named* under the query does not.
         use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
         let row = |name: &str, dev: &str, node: &str| OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -2107,6 +2253,7 @@ mod tests {
     fn endpoint_peer_kept_with_pipe_rows_only() {
         use crate::model::{AccessMode, FdType, OpenFile};
         let pipe = OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -2372,6 +2519,7 @@ mod tests {
     fn tcp(fd: u64, lport: u16, remote: Option<&str>, state: crate::TcpState) -> OpenFile {
         use crate::model::{AccessMode, SockState, SocketInfo};
         OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,

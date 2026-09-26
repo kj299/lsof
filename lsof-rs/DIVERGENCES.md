@@ -81,6 +81,205 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by making `-X` a toggle and printing `-F r` (2026-09-26)
+
+Items 45 and 47, both measured against the C.
+
+**`-X` toggles** (item 45). `main.c` flips it, `Fxopt = Fxopt ? 0 : 1`, under
+either prefix, and `initialize()` checks it against `-i` once every option has
+been read, on the value the last `-X` left. So `-X -X` is off again, and
+`lsof -X -i -X` lists the Internet files where lsof-rs refused the pair.
+lsof-rs set the flag however many times it was given. Measured on a process
+holding a TCP listener and a UDP socket: nine spellings, five of which
+differed.
+
+**`-F r` is the raw device number** (item 47). The C records `st_rdev` for a
+character or block special and for nothing else (`dnode.c`, `N_CHR` and
+`N_BLK`), and prints it in hex after `D`: `r0x103` for `/dev/null`, `r0x8800`
+for `/dev/pts/0`, `r0x700` for `/dev/loop0`. A bare `-F` leaves it out, "for
+compatibility" (`select_default_fields()`), and `-F -Fr` is the default set
+with it. lsof-rs accepted the letter and printed nothing. Rows under `-e`
+carry none, measured with `-e /` and `-e /dev`, although `dproc.c` would take
+one from the mount table there. A socket's is set only for a moment, to match
+a path argument, and restored before anything is printed.
+
+The number rides on the row as `OpenFile::rdev`, an `Option<NonZeroU32>`, so
+the row stays at 192 bytes: the niche fits in the padding, and every Linux
+`st_rdev` fits in 32 bits, a 12-bit major and a 20-bit minor. The one number it
+cannot carry is 0, device 0,0, which no driver answers, so only an `O_PATH` fd
+could hold it. On Windows, which has no such number, `-F r` prints nothing, as
+before.
+
+Once a letter prints that the default set leaves out, "no list" can no longer
+mean "every letter". The renderer now reads no list as the C's default set,
+and the parser spells the set out when a letter outside it is added to it.
+
+### What the gate gained
+
+Fixture **V** holds device nodes of four majors (`/dev/null`, `/dev/urandom`
+and a pty pair), and a block device where one can be opened, which takes root:
+this host's run has one, and an unprivileged CI runner does not. Seven cases
+were added, 235 in all: three on `-X` (twice is off; toggled off around `-i`;
+`+X`), and four on `r` (device rows only; not in the default set; `-F -Fr`;
+the table). A golden pins the field and its default-set rule, which Windows
+shares; a parser test pins `-F -Fr`; and a backend test pins `/dev/null`'s
+0x103.
+
+Six mutants, each killed by the differential and by a unit test: `-X` set
+rather than toggled; no rdev recorded; `r` in the default set; no list meaning
+every letter; `-F -Fr` dropping `r`; `r` in decimal. A seventh was not run,
+because it is equivalent: recording `st_rdev` on every row changes nothing,
+since it is 0 for every file that is not a device, and 0 is the value
+`NonZeroU32` leaves out.
+
+### What it found next to it
+
+Item 48: a mapped device file, such as a GPU driver maps, is a `mem` row. The
+C types it `CHR`, from its `stat`, with the device's number in DEVICE and in
+`r`. lsof-rs types every live mapping `REG`. Found by reading `maps.rs`. No
+device on this host can be mapped, so it is not measured.
+
+## Fixed by reading every option the way getopt offers it (2026-09-26)
+
+Items 41, 42 and 43, and the rest of the family 43 belonged to. All of it was
+measured against the C, spelling by spelling, on a process holding a deleted
+file, files with one and two links, a socket pair and a pipe.
+
+**`-L` hides the NLINK column and `+L` shows it** (item 41). `main.c` has one
+case for both: `Fnlink = (GOp == '+') ? 1 : 0`, so the prefix decides and `-L`
+is the default. lsof-rs read `-L` as "show" and refused a bare `+L`. Only `+L`
+takes a count: `-L 1` and `-L1` are `no number may follow -L`, exit 1. The
+count may be attached or the next word, and only its leading digits are the
+count: `+L1a` is `+L1 -a`, `+L foo` is `+L` and a file, and `-La` is `-L -a`.
+One rule is easy to miss. A count-less `-L` or `+L` sets the count to 0 but
+leaves the selection flag an earlier `+L n` raised, so `lsof +L1 -L -a -p P`
+selects nothing at all, and exits 0 because P was found. It does not select
+everything.
+
+**`+L n` selects only a count `stat` recorded** (item 42). `dnode.c` sets
+`SELNLINK` inside `if (ss & SB_NLINK)`, and a socket never reaches that line:
+`process_proc_node()` hands an `S_IFSOCK` inode to `process_proc_sock()` and
+returns before recording the count. The reason this item gave, that a socket's
+inode reports 1, was wrong. `+L2` does not select one either. lsof-rs let
+every row without a count through, which is every socket and every file it
+could not read. It also carried a count on one socket row, the fallback for a
+socket no table names (this host's AF_VSOCK one), because that row is built
+from `stat`. It carries none now, so NLINK and `-F k` are blank there as they
+are in the C.
+
+**An option's value may be the next word, for every option that takes one**
+(item 43). The C's `GetOpt` offers every option whose rule letter carries `:`
+the rest of its word or, failing that, the next word, and each option gives
+back a word that opens an option. lsof-rs honoured that for `-i`, `-s`, `-g`,
+`-K`, `-Z`, `-T` and `-o`, the first two only since items 21 and 6. It did not
+for five more. `+L` took the next word whatever it was, and the other four
+never took it:
+
+| spelling | the C | lsof-rs before |
+|---|---|---|
+| `-F pn` | fields `p` and `n` | a file called `pn` |
+| `+L -a` | `+L`, then `-a` | `invalid +L count: -a` |
+| `-r 2` | repeat every 2 s | a file called `2`, exit 1 |
+| `-x f` | the file-system half | a file called `f` |
+| `-f /dev/null` | `unknown file struct option: /`, exit 1 | a file, listed |
+
+All of them now go through one helper that implements the rule (`value_word`),
+and the options that read only leading digits (`-o`, `-r`, `+L`) go through
+another (`take_digits`). The C reads `-r`'s `c<count>` and `m<format>`
+suffixes, which lsof-rs refuses rather than half-reads. The C reads `-f g` as
+its file-flags option, which lsof-rs does not implement (item 46) and so
+refuses in either spelling.
+
+**`-F` is the C's option in three more ways.** A letter outside the C's field
+table (`store.c`, `FieldSel[]`) is fatal, `unknown field: x`; lsof-rs had
+printed `-Fpx` as `-Fp`, and `-F /tmp` could only have been a file. `-F ?`
+lists the letters on stderr, byte for byte as the C does, and exits 0. And
+repeated `-F` options add up, because the C only ever sets its `st` flags:
+`-Fn -Fp` is both fields, `-F -Fn` is the default set, and a `0` anywhere keeps
+NUL terminators. lsof-rs kept the last `-F` alone. `-F00` is two terminators
+and no letter, so `p` alone, where lsof-rs read an empty list as the default
+set. `T`'s side effect (the TCP state and queues) still belongs to the `-F`
+that names it, so `-FT -Tq -Fn` stays queues only.
+
+**A `+` word is a cluster, as a `-` word is.** `GetOpt` treats the prefix as a
+flag it hands each letter, and most of `main.c`'s cases never look at it: `+wa`
+is `+w -a`. lsof-rs read one letter per `+` word and silently dropped the rest,
+so `lsof +wa -p P -d 3` ORed where the C ANDs, 28 rows against one. Every
+letter the C reads the same under either prefix now means the same under `+`.
+One whose `+` meaning lsof-rs does not implement is refused rather than read as
+its `-` meaning: `+n` and `+P` (look names up), `+r` (repeat until nothing is
+open), `+e`, `+J`/`+j` (errors in the C too). An unknown letter's message names
+the prefix it came with.
+
+**`-t` reads the files a file selecter needs.** Both backends skip the file
+walk under `-t` when only the process table can matter, and both spelt that out
+by hand: no `-i`, no `-d`, no path, no `-s`. `+L`, `-U` and `-N` were missing,
+so `lsof -t +L1` and `lsof -t -U` printed no PID at all, where the C prints
+every process holding such a file (three and six on this host). The condition
+is now `Selection::terse_skips_files()`, built from `SelKinds::FILE`, the same
+mask that decides a process with no rows is no result, so the two cannot drift
+apart again. It was found here because `+L`'s selection was under test.
+
+Windows shares all of it. Its smoke case `link-count-dash-L` asserted the old
+reading of `-L`, and now asserts the C's.
+
+Not ported: on Linux the C also selects, under `+L`, an fd whose `stat` or
+`lstat` failed with `ESTALE`, and appends ` (STALE)` to its name (`dproc.c`).
+That takes a stale NFS handle, which no fixture here can make.
+
+### What the gate gained
+
+Fixture **N** holds the files and sockets above, and 21 cases were added, 228
+in all: nine on link counts, one on `+` clusters, one on `-t -U`, and ten on
+values as the next word (`-F`, `-f`, `-x`), accumulation, `T`'s side effect,
+unknown letters and `-F ?`. Unit tests pin every spelling in the tables above,
+and `-r`'s, which no differential case can run, since repeat mode never exits.
+A golden pins `-F ?` to the C's bytes. A backend test builds the socket
+fallback row from a bound AF_UNIX socket's path, which `stat`s as a socket
+without a namespace or a vsock module.
+
+On Windows, `link-count-dash-L` now asserts that `+L` shows the column and
+`-L` hides it. `link-filter-plus-L` asserts that `+L 2` finds the harness's
+one-link file, that every row it selects has a count, and that `-t +L 2`
+prints the harness's PID. Three smoke cases also run their spelling with the
+value as the next word.
+
+The kit's coverage gate now requires that spelling for every value-taking
+option (porting-kit LESSONS #071). Its first run against this port's coverage
+declaration flagged `-F`, `-f`, `-r` and `-x`, the options fixed here, plus
+`-i` and `-s`. Those two had real differential cases for the spelling that no
+one had declared. They are declared now.
+
+Twenty-eight mutants, all killed, twenty of them by the differential. The sweep
+changed two cases. As first written, `opt-x-letters-as-the-next-word` could not
+fail: under `+d {ADIR}` the C and the broken port both exit 1, for different
+reasons. For the C, nobody holds `xdir`; for the port, no file is called `f`.
+It now uses `{ASUB}`, where every item is located and the C exits 0.
+`fields-T-effect-belongs-to-its-own-dash-F` was added when only a unit test
+caught its mutant.
+
+Eight are caught by unit tests alone, because nothing the differential compares
+can show them:
+* letters after a next-word count read under `-` rather than `+`. Only a
+  letter with two meanings shows it (`+L 1w`), and no case gives one;
+* `+n`, `+P`, `+r` and `+e` read as their `-` meanings. The C's `+n` and `+P`
+  resolve names, which lsof-rs never does, and `+r` never exits;
+* both `-r` mutants: repeat mode never exits;
+* `+E` read as `-E`: no Linux case uses either;
+* `+w`'s warnings, which go to stderr, and the differential does not compare
+  stderr;
+* the socket row's link count: no fixture holds a socket that no table names;
+* a letter dropped from `-F ?`: stderr again, pinned by a golden of the C's
+  bytes.
+
+### What it found next to it
+
+Four more differences, recorded as items 44–47 rather than folded in:
+* the access letter of an `O_PATH` fd;
+* `-X` toggling rather than setting;
+* `-f[gG]`, the file-flags option;
+* `-F r`, which lsof-rs accepts and never prints.
+
 ## Fixed by laying the table out as `print.c` does (2026-09-26)
 
 Item 35, found by reading, and what comparing whitespace found once it could.
@@ -1763,9 +1962,14 @@ likely right; it is a compatibility decision, not a backend phase.
 | 38 | `-c /regex/`, and `-i` host names (`@localhost`) and service names (`:http`), which the C resolves | refused, with an error | **DEBT — recorded 2026-09-25.** Refusing replaced a silent wrong answer: `-c /re/` was a literal that matched nothing, and `-i:http` matched every Internet file. A regex engine is new attack surface; a resolver contradicts "No hostname or service resolution" below. |
 | 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. |
 | 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | stats the mapped file and prints `REG` | **DEBT — found 2026-09-25**, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it. The cwd/rtd/txt/fd half of `-e` has matched since 2026-09-20. |
-| 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | `-L` **shows** the column, and a bare `+L` is refused: `option +L requires a count`, or, followed by another option, `invalid +L count: -a` | **OPEN — found 2026-09-26** by the layout work. Lsof.8: "enables (`+`) or disables (`-`)". The Windows smoke case `link-count-dash-L` asserts lsof-rs's reading, so fixing it changes Windows too. |
-| 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). A socket's inode reports 1, so no socket is selected | a row whose count lsof-rs never read (every socket built from `/proc/net`) passes the filter | **OPEN — found 2026-09-26.** `lsof +L1 -a -p P` on a process holding two deleted files: the C lists those two, and lsof-rs lists them plus its unix socket. |
-| 43 | `-F` takes its field list as the **next word** too: `lsof -F pL -p P` prints `p` and `L` | reads `pL` as a file name: `status error on pL` | **OPEN — found 2026-09-26.** The same shape as `-s`'s and `-i`'s optional values, fixed for those two in DIVERGENCES 6 and 21. |
+| 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | ~~`-L` **shows** the column, and a bare `+L` is refused~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. Windows changed with it: its smoke case now asserts the C's reading. |
+| 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). ~~A socket's inode reports 1~~ A socket never has a count: `process_proc_node()` hands it to `process_proc_sock()` first | ~~a row whose count lsof-rs never read passes the filter~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. The reason this row first gave was wrong, and `+L2` shows it: no socket is selected there either. |
+| 43 | `-F` takes its field list as the **next word** too: `lsof -F pL -p P` prints `p` and `L` | ~~reads `pL` as a file name~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above: `-L`, `-f`, `-r` and `-x` had the same gap, `-F` refused no letter, and a `+` word was never a cluster. |
+| 44 | an `O_PATH` fd's access letter is `u`: `dnode.c` takes it from the fd link's own mode (`l->st_mode & (S_IRUSR \| S_IWUSR)`), which is 0 for `O_PATH`, and reads neither-bit as read/write | `r`, from fdinfo's flags (`O_RDONLY` is 0 too) | **OPEN — found 2026-09-26** comparing `+L` tables across the host: this session's harness holds an `O_PATH \| O_DIRECTORY` fd. Every other fd agreed, since a link's mode mirrors its open mode. |
+| 45 | `-X` **toggles** (`Fxopt = Fxopt ? 0 : 1`), so `-X -X` is off: `lsof -X -X -i` lists the Internet files | ~~sets it: `-X -X -i` is refused~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. |
+| 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g` | **OPEN — recorded 2026-09-26.** lsof-rs has refused it since `-f`/`+f` were implemented, without a row here. It prints `G` in `-F` already. |
+| 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | ~~accepts the letter and prints nothing~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. Windows has no such number and prints none. |
+| 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | types every live mapping `REG`, with the filesystem's device | **OPEN — found 2026-09-26** by reading `maps.rs` while adding `r`. Not measured: no device on this host can be mapped. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of

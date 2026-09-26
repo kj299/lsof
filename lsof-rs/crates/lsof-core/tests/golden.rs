@@ -196,6 +196,7 @@ fn table_offset_with_dash_o() {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -239,6 +240,7 @@ fn table_offset_with_dash_o() {
 fn the_size_off_column_has_three_modes() {
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let file = |fd: FdType, ty: FileType, size: Option<u64>, offset: Option<u64>| OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock: None,
@@ -384,6 +386,7 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -442,6 +445,7 @@ fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -541,6 +545,7 @@ fn a_task_row_is_distinguishable_from_a_thread_handle() {
     // cannot run it.
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let file = |fd: FdType| OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock: None,
@@ -602,6 +607,7 @@ fn table_command_width_caps() {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -661,6 +667,7 @@ fn fields_skips_empty_name() {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -769,6 +776,7 @@ fn windows_object_types_render() {
     // their TYPE code in the table and `-F t` and carry their object-path NAME.
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let mk = |h: u64, ft: FileType, name: &str| OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock: None,
@@ -895,6 +903,7 @@ fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1117,6 +1126,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         command: "server.exe".to_string(),
         user: Some("EXAMPLE\\alice".to_string()),
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1395,6 +1405,7 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1450,6 +1461,63 @@ fn a_restricted_field_list_emits_only_those_letters() {
     }
     assert!(out.contains("cserver.exe\n"), "{out:?}");
     assert!(out.contains("n*:445\n"), "{out:?}");
+}
+
+/// `-F r` (DIVERGENCES 47): the device a character or block special names,
+/// in hex, after `D`, measured against the C on `/dev/null` (`r0x103`) and a
+/// pty slave (`r0x8800`). A bare `-F` leaves it out, "for compatibility", and
+/// a row with no raw device prints no `r` at all.
+#[test]
+fn the_raw_device_field_is_only_asked_for_and_only_on_devices() {
+    use lsof_core::{AccessMode, FdType, FileType};
+    let mut null = row(
+        FdType::Handle(0),
+        AccessMode::Read,
+        None,
+        FileType::Chr,
+        "1,3",
+        None,
+        Some(0),
+        "3",
+        "/dev/null",
+    );
+    null.fs_device = Some(0x6);
+    null.rdev = std::num::NonZeroU32::new(0x103);
+    let mut pts = null.clone();
+    pts.fd = FdType::Handle(7);
+    pts.rdev = std::num::NonZeroU32::new(0x8800);
+    pts.name = "/dev/pts/0".into();
+    let plain = row(
+        FdType::Handle(3),
+        AccessMode::Write,
+        None,
+        FileType::Regular,
+        "254,0",
+        Some(1),
+        None,
+        "12",
+        "/tmp/f",
+    );
+    let p = python3(vec![null, pts, plain]);
+    let render = |only: Option<&[char]>| {
+        fields::render(
+            std::slice::from_ref(&p),
+            false,
+            only,
+            TcpInfoFlags::DEFAULT,
+            Escaper::UNIX,
+        )
+    };
+    assert_eq!(
+        render(Some(&['f', 'D', 'r'])),
+        "p496\nf0\nD0x6\nr0x103\nf7\nD0x6\nr0x8800\nf3\n",
+    );
+    let bare = render(None);
+    assert!(!bare.lines().any(|l| l.starts_with('r')), "{bare:?}");
+    assert!(
+        bare.contains("\nD0x6\n"),
+        "the rest of the default set: {bare:?}"
+    );
 }
 
 /// One regular-file row carrying `size` and `offset`, for the `-H` cases.
@@ -1606,6 +1674,7 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1706,6 +1775,7 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
         endpoint_peer: false,
         unlisted: false,
         files: vec![OpenFile {
+            rdev: None,
             fs_device: None,
             file_flags: None,
             lock: None,
@@ -1755,6 +1825,7 @@ fn row(
     name: &str,
 ) -> lsof_core::OpenFile {
     lsof_core::OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock,
