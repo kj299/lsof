@@ -3166,3 +3166,72 @@ finding it is supposed to produce.
   probe run through the same wrapper.
 - **Section amended:** PLAYBOOK · Phase 4.
 
+## 069. "One row per verdict" was a convention, and this kit is where it broke
+
+- **Date:** 2026-09-25
+- **Codebase:** the Porting Kit vendored here — the primary line's decision sweep
+  (its entry 48), brought back to the kit whose missing row prompted it
+- **What happened:** #064 put a call-must-be-code rule into the scanner's
+  verdict function with a fixture and no mutation row. The rule #050 sets — one
+  row per verdict that fails open alone — was never enforced: the table audit
+  (#052) asks whether a HARNESS has a row, and the scanner had two. The row was
+  added by hand afterwards; nothing would have asked for it.
+
+  The primary line then made the sweep find the verdicts itself (its entry 48),
+  and this brings it here. A verdict function is one holding a row's target.
+  Every decision in it — a test, a comparison, an and/or and each operand, a
+  `not` — is forced True, then False, and the harness's self-test must go red.
+  A decision it misses fails the sweep unless
+  `harnesses/gate-mutation/unpinned.jsonl` names it with a reason, and a line
+  that no longer names one fails too, so the file only shrinks.
+
+  First run here, measuring this tree and not the one it came from (#053): 580
+  mutants in 26 verdict functions across 21 harnesses, and 204 of them — 155
+  decisions in 23 functions — left the self-test green. The largest share, 43,
+  is this kit's own collision resolver (#048). Two, read:
+  - **The resolver's refusal to edit a file that still carries conflict
+    markers** is reached by no fixture. Forced off, the self-test stays green,
+    and the resolver would rewrite citations inside an unresolved merge.
+  - **coverage_gate's `w["id"] in required`** only chooses which waivers are
+    printed: report text, the kind of line a ledger reason can say is not a
+    verdict.
+
+  None was triaged here. All 204 go in as a dated baseline that says so. Two
+  full sweeps gave the same 204, and the keys (function, source line,
+  expression; never a line number) are identical on Python 3.10 through 3.13.
+
+- **One copy per mutant (#066).** The primary's first draft gave each worker
+  one kit copy and restored the file after every mutant — the in-place restore
+  #066 warns about, and #066 records that this harness was safe precisely
+  because it copied the kit per mutation. The primary fixed it before this
+  import: every decision mutant gets a fresh copy, pinned by a fixture whose
+  mutant writes into its copy.
+
+- **What the import met here.** The KIT-IMPORT header grew past the five lines
+  `check_imports.py` reads, so the last two `Re-cited:` lines — `#25->#052`,
+  `#48->#069` — fell outside it, and every citation they covered was flagged.
+  That is the fail-closed direction; the header now fits. And a resolver mutant
+  compiles with a SyntaxWarning (`((True))[2]`) that the sweep's own compile
+  check printed into check-kit's output; it is silenced now, in both kits.
+
+- **And the first collision found the ledger unread.** Another branch took
+  #068 while this one held it, and `resolve_collision.py` moved this block to
+  #069 and repointed every citation to it in every file the citation checker
+  scans. The ledger was not one of them. `check_lesson_refs.py` had no
+  `.jsonl` in its list, so the 204 lines citing this entry were checked by
+  nothing and would have kept #068 — the other branch's lesson — while every
+  check stayed green. #057's Makefile, in a new file type. `.jsonl` is scanned
+  now, with a fixture, and the resolver repointed all 205 citations in the
+  ledger.
+
+- **Where it stops.** Helpers a verdict function calls are plumbing and are not
+  enumerated; a verdict moved into one escapes unless its call site is itself a
+  decision. Bash harnesses keep hand rows only.
+
+- **Kit change:** gate-mutation: the primary's decision sweep and ledger,
+  re-cited (#48->#069, #44->#060; #066 local; the primary's #20 by title);
+  `unpinned.jsonl` holds this kit's own 204-line baseline; README row.
+  lesson-refs: `.jsonl` scanned, pinned by a fixture.
+- **Section amended:** harnesses/gate-mutation/mutate_gates.py;
+  harnesses/gate-mutation/unpinned.jsonl; harnesses/lessons/check_lesson_refs.py
+  · SCAN_EXTS; README.md · harness table.

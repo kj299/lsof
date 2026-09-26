@@ -103,8 +103,12 @@ NEAR_ENTRY_RE = re.compile(r"^(#{1,6}\s*#?\d{1,3}[.:\s—-])", re.M)
 # its comments, and for as long as this list had no entry for it those
 # citations were checked by nothing — found when the collision resolver, which
 # walks with the same list, renumbered every scanned file and left the one it
-# never visited stale (LESSONS #057).
-SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs", "Makefile")
+# never visited stale (LESSONS #057). `.jsonl` for the same reason: the
+# decision sweep's ledger cites its lesson on every line, and the first
+# collision after it landed would have renumbered every file but that one
+# (LESSONS #069).
+SCAN_EXTS = (".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".rs", "Makefile",
+             ".jsonl")
 SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
 
 
@@ -353,6 +357,11 @@ def _self_test():
         # outside the walk for the kit's whole life
         open(os.path.join(root, "Makefile"), "w").write("\t@# see LESSONS #22\n")
         check("a citation in a Makefile is scanned", run(root) == 1)
+        # ...and so is a line of a JSON-lines ledger (LESSONS #069).
+        os.remove(os.path.join(root, "Makefile"))
+        open(os.path.join(root, "unpinned.jsonl"), "w").write(
+            '{"why": "untriaged (LESSONS #22)"}\n')
+        check("a citation in a .jsonl ledger is scanned", run(root) == 1)
 
     with tempfile.TemporaryDirectory() as root:
         open(os.path.join(root, "LESSONS.md"), "w").write(entries)
