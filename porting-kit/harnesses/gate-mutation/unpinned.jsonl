@@ -112,7 +112,6 @@
 {"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "assert not (set(renumbered) & set(mapping)), \"appended and renumbered sets overlap\"", "expr": "not (set(renumbered) & set(mapping))", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "for n, t in eb if n in renumbered})", "expr": "n in renumbered", "to": "False", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "for n, t in eb if n in renumbered})", "expr": "n in renumbered", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
-{"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "if CONFLICT_RE.search(text):", "expr": "CONFLICT_RE.search(text)", "to": "False", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "if edits:", "expr": "edits", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "if h:", "expr": "h", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
 {"file": "harnesses/lessons/resolve_collision.py", "func": "build_plan", "line": "if k_added and m_added:", "expr": "m_added", "to": "True", "why": "untriaged: in the 2026-09-25 baseline (LESSONS #069)"}
