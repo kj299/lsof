@@ -471,6 +471,54 @@ def self_test() -> int:
             "        with:\n          components: miri\n")))
         check("a quoted # is not treated as a comment", bool(only_wf(
             'jobs:\n  j:\n    steps:\n      - run: echo "miri # not a comment"\n')))
+
+    # The report. Every fixture above asked run() for JSON and read only its
+    # exit code, while CI runs the text form, so neither report was checked
+    # (LESSONS #069/#071's decision sweep): which rows print as present, waived
+    # or MISSING, and what JSON says is present. One port reaches every row.
+    import contextlib
+    import io
+
+    def said(port, ci, allow, as_json):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run(port, ci, allow, as_json)
+        return rc, buf.getvalue()
+
+    with tempfile.TemporaryDirectory() as td:
+        port, ci = os.path.join(td, "port"), os.path.join(td, "wf")
+        os.makedirs(os.path.join(port, "fuzz", "fuzz_targets"))
+        os.makedirs(ci)
+        open(os.path.join(port, "progress.json"), "w").write('{"modules": {"a": "x", "b": "x"}}')
+        for t in ("one.rs", "two.rs"):
+            open(os.path.join(port, "fuzz", "fuzz_targets", t), "w").write("")
+        open(os.path.join(ci, "ci.yml"), "w").write(
+            "jobs:\n  m:\n    steps:\n      - run: cargo miri test -p a\n")
+        allow = {"divergences": "none yet"}
+        rc, out = said(port, ci, allow, False)
+        rows = {ln.split()[1]: ln for ln in out.splitlines() if ln[:8].strip() in
+                ("present", "waived", "MISSING")}
+        check("text report: a present ledger names its first path, and counts the rest",
+              rows.get("fuzz", "").endswith("(+1)") and "(+" not in rows.get("progress", "(+"))
+        check("text report: a waived ledger prints its reason",
+              rows.get("divergences", "").startswith("waived") and "— none yet" in rows["divergences"])
+        check("text report: san-crates names the unit no sanitizer step runs",
+              rc == 1 and rows.get("san-crates", "").endswith("no sanitizer job names: b"))
+        rc, out = said(port, ci, allow, True)
+        try:
+            rep = json.loads(out)
+        except ValueError:
+            rep = {}
+        check("--json: present, waived and missing, as a tool reads them",
+              rc == 1 and sorted(rep.get("present", {})) == ["fuzz", "progress", "sanitizers"]
+              and rep.get("waived") == allow and rep.get("missing") == ["san-crates"])
+        rc, out = said(port, ci, {}, False)
+        check("text report: an unwaived missing ledger is MISSING, named as an exit criterion",
+              "MISSING  divergences  (the playbook names this as an exit criterion)" in out)
+        os.remove(os.path.join(port, "progress.json"))
+        rc, out = said(port, ci, allow, False)
+        check("text report: with no units, san-crates points at the progress row",
+              "MISSING  san-crates   no progress.json units to check" in out)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

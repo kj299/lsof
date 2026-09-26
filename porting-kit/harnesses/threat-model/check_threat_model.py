@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #6->#036.
+# Re-cited: #6->#036, #16->#050, #48->#069, #50->#071.
 """Threat-model gate — a port must not reach cutover with an UNFILLED threat
 model. Hard-fails (exit 1) on leftover placeholders or a missing required
 section.
@@ -182,6 +182,20 @@ def _self_test() -> int:
         stub = os.path.join(d, "stub.md")
         open(stub, "w").write("# Threat model\n\nTODO\n")
         chk("a stub threat model FAILS", rc(stub, False) == 1)
+        # That stub fails three ways at once (length, sections, TODO), so none
+        # was pinned alone (LESSONS #050) — LESSONS #069/#071's decision sweep turned
+        # the length check off unnoticed. Every heading, nothing unfilled, too
+        # short: length alone.
+        short = os.path.join(d, "short.md")
+        open(short, "w").write("# Assets\n# Trust boundaries\n# Privilege\n"
+                               "# Attacker\n# Non-goals\n# C-defect\n")
+        chk("a stub with every section and nothing unfilled still FAILS on length",
+            rc(short, False) == 1)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            check(os.path.join(d, "nope.md"), False, quiet=True)
+        chk("a missing threat model says so, and what to copy",
+            "no threat model at" in buf.getvalue())
 
         # A leftover <placeholder> must be caught even when everything else is filled.
         ph = os.path.join(d, "ph.md")

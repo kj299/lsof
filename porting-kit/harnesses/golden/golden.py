@@ -107,6 +107,18 @@ def _self_test():
               os.path.exists(os.path.join(corpus, "fmt.golden")))
         check("replay same binary → match", replay(echo, matrix, corpus, False, False) == 0)
         check("replay divergent binary → fail", replay(printf, matrix, corpus, False, False) == 1)
+        # A case with no golden is not a pass: forced off, the `missing` count
+        # let replay exit 0 on a corpus nobody captured (LESSONS #069/#071's
+        # decision sweep found no fixture reaching it).
+        import contextlib
+        import io
+        nog = os.path.join(d, "nog.json")
+        open(nog, "w").write('[{"name": "nogolden", "args": []}]')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            nog_rc = replay(echo, nog, corpus, False, False)
+        check("a case with no golden fails replay, and says which",
+              nog_rc == 1 and "MISSING GOLDEN: nogolden" in buf.getvalue())
 
         # nondeterministic oracle must be flagged, not stored.
         #

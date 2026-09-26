@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #18->#039, #44->#060, #45->#064, #46->#065.
+# Re-cited: #18->#039, #44->#060, #45->#064, #46->#065, #48->#069,
+#          #50->#071.
 """Unsafe-containment gate — the `core` crate must FORBID `unsafe_code`, in a
 form the compiler actually applies, on every target root it builds.
 
@@ -441,6 +442,40 @@ def _self_test():
         check("a directory with no Cargo.toml is an error",
               run([os.path.join(t, "nope")]) == 2)
         check("no crate named at all is an error", run([]) == 2)
+
+        # LESSONS #069/#071's decision sweep: every test in _skip_block_comment could
+        # be forced either way with this self-test green, because no fixture put
+        # a block comment BEFORE a live attribute, none had a comment whose
+        # close could be misread, and none left one unterminated.
+        check("a block comment before a live attribute does not hide it",
+              st(c("cbefore", {"src/lib.rs": "/* header */\n" + FORBID})) == 0)
+        check("a comment's close is `*/` only: a forbid inside `/*xx…*/` is not live",
+              st(c("cclose", {"src/lib.rs": "/*xx" + FORBID + "*/\n"})) == 1)
+        check("an unterminated block comment hides the rest of the file",
+              st(c("cunterm", {"src/lib.rs": "/* never closed\n" + FORBID})) == 1)
+        bare = os.path.join(t, "bare")
+        os.makedirs(bare)
+        check("an existing directory with no Cargo.toml is an error, not a crash",
+              st(bare) == 2)
+        gone = c("gone", {}, manifest=pkg + '[lib]\npath = "src/missing.rs"\n')
+        check("a target root that does not exist fails, naming it",
+              st(gone) == 1 and "does not exist" in " ".join(check_crate(gone)[1]))
+        # Each NOT FORBIDDEN names its own reason, and only its own.
+        say = lambda root: " ".join(check_crate(root)[1])
+        cfg = say(c("cfgw", {"src/lib.rs": "#![cfg_attr(not(test), forbid(unsafe_code))]\n"}))
+        check("a conditional forbid is explained as conditional, not as a comment",
+              "conditional" in cfg and "only in a comment" not in cfg)
+        check("a conditional deny is explained as overridable",
+              "overridden" in say(c("cfgd", {"src/lib.rs":
+                                             "#![cfg_attr(not(test), deny(unsafe_code))]\n"})))
+        none = say(c("nonew", {"src/lib.rs": "pub fn f() {}\n"}))
+        check("no setting at all says exactly that",
+              "no unsafe_code lint setting at all" in none and "comment" not in none)
+        check("a manifest `deny` is explained from the manifest",
+              'only "forbid" contains it' in say(c("mandw", {"src/lib.rs": ""},
+                                              manifest=pkg + '[lints.rust]\nunsafe_code = "deny"\n')))
+        check("a crate with a setting is not also told it has none",
+              "no unsafe_code lint setting" not in say(deny))
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

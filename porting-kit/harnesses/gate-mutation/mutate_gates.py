@@ -269,7 +269,7 @@ MUTATIONS = [
     # `#![forbid(unsafe_code)]` on `core`, the table's first row (LESSONS #064).
     {"gate": "control-coverage-unreadable",
      "file": "harnesses/control-coverage/check_controls.py",
-     "old": "                if name and name not in unreadable:",
+     "old": "                if name not in unreadable:",
      "new": "                if False:",
      "why": "a gate-table row naming no harness vanishes from the report without a word",
      "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},

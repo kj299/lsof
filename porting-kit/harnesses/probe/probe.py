@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #6->#036, #13->#033, #14->#037, #17->#038, #18->#039, #19->#040,
-#          #21->#041, #23->#042; #15 by title (no entry in this log).
+#          #21->#041, #23->#042, #48->#069, #50->#071; #15 by title (no entry
+#          in this log).
 # Local: #047 (this import's own carried-over members).
 """Probe-then-port harness — the C is a spec only the oracle can read, so the
 module's test expectations are GENERATED from an oracle transcript, never
@@ -570,6 +571,53 @@ def _self_test():
               (os.remove(gen) or cmd_verify(V)) == 1)
         cmd_gen(G)
         check("regeneration clears it", cmd_verify(V) == 0)
+
+        # Every check above asks only whether verify exits 1, and one failure
+        # anywhere answers yes for all of them. Each verdict below is asked for
+        # by its own message (LESSONS #069/#071's decision sweep found four that
+        # no fixture reached on its own).
+        import contextlib
+        import io
+
+        def verify_says(v):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cmd_verify(v)
+            return rc, out.getvalue() + err.getvalue()
+
+        src = open(oracle).read()
+        open(oracle, "w").write(src.replace("sys.exit(1)", "sys.exit(2)"))
+        rc, said = verify_says(V)
+        check("an exit-code-only drift is ORACLE DRIFT (stdout alone is not the pin)",
+              rc == 1 and "ORACLE DRIFT on `rejects`" in said)
+        open(oracle, "w").write(src)
+
+        pd = json.load(open(probes))
+        pd["probes"][0]["stdin"] = "abcde"
+        json.dump(pd, open(probes, "w"))
+        rc, said = verify_says(V)
+        check("an edited probe is named as a correspondence failure, not only as drift",
+              rc == 1 and "probes file and transcript disagree" in said)
+        pd["probes"][0]["stdin"] = "abcd"
+        pd["probes"].append({"id": "new-1", "args": ["upper"], "stdin": "z"})
+        json.dump(pd, open(probes, "w"))
+        rc, said = verify_says(V)
+        check("a probe added without a re-run fails the correspondence check",
+              rc == 1 and "probes file and transcript disagree" in said)
+        pd["probes"].pop()
+        pd["module"] = "other"
+        json.dump(pd, open(probes, "w"))
+        rc, said = verify_says(V)
+        check("a transcript pinned for another module is refused",
+              rc == 1 and "module mismatch" in said)
+        pd["module"] = "demo"
+        json.dump(pd, open(probes, "w"))
+        rc, said = verify_says(ns(probes=probes, oracle=os.path.join(d, "no-oracle"),
+                                  transcript=transcript, out=gen, glue="probe_glue",
+                                  timeout=10))
+        check("a missing oracle is an error, not a crash",
+              rc == 1 and "oracle not found" in said)
+        check("...and the fixtures above leave verify clean", cmd_verify(V) == 0)
 
         # LESSONS #042: coverage — the gate above the gate. A module with NO
         # probes file at all must fail; nothing below this subcommand notices,
