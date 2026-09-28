@@ -34,6 +34,7 @@ pub fn sample_processes() -> Vec<Process> {
             unlisted: false,
             files: vec![
                 OpenFile {
+                    rdev: None,
                     fs_device: None,
                     file_flags: None,
                     lock: None,
@@ -49,6 +50,7 @@ pub fn sample_processes() -> Vec<Process> {
                     socket: None,
                 },
                 OpenFile {
+                    rdev: None,
                     fs_device: None,
                     file_flags: None,
                     lock: None,
@@ -78,6 +80,7 @@ pub fn sample_processes() -> Vec<Process> {
             unlisted: false,
             files: vec![
                 OpenFile {
+                    rdev: None,
                     fs_device: None,
                     file_flags: None,
                     lock: None,
@@ -99,6 +102,7 @@ pub fn sample_processes() -> Vec<Process> {
                     })),
                 },
                 OpenFile {
+                    rdev: None,
                     fs_device: None,
                     file_flags: None,
                     lock: None,
@@ -120,6 +124,7 @@ pub fn sample_processes() -> Vec<Process> {
                     })),
                 },
                 OpenFile {
+                    rdev: None,
                     fs_device: None,
                     file_flags: None,
                     lock: None,

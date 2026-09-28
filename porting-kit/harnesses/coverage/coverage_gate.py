@@ -30,6 +30,13 @@ Three layers:
      list (TYPE coverage comes from *fixtures*, which no flag spells, so it must
      be declared) — and fails on `required - waived - covered`.
 
+A value-taking option is also required SPELLED with its value as the next word
+(`optword:F`, covered by a case like `-F pn`), not only attached (`-Fpn`).
+getopt offers every such option the next word, so that is a second parse path,
+and it is the one a port gets wrong: lsof-rs took attached values only for five
+options, and each had a covered `opt:` id for years (LESSONS #071). An option
+whose `opt:` id is waived is out of scope, and its spelling is waived with it.
+
 Multi-platform ports: a waiver's reason is usually platform-specific
 ("Unix-only", "no Windows equivalent"), which means it EXPIRES the day the port
 grows a backend for that platform — and expires invisibly, because the file
@@ -239,7 +246,32 @@ def load_inventory(path: str, platform: str | None = None):
             continue
         for wid in ids:
             waives.append({"id": wid, "reason": reason, "platforms": platforms})
+    spelled, implied = spelling_requirements(
+        set(feats.get("options", [])), takes_value, {w["id"] for w in waives}
+    )
+    required |= spelled
+    for wid in implied:
+        waives.append({"id": wid, "reason": IMPLIED_WAIVER, "platforms": None})
     return required, waives, takes_value
+
+
+IMPLIED_WAIVER = "implied: its option is waived, so it has no spelling to exercise"
+
+
+def spelling_requirements(
+    options: set[str], takes_value: set[str], waived_ids: set[str]
+) -> tuple[set[str], list[str]]:
+    """(the `optword:X` ids required, the ones a waiver implies).
+
+    Every value-taking option in the inventory must be exercised with its
+    value as the NEXT word as well as attached, because getopt offers it both
+    and they are two paths through the parser (LESSONS #071). One whose `opt:`
+    id is waived is out of scope, so its spelling is waived with it — and a
+    waiver scoped to other platforms has already been dropped, so on those
+    the spelling comes back with the option."""
+    required = {f"optword:{o}" for o in takes_value if o in options}
+    implied = sorted(r for r in required if "opt:" + r[len("optword:"):] in waived_ids)
+    return required, implied
 
 
 def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
@@ -257,21 +289,33 @@ def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
     data = load_toml_or_json(path)
     covered: set[str] = set()
     for case in data.get("case", []):
-        for tok in case.get("args", []):
+        args = case.get("args", [])
+        for pos, tok in enumerate(args):
             if not isinstance(tok, str) or len(tok) < 2:
                 continue
             if tok.startswith("--"):
                 continue
             if tok[0] in "-+":
-                for ch in tok[1:]:
+                for k, ch in enumerate(tok[1:], 1):
                     if not ch.isalnum():
                         break  # punctuation: the rest is a value
                     covered.add(f"opt:{ch}")
                     if ch in takes_value:
+                        if _value_as_next_word(args, pos, tok, k):
+                            covered.add(f"optword:{ch}")
                         break  # the remainder is this option's argument
         for cid in case.get("covers", []):
             covered.add(str(cid))
     return covered
+
+
+def _value_as_next_word(args: list, pos: int, tok: str, k: int) -> bool:
+    """Whether the value-taking letter `tok[k]` of `args[pos]` is given its
+    value as the next word: it ends its word, and a next word follows that
+    does not open an option — getopt offers it that word, and every option of
+    lsof's gives back one that opens an option (`-F -a` is a bare `-F`)."""
+    nxt = args[pos + 1] if pos + 1 < len(args) else None
+    return k == len(tok) - 1 and isinstance(nxt, str) and not nxt.startswith(("-", "+"))
 
 
 # ------------------------------------------------------------------------ gate
@@ -301,7 +345,11 @@ def run_gate(
         print(json.dumps(report, indent=2))
     else:
         for fid in uncovered:
-            print(f"UNCOVERED {fid}  (no matrix case exercises it)")
+            if fid.startswith("optword:"):
+                o = fid[len("optword:"):]
+                print(f"UNCOVERED {fid}  (no matrix case gives -{o} its value as the next word)")
+            else:
+                print(f"UNCOVERED {fid}  (no matrix case exercises it)")
         for w in waives:
             if w["id"] in required:
                 print(f"waived    {w['id']}  — {w['reason']}")
@@ -399,11 +447,36 @@ MATRIX_FIXTURE = {
         {"name": "sockets", "args": ["-iTCP:80", "-a"], "covers": ["type:REG"]},
         {"name": "grouped", "args": ["-ab"]},
         {"name": "long-and-bare", "args": ["--json", "-"]},
+        # `-i` with its value as the next word: the second spelling getopt
+        # offers every value-taking option (LESSONS #071).
+        {"name": "spelled", "args": ["-a", "-i", ":80"]},
+    ]
+}
+
+# LESSONS #071: every way a value-taking option can END its word without
+# being given the next word as its value. None of these may count as the
+# next-word spelling: attached, followed by an option, last of all, followed
+# by `--`, and followed by something that is not a word at all.
+SPELLING_FIXTURE = {
+    "features": {"options": ["a", "F", "L", "i", "t"], "takes_value": ["F", "L", "i", "t", "Q"]},
+    "waive": [{"id": "opt:t", "reason": "out of scope, and so is its spelling"}],
+}
+SPELLING_MATRIX = {
+    "case": [
+        {"name": "attached", "args": ["-Fpn"]},
+        {"name": "then-an-option", "args": ["-F", "-a"]},
+        {"name": "then-a-plus-option", "args": ["-L", "+a"]},
+        {"name": "last", "args": ["-a", "-i"]},
+        {"name": "then-dashdash", "args": ["-i", "--", "x"]},
+        {"name": "then-not-a-word", "args": ["-i", 7]},
+        {"name": "mid-cluster", "args": ["-Fa", "x"]},
     ]
 }
 
 
 def self_test() -> int:
+    import contextlib
+    import io
     import os
     import tempfile
 
@@ -447,10 +520,17 @@ def self_test() -> int:
 
         uncovered = sorted(required - {w["id"] for w in waives} - covered)
         check("LESSONS #8: the un-created TYPE is caught", uncovered == ["type:KEY"])
+        check("LESSONS #071: `-i :80` spells -i with its value as the next word", "optword:i" in covered)
+        check("LESSONS #071: the next-word spelling is required", "optword:i" in required)
         check("waived option not reported uncovered", "opt:t" not in uncovered)
 
-        rc = run_gate(inv, mat, warn=False, as_json=False)
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            rc = run_gate(inv, mat, warn=False, as_json=False)
         check("gate exits 1 on uncovered", rc == 1)
+        check(
+            "an uncovered feature is named as one",
+            "UNCOVERED type:KEY  (no matrix case exercises it)\n" in said.getvalue(),
+        )
         rc = run_gate(inv, mat, warn=True, as_json=False)
         check("--warn exits 0", rc == 0)
 
@@ -524,6 +604,80 @@ def self_test() -> int:
             check("non-list `platforms` rejected", False)
         except SystemExit:
             check("non-list `platforms` rejected", True)
+
+        # --- the next-word spelling (LESSONS #071) -----------------------
+        # The miss this models: `-Fpn` covered `opt:F` for years while
+        # `-F pn` read `pn` as a file name. Coverage by letter could not see
+        # it; the spelling is a separate id, and nothing short of a case that
+        # really gives the option the next word covers it.
+        sinv = os.path.join(td, "sinv.json")
+        smat = os.path.join(td, "smat.json")
+        json.dump(SPELLING_FIXTURE, open(sinv, "w"))
+        json.dump(SPELLING_MATRIX, open(smat, "w"))
+        s_req, s_waives, s_takes = load_inventory(sinv)
+        s_cov = matrix_coverage(smat, s_takes)
+        check(
+            "the options are covered, by letter",
+            {"opt:F", "opt:L", "opt:i", "opt:a"} <= s_cov,
+        )
+        check(
+            "no spelling counts: attached, an option next, last, `--` next, a non-word next",
+            not {c for c in s_cov if c.startswith("optword:")},
+        )
+        check(
+            "every value-taking option in the inventory has its spelling required",
+            {"optword:F", "optword:L", "optword:i"} <= s_req,
+        )
+        check(
+            "a value-taking letter that is not an option requires nothing",
+            "optword:Q" not in s_req,
+        )
+        s_waived = {w["id"] for w in s_waives}
+        check("a waived option's spelling is waived with it", "optword:t" in s_waived)
+        check(
+            "...and only that one",
+            not ({"optword:F", "optword:L", "optword:i"} & s_waived),
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            s_rc = run_gate(sinv, smat, warn=False, as_json=False)
+        check(
+            "the gate fails naming the three spellings",
+            sorted(s_req - s_waived - s_cov) == ["optword:F", "optword:L", "optword:i"]
+            and s_rc == 1,
+        )
+        check(
+            "an uncovered spelling says which spelling",
+            "UNCOVERED optword:F  (no matrix case gives -F its value as the next word)\n"
+            in said.getvalue(),
+        )
+        json.dump(
+            {"case": SPELLING_MATRIX["case"] + [
+                {"name": "F", "args": ["-F", "pn"]},
+                {"name": "L", "args": ["+L", "1", "-a"]},
+                {"name": "i", "args": ["-a", "-i", "{PORT}"]},
+            ]},
+            open(smat, "w"),
+        )
+        check(
+            "one case per spelling covers them, and the gate passes",
+            run_gate(sinv, smat, warn=False, as_json=False) == 0,
+        )
+        # A platform-scoped waiver that expires takes the implied one with it.
+        pinv = os.path.join(td, "pinv.json")
+        json.dump(
+            {
+                "features": {"options": ["F"], "takes_value": ["F"]},
+                "waive": [{"id": "opt:F", "reason": "not on windows", "platforms": ["windows"]}],
+            },
+            open(pinv, "w"),
+        )
+        _, pw_win, _ = load_inventory(pinv, "windows")
+        _, pw_lin, _ = load_inventory(pinv, "linux")
+        check(
+            "an expired option waiver takes its implied spelling waiver with it",
+            "optword:F" in {w["id"] for w in pw_win}
+            and "optword:F" not in {w["id"] for w in pw_lin},
+        )
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

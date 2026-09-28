@@ -63,8 +63,8 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |
 | `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one row per thread under the process, with thread ID and start address. |
 | `-l` | out | ✅ shipped (5A) | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
-| `-L [l]` | out | ✅ shipped (5A) | **Show link count column** (with `+L count` filtering). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
-| `+L [l]` | sel | ✅ shipped (5A) | Filter to files whose link count < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too) |
+| `-L [l]` | out | ✅ shipped (5A) | **No link count column** — the default; `-L` takes no count. Shipped reading `-L` as "show the column", which is `+L`'s meaning; corrected 2026-09-26 (DIVERGENCES 41). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
+| `+L [l]` | sel | ✅ shipped (5A) | **The link count column**, and with `l`, also select files whose link count is known and < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too). A row with no count (a socket, a pipe) is never selected (DIVERGENCES 42). |
 | `-m m` | misc | ❌ N/A | Mount supplement — Unix mtab |
 | `+m [m]` | misc | ❌ N/A | Mount supplement output |
 | `+|-M` | misc | ❌ N/A | Portmapper — Unix RPC |

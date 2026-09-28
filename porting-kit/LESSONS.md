@@ -3275,3 +3275,57 @@ finding it is supposed to produce.
   `harnesses/differential/diff_run.py`;
   `harnesses/gate-mutation/mutate_gates.py`.
 
+---
+
+## 071. Coverage by option letter could not see an option's second spelling, for five options
+
+- **Date:** 2026-09-26
+- **Codebase:** lsof-rs (its argument parser), and this kit's coverage gate
+- **What happened:** getopt offers every value-taking option its value two
+  ways: the rest of the word (`-Fpn`) or, failing that, the next word
+  (`-F pn`). The two are separate paths through a port's parser. lsof-rs took
+  the second for some options and not for others. The coverage gate credits
+  `opt:F` for any case that says `-F`, and every value-taking option had one,
+  so the gate was green while `lsof -F pn` looked for a file called `pn`,
+  `lsof -r 2` for one called `2` (exit 1, where the C repeats every two
+  seconds), and `lsof -f /dev/null` listed a file the C refuses to read as
+  one. `-L`, `+L` and `-x` were the same. Measured against the C, all five.
+
+  Two members of the family had been fixed already, `-s` and `-i`, one at a
+  time, each written up as a fix for that option. That is #060's shape in a
+  port rather than in the kit: fix the member, describe the member, and the
+  next reader has a sentence saying the thing is handled. The rule both fixes
+  followed was getopt's, and it is written down once, in the C: every option
+  whose rule letter carries `:` is offered the next word, and every one of
+  lsof's gives back a word that opens an option. Enumerating that rule's
+  inputs meant reading the optstring, which the coverage gate already reads.
+
+  The same pass found the rule's other half broken the same way. The C treats
+  `+` as a flag on a cluster, exactly as `-`, so `+wa` is `+w -a`. lsof-rs read
+  one letter per `+` word and dropped the rest, so `lsof +wa -p P -d 3` listed
+  28 rows where the C lists one.
+- **The rule.** When the C parses every option through one routine, that
+  routine's spellings belong to every option's contract. Test each
+  value-taking option in each spelling the routine offers, not each option
+  once. The optstring enumerates them; a gate can too.
+- **Kit change:** `harnesses/coverage/coverage_gate.py` requires `optword:X`
+  for every value-taking option in the inventory, and only a case in which X
+  ends its word and the next argument opens no option covers it. The self-test
+  holds one fixture for each way a letter can end a word without being given
+  the next word (attached, then an option, then `+x`, last of all, then `--`,
+  then something that is not a string, mid-cluster), and shows none of them
+  counting. An option whose `opt:` id is waived is out of scope, and its
+  spelling is waived with it, reported as implied; a platform-scoped waiver
+  that expires takes the implied one with it. Two `mutate_gates.py` rows cover
+  what counts as the spelling and whether it is required. The UNCOVERED line
+  names the spelling, pinned by the self-test along with the ordinary one,
+  and that check also pinned `run_gate`'s `as_json` decision, so the
+  unpinned ledger lost a line.
+
+  Its first run against lsof-rs's own coverage declaration flagged exactly the
+  options the port had just fixed (`-F`, `-f`, `-r`, `-x`), plus `-i` and `-s`.
+  Those two had real differential cases for the spelling that nobody had
+  declared.
+- **Section amended:** harnesses/coverage/coverage_gate.py;
+  harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
+  harnesses/gate-mutation/unpinned.jsonl.
