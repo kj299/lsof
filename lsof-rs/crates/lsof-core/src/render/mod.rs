@@ -9,11 +9,13 @@
 //! (lsof's `safestrprt()`), and the JSON renderers escape per the JSON grammar.
 
 pub mod escape;
+pub mod fflags;
 pub mod fields;
 pub mod json;
 pub mod table;
 
 pub use escape::Escaper;
+pub use fflags::FileFlags;
 pub use table::TableOpts;
 
 /// How many decimal digits an offset may have before it is printed in hex —

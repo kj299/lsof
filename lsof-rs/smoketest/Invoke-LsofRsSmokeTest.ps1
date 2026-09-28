@@ -669,6 +669,17 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert ($plusF.Exit -ne 0) "+f on a non-file-system should fail (exit=$($plusF.Exit))"
         Assert-Contains $plusF.Err 'not a file system'
     }
+    Test-Case 'file-flags-plus-f-g' 'render/+f g' {
+        # On Linux `+f g` is a FILE-FLAG column (DIVERGENCES 46). Windows
+        # records no file flags, so the letter is refused, as a C dialect
+        # without them refuses it -- not a column that is always blank.
+        foreach ($spelling in @(@('+f', 'g'), @('+fG'), @('-f', 'g'))) {
+            $r = Invoke-Lsof ($spelling + @('-p', "$self")) 'fflags'
+            Assert ($r.Exit -ne 0) "$($spelling -join ' ') should be refused (exit=$($r.Exit))"
+            Assert-Contains $r.Err 'unknown file struct option' "$($spelling -join ' ')"
+            Assert-NotContains $r.Out 'FILE-FLAG' "$($spelling -join ' ') prints no column"
+        }
+    }
     Test-Case 'end-of-options-dashdash' 'misc/--' {
         # `--` ends options; the path after it is looked up (RM finds our PID).
         $r = Invoke-Lsof @('--', $fx.FilePath) 'dashdash'
