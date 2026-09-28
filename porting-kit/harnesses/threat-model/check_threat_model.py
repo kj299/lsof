@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #6->#036, #16->#050, #48->#069, #50->#071.
+# Re-cited: #6->#036, #16->#050, #48->#069, #50->#072.
 """Threat-model gate — a port must not reach cutover with an UNFILLED threat
 model. Hard-fails (exit 1) on leftover placeholders or a missing required
 section.
@@ -183,7 +183,7 @@ def _self_test() -> int:
         open(stub, "w").write("# Threat model\n\nTODO\n")
         chk("a stub threat model FAILS", rc(stub, False) == 1)
         # That stub fails three ways at once (length, sections, TODO), so none
-        # was pinned alone (LESSONS #050) — LESSONS #069/#071's decision sweep turned
+        # was pinned alone (LESSONS #050) — LESSONS #069/#072's decision sweep turned
         # the length check off unnoticed. Every heading, nothing unfilled, too
         # short: length alone.
         short = os.path.join(d, "short.md")

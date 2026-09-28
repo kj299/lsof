@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #6->#036, #13->#033, #14->#037, #18->#039, #19->#040,
-#          #48->#069, #50->#071; #26 by title (no entry in this log).
+#          #48->#069, #50->#072; #26 by title (no entry in this log).
 # Local: #047, #058, #060 (the use-vs-mention rule; this kit's own first run of
 #          it; and what that run's fix left open).
 """Lessons-pinned check — the smoke tests must track the lessons. Every LESSONS
@@ -260,7 +260,7 @@ def _self_test():
         check("cited lesson→harness link passes", run(root) == 0)
         # The summary's counters are how a skip stays visible (the docstring's
         # "a skip counter is where a gate hides"): none here, all three at the
-        # end. LESSONS #069/#071's decision sweep found every one unpinned.
+        # end. LESSONS #069/#072's decision sweep found every one unpinned.
         import contextlib
         import io
 

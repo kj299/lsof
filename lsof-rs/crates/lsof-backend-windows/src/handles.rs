@@ -259,6 +259,7 @@ pub fn enumerate(
         out.push((
             pid,
             OpenFile {
+                rdev: None,
                 fs_device: None,
                 file_flags: None,
                 lock: None,

@@ -304,7 +304,7 @@ def run(kit_root, also=()):
             f"not `## NNN.` — it would be invisible to this checker")
 
     # 0-of-0: a log with no entries this checker can read, and nothing citing
-    # it, used to report a clean run over nothing (LESSONS #069/#071's sweep, forcing
+    # it, used to report a clean run over nothing (LESSONS #069/#072's sweep, forcing
     # the guard below, is what reached this case at all).
     if not nums:
         problems.append("LESSONS.md: no `## NNN.` entries — nothing to check "
@@ -550,7 +550,7 @@ def _self_test():
               run(kit, [os.path.join(repo, "no-such-dir")]) == 1)
 
     # "...and is caught with it" above passes just as well if every --also-scan
-    # is refused, so a clean one must pass (LESSONS #069/#071's decision sweep).
+    # is refused, so a clean one must pass (LESSONS #069/#072's decision sweep).
     with contextlib.ExitStack() as stack:
         repo, kit = repo_fixture(stack)
         open(os.path.join(repo, "ci", "build.yml"), "w").write("# gate (LESSONS #1)\n")

@@ -986,7 +986,7 @@ def _self_test():
               msg is None and plan.orphaned == [3] and 3 not in plan.mapping
               and any("'#003'" in x for x in plan.review))
 
-    # --- shapes no fixture above reached (LESSONS #069/#071's decision sweep) --
+    # --- shapes no fixture above reached (LESSONS #069/#072's decision sweep) --
     # A kit at the repository root: main() passes kit_rel ".", and the log is
     # then `LESSONS.md`, not `./LESSONS.md`, which the file walk would take for
     # another file and refuse for its conflict markers.

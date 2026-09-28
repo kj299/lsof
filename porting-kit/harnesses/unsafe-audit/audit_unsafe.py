@@ -196,7 +196,7 @@ def audit_text(src: str, window: int):
     # also breaks on a form feed, which is whitespace to rustc, so one \f early
     # in a file moved every later line up by one. The upward scan then skipped
     # the line above a block and read the one above that, and a block with no
-    # comment was credited with the one before its neighbour (LESSONS #069/#071).
+    # comment was credited with the one before its neighbour (LESSONS #069/#072).
     lines = src.split("\n")
     documented, undocumented = [], []
     for line_no, kind in find_unsafe_blocks(src):
@@ -286,7 +286,7 @@ def self_test():
         any("trailing_only" in (SELF_TEST_SRC.splitlines()[ln - 1]) for ln, _ in undoc),
     )
     check("string/comment `unsafe` ignored (no extra findings)", len(doc) + len(undoc) == 4)
-    # One fixture per rule of the upward scan (LESSONS #050). LESSONS #069/#071's
+    # One fixture per rule of the upward scan (LESSONS #050). LESSONS #069/#072's
     # decision sweep found the first two unpinned, and both fail open: forced
     # on, ANY comment above a block documented it, and the window was never
     # enforced. The rest are documented allowances nothing exercised.

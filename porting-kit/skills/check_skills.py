@@ -65,7 +65,7 @@ def check_skill(skill_dir, kit_root):
     # `porting-kit/harnesses/<name>.py` is read only up to the `<` — PATH_RE
     # stops there — so it checks the directory, which must exist. (A skip for
     # placeholders stood here and could never fire: PATH_RE cannot match the
-    # characters it looked for. LESSONS #069/#071's decision sweep found it.)
+    # characters it looked for. LESSONS #069/#072's decision sweep found it.)
     for m in dict.fromkeys(PATH_RE.findall(text)):  # dedupe, keep order
         rel = m[len("porting-kit/"):].rstrip(".,);:")
         if not os.path.exists(os.path.join(kit_root, rel)):
@@ -134,7 +134,7 @@ def _self_test():
         shutil.rmtree(path_bad)
         check("...and removing that restores green too", run(skills) == 0)
 
-        # The same rule for every other check (LESSONS #069/#071's decision sweep
+        # The same rule for every other check (LESSONS #069/#072's decision sweep
         # found each of these unreached: a missing description passed outright).
         bad = os.path.join(skills, "bad-skill"); os.makedirs(bad)
         for label, body in [

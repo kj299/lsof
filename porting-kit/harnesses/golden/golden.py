@@ -108,7 +108,7 @@ def _self_test():
         check("replay same binary → match", replay(echo, matrix, corpus, False, False) == 0)
         check("replay divergent binary → fail", replay(printf, matrix, corpus, False, False) == 1)
         # A case with no golden is not a pass: forced off, the `missing` count
-        # let replay exit 0 on a corpus nobody captured (LESSONS #069/#071's
+        # let replay exit 0 on a corpus nobody captured (LESSONS #069/#072's
         # decision sweep found no fixture reaching it).
         import contextlib
         import io

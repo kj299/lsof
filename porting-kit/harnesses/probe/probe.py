@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #6->#036, #13->#033, #14->#037, #17->#038, #18->#039, #19->#040,
-#          #21->#041, #23->#042, #48->#069, #50->#071; #15 by title (no entry
+#          #21->#041, #23->#042, #48->#069, #50->#072; #15 by title (no entry
 #          in this log).
 # Local: #047 (this import's own carried-over members).
 """Probe-then-port harness — the C is a spec only the oracle can read, so the
@@ -574,7 +574,7 @@ def _self_test():
 
         # Every check above asks only whether verify exits 1, and one failure
         # anywhere answers yes for all of them. Each verdict below is asked for
-        # by its own message (LESSONS #069/#071's decision sweep found four that
+        # by its own message (LESSONS #069/#072's decision sweep found four that
         # no fixture reached on its own).
         import contextlib
         import io

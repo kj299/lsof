@@ -2,7 +2,7 @@
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Local: #070.
 # Re-cited: #1->#001, #4->#004, #6->#036, #8->#043, #9->#044, #11->#045,
-#          #14->#037, #16->#050, #48->#069, #50->#071; #36 by title (no
+#          #14->#037, #16->#050, #48->#069, #50->#072; #36 by title (no
 #          entry in this log).
 """Differential harness — run the C oracle and the Rust rewrite over the same
 input matrix, normalize both, and diff. Divergences are *triaged*, not blindly
@@ -465,7 +465,7 @@ def _self_test():
     check("different output → DIVERGE", res[0]["verdict"] == "DIVERGE")
     # The report's shape is read by other tools: diff_fuzz buckets findings by
     # `fingerprint_full`, and the fingerprint hashes note + body, so what goes
-    # INTO it decides what a ledger pin accepts. LESSONS #069/#071's decision sweep
+    # INTO it decides what a ledger pin accepts. LESSONS #069/#072's decision sweep
     # found each of these unpinned — stdout could drop out of the fingerprint.
     div = res[0]
     ddiff = div["diff"] or ""
@@ -584,7 +584,7 @@ def _self_test():
         res = compare(slow, fast, tc, ledger=None, sort=False, mask_numbers=False)
         check("oracle-only hang → DIVERGE (triaged, ledgerable)", res[0]["verdict"] == "DIVERGE")
         # The note names the side that hung; it is part of the fingerprint an
-        # oracle-only hang is ledgered under (unpinned until LESSONS #069/#071's
+        # oracle-only hang is ledgered under (unpinned until LESSONS #069/#072's
         # sweep).
         says = lambda o, r: compare(o, r, tc, ledger=None, sort=False,
                                     mask_numbers=False)[0]["diff"] or ""
@@ -630,7 +630,7 @@ def _self_test():
         check("--with-stderr on identical stderr → MATCH", res[0]["verdict"] == "MATCH")
 
     # Case names become corpus file names. Each rejection alone (LESSONS #050):
-    # none but the separator was reached until LESSONS #069/#071's decision sweep.
+    # none but the separator was reached until LESSONS #069/#072's decision sweep.
     with tempfile.TemporaryDirectory() as d:
         for label, name in [("an empty name", ""), ("a non-string name", 7),
                             ("`..` as a name", ".."), ("`.` as a name", ".")]:

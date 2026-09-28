@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #48->#069, #50->#071.
+# Re-cited: #48->#069, #50->#072.
 """Output normalization for differential testing — importable + CLI.
 
 The C oracle and the Rust rewrite will differ in *nondeterministic* ways that are
@@ -127,7 +127,7 @@ def _self_test():
     check("sort canonicalizes order",
           normalize_text("b\na", sort=True) == normalize_text("a\nb", sort=True))
     # Every option masks something, so each must mask ONLY when asked — forced
-    # on, it hides a real difference in every comparison. LESSONS #069/#071's
+    # on, it hides a real difference in every comparison. LESSONS #069/#072's
     # decision sweep found all of them unpinned; strip_blank's test forced True
     # dropped every line, so any two outputs compared equal.
     check("numbers are NOT masked unless asked",

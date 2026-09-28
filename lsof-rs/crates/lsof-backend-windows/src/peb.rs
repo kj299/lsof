@@ -98,6 +98,7 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
     };
 
     Some(OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: None,
         lock: None,

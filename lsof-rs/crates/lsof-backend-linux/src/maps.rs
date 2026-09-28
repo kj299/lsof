@@ -172,6 +172,7 @@ pub fn rows_for(base: &str, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
             // inode come from the maps line and SIZE stays blank, exactly as
             // the C prints it.
             out.push(OpenFile {
+                rdev: None,
                 fs_device: dev_num(&m.device),
                 file_flags: None,
                 lock: None,
@@ -204,6 +205,7 @@ pub fn rows_for(base: &str, exe: Option<(&str, &str)>) -> Vec<OpenFile> {
             continue;
         }
         out.push(OpenFile {
+            rdev: None,
             fs_device: Some(md.dev()),
             file_flags: None,
             lock: None,

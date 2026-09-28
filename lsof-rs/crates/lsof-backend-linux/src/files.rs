@@ -1,5 +1,6 @@
 //! A process's open files, from `/proc/<pid>/{fd,cwd,root,exe}`.
 
+use std::num::NonZeroU32;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -287,6 +288,7 @@ fn row(
         if let Some(fs) = exempt_match(&shown, exempt) {
             let kind = unkn_suffix(&fd);
             return Some(OpenFile {
+                rdev: None,
                 fs_device: None,
                 file_flags: info.flags,
                 lock: None,
@@ -338,6 +340,7 @@ fn row(
             // replaces the lookup entirely.
             if let Some(name) = ns.unresolved_name(pid, inode) {
                 return Some(OpenFile {
+                    rdev: None,
                     fs_device: None,
                     file_flags: info.flags,
                     lock: None,
@@ -369,6 +372,7 @@ fn row(
                 None => e.info.display_name(false, false),
             };
             return Some(OpenFile {
+                rdev: None,
                 // A socket has no filesystem device, so `-F D` has nothing to
                 // print; its open-file flags are real and come from fdinfo just
                 // like any other fd's.
@@ -392,7 +396,7 @@ fn row(
     }
 
     let fs_device = meta.as_ref().map(|m| m.dev());
-    let (file_type, device, size, node, links) = match &meta {
+    let (file_type, device, size, node, links, rdev) = match &meta {
         Some(m) => {
             // An anonymous inode stats as a regular file, but lsof types it
             // `a_inode` — the kernel object has no filesystem identity, and
@@ -411,6 +415,15 @@ fn row(
                 FileType::Chr | FileType::Block => m.rdev(),
                 _ => m.dev(),
             };
+            // ...and `-F r` prints that raw number, on a device node and
+            // nowhere else (`dnode.c` records `rdev` for N_CHR and N_BLK):
+            // `r0x103` for /dev/null (DIVERGENCES 47).
+            let rdev = match ty {
+                FileType::Chr | FileType::Block => {
+                    u32::try_from(m.rdev()).ok().and_then(NonZeroU32::new)
+                }
+                _ => None,
+            };
             // SIZE/OFF: lsof shows a size only where one means something. A
             // device node or a FIFO has an st_size of 0 that describes nothing,
             // so the C prints the offset (`0t0`) there and the size for regular
@@ -421,15 +434,26 @@ fn row(
                 FileType::Chr | FileType::Block | FileType::Fifo => None,
                 _ => Some(m.size()),
             };
+            // No link count for a socket: the C hands a socket inode to
+            // `process_proc_sock()` before `process_proc_node()` records one,
+            // so `+L` never selects it and NLINK stays blank (DIVERGENCES 42).
+            // This is the socket no table named; the rows the tables do name
+            // carry none either.
+            let links = if m.mode() & S_IFMT == S_IFSOCK {
+                None
+            } else {
+                u32::try_from(m.nlink()).ok()
+            };
             (
                 ty,
                 Some(dev_string(dev)),
                 size,
                 Some(m.ino().to_string()),
-                u32::try_from(m.nlink()).ok(),
+                links,
+                rdev,
             )
         }
-        None => (FileType::Unknown, None, None, None, None),
+        None => (FileType::Unknown, None, None, None, None, None),
     };
 
     let mut name = name_for_target(&name, info);
@@ -437,6 +461,7 @@ fn row(
         name.push_str(&why);
     }
     Some(OpenFile {
+        rdev,
         fs_device,
         file_flags: info.flags,
         lock: None,
@@ -464,6 +489,7 @@ fn row(
 /// every case but a race, since the same permission guards both.
 fn unreadable(name: String, fd: FdType, info: &FdInfo) -> OpenFile {
     OpenFile {
+        rdev: None,
         fs_device: None,
         file_flags: info.flags,
         lock: None,
@@ -1190,6 +1216,62 @@ mod tests {
             .find(|f| f.fd == FdType::Cwd)
             .expect("still a row");
         assert_eq!(quiet.name, "/nonexistent/lsof-rs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri supports only AF_INET and AF_INET6 sockets")]
+    fn a_socket_no_table_names_has_no_link_count() {
+        // The C hands every socket inode to `process_proc_sock()`, which
+        // records no link count, so `+L` never selects one and NLINK is blank
+        // (DIVERGENCES 42). lsof-rs's fallback row for a socket the tables do
+        // not name (on the test host, an AF_VSOCK one) kept the `stat` count,
+        // 1. A bound AF_UNIX socket's path stats as a socket too, which
+        // reaches the same row without a namespace or a vsock module.
+        let dir = fake_proc("sock");
+        let sock = dir.join("bound.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let file = dir.join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::os::unix::fs::symlink(&sock, dir.join("fd").join("3")).unwrap();
+        std::os::unix::fs::symlink(&file, dir.join("cwd")).unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let s = rows
+            .iter()
+            .find(|f| f.fd == FdType::Handle(3))
+            .expect("a row for fd 3");
+        assert_eq!(s.file_type, FileType::Other("SOCK".into()), "{s:?}");
+        assert_eq!(s.links, None, "a socket has no link count: {s:?}");
+        let cwd = rows
+            .iter()
+            .find(|f| f.fd == FdType::Cwd)
+            .expect("a cwd row");
+        assert_eq!(cwd.links, Some(1), "anything else keeps its count: {cwd:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's stat shim reports st_rdev as 0")]
+    fn a_device_node_carries_the_raw_number_it_names() {
+        // `-F r` prints `st_rdev` for a character or block special and for
+        // nothing else (DIVERGENCES 47): `/dev/null` is 1,3, which the kernel
+        // encodes as 0x103.
+        let dir = fake_proc("rdev");
+        let file = dir.join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::os::unix::fs::symlink("/dev/null", dir.join("fd").join("0")).unwrap();
+        std::os::unix::fs::symlink(&file, dir.join("fd").join("3")).unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let at = |n: u64| {
+            rows.iter()
+                .find(|f| f.fd == FdType::Handle(n))
+                .expect("a row")
+        };
+        assert_eq!(at(0).file_type, FileType::Chr);
+        assert_eq!(at(0).rdev.map(|r| r.get()), Some(0x103));
+        assert_eq!(at(3).rdev, None, "a regular file names no device");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

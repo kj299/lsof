@@ -518,7 +518,7 @@ def _self_test():
     chk("the mapping bullet does not launder a stray body number",
         any("#18" in p for p in probs))
 
-    # Three more outcomes, each reached by no fixture until LESSONS #069/#071's
+    # Three more outcomes, each reached by no fixture until LESSONS #069/#072's
     # decision sweep: a bullet that maps nothing, a `by title` mapping that is
     # honest, and a number that is not an entry at all. Each body cites
     # nothing, so no other check can answer for them (LESSONS #050).

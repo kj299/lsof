@@ -1,4 +1,4 @@
-# Decisions in verdict functions that no self-test pins — LESSONS #069, #071.
+# Decisions in verdict functions that no self-test pins — LESSONS #069, #072.
 #
 # harnesses/gate-mutation/mutate_gates.py forces every decision in a verdict
 # function (one holding a mutation row's target) True, then False, and runs the
@@ -10,9 +10,9 @@
 # a fixture, then delete its line. Keys name a decision by function, source
 # line and expression, never by line number; `n` numbers repeats on one line.
 #
-# Every line was triaged on 2026-09-26 (LESSONS #071). Of the 204 in the first
+# Every line was triaged on 2026-09-26 (LESSONS #072). Of the 204 in the first
 # baseline, 137 were pinned by fixtures (one by #070's, one by the resolver's
-# conflict-marker fixture, the rest in #071) and 6 went with code that was fixed
+# conflict-marker fixture, the rest in #072) and 6 went with code that was fixed
 # or removed. The 61 left, and one decision added since, say which kind each
 # is, and why:
 #   equivalent:  forcing it cannot change what the harness does.

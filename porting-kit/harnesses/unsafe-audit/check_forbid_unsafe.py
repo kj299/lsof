@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #18->#039, #44->#060, #45->#064, #46->#065, #48->#069,
-#          #50->#071.
+#          #50->#072.
 """Unsafe-containment gate — the `core` crate must FORBID `unsafe_code`, in a
 form the compiler actually applies, on every target root it builds.
 
@@ -443,7 +443,7 @@ def _self_test():
               run([os.path.join(t, "nope")]) == 2)
         check("no crate named at all is an error", run([]) == 2)
 
-        # LESSONS #069/#071's decision sweep: every test in _skip_block_comment could
+        # LESSONS #069/#072's decision sweep: every test in _skip_block_comment could
         # be forced either way with this self-test green, because no fixture put
         # a block comment BEFORE a live attribute, none had a comment whose
         # close could be misread, and none left one unterminated.

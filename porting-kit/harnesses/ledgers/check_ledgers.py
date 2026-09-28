@@ -474,7 +474,7 @@ def self_test() -> int:
 
     # The report. Every fixture above asked run() for JSON and read only its
     # exit code, while CI runs the text form, so neither report was checked
-    # (LESSONS #069/#071's decision sweep): which rows print as present, waived
+    # (LESSONS #069/#072's decision sweep): which rows print as present, waived
     # or MISSING, and what JSON says is present. One port reaches every row.
     import contextlib
     import io

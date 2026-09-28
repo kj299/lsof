@@ -363,7 +363,7 @@ def _self_test():
         check("a missing manifest fails", run(os.path.join(t, "nope.toml"), t) == 1)
 
     # --- manifest shapes the docstring allows, and none of the fixtures above
-    # used (LESSONS #069/#071's decision sweep reached none of them) ---------
+    # used (LESSONS #069/#072's decision sweep reached none of them) ---------
     import contextlib
     import io
 

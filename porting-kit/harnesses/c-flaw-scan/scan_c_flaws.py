@@ -253,7 +253,7 @@ def scan_text(src):
     char_names = _char_decls(src)
     in_block = False
     # Lines are what "\n" ends, as the format-string pass counts them and as an
-    # editor numbers them: splitlines() also breaks on a form feed (LESSONS #071).
+    # editor numbers them: splitlines() also breaks on a form feed (LESSONS #072).
     for lineno, line in enumerate(src.split("\n"), 1):
         stripped = line.strip()
         # `in_block` carries across lines, so a comment opened on a code line
@@ -454,7 +454,7 @@ def _self_test():
 
     # A form feed (a page break, common in old C) is not a line. splitlines()
     # broke on it, so every line-based hit after one was a line late, while the
-    # format-string pass, which counts "\n", was not (LESSONS #069/#071).
+    # format-string pass, which counts "\n", was not (LESSONS #069/#072).
     ff = scan_text("int a;\x0cint b;\nvoid f(char *d, char *s) {\n"
                    "  strcpy(d, s);\n  printf(d);\n}\n")
     check("after a form feed, every hit is on its own line, whichever pass found it",
@@ -464,7 +464,7 @@ def _self_test():
     # Only scanf reads the literal-keeping text. Sent through it, the other
     # rules see literal contents: a `;` in a string argument ends malloc's
     # `[^;)]*` early, and a real multiplication goes unreported. And alloca,
-    # a rule of its own, had no fixture at all (LESSONS #069/#071's sweep).
+    # a rule of its own, had no fixture at all (LESSONS #069/#072's sweep).
     mul = 'void m(int n) { char *p = malloc(n * strlen(";")); }\n'
     check("a malloc multiplication is flagged even with a `;` in a string argument",
           [h["category"] for h in scan_text(mul)] == ["int-overflow-mul"])

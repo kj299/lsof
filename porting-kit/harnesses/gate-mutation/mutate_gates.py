@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
@@ -291,6 +291,22 @@ MUTATIONS = [
      "old": "    uncovered = sorted(required - waived_ids - covered)",
      "new": "    uncovered = []",
      "why": "no feature is ever uncovered: an empty matrix reports full coverage",
+     "cmd": ["harnesses/coverage/coverage_gate.py", "--self-test"]},
+
+    # A value-taking option must also be exercised with its value as the next
+    # word (LESSONS #071). One row for what counts as that spelling, one for
+    # whether it is required at all: either broken, a port that parses only
+    # attached values is green again, as lsof-rs was for five options.
+    {"gate": "coverage-spelling", "file": "harnesses/coverage/coverage_gate.py",
+     "old": '    return k == len(tok) - 1 and isinstance(nxt, str) and not nxt.startswith(("-", "+"))',
+     "new": "    return True",
+     "why": "an attached value, or an option after the letter, counts as the next-word spelling",
+     "cmd": ["harnesses/coverage/coverage_gate.py", "--self-test"]},
+
+    {"gate": "coverage-spelling-required", "file": "harnesses/coverage/coverage_gate.py",
+     "old": '    required = {f"optword:{o}" for o in takes_value if o in options}',
+     "new": "    required = set()",
+     "why": "the next-word spelling is never required, so no case need give an option its value that way",
      "cmd": ["harnesses/coverage/coverage_gate.py", "--self-test"]},
 
     {"gate": "ledgers", "file": "harnesses/ledgers/check_ledgers.py",
