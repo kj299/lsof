@@ -293,6 +293,12 @@ name = "smoke/filesystem-args-dash-f-plus-f"
 args = ["-f", "--", "PATH"]
 
 [[case]]
+# Windows records no file flags, so `g` and `G` are refused there, under
+# either prefix and attached or not (DIVERGENCES 46).
+name = "smoke/file-flags-plus-f-g"
+args = ["+f", "g", "-p", "SELF"]
+
+[[case]]
 name = "smoke/tcp-info-selects-not-adds-dash-T"
 args = ["-nP", "-iTCP:PORT", "-Tq"]
 
@@ -702,3 +708,26 @@ covers = ["type:IPv4"]
 name = "linux/differential-fields-raw-device-on-device-nodes"
 args = ["-n", "-P", "-FfrDt", "-a", "-p", "PID"]
 covers = ["type:CHR"]
+
+# ---------- linux differential: access letters and file flags (DIVERGENCES 44, 46)
+
+[[case]]
+# Fixture Q: an fd per open flag the C names, an O_PATH file and directory, an
+# O_PATH /dev/null, access mode 3, and pipes, one of them with no flags at all.
+name = "linux/differential-access-of-O_PATH-and-mode-3-is-u"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:REG", "type:DIR", "type:CHR", "type:FIFO"]
+
+[[case]]
+name = "linux/differential-fflags-by-name"
+args = ["-n", "-P", "+fg", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:REG", "type:DIR", "type:CHR", "type:FIFO"]
+
+[[case]]
+name = "linux/differential-fflags-letters-as-the-next-word"
+args = ["-n", "-P", "+f", "g", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:REG", "type:DIR", "type:CHR", "type:FIFO"]
+
+[[case]]
+name = "linux/differential-fflags-by-name-in-the-G-field"
+args = ["-n", "-P", "-F", "+fg", "-a", "-d", "^mem", "-p", "PID"]

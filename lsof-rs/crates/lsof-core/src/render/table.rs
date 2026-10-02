@@ -16,6 +16,7 @@
 use std::io::{self, Write};
 
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process, Protocol};
+use crate::render::fflags::{self, FileFlags};
 use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 
@@ -345,8 +346,11 @@ pub struct TableOpts {
     /// `-H`: render the SIZE cell as a human-readable byte count. Affects the
     /// table only — the C leaves `-F` and its JSON untouched, and so does this.
     pub human_size: bool,
-    /// `-L`: an NLINK column.
+    /// `+L`: an NLINK column.
     pub show_links: bool,
+    /// `+f g` / `+f G`: a FILE-FLAG column after TYPE, the flags by name or in
+    /// hex (DIVERGENCES 46).
+    pub file_flags: FileFlags,
     /// `+c`: the COMMAND cap in printed characters, `None` for `+c 0` (no cap).
     /// This is the C's `CmdLim`, which is a cap on each row's *contribution* to
     /// the column width, not the width itself — see [`render`].
@@ -369,6 +373,7 @@ impl TableOpts {
             offset_digits: DEFAULT_OFFSET_DIGITS,
             human_size: false,
             show_links: false,
+            file_flags: FileFlags::Off,
             command_width: Some(DEFAULT_COMMAND_WIDTH),
             tcp_show: TcpInfoFlags::DEFAULT,
             esc,
@@ -413,6 +418,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         offset_digits,
         human_size,
         show_links,
+        file_flags,
         command_width,
         tcp_show,
         esc,
@@ -466,14 +472,14 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     } else {
         SizeOff::Both
     };
-    cols.extend([
-        Col::right("USER"),
-        FD_NAME,
-        FD_MODE,
-        Col::right("TYPE"),
-        Col::right("DEVICE"),
-        Col::right(size_off.header()),
-    ]);
+    cols.extend([Col::right("USER"), FD_NAME, FD_MODE, Col::right("TYPE")]);
+    // FILE-FLAG, right after TYPE, where `print.c` puts it: at least as wide
+    // as its title, and blank where a row has no flags to show.
+    let show_flags = file_flags != FileFlags::Off;
+    if show_flags {
+        cols.push(Col::right("FILE-FLAG"));
+    }
+    cols.extend([Col::right("DEVICE"), Col::right(size_off.header())]);
     if show_links {
         cols.push(Col::right("NLINK"));
     }
@@ -514,6 +520,12 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         r.push(fd_name(f));
         r.push(fd_mode(f));
         r.push(f.file_type.code());
+        if show_flags {
+            r.push(match f.file_flags {
+                Some(g) if fflags::shown(g, file_flags) => fflags::text(g, file_flags),
+                _ => String::new(),
+            });
+        }
         r.push(f.device.clone().unwrap_or_default());
         r.push(size_off_cell(f, size_off, human_size, offset_digits));
         if show_links {

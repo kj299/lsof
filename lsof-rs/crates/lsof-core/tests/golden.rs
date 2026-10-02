@@ -417,6 +417,7 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
         TcpInfoFlags::DEFAULT,
         Escaper::UNIX,
         0,
+        lsof_core::render::FileFlags::Hex,
     );
     assert!(f.contains("o0t123456789\n"), "{f:?}");
     let t = table::render(
@@ -1517,6 +1518,99 @@ fn the_raw_device_field_is_only_asked_for_and_only_on_devices() {
     assert!(
         bare.contains("\nD0x6\n"),
         "the rest of the default set: {bare:?}"
+    );
+}
+
+/// `+f g`, `+f G` and `-F G` (DIVERGENCES 46), against the C's own bytes: four
+/// fds of the flags fixture of 2026-09-28, printed by the C with
+/// `lsof -n -P +fg -a -d 3,8,13,14 -p P` (paths shortened; NAME is the last
+/// column and unpadded, so that changes nothing else). FILE-FLAG follows TYPE,
+/// right-aligned and at least as wide as its title; the C's table order
+/// decides which name a shared bit gets.
+#[test]
+fn the_file_flags_column_is_the_cs() {
+    use lsof_core::render::FileFlags;
+    use lsof_core::{AccessMode, FdType, FileType};
+    let reg = |fd: u64, access, flags: u32, node: &str, name: &str| {
+        let mut f = row(
+            FdType::Handle(fd),
+            access,
+            None,
+            FileType::Regular,
+            "254,0",
+            Some(0),
+            None,
+            node,
+            name,
+        );
+        f.file_flags = Some(flags);
+        f
+    };
+    let mut p = python3(vec![
+        reg(3, AccessMode::Write, 0o2102001, "1917894", "/w/f"),
+        reg(8, AccessMode::ReadWrite, 0o12000000, "1917894", "/w/f"),
+        reg(13, AccessMode::ReadWrite, 0o2100003, "1917894", "/w/f"),
+        reg(
+            14,
+            AccessMode::ReadWrite,
+            0o22300002,
+            "1917895",
+            "/w/#1917895 (deleted)",
+        ),
+    ]);
+    p.pid = 9850;
+    let table_with = |file_flags| {
+        table::render(
+            std::slice::from_ref(&p),
+            TableOpts {
+                file_flags,
+                ..TableOpts::new(Escaper::UNIX)
+            },
+        )
+    };
+    assert_eq!(
+        table_with(FileFlags::Names),
+        concat!(
+            "COMMAND  PID USER FD   TYPE         FILE-FLAG DEVICE SIZE/OFF    NODE NAME\n",
+            "python3 9850 root  3w   REG        W,AP,LG,CX  254,0        0 1917894 /w/f\n",
+            "python3 9850 root  8u   REG           CX,PATH  254,0        0 1917894 /w/f\n",
+            "python3 9850 root 13u   REG        W,RW,LG,CX  254,0        0 1917894 /w/f\n",
+            "python3 9850 root 14u   REG RW,DTY,LG,CX,TMPF  254,0        0 1917895 /w/#1917895 (deleted)\n",
+        )
+    );
+    assert_eq!(
+        table_with(FileFlags::Hex),
+        concat!(
+            "COMMAND  PID USER FD   TYPE    FILE-FLAG DEVICE SIZE/OFF    NODE NAME\n",
+            "python3 9850 root  3w   REG  0x88401;0x0  254,0        0 1917894 /w/f\n",
+            "python3 9850 root  8u   REG 0x280000;0x0  254,0        0 1917894 /w/f\n",
+            "python3 9850 root 13u   REG  0x88003;0x0  254,0        0 1917894 /w/f\n",
+            "python3 9850 root 14u   REG 0x498002;0x0  254,0        0 1917895 /w/#1917895 (deleted)\n",
+        )
+    );
+    assert!(
+        !table_with(FileFlags::Off).contains("FILE-FLAG"),
+        "no column unless asked for"
+    );
+    // `-F faG +fg`: the same names in the `G` field.
+    let fields_with = |file_flags| {
+        fields::render_with_offset_digits(
+            std::slice::from_ref(&p),
+            false,
+            Some(&['f', 'a', 'G']),
+            TcpInfoFlags::DEFAULT,
+            Escaper::UNIX,
+            lsof_core::render::DEFAULT_OFFSET_DIGITS,
+            file_flags,
+        )
+    };
+    assert_eq!(
+        fields_with(FileFlags::Names),
+        "p9850\nf3\naw\nGW,AP,LG,CX\nf8\nau\nGCX,PATH\nf13\nau\nGW,RW,LG,CX\nf14\nau\nGRW,DTY,LG,CX,TMPF\n"
+    );
+    assert!(
+        !fields_with(FileFlags::Off).contains("\nG"),
+        "`-F -fG`: no G field"
     );
 }
 

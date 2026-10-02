@@ -140,6 +140,8 @@ OUTPUT:\n\
     +L [count]    an NLINK (link count) column; with a count, also select the\n\
                   files with fewer links (`+L 1` = unlinked but still open).\n\
                   -L: no NLINK column (the default)\n\
+    +f g / +f G   (Linux) a FILE-FLAG column: each file's open flags by name\n\
+                  (W,AP,LG), or in hex; -f g hides it again\n\
     -V            verbose: report inaccessible / unmatched search items\n\
     -F [fields]   field (machine-readable) output; 0 = NUL terminators;\n\
                   -F ? lists the field letters\n\
@@ -852,6 +854,7 @@ fn main() {
                     show_size: columns.size,
                     offset_digits: columns.offset_digits,
                     show_links: columns.nlink,
+                    file_flags: columns.file_flags,
                     human_size: selection.human_size,
                     command_width: selection.command_width.cap(),
                     tcp_show: selection.tcp_info(),
@@ -866,6 +869,7 @@ fn main() {
                     selection.tcp_info(),
                     esc,
                     columns.offset_digits,
+                    columns.file_flags,
                 )
                 .as_bytes(),
             ),

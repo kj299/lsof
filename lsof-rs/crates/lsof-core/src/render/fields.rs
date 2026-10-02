@@ -38,6 +38,7 @@
 //! `\0` under `-F0`) cannot appear inside a value.
 
 use crate::model::{AccessMode, FdType, FileType, Process};
+use crate::render::fflags::{self, FileFlags};
 use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::TcpInfoFlags;
 
@@ -286,12 +287,22 @@ pub fn render(
     tcp_show: TcpInfoFlags,
     esc: Escaper,
 ) -> String {
-    render_with_offset_digits(procs, nul, only, tcp_show, esc, DEFAULT_OFFSET_DIGITS)
+    render_with_offset_digits(
+        procs,
+        nul,
+        only,
+        tcp_show,
+        esc,
+        DEFAULT_OFFSET_DIGITS,
+        FileFlags::Hex,
+    )
 }
 
 /// [`render`] with `-o <digits>`'s limit, which the `o` field obeys exactly as
 /// the table does: `0t<dec>` up to that many digits, `0x<hex>` past it
-/// (`print.c` applies `OffDecDig` in both printers).
+/// (`print.c` applies `OffDecDig` in both printers), and with how the `G`
+/// field shows the flags. [`render`] shows them in hex, which is what `-F`
+/// asks for; a `+f g` after it asks for names, and a `-f g` for nothing.
 pub fn render_with_offset_digits(
     procs: &[Process],
     nul: bool,
@@ -299,6 +310,7 @@ pub fn render_with_offset_digits(
     tcp_show: TcpInfoFlags,
     esc: Escaper,
     offset_digits: usize,
+    file_flags: FileFlags,
 ) -> String {
     let term = if nul { '\0' } else { '\n' };
     // No list is the C's default set, which is every letter but a few; a
@@ -393,10 +405,11 @@ pub fn render_with_offset_digits(
                 push!('t', &f.file_type.code());
             }
             if want('G') {
-                if let Some(g) = f.file_flags {
-                    // `0x<file flags>;0x<per-open flags>`. The second is the C's
-                    // `pof`, which its Linux dialect never sets.
-                    push!('G', &format!("0x{g:x};0x0"));
+                // In hex, `0x<file flags>;0x<per-open flags>` (the second is the
+                // C's `pof`, which its Linux dialect never sets), or by name
+                // after a `+f g` (DIVERGENCES 46).
+                if let Some(g) = f.file_flags.filter(|&g| fflags::shown(g, file_flags)) {
+                    push!('G', &fflags::text(g, file_flags));
                 }
             }
             // `d` is the file's device CHARACTER code, `D` its device NUMBER

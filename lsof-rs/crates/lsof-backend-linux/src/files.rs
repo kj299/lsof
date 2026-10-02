@@ -74,6 +74,11 @@ fn fdinfo_for(base: &str, fd: &str) -> FdInfo {
     }
 }
 
+/// `O_PATH`, as the kernel's `asm-generic/fcntl.h` defines it for x86_64 and
+/// aarch64 alike: an fd that names a file without opening it for either read
+/// or write.
+const O_PATH: u32 = 0o10000000;
+
 /// The C caps the fds it lists for an eventpoll at 32 and writes `...]` when
 /// there were more (`EPOLL_MAX_TFDS`, `lib/dialects/linux/dproc.c:95`).
 const EPOLL_MAX_TFDS: usize = 32;
@@ -93,7 +98,7 @@ pub struct FdInfo {
     /// `Pid:` on a pidfd — the process it refers to.
     pub pidfd_pid: Option<i64>,
     /// The raw `flags:` value, octal in the file. lsof's `-F G` prints it in
-    /// hex; the access mode above is its low two bits.
+    /// hex; the access mode above is derived from it.
     pub flags: Option<u32>,
     /// `tfd:` lines — the fds an eventpoll watches, ascending, capped.
     pub tfds: Vec<i64>,
@@ -108,6 +113,27 @@ impl FdInfo {
     }
 }
 
+/// The access letter the C prints for an fd with these open flags.
+///
+/// The C reads it off the fd link's own mode, not the flags (`dnode.c`:
+/// `l->st_mode & (S_IRUSR | S_IWUSR)`), and the kernel sets that mode from
+/// the open file's `f_mode`: read for `O_RDONLY`, write for `O_WRONLY`, both
+/// for `O_RDWR`, and neither for access mode 3 or an `O_PATH` fd. The C prints
+/// neither the way it prints both, as `u`, its catch-all (DIVERGENCES 44).
+/// lsof-rs had printed an `O_PATH` fd as `r`, and access mode 3 as nothing.
+/// The same answer comes from the flags this line already carries, with no
+/// second syscall per fd.
+fn access_from_flags(flags: u32) -> AccessMode {
+    if flags & O_PATH != 0 {
+        return AccessMode::ReadWrite;
+    }
+    match flags & 0o3 {
+        0 => AccessMode::Read,
+        1 => AccessMode::Write,
+        _ => AccessMode::ReadWrite,
+    }
+}
+
 /// The parsing half of [`fdinfo_for`], over the file's text. Pure, so the fuzz
 /// target can drive it with arbitrary bytes; must never panic.
 pub fn parse_fdinfo(info: &str) -> FdInfo {
@@ -116,12 +142,7 @@ pub fn parse_fdinfo(info: &str) -> FdInfo {
         if let Some(v) = line.strip_prefix("flags:") {
             if let Ok(flags) = u32::from_str_radix(v.trim(), 8) {
                 out.flags = Some(flags);
-                out.access = Some(match flags & 0o3 {
-                    0 => AccessMode::Read,
-                    1 => AccessMode::Write,
-                    2 => AccessMode::ReadWrite,
-                    _ => AccessMode::Unknown,
-                });
+                out.access = Some(access_from_flags(flags));
             }
         } else if let Some(v) = line.strip_prefix("pos:") {
             out.pos = v.trim().parse::<u64>().ok();
@@ -994,6 +1015,18 @@ mod tests {
         );
         assert_eq!(ap("flags:\t02\n"), (AccessMode::ReadWrite, None));
         assert_eq!(ap("pos:\t12\n"), (AccessMode::Unknown, Some(12)));
+        // The link's mode, which the C reads, grants neither read nor write to
+        // an O_PATH fd or to access mode 3, and the C prints neither as `u`
+        // (DIVERGENCES 44): measured on 012000000, 012200000 and 02100003.
+        assert_eq!(ap("flags:\t012000000\n").0, AccessMode::ReadWrite, "O_PATH");
+        assert_eq!(
+            ap("flags:\t012200000\n").0,
+            AccessMode::ReadWrite,
+            "O_PATH dir"
+        );
+        assert_eq!(ap("flags:\t02100003\n").0, AccessMode::ReadWrite, "mode 3");
+        assert_eq!(ap("flags:\t02100000\n").0, AccessMode::Read);
+        assert_eq!(ap("flags:\t02100001\n").0, AccessMode::Write);
         // Non-octal flags, a negative or absurd pos, junk lines, no newline at
         // all: each degrades to Unknown/None, none may panic.
         assert_eq!(ap("flags:\t9z\n"), (AccessMode::Unknown, None));
