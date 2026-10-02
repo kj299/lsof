@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #072 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
 # Those local lessons: this kit's first sweep, the resolver, pinned-lessons,
 # lesson-refs and forbid rows, the drivers behind the one-copy rule (#066), and
-# the stale verdict that a second run must repeat (#072).
+# the stale verdict that a second run must repeat (#073).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
 suite goes red. The standing "failure the kit still would not prevent" since
 retro #1 (RETROSPECTIVE-kit-v1.md §5 item 2), sharpened by LESSONS #033/#037: the
@@ -38,7 +38,7 @@ does not catch is UNPINNED — it must get a fixture, or a line in LEDGER saying
 why it stays. The ledger only shrinks.
 
 A ledger line is STALE when its decision no longer survives, and that verdict is
-confirmed before it is given (LESSONS #072). The sweep runs a self-test per CPU at
+confirmed before it is given (LESSONS #073). The sweep runs a self-test per CPU at
 once, and a self-test can fail, or overrun a budget measured with nothing beside
 it, for reasons that are the runner's: stale lines read off such runs named a
 different decision on each of two failing runs of one tree. So a ledgered decision
@@ -281,7 +281,7 @@ MUTATIONS = [
     # `#![forbid(unsafe_code)]` on `core`, the table's first row (LESSONS #064).
     {"gate": "control-coverage-unreadable",
      "file": "harnesses/control-coverage/check_controls.py",
-     "old": "                if name and name not in unreadable:",
+     "old": "                if name not in unreadable:",
      "new": "                if False:",
      "why": "a gate-table row naming no harness vanishes from the report without a word",
      "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
@@ -747,7 +747,7 @@ def sweep_decisions(kit_root, files, table, tmp, durations, workers=None,
     with ThreadPoolExecutor(max_workers=min(workers or os.cpu_count() or 1,
                                             len(jobs))) as ex:
         pooled = list(ex.map(one, jobs))
-    # A stale verdict must be one a second run repeats (LESSONS #072).
+    # A stale verdict must be one a second run repeats (LESSONS #073).
     results = []
     for job, (key, outcome, said) in zip(jobs, pooled):
         if outcome in ("caught", "hang") and _key(key) in confirm:
@@ -1328,7 +1328,7 @@ def _self_test():
         check("a hang's grandchild is killed with it: the sweep does not wait it out",
               got.get(("x > 5", "True")) == "hang" and time.monotonic() - t0 < 30)
 
-        # LESSONS #072: a kill the second run does not repeat is not a stale line.
+        # LESSONS #073: a kill the second run does not repeat is not a stale line.
         flaky = {"gate": "toy-flaky", "file": "harnesses/toy/flaky.py",
                  "cmd": ["harnesses/toy/flaky.py"], "why": "toy flaky",
                  "old": "    return True", "new": "    return False"}

@@ -12,7 +12,7 @@
 
 use lsof_core::model::tcp_state_table;
 use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
-use lsof_core::render::{Format, DEFAULT_OFFSET_DIGITS};
+use lsof_core::render::{FileFlags, Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
     CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol,
@@ -57,6 +57,9 @@ pub struct Columns {
     /// `+L`: an NLINK column after SIZE/OFF. `-L` turns it off again — the
     /// C's `Fnlink`, which the prefix sets and nothing else does.
     pub nlink: bool,
+    /// `+f g` / `+f G`: the open file's flags, by name or in hex, in a
+    /// FILE-FLAG column and in `-F`'s `G` field (DIVERGENCES 46).
+    pub file_flags: FileFlags,
 }
 
 impl Default for Columns {
@@ -68,6 +71,7 @@ impl Default for Columns {
             size: false,
             offset_digits: DEFAULT_OFFSET_DIGITS,
             nlink: false,
+            file_flags: FileFlags::Off,
         }
     }
 }
@@ -141,6 +145,12 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     let mut fields_offset = false;
     let mut fields = FieldChoice::default();
     let mut field_help = false;
+    // The C's `Fsv & FSV_FG` and `FsvFlagX`, which `-F` and the letters of
+    // `-f`/`+f` set in argument order: whether the flags are shown, and
+    // whether in hex. Folded into `columns.file_flags` once every option is
+    // read.
+    let mut flags_shown = false;
+    let mut flags_hex = false;
     // `-c`'s comparison. The C's case-sensitive prefix everywhere it has an
     // oracle; the Windows port keeps the forgiving match its image names were
     // designed around (see `CommandMatch`).
@@ -450,26 +460,40 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     // `-f` alone forces every path argument to be a plain
                     // file; `+f` forces it to be a file system, and widens
                     // what counts as one to any mount source, not just a block
-                    // device. The C also spells kernel-file-structure
-                    // selection `-f[cfgGn]`, which lsof-rs does not implement
-                    // and which is not what a bare `-f` means; a value here is
-                    // a request for that, so it is rejected rather than
-                    // silently read as the path-argument switch. The value may
-                    // be the next word, and a word that opens an option is not
-                    // one (`main.c`) — so `lsof -f /dev/null` is refused, as
-                    // the C refuses it (`unknown file struct option: /`), and
-                    // the path goes after `--`.
-                    if let Some(value) = optional_value(&chars, j, &args, &mut i) {
-                        return Err(match value.chars().find(|c| !matches!(c, 'g' | 'G')) {
-                            Some(other) => format!("unknown file struct option: {other}"),
-                            None => format!("unsupported kernel file structure selection: {value}"),
-                        });
+                    // device. With letters it is the C's kernel file-structure
+                    // option instead, and leaves the path arguments alone. The
+                    // letters may be the next word, and a word that opens an
+                    // option is not one (`main.c`), so `lsof -f /dev/null` is
+                    // refused, as the C refuses it (`unknown file struct
+                    // option: /`), and the path goes after `--`.
+                    match optional_value(&chars, j, &args, &mut i) {
+                        None => {
+                            sel.filesystem_args = if plus {
+                                FilesystemArgs::AlwaysFilesystem
+                            } else {
+                                FilesystemArgs::NeverFilesystem
+                            }
+                        }
+                        // Of the file-structure values Linux has only the
+                        // flags: `+` shows them and `-` hides them, and the
+                        // last of `g` (by name) and `G` (in hex) says how
+                        // (`main.c`: `FsvFlagX = (*GOv == 'G')`, DIVERGENCES
+                        // 46). Any other letter is the C's error, and so are
+                        // these where no flags are recorded.
+                        Some(letters) => {
+                            for c in letters.chars() {
+                                match c {
+                                    'g' | 'G' if HAS_FILE_FLAGS => {
+                                        flags_shown = plus;
+                                        flags_hex = c == 'G';
+                                    }
+                                    other => {
+                                        return Err(format!("unknown file struct option: {other}"))
+                                    }
+                                }
+                            }
+                        }
                     }
-                    sel.filesystem_args = if plus {
-                        FilesystemArgs::AlwaysFilesystem
-                    } else {
-                        FilesystemArgs::NeverFilesystem
-                    };
                     j = chars.len();
                     continue;
                 }
@@ -537,6 +561,14 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     };
                     let letters = value.as_deref().unwrap_or("");
                     fields.nul |= letters.contains('0');
+                    // `-F` shows the flags, in hex, when it selects `G`: the
+                    // default set does, and so does the letter (`main.c`:
+                    // `Ffield = FsvFlagX = 1`, and `G`'s `FieldSel` entry sets
+                    // `FSV_FG`). A `+f g` after it asks for names instead.
+                    if this_defaults || letters.contains('G') {
+                        flags_shown = true;
+                        flags_hex = true;
+                    }
                     if this_defaults {
                         fields.defaults = true;
                     } else {
@@ -658,6 +690,11 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     if !states.include.is_empty() || !states.exclude.is_empty() {
         sel.state_filter = Some(states);
     }
+    columns.file_flags = match (flags_shown, flags_hex) {
+        (false, _) => FileFlags::Off,
+        (true, false) => FileFlags::Names,
+        (true, true) => FileFlags::Hex,
+    };
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
@@ -894,6 +931,17 @@ const MAX_COMMAND_WIDTH: Option<usize> = None;
 const HAS_TCP_WINDOW: bool = false;
 #[cfg(not(target_os = "linux"))]
 const HAS_TCP_WINDOW: bool = true;
+
+/// Whether this platform records an open file's flags, which is what decides
+/// whether `g` and `G` are letters of `-f`/`+f`.
+///
+/// Linux reads them from `fdinfo`. Windows has none to read, and a dialect of
+/// the C without them compiles the letters out (`HASNOFSFLAGS`), so `+f g`
+/// there is refused rather than answered with a column that is always blank.
+#[cfg(target_os = "linux")]
+const HAS_FILE_FLAGS: bool = true;
+#[cfg(not(target_os = "linux"))]
+const HAS_FILE_FLAGS: bool = false;
 
 /// The word an option's optional value would be, as the C's `GetOpt` offers
 /// it to every option whose rule letter carries a `:` — the rest of this
@@ -2104,11 +2152,82 @@ mod tests {
             columns(&["+f", "/dev/null"]).unwrap_err(),
             "unknown file struct option: /"
         );
-        assert!(columns(&["-f", "g"]).unwrap_err().contains("unsupported"));
+        // `g` is the C's file-flags letter (DIVERGENCES 46): `-f g` hides the
+        // flags, which is the default, and leaves the path arguments alone.
+        // Where no flags are recorded it is a letter the platform lacks. The
+        // platform is named, not `HAS_FILE_FLAGS`, so a wrong constant fails.
+        if cfg!(target_os = "linux") {
+            let (cols, sel) = columns(&["-f", "g"]).unwrap();
+            assert_eq!(cols.file_flags, FileFlags::Off);
+            assert_eq!(sel.filesystem_args, FilesystemArgs::default());
+        } else {
+            assert_eq!(
+                columns(&["-f", "g"]).unwrap_err(),
+                "unknown file struct option: g"
+            );
+        }
         let (_, sel) = columns(&["-f", "--", "/dev/null"]).unwrap();
         assert_eq!(sel.filesystem_args, FilesystemArgs::NeverFilesystem);
         assert_eq!(sel.paths, vec!["/dev/null"]);
         let (_, sel) = columns(&["+f", "--", "/dev/null"]).unwrap();
+        assert_eq!(sel.filesystem_args, FilesystemArgs::AlwaysFilesystem);
+    }
+
+    /// `-f`/`+f` with `g` or `G`, and `-F`, in argument order, as the C reads
+    /// them (DIVERGENCES 46): `+` shows the flags and `-` hides them, the last
+    /// of `g` and `G` chooses names or hex, and `-F` shows them in hex when it
+    /// selects `G`. Every pair measured.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_file_flags_are_shown_as_the_last_option_says() {
+        let flags = |argv: &[&str]| columns(argv).unwrap().0.file_flags;
+        assert_eq!(flags(&[]), FileFlags::Off);
+        assert_eq!(flags(&["+fg"]), FileFlags::Names);
+        assert_eq!(flags(&["+f", "g"]), FileFlags::Names, "the next word");
+        assert_eq!(flags(&["+fG"]), FileFlags::Hex);
+        assert_eq!(flags(&["+fgG"]), FileFlags::Hex, "the last letter decides");
+        assert_eq!(flags(&["+fGg"]), FileFlags::Names);
+        assert_eq!(flags(&["+fg", "-fg"]), FileFlags::Off);
+        assert_eq!(flags(&["-fG", "+fg"]), FileFlags::Names);
+        assert_eq!(flags(&["-F"]), FileFlags::Hex);
+        assert_eq!(flags(&["-FG"]), FileFlags::Hex);
+        assert_eq!(flags(&["-Fn"]), FileFlags::Off, "no G, no flags");
+        assert_eq!(flags(&["-F", "+fg"]), FileFlags::Names);
+        assert_eq!(flags(&["+fg", "-F"]), FileFlags::Hex);
+        assert_eq!(flags(&["-F", "-fG"]), FileFlags::Off);
+        assert_eq!(flags(&["-F", "+fG"]), FileFlags::Hex);
+        // A bare `-f`/`+f` is the path-argument switch and leaves the flags be.
+        let (cols, sel) = columns(&["+fg", "-f"]).unwrap();
+        assert_eq!(cols.file_flags, FileFlags::Names);
+        assert_eq!(sel.filesystem_args, FilesystemArgs::NeverFilesystem);
+        let (_, sel) = columns(&["+fg"]).unwrap();
+        assert_eq!(sel.filesystem_args, FilesystemArgs::default());
+        // Linux compiles the other file-structure letters out.
+        for (argv, want) in [
+            (&["+fgx"][..], "unknown file struct option: x"),
+            (&["+fc"][..], "unknown file struct option: c"),
+            (&["-fn"][..], "unknown file struct option: n"),
+        ] {
+            assert_eq!(columns(argv).unwrap_err(), want, "{argv:?}");
+        }
+    }
+
+    /// Where the backend records no flags (Windows), `g` and `G` are refused
+    /// under either prefix, as a C dialect without them refuses them: asking
+    /// for the flags is an error, not a FILE-FLAG column of blanks. A bare
+    /// `-f`/`+f` is still the path-argument switch.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_file_flags_letters_are_refused_where_none_are_recorded() {
+        for (argv, want) in [
+            (&["+fg"][..], "unknown file struct option: g"),
+            (&["+f", "G"][..], "unknown file struct option: G"),
+            (&["-fg"][..], "unknown file struct option: g"),
+        ] {
+            assert_eq!(columns(argv).unwrap_err(), want, "{argv:?}");
+        }
+        let (cols, sel) = columns(&["+f", "--", "x"]).unwrap();
+        assert_eq!(cols.file_flags, FileFlags::Off);
         assert_eq!(sel.filesystem_args, FilesystemArgs::AlwaysFilesystem);
     }
 }

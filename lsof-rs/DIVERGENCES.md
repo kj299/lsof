@@ -81,6 +81,95 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by reading the access letter as the kernel sets it, and naming the file flags (2026-09-28)
+
+Items 44 and 46, both measured against the C.
+
+**An `O_PATH` fd is `u`** (item 44). The C takes the access letter from the
+fd link's own mode (`dnode.c`: `l->st_mode & (S_IRUSR | S_IWUSR)`), and the
+kernel sets that mode from the open file's `f_mode`: read for `O_RDONLY`,
+write for `O_WRONLY`, both for `O_RDWR`, and neither for an `O_PATH` fd or
+for access mode 3. The C prints neither the way it prints both, as `u`, its
+catch-all. lsof-rs read the letter off `fdinfo`'s access mode, which is 0 for
+`O_PATH` as for `O_RDONLY`, so it printed `r`, and it printed nothing at all
+for access mode 3. It now derives the letter from the same flags the way the
+kernel does, with no second system call per fd. Measured on an `O_PATH` file,
+an `O_PATH` directory, an `O_PATH` `/dev/null` and an fd opened with access
+mode 3; every other fd on the host already agreed, since for them the link's
+mode mirrors the open mode.
+
+**`+f g` and `+f G` show the file flags** (item 46). The C's `-f` and `+f`
+take the file-structure letters as their value, and Linux compiles in only
+`g` and `G`, the flags (`HASNOFSADDR`, `HASNOFSCOUNT`, `HASNOFSNADDR`). `+`
+shows them and `-` hides them (`Fsv & FSV_FG`), and the last of `g` and `G`
+chooses names or hex (`FsvFlagX`). `-F` shows them in hex when it selects `G`,
+as its default set does, so order matters: `-F +f g` names them in the `G`
+field, `+f g -F` prints them in hex, and `-F -f G` drops the field. The
+letters may be the next word, and with them `-f` leaves the path arguments
+alone. lsof-rs refused every value of `-f` and `+f` (`unsupported kernel file
+structure selection: g`).
+
+The FILE-FLAG column comes after TYPE, right-aligned and never narrower than
+its title. The names are `Pff_tab[]`'s (`dstore.c`), taken in its order, each
+clearing its bits; a bit no entry names follows in hex. In hex the C appends
+`;0x0`, the process's own open-file flags, which Linux does not have. A file
+with no flags prints nothing by name, not even a `G` field, and `0x0;0x0` in
+hex. The order decides two names: `O_SYNC` contains `O_DSYNC`'s bit and comes
+first, so the C prints an `O_DSYNC` fd as `SYN` and never prints `DSYN` or
+`RSYN`. `LG` is 0100000 whatever the build, since glibc defines `O_LARGEFILE`
+as 0 for a 64-bit program and `dstore.c` then falls back to that number.
+lsof-rs keeps the table, its order and the fallback. Across this host's 1306
+rows, both binaries print the same FILE-FLAG cell on every row, by name and
+in hex. The only rows that differ are item 22's `AF_VSOCK` names and the
+processes each run starts itself.
+
+Windows records no flags. There `g` and `G` are refused (`unknown file struct
+option: g`), as a C dialect without them refuses them, rather than answered
+with a column that is always blank. This is the rule `-T w` already follows on
+Linux. A bare `-f` or `+f` is the path switch on both.
+
+### What the gate gained
+
+Fixture **Q** holds an fd for each flag the fixture can set (append,
+non-blocking, `O_DSYNC`, `O_SYNC`, no-atime, no-follow, a directory), an
+`O_PATH` file, directory and `/dev/null`, an fd with access mode 3, a pipe
+made with no flags at all, and an `O_TMPFILE` file where the file system
+allows one. Ten cases were added, 245 in all, 0 unexplained. Two are on the
+access letter, in the table and the `a` field. Eight are on the flags: by
+name; in hex; as the next word; the last letter deciding; `-F` then `+f g`;
+`+f g` then `-F`; `-F` then `-f G`; and an unknown letter, which is fatal. A
+golden pins the column against the C's own bytes, both headers and the `G`
+field by name, and Windows shares it. A unit test pins every flags value the
+fixture produced, by name and in hex. The parser tests pin each ordering
+above, and on Windows the refusal, which the smoke suite also runs.
+
+Twelve mutants were run, and each was killed. Eleven were killed by the
+differential and by a unit test:
+- `O_PATH` read as `r`;
+- access mode 3 unknown;
+- the names printed in hex;
+- the table read backwards;
+- no `;0x0`;
+- `-f g` showing the flags;
+- `G` ignored;
+- `-F` not choosing hex;
+- `-F` not showing the flags;
+- no column;
+- the letters refused on Linux.
+
+The twelfth, flags of 0 shown by name, at first fell to a unit test alone. An
+empty cell is blank either way, and only the `G` field shows the difference,
+as a field with nothing in it. The fixture then gained its flagless pipe, and
+the differential kills it too.
+
+### What is not measured
+
+aarch64, where the kernel numbers three of the named flags differently
+(`O_DIRECT`, `O_DIRECTORY` and `O_NOFOLLOW`), and `LG`'s fixed 0100000 is then
+`O_NOFOLLOW`'s bit, which `NFLK`, earlier in the table, takes. `fflags.rs`
+takes those numbers from the kernel's `arch/arm64` header; no oracle has
+compared them.
+
 ## Fixed by making `-X` a toggle and printing `-F r` (2026-09-26)
 
 Items 45 and 47, both measured against the C.
@@ -1965,9 +2054,9 @@ likely right; it is a compatibility decision, not a backend phase.
 | 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | ~~`-L` **shows** the column, and a bare `+L` is refused~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. Windows changed with it: its smoke case now asserts the C's reading. |
 | 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). ~~A socket's inode reports 1~~ A socket never has a count: `process_proc_node()` hands it to `process_proc_sock()` first | ~~a row whose count lsof-rs never read passes the filter~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. The reason this row first gave was wrong, and `+L2` shows it: no socket is selected there either. |
 | 43 | `-F` takes its field list as the **next word** too: `lsof -F pL -p P` prints `p` and `L` | ~~reads `pL` as a file name~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above: `-L`, `-f`, `-r` and `-x` had the same gap, `-F` refused no letter, and a `+` word was never a cluster. |
-| 44 | an `O_PATH` fd's access letter is `u`: `dnode.c` takes it from the fd link's own mode (`l->st_mode & (S_IRUSR \| S_IWUSR)`), which is 0 for `O_PATH`, and reads neither-bit as read/write | `r`, from fdinfo's flags (`O_RDONLY` is 0 too) | **OPEN — found 2026-09-26** comparing `+L` tables across the host: this session's harness holds an `O_PATH \| O_DIRECTORY` fd. Every other fd agreed, since a link's mode mirrors its open mode. |
+| 44 | an `O_PATH` fd's access letter is `u`: `dnode.c` takes it from the fd link's own mode (`l->st_mode & (S_IRUSR \| S_IWUSR)`), which is 0 for `O_PATH`, and reads neither-bit as read/write | ~~`r`, from fdinfo's flags (`O_RDONLY` is 0 too)~~ **resolved 2026-09-28** | found 2026-09-26 comparing `+L` tables across the host: this session's harness holds an `O_PATH \| O_DIRECTORY` fd. See "Fixed by reading the access letter as the kernel sets it, and naming the file flags" above: access mode 3 is `u` too, where lsof-rs printed no letter. |
 | 45 | `-X` **toggles** (`Fxopt = Fxopt ? 0 : 1`), so `-X -X` is off: `lsof -X -X -i` lists the Internet files | ~~sets it: `-X -X -i` is refused~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. |
-| 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g` | **OPEN — recorded 2026-09-26.** lsof-rs has refused it since `-f`/`+f` were implemented, without a row here. It prints `G` in `-F` already. |
+| 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | ~~refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g`~~ **resolved 2026-09-28** | see "Fixed by reading the access letter as the kernel sets it, and naming the file flags" above. Windows records no flags and refuses `g` and `G`, as a C dialect without them does. |
 | 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | ~~accepts the letter and prints nothing~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. Windows has no such number and prints none. |
 | 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | types every live mapping `REG`, with the filesystem's device | **OPEN — found 2026-09-26** by reading `maps.rs` while adding `r`. Not measured: no device on this host can be mapped. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |

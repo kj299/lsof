@@ -106,6 +106,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   host. `+w` after `-t` restores the rows.
 
 ### Added
+- **`+f g` and `+f G`: the FILE-FLAG column** (DIVERGENCES 46). Each open
+  file's flags, as `fdinfo` reports them, named as the C names them
+  (`W,AP,LG,CX`) or in hex (`0x88401;0x0`), in a column after TYPE; `-f g`
+  hides it again, and the last of `g` and `G` decides. A bare `-F` prints the
+  `G` field in hex as before, and a `+f g` after it names the flags there too.
+  lsof-rs refused both spellings. The letters may be the next word (`+f g`),
+  and a bare `-f`/`+f` is still the path-argument switch. Windows records no
+  flags and refuses `g` and `G`, as a C dialect without them does.
 - **`-i` and `-U` now collect only sockets** (P5 of `docs/linux-l2-plan.md`).
   When the selection can print nothing but sockets — `-i`/`-U` with no process
   selecter, no `-d`, no path argument, no `+L`, no `-N`, no `-K` and no
@@ -137,6 +145,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **An `O_PATH` fd, and one opened with access mode 3, is `u`** in FD and in
+  the `a` field (DIVERGENCES 44). The C reads the letter off the fd link's
+  own mode, which grants neither read nor write to either, and prints that as
+  `u`. lsof-rs read `fdinfo`'s access mode instead, so an `O_PATH` fd was `r`,
+  since `O_RDONLY` is 0 too, and access mode 3 printed no letter at all.
 - **`-F r` prints the raw device number** of a character or block device, in
   hex after `D` (`r0x103` for `/dev/null`), as the C does (DIVERGENCES 47).
   lsof-rs accepted the letter and printed nothing. A bare `-F` still leaves it

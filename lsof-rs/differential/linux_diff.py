@@ -614,6 +614,49 @@ def device_holder(work: str) -> Fixture:
     return Fixture("V(devices)", [sys.executable, "-c", py], cwd=vdir, expect_fds=6)
 
 
+def flags_holder(work: str) -> Fixture:
+    """An fd for each open flag the C names, and the two access modes that grant
+    neither read nor write.
+
+    `+f g` names an fd's flags from `Pff_tab[]` and `+f G` prints them in hex
+    (DIVERGENCES 46), so the fixture holds append, non-blocking, `O_DSYNC`
+    (which the C calls `SYN`, since `O_SYNC` contains its bit and comes first),
+    `O_SYNC`, no-atime, no-follow, a directory and an `O_TMPFILE`, and a pipe
+    made with no flags at all, which the C shows by name as nothing. The access
+    letter is the fd link's own mode to the C (DIVERGENCES 44), which grants
+    neither read nor write to an `O_PATH` fd or to access mode 3; the C prints
+    both as `u`. `O_TMPFILE` needs a file system that has it, and is left out
+    where the work directory does not."""
+    qdir = os.path.join(work, "flags")
+    os.makedirs(qdir)
+    py = (
+        "import os,time\n"
+        "d=%r\n"
+        "f=os.path.join(d,'f'); open(f,'w').close()\n"
+        "keep=[os.open(f,os.O_WRONLY|os.O_APPEND),\n"
+        "      os.open(f,os.O_RDWR|os.O_NONBLOCK),\n"
+        "      os.open(f,os.O_WRONLY|os.O_DSYNC),\n"
+        "      os.open(f,os.O_WRONLY|os.O_SYNC),\n"
+        "      os.open(f,os.O_RDONLY|os.O_NOATIME),\n"
+        "      os.open(f,os.O_RDONLY|os.O_NOFOLLOW),\n"
+        "      os.open(f,os.O_PATH),\n"
+        "      os.open(d,os.O_PATH|os.O_DIRECTORY),\n"
+        "      os.open(d,os.O_RDONLY|os.O_DIRECTORY),\n"
+        "      os.open(f,3),\n"
+        "      os.open('/dev/null',os.O_PATH)]\n"
+        "keep+=list(os.pipe2(0))\n"
+        "try:\n"
+        "    keep.append(os.open(d,os.O_TMPFILE|os.O_RDWR))\n"
+        "except OSError:\n"
+        "    pass\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (qdir,)
+    )
+    # 0,1,2 + the eleven above and the pipe's two ends; the O_TMPFILE fd only
+    # where it opens.
+    return Fixture("Q(flags)", [sys.executable, "-c", py], cwd=qdir, expect_fds=16)
+
+
 def unprivileged_prefix() -> list | None:
     """The argv prefix that runs a command as a user who cannot read fixture U.
 
@@ -897,7 +940,8 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     st = state_holder(work)
     nl = unlinked_holder(work)
     v = device_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v
+    q = flags_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q
 
 
 # -------------------------------------------------------------------- matrix
@@ -1019,6 +1063,7 @@ def run(args) -> int:
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
         offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
+        flagfds,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -1068,7 +1113,7 @@ def run(args) -> int:
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
-                unreadable, states, unlinked, devices,
+                unreadable, states, unlinked, devices, flagfds,
             )
             if f is not None
         ]:
@@ -1139,6 +1184,7 @@ def run(args) -> int:
                 "S": str(states.pid),
                 "N": str(unlinked.pid),
                 "V": str(devices.pid),
+                "Q": str(flagfds.pid),
                 # Who the fixtures run as, for `-u` -- by number and by name.
                 "UID": str(os.getuid()),
                 "USER": pwd.getpwuid(os.getuid()).pw_name,
