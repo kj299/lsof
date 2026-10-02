@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #072 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
 # Those local lessons: this kit's first sweep, the resolver, pinned-lessons,
-# lesson-refs and forbid rows, and the drivers behind the one-copy rule (#066).
+# lesson-refs and forbid rows, the drivers behind the one-copy rule (#066), and
+# the stale verdict that a second run must repeat (#072).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
 suite goes red. The standing "failure the kit still would not prevent" since
 retro #1 (RETROSPECTIVE-kit-v1.md §5 item 2), sharpened by LESSONS #033/#037: the
@@ -36,6 +37,15 @@ a row's target is forced True, then False, and the self-test must go red. One it
 does not catch is UNPINNED — it must get a fixture, or a line in LEDGER saying
 why it stays. The ledger only shrinks.
 
+A ledger line is STALE when its decision no longer survives, and that verdict is
+confirmed before it is given (LESSONS #072). The sweep runs a self-test per CPU at
+once, and a self-test can fail, or overrun a budget measured with nothing beside
+it, for reasons that are the runner's: stale lines read off such runs named a
+different decision on each of two failing runs of one tree. So a ledgered decision
+that dies in the pool is run again alone. A fixture that kills it kills it again;
+a kill the second run does not repeat leaves the line standing and is reported
+as UNSTABLE, with what the self-test said, which does not fail the run.
+
 Fail-closed by construction (LESSONS #036):
   * a mutation whose old-text is missing (the harness was rewritten) or
     ambiguous (matches twice) is a HARD ERROR — the table must track the code,
@@ -59,6 +69,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -673,10 +685,22 @@ def load_ledger(kit_root):
 
 
 def sweep_decisions(kit_root, files, table, tmp, durations, workers=None,
-                    min_timeout=10):
+                    min_timeout=10, confirm=frozenset(), unstable=None):
     """Mutate every decision in the verdict functions of `files` and run each
     harness's self-test(s) from `table` against it. Returns a list of
     (key, outcome), outcome in caught / hang / survived.
+
+    `confirm` holds the `_key()`s of the decisions the ledger says survive. One
+    of those that does not survive in the pool is run again, ALONE, before its
+    verdict is taken: its ledger line is about to be called stale, and that is
+    a claim a fixture now kills it, which a fixture does on every run. The pool
+    runs a self-test per CPU at once, some of which start dozens of processes
+    of their own, and a self-test can fail, or overrun a budget measured with
+    nothing beside it, for reasons that are the runner's. A kill the second run
+    repeats stands. One it does not is not the code's: the decision keeps its
+    ledger verdict, and the first run, with the tail of its output, is appended
+    to `unstable`, because a self-test that failed over a mutant it does not
+    see is nondeterministic, and a kill it reports elsewhere is suspect too.
 
     Every mutant gets a FRESH copy of the kit, as every hand row does. Mutating
     one copy in place and restoring it lets whatever a mutant leaves behind — a
@@ -694,6 +718,7 @@ def sweep_decisions(kit_root, files, table, tmp, durations, workers=None,
         return []
 
     def one(job):
+        """(key, outcome, what the self-test said, for a kill)."""
         i, rel, cmds, key, mutated = job
         try:
             # A mutant can be valid and still draw a compile-time warning —
@@ -702,26 +727,36 @@ def sweep_decisions(kit_root, files, table, tmp, durations, workers=None,
                 warnings.simplefilter("ignore")
                 compile(mutated, rel, "exec")
         except SyntaxError as e:
-            return key, f"syntax error: {e}"
+            return key, f"syntax error: {e}", ""
         copy = os.path.join(tmp, f"decision-{i}")
         _copy_kit(kit_root, copy)
         try:
             open(os.path.join(copy, rel), "w", encoding="utf-8").write(mutated)
             for c in cmds:
+                budget = max(min_timeout, 10 * durations[c])
                 try:
-                    rc, _out = _run(copy, list(c),
-                                    timeout=max(min_timeout, 10 * durations[c]))
+                    rc, out = _run(copy, list(c), timeout=budget)
                 except subprocess.TimeoutExpired:
-                    return key, "hang"
+                    return key, "hang", f"{' '.join(c)} overran {budget:.1f}s"
                 if rc != 0:
-                    return key, "caught"
-            return key, "survived"
+                    return key, "caught", out[-600:]
+            return key, "survived", ""
         finally:
             shutil.rmtree(copy, ignore_errors=True)
 
     with ThreadPoolExecutor(max_workers=min(workers or os.cpu_count() or 1,
                                             len(jobs))) as ex:
-        results = list(ex.map(one, jobs))
+        pooled = list(ex.map(one, jobs))
+    # A stale verdict must be one a second run repeats (LESSONS #072).
+    results = []
+    for job, (key, outcome, said) in zip(jobs, pooled):
+        if outcome in ("caught", "hang") and _key(key) in confirm:
+            _, again, _ = one(job)
+            if again == "survived":
+                if unstable is not None:
+                    unstable.append({"decision": key, "first": outcome, "said": said})
+                outcome = "survived"
+        results.append((key, outcome))
     broken = [(k, o) for k, o in results if o.startswith("syntax error")]
     if broken:
         k, o = broken[0]
@@ -804,8 +839,10 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True,
             results.append({"gate": m["gate"], "file": m["file"], "why": m["why"],
                             "caught": rc != 0, "self_test_rc": rc})
 
+        unstable = []
         swept = sweep_decisions(kit_root, files, table, tmp, durations,
-                                min_timeout=decision_timeout)
+                                min_timeout=decision_timeout,
+                                confirm=frozenset(ledger), unstable=unstable)
 
     # LESSONS #069: an unpinned decision passes only if the ledger names it, and
     # a ledger line passes only if it still names an unpinned decision. On a
@@ -821,7 +858,8 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True,
                           "table_gaps": gaps,
                           "decisions": {"mutants": len(swept),
                                         "unpinned": len(unpinned),
-                                        "new": new, "stale": stale}}, indent=2))
+                                        "new": new, "stale": stale,
+                                        "unstable": unstable}}, indent=2))
     else:
         for r in results:
             print(f"[{'CAUGHT  ' if r['caught'] else 'SURVIVED'}] {r['gate']:16} "
@@ -845,6 +883,18 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True,
                   f"Delete them; the ledger only shrinks:")
             for e in stale:
                 print("  " + json.dumps(e, ensure_ascii=False))
+        if unstable:
+            print(f"\nUNSTABLE (not a failure): {len(unstable)} ledgered "
+                  f"decision(s) died in the pool and survived alone, so their "
+                  f"lines stand. The self-test that killed them failed over a "
+                  f"mutant it does not see: it is nondeterministic, and its "
+                  f"kills elsewhere cannot be trusted until that is fixed.")
+            for u in unstable:
+                k = u["decision"]
+                print(f"  {k['file']} {k['func']}: `{k['expr']}` -> {k['to']} "
+                      f"first run {u['first']}:")
+                for line in u["said"].strip().splitlines()[-8:]:
+                    print(f"      | {line}")
         if gaps:
             print(f"\nTABLE GAP: {len(gaps)} self-tested harness(es) have no "
                   f"mutation entry — the sweep's verdict does not cover them "
@@ -965,6 +1015,35 @@ def verdict(x):
 if __name__ == "__main__":
     clean = not os.path.exists("POLLUTED")
     sys.exit(0 if clean and verdict(1) and not verdict(-1) else 1)
+'''
+
+# A self-test that misbehaves ONCE per sweep, on its third run, whatever it is
+# testing: the baseline and the hand row are the first two, so the third is the
+# first decision mutant to start. It fails, or with `--stall` it overruns any
+# budget. `O_EXCL` makes each count claimed once however many runs start
+# together. Both decisions survive (`x > 5` guards nothing) and the ledger says
+# so, so the one that dies in the pool must be confirmed alone.
+_TOY_FLAKY = '''\
+#!/usr/bin/env python3
+import os, sys, time
+
+def verdict(x):
+    if x > 5:
+        pass
+    return True
+
+if __name__ == "__main__":
+    n = 0
+    while True:
+        try:
+            os.close(os.open(os.path.join("..", f"run-{n}"),
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            n += 1
+    if n == 2 and "--stall" in sys.argv:
+        time.sleep(60)
+    sys.exit(0 if n != 2 and verdict(1) else 1)
 '''
 
 # Forcing `x > 5` True makes the gate hang AND leave a grandchild holding its
@@ -1248,6 +1327,33 @@ def _self_test():
         got = outcomes(orphan, _TOY_ORPHAN, min_timeout=2)
         check("a hang's grandchild is killed with it: the sweep does not wait it out",
               got.get(("x > 5", "True")) == "hang" and time.monotonic() - t0 < 30)
+
+        # LESSONS #072: a kill the second run does not repeat is not a stale line.
+        flaky = {"gate": "toy-flaky", "file": "harnesses/toy/flaky.py",
+                 "cmd": ["harnesses/toy/flaky.py"], "why": "toy flaky",
+                 "old": "    return True", "new": "    return False"}
+        open(os.path.join(kit, flaky["file"]), "w").write(_TOY_FLAKY)
+        survivors = [dict(k, why="toy: guards nothing") for k, _ in
+                     decision_mutants(flaky["file"], _TOY_FLAKY, [flaky["old"]])]
+        write_ledger(survivors)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run_gates(kit, [flaky], check_coverage=False)
+        said = buf.getvalue()
+        check("a ledgered survivor killed once, by a self-test that fails at "
+              "random, is confirmed alone: its line is not called stale",
+              len(survivors) == 2 and rc == 0 and "STALE" not in said)
+        check("...and the instability is reported, with what the self-test said",
+              "UNSTABLE" in said and "first run caught" in said)
+        stall = dict(flaky, cmd=flaky["cmd"] + ["--stall"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run_gates(kit, [stall], check_coverage=False, decision_timeout=2)
+        said = buf.getvalue()
+        check("one that overran its budget in the pool, and not alone, is "
+              "confirmed the same way, and reported as a hang",
+              rc == 0 and "STALE" not in said and "first run hang" in said)
+        write_ledger(entries)
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

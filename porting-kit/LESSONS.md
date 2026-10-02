@@ -3329,3 +3329,61 @@ finding it is supposed to produce.
 - **Section amended:** harnesses/coverage/coverage_gate.py;
   harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
   harnesses/gate-mutation/unpinned.jsonl.
+
+## 072. A stale verdict read off one run in a busy pool failed check-kit on a tree that had passed
+
+- **Date:** 2026-10-02
+- **Codebase:** this kit's gate-mutation sweep, as lsof-rs's CI runs it
+- **What happened:** `kit integrity` went red on lsof-rs's master after a merge
+  that changed nothing the sweep judges. The kit tree was the one that had
+  passed two days before. The decision sweep (#069) called one ledger line
+  stale, a decision in `resolve_collision.py`'s `build_plan`. That evening a
+  PR that touched no kit file failed the same way, naming a different decision
+  in the same function, and the same commit passed when its job was run again.
+
+  Neither decision can change anything the resolver's self-test observes.
+  `if not h:` is unreachable as written: every entry `split_entries` yields
+  begins at its `## NNN.` heading, which `HEAD_RE` always matches. Forcing
+  `mapping` True in `if mapping or orphaned:` starts a walk over the other
+  files that skips each one when nothing is mapped or orphaned. So no fixture
+  killed either. The self-test itself failed, or overran its budget, on the
+  runner, about once in a sweep of 106 resolver runs, and the sweep took that
+  one run's word.
+
+  The sweep runs a self-test per CPU at once. Its budget is ten times a
+  baseline measured with nothing beside it, and the resolver's self-test
+  starts dozens of git processes of its own. Here, about six hundred runs of
+  those mutants never killed either: two full sweeps, forty hash seeds each,
+  and one CPU shared with six busy loops. The runner had git 2.55, which this
+  machine could not fetch. So what failed on the runner is not established.
+  The gate's half is: "stale" says a fixture now kills the decision, and a
+  fixture kills it on every run. One run cannot say that.
+- **The rule.** A verdict that fails a gate must be one the gate can repeat.
+  When the evidence for a failure is a single run in a shared, parallel
+  environment, run it again alone before failing on it. When the two runs
+  disagree, report that, with the output, rather than failing on noise or
+  swallowing it.
+- **Kit change:** `harnesses/gate-mutation/mutate_gates.py`:
+  `sweep_decisions()` takes the ledger's keys as `confirm`. A ledgered
+  decision that is caught, or hangs, in the pool is run again alone on the same
+  budget before its outcome is taken. A kill the second run repeats stands,
+  and the line is stale as before. One it does not repeat leaves the line
+  standing and goes into `unstable`, with the tail of what the self-test said.
+  The text report prints those as UNSTABLE, which does not fail the run, and
+  `--json` carries them. Nothing is run again unless a ledgered decision dies,
+  so a clean sweep costs what it did: 604 mutants, 0 stale, 179 s here against
+  158-171 s before.
+
+  The self-test gains a toy whose self-test misbehaves once per sweep, on
+  whichever mutant draws that run, with both its decisions in the ledger. It
+  fails, or with `--stall` it overruns its budget. Each of these turns the
+  self-test red, and each was checked:
+  - taking out the confirmation;
+  - confirming kills but not hangs;
+  - dropping the report;
+  - not passing the ledger's keys.
+
+  The UNSTABLE report is also the instrument for the cause: the runner's next
+  spurious failure will name itself in the CI log.
+- **Section amended:** harnesses/gate-mutation/mutate_gates.py ·
+  sweep_decisions, run_gates, self-test; README.md · gate-mutation row.
