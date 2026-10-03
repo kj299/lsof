@@ -74,6 +74,16 @@ pub struct SocketEntry {
 #[derive(Default)]
 pub struct SocketTable {
     by_inode: HashMap<u64, SocketEntry>,
+    /// The bound path's own bytes, by inode, for each AF_UNIX socket whose
+    /// path is not UTF-8: `SocketEntry::path` then shows U+FFFD for each stray
+    /// byte, which names no file, and a `stat` of the socket file there needs
+    /// the real name (DIVERGENCES 60). Rare, so kept beside the entries.
+    raw_paths: HashMap<u64, Box<[u8]>>,
+    /// The identity of the socket file at each bound path, by inode, found
+    /// the first time a row asks and kept: every fd that holds the socket, in
+    /// every process and task, asks the same question, which the C asks once
+    /// per `/proc/net/unix` line. Empty unless the run names a path.
+    bound_ids: std::cell::RefCell<HashMap<u64, Option<(String, String)>>>,
 }
 
 impl SocketTable {
@@ -137,6 +147,26 @@ impl SocketTable {
 
     pub fn get(&self, inode: u64) -> Option<&SocketEntry> {
         self.by_inode.get(&inode)
+    }
+
+    /// The bytes of `inode`'s bound path, when they are not UTF-8.
+    pub fn raw_path(&self, inode: u64) -> Option<&[u8]> {
+        self.raw_paths.get(&inode).map(|b| &**b)
+    }
+
+    /// The identity of the socket file at `inode`'s bound path: `find`'s
+    /// answer, asked once a run.
+    pub fn bound_id(
+        &self,
+        inode: u64,
+        find: impl FnOnce() -> Option<(String, String)>,
+    ) -> Option<(String, String)> {
+        if let Some(id) = self.bound_ids.borrow().get(&inode) {
+            return id.clone();
+        }
+        let id = find();
+        self.bound_ids.borrow_mut().insert(inode, id.clone());
+        id
     }
 
     fn load_inet(&mut self, path: &str, proto: Protocol, v6: bool, queues: bool) {
@@ -336,8 +366,47 @@ impl SocketTable {
     }
 
     fn load_unix(&mut self, path: &str) {
-        if let Some(text) = crate::text::read_lossy(path) {
-            self.parse_unix(&text);
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        match String::from_utf8(bytes) {
+            Ok(text) => self.parse_unix(&text),
+            // A stray byte costs that byte's display, never the table (see
+            // `text::read_lossy`), and the path keeps its bytes for a `stat`.
+            Err(e) => {
+                let raw = e.into_bytes();
+                self.parse_unix(&String::from_utf8_lossy(&raw));
+                self.keep_raw_unix_paths(&raw);
+            }
+        }
+    }
+
+    /// Give each socket whose bound path is not UTF-8 the path's own bytes.
+    /// Every column before the path is ASCII, so the decoded line and the raw
+    /// one agree up to it: the path starts at the same offset in both. A line
+    /// where that does not hold is left alone rather than cut in the wrong
+    /// place.
+    fn keep_raw_unix_paths(&mut self, raw: &[u8]) {
+        for line in raw.split(|&b| b == b'\n').skip(1) {
+            if std::str::from_utf8(line).is_ok() {
+                continue;
+            }
+            let shown = String::from_utf8_lossy(line);
+            let f = fields_with_rest(&shown, UNIX_PATH + 1);
+            let (Some(inode), Some(path)) = (
+                f.get(UNIX_INODE).and_then(|s| s.parse::<u64>().ok()),
+                f.get(UNIX_PATH),
+            ) else {
+                continue;
+            };
+            // The path is the last field, so it runs to the end of the line.
+            let start = shown.len() - path.len();
+            if !line.get(..start).is_some_and(<[u8]>::is_ascii) {
+                continue;
+            }
+            if self.by_inode.contains_key(&inode) {
+                self.raw_paths.insert(inode, line[start..].into());
+            }
         }
     }
 
@@ -959,6 +1028,31 @@ mod tests {
         let f = fields_with_rest(line, UNIX_PATH + 1);
         assert_eq!(f[UNIX_INODE], "184");
         assert_eq!(f[UNIX_PATH], "/tmp/my sock/x.sock");
+    }
+
+    #[test]
+    fn a_unix_path_that_is_not_utf8_keeps_its_bytes_for_the_stat() {
+        // DIVERGENCES 60: the path is shown with U+FFFD, which names no file,
+        // so a `stat` of the socket file there needs the path's own bytes.
+        let raw = b"Num RefCount Protocol Flags Type St Inode Path\n\
+0000: 00000002 00000000 00010000 0001 01 184 /tmp/s\xffock\n\
+0000: 00000002 00000000 00010000 0001 01 185 /tmp/plain.sock\n\
+0000: 0000\xfe02 00000000 00010000 0001 01 186 /tmp/t\xffo\n";
+        let path = std::env::temp_dir().join(format!("lsof-rs-unix-{}", std::process::id()));
+        std::fs::write(&path, raw).unwrap();
+        let mut t = SocketTable::default();
+        t.load_unix(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        let odd = t.get(184).unwrap();
+        assert_eq!(odd.path.as_deref(), Some("/tmp/s\u{FFFD}ock"));
+        assert_eq!(t.raw_path(184), Some(&b"/tmp/s\xffock"[..]));
+        // A path that is UTF-8 keeps nothing extra.
+        assert!(t.get(185).is_some());
+        assert_eq!(t.raw_path(185), None);
+        // A stray byte BEFORE the path moves it in the decoded line, so its
+        // bytes cannot be found by offset there, and none are kept.
+        assert!(t.get(186).is_some());
+        assert_eq!(t.raw_path(186), None);
     }
 
     #[test]

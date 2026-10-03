@@ -411,8 +411,11 @@ pub struct SocketInfo {
 /// path itself as typed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundPath {
-    /// The bound path, as the kernel reports it.
-    pub path: String,
+    /// The bound path, as the kernel reports it: what a path argument typed
+    /// exactly as it finds the socket by. `None` when it is not UTF-8, which
+    /// no argument can be, so that its U+FFFD form cannot pass for another
+    /// socket's path that really holds U+FFFD.
+    pub path: Option<String>,
     /// `(DEVICE, NODE)` of the file at `path`, when it is a socket file:
     /// what a path argument's own identity is compared with. `None` when
     /// the path is not absolute, cannot be stat'ed, or is no longer a

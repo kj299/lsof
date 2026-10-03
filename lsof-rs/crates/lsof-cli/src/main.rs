@@ -11,14 +11,13 @@
 //! drop it and the binary is unconstrained while the library still looks safe.
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
 use std::io::Write;
 
 use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, FilesystemArgs, Located, Process, Selection, TaskMode, UidSel, UserLookup,
+    errno_text, Backend, FilesystemArgs, Located, PathItem, Selection, TaskMode, UidSel, UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -192,6 +191,17 @@ fn canonicalize_selector(p: &mut String) {
     *p = strip_verbatim(&resolved.to_string_lossy());
 }
 
+/// `path` without the slashes that end it, keeping one: the C's rule for a
+/// path argument before it `stat`s it (`arg.c`, "Remove terminating `/'
+/// characters from paths longer than one").
+fn without_trailing_slashes(path: &str) -> &str {
+    let mut end = path.len();
+    while end > 1 && path.as_bytes()[end - 1] == b'/' {
+        end -= 1;
+    }
+    &path[..end]
+}
+
 /// `\\?\C:\x` -> `C:\x`; `\\?\UNC\srv\share` -> `\\srv\share`; anything else
 /// unchanged — the same spelling the backend's `normalize_final` produces.
 fn strip_verbatim(s: &str) -> String {
@@ -202,17 +212,6 @@ fn strip_verbatim(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-/// One path search item, and what "found" means for it.
-struct SearchItem {
-    /// The file's `(DEVICE, NODE)` identity, when the backend resolved it.
-    id: Option<(String, String)>,
-    /// Set when the argument named a **file system**: the item is located by
-    /// any displayed row on that filesystem, not by an identity of its own.
-    fs_device: Option<u64>,
-    /// What to print when it is not found — what the user typed.
-    display: String,
 }
 
 /// Every search item this run did not locate, as the lines `-V` prints for
@@ -230,18 +229,13 @@ struct SearchItem {
 ///
 /// * `-p`/`-g`/`-u`/`-c` — a gathered process matched it, before any file is
 ///   selected ([`Selection::locate`]): `lsof -a -p P -d 999` still exits 0.
-/// * a path — a **displayed** row is that file, by identity, or (for a file
-///   system argument) is on it.
+/// * a path — a file the C examined is it, by identity, or (for a file
+///   system argument) is on it, or is a socket bound at it, printed or not
+///   ([`Selection::locate`]).
 /// * `-i` (the bare form, and each specification) and `-N` — a file KEPT for
 ///   a process that passed selection, printed or not, as the C sets `Fnet`
 ///   and `Fnfs` when it links the file ([`Selection::locate`]).
-fn unlocated(
-    sel: &Selection,
-    located: &Located,
-    search: &[SearchItem],
-    procs: &[Process],
-    esc: Escaper,
-) -> Vec<String> {
+fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     let mut miss = Vec::new();
     // `-c`. The C keeps these in a list it PREPENDS to (`Cmdl = lpt`), so it
     // reports them last-given first.
@@ -250,58 +244,17 @@ fn unlocated(
             miss.push(format!("lsof: command not located: {}", esc.text(c)));
         }
     }
-    // Every search item must turn up among the displayed rows or the run exits
-    // 1, and for `+d`/`+D` each expanded ENTRY is its own item — verified
-    // against the C: a directory whose every entry is open exits 0, and adding
-    // one unopened file makes it 1. Identity is what "turn up" means, so a
-    // file queried through a hard link counts as found under its other name.
-    let shown: HashSet<(&str, &str)> = procs
-        .iter()
-        .flat_map(|p| &p.files)
-        .filter_map(|f| Some((f.device.as_deref()?, f.node.as_deref()?)))
-        .collect();
-    // An AF_UNIX socket shown because of the path it is bound to locates that
-    // path's item too: by the socket file's identity, or by the path as typed
-    // (`is_file_named()` marks the entry it matched either way).
-    let bound: Vec<&lsof_core::BoundPath> = procs
-        .iter()
-        .flat_map(|p| &p.files)
-        .filter_map(|f| f.socket.as_deref()?.bound.as_deref())
-        .collect();
-    for item in search {
-        let SearchItem {
-            id,
+    // Every path argument must be located or the run exits 1, and for
+    // `+d`/`+D` each expanded ENTRY is its own item — verified against the C:
+    // a directory whose every entry is open exits 0, and adding one unopened
+    // file makes it 1. Identity is what "located" means, so a file queried
+    // through a hard link counts as found under its other name.
+    for (item, &hit) in sel.path_items.iter().zip(&located.paths) {
+        let PathItem {
             fs_device,
-            display,
+            name: display,
+            ..
         } = item;
-        // A file-system argument is located by ANY row on that filesystem —
-        // it has no identity, and the mount point's own directory may well not
-        // be open.
-        let hit = if let Some(dev) = fs_device {
-            procs
-                .iter()
-                .flat_map(|p| &p.files)
-                .any(|f| f.fs_device == Some(*dev))
-        } else {
-            match id {
-                Some((dev, node)) => {
-                    shown.contains(&(dev.as_str(), node.as_str()))
-                        || bound.iter().any(|b| {
-                            b.id.as_ref().is_some_and(|(d, n)| d == dev && n == node)
-                                || b.path == *display
-                        })
-                }
-                // No identity for it (the backend could not resolve the path, or
-                // has no identities at all): fall back to the name comparison.
-                None => {
-                    let needle = display.to_ascii_lowercase();
-                    procs.iter().flat_map(|p| &p.files).any(|f| {
-                        let n = f.name.to_ascii_lowercase();
-                        n == needle || n.starts_with(&needle)
-                    })
-                }
-            }
-        };
         if !hit {
             // `sfp->type ? "" : " system"` — a file-system argument has its
             // own wording, measured: `no file system use located: /mnt/x`.
@@ -547,10 +500,13 @@ fn main() {
         } => (selection, format, repeat, columns),
     };
     // Each path argument as it was typed, kept before it is resolved below.
-    // A backend that identifies files has no use for the resolved spelling but
-    // to recognise a mount point, and the C keeps the typed one (`aname`) for
-    // the rest: it reports an unlocated argument by it (`no file use located:
-    // ./x`), and compares an AF_UNIX socket's bound path with it.
+    // A backend that identifies files uses the resolved spelling only to
+    // recognise a mount point, and the C keeps the typed one (`aname`) for the
+    // rest: it reports an unlocated argument by it (`no file use located:
+    // ./x`), and compares an AF_UNIX socket's bound path with it. The C's own
+    // resolution for the mount test is `Readlink()`, which leaves a relative
+    // path relative, so `lsof mnt` from the parent is no file system to it:
+    // that difference is item 65, not settled here.
     let typed_paths = selection.paths.clone();
     let selection = {
         let mut sel = selection;
@@ -583,7 +539,6 @@ fn main() {
     // file IS: `lsof /a/hardlink` finds it under its other name, and naming a
     // directory matches that directory, not everything beneath it. `+d` adds
     // one level of entries, `+D` the whole tree.
-    let mut search: Vec<SearchItem> = Vec::new();
     // Path arguments whose `stat()` failed, with the errno text, in argument
     // order. Collected rather than reported inline because whether they are
     // fatal depends on how many survived.
@@ -664,10 +619,10 @@ fn main() {
                 sel.path_names.insert(typed.clone());
                 for dev in devs {
                     sel.path_fs_devices.insert(dev);
-                    search.push(SearchItem {
+                    sel.path_items.push(PathItem {
                         id: None,
                         fs_device: Some(dev),
-                        display: shown.clone(),
+                        name: shown.clone(),
                     });
                 }
                 continue;
@@ -675,10 +630,16 @@ fn main() {
             if sel.filesystem_args == FilesystemArgs::AlwaysFilesystem {
                 // `+f` promised every argument is a file system; this one is
                 // not, and the C says so and exits 1 rather than falling back.
-                not_a_filesystem.push(p.clone());
+                not_a_filesystem.push(shown.clone());
                 continue;
             }
-            let id = env.backend.identify_path(p);
+            // Identity follows symlinks itself, so it needs no resolved
+            // spelling, and the resolved one can name nothing: it is built
+            // lossily, so a symlink to a name that is not UTF-8 resolved to a
+            // path with U+FFFD in it, which then failed to stat. The C strips
+            // trailing slashes first, from a path longer than one character
+            // (`arg.c`), so `FILE/` is FILE to it; it still reports `FILE/`.
+            let id = env.backend.identify_path(without_trailing_slashes(shown));
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
                 sel.path_names.insert(typed.clone());
@@ -694,10 +655,10 @@ fn main() {
                     .unwrap_or_else(|| "status error".to_string());
                 unstattable.push((p.clone(), why));
             }
-            search.push(SearchItem {
+            sel.path_items.push(PathItem {
                 id,
                 fs_device: None,
-                display: shown.clone(),
+                name: shown.clone(),
             });
         }
         // `+d`/`+D` are directory expansions, not file-system arguments: the C
@@ -727,10 +688,10 @@ fn main() {
                 sel.path_ids.insert(id);
                 sel.path_names.insert(dir.to_string());
             }
-            search.push(SearchItem {
+            sel.path_items.push(PathItem {
                 id,
                 fs_device: None,
-                display: dir.to_string(),
+                name: dir.to_string(),
             });
             // The directory's own file system, for the cross-over rule below.
             // `None` on a backend with no such notion, which switches the rule
@@ -781,10 +742,10 @@ fn main() {
                         sel.path_ids.insert(id);
                         sel.path_names.insert(shown.clone());
                     }
-                    search.push(SearchItem {
+                    sel.path_items.push(PathItem {
                         id,
                         fs_device: None,
-                        display: shown,
+                        name: shown,
                     });
                     // Only `+D` descends, and never through a symlink — a
                     // symlinked directory loop would otherwise walk forever.
@@ -805,8 +766,11 @@ fn main() {
             }
         }
         if !not_a_filesystem.is_empty() {
+            // `safestrprt(av[i], …)`: the argument as typed, escaped, since a
+            // script may pass along a file name it did not choose.
+            let esc = Escaper::for_host();
             for p in &not_a_filesystem {
-                eprintln!("lsof: not a file system: {p}");
+                eprintln!("lsof: not a file system: {}", esc.text(p));
             }
             std::process::exit(1);
         }
@@ -819,8 +783,10 @@ fn main() {
         // gave up. `-Q` mutes the message and makes the whole set non-fatal.
         if !unstattable.is_empty() {
             if !sel.quiet {
+                // Escaped, as `safestrprt()` prints it.
+                let esc = Escaper::for_host();
                 for (p, why) in &unstattable {
-                    eprintln!("lsof: status error on {p}: {why}");
+                    eprintln!("lsof: status error on {}: {why}", esc.text(p));
                 }
             }
             let none_survived = unstattable.len() == sel.paths.len()
@@ -868,7 +834,7 @@ fn main() {
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
         let esc = Escaper::for_host();
-        let misses = unlocated(&selection, &located, &search, &procs, esc);
+        let misses = unlocated(&selection, &located, esc);
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
@@ -1083,7 +1049,7 @@ mod tests {
                 tasks,
                 ..Default::default()
             };
-            super::unlocated(&sel, &located, &[], &[], Escaper::UNIX)
+            super::unlocated(&sel, &located, Escaper::UNIX)
         };
         assert_eq!(
             lines(&["-K", "-p", "1"], false),
@@ -1107,78 +1073,59 @@ mod tests {
         );
     }
 
-    /// A path argument is located by an AF_UNIX socket shown because of the
-    /// path it is bound to -- by the socket file's identity there, or by the
-    /// path as typed -- though the row's own identity is the socket's
-    /// (DIVERGENCES 60).
+    /// The C strips trailing slashes from a path argument longer than one
+    /// character before it stats it (`arg.c`), keeping one.
     #[test]
-    fn a_path_is_located_by_a_unix_socket_bound_to_it() {
-        use lsof_core::model::{
-            AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SocketInfo,
-        };
+    fn trailing_slashes_go_but_one_stays() {
+        use super::without_trailing_slashes as strip;
+        assert_eq!(strip("/d/f/"), "/d/f");
+        assert_eq!(strip("f//"), "f");
+        assert_eq!(strip("/"), "/");
+        assert_eq!(strip("//"), "/");
+        assert_eq!(strip("f"), "f");
+        assert_eq!(strip(""), "");
+    }
+
+    /// A path item `Selection::locate` did not mark is reported in its own
+    /// words, as typed: `no file use located`, or `no file system use
+    /// located` for one that named a file system (DIVERGENCES 60).
+    #[test]
+    fn an_unlocated_path_is_reported_as_typed() {
         use lsof_core::render::Escaper;
-        use lsof_core::{Located, Selection};
-        let sock = |path: &str, id: Option<(&str, &str)>| OpenFile {
-            rdev: None,
-            fs_device: None,
-            file_flags: None,
-            lock: None,
-            fd: FdType::Handle(3),
-            access: AccessMode::ReadWrite,
-            file_type: FileType::Unix,
-            name: format!("{path} type=STREAM"),
-            device: Some("0xffff".into()),
-            size: None,
-            offset: Some(0),
-            node: Some("500".into()),
-            links: None,
-            socket: Some(Box::new(SocketInfo {
-                bound: Some(Box::new(BoundPath {
-                    path: path.into(),
-                    id: id.map(|(d, n)| (d.into(), n.into())),
-                })),
-                protocol: Protocol::Other("unix"),
-                local: None,
-                remote: None,
-                state: None,
-                tcp: None,
-            })),
+        use lsof_core::{Located, PathItem, Selection};
+        let sel = Selection {
+            path_items: vec![
+                PathItem {
+                    id: Some(("254,0".into(), "11".into())),
+                    fs_device: None,
+                    name: "./x".into(),
+                },
+                PathItem {
+                    id: None,
+                    fs_device: Some(42),
+                    name: "mnt".into(),
+                },
+            ],
+            ..Default::default()
         };
-        let shown = |f: OpenFile| Process {
-            tid: None,
-            task_command: None,
-            uid: None,
-            pgid: None,
-            pid: 7,
-            ppid: None,
-            command: "x".into(),
-            user: None,
-            endpoint_peer: false,
-            unlisted: false,
-            files: vec![f],
+        let lines = |paths: Vec<bool>| {
+            let located = Located {
+                paths,
+                ..Default::default()
+            };
+            super::unlocated(&sel, &located, Escaper::UNIX)
         };
-        let item = |display: &str| super::SearchItem {
-            id: Some(("254,0".into(), "11".into())),
-            fs_device: None,
-            display: display.into(),
-        };
-        let misses = |procs: &[Process], typed: &str| {
-            super::unlocated(
-                &Selection::default(),
-                &Located::default(),
-                &[item(typed)],
-                procs,
-                Escaper::UNIX,
-            )
-        };
-        let by_id = [shown(sock("/d/s.sock", Some(("254,0", "11"))))];
-        assert!(misses(&by_id, "link-to-s.sock").is_empty());
-        let by_name = [shown(sock("/d/s.sock", None))];
-        assert!(misses(&by_name, "/d/s.sock").is_empty());
         assert_eq!(
-            misses(&by_name, "./s.sock"),
-            ["lsof: no file use located: ./s.sock"],
-            "only the path as typed is compared"
+            lines(vec![false, false]),
+            [
+                "lsof: no file use located: ./x",
+                "lsof: no file system use located: mnt"
+            ]
         );
+        assert_eq!(
+            lines(vec![true, false]),
+            ["lsof: no file system use located: mnt"]
+        );
+        assert!(lines(vec![true, true]).is_empty());
     }
 }

@@ -463,13 +463,21 @@ def non_utf8_holder(work: str) -> Fixture:
     (`/proc/net/unix`), and every `mem` row of this process (`maps`). The C
     lists all of them. All three need no privilege, which is why they matter.
     The cases compare what does not depend on how the byte is DISPLAYED --
-    the C prints `\\xff`, lsof-rs U+FFFD, a ledgered difference."""
+    the C prints `\\xff`, lsof-rs U+FFFD, a ledgered difference.
+
+    `sock-link` is an ASCII symlink to the socket file: the C finds the socket
+    through it by the socket file's identity, which a `stat` of the decoded
+    path, U+FFFD and all, could never give. `sock\\ufffd` is a second socket
+    whose path really holds U+FFFD, which is what the first one's decoded
+    path says too: only the bytes tell them apart (DIVERGENCES 60)."""
     xdir = os.path.join(work, "nonutf8")
     os.makedirs(xdir)
+    os.symlink(os.path.join(xdir.encode(), b"sock\xff"), os.path.join(xdir.encode(), b"sock-link"))
     py = (
         "import ctypes,mmap,os,socket,time\n"
         "d=%r.encode()\n"
         "s=socket.socket(socket.AF_UNIX); s.bind(os.path.join(d,b'sock\\xff')); s.listen(1)\n"
+        "t=socket.socket(socket.AF_UNIX); t.bind(os.path.join(d,'sock\\ufffd'.encode())); t.listen(1)\n"
         "f=open(os.path.join(d,b'map\\xfe'),'wb+'); f.write(b'x'*4096); f.flush()\n"
         "m=mmap.mmap(f.fileno(),4096)\n"
         "ctypes.CDLL(None).prctl(15, %r, 0, 0, 0)\n"
@@ -480,7 +488,7 @@ def non_utf8_holder(work: str) -> Fixture:
         "X(non-UTF-8)",
         [sys.executable, "-c", py],
         cwd=xdir,
-        expect_fds=5,  # 0,1,2 + the socket and the mapped file
+        expect_fds=6,  # 0,1,2 + the two sockets and the mapped file
         expect_comm=NON_UTF8_COMM,
     )
 
@@ -885,9 +893,20 @@ def socket_path_holder(work: str) -> Fixture:
     `u.sock`, `link-gone` one to `gone.sock`, both made here before their
     targets exist: what `link-gone` reaches is a regular file, which
     identifies no socket, and its own path is not the one the socket was
-    bound to, so it finds nothing."""
+    bound to, so it finds nothing.
+
+    `odd/sp ace.sock` is bound at a path with a space, which the C cuts at
+    the space when it reads `/proc/net/unix` (`get_fields()`): it shows the
+    socket as `odd/sp`, cannot find it by its real path, and finds it through
+    a regular file `odd/sp`. `odd/c:lon.sock` is the same at a `:`, the
+    realistic spelling (an ssh ControlPath), and `odd/c` is a socket of its
+    own there: the C finds both sockets through it, the second by the cut
+    path's identity. A C-DEFECT, ledgered; it sits in its own directory so
+    the `+d` case above stays about the rest."""
     ydir = os.path.join(work, "sockpaths")
-    os.makedirs(ydir)
+    os.makedirs(os.path.join(ydir, "odd"))
+    with open(os.path.join(ydir, "odd", "sp"), "w") as f:
+        f.write("the C's cut of 'sp ace.sock'\n")
     os.symlink(os.path.join(ydir, "u.sock"), os.path.join(ydir, "link.sock"))
     os.symlink(os.path.join(ydir, "gone.sock"), os.path.join(ydir, "link-gone"))
     py = (
@@ -897,13 +916,17 @@ def socket_path_holder(work: str) -> Fixture:
         "c=socket.socket(socket.AF_UNIX); c.connect(os.path.join(d,'u.sock'))\n"
         "a,_=u.accept()\n"
         "g=socket.socket(socket.AF_UNIX); g.bind(os.path.join(d,'gone.sock')); g.listen(1)\n"
+        "o=socket.socket(socket.AF_UNIX); o.bind(os.path.join(d,'odd','sp ace.sock')); o.listen(1)\n"
+        "k=socket.socket(socket.AF_UNIX); k.bind(os.path.join(d,'odd','c:lon.sock')); k.listen(1)\n"
+        "q=socket.socket(socket.AF_UNIX); q.bind(os.path.join(d,'odd','c')); q.listen(1)\n"
         "os.unlink(os.path.join(d,'gone.sock'))\n"
         "open(os.path.join(d,'gone.sock'),'w').write('not a socket\\n')\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
         "time.sleep(600)\n" % ydir
     )
-    # 0,1,2 + listener, client, accepted, and the socket whose file is gone.
-    return Fixture("Y(socket paths)", [sys.executable, "-c", py], cwd=ydir, expect_fds=7)
+    # 0,1,2 + listener, client, accepted, the socket whose file is gone, and
+    # the three under odd/.
+    return Fixture("Y(socket paths)", [sys.executable, "-c", py], cwd=ydir, expect_fds=10)
 
 
 def mount_ns_holder(work: str) -> Fixture:
@@ -944,6 +967,60 @@ def mount_ns_holder(work: str) -> Fixture:
         expect_fds=4,
         expect_comm=os.path.basename(sys.executable).encode()[:15],
         optional=True,
+    )
+
+
+# A mount point every Linux runner has: glibc keeps POSIX shared memory there.
+# Fixture MS binds a socket at exactly this path.
+SHM = "/dev/shm"
+
+
+def is_mount_point(dir_: str) -> bool:
+    """Whether something is mounted on `dir_`, as `/proc/self/mounts` says."""
+    try:
+        with open("/proc/self/mounts") as f:
+            return any(line.split(" ")[1:2] == [dir_] for line in f)
+    except OSError:
+        return False
+
+
+def mount_point_socket_holder(work: str) -> Fixture:
+    """A unix socket bound at a path that is a mount point here: `/dev/shm`.
+
+    The path is free to bind only in a mount namespace of the fixture's own,
+    with a tmpfs over `/dev`. Here `/dev/shm` is a file-system argument, and
+    the C finds the socket by it all the same: the bound path is not a socket
+    file here, so it is compared with every argument as typed, a mount
+    point's included (`hashSfile()`, `is_file_named()`). lsof-rs printed the
+    socket and then reported the file system not located (DIVERGENCES 60).
+
+    Made through an unprivileged user namespace, as fixture M is. Unavailable
+    where `/dev/shm` is not a mount point, since its cases would then name a
+    plain directory."""
+    mdir = os.path.join(work, "mntsock")
+    os.makedirs(mdir)
+    # A second spelling of the mount point. The C compares bound paths with
+    # the argument as typed, so through this link it does not find the socket.
+    os.symlink(SHM, os.path.join(mdir, "shm-link"))
+    py = (
+        "import socket,time\n"
+        "s=socket.socket(socket.AF_UNIX); s.bind(%r); s.listen(1)\n"
+        "open(%r,'w').close()\n"
+        "time.sleep(600)\n" % (SHM, os.path.join(mdir, "ready"))
+    )
+    sh = 'mount -t tmpfs lsofdiff /dev && exec "$1" -c "$2"'
+    return Fixture(
+        "MS(socket at a mount point)",
+        [
+            "unshare", "--user", "--map-root-user", "--mount", "--propagation",
+            "private", "sh", "-c", sh, "sh", sys.executable, py,
+        ],
+        cwd=mdir,
+        # 0,1,2 + the listener, under python's own comm.
+        expect_fds=4,
+        expect_comm=os.path.basename(sys.executable).encode()[:15],
+        optional=True,
+        unavailable=None if is_mount_point(SHM) else f"{SHM} is not a mount point here",
     )
 
 
@@ -1150,7 +1227,8 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     y = socket_path_holder(work)
     m = mount_ns_holder(work)
     w = owner_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w
+    ms = mount_point_socket_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms
 
 
 # -------------------------------------------------------------------- matrix
@@ -1272,7 +1350,7 @@ def run(args) -> int:
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
         offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
-        flagfds, sockpaths, mntns, owner,
+        flagfds, sockpaths, mntns, owner, mntsock,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -1289,6 +1367,7 @@ def run(args) -> int:
         "M": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
         "MMNT": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
         "MFILE": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+        "MS": (mntsock, "no `/dev/shm` mount here, or no unprivileged user namespaces"),
         # W's cases name {W} and {WR} together; both go with it.
         "W": (owner, "not root, and no passwordless sudo"),
         "WR": (owner, "not root, and no passwordless sudo"),
@@ -1320,19 +1399,21 @@ def run(args) -> int:
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
         started_optional = {k: v[0] for k, v in optional.items()}
-        netns, packet, userns, unreadable, mntns, owner = (
+        netns, packet, userns, unreadable, mntns, owner, mntsock = (
             started_optional["J"],
             started_optional["K"],
             started_optional["L"],
             started_optional["U"],
             started_optional["M"],
             started_optional["W"],
+            started_optional["MS"],
         )
         for fx in [
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
+                mntsock,
             )
             if f is not None
         ]:
@@ -1421,8 +1502,16 @@ def run(args) -> int:
                 "YLINK": os.path.join(sockpaths.cwd, "link.sock"),
                 "YGONE": os.path.join(sockpaths.cwd, "gone.sock"),
                 "YGONELINK": os.path.join(sockpaths.cwd, "link-gone"),
+                "XSOCKLINK": os.path.join(nonutf8.cwd, "sock-link"),
+                "XSOCKREPL": os.path.join(nonutf8.cwd, "sock\ufffd"),
+                "YCOLON": os.path.join(sockpaths.cwd, "odd", "c:lon.sock"),
+                "YCOLONCUT": os.path.join(sockpaths.cwd, "odd", "c"),
+                "YSPACE": os.path.join(sockpaths.cwd, "odd", "sp ace.sock"),
+                "YCUT": os.path.join(sockpaths.cwd, "odd", "sp"),
                 "MMNT": os.path.join(mntns.cwd if mntns else work, "mnt"),
                 "MFILE": os.path.join(mntns.cwd if mntns else work, "mnt", "f"),
+                "MSMNT": SHM,
+                "MSLINK": os.path.join(work, "mntsock", "shm-link"),
                 # Last, so they replace the placeholder pid the optional
                 # fixtures' entries above gave them.
                 **{k: str(v) for k, v in owners.items()},

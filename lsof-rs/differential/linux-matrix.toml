@@ -482,6 +482,68 @@ name = "path-unix-socket-not-found-through-its-replacement"
 args = ["-n", "-P", "-V", "{YGONELINK}"]
 
 [[case]]
+# Fixture X's socket is bound at a path that is not UTF-8; sock-link is an
+# ASCII symlink to it. PID and fd only, because the NAME is a recorded display
+# difference (U+FFFD for `\xff`); which socket is found is not. The fd tells
+# it from X's other socket, bound at that NAME's spelling: `-t` could not,
+# since the same process holds both.
+name = "path-unix-socket-whose-path-is-not-utf8"
+args = ["-F", "pf", "{XSOCKLINK}"]
+
+[[case]]
+# A `-e` on another file system changes nothing: the bound path is walked to
+# the socket file through the symlink, and no name is looked up under /proc.
+name = "path-unix-socket-through-a-symlink-under-another-dash-e"
+args = ["-t", "-e", "/proc", "{YLINK}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 66). The C cuts a bound path at its first
+# space when it reads /proc/net/unix, so it cannot find this socket by its
+# real path, which lsof-rs does.
+name = "path-unix-socket-with-a-space-found-in-lsof-rs"
+args = ["-t", "{YSPACE}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 66). The other half: the C finds the socket
+# through a regular file named as its cut path, which lsof-rs does not.
+name = "path-unix-socket-cut-at-a-space-in-the-c"
+args = ["-t", "{YCUT}"]
+
+[[case]]
+# A path is located as the C examines the file, before -a is applied: A holds
+# {FILE} on fd 3, so `-d 0` prints nothing, and the run exits 0 with no -V
+# line. lsof-rs had asked the rows it printed and exited 1.
+name = "path-located-by-a-file-a-drops"
+args = ["-n", "-P", "-V", "-a", "-p", "{A}", "-d", "0", "{FILE}"]
+
+[[case]]
+name = "path-unix-socket-located-by-a-socket-a-drops"
+args = ["-n", "-P", "-V", "-a", "-p", "{Y}", "-d", "0", "{YSOCK}"]
+
+[[case]]
+# X's second socket is bound at `sock` + U+FFFD (valid UTF-8); its first, at
+# `sock\xff`, is shown with U+FFFD as well. Only the second is that path.
+name = "path-unix-socket-not-found-for-another-by-its-shown-name"
+args = ["-n", "-P", "-F", "pfn", "{XSOCKREPL}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 66): the `:` form, found in lsof-rs only.
+name = "path-unix-socket-with-a-colon-found-in-lsof-rs"
+args = ["-t", "{YCOLON}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 66): `odd/c` is a socket, and the C finds
+# `odd/c:lon.sock` through it too, by the cut path's identity.
+name = "path-unix-socket-cut-at-a-colon-finds-another-in-the-c"
+args = ["-n", "-P", "-F", "pfn", "{YCOLONCUT}"]
+
+[[case]]
+# The C strips a path argument's trailing slashes before it stats it, so
+# `FILE/` is FILE (lsof-rs failed with `Not a directory`).
+name = "path-trailing-slash-on-a-file"
+args = ["-n", "-P", "-a", "-p", "{A}", "{FILE}/"]
+
+[[case]]
 name = "path-unix-socket-and-a-dash-U"
 args = ["-n", "-P", "-V", "-a", "-p", "{Y}", "-U", "{YSOCK}"]
 
@@ -521,6 +583,34 @@ args = ["-n", "-P", "-V", "-a", "-p", "{M}", "{MMNT}"]
 # The control: M's rows are there to be found, on the tmpfs.
 name = "path-another-mount-namespace-process-rows"
 args = ["-n", "-P", "-a", "-d", "cwd,3", "-p", "{M}"]
+
+# A file-system argument finds a socket bound at exactly the path typed
+# (DIVERGENCES 60, from the review). Fixture MS binds one at `/dev/shm`, free
+# in its own mount namespace, where a tmpfs covers `/dev`; here that path is a
+# mount point. The bound path is no socket file here, so the C compares it
+# with every argument as typed, a mount point's included. lsof-rs printed the
+# socket, then said `no file system use located` and exited 1.
+
+[[case]]
+name = "path-fs-arg-finds-a-socket-bound-at-its-path"
+args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "{MSMNT}"]
+
+[[case]]
+# `+f` insists the argument is a file system: the same.
+name = "path-fs-arg-plus-f-finds-a-socket-bound-at-its-path"
+args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "+f", "--", "{MSMNT}"]
+
+[[case]]
+# `-f` makes it a plain directory, whose identity is not the socket's: the
+# name finds the socket all the same.
+name = "path-dash-f-finds-a-socket-bound-at-its-path"
+args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "-f", "--", "{MSMNT}"]
+
+[[case]]
+# Through a symlink to the mount point, the argument as typed is the link's
+# path, which is not the bound path: no socket, and `-V` names the link.
+name = "path-fs-arg-through-a-symlink-is-not-the-bound-path"
+args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "{MSLINK}"]
 
 # ----------------------------------------------------------- anonymous inodes
 [[case]]

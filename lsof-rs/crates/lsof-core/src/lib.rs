@@ -28,6 +28,6 @@ pub use model::{
 pub use render::Escaper;
 pub use selection::{
     CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, InetFilter,
-    InetSpec, Located, Selection, StateFilter, TaskMode, TcpInfoFlags, UidSel,
+    InetSpec, Located, PathItem, Selection, StateFilter, TaskMode, TcpInfoFlags, UidSel,
     DEFAULT_COMMAND_WIDTH,
 };

@@ -207,35 +207,136 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
 /// `/dev/shm/x` but not `/dev/shmx`. A trailing slash on the argument is
 /// tolerated, as the C tolerates `-e /dev/shm/`.
 fn exempt_match<'a>(path: &str, exempt: &'a [String]) -> Option<&'a str> {
-    exempt.iter().find_map(|e| {
-        let trimmed = e.trim_end_matches('/');
-        let mp = if trimmed.is_empty() { "/" } else { trimmed };
-        // An fd whose link target is not an absolute path -- `socket:[14197]`,
-        // `pipe:[…]`, `anon_inode:…` -- lives on no file system and is exempt
-        // from nothing. Measured: under `-e /` the C still resolves sockets to
-        // their `IPv4 … TCP` rows. Testing `mp == "/"` alone swallowed them.
-        if !path.starts_with('/') {
-            return None;
+    // An fd whose link target is not an absolute path -- `socket:[14197]`,
+    // `pipe:[…]`, `anon_inode:…` -- lives on no file system and is exempt
+    // from nothing. Measured: under `-e /` the C still resolves sockets to
+    // their `IPv4 … TCP` rows. Testing `mp == "/"` alone swallowed them.
+    if !path.starts_with('/') {
+        return None;
+    }
+    exempt
+        .iter()
+        .find(|e| under_mount(path.as_bytes(), e))
+        .map(String::as_str)
+}
+
+/// Whether an absolute, canonical `path` is on or under the mount point `e`.
+fn under_mount(path: &[u8], e: &str) -> bool {
+    let trimmed = e.trim_end_matches('/');
+    let mp = if trimmed.is_empty() { "/" } else { trimmed }.as_bytes();
+    mp == b"/"
+        || path == mp
+        || (path.len() > mp.len() && path.starts_with(mp) && path[mp.len()] == b'/')
+}
+
+/// What an absolute path names, found as the kernel finds it, one component
+/// at a time, but without looking a name up inside a `-e` file system:
+/// `None` where the walk would enter one, or where the kernel would fail.
+///
+/// A bound path is text the binding process chose, so its spelling proves
+/// nothing: `//`, `/./`, `..` or a symlink can lead into an exempt mount past
+/// any test on the text. The walk keeps a path with no symlink or `.` in it,
+/// which the plain prefix test is right for, and asks before each step.
+fn metadata_outside(path: &[u8], exempt: &[String]) -> Option<std::fs::Metadata> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    // The kernel's own limit on symlinks in one lookup (`MAXSYMLINKS`).
+    const MAX_LINKS: usize = 40;
+    let os = std::ffi::OsStr::from_bytes;
+    // Components still to walk, the next one last.
+    let mut todo: Vec<Vec<u8>> = path
+        .split(|&b| b == b'/')
+        .rev()
+        .map(<[u8]>::to_vec)
+        .collect();
+    // Where the walk is, as a path with no symlink in it; empty is `/`.
+    let mut at: Vec<u8> = Vec::new();
+    let mut at_md: Option<std::fs::Metadata> = None;
+    let mut at_is_dir = true;
+    let mut links = 0;
+    while let Some(c) = todo.pop() {
+        if !at_is_dir {
+            return None; // ENOTDIR: more path after a file
         }
-        let hit = mp == "/"
-            || path == mp
-            || (path.len() > mp.len() && path.starts_with(mp) && path.as_bytes()[mp.len()] == b'/');
-        hit.then_some(e.as_str())
-    })
+        match c.as_slice() {
+            b"" | b"." => {}
+            b".." => {
+                // `at` holds no symlink, so its parent is its text's parent.
+                let cut = at.iter().rposition(|&b| b == b'/').unwrap_or(0);
+                at.truncate(cut);
+                at_md = None;
+            }
+            name => {
+                let mut next = Vec::with_capacity(at.len() + 1 + name.len());
+                next.extend_from_slice(&at);
+                next.push(b'/');
+                next.extend_from_slice(name);
+                if exempt.iter().any(|e| under_mount(&next, e)) {
+                    return None;
+                }
+                let md = std::fs::symlink_metadata(os(&next)).ok()?;
+                if md.file_type().is_symlink() {
+                    links += 1;
+                    let target = std::fs::read_link(os(&next))
+                        .ok()?
+                        .into_os_string()
+                        .into_vec();
+                    if links > MAX_LINKS || target.is_empty() {
+                        return None;
+                    }
+                    if target.starts_with(b"/") {
+                        at.clear();
+                        at_md = None;
+                    }
+                    todo.extend(target.split(|&b| b == b'/').rev().map(<[u8]>::to_vec));
+                } else {
+                    at_is_dir = md.is_dir();
+                    at = next;
+                    at_md = Some(md);
+                }
+            }
+        }
+    }
+    match at_md {
+        Some(md) => Some(md),
+        // The walk ended on `/`, or after a `..`: what `at` names.
+        None => {
+            let dir: &[u8] = if at.is_empty() { b"/" } else { &at };
+            if exempt.iter().any(|e| under_mount(dir, e)) {
+                return None;
+            }
+            std::fs::metadata(os(dir)).ok()
+        }
+    }
 }
 
 /// `(DEVICE, NODE)` of the socket file at an AF_UNIX socket's bound path, as
 /// the C takes it (`dsock.c`): only an absolute path, `stat`ed in this
 /// process's mount namespace, and only when what is there is a socket — a
 /// file put in its place after the bind identifies nothing, and leaves the
-/// path to be matched as typed. A path under a `-e` file system is not
-/// `stat`ed at all, which is that option's promise; the C does `stat` it.
-fn socket_file_id(path: &str, exempt: &[String]) -> Option<(String, String)> {
+/// path to be matched as typed.
+///
+/// Under a `-e`, the path is walked a component at a time
+/// ([`metadata_outside`]), and a socket file the walk would reach only
+/// through an exempted file system identifies nothing: its name is not looked
+/// up there, which is what `-e` exists to avoid. The C `stat`s it anyway; the
+/// socket is then found by the path as typed only.
+///
+/// `raw` is the path's own bytes when they are not UTF-8
+/// (`SocketTable::raw_path`): the `path` shown then holds U+FFFD, which names
+/// no file, and stat'ing it would lose the socket the way `maps` once lost a
+/// mapped file.
+fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<(String, String)> {
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::FileTypeExt;
-    if !path.starts_with('/') || exempt_match(path, exempt).is_some() {
+    if !path.starts_with('/') {
         return None;
     }
-    let md = std::fs::metadata(path).ok()?;
+    let bytes = raw.unwrap_or(path.as_bytes());
+    let md = if exempt.is_empty() {
+        std::fs::metadata(std::ffi::OsStr::from_bytes(bytes)).ok()?
+    } else {
+        metadata_outside(bytes, exempt)?
+    };
     md.file_type()
         .is_socket()
         .then(|| (dev_cell(&md), md.ino().to_string()))
@@ -417,9 +518,10 @@ fn row(
             let mut sock = e.info.clone();
             if ctx.bound_paths {
                 sock.bound = e.path.as_ref().map(|path| {
+                    let raw = socks.raw_path(inode);
                     Box::new(lsof_core::BoundPath {
-                        path: path.clone(),
-                        id: socket_file_id(path, exempt),
+                        path: raw.is_none().then(|| path.clone()),
+                        id: socks.bound_id(inode, || socket_file_id(path, raw, exempt)),
                     })
                 });
             }
@@ -1361,13 +1463,13 @@ mod tests {
         let path = sock.to_str().unwrap();
         let md = std::fs::metadata(&sock).unwrap();
         assert_eq!(
-            socket_file_id(path, &[]),
+            socket_file_id(path, None, &[]),
             Some((dev_cell(&md), md.ino().to_string()))
         );
         // A regular file in its place identifies nothing.
         let plain = dir.join("plain");
         std::fs::write(&plain, b"x").unwrap();
-        assert_eq!(socket_file_id(plain.to_str().unwrap(), &[]), None);
+        assert_eq!(socket_file_id(plain.to_str().unwrap(), None, &[]), None);
         // Nor does a relative path, even one that reaches that very socket
         // from here: it is relative to the cwd of whoever bound it, not this
         // one's, so the C never stats it.
@@ -1378,10 +1480,158 @@ mod tests {
             std::fs::metadata(&relative).is_ok(),
             "{relative} reaches it"
         );
-        assert_eq!(socket_file_id(&relative, &[]), None);
-        // Nor one under a `-e` file system, which is never stat'ed.
-        let exempt = [dir.to_str().unwrap().to_string()];
-        assert_eq!(socket_file_id(path, &exempt), None);
+        assert_eq!(socket_file_id(&relative, None, &[]), None);
+        // A path that is not UTF-8 is stat'ed by its own bytes: the U+FFFD
+        // it is shown with names no file.
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = [dir.to_str().unwrap().as_bytes(), b"/s\xff.sock"].concat();
+            let _odd =
+                std::os::unix::net::UnixListener::bind(std::ffi::OsStr::from_bytes(&raw)).unwrap();
+            let shown = String::from_utf8_lossy(&raw).into_owned();
+            let md = std::fs::metadata(std::ffi::OsStr::from_bytes(&raw)).unwrap();
+            assert_eq!(
+                socket_file_id(&shown, Some(&raw), &[]),
+                Some((dev_cell(&md), md.ino().to_string()))
+            );
+            assert_eq!(socket_file_id(&shown, None, &[]), None);
+        }
+        // Under a `-e` elsewhere the socket is still found, through a symlink
+        // too; under one that covers it, by no spelling, since each would
+        // look its name up in the exempted file system.
+        let id = Some((dev_cell(&md), md.ino().to_string()));
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("sub/up")).unwrap();
+        let d = dir.to_str().unwrap();
+        let spellings = [
+            path.to_string(),
+            format!("/{d}/s.sock"),
+            format!("{d}/./s.sock"),
+            format!("{d}/sub/../s.sock"),
+            format!("{d}/sub/up/s.sock"),
+        ];
+        let elsewhere = ["/nonexistent-fs".to_string()];
+        let exempt = [d.to_string()];
+        for s in &spellings {
+            assert_eq!(socket_file_id(s, None, &elsewhere), id, "{s}");
+            assert_eq!(socket_file_id(s, None, &exempt), None, "{s} under -e");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_walk_outside_the_exempt_mounts_finds_what_the_kernel_finds() {
+        // `metadata_outside` resolves as the kernel does, so a `-e` on another
+        // file system changes nothing the C would find; and it stops before
+        // it would look a name up inside an exempt one.
+        let dir = fake_proc("walk");
+        let d = dir.to_str().unwrap();
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/b/f"), b"x").unwrap();
+        std::os::unix::fs::symlink("a/b", dir.join("rel")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a"), dir.join("abs")).unwrap();
+        std::os::unix::fs::symlink("loop2", dir.join("loop1")).unwrap();
+        std::os::unix::fs::symlink("loop1", dir.join("loop2")).unwrap();
+        std::fs::create_dir(dir.join("ex")).unwrap();
+        std::os::unix::fs::symlink("ex", dir.join("to-ex")).unwrap();
+        let none = ["/nonexistent-fs".to_string()];
+        let ino = |p: &str| metadata_outside(p.as_bytes(), &none).map(|m| m.ino());
+        let want = std::fs::metadata(dir.join("a/b/f")).unwrap().ino();
+        let b = std::fs::metadata(dir.join("a/b")).unwrap().ino();
+        for (p, expect) in [
+            (format!("{d}/a/b/f"), Some(want)),
+            (format!("{d}//a/./b/f"), Some(want)),
+            (format!("{d}/rel/f"), Some(want)),
+            (format!("{d}/abs/b/f"), Some(want)),
+            // `..` after a symlink is the target's parent, as in the kernel.
+            (format!("{d}/rel/../b/f"), Some(want)),
+            (format!("{d}/a/b/f/.."), None), // a file is not a directory
+            (format!("{d}/a/b/f/"), None),
+            (format!("{d}/a/b/"), Some(b)),
+            (format!("{d}/a/b/f/../f"), None),
+            (format!("{d}/loop1"), None),
+            (format!("{d}/nope"), None),
+            (
+                "/".to_string(),
+                std::fs::metadata("/").ok().map(|m| m.ino()),
+            ),
+        ] {
+            assert_eq!(ino(&p), expect, "{p}");
+            assert_eq!(
+                std::fs::metadata(&p).ok().map(|m| m.ino()),
+                expect,
+                "the kernel on {p}"
+            );
+        }
+        let ex = [format!("{d}/ex/")];
+        assert!(metadata_outside(format!("{d}/a/b/f").as_bytes(), &ex).is_some());
+        for p in [
+            format!("{d}/ex"),
+            format!("{d}/to-ex"),
+            format!("{d}/to-ex/x"),
+            format!("{d}/a/../ex"),
+        ] {
+            assert!(metadata_outside(p.as_bytes(), &ex).is_none(), "{p}");
+        }
+        assert!(metadata_outside(b"/", &["/".to_string()]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri cannot bind a socket (bind is an unsupported operation)"
+    )]
+    fn a_sockets_bound_path_is_stated_once_for_all_its_rows() {
+        // Every fd that holds a socket asks for the same socket file's
+        // identity, which the C takes once per `/proc/net/unix` line. Asked
+        // again after the file is gone, a second row must still have the
+        // first answer: it comes from the socket's entry, not a new `stat`.
+        use std::os::unix::io::AsRawFd;
+        let dir = fake_proc("once");
+        let path = dir.join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let link = std::path::PathBuf::from(format!("/proc/self/fd/{}", listener.as_raw_fd()));
+        let target = std::fs::read_link(&link).unwrap();
+        let socks = SocketTable::load(false, true);
+        let locks = crate::locks::LockTable::default();
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &net::NetnsTables::default(),
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: true,
+        };
+        let id = |f: OpenFile| f.socket.and_then(|s| s.bound).and_then(|b| b.id);
+        let first = row(
+            &link,
+            target.clone(),
+            FdType::Handle(3),
+            &FdInfo::default(),
+            0,
+            &ctx,
+        );
+        let md = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            first.and_then(id),
+            Some((dev_cell(&md), md.ino().to_string()))
+        );
+        std::fs::remove_file(&path).unwrap();
+        let second = row(
+            &link,
+            target,
+            FdType::Handle(4),
+            &FdInfo::default(),
+            0,
+            &ctx,
+        );
+        assert_eq!(
+            second.and_then(id),
+            Some((dev_cell(&md), md.ino().to_string()))
+        );
+        drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
