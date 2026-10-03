@@ -731,3 +731,22 @@ covers = ["type:REG", "type:DIR", "type:CHR", "type:FIFO"]
 [[case]]
 name = "linux/differential-fflags-by-name-in-the-G-field"
 args = ["-n", "-P", "-F", "+fg", "-a", "-d", "^mem", "-p", "PID"]
+
+# ----------------------- linux differential: -K under -a, -K's search item (DIVERGENCES 33)
+
+[[case]]
+# Fixture A is single-threaded: under -K -a it is not a task, and is not listed.
+name = "linux/differential-tasks-dash-K-and-a-single-threaded-lists-nothing"
+args = ["-n", "-P", "-K", "-a", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-tasks-dash-K-and-a-V-says-no-tasks-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-tasks-dash-K-terse-lists-only-the-multi-threaded"
+args = ["-K", "-t", "-a", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-tasks-dash-K-i-then-K-is-K"
+args = ["-n", "-P", "-K", "i", "-K", "-a", "-p", "PID"]

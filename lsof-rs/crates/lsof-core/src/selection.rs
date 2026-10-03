@@ -2910,4 +2910,170 @@ mod tests {
         assert!(del.matches(&FdType::Deleted) && !del.matches(&FdType::Mem));
         assert_eq!(FdType::NoFd.code(), "NOFD");
     }
+
+    /// A row for the `-K` tests: a plain file, or a Windows thread row.
+    fn k_row(fd: FdType, file_type: FileType) -> OpenFile {
+        OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd,
+            access: crate::model::AccessMode::Read,
+            file_type,
+            name: "/d".to_string(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        }
+    }
+
+    /// A Linux-shaped run: process 1 is single-threaded, process 2 has one
+    /// task (tid 3), and the task entry repeats its process's cwd row.
+    fn k_linux() -> Vec<Process> {
+        let cwd = || k_row(FdType::Cwd, FileType::Dir);
+        let mut one = who(1, "one", 0, 1);
+        one.files = vec![cwd()];
+        let mut two = who(2, "two", 0, 2);
+        two.files = vec![cwd()];
+        let mut task = who(2, "two", 0, 2);
+        task.tid = Some(3);
+        task.task_command = Some("t".into());
+        task.files = vec![cwd()];
+        vec![one, two, task]
+    }
+
+    fn entries(procs: &[Process]) -> Vec<(u32, Option<u32>)> {
+        procs.iter().map(|p| (p.pid, p.tid)).collect()
+    }
+
+    /// `-K -a`: a process is listed only as a task, and is one only when it
+    /// has a task of its own (`dproc.c`: `Fand && ht && pidts`), DIVERGENCES
+    /// 33. The single-threaded process is not listed, its PID is still
+    /// located, and no task is.
+    #[test]
+    fn dash_k_and_a_lists_a_process_only_as_a_task() {
+        let sel = |pids: Vec<u32>| Selection {
+            pids,
+            and_mode: true,
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        assert_eq!(
+            entries(&sel(vec![1, 2]).apply(k_linux())),
+            vec![(2, None), (2, Some(3))],
+            "the single-threaded process is not a task"
+        );
+        assert!(sel(vec![1]).apply(k_linux()).is_empty());
+        let found = sel(vec![1]).locate(&k_linux());
+        assert!(!found.tasks, "no tasks located");
+        assert_eq!(found.pids, vec![true], "the PID still is");
+        assert!(sel(vec![2]).locate(&k_linux()).tasks);
+        // Without `-K` the task kind is not specified and plays no part.
+        let plain = Selection {
+            pids: vec![1],
+            and_mode: true,
+            ..Default::default()
+        };
+        assert_eq!(entries(&plain.apply(k_linux())), vec![(1, None)]);
+    }
+
+    /// Under `-K -a` the C compares `-c` only once the task test has passed,
+    /// so a process that is not a task leaves its command unlocated.
+    #[test]
+    fn dash_k_and_a_compares_the_command_only_of_a_task() {
+        let sel = |pid: u32, cmd: &str| Selection {
+            pids: vec![pid],
+            commands: vec![cmd.into()],
+            and_mode: true,
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        assert_eq!(sel(1, "one").locate(&k_linux()).commands, vec![false]);
+        assert_eq!(sel(2, "two").locate(&k_linux()).commands, vec![true]);
+    }
+
+    /// A task is located by a row KEPT, printed or not: `-d 999` drops every
+    /// row at the AND and the item is still located (`link_lfile`).
+    #[test]
+    fn dash_k_is_located_by_a_row_printed_or_not() {
+        let sel = |pid: u32| Selection {
+            pids: vec![pid],
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(999)],
+                exclude: vec![],
+            }),
+            and_mode: true,
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        assert!(sel(2).apply(k_linux()).is_empty());
+        assert!(sel(2).locate(&k_linux()).tasks);
+        assert!(!sel(1).locate(&k_linux()).tasks);
+    }
+
+    /// Under the OR, `-K` lists every task beside what else is selected, and
+    /// the process's own rows never locate a task.
+    #[test]
+    fn dash_k_without_a_ors_the_tasks_in() {
+        let sel = Selection {
+            pids: vec![1],
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        assert_eq!(
+            entries(&sel.apply(k_linux())),
+            vec![(1, None), (2, Some(3))]
+        );
+        assert!(sel.locate(&k_linux()).tasks);
+        let lone: Vec<Process> = k_linux().into_iter().filter(|p| p.pid == 1).collect();
+        assert!(!sel.locate(&lone).tasks, "rows, but none of a task");
+        assert_eq!(entries(&sel.apply(lone)), vec![(1, None)]);
+    }
+
+    /// Windows lists a thread as a row of its process, so the row carries the
+    /// task kind, and a process with thread rows counts as having tasks. A
+    /// bare `-K` had printed nothing there: no row had the only kind given.
+    #[test]
+    fn a_windows_thread_row_is_a_task() {
+        let mut app = who(7, "app.exe", 0, 7);
+        app.files = vec![
+            k_row(FdType::Handle(4), FileType::Regular),
+            k_row(FdType::Task, FileType::Thread),
+        ];
+        let bare = Selection {
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        let got = bare.apply(vec![app.clone()]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].files.len(), 1, "bare -K: the thread rows alone");
+        assert_eq!(got[0].files[0].file_type, FileType::Thread);
+        assert!(bare.locate(std::slice::from_ref(&app)).tasks);
+        for and_mode in [false, true] {
+            let sel = Selection {
+                pids: vec![7],
+                and_mode,
+                tasks: TaskMode::Always,
+                ..Default::default()
+            };
+            let got = sel.apply(vec![app.clone()]);
+            assert_eq!(
+                got[0].files.len(),
+                2,
+                "-a {and_mode}: its rows and its threads"
+            );
+            assert!(sel.locate(std::slice::from_ref(&app)).tasks);
+        }
+        // Without `-K` a thread row is an ordinary row of its process.
+        let plain = Selection {
+            pids: vec![7],
+            and_mode: true,
+            ..Default::default()
+        };
+        assert_eq!(plain.apply(vec![app]).len(), 1);
+    }
 }

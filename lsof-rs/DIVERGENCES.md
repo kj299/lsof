@@ -81,6 +81,86 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by making `-K` a search item, and a process a task only when it has one (2026-10-03)
+
+Items 33 and 9, both measured against the C.
+
+**`-K` under `-a`** (item 33). The C enters a process's own entry as a task
+only when the process has a task of its own: `dproc.c` passes `tid = pid` to
+`process_id()` when `Fand && ht && pidts`, `ht` meaning another task, not a
+zombie, passed the process tests, and 0 otherwise. Under `-a`, `is_proc_excl()`
+then requires the task kind with the PID, UID and group kinds, so a process
+that is not a task fails it. And it fails before `is_cmd_excl()` runs, so its
+command is never compared. So `lsof -K -a -p P` lists a multi-threaded P with
+its tasks, and a single-threaded P not at all, exiting 1. `lsof -V -K -a -c
+sle -p P`, P a `sleep`, reports both `command not located: sle` and `no tasks
+located`. lsof-rs had dropped the task kind from the `-a` requirement, which
+matched the C only on a multi-threaded process, the one its first measurement
+used.
+
+**`-K` is a search item.** `-K` sets `Ftask`, and `link_lfile()` raises it to 2
+when it links a file whose kinds include the task kind. A run that never does
+exits 1, and `-V` prints `lsof: no tasks located` after the PID lines. Linking
+is not printing: `-K -a -d 999 -p P` on a multi-threaded P prints nothing and
+exits 0, because P's rows were linked before the AND dropped them. lsof-rs had
+no such item. `-K i`, and a `-K i` after `-K`, turn it off with the selection.
+
+**`-t` under `-K`.** A task is selected, and located, only through a row of its
+own, and `-t`'s fast path built no task entries. So `lsof -K -t -p P` printed P
+alone, where the C prints every process with a task, and `-K -t -a -p P,Q`
+printed both PIDs where the C prints only the one with tasks. An explicit
+`-K` now takes the full path.
+
+lsof-rs models the rule rather than the C's temporary TID. `entry_kinds()`
+gives the process's own entry the task kind under `-K -a` when the run has a
+task entry for its PID. A task passes the process tests exactly when its
+process would with the task kind added, since it has the process's PID, UID,
+group and command, so that is the C's `ht`. `pidts` holds for every live
+process. The task kind is now required under `-a` like any other.
+
+Two changes ride on the same rule:
+- **Under `-a`, the Linux backend reads only in-scope processes' tasks.** A
+  task can pass `-a` only if its process does, and lsof-rs had read the fd
+  table of every task on the host to drop all but one process's.
+- **A Windows thread row is a task.** Windows lists a thread as a row of its
+  process, where Linux lists a task as an entry of its own, so the row carries
+  the task kind, and a process with thread rows counts as having tasks. A
+  bare `lsof -K` on Windows had printed nothing, since no row had the one kind
+  given. `-K -p P` and `-K -a -p P` print what they printed before.
+
+**Item 9 needed no code.** A directory opened by glibc's `opendir()`
+(`O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC`, flags `02304000`) is `r`
+in the C, as in lsof-rs. Across this host, every directory fd the C shows as
+`u` is an `O_PATH` fd, flags `012200000`; this session's own harness holds one.
+Both binaries agree on all 207 directory rows they share. That is #44's case:
+an `O_PATH` fd's access mode reads as read-only, the item's "fdinfo flags say
+read-only", while its link grants neither read nor write, which the C prints
+as `u`. #44 matched it.
+
+### What the gate gained
+
+Ten differential cases, 255 in all, 0 unexplained, on fixture A, a
+single-threaded `sleep`, and fixture I, a process with two threads:
+- under `-a`: the single-threaded process listed nothing; the `-V` line;
+  `-c` not compared; mixed PIDs with only the threaded one listed;
+- located printed or not, and not located without a task;
+- `-t`, in two shapes;
+- the last of `-K` and `-K i` deciding, both ways.
+
+Fixture Q holds an `opendir()` fd, so item 9's `r` is in every access case.
+
+Five unit tests pin the rules in the shared crate, the Windows thread row
+among them, since no Windows run can see it here. One more pins where the
+`-V` line goes. Measured against the C before the cases were written: 33
+spellings of `-K` on a single-threaded and a multi-threaded process, all now
+identical in output and exit status.
+
+### What it found next to it
+
+Item 49: an empty item in a `-p` list (`-p ,`, `-p ,1`, `-p 1,,1`) is PID 0
+to the C, which then reports `process ID not located: 0` and exits 1. A
+trailing comma is ignored. lsof-rs drops empty items.
+
 ## Fixed by reading the access letter as the kernel sets it, and naming the file flags (2026-09-28)
 
 Items 44 and 46, both measured against the C.
@@ -2004,7 +2084,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 6 | `-o` → header `OFFSET`, blank when unknown | ~~header unchanged, falls back to size~~ **resolved 2026-09-25** | renderer, both platforms; see "Fixed by measuring the SIZE/OFF column's three modes" above. The `files-offset-o` ledger entry is gone — the case MATCHes, and a stale entry would now fail the gate. |
 | 7 | `8uW` — `W` marks a write lock on the fd | ~~`8u`~~ **resolved on Linux 2026-09-05** | lock column, from `/proc/locks`. Windows still shows none: `FsRtlGetNextFileLock` is kernel-mode and nothing in user mode enumerates another process's locks (`docs/known-limitations.md`). |
 | 8 | `TYPE a_inode`, NAME `[eventpoll:7,9,…]` | ~~`unknown`, `anon_inode:[eventpoll]`~~ **resolved 2026-09-05** | Linux: named anon_inode kinds; see "Fixed by naming anonymous inodes" above |
-| 9 | a directory fd from `opendir` shows access `u` | `r` | **open question** — fdinfo `flags` say read-only; find how the C derives `u` before deciding which side is right |
+| 9 | ~~a directory fd from `opendir` shows access `u`~~ an `O_PATH` directory fd shows `u`; an `opendir` one shows `r` | `r` for both until #44, which matched the `O_PATH` one | **resolved 2026-10-03, by measurement** — see "Fixed by making `-K` a search item, and a process a task only when it has one" above. The `u` was an `O_PATH` fd, whose access mode reads as read-only. |
 | 10 | non-printable bytes in a name are escaped (`safestrprt()`) | ~~printed raw~~ **resolved 2026-09-04** | renderer, both platforms. Found by the `proc_status` fuzz target: a `\r` in `Name:` survives the parser verbatim, as it must (the kernel escapes only `\n` and `\\` there), and reached the COMMAND column raw — a process named with an ANSI escape sequence drove the terminal of whoever ran lsof-rs. Closed as the C does it; see "Fixed by the renderer escaping" above. |
 | 11 | `-F` emits the `f` marker only when selected (`-Fcn` → `p`, `c`, `n` lines) | ~~`f` on every file, whatever the selection~~ **resolved 2026-09-05** | `-F` renderer. Lsof.8: only `p` is "always selected". Found while writing the hostile-name `-F` cases, which select `f` explicitly (`-Ffc`, `-Ffn`) so they compare the escaping and not this. Windows `-F` output loses an `f` line per file when the selection omits it — which is the point. |
 
@@ -2043,7 +2123,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 30 | whole-host **peak RSS** was ~2.9x the C and grew with the host (9.8 MB against 29.0 MB at 1075 processes) | ~~2.9x and growing~~ **resolved 2026-09-24: 0.84x, 0.85x, 0.87x of the C at 76, 575 and 1075 processes** | **The cause recorded here in P5 was wrong.** It said the C streams each row and forgets it, and that closing the gap meant a streaming redesign of the `Backend` seam. It never read the C, which does not stream: `main.c` gathers every process into `Lproc[]` (`gather_proc_info()`, line 1343), `qsort`s it (1365) and only then prints and frees (1515–1522) — LESSONS #038's "only the oracle knows", ignored by the entry that closed P5. Both programs hold every row. A heap profile (massif, 1079 processes) put the real cost in three places, and none needed a redesign: the renderer held the table **three times** — the rows, a `Vec<Vec<String>>` of every cell (7 MB of `String` headers alone), and the whole output as one `String` — fixed by sizing the columns in one pass and writing each line in a second (22.95 → 8.57 MB); each process's `Vec<OpenFile>` kept its growth slack for the whole run (13.8 MB of capacity for 5.9 MB of rows) — trimmed after the walk (29.5 → 25.3 MB); and every row carried a 136-byte `SocketInfo` inline, used by about one row in eighteen — boxed, `OpenFile` 320 → 192 bytes (25.3 → 23.0 MB). Output byte-identical. The resource gate's whole-host ceiling drops from 3.50x to 1.30x. |
 | 31 | a selected process with **no readable files** (a zombie) is **not listed**: `lsof -p <zombie>` prints nothing and exits 1, and `-V` says `lsof: process ID not located: <pid>` | ~~prints a bare `unk unknown` row and exits 0~~ **resolved 2026-09-25** | the C skips a process in state `Z` but still walks its tasks; lsof-rs now does both, and reads a task's mapped files from the task. See "Fixed by not listing zombies" above. |
 | 32 | `-s TCP:<state>` is a **search item** (`TCP state not located: X`); an unknown state or protocol is fatal (`unknown TCP state name: X`, `unknown -s protocol: "x"`); and on Linux the TCP list tests every TCP **and UDP** socket by the kernel's number, UDP's being `CLOSE` or `ESTABLISHED`, and nothing else | ~~none of the three: any text accepted, the last `-s` kept, and `-sTCP:…` drops every non-TCP socket~~ **resolved 2026-09-25** | see "Fixed by making `-s` the C's state filter" above. This row had said a TCP filter "leaves UDP and unix sockets alone": **wrong about UDP**, which it filters, and corrected by measuring before the fix. The C's own defect is not copied: every `-s UDP:<state>` segfaults it (ledgered, `states-udp-names-crash-the-c`), and lsof-rs refuses the value. |
-| 33 | `-K` is a search item (`no tasks located`), and `-K -a -p <a single-threaded process>` lists **nothing** — the main process is entered as a task only when it has one of its own (`dproc.c`: `Fand && ht && pidts`) | lists the process's own rows and exits 0 | **OPEN — found 2026-09-25 by the item-21 audit.** The measurement behind `SelKinds::TASK`'s `-a` exemption was made on a multi-threaded process, where the two agree. Seen again 2026-09-25: `lsof -K -w -p P`, P multi-threaded and unreadable, prints nothing in both and exits **1** in the C — `-w` leaves no task a row, so no task is located. |
+| 33 | `-K` is a search item (`no tasks located`), and `-K -a -p <a single-threaded process>` lists **nothing** — the main process is entered as a task only when it has one of its own (`dproc.c`: `Fand && ht && pidts`) | ~~lists the process's own rows and exits 0~~ **resolved 2026-10-03** | see "Fixed by making `-K` a search item, and a process a task only when it has one" above. `-t` under `-K` was wrong with it, and is fixed with it. |
 | 34 | ~~option parsing stops at the first file name~~ | — | **a duplicate of item 12**, recorded 2026-09-25 by an audit that had not read the table it was adding to. Folded into 12, which now has the case this row said was missing. |
 | 35 | every column is **right-aligned** but COMMAND and TASKCMD (`print.c`: `" %*s"`), FD is the descriptor right-aligned plus its access and lock characters, and NAME follows one space unpadded | ~~USER, FD, TYPE, DEVICE and NODE left-aligned~~ **resolved 2026-09-26** | see "Fixed by laying the table out as `print.c` does" above. The item named four of the five columns. Every case now compares whitespace, and that found one more difference, a space after every packet-socket NAME. |
 | 36 | a UID with no password entry, or any UID under `-l`: no `-F L` field, the number eight wide in USER, and `lsof: no pwd entry for UID N` on stderr | ~~prints `L<uid>`, and a bare number~~ **resolved 2026-09-26, but for the stderr line** | the table and `-F` now match (measured with UID 65000 and with `-l`). The C writes the stderr warning once per row it prints, unless `-w`; lsof-rs writes none. |
@@ -2059,6 +2139,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | ~~refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g`~~ **resolved 2026-09-28** | see "Fixed by reading the access letter as the kernel sets it, and naming the file flags" above. Windows records no flags and refuses `g` and `G`, as a C dialect without them does. |
 | 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | ~~accepts the letter and prints nothing~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. Windows has no such number and prints none. |
 | 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | types every live mapping `REG`, with the filesystem's device | **OPEN — found 2026-09-26** by reading `maps.rs` while adding `r`. Not measured: no device on this host can be mapped. |
+| 49 | an empty item in a `-p` list is PID 0: `-p ,`, `-p ,1` and `-p 1,,1` report `process ID not located: 0` and exit 1, while a trailing comma (`-p 1,`) is ignored | drops every empty item, so `-p ,` lists the whole host | **OPEN — found 2026-10-03** while measuring item 33. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
