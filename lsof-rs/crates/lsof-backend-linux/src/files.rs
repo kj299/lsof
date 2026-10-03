@@ -1368,9 +1368,18 @@ mod tests {
         let plain = dir.join("plain");
         std::fs::write(&plain, b"x").unwrap();
         assert_eq!(socket_file_id(plain.to_str().unwrap(), &[]), None);
-        // Nor does a relative path, or one under a `-e` file system, which
-        // is never stat'ed.
-        assert_eq!(socket_file_id("s.sock", &[]), None);
+        // Nor does a relative path, even one that reaches that very socket
+        // from here: it is relative to the cwd of whoever bound it, not this
+        // one's, so the C never stats it.
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count().saturating_sub(1));
+        let relative = format!("{up}{}", path.trim_start_matches('/'));
+        assert!(
+            std::fs::metadata(&relative).is_ok(),
+            "{relative} reaches it"
+        );
+        assert_eq!(socket_file_id(&relative, &[]), None);
+        // Nor one under a `-e` file system, which is never stat'ed.
         let exempt = [dir.to_str().unwrap().to_string()];
         assert_eq!(socket_file_id(path, &exempt), None);
         let _ = std::fs::remove_dir_all(&dir);

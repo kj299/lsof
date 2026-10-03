@@ -148,6 +148,52 @@ keeps the typed spelling for that message and for the socket comparison, and
 uses the resolved one only to recognise a mount point, as the C uses its own
 `Readlink()`. Windows matches names and still resolves everything first.
 
+### What the gate gained
+
+Eighteen differential cases, 281 in all, 0 unexplained, on three new
+fixtures:
+- **Y** holds socket paths: a listener with an accepted connection, a symlink
+  to it, a socket whose file was replaced by a regular one, and a symlink to
+  that replacement, which must find nothing.
+- **M** is a process whose cwd and an open file sit on a tmpfs mounted over a
+  plain directory in a mount namespace of its own. It is made through an
+  unprivileged user namespace, as fixture L is, and is skipped by name where
+  those are not allowed.
+- **W** is two processes, with real and effective uids differing each way.
+  Only root can make them, so on a runner that is not root the harness starts
+  them through `sudo -n` and waits until their `Uid:` lines read as intended.
+  Without either, their cases are skipped by name.
+
+The suite passes run as root, and as a user who is not root but has
+passwordless sudo, which is how CI runs it. Against master's binary every new
+case but the one control diverges.
+
+Unit tests pin:
+- the effective field of `Uid:`;
+- the matching rules, with the socket named through a symlink, so identity
+  alone has to find it;
+- that a socket found by its path counts as located;
+- `socket_file_id()`: a socket file, a regular file, a relative path that
+  reaches the socket, and a path under `-e`.
+
+Thirteen mutants, all killed. Two passed an early version of the tests:
+- **A relative bound path being `stat`ed.** The unit test's relative path
+  existed nowhere, so its assertion held vacuously. It now reaches the very
+  socket from the test's cwd.
+- **Identity dropped from the socket rule.** Only the symlink case killed it
+  until the unit test named the socket through a link.
+
+Not gated by the differential: the `-e` rule for a socket's bound path, which
+only the unit test reaches. W's and M's cases need root or passwordless sudo,
+and unprivileged user namespaces, which CI has.
+
+### What it found next to it
+
+- **Item 62:** `-V` still reports a path argument that could not be `stat`ed,
+  after its status error. The C reports only the error.
+- **Item 63:** `+d`/`+D` spell a relative or symlinked directory differently
+  from the C's `Readlink()`, in `-V` only.
+
 ## Fixed by making `-K` a search item, and a process a task only when it has one (2026-10-03)
 
 Items 33 and 9, both measured against the C.
