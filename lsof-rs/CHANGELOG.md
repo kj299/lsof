@@ -145,6 +145,37 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **A process's owner is its effective uid** (DIVERGENCES 55), as the C takes
+  it from the owner of `/proc/<pid>/`. A process running with real uid 0 and
+  effective uid 65534 showed `root` and escaped `-u nobody`; the USER column,
+  `-l`, `-F u`, `-F L` and `-u` now see `nobody`. A task keeps its process's
+  owner, as in the C.
+- **A path argument finds a file by what it is, and an AF_UNIX socket by the
+  path it is bound to** (DIVERGENCES 60). With the same path in another mount
+  namespace naming another file, lsof-rs printed that file and then reported
+  the argument not located. And it never found a unix socket by its path, the
+  case its name comparison was meant for: now `lsof /run/x.sock` finds the
+  socket bound there, through a symlink or a relative spelling too, as the C
+  does.
+- **An unlocated path argument is reported as it was typed** (`no file use
+  located: ./x`), as the C reports it, not as the resolved absolute path; so
+  is `+f`'s `not a file system:`. That message and `status error on` now
+  escape the argument, as the C's `safestrprt()` does, where they printed it
+  raw.
+- **A path argument counts as located when a file it names is examined**,
+  printed or not (DIVERGENCES 64). As in the C, `lsof -a -p P -d 0 FILE`, with
+  P holding FILE on fd 3, lists nothing and exits 0; lsof-rs said
+  `no file use located` and exited 1.
+- **`FILE/`, a trailing slash on a file, finds FILE**, as in the C, which drops
+  the slash before the `stat`. lsof-rs failed with `Not a directory`.
+- **A unix socket's bound path that is not UTF-8 is `stat`ed by its own
+  bytes**, so a symlink or another name for that socket file finds it, and its
+  shown form, with U+FFFD, never finds another socket by name. Each bound path
+  is `stat`ed once a run, and only when a path is named. Under `-e` it is
+  resolved a component at a time and never looked up inside an exempt file
+  system, which the C does not promise.
+  The C cuts a bound path at a space, a TAB or a `:` (DIVERGENCES 66, a
+  C-DEFECT); lsof-rs keeps it whole and finds the socket by it.
 - **`-K -a` lists a process only as a task, and `-K` is a search item**
   (DIVERGENCES 33). As in the C, a process counts as a task under `-a` only
   when it has a task of its own, so `lsof -K -a -p P` lists nothing for a

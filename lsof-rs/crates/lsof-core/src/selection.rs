@@ -28,7 +28,7 @@
 //! `-s` exclusion form, which is the C's `SELEXCLF` — an absolute veto that
 //! outranks the OR.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::MountEntry;
 use crate::model::{tcp_state_table, FdType, FileType, OpenFile, Process, Protocol, TcpState};
@@ -577,6 +577,24 @@ pub struct Located {
     pub states: Vec<bool>,
     /// The `-K` item (the C's `Ftask == 2`): a row of a task was kept.
     pub tasks: bool,
+    /// Parallel to `sel.path_items` (the C's `Sfile[].f`).
+    pub paths: Vec<bool>,
+}
+
+/// One path argument, or one entry of a `+d`/`+D` expansion, as the search
+/// item the C reports on (an `Sfile` entry).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PathItem {
+    /// The `(DEVICE, NODE)` of the file it names, when the backend resolved
+    /// it.
+    pub id: Option<(String, String)>,
+    /// Set when it named a **file system**: any file on it locates it, as it
+    /// has no identity of its own.
+    pub fs_device: Option<u64>,
+    /// As typed, on a backend that identifies files: what an AF_UNIX socket's
+    /// bound path is compared with, and what `-V` prints when it is not
+    /// located. Resolved first on one that matches names.
+    pub name: String,
 }
 
 /// The full set of user-specified filters for one run.
@@ -600,9 +618,10 @@ pub struct Selection {
     pub users: Vec<String>,
     /// `-u` values resolved to user IDs, as the C resolves them while it
     /// parses: a number is the ID, a name goes through the password file. The
-    /// process's real UID is what is compared, so `-u 0` and `-u root` are the
-    /// same selection — `-u 0` had matched nothing on Linux, because it was
-    /// compared with the name `root`.
+    /// process's owner is what is compared, its effective UID on Linux
+    /// (DIVERGENCES 55), so `-u 0` and `-u root` are the same selection —
+    /// `-u 0` had matched nothing on Linux, because it was compared with the
+    /// name `root`.
     pub uids: Vec<UidSel>,
     /// `-u ^value`, resolved the same way.
     pub uid_excludes: Vec<u32>,
@@ -656,6 +675,14 @@ pub struct Selection {
     /// latter case selection falls back to matching names, which is what the
     /// Windows backend still does.
     pub path_ids: std::collections::HashSet<(String, String)>,
+    /// Every path argument as it was typed, and every entry a `+d`/`+D`
+    /// expansion produced: the C's `aname`s, which it compares with an
+    /// AF_UNIX socket's bound path when the socket file's identity did not
+    /// settle it (`is_file_named()` type 2). Nothing else is matched by name.
+    pub path_names: std::collections::HashSet<String>,
+    /// Every path argument and `+d`/`+D` entry as a search item, in the order
+    /// `-V` reports them; [`Selection::locate`] marks them.
+    pub path_items: Vec<PathItem>,
     /// `-d`: file-descriptor filter.
     pub fd_filter: Option<FdFilter>,
     /// `-s TCP:<states>`: the socket state filter, e.g. `TCP:LISTEN`,
@@ -978,11 +1005,24 @@ impl Selection {
                     return true;
                 }
             }
-            // A row with no identity (a socket, a row the backend could not
-            // stat) can still be named exactly — `lsof /run/x.sock` should find
-            // the AF_UNIX socket bound there, which has a name but no inode of
-            // its own on this row.
-            return self.paths.contains(&f.name);
+            // An AF_UNIX socket is found by the path it is bound to as well,
+            // as the C finds it (`dsock.c`): by the socket file at that path,
+            // so a symlink or a relative spelling finds it, and failing that
+            // by the path as typed. Nothing else falls back on its name: the C
+            // matches a file by device and inode, or by file system, and a
+            // file with the same path in another mount namespace is another
+            // file. lsof-rs had compared every row's NAME with the arguments,
+            // so it printed that file, and then said it had not found it; and
+            // a socket's NAME carries its `type=` tail, so it never found a
+            // socket (DIVERGENCES 60).
+            return f
+                .socket
+                .as_deref()
+                .and_then(|s| s.bound.as_deref())
+                .is_some_and(|b| {
+                    b.id.as_ref().is_some_and(|id| self.path_ids.contains(id))
+                        || b.path.as_ref().is_some_and(|p| self.path_names.contains(p))
+                });
         }
         // The backend cannot identify a path, so fall back to matching names.
         // This is the Windows path today, and it is a fallback rather than a
@@ -1102,6 +1142,7 @@ impl Selection {
             nfs: false,
             states: vec![false; self.state_filter.as_ref().map_or(0, |f| f.include.len())],
             tasks: false,
+            paths: vec![false; self.path_items.len()],
         };
         // `is_proc_excl` requires all of these under `-a` before `-c` is even
         // compared — the task kind among them, so a process that is not a
@@ -1114,6 +1155,7 @@ impl Selection {
         );
         let with_tasks = pids_with_tasks(gathered);
         let sockets_only = self.socket_rows_only();
+        let path_index = PathIndex::new(&self.path_items, self.paths_identified);
         for p in gathered {
             if self.excludes_process(p) {
                 continue;
@@ -1175,6 +1217,12 @@ impl Selection {
                 found.tasks |= self.tasks == TaskMode::Always
                     && !(sockets_only && f.fd == FdType::Task)
                     && kinds.union(self.file_kinds(f)).contains(SelKinds::TASK);
+                // A path is marked as the file is examined, too: the C sets
+                // `Sfile[].f` in `is_file_named()` while it builds the file,
+                // before `-a` is applied. So `lsof -a -p P -d 0 FILE`, P
+                // holding FILE on fd 3, lists nothing and exits 0; lsof-rs had
+                // asked the rows it printed, and exited 1.
+                path_index.mark(f, &mut found.paths, || self.path_matches(f));
             }
         }
         found
@@ -1446,6 +1494,88 @@ impl Selection {
             out.push(p);
         }
         out
+    }
+}
+
+/// [`Selection::path_items`] indexed for [`Selection::locate`], so each file
+/// examined is looked up once rather than compared with every item: a `+D`
+/// makes an item of every entry under it, and a whole host has thousands of
+/// files.
+struct PathIndex<'a> {
+    by_id: HashMap<(&'a str, &'a str), Vec<usize>>,
+    by_fs: HashMap<u64, Vec<usize>>,
+    /// Every item by its name as typed, for a socket's bound path: the C
+    /// compares that with every argument, a file system's included.
+    by_name: HashMap<&'a str, Vec<usize>>,
+    /// On a backend that matches names, every item, lowercased: compared with
+    /// the name of a file the path filter selects, as it is selected.
+    by_prefix: Vec<(usize, String)>,
+}
+
+impl<'a> PathIndex<'a> {
+    /// With `identified`, an item with no identity is an argument that could
+    /// not be `stat`ed. The C drops it, and nothing finds it by name here:
+    /// with identities, nothing is matched by name (DIVERGENCES 60).
+    fn new(items: &'a [PathItem], identified: bool) -> Self {
+        let mut ix = PathIndex {
+            by_id: HashMap::new(),
+            by_fs: HashMap::new(),
+            by_name: HashMap::new(),
+            by_prefix: Vec::new(),
+        };
+        for (i, item) in items.iter().enumerate() {
+            ix.by_name.entry(item.name.as_str()).or_default().push(i);
+            match (&item.id, item.fs_device) {
+                (_, Some(dev)) => ix.by_fs.entry(dev).or_default().push(i),
+                (Some((d, n)), None) => ix
+                    .by_id
+                    .entry((d.as_str(), n.as_str()))
+                    .or_default()
+                    .push(i),
+                (None, None) if !identified => {
+                    ix.by_prefix.push((i, item.name.to_ascii_lowercase()));
+                }
+                (None, None) => {}
+            }
+        }
+        ix
+    }
+
+    /// Mark every item `f` locates: one that names it (its identity), one
+    /// that named the file system it is on, and, for an AF_UNIX socket, one
+    /// that names the socket file at its bound path or is that path as typed.
+    /// With no identity to go by, by name: the file itself, or under it,
+    /// asked only of a file `selected` says the path filter takes. Only such
+    /// a name can start with an item's, and a `+D` makes an item of every
+    /// entry, so asking every file on the host would cost files x entries.
+    fn mark(&self, f: &OpenFile, hits: &mut [bool], selected: impl FnOnce() -> bool) {
+        let mut hit = |found: Option<&Vec<usize>>| {
+            for &i in found.into_iter().flatten() {
+                hits[i] = true;
+            }
+        };
+        if let (Some(d), Some(n)) = (f.device.as_deref(), f.node.as_deref()) {
+            hit(self.by_id.get(&(d, n)));
+        }
+        if let Some(dev) = f.fs_device {
+            hit(self.by_fs.get(&dev));
+        }
+        if let Some(b) = f.socket.as_deref().and_then(|s| s.bound.as_deref()) {
+            if let Some(path) = &b.path {
+                hit(self.by_name.get(path.as_str()));
+            }
+            if let Some((d, n)) = &b.id {
+                hit(self.by_id.get(&(d.as_str(), n.as_str())));
+            }
+        }
+        if !self.by_prefix.is_empty() && selected() {
+            let name = f.name.to_ascii_lowercase();
+            for (i, needle) in &self.by_prefix {
+                if name == *needle || name.starts_with(needle.as_str()) {
+                    hits[*i] = true;
+                }
+            }
+        }
     }
 }
 
@@ -1762,6 +1892,7 @@ mod tests {
             node: Some(proto.as_str().to_string()),
             links: None,
             socket: Some(Box::new(SocketInfo {
+                bound: None,
                 protocol: proto,
                 local: None,
                 remote: Some("127.0.0.1:0".parse().unwrap()),
@@ -2299,6 +2430,288 @@ mod tests {
     }
 
     #[test]
+    fn a_path_finds_no_file_by_name_and_a_unix_socket_by_its_bound_path() {
+        // DIVERGENCES 60. With identities, the C matches a file by device and
+        // inode alone, so a row NAMED as the argument with another identity --
+        // the same path in another mount namespace -- is not found. An AF_UNIX
+        // socket is, by the path it is bound to: the socket file's identity
+        // there, or, with no socket file there, the path as typed.
+        use crate::model::{
+            AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SocketInfo,
+        };
+        let row = |name: &str, node: &str, bound: Option<BoundPath>| OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: name.into(),
+            device: Some("0,41".into()),
+            size: None,
+            offset: None,
+            node: Some(node.into()),
+            links: None,
+            socket: bound.map(|b| {
+                Box::new(SocketInfo {
+                    bound: Some(Box::new(b)),
+                    protocol: Protocol::Other("unix"),
+                    local: None,
+                    remote: None,
+                    state: None,
+                    tcp: None,
+                })
+            }),
+        };
+        // `/d/link` is a symlink to `/d/s.sock`: only the socket file's
+        // identity can find the socket through it.
+        let mut sel = Selection {
+            paths: vec!["/d/mnt".into(), "/d/link".into(), "/d/gone.sock".into()],
+            paths_identified: true,
+            ..Default::default()
+        };
+        // Here, /d/mnt and /d/link's target are files with these identities.
+        sel.path_ids.insert(("254,0".into(), "10".into()));
+        sel.path_ids.insert(("254,0".into(), "11".into()));
+        for p in &sel.paths {
+            sel.path_names.insert(p.clone());
+        }
+        let bound = |path: &str, id: Option<(&str, &str)>| BoundPath {
+            path: Some(path.into()),
+            id: id.map(|(d, n)| (d.into(), n.into())),
+        };
+        let p = Process {
+            tid: None,
+            task_command: None,
+            uid: None,
+            pgid: None,
+            pid: 7,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            unlisted: false,
+            files: vec![
+                // The same path, another file: a tmpfs over /d/mnt elsewhere.
+                row("/d/mnt", "1", None),
+                // Bound at /d/s.sock, whose socket file is the argument's.
+                row(
+                    "/d/s.sock type=STREAM",
+                    "500",
+                    Some(bound("/d/s.sock", Some(("254,0", "11")))),
+                ),
+                // Bound at /d/gone.sock, where no socket file is: the path.
+                row(
+                    "/d/gone.sock type=STREAM",
+                    "501",
+                    Some(bound("/d/gone.sock", None)),
+                ),
+                // Bound elsewhere, its NAME no argument: found by nothing.
+                row(
+                    "/d/other.sock type=STREAM",
+                    "502",
+                    Some(bound("/d/other.sock", None)),
+                ),
+            ],
+        };
+        let got = sel.apply(vec![p]);
+        let nodes: Vec<&str> = got[0]
+            .files
+            .iter()
+            .filter_map(|f| f.node.as_deref())
+            .collect();
+        assert_eq!(nodes, vec!["500", "501"], "{got:#?}");
+    }
+
+    #[test]
+    fn a_path_is_located_by_a_file_the_c_examines_printed_or_not() {
+        // DIVERGENCES 60. The C marks a path argument while it builds the
+        // file, before `-a` is applied, for any process it examines: by
+        // identity, by file system, or by an AF_UNIX socket's bound path.
+        use crate::model::{
+            AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SocketInfo,
+        };
+        let row = |fd: u64, dev: &str, node: &str, bound: Option<BoundPath>| OpenFile {
+            rdev: None,
+            fs_device: Some(9),
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(fd),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "/elsewhere".into(),
+            device: Some(dev.into()),
+            size: None,
+            offset: None,
+            node: Some(node.into()),
+            links: None,
+            socket: bound.map(|b| {
+                Box::new(SocketInfo {
+                    bound: Some(Box::new(b)),
+                    protocol: Protocol::Other("unix"),
+                    local: None,
+                    remote: None,
+                    state: None,
+                    tcp: None,
+                })
+            }),
+        };
+        let proc_ = |pid: u32, files: Vec<OpenFile>| Process {
+            tid: None,
+            task_command: None,
+            uid: None,
+            pgid: None,
+            pid,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            unlisted: false,
+            files,
+        };
+        let item = |id: Option<(&str, &str)>, fs: Option<u64>, name: &str| PathItem {
+            id: id.map(|(d, n)| (d.into(), n.into())),
+            fs_device: fs,
+            name: name.into(),
+        };
+        // `-a -p 7 -d 0`: process 7 is examined and every row of it is
+        // dropped at print; process 8 fails `-p` and is never examined.
+        let sel = Selection {
+            pids: vec![7],
+            and_mode: true,
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(0)],
+                exclude: vec![],
+            }),
+            paths_identified: true,
+            path_items: vec![
+                item(Some(("254,0", "11")), None, "/d/link-to-s.sock"),
+                item(None, Some(42), "/d/m"),
+                item(Some(("254,0", "99")), None, "/d/f.txt"),
+                item(Some(("254,0", "77")), None, "/d/g.txt"),
+                item(None, Some(9), "/fs"),
+            ],
+            ..Default::default()
+        };
+        let bound = |path: &str, id: Option<(&str, &str)>| BoundPath {
+            path: Some(path.into()),
+            id: id.map(|(d, n)| (d.into(), n.into())),
+        };
+        let gathered = [
+            proc_(
+                7,
+                vec![
+                    row(
+                        3,
+                        "0xffff",
+                        "500",
+                        Some(bound("/d/s.sock", Some(("254,0", "11")))),
+                    ),
+                    row(4, "0xffff", "501", Some(bound("/d/m", None))),
+                    row(5, "254,0", "99", None),
+                ],
+            ),
+            proc_(8, vec![row(3, "254,0", "77", None)]),
+        ];
+        assert!(
+            sel.apply(gathered.to_vec()).is_empty(),
+            "-d 0 prints nothing"
+        );
+        assert_eq!(
+            sel.locate(&gathered).paths,
+            [true, true, true, false, true],
+            "socket by identity, socket by the typed path, a file not printed, \
+             nothing from a process -a left out, a file system"
+        );
+    }
+
+    #[test]
+    fn where_paths_have_no_identity_a_path_is_located_by_name() {
+        // A backend that matches names (Windows) has no identity to mark a
+        // path item by: a row named as it, or under it, locates it.
+        use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
+        let file = |name: &str| OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(4),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: name.into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+        };
+        let item = |name: &str| PathItem {
+            name: name.into(),
+            ..Default::default()
+        };
+        let sel = Selection {
+            paths: vec!["C:\\Dir".into(), "C:\\Other".into()],
+            path_items: vec![item("C:\\Dir"), item("C:\\Other")],
+            ..Default::default()
+        };
+        let p = |name: &str| Process {
+            tid: None,
+            task_command: None,
+            uid: None,
+            pgid: None,
+            pid: 7,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            unlisted: false,
+            files: vec![file(name)],
+        };
+        assert_eq!(sel.locate(&[p("c:\\dir\\a.txt")]).paths, [true, false]);
+        // Only a file the path filter selects is compared: `+d` takes what is
+        // directly in the directory, so a file two levels down, though its
+        // name starts with the directory's and with its entry's, locates
+        // neither.
+        let sel = Selection {
+            dirs_one_level: vec!["C:\\Dir".into()],
+            path_items: vec![item("C:\\Dir"), item("C:\\Dir\\Sub")],
+            ..Default::default()
+        };
+        assert_eq!(
+            sel.locate(&[p("c:\\dir\\sub\\deep.txt")]).paths,
+            [false, false]
+        );
+        assert_eq!(sel.locate(&[p("c:\\dir\\sub")]).paths, [true, true]);
+        // Where paths have identities, one with none is an argument that
+        // could not be `stat`ed: the C drops it, and no name finds it. Not a
+        // file of the same name, which can only be another file, nor one the
+        // path filter takes for another argument (a hard link to `/real`)
+        // whose name happens to start with it.
+        let real = ("0,1".to_string(), "7".to_string());
+        let mut sel = Selection {
+            paths: vec!["/gone".into(), "/real".into()],
+            paths_identified: true,
+            path_items: vec![
+                item("/gone"),
+                PathItem {
+                    id: Some(real.clone()),
+                    ..item("/real")
+                },
+            ],
+            ..Default::default()
+        };
+        sel.path_ids.insert(real.clone());
+        let mut link = file("/gone-too");
+        link.device = Some(real.0.clone());
+        link.node = Some(real.1.clone());
+        let mut q = p("/gone");
+        q.files.push(link);
+        assert_eq!(sel.locate(&[q]).paths, [false, true]);
+    }
+
+    #[test]
     fn plus_d_is_one_level_where_only_names_are_available() {
         // The fallback used when a backend cannot identify paths (Windows).
         // `+d` must still mean one level, or it silently becomes `+D`.
@@ -2678,6 +3091,7 @@ mod tests {
             node: Some("TCP".into()),
             links: None,
             socket: Some(Box::new(SocketInfo {
+                bound: None,
                 protocol: Protocol::Tcp,
                 local: Some(format!("127.0.0.1:{lport}").parse().unwrap()),
                 remote: remote.map(|r| r.parse().unwrap()),
@@ -2805,6 +3219,7 @@ mod tests {
         let mut f = tcp(fd, lport, None, TcpState::Listen);
         f.node = Some("UDP".into());
         f.socket = Some(Box::new(SocketInfo {
+            bound: None,
             protocol: Protocol::Udp,
             local: Some(format!("127.0.0.1:{lport}").parse().unwrap()),
             remote: None,
@@ -2842,6 +3257,7 @@ mod tests {
         let mut unix = tcp(9, 1, None, TcpState::Listen);
         unix.file_type = FileType::Unix;
         unix.socket = Some(Box::new(SocketInfo {
+            bound: None,
             protocol: Protocol::Other("unix"),
             local: None,
             remote: None,

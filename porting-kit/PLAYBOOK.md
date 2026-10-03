@@ -274,6 +274,12 @@ Then the loop — each step is a CI-enforced gate:
    **oracle-substitution** (diff against a native tool over self-owned fixtures)
    with a three-way exit contract — match / divergence / infra-error — so a
    broken harness can't read as a port bug. Both modes are in the matrix header.
+   **A fallback is a feature of its own** (LESSONS #075): for each fallback,
+   exemption or second matching rule, name the input it is for, and give the
+   matrix a case where it must fire for that input and one where another input
+   must not reach it. lsof-rs compared NAMEs to find sockets by path; a socket's
+   NAME carries a `type=` tail, so the comparison never found one and fired only
+   for a file of the same name in another mount namespace.
    Finally, **mutate the cases you just wrote** (LESSONS #26): for each one, name
    the change it is meant to catch, make that change, and confirm the case turns
    red — then record the result as a kill table, one row per case. A case no

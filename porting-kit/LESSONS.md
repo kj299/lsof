@@ -3510,3 +3510,34 @@ finding it is supposed to produce.
   kill the way `sweep_decisions()` confirms a stale line would be a change to
   `harnesses/gate-mutation`, and is proposed, not made.
 - **Section amended:** none.
+
+## 075. A name fallback written for sockets never matched one, and fired only where it was wrong
+
+- **Date:** 2026-10-03
+- **Codebase:** lsof-rs (path arguments, DIVERGENCES 60)
+- **What happened:** lsof-rs matched a path argument by device and inode, as
+  the C does, and then also compared each row's NAME with the arguments. The
+  comparison was meant for AF_UNIX sockets, which the C finds by the path they
+  are bound to. But a socket's NAME is that path plus a `type=STREAM` tail, so
+  it never matched a socket. What it did match was a file at the same path in
+  another mount namespace: a different file, which the C does not match. So
+  lsof-rs printed that file and then reported the argument not located, since
+  it counted located by identity. The differential had no socket named by its
+  path and no second mount namespace, so neither half showed. The fix moved
+  the rule to the bound path, read from `/proc/net/unix`, where the C has it.
+
+  A review of the fix found the same shape again, in the new code. `-e`
+  exempts a path by prefix, a test sound for fd link targets, which the
+  kernel makes canonical. It was reused on bound paths, which are text the
+  binding process chose, so `//`, `/./` or a symlink got past it, and the
+  exempt file system was `stat`ed after all.
+- **The rule.** A fallback, an exemption or a second matching rule is a
+  feature of its own. Name the input it is for. Give the matrix one case where
+  it must fire for that input, and one where another input must not reach it.
+  A check that holds for values from one source, such as those the kernel
+  makes canonical, does not hold for the same type from another source, such
+  as text a user or a process chose, until the property it relies on is
+  checked there too.
+- **Kit change:** PLAYBOOK Phase 4, step 2, now asks for those two cases for
+  each fallback.
+- **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.

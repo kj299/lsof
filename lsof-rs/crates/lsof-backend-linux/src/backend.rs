@@ -148,6 +148,7 @@ impl Backend for LinuxBackend {
             exempt: &sel.exempt_fs,
             sockets_only: sel.socket_rows_only(),
             omit_unreadable: sel.omit_unreadable,
+            bound_paths: sel.has_path_filter(),
         };
 
         for p in procs.iter_mut() {
@@ -295,10 +296,18 @@ mod tests {
         let unread = |f: &lsof_core::model::OpenFile| {
             f.name.contains(" (readlink: ") || f.name.contains(" (opendir: ")
         };
+        // A socket held in another network namespace is a `sock` row named
+        // by its protocol (`protocol: TCP`), with no `SocketInfo`: a socket all
+        // the same, and one any host running a container has.
+        let foreign = |f: &lsof_core::model::OpenFile| {
+            f.file_type == lsof_core::model::FileType::Other("sock".into())
+        };
         let non_socket: Vec<String> = procs
             .iter()
             .flat_map(|p| p.files.iter())
-            .filter(|f| f.socket.is_none() && !f.name.starts_with("socket:[") && !unread(f))
+            .filter(|f| {
+                f.socket.is_none() && !f.name.starts_with("socket:[") && !unread(f) && !foreign(f)
+            })
             .map(|f| format!("{:?} {}", f.fd, f.name))
             .collect();
         assert!(

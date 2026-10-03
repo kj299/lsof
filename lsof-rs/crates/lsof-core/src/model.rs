@@ -399,6 +399,28 @@ pub struct SocketInfo {
     /// requested it and the per-connection stats were readable; `None`
     /// otherwise, so renderers emit nothing extra on a plain run.
     pub tcp: Option<TcpExtInfo>,
+    /// What a path argument can find an AF_UNIX socket by. A backend fills
+    /// it only when the run named a path, since nothing else reads it; boxed
+    /// so a socket row pays one pointer for it otherwise.
+    pub bound: Option<Box<BoundPath>>,
+}
+
+/// The path an AF_UNIX socket is bound to, which the C searches as well as
+/// the row's own identity (`dsock.c`): a path argument finds the socket when
+/// it names the socket file at that path, or, failing that, when it is the
+/// path itself as typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundPath {
+    /// The bound path, as the kernel reports it: what a path argument typed
+    /// exactly as it finds the socket by. `None` when it is not UTF-8, which
+    /// no argument can be, so that its U+FFFD form cannot pass for another
+    /// socket's path that really holds U+FFFD.
+    pub path: Option<String>,
+    /// `(DEVICE, NODE)` of the file at `path`, when it is a socket file:
+    /// what a path argument's own identity is compared with. `None` when
+    /// the path is not absolute, cannot be stat'ed, or is no longer a
+    /// socket (a file put in its place after the bind).
+    pub id: Option<(String, String)>,
 }
 
 /// Extended per-connection TCP statistics for `-T` (Windows EStats). Each

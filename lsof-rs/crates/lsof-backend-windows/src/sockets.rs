@@ -166,6 +166,7 @@ fn make_file(
     state: Option<TcpState>,
 ) -> OpenFile {
     let sock = SocketInfo {
+        bound: None,
         protocol: proto,
         local: Some(local),
         remote,

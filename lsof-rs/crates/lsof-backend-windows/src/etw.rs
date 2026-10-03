@@ -206,6 +206,7 @@ pub fn to_open_file(sock: &EtwSocket) -> OpenFile {
     // sits in an unnamed binary property — see the schema dump). The
     // renderer prints `*:*` for an absent local, which is lsof's convention.
     let info = SocketInfo {
+        bound: None,
         protocol,
         local: None,
         remote: sock.last_remote,

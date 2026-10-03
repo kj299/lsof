@@ -146,7 +146,7 @@ pub fn tasks_of(parent: &Process) -> Vec<Process> {
 pub struct Status {
     pub command: String,
     pub ppid: Option<u32>,
-    /// The **real** uid — the owner lsof shows, and its `-F u` value.
+    /// The **effective** uid — the owner lsof shows, and its `-F u` value.
     pub uid: Option<u32>,
     /// From `NSpgid:`, for `-F g` and `-g`.
     pub pgid: Option<u32>,
@@ -179,10 +179,17 @@ pub fn parse_status(status: &str) -> Status {
         } else if let Some(v) = line.strip_prefix("PPid:") {
             ppid = v.trim().parse::<u32>().ok();
         } else if let Some(v) = line.strip_prefix("Uid:") {
-            // real, effective, saved, fs — the real uid is the owner lsof shows.
+            // real, effective, saved, fs. The owner lsof shows is the
+            // EFFECTIVE one: the C takes `stat("/proc/<pid>/").st_uid`
+            // (`dproc.c`), and the kernel gives that directory the task's
+            // effective uid whatever its dumpable state (`task_dump_owner()`
+            // exempts a world-readable directory from the root fallback).
+            // Measured on a process with real uid 0 and effective 65534: the
+            // C shows `nobody`, and `-u nobody` selects it. lsof-rs had read
+            // the real uid and shown `root` (DIVERGENCES 55).
             uid = v
                 .split_whitespace()
-                .next()
+                .nth(1)
                 .and_then(|s| s.parse::<u32>().ok());
         }
         // `NSpgid` is the process group as seen in our own namespace, which
@@ -279,6 +286,19 @@ mod tests {
     fn triple(s: &str) -> (String, Option<u32>, Option<u32>) {
         let st = parse_status(s);
         (st.command, st.ppid, st.uid)
+    }
+
+    #[test]
+    fn the_owner_is_the_effective_uid() {
+        // `Uid:` is real, effective, saved, fs. The C's owner is the owner of
+        // `/proc/<pid>/`, which the kernel sets to the effective uid
+        // (DIVERGENCES 55), so each of these reads the second field.
+        let uid = |line: &str| parse_status(&format!("Name:\tx\n{line}\n")).uid;
+        assert_eq!(uid("Uid:\t0\t65534\t0\t65534"), Some(65534));
+        assert_eq!(uid("Uid:\t65534\t0\t0\t0"), Some(0));
+        assert_eq!(uid("Uid:\t1000\t1000\t1000\t1000"), Some(1000));
+        // A line with no effective field names no owner: not the real uid.
+        assert_eq!(uid("Uid:\t1000"), None);
     }
 
     #[test]

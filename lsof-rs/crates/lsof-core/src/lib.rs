@@ -22,12 +22,12 @@ pub mod service;
 
 pub use backend::{errno_text, Backend, BackendError, MountEntry, Privilege, UserLookup};
 pub use model::{
-    AccessMode, FdType, FileType, OpenFile, Process, Protocol, SockState, SocketInfo, TcpState,
-    UnixState,
+    AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SockState, SocketInfo,
+    TcpState, UnixState,
 };
 pub use render::Escaper;
 pub use selection::{
     CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, InetFilter,
-    InetSpec, Located, Selection, StateFilter, TaskMode, TcpInfoFlags, UidSel,
+    InetSpec, Located, PathItem, Selection, StateFilter, TaskMode, TcpInfoFlags, UidSel,
     DEFAULT_COMMAND_WIDTH,
 };
