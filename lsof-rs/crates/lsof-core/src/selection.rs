@@ -941,8 +941,9 @@ impl Selection {
         // A Windows thread is a row of its process, where a Linux task is an
         // entry of its own, so it is the row that carries the task kind. A
         // bare `lsof -K` had printed nothing on Windows: no row had the only
-        // kind specified.
-        if self.tasks == TaskMode::Always && f.file_type == FileType::Thread {
+        // kind specified. The thread row is the `task` one: an open HANDLE to
+        // a thread object is typed `THRD` as well, and is not a task.
+        if self.tasks == TaskMode::Always && f.fd == FdType::Task {
             k.insert(SelKinds::TASK);
         }
         k
@@ -1112,6 +1113,7 @@ impl Selection {
                 .union(SelKinds::TASK),
         );
         let with_tasks = pids_with_tasks(gathered);
+        let sockets_only = self.socket_rows_only();
         for p in gathered {
             if self.excludes_process(p) {
                 continue;
@@ -1164,7 +1166,14 @@ impl Selection {
                 // matched anything, and a task's files all inherit the task
                 // kind, so any row of a task locates the item — printed or not,
                 // as `-a -d 999` on a multi-threaded process exits 0, measured.
+                // Any row the C builds, that is: under `-a` with `-i` or `-U`
+                // it builds a task's sockets alone. The Linux backend builds
+                // the same (`socket_rows_only`); Windows builds only sockets
+                // under `-i`/`-U` too, but adds its thread rows, which give
+                // the process's sockets the task kind and are not sockets
+                // themselves.
                 found.tasks |= self.tasks == TaskMode::Always
+                    && !(sockets_only && f.fd == FdType::Task)
                     && kinds.union(self.file_kinds(f)).contains(SelKinds::TASK);
             }
         }
@@ -1291,7 +1300,7 @@ impl Selection {
     /// when `inherited ∪ file_kinds(f)` is non-empty. A socket satisfies `-i`
     /// and `-U`; a mapped file, a cwd, a root, an executable and a plain fd
     /// satisfy neither, and can only come back through one of the other kinds.
-    /// So every one of these has to be absent:
+    /// So under the OR every one of these has to be absent:
     ///
     /// * a **process** selecter (`-p`/`-u`/`-c`/`-g`) — a process it matches
     ///   contributes `inherited`, which selects *every* file it holds. This is
@@ -1304,15 +1313,22 @@ impl Selection {
     ///   survive a run that specified only `-i`.
     ///
     /// An empty specified set is `AllProc` — everything prints — so it is not
-    /// socket-only either. `-a` only makes the test stricter, so it needs no
-    /// clause: anything this predicate allows to be skipped under the OR is
-    /// still dropped under the AND.
+    /// socket-only either.
+    ///
+    /// Under `-a` any network selecter is enough, whatever else is given:
+    /// every printed row must then carry a network kind, and only a socket
+    /// can. That is the C's own rule, and it decides more than what prints:
+    /// `dproc.c` sets `Ckscko` when `Fand || !(Selflags & ~SELNW)`, so a
+    /// process's cwd, root, executable, mapped files and non-socket fds are
+    /// never built — never linked, and so never locate `-K` or `-N`. Measured:
+    /// `lsof -V -K -a -p P -U` on a multi-threaded P that holds no socket says
+    /// `no tasks located` and exits 1; lsof-rs located the task through rows
+    /// the C does not build, and exited 0 (DIVERGENCES 33).
     pub fn socket_rows_only(&self) -> bool {
         let spec = self.specified();
-        !spec.is_empty()
-            && spec
-                .without(SelKinds::NET.union(SelKinds::NA).union(SelKinds::UNX))
-                .is_empty()
+        let net = SelKinds::NET.union(SelKinds::NA).union(SelKinds::UNX);
+        spec.intersects(net)
+            && (self.and_mode || spec.without(net).is_empty())
             && self.endpoints.is_none()
     }
 
@@ -1435,15 +1451,16 @@ impl Selection {
 
 /// The processes in `procs` that have tasks of their own: those with a task
 /// entry (Linux, where a task is an entry of its own, and the backend leaves
-/// out the main thread and zombie ones), or with a thread row (Windows, where
-/// a thread is a row of its process). This is the C's `ht`, "a task was
-/// recorded", for [`Selection::entry_kinds`]. A task passes the process tests
-/// exactly when its process would with the task kind added, since it has the
-/// process's PID, UID, group and command, so nothing more is checked here.
+/// out the main thread and zombie ones), or with a `task` row (Windows, where
+/// a thread is a row of its process; a handle to a thread object is not one).
+/// This is the C's `ht`, "a task was recorded", for
+/// [`Selection::entry_kinds`]. A task passes the process tests exactly when
+/// its process would with the task kind added, since it has the process's
+/// PID, UID, group and command, so nothing more is checked here.
 fn pids_with_tasks(procs: &[Process]) -> HashSet<u32> {
     procs
         .iter()
-        .filter(|p| p.tid.is_some() || p.files.iter().any(|f| f.file_type == FileType::Thread))
+        .filter(|p| p.tid.is_some() || p.files.iter().any(|f| f.fd == FdType::Task))
         .map(|p| p.pid)
         .collect()
 }
@@ -1935,6 +1952,50 @@ mod tests {
                 "endpoint mode with -i: peer pipe rows survive the OR"
             );
         }
+
+        // Under -a a network selecter is enough, beside anything else: the C's
+        // `Fand` branch sets `Ckscko` (dproc.c), so a task with no socket is
+        // not located by `-K -a -p P -U` (DIVERGENCES 33).
+        let and = |sel: Selection| Selection {
+            and_mode: true,
+            ..sel
+        };
+        assert!(
+            and(Selection {
+                pids: vec![1],
+                ..base.clone()
+            })
+            .socket_rows_only(),
+            "-a -p -i: every printed row needs NET"
+        );
+        assert!(
+            and(Selection {
+                pids: vec![1],
+                unix_only: true,
+                tasks: TaskMode::Always,
+                ..Default::default()
+            })
+            .socket_rows_only(),
+            "-K -a -p -U: the C builds no row of a task but its sockets"
+        );
+        assert!(
+            !and(Selection {
+                pids: vec![1],
+                tasks: TaskMode::Always,
+                ..Default::default()
+            })
+            .socket_rows_only(),
+            "-a without a network selecter: every row can print"
+        );
+        assert!(
+            !and(Selection {
+                pids: vec![1],
+                endpoints: Some(EndpointMode::Files),
+                ..base.clone()
+            })
+            .socket_rows_only(),
+            "-a -i +E: the endpoint clause still holds"
+        );
     }
 
     #[test]
@@ -3040,8 +3101,11 @@ mod tests {
     #[test]
     fn a_windows_thread_row_is_a_task() {
         let mut app = who(7, "app.exe", 0, 7);
+        // Handle 8 is an open handle to a thread object: `THRD` too, but a
+        // file the process holds, not one of its threads.
         app.files = vec![
             k_row(FdType::Handle(4), FileType::Regular),
+            k_row(FdType::Handle(8), FileType::Thread),
             k_row(FdType::Task, FileType::Thread),
         ];
         let bare = Selection {
@@ -3050,9 +3114,43 @@ mod tests {
         };
         let got = bare.apply(vec![app.clone()]);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].files.len(), 1, "bare -K: the thread rows alone");
-        assert_eq!(got[0].files[0].file_type, FileType::Thread);
+        let fds: Vec<&FdType> = got[0].files.iter().map(|f| &f.fd).collect();
+        assert_eq!(fds, vec![&FdType::Task], "bare -K: the thread rows alone");
         assert!(bare.locate(std::slice::from_ref(&app)).tasks);
+        // A thread handle alone neither is a task nor makes one.
+        let mut handle_only = app.clone();
+        handle_only.files.retain(|f| f.fd != FdType::Task);
+        assert!(bare.apply(vec![handle_only.clone()]).is_empty());
+        assert!(!bare.locate(std::slice::from_ref(&handle_only)).tasks);
+        let and_p7 = Selection {
+            pids: vec![7],
+            and_mode: true,
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        assert!(
+            and_p7.apply(vec![handle_only.clone()]).is_empty(),
+            "-K -a: a process whose only THRD row is a handle has no task"
+        );
+        assert!(!and_p7.locate(std::slice::from_ref(&handle_only)).tasks);
+        // Under `-a -i` the backend builds sockets and the thread rows. A
+        // thread row is no socket, so it locates nothing; a socket of the
+        // process, which the thread rows make a task, does.
+        let and_i = Selection {
+            inet: InetFilter {
+                enabled: true,
+                ..Default::default()
+            },
+            ..and_p7.clone()
+        };
+        let mut no_socket = who(7, "app.exe", 0, 7);
+        no_socket.files = vec![k_row(FdType::Task, FileType::Thread)];
+        assert!(!and_i.locate(std::slice::from_ref(&no_socket)).tasks);
+        let mut with_socket = no_socket.clone();
+        with_socket
+            .files
+            .push(k_row(FdType::Handle(12), FileType::Ipv4));
+        assert!(and_i.locate(std::slice::from_ref(&with_socket)).tasks);
         for and_mode in [false, true] {
             let sel = Selection {
                 pids: vec![7],
@@ -3063,7 +3161,7 @@ mod tests {
             let got = sel.apply(vec![app.clone()]);
             assert_eq!(
                 got[0].files.len(),
-                2,
+                3,
                 "-a {and_mode}: its rows and its threads"
             );
             assert!(sel.locate(std::slice::from_ref(&app)).tasks);

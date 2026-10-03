@@ -574,6 +574,27 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert ($r.Exit -eq 0) "-K i should run cleanly (exit=$($r.Exit))"
         Assert (-not ($r.Out -match $taskRow)) '-K i should suppress `task` rows'
     }
+    Test-Case 'tasks-dash-K-with-a-held-file' 'selection/-K' {
+        # A bare file argument is answered by Restart Manager, which returned
+        # before the thread phase. Once -K became a search item (DIVERGENCES
+        # 33) that made `-K FILE` exit 1, no task ever being located, and
+        # `-K -a -p P FILE` drop the holder's row, its process having no task.
+        $leaf = Split-Path $fx.FilePath -Leaf
+        $r = Invoke-Lsof @('-K', '-a', '-p', "$self", $fx.FilePath) 'K-a-file'
+        Assert ($r.Exit -eq 0) "-K -a -p self FILE should exit 0 (exit=$($r.Exit))"
+        Assert-Contains $r.Out $leaf '-K -a -p self FILE should keep the holder''s row'
+        $r = Invoke-Lsof @('-K', $fx.FilePath) 'K-file'
+        Assert ($r.Exit -eq 0) "-K FILE should exit 0 (exit=$($r.Exit))"
+        Assert-Contains $r.Out $leaf '-K FILE should list the holder''s row'
+        Assert ($r.Out -match $taskRow) '-K FILE should list `task` rows'
+    }
+    Test-Case 'tasks-dash-K-terse' 'selection/-K' {
+        # `-t -K` with no file selecter is answered from the thread snapshot
+        # alone, without the module, socket and handle scans.
+        $r = Invoke-Lsof @('-t', '-K', '-p', "$self") 'K-t'
+        Assert ($r.Exit -eq 0) "-t -K -p self should exit 0 (exit=$($r.Exit))"
+        Assert ($r.Out -match "(?m)^$self\s*$") '-t -K -p self should print our PID'
+    }
     Test-Case 'link-count-dash-L' 'render/-L' {
         # The prefix decides, as in the C (DIVERGENCES 41): +L shows the NLINK
         # column and -L leaves it out, which is also the default. This case

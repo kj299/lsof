@@ -343,6 +343,16 @@ name = "smoke/tasks-K-i-suppresses"
 args = ["-K", "i", "-p", "SELF"]
 
 [[case]]
+# A bare file argument goes through Restart Manager; -K must still bring the
+# threads, or no task is located (DIVERGENCES 33).
+name = "smoke/tasks-K-with-a-held-file"
+args = ["-K", "-a", "-p", "SELF", "FILE"]
+
+[[case]]
+name = "smoke/tasks-K-terse"
+args = ["-t", "-K", "-p", "SELF"]
+
+[[case]]
 name = "smoke/link-count-L"
 args = ["-L", "-p", "SELF"]
 
@@ -750,3 +760,13 @@ args = ["-K", "-t", "-a", "-p", "PID"]
 [[case]]
 name = "linux/differential-tasks-dash-K-i-then-K-is-K"
 args = ["-n", "-P", "-K", "i", "-K", "-a", "-p", "PID"]
+
+[[case]]
+# Under -a a network selecter builds a task's sockets alone, so a task with
+# none does not locate -K.
+name = "linux/differential-tasks-dash-K-and-a-U-socketless-task-not-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "PID", "-U"]
+
+[[case]]
+name = "linux/differential-tasks-dash-K-and-a-i-socketless-task-not-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "PID", "-i"]

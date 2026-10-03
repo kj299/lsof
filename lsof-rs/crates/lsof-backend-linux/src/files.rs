@@ -249,7 +249,8 @@ pub struct GatherCtx<'a> {
     pub ns: &'a net::NetnsTables,
     pub exempt: &'a [String],
     /// `Selection::socket_rows_only`: nothing but a socket can reach the
-    /// output, so nothing but a socket is collected.
+    /// output, so nothing but a socket is collected — and the rows that say
+    /// what could not be read, which the C builds whatever it is checking.
     pub sockets_only: bool,
     /// `Selection::omit_unreadable` — `-w`, or `-t`: make no row for a file
     /// that cannot be read, rather than one saying why.
@@ -563,9 +564,14 @@ pub fn for_pid(pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>) -> Vec<OpenFile>
 /// this directory's, as the C's are: `/proc/85/task/86/cwd (readlink: …)`.
 pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>) -> Vec<OpenFile> {
     let sockets_only = ctx.sockets_only;
-    // A row for what could not be read is never a socket row, so a run that
-    // can print only sockets makes none — the C makes them and drops them.
-    let report_unreadable = !ctx.omit_unreadable && !sockets_only;
+    // A row for what could not be read is never a socket row, but a run that
+    // can print only sockets still makes the ones the C makes: under
+    // `Ckscko` it builds and links the `NOFD` row and an fd whose link would
+    // not read (`dproc.c` decides socket-or-not only after both), and a
+    // linked row of a task locates `-K` — measured, `lsof -V -K -a -p P -U`
+    // run as a user who cannot read P exits 0. The specials it skips
+    // outright, below.
+    let report_unreadable = !ctx.omit_unreadable;
     let mut out = Vec::new();
 
     // The specials. Unlike fds these have no access mode of their own.
@@ -1309,15 +1315,41 @@ mod tests {
     }
 
     #[test]
-    fn under_dash_w_or_for_sockets_only_nothing_unreadable_is_a_row() {
+    fn under_dash_w_nothing_unreadable_is_a_row_and_sockets_only_skips_the_specials() {
         // `-w` and `-t`: the C makes no row for what it cannot read, so a
-        // process with nothing else has none (DIVERGENCES 37). A socket-only
-        // run (`-i`, `-U`) makes none either: they could never be printed.
+        // process with nothing else has none (DIVERGENCES 37).
         let dir = fake_proc("quiet");
         std::fs::write(dir.join("cwd"), b"x").unwrap();
         assert!(walk(&dir, Some(1000), true, false).is_empty());
-        assert!(walk(&dir, Some(1000), false, true).is_empty());
         assert!(!walk(&dir, Some(1000), false, false).is_empty());
+        // A socket-only run (`-i`, `-U`, or either under `-a`) skips the
+        // specials outright, but makes the NOFD row the C builds and links
+        // whatever it is checking: a task's locates `-K` (DIVERGENCES 33).
+        let fds = |sockets_only| -> Vec<FdType> {
+            walk(&dir, Some(1000), false, sockets_only)
+                .into_iter()
+                .map(|f| f.fd)
+                .collect()
+        };
+        assert_eq!(fds(true), vec![FdType::NoFd], "no cwd row, the NOFD row");
+        // And an fd whose link will not read, which the C builds before it
+        // asks whether the fd is a socket; a readable non-socket fd it skips.
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::fs::write(dir.join("fd").join("5"), b"x").unwrap();
+        std::os::unix::fs::symlink("/dev/null", dir.join("fd").join("6")).unwrap();
+        assert_eq!(fds(true), vec![FdType::Handle(5)]);
+        assert_eq!(
+            fds(false),
+            vec![
+                FdType::Cwd,
+                FdType::Root,
+                FdType::Txt,
+                FdType::Handle(5),
+                FdType::Handle(6)
+            ],
+            "the control: the full walk has the specials and both fds"
+        );
+        assert!(walk(&dir, Some(1000), true, true).is_empty(), "-w as well");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

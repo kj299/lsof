@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{FileType, OpenFile, Process};
-use lsof_core::selection::{EndpointMode, Selection};
+use lsof_core::selection::{EndpointMode, SelKinds, Selection};
 
 use crate::util::trace;
 use crate::{
@@ -102,6 +102,60 @@ fn per_process_extras_all(
     out
 }
 
+/// The processes the process-level selecters can match, or `None` when no
+/// such selecter was given: the scope of the expensive per-process work, and
+/// of `-K`'s threads.
+fn process_scope(sel: &Selection, procs: &[Process]) -> Option<HashSet<u32>> {
+    sel.has_process_selector().then(|| {
+        procs
+            .iter()
+            .filter(|p| sel.selects_process(p))
+            .map(|p| p.pid)
+            .collect()
+    })
+}
+
+/// Whether `-t` can be answered from the thread snapshot alone: an explicit
+/// `-K` and nothing that reads a file. Which PIDs print, and whether a task is
+/// located, then depend only on the `task` rows, since a Windows thread is a
+/// row of its process; everything else is the process table. This is
+/// `Selection::terse_skips_files` with `-K` given, which that predicate has to
+/// refuse because a Linux task is located only through files of its own.
+fn terse_needs_only_threads(sel: &Selection) -> bool {
+    sel.terse
+        && sel.tasks == lsof_core::TaskMode::Always
+        && !sel.specified().intersects(SelKinds::FILE)
+        && sel.state_filter.is_none()
+}
+
+/// `-K`: each in-scope process's threads, as `task` rows. `base` supplies the
+/// entry for a process `procs` does not hold yet.
+fn attach_threads(
+    procs: &mut Vec<Process>,
+    idx: &mut HashMap<u32, usize>,
+    restrict: Option<&HashSet<u32>>,
+    base: impl Fn(u32) -> Option<Process>,
+) {
+    trace("gather: threads::enumerate start");
+    let ts = threads::enumerate(restrict);
+    trace(&format!(
+        "gather: threads::enumerate done ({} threads)",
+        ts.len()
+    ));
+    for (pid, file) in ts {
+        if restrict.is_some_and(|s| !s.contains(&pid)) {
+            continue;
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = idx.entry(pid) {
+            if let Some(p) = base(pid) {
+                slot.insert(procs.len());
+                procs.push(p);
+            }
+        }
+        attach(procs, idx, pid, file);
+    }
+}
+
 /// lsof-rs's native Windows data source.
 pub struct WindowsBackend {
     elevated: bool,
@@ -178,13 +232,42 @@ impl Backend for WindowsBackend {
             return Ok(procs);
         }
 
+        let mut idx: HashMap<u32, usize> = HashMap::with_capacity(procs.len());
+        for (i, p) in procs.iter().enumerate() {
+            idx.insert(p.pid, i);
+        }
+
+        // `-t -K` with nothing that reads a file: the threads are all it needs.
+        // Without this every `-t -K` paid for the module, socket (with name
+        // lookups) and system-wide handle scans, to print what the thread
+        // snapshot already says.
+        if terse_needs_only_threads(sel) {
+            trace("gather: terse -K fast-path (threads only)");
+            let restrict = process_scope(sel, &procs);
+            attach_threads(&mut procs, &mut idx, restrict.as_ref(), |_| None);
+            return Ok(procs);
+        }
+
         // Bare-file path lookup via Restart Manager (unprivileged, exact) — but
         // a `+D`/`+d` directory tree needs full enumeration, so it falls through.
         if !sel.paths.is_empty() && !sel.has_dir_trees() {
+            let restrict = process_scope(sel, &procs);
             trace("gather: restart::lookup (bare path) start");
             let by_pid: HashMap<u32, Process> = procs.into_iter().map(|p| (p.pid, p)).collect();
-            let r = restart::lookup(&sel.paths, &by_pid);
+            let mut r = restart::lookup(&sel.paths, &by_pid);
             trace("gather: restart::lookup done");
+            // Restart Manager answers for the files alone. An explicit `-K`
+            // still needs the threads the full path would attach: without them
+            // no task is ever located, so `-K FILE` exited 1, and `-K -a FILE`
+            // dropped the holder's row, since its process had no task.
+            if sel.tasks == lsof_core::TaskMode::Always {
+                let mut idx: HashMap<u32, usize> =
+                    r.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+                attach_threads(&mut r, &mut idx, restrict.as_ref(), |pid| {
+                    by_pid.get(&pid).cloned()
+                });
+                r.sort_by_key(|p| p.pid);
+            }
             return Ok(r);
         }
 
@@ -192,23 +275,8 @@ impl Backend for WindowsBackend {
         // snapshots) to the processes the process-level selectors can match, so
         // `lsof -p/-c/-u …` doesn't enumerate the whole system. `None` means no
         // process selector was given — inspect everything.
-        let restrict: Option<HashSet<u32>> = if sel.has_process_selector() {
-            Some(
-                procs
-                    .iter()
-                    .filter(|p| sel.selects_process(p))
-                    .map(|p| p.pid)
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let restrict = process_scope(sel, &procs);
         let wanted = |pid: u32| restrict.as_ref().is_none_or(|s| s.contains(&pid));
-
-        let mut idx: HashMap<u32, usize> = HashMap::with_capacity(procs.len());
-        for (i, p) in procs.iter().enumerate() {
-            idx.insert(p.pid, i);
-        }
 
         // `-i` and `-U` are network-only queries: gather only sockets and skip
         // the handle/per-process enumeration (which is where elevation matters),
@@ -372,17 +440,7 @@ impl Backend for WindowsBackend {
         // do it. So on Windows `-K` stays opt-in, and `-K i` remains its
         // (already default) inverse.
         if sel.tasks == lsof_core::TaskMode::Always {
-            trace("gather: threads::enumerate start");
-            let ts = threads::enumerate(restrict.as_ref());
-            trace(&format!(
-                "gather: threads::enumerate done ({} threads)",
-                ts.len()
-            ));
-            for (pid, file) in ts {
-                if wanted(pid) {
-                    attach(&mut procs, &mut idx, pid, file);
-                }
-            }
+            attach_threads(&mut procs, &mut idx, restrict.as_ref(), |_| None);
         }
 
         trace("gather: done");

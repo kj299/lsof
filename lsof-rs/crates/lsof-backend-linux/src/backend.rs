@@ -287,10 +287,18 @@ mod tests {
         // `socket:[<inode>]` (DIVERGENCES item 22: netlink, AF_VSOCK). It IS a
         // socket, so the test asks what the fast path actually promises: the
         // link was `socket:[...]`, not that the row resolved.
+        //
+        // The rows that say what could not be read stay too, as the C builds
+        // them under `Ckscko` (DIVERGENCES 33): an fd closed, or a process
+        // gone, between listing and reading -- which a host running other
+        // tests makes routine -- is one of those, not a collected file.
+        let unread = |f: &lsof_core::model::OpenFile| {
+            f.name.contains(" (readlink: ") || f.name.contains(" (opendir: ")
+        };
         let non_socket: Vec<String> = procs
             .iter()
             .flat_map(|p| p.files.iter())
-            .filter(|f| f.socket.is_none() && !f.name.starts_with("socket:["))
+            .filter(|f| f.socket.is_none() && !f.name.starts_with("socket:[") && !unread(f))
             .map(|f| format!("{:?} {}", f.fd, f.name))
             .collect();
         assert!(
@@ -300,7 +308,7 @@ mod tests {
         let specials: Vec<String> = procs
             .iter()
             .flat_map(|p| p.files.iter())
-            .filter(|f| !matches!(f.fd, FdType::Handle(_)))
+            .filter(|f| !matches!(f.fd, FdType::Handle(_) | FdType::NoFd))
             .map(|f| format!("{:?}", f.fd))
             .collect();
         assert!(
@@ -522,5 +530,71 @@ mod tests {
             .map(|p| p.pid)
             .collect();
         assert_eq!(with_files, vec![me]);
+    }
+
+    /// Not a test: the process `dash_k_and_a_reads_only_the_selected_tasks`
+    /// runs beside itself, with a task other than its main thread.
+    #[test]
+    #[ignore = "a helper process, spawned by dash_k_and_a_reads_only_the_selected_tasks"]
+    fn helper_holds_a_second_thread() {
+        let idle = || std::thread::sleep(std::time::Duration::from_secs(60));
+        let t = std::thread::spawn(idle);
+        idle();
+        let _ = t.join();
+    }
+
+    /// `-K -a -p N` reads the tasks of N alone: a task passes `-a` exactly when
+    /// its process does, so another process's are never listed, and reading
+    /// them had walked every task on the host. Output alone cannot pin this —
+    /// the extra entries were dropped at selection — so the gather is asked.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+    )]
+    fn dash_k_and_a_reads_only_the_selected_tasks() {
+        use std::time::{Duration, Instant};
+        let me = std::process::id();
+        let mut other = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "backend::tests::helper_holds_a_second_thread",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the helper");
+        let pid = other.id();
+        let tasks = || std::fs::read_dir(format!("/proc/{pid}/task")).map_or(0, |d| d.count());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while tasks() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let read = |and_mode| -> HashSet<u32> {
+            let sel = Selection {
+                pids: vec![me],
+                tasks: lsof_core::TaskMode::Always,
+                and_mode,
+                ..Default::default()
+            };
+            let procs = LinuxBackend::new().gather(&sel).unwrap();
+            procs
+                .iter()
+                .filter(|p| p.tid.is_some())
+                .map(|p| p.pid)
+                .collect()
+        };
+        let (or, and) = (read(false), read(true));
+        let _ = other.kill();
+        let _ = other.wait();
+        assert!(
+            or.contains(&pid),
+            "the control: under the OR every process's tasks are read"
+        );
+        assert!(
+            and.iter().all(|&p| p == me),
+            "-K -a -p {me} read the tasks of {and:?}"
+        );
     }
 }

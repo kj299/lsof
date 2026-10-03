@@ -677,6 +677,57 @@ args = ["-n", "-P", "-K", "i", "-K", "-a", "-p", "{A}"]
 name = "tasks-dash-K-then-K-i-is-not-a-search-item"
 args = ["-n", "-P", "-K", "-K", "i", "-a", "-d", "cwd", "-p", "{A}"]
 
+# Under -a a network selecter (-i, -U) makes the C build a process's socket
+# rows and nothing else -- `Ckscko` in dproc.c, set when `Fand ||
+# !(Selflags & ~SELNW)` -- and the rows that say what could not be read,
+# which it builds before asking. So only those can locate -K. Fixture I holds
+# no socket; S and U each run an idle second thread. lsof-rs had built every
+# row, so a socketless task was located and `-U` exited 0 (DIVERGENCES 33).
+
+[[case]]
+name = "tasks-dash-K-and-a-U-socketless-task-not-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{I}", "-U"]
+
+[[case]]
+name = "tasks-dash-K-and-a-i-socketless-task-not-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{I}", "-i"]
+
+[[case]]
+name = "tasks-dash-K-and-a-U-terse-socketless-task-exits-1"
+args = ["-t", "-K", "-a", "-p", "{I}", "-U"]
+
+[[case]]
+name = "tasks-dash-K-and-a-U-lists-the-task-sockets"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{S}", "-U"]
+
+[[case]]
+# Port 1 names no socket of S, so nothing prints -- but S's sockets are still
+# built, and a socket of a task locates -K printed or not: only `Internet
+# address not located` stays.
+name = "tasks-dash-K-and-a-unprinted-socket-locates-the-task"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{S}", "-iTCP:1"]
+
+[[case]]
+# {IT2DIR} is the cwd of fixture I's thread t2 alone, so only that task's
+# row is selected.
+name = "tasks-dash-K-and-a-a-row-only-a-task-holds"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{I}", "{IT2DIR}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 57). The case above lists a row of I's, so
+# -t prints I's PID in lsof-rs. The C prints nothing and exits 0: under -t,
+# print.c marks the PID printed before it looks for a selected file, and
+# the process's own entry, which has none, sorts first.
+name = "tasks-dash-K-terse-a-row-only-a-task-holds-in-lsof-rs"
+args = ["-K", "-t", "-a", "-p", "{I}", "{IT2DIR}"]
+
+[[case]]
+# Run as a user who cannot read U: the NOFD row is built whatever the C is
+# checking, and it locates -K.
+name = "unreadable-dash-K-and-a-U-located-by-the-nofd-row"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{U}", "-U"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
 # ------------------------------------------- sockets in another namespace (J)
 # `/proc/net/*` shows the CALLING process's network namespace, so a socket
 # inside a container is an inode no local table explains. The C answers it from

@@ -152,11 +152,18 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   is kept, printed or not, the run exits 1 and `-V` prints `no tasks located`.
   lsof-rs had listed the process and exited 0. `-K i`, or a `-K i` after `-K`,
   asks for nothing to be located.
+- **Under `-a` with `-i` or `-U`, Linux builds only a process's socket rows**,
+  plus the rows that say what could not be read, as the C does. A task with no
+  socket therefore does not locate `-K`: `lsof -K -a -p P -U` exits 1 for a
+  multi-threaded P without one, where lsof-rs had exited 0. Those runs also
+  skip the mapped-file walk.
 - **`lsof -K -t` prints every process with a task**, as the C does. The `-t`
   fast path built no task entries, so `-K -t -p P` printed P alone.
-- **A bare `lsof -K` on Windows lists threads.** A thread row now carries the
-  task kind, as a Linux task entry does; it had printed nothing. `-K -p P` and
-  `-K -a -p P` print what they did.
+- **A bare `lsof -K` on Windows lists threads.** A thread row (FD `task`) now
+  carries the task kind, as a Linux task entry does; it had printed nothing.
+  An open handle to a thread object is not a thread row. `-K -p P` and
+  `-K -a -p P` print what they did. `-K` with a file argument still lists the
+  holder's row and the threads, and `-t -K` reads only the thread snapshot.
 - **`-K -a` reads only the selected processes' tasks** on Linux, where it had
   read the fd table of every task on the host to keep one process's.
 - **An `O_PATH` fd, and one opened with access mode 3, is `u`** in FD and in
