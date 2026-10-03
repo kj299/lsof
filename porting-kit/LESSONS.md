@@ -3471,3 +3471,42 @@ finding it is supposed to produce.
   spurious failure will name itself in the CI log.
 - **Section amended:** harnesses/gate-mutation/mutate_gates.py ·
   sweep_decisions, run_gates, self-test; README.md · gate-mutation row.
+
+---
+
+## 074. "Any row" meant every row the port built, and the C builds fewer
+
+- **Date:** 2026-10-03
+- **Codebase:** lsof-rs (`-K` as a search item, DIVERGENCES 33)
+- **What happened:** the C locates `-K` when it links a row of a task. That
+  was measured on 33 spellings and written as "any row of a task locates it,
+  printed or not", and the differential agreed with every case built from it.
+  But `dproc.c` decides which rows exist before any of that. Under `-a` with
+  `-i` or `-U` it builds a process's sockets and nothing else (`Ckscko`), a
+  switch that reads like a speed-up. lsof-rs built every row and let
+  selection drop them, a difference no output could show until a search item
+  counted rows that do not print. `lsof -V -K -a -p P -U` on a threaded P
+  with no socket exited 0, where the C says `no tasks located` and exits 1.
+  None of the 33 spellings had a network selecter. A review of the branch
+  found it: three sweeps over about 2,500 spellings against the C and master.
+  The fix was to build what the C builds.
+
+  The same branch's mutation run had a kill that was not one. A mutant that
+  changes no output, only which tasks are read, was "killed" by a test that
+  never reaches that code: it drops a pipe's read end after spawning lsof,
+  and races it on a loaded host. Counted as a kill, it hid a missing test.
+- **The rule.** When the C's rule ranges over the rows it has, the port's
+  version must range over the same set. The C's build policy, everything it
+  skips for speed, is part of that set, not an optimization the port is free
+  to skip or not. List the places the C declines to build something, and
+  check each against every rule that counts rows: located items, `-t`,
+  "a process with no rows". And a mutation kill is evidence only when the
+  killer reaches the mutated code: a kill from a test that does not is a
+  flake until it fails on the mutant again and passes without it. This is
+  #073's rule for stale verdicts, from the other side.
+- **Kit change:** none here. The port builds what the C builds under `-a`
+  (`socket_rows_only()`), and the differential gained the cases. The scratch
+  mutation driver that counted the flake is not a kit harness. Confirming a
+  kill the way `sweep_decisions()` confirms a stale line would be a change to
+  `harnesses/gate-mutation`, and is proposed, not made.
+- **Section amended:** none.

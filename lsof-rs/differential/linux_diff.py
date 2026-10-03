@@ -386,21 +386,34 @@ def thread_holder(work: str) -> Fixture:
     `Lp->tcmd`), and a port that reused the COMMAND width instead would cut a
     thread name against `python3`. With two 7-character names -- the first
     draft -- that bug is invisible, because 7 is also what `COMMAND` sizes to.
-    `taskname-long-1` is 15 bytes, the kernel's `comm` ceiling."""
+    `taskname-long-1` is 15 bytes, the kernel's `comm` ceiling.
+
+    `t2` has a cwd of its own (`unshare(CLONE_FS)`, then `chdir` into
+    `t2cwd`, which is `{IT2DIR}`), so a path argument can name a file only a
+    task holds. The C reads each task's cwd from the task's own directory, as
+    lsof-rs does. Under `-t` the C then lists nothing for the process
+    (`print.c` marks the PID printed before it finds a selected file, and the
+    process's own entry sorts first): DIVERGENCES 57."""
     tdir = os.path.join(work, "threads")
-    os.makedirs(tdir)
+    os.makedirs(os.path.join(tdir, "t2cwd"))
     py = (
         "import ctypes,os,threading,time\n"
         "libc=ctypes.CDLL('libc.so.6')\n"
         "h=open(os.path.join(%r,'held.txt'),'w')\n"
-        "def w(n):\n"
+        "def w(n,up):\n"
+        "    if n=='t2':\n"
+        "        assert libc.unshare(0x200)==0\n"
+        "        os.chdir(os.path.join(%r,'t2cwd'))\n"
         "    libc.prctl(15, n.encode(), 0,0,0)\n"
+        "    up.set()\n"
         "    time.sleep(600)\n"
+        "ups=[]\n"
         "for n in ('taskname-long-1','t2'):\n"
-        "    threading.Thread(target=w, args=(n,), daemon=True).start()\n"
-        "time.sleep(0.4)\n"
+        "    ups.append(threading.Event())\n"
+        "    threading.Thread(target=w, args=(n,ups[-1]), daemon=True).start()\n"
+        "for up in ups: up.wait()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (tdir, tdir)
+        "time.sleep(600)\n" % (tdir, tdir, tdir)
     )
     # 4 fds: stdio on /dev/null plus held.txt. The fd count alone would go
     # true before the threads exist (held.txt opens first), so the real gate is
@@ -517,13 +530,19 @@ def unreadable_holder(work: str) -> Fixture:
 
     Until this fixture existed the gate could read every process it compared,
     so no case had ever held a file the tool could not read -- the path most
-    of a non-root user's output takes (porting-kit LESSONS #068)."""
+    of a non-root user's output takes (porting-kit LESSONS #068).
+
+    It runs a second thread, idle, so a `-K -a` case has a task whose only
+    rows say what could not be read: under `-U` the C still builds and links
+    the `NOFD` row, and that locates `-K` (DIVERGENCES 33). No case without
+    `-K` sees the thread."""
     udir = os.path.join(work, "unreadable")
     os.makedirs(udir)
     py = (
-        "import ctypes,os,time\n"
+        "import ctypes,os,threading,time\n"
         "held=open(os.path.join(%r,'held'),'w')\n"
         "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0\n"
+        "threading.Thread(target=time.sleep,args=(600,),daemon=True).start()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
         "time.sleep(600)\n" % (udir, udir)
     )
@@ -542,17 +561,23 @@ def state_holder(work: str) -> Fixture:
     and `-sTCP:LISTEN` drops both UDP sockets, while the unix socket and the
     file are never touched. A TCP socket that is bound but neither listening
     nor connected is deliberately absent: `/proc/net/tcp` does not list it,
-    and naming it is DIVERGENCES 22's open decision."""
+    and naming it is DIVERGENCES 22's open decision.
+
+    It runs a second thread, idle, so `-K -a` with `-i` or `-U` has a task
+    that holds sockets: the C then builds a task's socket rows and nothing
+    else (`Ckscko`), and those locate `-K` (DIVERGENCES 33). No case without
+    `-K` sees the thread."""
     sdir = os.path.join(work, "states")
     os.makedirs(sdir)
     py = (
-        "import os,socket,time\n"
+        "import os,socket,threading,time\n"
         "l=socket.socket(); l.bind(('127.0.0.1',0)); l.listen(1)\n"
         "c=socket.create_connection(l.getsockname()); a,_=l.accept()\n"
         "uu=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); uu.bind(('127.0.0.1',0))\n"
         "uc=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); uc.connect(uu.getsockname())\n"
         "x=socket.socket(socket.AF_UNIX); x.bind(os.path.join(%r,'s.sock')); x.listen(1)\n"
         "f=open(os.path.join(%r,'held'),'w')\n"
+        "threading.Thread(target=time.sleep,args=(600,),daemon=True).start()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
         "time.sleep(600)\n" % (sdir, sdir, sdir)
     )
@@ -625,8 +650,10 @@ def flags_holder(work: str) -> Fixture:
     made with no flags at all, which the C shows by name as nothing. The access
     letter is the fd link's own mode to the C (DIVERGENCES 44), which grants
     neither read nor write to an `O_PATH` fd or to access mode 3; the C prints
-    both as `u`. `O_TMPFILE` needs a file system that has it, and is left out
-    where the work directory does not."""
+    both as `u`. A directory opened by glibc's `opendir()` (read-only,
+    non-blocking) is `r` to both: DIVERGENCES 9 had recorded it as `u` in the
+    C, which was an `O_PATH` directory fd. `O_TMPFILE` needs a file system that
+    has it, and is left out where the work directory does not."""
     qdir = os.path.join(work, "flags")
     os.makedirs(qdir)
     py = (
@@ -644,6 +671,12 @@ def flags_holder(work: str) -> Fixture:
         "      os.open(d,os.O_RDONLY|os.O_DIRECTORY),\n"
         "      os.open(f,3),\n"
         "      os.open('/dev/null',os.O_PATH)]\n"
+        "import ctypes\n"
+        "libc=ctypes.CDLL(None)\n"
+        "libc.opendir.restype=ctypes.c_void_p\n"
+        "libc.opendir.argtypes=[ctypes.c_char_p]\n"
+        "libc.dirfd.argtypes=[ctypes.c_void_p]\n"
+        "keep.append(libc.dirfd(libc.opendir(d.encode())))\n"
         "keep+=list(os.pipe2(0))\n"
         "try:\n"
         "    keep.append(os.open(d,os.O_TMPFILE|os.O_RDWR))\n"
@@ -652,9 +685,9 @@ def flags_holder(work: str) -> Fixture:
         "open(os.path.join(d,'ready'),'w').close()\n"
         "time.sleep(600)\n" % (qdir,)
     )
-    # 0,1,2 + the eleven above and the pipe's two ends; the O_TMPFILE fd only
-    # where it opens.
-    return Fixture("Q(flags)", [sys.executable, "-c", py], cwd=qdir, expect_fds=16)
+    # 0,1,2 + the eleven above, the opendir() fd and the pipe's two ends; the
+    # O_TMPFILE fd only where it opens.
+    return Fixture("Q(flags)", [sys.executable, "-c", py], cwd=qdir, expect_fds=17)
 
 
 def unprivileged_prefix() -> list | None:
@@ -1177,6 +1210,7 @@ def run(args) -> int:
                 "G": str(anon.pid),
                 "H": str(longcmd.pid),
                 "I": str(threads.pid),
+                "IT2DIR": os.path.join(threads.cwd, "t2cwd"),
                 "O": str(offsets.pid),
                 "X": str(nonutf8.pid),
                 "Z": str(zombies.pid),

@@ -18,7 +18,7 @@ use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, FilesystemArgs, Located, Process, Selection, UidSel, UserLookup,
+    errno_text, Backend, FilesystemArgs, Located, Process, Selection, TaskMode, UidSel, UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -364,6 +364,13 @@ fn unlocated(
         if !hit {
             miss.push(format!("lsof: process ID not located: {pid}"));
         }
+    }
+    // `-K` is a search item of its own, after the PIDs as the C reports it
+    // (`main.c`, `Ftask < 2`): located by a row of a task, printed or not.
+    // So `lsof -K -a -p P` exits 1 on a single-threaded P, which is not a task
+    // and has none, and `-K i` asks for nothing to be located (DIVERGENCES 33).
+    if sel.tasks == TaskMode::Always && !located.tasks {
+        miss.push("lsof: no tasks located".to_string());
     }
     for (pgid, hit) in sel.pgids.iter().zip(&located.pgids) {
         if !hit {
@@ -1035,5 +1042,42 @@ mod tests {
         );
         assert_eq!(strip_verbatim("C:\\plain"), "C:\\plain");
         assert_eq!(strip_verbatim("/unix/path"), "/unix/path");
+    }
+
+    /// `-K`'s search item is reported after the PIDs, and only for an
+    /// explicit `-K`, the last of `-K` and `-K i` deciding (DIVERGENCES 33).
+    #[test]
+    fn no_tasks_located_follows_the_pids_and_only_under_dash_k() {
+        use lsof_core::render::Escaper;
+        use lsof_core::Located;
+        let lines = |argv: &[&str], tasks: bool| {
+            let (sel, _) = parsed(argv);
+            let located = Located {
+                pids: vec![false],
+                tasks,
+                ..Default::default()
+            };
+            super::unlocated(&sel, &located, &[], &[], Escaper::UNIX)
+        };
+        assert_eq!(
+            lines(&["-K", "-p", "1"], false),
+            ["lsof: process ID not located: 1", "lsof: no tasks located"]
+        );
+        assert_eq!(
+            lines(&["-K", "-p", "1"], true),
+            ["lsof: process ID not located: 1"]
+        );
+        assert_eq!(
+            lines(&["-K", "-K", "i", "-p", "1"], false),
+            ["lsof: process ID not located: 1"]
+        );
+        assert_eq!(
+            lines(&["-K", "i", "-K", "-p", "1"], false),
+            ["lsof: process ID not located: 1", "lsof: no tasks located"]
+        );
+        assert_eq!(
+            lines(&["-p", "1"], false),
+            ["lsof: process ID not located: 1"]
+        );
     }
 }

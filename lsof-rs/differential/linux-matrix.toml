@@ -618,6 +618,116 @@ args = ["-n", "-P", "-K", "{FILE}"]
 name = "tasks-dash-K-fields"
 args = ["-n", "-P", "-K", "-a", "-d", "^mem", "-FpKMcf", "-p", "{I}"]
 
+# ---------------------------------------- tasks under -a, and -K's search item
+# DIVERGENCES 33. Under `-a` the C enters a process as a task only when it has
+# a task of its own (`dproc.c`: `Fand && ht && pidts`); otherwise the process
+# fails the AND. So `-K -a -p` lists a multi-threaded process (fixture I) with
+# its tasks, and a single-threaded one (fixture A, a `sleep`) not at all.
+# `-K` is also a search item: if no row of a task is kept, printed or not, the
+# run exits 1 and `-V` says `no tasks located`. lsof-rs had dropped the task
+# kind from `-a` and had no such item, so it listed A and exited 0.
+
+[[case]]
+name = "tasks-dash-K-and-a-single-threaded-lists-nothing"
+args = ["-n", "-P", "-K", "-a", "-p", "{A}"]
+
+[[case]]
+# The item's line, after any PID line, on stdout.
+name = "tasks-dash-K-and-a-V-says-no-tasks-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{A}"]
+
+[[case]]
+# Under `-a` the C compares `-c` only once the task test has passed, so a
+# process that is not a task leaves its command unlocated too.
+name = "tasks-dash-K-and-a-does-not-compare-the-command"
+args = ["-n", "-P", "-V", "-K", "-a", "-c", "sle", "-p", "{A}"]
+
+[[case]]
+# Both processes asked for; only the one with tasks is listed.
+name = "tasks-dash-K-and-a-lists-only-the-multi-threaded"
+args = ["-n", "-P", "-K", "-a", "-d", "cwd", "-p", "{A},{I}"]
+
+[[case]]
+# Located means KEPT, printed or not: I's rows are kept, then `-d 999` drops
+# them all at the AND, and the run still exits 0.
+name = "tasks-dash-K-located-by-a-row-printed-or-not"
+args = ["-n", "-P", "-V", "-K", "-a", "-d", "999", "-p", "{I}"]
+
+[[case]]
+# ...where A, which has no task to keep, exits 1.
+name = "tasks-dash-K-not-located-without-a-task"
+args = ["-n", "-P", "-V", "-K", "-a", "-d", "999", "-p", "{A}"]
+
+[[case]]
+# `-t` reads the tasks' rows under `-K`: lsof-rs's fast path built no task
+# entries and printed both PIDs.
+name = "tasks-dash-K-terse-lists-only-the-multi-threaded"
+args = ["-K", "-t", "-a", "-p", "{A},{I}"]
+
+[[case]]
+name = "tasks-dash-K-terse-single-threaded-exits-1"
+args = ["-K", "-t", "-a", "-p", "{A}"]
+
+[[case]]
+# The last of `-K` and `-K i` decides, the item with it.
+name = "tasks-dash-K-i-then-K-is-K"
+args = ["-n", "-P", "-K", "i", "-K", "-a", "-p", "{A}"]
+
+[[case]]
+name = "tasks-dash-K-then-K-i-is-not-a-search-item"
+args = ["-n", "-P", "-K", "-K", "i", "-a", "-d", "cwd", "-p", "{A}"]
+
+# Under -a a network selecter (-i, -U) makes the C build a process's socket
+# rows and nothing else -- `Ckscko` in dproc.c, set when `Fand ||
+# !(Selflags & ~SELNW)` -- and the rows that say what could not be read,
+# which it builds before asking. So only those can locate -K. Fixture I holds
+# no socket; S and U each run an idle second thread. lsof-rs had built every
+# row, so a socketless task was located and `-U` exited 0 (DIVERGENCES 33).
+
+[[case]]
+name = "tasks-dash-K-and-a-U-socketless-task-not-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{I}", "-U"]
+
+[[case]]
+name = "tasks-dash-K-and-a-i-socketless-task-not-located"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{I}", "-i"]
+
+[[case]]
+name = "tasks-dash-K-and-a-U-terse-socketless-task-exits-1"
+args = ["-t", "-K", "-a", "-p", "{I}", "-U"]
+
+[[case]]
+name = "tasks-dash-K-and-a-U-lists-the-task-sockets"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{S}", "-U"]
+
+[[case]]
+# Port 1 names no socket of S, so nothing prints -- but S's sockets are still
+# built, and a socket of a task locates -K printed or not: only `Internet
+# address not located` stays.
+name = "tasks-dash-K-and-a-unprinted-socket-locates-the-task"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{S}", "-iTCP:1"]
+
+[[case]]
+# {IT2DIR} is the cwd of fixture I's thread t2 alone, so only that task's
+# row is selected.
+name = "tasks-dash-K-and-a-a-row-only-a-task-holds"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{I}", "{IT2DIR}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 57). The case above lists a row of I's, so
+# -t prints I's PID in lsof-rs. The C prints nothing and exits 0: under -t,
+# print.c marks the PID printed before it looks for a selected file, and
+# the process's own entry, which has none, sorts first.
+name = "tasks-dash-K-terse-a-row-only-a-task-holds-in-lsof-rs"
+args = ["-K", "-t", "-a", "-p", "{I}", "{IT2DIR}"]
+
+[[case]]
+# Run as a user who cannot read U: the NOFD row is built whatever the C is
+# checking, and it locates -K.
+name = "unreadable-dash-K-and-a-U-located-by-the-nofd-row"
+args = ["-n", "-P", "-V", "-K", "-a", "-p", "{U}", "-U"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
 # ------------------------------------------- sockets in another namespace (J)
 # `/proc/net/*` shows the CALLING process's network namespace, so a socket
 # inside a container is an inode no local table explains. The C answers it from
@@ -1450,7 +1560,9 @@ args = ["-n", "-P", "-l", "-FpuL", "-p", "{A}"]
 
 # ------------------------------- access letters and file flags (DIVERGENCES 44, 46)
 # Fixture Q holds an fd for each open flag the C names, an O_PATH file, an
-# O_PATH directory and an access-mode-3 fd.
+# O_PATH directory and an access-mode-3 fd. And, for DIVERGENCES 9, a directory
+# opened by glibc's opendir(), which both print as `r`: the `u` item 9 recorded
+# was an O_PATH directory fd.
 
 [[case]]
 # The C reads the access letter off the fd link's mode, which grants neither
