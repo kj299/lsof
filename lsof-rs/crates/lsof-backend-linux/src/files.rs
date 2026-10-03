@@ -224,6 +224,23 @@ fn exempt_match<'a>(path: &str, exempt: &'a [String]) -> Option<&'a str> {
     })
 }
 
+/// `(DEVICE, NODE)` of the socket file at an AF_UNIX socket's bound path, as
+/// the C takes it (`dsock.c`): only an absolute path, `stat`ed in this
+/// process's mount namespace, and only when what is there is a socket — a
+/// file put in its place after the bind identifies nothing, and leaves the
+/// path to be matched as typed. A path under a `-e` file system is not
+/// `stat`ed at all, which is that option's promise; the C does `stat` it.
+fn socket_file_id(path: &str, exempt: &[String]) -> Option<(String, String)> {
+    use std::os::unix::fs::FileTypeExt;
+    if !path.starts_with('/') || exempt_match(path, exempt).is_some() {
+        return None;
+    }
+    let md = std::fs::metadata(path).ok()?;
+    md.file_type()
+        .is_socket()
+        .then(|| (dev_cell(&md), md.ino().to_string()))
+}
+
 /// The C's `UNKN*` TYPE code for an fd kind — `UNKNfd`, `UNKNcwd`, `UNKNrtd`,
 /// `UNKNtxt`, `UNKNmem`, `UNKNdel`. Measured: an exempted numeric fd is
 /// `UNKNfd`, the cwd is `UNKNcwd`, the executable is `UNKNtxt`.
@@ -255,6 +272,10 @@ pub struct GatherCtx<'a> {
     /// `Selection::omit_unreadable` — `-w`, or `-t`: make no row for a file
     /// that cannot be read, rather than one saying why.
     pub omit_unreadable: bool,
+    /// Whether the run named a path: only then does an AF_UNIX row carry the
+    /// path it is bound to, and a `stat` of the socket file there, for a path
+    /// argument to find it by (`SocketInfo::bound`).
+    pub bound_paths: bool,
 }
 
 /// The kernel's name for a socket fd: `socket:[<inode>]`, for every family.
@@ -393,6 +414,15 @@ fn row(
                 },
                 None => e.info.display_name(false, false),
             };
+            let mut sock = e.info.clone();
+            if ctx.bound_paths {
+                sock.bound = e.path.as_ref().map(|path| {
+                    Box::new(lsof_core::BoundPath {
+                        path: path.clone(),
+                        id: socket_file_id(path, exempt),
+                    })
+                });
+            }
             return Some(OpenFile {
                 rdev: None,
                 // A socket has no filesystem device, so `-F D` has nothing to
@@ -412,7 +442,7 @@ fn row(
                 offset: Some(0),
                 node: Some(e.node.clone()),
                 links: None,
-                socket: Some(Box::new(e.info.clone())),
+                socket: Some(Box::new(sock)),
             });
         }
     }
@@ -745,6 +775,7 @@ mod tests {
                 exempt,
                 sockets_only: false,
                 omit_unreadable: false,
+                bound_paths: false,
             },
         )
     }
@@ -825,6 +856,7 @@ mod tests {
                 exempt: &[],
                 sockets_only: false,
                 omit_unreadable: false,
+                bound_paths: false,
             },
         );
         assert!(
@@ -1116,6 +1148,7 @@ mod tests {
                 exempt: &[],
                 sockets_only,
                 omit_unreadable,
+                bound_paths: false,
             },
         )
     }
@@ -1311,6 +1344,35 @@ mod tests {
         assert_eq!(at(0).file_type, FileType::Chr);
         assert_eq!(at(0).rdev.map(|r| r.get()), Some(0x103));
         assert_eq!(at(3).rdev, None, "a regular file names no device");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri cannot bind a socket (bind is an unsupported operation)"
+    )]
+    fn a_bound_path_identifies_only_a_socket_file_not_on_an_exempt_fs() {
+        // DIVERGENCES 60: the C stats an AF_UNIX socket's bound path and uses
+        // the identity only when what is there is a socket file.
+        let dir = fake_proc("bound");
+        let sock = dir.join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let path = sock.to_str().unwrap();
+        let md = std::fs::metadata(&sock).unwrap();
+        assert_eq!(
+            socket_file_id(path, &[]),
+            Some((dev_cell(&md), md.ino().to_string()))
+        );
+        // A regular file in its place identifies nothing.
+        let plain = dir.join("plain");
+        std::fs::write(&plain, b"x").unwrap();
+        assert_eq!(socket_file_id(plain.to_str().unwrap(), &[]), None);
+        // Nor does a relative path, or one under a `-e` file system, which
+        // is never stat'ed.
+        assert_eq!(socket_file_id("s.sock", &[]), None);
+        let exempt = [dir.to_str().unwrap().to_string()];
+        assert_eq!(socket_file_id(path, &exempt), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

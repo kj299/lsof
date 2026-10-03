@@ -260,6 +260,14 @@ fn unlocated(
         .flat_map(|p| &p.files)
         .filter_map(|f| Some((f.device.as_deref()?, f.node.as_deref()?)))
         .collect();
+    // An AF_UNIX socket shown because of the path it is bound to locates that
+    // path's item too: by the socket file's identity, or by the path as typed
+    // (`is_file_named()` marks the entry it matched either way).
+    let bound: Vec<&lsof_core::BoundPath> = procs
+        .iter()
+        .flat_map(|p| &p.files)
+        .filter_map(|f| f.socket.as_deref()?.bound.as_deref())
+        .collect();
     for item in search {
         let SearchItem {
             id,
@@ -276,7 +284,13 @@ fn unlocated(
                 .any(|f| f.fs_device == Some(*dev))
         } else {
             match id {
-                Some((dev, node)) => shown.contains(&(dev.as_str(), node.as_str())),
+                Some((dev, node)) => {
+                    shown.contains(&(dev.as_str(), node.as_str()))
+                        || bound.iter().any(|b| {
+                            b.id.as_ref().is_some_and(|(d, n)| d == dev && n == node)
+                                || b.path == *display
+                        })
+                }
                 // No identity for it (the backend could not resolve the path, or
                 // has no identities at all): fall back to the name comparison.
                 None => {
@@ -532,6 +546,12 @@ fn main() {
             columns,
         } => (selection, format, repeat, columns),
     };
+    // Each path argument as it was typed, kept before it is resolved below.
+    // A backend that identifies files has no use for the resolved spelling but
+    // to recognise a mount point, and the C keeps the typed one (`aname`) for
+    // the rest: it reports an unlocated argument by it (`no file use located:
+    // ./x`), and compares an AF_UNIX socket's bound path with it.
+    let typed_paths = selection.paths.clone();
     let selection = {
         let mut sel = selection;
         // Path selectors are literal prefix/equality matches against the
@@ -636,15 +656,18 @@ fn main() {
             }
         }
         let mut not_a_filesystem: Vec<String> = Vec::new();
-        for p in &sel.paths {
+        for (p, typed) in sel.paths.iter().zip(&typed_paths) {
+            // Matching by name needs the resolved spelling; nothing else does.
+            let shown = if sel.paths_identified { typed } else { p };
             let devs = filesystems_named(&mounts, p, sel.filesystem_args);
             if !devs.is_empty() {
+                sel.path_names.insert(typed.clone());
                 for dev in devs {
                     sel.path_fs_devices.insert(dev);
                     search.push(SearchItem {
                         id: None,
                         fs_device: Some(dev),
-                        display: p.clone(),
+                        display: shown.clone(),
                     });
                 }
                 continue;
@@ -658,6 +681,7 @@ fn main() {
             let id = env.backend.identify_path(p);
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
+                sel.path_names.insert(typed.clone());
             } else if sel.paths_identified {
                 // The C stats every path argument and DROPS the ones that
                 // fail, reporting the errno (`arg.c`, `ck_file_arg`:
@@ -673,7 +697,7 @@ fn main() {
             search.push(SearchItem {
                 id,
                 fs_device: None,
-                display: p.clone(),
+                display: shown.clone(),
             });
         }
         // `+d`/`+D` are directory expansions, not file-system arguments: the C
@@ -701,6 +725,7 @@ fn main() {
             }
             if let Some(id) = id.clone() {
                 sel.path_ids.insert(id);
+                sel.path_names.insert(dir.to_string());
             }
             search.push(SearchItem {
                 id,
@@ -754,6 +779,7 @@ fn main() {
                     let id = env.backend.identify_path(&shown);
                     if let Some(id) = id.clone() {
                         sel.path_ids.insert(id);
+                        sel.path_names.insert(shown.clone());
                     }
                     search.push(SearchItem {
                         id,
@@ -1078,6 +1104,81 @@ mod tests {
         assert_eq!(
             lines(&["-p", "1"], false),
             ["lsof: process ID not located: 1"]
+        );
+    }
+
+    /// A path argument is located by an AF_UNIX socket shown because of the
+    /// path it is bound to -- by the socket file's identity there, or by the
+    /// path as typed -- though the row's own identity is the socket's
+    /// (DIVERGENCES 60).
+    #[test]
+    fn a_path_is_located_by_a_unix_socket_bound_to_it() {
+        use lsof_core::model::{
+            AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SocketInfo,
+        };
+        use lsof_core::render::Escaper;
+        use lsof_core::{Located, Selection};
+        let sock = |path: &str, id: Option<(&str, &str)>| OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Unix,
+            name: format!("{path} type=STREAM"),
+            device: Some("0xffff".into()),
+            size: None,
+            offset: Some(0),
+            node: Some("500".into()),
+            links: None,
+            socket: Some(Box::new(SocketInfo {
+                bound: Some(Box::new(BoundPath {
+                    path: path.into(),
+                    id: id.map(|(d, n)| (d.into(), n.into())),
+                })),
+                protocol: Protocol::Other("unix"),
+                local: None,
+                remote: None,
+                state: None,
+                tcp: None,
+            })),
+        };
+        let shown = |f: OpenFile| Process {
+            tid: None,
+            task_command: None,
+            uid: None,
+            pgid: None,
+            pid: 7,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            unlisted: false,
+            files: vec![f],
+        };
+        let item = |display: &str| super::SearchItem {
+            id: Some(("254,0".into(), "11".into())),
+            fs_device: None,
+            display: display.into(),
+        };
+        let misses = |procs: &[Process], typed: &str| {
+            super::unlocated(
+                &Selection::default(),
+                &Located::default(),
+                &[item(typed)],
+                procs,
+                Escaper::UNIX,
+            )
+        };
+        let by_id = [shown(sock("/d/s.sock", Some(("254,0", "11"))))];
+        assert!(misses(&by_id, "link-to-s.sock").is_empty());
+        let by_name = [shown(sock("/d/s.sock", None))];
+        assert!(misses(&by_name, "/d/s.sock").is_empty());
+        assert_eq!(
+            misses(&by_name, "./s.sock"),
+            ["lsof: no file use located: ./s.sock"],
+            "only the path as typed is compared"
         );
     }
 }

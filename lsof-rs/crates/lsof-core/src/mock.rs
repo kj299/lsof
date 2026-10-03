@@ -94,6 +94,7 @@ pub fn sample_processes() -> Vec<Process> {
                     node: Some("TCP".into()),
                     links: None,
                     socket: Some(Box::new(SocketInfo {
+                        bound: None,
                         protocol: Protocol::Tcp,
                         local: Some(addr("0.0.0.0:445")),
                         remote: None,
@@ -116,6 +117,7 @@ pub fn sample_processes() -> Vec<Process> {
                     node: Some("TCP".into()),
                     links: None,
                     socket: Some(Box::new(SocketInfo {
+                        bound: None,
                         protocol: Protocol::Tcp,
                         local: Some(addr("127.0.0.1:445")),
                         remote: Some(addr("127.0.0.1:51000")),
@@ -138,6 +140,7 @@ pub fn sample_processes() -> Vec<Process> {
                     node: Some("UDP".into()),
                     links: None,
                     socket: Some(Box::new(SocketInfo {
+                        bound: None,
                         protocol: Protocol::Udp,
                         local: Some(addr("[::]:53")),
                         remote: None,

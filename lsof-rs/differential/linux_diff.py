@@ -149,10 +149,14 @@ class Fixture:
         expect_comm: bytes | None = None,
         optional: bool = False,
         new_session: bool = False,
+        unavailable: str | None = None,
     ):
         # When true, a failure to start raises FixtureUnavailable instead of
         # ending the run: the cases naming this fixture are skipped by name.
         self.optional = optional
+        # Set when it is known before starting that this runner cannot: an
+        # optional fixture then reports why instead of being run to fail.
+        self.unavailable = unavailable
         self.name = name
         self.argv = argv
         self.cwd = cwd
@@ -175,6 +179,8 @@ class Fixture:
         return self.proc.pid
 
     def start(self) -> None:
+        if self.unavailable:
+            self._failed(self.unavailable)
         self.proc = subprocess.Popen(
             self.argv,
             cwd=self.cwd,
@@ -862,6 +868,173 @@ def userns_socket_holder(work: str) -> Fixture:
     )
 
 
+def socket_path_holder(work: str) -> Fixture:
+    """AF_UNIX sockets a path argument finds by the path they are bound to.
+
+    The C `stat`s the path of every bound unix socket in `/proc/net/unix`, and
+    a path argument naming the socket file at that path finds the socket by
+    its device and inode (`dsock.c`) -- so a symlink to it, or a relative
+    spelling, finds it too. When what is at that path is no longer a socket
+    (a file put in its place after the bind), it compares the path as typed.
+    lsof-rs compared each row's NAME, which ends in a `type=` tail, and never
+    found a socket at all (DIVERGENCES 60).
+
+    `u.sock` is a listener with one accepted connection, whose row carries the
+    path as well; the client end of the pair has none. `gone.sock` was bound,
+    then unlinked and replaced by a regular file. `link.sock` is a symlink to
+    `u.sock`, `link-gone` one to `gone.sock`, both made here before their
+    targets exist: what `link-gone` reaches is a regular file, which
+    identifies no socket, and its own path is not the one the socket was
+    bound to, so it finds nothing."""
+    ydir = os.path.join(work, "sockpaths")
+    os.makedirs(ydir)
+    os.symlink(os.path.join(ydir, "u.sock"), os.path.join(ydir, "link.sock"))
+    os.symlink(os.path.join(ydir, "gone.sock"), os.path.join(ydir, "link-gone"))
+    py = (
+        "import os,socket,time\n"
+        "d=%r\n"
+        "u=socket.socket(socket.AF_UNIX); u.bind(os.path.join(d,'u.sock')); u.listen(1)\n"
+        "c=socket.socket(socket.AF_UNIX); c.connect(os.path.join(d,'u.sock'))\n"
+        "a,_=u.accept()\n"
+        "g=socket.socket(socket.AF_UNIX); g.bind(os.path.join(d,'gone.sock')); g.listen(1)\n"
+        "os.unlink(os.path.join(d,'gone.sock'))\n"
+        "open(os.path.join(d,'gone.sock'),'w').write('not a socket\\n')\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ydir
+    )
+    # 0,1,2 + listener, client, accepted, and the socket whose file is gone.
+    return Fixture("Y(socket paths)", [sys.executable, "-c", py], cwd=ydir, expect_fds=7)
+
+
+def mount_ns_holder(work: str) -> Fixture:
+    """A process whose cwd and one open file are on a tmpfs mounted, in a
+    mount namespace of its own, over a directory that exists here too.
+
+    So `mnt` and `mnt/f` name other files here: a plain directory and a plain
+    file, each with its own device and inode. The C matches a path argument
+    by device and inode only, and finds neither in this process. lsof-rs
+    compared names as well, printed this process's rows for both, and then
+    reported both not located (DIVERGENCES 60).
+
+    `unshare --user --map-root-user` lets an unprivileged runner make the
+    namespace and mount the tmpfs, as fixture L does; `exec` keeps one pid
+    from `unshare` to the python that holds the file."""
+    mdir = os.path.join(work, "mntns")
+    mnt = os.path.join(mdir, "mnt")
+    os.makedirs(mnt)
+    with open(os.path.join(mnt, "f"), "w") as f:
+        f.write("outer\n")
+    py = (
+        "import os,time\n"
+        "f=open('f')\n"
+        "open(%r,'w').close()\n"
+        "time.sleep(600)\n" % os.path.join(mdir, "ready")
+    )
+    sh = 'mount -t tmpfs lsofdiff "$1" && cd "$1" && echo inner > f && exec "$2" -c "$3"'
+    return Fixture(
+        "M(mount namespace)",
+        [
+            "unshare", "--user", "--map-root-user", "--mount", "--propagation",
+            "private", "sh", "-c", sh, "sh", mnt, sys.executable, py,
+        ],
+        cwd=mdir,
+        # 0,1,2 + the inner `f`, under python's own comm: until both, the pid
+        # is still `unshare` or `sh`, and a namespace that could not be made
+        # exits here, which reads as unavailable rather than broken.
+        expect_fds=4,
+        expect_comm=os.path.basename(sys.executable).encode()[:15],
+        optional=True,
+    )
+
+
+# The two credential shapes fixture W holds: (real, effective) uid. The C
+# shows the effective one -- the owner of `/proc/<pid>/` -- and lsof-rs had
+# shown the real one, so each shape reads differently in the two (DIVERGENCES
+# 55). 65534 is `nobody` on every runner this harness uses.
+OWNER_SHAPES = {"W": (0, 65534), "WR": (65534, 0)}
+
+
+def root_prefix() -> list | None:
+    """How to start a process as root: nothing when already root, `sudo -n`
+    when this user may use it without a password (a CI runner), else `None`
+    and the fixture that needs it is unavailable."""
+    if os.getuid() == 0:
+        return []
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return None
+    probe = subprocess.run(
+        [sudo, "-n", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    return [sudo, "-n"] if probe.returncode == 0 else None
+
+
+def owner_holder(work: str) -> Fixture:
+    """Two processes whose real and effective uids differ, one each way.
+
+    {W} runs with real uid 0 and effective 65534, {WR} the other way round.
+    Only root can make either, so the fixture starts through `sudo -n` when
+    the runner is not root, and is unavailable when it cannot. Each writes its
+    pid before it changes its credentials -- after, it could no longer write
+    here -- and dies with its parent (`PR_SET_PDEATHSIG`, set after the change,
+    which clears it), so stopping the fixture stops both."""
+    wdir = os.path.join(work, "owner")
+    os.makedirs(wdir)
+    prefix = root_prefix()
+    py = (
+        "import ctypes,os,signal,sys,time\n"
+        "libc=ctypes.CDLL(None)\n"
+        "d=sys.argv[1]\n"
+        "def hold(key, real, eff, parent):\n"
+        "    open(os.path.join(d,key+'.pid'),'w').write(str(os.getpid()))\n"
+        "    os.setresgid(real, eff, real)\n"
+        "    os.setresuid(real, eff, real)\n"
+        "    libc.prctl(1, signal.SIGKILL, 0, 0, 0)\n"
+        "    if os.getppid() != parent: os._exit(0)\n"
+        "    time.sleep(600)\n"
+        "    os._exit(0)\n"
+        "me=os.getpid()\n"
+        "if os.fork()==0: hold('WR', %d, %d, me)\n"
+        "hold('W', %d, %d, os.getppid())\n"
+        % (*OWNER_SHAPES["WR"], *OWNER_SHAPES["W"])
+    )
+    return Fixture(
+        "W(owner)",
+        [*(prefix or []), sys.executable, "-c", py, wdir],
+        cwd=wdir,
+        expect_fds=0,  # `owners_ready` decides: the pids, then their credentials
+        optional=True,
+        unavailable=None if prefix is not None else "not root, and no passwordless sudo",
+    )
+
+
+def owners_ready(w: Fixture) -> dict[str, int]:
+    """Wait until both of fixture W's processes run with the credentials they
+    are there for, and return their pids by matrix key. The `Uid:` line is the
+    test, not a marker file: the credentials ARE the fixture."""
+    deadline = time.monotonic() + 5.0
+    pids: dict[str, int] = {}
+    while time.monotonic() < deadline:
+        if w.proc is not None and w.proc.poll() is not None:
+            raise FixtureUnavailable(f"{w.name}: exited (rc={w.proc.returncode})")
+        for key, (real, eff) in OWNER_SHAPES.items():
+            if key in pids:
+                continue
+            try:
+                with open(os.path.join(w.cwd, key + ".pid")) as f:
+                    pid = int(f.read())
+                with open(f"/proc/{pid}/status") as f:
+                    uids = next(l for l in f if l.startswith("Uid:")).split()[1:3]
+            except (OSError, ValueError, StopIteration):
+                continue
+            if uids == [str(real), str(eff)]:
+                pids[key] = pid
+        if len(pids) == len(OWNER_SHAPES):
+            return pids
+        time.sleep(0.02)
+    raise FixtureUnavailable(f"{w.name}: credentials not in place within 5s")
+
+
 def make_fixtures(work: str) -> tuple[Fixture, ...]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
@@ -974,7 +1147,10 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     nl = unlinked_holder(work)
     v = device_holder(work)
     q = flags_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q
+    y = socket_path_holder(work)
+    m = mount_ns_holder(work)
+    w = owner_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w
 
 
 # -------------------------------------------------------------------- matrix
@@ -1096,7 +1272,7 @@ def run(args) -> int:
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
         offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
-        flagfds,
+        flagfds, sockpaths, mntns, owner,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -1108,6 +1284,14 @@ def run(args) -> int:
         "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
         "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
         "U": (unreadable, "no user here that cannot read a non-dumpable process"),
+        # M's paths name a plain directory here whether or not M came up; a
+        # case naming one without M would MATCH on nothing, so they go with it.
+        "M": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+        "MMNT": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+        "MFILE": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+        # W's cases name {W} and {WR} together; both go with it.
+        "W": (owner, "not root, and no passwordless sudo"),
+        "WR": (owner, "not root, and no passwordless sudo"),
     }
     # How fixture U's cases run as a user who cannot read it; see
     # `unprivileged_prefix`. Root with no way down skips them.
@@ -1136,17 +1320,19 @@ def run(args) -> int:
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
         started_optional = {k: v[0] for k, v in optional.items()}
-        netns, packet, userns, unreadable = (
+        netns, packet, userns, unreadable, mntns, owner = (
             started_optional["J"],
             started_optional["K"],
             started_optional["L"],
             started_optional["U"],
+            started_optional["M"],
+            started_optional["W"],
         )
         for fx in [
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
-                unreadable, states, unlinked, devices, flagfds,
+                unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
             )
             if f is not None
         ]:
@@ -1159,6 +1345,16 @@ def run(args) -> int:
             if not os.path.exists(ready):
                 infra(f"fixture {fx.name} was not ready within 5s")
         zchild = zombies_ready(zombies)
+        # W's pids are its two processes', not the `sudo` it may run under,
+        # and they count only once the credentials are in place.
+        owners: dict[str, int] = {}
+        if owner is not None:
+            try:
+                owners = owners_ready(owner)
+            except FixtureUnavailable as unavailable:
+                print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                optional["W"] = (None, optional["W"][1])
+                optional["WR"] = (None, optional["WR"][1])
         # U is only worth comparing if the user its cases run as really cannot
         # read it -- a runner with CAP_SYS_PTRACE could, and both binaries
         # would then MATCH on a readable process, a green that measured
@@ -1219,6 +1415,17 @@ def run(args) -> int:
                 "N": str(unlinked.pid),
                 "V": str(devices.pid),
                 "Q": str(flagfds.pid),
+                "Y": str(sockpaths.pid),
+                "YDIR": sockpaths.cwd,
+                "YSOCK": os.path.join(sockpaths.cwd, "u.sock"),
+                "YLINK": os.path.join(sockpaths.cwd, "link.sock"),
+                "YGONE": os.path.join(sockpaths.cwd, "gone.sock"),
+                "YGONELINK": os.path.join(sockpaths.cwd, "link-gone"),
+                "MMNT": os.path.join(mntns.cwd if mntns else work, "mnt"),
+                "MFILE": os.path.join(mntns.cwd if mntns else work, "mnt", "f"),
+                # Last, so they replace the placeholder pid the optional
+                # fixtures' entries above gave them.
+                **{k: str(v) for k, v in owners.items()},
                 # Who the fixtures run as, for `-u` -- by number and by name.
                 "UID": str(os.getuid()),
                 "USER": pwd.getpwuid(os.getuid()).pw_name,

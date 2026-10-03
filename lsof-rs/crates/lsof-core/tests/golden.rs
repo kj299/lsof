@@ -1107,6 +1107,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         AccessMode, FdType, FileType, OpenFile, Process, Protocol, SocketInfo, TcpExtInfo, TcpState,
     };
     let sock = SocketInfo {
+        bound: None,
         protocol: Protocol::Tcp,
         local: Some("127.0.0.1:5000".parse().unwrap()),
         remote: Some("127.0.0.1:51000".parse().unwrap()),
@@ -1420,6 +1421,7 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
             node: Some("TCP".into()),
             links: None,
             socket: Some(Box::new(SocketInfo {
+                bound: None,
                 protocol: Protocol::Tcp,
                 local: None,
                 remote: None,
@@ -1782,6 +1784,7 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
             node: Some("ALL".into()),
             links: None,
             socket: Some(Box::new(SocketInfo {
+                bound: None,
                 protocol: Protocol::Other("packet"),
                 local: None,
                 remote: None,
@@ -1883,6 +1886,7 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
             node: Some("3939".into()),
             links: None,
             socket: Some(Box::new(SocketInfo {
+                bound: None,
                 protocol: Protocol::Other("unix"),
                 local: None,
                 remote: None,
@@ -2174,6 +2178,7 @@ fn only_tcp_udp_and_unix_rows_carry_the_dash_t_separator() {
             name,
         );
         f.socket = Some(Box::new(SocketInfo {
+            bound: None,
             protocol: proto,
             local: None,
             remote: None,

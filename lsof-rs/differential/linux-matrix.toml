@@ -453,6 +453,75 @@ args = ["-n", "-P", "+d", "{ADIR}"]
 name = "path-plus-D-tree"
 args = ["-n", "-P", "+D", "{ADIR}"]
 
+# An AF_UNIX socket is found by the path it is bound to (DIVERGENCES 60). The C
+# stats each bound path in /proc/net/unix and, when it is a socket file, finds
+# the socket by that file's device and inode -- so a symlink to it finds it
+# too -- and otherwise compares the path as typed. Fixture Y: a listener on
+# u.sock with one accepted connection (whose row carries the path; the client
+# end has none), link.sock a symlink to it, and gone.sock a socket whose file
+# was replaced by a regular one. lsof-rs compared each row's NAME, which ends
+# in `type=STREAM`, and found no socket at all.
+
+[[case]]
+name = "path-unix-socket-by-its-path"
+args = ["-n", "-P", "-V", "{YSOCK}"]
+
+[[case]]
+name = "path-unix-socket-through-a-symlink"
+args = ["-n", "-P", "-V", "{YLINK}"]
+
+[[case]]
+# The file at gone.sock is no socket, so the path as typed decides.
+name = "path-unix-socket-whose-file-was-replaced"
+args = ["-n", "-P", "-V", "{YGONE}"]
+
+[[case]]
+# A symlink to that regular file reaches no socket file, and its own path is
+# not the bound one: nothing is found, and the run exits 1.
+name = "path-unix-socket-not-found-through-its-replacement"
+args = ["-n", "-P", "-V", "{YGONELINK}"]
+
+[[case]]
+name = "path-unix-socket-and-a-dash-U"
+args = ["-n", "-P", "-V", "-a", "-p", "{Y}", "-U", "{YSOCK}"]
+
+[[case]]
+name = "path-unix-socket-terse"
+args = ["-t", "{YSOCK}"]
+
+[[case]]
+name = "path-unix-socket-fields"
+args = ["-n", "-P", "-F", "pfn", "{YSOCK}"]
+
+[[case]]
+# +d finds u.sock by identity and gone.sock by name; link.sock is a symlink,
+# which +d skips; `ready` is open nowhere, so the run exits 1.
+name = "path-plus-d-finds-the-sockets"
+args = ["-n", "-P", "+d", "{YDIR}"]
+
+# A file with the same path in another mount namespace is another file
+# (DIVERGENCES 60). Fixture M's cwd and its open `f` are on a tmpfs mounted,
+# in its own namespace, over a plain directory and file here. The C matches
+# by device and inode only and finds neither; lsof-rs also compared names,
+# printed M's rows, then reported both paths not located.
+
+[[case]]
+name = "path-another-mount-namespace-is-another-dir"
+args = ["-n", "-P", "-V", "{MMNT}"]
+
+[[case]]
+name = "path-another-mount-namespace-is-another-file"
+args = ["-n", "-P", "-V", "{MFILE}"]
+
+[[case]]
+name = "path-another-mount-namespace-and-a"
+args = ["-n", "-P", "-V", "-a", "-p", "{M}", "{MMNT}"]
+
+[[case]]
+# The control: M's rows are there to be found, on the tmpfs.
+name = "path-another-mount-namespace-process-rows"
+args = ["-n", "-P", "-a", "-d", "cwd,3", "-p", "{M}"]
+
 # ----------------------------------------------------------- anonymous inodes
 [[case]]
 # Fds with no filesystem identity: the kernel names them `anon_inode:<kind>`
@@ -1407,6 +1476,39 @@ env = { LSOF_DIFF_UNPRIVILEGED = "1" }
 name = "unreadable-socket-only-run"
 args = ["-n", "-P", "-V", "-a", "-p", "{U}", "-i"]
 env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+# ---------------------------------------------------------------- owner (W)
+# A process's owner is its effective uid: the C takes the owner of
+# /proc/<pid>/, which the kernel sets to the effective uid. Fixture W runs
+# with real uid 0 and effective 65534, WR the other way round, so every view
+# of the owner reads differently from the real uid lsof-rs had shown
+# (DIVERGENCES 55). They need root to exist, so the fixture runs through
+# `sudo -n` on a runner that is not root, and is skipped where it cannot; run
+# as a user who cannot read them, their rows say so, the same in both.
+
+[[case]]
+name = "owner-is-the-effective-uid-fields"
+args = ["-F", "pcuL", "-p", "{W},{WR}"]
+
+[[case]]
+name = "owner-is-the-effective-uid-table"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{W},{WR}"]
+
+[[case]]
+name = "owner-is-the-effective-uid-numeric"
+args = ["-n", "-P", "-l", "-a", "-d", "cwd", "-p", "{W},{WR}"]
+
+[[case]]
+name = "owner-dash-u-name-selects-the-effective-uid"
+args = ["-n", "-P", "-V", "-u", "nobody", "-a", "-d", "cwd", "-p", "{W},{WR}"]
+
+[[case]]
+name = "owner-dash-u-number-selects-the-effective-uid"
+args = ["-n", "-P", "-V", "-u", "0", "-a", "-d", "cwd", "-p", "{W},{WR}"]
+
+[[case]]
+name = "owner-dash-u-negated-excludes-the-effective-uid"
+args = ["-n", "-P", "-V", "-u", "^nobody", "-a", "-d", "cwd", "-p", "{W},{WR}"]
 
 # ----------------------------------------------------------- states fixture
 # Fixture S: a TCP listener, an established TCP pair, an unconnected and a

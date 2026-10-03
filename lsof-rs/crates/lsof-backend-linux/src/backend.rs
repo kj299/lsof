@@ -148,6 +148,7 @@ impl Backend for LinuxBackend {
             exempt: &sel.exempt_fs,
             sockets_only: sel.socket_rows_only(),
             omit_unreadable: sel.omit_unreadable,
+            bound_paths: sel.has_path_filter(),
         };
 
         for p in procs.iter_mut() {

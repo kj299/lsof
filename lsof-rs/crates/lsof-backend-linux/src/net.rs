@@ -182,6 +182,7 @@ impl SocketTable {
                 SocketEntry {
                     file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },
                     info: SocketInfo {
+                        bound: None,
                         protocol: proto,
                         local,
                         remote,
@@ -234,6 +235,7 @@ impl SocketTable {
                 SocketEntry {
                     file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },
                     info: SocketInfo {
+                        bound: None,
                         protocol,
                         local,
                         remote,
@@ -313,6 +315,7 @@ impl SocketTable {
                     // `sock` and unlike `IPv4` — lsof's own casing.
                     file_type: FileType::Other("pack".into()),
                     info: SocketInfo {
+                        bound: None,
                         // The family, not the ethernet protocol: the latter is
                         // the NODE cell, and `-F P` reads it from there. Same
                         // split `parse_unix` makes with `Protocol::Other`.
@@ -360,6 +363,7 @@ impl SocketTable {
                 SocketEntry {
                     file_type: FileType::Unix,
                     info: SocketInfo {
+                        bound: None,
                         protocol: Protocol::Other("unix"),
                         local: None,
                         remote: None,
