@@ -583,10 +583,12 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         $r = Invoke-Lsof @('-K', '-a', '-p', "$self", $fx.FilePath) 'K-a-file'
         Assert ($r.Exit -eq 0) "-K -a -p self FILE should exit 0 (exit=$($r.Exit))"
         Assert-Contains $r.Out $leaf '-K -a -p self FILE should keep the holder''s row'
-        $r = Invoke-Lsof @('-K', $fx.FilePath) 'K-file'
-        Assert ($r.Exit -eq 0) "-K FILE should exit 0 (exit=$($r.Exit))"
-        Assert-Contains $r.Out $leaf '-K FILE should list the holder''s row'
-        Assert ($r.Out -match $taskRow) '-K FILE should list `task` rows'
+        # `-n` sits between them because `-K` takes its optional value as the
+        # next word, as the C does: `-K FILE` is refused, FILE read as `-K`'s.
+        $r = Invoke-Lsof @('-K', '-n', $fx.FilePath) 'K-file'
+        Assert ($r.Exit -eq 0) "-K -n FILE should exit 0 (exit=$($r.Exit))"
+        Assert-Contains $r.Out $leaf '-K -n FILE should list the holder''s row'
+        Assert ($r.Out -match $taskRow) '-K -n FILE should list `task` rows'
     }
     Test-Case 'tasks-dash-K-terse' 'selection/-K' {
         # `-t -K` with no file selecter is answered from the thread snapshot
