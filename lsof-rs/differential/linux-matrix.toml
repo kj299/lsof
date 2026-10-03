@@ -1427,6 +1427,170 @@ name = "search-p-selected-and-excluded-is-fatal"
 args = ["-n", "-P", "-V", "-p", "{A},^{A}"]
 
 [[case]]
+# An empty item in a -p list is PID 0, the digits of nothing (`enter_id()`),
+# and no process has it (DIVERGENCES 49). lsof-rs had dropped the item, so
+# `-p ,` listed the whole host and exited 0.
+name = "search-p-empty-item-is-pid-0"
+args = ["-t", "-p", ","]
+
+[[case]]
+name = "search-p-empty-item-beside-a-pid"
+args = ["-t", "-p", ",{A}"]
+
+[[case]]
+# ...and -V names it: `process ID not located: 0`.
+name = "search-p-dash-V-reports-pid-0"
+args = ["-n", "-P", "-V", "-t", "-p", "{A},,{A}"]
+
+[[case]]
+# A trailing comma ends the list: no PID 0 there.
+name = "search-p-trailing-comma-ends-the-list"
+args = ["-t", "-p", "{A},"]
+
+[[case]]
+# A `^` alone excludes PID 0 (lsof-rs refused it).
+name = "search-p-caret-alone-excludes-pid-0"
+args = ["-t", "-p", "^", "-p", "{A}"]
+
+[[case]]
+name = "search-p-zero-included-and-excluded-is-fatal"
+args = ["-t", "-p", ",^"]
+
+[[case]]
+# Only a comma separates: a space makes the whole argument illegal
+# (`illegal process ID: …`). lsof-rs had split on spaces too.
+name = "search-p-space-is-illegal"
+args = ["-t", "-p", "{A} {B}"]
+
+[[case]]
+# LEDGERED (C-DEFECT). The C sums the digits in an `int`, so 4294967296 wraps
+# to PID 0, which -V reports. lsof-rs refuses an ID that does not fit.
+name = "search-p-overflow-wraps-in-the-c"
+args = ["-n", "-P", "-V", "-t", "-p", "4294967296"]
+
+[[case]]
+# -g reads the same list: an empty item is PGID 0, which the kernel's own
+# threads hold wherever /proc shows them; -a then leaves A out.
+name = "search-g-empty-item-is-pgid-0"
+args = ["-t", "-a", "-g", ",", "-p", "{A}"]
+
+[[case]]
+name = "search-g-caret-alone-excludes-pgid-0"
+args = ["-t", "-a", "-g", "^", "-p", "{A}"]
+
+[[case]]
+# -u reads it too (DIVERGENCES 69): `-u ,` is UID 0, and so is `-u ,^`.
+name = "search-u-zero-included-and-excluded-is-fatal"
+args = ["-t", "-u", ",^"]
+
+[[case]]
+# A -u item longer than a login name can be, 32 bytes (`LOGINML`), is refused
+# whatever it holds; lsof-rs read these 33 digits as UID 0.
+name = "search-u-33-characters-are-refused"
+args = ["-t", "-a", "-u", "000000000000000000000000000000000", "-p", "{A}"]
+
+# ------------------------------------------------------------- -d lists
+# `enter_fd()` adds every -d to one list, of one kind (DIVERGENCES 51).
+# lsof-rs kept only the last -d, and took a list of both kinds.
+
+[[case]]
+name = "fd-lists-add-up"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "3", "-d", "5"]
+
+[[case]]
+name = "fd-exclusions-add-up"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "^cwd", "-d", "^rtd", "-d", "^txt", "-d", "^mem", "-d", "^0-2"]
+
+[[case]]
+# A list of both kinds is refused, and the run never starts...
+name = "fd-mixed-list-is-fatal"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "3,^4"]
+
+[[case]]
+# ...across two -d as well...
+name = "fd-mixed-across-options-is-fatal"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "^4", "-d", "3"]
+
+[[case]]
+# ...and under -t, which mutes the message but not the refusal.
+name = "fd-mixed-list-is-fatal-under-t"
+args = ["-t", "-a", "-p", "{A}", "-d", "3,^4"]
+
+[[case]]
+# An empty item enters nothing: `-d ,` is no list at all.
+name = "fd-empty-items-enter-nothing"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", ","]
+
+[[case]]
+name = "fd-caret-alone-enters-nothing"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "^"]
+
+[[case]]
+name = "fd-empty-value-is-fatal"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", ""]
+
+[[case]]
+# `fd` is the C's name for every numbered descriptor (lsof-rs refused it).
+name = "fd-name-fd-is-every-number"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "fd"]
+
+[[case]]
+name = "fd-name-fd-excluded"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "^fd,^mem"]
+
+[[case]]
+# Another dialect's FD name is no error, and nothing here carries one.
+name = "fd-other-dialect-name-selects-nothing"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "ltx"]
+
+[[case]]
+name = "fd-unknown-name-is-fatal"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "foo"]
+
+[[case]]
+# A range's low end must be below its high: lsof-rs took 3-3 as fd 3.
+name = "fd-range-low-not-below-high-is-fatal"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "3-3"]
+
+# -------------------------------------------------- -a with nothing to AND
+# `main.c` refuses -a when no selection flag is set: nothing on stdout, exit
+# 1 (DIVERGENCES 50). lsof-rs listed the whole host.
+
+[[case]]
+name = "and-with-nothing-is-fatal"
+args = ["-a"]
+
+[[case]]
+# Exclusions select nothing.
+name = "and-with-only-exclusions-is-fatal"
+args = ["-a", "-p", "^{A}", "-u", "^{UID}"]
+
+[[case]]
+# `-K i` selects nothing, where `-K` would.
+name = "and-with-dash-K-i-is-fatal"
+args = ["-a", "-K", "i"]
+
+[[case]]
+# -s filters socket states; it selects nothing.
+name = "and-with-only-a-state-filter-is-fatal"
+args = ["-a", "-s", "TCP:LISTEN"]
+
+[[case]]
+name = "and-with-an-empty-fd-list-is-fatal"
+args = ["-a", "-d", ","]
+
+[[case]]
+# An exclusion-only -d does select: every row it does not exclude. Excluding
+# every kind there is leaves none, so nothing prints and the run exits 0.
+name = "and-with-an-fd-exclusion-list-runs"
+args = ["-t", "-a", "-d", "^fd,^cwd,^rtd,^txt,^mem,^DEL,^NOFD,^unk"]
+
+[[case]]
+# So does `+L0`, though nothing has fewer than 0 links.
+name = "and-with-plus-L-zero-runs"
+args = ["-t", "-a", "+L0"]
+
+[[case]]
 name = "search-dash-V-reports-a-repeated-pid-once"
 args = ["-n", "-P", "-V", "-p", "999999999,999999999"]
 
@@ -1599,6 +1763,26 @@ args = ["-n", "-P", "-V", "-u", "0", "-a", "-d", "cwd", "-p", "{W},{WR}"]
 [[case]]
 name = "owner-dash-u-negated-excludes-the-effective-uid"
 args = ["-n", "-P", "-V", "-u", "^nobody", "-a", "-d", "cwd", "-p", "{W},{WR}"]
+
+[[case]]
+# An empty -u item is UID 0 (DIVERGENCES 69): WR, root by its effective UID.
+# lsof-rs had dropped the item and listed both.
+name = "owner-dash-u-empty-item-is-uid-0"
+args = ["-t", "-a", "-u", ",", "-p", "{W},{WR}"]
+
+[[case]]
+name = "owner-dash-u-empty-item-beside-a-uid"
+args = ["-t", "-a", "-u", ",65534", "-p", "{W},{WR}"]
+
+[[case]]
+# A `^` alone excludes UID 0: W alone, and WR's PID is not located.
+name = "owner-dash-u-caret-alone-excludes-uid-0"
+args = ["-t", "-a", "-u", "^", "-p", "{W},{WR}"]
+
+[[case]]
+# 32 bytes are a name the C takes, digits and all: nobody, so W.
+name = "owner-dash-u-32-characters-are-taken"
+args = ["-t", "-a", "-u", "00000000000000000000000000065534", "-p", "{W},{WR}"]
 
 # ----------------------------------------------------------- states fixture
 # Fixture S: a TCP listener, an established TCP pair, an unconnected and a

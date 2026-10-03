@@ -280,6 +280,11 @@ Then the loop — each step is a CI-enforced gate:
    must not reach it. lsof-rs compared NAMEs to find sockets by path; a socket's
    NAME carries a `type=` tail, so the comparison never found one and fired only
    for a file of the same name in another mount namespace.
+   **An empty list item is input too** (LESSONS #076): for every list-valued
+   option, give the matrix an empty item in each position (`,`, `,x`, `x,`,
+   `x,,y`), a lone prefix (`^`), a separator the oracle does not name, a
+   repeated option and items of mixed kinds. lsof-rs split its lists with
+   `filter(|s| !s.is_empty())`, and the C read an empty `-p` item as PID 0.
    Finally, **mutate the cases you just wrote** (LESSONS #26): for each one, name
    the change it is meant to catch, make that change, and confirm the case turns
    red — then record the result as a kill table, one row per case. A case no

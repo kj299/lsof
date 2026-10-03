@@ -80,3 +80,52 @@ fn a_status_error_escapes_the_argument() {
         "a raw ESC reached stderr: {err:?}"
     );
 }
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn a_parse_error_escapes_the_argument_it_quotes() {
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .args(["-p", "1\x1b[2J"])
+        .output()
+        .expect("run lsof");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("lsof: illegal process ID: 1^[[2J\n"),
+        "{err:?}"
+    );
+    assert!(
+        !out.stderr.contains(&0x1b),
+        "a raw ESC reached stderr: {err:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn a_refusal_the_c_makes_in_silence_under_dash_t_still_ends_the_run() {
+    // A `-d` list of both kinds is refused. The C's `Fwarn`, which `-t` and
+    // `-w` set, mutes the message, not the refusal: only the usage follows.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .args(args)
+            .output()
+            .expect("run lsof")
+    };
+    let out = run(&["-t", "-d", "3,^4"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Try 'lsof -h' for usage.\n"
+    );
+    let out = run(&["-d", "3,^4"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr)
+        .starts_with("lsof: exclude in an include -d list: ^4\n"));
+}

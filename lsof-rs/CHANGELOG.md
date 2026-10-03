@@ -28,6 +28,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
 
 ### Changed
+- **`-a` with nothing to AND is refused**, as the C refuses it (DIVERGENCES
+  50): `lsof: no select options to AND via -a`, exit 1. A bare `-a`, or one
+  with only exclusions (`-a -p ^1`), `-K i` or `-s`, had listed the whole
+  host. **This changes Windows too.**
+- **A `-d` list is all inclusions or all exclusions**, as in the C
+  (DIVERGENCES 51): `-d 3,^4`, or `-d 3 -d ^4`, is refused (`exclude in an
+  include -d list: ^4`), where lsof-rs had taken both kinds. **This changes
+  Windows too.**
+- **Only a comma separates `-p` and `-g` items**, as in the C: `-p "1 2"` is
+  `illegal process ID: 1 2`, where lsof-rs had read two PIDs. **This changes
+  Windows too:** use `-p 1,2`.
 - **`-X` toggles, as in the C** (DIVERGENCES 45): `-X -X` is off again, and
   `-i` is refused only when the last `-X` left it on. lsof-rs set it however
   many times it was given, so `lsof -X -X -i` was refused.
@@ -145,6 +156,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **Repeated `-d` options add up**, as in the C (DIVERGENCES 51): `-d 3 -d 4`
+  selects both fds, where lsof-rs kept only the last `-d`. The C's names are
+  accepted, `fd` (every numbered fd) among them, and a range needs its low
+  end below its high one.
+- **An empty item in a `-p`, `-g` or `-u` list is ID 0** (DIVERGENCES 49,
+  69): `lsof -p ,` looks for PID 0 and exits 1, where lsof-rs listed the
+  whole host, `-u ,` selects root, and a `^` alone excludes ID 0. A `-u` item
+  over 32 bytes is refused, as no login name is that long.
+- **Error messages quote the argument escaped**, as the C's `safestrprt()`
+  does, so a control character in an argument cannot reach the terminal.
 - **A process's owner is its effective uid** (DIVERGENCES 55), as the C takes
   it from the owner of `/proc/<pid>/`. A process running with real uid 0 and
   effective uid 65534 showed `root` and escaped `-u nobody`; the USER column,

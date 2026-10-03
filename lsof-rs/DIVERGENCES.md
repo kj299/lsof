@@ -49,6 +49,12 @@ disagreeing, and it names the C code so anyone can check the triage.
   and the run stops with `can't get UID`. Not pinned to a fingerprint, unlike
   its neighbours: what the C prints here depends on whether fixture A runs as
   root (then `-u 0` names it), so the accepted diff differs between hosts.
+- [x] search-p-overflow-wraps-in-the-c [sha256:8285c127bd0a]: C-DEFECT, not
+  reproduced — item 49's twin of the `-u` overflow above. `enter_id()` sums
+  a PID's digits in an `int` with no overflow check, so `-p 4294967296` is
+  PID 0, which `-V` reports as not located, and 4294967297 is PID 1. lsof-rs
+  refuses an ID that does not fit in 32 bits, as `illegal process ID`. The
+  exit is 1 in both; only the `-V` line differs.
 - [x] path-bare-hardlink: DECISION — the NAME cell only. Both binaries find
   the same fd on the same inode when a file is queried through a hard link;
   they disagree on what to call it. The C substitutes **the name you asked
@@ -111,6 +117,92 @@ disagreeing, and it names the C code so anyone can check the triage.
   that is not an option, so in `lsof FILE -a -p PID` the last three are file
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
+
+## Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND (2026-10-03)
+
+Items 49, 50, 51 and 69, all measured against the C.
+
+**An empty item is ID 0** (items 49 and 69). The C's `enter_id()` (`-p`,
+`-g`) and `enter_uid()` (`-u`) read a list item by item, split at commas
+alone, and an item's number is the sum of its digits, so an empty item is 0:
+`-p ,` asks for PID 0, `-p ,1` for 0 and 1, and `-u ,` for UID 0, root. A `^`
+alone excludes ID 0, and a trailing comma ends the list without an empty
+item. lsof-rs dropped every empty item, so `lsof -p ,` listed the whole host
+and exited 0, where the C finds no PID 0 and exits 1; and it refused `-p ^`
+and `-u ^`. Two more of the readers' rules came with them:
+- Only a comma separates. A space makes the whole argument illegal
+  (`illegal process ID: 1 2`); lsof-rs had split `-p` and `-g` at spaces too.
+- A `-u` item may be 32 bytes at most after its `^` (`LOGINML`), whatever
+  it holds: 33 digits are refused, where lsof-rs read them as a UID.
+
+One difference stays: the C sums the digits of `-p` and `-g` in an `int`
+with no overflow check, so `-p 4294967296` is PID 0 and `-p 4294967297` PID
+1. lsof-rs refuses an ID that does not fit in 32 bits, as illegal: a
+C-DEFECT, not reproduced, ledgered as `search-p-overflow-wraps-in-the-c`.
+Between 2^31 and 2^32 the C's `-V` reports the ID negative
+(`-1294967296`), and lsof-rs as it was given.
+
+**`-d` is one list, of one kind** (item 51). Each `-d` adds to the C's one
+list (`enter_fd()` extends `Fdl`), so `-d 3 -d 4` selects both and
+`-d ^cwd -d ^rtd` excludes both; lsof-rs kept only the last `-d`. The list
+holds inclusions or exclusions, never both: an item of the other kind, in
+the same `-d` or a later one, ends the run (`exclude in an include -d list:
+^4`, exit 1), in silence under `-w` or `-t`. lsof-rs took a list of both
+kinds. The rest of `enter_fd_lst()`'s grammar came with it:
+- an empty item, `,` or a `^` alone, enters nothing, so `-a -d ,` has
+  nothing to AND, and `-d ""` is an error;
+- a range needs digits on both sides of its last `-`, and a low end below
+  its high one: `3-3` is refused, where lsof-rs took it as fd 3;
+- the names are the C's table. `fd` is every numbered descriptor, `unk` one
+  of unknown kind, and the names of other dialects' kinds (`ltx`, `ctty`,
+  `jd.`, …) are accepted and select nothing here. lsof-rs refused all but
+  six, `fd`, the most useful, among them.
+
+**`-a` needs something to AND** (item 50). `main.c` computes its selection
+flags and refuses `-a` when none is set: `no select options to AND via -a`,
+the usage, exit 1, nothing listed. Exclusions set none, nor do `-s`, `-E` or
+a bare `-g`, so `-a -p ^N`, `-a -K i` and `-a -s TCP:LISTEN` are refused;
+an exclusion-only `-d`, `-K`, and `+L` with any count, `+L0` too, set one.
+lsof-rs listed the whole host. It now asks `Selection::specified()`, which
+already mirrored the C's flags. `-h` and `-v` still come first.
+
+**Error messages quote the argument escaped**, as the C's `safestrprt()`
+prints it: `-p $'1\e[2J'` reports `illegal process ID: 1^[[2J`.
+
+These rules hold on Windows too, where the C has no say. A space in a `-p`
+or `-g` list is refused there now, and a script that relied on it must use
+commas; a mixed `-d` list and a bare `-a` are refused as well.
+
+### What the gate gained
+
+Thirty-six differential cases, 331 in all, 0 unexplained; one is the
+ledgered overflow. Fixture A carries the `-p`, `-g` and `-d` cases, and
+fixture W, whose two processes' owners are known, the `-u` ones. Against
+master's binary, 29 of the 36 diverge. Of the other seven, four are
+controls, the overflow diverges there too, and two `,^` cases end in a
+refusal on master for another reason: the same empty stdout and exit 1.
+
+Unit tests pin every rule above, spelling by spelling, and two integration
+tests run the binary for what only stderr shows: the argument escaped, and
+the refusal `-t` mutes ending the run all the same.
+
+Mutants: 21, all killed. Each item's rules have their own: the `-d` list
+kept to its last option, a mixture allowed or made loud under `-t`, an empty
+item entered, `-d ""` allowed, `3-3` allowed, `fd` or another dialect's name
+refused, a leading `-` taken, duplicates kept; an empty `-p` item skipped or
+made illegal, a space splitting, a lone `^` refused; an empty `-u` item
+dropped, the length unchecked, counted with its `^`, or off by one; the `-a`
+check gone; and the stderr message printed raw, or printed when muted. The
+two `,^` cases that master matches by accident are not hollow: they kill the
+mutants that skip an empty item.
+
+**The review.** An independent sweep against the C and master, and a
+reading of the change, was still running when this was first committed; its
+findings are recorded here when it reports.
+
+Not gated by the differential: the stderr messages, which unit and
+integration tests pin, and Windows, where no oracle runs. The same parser
+serves both platforms, and its unit tests run on each.
 
 ## Fixed by taking the owner from the effective uid, and finding a file by what it is (2026-10-03)
 
@@ -2490,9 +2582,9 @@ likely right; it is a compatibility decision, not a backend phase.
 | 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | ~~refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g`~~ **resolved 2026-09-28** | see "Fixed by reading the access letter as the kernel sets it, and naming the file flags" above. Windows records no flags and refuses `g` and `G`, as a C dialect without them does. |
 | 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | ~~accepts the letter and prints nothing~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. Windows has no such number and prints none. |
 | 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | types every live mapping `REG`, with the filesystem's device | **OPEN — found 2026-09-26** by reading `maps.rs` while adding `r`. Not measured: no device on this host can be mapped. |
-| 49 | an empty item in a `-p` list is PID 0: `-p ,`, `-p ,1` and `-p 1,,1` report `process ID not located: 0` and exit 1, while a trailing comma (`-p 1,`) is ignored | drops every empty item, so `-p ,` lists the whole host | **OPEN — found 2026-10-03** while measuring item 33. |
-| 50 | `-a` with **nothing to AND** is a usage error: a bare `-a`, `-a -K i`, `-a -p ^N` (only exclusions) print `no select options to AND via -a` and the usage, and exit 1 (`main.c`: `if (Selflags == 0) { if (Fand) …`) | lists the whole host and exits 0 | **OPEN — found 2026-10-03** by the item 33 review sweep, through `-a -K -K i`, whose last `-K i` leaves nothing; MASTER does the same. |
-| 51 | repeated `-d` options **add up** (`enter_fd()` extends `Fdl`): `-d 3 -d 4` selects both, `-d ^cwd -d ^rtd` excludes both. An include and an exclude in one run are refused, within a list or across two: `exclude in an include -d list: ^4`, `include in an exclude -d list: mem`, exit 1 | keeps only the last `-d`, and accepts a mixed list | **OPEN — found 2026-10-03** by the item 33 review sweep, on `-K -a -d 3 -d 4 -p P`, where every task loses fd 3. |
+| 49 | an empty item in a `-p` list is PID 0: `-p ,`, `-p ,1` and `-p 1,,1` report `process ID not located: 0` and exit 1, while a trailing comma (`-p 1,`) is ignored | ~~drops every empty item, so `-p ,` lists the whole host~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. The same reader takes `-g`, and only a comma separates: lsof-rs had split at spaces too. |
+| 50 | `-a` with **nothing to AND** is a usage error: a bare `-a`, `-a -K i`, `-a -p ^N` (only exclusions) print `no select options to AND via -a` and the usage, and exit 1 (`main.c`: `if (Selflags == 0) { if (Fand) …`) | ~~lists the whole host and exits 0~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. |
+| 51 | repeated `-d` options **add up** (`enter_fd()` extends `Fdl`): `-d 3 -d 4` selects both, `-d ^cwd -d ^rtd` excludes both. An include and an exclude in one run are refused, within a list or across two: `exclude in an include -d list: ^4`, `include in an exclude -d list: mem`, exit 1 | ~~keeps only the last `-d`, and accepts a mixed list~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. Wider than this row said: an empty item enters nothing, a range needs low < high, and the names are the C's table, `fd` included, which lsof-rs had refused. |
 | 52 | `-V` reports unlocated **file arguments last given first** (`arg.c` prepends each to `Sfile`), and a `+d`/`+D` expansion in reverse, the directory itself last | in the order given | **OPEN — found 2026-10-03** by the item 33 review sweep. The `-V` order above records "last given first" for `-c` and `-i` only. The exit status matches. |
 | 53 | `-V` **under `-Q`** still prints every `not located` line: `-Q` clears `FsearchErr`, which changes only the exit status (`lsof -V -Q -p 3999999` prints the line and exits 0) | prints nothing (`verbose && !quiet`) | **OPEN — found 2026-10-03** by the item 33 review sweep. Item 19's "`-Q` mutes the message" is the `stat` error on stderr, not these. |
 | 54 | under `-r` the `not located` report comes **once, after the repeat loop** — so never under `-r`, which ends only on a signal | after every cycle: `lsof -V -r 1 -p 3999999` prints the line before each `=======` | **OPEN — found 2026-10-03** by the item 33 review sweep. |
@@ -2510,7 +2602,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 66 | a socket's bound path ends at its first space, TAB or `:`, where `get_fields()` ends a field: its NAME is `…/sp` for `…/sp ace.sock`, the full path finds nothing, and a file at the cut path finds the socket | keeps and shows the whole path, and finds the socket by it | **C-DEFECT, not reproduced — found 2026-10-03** by the item 60 review sweep. Ledgered as `path-unix-socket-with-a-space-found-in-lsof-rs`, `path-unix-socket-cut-at-a-space-in-the-c`, `path-unix-socket-with-a-colon-found-in-lsof-rs` and `path-unix-socket-cut-at-a-colon-finds-another-in-the-c`; the NAME difference was on master too. Real names have a `:`, such as an ssh control socket's (`%r@%h:%p`), and the C prints those cut; but ssh binds a temporary name and then links it into place, so the bound path names nothing and neither binary finds one by its path. |
 | 67 | an argument typed exactly `socket` finds every unbound AF_UNIX socket: with no bound path, the C compares the fd link's text, cut at `:`, with the argument (`dsock.c`) | finds none | **C-DEFECT, not reproduced — found 2026-10-03** by the item 60 review sweep. Any stat-able file called `socket` in the cwd will do. |
 | 68 | a numeric owner is printed lossily: the USER column keeps 8 digits (`printuid()`, `USERPRTL`), and `-F u` and the JSON `uid` print it as a signed `int`, so 3000000000 is `30000000` and `u-1294967296` | every digit, unsigned | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. Owners that large come from user-namespace UID ranges. Arguably a C-DEFECT; the maintainer's call. |
-| 69 | a `-u` list item may be **empty** (UID 0: `-u ,` and `-u ,65534` select root) or a bare `^` (excludes UID 0), and an item of 33 characters or more is refused (`LOGINML`) | drops empty items, refuses `-u ^`, and resolves an item of any length | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. The `-u` form of item 49. |
+| 69 | a `-u` list item may be **empty** (UID 0: `-u ,` and `-u ,65534` select root) or a bare `^` (excludes UID 0), and an item of 33 characters or more is refused (`LOGINML`) | ~~drops empty items, refuses `-u ^`, and resolves an item of any length~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. |
 | 70 | a **login name** is what glibc returns, cut to 32 bytes (`LOGINML`), printed raw in USER and `-F L`, and re-read when `/etc/passwd` changes between `-r` cycles | lsof-rs parses `/etc/passwd` itself, by its own rules (no blank-stripping, comments, `+`/`-` entries or field checks), keeps the whole name, escapes it, and reads the file once | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. The raw print is arguably a C-DEFECT like item 59: a name can hold an escape sequence. Item 39 is the NSS sources beyond the file. |
 | 71 | USER is padded by **bytes**, so `jöhn` fills a 5-wide column | pads by characters after sizing by bytes, so a multibyte name is shifted one column per extra byte | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. USER is the one padded column that can hold multibyte text unescaped. |
 | 72 | under `-K -a`, a **zombie leader's** tasks are still read, with the leader's owner, so they locate `-u` and `-p` though they fail the AND | reads tasks only for processes that pass the AND, and has no entry for a zombie, so `user ID not located` (exit 1) where the C exits 0 | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. Only a zombie leader shows it; item 33's task scope holds for a live process, which keeps its own entry. |
