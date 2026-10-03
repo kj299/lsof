@@ -18,7 +18,7 @@ use lsof_cli::args::{parse, Action};
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, FilesystemArgs, Located, Process, Selection, UidSel, UserLookup,
+    errno_text, Backend, FilesystemArgs, Located, Process, Selection, TaskMode, UidSel, UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -364,6 +364,13 @@ fn unlocated(
         if !hit {
             miss.push(format!("lsof: process ID not located: {pid}"));
         }
+    }
+    // `-K` is a search item of its own, after the PIDs as the C reports it
+    // (`main.c`, `Ftask < 2`): located by a row of a task, printed or not.
+    // So `lsof -K -a -p P` exits 1 on a single-threaded P, which is not a task
+    // and has none, and `-K i` asks for nothing to be located (DIVERGENCES 33).
+    if sel.tasks == TaskMode::Always && !located.tasks {
+        miss.push("lsof: no tasks located".to_string());
     }
     for (pgid, hit) in sel.pgids.iter().zip(&located.pgids) {
         if !hit {

@@ -28,6 +28,8 @@
 //! `-s` exclusion form, which is the C's `SELEXCLF` — an absolute veto that
 //! outranks the OR.
 
+use std::collections::HashSet;
+
 use crate::backend::MountEntry;
 use crate::model::{tcp_state_table, FdType, FileType, OpenFile, Process, Protocol, TcpState};
 
@@ -61,11 +63,12 @@ impl SelKinds {
     pub const NM: Self = Self(1 << 7);
     /// `+L`, the C's `SELNLINK`.
     pub const NLINK: Self = Self(1 << 8);
-    /// `-K`, the C's `SELTASK`. Unlike every other kind this one is asymmetric:
-    /// it takes part in the OR, so a bare `lsof -K` lists tasks and nothing
-    /// else, but it is dropped from the `-a` requirement, so `lsof -K -a -p N`
-    /// still shows that process's own rows alongside its tasks. Measured, not
-    /// derived — see `Selection::apply`.
+    /// `-K`, the C's `SELTASK`. A task entry has it, and so does a Windows
+    /// thread row. Under `-a` it is required like any other kind, and the
+    /// process's own entry has it only when the process has tasks of its own
+    /// (`dproc.c`: `Fand && ht && pidts`): so `lsof -K -a -p N` lists a
+    /// multi-threaded N with its tasks and a single-threaded N not at all,
+    /// both measured (DIVERGENCES 33). See [`Selection::entry_kinds`].
     pub const TASK: Self = Self(1 << 9);
     /// `-N`, the C's `SELNFS`.
     pub const NFS: Self = Self(1 << 10);
@@ -572,6 +575,8 @@ pub struct Located {
     pub nfs: bool,
     /// Parallel to `sel.state_filter`'s `include` (the C's `TcpStI[i] == 2`).
     pub states: Vec<bool>,
+    /// The `-K` item (the C's `Ftask == 2`): a row of a task was kept.
+    pub tasks: bool,
 }
 
 /// The full set of user-specified filters for one run.
@@ -842,6 +847,29 @@ impl Selection {
         self.tcp_info_opt.unwrap_or(TcpInfoFlags::DEFAULT)
     }
 
+    /// [`Selection::proc_kinds`] for an entry of the run's output, with what
+    /// `-K -a` adds: the process's own entry counts as a task when the process
+    /// has tasks of its own (`with_tasks`, from [`pids_with_tasks`]), so its
+    /// rows can meet a `-a` that requires the task kind. The C enters it as a
+    /// task for exactly that (`dproc.c`: `tid = (Fand && ht && pidts && …) ?
+    /// pid : 0`), and only under `-a`. A single-threaded process has no task
+    /// to be entered beside, so under `-K -a` it is not listed at all, and
+    /// its command is never even compared: measured, `lsof -V -K -a -c
+    /// python3 -p P` reports both `command not located` and `no tasks
+    /// located` (DIVERGENCES 33). `pidts`, the main thread in `task/`, holds
+    /// for every process the backend can read.
+    fn entry_kinds(&self, p: &Process, with_tasks: &HashSet<u32>) -> SelKinds {
+        let mut k = self.proc_kinds(p);
+        if self.and_mode
+            && self.tasks == TaskMode::Always
+            && p.tid.is_none()
+            && with_tasks.contains(&p.pid)
+        {
+            k.insert(SelKinds::TASK);
+        }
+        k
+    }
+
     /// Which process selecters `p` matches — the C's `lp->sf`
     /// (`lib/proc.c:is_proc_excl`). A kind absent from
     /// [`Selection::specified`] can never appear here.
@@ -909,6 +937,13 @@ impl Selection {
             if f.links.is_some_and(|n| u64::from(n) < max) {
                 k.insert(SelKinds::NLINK);
             }
+        }
+        // A Windows thread is a row of its process, where a Linux task is an
+        // entry of its own, so it is the row that carries the task kind. A
+        // bare `lsof -K` had printed nothing on Windows: no row had the only
+        // kind specified.
+        if self.tasks == TaskMode::Always && f.file_type == FileType::Thread {
+            k.insert(SelKinds::TASK);
         }
         k
     }
@@ -1065,10 +1100,18 @@ impl Selection {
             inet_all: false,
             nfs: false,
             states: vec![false; self.state_filter.as_ref().map_or(0, |f| f.include.len())],
+            tasks: false,
         };
-        let and_kinds = self
-            .specified()
-            .intersection(SelKinds::PID.union(SelKinds::UID).union(SelKinds::PGID));
+        // `is_proc_excl` requires all of these under `-a` before `-c` is even
+        // compared — the task kind among them, so a process that is not a
+        // task under `-K -a` does not locate its command.
+        let and_kinds = self.specified().intersection(
+            SelKinds::PID
+                .union(SelKinds::UID)
+                .union(SelKinds::PGID)
+                .union(SelKinds::TASK),
+        );
+        let with_tasks = pids_with_tasks(gathered);
         for p in gathered {
             if self.excludes_process(p) {
                 continue;
@@ -1085,7 +1128,8 @@ impl Selection {
             for (hit, u) in found.users.iter_mut().zip(&self.users) {
                 *hit |= user_matches(u, p.user.as_deref());
             }
-            if self.and_mode && !self.proc_kinds(p).contains(and_kinds) {
+            let kinds = self.entry_kinds(p, &with_tasks);
+            if self.and_mode && !kinds.contains(and_kinds) {
                 continue;
             }
             for (hit, c) in found.commands.iter_mut().zip(&self.commands) {
@@ -1093,7 +1137,7 @@ impl Selection {
             }
             // Its files are examined only if the process passed the command
             // test as well.
-            if self.and_mode && !self.proc_selected(self.proc_kinds(p)) {
+            if self.and_mode && !self.proc_selected(kinds) {
                 continue;
             }
             // A state is located by a socket in it, whatever else happens to
@@ -1116,6 +1160,12 @@ impl Selection {
                 found.inet_all |= self.inet.all_matches(f);
                 found.nfs |=
                     self.nfs_only && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d));
+                // `Ftask = 2` in `link_lfile()`: a file is linked when it
+                // matched anything, and a task's files all inherit the task
+                // kind, so any row of a task locates the item — printed or not,
+                // as `-a -d 999` on a multi-threaded process exits 0, measured.
+                found.tasks |= self.tasks == TaskMode::Always
+                    && kinds.union(self.file_kinds(f)).contains(SelKinds::TASK);
             }
         }
         found
@@ -1274,8 +1324,15 @@ impl Selection {
     /// (DIVERGENCES 32). Both backends had spelt the condition out by hand and
     /// missed `+L`, `-U` and `-N`, so `lsof -t +L1` and `lsof -t -U` printed
     /// no PID at all where the C prints every process holding such a file.
+    /// An explicit `-K` needs the files too: a task is selected, and located,
+    /// only through a row of its own, and the fast path builds no task
+    /// entries at all, so `lsof -t -K -p P` printed P alone where the C
+    /// prints every process with a task (DIVERGENCES 33).
     pub fn terse_skips_files(&self) -> bool {
-        self.terse && !self.specified().intersects(SelKinds::FILE) && self.state_filter.is_none()
+        self.terse
+            && !self.specified().intersects(SelKinds::FILE)
+            && self.state_filter.is_none()
+            && self.tasks != TaskMode::Always
     }
 
     /// Whether any path / directory-tree filter was given.
@@ -1300,6 +1357,7 @@ impl Selection {
     /// specified set — non-empty for the OR, complete for `-a`.
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
         let specified = self.specified();
+        let with_tasks = pids_with_tasks(&procs);
         let mut out = Vec::new();
         for mut p in procs {
             if self.excludes_process(&p) {
@@ -1308,7 +1366,7 @@ impl Selection {
             // The kinds this process matched. A file inherits them only if the
             // process matched something, the C's `PS_PRI` gate on
             // `Lf->sf = Lp->sf` (`lib/proc.c:178`).
-            let inherited = self.proc_kinds(&p);
+            let inherited = self.entry_kinds(&p, &with_tasks);
             let peer_only = p.endpoint_peer && inherited.is_empty();
             p.files.retain(|f| {
                 // `-s` is not a list option: it can only veto. Its exclusion
@@ -1335,13 +1393,12 @@ impl Selection {
                 if sf.is_empty() {
                     return false;
                 }
-                // `-a` requires every specified kind EXCEPT `-K`'s. Measured:
-                // `lsof -K -a -p N` shows that process's own rows as well as
-                // its tasks, so TASK cannot be part of the AND requirement —
-                // while `lsof -K` alone shows tasks and nothing else, so it
-                // must still be part of the OR. Both hold only if it is
-                // dropped here and nowhere else.
-                !self.and_mode || sf.contains(specified.without(SelKinds::TASK))
+                // `-a` requires every specified kind, `-K`'s included: the
+                // process's own rows have it only when the process has tasks
+                // ([`Selection::entry_kinds`]). It had been dropped from the
+                // requirement, which matched the C on a multi-threaded process
+                // and listed a single-threaded one the C does not.
+                !self.and_mode || sf.contains(specified)
             });
             if p.files.is_empty() {
                 // A process with no rows left is a result only when it was
@@ -1350,11 +1407,14 @@ impl Selection {
                 // `-K` adds one more way to have no result: a run that
                 // specified tasks, on an entry that is not one and matched
                 // nothing else, is not selected at all — `lsof -K` prints the
-                // tasks and no line for the process. This lives here rather
-                // than in `proc_selected` because that predicate also scopes
-                // the backend's fd walk, and the process's own files still
-                // have to be read: `lsof -K -a -p N` shows them.
-                let task_only_miss = specified.contains(SelKinds::TASK) && inherited.is_empty();
+                // tasks and no line for the process — and under `-a` an entry
+                // that is not a task is not selected whatever else it matched.
+                // This lives here rather than in `proc_selected` because that
+                // predicate also scopes the backend's fd walk, which has to
+                // read a process before anyone knows whether it has tasks.
+                let task_only_miss = specified.contains(SelKinds::TASK)
+                    && !inherited.contains(SelKinds::TASK)
+                    && (self.and_mode || inherited.is_empty());
                 // And a process its backend read and found nothing to show
                 // in is not a bare line either: where the C lists a process
                 // only through its files, it has no line at all.
@@ -1371,6 +1431,21 @@ impl Selection {
         }
         out
     }
+}
+
+/// The processes in `procs` that have tasks of their own: those with a task
+/// entry (Linux, where a task is an entry of its own, and the backend leaves
+/// out the main thread and zombie ones), or with a thread row (Windows, where
+/// a thread is a row of its process). This is the C's `ht`, "a task was
+/// recorded", for [`Selection::entry_kinds`]. A task passes the process tests
+/// exactly when its process would with the task kind added, since it has the
+/// process's PID, UID, group and command, so nothing more is checked here.
+fn pids_with_tasks(procs: &[Process]) -> HashSet<u32> {
+    procs
+        .iter()
+        .filter(|p| p.tid.is_some() || p.files.iter().any(|f| f.file_type == FileType::Thread))
+        .map(|p| p.pid)
+        .collect()
 }
 
 /// Whether `name` is `dir` itself or an entry *directly* in it — `+d`, one
@@ -1558,15 +1633,24 @@ mod tests {
                 },
             ),
             (
-                "-t -K",
+                "-t -K i",
                 Selection {
-                    tasks: TaskMode::Always,
+                    tasks: TaskMode::Never,
                     ..terse.clone()
                 },
             ),
         ] {
             assert!(sel.terse_skips_files(), "{what}: only processes select");
         }
+        // An explicit `-K` selects and locates a task only through a row of
+        // its own, and the fast path builds no task entries: `-t -K -p P` had
+        // printed P alone where the C prints every process with a task
+        // (DIVERGENCES 33).
+        let tasks = Selection {
+            tasks: TaskMode::Always,
+            ..terse.clone()
+        };
+        assert!(!tasks.terse_skips_files(), "-t -K needs the tasks' rows");
         let mut inet = terse.clone();
         inet.inet.enabled = true;
         for (what, sel) in [

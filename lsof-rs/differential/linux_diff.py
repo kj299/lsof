@@ -625,8 +625,10 @@ def flags_holder(work: str) -> Fixture:
     made with no flags at all, which the C shows by name as nothing. The access
     letter is the fd link's own mode to the C (DIVERGENCES 44), which grants
     neither read nor write to an `O_PATH` fd or to access mode 3; the C prints
-    both as `u`. `O_TMPFILE` needs a file system that has it, and is left out
-    where the work directory does not."""
+    both as `u`. A directory opened by glibc's `opendir()` (read-only,
+    non-blocking) is `r` to both: DIVERGENCES 9 had recorded it as `u` in the
+    C, which was an `O_PATH` directory fd. `O_TMPFILE` needs a file system that
+    has it, and is left out where the work directory does not."""
     qdir = os.path.join(work, "flags")
     os.makedirs(qdir)
     py = (
@@ -644,6 +646,12 @@ def flags_holder(work: str) -> Fixture:
         "      os.open(d,os.O_RDONLY|os.O_DIRECTORY),\n"
         "      os.open(f,3),\n"
         "      os.open('/dev/null',os.O_PATH)]\n"
+        "import ctypes\n"
+        "libc=ctypes.CDLL(None)\n"
+        "libc.opendir.restype=ctypes.c_void_p\n"
+        "libc.opendir.argtypes=[ctypes.c_char_p]\n"
+        "libc.dirfd.argtypes=[ctypes.c_void_p]\n"
+        "keep.append(libc.dirfd(libc.opendir(d.encode())))\n"
         "keep+=list(os.pipe2(0))\n"
         "try:\n"
         "    keep.append(os.open(d,os.O_TMPFILE|os.O_RDWR))\n"
@@ -652,9 +660,9 @@ def flags_holder(work: str) -> Fixture:
         "open(os.path.join(d,'ready'),'w').close()\n"
         "time.sleep(600)\n" % (qdir,)
     )
-    # 0,1,2 + the eleven above and the pipe's two ends; the O_TMPFILE fd only
-    # where it opens.
-    return Fixture("Q(flags)", [sys.executable, "-c", py], cwd=qdir, expect_fds=16)
+    # 0,1,2 + the eleven above, the opendir() fd and the pipe's two ends; the
+    # O_TMPFILE fd only where it opens.
+    return Fixture("Q(flags)", [sys.executable, "-c", py], cwd=qdir, expect_fds=17)
 
 
 def unprivileged_prefix() -> list | None:

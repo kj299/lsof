@@ -177,10 +177,15 @@ impl Backend for LinuxBackend {
             // An explicit `-K` makes tasks a selector of their own, so EVERY
             // process's tasks are candidates — `lsof -K -p N` lists N's rows
             // and every other process's task rows, because the two selectors
-            // are ORed. Without `-K` the listing is the unselected default,
-            // where `restrict` is `None` anyway, so this costs nothing extra.
+            // are ORed. Under `-a` they are not: a task has its process's PID,
+            // UID, group and command, so it passes the process selecters
+            // exactly when its process does, and the tasks of a process
+            // `restrict` left out cannot be listed. Reading their fd tables
+            // anyway had made `lsof -K -a -p N` walk every task on the host.
+            // Without `-K` the listing is the unselected default, where
+            // `restrict` is `None` anyway, so this costs nothing extra.
             let task_scope = match sel.tasks {
-                lsof_core::TaskMode::Always => None,
+                lsof_core::TaskMode::Always if !sel.and_mode => None,
                 _ => restrict.as_ref(),
             };
             for p in procs.iter() {
