@@ -145,6 +145,20 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **A process's owner is its effective uid** (DIVERGENCES 55), as the C takes
+  it from the owner of `/proc/<pid>/`. A process running with real uid 0 and
+  effective uid 65534 showed `root` and escaped `-u nobody`; the USER column,
+  `-l`, `-F u`, `-F L` and `-u` now see `nobody`. A task keeps its process's
+  owner, as in the C.
+- **A path argument finds a file by what it is, and an AF_UNIX socket by the
+  path it is bound to** (DIVERGENCES 60). With the same path in another mount
+  namespace naming another file, lsof-rs printed that file and then reported
+  the argument not located. And it never found a unix socket by its path, the
+  case its name comparison was meant for: now `lsof /run/x.sock` finds the
+  socket bound there, through a symlink or a relative spelling too, as the C
+  does.
+- **An unlocated path argument is reported as it was typed** (`no file use
+  located: ./x`), as the C reports it, not as the resolved absolute path.
 - **`-K -a` lists a process only as a task, and `-K` is a search item**
   (DIVERGENCES 33). As in the C, a process counts as a task under `-a` only
   when it has a task of its own, so `lsof -K -a -p P` lists nothing for a

@@ -770,3 +770,21 @@ args = ["-n", "-P", "-V", "-K", "-a", "-p", "PID", "-U"]
 [[case]]
 name = "linux/differential-tasks-dash-K-and-a-i-socketless-task-not-located"
 args = ["-n", "-P", "-V", "-K", "-a", "-p", "PID", "-i"]
+
+[[case]]
+# An AF_UNIX socket is found by the path it is bound to (DIVERGENCES 60).
+name = "linux/differential-path-unix-socket-by-its-path"
+args = ["-n", "-P", "-V", "PATH"]
+
+[[case]]
+name = "linux/differential-path-plus-d-finds-the-sockets"
+args = ["-n", "-P", "+d", "DIR"]
+
+[[case]]
+# The owner is the effective uid, in every view (DIVERGENCES 55).
+name = "linux/differential-owner-is-the-effective-uid-fields"
+args = ["-F", "pcuL", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-owner-dash-u-name-selects-the-effective-uid"
+args = ["-n", "-P", "-V", "-u", "USER", "-a", "-d", "cwd", "-p", "PID"]

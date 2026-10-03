@@ -2352,12 +2352,14 @@ mod tests {
                 })
             }),
         };
+        // `/d/link` is a symlink to `/d/s.sock`: only the socket file's
+        // identity can find the socket through it.
         let mut sel = Selection {
-            paths: vec!["/d/mnt".into(), "/d/s.sock".into(), "/d/gone.sock".into()],
+            paths: vec!["/d/mnt".into(), "/d/link".into(), "/d/gone.sock".into()],
             paths_identified: true,
             ..Default::default()
         };
-        // Here, /d/mnt and /d/s.sock are files with these identities.
+        // Here, /d/mnt and /d/link's target are files with these identities.
         sel.path_ids.insert(("254,0".into(), "10".into()));
         sel.path_ids.insert(("254,0".into(), "11".into()));
         for p in &sel.paths {

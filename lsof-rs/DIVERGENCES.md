@@ -93,6 +93,61 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by taking the owner from the effective uid, and finding a file by what it is (2026-10-03)
+
+Items 55 and 60, both measured against the C.
+
+**A process's owner is its effective uid** (item 55). The C takes it from
+`stat("/proc/<pid>/").st_uid` (`dproc.c`), and the kernel owns that directory
+by the task's effective uid, whatever its dumpable state: `task_dump_owner()`
+exempts a world-readable directory from the rule that hands a non-dumpable
+task's files to root. Measured on three processes:
+- real uid 0, effective 65534: the C shows `nobody`;
+- real 65534, effective 0: `root`;
+- a root process with one thread switched to 65534 alone: `root`, and its
+  task too, since the C passes the process's owner to every task.
+
+Each view agrees: the USER column, `-l`, `-F u`, `-F L`, and `-u` by name, by
+number and negated. lsof-rs had read the real uid, the first field of `Uid:`,
+so the first two read the other way round, and `-u nobody` selected the wrong
+one. It now reads the second field: the same number as the C's `stat`, without
+the extra call.
+
+**A path argument finds a file by what it is** (item 60). With identities, the
+C matches a path argument by device and inode, or, for a mount point, by file
+system (`dfile.c`, `is_file_named()`), and never by name. lsof-rs compared
+every row's NAME with the arguments too. So a file with the same path in
+another mount namespace, such as a tmpfs mounted over a directory in a
+process's own namespace, was printed, and then the argument was reported not
+located, since that bookkeeping was by identity. lsof-rs said both things at
+once.
+
+That name comparison had been meant for AF_UNIX sockets, and it never worked
+for them: a socket's NAME ends in its `type=STREAM` tail. The C's rule for a
+socket (`dsock.c`): it `stat`s each absolute bound path in `/proc/net/unix`
+in its own mount namespace. When that is a socket file, a path argument finds
+the socket by that file's device and inode, so a symlink, a hard link or a
+relative spelling finds it. Otherwise it compares the bound path with the
+argument exactly as typed, a `+d`/`+D` entry included. Measured: a listener
+and its accepted connection (the client end has no path), through a symlink,
+by a relative path, and with the socket file replaced by a regular file,
+found by the path alone. A symlink to that replacement finds nothing. lsof-rs
+found the socket in none of these.
+
+A unix socket row now carries its bound path, and that socket file's identity,
+in `SocketInfo::bound`. It is filled only when the run names a path, since
+nothing else reads it, and boxed, so other runs pay one pointer per socket
+row. A bound path under a `-e` file system is not `stat`ed; that is the
+option's promise, though the C does `stat` it. A DECISION, on a corner no case
+reaches.
+
+**The argument as typed.** The C reports an unlocated argument as it was typed
+(`no file use located: ./x`, or `alias` for a symlink), and lsof-rs printed
+the resolved absolute path. On a backend that identifies files, lsof-rs now
+keeps the typed spelling for that message and for the socket comparison, and
+uses the resolved one only to recognise a mount point, as the C uses its own
+`Readlink()`. Windows matches names and still resolves everything first.
+
 ## Fixed by making `-K` a search item, and a process a task only when it has one (2026-10-03)
 
 Items 33 and 9, both measured against the C.
@@ -2256,13 +2311,15 @@ likely right; it is a compatibility decision, not a backend phase.
 | 52 | `-V` reports unlocated **file arguments last given first** (`arg.c` prepends each to `Sfile`), and a `+d`/`+D` expansion in reverse, the directory itself last | in the order given | **OPEN — found 2026-10-03** by the item 33 review sweep. The `-V` order above records "last given first" for `-c` and `-i` only. The exit status matches. |
 | 53 | `-V` **under `-Q`** still prints every `not located` line: `-Q` clears `FsearchErr`, which changes only the exit status (`lsof -V -Q -p 3999999` prints the line and exits 0) | prints nothing (`verbose && !quiet`) | **OPEN — found 2026-10-03** by the item 33 review sweep. Item 19's "`-Q` mutes the message" is the `stat` error on stderr, not these. |
 | 54 | under `-r` the `not located` report comes **once, after the repeat loop** — so never under `-r`, which ends only on a signal | after every cycle: `lsof -V -r 1 -p 3999999` prints the line before each `=======` | **OPEN — found 2026-10-03** by the item 33 review sweep. |
-| 55 | a process's **owner** (USER, `-u`, `-F u`) is the owner of `/proc/<pid>` (`dproc.c`: `uid = sb.st_uid` after `stat()`), which the kernel sets to the **effective** uid of a dumpable process | the **real** uid, the first field of `Uid:` in `status` | **OPEN — found 2026-10-03** by the item 33 review sweep. Measured on a process with real uid 0 and effective uid 65534: the C shows `nobody` and `-a -u nobody -p P` exits 0; lsof-rs shows `root` and exits 1. Tasks inherit it, so `-K` repeats it on every task row. |
+| 55 | a process's **owner** (USER, `-u`, `-F u`) is the owner of `/proc/<pid>` (`dproc.c`: `uid = sb.st_uid` after `stat()`), which the kernel sets to the **effective** uid, dumpable or not | ~~the **real** uid, the first field of `Uid:` in `status`~~ **resolved 2026-10-03** | see "Fixed by taking the owner from the effective uid, and finding a file by what it is" above. This row's "of a dumpable process" was too narrow: `task_dump_owner()` gives a world-readable directory the effective uid either way. |
 | 56 | on Linux `-E`/`+E` **name endpoints** (a pipe's `PID,cmd,FDmode`, a unix socket's, a TCP connection to the same host's), and under `-a` they keep reading the processes `-a` excluded (`process_id()`: `if (!FeptE) return (1);`), so those processes' files still locate search items: `-i`, a file name, and `-K` through any task on the host. `lsof -V -E -K -a -p P`, P single-threaded, prints nothing and exits 0 | accepted and ignored on Linux: no endpoint names, and an excluded process locates nothing, so the same run says `no tasks located` and exits 1 | **OPEN — found 2026-10-03** by the item 33 review sweep. The `-E`/`+E` implementation is Windows-only (named pipes); nothing recorded the Linux side until now. |
 | 57 | under `-t` a process whose own entry has **no selected row** hides its tasks' PID: `print_proc()` sets `LastPid` before it looks for one, so `-K -t -a -p P DIR`, with DIR the cwd of one of P's threads alone, prints nothing and exits 0 | prints P, the PID whose row the same run without `-t` lists | **C-DEFECT, not reproduced — found 2026-10-03** by the item 33 review sweep, after `-K -t` stopped taking the fast path (which matched the C here only by never reading a task). Ledgered as `tasks-dash-K-terse-a-row-only-a-task-holds-in-lsof-rs`. The same happens run as a user who can read a thread but not its process. |
 | 58 | a **newline in a command name** (COMMAND, TASKCMD, `-F c`, `-F M`) is `?`: the C reads the name from `stat` and replaces each `\n` (`read_id_stat()`) | reads `Name:` from `status`, un-escapes the kernel's `\n`, and the renderer prints `\n` | **OPEN — found 2026-10-03** by the item 33 review sweep. The hostile-command cases hold CR, TAB and a backslash, never a newline. It changes the width of the column too. |
 | 59 | `-F M`, the task command, is printed **raw** (`print.c`: `printf("%c%s%c", LSOF_FID_TCMD, Lp->tcmd, Terminator)`), while `c` and the TASKCMD column are escaped | escaped as `c` is | **C-DEFECT, not reproduced — found 2026-10-03** by the item 33 review sweep. Any process can name a thread, so the C's `-F M` lets it write an escape sequence to the terminal of whoever runs lsof. No case pins it: fixture I's thread names are plain. |
-| 60 | a path argument matches a file by **identity alone** (device and inode) | falls back to the NAME text for every row, so a file with the same path in another mount namespace (a task's private tmpfs over DIR) is printed, and then reported `no file use located`, exit 1 | **OPEN — found 2026-10-03** by the item 33 review sweep. `path_matches()`'s name fallback is meant for rows with no identity (sockets) and is applied to all. lsof-rs contradicts itself here, which the C does not. |
+| 60 | a path argument matches a file by **identity alone** (device and inode), and an AF_UNIX socket by the path it is bound to: that socket file's identity, else the path as typed | ~~falls back to the NAME text for every row, so a file with the same path in another mount namespace (a task's private tmpfs over DIR) is printed, and then reported `no file use located`, exit 1~~ **resolved 2026-10-03** | see "Fixed by taking the owner from the effective uid, and finding a file by what it is" above. Wider than this row said: the fallback was meant for sockets and never found one, since a socket's NAME carries its `type=` tail, so `lsof /run/x.sock` found nothing. |
 | 61 | `-J`/`-j` under `-K` give a task's object `"tid"` and `"task_cmd"` (`print.c`) | neither: a task's object repeats its process's | **OPEN — found 2026-10-03** by the item 33 review sweep. The two JSON documents differ in schema anyway (never byte-compared), but here a task cannot be told from its process. |
+| 62 | a path argument that cannot be `stat`ed is reported once, by its status error, and dropped: `-V` says nothing more of it | `-V` also prints `no file use located: <arg>` for it, after the status error; the exit status is 1 in both | **OPEN — found 2026-10-03** while measuring item 60, and on master too. Item 19 dropped the argument from the search, not from the `-V` report. |
+| 63 | a `+d`/`+D` directory is spelt as `Readlink()` leaves it, so a relative one stays relative (`no file use located: rel/x`) and a symlinked one is resolved | `+D` resolves the directory to an absolute path (`$PWD/rel/x`); `+d` keeps it as typed, symlinks included | **OPEN — found 2026-10-03** while measuring item 60. Measured with `rel-link` a symlink to `rel`: the C reports `rel/x` for both `+d rel-link` and `+D rel-link`; lsof-rs reports `rel-link/x` and `$PWD/rel/x`. Only the `-V` spelling of entries; which files are found does not change. Item 60 kept bare arguments as typed, and left these. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
