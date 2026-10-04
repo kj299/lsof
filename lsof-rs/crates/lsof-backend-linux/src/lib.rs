@@ -41,9 +41,7 @@
 //! API. It waits on the decision recorded as DIVERGENCES item 22, not on
 //! effort. Packet sockets were the other half of that pair and are done.
 //!
-//! Also open: `-e` on mapped files (DIVERGENCES 40 — the C prints them as
-//! `UNKNmem` without `stat`ing them; the cwd/rtd/txt/fd half is done), the
-//! `-Z` CONTEXT column, the options `-S` and `-b`, and the rows of
+//! Also open: the `-Z` CONTEXT column, the options `-S` and `-b`, and the rows of
 //! `lsof-rs/DIVERGENCES.md` still OPEN for this backend. `lsof-rs/docs/linux-l2-plan.md` measures each;
 //! the `DEBT` entries in `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are
 //! what the coverage gate prints on every run.

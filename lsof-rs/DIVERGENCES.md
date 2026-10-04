@@ -127,6 +127,213 @@ disagreeing, and it names the C code so anyone can check the triage.
   that is not an option, so in `lsof FILE -a -p PID` the last three are file
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
+- [x] mapped-name-with-a-tab-kept-whole-in-lsof-rs: C-DEFECT, not reproduced
+  — item 103. The C's `get_fields()` ends a maps path at a TAB, so fixture
+  T's `tab<TAB>here` is `…/tab (stat: No such file or directory)`: a cut
+  name, `stat`ed as another path, under which a name its owner chose passes
+  for another file's (`libssl.so<TAB>x` reads `libssl.so`). lsof-rs keeps
+  the whole name, as it keeps a socket's path the C cuts the same way (item
+  66). Not pinned: the name holds the run's work directory.
+- [x] mapping-named-by-no-path-not-stated-in-lsof-rs: C-DEFECT, not
+  reproduced — item 102. The kernel names an io_uring ring
+  `anon_inode:[io_uring]`, which is no path; the C `stat`s it relative to its
+  working directory, and from fixture RN's `plant/` describes the file
+  planted there under that name in the ring's place, `(path dev=…, inode=…)`.
+  lsof-rs never `stat`s a name that is no path, and prints `(stat: No such
+  file or directory)`, as the C does where nothing is planted. Not pinned:
+  the diff holds the planted file's device and inode.
+
+## Fixed by building every mapping's row as the C does (2026-10-04)
+
+Items 95, 48 and 40, measured against the C, and what measuring them found
+beside them: the lock letter on rows other than an fd's and on device nodes
+(96), the letter when one file holds several kinds of lock (97), `-e`'s prefix
+and its trailing slash (98), what counts as a maps line's path (99), and the
+device number of a `DEL` row (100). A review of the change found three more,
+older, next to it: which of two `-e` paths names a row (104), an `-e` that is
+no path (105), and an unidentified socket's device (106). Two things the C
+does there lsof-rs does not reproduce (102, 103, and a minor 107), and one
+more stays open (101).
+
+**A mapping is a row, whatever a `stat` of it says** (item 95). The C's
+`process_proc_map()` makes a row of every distinct mapping that has a path and
+a device or inode other than 0, and `stat`s it to describe it. When the `stat`
+fails, or names another file than the maps line's device and inode, the row
+keeps that device and inode, is typed `REG`, has no size or link count, and
+says why in NAME: `(stat: No such file or directory)`, `(path dev=0,42,
+inode=2)` (the file the path leads to now), `(path inode=N)`. `-w`, and so
+`-t`, mutes the reason; a deleted mapping, whose path is expected to fail,
+never has one. lsof-rs dropped every such row.
+
+Most of them belong to a process in **another mount namespace**: a container,
+a Flatpak or snap application. Its maps paths are its own, and here they name
+another file or none. The C notices (`compare_mntns()`: the inode of
+`/proc/self/ns/mnt` against the process's) and `stat`s each mapping through
+`/proc/<pid>/map_files/<start>-<end>` instead, which reaches the file the
+process mapped. Following those links takes `CAP_SYS_ADMIN`, so as root every
+mapping is described, and as anyone else every one, the libraries included, is
+a row saying `(stat: Operation not permitted)`. Through `map_files` a deleted
+file is described too: as root, the C prints a container's unlinked library
+`mem`, with its size and a link count of 0, not `DEL`. lsof-rs matches all of
+it; see "For you to decide" below about the last.
+
+**A file the path names again is `mem`.** The C `stat`s a deleted mapping's
+path as well. If it names the same inode again (the file was relinked), the
+row is `mem`, with its size and link count; only a `stat` that fails or names
+another file leaves it `DEL`. lsof-rs never looked.
+
+**A mapped device is typed from its `stat`** (item 48). `/dev/zero`, a GPU's
+`/dev/dri/renderD128` or a block device is `CHR` or `BLK`: DEVICE the device it
+names, `-F r` its raw number, `-F D` the devtmpfs it lives on, and SIZE/OFF
+blank, since `process_proc_node()` keeps a size for neither a device nor a
+FIFO and a mapping has no offset to show instead. lsof-rs printed `REG`, the
+devtmpfs's number and a size of 0, and a path argument naming the device did
+not find the row. What only a `map_files` link reaches is typed the same way:
+an anonymous inode (an io_uring ring) by its raw format, `0000`, and a socket
+(a packet ring) as the socket's own row, with SIZE/OFF blank.
+
+**`-e` exempts mappings** (item 40). The C does not `stat` a mapping on an
+exempted file system: TYPE `UNKNmem` (`UNKNdel` for a deleted one), DEVICE and
+NODE from the maps line, `(-e FS)` in NAME, no lock. It never takes the row to
+`process_proc_node()`, so no path argument, file-system argument or `-N`
+selects it or is located by it: `lsof -e MNT MNT/f`, where `f` is mapped and
+held nowhere else, prints nothing and exits 1. lsof-rs printed the row `REG`
+and found it.
+
+**A lock on every row the C describes** (item 96). The C's `check_lock()`
+runs for every row `process_proc_node()` makes, the cwd, the executable, a
+mapping and a `DEL` row as much as an fd, and looks the lock up by the file's
+own device (`st_dev`) and inode: `cwd-R`, `txt-R`, `mem-W`, `DEL-W`, measured.
+lsof-rs attached locks to numbered fds only, on the stated ground that the
+others are not open file descriptions. It also looked them up by the DEVICE
+cell, which for a device node is the device it names, so a flock on
+`/dev/null`, held on a devtmpfs inode, showed nowhere; the C shows `W` on every
+`/dev/null` fd of the process, its stdio included.
+
+**The letter when one file holds several locks** (item 97). A process can
+hold several byte-range locks on one file, as SQLite does, and one letter is
+shown. The C chains each lock onto the head of its hash bucket unless the file
+already has one of that kind (`get_locks()`), and `check_lock()` takes the
+first it meets: the latest kind new to the file. The kernel lists each CPU's
+locks newest first, so `w` at 0, `r` at 10 and `w` at 20, taken on one CPU,
+read back `w r w`, and the C shows `r`. lsof-rs kept the last line's, `w`.
+
+**`-e` matches a plain prefix, without a trailing slash** (item 98).
+`isefsys()` compares the `-e` path with the start of a file's path, byte for
+byte, so `-e /dev/shm` exempts `/dev/shmx/f`. lsof-rs had required a
+path-component boundary, which nothing had measured. `enter_efsys()` drops the
+trailing slashes, so `-e /dev/shm/` prints `(-e /dev/shm)`, and an `-e` that
+names no mount is reported without them; lsof-rs kept the slash in both.
+
+**What a maps line's path is** (item 99). The C's `get_fields()` takes the
+path as the rest of the line after its padding, trims nothing, and keeps a
+path that does not start with `/`. So an io_uring ring
+(`anon_inode:[io_uring]`) and a packet socket's ring (`socket:[N]`) are rows,
+with `(stat: No such file or directory)`, and a file whose name ends in a
+space or a CR keeps it. lsof-rs required a leading `/` and trimmed blanks and
+a CR from the end, which `stat`ed another name.
+
+**A `DEL` row's device number** (item 100). The C builds the device of a row
+only the maps line describes with `makedev()`, and `-F D` prints that: device
+`0,301` is `0x10002d`. lsof-rs printed `0x12d`, 256 times the major plus the
+minor, which agrees for every minor under 256; a host with more anonymous
+devices than that, as a container host has, showed the difference.
+
+**Not reproduced** (items 102 and 103). The C `stat`s a mapping's name that
+is no path, `anon_inode:[io_uring]`, relative to its own working directory.
+So a file planted under that name in the directory lsof runs in, often
+everyone's (`/tmp`), is described in the mapping's place, `(path dev=254,0,
+inode=…)` (measured), and a link planted there into a hung file system stops
+the run. lsof-rs never `stat`s such a name, and says what the C says when
+nothing is planted. And `get_fields()` ends a maps path at a TAB, as it ends a
+socket's path (item 66): `libssl.so<TAB>x` reads as `libssl.so`, the name of
+another file, which a name its owner chose then passes for. lsof-rs keeps the
+whole name. Each is ledgered, unpinned, since its diff holds the run's paths
+and inodes.
+
+**Found by the review** (items 104 to 106, and a bug of this change's own).
+The C puts each `-e` path at the head of its list, skipping a repeat, so when
+two cover a file NAME gives the one named last: `lsof -e / -e /dev` says
+`(-e /dev)` of `/dev/zero`, where lsof-rs gave the first. An `-e` value that
+does not start with `/` is the missing value's error, `-e not followed by a
+file system path: "dev/"`; lsof-rs took `-e ""` as a prefix of every path and
+exempted them all. A socket no table names has its file system's device in
+`Lf->dev`, so `-F` prints it as `D0x9`, as for a file; lsof-rs gave the `d`
+string, `d0,9`. And this change's own mapped socket, a packet ring in another
+network namespace that no table here knows, was named from its namespace,
+`protocol: PACKET`, as its fd is; the C names a mapping from `getxattr()` of
+`socket:[N]`, which is no path, so it prints `can't identify protocol`.
+
+On Windows nothing changes: it has no maps file, no `/proc/locks` and no `-e`.
+
+### What stays open
+
+Item 101. lsof-rs identifies a file by its DEVICE cell and inode, where the C
+uses `st_dev` and the inode for every file, device nodes included. The two
+agree but for a row whose device lsof-rs could not `stat`: as non-root, a
+process in another mount namespace that maps `/dev/zero` has a `REG 0,6` row
+from the maps line, which the C's `lsof /dev/zero` finds by the devtmpfs's
+device and the inode, and lsof-rs, looking for the device `/dev/zero` names
+(`1,5`), does not. The identity is carried by every path argument, `+d`/`+D`
+entry and bound socket, in the core and both backends, so it is recorded here
+rather than changed with the rows.
+
+### For you to decide
+
+A deleted mapping in another mount namespace is `mem`, not `DEL`, when the C
+runs as root, because `map_files` describes it, and `DEL` when it does not.
+`lsof | grep DEL`, the usual way to find what still runs a library an upgrade
+replaced, then misses a container's when root runs it, though `+L1` finds it
+(NLINK 0). lsof-rs matches the C. Keeping `DEL` instead would be a C-DEFECT
+row and a one-line change.
+
+### What the gate gained
+
+**31 cases, 425 in all, 0 unexplained.** Fixture E maps `/dev/zero`, a
+relinked file, names with a trailing space and a CR, two locked files (one
+then unlinked) and an io_uring ring where the kernel allows one. F flocks
+`/dev/null`, its cwd and its executable, and holds `w r w` on one file,
+pinned to one CPU so the order is fixed. M, in its own mount namespace, maps
+its tmpfs file, a file it unlinks, `/dev/zero` and an io_uring ring. MS holds
+`/dev/shmx/f` and maps `/dev/shmx/m`. L maps a packet ring, in a mount
+namespace of its own. Four fixtures are new: EM maps and
+holds files on `/dev/shm`, for `-e`; P maps three files whose paths the
+harness then mounts over, as root (P needs root or passwordless sudo, which CI
+has); RN maps an io_uring ring, run beside a planted file of its name (RN
+needs a kernel that allows io_uring); and T maps a name with a TAB, on its own
+and with no path argument, whose name the C would print in the row's (item
+17). M's cases give one answer as root and another as anyone else, both the
+C's: this host runs as root, CI does not. Against master's binary every new
+case diverges but the one control, and so do the three existing cases whose
+fixtures grew.
+
+**30 mutants, one per rule, all killed.** Eighteen fall to the differential
+alone, among them every lock rule, the `stat` through `map_files`, the reason
+and its muting, a device's type and size, and the mapped socket's name, which
+only a run as root reaches. Eleven fall to both it and a unit test: the
+parser's three rules (a leading `/`, trimming, the TAB), `stat`ing a name
+that is no path, the `(path …)` wording, the lock chain, the raw type, which
+the differential sees only as root, and four of `-e`'s rules. The two
+C-DEFECTs fall to their ledgered cases going stale. One, `makedev()`'s old
+encoding, falls to unit tests alone: no fixture reaches a minor past 255.
+
+The harness undoes what it does to the host however a run ends: P's mounts
+are recorded as each is made, a run killed by SIGTERM unmounts them and
+removes EM's directory in `/dev/shm` before it exits 2 (tested), a mount a
+stopped fixture still pins is detached lazily, and F's flocks on files every
+process shares are shared and never wait (LESSONS #081).
+
+Unit tests pin what the differential cannot reach: `makedev()` against the
+measured `0x10002d`, the parser's TAB, blank, CR and relative-path rules, the
+`(path …)` wording, the lock chain, `-e`'s prefix, the raw type, and that a
+name that is no path is never `stat`ed. A Miri
+test of a live process's mappings, ignored since the shim's `st_dev` of 0
+made lsof-rs drop every mapping, runs again.
+
+Measured here and gated nowhere: the packet ring's socket row in another mount
+namespace, which takes root and `CAP_NET_RAW`, and the `0000` type of an
+io_uring ring, which only root sees (M's ring shows it on this host, not on
+CI).
 
 ## Fixed by reporting what was not located as the C reports it (2026-10-04)
 
@@ -2675,7 +2882,9 @@ renders decimal (`254,0`), so the key is converted on the way in. Verified
 against the C by a new fixture holding one of each of the four characters at
 once (`locks-fd-suffix`), and fuzzed by `proc_locks`, which asserts the parser
 invents nothing and that every key it emits is in the shape a built row can be
-looked up by.
+looked up by. [2026-10-04: the key is numbers now, the file's own device and
+inode, and a lock shows on every row the C describes, not only an fd's; see
+"Fixed by building every mapping's row as the C does".]
 
 ## Fixed by reading /proc/<pid>/maps (2026-09-05)
 
@@ -2714,6 +2923,10 @@ one whose `stat` disagrees with the maps line, get a row with a
 `(stat: ...)` or `(path inode=...)` name addition. lsof-rs omits such a row (row
 95). This used to call that the same deliberate choice lsof-rs made for an
 unreadable `/proc` link; that link has been reported since 2026-09-25.
+[2026-10-04: resolved, with what else that section found; a deleted mapping
+the C can `stat` after all is `mem`, and "every path is absolute" is no
+longer the fuzz target's rule. See "Fixed by building every mapping's row as
+the C does".]
 
 ## Fixed by rebuilding the selection engine (2026-09-05)
 
@@ -2888,7 +3101,7 @@ C-DEFECT not reproduced.
 | 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed — yet still located: `lsof -t -p 1` prints nothing on this host, and exits 0 | ~~the blank row, and `-t` prints the pid~~ **resolved 2026-09-25** | see "Fixed by reporting what could not be read" above. The fast path still skips the file walk; it asks whether one link reads. |
 | 38 | `-c /regex/`, and `-i` host names (`@localhost`) and service names (`:http`), which the C resolves | refused, with an error | **DEBT — recorded 2026-09-25.** Refusing replaced a silent wrong answer: `-c /re/` was a literal that matched nothing, and `-i:http` matched every Internet file. A regex engine is new attack surface; a resolver contradicts "No hostname or service resolution" below. |
 | 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. |
-| 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | stats the mapped file and prints `REG` | **DEBT — found 2026-09-25**, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it. The cwd/rtd/txt/fd half of `-e` has matched since 2026-09-20. |
+| 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | ~~stats the mapped file and prints `REG`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-09-25, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it; the cwd/rtd/txt/fd half of `-e` had matched since 2026-09-20. |
 | 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | ~~`-L` **shows** the column, and a bare `+L` is refused~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. Windows changed with it: its smoke case now asserts the C's reading. |
 | 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). ~~A socket's inode reports 1~~ A socket never has a count: `process_proc_node()` hands it to `process_proc_sock()` first | ~~a row whose count lsof-rs never read passes the filter~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. The reason this row first gave was wrong, and `+L2` shows it: no socket is selected there either. |
 | 43 | `-F` takes its field list as the **next word** too: `lsof -F pL -p P` prints `p` and `L` | ~~reads `pL` as a file name~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above: `-L`, `-f`, `-r` and `-x` had the same gap, `-F` refused no letter, and a `+` word was never a cluster. |
@@ -2896,7 +3109,7 @@ C-DEFECT not reproduced.
 | 45 | `-X` **toggles** (`Fxopt = Fxopt ? 0 : 1`), so `-X -X` is off: `lsof -X -X -i` lists the Internet files | ~~sets it: `-X -X -i` is refused~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. |
 | 46 | `-f[gG]` and `+f[gG]` are the file-flags option: `+fg` adds a FILE-FLAG column (`W,LG,CX`), `+fG` the same in hex (`0x88001;0x0`), and `-fg` clears it, so `-F -fg` drops the `G` field while `-fg -F` keeps it (the default set sets it again). `-f` with a value does not force path arguments | ~~refuses any value of `-f` or `+f`, attached or the next word: `unsupported kernel file structure selection: g`~~ **resolved 2026-09-28** | see "Fixed by reading the access letter as the kernel sets it, and naming the file flags" above. Windows records no flags and refuses `g` and `G`, as a C dialect without them does. |
 | 47 | `-F r` prints the raw device number of a device node as `0x<hex>` (`r0x103` for `/dev/null`); the default set leaves it out, "for compatibility" | ~~accepts the letter and prints nothing~~ **resolved 2026-09-26** | see "Fixed by making `-X` a toggle and printing `-F r`" above. Windows has no such number and prints none. |
-| 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | types every live mapping `REG`, with the filesystem's device | **OPEN — found 2026-09-26** by reading `maps.rs` while adding `r`. Not measured: no device on this host can be mapped. |
+| 48 | a mapped **device** file (a `mem` row, as a GPU driver maps one) is typed from its `stat`: `CHR`, with the device's number in DEVICE and `r` | ~~types every live mapping `REG`, with the filesystem's device~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-09-26 by reading `maps.rs` while adding `r`; measured on `/dev/zero` (`CHR`) and `/dev/loop0` (`BLK`), which this host can map after all. |
 | 49 | an empty item in a `-p` list is PID 0: `-p ,`, `-p ,1` and `-p 1,,1` report `process ID not located: 0` and exit 1, while a trailing comma (`-p 1,`) is ignored | ~~drops every empty item, so `-p ,` lists the whole host~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. The same reader takes `-g`, and only a comma separates: lsof-rs had split at spaces too. |
 | 50 | `-a` with **nothing to AND** is a usage error: a bare `-a`, `-a -K i`, `-a -p ^N` (only exclusions) print `no select options to AND via -a` and the usage, and exit 1 (`main.c`: `if (Selflags == 0) { if (Fand) …`) | ~~lists the whole host and exits 0~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. |
 | 51 | repeated `-d` options **add up** (`enter_fd()` extends `Fdl`): `-d 3 -d 4` selects both, `-d ^cwd -d ^rtd` excludes both. An include and an exclude in one run are refused, within a list or across two: `exclude in an include -d list: ^4`, `include in an exclude -d list: mem`, exit 1 | ~~keeps only the last `-d`, and accepts a mixed list~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. Wider than this row said: an empty item enters nothing, a range needs low < high, and the names are the C's table, `fd` included, which lsof-rs had refused. |
@@ -2943,7 +3156,19 @@ C-DEFECT not reproduced.
 | 92 | a path argument that is not UTF-8 is a path like any other: `lsof $'bad\xffname'` lists the file | refused: `an argument is not valid UTF-8, which lsof-rs cannot take`, exit 1 | **OPEN — recorded 2026-10-04** by the drift audit; the refusal replaced a panic on 2026-09-25 (see "Fixed by reading bytes: one byte had blinded a whole table" above). Names that `+d`/`+D` find are bytes since item 63; arguments are still read as text. |
 | 93 | a byte that is not UTF-8 prints as `\xff` | prints U+FFFD | **DECISION** — see "Fixed by reading bytes: one byte had blinded a whole table" above. Given a row 2026-10-04 by the drift audit; it had lived only in that section's prose. |
 | 94 | `-b` and `-S [t]` are accepted: avoid the kernel functions that might block, and time out `stat`/`readlink` | refused: `unsupported option: -b` | **DECISION PENDING — recorded 2026-10-04** by the drift audit. "Fixed by taking the owner from the effective uid, and finding a file by what it is" above calls refusing them a DECISION; the coverage inventory calls them `DEBT (L2)`, a phase now finished. Which it is, is the maintainer's call. |
-| 95 | a mapping it cannot `stat`, or whose `stat` disagrees with the maps line, is a `mem` row with a `(stat: ...)` or `(path inode=...)` name addition | omits the row (`maps.rs`) | **OPEN — recorded 2026-10-04** by the drift audit, from the L2 maps work's own note ("What the C prints and lsof-rs still does not", above). |
+| 95 | a mapping it cannot `stat`, or whose `stat` disagrees with the maps line, is a `mem` row with a `(stat: ...)` or `(path inode=...)` name addition | ~~omits the row (`maps.rs`)~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Recorded 2026-10-04 by the drift audit, from the L2 maps work's own note; measuring it found the larger half, a process in another mount namespace, whose mappings the C `stat`s through `/proc/<pid>/map_files/`. |
+| 96 | a lock is shown on **every row the C describes**, found by the file's own device and inode: `cwd-R`, `txt-R`, `mem-W`, `DEL-W`, and `W` on every `/dev/null` fd for a flock on its devtmpfs inode | ~~on numbered fds only, looked up by the DEVICE cell (for a device node, the device it names)~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-10-04 measuring item 95. |
+| 97 | with several of a process's locks on one file, the letter is the **latest kind new to the file** (`get_locks()` chains a new kind onto its bucket's head): `w r w` shows `r` | ~~the last line of `/proc/locks`: `w`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-10-04 keying the lock table by number. SQLite holds such locks. |
+| 98 | `-e` matches a **plain prefix** (`-e /dev/shm` exempts `/dev/shmx/f`), and its trailing slashes are dropped: `(-e /dev/shm)` | ~~a path-component boundary; the slash kept~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. The boundary was an assumption from 2026-09-20 that nothing had measured. |
+| 99 | a maps line's path is the rest of the line, **untrimmed**, and **need not start with `/`**: an io_uring or packet-socket ring is a row | ~~only a path starting with `/`; blanks and a CR trimmed from the end~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. |
+| 100 | a row the maps line alone describes has the device `makedev()` builds: `-F D` is `0x10002d` for device `0,301` | ~~256 times the major plus the minor: `0x12d`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Only past minor 255, which a container host reaches. |
+| 101 | a path argument finds a file by its **`st_dev` and inode**, a device node's too | by its DEVICE cell (for a device node, the device it names) and inode: the same answer but for a row whose device lsof-rs could not `stat`. Run as non-root, a process in another mount namespace that maps `/dev/zero` has a `REG 0,6` row, which `lsof /dev/zero` finds in the C and not in lsof-rs | **OPEN — found 2026-10-04** measuring item 95. The identity is carried by every path argument, `+d`/`+D` entry and bound socket, in the core and both backends. |
+| 102 | a mapping's name that is **no path** (`anon_inode:[io_uring]`) is `stat`ed relative to lsof's working directory: a file planted there under that name is described in the mapping's place, `(path dev=254,0, inode=…)`, and a link there into a hung file system stops the run | never `stat`ed: `(stat: No such file or directory)`, what the C prints where nothing is planted | **C-DEFECT, not reproduced — found 2026-10-04** measuring item 99. Ledgered as `mapping-named-by-no-path-not-stated-in-lsof-rs`. |
+| 103 | a maps path **ends at a TAB** (`get_fields()`): `libssl.so<TAB>x` is `libssl.so (stat: …)`, or the real `libssl.so`'s `(path …)` | keeps the whole name | **C-DEFECT, not reproduced — found 2026-10-04** measuring item 99; the maps twin of item 66. Ledgered as `mapped-name-with-a-tab-kept-whole-in-lsof-rs`. |
+| 104 | when two `-e` paths cover a file, NAME gives the one **named last** (the C puts each at the head of its list), and a repeat keeps its first place: `-e / -e /dev` says `(-e /dev)` of `/dev/zero` | ~~the one named first~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review; on fd rows since 2026-09-20, and on mapped files with this change. |
+| 105 | an `-e` value that does not start with `/` is the missing value's error: `-e not followed by a file system path: "dev/"`, exit 1 | ~~`"-e dev" is not a mounted file system.`; and `-e ""` exempted every file, `(-e )`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review. The usage the C prints after it is row 83's. |
+| 106 | a socket no table names has its file system's device, which `-F` prints as `D0x9` | ~~the `d` string, `d0,9`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review, on an fd of fixture L's. |
+| 107 | a maps line longer than its 4096-byte buffer is read in pieces (`fgets()`), so a path that long is cut and `stat`ed as another | keeps the whole path | **C-DEFECT, not reproduced — found 2026-10-04** by the change's review. Not gated: no fixture maps a path that long. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

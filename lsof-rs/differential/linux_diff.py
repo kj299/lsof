@@ -31,9 +31,13 @@ ledger — those are the kit's, on purpose.
              prints them (see the matrix)
   fixture E  a process holding one live mapped library and one that has been
              deleted while still mapped — the `mem` and `DEL` rows that come
-             from /proc/<pid>/maps rather than from an fd
+             from /proc/<pid>/maps rather than from an fd — and mappings of
+             every other kind it can make unprivileged: /dev/zero, a file
+             relinked after unlinking, names with a trailing space and a CR,
+             two locked files (one unlinked), an io_uring ring
   fixture F  a process holding one of each lock character Linux can report:
-             whole-file and partial, read and write (`R r W w`)
+             whole-file and partial, read and write (`R r W w`); locks on
+             /dev/null, its cwd and its executable; three ranges on one file
   fixture H  a sleeper whose command name is 15 characters, so the COMMAND
              column's default nine-character cap is visible at all -- in a
              session (so a process group) of its own, the one `-g` can name
@@ -71,16 +75,25 @@ ledger — those are the kit's, on purpose.
   fixture Y  AF_UNIX sockets a path argument finds by the path they are
              bound to (through a link, a relative spelling, a replaced file)
 
-  Seven more need a capability the runner may lack. Without it, the fixture
-  is unavailable and its cases are skipped by name, not failed:
+  These need a capability the runner may lack. Without it, the fixture is
+  unavailable and its cases are skipped by name, not failed:
   fixture J  a TCP listener in its own network namespace (CAP_SYS_ADMIN)
   fixture K  AF_PACKET sockets in this namespace (CAP_NET_RAW)
-  fixture L  a packet socket and two AF_UNIX sockets in a foreign user and
-             network namespace (unprivileged user namespaces)
+  fixture L  a packet socket, with a mapped ring, and two AF_UNIX sockets in
+             a foreign user, network and mount namespace (unprivileged user
+             namespaces)
   fixture M  a cwd and an open file on a tmpfs mounted in a mount namespace
-             of its own (unprivileged user namespaces)
+             of its own, and files mapped there (unprivileged user namespaces)
   fixture MS a unix socket bound at a path that is a mount point here,
-             `/dev/shm` (a /dev/shm mount and user namespaces)
+             `/dev/shm`, and files under `/dev/shmx` (a /dev/shm mount and
+             user namespaces)
+  fixture EM files on /dev/shm mapped, mapped and unlinked, and held open,
+             for `-e /dev/shm` (a /dev/shm mount)
+  fixture P  three mapped files whose paths are then mounted over here
+             (root, or passwordless sudo)
+  fixture RN an io_uring ring, a mapping named by no path, and a file
+             planted under that name (a kernel that allows io_uring)
+  fixture T  a mapped file with a TAB in its name, which the C cuts there
   fixture U  (above) runs its cases as a user who cannot read it
   fixture W  two processes whose real and effective uids differ, one each
              way (root, or passwordless sudo)
@@ -296,30 +309,76 @@ def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
     )
 
 
-def mapping_holder(work: str) -> Fixture:
-    """A process with one live mapped library and one deleted-but-mapped one.
+# A fixture program's way to map a file without holding an fd to it: `mmap(2)`
+# through ctypes, since Python's own `mmap` module keeps a dup of the fd open,
+# which would add an fd row to every case. `mp(path)` maps one page of `path`
+# privately and closes the fd unless `keep`; it returns the fd. `mk(path)`
+# writes a page to map. The mapping lasts as long as the process.
+MMAP_PRELUDE = (
+    "import ctypes,fcntl,os,sys,time\n"
+    "libc=ctypes.CDLL(None,use_errno=True)\n"
+    "libc.mmap.restype=ctypes.c_void_p\n"
+    "libc.mmap.argtypes=[ctypes.c_void_p,ctypes.c_size_t,ctypes.c_int,"
+    "ctypes.c_int,ctypes.c_int,ctypes.c_long]\n"
+    "libc.syscall.restype=ctypes.c_long\n"
+    "def mp(path,keep=False,mode=os.O_RDONLY):\n"
+    "    fd=os.open(path,mode)\n"
+    "    if libc.mmap(None,4096,1,2,fd,0) in (None,2**64-1):\n"
+    "        raise OSError(ctypes.get_errno(),path)\n"
+    "    if not keep: os.close(fd)\n"
+    "    return fd\n"
+    "def mk(path):\n"
+    "    with open(path,'wb') as f: f.write(b'x'*4096)\n"
+)
 
-    The deleted mapping is the `DEL` row -- lsof's canonical "who is still
-    running against the old shared object after an upgrade" answer -- and it is
-    the one maps row that cannot be stat'd, so it exercises the branch that
-    takes its device and inode from the maps line instead. Both copies carry a
-    space in the name, because a maps path is the rest of the line and must not
-    be split on whitespace."""
+
+def mapping_holder(work: str) -> Fixture:
+    """A process holding every kind of mapping the C builds a row for without
+    a privilege (DIVERGENCES 95, 48):
+
+    * one live mapped library and one deleted while still mapped -- the `DEL`
+      row, lsof's canonical "who is still running against the old shared
+      object after an upgrade" answer. Both carry a space in the name, because
+      a maps path is the rest of the line and must not be split on whitespace;
+    * `/dev/zero`, mapped: a device, typed `CHR` from its `stat` with the
+      device it names and no size;
+    * `relink`: mapped, linked elsewhere, unlinked and relinked, so the maps
+      line says deleted and the path names the same inode again -- a `mem`
+      row in the C, with its size and a link count of 2;
+    * names the C's field splitter keeps whole: a trailing space and a CR are
+      part of the name (a TAB, where it cuts one, is fixture X's);
+    * two files mapped and locked through a kept fd, one of them then
+      unlinked: the lock is shown on the `mem` and `DEL` rows too;
+    * an io_uring ring, where the kernel allows one: a mapping whose name,
+      `anon_inode:[io_uring]`, is no path at all -- `(stat: …)` again."""
     mdir = os.path.join(work, "maps")
     os.makedirs(mdir)
     live = os.path.join(mdir, "live lib.so")
     gone = os.path.join(mdir, "gone lib.so")
     shutil.copy("/usr/lib/x86_64-linux-gnu/libm.so.6", live)
     shutil.copy("/usr/lib/x86_64-linux-gnu/libc.so.6", gone)
-    py = (
-        "import ctypes,os,time\n"
+    py = MMAP_PRELUDE + (
+        "d=sys.argv[1]\n"
         "a=ctypes.CDLL(%r)\n"
         "b=ctypes.CDLL(%r)\n"
         "os.unlink(%r)\n"
-        "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (live, gone, gone, mdir)
+        "mp('/dev/zero')\n"
+        "r=os.path.join(d,'relink'); mk(r); mp(r)\n"
+        "os.link(r,r+'.keep'); os.unlink(r); os.link(r+'.keep',r)\n"
+        "for n in ('space ','cr\\r'):\n"
+        "    mk(os.path.join(d,n)); mp(os.path.join(d,n))\n"
+        "for n in ('locked','locked-gone'):\n"
+        "    mk(os.path.join(d,n))\n"
+        "    fcntl.lockf(mp(os.path.join(d,n),True,os.O_RDWR),fcntl.LOCK_EX)\n"
+        "os.unlink(os.path.join(d,'locked-gone'))\n"
+        "ring=libc.syscall(425,4,(ctypes.c_char*120)())\n"
+        "if ring>=0: libc.mmap(None,4096,3,1,ring,0)\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (live, gone, gone)
     )
-    return Fixture("E(mappings)", [sys.executable, "-c", py], cwd=mdir, expect_fds=3)
+    return Fixture(
+        "E(mappings)", [sys.executable, "-c", py, mdir], cwd=mdir, expect_fds=3
+    )
 
 
 def lock_holder(work: str) -> Fixture:
@@ -328,7 +387,15 @@ def lock_holder(work: str) -> Fixture:
     /proc/locks reports only shared-vs-exclusive and the byte range, which is
     exactly the four characters `R`, `r`, `W`, `w` -- whole-file read, partial
     read, whole-file write, partial write. The partial locks are what separate
-    the lower-case characters from the upper-case ones, so both are held."""
+    the lower-case characters from the upper-case ones, so both are held.
+
+    And the locks the C shows where lsof-rs showed none: on a device node
+    (`/dev/null`, flocked -- its stdio fds are that inode too, so they show
+    it), on the cwd and on the executable (`cwd-R`, `txt-R`), all found by
+    the file's own device and inode; and on one file three byte ranges, `w`,
+    `r`, `w` in that order, which the C shows as `r` -- the latest kind new to
+    the file, where the last line of /proc/locks says `w`. The flocks on
+    files every process shares are shared ones, and never wait."""
     ldir = os.path.join(work, "locks")
     os.makedirs(ldir)
     py = (
@@ -340,10 +407,26 @@ def lock_holder(work: str) -> Fixture:
         "fcntl.lockf(wp, fcntl.LOCK_EX, 5, 10)\n"
         "fcntl.lockf(rf, fcntl.LOCK_SH)\n"
         "fcntl.lockf(rp, fcntl.LOCK_SH, 5, 10)\n"
+        # Shared and non-blocking: /dev/null and the interpreter are every
+        # process's, and an exclusive or waiting lock on them could stall
+        # another run, or anything else that locks them (LESSONS #081).
+        "SH=fcntl.LOCK_SH|fcntl.LOCK_NB\n"
+        "n=os.open('/dev/null',os.O_RDONLY); fcntl.flock(n, SH)\n"
+        "c=os.open('.',os.O_RDONLY); fcntl.flock(c, SH)\n"
+        "x=os.open(os.readlink('/proc/self/exe'),os.O_RDONLY); fcntl.flock(x, SH)\n"
+        "mx=f('mixed')\n"
+        # /proc/locks is one list per CPU, each newest first: on one CPU the
+        # three come back w(20) r(10) w(0), the order that tells the rules
+        # apart.
+        "os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})\n"
+        "fcntl.lockf(mx, fcntl.LOCK_EX, 2, 0)\n"
+        "fcntl.lockf(mx, fcntl.LOCK_SH, 2, 10)\n"
+        "fcntl.lockf(mx, fcntl.LOCK_EX, 2, 20)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
         "time.sleep(600)\n" % (ldir, ldir)
     )
-    return Fixture("F(locks)", [sys.executable, "-c", py], cwd=ldir, expect_fds=7)
+    # 0,1,2 + the four lock files, /dev/null, the cwd, the executable, mixed.
+    return Fixture("F(locks)", [sys.executable, "-c", py], cwd=ldir, expect_fds=11)
 
 
 def anon_inode_holder(work: str) -> Fixture:
@@ -518,6 +601,57 @@ def non_utf8_holder(work: str) -> Fixture:
         cwd=xdir,
         expect_fds=6,  # 0,1,2 + the two sockets and the mapped file
         expect_comm=NON_UTF8_COMM,
+    )
+
+
+def tab_name_holder(work: str) -> Fixture:
+    """A process that maps one file, whose name holds a TAB: `tab<TAB>here`.
+    The C's `get_fields()` ends a maps path at a TAB, so it reads this one as
+    `tab`, which is no file here -- `(stat: No such file or directory)` --
+    and would be another file's name if one were there: a name its owner
+    chose passes for another. lsof-rs keeps the whole name (DIVERGENCES 103,
+    a C-DEFECT not reproduced). A fixture of its own, so that its case shows
+    that row alone, and without a path argument, whose name the C would
+    print instead (item 17)."""
+    tdir = os.path.join(work, "tabname")
+    os.makedirs(tdir)
+    py = MMAP_PRELUDE + (
+        "d=sys.argv[1]\n"
+        "mk(os.path.join(d,'tab\\there')); mp(os.path.join(d,'tab\\there'))\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture("T(a name with a TAB)", [sys.executable, "-c", py, tdir], cwd=tdir, expect_fds=3)
+
+
+def relative_name_holder(work: str) -> Fixture:
+    """An io_uring ring, mapped: a mapping the kernel names
+    `anon_inode:[io_uring]`, which is no path at all. The C `stat`s that name
+    relative to its own working directory, so run in `plant/`, which holds a
+    file of that name, it describes the file in the ring's place: `(path
+    dev=…, inode=…)` where it otherwise says `(stat: No such file or
+    directory)`. A link planted there into a hung file system would stop it.
+    lsof-rs does not look (DIVERGENCES 102, a C-DEFECT not reproduced).
+    Unavailable where the kernel refuses io_uring: the ring fd is what it
+    waits for, and without one the program exits first."""
+    rdir = os.path.join(work, "relname")
+    os.makedirs(os.path.join(rdir, "plant"))
+    with open(os.path.join(rdir, "plant", "anon_inode:[io_uring]"), "w") as f:
+        f.write("planted\n")
+    py = MMAP_PRELUDE + (
+        "d=sys.argv[1]\n"
+        "ring=libc.syscall(425,4,(ctypes.c_char*120)())\n"
+        "if ring<0: sys.exit(3)\n"
+        "libc.mmap(None,4096,3,1,ring,0)\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "RN(a mapping named by no path)",
+        [sys.executable, "-c", py, rdir],
+        cwd=rdir,
+        expect_fds=4,  # 0,1,2 + the ring
+        optional=True,
     )
 
 
@@ -883,21 +1017,33 @@ def userns_socket_holder(work: str) -> Fixture:
     That fallback is the only path on which the KERNEL's name for a socket is
     visible, and for these three it is not the name either program uses
     elsewhere -- `PACKET`, `UNIX-STREAM` and `UNIX`, measured against the C.
-    Nothing else in this harness reaches that code.
+    Nothing else in this harness reaches that code. Such a row's device is
+    the socket file system's, which `-F` prints as `D`, as for a file.
+
+    The packet socket also maps a ring, as libpcap does, and `--mount` puts
+    the process in a mount namespace of its own: as root, the C `stat`s that
+    mapping through `map_files`, finds a socket no table here knows, and
+    names it from `getxattr()` of `socket:[N]`, which is no path -- `can't
+    identify protocol`, where the fd's own row is `protocol: PACKET`.
     """
     udir = os.path.join(work, "userns")
     os.makedirs(udir)
-    py = (
-        "import os,socket,time\n"
+    py = MMAP_PRELUDE + (
+        "import socket,struct\n"
         "p=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(3))\n"
         "st=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
         "dg=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)\n"
+        "p.setsockopt(263,5,struct.pack('IIII',4096,1,2048,2))\n"
+        "if libc.mmap(None,4096,3,1,p.fileno(),0) in (None,2**64-1): sys.exit(3)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
         "time.sleep(600)\n" % udir
     )
     return Fixture(
         "L(userns sockets)",
-        ["unshare", "--user", "--map-root-user", "--net", sys.executable, "-c", py],
+        [
+            "unshare", "--user", "--map-root-user", "--net", "--mount",
+            sys.executable, "-c", py,
+        ],
         cwd=udir,
         expect_fds=6,  # 0,1,2 + packet, unix stream, unix dgram
         optional=True,
@@ -969,15 +1115,28 @@ def mount_ns_holder(work: str) -> Fixture:
 
     `unshare --user --map-root-user` lets an unprivileged runner make the
     namespace and mount the tmpfs, as fixture L does; `exec` keeps one pid
-    from `unshare` to the python that holds the file."""
+    from `unshare` to the python that holds the file.
+
+    It maps files too (DIVERGENCES 95): the inner `f`, a `g` it then
+    unlinks, `/dev/zero`, and an io_uring ring where the kernel allows one.
+    The C `stat`s a mapping of a process in another mount namespace through
+    `/proc/<pid>/map_files/`: as root that reaches each file, deleted or not,
+    and as anyone else it fails -- following those links takes
+    `CAP_SYS_ADMIN` -- and every mapping, its libraries' included, is a row
+    saying `(stat: Operation not permitted)`. lsof-rs `stat`ed the paths
+    here, found other files or none, and dropped those rows."""
     mdir = os.path.join(work, "mntns")
     mnt = os.path.join(mdir, "mnt")
     os.makedirs(mnt)
     with open(os.path.join(mnt, "f"), "w") as f:
         f.write("outer\n")
-    py = (
-        "import os,time\n"
+    py = MMAP_PRELUDE + (
         "f=open('f')\n"
+        "mp('f')\n"
+        "mk('g'); mp('g'); os.unlink('g')\n"
+        "mp('/dev/zero')\n"
+        "ring=libc.syscall(425,4,(ctypes.c_char*120)())\n"
+        "if ring>=0: libc.mmap(None,4096,3,1,ring,0)\n"
         "open(%r,'w').close()\n"
         "time.sleep(600)\n" % os.path.join(mdir, "ready")
     )
@@ -1024,17 +1183,26 @@ def mount_point_socket_holder(work: str) -> Fixture:
 
     Made through an unprivileged user namespace, as fixture M is. Unavailable
     where `/dev/shm` is not a mount point, since its cases would then name a
-    plain directory."""
+    plain directory.
+
+    It holds `/dev/shmx/f` open on fd 4, and maps `/dev/shmx/m`: names that
+    start with `/dev/shm` without being under it, which the C's `-e
+    /dev/shm` exempts all the same -- its `isefsys()` compares a plain
+    prefix. lsof-rs had required a path-component boundary."""
     mdir = os.path.join(work, "mntsock")
     os.makedirs(mdir)
     # A second spelling of the mount point. The C compares bound paths with
     # the argument as typed, so through this link it does not find the socket.
     os.symlink(SHM, os.path.join(mdir, "shm-link"))
-    py = (
-        "import socket,time\n"
+    py = MMAP_PRELUDE + (
+        "import socket\n"
         "s=socket.socket(socket.AF_UNIX); s.bind(%r); s.listen(1)\n"
+        "os.makedirs(%r)\n"
+        "x=open(%r,'w')\n"
+        "mk(%r); mp(%r)\n"
         "open(%r,'w').close()\n"
-        "time.sleep(600)\n" % (SHM, os.path.join(mdir, "ready"))
+        "time.sleep(600)\n"
+        % (SHM, SHM + "x", SHM + "x/f", SHM + "x/m", SHM + "x/m", os.path.join(mdir, "ready"))
     )
     sh = 'mount -t tmpfs lsofdiff /dev && exec "$1" -c "$2"'
     return Fixture(
@@ -1044,12 +1212,157 @@ def mount_point_socket_holder(work: str) -> Fixture:
             "private", "sh", "-c", sh, "sh", sys.executable, py,
         ],
         cwd=mdir,
-        # 0,1,2 + the listener, under python's own comm.
-        expect_fds=4,
+        # 0,1,2 + the listener and /dev/shmx/f, under python's own comm.
+        expect_fds=5,
         expect_comm=os.path.basename(sys.executable).encode()[:15],
         optional=True,
         unavailable=None if is_mount_point(SHM) else f"{SHM} is not a mount point here",
     )
+
+
+# Directories a run made outside its work directory, removed with it.
+OUTSIDE_WORK: list[str] = []
+
+
+def exempt_mapping_holder(work: str) -> Fixture:
+    """Files on `/dev/shm`, for `-e /dev/shm` (DIVERGENCES 40): one mapped,
+    one mapped and then unlinked, one held open. The C makes the mappings
+    `UNKNmem` and `UNKNdel` rows from the maps line alone, with `(-e
+    /dev/shm)` in NAME, and never asks whether a path argument names one:
+    `lsof -e /dev/shm /dev/shm/…/live` prints nothing and exits 1. lsof-rs
+    `stat`ed the mappings, printed them `REG`, and found them by path.
+
+    In this mount namespace, because a path argument must name the same file
+    here; under a directory of its own in `/dev/shm`, since that is the one
+    mount point every runner has and may write to. Unavailable where
+    `/dev/shm` is not a mount point."""
+    edir = os.path.join(work, "exempt")
+    os.makedirs(edir)
+    shm = edir
+    unavailable = None if is_mount_point(SHM) else f"{SHM} is not a mount point here"
+    if unavailable is None:
+        shm = tempfile.mkdtemp(prefix="lsof-rs-diff-", dir=SHM)
+        OUTSIDE_WORK.append(shm)
+    py = MMAP_PRELUDE + (
+        "d,s=sys.argv[1],sys.argv[2]\n"
+        "mk(os.path.join(s,'live')); mp(os.path.join(s,'live'))\n"
+        "mk(os.path.join(s,'gone')); mp(os.path.join(s,'gone'))\n"
+        "os.unlink(os.path.join(s,'gone'))\n"
+        "mk(os.path.join(s,'held')); h=open(os.path.join(s,'held'))\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "EM(exempt mappings)",
+        [sys.executable, "-c", py, edir, shm],
+        cwd=edir,
+        # 0,1,2 + `held`.
+        expect_fds=4,
+        optional=True,
+        unavailable=unavailable,
+    )
+
+
+def path_note_holder(work: str) -> Fixture:
+    """Three mapped files whose paths the harness then covers, as root, so
+    that each names another file here or none (DIVERGENCES 95): a tmpfs over
+    `ovl`, another over `shadow` holding a file of the same name, and another
+    file of the same file system bound over `t/b`. The C keeps each row with
+    the maps line's device and inode and says why in NAME -- `(stat: No such
+    file or directory)`, `(path dev=0,42, inode=2)`, `(path inode=N)` -- and
+    `-w` mutes that. lsof-rs dropped them.
+
+    The mounts are made in this mount namespace, since that is where both
+    binaries look; that takes root or passwordless sudo, and without it the
+    fixture is unavailable. `t` is a tmpfs mounted before the files are
+    mapped ([`prepare_paths`]; the fixture waits for `go`): a file bound from
+    the root file system would give the bind mount `/`'s source, and a
+    source that names two file systems is DIVERGENCES 84, which would change
+    the cases that name `/` by its source (LESSONS #081)."""
+    pdir = os.path.join(work, "pathnotes")
+    for sub in ("ovl", "shadow", "t"):
+        os.makedirs(os.path.join(pdir, sub))
+    py = MMAP_PRELUDE + (
+        "d=sys.argv[1]\n"
+        "give_up=time.monotonic()+60\n"
+        "while not os.path.exists(os.path.join(d,'go')):\n"
+        "    if time.monotonic()>give_up: sys.exit(3)\n"
+        "    time.sleep(0.01)\n"
+        "for n in ('ovl/hidden','shadow/s','t/b'):\n"
+        "    mk(os.path.join(d,n)); mp(os.path.join(d,n))\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "P(path notes)",
+        [sys.executable, "-c", py, pdir],
+        cwd=pdir,
+        expect_fds=3,
+        optional=True,
+        unavailable=None if root_prefix() is not None else "not root, and no passwordless sudo",
+    )
+
+
+def _mount(args: list[str], mounted: list[str]) -> None:
+    """Run `mount ARGS` as root, and record its target (the last argument)
+    in `mounted` the moment it exists, so an interrupted run still undoes it."""
+    subprocess.run([*(root_prefix() or []), "mount", *args], check=True, capture_output=True)
+    mounted.append(args[-1])
+
+
+def prepare_paths(p: Fixture, mounted: list[str]) -> None:
+    """Mount fixture P's `t`, a tmpfs this user owns, and let it map its
+    files (`go`). What is mounted goes into `mounted` as it is made, for
+    [`uncover`], which the run's `finally` calls whatever happens."""
+    own = f"uid={os.getuid()},gid={os.getgid()}"
+    try:
+        _mount(["-t", "tmpfs", "-o", own, "lsofdiff", os.path.join(p.cwd, "t")], mounted)
+        with open(os.path.join(p.cwd, "t", "other"), "wb") as f:
+            f.write(b"o" * 4096)
+        open(os.path.join(p.cwd, "go"), "w").close()
+    except (subprocess.CalledProcessError, OSError) as why:
+        raise FixtureUnavailable(f"{p.name}: could not mount its tmpfs: {_why(why)}")
+
+
+def cover_paths(p: Fixture, mounted: list[str]) -> None:
+    """Mount over fixture P's mapped paths once it holds them, as root: a
+    tmpfs over `ovl` (so `ovl/hidden` is no file), one over `shadow` with a
+    new `s` in it, and `t/other` bound over `t/b`. The tmpfs are this user's
+    (`uid=`), so it writes the new `s` itself. What is mounted goes into
+    `mounted` as it is made; a mount that fails makes the fixture
+    unavailable, and the run's `finally` undoes the rest."""
+    own = f"uid={os.getuid()},gid={os.getgid()}"
+    try:
+        _mount(["-t", "tmpfs", "-o", own, "lsofdiff", os.path.join(p.cwd, "ovl")], mounted)
+        _mount(["-t", "tmpfs", "-o", own, "lsofdiff", os.path.join(p.cwd, "shadow")], mounted)
+        with open(os.path.join(p.cwd, "shadow", "s"), "wb") as f:
+            f.write(b"i" * 4096)
+        _mount(
+            ["--bind", os.path.join(p.cwd, "t", "other"), os.path.join(p.cwd, "t", "b")],
+            mounted,
+        )
+    except (subprocess.CalledProcessError, OSError) as why:
+        raise FixtureUnavailable(f"{p.name}: could not mount over its paths: {_why(why)}")
+
+
+def _why(why: Exception) -> str:
+    """An exception, with a failed command's stderr."""
+    err = getattr(why, "stderr", b"") or b""
+    return f"{why} {err.decode(errors='replace').strip()}".strip()
+
+
+def uncover(mounted: list[str]) -> None:
+    """Undo [`prepare_paths`] and [`cover_paths`], last mount first. A mount
+    a stopped fixture still pins is detached lazily (`umount -l`) rather
+    than left; one that will not go even so is named on stderr, never hidden
+    behind the work directory's removal."""
+    prefix = root_prefix() or []
+    for target in reversed(mounted):
+        if subprocess.run([*prefix, "umount", target], capture_output=True).returncode == 0:
+            continue
+        if subprocess.run([*prefix, "umount", "-l", target], capture_output=True).returncode != 0:
+            print(f"linux_diff: WARNING: could not unmount {target}", file=sys.stderr)
+    mounted.clear()
 
 
 def path_spelling_holder(work: str) -> Fixture:
@@ -1343,7 +1656,14 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     w = owner_holder(work)
     ms = mount_point_socket_holder(work)
     r = path_spelling_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r
+    em = exempt_mapping_holder(work)
+    pn = path_note_holder(work)
+    rn = relative_name_holder(work)
+    t = tab_name_holder(work)
+    return (
+        a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
+        em, pn, rn, t,
+    )
 
 
 # -------------------------------------------------------------------- matrix
@@ -1460,6 +1780,12 @@ def _raw_args(matrix_path: str, name: str) -> list:
 # ---------------------------------------------------------------------- main
 
 
+def _terminated(signum, frame) -> "NoReturn":  # type: ignore[name-defined]
+    """SIGTERM: leave through `run`'s `finally`, as an infra failure."""
+    print("linux_diff: INFRA: terminated; undoing what the fixtures did", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def run(args) -> int:
     if not os.path.isfile(KIT_RUNNER):
         infra(f"kit runner not found at {KIT_RUNNER}")
@@ -1468,59 +1794,75 @@ def run(args) -> int:
     preflight_locale()
 
     work = tempfile.mkdtemp(prefix="lsof-rs-diff-")
-    fixtures = make_fixtures(work)
-    (
-        a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
-        offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
-        flagfds, sockpaths, mntns, owner, mntsock, spellings,
-    ) = fixtures
-    # Every fixture that needs a capability the runner may not have, with the
-    # matrix placeholder its cases use and the reason to print when it is
-    # missing. A missing capability is neither a divergence nor a broken
-    # harness: those cases are SKIPPED, by name, on stderr -- never silently
-    # compared against something else, and never counted as passing.
-    optional: dict[str, tuple[Fixture | None, str]] = {
-        "J": (netns, "no CAP_SYS_ADMIN for `unshare --net`"),
-        "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
-        "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
-        "U": (unreadable, "no user here that cannot read a non-dumpable process"),
-        # M's paths name a plain directory here whether or not M came up; a
-        # case naming one without M would MATCH on nothing, so they go with it.
-        "M": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
-        "MMNT": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
-        "MFILE": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
-        "MS": (mntsock, "no `/dev/shm` mount here, or no unprivileged user namespaces"),
-        # W's cases name {W} and {WR} together; both go with it.
-        "W": (owner, "not root, and no passwordless sudo"),
-        "WR": (owner, "not root, and no passwordless sudo"),
-        # A case that spells /dev/shm differently asks whether the spelling
-        # still names the file system; where /dev/shm is no mount point, both
-        # binaries would answer "a directory" and MATCH on nothing.
-        "SHMMNT": (
-            spellings if is_mount_point(SHM) else None,
-            f"{SHM} is not a mount point here",
-        ),
-        "SHMREL": (
-            spellings if is_mount_point(SHM) else None,
-            f"{SHM} is not a mount point here",
-        ),
-        "SHMDIR": (
-            spellings if is_mount_point(SHM) else None,
-            f"{SHM} is not a mount point here",
-        ),
-        "SHMBASE": (
-            spellings if is_mount_point(SHM) else None,
-            f"{SHM} is not a mount point here",
-        ),
-        "SHMSRC": (
-            spellings if is_mount_point(SHM) and "/" not in mount_source(SHM) else None,
-            f"{SHM} is not a mount point here, or its source is a path",
-        ),
-    }
-    # How fixture U's cases run as a user who cannot read it; see
-    # `unprivileged_prefix`. Root with no way down skips them.
-    prefix = unprivileged_prefix()
+    # A run killed by SIGTERM (a `timeout`, a cancelled job) still undoes
+    # what it did to the host in the `finally` below -- fixture P's mounts,
+    # fixture EM's directory in /dev/shm -- and exits 2: infra, not a verdict.
+    signal.signal(signal.SIGTERM, _terminated)
+    # What `prepare_paths` and `cover_paths` mounted, to be unmounted; each
+    # mount is recorded as it is made, so none outlives an interrupted run.
+    covered: list[str] = []
+    fixtures: tuple = ()
     try:
+        fixtures = make_fixtures(work)
+        (
+            a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
+            offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
+            flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
+            relnames, tabname,
+        ) = fixtures
+        # Every fixture that needs a capability the runner may not have, with the
+        # matrix placeholder its cases use and the reason to print when it is
+        # missing. A missing capability is neither a divergence nor a broken
+        # harness: those cases are SKIPPED, by name, on stderr -- never silently
+        # compared against something else, and never counted as passing.
+        optional: dict[str, tuple[Fixture | None, str]] = {
+            "J": (netns, "no CAP_SYS_ADMIN for `unshare --net`"),
+            "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
+            "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
+            "U": (unreadable, "no user here that cannot read a non-dumpable process"),
+            # M's paths name a plain directory here whether or not M came up; a
+            # case naming one without M would MATCH on nothing, so they go with it.
+            "M": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+            "MMNT": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+            "MFILE": (mntns, "no unprivileged user namespaces for `unshare --user --mount`"),
+            "MS": (mntsock, "no `/dev/shm` mount here, or no unprivileged user namespaces"),
+            # EM's cases name the file system and a file on it as well as EM.
+            "EM": (exmaps, f"{SHM} is not a mount point here"),
+            "EMFS": (exmaps, f"{SHM} is not a mount point here"),
+            "EMFSSLASH": (exmaps, f"{SHM} is not a mount point here"),
+            "EMLIVE": (exmaps, f"{SHM} is not a mount point here"),
+            "P": (pathnotes, "not root, and no passwordless sudo, to mount over its paths"),
+            "RN": (relnames, "no io_uring here"),
+            # W's cases name {W} and {WR} together; both go with it.
+            "W": (owner, "not root, and no passwordless sudo"),
+            "WR": (owner, "not root, and no passwordless sudo"),
+            # A case that spells /dev/shm differently asks whether the spelling
+            # still names the file system; where /dev/shm is no mount point, both
+            # binaries would answer "a directory" and MATCH on nothing.
+            "SHMMNT": (
+                spellings if is_mount_point(SHM) else None,
+                f"{SHM} is not a mount point here",
+            ),
+            "SHMREL": (
+                spellings if is_mount_point(SHM) else None,
+                f"{SHM} is not a mount point here",
+            ),
+            "SHMDIR": (
+                spellings if is_mount_point(SHM) else None,
+                f"{SHM} is not a mount point here",
+            ),
+            "SHMBASE": (
+                spellings if is_mount_point(SHM) else None,
+                f"{SHM} is not a mount point here",
+            ),
+            "SHMSRC": (
+                spellings if is_mount_point(SHM) and "/" not in mount_source(SHM) else None,
+                f"{SHM} is not a mount point here, or its source is a path",
+            ),
+        }
+        # How fixture U's cases run as a user who cannot read it; see
+        # `unprivileged_prefix`. Root with no way down skips them.
+        prefix = unprivileged_prefix()
         for fx in fixtures:
             if fx.optional:
                 try:
@@ -1544,7 +1886,10 @@ def run(args) -> int:
         # keeps a half-loaded fixture from producing a matching-but-partial
         # table on both sides, which would be a false green (LESSONS #6).
         started_optional = {k: v[0] for k, v in optional.items()}
-        netns, packet, userns, unreadable, mntns, owner, mntsock = (
+        (
+            netns, packet, userns, unreadable, mntns, owner, mntsock, exmaps, pathnotes,
+            relnames,
+        ) = (
             started_optional["J"],
             started_optional["K"],
             started_optional["L"],
@@ -1552,13 +1897,24 @@ def run(args) -> int:
             started_optional["M"],
             started_optional["W"],
             started_optional["MS"],
+            started_optional["EM"],
+            started_optional["P"],
+            started_optional["RN"],
         )
+        # P maps its files only once its tmpfs is there.
+        if pathnotes is not None:
+            try:
+                prepare_paths(pathnotes, covered)
+            except FixtureUnavailable as unavailable:
+                print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                optional["P"] = (None, optional["P"][1])
+                pathnotes = None
         for fx in [
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
-                mntsock, spellings,
+                mntsock, spellings, exmaps, pathnotes, relnames, tabname,
             )
             if f is not None
         ]:
@@ -1570,6 +1926,13 @@ def run(args) -> int:
                 time.sleep(0.02)
             if not os.path.exists(ready):
                 infra(f"fixture {fx.name} was not ready within 5s")
+        # P's paths are covered only now that it has mapped them.
+        if pathnotes is not None:
+            try:
+                cover_paths(pathnotes, covered)
+            except FixtureUnavailable as unavailable:
+                print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                optional["P"] = (None, optional["P"][1])
         zchild = zombies_ready(zombies)
         # W's pids are its two processes', not the `sudo` it may run under,
         # and they count only once the credentials are in place.
@@ -1664,6 +2027,12 @@ def run(args) -> int:
                 "SHMBASE": os.path.basename(SHM),
                 "SHMREL": os.path.join(spellings.cwd, "shm-rel"),
                 "SHMSRC": mount_source(SHM),
+                "ERELINK": os.path.join(e.cwd, "relink"),
+                "T": str(tabname.pid),
+                "RNPLANT": os.path.join(relnames.cwd if relnames else work, "plant"),
+                "EMFS": SHM,
+                "EMFSSLASH": SHM + "/",
+                "EMLIVE": os.path.join(exmaps.argv[4] if exmaps else work, "live"),
                 # Last, so they replace the placeholder pid the optional
                 # fixtures' entries above gave them.
                 **{k: str(v) for k, v in owners.items()},
@@ -1729,10 +2098,13 @@ def run(args) -> int:
     finally:
         for fx in fixtures:
             fx.stop()
+        uncover(covered)
         if args.keep_fixtures:
-            print(f"linux_diff: fixtures kept under {work}")
+            print(f"linux_diff: fixtures kept under {work} " + " ".join(OUTSIDE_WORK))
         else:
             shutil.rmtree(work, ignore_errors=True)
+            for outside in OUTSIDE_WORK:
+                shutil.rmtree(outside, ignore_errors=True)
 
 
 def self_test() -> int:

@@ -154,6 +154,12 @@ pub enum FileType {
     /// could not be read, or what it names could not be `stat`ed. The C's
     /// `LSOF_FILE_UNKNOWN_STAT`.
     Unknown,
+    /// `UNKN<kind>` (`UNKNfd`, `UNKNcwd`, `UNKNrtd`, `UNKNtxt`, `UNKNmem`,
+    /// `UNKNdel`): a file on a file system `-e` exempted, so never `stat`ed.
+    /// The C builds the row without `process_proc_node()`, so no path or
+    /// file-system argument and no `-N` ever selects it, whatever device and
+    /// inode it shows (see [`OpenFile::is_exempt`]).
+    Exempt(&'static str),
     /// No type was ever set: the C's `LSOF_FILE_NONE`, which only its `NOFD`
     /// row carries. The table prints what the C's fallback formats for it —
     /// the raw type number in octal, `%04o`, so `0000` — and `-F` omits the
@@ -182,6 +188,7 @@ impl FileType {
             FileType::Thread => "THRD".into(),
             FileType::Token => "TOKN".into(),
             FileType::Other(code) => code.clone(),
+            FileType::Exempt(kind) => format!("UNKN{kind}"),
             FileType::Unknown => "unknown".into(),
             FileType::NoType => "0000".into(),
         }
@@ -566,6 +573,16 @@ impl OpenFile {
     /// True if this file is an Internet (IPv4/IPv6) socket — the `-i` predicate.
     pub fn is_internet(&self) -> bool {
         self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6)
+    }
+
+    /// True for a row `-e` exempted ([`FileType::Exempt`]). Its DEVICE and
+    /// NODE are only what a maps line said, never a `stat`: a path argument,
+    /// a file-system argument and `-N` pass it by, and it is never located,
+    /// as the C's `isefsys()` rows never reach `is_file_named()`. Measured:
+    /// `lsof -e MNT MNT/f`, where `f` is mapped and on nothing else, prints
+    /// nothing and exits 1.
+    pub fn is_exempt(&self) -> bool {
+        matches!(self.file_type, FileType::Exempt(_))
     }
 }
 

@@ -149,6 +149,7 @@ impl Backend for LinuxBackend {
             sockets_only: sel.socket_rows_only(),
             omit_unreadable: sel.omit_unreadable,
             bound_paths: sel.has_path_filter(),
+            mnt_ns: std::fs::metadata("/proc/self/ns/mnt").ok().map(|m| m.ino()),
         };
 
         for p in procs.iter_mut() {
@@ -338,11 +339,12 @@ mod tests {
     /// 60-minute budget of the observe-first miri job went the first time this
     /// was written. `process_selector_scopes_the_fd_walk` pins that only the
     /// named pid pays for an fd walk, so one process is all this needs.
+    ///
+    /// Under miri too, since a mapping is a row whatever its `stat` says:
+    /// miri's shim reports `st_dev` as 0, which once made every mapping
+    /// unmatched and dropped, so this was ignored there; each is now a row
+    /// the maps line describes (22.7 s under the pinned miri, measured).
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "miri's stat shim reports st_dev as 0, so maps::rows_for drops                   every live mapping on the device check: measured on the same                   process, 12132 bytes of /proc/<pid>/maps read and 30 mappings                   parsed, 0 mem rows built (natively: 4 parsed, 4 rows). Same                   shim as device_nodes_report_their_own_number_not_the_filesystem"
-    )]
     fn default_selection_still_collects_specials_and_mapped_rows() {
         use lsof_core::model::FdType;
         let me: u32 = std::fs::read_to_string("/proc/self/stat")

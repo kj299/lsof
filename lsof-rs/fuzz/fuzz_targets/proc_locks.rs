@@ -21,20 +21,9 @@ fuzz_target!(|data: &[u8]| {
         table.len(),
         text.lines().count()
     );
-    for ((_pid, device, inode), kind) in &table {
-        // The key is rendered the way every other row renders it, or the
-        // lookup against a built row could never hit.
-        let (maj, min) = device
-            .split_once(',')
-            .unwrap_or_else(|| panic!("device not `maj,min`: {device:?}"));
-        assert!(
-            maj.bytes().all(|b| b.is_ascii_digit()) && min.bytes().all(|b| b.is_ascii_digit()),
-            "device is not decimal: {device:?}"
-        );
-        assert!(
-            !inode.is_empty() && inode.bytes().all(|b| b.is_ascii_digit()),
-            "inode is not a decimal number: {inode:?}"
-        );
+    // The key is numbers now — pid, `makedev()` device, inode — so its form
+    // needs no checking; what is left to check is the character.
+    for kind in table.values() {
         assert!(
             matches!(kind.code(), 'r' | 'R' | 'w' | 'W'),
             "unexpected lock character: {:?}",

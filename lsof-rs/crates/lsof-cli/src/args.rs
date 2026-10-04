@@ -411,7 +411,25 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                             }
                         }
                     };
-                    sel.exempt_fs.push(value);
+                    // A file system path starts with `/`, or it is the
+                    // missing value's error: `-e dev/` and `-e ""` are
+                    // `-e not followed by a file system path: "dev/"`, exit 1
+                    // (measured), where lsof-rs had exempted every file for
+                    // an empty one.
+                    if !value.starts_with('/') {
+                        return Err(format!("-e not followed by a file system path: {value:?}"));
+                    }
+                    // Without its trailing slashes, and once, as
+                    // `enter_efsys()` keeps it: `-e /dev/shm/` is printed
+                    // `(-e /dev/shm)`, and reported `"-e /dev/shm" is not a
+                    // mounted file system.` (both measured). `/` stays `/`.
+                    let trimmed = match value.trim_end_matches('/') {
+                        "" => "/",
+                        t => t,
+                    };
+                    if !sel.exempt_fs.iter().any(|e| e == trimmed) {
+                        sel.exempt_fs.push(trimmed.to_string());
+                    }
                     j = chars.len();
                     continue;
                 }
@@ -1447,6 +1465,28 @@ mod tests {
     }
 
     /// Parse and hand back the column choices, or the error.
+    /// `-e` (DIVERGENCES 98, 105): a file system path, or the missing
+    /// value's error; kept without its trailing slashes, and once.
+    #[test]
+    fn dash_e_takes_a_path_once_without_its_trailing_slashes() {
+        let fs = |argv: &[&str]| columns(argv).map(|(_, s)| s.exempt_fs);
+        assert_eq!(fs(&["-e", "/dev/shm/"]).unwrap(), ["/dev/shm"]);
+        assert_eq!(fs(&["-e", "///"]).unwrap(), ["/"]);
+        assert_eq!(
+            fs(&["-e", "/dev", "-e", "/", "-e", "/dev/"]).unwrap(),
+            ["/dev", "/"],
+            "a repeat keeps its first place"
+        );
+        assert_eq!(
+            fs(&["-e", ""]).unwrap_err(),
+            r#"-e not followed by a file system path: """#
+        );
+        assert_eq!(
+            fs(&["-e", "dev/"]).unwrap_err(),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+    }
+
     fn columns(argv: &[&str]) -> Result<(Columns, Selection), String> {
         match parse(argv.iter().map(|s| s.to_string()).collect())? {
             Action::Run {

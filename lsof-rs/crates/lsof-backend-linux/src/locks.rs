@@ -19,19 +19,32 @@ use std::collections::HashMap;
 
 use lsof_core::model::LockKind;
 
-/// Locks indexed by the three things that identify the locked file from a
-/// row's point of view: `(pid, device, inode)`, with device and inode rendered
-/// the way the rest of the backend renders them (`254,0` and a decimal inode)
-/// so the lookup is a plain string compare against a built row.
-pub type LockTable = HashMap<(u32, String, String), LockKind>;
+/// Locks indexed by the three things that identify the locked file:
+/// `(pid, device, inode)`, the device a `dev_t` packed as `makedev()` packs
+/// it, which is what a row's `stat` (`st_dev`) and a maps line give too. The
+/// key is the file's own device and never the one a device node names: a
+/// lock on `/dev/null` is held on a devtmpfs inode, and keying on the DEVICE
+/// cell (`1,3`) missed it. Numbers, so a lookup allocates nothing.
+pub type LockTable = HashMap<(u32, u64, u64), LockKind>;
 
 /// Parse `/proc/locks`.
 ///
 /// Pure, so the fuzz target can drive it with arbitrary bytes; it must never
 /// panic. Anything unparseable is skipped rather than guessed — a wrong lock
 /// character is worse than no lock character.
+///
+/// One file can hold several of a process's locks — byte ranges of
+/// different kinds, as SQLite takes them — and one character is shown. The
+/// C chains each lock onto its hash bucket's head unless the same kind is
+/// already there for that file (`get_locks()`), and `check_lock()` takes the
+/// first it meets: the latest kind *new to that file*. The kernel lists each
+/// CPU's locks newest first, so `w` at 0, `r` at 10, `w` at 20, taken on one
+/// CPU, read back `w` 20, `r` 10, `w` 0 and show `r` — measured, `3ur` from
+/// the C where taking the last line showed `3uw`.
 pub fn parse_locks(text: &str) -> LockTable {
     let mut out = HashMap::new();
+    // The kinds each file has had so far, one bit apiece.
+    let mut seen: HashMap<(u32, u64, u64), u8> = HashMap::new();
     for line in text.lines() {
         // The C splits on `:` as well as whitespace, which is what turns
         // `fe:00:1884163` into three fields.
@@ -60,12 +73,9 @@ pub fn parse_locks(text: &str) -> LockTable {
         else {
             continue;
         };
-        // The inode is the lookup key, so it is stored re-rendered from the
-        // parsed number rather than as the text that was read. Rust's integer
-        // parser accepts a leading `+`, so `+0` would otherwise be keyed as
-        // "+0" and never match a row whose node is "0" — a lock silently
-        // missed where the C, which keys on the number, finds it. The
-        // `proc_locks` fuzz target found exactly that.
+        // The inode is keyed as the number, as the C keys it. (When the key
+        // was text, Rust's parser accepting a leading `+` made `+0` a key no
+        // row's "0" could match — the `proc_locks` fuzz target found that.)
         let Ok(inode) = f[7].parse::<u64>() else {
             continue;
         };
@@ -74,10 +84,19 @@ pub fn parse_locks(text: &str) -> LockTable {
         };
         // `EOF` is how the kernel writes "to the end of the file".
         let whole_file = start == 0 && f[9] == "EOF";
-        out.insert(
-            (pid, format!("{maj},{min}"), inode.to_string()),
-            LockKind::new(write, whole_file),
-        );
+        let key = (pid, crate::files::makedev(maj, min), inode);
+        let kind = LockKind::new(write, whole_file);
+        let bit = match kind {
+            LockKind::ReadPartial => 1,
+            LockKind::ReadFull => 2,
+            LockKind::WritePartial => 4,
+            LockKind::WriteFull => 8,
+        };
+        let had = seen.entry(key).or_insert(0);
+        if *had & bit == 0 {
+            *had |= bit;
+            out.insert(key, kind);
+        }
     }
     out
 }
@@ -104,16 +123,19 @@ mod tests {
 4: OFDLCK ADVISORY  READ -1 fe:00:1892440 0 EOF
 ";
 
-    fn kind(t: &LockTable, pid: u32, ino: &str) -> Option<LockKind> {
-        t.get(&(pid, "254,0".to_string(), ino.to_string())).copied()
+    /// `fe:00`, the device every SAMPLE line names.
+    const FE00: u64 = 0xfe00;
+
+    fn kind(t: &LockTable, pid: u32, ino: u64) -> Option<LockKind> {
+        t.get(&(pid, FE00, ino)).copied()
     }
 
     #[test]
     fn whole_file_and_partial_locks_get_different_characters() {
         let t = parse_locks(SAMPLE);
-        assert_eq!(kind(&t, 3808, "1892433"), Some(LockKind::ReadFull));
-        assert_eq!(kind(&t, 3808, "1892432"), Some(LockKind::WritePartial));
-        assert_eq!(kind(&t, 3808, "1892421"), Some(LockKind::WriteFull));
+        assert_eq!(kind(&t, 3808, 1892433), Some(LockKind::ReadFull));
+        assert_eq!(kind(&t, 3808, 1892432), Some(LockKind::WritePartial));
+        assert_eq!(kind(&t, 3808, 1892421), Some(LockKind::WriteFull));
         assert_eq!(LockKind::ReadFull.code(), 'R');
         assert_eq!(LockKind::WritePartial.code(), 'w');
     }
@@ -123,7 +145,7 @@ mod tests {
         // The `-> ` line is a process *waiting* for lock 3. Counting it would
         // put a W on an fd that does not hold anything.
         let t = parse_locks(SAMPLE);
-        assert_eq!(kind(&t, 9999, "1892421"), None);
+        assert_eq!(kind(&t, 9999, 1892421), None);
     }
 
     #[test]
@@ -136,13 +158,34 @@ mod tests {
     }
 
     #[test]
-    fn the_device_is_hex_in_the_file_and_decimal_in_the_key() {
-        // fe:00 is hex; every other row in the backend renders 254,0.
+    fn the_device_is_hex_in_the_file_and_a_dev_t_in_the_key() {
+        // ff:1f is hex, and keyed as `makedev(255, 31)`, the `st_dev` a row
+        // of a file on that device has.
         let t = parse_locks("1: POSIX ADVISORY WRITE 5 ff:1f:7 0 EOF\n");
-        assert_eq!(
-            t.get(&(5, "255,31".to_string(), "7".to_string())),
-            Some(&LockKind::WriteFull)
+        assert_eq!(t.get(&(5, 0xff1f, 7)), Some(&LockKind::WriteFull));
+        // A minor past 255 is where `major << 8 | minor` and `makedev()`
+        // part: 0,301 is 0x10002d.
+        let t = parse_locks("1: POSIX ADVISORY WRITE 5 00:12d:7 0 EOF\n");
+        assert_eq!(t.get(&(5, 0x10_002d, 7)), Some(&LockKind::WriteFull));
+    }
+
+    #[test]
+    fn the_latest_kind_new_to_a_file_is_the_one_shown() {
+        // Measured: the kernel lists the newest lock first, and for these
+        // three the C prints `3ur` — the read lock, the latest kind it had
+        // not yet chained. Taking the last line said `w`.
+        let t = parse_locks(
+            "2: POSIX  ADVISORY  WRITE 2287 fe:00:1900990 20 21\n\
+             3: POSIX  ADVISORY  READ 2287 fe:00:1900990 10 11\n\
+             4: POSIX  ADVISORY  WRITE 2287 fe:00:1900990 0 1\n",
         );
+        assert_eq!(t.get(&(2287, FE00, 1900990)), Some(&LockKind::ReadPartial));
+        // A new kind does take over.
+        let t = parse_locks(
+            "1: POSIX  ADVISORY  READ 7 fe:00:9 0 1\n\
+             2: POSIX  ADVISORY  WRITE 7 fe:00:9 0 EOF\n",
+        );
+        assert_eq!(t.get(&(7, FE00, 9)), Some(&LockKind::WriteFull));
     }
 
     #[test]
@@ -152,7 +195,7 @@ mod tests {
         // match a row whose node is "0". The C keys on the number.
         let t = parse_locks("1: POSIX ADVISORY WRITE 5 fe:00:+7 0 EOF\n");
         assert_eq!(
-            t.get(&(5, "254,0".to_string(), "7".to_string())),
+            t.get(&(5, FE00, 7)),
             Some(&LockKind::WriteFull),
             "the key must be the number, not the spelling"
         );

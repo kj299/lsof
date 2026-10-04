@@ -216,8 +216,8 @@ meet. Each number is a row there, with the measurement behind it.
   sockets, and a TCP socket that is bound but not listening, show as `SOCK`
   `socket:[N]` (22, waiting on a decision); a login name is read from
   `/etc/passwd` only, so an LDAP or SSSD account can be named by its UID alone
-  (39); `-e` does not exempt mapped files (40); a mapped device file is typed
-  `REG` (48); a mapping that cannot be `stat`ed has no row (95).
+  (39); run as non-root, a device that a process in another mount namespace
+  maps is not found by its path (101).
 - **Output shape:** the JSON from `-J`/`-j` has lsof-rs's own schema, not the
   C's (91), and under `-K` a task's object repeats its process's (61); a byte
   that is not UTF-8 prints as U+FFFD, where the C prints `\xff` (93); `-F`,
