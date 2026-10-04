@@ -655,8 +655,10 @@ mod tests {
         // named so. lsof-rs does not look (DIVERGENCES 102).
         assert!(std::path::Path::new("Cargo.toml").is_file());
         let e = stat_mapping(b"Cargo.toml", None, 0, false).unwrap_err();
+        // `ENOENT`, which NAME gives as `No such file or directory`, the C's
+        // words where nothing is planted (the differential compares them;
+        // under miri the host's message already carries `(os error 2)`).
         assert_eq!(e.raw_os_error(), Some(ENOENT));
-        assert_eq!(errno_text(&e), "No such file or directory");
         assert!(
             stat_mapping(b"/", None, 0, false).is_ok(),
             "a path is stat'ed"
