@@ -127,9 +127,12 @@ with a one-time, gentler warning), without compromising the release pipeline.
 
 ## Acceptance criteria
 
-- [ ] Pick a signing approach (Trusted Signing / SignPath / EV cert).
-- [ ] Wire signing into `.github/workflows/lsof-rs-release.yml` so `lsof.exe`
-  is signed *before* the release-asset upload step.
+- [ ] Pick a signing approach (Trusted Signing / SignPath / EV cert) —
+  deferred by choice; see *Status* above.
+- [x] Wire signing into `.github/workflows/lsof-rs-release.yml` so `lsof.exe`
+  is signed *before* the release-asset upload step — done, gated on the
+  `AZSIGN_*` secrets (see *What is already wired*); without them the steps
+  no-op.
 - [ ] Verify on a clean Win10/11 box: SmartScreen either doesn't warn or
   shows a one-time "verified publisher" prompt; Defender does **not**
   quarantine a fresh download.

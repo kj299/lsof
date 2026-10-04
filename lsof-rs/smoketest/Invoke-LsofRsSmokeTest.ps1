@@ -22,6 +22,10 @@
 .PARAMETER Coverage
     Build an instrumented debug binary and produce a line-coverage report.
 
+.PARAMETER Binary
+    Path to a prebuilt lsof.exe (a release, or a CI artifact). Skips the build;
+    -Coverage is ignored with it.
+
 .EXAMPLE
     .\Invoke-LsofRsSmokeTest.ps1
 .EXAMPLE

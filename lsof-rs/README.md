@@ -11,13 +11,14 @@ It ships **two data-acquisition backends** behind one platform seam:
 | Backend | Status | Data source |
 |---|---|---|
 | **Windows** | complete — [v1.0.1](https://github.com/kj299/lsof/releases), field-validated | Win32/NT: Toolhelp, IP Helper, the NT handle table, ETW |
-| **Linux** | **phase L2** — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files (`mem`/`DEL`), locks and anon-inode kinds | `/proc` |
+| **Linux** | **L0–L3 done** — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files (`mem`/`DEL`), locks, anon-inode kinds, mount points, and the differential against the C in CI. Not in a release yet: build from source | `/proc` |
 
 Everything above the seam — the selection engine, all three output formats, the
-argument parser — is shared and platform-agnostic, which is why adding Linux
-took one additive enum variant in the core and no changes anywhere else. See
-[`docs/linux-backend-scope.md`](docs/linux-backend-scope.md) for the remaining
-phases.
+argument parser — is shared, which is why adding Linux took one additive enum
+variant in the core and no changes anywhere else. A few parser rules differ by
+platform, as the dialects do: `-c` and `-g` on Windows; the `+c` limit, `-T w`
+and `+f g` on Linux. See [`docs/linux-l2-plan.md`](docs/linux-l2-plan.md) for
+what is left on Linux, and the OPEN rows of [`DIVERGENCES.md`](DIVERGENCES.md).
 
 > **Formerly `winlsof`.** The old name dated from when this was Windows-only
 > and stopped being true when the Linux backend landed; it was renamed once
@@ -30,14 +31,16 @@ phases.
 > `lsof`, and every crate name was already platform-neutral.
 
 This is the incremental rewrite described in the project plan; it lives
-**alongside** the original C `lsof` tree (in `../`) without modifying it. On
+**alongside** the original C `lsof` tree (in `../`). The oracle builds upstream's
+sources unchanged; PR #81 removed only dialects and scripts that do not build
+here, and the docs and `Configure` lines that pointed at them. On
 Linux that neighbour is also the **differential oracle**: the C builds and runs
 on the same host, so the port is diffed against the reference implementation
 directly rather than against the substitute oracle Windows forces.
 
 ## Why
 
-`lsof` is ~159K lines of C with no Windows support. Memory-unsafety in C/C++ is
+`lsof` is about 75K lines of C with no Windows support. Memory-unsafety in C/C++ is
 behind the majority of security vulnerabilities, and the industry — Microsoft
 most visibly — is moving privileged systems code to memory-safe languages like
 Rust. A privileged, pointer-heavy enumerator like `lsof` is an ideal candidate.
@@ -50,7 +53,7 @@ independent code and per-OS "dialect" backends:
 | Crate | Role |
 |---|---|
 | `lsof-core` | Platform-agnostic: data model (`Process`/`OpenFile` ≈ lsof's `lproc`/`lfile`), the selection/filter engine, the output renderers (table / `-F` / JSON), and the `Backend` trait (the "dialect" seam). **Zero dependencies, `#![forbid(unsafe_code)]`, fully unit-tested on any host.** |
-| `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper, file handles (Phase 3) via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows. |
+| `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper and ETW, file handles via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows, but for its pure name parsers, which are fuzzed on Linux. |
 | `lsof-backend-linux` | The Linux "dialect": implements `Backend` over `/proc`. **Dependency-free and `#![forbid(unsafe_code)]`** — `/proc` is a filesystem and `std::os::unix::fs::MetadataExt` supplies every stat field, so no FFI is involved at all. Compiled only on Linux. |
 | `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). **Dependency-free and `#![forbid(unsafe_code)]`** — on both of its crate roots, since a bin and a lib in one package are two crates and the attribute does not cross between them. |
 
@@ -61,8 +64,8 @@ independent code and per-OS "dialect" backends:
 | `/proc` PID scan, COMMAND, PPID | `CreateToolhelp32Snapshot` + `Process32NextW` |
 | owner uid → USER | process token → `GetTokenInformation(TokenUser)` → `LookupAccountSidW` |
 | `/proc/net/{tcp,udp}{,6}` (`-i`) | `GetExtendedTcpTable` / `GetExtendedUdpTable` (`*_OWNER_PID`, v4+v6) |
-| `/proc/<pid>/fd/*` open files | `NtQuerySystemInformation` + `NtQueryObject` *(Phase 3)* |
-| inode / `st_ino` | `GetFileInformationByHandle` file index *(Phase 3)* |
+| `/proc/<pid>/fd/*` open files | `NtQuerySystemInformation` + `NtQueryObject` |
+| inode / `st_ino` | `GetFileInformationByHandle` file index |
 
 ## Status
 
@@ -70,14 +73,14 @@ independent code and per-OS "dialect" backends:
 
 - ✅ **Phase 0** — workspace, `Backend` trait, least-privilege scaffolding, CI.
 - ✅ **Phase 1** — process + owner enumeration; `-p` / `-c` / `-u` / `-t`.
-- ✅ **Phase 2** — TCP/UDP (v4+v6) with owning PID; `-i [46][tcp|udp][@host][:port]`,
+- ✅ **Phase 2** — TCP/UDP (v4+v6) with owning PID; `-i [46][tcp|udp][@addr][:port]`,
   `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`) output.
 - ✅ **Phase 3** — system-wide open *file handle* enumeration via the NT handle
   table (`NtQuerySystemInformation` + `DuplicateHandle` + `NtQueryObject`):
   regular files, directories, named pipes, and char devices, with drive-letter
   mapping (`QueryDosDeviceW`), size/file-index, access mode, and file offset
   (`-o`) — all under just-in-time `SeDebugPrivilege`
-  (`lsof-backend-windows/src/handles.rs`). Handles are classified by their NT
+  (`crates/lsof-backend-windows/src/handles.rs`). Handles are classified by their NT
   object-type index (avoiding a per-handle `NtQueryObject` type query that can
   block forever on synchronous handles), and the entire per-handle
   classification runs on a worker thread under a timeout, so a wedged pipe/device
@@ -89,20 +92,22 @@ independent code and per-OS "dialect" backends:
 
 All planned phases (0–4) are implemented and **validated on real Windows 11
 hardware in both privilege modes**: the [`smoketest/`](smoketest/) harness runs
-67 cases covering every option, output format, and code path, differentially
-cross-checked against native Windows oracles (no downloads). The few
+a case for every option, output format, and code path, differentially
+cross-checked against native Windows oracles (no downloads), and CI runs it on
+every PR. The few
 skips in any single pass are mode-specific (admin-only features unelevated, and
 vice versa) — running an unelevated **and** an elevated pass exercises
 everything. Latest field validation: the released **v1.0.1** `lsof.exe`, as
-downloaded, on Windows 11 (build 26200) — 51 PASS unelevated and 57 PASS
-elevated, zero failures, zero hangs, all 67 cases green in at least one mode.
+downloaded, on Windows 11 (build 26200), with the 59-case suite of the time — 51
+PASS unelevated and 57 PASS elevated, zero failures, zero hangs, all 59 cases
+green in at least one mode.
 That checkpoint is not a formality: it is what caught the elevated stall fixed
 in 1.0.1, on a build every automated gate had passed. The
 [research roadmap](docs/research-roadmap.md) is fully dispositioned — every
 item is shipped or a documented closed gate — and the release criteria are in
 [`docs/road-to-1.0.md`](docs/road-to-1.0.md).
 
-### Linux backend — phase L2 of 4
+### Linux backend — L0 to L3 done
 
 - ✅ **L0** — processes and owners from `/proc/<pid>/status`; open files from
   `/proc/<pid>/fd` plus the `cwd`/`root`/`exe` links; types, DEVICE, SIZE,
@@ -112,7 +117,7 @@ item is shipped or a documented closed gate — and the release criteria are in
   once per gather and indexed by inode; an fd whose target is `socket:[N]`
   resolves by that key into a real TYPE, protocol, addresses and TCP state.
   **`-i` and `-U` work** in every form the core supports, as does `-T q`.
-- 🔶 **L2** — ✅ `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock
+- ✅ **L2** — `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock
   column (`3uW`) from `/proc/locks`; ✅ named `anon_inode` kinds
   (`[eventpoll:4,6]`, `[eventfd:6]`, `[pidfd:N]`); ✅ **path arguments matched
   by device and inode** rather than by name, so `lsof /path/hardlink` finds the
@@ -121,15 +126,16 @@ item is shipped or a documented closed gate — and the release criteria are in
   `-f`/`+f` to force the reading either way (#15). A path is spelt as the C's
   `Readlink()` spells it, so only the mount point's own spelling (`/mnt`, or a
   link to it) names the file system; `mnt` from `/` or `/mnt/.` names the
-  directory (#65). ⬜ What remains is
-  per-network-namespace socket reads (#16), measured against the C with the
-  exact commands in the ledger.
+  directory (#65); ✅ sockets in another network namespace are named from
+  that namespace's own tables (#16), and packet sockets have their `pack` row.
+  ⬜ What remains is naming netlink and AF_VSOCK sockets, which have no
+  `/proc/net` table to read (#22, waiting on a decision).
 - ✅ **L3** — the C-vs-Rust differential as a CI gate
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed
   through the porting kit's runner with [`DIVERGENCES.md`](DIVERGENCES.md) as
-  the ledger. 26 cases over seven fixtures; every unledgered difference fails
-  the build. On its first fixture it found two more fidelity gaps (the offset
+  the ledger. Every case in `linux-matrix.toml`, over self-owned fixture
+  processes; every unledgered difference fails the build. On its first fixture it found two more fidelity gaps (the offset
   cell for devices and FIFOs, `pipe` in NAME), fixed the same day; its
   hostile-name fixtures then found a defect in the C itself (a signed-`char`
   comparison that truncates non-ASCII commands), which the port deliberately
@@ -167,19 +173,20 @@ run.
 Both phases were diffed by hand against the real C `lsof` 4.95.0 on the same
 host, and that diff is the reason to trust them: **`-i`, `-iTCP:443`,
 `-i@127.0.0.1`, `-i4` and `-iUDP` all return the same row count as the C, and
-`-U` matches it cell for cell.** The differences that remain are recorded in
-[`docs/known-limitations.md`](docs/known-limitations.md) rather than left
-looking like parity — including three renderer divergences the diff exposed
-that had been latent in the **Windows** output since v0.2.0, where no C exists
-to compare against.
+`-U` matches it cell for cell.** The differences that remain are rows in
+[`DIVERGENCES.md`](DIVERGENCES.md) rather than left looking like parity. The diff
+also exposed three renderer divergences that had been latent in the **Windows**
+output since v0.2.0, where no C exists to compare against; all three are fixed,
+and [`docs/known-limitations.md`](docs/known-limitations.md) records them.
 
 ## Privilege model (least privilege)
 
 Like Unix `lsof`, **no elevation is required to run** — you get a current-user
 view, and the system-wide view is a deliberate act by the operator.
 
-**On Windows**, the binary's manifest pins `requestedExecutionLevel=asInvoker`,
-so it never triggers a UAC prompt; an administrator must *deliberately* run
+**On Windows**, the binary runs as invoker — the default for an MSVC build — so
+it never triggers a UAC prompt (`crates/lsof-cli/app.manifest` records that
+choice; the build does not embed it yet); an administrator must *deliberately* run
 elevated. Even then `lsof-rs` never holds privileges globally: it enables a
 privilege (e.g. `SeDebugPrivilege`) only just-in-time around the specific call
 that needs it, via the RAII `PrivilegeGuard`, and only when the switches in use
@@ -244,7 +251,7 @@ cd lsof-rs
 cargo build --release
 ./target/release/lsof -p $$             # this shell's open files
 ./target/release/lsof -t                # every PID
-# (-i needs phase L1; see Status.)
+./target/release/lsof -nP -i            # Internet sockets
 
 # On any other host the CLI falls back to a mock backend, so the
 # parse -> select -> render pipeline still runs and is testable:
@@ -263,13 +270,15 @@ rustup target add x86_64-pc-windows-gnu
 cargo check --target x86_64-pc-windows-gnu
 ```
 
-On Linux, `cargo test --all` includes the Linux backend's own tests, three of
+On Linux, `cargo test --all` includes the Linux backend's own tests, some of
 which read this host's live `/proc` rather than a fixture — the cheapest way to
 keep the parsing honest against a real kernel.
 
 Every parser that takes text from outside the process has a cargo-fuzz target
-under [`fuzz/`](fuzz/) — the argv parser, and the Linux backend's `/proc/net`
-tables, `/proc/<pid>/status`, fdinfo and `/etc/passwd` readers. The contract is
+under [`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
+`/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
+`/etc/passwd` readers; the Windows backend's name parsers; and the escaper that
+every one of them feeds. The contract is
 *no panic on any input*; CI smoke-runs all of them on every PR and soaks them
 nightly. The `proc_net` target found a real panic in the IPv6 decoder in its
 first seconds.
@@ -280,8 +289,11 @@ cd lsof-rs/fuzz && cargo +nightly fuzz list          # the targets
 cargo +nightly fuzz run proc_net -- -max_total_time=60
 ```
 
-CI (`.github/workflows/lsof-rs-ci.yml`) runs the lints + tests on Linux and
-builds/tests the Windows backend on `windows-latest`.
+CI (`.github/workflows/lsof-rs-ci.yml`) runs eight jobs: lints, rustdoc and
+tests on Linux; build, tests, a socket differential and the smoke suite on
+`windows-latest`; cargo-deny; a fuzz smoke of every target; the differential
+against the C, with its resource gate; Miri over the portable crates and over
+the Linux backend; and ASan over the Windows backend.
 
 For end-to-end validation on a real Windows host (concrete commands + expected
 output, cross-checked against native oracles — `Get-NetTCPConnection`,
@@ -294,19 +306,24 @@ output, cross-checked against native oracles — `Get-NetTCPConnection`,
 - [`docs/road-to-1.0.md`](docs/road-to-1.0.md) — what 1.0 means, the exit
   criteria checklist, and the elevation blind-spot decision record with the
   per-release manual (unelevated) checkpoint.
-- [`docs/linux-backend-scope.md`](docs/linux-backend-scope.md) — scoping study
-  for a second (Linux/`/proc`) backend behind the same `Backend` seam: effort,
-  module map, and the C-vs-Rust differential it would unlock. A proposal, not a
-  commitment.
-- [`docs/known-limitations.md`](docs/known-limitations.md) — what lsof-rs
-  deliberately doesn't show (socket FD value, byte-range locks, raw/ICMP/
-  AF_UNIX), and why; user-facing.
+- [`DIVERGENCES.md`](DIVERGENCES.md) — every known difference from the C, each
+  with its status: fixed, deliberate, a C defect not reproduced, or still open.
+- [`THREAT-MODEL.md`](THREAT-MODEL.md) — trust boundaries, privilege, what the
+  port defends against and what it does not.
+- [`docs/linux-backend-scope.md`](docs/linux-backend-scope.md) — the scoping
+  study written before the Linux backend existed; kept as a record.
+- [`docs/linux-l2-plan.md`](docs/linux-l2-plan.md) — what was measured as left
+  after L1, and where each item stands.
+- [`docs/feature-parity-plan.md`](docs/feature-parity-plan.md) — the option
+  inventory against the C, as a record.
+- [`docs/known-limitations.md`](docs/known-limitations.md) — what lsof-rs does
+  not show, or shows differently from the C, and why; user-facing.
 - [`docs/code-signing.md`](docs/code-signing.md) — tracking doc for signing
   the release binary (the SmartScreen / Defender fix).
 - [`docs/research-roadmap.md`](docs/research-roadmap.md) — engineering spike
-  records and the next open item (ETW-based socket → FD correlation).
-- [`docs/etw-spike.md`](docs/etw-spike.md) — step-by-step `logman` + `tracerpt`
-  P1 spike for item §5; no Rust needed, answers the gating question first.
+  records; every item is shipped or closed.
+- [`docs/etw-spike.md`](docs/etw-spike.md) — the `logman` + `tracerpt` P1 spike
+  for item §5, as run; a record.
 - [`docs/windows-validation.md`](docs/windows-validation.md) — manual T1–T20
   validation plan against Windows oracles.
 - [`smoketest/README.md`](smoketest/README.md) — live Windows smoke-test

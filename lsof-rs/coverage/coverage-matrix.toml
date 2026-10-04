@@ -8,10 +8,14 @@
 # declared with `covers`, because no flag spells what a fixture creates — which
 # is precisely how the dropped-object-type gap stayed invisible (LESSONS #8).
 #
-# Sources, all three real and maintained:
+# Sources, all real and maintained:
 #   golden/*      crates/lsof-core/tests/golden.rs   (portable, every CI push)
+#   core/*        lsof-core and lsof-cli unit tests  (portable, every CI push)
+#   backend/*     the Windows backend's kernel-object test (windows CI)
 #   diff/*        ../differential/capture.ps1        (windows CI, hard gate)
-#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (65-case live harness)
+#   smoke/*       ../smoketest/Invoke-LsofRsSmokeTest.ps1  (live harness)
+#   linux/*       the Linux backend's tests, and cases of
+#                 ../differential/linux-matrix.toml   (linux CI, hard gate)
 #
 # Keep it truthful: a case belongs here only if a test really runs those args
 # and really asserts on that output. Declaring coverage you don't have converts
@@ -144,7 +148,7 @@ args = ["-F", "-nP", "-i"]
 covers = ["type:IPv4", "type:IPv6"]
 
 # --------------------------------------------------------------- smoke tests
-# The 55-case live harness. Fixtures are self-owned (a held file at a known
+# The live harness. Fixtures are self-owned (a held file at a known
 # offset, a named pipe, a mapped data file, TCP v4/v6 + UDP sockets, child
 # processes with known cwd in 64- and 32-bit).
 

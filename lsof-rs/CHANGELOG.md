@@ -2,8 +2,8 @@
 
 All notable changes to **lsof-rs** (the Rust `lsof` reimplementation under
 [`lsof-rs/`](.), with native Windows and Linux backends). The changelog tracks
-the new Rust workspace; the legacy C `lsof` tree in the parent directory is
-untouched. Entries below are left as written at the time, so older ones
+the new Rust workspace; the C `lsof` tree in the parent directory is its oracle,
+and changes only where PR #81 removed what does not build here. Entries below are left as written at the time, so older ones
 describe the project while it was still Windows-only.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
@@ -47,6 +47,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   (DIVERGENCES 78). **This changes Windows too.**
 - **When every bare path argument is dropped, the run ends** (DIVERGENCES
   77), whatever `+d`/`+D` supplied, as in the C.
+- **A `+d`/`+D` walk warns as the C does**: `can't opendir(…)`, `can't
+  lstat(…)` and `can't stat(…) symbolc link` (the C's spelling), unless a `-w`
+  came before the option. lsof-rs had said nothing.
 - **A `+d`/`+D` walk that stops at lsof-rs's limit says so** (DIVERGENCES
   81): `WARNING: stopped walking DIR after N entries`, unless `-w` came
   first. The limit, which the C does not have, is 200,000 entries or, new,
@@ -79,8 +82,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   deleted files. The one Linux socket row that still carried a count from
   `stat` no longer does.
 - **An option's value may be the next word for every option that takes one**
-  (DIVERGENCES 43): `-F pn`, `+L 1`, `-r 2`, `-x f`, and `-f` (whose values
-  lsof-rs refuses, now including `lsof -f /dev/null`, as the C refuses it). A
+  (DIVERGENCES 43): `-F pn`, `+L 1`, `-r 2`, `-x f`, and `-f` (whose value is
+  a file-structure letter: `lsof -f /dev/null` is refused, as the C refuses
+  it, and `g`/`G` are taken since `+f g`, below). A
   word that opens an option is still not a value. `lsof -r 2` had looked for a
   file called `2`, and `lsof -F pn` for one called `pn`.
 - **`-F` is the C's**: a letter outside its field table is fatal (`unknown
@@ -141,6 +145,12 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   host. `+w` after `-t` restores the rows.
 
 ### Added
+- **`THREAT-MODEL.md`**: the port's threat model — trust boundaries and the
+  fuzz target behind each, privilege, what it defends against and what it does
+  not — checked in CI by the porting kit's threat-model gate. Corrected on
+  2026-10-04 where it had stopped matching the code: it had claimed a lint the
+  workspace never set, and that lsof-rs never writes to the host, which an
+  elevated `-T q`/`-T w` and `--etw` do on Windows.
 - **`+f g` and `+f G`: the FILE-FLAG column** (DIVERGENCES 46). Each open
   file's flags, as `fdinfo` reports them, named as the C names them
   (`W,AP,LG,CX`) or in hex (`0x88401;0x0`), in a column after TYPE; `-f g`
@@ -152,7 +162,8 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 - **`-i` and `-U` now collect only sockets** (P5 of `docs/linux-l2-plan.md`).
   When the selection can print nothing but sockets — `-i`/`-U` with no process
   selecter, no `-d`, no path argument, no `+L`, no `-N`, no `-K` and no
-  `+E`/`-E`, the exact set `Selection::socket_rows_only` tests — the Linux
+  `+E`/`-E` (and, since the `-K` change below, under `-a` with `-i` or `-U`
+  whatever else is given) — the Linux
   backend stops building the rows that selection was going to drop: the
   `cwd`/`rtd`/`txt` specials, every non-socket fd, and above all the
   `/proc/<pid>/maps` walk. `strace -c` at 577 processes: **this port opened 578
@@ -180,6 +191,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **`lsof -h` keeps its layout, and says what each platform does.** Every
+  line had printed flush left: the text ended each line with `\n\`, and a
+  Rust string continuation also eats the next line's leading spaces. The text
+  was wrong in places too: a bare `-T` shows no TCP information (`+T` shows the
+  state), as the C's does, where it said "bare -T = qs"; `-n`, `-P`, `-E`,
+  `+E` and the ETW notes apply to Windows alone; `-l` shows the UID on Linux;
+  `--ascii` and `--unicode` change no output. It now lists `-H`, `-N`, `-X`,
+  `-x`, `-e`, `-Z`, `-K i` and `-d unk`, which it had left out, and `-v` no
+  longer calls lsof-rs Windows-only. A test pins the layout.
 - **An argument the C drops is no search item** (DIVERGENCES 62). It is
   reported once on stderr (`status error on …`, a `readlink()` message, or
   `not a file system` under `+f`), the run exits 1 unless `-Q`, and `-V` no
@@ -356,7 +376,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   29.1 MB at 1075 processes. §5 carries the correction; the remaining
   whole-host cost is **DIVERGENCES item 30**, open and now ceilinged rather
   than silently drifting — closed later in this release; see "Whole-host peak
-  memory" below. LESSONS #061.
+  memory" above. LESSONS #061.
 
 - **`-X`, `-x`, `-e`, `-N` and `-Z`** (P4 of `docs/linux-l2-plan.md`;
   DIVERGENCES items 25–29). The plan called these "the small options" and every
@@ -678,9 +698,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `all-paths-unstattable` began as `lsof {NOPE} {NOPE}x` — with no other
   selector, "every path is bad" prints nothing whether or not the run aborts, so
   it could not fail; `-p {A}` gave it something to lose. And
-  `plus-d-supplies-a-surviving-item` began by naming `{ADIR}`, where the C drops
-  four entry rows to the defect now ledgered as item 20, so it was measuring
-  that defect rather than the abort rule.
+  `plus-d-supplies-a-surviving-item` began by naming `{ADIR}`, where the C
+  dropped four entry rows — then ledgered as a defect, item 20, and found on
+  2026-10-04 to be item 12: the C reads `+d` and DIR after a file name as two
+  more file names — so it was measuring that rather than the abort rule.
 
 - **The `proc_maps` fuzz target was accusing a correct parser.** It asserted no
   parsed path ever ends with ` (deleted)`, and fired on a ` (deleted) (deleted)`
@@ -706,7 +727,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   least one, including two that kill exactly one case each — "tasks omit `mem`
   rows" and "seed the TASKCMD width from 0" — so neither case is redundant with
   its neighbours. Two of the mutants killed cases that had been passing
-  accidentally, which is how the `-K` argument bugs above were found at all.
+  accidentally, which is how the `-K` argument bugs below were found at all.
 
   The fixture's own first draft was the same kind of hollow: both its threads
   were named `worker1`/`worker2`, seven characters, which is also what the
@@ -955,6 +976,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   six cases; 26 cases over seven fixtures, 0 unexplained divergences.
 
 ### Known, measured, not yet changed
+*All fixed later in this release: see "A path argument now matches the file it
+names", "Naming a mount point…" and "A socket in another network namespace is
+named". Kept as written.*
 - `DIVERGENCES.md` **#14/#15**: lsof matches a **path argument by device and
   inode**, not by name — which is also why naming a mount point selects
   everything on that filesystem. lsof-rs matches by lowercased string prefix, so
@@ -1001,8 +1025,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   or without `-a`, though `-p` names that very process. A negation is therefore
   not a `SelKinds` kind at all — it cannot select, only veto, and it outranks
   everything that can. An excluded process also stops counting as a located
-  `-p` search item, so that command exits 1 in both binaries. Two differential
-  cases pin it.
+  `-p` search item, so lsof-rs exits 1 there. The C exits 1 too, but because
+  it never marks a `-c ^` value as found (DIVERGENCES 13), and its `-V` names
+  the command where lsof-rs names the pid. Two differential cases pin it.
 - `Selection::selects_process`, the predicate backends use to skip work, had to
   change with it: under the OR rule a file selector can select a file of a
   process matching no process selector, so a backend may only skip when no file
@@ -1185,6 +1210,8 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   waiver claims "we will never do this", which is untrue of `-Z`.
 
 ### Known, recorded rather than changed
+*All fixed later in this release (DIVERGENCES 1–10); the case left without
+`-a` was replaced by the `or-semantics-*` cases. Kept as written.*
 - ~~**Control characters in a process name reach the COMMAND column raw**
   (`DIVERGENCES.md` #10).~~ Found by the `proc_status` fuzz target — not as a
   parser bug but as a wrong invariant in the target's first draft: a bare `\r`

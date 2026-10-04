@@ -1,5 +1,12 @@
 # lsof-rs — what is actually left for the Linux backend
 
+> **Record (written 2026-09-15, notes to 2026-09-25; status added 2026-10-04).**
+> P1–P5 below are done. Of what this page called L2, what is left is naming
+> netlink and AF_VSOCK sockets (DIVERGENCES 22, waiting on a decision) and the
+> options `-S` and `-b` (DIVERGENCES 94). DIVERGENCES 9 and 21, listed as not
+> scheduled below, are resolved. The current list of differences is
+> [`../DIVERGENCES.md`](../DIVERGENCES.md).
+
 Written 2026-09-15, after measuring rather than reading. Companion to
 [`linux-backend-scope.md`](linux-backend-scope.md), which scoped L0–L3 before
 any of it existed; this document replaces its L2 row with what the tree and the
@@ -193,6 +200,9 @@ dependency in a crate documented as needing neither.
 
 ## 4. The options that are genuinely missing
 
+> 2026-09-20: `-H` (P1) and `-Z -N -x -X -e` (P4) are done; `-S` and `-b` are
+> still refused.
+
 Swept every option in the C's usage line against both binaries:
 
 | option | what it does | cost | note |
@@ -274,7 +284,7 @@ host with thousands.
 
 ## 6. Recommended order
 
-**P1 — make the bookkeeping true (½ day).** Fix `opt:H`'s reason and implement
+**P1 — make the bookkeeping true (½ day). DONE 2026-09-19 (PR #88).** Fix `opt:H`'s reason and implement
 `-H`; rescope `opt:m`/`opt:M` as not-in-dialect; retire the expired waivers;
 rewrite the `lib.rs` header. Do this first because every later claim in this
 document is read through those files, and one of the four defects is a live

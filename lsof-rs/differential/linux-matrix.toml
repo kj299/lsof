@@ -1,7 +1,8 @@
 # lsof-rs Linux differential matrix — mode 1: the real C oracle, same host.
 #
-# Run by linux_diff.py, which stands up four fixture processes and substitutes
-# their PIDs for {A} (files: cwd, a regular file on fd 3, a hostile-named file
+# Run by linux_diff.py, which stands up the fixture processes its docstring lists
+# (`linux_diff.py --help`) and substitutes their PIDs, paths and port. The first
+# four are {A} (files: cwd, a regular file on fd 3, a hostile-named file
 # on fd 4, a directory on fd 5, a FIFO on fd 6), {B} (sockets: a TCP listener,
 # a UDP socket, and four AF_UNIX sockets covering every state lsof names —
 # listening, both halves of a connected pair, and one never connected), {C}
@@ -14,8 +15,8 @@
 # case `keep_whitespace = true`, so the table's alignment is compared byte for
 # byte (DIVERGENCES 35). A case may set it to false, and none does.
 #
-# MOST CASES CARRY -a, and the two that do not are the whole point of
-# `or-semantics-*`. lsof ORs its list options unless -a ANDs them (Lsof.8:
+# MOST CASES CARRY -a. The ones that do not are about OR itself
+# (`or-semantics-*`), search items, path arguments and option errors. lsof ORs its list options unless -a ANDs them (Lsof.8:
 # "list options that are specifically stated are ORed"), which lsof-rs now
 # implements. Keeping -a on the other cases is still not optional: without it
 # `-d ^mem -p PID` means "every non-mem file on the host OR process PID's
@@ -23,8 +24,8 @@
 # names — and a whole-system case cannot be gated at all, because each binary
 # lists ITSELF, under a pid that differs on every run.
 #
-# -n -P everywhere: the C resolves hostnames and service names by default;
-# lsof-rs never does (a deliberate difference, docs/known-limitations.md), so
+# -n -P wherever a socket can appear: the C resolves hostnames and service
+# names by default; lsof-rs on Linux never does (docs/known-limitations.md), so
 # the C is asked for the numeric form it will otherwise not print.
 #
 # -d ^mem on most file cases: a process maps a dozen libraries, and excluding

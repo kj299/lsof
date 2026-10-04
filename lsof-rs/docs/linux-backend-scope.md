@@ -1,5 +1,11 @@
 # lsof-rs — scoping a Linux backend
 
+> **Record (2026-09-01).** L0–L3 have shipped. [`linux-l2-plan.md`](linux-l2-plan.md)
+> replaced this page's L2 row with what was measured after L1, and the current
+> differences from the C are [`../DIVERGENCES.md`](../DIVERGENCES.md). Statements
+> below about CI, the coverage inventory and "today" are as of when this was
+> written.
+
 A scoping document, not a commitment. It answers: *what would it take to make
 this a genuinely cross-platform, memory-safe `lsof`, and is it worth doing?*
 

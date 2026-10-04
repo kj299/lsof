@@ -6,14 +6,12 @@ output, cross-checks against native Windows oracles, and (optionally) produces a
 **`llvm-cov` line-coverage report** so you can see exactly which lines of lsof-rs
 were executed on Windows — and where the gaps (and bugs) are.
 
-This is the P0 "prove it actually runs on hardware" step: CI compiles the backend
-and runs scoped integration tests, but only a real machine exercises the
-system-wide paths, elevation, WOW64, and the OS data sources end to end.
-
-> First-run expectation: this harness was authored without a Windows host to
-> validate against, so some **assertions may be too strict vs. real output**. A
-> `FAIL` here is exactly the signal we want — capture it and report back (see
-> [Reporting findings](#reporting-findings)) and the expectation/code gets fixed.
+CI runs this whole harness on every PR, elevated, on a hosted `windows-latest`
+runner, as a hard gate. A run on your own machine adds what CI cannot: the
+unelevated pass (hosted runners are always Administrator) and real hardware. A
+`FAIL` there is exactly the signal we want — capture it and report back (see
+[Reporting findings](#reporting-findings)) and the expectation or the code gets
+fixed.
 
 ## What it does
 
@@ -31,8 +29,8 @@ system-wide paths, elevation, WOW64, and the OS data sources end to end.
      **UDP v4/v6** sockets,
    - child **cmd.exe** with a known cwd (64-bit) and **SysWOW64\cmd.exe** (32-bit
      **WOW64**, exercises the 32-bit PEB cwd path).
-3. **Runs ~50 cases** covering every flag/format/branch, writing each invocation's
-   stdout/stderr/exit code to `cases\NNN-name.out.txt` / `.err.txt`.
+3. **Runs its cases** — one per flag, format and branch it covers — writing each
+   invocation's stdout and stderr to `cases\NNN-name.out.txt` / `.err.txt`.
 4. **Cross-checks** against native Windows oracles — `Get-NetTCPConnection`
    (socket owners) and `Get-Process` (`.Path`, `.HandleCount`) — and the
    harness's own fixtures, whose paths/ports are authoritative ground truth.
@@ -96,8 +94,8 @@ Use `Invoke-LsofRsSmokeTest.ps1 -Binary <path>` for the exhaustive suite (pipes,
 mapped files, WOW64 cwd, modules, Restart Manager, every format, native oracles);
 `Test-Lsof.ps1` for a 10-second "does this binary work" smoke.
 
-> SKIPs in a single pass are by design, not gaps: the `-T`, `-U`, and
-> system-process cases need Administrator (they run in pass 2), while the
+> SKIPs in a single pass are by design, not gaps: the `-T`, `-U`, `-iICMP`,
+> `-iRAW` and system-process cases need Administrator (they run in pass 2), while the
 > privilege-hint cases (`privilege-hint-unelevated`, `suppress-warnings-dash-w`)
 > only apply to a **non-elevated** run (pass 1). Hosted CI runners are always
 > elevated, so pass 1's two cases never execute there — their decision logic is
@@ -117,23 +115,30 @@ any red (unexecuted) lines — those are either missing test cases or dead code.
 
 ## Coverage map — which cases touch which code
 
+Case names are the script's own (`Test-Case '<name>'`), so a name here can be
+found in the results.
+
 | Area / cases | Source exercised |
 |---|---|
-| `version`, `help`, `bad-option`, all flag parsing | `lsof-cli/src/args.rs`, `main.rs` |
-| `terse`, `process-table`, owner/USER column | `process.rs` (Toolhelp + token→SID), `render/table.rs` |
-| `offset-self` (`-o`), file handle naming/size/node | `handles.rs` (`describe`/`final_path`/`disk_details`/`file_offset`) |
-| `named-pipe`, `char device` | `handles.rs` PIPE/CHAR branches, `pipe_display` |
-| `mapped-file` (`mem`) | `mapped.rs` (`VirtualQueryEx`/`GetMappedFileNameW`) |
-| `tcp4/tcp6/udp4/udp6`, LISTEN/ESTABLISHED, `-i` filters | `sockets.rs`, `selection.rs` inet filter |
-| `-n`/`-P` resolution, service names | `resolve.rs`, `lsof-core/src/service.rs`, `sockets.rs::format_socket` |
-| `cwd-64bit`, `cwd-wow64` | `peb.rs` (`read_cwd64`/`read_cwd32`) |
-| `modules-txt`, `modules-mem` | `modules.rs` |
-| `named-file-lookup`, `+D` | `restart.rs`, `selection.rs` paths/dir_trees |
-| `-d` (named/num/range/`^excl`), `-R`, `-a`, `-c`, `-u` | `selection.rs`, `render/table.rs` |
-| `-F`/`-F0`/`-Fxxx`, `-J`, `-j` | `render/fields.rs`, `render/json.rs` |
-| `-V` verbose, not-found, inaccessible count | `main.rs::report_unmatched`, `handles.rs` verbose |
-| `priv-hint`, `inet-no-hint`, elevated system-process handles | `privilege.rs`, `backend.rs` least-privilege, `main.rs` hint |
-| `repeat-mode` (`-r`) | `main.rs` repeat loop |
+| `version`, `help-usage`, `help-alias-question`, `unknown-option-errors`, `end-of-options-dashdash`, `no-op-dash-O`, the `p4-dash-*` checks (`-N`, `-X`, `-Z`, `-e`, `-x`) | `lsof-cli/src/args.rs`, `main.rs` |
+| `process-of-self`, `terse-lists-pids`, `user-column-present`, `ppid-column-dash-R`, `numeric-ids-dash-l` | `process.rs` (Toolhelp + token→SID), `render/table.rs` |
+| `open-file-listed`, `file-offset-dash-o`, `human-size-dash-H`, `human-size-leaves-offset`, `link-count-dash-L`, `link-filter-plus-L`, `file-flags-plus-f-g` | `handles.rs` (`describe`/`final_path`/`disk_details`/`file_offset`), `render/table.rs` |
+| `named-pipe-listed`, `pipe-endpoints-dash-E`, `pipe-endpoints-plus-E` | `handles.rs` PIPE branch, `pipe_display`, the endpoint lookup |
+| `mapped-data-file-listed` (`mem`) | `mapped.rs` (`VirtualQueryEx`/`GetMappedFileNameW`) |
+| `tcp4-listen-by-port`, `tcp4-established-state`, `tcp6-listen`, `udp4-by-port`, `inet-tcp-only`, `inet6-filter-excludes-v4`, `state-filter-listen`, `state-filter-exclude` | `sockets.rs`, `selection.rs` inet and state filters |
+| `inet-icmp-family-dash-i`, `inet-raw-family-dash-i`, `unix-sockets-dash-U` | `etw.rs` (Administrator) |
+| `port-service-name-https` (port names by default) | `resolve.rs`, `lsof-core/src/service.rs`, `sockets.rs::format_socket` |
+| `tcp-info-selects-not-adds-dash-T`, `tcp-info-window-dash-T`, `tcp-info-window-v6-dash-T`, `tcp-info-fields-dash-T`, `tcp-info-json-dash-T` | `tcpinfo.rs` (EStats; Administrator) |
+| `cwd-64bit`, `cwd-wow64-32bit` | `peb.rs` (`read_cwd64`/`read_cwd32`) |
+| `modules-txt-image`, `modules-mem-dll` | `modules.rs` |
+| `named-file-who-has-open`, `plus-D-directory-tree`, `filesystem-args-dash-f-plus-f` | `restart.rs`, `selection.rs` paths and dir trees |
+| `tasks-dash-K`, `tasks-dash-K-i-suppresses`, `tasks-dash-K-terse`, `tasks-dash-K-with-a-held-file`, `tasks-not-listed-by-default` | `threads.rs`, `selection.rs` |
+| `fd-filter-named-cwd`, `and-mode-dash-a`, `command-filter`, `ppid-select-dash-g`, `command-width-plus-c` | `selection.rs`, `render/table.rs` |
+| `field-output-bare-F`, `field-output-Fpn`, `field-output-nul-F0`, `field-output-socket-state`, `json-aggregated-J`, `json-lines-j` | `render/fields.rs`, `render/json.rs` |
+| `verbose-pid-not-found`, `quiet-dash-Q`, `suppress-warnings-dash-w` | `main.rs::unlocated`, `handles.rs` verbose |
+| `privilege-hint-unelevated`, `inet-no-privilege-hint`, `elevated-system-process-handles` | `privilege.rs`, `backend.rs` least-privilege, `main.rs` hint |
+| `native-handle-cross-check` | the harness's own fixtures and `Get-Process` |
+| `repeat-mode-dash-r` | `main.rs` repeat loop |
 
 `-Coverage` turns "touch each line" from aspiration into a measured number.
 
