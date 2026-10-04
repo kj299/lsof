@@ -666,3 +666,263 @@ measurement, until a same-host diff exists somewhere in the port.** It cannot
 manufacture that diff. The next single-platform port's target is to find a
 cheaper substitute — a recorded C transcript corpus captured on any host where
 the C runs, replayed as golden input on the target — before it ships 1.0.
+
+## 12. Addendum — the Linux parity arc (2026-09-02 → 2026-10-04)
+
+Scope: PRs #64–#121, 145 non-merge commits in 33 days. The Linux differential
+(L3, PR #66) went from nothing to 425 cases against the C built from this tree,
+and DIVERGENCES.md's numbered table from nothing to 107 rows. LESSONS went from
+#022 to #081: 59 entries, 45 written here and 14 imported from the primary line.
+Inside the arc sit three smaller ones: the repository cleanup (PRs #81–#96, with
+its own retrospective, `RETROSPECTIVE-cleanup.md`); the kit's refresh from the
+primary line (PR #93) and eleven kit PRs after it; and the parity work that runs
+through PRs #106–#121, where each change closed measured differences one at a
+time. Reconstructed from git, the arc's LESSONS entries, DIVERGENCES.md and a
+step-0 run on 2026-10-04 against master `2543252`.
+
+### 12.0 Step-0 results
+
+Every gate the port runs was green on the real tree. Two harnesses the kit
+offers could not be pointed at it, and one control had no evidence to run:
+
+| Harness | On the real tree, 2026-10-04 |
+|---|---|
+| fmt, clippy (Linux, and Windows through `x86_64-pc-windows-gnu`), rustdoc, unit tests | clean |
+| `audit_unsafe.py`, `check_forbid_unsafe.py` | 139 `unsafe` blocks, all documented; 3 crates forbid `unsafe_code` |
+| `coverage_gate.py`, both platforms | 186 features, 0 uncovered (Linux 80 covered and 106 waived; Windows 80 and 126) |
+| `check_ledgers.py`, `check_threat_model.py` | 5 of 5 present; pass |
+| `linux_diff.py` | 425 cases, 0 unexplained, 8 s |
+| `resource_gate.py`, 400 synthetic processes | `-i` at 0.94x the C's wall time and 0.96x its peak RSS; the whole host at 0.88x and 0.89x |
+| miri: core and CLI; the Linux backend | green, in 122 s and 387 s |
+| ten fuzz targets, 46 s each | 12.0 M executions, no crash |
+| cargo-deny | advisories, bans, licenses and sources ok |
+| `scan_c_flaws.py`, over the triage's scope | the committed triage's 98 hits, exactly |
+| `make check-kit` | OK in 6 min: 46 gates mutated, 0 survivors; 608 decisions, 0 new, 0 stale. One warning called a self-test that overran its time under load "nondeterministic"; alone it ran in 1.9 s |
+| `diff_fuzz.py` | **cannot be pointed at lsof**: it fuzzes stdin, and lsof parses argv |
+| `perf_gate.py` | **cannot run this matrix**: 395 of its 425 cases need a fixture process; the port wrote `resource_gate.py` instead |
+| the port's mutants | **nothing to run**: at least 233 mutants recorded in DIVERGENCES.md, by eight scripts, none committed |
+
+The three bold rows were the finding, with the warning: it told a reader that
+kills elsewhere in the sweep could not be trusted, when the cause was load. Its
+message now says which of the two happened. The integrity sweep (§12.3) then
+asked each green gate what it does with input that is missing, misspelt or
+empty, and nine passed where they should have failed (LESSONS #082).
+
+### 12.1 Failure inventory
+
+Ranked by what each cost. Most were found by measuring against the C; F7 was
+found by reading the code.
+
+**F1 — the option parser was debugged by hand for eight days** (PRs #112–#118;
+LESSONS #084). getopt's two spellings of a value, a `+` word read as a cluster,
+an empty list item: each was found by measuring one case against the C, writing
+a row and fixing it. The retrospective built an argv fuzzer and ran it against
+the binary from the merge before #112: 1,500 vectors in about a minute found 52
+distinct divergences, and 34 of them are what those eight days fixed. The kit's
+differential fuzzer could not have been pointed at lsof: it fuzzes stdin.
+
+**F2 — rules that were reasoned about, not measured, were wrong** (LESSONS
+#074–#078). "Any row of a task locates `-K`" (under `-a -i` the C builds fewer
+rows); a NAME fallback for sockets that never matched a socket and did match the
+wrong file in another mount namespace; `filter(|s| !s.is_empty())` deciding what
+an empty list item means; `canonicalize()` standing in for the C's `Readlink()`;
+two cases that matched for the wrong reason. Each rule passed every differential
+case written from it, because the cases were written from the same belief, and
+each was found by a second reader measuring against the C. Of the 44 DIVERGENCES
+rows that say how they were found, 22 came from that review, 9 from measuring
+the C for a change, and 10 from this retrospective (LESSONS #085).
+
+**F3 — the gate could not compare what differed** (LESSONS #067, #068, #070,
+#071). The normalizer collapsed runs of blanks, so the C's right-aligned columns
+matched the port's left-aligned ones in 205 cases. The port printed one `unk`
+line where the C prints a row for each unreadable link, through 170 cases,
+because every fixture was the harness's own process, which it could read. A
+kernel table holding one byte that is not UTF-8 was read as empty. Coverage by
+option letter credited `-F` for `-Fpn` while `-F pn` looked for a file named
+`pn`. In each case the gate compared what it could compare, and the difference
+was somewhere else.
+
+**F4 — costs that scale were invisible at ambient scale** (LESSONS #061, #062,
+#079). `lsof -i` read every process's maps file, 578 of them at 577 processes
+where the C read none, and the output was identical. The meter that called
+memory "identical and flat" was measuring Python. Porting the C's `Readlink()`
+and `+D` walk brought the C's costs to input a user can choose: 2 s per mount
+for a FUSE source holding 20 links. The resource gate now starts 400 processes
+of its own, so the `-i` cost would fail it if it came back.
+
+**F5 — `lsof | head` panicked** (LESSONS #063) with exit 101, for the life of
+the port: the C dies of SIGPIPE and Rust ignores it. No gate piped the output
+anywhere.
+
+**F6 — gates reported what they had not measured, again** (LESSONS #029,
+#031–#033, #058–#060, #066, #072, #073, #082). This was the arc's most-written
+lesson. Most failed open: the kit's integrity gate ran in no workflow; the
+sanitizers ledger took a comment for a job; a citation list was checked on its
+first number; a skip counter hid four live links; a mutant that was not reverted
+read as a kill. Some failed the other way: a mutation that did not apply read as
+a survivor, and a stale verdict read off one run in a busy pool failed
+`check-kit` on a tree that had passed. Each fix closed one instance, and nothing
+enumerated the class until the retrospective asked nine more gates the same
+question.
+
+**F7 — what the port touches, as against what it prints** (DIVERGENCES
+110–112). This was found by the retrospective's code review and confirmed with
+`strace`, not by any gate:
+- lsof-rs `statx()`es every mount directory in-process, with no timeout and
+  without `AT_NO_AUTOMOUNT`, on every run but `-f`, `-i` included. The C `stat`s
+  them only when a run needs them, each in a child under a 15 s `alarm()`, and
+  none under `-i`.
+- A `+D` walk `lstat`s an entry and then `stat`s it again following links, so a
+  rename between the two gives the entry another file's identity.
+- An `-i` error message prints its argument raw, ESC included.
+
+On a healthy host all three print what the C prints (see §12.6).
+
+**F8 — "done" was a gate state** (LESSONS #085). `progress.json` had said all
+four units were done since 2026-09-20, and 37 rows were found in October.
+
+**F9 — documents restated the code, and drifted** (LESSONS #080). About 200
+claims had stopped being true, most of them counts written into prose. This
+retrospective found another round (§12.3).
+
+### 12.2 Diff against the playbook — what it prevented and what it lacked
+
+*Prevented, as written.* The differential-and-ledger loop held for the whole
+arc. Every divergence was triaged, and the C's own defects were recorded, not
+ported (`safestrlen()`'s sizing, LESSONS #023; rows 102, 103 and 107). Mutating
+the cases a change had just written found tests that passed for the wrong reason
+(LESSONS #026, #078). Observe-first promotion took miri (PR #65) and the Windows
+ASan job (PR #78) to hard gates without a red master. The threat model became a
+gate (PR #97), and the flaw scan was triaged (PRs #75, #98). The coverage gate,
+given a platform axis in §11, gained the next-word spelling the day it was shown
+blind to it (LESSONS #071).
+
+*Lacked — failures the playbook, as written, would not have prevented:*
+
+1. **No step measured the C before the Rust was written, and "review" was not
+   defined** (F2). Phase 4 began at "port the module". Patched: Phase 4 now
+   measures the C first, and step 6 says what a review is and what it produces
+   (LESSONS #085).
+2. **Mutation evidence was prose** (§12.0). Patched: `mutate_port.py`, and
+   lsof-rs's first mutants file (LESSONS #083).
+3. **The differential fuzzer could not reach the port's input** (F1). Patched:
+   an argv mode (LESSONS #084).
+4. **Cost was not a control** (F4). The port built its own resource gate, and
+   the playbook had no row for one. Patched: a cross-cutting row for cost.
+5. **Phase 2 prescribed `golden.py` capture**, and this copy's `golden.py`
+   stores a hang as a golden and ignores exit codes (§12.4). It was not used on
+   real input here, so it cost nothing; the playbook now warns.
+6. **"Done" in the progress table read as "matches"** (F8). Patched in prose
+   (LESSONS #085); the table is unchanged.
+7. **Nothing compares what the port touches** (F7). Not patched; see §12.6.
+
+### 12.3 The integrity sweep — every tracked file against the project's purpose
+
+The repository states its purpose in three parts: lsof-rs is a memory-safe
+reimplementation of lsof; the C tree beside it is the oracle it is compared
+with, unchanged; and `porting-kit/` is the method, vendored from the primary
+line. All 425 tracked files were read against that, in nine passes (five by
+area, three for step 4c, and step 0), which reported 124 findings, about a dozen
+of them one defect seen twice.
+
+- **The oracle is unchanged.** Over the arc nothing the Linux build of the C
+  compiles changed: there were two comment-only edits to
+  `lib/dialects/linux/machine.h` and one `EXTRA_DIST` line. Of the 128 files PR
+  #81 deleted, none is compiled for Linux.
+- **The port is less safe than the C in three places** (F7, rows 110–112). Each
+  is recorded as an OPEN security row. The threat model's §2 gained the inputs
+  it lacked: link targets, namespace links, mount directories, AF_UNIX paths,
+  Windows object and module names, accounts, the IP Helper tables and reverse
+  DNS. Fixing row 110 is the next work item.
+- **The kit's gates.** Nine fail-opens were fixed (LESSONS #082). The skeleton
+  is built and tested by something automatic for the first time. The BSD CI
+  claim is withdrawn: no provider runs `.cirrus.yml` or `.builds/` for this
+  fork, so the platform ledger waives FreeBSD, NetBSD and OpenBSD, and
+  `RETROSPECTIVE-cleanup.md` carries the correction.
+- **The release workflow** could publish a build of one commit under another
+  commit's tag, and pasted the tag into its script in a job that can write to
+  the repository. It now builds the tag's own commit, refuses to replace a
+  published release without an explicit input, and reads the tag from the
+  environment.
+- **Documents.** The kit's README now says where each harness runs here and
+  where it does not, and the playbook is back under its ~400 lines. The C tree's
+  docs no longer point at what PR #81 deleted. lsof-rs's README, threat model,
+  coverage waivers and plans were corrected where they had drifted; two waivers
+  covered TYPE codes the port had shipped.
+
+Every finding has one of four dispositions: fixed in the retrospective's PR,
+recorded as a DIVERGENCES row, left as a decision for the maintainer (§12.7),
+or put on the kit's backlog.
+
+### 12.4 Step 4c — the vendored kit against the primary line
+
+This copy has 27 harness and skill scripts. 21 are shared with the primary
+(`kj299/c2rust-port` at `eb058f6`), and all 21 differ, mostly in renumbered
+citations. Six exist only here (`coverage_gate.py`, `check_ledgers.py`,
+`check_imports.py`, `resolve_collision.py`, `check_platforms.py` and
+`mutate_port.py`). Four exist only there; the README's not-vendored table says
+why.
+
+| Disposition | What |
+|---|---|
+| Imported now | `check_controls.py`'s comment-filter fixtures and the mutation row that pins the filter; the `cites()` row for `check_lessons_pinned.py`; the CI template's `rust-src` for the sanitizer job and its fail-closed fuzz loop |
+| To import (backlog) | `golden.py`: an exit-code sidecar, refusing a hang as a golden, `keep_whitespace`, pruning stale goldens. `progress.py`'s ingest matching. The scanner's multi-line sinks, `memcpy`, precomputed `malloc` sizes and `exec` family. The example matrix's multibyte case |
+| To send to the primary | the fail-open fixes in harnesses both copies share; `mutate_port.py` and the argv mode; the placement rule for `// SAFETY:` in `audit_unsafe.py`; `check_lessons_pinned.py`'s fixture numbers; `golden.py`'s refusal of an empty matrix; the scanner's literal blanking bounded to one line; the quoted fuzz-ledger form; the CI template running every control, with the C sources in its trigger and miri's isolation flag |
+| Deliberate divergence | never take the primary's `diff_run.py` whole: it ignores `cwd` and `with_stderr`, which 41 and 6 of lsof-rs's cases set |
+
+### 12.5 What this retrospective carried into the kit
+
+The three largest improvements:
+
+1. **Mutants as data** (LESSONS #083): `harnesses/port-mutation/mutate_port.py`,
+   and `lsof-rs/mutants/mapped-rows.toml`, a kill table that runs again. Run
+   against master, all 30 of its mutants were killed, and the split between
+   gates had moved since the PR recorded it.
+2. **An argv mode for the differential fuzzer** (LESSONS #084), taking its
+   alphabet from the coverage inventory. Its first run on master took 16 s and
+   found four divergences no one had recorded (rows 114–117).
+3. **The fail-open sweep** (LESSONS #082): nine gates fixed, each with a
+   fixture, and the rule to sweep the class when one is found.
+
+The prose changes: Phase 4's measure-first step and a defined review (LESSONS
+#085); `MATRIX-CHECKLIST.md` and `CI-AND-RELEASE.md`, split out of the playbook;
+a README that says which harness runs where; the step-4c warning about
+`diff_run.py`. The lift script, a one-time tool whose `FORCE=1` overwrites the
+primary's `main`, was deleted.
+
+### 12.6 The single failure the kit still would not prevent
+
+**F7: what the port touches.** The kit's controls look at what the port prints
+(the differential, golden, coverage), whether it crashes (fuzzing), whether its
+`unsafe` is sound (miri, ASan, the audit) and what it costs (the resource
+gate). None of them looks at what the port does to the system it reads. Row 110
+is the sharpest case. With a hung NFS server, lsof-rs hangs where the C gives
+up after 15 s, and listing an automount point mounts it; on a healthy host the
+two print the same bytes. A reader with the code open found it, and `strace`
+confirmed it. The same tool had found the 578 maps files of LESSONS #062.
+
+The candidate control is a **syscall differential**. Run each matrix case under
+`strace -f` for both binaries and compare, by class, what each one touches:
+which paths it `stat`s, opens or follows, and in which process. Deliberate
+differences get waivers, as the ledger has. It would have caught the maps files
+of LESSONS #062, row 110 and row 111 the day each was written. Building it is
+the next port's target.
+
+### 12.7 Decisions this retrospective leaves to the maintainer
+
+1. **The next version.** Master's binary says 1.0.1 while the CHANGELOG's
+   Unreleased section holds breaking changes; by semver that is 2.0.0.
+2. **Row 110 first.** Stat mounts in a child under a timeout, with
+   `AT_NO_AUTOMOUNT`, and none under `-i`.
+3. **`overflow-checks`.** Turning them on in the release profile needs
+   `checked_add` first in `peb.rs`, which adds offsets read from the target
+   process; otherwise a hostile process could make lsof-rs panic.
+4. **Rows 91 (`-J`'s schema) and 94 (`-b`, `-S`)**, both DECISION PENDING; row
+   101 (a path argument that names a device); and `DEL` against `mem` for a
+   container's deleted library (DIVERGENCES, "For you to decide").
+5. **`default.nix` and `mkdocs.yml`**, whose consumers are gone.
+6. **Connect Cirrus CI and sourcehut, or keep the three BSD dialects waived.**
+7. **Kit work that needs a design:** signed `+X`/`-X` ids in the coverage gate;
+   coverage per platform rather than shared; a check that the normalizer's masks
+   hide nothing a case means to compare; a guard against optional fixtures
+   skipping silently; third-party actions pinned by SHA.
