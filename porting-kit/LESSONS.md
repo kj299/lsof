@@ -3745,3 +3745,77 @@ finding it is supposed to produce.
   from a tmpfs; its flocks on shared files are shared and never wait; and a
   run records each mount as it makes it and undoes them all on SIGTERM.
 - **Section amended:** `lsof-rs/differential/linux_diff.py` (fixture P).
+
+---
+
+## 082. Asked what it does with input that is missing, misspelt, empty or only described, a gate this repo runs passed nine times
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs and this kit (the retrospective of 2026-09-02 → 2026-10-04)
+- **What happened:** the retrospective's integrity sweep put one question to
+  each gate that runs on this repository's real input: what does it do when
+  its input is missing, misspelt, empty, or present only as a description?
+  Nine passed where they should have failed:
+  - `audit_unsafe.py`, the hard gate on the Windows backend's 139 `unsafe`
+    blocks, given a directory that is not there, printed `unsafe blocks: 0`
+    and exited 0. CI passes it a literal path; a rename would have passed.
+  - `diff_run.py` ignored a case key it did not know, so `with_stdrr = true`
+    or `keep_whitespce = true` ran the case without the comparison it named,
+    and it still MATCHed. The matrix uses `cwd`, `with_stderr` and `env`.
+  - control-coverage counted `scan_c_flaws.py --self-test` as running the
+    control: the self-test runs the scanner on its own fixtures, never on the
+    C. And its comment filter, the reason it reads only executable text,
+    could be deleted with its self-test still green, while on this repo's
+    real files that deletion turns two exemptions into runs.
+  - check-kit ran `check_skeleton.sh --check`, which runs no cargo, and never
+    the mode that does, while the note it printed read as though it had.
+    The skeleton every port copies, and the tests that pin LESSONS #063 and
+    #067 in it, had never been built by anything automatic.
+  - `bash -n "$0" && echo PASS` sat in three `--check` blocks: under
+    `set -e` a failing command inside an `&&` list does not stop the script,
+    so a script that did not parse passed its own check.
+  - CI's fuzz smoke, `for t in $(cargo fuzz list)`, ran zero targets and
+    passed when that listing failed or was empty.
+  - The platform ledger counted three BSD dialects as built by CI because
+    upstream's `.cirrus.yml` and `.builds/` are in the tree. No provider runs
+    them for this fork: the GitHub API shows only Actions check suites and no
+    commit statuses on any commit since the fork. The repo-cleanup arc's
+    decision to keep those dialects rested on the same reading.
+  - The coverage gate measured an inventory whose `[features]` table was
+    misspelt as `features: 0 … UNCOVERED: 0`, and passed.
+  - `lsof-rs-ci.yml` excluded `lsof-rs/**.md` from its triggers as "a
+    markdown edit cannot affect the gates", but `DIVERGENCES.md` is the
+    differential's ledger and `THREAT-MODEL.md` the threat-model gate's
+    input: a PR editing only those ran neither gate.
+
+  Most of these are LESSONS #036 and #039 again — a gate that finds nothing
+  to check must say so — in harnesses those lessons were never applied to.
+  The kit's decision sweep (LESSONS #069) could not find them: it forces the
+  decisions of *verdict* functions, and every one of these lived in the code
+  that reads a gate's input, which the sweep calls plumbing.
+- **The rule.** For every gate, feed it a missing path, a misspelt key, an
+  empty input and a description of the thing in place of the thing, and make
+  each a failure (exit 2 for "cannot judge") with a fixture that proves it. A
+  fail-open fixed in one harness is open in the others until something
+  enumerates them: when you fix one, sweep the class.
+- **Kit change:** `audit_unsafe.py` refuses a path that is missing or not
+  Rust, counts the files it read, says NOTHING-TO-AUDIT for zero blocks, and
+  skips cargo's build directory by its `CACHEDIR.TAG` rather than any
+  directory named `target`. `diff_run.py` refuses an unknown case key.
+  `check_controls.py` does not count a `--self-test` or `--check` invocation
+  as a run, and carries the primary line's comment fixtures. check-kit runs
+  the skeleton gate's real mode and checks that the skeleton's `cli` forbids
+  `unsafe` too. The three `bash -n` lines fail. The platform ledger lists only
+  the CI that runs here and waives the three BSD dialects. The coverage gate
+  refuses an empty inventory with exit 2. `mutate_gates.py` has a row for
+  each new verdict, and the CI template runs the flaw scanner on the C, not
+  only its self-test. In lsof-rs's CI: the fuzz smoke fails on an empty or
+  failing target list, the two ledgers wake the gates that read them, and the
+  scanner's control is exempted in writing, pointing at its committed triage.
+- **Section amended:** `harnesses/unsafe-audit/audit_unsafe.py`;
+  `harnesses/differential/diff_run.py`; `harnesses/control-coverage/check_controls.py`;
+  `harnesses/coverage/coverage_gate.py`; `harnesses/skeleton-check/check_skeleton.sh`;
+  `harnesses/supply-chain/run_supply_chain.sh`; `harnesses/sanitizers/run_sanitizers.sh`;
+  `harnesses/gate-mutation/mutate_gates.py`; `harnesses/ci/porting-ci.template.yml`;
+  `skeleton/crates/cli/src/main.rs`; `harnesses/platforms/platforms.toml`;
+  `Makefile` · check-kit; `.github/workflows/lsof-rs-ci.yml`.

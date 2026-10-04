@@ -12,7 +12,7 @@ check-kit:
 	@# copies must itself forbid unsafe in core. lsof-rs's own crates are
 	@# checked by lsof-rs-ci.yml, which control-coverage requires to call it.
 	@echo "== forbid-unsafe self-test =="; $(PY) $(H)/unsafe-audit/check_forbid_unsafe.py --self-test
-	@echo "== forbid-unsafe: the skeleton's core =="; $(PY) $(H)/unsafe-audit/check_forbid_unsafe.py skeleton/crates/core
+	@echo "== forbid-unsafe: the skeleton's portable crates =="; $(PY) $(H)/unsafe-audit/check_forbid_unsafe.py skeleton/crates/core skeleton/crates/cli
 	@echo "== normalize ==";        $(PY) $(H)/differential/normalize.py --self-test
 	@echo "== diff_run ==";         $(PY) $(H)/differential/diff_run.py --self-test
 	@echo "== golden ==";           $(PY) $(H)/golden/golden.py --self-test
@@ -81,7 +81,10 @@ check-kit:
 	@# Toolchain-OPTIONAL: SKIPs cleanly with no cargo, so check-kit keeps its
 	@# python3+bash-only minimum. With cargo it runs the REAL fmt/clippy/build/
 	@# test against the skeleton every port starts by copying (LESSONS #044).
-	@echo "== skeleton ==";         bash  $(H)/skeleton-check/check_skeleton.sh --check
+	@# Both modes: `--check` alone runs no cargo, and until LESSONS #082 it was
+	@# the only one this target ran, so the skeleton's tests had never run here.
+	@echo "== skeleton self-test =="; bash  $(H)/skeleton-check/check_skeleton.sh --check
+	@echo "== skeleton ==";         bash  $(H)/skeleton-check/check_skeleton.sh
 	@# The gate above the gates: neutralize each gate's crown verdict in a scratch
 	@# copy and require its own self-test to go red. A self-test that stays green
 	@# over a dead verdict is pinning nothing. The sweep also AUDITS ITS OWN TABLE

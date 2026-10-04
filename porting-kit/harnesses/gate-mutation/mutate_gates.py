@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
@@ -127,6 +127,14 @@ MUTATIONS = [
      "why": "every unsafe block counts as documented",
      "cmd": ["harnesses/unsafe-audit/audit_unsafe.py", "--self-test"]},
 
+    # A path that is not there is an error, not zero blocks (LESSONS #082): the
+    # hard gate was given a literal directory, and a rename would have passed.
+    {"gate": "unsafe-audit-paths", "file": "harnesses/unsafe-audit/audit_unsafe.py",
+     "old": '    return [p for p in paths if not (os.path.isdir(p) or (os.path.isfile(p) and p.endswith(".rs")))]',
+     "new": "    return []",
+     "why": "a missing or non-Rust path audits as zero blocks and passes",
+     "cmd": ["harnesses/unsafe-audit/audit_unsafe.py", "--self-test"]},
+
     # Unsafe CONTAINED (LESSONS #065) — five verdicts, each of which lets a
     # crate that does not forbid unsafe pass on its own, so one row each
     # (LESSONS #050). Every "does not count" was checked against rustc.
@@ -188,6 +196,14 @@ MUTATIONS = [
     # reports MATCH. The test is silently narrowed rather than failed, which is
     # the one failure shape a differential cannot report on itself. Two gates
     # depend on it: the matrix and the fuzzer's seed corpus.
+    # A misspelt case key is refused (LESSONS #082): ignored, the case loses
+    # the comparison it named and still MATCHes.
+    {"gate": "diff-matrix-keys", "file": "harnesses/differential/diff_run.py",
+     "old": "        if unknown:\n            sys.exit(f\"error: case {name!r} has unknown key(s)",
+     "new": "        if False:\n            sys.exit(f\"error: case {name!r} has unknown key(s)",
+     "why": "a misspelt case key is ignored: the case runs without the comparison it asked for",
+     "cmd": ["harnesses/differential/diff_run.py", "--self-test"]},
+
     {"gate": "diff-matrix-bytes", "file": "harnesses/differential/diff_run.py",
      "old": '                case["stdin_bytes"] = base64.b64decode(case["stdin_b64"], validate=True)',
      "new": '                case["stdin_bytes"] = b""',
@@ -241,7 +257,7 @@ MUTATIONS = [
     {"gate": "progress", "file": "harnesses/progress/progress.py",
      "old": '        if rep.get("undocumented", 1) == 0:',
      "new": "        if True:",
-     "why": "any differential report (even all-DIVERGE, even empty) advances the gate",
+     "why": "any unsafe-audit report advances the module, undocumented blocks or not",
      "cmd": ["harnesses/progress/progress.py", "--self-test"]},
 
 
@@ -271,10 +287,26 @@ MUTATIONS = [
      "cmd": ["harnesses/perf/perf_gate.py", "--self-test"]},
 
     {"gate": "control-coverage", "file": "harnesses/control-coverage/check_controls.py",
-     "old": "    return any((control in executable_text(text)) or (base in executable_text(text))\n"
-            "               for text in gate_texts)",
-     "new": "    return True",
+     "old": "        if _runs(code, control) or _runs(code, base):\n            return True",
+     "new": "        if True:\n            return True",
      "why": "every declared control counts as wired: an unrun gate ships green",
+     "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
+
+    # The comment filter (imported from the primary line with its fixtures):
+    # read raw, a gate's exemption comment, or a TODO naming a harness, counts
+    # as running it. This copy's self-test stayed green with the filter gone.
+    {"gate": "control-coverage-executable", "file": "harnesses/control-coverage/check_controls.py",
+     "old": "        code = executable_text(text)",
+     "new": "        code = text",
+     "why": "a comment that names a harness counts as running it",
+     "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
+
+    # A self-test is not a run (LESSONS #082): `x.py --self-test` runs x on its
+    # own fixtures. This repo's CI ran the C-flaw scanner only that way.
+    {"gate": "control-coverage-self-test", "file": "harnesses/control-coverage/check_controls.py",
+     "old": '            if not _SELF_TEST.search(" " + command):',
+     "new": "            if True:",
+     "why": "a harness run only as its own self-test counts as the control",
      "cmd": ["harnesses/control-coverage/check_controls.py", "--self-test"]},
 
     # A table row naming no harness used to vanish from the report; it was
@@ -309,6 +341,14 @@ MUTATIONS = [
     # word (LESSONS #071). One row for what counts as that spelling, one for
     # whether it is required at all: either broken, a port that parses only
     # attached values is green again, as lsof-rs was for five options.
+    # An inventory that declares nothing (`[feature]` for `[features]`) is
+    # refused, not measured as 0-of-0 (LESSONS #082).
+    {"gate": "coverage-empty-inventory", "file": "harnesses/coverage/coverage_gate.py",
+     "old": "    if not required:\n        print(f\"error: {path} declares no features",
+     "new": "    if False:\n        print(f\"error: {path} declares no features",
+     "why": "an inventory with no features passes as 0 uncovered",
+     "cmd": ["harnesses/coverage/coverage_gate.py", "--self-test"]},
+
     {"gate": "coverage-spelling", "file": "harnesses/coverage/coverage_gate.py",
      "old": '    return k == len(tok) - 1 and isinstance(nxt, str) and not nxt.startswith(("-", "+"))',
      "new": "    return True",
@@ -380,6 +420,17 @@ MUTATIONS = [
     # The `old`-appears-exactly-once rule this harness enforces is what keeps
     # these rows honest: a pattern that no longer occurs would otherwise no-op
     # and read as a survivor (LESSONS #059).
+    # Imported from the primary line: its row makes `cites()` a verdict
+    # function, so the decision sweep forces each of its six decisions. All six
+    # were already caught here; the row is what makes the sweep look.
+    {"gate": "lessons-pinned-cites",
+     "file": "harnesses/doc-check/check_lessons_pinned.py",
+     "old": '    return any("LESSONS" in line and tok.search(line)\n'
+            "               for line in file_text.splitlines())",
+     "new": "    return True",
+     "why": "every amended file counts as citing its lesson",
+     "cmd": ["harnesses/doc-check/check_lessons_pinned.py", "--self-test"]},
+
     {"gate": "lessons-pinned",
      "file": "harnesses/doc-check/check_lessons_pinned.py",
      "old": "    return 1 if problems else 0",
@@ -884,11 +935,26 @@ def run_gates(kit_root, mutations, as_json=False, check_coverage=True,
             for e in stale:
                 print("  " + json.dumps(e, ensure_ascii=False))
         if unstable:
+            # Two different things reach here, and they were reported as one
+            # (LESSONS #082). A self-test that FAILED in the pool over a mutant
+            # it does not see is nondeterministic. One that OVERRAN its budget
+            # in the pool and finished alone was slow there: the budget is ten
+            # times a run with nothing beside it, and a loaded machine is
+            # slower than that. Only the first casts doubt on its other kills.
+            failed = [u for u in unstable if u["first"] != "hang"]
+            slow = [u for u in unstable if u["first"] == "hang"]
             print(f"\nUNSTABLE (not a failure): {len(unstable)} ledgered "
                   f"decision(s) died in the pool and survived alone, so their "
-                  f"lines stand. The self-test that killed them failed over a "
-                  f"mutant it does not see: it is nondeterministic, and its "
-                  f"kills elsewhere cannot be trusted until that is fixed.")
+                  f"lines stand.")
+            if failed:
+                print(f"  {len(failed)} failed in the pool: that self-test failed "
+                      f"over a mutant it does not see, so it is nondeterministic, "
+                      f"and its kills elsewhere cannot be trusted until that is fixed.")
+            if slow:
+                print(f"  {len(slow)} overran the budget in the pool and finished "
+                      f"alone: the machine was slower than the budget allows "
+                      f"(another job, or this sweep's own workers). Rerun on a "
+                      f"quiet machine before reading anything into it.")
             for u in unstable:
                 k = u["decision"]
                 print(f"  {k['file']} {k['func']}: `{k['expr']}` -> {k['to']} "
@@ -1353,6 +1419,9 @@ def _self_test():
         check("one that overran its budget in the pool, and not alone, is "
               "confirmed the same way, and reported as a hang",
               rc == 0 and "STALE" not in said and "first run hang" in said)
+        check("...as slowness, not as a self-test that cannot be trusted (LESSONS #082)",
+              "overran the budget in the pool" in said
+              and "nondeterministic" not in said)
         write_ledger(entries)
 
     print("\nself-test:", "OK" if ok else "FAILED")

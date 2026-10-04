@@ -205,6 +205,17 @@ def load_toml_or_json(path: str):
         return tomllib.load(f)
 
 
+def require_features(required: set[str], path: str) -> None:
+    """An inventory that declares nothing is refused (exit 2), never measured: a
+    `[feature]` table spelt for `[features]` made this gate report
+    `features: 0 ... UNCOVERED: 0` and pass (LESSONS #039, #082)."""
+    if not required:
+        print(f"error: {path} declares no features under [features] "
+              f"(options/types/extra): a coverage gate over nothing proves nothing",
+              file=sys.stderr)
+        sys.exit(2)
+
+
 def load_inventory(path: str, platform: str | None = None):
     """-> (required ids, waives [{id, reason, platforms}], value-taking letters).
 
@@ -230,6 +241,7 @@ def load_inventory(path: str, platform: str | None = None):
     required = {f"opt:{o}" for o in feats.get("options", [])}
     required |= {f"type:{t}" for t in feats.get("types", [])}
     required |= set(feats.get("extra", []))  # free-form ids (fmt:json, field:T, ...)
+    require_features(required, path)
     takes_value = set(feats.get("takes_value", []))
     waives = []
     for w in data.get("waive", []):
@@ -492,6 +504,16 @@ def self_test() -> int:
         ctyp = os.path.join(td, "typ.c")
         open(copt, "w").write(C_OPTSTRING_FIXTURE)
         open(ctyp, "w").write(C_TYPES_FIXTURE)
+
+        # LESSONS #082: an inventory that declares nothing is exit 2, not 0-of-0.
+        misspelt = os.path.join(td, "misspelt.toml")
+        open(misspelt, "w").write('[feature]\noptions = ["a"]\n')
+        try:
+            load_inventory(misspelt)
+            refused = None
+        except SystemExit as e:
+            refused = e.code
+        check("an inventory with no [features] is refused with exit 2", refused == 2)
 
         opts, takes = extract_options([copt])
         check(

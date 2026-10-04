@@ -14,11 +14,15 @@ name: lsof-rs CI
 # differential + the smoke suite) twice over. The pull_request run
 # covers the branch; this one covers master after a merge.
 #
-# The `!` negations skip documentation-only changes: a markdown edit cannot
-# affect the build, the gates, or the smoke suite. A change touching docs *and*
-# code still runs everything, because the filter tests the union of changed
-# files. (A docs-only PR therefore shows no checks at all — correct, but worth
-# knowing before turning on required status checks.)
+# The `!` negations skip documentation-only changes. A change touching docs
+# *and* code still runs everything, because the filter tests the union of
+# changed files. (A docs-only PR therefore shows no checks at all — correct,
+# but worth knowing before turning on required status checks.) Two markdown
+# files are not documentation, and are named again after the negation, which
+# GitHub reads in order: DIVERGENCES.md is the differential's ledger and
+# THREAT-MODEL.md the threat-model gate's input. Excluded with the rest, a PR
+# that edited only them ran neither gate, and the next code PR inherited
+# whatever they broke (porting-kit LESSONS #082).
 #
 # `porting-kit/harnesses/**` is in the list because several of the gates below
 # ARE kit harnesses: a change to one of them changes what this workflow enforces,
@@ -49,6 +53,8 @@ on:
       - 'lsof-rs/**'
       - '!lsof-rs/**.md'
       - '!lsof-rs/docs/**'
+      - 'lsof-rs/DIVERGENCES.md'
+      - 'lsof-rs/THREAT-MODEL.md'
       - 'porting-kit/harnesses/**'
       - '!porting-kit/harnesses/**.md'
       - '.github/workflows/lsof-rs-ci.yml'
@@ -67,6 +73,8 @@ on:
       - 'lsof-rs/**'
       - '!lsof-rs/**.md'
       - '!lsof-rs/docs/**'
+      - 'lsof-rs/DIVERGENCES.md'
+      - 'lsof-rs/THREAT-MODEL.md'
       - 'porting-kit/harnesses/**'
       - '!porting-kit/harnesses/**.md'
       - '.github/workflows/lsof-rs-ci.yml'
@@ -166,6 +174,10 @@ jobs:
         # a comment must NOT count as a TOCTOU finding. A scanner whose rules
         # nothing checks is the "declared but never run" shape the ledger exists
         # to catch (LESSONS #019, #025).
+        #
+        # The self-test runs the scanner on its own fixtures, so it is not the
+        # control, and control-coverage no longer counts it as one (LESSONS #082):
+        # control-coverage: exempt harnesses/c-flaw-scan/scan_c_flaws.py -- a Phase-0 inventory of the C, run once and triaged: lsof-rs/coverage/c-flaw-scan.json (98 hits; the scope THREAT-MODEL.md §6b gives reproduces it exactly, 2026-10-04). The C here does not change, so a CI rerun would only repeat it.
         run: python3 ../porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
 
       - name: ledgers exist (progress, divergences, fuzz target, sanitizer per crate)
@@ -286,10 +298,24 @@ jobs:
         # fuzz/Cargo.toml is gated here without touching this file — a target
         # that exists but is not run is the LESSONS #019 failure again. Short
         # time-box per target gates every PR; the nightly runs long.
+        #
+        # The list is taken on its own line, so a `cargo fuzz list` that fails
+        # stops the step, and an empty one fails it: `for t in $(...)` ran zero
+        # targets and passed in both cases. Its length must match the target
+        # files, or one is not registered in fuzz/Cargo.toml and not fuzzed;
+        # the fuzz crate is outside the workspace, so nothing else would see
+        # it (porting-kit LESSONS #082). 60 s each, the kit's smoke minimum.
         run: |
-          for t in $(cargo fuzz list); do
+          targets=$(cargo fuzz list)
+          n=$(echo "$targets" | wc -w)
+          files=$(ls fuzz/fuzz_targets/*.rs | wc -l)
+          if [ "$n" -eq 0 ] || [ "$n" -ne "$files" ]; then
+            echo "::error::cargo fuzz list names $n target(s); fuzz/fuzz_targets holds $files"
+            exit 1
+          fi
+          for t in $targets; do
             echo "=== fuzz smoke: $t ==="
-            cargo fuzz run "$t" -- -max_total_time=45 -rss_limit_mb=2048
+            cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=2048
           done
 
   differential-linux:

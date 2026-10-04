@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #9->#044, #25->#052.
+# Local: #082 (check-kit ran only the mode that runs no cargo).
 # Skeleton gate — the shipped skeleton must PASS the gates it configures. It sets
 # strict workspace lints ([workspace.lints]: arithmetic_side_effects,
 # cast_possible_truncation, the unsafe docs) and the kit's CI runs `cargo fmt
@@ -28,7 +29,10 @@ skel_present() { test -d "$1" && test -f "$1/Cargo.toml"; }
 
 if [[ "${1:-}" == "--check" ]]; then
   ok=1
-  bash -n "$0" && echo "PASS  script syntax ok"
+  # `bash -n "$0" && echo PASS` could not fail this check: under `set -e` a
+  # failing command inside an `&&` list does not stop the script (LESSONS #082).
+  if bash -n "$0"; then echo "PASS  script syntax ok"
+  else echo "FAIL  this script does not parse"; exit 1; fi
   if skel_present "$DEFAULT_SKEL"; then
     echo "PASS  skeleton dir present"
   else
@@ -44,8 +48,11 @@ if [[ "${1:-}" == "--check" ]]; then
   fi
   rmdir "$_empty" 2>/dev/null || true
   [[ "$ok" == "1" ]] || { echo "self-test: FAILED"; exit 1; }
-  if have cargo; then echo "note: cargo present — the skeleton gate runs the real fmt/clippy/build/test"
-  else echo "note: cargo absent — the skeleton gate will SKIP (install a Rust toolchain to run it)"; fi
+  # This mode runs no cargo. The note says what the OTHER mode will do: for a
+  # year it read as though this one had, while check-kit ran only this one
+  # and the skeleton was never built by anything automatic (LESSONS #082).
+  if have cargo; then echo "note: --check runs no cargo; without it, this gate runs the real fmt/clippy/build/test"
+  else echo "note: --check runs no cargo; without it, this gate will SKIP (no Rust toolchain)"; fi
   echo "self-test: OK"
   exit 0
 fi

@@ -78,6 +78,11 @@ jobs:
       # The flaw scanner is a Phase 0 tool, but its rules are code: run its own
       # self-test so a change to the kit cannot silently weaken it.
       - run: python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
+      # And run it on the C. The self-test runs the scanner on its own fixtures,
+      # which is not the control (LESSONS #082). An inventory, not a verdict:
+      # it exits 0, and a hit it reports that the committed triage lacks is a
+      # change in the C to read. Point it at the C sources the port reads.
+      - run: python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py c-src/
 
   ledgers:
     name: ledgers exist (progress, divergences, fuzz target, sanitizers per unit) + threat model

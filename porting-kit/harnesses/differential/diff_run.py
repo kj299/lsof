@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #070, #077.
+# Local: #070, #077, #082.
 # Re-cited: #1->#001, #4->#004, #6->#036, #8->#043, #9->#044, #11->#045,
 #          #14->#037, #16->#050, #48->#069, #50->#072; #36 by title (no
 #          entry in this log).
@@ -95,6 +95,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import normalize as N  # noqa: E402
 
 
+# Every key a case may carry. A key outside this set is refused rather than
+# ignored: `with_stdrr = true` or `keep_whitespce = true` would otherwise run
+# the case without the comparison it names and still MATCH, and nothing would
+# say so (LESSONS #082). `covers` belongs to the coverage gate, which reads the
+# same matrices.
+_CASE_KEYS = frozenset({"name", "args", "stdin", "stdin_b64", "timeout", "env",
+                        "cwd", "with_stderr", "keep_whitespace", "covers"})
+
+
 def _validate_matrix(cases):
     """Case names become file names (golden corpus: <name>.golden) and report
     labels; a separator or '..' would escape the corpus directory. The test
@@ -116,6 +125,11 @@ def _validate_matrix(cases):
         if re.search(r"[/\\]", name) or name in (".", ".."):
             sys.exit(f"error: case name {name!r} contains a path separator / traversal "
                      "(names become corpus file names)")
+        unknown = sorted(set(case) - _CASE_KEYS)
+        if unknown:
+            sys.exit(f"error: case {name!r} has unknown key(s) {unknown}: a misspelt "
+                     f"key is ignored by every runner, so it is refused here "
+                     f"(known: {sorted(_CASE_KEYS)})")
         # A misspelt value must not quietly mean "collapse": `"yes"` and `1`
         # are refused, so a layout case cannot pass on a typo.
         if "keep_whitespace" in case and not isinstance(case["keep_whitespace"], bool):
@@ -679,6 +693,15 @@ def _self_test():
               _exits(lambda: _validate_matrix([{"name": "x", "keep_whitespace": "yes"}])))
         check("a boolean `keep_whitespace` is accepted",
               not _exits(lambda: _validate_matrix([{"name": "x", "keep_whitespace": False}])))
+        # A misspelt key is refused, not ignored: ignored, the case loses the
+        # comparison it asked for and still MATCHes (LESSONS #082).
+        check("a misspelt key (`keep_whitespce`) is refused",
+              _exits(lambda: _validate_matrix([{"name": "x", "keep_whitespce": True}])))
+        check("every key the runners read is accepted",
+              not _exits(lambda: _validate_matrix([{
+                  "name": "x", "args": [], "stdin": "", "timeout": 5, "env": {},
+                  "cwd": ".", "with_stderr": True, "keep_whitespace": True,
+                  "covers": []}])))
 
     # stderr: ignored by default (documented), compared with --with-stderr
     with tempfile.TemporaryDirectory() as d:
