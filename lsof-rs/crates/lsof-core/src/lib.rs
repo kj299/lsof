@@ -16,6 +16,7 @@
 pub mod backend;
 pub mod mock;
 pub mod model;
+pub mod readlink;
 pub mod render;
 pub mod selection;
 pub mod service;
@@ -27,7 +28,7 @@ pub use model::{
 };
 pub use render::Escaper;
 pub use selection::{
-    CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, InetFilter,
-    InetSpec, Located, PathItem, Selection, StateFilter, TaskMode, TcpInfoFlags, UidSel,
-    DEFAULT_COMMAND_WIDTH,
+    CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs,
+    InetFilter, InetSpec, Located, PathItem, Selection, StateFilter, TaskMode, TcpInfoFlags,
+    UidSel, DEFAULT_COMMAND_WIDTH,
 };

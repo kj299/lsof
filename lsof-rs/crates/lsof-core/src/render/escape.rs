@@ -75,6 +75,24 @@ impl Escaper {
         escape(s, Mode::Text, self.backslash)
     }
 
+    /// [`Escaper::text`] for a name that need not be UTF-8 — a file name, a
+    /// link's target — as `safestrprt()` prints one in a UTF-8 locale: where
+    /// `mblen()` finds no character, the byte is printed as `\xNN`, and the
+    /// rest as text. `nu/\xfe`, measured.
+    pub fn bytes<'a>(&self, b: &'a [u8]) -> Cow<'a, str> {
+        if let Ok(s) = std::str::from_utf8(b) {
+            return self.text(s);
+        }
+        let mut out = String::with_capacity(b.len() + 8);
+        for chunk in b.utf8_chunks() {
+            out.push_str(&self.text(chunk.valid()));
+            for &byte in chunk.invalid() {
+                push_hex(&mut out, byte);
+            }
+        }
+        Cow::Owned(out)
+    }
+
     /// The COMMAND column: `safestrprtn(s, width, fs, 2)` without the width.
     /// Whitespace-free and pure ASCII, so the column splits and measures as
     /// bytes.
@@ -170,15 +188,20 @@ fn push(out: &mut String, c: char, mode: Mode, backslash: bool) {
         c => {
             // Space (COMMAND), DEL, and every escaped non-ASCII character: the
             // C prints `\x%02x` for each byte it could not print.
-            const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut buf = [0u8; 4];
             for b in c.encode_utf8(&mut buf).bytes() {
-                out.push_str("\\x");
-                out.push(HEX[usize::from(b >> 4)] as char);
-                out.push(HEX[usize::from(b & 0x0f)] as char);
+                push_hex(out, b);
             }
         }
     }
+}
+
+/// `\x%02x`, `safepup()`'s form for a byte it cannot print.
+fn push_hex(out: &mut String, b: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push_str("\\x");
+    out.push(HEX[usize::from(b >> 4)] as char);
+    out.push(HEX[usize::from(b & 0x0f)] as char);
 }
 
 #[cfg(test)]
@@ -217,6 +240,19 @@ mod tests {
         assert_eq!(U.text("\x7f"), "\\x7f");
         // The ANSI clear-screen the fuzz target's finding pointed at.
         assert_eq!(U.text("h\x1b[2Jz"), "h^[[2Jz");
+    }
+
+    #[test]
+    fn bytes_escape_what_is_not_utf8_byte_by_byte() {
+        // Measured: `+d nu` reports `nu/\xfe` for a file named 0xfe.
+        assert_eq!(U.bytes(b"nu/\xfe"), "nu/\\xfe");
+        // Valid UTF-8 is `text`, borrowed when nothing needs escaping.
+        assert!(matches!(U.bytes("café".as_bytes()), Cow::Borrowed("café")));
+        assert_eq!(U.bytes(b"a\x1bb"), "a^[b");
+        // A cut sequence is each of its bytes; what follows it is text again,
+        // escaped by the same rules.
+        assert_eq!(U.bytes(b"\xe2\x82(\\\xa1\xc3\xa9"), "\\xe2\\x82(\\\\\\xa1é");
+        assert_eq!(W.bytes(b"C:\\\xff"), "C:\\\\xff");
     }
 
     #[test]

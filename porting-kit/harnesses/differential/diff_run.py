@@ -29,7 +29,18 @@ Matrix (TOML or JSON): a list of cases, each with a name and argv, e.g.
   name = "listen-sockets"
   args = ["-nP", "-iTCP"]
   # optional: stdin = "...", env = {FOO="bar"}, timeout = 10,
-  #           keep_whitespace = true
+  #           keep_whitespace = true, cwd = "/some/dir", with_stderr = true
+
+`with_stderr = true` compares that case's stderr as well, as `--with-stderr`
+does for every case: for a case whose point is a message, where the rest of
+the matrix would drown in noise the oracle writes there (its usage text, a
+warning about the host).
+
+`cwd` is the directory both binaries start in, for a case whose argument is a
+relative path: how a tool spells and resolves `mnt`, `./x` or `.` is behavior,
+and a matrix that can only name absolute paths cannot reach it. The directory
+must exist; a case naming one that does not is an infra error, not a
+divergence.
 
 Output is normalized before it is compared: masking rules, and runs of blanks
 collapsed with trailing ones stripped. That collapse is what lets content be
@@ -235,6 +246,16 @@ def run_one(binary, case, default_timeout=15):
     sides that both hang produce identical sentinels, and comparing those as if
     they were output would pass the exact hang class this harness exists to
     catch."""
+    cwd = case.get("cwd")
+    if cwd is not None and not os.path.isdir(cwd):
+        sys.exit(f"error: case {case.get('name')!r}: cwd is not a directory: {cwd}")
+    # A relative path names the binary from where this harness runs, not from
+    # the case's `cwd`: `subprocess` resolves it from the new directory, so a
+    # CI job passing `--oracle ../lsof` found no binary once a case named a
+    # `cwd`. A bare name (no separator) is still looked up on PATH.
+    if not os.path.isabs(binary) and any(
+            sep and sep in binary for sep in (os.sep, os.altsep)):
+        binary = os.path.abspath(binary)
     argv = [binary] + [str(a) for a in case.get("args", [])]
     env = dict(os.environ)
     env.update({k: str(v) for k, v in case.get("env", {}).items()})
@@ -260,6 +281,7 @@ def run_one(binary, case, default_timeout=15):
             capture_output=True,
             timeout=case.get("timeout", default_timeout),
             env=env,
+            cwd=cwd,
         )
         # `backslashreplace`, NOT `replace`: `replace` maps EVERY invalid byte to
         # the same U+FFFD, so a C tool emitting 0xFF and a Rust tool emitting 0xFE
@@ -294,7 +316,9 @@ def compare_one(name, oracle_bin, rust_bin, case, known, sort, mask_numbers,
     # but returns the wrong status (lsof exits 1 on no-match; scripts branch
     # on it) is NOT a match. Exit-code drift was a real lsof-rs bug.
     # (LESSONS #004). `--ignore-exit` opts out for tools without stable codes.
-    # `--with-stderr` opts stderr in (error text is behavior too).
+    # `--with-stderr` opts stderr in (error text is behavior too), for every
+    # case or for one that asks (`with_stderr = true`).
+    with_stderr = with_stderr or bool(case.get("with_stderr"))
     stdout_match = o_n == r_n
     exit_match = ignore_exit or (o_rc == r_rc)
     o_e, r_e = (norm(o_err), norm(r_err)) if with_stderr else ("", "")
@@ -456,6 +480,47 @@ def _self_test():
     res = run_one(cat, {"name": "no-stdin", "args": [], "timeout": 5})
     check("no-stdin case feeds DEVNULL, doesn't hang on inherited stdin",
           res[2] is False and res[0] == "")
+
+    # `cwd`: both sides start in the case's directory, so a relative argument
+    # means the same file to each. `pwd` prints where it started.
+    pwd_bin = "/bin/pwd" if os.path.exists("/bin/pwd") else "pwd"
+    with tempfile.TemporaryDirectory() as cwd_dir:
+        real = os.path.realpath(cwd_dir)
+        out, rc, _to, _e = run_one(pwd_bin, {"name": "cwd", "args": ["-P"], "cwd": cwd_dir})
+        check("a case's `cwd` is where the binary starts", out.strip() == real and rc == 0)
+    check("a `cwd` that is not a directory is an infra error, not a verdict",
+          _exits(lambda: run_one(pwd_bin, {"name": "cwd-gone", "args": [],
+                                           "cwd": "/nonexistent-diff-run-cwd"})))
+    # A binary given by a relative path is the one beside the harness, wherever
+    # the case starts: the CI differential passes `--oracle ../lsof`.
+    here = os.getcwd()
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as away:
+        os.makedirs(os.path.join(home, "bin"))
+        script = os.path.join(home, "bin", "pwd-here")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\nexec pwd -P\n")
+        os.chmod(script, 0o755)
+        try:
+            os.chdir(home)
+            out, rc, _to, _e = run_one(os.path.join("bin", "pwd-here"),
+                                       {"name": "rel-bin", "args": [], "cwd": away})
+        except SystemExit:
+            out, rc = "", None
+        finally:
+            os.chdir(here)
+        check("a relative binary path is resolved from the harness, not the case's `cwd`",
+              rc == 0 and out.strip() == os.path.realpath(away))
+
+    # `with_stderr` on a case compares its stderr; without it, stderr is not
+    # compared. `sh -c` writes the same stdout and different stderr per side.
+    sh = "/bin/sh" if os.path.exists("/bin/sh") else "sh"
+    loud = {"name": "loud", "args": ["-c", "echo out; echo $0 >&2"]}
+    res = compare(sh, "/bin/sh" if sh != "/bin/sh" else "sh", [loud], ledger=None,
+                  sort=False, mask_numbers=False)
+    check("stderr is not compared by default", res[0]["verdict"] == "MATCH")
+    res = compare(sh, "/bin/sh" if sh != "/bin/sh" else "sh", [dict(loud, with_stderr=True)],
+                  ledger=None, sort=False, mask_numbers=False)
+    check("a case's `with_stderr` compares its stderr", res[0]["verdict"] == "DIVERGE")
 
     # echo vs printf genuinely diverge on a format-string arg:
     # echo "%s" "hi" → "%s hi"   ;   printf "%s" "hi" → "hi"

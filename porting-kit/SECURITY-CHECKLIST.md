@@ -32,6 +32,12 @@ to safety and security" — this is that list.
       input. (Closes the C `malloc(a*b)` overflow class.)
 - [ ] **Bounds by construction.** Slices + lengths, not raw pointer + count.
       Buffer "call-twice-for-size" idioms use a growing `Vec` with checks.
+- [ ] **Bounded cost on hostile input.** A routine that runs on data a user can
+      choose (a file name, a link, a mount source) is measured for time and
+      memory on the worst such input at each place it runs. It runs only where
+      its answer is used, and what it keeps is bounded by size, not only by
+      count. A faithful port of the C brings the C's costs with it; lsof-rs's
+      `Readlink()` made every run slow over one user's mount (LESSONS #079).
 - [ ] **Differential-clean.** `diff_run.py` shows MATCH or a ledgered divergence;
       no unexplained drift.
 - [ ] **C flaws closed.** Every `scan_c_flaws.py` hit in this module is either

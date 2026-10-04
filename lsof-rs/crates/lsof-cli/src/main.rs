@@ -11,13 +11,17 @@
 //! drop it and the binary is unconstrained while the library still looks safe.
 #![forbid(unsafe_code)]
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use lsof_cli::args::{parse, Action};
+use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, FilesystemArgs, Located, PathItem, Selection, TaskMode, UidSel, UserLookup,
+    errno_text, Backend, DirArg, FilesystemArgs, Located, PathItem, Selection, TaskMode, UidSel,
+    UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -119,8 +123,10 @@ SELECTION:\n\
     <path>        find who has this FILE open, matched by identity (a hard\n\
                   link to it counts); +d <dir> = the dir and its entries,\n\
                   +D <dir> = the whole tree beneath it\n\
-                  A path naming a MOUNT POINT (or a block device it was\n\
-                  mounted from) selects every open file on that filesystem.\n\
+                  A MOUNT POINT's absolute path (or the block device it\n\
+                  was mounted from, or a link to either) selects every open\n\
+                  file on that filesystem; `/mnt/.` or a relative `mnt`\n\
+                  names the directory alone.\n\
     -f / +f       never / always read a path argument as a file system;\n\
                   +f also accepts a non-block mount source, and complains\n\
                   if an argument names no mount\n\
@@ -175,15 +181,16 @@ specific operations that need them.\n",
     )
 }
 
-/// Resolve a user-typed path selector (`+d`/`+D` directory, bare path) to its
+/// Resolve a user-typed path selector (`+D` directory, bare path) to its
 /// canonical long form so the literal prefix/equality match in the selection
-/// engine sees the same spelling the backend reports. This is what bridges 8.3
-/// short names (`C:\Users\RUNNER~1\...` — the default %TEMP% on hosted Windows
-/// CI), relative paths, and symlinked directories. `std::fs::canonicalize`
-/// returns Windows paths in verbatim form (`\\?\C:\...`, `\\?\UNC\srv\...`);
-/// strip that the same way the backend's `normalize_final` does, so both sides
-/// of the comparison use one spelling. A path that can't be resolved (it
-/// doesn't exist) is left as typed — the unmatched-item reporting owns that.
+/// engine sees the same spelling the backend reports — on a backend that
+/// matches names (Windows). This is what bridges 8.3 short names
+/// (`C:\Users\RUNNER~1\...` — the default %TEMP% on hosted Windows CI),
+/// relative paths, and symlinked directories. `std::fs::canonicalize` returns
+/// Windows paths in verbatim form (`\\?\C:\...`, `\\?\UNC\srv\...`); strip
+/// that the same way the backend's `normalize_final` does, so both sides of
+/// the comparison use one spelling. A path that can't be resolved (it doesn't
+/// exist) is left as typed — the unmatched-item reporting owns that.
 fn canonicalize_selector(p: &mut String) {
     let Ok(resolved) = std::fs::canonicalize(&*p) else {
         return;
@@ -194,12 +201,223 @@ fn canonicalize_selector(p: &mut String) {
 /// `path` without the slashes that end it, keeping one: the C's rule for a
 /// path argument before it `stat`s it (`arg.c`, "Remove terminating `/'
 /// characters from paths longer than one").
-fn without_trailing_slashes(path: &str) -> &str {
+#[cfg_attr(not(unix), allow(dead_code))]
+fn without_trailing_slashes(path: &[u8]) -> &[u8] {
     let mut end = path.len();
-    while end > 1 && path.as_bytes()[end - 1] == b'/' {
+    while end > 1 && path[end - 1] == b'/' {
         end -= 1;
     }
     &path[..end]
+}
+
+/// A path argument as the C spells it before it looks at it (`arg.c`,
+/// `ck_file_arg`): its `Readlink()`, less the slashes that end it. So `FILE/`
+/// is FILE, `mnt` from `/` stays `mnt`, which no mount point is, and a
+/// `/proc/PID/fd/N` link is the text it holds (DIVERGENCES 65). lsof-rs had
+/// used `canonicalize()`, which made `lsof mnt` a file system and followed
+/// such a link to the file behind it. Where names are matched instead
+/// (Windows), the argument as [`spell_names_as_reported`] left it.
+fn spell_path(typed: &str, identified: bool) -> Result<OsString, ReadlinkError> {
+    #[cfg(unix)]
+    if identified {
+        use std::os::unix::ffi::OsStringExt;
+        let mut path = lsof_core::readlink::resolve(typed.as_ref())?.into_vec();
+        path.truncate(without_trailing_slashes(&path).len());
+        return Ok(OsString::from_vec(path));
+    }
+    let _ = identified;
+    Ok(typed.into())
+}
+
+/// On a backend that matches names (Windows), the path arguments and the `+D`
+/// trees in the long form the backend reports, which is what selection
+/// compares a row's name with; see [`canonicalize_selector`]. Without it an
+/// 8.3 short name (`RUNNER~1`, the hosted runner's `%TEMP%`) selects nothing.
+/// A backend that identifies files needs none of it: the C's spelling is
+/// [`spell_path`]'s.
+fn spell_names_as_reported(sel: &mut Selection) {
+    if sel.paths_identified {
+        return;
+    }
+    for p in sel.paths.iter_mut().chain(sel.dir_trees.iter_mut()) {
+        canonicalize_selector(p);
+    }
+}
+
+/// How many entries a `+d`/`+D` walk takes, and how many bytes of their
+/// names. The C walks on: a tree of 200,000 entries and more is taken whole,
+/// and two links to `.` under `-x l` make 2^40 paths it never finishes. lsof-rs
+/// stops, and says so (DIVERGENCES 81). Names count as well as entries: under
+/// `-x l` a link to `.` makes every name longer than the last, and 200,000
+/// of them reached a gigabyte.
+const WALK_ENTRIES: usize = 200_000;
+const WALK_NAME_BYTES: usize = 16 << 20;
+
+/// What a walk has left of [`WALK_ENTRIES`] and [`WALK_NAME_BYTES`].
+struct WalkBudget {
+    entries: usize,
+    bytes: usize,
+}
+
+impl WalkBudget {
+    fn new() -> Self {
+        WalkBudget {
+            entries: WALK_ENTRIES,
+            bytes: WALK_NAME_BYTES,
+        }
+    }
+
+    /// Take one entry with a name of `len` bytes, or `false` if that would
+    /// exceed either limit.
+    fn take(&mut self, len: usize) -> bool {
+        if self.entries == 0 || self.bytes < len {
+            return false;
+        }
+        self.entries -= 1;
+        self.bytes -= len;
+        true
+    }
+}
+
+/// One `+d`/`+D` directory and what is in it, entered as the C's
+/// `enter_dir()` enters them (`arg.c`): the directory under the name
+/// `Readlink()` gave it when the option was checked, then each entry as that
+/// name, a `/` unless it ends in one, and the entry's own name, byte for byte.
+/// So `+D rel` reports `rel/y`, not `$PWD/rel/y`, `+d rel-link` reports
+/// `rel/y` (DIVERGENCES 63), and an entry whose name is not UTF-8 is found by
+/// it, where a lossy name had found nothing (DIVERGENCES 65).
+fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper) {
+    fn enter(sel: &mut Selection, path: &Path, id: Option<(String, String)>) {
+        if let Some(id) = &id {
+            sel.path_ids.insert(id.clone());
+            sel.path_names.insert(path.as_os_str().to_os_string());
+        }
+        sel.path_items.push(PathItem {
+            id,
+            fs_device: None,
+            name: path.as_os_str().to_os_string(),
+        });
+    }
+    let identified = sel.paths_identified;
+    // Where names are matched, a `+D` keeps the long-form name it had.
+    let base = if identified || !dir.recursive {
+        PathBuf::from(&dir.dir)
+    } else {
+        let mut p = dir.dir.to_string_lossy().into_owned();
+        canonicalize_selector(&mut p);
+        PathBuf::from(p)
+    };
+    let id = backend.identify_path(&base);
+    if identified && id.is_none() {
+        // Gone since the option was checked.
+        return;
+    }
+    enter(sel, &base, id);
+    // The directory's own file system, for the cross-over rule below. `None`
+    // on a backend with no such notion, which switches the rule off rather
+    // than guessing.
+    let dir_fs = backend.path_fs_device(&base);
+    let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
+    let mut budget = WalkBudget::new();
+    let mut stack = vec![base.clone()];
+    while let Some(dn) = stack.pop() {
+        let entries = match std::fs::read_dir(&dn) {
+            Ok(entries) => entries,
+            Err(e) => {
+                if dir.warn && e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "lsof: WARNING: can't opendir({}): {}",
+                        shown(&dn),
+                        errno_text(&e)
+                    );
+                }
+                continue;
+            }
+        };
+        for e in entries.flatten() {
+            // `dn`, a `/` unless it ends in one, and the entry's name: the C's
+            // spelling, and `DirEntry::path()`'s.
+            let path = e.path();
+            if !budget.take(path.as_os_str().len()) {
+                if dir.warn {
+                    eprintln!(
+                        "lsof: WARNING: stopped walking {} after {} entries",
+                        shown(&base),
+                        WALK_ENTRIES - budget.entries
+                    );
+                }
+                return;
+            }
+            // The entry is `lstat`ed first; then the two cross-over rules, in
+            // the C's order (`arg.c`):
+            //
+            //   unless -x / -x f, skip an entry whose st_dev is not the
+            //         directory's — do not leave this file system;
+            //   unless -x / -x l, skip a symbolic link outright. With it, the
+            //         link is followed: the TARGET is what is searched for,
+            //         and for `+D` what is descended into, as the C stacks a
+            //         directory by the `stat` that followed the link
+            //         (DIVERGENCES 78).
+            //
+            // `-x` is the one in force when the option was checked
+            // (DIVERGENCES 75).
+            let dev = backend.path_fs_device(&path);
+            if identified && dev.is_none() {
+                // `lstat` failed: gone, or not ours to see.
+                if dir.warn {
+                    if let Err(err) = std::fs::symlink_metadata(&path) {
+                        if err.kind() != std::io::ErrorKind::NotFound {
+                            eprintln!(
+                                "lsof: WARNING: can't lstat({}): {}",
+                                shown(&path),
+                                errno_text(&err)
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            if !dir.cross_filesystems {
+                if let (Some(d), Some(e_dev)) = (dir_fs, dev) {
+                    if d != e_dev {
+                        continue;
+                    }
+                }
+            }
+            let Ok(kind) = e.file_type() else {
+                continue;
+            };
+            let is_dir = if kind.is_symlink() {
+                if !dir.cross_symlinks {
+                    continue;
+                }
+                match std::fs::metadata(&path) {
+                    Ok(m) => m.is_dir(),
+                    Err(err) => {
+                        // The C's words, its spelling included.
+                        if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                            eprintln!(
+                                "lsof: WARNING: can't stat({}) symbolc link: {}",
+                                shown(&path),
+                                errno_text(&err)
+                            );
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                kind.is_dir()
+            };
+            let id = backend.identify_path(&path);
+            if identified && id.is_none() {
+                continue;
+            }
+            if dir.recursive && is_dir {
+                stack.push(path.clone());
+            }
+            enter(sel, &path, id);
+        }
+    }
 }
 
 /// `\\?\C:\x` -> `C:\x`; `\\?\UNC\srv\share` -> `\\srv\share`; anything else
@@ -265,7 +483,7 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
             };
             miss.push(format!(
                 "lsof: no {kind} use located: {}",
-                esc.text(display)
+                esc.bytes(display.as_encoded_bytes())
             ));
         }
     }
@@ -505,29 +723,6 @@ fn main() {
             columns,
         } => (selection, format, repeat, columns),
     };
-    // Each path argument as it was typed, kept before it is resolved below.
-    // A backend that identifies files uses the resolved spelling only to
-    // recognise a mount point, and the C keeps the typed one (`aname`) for the
-    // rest: it reports an unlocated argument by it (`no file use located:
-    // ./x`), and compares an AF_UNIX socket's bound path with it. The C's own
-    // resolution for the mount test is `Readlink()`, which leaves a relative
-    // path relative, so `lsof mnt` from the parent is no file system to it:
-    // that difference is item 65, not settled here.
-    let typed_paths = selection.paths.clone();
-    let selection = {
-        let mut sel = selection;
-        // Path selectors are literal prefix/equality matches against the
-        // long-form names the backend reports, so resolve what the user typed
-        // first — otherwise an 8.3 short name (`C:\Users\RUNNER~1\...`, the
-        // hosted-CI %TEMP%), a relative path, or a symlink silently matches
-        // nothing. A path that doesn't resolve is kept as typed; the
-        // unmatched-item reporting handles it.
-        for p in sel.paths.iter_mut().chain(sel.dir_trees.iter_mut()) {
-            canonicalize_selector(p);
-        }
-        sel
-    };
-
     let env = make_env();
     let selection = {
         let mut sel = selection;
@@ -540,15 +735,19 @@ fn main() {
         }
         sel
     };
-    // Resolve the path arguments to file identities, now that a backend exists
-    // to render them the way it renders a row. lsof matches a path by what the
-    // file IS: `lsof /a/hardlink` finds it under its other name, and naming a
-    // directory matches that directory, not everything beneath it. `+d` adds
-    // one level of entries, `+D` the whole tree.
-    // Path arguments whose `stat()` failed, with the errno text, in argument
-    // order. Collected rather than reported inline because whether they are
-    // fatal depends on how many survived.
-    let mut unstattable: Vec<(String, String)> = Vec::new();
+    // The path arguments, as the C's `ck_file_arg()` enters them once its
+    // options are parsed (`arg.c`), and then the `+d`/`+D` directories the
+    // parser checked, expanded now that a backend exists to identify what is
+    // in them. lsof matches a path by what the file IS: `lsof /a/hardlink`
+    // finds it under its other name, and naming a directory matches that
+    // directory, not everything beneath it.
+    //
+    // An argument the C drops — `Readlink()` gave up on it, `+f` found no
+    // file system, `stat()` failed — says why on its own, is no search item,
+    // and makes the run exit 1, as the C's `ErrStat` does (`main.c`: `if (!rv
+    // && ErrStat) rv = LSOF_EXIT_ERROR`). lsof-rs had made a search item of it
+    // as well, so `-V` reported it a second time (DIVERGENCES 62).
+    let mut dropped_an_argument = false;
     let selection = {
         let mut sel = selection;
         // lsof reads a path argument as a FILE SYSTEM name when it matches a
@@ -556,9 +755,11 @@ fn main() {
         // `lsof /dev/vda` means the root filesystem — and then selects every
         // open file on it. `-f` forbids that reading, `+f` forces it and
         // widens the source test to any mount source.
+        // Only a bare path argument is compared with a mount's source, so
+        // only a run that names one asks the backend to spell the sources.
         let mounts = match sel.filesystem_args {
             FilesystemArgs::NeverFilesystem => Vec::new(),
-            _ => env.backend.mounts(),
+            _ => env.backend.mounts(!sel.paths.is_empty()),
         };
         sel.paths_identified = env.backend.identifies_paths();
         // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
@@ -608,202 +809,122 @@ fn main() {
                     t
                 }
             };
+            // A value is UTF-8 (`main` refuses any other argument), so a
+            // mount point that is not can never be it.
             if !mounts.iter().any(|m| {
-                m.dir.trim_end_matches('/') == want.trim_end_matches('/')
+                m.dir
+                    .to_str()
+                    .is_some_and(|dir| dir.trim_end_matches('/') == want.trim_end_matches('/'))
                     || (want == "/" && m.dir == "/")
             }) {
                 eprintln!("lsof: \"-e {e}\" is not a mounted file system.");
                 std::process::exit(1);
             }
         }
-        let mut not_a_filesystem: Vec<String> = Vec::new();
-        for (p, typed) in sel.paths.iter().zip(&typed_paths) {
-            // Matching by name needs the resolved spelling; nothing else does.
-            let shown = if sel.paths_identified { typed } else { p };
-            let devs = filesystems_named(&mounts, p, sel.filesystem_args);
+        let esc = Escaper::for_host();
+        spell_names_as_reported(&mut sel);
+        let identified = sel.paths_identified;
+        let mut survived = 0usize;
+        for typed in sel.paths.clone() {
+            let path = match spell_path(&typed, identified) {
+                Ok(path) => path,
+                Err(e) => {
+                    // A warning: `-w` mutes it, `-Q` does not.
+                    if !sel.omit_unreadable {
+                        eprintln!("lsof: {}", e.message(&esc.text(&typed)));
+                    }
+                    dropped_an_argument = true;
+                    continue;
+                }
+            };
+            // Where files have identities, the argument is reported, and
+            // compared with a socket's bound path, as typed: the C's `aname`.
+            let name: OsString = if identified {
+                typed.as_str().into()
+            } else {
+                path.clone()
+            };
+            let devs = filesystems_named(&mounts, &path, sel.filesystem_args);
             if !devs.is_empty() {
-                sel.path_names.insert(typed.clone());
+                sel.path_names.insert(typed.as_str().into());
                 for dev in devs {
                     sel.path_fs_devices.insert(dev);
                     sel.path_items.push(PathItem {
                         id: None,
                         fs_device: Some(dev),
-                        name: shown.clone(),
+                        name: name.clone(),
                     });
                 }
+                survived += 1;
                 continue;
             }
             if sel.filesystem_args == FilesystemArgs::AlwaysFilesystem {
-                // `+f` promised every argument is a file system; this one is
-                // not, and the C says so and exits 1 rather than falling back.
-                not_a_filesystem.push(shown.clone());
+                // `+f` promised a file system. The C says this is none
+                // (unless `-Q`), drops it, and lists the rest; lsof-rs had
+                // ended the run (DIVERGENCES 76). `safestrprt(av[i], …)`: as
+                // typed, escaped, since a script may pass along a file name
+                // it did not choose.
+                if !sel.quiet {
+                    eprintln!("lsof: not a file system: {}", esc.text(&typed));
+                }
+                dropped_an_argument = true;
                 continue;
             }
-            // Identity follows symlinks itself, so it needs no resolved
-            // spelling, and the resolved one can name nothing: it is built
-            // lossily, so a symlink to a name that is not UTF-8 resolved to a
-            // path with U+FFFD in it, which then failed to stat. The C strips
-            // trailing slashes first, from a path longer than one character
-            // (`arg.c`), so `FILE/` is FILE to it; it still reports `FILE/`.
-            let id = env.backend.identify_path(without_trailing_slashes(shown));
-            if let Some(id) = id.clone() {
-                sel.path_ids.insert(id);
-                sel.path_names.insert(typed.clone());
-            } else if sel.paths_identified {
-                // The C stats every path argument and DROPS the ones that
-                // fail, reporting the errno (`arg.c`, `ck_file_arg`:
-                // `statsafely()` fails -> message, `ErrStat = 1`, the sfile is
-                // freed). Only a backend that resolves identities at all can
-                // tell a failure from "this platform has no identities".
-                let why = std::fs::metadata(p)
-                    .err()
-                    .map(|e| errno_text(&e))
-                    .unwrap_or_else(|| "status error".to_string());
-                unstattable.push((p.clone(), why));
+            if !identified {
+                // Matched by name, as the backend spells names.
+                sel.path_items.push(PathItem {
+                    id: None,
+                    fs_device: None,
+                    name,
+                });
+                survived += 1;
+                continue;
             }
-            sel.path_items.push(PathItem {
-                id,
-                fs_device: None,
-                name: shown.clone(),
-            });
-        }
-        // `+d`/`+D` are directory expansions, not file-system arguments: the C
-        // reaches them through a different path and the mount table plays no
-        // part, so `+d /` is one level of `/`, not the whole root filesystem.
-        let quiet = sel.quiet;
-        let identifies = sel.paths_identified;
-        // Copied out before the closure so it does not borrow `sel`, which it
-        // already borrows mutably for `path_ids`.
-        let cross_filesystems = sel.cross_filesystems;
-        let cross_symlinks = sel.cross_symlinks;
-        let mut expand = |dir: &str, recursive: bool| {
-            let id = env.backend.identify_path(dir);
-            // A `+d`/`+D` argument that cannot be stat'ed is a WARNING here,
-            // not the fatal error a bare path gets: the C reaches these
-            // through `enter_dir()` rather than `ck_file_arg()`, so the run
-            // continues and only the exit status records it. Saying nothing
-            // at all made a typo'd `+d` path look like an empty directory.
-            if id.is_none() && identifies && !quiet {
-                let why = std::fs::metadata(dir)
-                    .err()
-                    .map(|e| errno_text(&e))
-                    .unwrap_or_else(|| "status error".to_string());
-                eprintln!("lsof: WARNING: can't stat({dir}): {why}");
-            }
-            if let Some(id) = id.clone() {
-                sel.path_ids.insert(id);
-                sel.path_names.insert(dir.to_string());
-            }
-            sel.path_items.push(PathItem {
-                id,
-                fs_device: None,
-                name: dir.to_string(),
-            });
-            // The directory's own file system, for the cross-over rule below.
-            // `None` on a backend with no such notion, which switches the rule
-            // off rather than guessing.
-            let dir_fs = env.backend.path_fs_device(dir);
-            let mut stack = vec![std::path::PathBuf::from(dir)];
-            let mut budget = 200_000usize; // a tree walk is not a licence to hang
-            while let Some(d) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&d) else {
-                    continue;
-                };
-                for e in entries.flatten() {
-                    if budget == 0 {
-                        return;
-                    }
-                    budget -= 1;
-                    let path = e.path();
-                    let shown = path.to_string_lossy().into_owned();
-                    // The two cross-over rules, in the C's order (`arg.c`):
-                    //
-                    //   1029  unless -x / -x f, skip an entry whose st_dev is
-                    //         not the directory's — do not leave this file
-                    //         system;
-                    //   1038  unless -x / -x l, skip a symbolic link outright.
-                    //         With it, the link is resolved and the TARGET is
-                    //         what gets searched for.
-                    //
-                    // lsof-rs had the second backwards: `identify_path` uses
-                    // `metadata()`, which follows, so every link was resolved
-                    // and `+d DIR` selected files only a link inside DIR
-                    // pointed at. Measured against the oracle on a directory
-                    // holding one symlink out of it: the C printed nothing,
-                    // lsof-rs printed the target's row.
-                    if !cross_filesystems {
-                        if let (Some(d), Some(e_dev)) = (dir_fs, env.backend.path_fs_device(&shown))
-                        {
-                            if d != e_dev {
-                                continue;
-                            }
-                        }
-                    }
-                    let is_link = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
-                    if is_link && !cross_symlinks {
-                        continue;
-                    }
-                    let id = env.backend.identify_path(&shown);
-                    if let Some(id) = id.clone() {
-                        sel.path_ids.insert(id);
-                        sel.path_names.insert(shown.clone());
-                    }
+            match env.backend.identify_path(Path::new(&path)) {
+                Some(id) => {
+                    sel.path_ids.insert(id.clone());
+                    sel.path_names.insert(typed.as_str().into());
                     sel.path_items.push(PathItem {
-                        id,
+                        id: Some(id),
                         fs_device: None,
-                        name: shown,
+                        name,
                     });
-                    // Only `+D` descends, and never through a symlink — a
-                    // symlinked directory loop would otherwise walk forever.
-                    if recursive && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        stack.push(path);
+                    survived += 1;
+                }
+                None => {
+                    // Named as the C names it, by its `Readlink()`: a link
+                    // to `/nonexistent/f` is `status error on
+                    // /nonexistent/f`, and a `/proc/PID/fd/N` pipe is `status
+                    // error on /proc/PID/fd/pipe:[N]`.
+                    if !sel.quiet {
+                        let why = std::fs::metadata(&path)
+                            .err()
+                            .map(|e| errno_text(&e))
+                            .unwrap_or_else(|| "status error".to_string());
+                        eprintln!(
+                            "lsof: status error on {}: {why}",
+                            esc.bytes(path.as_encoded_bytes())
+                        );
                     }
+                    dropped_an_argument = true;
                 }
             }
-        };
-        {
-            // The closure borrows `sel`; the block ends the borrow so `sel`
-            // can be moved out below.
-            for d in sel.dirs_one_level.clone() {
-                expand(&d, false);
-            }
-            for d in sel.dir_trees.clone() {
-                expand(&d, true);
-            }
         }
-        if !not_a_filesystem.is_empty() {
-            // `safestrprt(av[i], …)`: the argument as typed, escaped, since a
-            // script may pass along a file name it did not choose.
-            let esc = Escaper::for_host();
-            for p in &not_a_filesystem {
-                eprintln!("lsof: not a file system: {}", esc.text(p));
-            }
+        // With no argument left, `ck_file_arg` returns non-zero and `main.c`
+        // answers with `Error()`: the run ends before anything is listed, `+d`
+        // and `+D` or not, as the C entered those while it parsed (DIVERGENCES
+        // 77). So `lsof /a/real/file /nope` still lists the first file (and
+        // exits 1), while `lsof -p 123 /nope` lists nothing at all. `-Q` makes
+        // it non-fatal.
+        if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             std::process::exit(1);
         }
-        // A stat failure is reported per argument, but it is FATAL only when
-        // no path argument survived: `ck_file_arg` returns non-zero on `!ss`
-        // and `main.c` answers with `Error()`, which exits before the listing
-        // runs. So `lsof /a/real/file /nope` still prints the first file's
-        // rows (and exits 1), while `lsof -p 123 /nope` prints nothing at all
-        // — the `-p` never gets a chance, because argument processing already
-        // gave up. `-Q` mutes the message and makes the whole set non-fatal.
-        if !unstattable.is_empty() {
-            if !sel.quiet {
-                // Escaped, as `safestrprt()` prints it.
-                let esc = Escaper::for_host();
-                for (p, why) in &unstattable {
-                    eprintln!("lsof: status error on {}: {why}", esc.text(p));
-                }
-            }
-            let none_survived = unstattable.len() == sel.paths.len()
-                && sel.dirs_one_level.is_empty()
-                && sel.dir_trees.is_empty();
-            if none_survived && !sel.quiet {
-                std::process::exit(1);
-            }
+        for dir in sel.dir_args.clone() {
+            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc);
         }
         sel
     };
+
     let _ = env.elevated; // read on all platforms; used for the hint on Windows.
     if let Some(note) = &env.note {
         eprintln!("lsof: {note}");
@@ -920,7 +1041,11 @@ fn main() {
             // `LSOF_SEARCH_FAILURE`, so `lsof -Q /nope` and `lsof -Q -p 999999`
             // both exit 0. lsof-rs had muted the message alone and still
             // exited 1, which is the half that scripts actually branch on.
-            let code = if run_cycle() > 0 && !quiet { 1 } else { 0 };
+            let code = if (run_cycle() > 0 || dropped_an_argument) && !quiet {
+                1
+            } else {
+                0
+            };
             #[cfg(windows)]
             lsof_backend_windows::exit_now(code);
             #[cfg(not(windows))]
@@ -984,7 +1109,8 @@ mod tests {
         // Path lookups go through the Restart Manager, no elevation needed.
         let (sel, fmt) = parsed(&["C:\\some\\file.txt"]);
         assert!(!wants_privilege_hint(false, &sel, &fmt));
-        let (sel, fmt) = parsed(&["+D", "C:\\temp"]);
+        let temp = std::env::temp_dir().to_string_lossy().into_owned();
+        let (sel, fmt) = parsed(&["+D", &temp]);
         assert!(!wants_privilege_hint(false, &sel, &fmt));
     }
 
@@ -1026,6 +1152,66 @@ mod tests {
         let mut missing = "definitely/not/a/real/path-xyzzy".to_string();
         canonicalize_selector(&mut missing);
         assert_eq!(missing, "definitely/not/a/real/path-xyzzy");
+    }
+
+    /// Where names are matched, the path arguments and the `+D` trees are
+    /// selected by their long form; `+d` stays as typed, as it always has. A
+    /// backend that identifies files keeps every argument as typed, for
+    /// `Readlink()` to spell. The Windows smoke suite found this dropped: `+D
+    /// %TEMP%`, an 8.3 name on the runner, selected nothing.
+    #[test]
+    fn names_are_spelt_as_reported_only_where_names_are_matched() {
+        use super::spell_names_as_reported;
+        use lsof_core::Selection;
+        let missing = "definitely/not/a/real/path-xyzzy".to_string();
+        let dir = std::env::temp_dir();
+        let typed = dir.join(".").to_string_lossy().into_owned();
+        let selection = |identified: bool| Selection {
+            paths: vec![typed.clone(), missing.clone()],
+            dir_trees: vec![typed.clone()],
+            dirs_one_level: vec![typed.clone()],
+            paths_identified: identified,
+            ..Default::default()
+        };
+        let mut sel = selection(false);
+        spell_names_as_reported(&mut sel);
+        let long = {
+            let mut p = typed.clone();
+            super::canonicalize_selector(&mut p);
+            p
+        };
+        assert_ne!(
+            long, typed,
+            "the test needs a spelling canonicalize changes"
+        );
+        assert_eq!(sel.paths, [long.clone(), missing.clone()]);
+        assert_eq!(sel.dir_trees, [long]);
+        assert_eq!(sel.dirs_one_level, std::slice::from_ref(&typed));
+        let mut sel = selection(true);
+        spell_names_as_reported(&mut sel);
+        assert_eq!(sel.paths, [typed.clone(), missing]);
+        assert_eq!(sel.dir_trees, [typed]);
+    }
+
+    /// A walk stops at whichever limit it meets first, entries or the bytes
+    /// of their names, and never goes below either.
+    #[test]
+    fn a_walk_budget_counts_entries_and_name_bytes() {
+        use super::{WalkBudget, WALK_ENTRIES, WALK_NAME_BYTES};
+        let mut b = WalkBudget::new();
+        let mut taken = 0;
+        while b.take(1) {
+            taken += 1;
+        }
+        assert_eq!(taken, WALK_ENTRIES);
+        let mut b = WalkBudget::new();
+        assert!(b.take(WALK_NAME_BYTES - 1));
+        assert!(b.take(1));
+        assert!(!b.take(1), "no bytes left");
+        assert_eq!(b.entries, WALK_ENTRIES - 2);
+        let mut b = WalkBudget::new();
+        assert!(!b.take(WALK_NAME_BYTES + 1), "one name past the limit");
+        assert_eq!((b.entries, b.bytes), (WALK_ENTRIES, WALK_NAME_BYTES));
     }
 
     #[test]
@@ -1084,12 +1270,13 @@ mod tests {
     #[test]
     fn trailing_slashes_go_but_one_stays() {
         use super::without_trailing_slashes as strip;
-        assert_eq!(strip("/d/f/"), "/d/f");
-        assert_eq!(strip("f//"), "f");
-        assert_eq!(strip("/"), "/");
-        assert_eq!(strip("//"), "/");
-        assert_eq!(strip("f"), "f");
-        assert_eq!(strip(""), "");
+        assert_eq!(strip(b"/d/f/"), b"/d/f");
+        assert_eq!(strip(b"f//"), b"f");
+        assert_eq!(strip(b"/"), b"/");
+        assert_eq!(strip(b"//"), b"/");
+        assert_eq!(strip(b"f"), b"f");
+        assert_eq!(strip(b""), b"");
+        assert_eq!(strip(b"nu/\xff/"), b"nu/\xff");
     }
 
     /// A path item `Selection::locate` did not mark is reported in its own

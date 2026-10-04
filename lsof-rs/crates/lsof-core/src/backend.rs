@@ -6,6 +6,9 @@
 //! so the Windows implementation (and any future Linux one) is fully decoupled
 //! from selection and rendering.
 
+use std::ffi::OsString;
+use std::path::Path;
+
 use crate::model::Process;
 use crate::selection::Selection;
 
@@ -49,12 +52,15 @@ pub enum Privilege {
 /// carries in [`OpenFile::fs_device`](crate::model::OpenFile::fs_device).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountEntry {
-    /// The mounted-on directory, e.g. `/` or `/boot`.
-    pub dir: String,
-    /// What was mounted, symlink-resolved — a device path like `/dev/vda`, or
-    /// a name with no file behind it like `tmpfs` or `proc`. `None` when the
-    /// source could not be resolved.
-    pub source: Option<String>,
+    /// The mounted-on directory, e.g. `/` or `/boot`, byte for byte: a path
+    /// argument names the file system only when it is spelt the same.
+    pub dir: OsString,
+    /// What was mounted, as the C's `Readlink()` spells it when it is a path
+    /// — `/dev/vda`, or `/dev/mapper/../dm-0` for a link that is relative —
+    /// or the name itself when it is none, like `tmpfs` or `proc`. `None`
+    /// when the table was read without sources ([`Backend::mounts`]), or a
+    /// path could not be read.
+    pub source: Option<OsString>,
     /// Whether [`Self::source`] names a block device. lsof accepts a mount's
     /// *source* as a file-system argument only when it is one — `lsof /dev/vda`
     /// means the root filesystem, while `lsof tmpfs` means nothing — unless
@@ -116,7 +122,10 @@ pub trait Backend {
     /// name, and `lsof /some/dir` matches that directory and *not* the files
     /// beneath it. A backend that cannot cheaply identify a path returns
     /// `None`, and selection falls back to comparing names.
-    fn identify_path(&self, _path: &str) -> Option<(String, String)> {
+    ///
+    /// A `Path`, not a `str`: on Linux a name may hold any byte but `/` and
+    /// NUL, and a lossy spelling names another file, or none.
+    fn identify_path(&self, _path: &Path) -> Option<(String, String)> {
         None
     }
 
@@ -130,7 +139,7 @@ pub trait Backend {
     ///
     /// `None` where the platform has no such notion, which switches that rule
     /// off rather than guessing at it.
-    fn path_fs_device(&self, _path: &str) -> Option<u64> {
+    fn path_fs_device(&self, _path: &Path) -> Option<u64> {
         None
     }
 
@@ -142,7 +151,13 @@ pub trait Backend {
     /// `ck_file_arg`). The rule itself is portable and lives in the CLI —
     /// what a backend supplies is the table. A platform with no such table
     /// returns an empty one, and every path argument is then a plain file.
-    fn mounts(&self) -> Vec<MountEntry> {
+    ///
+    /// Each mount's [`MountEntry::source`] is filled in only with `sources`:
+    /// only a path argument is compared with one, and spelling a source can
+    /// cost what a user who chose it wants it to cost (the C's `Readlink()`
+    /// re-reads a long chain of links up to 21 times), so a run that names
+    /// no path pays nothing for it.
+    fn mounts(&self, _sources: bool) -> Vec<MountEntry> {
         Vec::new()
     }
 

@@ -128,6 +128,240 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by spelling paths as the C's `Readlink()` does (2026-10-04)
+
+Items 62, 63 and 65, and five more found while measuring them (74 to 78),
+all measured against the C. Two slips of the C's are recorded and not
+reproduced (79, 80), and item 20 turned out to be item 12.
+
+**A path is spelt, not resolved** (items 65, 63). The C reads a path
+argument, a `+d`/`+D` directory and a mount's absolute source through its own
+`Readlink()` (`lib/misc.c`). It reads each prefix of the path as a symbolic
+link and replaces a link by its target, an absolute target replacing what
+came before. Nothing else changes, and the path is read again until it stops
+changing, 20 times at most (glibc's `MAXSYMLINKS`). lsof-rs had used
+`canonicalize()`, and the two differ wherever a path is not already in
+canonical form:
+- A mount point names its file system only spelt as the mount table spells
+  it. `lsof shm` from `/dev`, `./shm`, `shm/.`, `lsof .` from inside,
+  `/dev/shm/.`, `//dev/shm`, `/dev//shm`, and a link whose relative target
+  climbs out through `..`: the C searches for the directory alone, and under
+  `+f` says `not a file system`. lsof-rs had listed every open file on the
+  file system. A block device named relatively (`lsof vda` from `/dev`) is
+  the device node, not the root file system.
+- A `/proc/PID/fd/N` link is the text it holds. `pipe:[N]` is appended to
+  `/proc/PID/fd`, so the C reports `status error on
+  /proc/PID/fd/pipe:[N]`, and the same for an eventfd's `anon_inode:[…]`, a
+  socket's `socket:[N]` and a deleted file's `… (deleted)`. lsof-rs had
+  followed the link: both ends of the pipe, the deleted file, and for an
+  eventfd every `anon_inode` on the host. A link whose text is a path (a
+  file, `/proc/PID/cwd`) finds the same file in both.
+- A `+d`/`+D` entry is named from its directory's `Readlink()`: `+D rel`
+  reports `rel/y` where lsof-rs reported `$PWD/rel/y`, `+d rel-link`
+  reports `rel/y` where lsof-rs reported `rel-link/y`, and `+d deep/a/b/up`
+  reports `deep/a/b/../../../rel/y`. Only `-V`'s lines show it.
+- A name is bytes. A `+d` entry named 0xff is found by its name, and `-V`
+  names its unopened neighbour `nu/\xfe`; lsof-rs had made both names
+  U+FFFD, found neither, and reported two identical lines. The mount table is
+  read as bytes, and a mount's absolute source is spelt by `Readlink()`
+  (`/dev/mapper/../dm-0` for a relative link), as is the argument that names
+  it.
+
+The port is compared with the C's own `Readlink()`, compiled from
+`lib/misc.c` into a harness: 543,840 random spellings in 1,320 random trees
+of links, no difference. 395,520 of them compared the kind of each refusal
+too, and 148,320 ran after the review's change to the port.
+
+**A dropped argument is no search item** (item 62). The C reports an
+argument it cannot use once, on stderr, and drops it: `Readlink()` gave up on
+it, `stat()` failed, or `+f` found no file system in it. The run then exits 1
+(`ErrStat`) unless `-Q` is given. lsof-rs had made a search item of it as
+well, so `-V` reported it a second time, as not located. The same function
+holds three more rules:
+- The status error names the path the C `stat`ed, the `Readlink()` result:
+  for a link to `/nonexistent/f` it is `status error on /nonexistent/f`,
+  where lsof-rs named the link. `Readlink()` has messages of its own (`too
+  many (> 20) symbolic links in readlink() path: loop1`, `readlink() path
+  too long: …`), which `-w` mutes and `-Q` does not.
+- Under `+f`, an argument that names no file system is dropped like a status
+  error, with `not a file system: x` unless `-Q`, and the rest is listed
+  (item 76). lsof-rs had ended the run at the first one, `-Q` or not.
+  `Readlink()` drops an argument before `+f` asks about it.
+- When every bare path is dropped, the run ends before anything is listed,
+  whatever `+d`/`+D` supplied (item 77). lsof-rs had listed the `+d` files.
+
+**`+d` and `+D` are what the C made of them while it parsed** (items 74, 75,
+78). The C's `enter_dir()` runs at the option:
+- A directory it cannot use ends the run: one that is empty or starts with
+  `+` or `-`, that `Readlink()` refuses, that cannot be `stat`ed, or that is
+  not a directory. It prints its message, then the usage, and exits 1 with
+  nothing listed, under `-Q` too and before `-h` is acted on. A `-w` or `-t`
+  given before the option mutes the message; one given after it does not.
+  lsof-rs had warned and listed the rest.
+- The walk obeys the `-x` given so far: `+d DIR -x` follows no link in DIR,
+  and `+d /dev -x f` does not reach `/dev/shm`.
+- Under `-x l` a link to a directory is followed, and `+D` descends into it,
+  since the C stacks the directory by the `stat` that followed the link:
+  `xl/lnk/x` is found. lsof-rs never descended through a link. A loop ends
+  at the kernel's `ELOOP`. lsof-rs keeps a walk budget, which the C lacks,
+  of 200,000 entries or 16 MiB of their names, and now says when it stops a
+  walk (row 81): two links to `.` make 2^40 paths.
+
+The walk's warnings are the C's: `can't opendir`, `can't lstat`, and `can't
+stat(…) symbolc link`, misspelling kept.
+
+**Two of `Readlink()`'s slips are not reproduced** (79, 80). For an empty
+argument the C reads a buffer it never wrote, so `lsof rel/x ''` searches for
+`rel/x` twice. After a re-reading gives up as too long it does not reset its
+link count, so the next argument's chain of 20 links is refused.
+
+**Item 20 was item 12.** "`lsof ANY_PATH +d DIR` prints DIR alone" is the C
+ending its options at the first name. `+d` and `DIR` are two more path
+arguments to it: `+d` a status error, `DIR` a plain directory. With `+d`
+first, the C expands DIR. Two cases had been built on the old reading. One
+said an unusable `+d` lets the run continue, the other that a `+d` keeps
+alive a run whose bare paths all fail. Their outcomes matched the C's
+because a run that lists nothing cannot tell the two readings apart. Both
+now say what the C does.
+
+On Windows, where the C has no say, three of these rules apply too: a `+d`
+or `+D` directory that cannot be `stat`ed or is not a directory ends the
+run; a `-x` given after it does not reach it; and `-Q +f -- x` exits 0. The
+spelling does not change there: paths are still canonicalised, to match the
+long names the backend reports.
+
+### What the gate gained
+
+**A case can start in a directory.** The kit's `diff_run.py` takes a per-case
+`cwd`, with a self-test that a case starts there and that a missing one is an
+infra error, not a verdict. `linux_diff.py` substitutes into it, and drops by
+name a case whose `cwd` names a fixture or a mount that did not come up. Until
+now no case could name a relative path, which is where most of these lived.
+The first CI run failed on the runner itself. CI passes `--oracle ../lsof`, a
+relative path, and `subprocess` resolved it from the case's `cwd`, so the
+first case with one found no binary. Every local run had hidden it: as root
+the harness wraps both binaries in scripts named by absolute paths, and the
+non-root run had been given absolute ones. The runner now resolves a relative
+binary path from where it runs, and a self-test fails without that. The same
+run's Windows smoke suite failed two cases, rightly: `+D %TEMP%` selected
+nothing, and a held file named by its 8.3 path was not located. Windows
+matches names, so its path arguments and `+D` trees must be in the long form
+its backend reports, and the first version had kept that form for `-V`'s
+names only. They are canonicalised again before selection, on a backend that
+matches names alone, and a unit test pins which lists are.
+
+**Fifty-four cases, 387 in all, 0 unexplained.** Fixture R holds the
+spellings and the files they name. The cases cover:
+- the mount point spelt seven ways;
+- `/proc/R/fd/N` for a file, a pipe, an eventfd, a deleted file and a socket;
+- `+d`/`+D` through each kind of link, and with non-UTF-8 entries;
+- the dropped arguments, and each refused `+d`;
+- `-x` before and after the option;
+- `+f`'s drops, and a source that is a name;
+- the descent through a link.
+
+Six of them compare stderr as well (see the review below). Each `+d`/`+D`
+case leaves one entry unlocated, so the order of `-V`'s lines is not in
+question. Two older cases are rewritten (see item 20 above). The suite passes
+as root, and as a user who is not root but has passwordless sudo, with CI's
+relative binary paths. Against master's binary, 46 of the 54 diverge. The
+other eight are seven controls (a file, the mount table's spelling, a cwd
+link, `-Q`, a `-x` before the option twice, a path with no link in it) and
+the rewritten case whose outcome never changed. Cases that need `/dev/shm`
+to be a mount point are skipped, by name, where it is not.
+
+**Unit and integration tests.** The `Readlink()` port has 15 unit tests.
+They drive the algorithm through a table of links, so Miri runs them too.
+The escaper's byte form, the mount table's bytes and sources, `+d`'s
+snapshot of the switches before it, the walk's budget, and where names are
+spelt as the backend reports them have tests of their own. Seven
+integration tests run the binary for what only stderr shows:
+- the status error naming the `Readlink()` result;
+- `Readlink()`'s messages, and what mutes them;
+- each refused `+d`, with the usage;
+- `+f`'s message;
+- the walk's warning;
+- `lsof ''`;
+- a walk stopping at its budget.
+
+**Mutants: 34, all killed but one, whose code is gone.** One was aimed at
+each rule:
+- the port: an absolute target appended, one reading, 21 links allowed,
+  either slash rule of the first component, a doubled slash, both length
+  limits off by one, the prefix read as the component;
+- the CLI: `canonicalize()` back, trailing slashes kept, a dropped argument
+  made a search item or exiting 0, `+f` ending the run, a `+d` keeping a run
+  alive, `-Q` muting `Readlink()`, the typed path named, `-V` lossy;
+- the walk: lossy names, no descent through a link, the final `-x` or `-w`
+  used for either;
+- `+d` at parse time: failures ignored, `-w` ignored, a file accepted, an
+  option-like value accepted, the typed spelling kept;
+- the mount table: sources canonicalised, a name read as a path, directories
+  lossy;
+- the escaper: bytes made U+FFFD.
+
+Two survived the first run: a doubled slash after an assembly ending in one,
+now killed by a unit test, and a mount source read as a path, killed by the
+`tmpfs` case added for it. The one left cut a link's target at 4096 bytes,
+as the C reads it; Linux never returns one that long, so the cut was dead,
+and it is gone.
+
+**One-off measurements, not gates.** The port was compared with the C's own
+`Readlink()`, as above. The fuzz targets for the mount parser, which now
+takes bytes, and for the argument parser, which now checks a `+d` as it
+parses, each ran two minutes without a finding. And `+D /usr` (84,554
+entries) takes 0.49 s and 63 MB, where master took 0.45 s and 63 MB and the
+C 0.94 s and 25 MB.
+
+**The review.** An independent sweep ran about 3,700 spellings against the C
+and master, and read the change. It used a private mount namespace with
+mounts of its own, ran as root and as `nobody`, and added 2,400 random
+spellings. Everything matched except the differences recorded above and
+these:
+- **Windows selected by the short name (F1).** The step that turned path
+  arguments into the long names the Windows backend reports had moved into
+  `-V`'s names only, so `+D %TEMP%` selected nothing. The smoke suite failed
+  on it in the same CI run, and it is fixed (above).
+- **A mount source could slow every run (F2).** `Readlink()` on a source a
+  user chose (a FUSE name of 3,894 bytes ending in 20 links) cost 2 s per
+  mount on every run; master's `canonicalize()` cost 0.1 s. Now only a run
+  that names a path spells the sources, and a reading skips the part of a path
+  the last reading found to hold no link. With three such mounts, a run with a
+  path takes 0.34 s (master 0.33 s, the C 11.8 s), and any other run 0.01 s
+  (master 0.39 s). The skip changes no answer: 148,320 more random spellings
+  matched the C's `Readlink()`.
+- **A tree of links to itself took a gigabyte (F5).** Under `-x l`, `+D` now
+  follows links, so names grow, and 200,000 entries reached 1.1 GB in 5 s. The
+  walk also stops at 16 MiB of names now, and says when it stops (row 81): the
+  same tree takes 0.13 s and 26 MB.
+- **Tests assumed the temporary directory's path had no link in it (F6),**
+  which on macOS it has. Four new tests and two older ones now use the
+  canonical directory.
+- **`+d` with no value (P8)** printed lsof-rs's own words. It prints the C's
+  now, muted by an earlier `-w`.
+- **Only tests of lsof-rs's own strings checked stderr (F7).** The kit's
+  runner now takes `with_stderr` per case. Six cases compare the status error
+  and `not a file system` with the C's, under `-w`, which keeps the C's
+  warnings about the host out of them (row 87).
+- Recorded and not fixed: the walk's warnings are printed after parsing, so
+  a run that ends during parsing loses them (row 82), and the parser reports
+  only its first error (83). Seven differences were on master too: the mount
+  table (84 to 87), `-e` (88), `/proc/self` (89, a C-DEFECT) and `-F` with
+  `-t` (90).
+
+Twelve more mutants were aimed at the review's fixes:
+- the skip over plain prefixes, kept after an absolute or a relative link,
+  or switched off;
+- sources never spelt;
+- the walk's byte limit ignored, its warning dropped or printed under `-w`;
+- `+d`'s old message;
+- names never, or always, spelt as the backend reports them;
+- the typed path named in a status error.
+
+Eleven are killed, the last one by three of the new stderr cases as well as
+its integration test. One survives by design: spelling the sources on every
+run changes no answer, only the time, which the measurement above covers.
+
 ## Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND (2026-10-03)
 
 Items 49, 50, 51 and 69, all measured against the C.
@@ -2583,7 +2817,7 @@ likely right; it is a compatibility decision, not a backend phase.
 
 | 19 | a path argument that cannot be `stat()`ed is reported and **dropped**, and if NO argument survived the run exits before listing anything; `-Q` mutes both the message and the status | ~~reported exit 1 but still printed what the other selectors matched, and `-Q` muted only the message~~ **resolved 2026-09-12** | see "Fixed by making the search-item contract the C's" above. This entry was also imprecise: it said the failure is fatal full stop. It is fatal only when EVERY path argument fails — `lsof /a/real/file /nope` prints the first file's rows and exits 1, and lsof-rs already matched there. |
 
-| 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. **C-DEFECT**, not reproduced; the `search-plus-d-supplies-a-surviving-item` case names `{ASUB}`, which is empty, precisely so it measures the abort rule and not this. |
+| 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. ~~**C-DEFECT**, not reproduced~~ **re-diagnosed 2026-10-04: item 12, not a defect.** The C ends its options at the first name, so in `lsof ANY_PATH +d DIR` the words `+d` and `DIR` are two more path arguments: `+d` a status error, `DIR` a plain directory, whose entries are no search items. With `+d` first the C expands DIR. See "Fixed by spelling paths as the C's `Readlink()` does" above. |
 
 | 21 | `-c`, `-u` and `-g` are **search items**: a value that matches nothing exits 1, and `-V` says `command not located:` / `no user use located:` etc. | ~~they select, but never counted as unlocated, so the run exits 0~~ **resolved 2026-09-25** | every one of the C's ten `not located` messages audited; `-c`, `-u`, `-g`, `-p ^`, each `-i` specification and the order of the lines fixed, `-s` and `-K` recorded as items 32 and 33. See "Fixed by making every search item one" above. |
 
@@ -2633,10 +2867,10 @@ likely right; it is a compatibility decision, not a backend phase.
 | 59 | `-F M`, the task command, is printed **raw** (`print.c`: `printf("%c%s%c", LSOF_FID_TCMD, Lp->tcmd, Terminator)`), while `c` and the TASKCMD column are escaped | escaped as `c` is | **C-DEFECT, not reproduced — found 2026-10-03** by the item 33 review sweep. Any process can name a thread, so the C's `-F M` lets it write an escape sequence to the terminal of whoever runs lsof. No case pins it: fixture I's thread names are plain. |
 | 60 | a path argument matches a file by **identity alone** (device and inode), and an AF_UNIX socket by the path it is bound to: that socket file's identity, else the path as typed | ~~falls back to the NAME text for every row, so a file with the same path in another mount namespace (a task's private tmpfs over DIR) is printed, and then reported `no file use located`, exit 1~~ **resolved 2026-10-03** | see "Fixed by taking the owner from the effective uid, and finding a file by what it is" above. Wider than this row said: the fallback was meant for sockets and never found one, since a socket's NAME carries its `type=` tail, so `lsof /run/x.sock` found nothing. |
 | 61 | `-J`/`-j` under `-K` give a task's object `"tid"` and `"task_cmd"` (`print.c`) | neither: a task's object repeats its process's | **OPEN — found 2026-10-03** by the item 33 review sweep. The two JSON documents differ in schema anyway (never byte-compared), but here a task cannot be told from its process. |
-| 62 | a path argument that cannot be `stat`ed is reported once, by its status error, and dropped: `-V` says nothing more of it | `-V` also prints `no file use located: <arg>` for it, after the status error; the exit status is 1 in both | **OPEN — found 2026-10-03** while measuring item 60, and on master too. Item 19 dropped the argument from the search, not from the `-V` report. |
-| 63 | a `+d`/`+D` directory is spelt as `Readlink()` leaves it, so a relative one stays relative (`no file use located: rel/x`) and a symlinked one is resolved | `+D` resolves the directory to an absolute path (`$PWD/rel/x`); `+d` keeps it as typed, symlinks included | **OPEN — found 2026-10-03** while measuring item 60. Measured with `rel-link` a symlink to `rel`: the C reports `rel/x` for both `+d rel-link` and `+D rel-link`; lsof-rs reports `rel-link/x` and `$PWD/rel/x`. Only the `-V` spelling of entries; which files are found does not change. Item 60 kept bare arguments as typed, and left these. |
+| 62 | a path argument that cannot be `stat`ed is reported once, by its status error, and dropped: `-V` says nothing more of it | ~~`-V` also prints `no file use located: <arg>` for it, after the status error; the exit status is 1 in both~~ **resolved 2026-10-04** | found 2026-10-03 while measuring item 60, and on master too; see "Fixed by spelling paths as the C's `Readlink()` does" above. Wider than this row said: an argument `Readlink()` gives up on, or that `+f` finds no file system in, is dropped the same way, and the status error names the path `Readlink()` made. |
+| 63 | a `+d`/`+D` directory is spelt as `Readlink()` leaves it, so a relative one stays relative (`no file use located: rel/x`) and a symlinked one is resolved | ~~`+D` resolves the directory to an absolute path (`$PWD/rel/x`); `+d` keeps it as typed, symlinks included~~ **resolved 2026-10-04** | see "Fixed by spelling paths as the C's `Readlink()` does" above. Found 2026-10-03 while measuring item 60. Measured with `rel-link` a symlink to `rel`: the C reports `rel/x` for both `+d rel-link` and `+D rel-link`; lsof-rs reports `rel-link/x` and `$PWD/rel/x`. Only the `-V` spelling of entries; which files are found does not change. Item 60 kept bare arguments as typed, and left these. |
 | 64 | a path argument is **located as a matching file is examined** (`is_file_named()` sets `Sfile[].f`), before `-a` decides what prints: `lsof -a -p P -d 0 FILE`, P holding FILE on fd 3, lists nothing and exits 0 | ~~asked only the rows it printed, so that run said `no file use located` and exited 1, for a socket named by its path as for a file~~ **resolved 2026-10-03** | found by the item 60 review sweep, on master too; see "Fixed by taking the owner from the effective uid, and finding a file by what it is" above. |
-| 65 | a path argument is resolved by the C's own `Readlink()`, which only replaces symlink components | lsof-rs resolves with `canonicalize()` to recognise a mount point, and stats the typed spelling | **OPEN — found 2026-10-03** by the item 60 review sweep, all on master too:<br>• `mnt`, `./mnt` or `mnt/.` naming a mount point from its parent: `Readlink()` leaves it relative, so the C reads a plain directory; lsof-rs reads a file system and lists everything on it.<br>• `/proc/PID/fd/N`: the C resolves the magic link as text, `pipe:[N]`, and fails to `stat` it; lsof-rs follows it and finds the pipe, the deleted file, even every `anon_inode` fd.<br>• a `+d`/`+D` entry whose name is not UTF-8: the walk converts names lossily, so it identifies nothing.<br>A fourth, `FILE/`, a trailing slash on a file, is fixed: lsof-rs drops it before the `stat`, as the C does (`arg.c`), where it had failed with `Not a directory`. |
+| 65 | a path argument is resolved by the C's own `Readlink()`, which only replaces symlink components | ~~lsof-rs resolves with `canonicalize()` to recognise a mount point, and stats the typed spelling~~ **resolved 2026-10-04**, all three below | see "Fixed by spelling paths as the C's `Readlink()` does" above. Found 2026-10-03 by the item 60 review sweep, all on master too:<br>• `mnt`, `./mnt` or `mnt/.` naming a mount point from its parent: `Readlink()` leaves it relative, so the C reads a plain directory; lsof-rs reads a file system and lists everything on it.<br>• `/proc/PID/fd/N`: the C resolves the magic link as text, `pipe:[N]`, and fails to `stat` it; lsof-rs follows it and finds the pipe, the deleted file, even every `anon_inode` fd.<br>• a `+d`/`+D` entry whose name is not UTF-8: the walk converts names lossily, so it identifies nothing.<br>A fourth, `FILE/`, a trailing slash on a file, is fixed: lsof-rs drops it before the `stat`, as the C does (`arg.c`), where it had failed with `Not a directory`. |
 | 66 | a socket's bound path ends at its first space, TAB or `:`, where `get_fields()` ends a field: its NAME is `…/sp` for `…/sp ace.sock`, the full path finds nothing, and a file at the cut path finds the socket | keeps and shows the whole path, and finds the socket by it | **C-DEFECT, not reproduced — found 2026-10-03** by the item 60 review sweep. Ledgered as `path-unix-socket-with-a-space-found-in-lsof-rs`, `path-unix-socket-cut-at-a-space-in-the-c`, `path-unix-socket-with-a-colon-found-in-lsof-rs` and `path-unix-socket-cut-at-a-colon-finds-another-in-the-c`; the NAME difference was on master too. Real names have a `:`, such as an ssh control socket's (`%r@%h:%p`), and the C prints those cut; but ssh binds a temporary name and then links it into place, so the bound path names nothing and neither binary finds one by its path. |
 | 67 | an argument typed exactly `socket` finds every unbound AF_UNIX socket: with no bound path, the C compares the fd link's text, cut at `:`, with the argument (`dsock.c`) | finds none | **C-DEFECT, not reproduced — found 2026-10-03** by the item 60 review sweep. Any stat-able file called `socket` in the cwd will do. |
 | 68 | a numeric owner is printed lossily: the USER column keeps 8 digits (`printuid()`, `USERPRTL`), and `-F u` and the JSON `uid` print it as a signed `int`, so 3000000000 is `30000000` and `u-1294967296` | every digit, unsigned | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. Owners that large come from user-namespace UID ranges. Arguably a C-DEFECT; the maintainer's call. |
@@ -2645,6 +2879,23 @@ likely right; it is a compatibility decision, not a backend phase.
 | 71 | USER is padded by **bytes**, so `jöhn` fills a 5-wide column | pads by characters after sizing by bytes, so a multibyte name is shifted one column per extra byte | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. USER is the one padded column that can hold multibyte text unescaped. |
 | 72 | under `-K -a`, a **zombie leader's** tasks are still read, with the leader's owner, so they locate `-u` and `-p` though they fail the AND | reads tasks only for processes that pass the AND, and has no entry for a zombie, so `user ID not located` (exit 1) where the C exits 0 | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. Only a zombie leader shows it; item 33's task scope holds for a live process, which keeps its own entry. |
 | 73 | a `-u` error the C finds while it parses — a login name `getpwnam()` cannot resolve, or a login name and a UID both selected and excluded — ends the run before `-h`, `-v` or `-F ?` is acted on: nothing on stdout, exit 1 | resolves login names after acting on those, so `lsof -u nosuchuser -h` prints the help and exits 0. A numeric UID's conflict is found while parsing, as in the C (`-u ,^ -h` exits 1) | **OPEN — found 2026-10-03** by the item 49/69 review, and on master for every spelling with a name. Resolving a name needs the backend, which the run builds after `-h`, `-v` and `-F ?` are handled. |
+| 74 | a `+d`/`+D` the C cannot use ends the run while it parses (`enter_dir()` fails, then `usage()`): one that is empty or starts with `+` or `-`, that `Readlink()` refuses, that cannot be `stat`ed, or that is not a directory. Its message, unless a `-w` or `-t` came before it, then the usage; exit 1, nothing listed, under `-Q` too and before `-h` | ~~warned (`can't stat(dangle)`), listed the rest, and `-V` reported the directory~~ **resolved 2026-10-04** | found 2026-10-04 while measuring item 63, on master too; see "Fixed by spelling paths as the C's `Readlink()` does" above. A case had been written to the old reading, and matched because its run listed nothing. |
+| 75 | a `+d`/`+D` is expanded at the option, so its walk obeys the `-x` given so far, and its warnings the `-w` given so far: `+d DIR -x` follows no link in DIR | ~~applied the run's final `-x` to every expansion~~ **resolved 2026-10-04** | found 2026-10-04 while measuring item 63, on master too; see above. |
+| 76 | under `+f`, an argument that names no file system is reported (unless `-Q`) and dropped, and the rest is listed; the run exits 1, or 0 under `-Q` | ~~ended the run at the first such argument, listing nothing, `-Q` or not~~ **resolved 2026-10-04** | found 2026-10-04 while measuring item 65, on master too; see above. |
+| 77 | when every bare path argument is dropped, the run ends before anything is listed (`ck_file_arg()` fails, then `Error()`), whatever `+d`/`+D` supplied | ~~listed the `+d`/`+D` files~~ **resolved 2026-10-04** | found 2026-10-04 while measuring item 62, on master too; see above. The case that said otherwise had put the bare path first, where the C's options end (item 12). |
+| 78 | under `-x l`, `+D` descends into a directory reached through a symbolic link, stacking it by the `stat` that followed the link; a loop ends at the kernel's `ELOOP` | ~~never descended through a link~~ **resolved 2026-10-04** | found 2026-10-04 while measuring item 63, on master too; see above. lsof-rs keeps a walk budget of 200,000 entries, which the C lacks: two links to `.` make 2^40 paths. |
+| 79 | `lsof ''`: `Readlink("")` never enters its loop, and compares and copies a buffer it never wrote — in practice the previous argument's spelling, so `lsof rel/x ''` searches for `rel/x` twice | `stat`s the empty path: `status error on : No such file or directory`, and drops it | **C-DEFECT, not reproduced — found 2026-10-04** by comparing `Readlink()` with its port. An integration test pins lsof-rs's answer; no differential case, as the C's is undefined. |
+| 80 | `Readlink()`'s link count (`Readlink_sx`) is not reset when a re-reading gives up as too long, so the next argument starts with links counted: after such an argument, a chain of exactly 20 links is refused (`too many (> 20) symbolic links`) | counts each argument's links on its own | **C-DEFECT, not reproduced — found 2026-10-04** reading `lib/misc.c`, then measured. |
+| 81 | a `+d`/`+D` tree is walked whole, whatever its size: two links to `.` under `-x l` make 2^40 paths, and the C does not finish | stops after 200,000 entries or 16 MiB of their names, and says so: `WARNING: stopped walking DIR after N entries`, unless a `-w` came before the option | **DECISION — 2026-10-04**, from the item 62 review. The entry limit is older, and was silent. Once `+D` followed links under `-x l` (78), 200,000 entries of a tree of links to itself, each name longer than the last, reached 1.1 GB in 5 s; the byte limit stops it at 26 MB in 0.13 s. A tree past either limit is searched in part, and the warning says so. |
+| 82 | a `+d`/`+D` walk's warnings (`can't opendir`, `can't lstat`, `can't stat(…) symbolc link`) are printed as the C parses its options: before a bare path's status error, and before an option error, `-h`, `-v` or `-F ?` ends the run | walks after parsing and after the bare paths, so its warnings follow their status errors, and a run that ends during parsing prints none | **OPEN — found 2026-10-04** by the item 62 review. stderr only. The walk needs the backend to identify what it finds, and the run builds that after parsing. |
+| 83 | every option error the C finds is printed before the usage: `lsof -x +d nonexist` adds `-x must accompany +d or +D`, `lsof +d dangle -p abc` prints both | prints the first error and stops | **OPEN — found 2026-10-04** by the item 62 review. stderr only: exit 1 and nothing listed in both. It was so before this change too (`-p abc -x z`). |
+| 84 | a bind mount of a block device (the same device on another directory) is a second search item: `lsof /dev/vda` and `+f -- /dev/vda` locate one and report the other, `no file system use located: /dev/vda`, exit 1 | one item per device: exit 0 | **OPEN — found 2026-10-04** by the item 62 review, on master too. Common in containers. Arguably the same bookkeeping as item 17's two names for one file; the maintainer's call. |
+| 85 | the mount reader keeps the first row for each mounted-on directory but `/` (`dmnt.c`), so after an overmount the covering mount's source names nothing: `+f -- SOURCE` is `not a file system` | keeps every row: the covering source names the file system | **OPEN — found 2026-10-04** by the item 62 review, on master too. |
+| 86 | each mount directory is spelt by `Readlink()` as well (`dmnt.c`), so a mount reached through a link that now stands in its path is named by the link's spelling | compares the kernel's spelling | **OPEN — found 2026-10-04** by the item 62 review, on master too. Needs a directory replaced by a link after the mount. |
+| 87 | for each mount directory it cannot `stat`, the C warns (`WARNING: can't stat() TYPE file system DIR`, then `Output information may be incomplete.`), and a source `Readlink()` gives up on prints its message, under `-f` too; `-w` mutes both | says nothing | **OPEN — found 2026-10-04** by the item 62 review. stderr only. Seen by a user who is not root on a host with mounts under directories they cannot enter; the six stderr cases pass `-w` for this reason. |
+| 88 | `-e` takes its path through `Readlink()`, and skips both `Readlink()` and `stat()` for the exempt mount's source: `-e LINK-TO-A-MOUNT` is accepted, and `lsof -e MNT SOURCE-OF-MNT` exits 0 | compares the `-e` path as typed, refusing a link; `lsof -e MNT SOURCE` exits 1, `no file system use located` | **OPEN — found 2026-10-04** by the item 62 review, on master too. |
+| 89 | `/proc/self/...` is read by a child the C forks to read links (`doinchild()`), so `self` is that child: `lsof /proc/self/fd/0 </dev/null` is a status error on the child's pipe | `self` is lsof: the same run lists every user of `/dev/null` | **C-DEFECT, not reproduced — found 2026-10-04** by the item 62 review. |
+| 90 | `-F`, `-J` or `-j` with `-t` is refused: `-F and -t are mutually exclusive`, exit 1 | accepted, exit 0 | **OPEN — found 2026-10-04** by the item 62 review, on master too. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of

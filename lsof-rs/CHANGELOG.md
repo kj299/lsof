@@ -28,6 +28,30 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   so `lsof /tmp/$'\xff'` exited 101; it is now refused in one line, exit 1.
 
 ### Changed
+- **A path names a file system only as the mount table spells it**, as in the
+  C, which spells a path argument with its own `Readlink()`: only symbolic
+  links are replaced (DIVERGENCES 65). `lsof shm` from `/dev`, `lsof .` from
+  inside a mount point, `/dev/shm/.` and `//dev/shm` name the directory
+  alone, where lsof-rs had listed every open file on the file system; use
+  `lsof /dev/shm` for that. A `/proc/PID/fd/N` link is read as the text it
+  holds, so a pipe, a socket, an eventfd or a deleted file behind it is a
+  status error, as in the C, where lsof-rs had followed the link.
+- **A `+d`/`+D` directory the C cannot use ends the run** (DIVERGENCES 74):
+  one that is empty or starts with `+` or `-`, that cannot be `stat`ed, or
+  that is not a directory. The message is printed, then the usage, and the run
+  exits 1 with nothing listed, under `-Q` too and before `-h`. lsof-rs had
+  warned and listed the rest. **This changes Windows too.**
+- **A `+d`/`+D` obeys the `-x` given before it**, as the C expands it where
+  it stands (DIVERGENCES 75): `+d DIR -x` follows no link in DIR. Under
+  `-x l`, `+D` now descends into a directory reached through a link
+  (DIVERGENCES 78). **This changes Windows too.**
+- **When every bare path argument is dropped, the run ends** (DIVERGENCES
+  77), whatever `+d`/`+D` supplied, as in the C.
+- **A `+d`/`+D` walk that stops at lsof-rs's limit says so** (DIVERGENCES
+  81): `WARNING: stopped walking DIR after N entries`, unless `-w` came
+  first. The limit, which the C does not have, is 200,000 entries or, new,
+  16 MiB of their names: a tree of links to itself under `-x l` had reached a
+  gigabyte. **This changes Windows too.**
 - **`-a` with nothing to AND is refused**, as the C refuses it (DIVERGENCES
   50): `lsof: no select options to AND via -a`, exit 1. A bare `-a`, or one
   with only exclusions (`-a -p ^1`), `-K i` or `-s`, had listed the whole
@@ -156,6 +180,24 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   LESSONS #061, #062.
 
 ### Fixed
+- **An argument the C drops is no search item** (DIVERGENCES 62). It is
+  reported once on stderr (`status error on …`, a `readlink()` message, or
+  `not a file system` under `+f`), the run exits 1 unless `-Q`, and `-V` no
+  longer reports it again as not located. The status error names the path the
+  C `stat`s, a link's target where a link was given.
+- **`+f` drops an argument that names no file system and lists the rest**
+  (DIVERGENCES 76), where lsof-rs had ended the run at the first one; under
+  `-Q` it exits 0. **This changes Windows too.**
+- **`+d`/`+D` entries are named as the C names them** (DIVERGENCES 63): from
+  the directory's own spelling, so `+D rel` reports `rel/y`, not
+  `$PWD/rel/y`, and `+d rel-link` reports `rel/y`.
+- **`+d`/`+D` with nothing after them** say `+d not followed by a directory
+  path`, the C's words, muted by an earlier `-w`.
+- **A run that names no path reads no mount source.** Only a path argument is
+  compared with one, and spelling a source a user chose could be made slow.
+- **A `+d`/`+D` entry whose name is not UTF-8 is found** (DIVERGENCES 65),
+  and `-V` names one it did not find byte for byte (`nu/\xfe`). Names had been
+  made lossy, which found nothing. The mount table is read as bytes too.
 - **Repeated `-d` options add up**, as in the C (DIVERGENCES 51): `-d 3 -d 4`
   selects both fds, where lsof-rs kept only the last `-d`. The C's names are
   accepted, `fd` (every numbered fd) among them, a range needs its low end
