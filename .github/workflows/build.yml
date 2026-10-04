@@ -20,8 +20,14 @@ name: C/C++ CI
 # too-narrow look identical from outside the run). Anything that can alter the
 # oracle — C sources, Configure, Makefile.am, the man pages, this file — must
 # still trigger these jobs.
+#
+# Pushes run on master only, like lsof-rs-ci.yml and porting-kit.yml: a push to
+# a branch with an open PR ran every job twice, once for the push and once for
+# the pull_request event on the same commit (2026-10-04: runs 37207640123 and
+# 37207697077). The PR run is the one that gates the merge.
 on:
   push:
+    branches: [ "master" ]
     paths-ignore:
       - 'porting-kit/**'
       - 'lsof-rs/**'
@@ -35,12 +41,19 @@ on:
       - '.github/workflows/lsof-rs-*.yml'
       - '.github/workflows/porting-kit.yml'
 
+# The jobs only read the tree.
+permissions:
+  contents: read
+
+# A job takes 3-5 minutes (2026-10-04). The bound is for a hung test, which
+# otherwise holds the runner for GitHub's six-hour default.
 jobs:
   linux:
     strategy:
       matrix:
         os: [ubuntu-24.04, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v5
     - name: install dependencies
@@ -75,6 +88,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v5
     - name: make the hostname resolution round-trip (LTsock)
