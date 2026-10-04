@@ -3819,3 +3819,74 @@ finding it is supposed to produce.
   `harnesses/gate-mutation/mutate_gates.py`; `harnesses/ci/porting-ci.template.yml`;
   `skeleton/crates/cli/src/main.rs`; `harnesses/platforms/platforms.toml`;
   `Makefile` · check-kit; `.github/workflows/lsof-rs-ci.yml`.
+
+---
+
+## 083. The kill tables were prose: 233 mutants, and not one could be run again
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (the Linux parity arc, 2026-09-25 → 2026-10-04)
+- **What happened:** PLAYBOOK Phase 4 asks each change to mutate the cases it
+  wrote and record a kill table (LESSONS #026). lsof-rs did, sixteen times:
+  DIVERGENCES.md records at least 233 mutants, every one killed. Each change
+  wrote its own throwaway script in a scratch directory, eight different
+  scripts in eight shapes, and none was committed. So the tables are claims:
+  no one can run them again, and a later change that left one of those cases
+  checking nothing would go unnoticed. LESSONS #059 had asked for a helper
+  "when the kit grows a mutation harness" and deferred it; the kit had one
+  for its own gates, `mutate_gates.py`, and none for a port. Each script
+  re-learned #059 (an edit that does not apply reads as a survivor) and #066
+  (a mutant left in place reads as a kill). The retrospective converted the
+  last change's 30 mutants to a file and ran them against master: all 30
+  killed, and the table had moved since the PR recorded it — 17 killed by the
+  differential alone, 12 by it and a unit test, 1 by unit tests alone, where
+  the PR said 18, 11 and 1, because a unit test added in review caught one
+  more. Only a table that runs again can show that.
+- **The rule.** A mutant is evidence only if it can be run again. Commit the
+  mutants with the change, as data, beside the cases they prove; run them
+  with a harness that refuses an edit that does not apply, restores every file
+  it touched and checks it did, and rebuilds at the end so no mutant's binary
+  is left behind.
+- **Kit change:** `harnesses/port-mutation/mutate_port.py` (new): a mutants
+  file (TOML: build, gates, mutants as `file`/`old`/`new` edits), verdicts
+  KILLED / SURVIVED / DOES-NOT-APPLY / NOBUILD / INFRA, a baseline that must be
+  green, restoration checked by hash and on SIGTERM, `--apply-only` for a
+  per-PR check that every mutant still fits the code. Its verdict function is
+  in the mutation table, with all 16 of its decisions pinned. The module skill
+  names it; lsof-rs commits its first mutants file,
+  `lsof-rs/mutants/mapped-rows.toml`, and CI checks that its mutants apply.
+- **Section amended:** `harnesses/port-mutation/mutate_port.py`;
+  `harnesses/gate-mutation/mutate_gates.py`; `Makefile` · check-kit;
+  `skills/porting-kit-module/SKILL.md`; `.github/workflows/lsof-rs-ci.yml`.
+
+---
+
+## 084. The differential fuzzer could not reach the input this port parses
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (the Linux parity arc) and this kit
+- **What happened:** `diff_fuzz.py`, which the operating guide calls "the
+  highest-value single addition for a security-critical port", fuzzes stdin,
+  with argv fixed. lsof does not read stdin; its parser is its command line.
+  So the harness could not be pointed at this port, and the option-parsing
+  divergences of the arc were found by hand, one measured case at a time,
+  across PRs #112 to #118: getopt's spellings, a `+` word as a cluster, an
+  empty list item, a value attached or in the next word. The retrospective
+  spiked an argv fuzzer: random option words drawn from the coverage
+  inventory, anchored to one fixture process with `-a -p PID`. Against the
+  lsof-rs built from the merge before PR #112, 1,500 vectors in about a
+  minute found 52 distinct divergences, 34 of which the following eight days
+  then fixed by hand. Against master it found nothing new: every signature
+  was a recorded row.
+- **The rule.** Point the differential fuzzer at the surface the port parses.
+  For a command-line tool that is argv, and the C's own option letters, from
+  the coverage gate's inventory, are its alphabet.
+- **Kit change:** `diff_fuzz.py` gains an argv mode: `--argv-inventory`
+  (options and which take a value, from a coverage-gate inventory),
+  `--argv-value`, `--argv-exclude`, `--argv-words`. Vectors put options
+  first and at most one operand last, the order getopt reads; minimizing drops
+  whole words; a finding is saved as `<fp>.argv`. `--max-time` alone now runs
+  for its time (a default of 1000 iterations had capped every timed run), and
+  a zero budget is refused. The diff-fuzz skill describes the mode.
+- **Section amended:** `harnesses/diff-fuzz/diff_fuzz.py`;
+  `skills/porting-kit-diff-fuzz/SKILL.md`.

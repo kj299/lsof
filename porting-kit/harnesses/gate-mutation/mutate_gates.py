@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082, #083 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
@@ -118,6 +118,14 @@ MUTATIONS = [
      "new": "    return False",
      "why": "nothing is ever a finding: the fuzzer reports clean on divergence",
      "cmd": ["harnesses/diff-fuzz/diff_fuzz.py", "--self-test"]},
+
+    # The port's own mutants (LESSONS #083). The verdict that calls a mutant
+    # killed: neutralized, a kill table of survivors reads all green.
+    {"gate": "port-mutation", "file": "harnesses/port-mutation/mutate_port.py",
+     "old": '    if killers:\n        return "KILLED"',
+     "new": '    if True:\n        return "KILLED"',
+     "why": "every mutant counts as killed: a kill table of survivors reads all green",
+     "cmd": ["harnesses/port-mutation/mutate_port.py", "--self-test"]},
 
     {"gate": "unsafe-audit", "file": "harnesses/unsafe-audit/audit_unsafe.py",
      "old": "        break  # first real code line: the run is over, not documented\n"
