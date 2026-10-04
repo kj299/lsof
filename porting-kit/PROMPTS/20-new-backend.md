@@ -47,7 +47,8 @@ The `[PROJECT]` port ships on `[PLATFORM A]`. Add a `[PLATFORM B]` backend.
    blocker under the kit's own rule, whether or not the crate has `unsafe`.
 
 4. **Create the ledgers on day one, not at 1.0** — `progress.json`, the
-   divergence ledger, the fuzz targets — and run
+   divergence ledger, the fuzz targets, and a sanitizer step that names the new
+   crate (`cargo … -p [PROJECT]-backend-[b]`) — and run
    `harnesses/ledgers/check_ledgers.py` in CI so their absence fails the build
    (LESSONS #019). The first backend shipped 1.0 without any of them.
 

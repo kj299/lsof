@@ -37,6 +37,9 @@ repo-root `porting-kit/`; if you vendor it elsewhere, adjust the paths inside ea
 - **`porting-kit-module`** — the six-gate loop for one module: spike-if-hazardous →
   port → differential → fuzz → sanitize → unsafe-audit → pin+merge. Advances
   `progress.json`.
+- **`porting-kit-diff-fuzz`** — once the matrix is green, fuzz the port against the
+  C oracle on shared inputs; triage each distinct divergence and pin its reproducer
+  as a matrix case.
 - **`porting-kit-audit`** — run the full safety-gate suite; report a gate-status
   table; refuse a "safe" verdict unless every applicable gate is green or a
   divergence is ledgered. Gate every merge/release with it.
@@ -48,7 +51,7 @@ repo-root `porting-kit/`; if you vendor it elsewhere, adjust the paths inside ea
 ```
 kickoff
   → (cflaw-scan  ∥  oracle)
-  → for each leaf in topological order:  module  →  audit
+  → for each leaf in topological order:  module  →  diff-fuzz  →  audit
   → retrospective   (patch the kit + LESSONS; keep skills in integrity)
 ```
 

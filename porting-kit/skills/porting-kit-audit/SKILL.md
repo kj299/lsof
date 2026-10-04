@@ -22,16 +22,23 @@ oracle is at gate 2 of 6, not done.
    gate catches.) Plus `cargo clippy --all-targets -- -D warnings -D
    clippy::missing_safety_doc -D clippy::undocumented_unsafe_blocks`.
 2. **No UB:** `bash porting-kit/harnesses/sanitizers/run_sanitizers.sh all .`
-   (Miri + ASan/UBSan; TSan for threaded code — the class that hides the hang bugs.)
+   (Miri + ASan; rustc has no UB sanitizer, so the `ubsan` mode runs Miri. TSan for
+   threaded code — the class that hides the hang bugs.)
 3. **No panic on input:** `cargo fuzz list` then a 60s smoke per target. Any crash blocks.
 4. **Clean supply chain:** `bash porting-kit/harnesses/supply-chain/run_supply_chain.sh .`
    (`cargo audit` + `cargo deny`: no advisories, licenses allow-listed, crates.io-only.)
 5. **No silent drift:** the differential shows MATCH or a ledgered divergence
-   (`diff_run.py ... --ledger DIVERGENCES.md`).
-6. **Least privilege / no secrets / signed build / current threat model** — walk the
-   per-release section of `SECURITY-CHECKLIST.md`.
-7. **Performance sanity** (synthesis; LESSONS #061, LESSONS #062): fail if a module is
-   >1.3x the C median runtime — that's a specific bug (a copy, a missed release build,
+   (`diff_run.py ... --ledger DIVERGENCES.md`), and the matrix covers the C's
+   surface, once per platform:
+   `python3 porting-kit/harnesses/coverage/coverage_gate.py --inventory <inv> --matrix <m> --platform <p>`.
+6. **Ledgers, least privilege / no secrets / signed build / current threat model** —
+   run the mechanical halves first:
+   `python3 porting-kit/harnesses/ledgers/check_ledgers.py . --ci-dir .github/workflows`
+   and `python3 porting-kit/harnesses/threat-model/check_threat_model.py THREAT-MODEL.md`
+   (a hard fail); then walk the per-release section of `SECURITY-CHECKLIST.md`.
+7. **Performance sanity** (synthesis; LESSONS #061, LESSONS #062): run
+   `python3 porting-kit/harnesses/perf/perf_gate.py --oracle <c> --rust <rust> --matrix <m>`
+   (`--warn` on a shared runner); it fails if a case is >1.3x the C median runtime — that's a specific bug (a copy, a missed release build,
    bounds checks in a hot loop), not "the cost of Rust". Two questions before any number
    is quoted, both of which this kit has answered wrongly in the field:
    - **What was the instrument validated against, at BOTH ends?** lsof-rs published

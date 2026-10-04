@@ -38,7 +38,8 @@ workspace/
 
 - **`overflow-checks = true` in release.** Silent integer wraparound is a C bug
   class a safety rewrite must not reproduce; pay the small cost.
-- **`#![deny(unsafe_op_in_unsafe_fn)]` in `sys`.** Even inside an `unsafe fn`,
+- **`unsafe_op_in_unsafe_fn = "deny"`, a workspace lint every crate inherits**
+  (`skeleton/Cargo.toml`). Even inside an `unsafe fn`,
   each unsafe operation needs an explicit `unsafe {}` — so every one gets a
   `// SAFETY:` and the audit harness sees it.
 - **No `unwrap()`/`expect()` on untrusted input.** Parsers return `Result`; the
@@ -60,7 +61,7 @@ Two corrections from lsof-rs's second backend (LESSONS #017, #021):
 - **"`sys` is the unsafe crate" is a property of the *first* platform, not of
   backends.** A backend whose data source is a filesystem or a documented API
   (Linux `/proc`) needs no FFI and should be `#![forbid(unsafe_code)]` itself —
-  lsof-rs's is, at 1,200 lines. The unsafe audit runs per backend crate; a
+  lsof-rs's is. The unsafe audit runs per backend crate; a
   backend with zero `unsafe` is the goal, not an anomaly the template lacks a
   slot for.
 - **The seam earns its keep when the second backend costs `core` almost

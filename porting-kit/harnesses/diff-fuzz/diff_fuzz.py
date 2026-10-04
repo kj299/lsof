@@ -2,6 +2,7 @@
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
 # Re-cited: #4->#004, #6->#036, #8->#043, #14->#037;
 #          #16 and #36 by title (no entries in this log).
+# Local: #080.
 """Differential fuzzing — feed the SAME generated input to the C oracle and the
 Rust rewrite and compare, over thousands of mutated inputs. The fixed matrix
 (diff_run.py) checks the cases you thought of; this finds the semantic
@@ -19,7 +20,7 @@ by `diff_run.compare_one`, so the stdout+exit-code verdict (LESSONS #004), the
 fail-closed timeout handling (a rust-side hang on some input is a finding, not a
 pass — LESSONS #036), and the ledger fingerprint (LESSONS #043) are exactly the same
 as the matrix differential. A divergence whose fingerprint is pinned in
-DIVERGENCES.md (`- [x] fuzz:<desc> [sha256:<hex>]: <why>`) is a known-intentional
+DIVERGENCES.md (``- [x] `fuzz:<desc>` [sha256:<hex>]: <why>``) is a known-intentional
 divergence and is suppressed — triage a fuzz finding the same way you triage a
 matrix one.
 
@@ -153,7 +154,7 @@ def _judge(data, oracle, rust, args, opts):
 
 def _suppressed(fp_full, known_fps):
     """A fuzz divergence is suppressed iff its fingerprint is pinned in the
-    ledger (`- [x] fuzz:<desc> [sha256:<hex>]: <why>`). Prefix match so a short
+    ledger (``- [x] `fuzz:<desc>` [sha256:<hex>]: <why>``). Prefix match so a short
     pin locks a full fingerprint — same rule diff_run uses (LESSONS #043)."""
     return any(fp_full.startswith(p) for p in known_fps)
 
@@ -265,7 +266,9 @@ def _report(summary, as_json):
     if n:
         print("Triage each: fix the Rust, OR — if the C is the buggy one — pin the "
               "intentional divergence in the ledger as\n"
-              "  - [x] fuzz:<desc> [sha256:<fingerprint>]: <why + CWE>")
+              "  - [x] `fuzz:<desc>` [sha256:<fingerprint>]: <why + CWE>\n"
+              "(quote the name: unquoted, every fuzz entry is named `fuzz`, and "
+              "the second one stops the run)")
 
 
 def _self_test():
@@ -331,7 +334,10 @@ def _self_test():
         # ledger pin suppresses the whole class (reuses LESSONS #043 fingerprints):
         # every '%' input minimizes to "%", so one pin covers them all.
         led = os.path.join(d, "DIVERGENCES.md")
-        open(led, "w").write(f"- [x] fuzz:pct [sha256:{fp}]: intentional; C format bug\n")
+        # Two entries, in the quoted form the triage text prints: unquoted, both
+        # would be named `fuzz` and the second would stop load_ledger (LESSONS #080).
+        open(led, "w").write(f"- [x] `fuzz:pct` [sha256:{fp}]: intentional; C format bug\n"
+                             "- [x] `fuzz:other` [sha256:0123456789ab]: another finding\n")
         opts_l = dict(base_opts); opts_l["ledger"] = led; opts_l["max_findings"] = 5
         summary = fuzz(oracle, rust, opts_l)
         check("ledger-pinned divergence is suppressed",

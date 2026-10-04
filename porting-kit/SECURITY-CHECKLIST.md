@@ -6,7 +6,9 @@ to safety and security" — this is that list.
 
 ## Per module (Phase 4 gates)
 
-- [ ] **No `unsafe` in `core`.** `#![forbid(unsafe_code)]` present → compile-time.
+- [ ] **No `unsafe` in `core`.** `#![forbid(unsafe_code)]` on every target root,
+      in a form rustc applies → `unsafe-audit/check_forbid_unsafe.py` (hard-fail
+      CI; LESSONS #065 found nothing checked the attribute before it).
 - [ ] **Every `unsafe` block justified.** `unsafe-audit/audit_unsafe.py crates/`
       reports 0 undocumented. Each `// SAFETY:` states the invariant that makes
       the block sound, not just "it's fine." (Toolchain-free hard gate.) The
@@ -25,8 +27,9 @@ to safety and security" — this is that list.
 - [ ] **No panic on untrusted input.** A `cargo-fuzz` target exists for every
       parse/decode entry point and runs clean (60s smoke min; nightly deep).
       No `unwrap()`/`expect()`/`[i]` indexing on attacker-controlled data.
-- [ ] **No UB.** Miri passes on the pure logic; ASan/UBSan pass over the FFI
-      layer; TSan if the module shares state across threads (lsof-rs's hang class).
+- [ ] **No UB.** Miri passes on the pure logic; ASan passes over the FFI layer;
+      TSan if the module shares state across threads (lsof-rs's hang class).
+      rustc has no UB sanitizer: the harness's `ubsan` mode runs Miri.
 - [ ] **Integer safety.** `overflow-checks = true`; size math uses
       `checked_*`/`saturating_*`; no `as` truncation on lengths/offsets from
       input. (Closes the C `malloc(a*b)` overflow class.)
@@ -47,7 +50,8 @@ to safety and security" — this is that list.
 
 - [ ] **Supply chain clean.** `supply-chain/run_supply_chain.sh`: `cargo audit`
       (no open RUSTSEC advisories) + `cargo deny` (licenses allow-listed, sources
-      restricted to crates.io, no banned/duplicate crates). Dependency count is
+      restricted to crates.io, no wildcard dependencies; duplicate versions only
+      warn, and the template bans nothing — add bans yourself). Dependency count is
       justifiable — a safety rewrite doesn't import unsafety through its deps.
 - [ ] **The harness supply chain is clean, too.** The test / differential / smoke
       harness must not download-and-execute a binary oracle: a compromised host
@@ -67,6 +71,8 @@ to safety and security" — this is that list.
       C original are a feature; tell users what behavior changed and why.
 - [ ] **Threat model current.** `THREAT-MODEL.md` reflects the shipped surface;
       non-goals stated so reviewers don't assume uncovered protections.
+      `threat-model/check_threat_model.py` hard-fails a missing file, a leftover
+      placeholder or a deleted section; that it is *current* is this box's job.
 
 ## Threat-model template
 

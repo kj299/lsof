@@ -29,9 +29,10 @@ the loop's fuzz and ledger gates because nothing asked (LESSONS #017–#021).
 
 ## The gates (non-negotiable, wired into CI)
 
-Every module clears all six before merge:
-`ported → differential → fuzzed → sanitized → unsafe-audited`. A module that
-compiles and matches the oracle is at step 2 of 6, not done.
+Every module clears all six before merge — the five `progress.py` states,
+`ported` → `differential` → `fuzzed` → `sanitized` → `unsafe_audited`, then
+review. A module that compiles and matches the oracle is at step 2 of 6, not
+done.
 
 | Control | Command |
 |---|---|
@@ -43,7 +44,7 @@ compiles and matches the oracle is at step 2 of 6, not done.
 | threat model filled in | `harnesses/threat-model/check_threat_model.py THREAT-MODEL.md` — **hard fail** |
 | no silent drift | `harnesses/differential/diff_run.py` + `DIVERGENCES.md` |
 | matrix covers the C's surface | `harnesses/coverage/coverage_gate.py --platform X`, once per platform |
-| the mandated ledgers exist | `harnesses/ledgers/check_ledgers.py` — progress, divergences, fuzz target, sanitizer job |
+| the mandated ledgers exist | `harnesses/ledgers/check_ledgers.py` — progress, divergences, fuzz target, a sanitizer job, and a sanitizer step that runs `cargo … -p <unit>` for every unit `progress.json` tracks |
 | don't re-port a vuln | `harnesses/c-flaw-scan/scan_c_flaws.py` at Phase 0 |
 
 Smoke-test the harnesses anytime with `make -C porting-kit check-kit` (python3 +
@@ -63,7 +64,7 @@ bash only; no toolchain needed).
 ## Skills
 
 `skills/` operationalizes this kit as invokable Claude Code skills —
-`porting-kit-{kickoff,cflaw-scan,oracle,module,audit,retrospective}`. They are
+`porting-kit-{kickoff,cflaw-scan,oracle,module,diff-fuzz,audit,retrospective}`. They are
 **thin wrappers**: they point at the authoritative docs here and run the real
 harness commands, never a divergent copy. **Keep them in integrity with the kit** —
 if you rename a harness or change a flag, update every skill that references it;

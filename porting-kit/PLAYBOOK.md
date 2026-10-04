@@ -32,11 +32,12 @@ per-module control ledger the phases refer to.
 **Do:**
 - Enumerate the C: modules, LOC, external deps, the syscall/ioctl/FFI surface,
   global mutable state, macros, the build system. `harnesses/progress/progress.py
-  --init` seeds the module table from this.
+  init --modules a,b,c` seeds the module table from this (one unit per crate:
+  `check_ledgers.py` matches each against a sanitizer step's `-p <unit>`).
 - **Scan the C for vulnerability classes** — `harnesses/c-flaw-scan/scan_c_flaws.py`
-  flags the classic sinks (unchecked `memcpy`/`strcpy`/`sprintf`, `alloca`,
-  integer-overflow-before-`malloc`, `system`/`popen`, format-string,
-  `gets`, TOCTOU pairs). Every hit becomes a note on the owning module: *do not
+  flags the classic sinks (`strcpy`/`strcat`/`sprintf`/`gets`/`scanf("%s")`,
+  `alloca`, integer-overflow-before-`malloc`, `system`/`popen`/`exec*`,
+  non-literal formats, `access`/`stat` before open, signed-`char` compares). Every hit becomes a note on the owning module: *do not
   port this bug — fix it, and log the fix as an intentional divergence.*
   A scanner is only useful if it is *trusted*: tune it for signal-to-noise
   against the real target before relying on it — a check that cries wolf gets
@@ -207,7 +208,8 @@ a ten-second check months earlier.
 gate wired into CI (`harnesses/unsafe-audit`); trace logger present; environment
 preflight clean; **the ledgers exist and CI checks that they do** —
 `harnesses/ledgers/check_ledgers.py` passes (progress file, divergence ledger,
-≥1 fuzz target, a sanitizer job). Create them empty on day one: lsof-rs reached
+≥1 fuzz target, a sanitizer job, and a sanitizer step that runs `cargo … -p
+<unit>` for every unit `progress.json` tracks). Create them empty on day one: lsof-rs reached
 1.0 with none of the first three and no sanitizer job, because nothing failed
 without them (LESSONS #19).
 **Artifacts:** the workspace; CI config from `harnesses/ci/porting-ci.template.yml`.
@@ -311,12 +313,14 @@ Then the loop — each step is a CI-enforced gate:
    second backend's seven `/proc` parsers — a `forbid(unsafe_code)` crate can
    still panic on a hostile `Name:` field.
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
-   logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). lsof-rs's
+   logic and, for the `sys` layer, ASan (and TSan if threaded); rustc has no UB
+   sanitizer, so the harness's `ubsan` mode runs Miri. lsof-rs's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
 6. **Review & merge.** Update the `progress` table (the module advances
-   ported → differential-passing → fuzzed → sanitized → unsafe-audited).
+   `ported` → `differential` → `fuzzed` → `sanitized` → `unsafe_audited`, the
+   names `progress.py set` takes).
 
 **Entry criteria:** skeleton + oracle.
 **Exit criteria (per module):** all six gates green; `progress` row fully ticked.
@@ -335,7 +339,9 @@ undocumented unsafe (gate 5).
 - Gate cutover on: 100% of the port's target modules through all six gates; the
   differential corpus green (modulo logged divergences); fuzz corpus seeded and
   clean; supply-chain gate clean (`harnesses/supply-chain/run_supply_chain.sh` —
-  `cargo audit` + `cargo deny`); **and the field checkpoint** (LESSONS #15): the
+  `cargo audit` + `cargo deny`); the threat model filled in
+  (`harnesses/threat-model/check_threat_model.py THREAT-MODEL.md`); **and the
+  field checkpoint** (LESSONS #15): the
   *exact* release artifact — downloaded, not a local build — run on real target
   hardware in every privilege mode, with a per-case time ceiling, results logged
   next to the verdict. **Hosted CI cannot substitute for this.** lsof-rs's 1.0.0
@@ -380,18 +386,20 @@ kept both trees side by side — preserve that discipline.
 
 | Control | Harness / mechanism | Gate |
 |---|---|---|
-| No `unsafe` in pure logic | `#![forbid(unsafe_code)]` on `core` | compile |
+| No `unsafe` in pure logic | `#![forbid(unsafe_code)]` on every target root of `core`, checked by `unsafe-audit/check_forbid_unsafe.py` (LESSONS #065) | **hard-fail CI** |
 | Every `unsafe` justified | `unsafe-audit/audit_unsafe.py` | **hard-fail CI** |
-| No UB at the FFI boundary | `sanitizers/run_sanitizers.sh` (Miri, ASan/UBSan/TSan) | CI |
+| No UB at the FFI boundary | `sanitizers/run_sanitizers.sh` (Miri, ASan, TSan) | CI |
 | No panics on untrusted input | `fuzz/` (`cargo-fuzz`) | CI smoke + nightly deep |
 | No vulnerable/untrusted deps | `supply-chain/run_supply_chain.sh` (`cargo audit`,`cargo deny`) | CI |
 | No silent behavior drift | `differential/diff_run.py` + `DIVERGENCES.md` | CI |
 | Matrix covers the C's surface | `coverage/coverage_gate.py` (inventory vs matrix), **run once per platform** with `--platform` — a waiver whose reason names a platform (`platforms = [...]`) expires the day that platform is added, silently unless scoped (LESSONS #18) | CI |
-| The mandated ledgers exist | `ledgers/check_ledgers.py` — progress file, divergence ledger, ≥1 fuzz target, sanitizer job (LESSONS #19) | CI |
+| The mandated ledgers exist | `ledgers/check_ledgers.py` — progress file, divergence ledger, ≥1 fuzz target, a sanitizer job, and a sanitizer run per tracked unit (LESSONS #19, #21) | CI |
+| The threat model is filled in | `threat-model/check_threat_model.py THREAT-MODEL.md` | **hard-fail CI** |
 | Lints as errors | `clippy -D warnings` (+ overflow/cast lints) | CI |
 | Don't re-port a C vuln | `c-flaw-scan/scan_c_flaws.py` at Phase 0 | review |
 
-See `harnesses/ci/porting-ci.template.yml` for the wiring and
+See `harnesses/ci/porting-ci.template.yml` for the wiring (control-coverage checks
+it in `check-kit`) and
 `make -C porting-kit check-kit` to smoke-test every harness.
 
 **When a gate can only run in CI** — a platform backend you can't build on the

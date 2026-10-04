@@ -534,6 +534,7 @@ had applied to every Windows release; nobody could see them because Windows has
 no C to compare against. **The Linux differential found Windows bugs.** They are
 recorded, not fixed — each alters output the golden fixtures and 59 smoke cases
 assert, which makes matching the C a compatibility decision for the maintainer.
+*Fixed 2026-09-05 (PR #73), all three: DIVERGENCES.md rows 1–3.*
 
 **F8 — the rename broke four things across three passes** (`e73c73c`). A
 case-sensitive `find -name` missed `Invoke-WinlsofSmokeTest.ps1`. A bare
@@ -598,6 +599,9 @@ pre-waived and building against that gate would have produced no signal. And it
 said to start the L3 harness right after L0; that is still not started, and the
 diffs in F5–F7 were run by hand in a shell. **L3 is the highest-leverage open
 item in the port** and the kit should have made it a gate, not a suggestion.
+
+*Closed 2026-09-02 (PR #66):* the L3 harness is the `differential (linux, vs the
+C)` CI job, `lsof-rs/differential/linux_diff.py`.
 
 ### 11.3 Top time sinks (churn + clustering)
 

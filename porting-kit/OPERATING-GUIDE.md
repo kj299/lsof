@@ -18,14 +18,16 @@ with a mechanical integrity check.
 **Provisional** — designed and documented, not yet battle-tested end-to-end:
 the **library** path (the differential is executable-shaped; C-ABI libraries need
 the `cando`-style function-level harness, §5 P0); C→C **preconditioning** is prose,
-not tooling; the **performance** gate is a number in the playbook, not a harness;
-**held-back vectors** and **C-baseline vector validation** are described, not wired.
+not tooling; the **performance** gate (`harnesses/perf/perf_gate.py`) is built and
+self-tested, but no port has run it in CI yet; **held-back vectors** and
+**C-baseline vector validation** are described, not wired.
 
 **Bottom line:** ready to *drive an executable port today* and to *structure* a
 library port; not yet a turnkey library-migration pipeline. §5 is the path to that,
-prioritized. Lifting to its own repo is reasonable **now** if you ship it with this
-honest maturity note and the P0 backlog visible — not as "done," but as "v0.x,
-proven spine, known edges."
+prioritized. The kit has since been lifted to its own repo,
+[`kj299/c2rust-port`](https://github.com/kj299/c2rust-port), with this maturity note
+and the P0 backlog visible — not as "done," but as "v0.x, proven spine, known
+edges"; this copy is vendored from it.
 
 ---
 
@@ -67,7 +69,7 @@ The kit is designed so an agent reads *verdicts, not corpora*. Lean into that:
   the gate re-running. The two failures are not symmetric — an extra run costs
   minutes, a missing run costs the gate, so when in doubt include the path.
 - **Tier the slow gates:** fuzz = 60s smoke per target in CI, deep run nightly;
-  Miri/ASan/UBSan on the `sys`/changed crates per-PR, full sweep nightly. Don't pay
+  Miri/ASan on the `sys`/changed crates per-PR, full sweep nightly. Don't pay
   the whole safety matrix on every push.
 - **Leaf-first order is an efficiency lever, not just correctness** — it localizes
   every failure to one definition, so you debug one thing, not a 10k-line blast
@@ -98,7 +100,8 @@ The checklist is the floor. To make this a *security* rewrite you'd defend:
   threat-model's untrusted boundaries first**. Use `arbitrary` for typed fuzzing of
   structured parsers, and **cap allocations derived from untrusted length fields**
   (integer-overflow-before-alloc is a top C class you must not re-port).
-- **Differential fuzzing** (§5 P1): feed the *same* fuzz input to the C oracle and
+- **Differential fuzzing** (shipped: `harnesses/diff-fuzz/diff_fuzz.py` and the
+  `porting-kit-diff-fuzz` skill): feed the *same* fuzz input to the C oracle and
   the Rust and compare — finds semantic divergences the fixed matrix never covers.
   The highest-value single addition for a security-critical port.
 - **Stricter unsafe lints:** beyond `undocumented_unsafe_blocks` / `missing_safety_doc`
@@ -121,6 +124,7 @@ The skills are the operational surface; use them, don't re-derive their steps.
 | Phase 0 vuln hunt | `porting-kit-cflaw-scan` | once (re-run per subsystem) |
 | Phase 2 oracle | `porting-kit-oracle` | once, before any Rust |
 | Phase 4 per module | `porting-kit-module` | **repeated — the hot path** |
+| Phase 4, once the matrix is green | `porting-kit-diff-fuzz` | per module (short), nightly (long) |
 | Pre-merge / "is it safe?" | `porting-kit-audit` | per module + per release |
 | Port/phase done | `porting-kit-retrospective` | once per phase — **never skip** |
 
@@ -134,14 +138,16 @@ The skills are the operational surface; use them, don't re-derive their steps.
   harnesses, **and the skills** (integrity), then appends LESSONS.
 
 **The one-line recipe:** `kickoff → (cflaw-scan ∥ oracle) → for each leaf: module →
-audit → retrospective`.
+diff-fuzz → audit → retrospective`.
 
 ## 5. Improvements backlog (the path to v1.0, prioritized)
 
 **P0 — needed before a *library* port or a security-critical claim:**
 1. **`cando`-style function-level differential harness** for C-ABI libraries — the
    current differential is executable-shaped (argv/stdin→stdout+exit). Biggest gap.
-2. **Performance gate harness** — measure module runtime vs the C median, fail >1.3×.
+2. ~~**Performance gate harness** — measure module runtime vs the C median, fail
+   >1.3×.~~ **Done** — `harnesses/perf/perf_gate.py` (`--warn` for a shared runner);
+   lsof-rs gates its own resources with `differential/resource_gate.py`.
 3. **Held-back vectors + C-baseline validation** in `golden.py`. Proposed, not
    built: a `--holdout` option, plus the rule "a vector must pass on C before it
    may judge Rust". (Written without the script and the flag on one line so the

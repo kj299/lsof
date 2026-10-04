@@ -9,7 +9,7 @@
 # the stale verdict that a second run must repeat (#073).
 """Gate-mutation harness — break each gate's verdict on purpose and PROVE the
 suite goes red. The standing "failure the kit still would not prevent" since
-retro #1 (RETROSPECTIVE-kit-v1.md §5 item 2), sharpened by LESSONS #033/#037: the
+retro #1 (RETROSPECTIVE-kit-v1.md §5 item 2, in the c2rust-port lineage), sharpened by LESSONS #033/#037: the
 kit's fail-open holes (LEDGER-STALE, the wrapped-path skip, the fenced-block
 harvest) were all gates that PASSED while checking nothing, each found by a
 human probing by hand. This harness makes that probe mechanical.
