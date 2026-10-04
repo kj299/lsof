@@ -120,6 +120,14 @@ jobs:
         run: cargo doc --no-deps --document-private-items --workspace
       - name: test (core, CLI and the Linux backend)
         run: cargo test --all
+      - name: committed mutants still apply
+        # Each change commits its mutants as data, so its kill table can be run
+        # again (porting-kit LESSONS #083). This checks, in seconds, that every
+        # one still fits the code, so a refactor cannot leave a table that
+        # describes code that is gone. That each is still KILLED takes the full
+        # run, with the C oracle built, which the change adding or re-anchoring
+        # a mutant makes: `mutate_port.py mutants/<file>.toml` from lsof-rs/.
+        run: python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --apply-only mutants/*.toml
       - name: unsafe contained (forbid(unsafe_code) on every portable crate)
         # Contained first, then documented. The unsafe-audit step below checks
         # that every unsafe block is JUSTIFIED — it passes on unsafe in core as
