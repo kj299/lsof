@@ -11,7 +11,16 @@
 > wholesale copy: each harness is brought over one at a time and every `LESSONS #N`
 > inside it is re-cited to this log's numbering. `harnesses/lessons/check_imports.py`
 > enforces that; a file carrying a `KIT-IMPORT:` header must account for every
-> citation in it. Do not `cp -r` the other kit over this one.
+> citation in it. Do not `cp -r` the other kit over this one. Above all, never
+> copy the primary's `harnesses/differential/diff_run.py` over this one's: this
+> runner reads a case's `cwd` and `with_stderr` (41 of lsof-rs's cases set the
+> first, 6 the second), and the primary's ignores both, so those cases would
+> weaken without a word.
+>
+> **This copy's `make check-kit` is bound to this repository.** Its control
+> coverage reads lsof-rs's CI and differential, and its platform ledger reads
+> lsof's dialects, so in another repository it fails at its first host-bound
+> step. Start a new port from the primary line.
 >
 > The same collision arrives from *inside* one repository whenever two branches
 > append to the log (LESSONS #048): the merge conflicts on `LESSONS.md`, and the
@@ -36,12 +45,13 @@ vulnerability. Maximize safety controls.
 |---|---|
 | Understand the whole process | [`PLAYBOOK.md`](PLAYBOOK.md) |
 | Run a port well (tokens, efficiency, security, backlog) | [`OPERATING-GUIDE.md`](OPERATING-GUIDE.md) |
-| Lift this kit into its own repo over SSH (two git commands) | [`scripts/lift-to-c2rust-port.sh`](scripts/lift-to-c2rust-port.sh) |
 | Kick off a new port | paste [`PROMPTS/00-new-port-kickoff.md`](PROMPTS/00-new-port-kickoff.md) |
 | Port one module | paste [`PROMPTS/10-module-port.md`](PROMPTS/10-module-port.md) |
 | Add a backend for a second platform | paste [`PROMPTS/20-new-backend.md`](PROMPTS/20-new-backend.md) |
 | Close a port & improve the kit | paste [`PROMPTS/90-retrospective.md`](PROMPTS/90-retrospective.md) |
 | Lay out the workspace | copy [`skeleton/`](skeleton/); see [`ARCHITECTURE-TEMPLATE.md`](ARCHITECTURE-TEMPLATE.md) |
+| Design the differential matrix | [`MATRIX-CHECKLIST.md`](MATRIX-CHECKLIST.md) |
+| Promote a CI gate, cut a release, rename the port | [`CI-AND-RELEASE.md`](CI-AND-RELEASE.md) |
 | The control ledger | [`SECURITY-CHECKLIST.md`](SECURITY-CHECKLIST.md) |
 | Standing rules for any kit repo | [`CLAUDE.md`](CLAUDE.md) |
 
@@ -76,7 +86,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/unsafe-audit/audit_unsafe.py` | every `unsafe {}` needs a `// SAFETY:` | **hard-fail CI** |
 | `harnesses/unsafe-audit/check_forbid_unsafe.py` | the portable crates forbid `unsafe_code` on every target root, in a form rustc applies — not in a comment, not `deny`, not under `cfg_attr` | **hard-fail CI** |
 | `harnesses/differential/diff_run.py` (+`normalize.py`) | diff Rust vs C oracle; triage divergences via a ledger; timeout = liveness backstop | CI |
-| `harnesses/golden/golden.py` | capture/version/replay the oracle; flag oracle nondeterminism | CI |
+| `harnesses/golden/golden.py` | capture/version/replay the oracle; flag oracle nondeterminism. *This copy compares stdout only and stores a hang as a golden (PLAYBOOK Phase 2); the primary's keeps exit codes* | CI |
 | `harnesses/coverage/coverage_gate.py` | the matrix exercises the C's whole surface: every option letter and TYPE code the C can emit, less waivers that carry reasons and can be scoped to a platform. A value-taking option must also be given its value as the next word, which is a second path through a port's parser (LESSONS #071) | CI |
 | `harnesses/fuzz/gen_fuzz_target.sh` | scaffold a cargo-fuzz target per module | CI smoke + nightly |
 | `harnesses/sanitizers/run_sanitizers.sh` | Miri / ASan / TSan over the unsafe layer (rustc has no UB sanitizer: the `ubsan` mode runs Miri) | CI |
@@ -100,6 +110,28 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/lessons/resolve_collision.py` | two branches appended to the log and took the same numbers: rebuild the merge from git, renumber the block that landed second, repoint its citations by *line provenance*, and refuse what only a human can decide (an ambiguous line, a split range, a displaced paragraph) | merge-time |
 | `harnesses/ci/porting-ci.template.yml` | wires every control `CLAUDE.md` declares into GitHub Actions; `make check-kit` runs control-coverage over it, so a control added without wiring fails the kit | — |
 
+The Gate column says where a port should run each harness. **Where each runs
+in this repository** (checked 2026-10-04):
+
+- **On real input, in lsof-rs's CI:** `audit_unsafe`, `check_forbid_unsafe`,
+  `diff_run` with `normalize` (through `lsof-rs/differential/linux_diff.py`),
+  `coverage_gate`, `check_ledgers`, `check_threat_model`, and `mutate_port`
+  (`--apply-only`).
+- **On real input, in `make check-kit`:** `check_lesson_refs`, `check_imports`,
+  `check_lessons_pinned`, `check_controls`, `check_doc_flags`, `check_skills`,
+  `check_platforms`, `mutate_gates`, `check_skeleton` and `check_forbid_unsafe`
+  over the skeleton.
+- **Exempted in writing:** `run_sanitizers` (lsof-rs runs miri and ASan itself,
+  on a pinned nightly) and `run_supply_chain` (lsof-rs runs `cargo deny` against
+  its own policy).
+- **Self-test only:** `golden`; `perf_gate` (lsof-rs's matrix needs fixtures this
+  runner cannot start, so the port gates cost with its own
+  `differential/resource_gate.py`); `diff_fuzz` (its argv mode was run by hand
+  once, LESSONS #084); `probe` and `progress` (`progress.json` is set by hand);
+  `scan_c_flaws` (a Phase-0 inventory, run once, its triage committed at
+  `lsof-rs/coverage/c-flaw-scan.json`); `gen_fuzz_target` (a scaffolder;
+  cargo-fuzz itself runs in CI); `resolve_collision` (merge time).
+
 ```
 make check-kit      # smoke-test every harness (python3 + bash only, no toolchain)
 ```
@@ -111,7 +143,8 @@ Named rather than silently skipped, so the absence is a decision on the record:
 | Harness there | Why not here |
 |---|---|
 | `api-coverage`, `library-differential`, `cando` | All three answer "is every exported FUNCTION of a C library on the compared contract". This port's subject is a program: the contract is argv/stdin → stdout + exit code, which `differential/` already covers end to end. They become relevant the day this kit is used for a library. |
-| `oracle-sanitize` | It sanitizes the C **driver a port writes** around a vendored library so the differential has something to execute — code the port authored, compiled without sanitizers, whose memory errors change no stdout. This port writes no C at all: its oracle is real `lsof`, built from this repo's own upstream sources by autotools. There is no port-authored C here to sanitize. |
+| `oracle-sanitize` | It sanitizes the C **driver a port writes** around a vendored library so the differential has something to execute — code the port authored, compiled without sanitizers, whose memory errors change no stdout. This port commits no C: its oracle is real `lsof`, built from this repo's own upstream sources by autotools, and its cases are fixture-driven through `linux_diff.py`, not an argv/stdin matrix the harness could drive. The one C harness it wrote, `Readlink()` compiled as its own oracle (LESSONS #077), was a measurement and was not committed; a port that commits such a driver should vendor this. |
+| `skills/porting-kit-precondition` | A C→C refactor of the C's global state before translating it. lsof-rs reimplements a command-line tool against a live oracle built from this tree, so refactoring lsof's C would move the oracle itself. The skill wraps `C-to-Rust-Playbook-Best-of-Both.md` Step 0, which is here. |
 
 ## Related
 

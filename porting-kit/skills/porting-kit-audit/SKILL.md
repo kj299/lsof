@@ -58,9 +58,12 @@ oracle is at gate 2 of 6, not done.
    if one is neither built nor waived. Read its evidence column, not just its
    exit code: it prints the file and line that satisfied each platform, and a
    pattern matching a comment rather than a job step is exactly how this check
-   was wrong on its own first run (LESSONS #054). In this repo it is what shows
-   that FreeBSD is gated on Cirrus and NetBSD/OpenBSD on sourcehut — three
-   platform gates no GitHub check ever displays, which a deletion nearly cost.
+   was wrong on its own first run (LESSONS #054). And a config file is a claim:
+   evidence that a provider builds a platform is a run of it, so check that
+   each provider whose config the ledger reads has reported on a recent commit
+   (check suites and commit statuses). In this repo upstream's `.cirrus.yml` and
+   `.builds/` name FreeBSD, NetBSD and OpenBSD, and no provider runs them, so
+   those three are waived (LESSONS #082).
    Then: confirm each language/subtree's CI is
    path-scoped so unrelated changes don't trigger heavyweight jobs or leave PRs
    misleadingly "unstable"; see `porting-kit/harnesses/ci/porting-ci.template.yml`.

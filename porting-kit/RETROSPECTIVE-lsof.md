@@ -349,6 +349,22 @@ The reusable, evidence-backed lessons:
 8. **Fix-forward, then immediately pin the regression test** — practiced but not
    enforced; several fidelity misses shipped before their test existed.
 
+
+### Questions behind the `[INFERRED]` marks
+
+Promised at the top and never written until 2026-10-04, when a retrospective
+found the list missing.
+
+1. **`[INFERRED-1]`** Was FFI coexistence with the C considered and rejected,
+   or never considered? *Open: only the author can say.*
+2. **`[INFERRED-2]`** Was `#[non_exhaustive]` with a builder considered for the
+   model structs, and rejected? *Open.*
+3. **`[INFERRED-3]`** How many `unsafe` blocks lacked a `// SAFETY:` comment?
+   *Answered by LESSONS #1: 131 real blocks, 51 undocumented; the 144 and 91
+   above are grep hits. On 2026-10-04 the audit counts 139 blocks, all
+   documented.*
+4. **`[INFERRED-4]`** Is time sink 3 or 4 the larger? *Open, and it changes
+   nothing above.*
 ---
 
 ## 9. Addendum — scope direction from the author (2026-07-05)

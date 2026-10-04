@@ -48,6 +48,9 @@ is present and green:
 - lesson refs: `62 entries, 508 citations in 72 files, 0 problems` — the scan
   has grown with the repository, from 216 citations in 50 files when built
 - platform ledger: `7 selectable, 5 built by CI, 2 waived, 8 CI configs, 0 problems`
+  [2026-10-04: three of those five were counted from config files no provider
+  runs for this fork; the ledger now reads `2 built by CI, 5 waived`. See the
+  note at the end.]
 - `lsof-rs` ledgers: `5 present, 0 missing`
 - the lesson log: 62 entries, unique, contiguous
 
@@ -60,7 +63,7 @@ something adjacent to what it claimed to check.** Four forms:
 |---|---|
 | **nothing ran it** | `00MANIFEST` (223 of 280 entries dangling, read by nothing); `check-kit` never wired to CI |
 | **it read the wrong thing** | the sanitizer ledger accepted a comment as evidence; a citation list read as its first number; the platform ledger certified `darwin` from a comment on its first run |
-| **it saw too little** | a kit-only citation scan (52 of 214 citations unchecked); the GitHub status list taken as the set of gates, when three platforms are gated on Cirrus and sourcehut |
+| **it saw too little** | a kit-only citation scan (52 of 214 citations unchecked); the GitHub status list taken as the set of gates, when three platforms are gated on Cirrus and sourcehut [2026-10-04: upstream's are; this fork's are not — see the end] |
 | **it couldn't be woken** | `build.yml` over-triggered; the differential under-triggered on its own oracle |
 
 A green board looks identical in all four cases, which is why CI found none of
@@ -125,7 +128,8 @@ force; a check does.*
 - **Weigh the investigation, not the diff.** The arc's best outcome was the
   dialect decision: asked to delete six "unused" dialects, measurement showed four
   were live tested platforms — three on providers no GitHub check displays — and
-  the result was a table and an empty diff.
+  the result was a table and an empty diff. [2026-10-04: tested by upstream's CI;
+  on this fork two of the four are, see the correction at the end.]
 
 ## Recommended next steps, highest value first
 
@@ -137,3 +141,19 @@ force; a check does.*
    untested claim.
 3. **One host-aware scan-root helper** shared by every harness that walks files,
    so none can be written blind to the repository it is vendored into.
+
+## Correction (2026-10-04)
+
+The arc's dialect decision rested on a reading this document repeats: that
+FreeBSD is gated on Cirrus and NetBSD and OpenBSD on sourcehut. Those gates are
+upstream lsof's. The fork inherited `.cirrus.yml` and `.builds/`, and no one
+connected either provider to it: on master's head, on PR #81's merge and on
+every other commit since the fork that was checked, the GitHub API shows only
+GitHub Actions (and claude) check suites and no commit status, which is where
+Cirrus and sourcehut report. So the three dialects were never built by this
+repository's CI, and the platform ledger that certified them did so on the
+strength of config text. The decision to keep them as source still holds, as it
+does for `aix` and `sun`: they are waived now, with that reason, and the ledger
+reads only the CI that runs here. Connecting the providers and recording a run
+would make them gated again. Found by the 2026-10-04 retrospective's integrity
+sweep (LESSONS #082).

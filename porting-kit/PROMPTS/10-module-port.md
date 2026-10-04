@@ -24,7 +24,12 @@ Then run every gate; each is a hard requirement before merge:
    `python3 porting-kit/harnesses/differential/diff_run.py --oracle <c> --rust
    <rust> --matrix <m> --ledger DIVERGENCES.md`. A divergence is a TRIAGE: fix the
    Rust, OR — if the C was wrong — record the intentional fix in `DIVERGENCES.md`
-   (`- [x] <case>: <why + CWE>`). Never silently match a C bug.
+   with the divergence's fingerprint, which the runner prints:
+   (`- [x] <case> [sha256:<12 hex>]: <why + CWE>`). Without the pin the entry
+   suppresses the case by name, whatever it prints next (LESSONS #043). Never
+   silently match a C bug. Then mutate the rules you wrote, as a committed
+   mutants file run with `porting-kit/harnesses/port-mutation/mutate_port.py`
+   (LESSONS #083).
 3. **Fuzz** the input surface:
    `bash porting-kit/harnesses/fuzz/gen_fuzz_target.sh [MODULE] --crate <crate>`,
    then `cargo fuzz run [MODULE] -- -max_total_time=60`. Any panic/crash blocks.

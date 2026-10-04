@@ -43,6 +43,16 @@ to safety and security" — this is that list.
       `Readlink()` made every run slow over one user's mount (LESSONS #079).
 - [ ] **Differential-clean.** `diff_run.py` shows MATCH or a ledgered divergence;
       no unexplained drift.
+- [ ] **The matrix covers the C's surface.** `coverage/coverage_gate.py
+      --platform X` reports 0 uncovered on every platform, and every waiver
+      says why (LESSONS #018); a waiver that excuses what the port now does is
+      removed, not kept.
+- [ ] **The cases check something.** The rules the change wrote are mutated, the
+      mutants committed beside the cases, and every one is KILLED by
+      `port-mutation/mutate_port.py` (LESSONS #083).
+- [ ] **The ledgers exist.** `ledgers/check_ledgers.py`: progress file,
+      divergence ledger, a fuzz target, a sanitizer job and a sanitizer step
+      per tracked unit (LESSONS #019).
 - [ ] **C flaws closed.** Every `scan_c_flaws.py` hit in this module is either
       not-applicable (documented) or fixed → `DIVERGENCES.md` entry with CWE.
 

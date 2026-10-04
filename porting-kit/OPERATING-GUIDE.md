@@ -145,6 +145,8 @@ diff-fuzz → audit → retrospective`.
 **P0 — needed before a *library* port or a security-critical claim:**
 1. **`cando`-style function-level differential harness** for C-ABI libraries — the
    current differential is executable-shaped (argv/stdin→stdout+exit). Biggest gap.
+   *[2026-10-04: built on the primary line, `harnesses/cando/`; not vendored here,
+   for the reason README's "Deliberately not vendored" gives.]*
 2. ~~**Performance gate harness** — measure module runtime vs the C median, fail
    >1.3×.~~ **Done** — `harnesses/perf/perf_gate.py` (`--warn` for a shared runner);
    lsof-rs gates its own resources with `differential/resource_gate.py`.
@@ -165,7 +167,8 @@ diff-fuzz → audit → retrospective`.
    line-based checks can miss multi-line calls (the format-string check is already
    whole-file — extend the rest).
 7. **A `porting-kit-precondition` skill** for Step 0 (C→C: global-state threading,
-   aliasing reduction, `#ifdef` story) — currently prose only.
+   aliasing reduction, `#ifdef` story) — currently prose only. *[2026-10-04: built
+   on the primary line; not vendored here, see README.]*
 
 **P2 — polish / breadth:**
 8. ~~`normalize.py` rules as a per-project data file (currently code constants).~~
