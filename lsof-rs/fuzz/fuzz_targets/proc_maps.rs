@@ -34,9 +34,19 @@ fuzz_target!(|data: &[u8]| {
 
     let mut seen = Vec::new();
     for m in &maps {
-        // Only file-backed mappings, and a path is absolute. `[heap]`,
-        // `[vdso]` and anonymous mappings must never reach a row.
-        assert!(m.path.starts_with('/'), "not an absolute path: {:?}", m.path);
+        // Only a mapping with a path and a device or inode, as the C keeps
+        // them: `[heap]`, `[vdso]` and anonymous mappings (0:0, inode 0)
+        // must never reach a row. A path need not be absolute —
+        // `anon_inode:[io_uring]` is a mapping the C lists.
+        assert!(m.dev != 0 || m.inode != 0, "a 0:0 inode-0 mapping: {:?}", m.path);
+        let bytes = m.raw_path.as_deref().unwrap_or(m.path.as_bytes());
+        assert!(!bytes.is_empty(), "an empty path");
+        // The path is the rest of the line after its padding: it starts with
+        // neither a blank nor a TAB, and holds no newline.
+        assert!(
+            !bytes.starts_with(b" ") && !bytes.starts_with(b"\t") && !bytes.contains(&b'\n'),
+            "the path field is cut wrongly: {bytes:?}"
+        );
         // The kernel appends exactly ONE " (deleted)", and the parser removes
         // exactly one — as the C does (`dproc.c`: a single NUL store, not a
         // loop). So a path that still ends with the marker after parsing is
@@ -75,7 +85,7 @@ fuzz_target!(|data: &[u8]| {
         }
         // One row per file: (device, inode) is the identity, and it is unique
         // across the result however many segments the input mapped.
-        let key = (m.device.clone(), m.inode);
+        let key = (m.dev, m.inode);
         assert!(!seen.contains(&key), "duplicate mapping for {key:?}");
         seen.push(key);
     }

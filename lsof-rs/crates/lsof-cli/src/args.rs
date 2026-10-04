@@ -411,7 +411,17 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                             }
                         }
                     };
-                    sel.exempt_fs.push(value);
+                    // Without its trailing slashes, as `enter_efsys()` keeps
+                    // it: `-e /dev/shm/` is printed `(-e /dev/shm)`, and
+                    // reported `"-e /dev/shm" is not a mounted file system.`
+                    // (both measured). `/` stays `/`.
+                    let trimmed = value.trim_end_matches('/');
+                    sel.exempt_fs
+                        .push(if trimmed.is_empty() && value.starts_with('/') {
+                            "/".to_string()
+                        } else {
+                            trimmed.to_string()
+                        });
                     j = chars.len();
                     continue;
                 }

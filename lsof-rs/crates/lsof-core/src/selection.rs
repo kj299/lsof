@@ -987,7 +987,10 @@ impl Selection {
         if self.unix_only && f.file_type == FileType::Unix {
             k.insert(SelKinds::UNX);
         }
-        if self.nfs_only && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d)) {
+        if self.nfs_only
+            && !f.is_exempt()
+            && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d))
+        {
             k.insert(SelKinds::NFS);
         }
         if self.inet.all_matches(f) {
@@ -1021,6 +1024,11 @@ impl Selection {
     /// Whether `f`'s name is one of the path arguments or under one of the
     /// `+d`/`+D` trees. Only called when such an argument was given.
     fn path_matches(&self, f: &OpenFile) -> bool {
+        // A row `-e` exempted was never `stat`ed, and the C never asks
+        // `is_file_named()` about it: no argument names it.
+        if f.is_exempt() {
+            return false;
+        }
         // A path argument that named a FILE SYSTEM matches every file on it —
         // the C's `HbyFsd` branch in `is_file_named()`, a plain `s->dev ==
         // Lf->dev`. It is tested first and independently: the argument has no
@@ -1246,8 +1254,9 @@ impl Selection {
                     *hit = *hit || spec.matches(f);
                 }
                 found.inet_all |= self.inet.all_matches(f);
-                found.nfs |=
-                    self.nfs_only && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d));
+                found.nfs |= self.nfs_only
+                    && !f.is_exempt()
+                    && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d));
                 // `Ftask = 2` in `link_lfile()`: a file is linked when it
                 // matched anything, and a task's files all inherit the task
                 // kind, so any row of a task locates the item — printed or not,
@@ -1594,6 +1603,9 @@ impl<'a> PathIndex<'a> {
     /// a name can start with an item's, and a `+D` makes an item of every
     /// entry, so asking every file on the host would cost files x entries.
     fn mark(&self, f: &OpenFile, hits: &mut [bool], selected: impl FnOnce() -> bool) {
+        if f.is_exempt() {
+            return; // never `stat`ed, so it names nothing (see `path_matches`)
+        }
         let mut hit = |found: Option<&Vec<usize>>| {
             for &i in found.into_iter().flatten() {
                 hits[i] = true;

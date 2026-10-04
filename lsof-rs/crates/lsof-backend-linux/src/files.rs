@@ -1,11 +1,12 @@
 //! A process's open files, from `/proc/<pid>/{fd,cwd,root,exe}`.
 
 use std::num::NonZeroU32;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use lsof_core::errno_text;
-use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
+use lsof_core::model::{AccessMode, FdType, FileType, LockKind, OpenFile};
 
 use crate::net::{self, SocketTable};
 
@@ -20,9 +21,6 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFIFO: u32 = 0o010000;
 
-/// Decode Linux's packed `dev_t` into lsof's `major,minor` DEVICE column.
-/// The layout is glibc's: 12 low + 20 high bits of major, 8 low + 12 high of
-/// minor, interleaved.
 /// The DEVICE cell for a stat result: `st_rdev` for a device node (a
 /// character or block special names *its own* device), `st_dev` for everything
 /// else (the filesystem the file lives on). Shared with `identify_path` so a
@@ -34,13 +32,31 @@ pub(crate) fn dev_cell(md: &std::fs::Metadata) -> String {
     }
 }
 
+/// Decode Linux's packed `dev_t` into lsof's `major,minor` DEVICE column.
+/// The layout is glibc's: the major's low 12 bits at bit 8 and its high 20 at
+/// bit 44, the minor's low 8 bits at bit 0 and its high 24 at bit 20.
 pub(crate) fn dev_string(dev: u64) -> String {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfffu64);
-    let minor = (dev & 0xff) | ((dev >> 12) & !0xffu64);
+    // Bits 20-43 only, as glibc's `minor()` takes them: the bits above 43
+    // are the major's.
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
     format!("{major},{minor}")
 }
 
-fn type_from_mode(mode: u32) -> FileType {
+/// A `dev_t` from its major and minor, packed as glibc's `makedev()` packs it
+/// — the inverse of [`dev_string`]. A device that only a maps line or
+/// `/proc/locks` names (`fe:00`) is built this way, as the C builds it, and
+/// `-F D` prints the result: `0,301` is `0x10002d`, which `major << 8 |
+/// minor` (`0x12d`, what lsof-rs printed for a `DEL` row) is not.
+pub(crate) fn makedev(major: u32, minor: u32) -> u64 {
+    let (major, minor) = (u64::from(major), u64::from(minor));
+    ((major & 0xfff) << 8)
+        | ((major & 0xffff_f000) << 32)
+        | (minor & 0xff)
+        | ((minor & 0xffff_ff00) << 12)
+}
+
+pub(crate) fn type_from_mode(mode: u32) -> FileType {
     match mode & S_IFMT {
         S_IFREG => FileType::Regular,
         S_IFDIR => FileType::Dir,
@@ -54,7 +70,12 @@ fn type_from_mode(mode: u32) -> FileType {
         // still real, and its `socket:[inode]` name is the key that would
         // resolve it, so it is reported unresolved rather than guessed at.
         S_IFSOCK => FileType::Other("SOCK".into()),
-        _ => FileType::Unknown,
+        // Any other format, `0` included — an anonymous inode, which a
+        // mapping in another mount namespace reaches through `map_files`: the
+        // C's `LSOF_FILE_UNKNOWN_RAW`, the format's number in octal (`0000`),
+        // printed by `-F t` too. An fd's anonymous inode never gets here: its
+        // link names it, and it is `a_inode`.
+        _ => FileType::Other(format!("{:04o}", (mode >> 12) & 0xf)),
     }
 }
 
@@ -201,22 +222,24 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
     target.to_string()
 }
 
-/// The exempted mount point a path falls under, if any (`-e`).
-///
-/// Prefix matching, not `stat`: `/` covers everything, and `/dev/shm` covers
-/// `/dev/shm/x` but not `/dev/shmx`. A trailing slash on the argument is
-/// tolerated, as the C tolerates `-e /dev/shm/`.
-fn exempt_match<'a>(path: &str, exempt: &'a [String]) -> Option<&'a str> {
+/// The exempted mount point a path falls under, if any (`-e`), as the C's
+/// `isefsys()` decides it: the `-e` path is a plain prefix of the file's,
+/// bytes against bytes, with no `stat`. So `/` covers everything, and
+/// `/dev/shm` covers `/dev/shm/x` — and `/dev/shmx/f` too: measured, `lsof
+/// -e W/m` makes `W/mx/f` an `UNKNfd` row. lsof-rs had required a component
+/// boundary there, which nothing had measured. The CLI has trimmed the `-e`
+/// path's trailing slashes, as the C's `enter_efsys()` does.
+pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [String]) -> Option<&'a str> {
     // An fd whose link target is not an absolute path -- `socket:[14197]`,
     // `pipe:[…]`, `anon_inode:…` -- lives on no file system and is exempt
     // from nothing. Measured: under `-e /` the C still resolves sockets to
     // their `IPv4 … TCP` rows. Testing `mp == "/"` alone swallowed them.
-    if !path.starts_with('/') {
+    if !path.starts_with(b"/") {
         return None;
     }
     exempt
         .iter()
-        .find(|e| under_mount(path.as_bytes(), e))
+        .find(|e| path.starts_with(e.as_bytes()))
         .map(String::as_str)
 }
 
@@ -326,7 +349,6 @@ fn metadata_outside(path: &[u8], exempt: &[String]) -> Option<std::fs::Metadata>
 /// no file, and stat'ing it would lose the socket the way `maps` once lost a
 /// mapped file.
 fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<(String, String)> {
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::FileTypeExt;
     if !path.starts_with('/') {
         return None;
@@ -344,8 +366,9 @@ fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<(
 
 /// The C's `UNKN*` TYPE code for an fd kind — `UNKNfd`, `UNKNcwd`, `UNKNrtd`,
 /// `UNKNtxt`, `UNKNmem`, `UNKNdel`. Measured: an exempted numeric fd is
-/// `UNKNfd`, the cwd is `UNKNcwd`, the executable is `UNKNtxt`.
-fn unkn_suffix(fd: &FdType) -> &'static str {
+/// `UNKNfd`, the cwd is `UNKNcwd`, the executable is `UNKNtxt`, a mapping
+/// `UNKNmem` and a deleted one `UNKNdel`.
+pub(crate) fn unkn_suffix(fd: &FdType) -> &'static str {
     match fd {
         FdType::Cwd => "cwd",
         FdType::Root => "rtd",
@@ -377,6 +400,24 @@ pub struct GatherCtx<'a> {
     /// path it is bound to, and a `stat` of the socket file there, for a path
     /// argument to find it by (`SocketInfo::bound`).
     pub bound_paths: bool,
+    /// The inode of this process's mount namespace (`/proc/self/ns/mnt`),
+    /// read once: a process whose own differs has its mappings `stat`ed
+    /// through `map_files` (see [`crate::maps::rows_for`]).
+    pub mnt_ns: Option<u64>,
+}
+
+/// The lock `pid` holds on the file a row was built from, as the C's
+/// `check_lock()` finds it for every row `process_proc_node()` makes — cwd,
+/// rtd and txt, a mapping, an fd: `cwd-R`, `txt-R`, `mem-W`, `DEL-W`, `3uW`,
+/// all measured. By the file's own device (`st_dev`) and inode, so a lock on
+/// `/dev/null` is found on its devtmpfs inode, where looking it up by the
+/// DEVICE cell (`1,3`) missed it. A socket row has no such device here, and
+/// an `-e` row was never `stat`ed: neither gets one, as in the C. Only an fd
+/// had got one.
+fn lock_of(locks: &crate::locks::LockTable, pid: u32, f: &OpenFile) -> Option<LockKind> {
+    let dev = f.fs_device?;
+    let ino = f.node.as_deref()?.parse::<u64>().ok()?;
+    locks.get(&(pid, dev, ino)).copied()
 }
 
 /// The kernel's name for a socket fd: `socket:[<inode>]`, for every family.
@@ -384,6 +425,90 @@ fn is_socket_link(target: &Path) -> bool {
     target
         .to_str()
         .is_some_and(|s| s.starts_with("socket:[") && s.ends_with(']'))
+}
+
+/// The row for socket `inode` held in slot `fd`, as the tables name it: this
+/// namespace's `/proc/net`, or, failing that, the protocol from the owning
+/// process's own namespace (`sock … protocol: TCP`) — or, under `-X`, the
+/// fixed string that replaces the lookup. `None` when neither knows the
+/// socket, and the caller keeps the row its `stat` gives. An fd's row and a
+/// mapped socket's (a packet ring in another mount namespace) are built
+/// alike; the mapping's caller then blanks the offset, which it has none of.
+pub(crate) fn socket_row(
+    inode: u64,
+    fd: &FdType,
+    info: &FdInfo,
+    meta: Option<&std::fs::Metadata>,
+    pid: u32,
+    ctx: &GatherCtx<'_>,
+) -> Option<OpenFile> {
+    let (socks, ns) = (ctx.socks, ctx.ns);
+    if socks.get(inode).is_none() {
+        // Not in this namespace's tables. Before falling back to the bare
+        // `socket:[inode]` row, ask for the name the C would print here.
+        let name = ns.unresolved_name(pid, inode)?;
+        return Some(OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: info.flags,
+            lock: None,
+            fd: fd.clone(),
+            access: info.access(),
+            // Lowercase `sock`, the C's LSOF_FILE_SOCKET, and the OFFSET
+            // rather than a size: an unidentified socket has no size worth
+            // printing and the C shows `0t0`.
+            file_type: FileType::Other("sock".into()),
+            name,
+            device: meta.map(dev_cell),
+            size: None,
+            offset: Some(info.pos.unwrap_or(0)),
+            node: Some(inode.to_string()),
+            links: None,
+            socket: None,
+        });
+    }
+    let e = socks.get(inode)?;
+    // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
+    // anonymous socket — and every AF_PACKET socket, which never has a path —
+    // shows the tail alone.
+    let name = match &e.type_suffix {
+        Some(suffix) => match &e.path {
+            Some(p) => format!("{p} {suffix}"),
+            None => suffix.clone(),
+        },
+        None => e.info.display_name(false, false),
+    };
+    let mut sock = e.info.clone();
+    if ctx.bound_paths {
+        sock.bound = e.path.as_ref().map(|path| {
+            let raw = socks.raw_path(inode);
+            Box::new(lsof_core::BoundPath {
+                path: raw.is_none().then(|| path.clone()),
+                id: socks.bound_id(inode, || socket_file_id(path, raw, ctx.exempt)),
+            })
+        });
+    }
+    Some(OpenFile {
+        rdev: None,
+        // A socket has no filesystem device, so `-F D` has nothing to print;
+        // its open-file flags are real and come from fdinfo just like any
+        // other fd's.
+        fs_device: None,
+        file_flags: info.flags,
+        lock: None,
+        fd: fd.clone(),
+        access: info.access(),
+        file_type: e.file_type.clone(),
+        name,
+        device: Some(e.device.clone()),
+        size: None,
+        // lsof prints `0t0` in SIZE/OFF for every socket row — a socket has
+        // no size, and its offset is meaningless but always shown.
+        offset: Some(0),
+        node: Some(e.node.clone()),
+        links: None,
+        socket: Some(Box::new(sock)),
+    })
 }
 
 /// One row from a path under `/proc` that is a magic symlink (an fd, or
@@ -404,7 +529,7 @@ fn row(
     pid: u32,
     ctx: &GatherCtx<'_>,
 ) -> Option<OpenFile> {
-    let (socks, ns, exempt, sockets_only) = (ctx.socks, ctx.ns, ctx.exempt, ctx.sockets_only);
+    let (exempt, sockets_only) = (ctx.exempt, ctx.sockets_only);
     let access = info.access();
     let offset = info.pos;
     let target = Some(target);
@@ -428,8 +553,7 @@ fn row(
     // `UNKN<fd kind>`, DEVICE the literal `UNKNOWN`, and size, inode and link
     // count are absent. NAME gains ` (-e <fs>)`.
     if let Some(t) = target.as_ref() {
-        let shown = t.to_string_lossy();
-        if let Some(fs) = exempt_match(&shown, exempt) {
+        if let Some(fs) = exempt_match(t.as_os_str().as_bytes(), exempt) {
             let kind = unkn_suffix(&fd);
             return Some(OpenFile {
                 rdev: None,
@@ -438,8 +562,8 @@ fn row(
                 lock: None,
                 fd,
                 access: AccessMode::Unknown,
-                file_type: FileType::Other(format!("UNKN{kind}")),
-                name: format!("{shown} (-e {fs})"),
+                file_type: FileType::Exempt(kind),
+                name: format!("{} (-e {fs})", t.to_string_lossy()),
                 device: Some("UNKNOWN".to_string()),
                 size: None,
                 // Pass the fdinfo position through rather than defaulting it:
@@ -476,76 +600,8 @@ fn row(
     // exactly as it was, which is the honest result for a socket in another
     // network namespace.
     if let Some(inode) = net::socket_inode(&name) {
-        if socks.get(inode).is_none() {
-            // Not in this namespace's tables. Before falling back to the bare
-            // `socket:[inode]` row, ask for the name the C would print here —
-            // the protocol from the owning process's OWN namespace
-            // (`sock … protocol: TCP`), or, under `-X`, the fixed string that
-            // replaces the lookup entirely.
-            if let Some(name) = ns.unresolved_name(pid, inode) {
-                return Some(OpenFile {
-                    rdev: None,
-                    fs_device: None,
-                    file_flags: info.flags,
-                    lock: None,
-                    fd,
-                    access,
-                    // Lowercase `sock`, the C's LSOF_FILE_SOCKET, and the
-                    // OFFSET rather than a size: an unidentified socket has no
-                    // size worth printing and the C shows `0t0`.
-                    file_type: FileType::Other("sock".into()),
-                    name,
-                    device: meta.as_ref().map(dev_cell),
-                    size: None,
-                    offset: Some(offset.unwrap_or(0)),
-                    node: Some(inode.to_string()),
-                    links: None,
-                    socket: None,
-                });
-            }
-        }
-        if let Some(e) = socks.get(inode) {
-            // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
-            // anonymous socket — and every AF_PACKET socket, which never has a
-            // path — shows the tail alone.
-            let name = match &e.type_suffix {
-                Some(suffix) => match &e.path {
-                    Some(p) => format!("{p} {suffix}"),
-                    None => suffix.clone(),
-                },
-                None => e.info.display_name(false, false),
-            };
-            let mut sock = e.info.clone();
-            if ctx.bound_paths {
-                sock.bound = e.path.as_ref().map(|path| {
-                    let raw = socks.raw_path(inode);
-                    Box::new(lsof_core::BoundPath {
-                        path: raw.is_none().then(|| path.clone()),
-                        id: socks.bound_id(inode, || socket_file_id(path, raw, exempt)),
-                    })
-                });
-            }
-            return Some(OpenFile {
-                rdev: None,
-                // A socket has no filesystem device, so `-F D` has nothing to
-                // print; its open-file flags are real and come from fdinfo just
-                // like any other fd's.
-                fs_device: None,
-                file_flags: info.flags,
-                lock: None,
-                fd,
-                access,
-                file_type: e.file_type.clone(),
-                name,
-                device: Some(e.device.clone()),
-                size: None,
-                // lsof prints `0t0` in SIZE/OFF for every socket row — a socket
-                // has no size, and its offset is meaningless but always shown.
-                offset: Some(0),
-                node: Some(e.node.clone()),
-                links: None,
-                socket: Some(Box::new(sock)),
-            });
+        if let Some(f) = socket_row(inode, &fd, info, meta.as_ref(), pid, ctx) {
+            return Some(f);
         }
     }
 
@@ -725,7 +781,7 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
         let p = format!("{base}/{name}");
         match std::fs::read_link(&p) {
             Ok(target) => {
-                if let Some(f) = row(
+                if let Some(mut f) = row(
                     Path::new(&p),
                     target,
                     fd.clone(),
@@ -733,6 +789,7 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
                     pid,
                     ctx,
                 ) {
+                    f.lock = lock_of(ctx.locks, pid, &f);
                     out.push(f);
                 }
             }
@@ -746,15 +803,17 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
 
     // Mapped files, after the specials and before the numbered fds — the
     // order the C emits them in. The txt row, if there is one, identifies the
-    // executable's own mapping so it is not listed a second time as `mem`.
-    // A `maps` that cannot be read adds nothing, and says nothing: the C
-    // returns from `process_proc_map()` without a row.
+    // executable's own mapping so it is not listed a second time as `mem`:
+    // by its `st_dev` and inode, which an `-e` txt row has neither of, and
+    // then the executable is a mapping like any other, as in the C. A `maps`
+    // that cannot be read adds nothing, and says nothing: the C returns from
+    // `process_proc_map()` without a row.
     if !sockets_only {
         let exe = out
             .iter()
             .find(|f| f.fd == FdType::Txt)
-            .and_then(|f| Some((f.device.as_deref()?, f.node.as_deref()?)));
-        out.extend(crate::maps::rows_for(base, exe));
+            .and_then(|f| Some((f.fs_device?, f.node.as_deref()?.parse::<u64>().ok()?)));
+        out.extend(crate::maps::rows_for(base, pid, exe, ctx));
     }
 
     let dir = match std::fs::read_dir(format!("{base}/fd")) {
@@ -801,15 +860,8 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
             }
         };
         if let Some(mut f) = row(Path::new(&p), target, FdType::Handle(num), &info, pid, ctx) {
-            // The lock character lsof appends to the FD cell (`8uW`). Only a
-            // numbered fd can hold one: the specials and the mapped-file rows
-            // are not open file descriptions.
-            if let (Some(dev), Some(node)) = (f.device.as_deref(), f.node.as_deref()) {
-                f.lock = ctx
-                    .locks
-                    .get(&(pid, dev.to_string(), node.to_string()))
-                    .copied();
-            }
+            // The lock character lsof appends to the FD cell (`8uW`).
+            f.lock = lock_of(ctx.locks, pid, &f);
             out.push(f);
         }
     }
@@ -824,7 +876,8 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
 }
 
 /// Whether the walk of `base` would find anything to show when unreadable
-/// files make no rows: a link that reads, or a mapped file.
+/// files make no rows: a link that reads, or a mapping (each is a row,
+/// whatever a `stat` of it would say).
 ///
 /// `-t`'s fast path asks this instead of walking. The C lists a process only
 /// through its files, and `-t` sets `-w`, under which it makes no row for a
@@ -845,7 +898,7 @@ pub fn has_readable_file(base: &str) -> bool {
                     && std::fs::read_link(e.path()).is_ok()
             })
         })
-        || !crate::maps::rows_for(base, None).is_empty()
+        || crate::maps::has_mapping(base)
 }
 
 #[cfg(test)]
@@ -878,6 +931,7 @@ mod tests {
                 sockets_only: false,
                 omit_unreadable: false,
                 bound_paths: false,
+                mnt_ns: None,
             },
         )
     }
@@ -894,7 +948,35 @@ mod tests {
         assert_eq!(type_from_mode(S_IFIFO | 0o600).code(), "FIFO");
         assert_eq!(type_from_mode(S_IFSOCK | 0o777).code(), "SOCK");
         assert_eq!(type_from_mode(S_IFLNK | 0o777).code(), "LINK");
-        assert_eq!(type_from_mode(0).code(), "unknown");
+        // Any other format is its number in octal, the C's
+        // `LSOF_FILE_UNKNOWN_RAW`: an anonymous inode reached through a
+        // mapping's `map_files` link is `0000` (measured: `mem 0000 0,16 0
+        // 12518 anon_inode:[io_uring]`), and `-F t` prints it.
+        assert_eq!(type_from_mode(0o600).code(), "0000");
+        assert!(type_from_mode(0).has_code());
+        assert_eq!(type_from_mode(0o160000).code(), "0016");
+    }
+
+    #[test]
+    fn makedev_packs_as_glibc_and_dev_string_unpacks_it() {
+        // `-F D` of a row built from a maps line: measured, the C prints
+        // `D0x10002d` for device 0,301, and `D0xfe00` for 254,0.
+        assert_eq!(makedev(0, 301), 0x10_002d);
+        assert_eq!(makedev(254, 0), 0xfe00);
+        for (maj, min) in [
+            (0, 0),
+            (8, 1),
+            (254, 0),
+            (0, 301),
+            (4095, 255),
+            (4096, 1 << 19),
+        ] {
+            assert_eq!(
+                dev_string(makedev(maj, min)),
+                format!("{maj},{min}"),
+                "{maj},{min} round trip"
+            );
+        }
     }
 
     #[test]
@@ -959,6 +1041,7 @@ mod tests {
                 sockets_only: false,
                 omit_unreadable: false,
                 bound_paths: false,
+                mnt_ns: None,
             },
         );
         assert!(
@@ -1185,26 +1268,32 @@ mod tests {
         );
     }
     #[test]
-    fn an_exempt_match_is_a_path_prefix_and_never_a_socket() {
+    fn an_exempt_match_is_a_plain_prefix_and_never_a_socket() {
         let root = vec!["/".to_string()];
         let shm = vec!["/dev/shm".to_string()];
-        let shm_slash = vec!["/dev/shm/".to_string()];
 
-        assert_eq!(exempt_match("/usr/bin/python3", &root), Some("/"));
-        assert_eq!(exempt_match("/", &root), Some("/"));
-        assert_eq!(exempt_match("/dev/shm/x", &shm), Some("/dev/shm"));
-        assert_eq!(exempt_match("/dev/shm", &shm), Some("/dev/shm"));
-        // A trailing slash on the argument is tolerated, as the C tolerates it.
-        assert_eq!(exempt_match("/dev/shm/x", &shm_slash), Some("/dev/shm/"));
-        // Prefix, not substring: /dev/shmx is a different directory.
-        assert_eq!(exempt_match("/dev/shmx", &shm), None);
-        assert_eq!(exempt_match("/usr/bin/python3", &shm), None);
+        assert_eq!(exempt_match(b"/usr/bin/python3", &root), Some("/"));
+        assert_eq!(exempt_match(b"/", &root), Some("/"));
+        assert_eq!(exempt_match(b"/dev/shm/x", &shm), Some("/dev/shm"));
+        assert_eq!(exempt_match(b"/dev/shm", &shm), Some("/dev/shm"));
+        // A plain prefix, as the C's `isefsys()` compares: measured, `-e W/m`
+        // exempts `W/mx/f`. (The CLI has trimmed `-e /dev/shm/` to this.)
+        assert_eq!(exempt_match(b"/dev/shmx", &shm), Some("/dev/shm"));
+        assert_eq!(exempt_match(b"/dev/sh", &shm), None);
+        assert_eq!(exempt_match(b"/usr/bin/python3", &shm), None);
+        // Bytes: a name that is not UTF-8 is under its mount point all the
+        // same.
+        assert_eq!(exempt_match(b"/dev/shm/\xff", &shm), Some("/dev/shm"));
 
         // The bug the oracle caught: an fd whose target is not a path lives on
         // no file system, and `-e /` must not swallow it. Under `-e /` the C
         // still resolves sockets to their `IPv4 … TCP` rows.
         for target in ["socket:[14197]", "pipe:[99]", "anon_inode:[eventfd]"] {
-            assert_eq!(exempt_match(target, &root), None, "{target} is not a path");
+            assert_eq!(
+                exempt_match(target.as_bytes(), &root),
+                None,
+                "{target} is not a path"
+            );
         }
     }
 
@@ -1255,6 +1344,7 @@ mod tests {
                 sockets_only,
                 omit_unreadable,
                 bound_paths: false,
+                mnt_ns: None,
             },
         )
     }
@@ -1607,6 +1697,7 @@ mod tests {
             sockets_only: false,
             omit_unreadable: false,
             bound_paths: true,
+            mnt_ns: None,
         };
         let id = |f: OpenFile| f.socket.and_then(|s| s.bound).and_then(|b| b.id);
         let first = row(
