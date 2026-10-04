@@ -3596,9 +3596,12 @@ finding it is supposed to produce.
   names a path must be able to name a relative one, so a case can name the
   directory it runs in.
 - **Kit change:** `harnesses/differential/diff_run.py` takes a per-case
-  `cwd`, with a self-test that a case starts there and that a missing one is
-  an infra error. PLAYBOOK Phase 4, step 2, asks for every spelling of a
-  path and for the C's own helper as the oracle.
+  `cwd`, with self-tests that a case starts there, that a missing one is an
+  infra error, and that a binary named by a relative path is still the one
+  beside the harness. The first CI run failed on that last one, which every
+  local run had hidden by passing absolute paths. PLAYBOOK Phase 4, step 2,
+  asks for every spelling of a path and for the C's own helper as the
+  oracle.
 - **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.
 
 ## 078. Two cases that listed nothing matched for the wrong reason, and a C-DEFECT was the C's option parsing

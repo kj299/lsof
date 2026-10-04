@@ -235,6 +235,12 @@ long names the backend reports.
 infra error, not a verdict. `linux_diff.py` substitutes into it, and drops by
 name a case whose `cwd` names a fixture or a mount that did not come up. Until
 now no case could name a relative path, which is where most of these lived.
+The first CI run failed on the runner itself. CI passes `--oracle ../lsof`, a
+relative path, and `subprocess` resolved it from the case's `cwd`, so the
+first case with one found no binary. Every local run had hidden it: as root
+the harness wraps both binaries in scripts named by absolute paths, and the
+non-root run had been given absolute ones. The runner now resolves a relative
+binary path from where it runs, and a self-test fails without that.
 
 **Forty-eight cases, 381 in all, 0 unexplained.** Fixture R holds the
 spellings and the files they name. The cases cover the mount point spelt

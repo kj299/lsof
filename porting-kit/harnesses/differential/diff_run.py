@@ -241,10 +241,17 @@ def run_one(binary, case, default_timeout=15):
     sides that both hang produce identical sentinels, and comparing those as if
     they were output would pass the exact hang class this harness exists to
     catch."""
-    argv = [binary] + [str(a) for a in case.get("args", [])]
     cwd = case.get("cwd")
     if cwd is not None and not os.path.isdir(cwd):
         sys.exit(f"error: case {case.get('name')!r}: cwd is not a directory: {cwd}")
+    # A relative path names the binary from where this harness runs, not from
+    # the case's `cwd`: `subprocess` resolves it from the new directory, so a
+    # CI job passing `--oracle ../lsof` found no binary once a case named a
+    # `cwd`. A bare name (no separator) is still looked up on PATH.
+    if not os.path.isabs(binary) and any(
+            sep and sep in binary for sep in (os.sep, os.altsep)):
+        binary = os.path.abspath(binary)
+    argv = [binary] + [str(a) for a in case.get("args", [])]
     env = dict(os.environ)
     env.update({k: str(v) for k, v in case.get("env", {}).items()})
     # `stdin_bytes` (raw bytes) feeds the child EXACTLY those bytes — the fuzzer
@@ -477,6 +484,25 @@ def _self_test():
     check("a `cwd` that is not a directory is an infra error, not a verdict",
           _exits(lambda: run_one(pwd_bin, {"name": "cwd-gone", "args": [],
                                            "cwd": "/nonexistent-diff-run-cwd"})))
+    # A binary given by a relative path is the one beside the harness, wherever
+    # the case starts: the CI differential passes `--oracle ../lsof`.
+    here = os.getcwd()
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as away:
+        os.makedirs(os.path.join(home, "bin"))
+        script = os.path.join(home, "bin", "pwd-here")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\nexec pwd -P\n")
+        os.chmod(script, 0o755)
+        try:
+            os.chdir(home)
+            out, rc, _to, _e = run_one(os.path.join("bin", "pwd-here"),
+                                       {"name": "rel-bin", "args": [], "cwd": away})
+        except SystemExit:
+            out, rc = "", None
+        finally:
+            os.chdir(here)
+        check("a relative binary path is resolved from the harness, not the case's `cwd`",
+              rc == 0 and out.strip() == os.path.realpath(away))
 
     # echo vs printf genuinely diverge on a format-string arg:
     # echo "%s" "hi" → "%s hi"   ;   printf "%s" "hi" → "hi"
