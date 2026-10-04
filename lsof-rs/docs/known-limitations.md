@@ -225,9 +225,8 @@ meet. Each number is a row there, with the measurement behind it.
 - **Deliberate:** options after the first file name are still options (12);
   NAME shows the name the process opened, not the one you asked about (17); a
   `+d`/`+D` walk stops at 200,000 entries or 16 MiB of names, and says so (81).
-- **Rarer:** large UIDs (68), the padding of a multibyte login name (71), and
-  the `-V` report's order and what mutes it (52–54). The rest, including the
-  stderr-only differences, are in the ledger.
+- **Rarer:** large UIDs (68) and the padding of a multibyte login name (71).
+  The rest, including the stderr-only differences, are in the ledger.
 
 ## Where these limitations are tracked
 

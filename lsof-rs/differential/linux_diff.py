@@ -1067,8 +1067,9 @@ def path_spelling_holder(work: str) -> Fixture:
     rel/x, 11 rel/, 12 nu/, 13 nu/0xff, 14 /dev/shm/, 15 an unlinked file on
     /dev/shm, 16/17 a pipe, 18 an eventfd, 19 an unlinked file here, 20 an
     AF_UNIX socket, 21 xd/, 22 xl/. Holding each directory a case expands
-    leaves one entry unlocated, so `-V` prints one line, whose order is not
-    in question (DIVERGENCES 52)."""
+    leaves one entry unlocated, so `-V` prints one line there. `vord/` is
+    the opposite: `a`, `b` and `sub/c`, none held, for the cases about the
+    order `-V` reports them in (DIVERGENCES 52)."""
     rdir = os.path.join(work, "spell")
     rel = os.path.join(rdir, "rel")
     os.makedirs(rel)
@@ -1092,6 +1093,10 @@ def path_spelling_holder(work: str) -> Fixture:
     os.symlink(os.path.join(rel, "x"), os.path.join(rdir, "xd", "to-x"))
     os.makedirs(os.path.join(rdir, "xl"))
     os.symlink(rel, os.path.join(rdir, "xl", "lnk"))
+    os.makedirs(os.path.join(rdir, "vord", "sub"))
+    for name in ("a", "b", os.path.join("sub", "c")):
+        with open(os.path.join(rdir, "vord", name), "w") as f:
+            f.write("vord\n")
     # A link named as /dev/shm's mount source is named (`tmpfs`), so that
     # `+f -- tmpfs` from here is an argument `Readlink()` turns into
     # `elsewhere`, while the source, a name and no path, stays `tmpfs`.

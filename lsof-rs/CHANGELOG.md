@@ -11,6 +11,21 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`-V` names path search items in the C's order**: last given first, and a
+  `+d`/`+D` expansion backwards, its directory after its entries, the latest
+  option first (DIVERGENCES 52). lsof-rs had reported them as given. `+d` and
+  `+D` are now expanded before the bare paths, as the C expands them while it
+  parses, so the walk's warnings come before a bare path's status error, and
+  come even when every bare path is dropped. **This changes Windows too.**
+- **`-V` still reports under `-Q`** (DIVERGENCES 53): `-Q` changes only the
+  exit status, as the C's does; lsof-rs had muted the report. **This changes
+  Windows too.**
+- **`-V` reports nothing under `-r`** (DIVERGENCES 54): the C reports once,
+  after its repeat loop, which a plain `-r` ends only by a signal. lsof-rs
+  had printed the report before every cycle's marker. **This changes Windows
+  too.**
+
 ### Security
 - **A process could hide from lsof-rs — and blind it for everyone — with one
   byte.** The Linux backend read every kernel table with `read_to_string` and

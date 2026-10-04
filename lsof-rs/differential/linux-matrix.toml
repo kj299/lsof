@@ -2495,6 +2495,58 @@ args = ["-n", "-P", "-a", "-d", "^mem", "+d", "{ASUB}", "-x", "f", "-p", "{A}"]
 name = "opt-x-word-of-unknown-letters-is-fatal"
 args = ["-n", "-P", "+d", "{ADIR}", "-x", "{ADIR}", "-p", "{A}"]
 
+# ------------------------------------------------- the -V report (DIVERGENCES 52-54)
+# `vord/` holds `a`, `b` and `sub/c`, which nothing has open, so each is a
+# search item `-V` reports. The C PREPENDS each one to the list it reports
+# from (`ck_file_arg()`), and expands `+d`/`+D` as it parses, before any bare
+# path: so bare paths come last given first, then each expansion backwards,
+# its entries before the directory, the latest option first. lsof-rs had
+# reported them in the order given.
+
+[[case]]
+name = "verbose-files-last-given-first"
+cwd = "{RDIR}"
+args = ["-V", "vord/a", "vord/b", "vord/sub/c"]
+
+[[case]]
+# The entries in reverse readdir order, then `vord` itself.
+name = "verbose-plus-d-entries-backwards-then-the-directory"
+cwd = "{RDIR}"
+args = ["-V", "+d", "vord"]
+
+[[case]]
+# `+D` walks as a stack (the last subdirectory found is read first); the
+# report is that walk backwards.
+name = "verbose-plus-D-the-walk-backwards"
+cwd = "{RDIR}"
+args = ["-V", "+D", "vord"]
+
+[[case]]
+# The bare paths first, though given after `+d`: the C entered `+d`'s items
+# while it parsed. `vord/a` is an item twice, and reported twice.
+name = "verbose-plus-d-is-entered-before-the-bare-paths"
+cwd = "{RDIR}"
+args = ["-V", "+d", "vord", "rel/y", "vord/a"]
+
+[[case]]
+name = "verbose-the-latest-plus-d-first"
+cwd = "{RDIR}"
+args = ["-V", "+d", "vord", "+d", "vord/sub"]
+
+[[case]]
+# `-Q` changes only the exit status (`FsearchErr`): the lines still print,
+# and the run exits 0. lsof-rs had muted them (DIVERGENCES 53).
+name = "verbose-under-minus-q-still-reports"
+cwd = "{RDIR}"
+args = ["-V", "-Q", "vord/b", "vord/a"]
+
+[[case]]
+name = "verbose-under-minus-q-a-pid-too"
+args = ["-V", "-Q", "-p", "999999999"]
+
+# (DIVERGENCES 54, no report under `-r`, needs a signal to end the run, which
+# a case cannot send; lsof-cli/tests/arguments.rs pins it.)
+
 # ------------------------------------------------------------- exit contract
 
 [[case]]

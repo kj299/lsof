@@ -128,6 +128,62 @@ disagreeing, and it names the C code so anyone can check the triage.
   names that cannot be stat'ed: it lists FILE's row and exits 1. lsof-rs reads
   options wherever they appear, lists the same row, and exits 0.
 
+## Fixed by reporting what was not located as the C reports it (2026-10-04)
+
+Items 52, 53 and 54, measured against the C, and the half of item 82 the same
+change reaches.
+
+**The order** (item 52). The C reports a path search item from a list
+`ck_file_arg()` builds by prepending each one (`sfp->next = Sfile`), so `-V`
+names them last given first. It expands `+d`/`+D` as it parses its options
+(`enter_dir()`), before it looks at any bare path: the directory goes in
+first, then each entry as the walk meets it, in `readdir` order, a `+D`
+walking its subdirectories as a stack (`stkdir()`). The report is all of that
+backwards: the bare paths last given first, then each expansion's entries in
+reverse with the directory after them, the latest option first. lsof-rs had
+reported them as given. It now enters `+d`/`+D` before the bare paths, as the
+C does, and reports the list backwards; its walk was already the C's. The
+other kinds of item were already in the C's order: `-c` and `-i` last given
+first, the rest as given.
+
+**`-Q` does not mute `-V`** (item 53). `-Q` changes only what a search failure
+does to the exit status (`LSOF_SEARCH_FAILURE` is `FsearchErr ? 1 : 0`), and
+every `not located` line still prints. lsof-rs had printed none under `-Q`.
+The run still exits 0.
+
+**No report under `-r`** (item 54). The C reports once, after its repeat
+loop. A plain `-r` loop ends only on a signal, and the C handles none but
+`SIGALRM`, so it dies first: under `-r` there is no report at all. lsof-rs
+printed one before every cycle's marker. The C's loop can also end by itself,
+under `+r` at the first cycle that lists nothing, or after a repeat count
+(`-r 1c3`); lsof-rs refuses both, so its loop too ends only on a signal.
+
+**The walk's warnings come first** (item 82, in part). Expanding `+d`/`+D`
+before the bare paths also puts the walk's warnings ahead of a bare path's
+status error, and they now come when the status errors drop every bare path
+and end the run, where lsof-rs had printed none. A run that ends during
+parsing (an option error, `-h`, `-v`, `-F ?`) still prints none, so row 82
+stays open for that.
+
+On Windows, where the C has no say, the same three rules apply.
+
+### What the gate gained
+
+**Seven cases, 394 in all, 0 unexplained.** Fixture R gained `vord/`, three
+files nothing holds open. The cases cover bare paths, `+d`, `+D`, `+d` given
+before bare paths (a file named twice is reported twice), two `+d`s, and `-V
+-Q` for files and for a pid. No case can send a signal, so an integration
+test pins `-r`, and `-Q` with it (`minus_v_reports_under_minus_q_and_never_under_minus_r`);
+another pins the stderr order (`the_walk_warns_before_a_bare_paths_status_error`).
+Both were measured against the C byte for byte, with the signal sent from a
+process that does not ignore `SIGINT`: a job started with `&` in a
+non-interactive shell inherits it ignored, and neither binary then stops.
+
+**Four mutants, one per rule, all killed.** Reporting in the given order: six
+cases and a unit test. Expanding after the bare paths: one case and the
+stderr test. `-Q` muting the report: two cases and the integration test.
+Reporting every cycle: the integration test alone.
+
 ## Fixed by spelling paths as the C's `Readlink()` does (2026-10-04)
 
 Items 62, 63 and 65, and five more found while measuring them (74 to 78),
@@ -2844,9 +2900,9 @@ C-DEFECT not reproduced.
 | 49 | an empty item in a `-p` list is PID 0: `-p ,`, `-p ,1` and `-p 1,,1` report `process ID not located: 0` and exit 1, while a trailing comma (`-p 1,`) is ignored | ~~drops every empty item, so `-p ,` lists the whole host~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. The same reader takes `-g`, and only a comma separates: lsof-rs had split at spaces too. |
 | 50 | `-a` with **nothing to AND** is a usage error: a bare `-a`, `-a -K i`, `-a -p ^N` (only exclusions) print `no select options to AND via -a` and the usage, and exit 1 (`main.c`: `if (Selflags == 0) { if (Fand) …`) | ~~lists the whole host and exits 0~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. |
 | 51 | repeated `-d` options **add up** (`enter_fd()` extends `Fdl`): `-d 3 -d 4` selects both, `-d ^cwd -d ^rtd` excludes both. An include and an exclude in one run are refused, within a list or across two: `exclude in an include -d list: ^4`, `include in an exclude -d list: mem`, exit 1 | ~~keeps only the last `-d`, and accepts a mixed list~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. Wider than this row said: an empty item enters nothing, a range needs low < high, and the names are the C's table, `fd` included, which lsof-rs had refused. |
-| 52 | `-V` reports unlocated **file arguments last given first** (`arg.c` prepends each to `Sfile`), and a `+d`/`+D` expansion in reverse, the directory itself last | in the order given | **OPEN — found 2026-10-03** by the item 33 review sweep. The `-V` order above records "last given first" for `-c` and `-i` only. The exit status matches. |
-| 53 | `-V` **under `-Q`** still prints every `not located` line: `-Q` clears `FsearchErr`, which changes only the exit status (`lsof -V -Q -p 3999999` prints the line and exits 0) | prints nothing (`verbose && !quiet`) | **OPEN — found 2026-10-03** by the item 33 review sweep. Item 19's "`-Q` mutes the message" is the `stat` error on stderr, not these. |
-| 54 | under `-r` the `not located` report comes **once, after the repeat loop** — so never under `-r`, which ends only on a signal | after every cycle: `lsof -V -r 1 -p 3999999` prints the line before each `=======` | **OPEN — found 2026-10-03** by the item 33 review sweep. |
+| 52 | `-V` reports unlocated **file arguments last given first** (`arg.c` prepends each to `Sfile`), and a `+d`/`+D` expansion in reverse, the directory itself last | ~~in the order given~~ **resolved 2026-10-04** | see "Fixed by reporting what was not located as the C reports it" above. Found 2026-10-03 by the item 33 review sweep. |
+| 53 | `-V` **under `-Q`** still prints every `not located` line: `-Q` clears `FsearchErr`, which changes only the exit status (`lsof -V -Q -p 3999999` prints the line and exits 0) | ~~prints nothing (`verbose && !quiet`)~~ **resolved 2026-10-04** | see "Fixed by reporting what was not located as the C reports it" above. Item 19's "`-Q` mutes the message" is the `stat` error on stderr, not these. |
+| 54 | under `-r` the `not located` report comes **once, after the repeat loop** — so never under `-r`, which ends only on a signal | ~~after every cycle: `lsof -V -r 1 -p 3999999` prints the line before each `=======`~~ **resolved 2026-10-04** | see "Fixed by reporting what was not located as the C reports it" above. |
 | 55 | a process's **owner** (USER, `-u`, `-F u`) is the owner of `/proc/<pid>` (`dproc.c`: `uid = sb.st_uid` after `stat()`), which the kernel sets to the **effective** uid, dumpable or not | ~~the **real** uid, the first field of `Uid:` in `status`~~ **resolved 2026-10-03** | see "Fixed by taking the owner from the effective uid, and finding a file by what it is" above. This row's "of a dumpable process" was too narrow: `task_dump_owner()` gives a world-readable directory the effective uid either way. |
 | 56 | on Linux `-E`/`+E` **name endpoints** (a pipe's `PID,cmd,FDmode`, a unix socket's, a TCP connection to the same host's), and under `-a` they keep reading the processes `-a` excluded (`process_id()`: `if (!FeptE) return (1);`), so those processes' files still locate search items: `-i`, a file name, and `-K` through any task on the host. `lsof -V -E -K -a -p P`, P single-threaded, prints nothing and exits 0 | accepted and ignored on Linux: no endpoint names, and an excluded process locates nothing, so the same run says `no tasks located` and exits 1 | **OPEN — found 2026-10-03** by the item 33 review sweep. The `-E`/`+E` implementation is Windows-only (named pipes); nothing recorded the Linux side until now. |
 | 57 | under `-t` a process whose own entry has **no selected row** hides its tasks' PID: `print_proc()` sets `LastPid` before it looks for one, so `-K -t -a -p P DIR`, with DIR the cwd of one of P's threads alone, prints nothing and exits 0 | prints P, the PID whose row the same run without `-t` lists | **C-DEFECT, not reproduced — found 2026-10-03** by the item 33 review sweep, after `-K -t` stopped taking the fast path (which matched the C here only by never reading a task). Ledgered as `tasks-dash-K-terse-a-row-only-a-task-holds-in-lsof-rs`. The same happens run as a user who can read a thread but not its process. |
@@ -2874,7 +2930,7 @@ C-DEFECT not reproduced.
 | 79 | `lsof ''`: `Readlink("")` never enters its loop, and compares and copies a buffer it never wrote — in practice the previous argument's spelling, so `lsof rel/x ''` searches for `rel/x` twice | `stat`s the empty path: `status error on : No such file or directory`, and drops it | **C-DEFECT, not reproduced — found 2026-10-04** by comparing `Readlink()` with its port. An integration test pins lsof-rs's answer; no differential case, as the C's is undefined. |
 | 80 | `Readlink()`'s link count (`Readlink_sx`) is not reset when a re-reading gives up as too long, so the next argument starts with links counted: after such an argument, a chain of exactly 20 links is refused (`too many (> 20) symbolic links`) | counts each argument's links on its own | **C-DEFECT, not reproduced — found 2026-10-04** reading `lib/misc.c`, then measured. |
 | 81 | a `+d`/`+D` tree is walked whole, whatever its size: two links to `.` under `-x l` make 2^40 paths, and the C does not finish | stops after 200,000 entries or 16 MiB of their names, and says so: `WARNING: stopped walking DIR after N entries`, unless a `-w` came before the option | **DECISION — 2026-10-04**, from the item 62 review. The entry limit is older, and was silent. Once `+D` followed links under `-x l` (78), 200,000 entries of a tree of links to itself, each name longer than the last, reached 1.1 GB in 5 s; the byte limit stops it at 26 MB in 0.13 s. A tree past either limit is searched in part, and the warning says so. |
-| 82 | a `+d`/`+D` walk's warnings (`can't opendir`, `can't lstat`, `can't stat(…) symbolc link`) are printed as the C parses its options: before a bare path's status error, and before an option error, `-h`, `-v` or `-F ?` ends the run | walks after parsing and after the bare paths, so its warnings follow their status errors, and a run that ends during parsing prints none | **OPEN — found 2026-10-04** by the item 62 review. stderr only. The walk needs the backend to identify what it finds, and the run builds that after parsing. |
+| 82 | a `+d`/`+D` walk's warnings (`can't opendir`, `can't lstat`, `can't stat(…) symbolc link`) are printed as the C parses its options: before a bare path's status error, and before an option error, `-h`, `-v` or `-F ?` ends the run | walks after parsing, so a run that ends during parsing prints none | **OPEN — found 2026-10-04** by the item 62 review; narrowed the same day by item 52's fix, which walks before the bare paths, so the warnings now precede their status errors and survive their dropping every bare path. stderr only. The walk needs the backend to identify what it finds, and the run builds that after parsing. |
 | 83 | every option error the C finds is printed before the usage: `lsof -x +d nonexist` adds `-x must accompany +d or +D`, `lsof +d dangle -p abc` prints both | prints the first error and stops | **OPEN — found 2026-10-04** by the item 62 review. stderr only: exit 1 and nothing listed in both. It was so before this change too (`-p abc -x z`). |
 | 84 | a bind mount of a block device (the same device on another directory) is a second search item: `lsof /dev/vda` and `+f -- /dev/vda` locate one and report the other, `no file system use located: /dev/vda`, exit 1 | one item per device: exit 0 | **OPEN — found 2026-10-04** by the item 62 review, on master too. Common in containers. Arguably the same bookkeeping as item 17's two names for one file; the maintainer's call. |
 | 85 | the mount reader keeps the first row for each mounted-on directory but `/` (`dmnt.c`), so after an overmount the covering mount's source names nothing: `+f -- SOURCE` is `not a file system` | keeps every row: the covering source names the file system | **OPEN — found 2026-10-04** by the item 62 review, on master too. |

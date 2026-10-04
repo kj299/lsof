@@ -488,7 +488,14 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     // a directory whose every entry is open exits 0, and adding one unopened
     // file makes it 1. Identity is what "located" means, so a file queried
     // through a hard link counts as found under its other name.
-    for (item, &hit) in sel.path_items.iter().zip(&located.paths) {
+    //
+    // Last entered, first reported: `ck_file_arg()` PREPENDS each item to
+    // `Sfile`, which the report walks. So bare paths come last given first,
+    // then each `+d`/`+D` expansion backwards — its entries before the
+    // directory itself — the latest option first (DIVERGENCES 52). The items
+    // are entered in the C's order (`+d`/`+D` first, each walked as
+    // `enter_dir` walks), so reversing them is the C's report.
+    for (item, &hit) in sel.path_items.iter().zip(&located.paths).rev() {
         let PathItem {
             fs_device,
             name: display,
@@ -841,6 +848,14 @@ fn main() {
         }
         let esc = Escaper::for_host();
         spell_names_as_reported(&mut sel);
+        // `+d`/`+D` first: the C expands them as it parses its options, so
+        // their entries are search items before any bare path is, their
+        // warnings come before a bare path's status error, and they come even
+        // when every bare path is then dropped. The order matters to `-V`,
+        // which reports the items last-entered first (DIVERGENCES 52).
+        for dir in sel.dir_args.clone() {
+            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc);
+        }
         let identified = sel.paths_identified;
         let mut survived = 0usize;
         for typed in sel.paths.clone() {
@@ -937,9 +952,6 @@ fn main() {
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             std::process::exit(1);
         }
-        for dir in sel.dir_args.clone() {
-            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc);
-        }
         sel
     };
 
@@ -961,6 +973,11 @@ fn main() {
     // Captured before `run_cycle` takes `selection`: `-Q` decides the exit
     // status, and the closure needs the selection itself.
     let quiet = selection.quiet;
+    // The C reports what it did not locate once, after its repeat loop, and a
+    // plain `-r` loop ends only on a signal, which kills it first: under `-r`
+    // there is no report at all (DIVERGENCES 54). lsof-rs refuses `+r` and a
+    // repeat count, the two ways the C's loop can end by itself.
+    let repeating = repeat.is_some();
 
     let run_cycle = move || -> usize {
         let gathered = match env.backend.gather(&selection) {
@@ -979,7 +996,11 @@ fn main() {
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
         let esc = Escaper::for_host();
-        let misses = unlocated(&selection, &located, esc);
+        let misses = if repeating {
+            Vec::new()
+        } else {
+            unlocated(&selection, &located, esc)
+        };
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
@@ -1025,8 +1046,10 @@ fn main() {
             Format::JsonLines => sink.write_all(json::render_lines(&procs).as_bytes()),
         };
         // `-V`'s lines follow the listing, on the same stream, as the C's do.
+        // `-Q` does not mute them: it changes only the exit status, as the
+        // C's `FsearchErr` does (DIVERGENCES 53).
         let written = written.and_then(|()| {
-            if selection.verbose && !selection.quiet {
+            if selection.verbose {
                 for m in &misses {
                     writeln!(sink, "{m}")?;
                 }
@@ -1317,7 +1340,9 @@ mod tests {
 
     /// A path item `Selection::locate` did not mark is reported in its own
     /// words, as typed: `no file use located`, or `no file system use
-    /// located` for one that named a file system (DIVERGENCES 60).
+    /// located` for one that named a file system (DIVERGENCES 60) — and the
+    /// last one entered first, as the C walks the list it prepended to
+    /// (DIVERGENCES 52).
     #[test]
     fn an_unlocated_path_is_reported_as_typed() {
         use lsof_core::render::Escaper;
@@ -1347,8 +1372,8 @@ mod tests {
         assert_eq!(
             lines(vec![false, false]),
             [
-                "lsof: no file use located: ./x",
-                "lsof: no file system use located: mnt"
+                "lsof: no file system use located: mnt",
+                "lsof: no file use located: ./x"
             ]
         );
         assert_eq!(
