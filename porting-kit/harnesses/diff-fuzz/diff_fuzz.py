@@ -47,7 +47,9 @@ Usage:
   diff_fuzz.py --oracle PATH --rust PATH [--seed N] [--iterations N | --max-time S]
                [--args A ...] [--seed-file F ...] [--matrix M]
                [--argv-inventory TOML [--argv-exclude LETTERS]
-                [--argv-value V ...] [--argv-words N]]
+                [--argv-value V ...] [--argv-words N]] [-- FIXED-ARGV ...]
+  Fixed arguments that start with `-`, as a command-line tool's do, go after
+  `--`: `--args -a -p 1` reads `-a` as an option of this script.
                [--ledger DIVERGENCES.md] [--findings-dir DIR]
                [--timeout S] [--max-findings N] [--sort] [--mask-numbers]
                [--ignore-exit] [--with-stderr] [--json]
@@ -523,6 +525,9 @@ def _self_test():
         check("an alphabet with every letter excluded is an error, not a clean run",
               main(["--oracle", aoracle, "--rust", arust, "--argv-inventory", empty,
                     "--argv-exclude", "q"]) == 2)
+        check("fixed arguments that start with `-` go after `--`",
+              _split_fixed(["--oracle", "o", "--", "-a", "-p", "1"])
+              == (["--oracle", "o"], ["-a", "-p", "1"]))
         check("argv mode refuses stdin seeds rather than ignoring them",
               main(["--oracle", aoracle, "--rust", arust, "--argv-inventory", inv,
                     "--seed-file", inv]) == 2)
@@ -531,7 +536,18 @@ def _self_test():
     return 0 if ok else 1
 
 
+def _split_fixed(argv):
+    """(this script's arguments, the fixed argv after `--`). argparse cannot take
+    `--args -a -p 1`: it reads `-a` as an option here, so a command-line tool's
+    fixed arguments were impossible to pass."""
+    if "--" in argv:
+        i = argv.index("--")
+        return argv[:i], argv[i + 1:]
+    return argv, []
+
+
 def main(argv=None):
+    argv, fixed = _split_fixed(list(sys.argv[1:] if argv is None else argv))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--oracle", help="C reference binary (a live one: a golden replay cannot answer a generated input)")
     ap.add_argument("--rust", help="Rust binary under test")
@@ -557,6 +573,7 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
+    args.args = list(args.args) + fixed
 
     if args.self_test:
         return _self_test()

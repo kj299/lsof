@@ -3887,6 +3887,10 @@ finding it is supposed to produce.
   first and at most one operand last, the order getopt reads; minimizing drops
   whole words; a finding is saved as `<fp>.argv`. `--max-time` alone now runs
   for its time (a default of 1000 iterations had capped every timed run), and
-  a zero budget is refused. The diff-fuzz skill describes the mode.
+  a zero budget is refused. Fixed arguments that start with `-` go after `--`:
+  `--args -a -p 1` was read as options of the harness, so a command-line
+  tool's fixed argv could never be passed — found by the mode's first real
+  run, which then found four divergences no one had recorded (DIVERGENCES
+  114–117). The diff-fuzz skill describes the mode.
 - **Section amended:** `harnesses/diff-fuzz/diff_fuzz.py`;
   `skills/porting-kit-diff-fuzz/SKILL.md`.
