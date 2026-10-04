@@ -374,13 +374,7 @@ fn path_note(md: &std::fs::Metadata, m: &Mapping) -> Option<String> {
 /// row. Always `mem`.
 fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> OpenFile {
     if md.file_type().is_socket() {
-        let info = files::FdInfo::default();
-        if let Some(mut f) = files::socket_row(md.ino(), &FdType::Mem, &info, Some(md), pid, ctx) {
-            // A mapping has no position: SIZE/OFF is blank where an fd's is
-            // `0t0` (measured, a packet ring: `mem pack 11337 <blank>`).
-            f.offset = None;
-            return f;
-        }
+        return socket_mapping(md, pid, ctx);
     }
     let ty = files::type_from_mode(md.mode());
     let (device, rdev, size) = match ty {
@@ -406,6 +400,41 @@ fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>
         offset: None,
         node: Some(md.ino().to_string()),
         links: u32::try_from(md.nlink()).ok(),
+        socket: None,
+    }
+}
+
+/// A mapped socket's row (a packet ring, reached through `map_files`), as
+/// the C's `process_proc_sock()` makes it with the mapping's name for a path.
+/// A socket this namespace's tables know is that socket's row, with SIZE/OFF
+/// blank where an fd's is `0t0` (measured: `mem pack 11337 <blank>`). One
+/// they do not know the C names from `getxattr()` of that name, which is no
+/// path, so it never can: `can't identify protocol`, `sock`, its file
+/// system's device, no lock and no link count (measured, a packet ring in
+/// another network namespace). An fd's link is a path, so the same socket's
+/// fd row does get its protocol (`protocol: PACKET`).
+fn socket_mapping(md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> OpenFile {
+    if ctx.socks.get(md.ino()).is_some() {
+        let info = files::FdInfo::default();
+        if let Some(mut f) = files::socket_row(md.ino(), &FdType::Mem, &info, Some(md), pid, ctx) {
+            f.offset = None;
+            return f;
+        }
+    }
+    OpenFile {
+        rdev: None,
+        fs_device: Some(md.dev()),
+        file_flags: None,
+        lock: None,
+        fd: FdType::Mem,
+        access: AccessMode::Unknown,
+        file_type: FileType::Other("sock".into()),
+        name: ctx.ns.unidentified().to_string(),
+        device: Some(files::dev_string(md.dev())),
+        size: None,
+        offset: None,
+        node: Some(md.ino().to_string()),
+        links: None,
         socket: None,
     }
 }
@@ -574,6 +603,49 @@ mod tests {
             "400000-452000"
         );
         assert_eq!(parse_maps("zz-1 r--p 0 fe:00 9 /bin/x\n")[0].range, None);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri cannot create a socket")]
+    fn a_mapped_socket_no_table_knows_cannot_be_named() {
+        use std::os::fd::AsRawFd;
+        // A socket's own `stat`, through its fd's link: what `map_files`
+        // gives for a mapped packet ring in another network namespace. No
+        // table here knows this one.
+        let s = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        let md = std::fs::metadata(format!("/proc/self/fd/{}", s.as_raw_fd())).unwrap();
+        let socks = crate::net::SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = crate::net::NetnsTables::new(false);
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+        };
+        let f = socket_mapping(&md, std::process::id(), &ctx);
+        assert_eq!(f.fd, FdType::Mem);
+        assert_eq!(f.file_type.code(), "sock");
+        assert_eq!(
+            f.name, "can't identify protocol",
+            "getxattr() of `socket:[N]` fails"
+        );
+        assert_eq!(f.fs_device, Some(md.dev()), "`-F` gives its device as `D`");
+        assert_eq!(
+            (f.size, f.offset, f.links, f.lock),
+            (None, None, None, None)
+        );
+        // Under `-X` the C does not look, and says so.
+        let ns = crate::net::NetnsTables::new(true);
+        let ctx = GatherCtx { ns: &ns, ..ctx };
+        assert_eq!(
+            socket_mapping(&md, std::process::id(), &ctx).name,
+            "can't identify protocol (-X specified)"
+        );
     }
 
     #[test]

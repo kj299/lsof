@@ -670,10 +670,21 @@ impl NetnsTables {
     /// skipped rather than performed and discarded.
     pub fn unresolved_name(&self, pid: u32, inode: u64) -> Option<String> {
         if self.skip_inet {
-            return Some("can't identify protocol (-X specified)".to_string());
+            return Some(self.unidentified().to_string());
         }
         self.protocol_for(pid, inode)
             .map(|proto| format!("protocol: {proto}"))
+    }
+
+    /// NAME for a socket the C cannot name: what `process_proc_sock()`
+    /// prints when no table knows it and its `getxattr()` fails, or under
+    /// `-X`, where it does not look.
+    pub fn unidentified(&self) -> &'static str {
+        if self.skip_inet {
+            "can't identify protocol (-X specified)"
+        } else {
+            "can't identify protocol"
+        }
     }
 
     /// The protocol name for `inode` as `pid`'s own namespace sees it —

@@ -3730,7 +3730,11 @@ finding it is supposed to produce.
   `/` that names no such fixture, diverged: it had met an open difference
   (DIVERGENCES 84) the fixture made reachable. Every new case matched; only
   the run of the whole matrix showed it. The fix bound a file from a tmpfs
-  of the fixture's own, whose source is a name no other case uses.
+  of the fixture's own, whose source is a name no other case uses. The
+  change's review found the same shape twice more: a fixture took an
+  exclusive, waiting flock on `/dev/null`, every process's, for ten minutes,
+  and a run killed by SIGTERM left its mounts and a directory in `/dev/shm`
+  behind.
 - **The rule.** A fixture that changes state other cases read (the mount
   table, `/dev/shm`, a sysctl, the lock table) is an input to every case,
   not only its own. Give what it makes names nothing else uses, undo it in
@@ -3738,5 +3742,6 @@ finding it is supposed to produce.
   by its own cases.
 - **Kit change:** none to the kit's code. lsof-rs's
   `differential/linux_diff.py` says, at fixture P, why its bind mount comes
-  from a tmpfs.
+  from a tmpfs; its flocks on shared files are shared and never wait; and a
+  run records each mount as it makes it and undoes them all on SIGTERM.
 - **Section amended:** `lsof-rs/differential/linux_diff.py` (fixture P).

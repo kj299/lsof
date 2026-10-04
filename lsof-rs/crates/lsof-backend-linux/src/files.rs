@@ -228,7 +228,10 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
 /// `/dev/shm` covers `/dev/shm/x` — and `/dev/shmx/f` too: measured, `lsof
 /// -e W/m` makes `W/mx/f` an `UNKNfd` row. lsof-rs had required a component
 /// boundary there, which nothing had measured. The CLI has trimmed the `-e`
-/// path's trailing slashes, as the C's `enter_efsys()` does.
+/// path's trailing slashes and dropped a repeat, as the C's `enter_efsys()`
+/// does, and the C puts each new path at the head of its list: when two
+/// match, the one named LAST is the one NAME gives, so `lsof -e / -e /dev`
+/// says `(-e /dev)` of `/dev/zero` (measured).
 pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [String]) -> Option<&'a str> {
     // An fd whose link target is not an absolute path -- `socket:[14197]`,
     // `pipe:[…]`, `anon_inode:…` -- lives on no file system and is exempt
@@ -239,6 +242,7 @@ pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [String]) -> Option<&'a 
     }
     exempt
         .iter()
+        .rev()
         .find(|e| path.starts_with(e.as_bytes()))
         .map(String::as_str)
 }
@@ -449,14 +453,17 @@ pub(crate) fn socket_row(
         let name = ns.unresolved_name(pid, inode)?;
         return Some(OpenFile {
             rdev: None,
-            fs_device: None,
+            fs_device: meta.map(MetadataExt::dev),
             file_flags: info.flags,
             lock: None,
             fd: fd.clone(),
             access: info.access(),
             // Lowercase `sock`, the C's LSOF_FILE_SOCKET, and the OFFSET
             // rather than a size: an unidentified socket has no size worth
-            // printing and the C shows `0t0`.
+            // printing and the C shows `0t0`. Its device is the socket's
+            // file system's, which the C records (`Lf->dev`), so `-F` gives
+            // it as `D0x9`, not as the `d` string a socket from a table
+            // gets (measured).
             file_type: FileType::Other("sock".into()),
             name,
             device: meta.map(dev_cell),
@@ -1284,6 +1291,11 @@ mod tests {
         // Bytes: a name that is not UTF-8 is under its mount point all the
         // same.
         assert_eq!(exempt_match(b"/dev/shm/\xff", &shm), Some("/dev/shm"));
+        // The C puts each new `-e` at the head of its list: when two cover a
+        // file, NAME gives the one named last (`-e / -e /dev`, measured).
+        let both = vec!["/".to_string(), "/dev".to_string()];
+        assert_eq!(exempt_match(b"/dev/zero", &both), Some("/dev"));
+        assert_eq!(exempt_match(b"/usr/lib/x", &both), Some("/"));
 
         // The bug the oracle caught: an fd whose target is not a path lives on
         // no file system, and `-e /` must not swallow it. Under `-e /` the C

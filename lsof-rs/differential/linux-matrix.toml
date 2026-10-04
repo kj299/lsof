@@ -726,6 +726,24 @@ args = ["-n", "-P", "-e", "{EMFS}", "-a", "-p", "{EM}", "{EMFS}"]
 name = "exempt-mapping-control-without-e"
 args = ["-n", "-P", "-a", "-p", "{EM}", "{EMLIVE}"]
 
+[[case]]
+# Two `-e` paths that both cover a file: the C puts each new one at the head
+# of its list, so NAME names the one given last. lsof-rs named the first.
+name = "exempt-the-last-given-names-the-row"
+args = ["-n", "-P", "-e", "/", "-e", "{EMFS}", "-a", "-d", "mem,DEL,3", "-p", "{EM}"]
+
+[[case]]
+# ...and a repeated path keeps its first place: `/dev/shm` given again after
+# `/` is dropped, and `/` names the rows.
+name = "exempt-a-repeat-keeps-its-first-place"
+args = ["-n", "-P", "-e", "{EMFS}", "-e", "/", "-e", "{EMFS}", "-a", "-d", "mem,DEL,3", "-p", "{EM}"]
+
+[[case]]
+# An `-e` that is not a file system path is an error, an empty one too:
+# lsof-rs had taken `-e ""` as a prefix of every path, and exempted them all.
+name = "exempt-an-empty-path-is-an-error"
+args = ["-n", "-P", "-e", "", "-a", "-d", "cwd", "-p", "{A}"]
+
 # ------------------------------------------ paths that name another file (P)
 # Fixture P maps three files whose paths the harness then covers, as root: a
 # tmpfs over the directory of one, another tmpfs (with a file of the same
@@ -1537,6 +1555,21 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{L}"]
 [[case]]
 name = "userns-sockets-kernel-protocol-name-fields"
 args = ["-n", "-P", "-a", "-d", "^mem", "-Ftn", "-p", "{L}"]
+
+[[case]]
+# A socket no table here knows has the socket file system for its device,
+# which the C records, so `-F` prints it as `D0x9`; lsof-rs printed `d0,9`.
+name = "userns-unidentified-socket-device-is-D"
+args = ["-n", "-P", "-a", "-d", "^mem", "-FtDdn", "-p", "{L}"]
+
+[[case]]
+# L's packet ring, mapped in a mount namespace of its own. As root, the C
+# reaches it through `map_files`, finds a socket no table here knows, and
+# names it from `getxattr()` of `socket:[N]`, which is no path: `can't
+# identify protocol`. lsof-rs printed `protocol: PACKET`, the fd's name. As
+# anyone else every mapping of L reads `(stat: Operation not permitted)`.
+name = "userns-mapped-socket-cannot-be-named"
+args = ["-n", "-P", "-a", "-d", "mem", "-p", "{L}"]
 
 # ----------------------------------------------- the search-item contract
 # WHAT COUNTS AS A SEARCH ITEM, and what happens when one is not located.

@@ -149,8 +149,11 @@ Items 95, 48 and 40, measured against the C, and what measuring them found
 beside them: the lock letter on rows other than an fd's and on device nodes
 (96), the letter when one file holds several kinds of lock (97), `-e`'s prefix
 and its trailing slash (98), what counts as a maps line's path (99), and the
-device number of a `DEL` row (100). Two things the C does there lsof-rs does
-not reproduce (102, 103), and one more stays open (101).
+device number of a `DEL` row (100). A review of the change found three more,
+older, next to it: which of two `-e` paths names a row (104), an `-e` that is
+no path (105), and an unidentified socket's device (106). Two things the C
+does there lsof-rs does not reproduce (102, 103, and a minor 107), and one
+more stays open (101).
 
 **A mapping is a row, whatever a `stat` of it says** (item 95). The C's
 `process_proc_map()` makes a row of every distinct mapping that has a path and
@@ -248,6 +251,19 @@ another file, which a name its owner chose then passes for. lsof-rs keeps the
 whole name. Each is ledgered, unpinned, since its diff holds the run's paths
 and inodes.
 
+**Found by the review** (items 104 to 106, and a bug of this change's own).
+The C puts each `-e` path at the head of its list, skipping a repeat, so when
+two cover a file NAME gives the one named last: `lsof -e / -e /dev` says
+`(-e /dev)` of `/dev/zero`, where lsof-rs gave the first. An `-e` value that
+does not start with `/` is the missing value's error, `-e not followed by a
+file system path: "dev/"`; lsof-rs took `-e ""` as a prefix of every path and
+exempted them all. A socket no table names has its file system's device in
+`Lf->dev`, so `-F` prints it as `D0x9`, as for a file; lsof-rs gave the `d`
+string, `d0,9`. And this change's own mapped socket, a packet ring in another
+network namespace that no table here knows, was named from its namespace,
+`protocol: PACKET`, as its fd is; the C names a mapping from `getxattr()` of
+`socket:[N]`, which is no path, so it prints `can't identify protocol`.
+
 On Windows nothing changes: it has no maps file, no `/proc/locks` and no `-e`.
 
 ### What stays open
@@ -273,13 +289,14 @@ row and a one-line change.
 
 ### What the gate gained
 
-**26 cases, 420 in all, 0 unexplained.** Fixture E maps `/dev/zero`, a
+**31 cases, 425 in all, 0 unexplained.** Fixture E maps `/dev/zero`, a
 relinked file, names with a trailing space and a CR, two locked files (one
 then unlinked) and an io_uring ring where the kernel allows one. F flocks
 `/dev/null`, its cwd and its executable, and holds `w r w` on one file,
 pinned to one CPU so the order is fixed. M, in its own mount namespace, maps
 its tmpfs file, a file it unlinks, `/dev/zero` and an io_uring ring. MS holds
-`/dev/shmx/f` and maps `/dev/shmx/m`. Four fixtures are new: EM maps and
+`/dev/shmx/f` and maps `/dev/shmx/m`. L maps a packet ring, in a mount
+namespace of its own. Four fixtures are new: EM maps and
 holds files on `/dev/shm`, for `-e`; P maps three files whose paths the
 harness then mounts over, as root (P needs root or passwordless sudo, which CI
 has); RN maps an io_uring ring, run beside a planted file of its name (RN
@@ -290,15 +307,21 @@ C's: this host runs as root, CI does not. Against master's binary every new
 case diverges but the one control, and so do the three existing cases whose
 fixtures grew.
 
-**25 mutants, one per rule, all killed.** Sixteen fall to the differential
-alone, among them every lock rule, every `-e` rule, the `stat` through
-`map_files`, the reason and its muting, and a device's type and size. Eight
-fall to both it and a unit test: the parser's three rules (a leading `/`,
-trimming, the TAB), `stat`ing a name that is no path, the `(path …)` wording,
-the component boundary, the lock chain, and the raw type, which the
-differential sees only as root. The two C-DEFECTs fall to their ledgered
-cases going stale. One, `makedev()`'s old encoding, falls to unit tests
-alone: no fixture reaches a minor past 255.
+**30 mutants, one per rule, all killed.** Eighteen fall to the differential
+alone, among them every lock rule, the `stat` through `map_files`, the reason
+and its muting, a device's type and size, and the mapped socket's name, which
+only a run as root reaches. Eleven fall to both it and a unit test: the
+parser's three rules (a leading `/`, trimming, the TAB), `stat`ing a name
+that is no path, the `(path …)` wording, the lock chain, the raw type, which
+the differential sees only as root, and four of `-e`'s rules. The two
+C-DEFECTs fall to their ledgered cases going stale. One, `makedev()`'s old
+encoding, falls to unit tests alone: no fixture reaches a minor past 255.
+
+The harness undoes what it does to the host however a run ends: P's mounts
+are recorded as each is made, a run killed by SIGTERM unmounts them and
+removes EM's directory in `/dev/shm` before it exits 2 (tested), a mount a
+stopped fixture still pins is detached lazily, and F's flocks on files every
+process shares are shared and never wait (LESSONS #081).
 
 Unit tests pin what the differential cannot reach: `makedev()` against the
 measured `0x10002d`, the parser's TAB, blank, CR and relative-path rules, the
@@ -3142,6 +3165,10 @@ C-DEFECT not reproduced.
 | 101 | a path argument finds a file by its **`st_dev` and inode**, a device node's too | by its DEVICE cell (for a device node, the device it names) and inode: the same answer but for a row whose device lsof-rs could not `stat`. Run as non-root, a process in another mount namespace that maps `/dev/zero` has a `REG 0,6` row, which `lsof /dev/zero` finds in the C and not in lsof-rs | **OPEN — found 2026-10-04** measuring item 95. The identity is carried by every path argument, `+d`/`+D` entry and bound socket, in the core and both backends. |
 | 102 | a mapping's name that is **no path** (`anon_inode:[io_uring]`) is `stat`ed relative to lsof's working directory: a file planted there under that name is described in the mapping's place, `(path dev=254,0, inode=…)`, and a link there into a hung file system stops the run | never `stat`ed: `(stat: No such file or directory)`, what the C prints where nothing is planted | **C-DEFECT, not reproduced — found 2026-10-04** measuring item 99. Ledgered as `mapping-named-by-no-path-not-stated-in-lsof-rs`. |
 | 103 | a maps path **ends at a TAB** (`get_fields()`): `libssl.so<TAB>x` is `libssl.so (stat: …)`, or the real `libssl.so`'s `(path …)` | keeps the whole name | **C-DEFECT, not reproduced — found 2026-10-04** measuring item 99; the maps twin of item 66. Ledgered as `mapped-name-with-a-tab-kept-whole-in-lsof-rs`. |
+| 104 | when two `-e` paths cover a file, NAME gives the one **named last** (the C puts each at the head of its list), and a repeat keeps its first place: `-e / -e /dev` says `(-e /dev)` of `/dev/zero` | ~~the one named first~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review; on fd rows since 2026-09-20, and on mapped files with this change. |
+| 105 | an `-e` value that does not start with `/` is the missing value's error: `-e not followed by a file system path: "dev/"`, exit 1 | ~~`"-e dev" is not a mounted file system.`; and `-e ""` exempted every file, `(-e )`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review. The usage the C prints after it is row 83's. |
+| 106 | a socket no table names has its file system's device, which `-F` prints as `D0x9` | ~~the `d` string, `d0,9`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review, on an fd of fixture L's. |
+| 107 | a maps line longer than its 4096-byte buffer is read in pieces (`fgets()`), so a path that long is cut and `stat`ed as another | keeps the whole path | **C-DEFECT, not reproduced — found 2026-10-04** by the change's review. Not gated: no fixture maps a path that long. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

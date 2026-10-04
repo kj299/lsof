@@ -36,6 +36,12 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 - **Maps lines read as the C reads them** (DIVERGENCES 99): io_uring and
   packet-socket rings are rows, and a name ending in a space or a CR keeps
   it. A `DEL` row's `-F D` is `makedev()`'s past minor 255 (DIVERGENCES 100).
+- **`-e` as the C takes it** (DIVERGENCES 104, 105): when two `-e` paths cover
+  a file, NAME gives the one named last, as the C's list keeps them; and a
+  value that does not start with `/` is an error, where lsof-rs took `-e ""`
+  as a prefix of every path and exempted them all.
+- **A socket no table names gives its device as `-F D`** (DIVERGENCES 106),
+  `D0x9` where lsof-rs printed `d0,9`.
 
 ### Security
 - **A mapped file's name cannot pass for another file's, or stall the run.**
