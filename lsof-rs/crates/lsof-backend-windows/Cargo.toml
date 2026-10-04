@@ -1,6 +1,6 @@
 [package]
 name = "lsof-backend-windows"
-description = "Windows data-acquisition backend for lsof-rs: enumerates processes, owning users, and TCP/UDP endpoints through native Win32 APIs, behind a strict least-privilege model. Implements lsof-core's Backend trait."
+description = "Windows data-acquisition backend for lsof-rs: processes, owners, open file handles, mapped modules, threads and sockets, through native Win32/NT APIs and ETW, behind a strict least-privilege model. Implements lsof-core's Backend trait."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

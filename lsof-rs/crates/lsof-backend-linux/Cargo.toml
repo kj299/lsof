@@ -18,7 +18,7 @@ lsof-core = { path = "../lsof-core" }
 
 [features]
 # Exposes the pure text parsers (`/proc/net/*`, `/proc/<pid>/status`, fdinfo,
-# /etc/passwd) through `fuzz_api` so the cargo-fuzz targets in ../../fuzz can
+# maps, `/proc/locks`, the mount table, /etc/passwd) through `fuzz_api` so the cargo-fuzz targets in ../../fuzz can
 # reach them. Nothing else changes; the crate stays forbid(unsafe_code). Never
 # enabled by the CLI (porting-kit PLAYBOOK Phase 4 gate 3, LESSONS #021).
 fuzzing = []

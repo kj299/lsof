@@ -162,8 +162,8 @@ impl EtwSocket {
     }
 
     /// Whether this endpoint is one IP Helper's TCP/UDP tables already cover —
-    /// in which case our [`emit_extras`] caller should skip it. We surface only
-    /// the rows IP Helper *doesn't* enumerate.
+    /// in which case the backend's socket gather skips it. We surface only the
+    /// rows IP Helper *doesn't* enumerate.
     pub fn is_covered_by_ip_helper(&self) -> bool {
         let proto = self.effective_protocol();
         (self.family == AF_INET || self.family == AF_INET6)

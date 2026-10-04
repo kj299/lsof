@@ -21,8 +21,10 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use crate::util::OwnedHandle;
 
 /// Returns true if the current process is running with an elevated token (i.e.
-/// "Run as administrator"). Used only to tailor the user-facing hint; it never
-/// causes a privilege to be enabled.
+/// "Run as administrator"). The answer picks the user-facing hint, and the
+/// backend keeps it: `SeDebugPrivilege` is enabled for the handle walk, and
+/// EStats collection for `-T q`/`-T w`, only when the token is already
+/// elevated. Nothing here elevates the process.
 pub fn is_elevated() -> bool {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo-handle that must not be closed;

@@ -15,9 +15,9 @@ path = "src/main.rs"
 [dependencies]
 lsof-core = { path = "../lsof-core" }
 
-# The real backend is only linked on Windows; elsewhere the CLI falls back to the
-# mock backend so the parse -> select -> render pipeline runs (and is testable)
-# on any host.
+# Each platform links its own backend (Windows, Linux); anywhere else the CLI
+# falls back to the mock backend so the parse -> select -> render pipeline runs
+# (and is testable) on any host.
 [target.'cfg(windows)'.dependencies]
 lsof-backend-windows = { path = "../lsof-backend-windows" }
 

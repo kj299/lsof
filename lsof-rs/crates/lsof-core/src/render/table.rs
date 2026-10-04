@@ -5,7 +5,7 @@
 //! `print.c`'s byte for byte (DIVERGENCES 35): every column is right-aligned
 //! except COMMAND and TASKCMD, NAME is not padded at all, one space separates
 //! each pair, and the FD cell is the descriptor right-aligned with its access
-//! and lock characters after it — see [`Col`].
+//! and lock characters after it — see `Col`.
 //!
 //! COMMAND, USER and NAME are escaped through [`Escaper`] before they are
 //! measured or printed, as lsof's `print.c` does with `safestrprt()`: a process
