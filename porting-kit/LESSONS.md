@@ -3541,3 +3541,29 @@ finding it is supposed to produce.
 - **Kit change:** PLAYBOOK Phase 4, step 2, now asks for those two cases for
   each fallback.
 - **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.
+
+## 076. `filter(|s| !s.is_empty())` decided what an empty list item means, and the C had decided otherwise
+
+- **Date:** 2026-10-03
+- **Codebase:** lsof-rs (list options, DIVERGENCES 49, 51, 69)
+- **What happened:** every list option in lsof-rs was split the idiomatic
+  way, `split(',').filter(|s| !s.is_empty())`, so an empty item vanished.
+  The C reads each list item by item, and its readers give an empty item a
+  meaning. In `-p`, `-g` and `-u` the item's number is the sum of its digits,
+  so an empty one is ID 0: `lsof -p ,` looks for PID 0 and exits 1, where
+  lsof-rs dropped the item and listed the whole host. In `-d` an empty item
+  enters nothing, so there the idiom was right, by luck. The same parsers
+  had also chosen their separators (`-p` split at spaces too, which the C
+  refuses), their repeats (`-d` kept only its last option, where the C's
+  list grows), and their mixtures (`-d` took inclusions and exclusions
+  together, which the C refuses). None of it was measured: the grammar was
+  written for the Windows build, before the oracle ran here, and no case gave
+  a list an empty item.
+- **The rule.** Splitting input is a decision about what the input means.
+  For every list-valued option, measure the oracle on an empty item in each
+  position (`,`, `,x`, `x,`, `x,,y`), a lone prefix (`^`), a separator it
+  does not name (a space), a repeated option, and items of mixed kinds. Give
+  each its own case before writing the parser, not after.
+- **Kit change:** PLAYBOOK Phase 4, step 2, now lists those inputs for every
+  list-valued option.
+- **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.

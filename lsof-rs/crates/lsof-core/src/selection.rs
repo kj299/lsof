@@ -482,7 +482,7 @@ pub struct FdFilter {
 /// One `-d` term.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FdSpec {
-    /// A special FD kind (`cwd`, `rtd`, `txt`, `mem`).
+    /// A named FD kind (`cwd`, `rtd`, `txt`, `mem`, …).
     Named(FdKind),
     /// A single numeric handle value.
     Num(u64),
@@ -501,6 +501,11 @@ pub enum FdKind {
     Del,
     /// `NOFD`: the row for an fd directory that could not be opened.
     NoFd,
+    /// `unk`: a row whose kind could not be determined.
+    Unknown,
+    /// A name the C's table has for another dialect's kind (`ltx`, `ctty`,
+    /// `jd.`, …). No row here carries one, so it selects nothing.
+    OtherDialect(&'static str),
 }
 
 impl FdSpec {
@@ -512,6 +517,7 @@ impl FdSpec {
             (FdSpec::Named(FdKind::Mem), FdType::Mem) => true,
             (FdSpec::Named(FdKind::Del), FdType::Deleted) => true,
             (FdSpec::Named(FdKind::NoFd), FdType::NoFd) => true,
+            (FdSpec::Named(FdKind::Unknown), FdType::Unknown) => true,
             (FdSpec::Num(n), FdType::Handle(h)) => h == n,
             (FdSpec::Range(a, b), FdType::Handle(h)) => h >= a && h <= b,
             _ => false,

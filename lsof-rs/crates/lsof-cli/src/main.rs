@@ -96,14 +96,14 @@ USAGE:\n\
     lsof [options]\n\
 \n\
 SELECTION:\n\
-    -p <pids>     select by PID (comma/space separated; ^pid excludes)\n\
+    -p <pids>     select by PID (comma separated; ^pid excludes)\n\
     -u <users>    select by owning user, login name or UID (^ excludes)\n\
     -c <cmd>      select by command name: a prefix (case-insensitive substring\n\
                   on Windows); ^cmd excludes. -c /regex/ is not supported\n\
     -g [pgids]    process groups: the PGID column, and with pgids, selection\n\
                   (^ excludes). On Windows: select children of these PPIDs\n\
-    -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD, numbers, a-b ranges,\n\
-                  ^exclude\n\
+    -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD,fd (every number),\n\
+                  numbers, a-b ranges; all ^excluded or none. Repeats add up\n\
     -i [spec]     Internet sockets; spec = [46][tcp|udp|icmp|raw][@addr][:ports]\n\
                   ports may be a list and ranges (:22,80,1000-2000); each -i\n\
                   is its own item, ORed. Host and service names are not resolved\n\
@@ -115,7 +115,7 @@ SELECTION:\n\
     -K            list each process's threads as `task` rows (TID in NODE)\n\
     -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
                   (q/w need Administrator; IPv4 + IPv6; bare -T = qs)\n\
-    -a            AND the selectors together (default is OR)\n\
+    -a            AND the selectors together (default is OR); needs one\n\
     <path>        find who has this FILE open, matched by identity (a hard\n\
                   link to it counts); +d <dir> = the dir and its entries,\n\
                   +D <dir> = the whole tree beneath it\n\
@@ -469,7 +469,13 @@ fn main() {
     let action = match parse(argv) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("lsof: {e}");
+            // An argument is escaped where the message quotes it, as the C
+            // escapes it with `safestrprt()` where it does. An error the C
+            // makes in silence under `-w` or `-t` comes back empty: the run
+            // still ends, with the usage hint alone.
+            if !e.is_empty() {
+                eprintln!("lsof: {e}");
+            }
             eprintln!("Try 'lsof -h' for usage.");
             std::process::exit(1);
         }
