@@ -612,6 +612,283 @@ args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "-f", "--", "{MSMNT}"]
 name = "path-fs-arg-through-a-symlink-is-not-the-bound-path"
 args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "{MSLINK}"]
 
+# ------------------------------------------------- path spellings, as the C's
+# A path argument, a `+d`/`+D` directory and a mount's source are spelt by the
+# C's `Readlink()` (lib/misc.c), which replaces a path's symbolic links and
+# nothing else: a relative path stays relative, `.`, `..` and doubled slashes
+# stay, and a link is read as the text it holds. lsof-rs had used
+# `canonicalize()` (DIVERGENCES 63, 65). Fixture R (`spell/`, see
+# linux_diff.py) holds a file and the directory itself on /dev/shm, a pipe, an
+# eventfd, an unlinked file and a socket on fixed fds, and directories of
+# links and of names that are not UTF-8. `-F pf`: a row found through an
+# argument is NAMEd for the argument in the C (DIVERGENCES 17); which rows are
+# found is the question here. Each `+d`/`+D` case leaves one entry unlocated,
+# so the order of `-V`'s lines (DIVERGENCES 52) is not.
+
+[[case]]
+# The control: the mount point as the mount table spells it is the file
+# system, so R's file on it (fd 15) is found with the directory (fd 14).
+name = "path-mount-point-as-the-mount-table-spells-it"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "{SHMMNT}"]
+
+[[case]]
+# `shm` from `/dev` is no mount point to the C, which compares the spelling:
+# the directory alone. lsof-rs had resolved it to `/dev/shm` and listed every
+# file on the file system.
+name = "path-mount-point-relative-is-a-directory"
+cwd = "{SHMDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "{SHMBASE}"]
+
+[[case]]
+name = "path-mount-point-dot-relative-is-a-directory"
+cwd = "{SHMDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "./{SHMBASE}"]
+
+[[case]]
+# `lsof .` from inside the mount point.
+name = "path-mount-point-dot-from-inside-is-a-directory"
+cwd = "{SHMMNT}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "."]
+
+[[case]]
+name = "path-mount-point-with-a-trailing-dot-is-a-directory"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "{SHMMNT}/."]
+
+[[case]]
+name = "path-mount-point-with-a-doubled-slash-is-a-directory"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "{SHMDIR}//{SHMBASE}"]
+
+[[case]]
+# A relative link to it, through `..`: `spell/../../../dev/shm`.
+name = "path-mount-point-through-a-relative-link-is-a-directory"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "{SHMREL}"]
+
+[[case]]
+# `+f` insists on a file system and the relative spelling names none: `not a
+# file system: shm`, the argument dropped, and with none left the run ends.
+name = "path-mount-point-relative-under-plus-f-is-none"
+cwd = "{SHMDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+f", "--", "{SHMBASE}"]
+
+[[case]]
+name = "path-mount-point-trailing-dot-under-plus-f-is-none"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+f", "--", "{SHMMNT}/."]
+
+[[case]]
+# A `/proc/PID/fd/N` link is the text it holds. For a file that text is its
+# path, so the control finds fd 10.
+name = "path-proc-fd-of-a-file-is-the-file"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "/proc/{R}/fd/10"]
+
+[[case]]
+name = "path-proc-cwd-is-the-directory"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "/proc/{R}/cwd"]
+
+[[case]]
+# For a pipe it is `pipe:[N]`, which `Readlink()` appends to `/proc/R/fd`:
+# `status error on /proc/R/fd/pipe:[N]`, nothing to search for, exit 1.
+# lsof-rs had followed the link and found both ends of the pipe.
+name = "path-proc-fd-of-a-pipe-is-its-links-text"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "/proc/{R}/fd/16"]
+
+[[case]]
+# lsof-rs had found the eventfd, and on a host every `anon_inode` fd.
+name = "path-proc-fd-of-an-eventfd-is-its-links-text"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "/proc/{R}/fd/18"]
+
+[[case]]
+# `<spell>/gone (deleted)` names nothing.
+name = "path-proc-fd-of-a-deleted-file-is-its-links-text"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "/proc/{R}/fd/19"]
+
+[[case]]
+# lsof-rs had found nothing either, and reported it not located.
+name = "path-proc-fd-of-a-socket-is-its-links-text"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "/proc/{R}/fd/20"]
+
+[[case]]
+# A `+d` entry whose name is not UTF-8 is found by its own bytes, and `-V`
+# names the one left (`nu/\xfe`). lsof-rs had made both names lossy, found
+# neither, and reported two U+FFFD lines.
+name = "path-plus-d-entries-that-are-not-utf8"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "{RDIR}/nu"]
+
+[[case]]
+name = "path-plus-D-entries-that-are-not-utf8"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "nu"]
+
+[[case]]
+# `+d`/`+D` name their entries from the directory's `Readlink()`: `rel/y`,
+# where lsof-rs reported `rel-link/y`.
+name = "path-plus-d-through-a-relative-link"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "rel-link"]
+
+[[case]]
+name = "path-plus-d-through-an-absolute-link"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "{RDIR}/abs-link"]
+
+[[case]]
+# `deep/a/b/../../../rel/y`, `..` and all.
+name = "path-plus-d-through-a-link-with-dotdot"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "deep/a/b/up"]
+
+[[case]]
+# `+D` had resolved its directory to an absolute path: `$PWD/rel/y`.
+name = "path-plus-D-relative-stays-relative"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "rel"]
+
+[[case]]
+name = "path-plus-D-doubled-slash-is-kept"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "rel//"]
+
+[[case]]
+name = "path-plus-D-dot-slash-is-kept"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "./rel"]
+
+[[case]]
+name = "path-plus-D-dot"
+cwd = "{RDIR}/rel"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "."]
+
+[[case]]
+name = "path-plus-D-through-a-relative-link"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "rel-link"]
+
+[[case]]
+# An argument the C drops is no search item (DIVERGENCES 62): `status error`
+# on stderr, the rest listed, no `-V` line for it, exit 1.
+name = "path-unstatable-is-no-search-item"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "{RDIR}/nosuch", "rel/x"]
+
+[[case]]
+name = "path-dangling-link-is-no-search-item"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "dangle", "rel/x"]
+
+[[case]]
+# `Readlink()` gives up on a loop: `too many (> 20) symbolic links`.
+name = "path-link-loop-is-no-search-item"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "loop1", "rel/x"]
+
+[[case]]
+name = "path-link-loop-under-dash-Q"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-Q", "-a", "-p", "{R}", "loop1", "rel/x"]
+
+[[case]]
+# A `+d`/`+D` the C cannot use ends the run as it parses: usage, exit 1,
+# nothing listed (DIVERGENCES 74). lsof-rs had warned and listed the rest.
+name = "path-plus-d-unstatable-ends-the-run"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "dangle", "rel/x"]
+
+[[case]]
+name = "path-plus-d-not-a-directory-ends-the-run"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "rel/x"]
+
+[[case]]
+name = "path-plus-D-link-loop-ends-the-run"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+D", "loop1", "rel/x"]
+
+[[case]]
+name = "path-plus-d-ends-the-run-under-dash-Q"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-Q", "-a", "-p", "{R}", "+d", "dangle", "rel/x"]
+
+[[case]]
+# Before `-h` is acted on: lsof-rs had printed the help and exited 0.
+name = "path-plus-d-ends-the-run-before-dash-h"
+cwd = "{RDIR}"
+args = ["+d", "dangle", "-h"]
+
+[[case]]
+name = "path-plus-d-with-an-empty-value-ends-the-run"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", ""]
+
+[[case]]
+# The C takes `-x` as `+d`'s value, and refuses it.
+name = "path-plus-d-followed-by-an-option-ends-the-run"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "-x", "rel"]
+
+[[case]]
+# The C expands `+d` as it parses, so a `-x` after it does not reach it: the
+# link in `xd` is skipped, and only the directory is found (DIVERGENCES 75).
+name = "path-plus-d-dash-x-after-it-does-not-reach-it"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "xd", "-x"]
+
+[[case]]
+name = "path-plus-d-dash-x-before-it-does"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "-x", "+d", "xd"]
+
+[[case]]
+# The file-system half: `/dev/shm` is an entry of `/dev` on a file system of
+# its own, so `+d /dev` skips it unless `-x f` came first -- R's fd 14, the
+# directory itself, is found only then. No `-V`: most of `/dev` is unlocated,
+# and the order of those lines is DIVERGENCES 52.
+name = "path-plus-d-dash-x-f-after-it-does-not-reach-it"
+args = ["-F", "pf", "-a", "-p", "{R}", "+d", "{SHMDIR}", "-x", "f"]
+
+[[case]]
+name = "path-plus-d-dash-x-f-before-it-does"
+args = ["-F", "pf", "-a", "-p", "{R}", "-x", "f", "+d", "{SHMDIR}"]
+
+[[case]]
+# Under `+f`, an argument that is no file system is dropped like a status
+# error: the rest is listed, and the run exits 1 (DIVERGENCES 76). lsof-rs had
+# listed nothing.
+name = "path-plus-f-drops-what-is-no-file-system"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+f", "--", "{SHMMNT}", "rel"]
+
+[[case]]
+# ...and under `-Q` quietly, exit 0: lsof-rs had exited 1.
+name = "path-plus-f-drops-it-quietly-under-dash-Q"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-Q", "-a", "-p", "{R}", "+f", "--", "rel"]
+
+[[case]]
+# A mount's source that is a name (`tmpfs`) is no path, and `readmnt()` never
+# reads it as one; the argument is a path, and `Readlink()` turns it, here,
+# into `elsewhere`. So the two differ, and `+f` finds no file system.
+name = "path-plus-f-a-source-that-is-a-name-is-not-read-as-a-path"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+f", "--", "{SHMSRC}"]
+
+[[case]]
+# `Readlink()` drops the loop before `+f` asks whether it is a file system.
+name = "path-plus-f-a-link-loop-is-dropped-first"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+f", "--", "loop1", "{SHMMNT}"]
+
+[[case]]
+# With every bare argument dropped the run ends, though a `+d` was entered
+# (DIVERGENCES 77): lsof-rs had listed the `+d` files.
+name = "path-every-bare-argument-dropped-ends-the-run"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "rel", "{RDIR}/nosuch"]
+
+[[case]]
+# Under `-x l` the C follows a link and stacks a directory by the `stat` that
+# followed it, so `+D` descends through `xl/lnk` into `rel`: fd 10 is found as
+# `xl/lnk/x`, and `xl/lnk/y` is reported (DIVERGENCES 78).
+name = "path-plus-D-descends-through-a-link-under-dash-x-l"
+cwd = "{RDIR}"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "-x", "l", "+D", "xl"]
+
 # ----------------------------------------------------------- anonymous inodes
 [[case]]
 # Fds with no filesystem identity: the kernel names them `anon_inode:<kind>`
@@ -1165,24 +1442,23 @@ name = "search-dash-Q-mutes-an-unlocated-pid"
 args = ["-n", "-P", "-Q", "-p", "999999999"]
 
 [[case]]
-# `+d` and `+D` reach the C through `enter_dir()`, NOT `ck_file_arg()`, so an
-# unstattable directory is a warning and the run continues -- the opposite of
-# a bare path. Exit 1, empty stdout, and the warning on stderr.
-name = "search-plus-d-unstattable-is-not-fatal"
+# A `+d` or `+D` the C cannot use ends the run while it parses: `enter_dir()`
+# fails, and `main.c` answers with `usage()`. Exit 1, empty stdout. This case
+# was first read as "a warning, and the run continues", which a run with
+# nothing else to list cannot tell apart; `path-plus-d-unstatable-ends-the-run`
+# has something to list (DIVERGENCES 74).
+name = "search-plus-d-unstattable-ends-the-run"
 args = ["-n", "-P", "+d", "{NOPE}"]
 
 [[case]]
-# The other side of that: a `+d` that DOES resolve supplies search items, so a
-# bad bare path alongside it is no longer "nothing survived" and the listing
-# runs. Measured -- this is the case that decides whether the fatal test may
-# look at bare paths alone, and nothing else here can see it.
-#
-# `{ASUB}` and not `{ADIR}` on purpose: fixture A holds `sub` open on fd 5 and
-# `sub` is EMPTY, so there are no entry rows for the C to lose to the defect
-# ledgered as `plus-d-entries-lost-to-a-bare-path` -- which would otherwise
-# make this case about that defect instead of about the abort.
-name = "search-plus-d-supplies-a-surviving-item"
-args = ["-n", "-P", "{NOPE}", "+d", "{ASUB}"]
+# A `+d` is no surviving PATH argument: with every bare path dropped the run
+# ends, `+d` or not (DIVERGENCES 77). `+d` comes first so that it is an option
+# to the C too. This case first put the bare path first, where the C's options
+# end (DIVERGENCES 12): `+d` and `sub` were two more paths to it, and `sub`
+# survived as a plain directory -- which read as a `+d` keeping the run alive,
+# and as the C losing the expansion's entries (item 20, re-diagnosed).
+name = "search-plus-d-is-no-surviving-bare-path"
+args = ["-n", "-P", "+d", "{ASUB}", "{NOPE}"]
 
 # ------------------------------------------------ the -o digit limit (item 6)
 # Fixture O holds fd 3 at offset 123456789 and fd 4 at 12. The C prints an

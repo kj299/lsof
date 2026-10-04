@@ -3567,3 +3567,59 @@ finding it is supposed to produce.
 - **Kit change:** PLAYBOOK Phase 4, step 2, now lists those inputs for every
   list-valued option.
 - **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.
+
+## 077. `canonicalize()` agreed with the C's `Readlink()` on every path the matrix could spell
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (path arguments, DIVERGENCES 63, 65)
+- **What happened:** lsof-rs resolved a path argument with `canonicalize()`.
+  The C spells one with a helper of its own, `Readlink()`, which replaces a
+  path's symbolic links and nothing else. The two agree on an absolute path
+  with no `.`, no `..`, no doubled slash and no relative link. Every path in
+  the differential matrix was one, because the kit runner started every case
+  in the harness's own directory, so a case could not name a relative path.
+  The differences sat in what users type. `lsof mnt` from the parent, or
+  `lsof .` inside a mount point, listed a whole file system in lsof-rs and the
+  directory alone in the C. A `/proc/PID/fd/N` link led lsof-rs to the pipe
+  behind it, where the C reports a status error on the link's text. `+D rel`
+  reported `$PWD/rel/y` where the C reports `rel/y`. A review that asked how
+  the C resolves a path found them. The port was then checked against the C's
+  own function: `Readlink()` compiled from `lib/misc.c` with stubs for
+  lsof's globals, and both fed 296,640 random spellings over random trees of
+  links. The only difference was the C's own undefined behaviour, an empty
+  path reading a buffer it never wrote.
+- **The rule.** When the C uses a helper of its own where the library offers
+  one (`Readlink()` for `realpath()`), port the helper, and use the library's
+  only where it is shown equal. For a helper that is pure, or pure but for the
+  file system, compile the C's own function into a harness and fuzz the port
+  against it. And let the matrix reach the input's whole shape: a case that
+  names a path must be able to name a relative one, so a case can name the
+  directory it runs in.
+- **Kit change:** `harnesses/differential/diff_run.py` takes a per-case
+  `cwd`, with a self-test that a case starts there and that a missing one is
+  an infra error. PLAYBOOK Phase 4, step 2, asks for every spelling of a
+  path and for the C's own helper as the oracle.
+- **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.
+
+## 078. Two cases that listed nothing matched for the wrong reason, and a C-DEFECT was the C's option parsing
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (`+d`/`+D`, DIVERGENCES 20, 74, 77)
+- **What happened:** one case was written to show that a `+d` naming nothing
+  lets the run continue, and another that a `+d` keeps alive a run whose bare
+  paths all fail. Both matched the C. The first matched because a run with
+  nothing to list exits 1 with empty output whether the C warned and went on
+  or refused at once, and it refuses at once. The second put its bare path
+  first, and the C's options end at the first name, so `+d` and the directory
+  were two more path arguments to it, and the directory survived as one. The
+  same misreading had been recorded as a C defect, "the C loses the
+  expansion's entries" (item 20). With something to list, and with the
+  options first, the C refuses both, and lsof-rs's two rules were wrong.
+- **The rule.** An empty stdout proves the exit status, not the claim. When a
+  case claims something about what is listed, give it something the claim
+  would change. Before recording a C-DEFECT that depends on where an argument
+  stands, check that the C read the command line as the case means: put the
+  options first.
+- **Kit change:** PLAYBOOK Phase 4, step 2, adds both checks to the paragraph
+  on cases whose outcome is silence.
+- **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.

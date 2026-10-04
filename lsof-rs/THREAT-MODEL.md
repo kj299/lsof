@@ -192,10 +192,19 @@ the C code so the triage can be checked:
 - **`lsof -c ^name` exits 1 on a successful listing** while `lsof -u ^name`
   exits 0, for two options the man page describes identically. lsof-rs copies
   the half that is defensible and not the asymmetry.
-- **A bare path argument alongside `+d`/`+D` makes the C silently lose the
-  expansion's entries.** Measured: 4 entry rows dropped where a correct result is
-  discarded because of an unrelated argument. Silently incomplete output, which
-  §1 names as an asset in its own right. Not reproduced.
+- ~~**A bare path argument alongside `+d`/`+D` makes the C silently lose the
+  expansion's entries.**~~ **Withdrawn 2026-10-04: not a defect.** The C ends
+  its options at the first name, so in `lsof FILE +d DIR` the words `+d` and
+  `DIR` are two more path arguments, and `DIR` is searched for as a plain
+  directory. With `+d` first, the C expands DIR (DIVERGENCES 12, 20).
+- **`lsof ''` makes the C read memory it never wrote.** `Readlink()` never
+  enters its loop for an empty path, then compares and copies a stack buffer it
+  never initialised. In practice it searches for the previous argument's
+  spelling again (DIVERGENCES 79). Undefined behaviour on an input any caller can
+  pass. Not reproduced: lsof-rs `stat`s the empty path and reports the error.
+- **`Readlink()` keeps a link count across arguments** after one gives up as
+  too long, so the next argument's chain of 20 links is refused (DIVERGENCES 80).
+  Not reproduced.
 
 ### 6b. The Phase-0 flaw scan
 

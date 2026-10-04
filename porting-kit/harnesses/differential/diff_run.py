@@ -29,7 +29,13 @@ Matrix (TOML or JSON): a list of cases, each with a name and argv, e.g.
   name = "listen-sockets"
   args = ["-nP", "-iTCP"]
   # optional: stdin = "...", env = {FOO="bar"}, timeout = 10,
-  #           keep_whitespace = true
+  #           keep_whitespace = true, cwd = "/some/dir"
+
+`cwd` is the directory both binaries start in, for a case whose argument is a
+relative path: how a tool spells and resolves `mnt`, `./x` or `.` is behavior,
+and a matrix that can only name absolute paths cannot reach it. The directory
+must exist; a case naming one that does not is an infra error, not a
+divergence.
 
 Output is normalized before it is compared: masking rules, and runs of blanks
 collapsed with trailing ones stripped. That collapse is what lets content be
@@ -236,6 +242,9 @@ def run_one(binary, case, default_timeout=15):
     they were output would pass the exact hang class this harness exists to
     catch."""
     argv = [binary] + [str(a) for a in case.get("args", [])]
+    cwd = case.get("cwd")
+    if cwd is not None and not os.path.isdir(cwd):
+        sys.exit(f"error: case {case.get('name')!r}: cwd is not a directory: {cwd}")
     env = dict(os.environ)
     env.update({k: str(v) for k, v in case.get("env", {}).items()})
     # `stdin_bytes` (raw bytes) feeds the child EXACTLY those bytes — the fuzzer
@@ -260,6 +269,7 @@ def run_one(binary, case, default_timeout=15):
             capture_output=True,
             timeout=case.get("timeout", default_timeout),
             env=env,
+            cwd=cwd,
         )
         # `backslashreplace`, NOT `replace`: `replace` maps EVERY invalid byte to
         # the same U+FFFD, so a C tool emitting 0xFF and a Rust tool emitting 0xFE
@@ -456,6 +466,17 @@ def _self_test():
     res = run_one(cat, {"name": "no-stdin", "args": [], "timeout": 5})
     check("no-stdin case feeds DEVNULL, doesn't hang on inherited stdin",
           res[2] is False and res[0] == "")
+
+    # `cwd`: both sides start in the case's directory, so a relative argument
+    # means the same file to each. `pwd` prints where it started.
+    pwd_bin = "/bin/pwd" if os.path.exists("/bin/pwd") else "pwd"
+    with tempfile.TemporaryDirectory() as cwd_dir:
+        real = os.path.realpath(cwd_dir)
+        out, rc, _to, _e = run_one(pwd_bin, {"name": "cwd", "args": ["-P"], "cwd": cwd_dir})
+        check("a case's `cwd` is where the binary starts", out.strip() == real and rc == 0)
+    check("a `cwd` that is not a directory is an infra error, not a verdict",
+          _exits(lambda: run_one(pwd_bin, {"name": "cwd-gone", "args": [],
+                                           "cwd": "/nonexistent-diff-run-cwd"})))
 
     # echo vs printf genuinely diverge on a format-string arg:
     # echo "%s" "hi" → "%s hi"   ;   printf "%s" "hi" → "hi"

@@ -285,6 +285,11 @@ Then the loop — each step is a CI-enforced gate:
    `x,,y`), a lone prefix (`^`), a separator the oracle does not name, a
    repeated option and items of mixed kinds. lsof-rs split its lists with
    `filter(|s| !s.is_empty())`, and the C read an empty `-p` item as PID 0.
+   **Spell a path every way a user types it** (LESSONS #077): relative (a case
+   names the directory it runs in, `cwd`), `.`, `..`, doubled and trailing
+   slashes, links with relative and absolute targets, a link's text (`/proc`).
+   Where the C spells or parses an input with a helper of its own, port the
+   helper, and compile the C's own function into a harness as its oracle.
    Finally, **mutate the cases you just wrote** (LESSONS #26): for each one, name
    the change it is meant to catch, make that change, and confirm the case turns
    red — then record the result as a kill table, one row per case. A case no
@@ -294,6 +299,10 @@ Then the loop — each step is a CI-enforced gate:
    test: lsof-rs's `lsof -K x` case compared an empty stdout and an exit 1 that
    the two binaries reached for opposite reasons, and it took the mutant that
    should have killed it to expose both the hollow case and a real bug behind it.
+   A case that claims something about what is listed needs something to list
+   that the claim would change, and a C-DEFECT that depends on where an
+   argument stands needs the options first, where the C reads them as options
+   (LESSONS #078).
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker. **This applies per backend crate, and "input" includes text

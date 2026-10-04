@@ -118,7 +118,10 @@ item is shipped or a documented closed gate — and the release criteria are in
   by device and inode** rather than by name, so `lsof /path/hardlink` finds the
   file opened under its other name ([`DIVERGENCES.md`](DIVERGENCES.md) #14);
   ✅ **naming a mount point selects everything open on that filesystem**, with
-  `-f`/`+f` to force the reading either way (#15). ⬜ What remains is
+  `-f`/`+f` to force the reading either way (#15). A path is spelt as the C's
+  `Readlink()` spells it, so only the mount point's own spelling (`/mnt`, or a
+  link to it) names the file system; `mnt` from `/` or `/mnt/.` names the
+  directory (#65). ⬜ What remains is
   per-network-namespace socket reads (#16), measured against the C with the
   exact commands in the ledger.
 - ✅ **L3** — the C-vs-Rust differential as a CI gate

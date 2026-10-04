@@ -29,6 +29,7 @@
 //! outranks the OR.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 
 use crate::backend::MountEntry;
 use crate::model::{tcp_state_table, FdType, FileType, OpenFile, Process, Protocol, TcpState};
@@ -373,12 +374,16 @@ pub enum FilesystemArgs {
 /// it equals a mount's mounted-on **directory**, or — when the mount's source
 /// is a block device, or `+f` widened the test to any source — the mount's
 /// **source**. Empty means "not a file system", and the caller then reads the
-/// argument as a plain file (or, under `+f`, refuses it).
+/// argument as a plain file (or, under `+f`, drops it).
+///
+/// `path` is the argument as the C's `Readlink()` left it (see
+/// [`crate::readlink`]), compared byte for byte: `/dev/shm/.`, `//dev/shm` and
+/// `shm` from `/dev` name the directory, not the file system.
 ///
 /// **Every** match, not the first: one argument can name several mounts (`+f --
 /// tmpfs` names all of them), the C makes a separate search item of each, and
 /// a run that finds files on one and nothing on the others still exits 1.
-pub fn filesystems_named(mounts: &[MountEntry], path: &str, mode: FilesystemArgs) -> Vec<u64> {
+pub fn filesystems_named(mounts: &[MountEntry], path: &OsStr, mode: FilesystemArgs) -> Vec<u64> {
     if mode == FilesystemArgs::NeverFilesystem {
         return Vec::new();
     }
@@ -597,10 +602,36 @@ pub struct PathItem {
     /// Set when it named a **file system**: any file on it locates it, as it
     /// has no identity of its own.
     pub fs_device: Option<u64>,
-    /// As typed, on a backend that identifies files: what an AF_UNIX socket's
-    /// bound path is compared with, and what `-V` prints when it is not
-    /// located. Resolved first on one that matches names.
-    pub name: String,
+    /// The C's `aname`: what an AF_UNIX socket's bound path is compared with,
+    /// and what `-V` prints when it is not located. A path argument as typed;
+    /// a `+d`/`+D` directory as `Readlink()` spelt it, and each entry as that
+    /// directory, a `/`, and the entry's own name, byte for byte (DIVERGENCES
+    /// 63, 65). Resolved first on a backend that matches names.
+    pub name: OsString,
+}
+
+/// One `+d`/`+D` directory, as the C's `enter_dir()` met it (`arg.c`).
+///
+/// The C expands it while it parses its options, so what holds at that point
+/// is what applies: a `-x` or `-w` given after it does not reach it (`lsof +d
+/// DIR -x` follows no link in DIR), and a directory that cannot be used ends
+/// the run before anything is listed (DIVERGENCES 74, 75). The CLI checks it
+/// at the option and keeps this; the expansion itself needs the backend and
+/// comes later.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirArg {
+    /// `+D`, the whole tree; else `+d`, the directory and its entries.
+    pub recursive: bool,
+    /// The directory as `Readlink()` spelt it, trailing slashes kept: the
+    /// name `-V` gives it, and the start of every entry's name — `+D rel`
+    /// reports `rel/y`, `+d rel-link` reports `rel/y` too (DIVERGENCES 63).
+    pub dir: OsString,
+    /// `-x f`, as it stood: the walk may leave the directory's file system.
+    pub cross_filesystems: bool,
+    /// `-x l`, as it stood: the walk follows a symbolic link.
+    pub cross_symlinks: bool,
+    /// Whether the walk's warnings print: the C's `!Fwarn` as it stood.
+    pub warn: bool,
 }
 
 /// The full set of user-specified filters for one run.
@@ -670,6 +701,11 @@ pub struct Selection {
     /// lsof distinguishes this from `+D`; conflating them both misses and
     /// invents rows.
     pub dirs_one_level: Vec<String>,
+    /// Every `+d`/`+D`, in the order given, as the CLI checked it while it
+    /// parsed — the C's `enter_dir()` runs at the option (see [`DirArg`]).
+    /// [`Selection::dirs_one_level`] and [`Selection::dir_trees`] keep the
+    /// same arguments as typed, for a backend that matches names.
+    pub dir_args: Vec<DirArg>,
     /// The `(DEVICE, NODE)` identities named by the path arguments, resolved
     /// once at startup through [`Backend::identify_path`](crate::Backend) and
     /// expanded for `+d`/`+D`.
@@ -685,7 +721,7 @@ pub struct Selection {
     /// expansion produced: the C's `aname`s, which it compares with an
     /// AF_UNIX socket's bound path when the socket file's identity did not
     /// settle it (`is_file_named()` type 2). Nothing else is matched by name.
-    pub path_names: std::collections::HashSet<String>,
+    pub path_names: std::collections::HashSet<OsString>,
     /// Every path argument and `+d`/`+D` entry as a search item, in the order
     /// `-V` reports them; [`Selection::locate`] marks them.
     pub path_items: Vec<PathItem>,
@@ -1027,7 +1063,9 @@ impl Selection {
                 .and_then(|s| s.bound.as_deref())
                 .is_some_and(|b| {
                     b.id.as_ref().is_some_and(|id| self.path_ids.contains(id))
-                        || b.path.as_ref().is_some_and(|p| self.path_names.contains(p))
+                        || b.path
+                            .as_ref()
+                            .is_some_and(|p| self.path_names.contains(OsStr::new(p)))
                 });
         }
         // The backend cannot identify a path, so fall back to matching names.
@@ -1512,7 +1550,7 @@ struct PathIndex<'a> {
     by_fs: HashMap<u64, Vec<usize>>,
     /// Every item by its name as typed, for a socket's bound path: the C
     /// compares that with every argument, a file system's included.
-    by_name: HashMap<&'a str, Vec<usize>>,
+    by_name: HashMap<&'a OsStr, Vec<usize>>,
     /// On a backend that matches names, every item, lowercased: compared with
     /// the name of a file the path filter selects, as it is selected.
     by_prefix: Vec<(usize, String)>,
@@ -1530,7 +1568,7 @@ impl<'a> PathIndex<'a> {
             by_prefix: Vec::new(),
         };
         for (i, item) in items.iter().enumerate() {
-            ix.by_name.entry(item.name.as_str()).or_default().push(i);
+            ix.by_name.entry(item.name.as_os_str()).or_default().push(i);
             match (&item.id, item.fs_device) {
                 (_, Some(dev)) => ix.by_fs.entry(dev).or_default().push(i),
                 (Some((d, n)), None) => ix
@@ -1539,7 +1577,8 @@ impl<'a> PathIndex<'a> {
                     .or_default()
                     .push(i),
                 (None, None) if !identified => {
-                    ix.by_prefix.push((i, item.name.to_ascii_lowercase()));
+                    ix.by_prefix
+                        .push((i, item.name.to_string_lossy().to_ascii_lowercase()));
                 }
                 (None, None) => {}
             }
@@ -1568,7 +1607,7 @@ impl<'a> PathIndex<'a> {
         }
         if let Some(b) = f.socket.as_deref().and_then(|s| s.bound.as_deref()) {
             if let Some(path) = &b.path {
-                hit(self.by_name.get(path.as_str()));
+                hit(self.by_name.get(OsStr::new(path)));
             }
             if let Some((d, n)) = &b.id {
                 hit(self.by_id.get(&(d.as_str(), n.as_str())));
@@ -2291,36 +2330,42 @@ mod tests {
         ];
         use FilesystemArgs::*;
         // A mounted-on directory, under any mode that allows the reading.
-        assert_eq!(filesystems_named(&table, "/dev", Auto), vec![6]);
-        assert_eq!(filesystems_named(&table, "/dev", AlwaysFilesystem), vec![6]);
+        assert_eq!(filesystems_named(&table, OsStr::new("/dev"), Auto), vec![6]);
+        assert_eq!(
+            filesystems_named(&table, OsStr::new("/dev"), AlwaysFilesystem),
+            vec![6]
+        );
         // `-f` refuses the reading outright.
         assert_eq!(
-            filesystems_named(&table, "/dev", NeverFilesystem),
+            filesystems_named(&table, OsStr::new("/dev"), NeverFilesystem),
             Vec::<u64>::new()
         );
         // A BLOCK-device source names its filesystem by default...
-        assert_eq!(filesystems_named(&table, "/dev/vda", Auto), vec![100]);
+        assert_eq!(
+            filesystems_named(&table, OsStr::new("/dev/vda"), Auto),
+            vec![100]
+        );
         // ...a non-block source does not, until `+f` widens the test.
         assert_eq!(
-            filesystems_named(&table, "devtmpfs", Auto),
+            filesystems_named(&table, OsStr::new("devtmpfs"), Auto),
             Vec::<u64>::new()
         );
         assert_eq!(
-            filesystems_named(&table, "devtmpfs", AlwaysFilesystem),
+            filesystems_named(&table, OsStr::new("devtmpfs"), AlwaysFilesystem),
             vec![6]
         );
         // One source, several mounts: EVERY device, deduplicated.
         assert_eq!(
-            filesystems_named(&table, "tmpfs", AlwaysFilesystem),
+            filesystems_named(&table, OsStr::new("tmpfs"), AlwaysFilesystem),
             vec![40, 41, 42]
         );
         // Not a mount at all.
         assert_eq!(
-            filesystems_named(&table, "/etc/passwd", Auto),
+            filesystems_named(&table, OsStr::new("/etc/passwd"), Auto),
             Vec::<u64>::new()
         );
         assert_eq!(
-            filesystems_named(&[], "/", AlwaysFilesystem),
+            filesystems_named(&[], OsStr::new("/"), AlwaysFilesystem),
             Vec::<u64>::new()
         );
     }
@@ -2481,7 +2526,7 @@ mod tests {
         sel.path_ids.insert(("254,0".into(), "10".into()));
         sel.path_ids.insert(("254,0".into(), "11".into()));
         for p in &sel.paths {
-            sel.path_names.insert(p.clone());
+            sel.path_names.insert(p.into());
         }
         let bound = |path: &str, id: Option<(&str, &str)>| BoundPath {
             path: Some(path.into()),

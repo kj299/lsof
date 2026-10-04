@@ -10,13 +10,16 @@
 //! path argument is an exact-file lookup; `+D`/`+d <dir>` is a directory-tree
 //! lookup.
 
+use std::ffi::OsString;
+
 use lsof_core::model::tcp_state_table;
+use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
 use lsof_core::render::{Escaper, FileFlags, Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
-    CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol,
-    Selection, TaskMode, TcpInfoFlags,
+    errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec,
+    FilesystemArgs, Protocol, Selection, TaskMode, TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -237,7 +240,9 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     return Err(format!("unsupported option: +{c}"))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
-                // `+D` descends the whole tree. lsof distinguishes them.
+                // `+D` descends the whole tree. lsof distinguishes them. Both
+                // are checked here, at the option, as the C's `enter_dir()`
+                // runs where it meets them (see [`enter_dir`]).
                 'd' | 'D' if plus => {
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
@@ -249,6 +254,8 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                         }
                         args[i].clone()
                     };
+                    let dir = enter_dir(&value, c == 'D', &sel)?;
+                    sel.dir_args.push(dir);
                     if c == 'd' {
                         sel.dirs_one_level.push(value);
                     } else {
@@ -758,6 +765,56 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
         repeat,
         columns,
     })
+}
+
+/// A `+d`/`+D` directory, checked as the C's `enter_dir()` checks it
+/// (`arg.c`), where the option stands: the C expands it while it parses.
+///
+/// The directory is spelt by `Readlink()` (DIVERGENCES 63), then `stat`ed. A
+/// value that is empty or starts an option, one `Readlink()` gives up on, one
+/// that cannot be `stat`ed and one that is no directory each end the run, as a
+/// usage error: before anything is listed, `-Q` or not, and ahead of `-h` and
+/// `-v`. lsof-rs had warned and carried on (DIVERGENCES 74). The message is
+/// muted by a `-w` or `-t` given before the option, the C's `Fwarn` as it
+/// stands then, and the run still ends; and the `-x` given so far is the one
+/// its walk obeys (DIVERGENCES 75).
+fn enter_dir(value: &str, recursive: bool, sel: &Selection) -> Result<DirArg, String> {
+    let warn = !sel.omit_unreadable;
+    let said = |message: String| if warn { message } else { String::new() };
+    let esc = Escaper::for_host();
+    // The C's own words, for `+D` too.
+    if value.is_empty() || value.starts_with('+') || value.starts_with('-') {
+        return Err(said("+d not followed by a directory path".to_string()));
+    }
+    let dir = resolve_dir(value).map_err(|e| said(e.message(&esc.text(value))))?;
+    let shown = || esc.bytes(dir.as_encoded_bytes()).into_owned();
+    match std::fs::metadata(&dir) {
+        Err(e) => Err(said(format!(
+            "WARNING: can't stat({}): {}",
+            shown(),
+            errno_text(&e)
+        ))),
+        Ok(m) if !m.is_dir() => Err(said(format!("WARNING: not a directory: {}", shown()))),
+        Ok(_) => Ok(DirArg {
+            recursive,
+            dir,
+            cross_filesystems: sel.cross_filesystems,
+            cross_symlinks: sel.cross_symlinks,
+            warn,
+        }),
+    }
+}
+
+/// A `+d`/`+D` directory as the C spells it: its `Readlink()`. Windows has no
+/// such reading, and keeps it as typed.
+#[cfg(unix)]
+fn resolve_dir(value: &str) -> Result<OsString, ReadlinkError> {
+    lsof_core::readlink::resolve(value.as_ref())
+}
+
+#[cfg(not(unix))]
+fn resolve_dir(value: &str) -> Result<OsString, ReadlinkError> {
+    Ok(value.into())
 }
 
 /// One `-d` option's list, entered as `enter_fd()` enters it (`arg.c`), into
@@ -1387,6 +1444,12 @@ mod tests {
         }
     }
 
+    /// A directory every host has: the parser checks a `+d`/`+D` where it
+    /// stands, as the C's `enter_dir()` does, so a made-up one is an error.
+    fn a_dir() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
+
     /// Parse and hand back the column choices, or the error.
     fn columns(argv: &[&str]) -> Result<(Columns, Selection), String> {
         match parse(argv.iter().map(|s| s.to_string()).collect())? {
@@ -1733,7 +1796,7 @@ mod tests {
             &["-a", "-p", "^1", "-p", "2"],
             &["-a", "-u", "^nobody", "-u", "root"],
             &["-a", "/x"],
-            &["-a", "+d", "/x"],
+            &["-a", "+d", a_dir().as_str()],
         ] {
             assert_eq!(err(argv), None, "{argv:?}");
         }
@@ -2074,8 +2137,32 @@ mod tests {
     fn bare_path_vs_plus_d() {
         assert_eq!(paths(&["C:\\f.txt"]), vec!["C:\\f.txt".to_string()]);
         assert!(dirs(&["C:\\f.txt"]).is_empty());
-        assert_eq!(dirs(&["+D", "C:\\tmp"]), vec!["C:\\tmp".to_string()]);
-        assert!(paths(&["+D", "C:\\tmp"]).is_empty());
+        let d = a_dir();
+        assert_eq!(dirs(&["+D", &d]), vec![d.clone()]);
+        assert!(paths(&["+D", &d]).is_empty());
+    }
+
+    /// The C expands a `+d`/`+D` where it stands, so each keeps the `-x` and
+    /// the `-w`/`-t` given before it, and none after (DIVERGENCES 75).
+    #[test]
+    fn a_plus_d_keeps_the_switches_given_before_it() {
+        let d = a_dir();
+        let held = |argv: &[&str]| {
+            run(argv)
+                .0
+                .dir_args
+                .iter()
+                .map(|a| (a.cross_filesystems, a.cross_symlinks, a.warn))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            held(&["-x", "f", "+d", &d, "-x", "l", "+D", &d, "-w"]),
+            [(true, false, true), (true, true, true)]
+        );
+        assert_eq!(held(&["+d", &d, "-x"]), [(false, false, true)]);
+        assert_eq!(held(&["-w", "+d", &d]), [(false, false, false)]);
+        assert_eq!(held(&["-t", "+D", &d]), [(false, false, false)]);
+        assert_eq!(held(&["-w", "+w", "+d", &d]), [(false, false, true)]);
     }
 
     #[test]
@@ -2084,10 +2171,14 @@ mod tests {
         // immediate entries, `+D` descends the whole tree. They were parsed
         // into one list, which both missed rows and invented them.
         let one = |a: &[&str]| run(a).0.dirs_one_level;
-        assert_eq!(one(&["+dC:\\x"]), vec!["C:\\x".to_string()]);
-        assert_eq!(one(&["+d", "C:\\x"]), vec!["C:\\x".to_string()]);
-        assert!(dirs(&["+d", "C:\\x"]).is_empty(), "+d is not a tree");
-        assert!(one(&["+D", "C:\\x"]).is_empty(), "+D is not one level");
+        let d = a_dir();
+        assert_eq!(one(&[&format!("+d{d}")]), vec![d.clone()]);
+        assert_eq!(one(&["+d", &d]), vec![d.clone()]);
+        assert!(dirs(&["+d", &d]).is_empty(), "+d is not a tree");
+        assert!(one(&["+D", &d]).is_empty(), "+D is not one level");
+        let walks = |a: &[&str]| run(a).0.dir_args;
+        assert!(!walks(&["+d", &d])[0].recursive);
+        assert!(walks(&["+D", &d])[0].recursive);
         // The error text names the option the user actually typed.
         assert!(parse(vec!["+d".into()])
             .unwrap_err()
@@ -2232,17 +2323,17 @@ mod tests {
             "-x must accompany +d or +D"
         );
         assert_eq!(
-            parse(vec!["-xq".into(), "+d".into(), "/tmp".into()]).unwrap_err(),
+            parse(vec!["-xq".into(), "+d".into(), a_dir()]).unwrap_err(),
             "unknown cross-over option: q"
         );
         // A known letter alongside an unknown one still fails, and names the
         // unknown one — the C loops over the value rather than testing it whole.
         assert_eq!(
-            parse(vec!["-xfz".into(), "+d".into(), "/tmp".into()]).unwrap_err(),
+            parse(vec!["-xfz".into(), "+d".into(), a_dir()]).unwrap_err(),
             "unknown cross-over option: z"
         );
         // `+D` satisfies it too, and the check is order-independent.
-        assert!(parse(vec!["+D".into(), "/tmp".into(), "-x".into()]).is_ok());
+        assert!(parse(vec!["+D".into(), a_dir(), "-x".into()]).is_ok());
     }
 
     #[test]
@@ -2256,15 +2347,12 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         };
-        assert_eq!(
-            flags(&["-x", "+d", "/tmp"]),
-            (true, true),
-            "bare -x is both"
-        );
-        assert_eq!(flags(&["-xf", "+d", "/tmp"]), (true, false));
-        assert_eq!(flags(&["-xl", "+d", "/tmp"]), (false, true));
-        assert_eq!(flags(&["-xfl", "+d", "/tmp"]), (true, true));
-        assert_eq!(flags(&["+d", "/tmp"]), (false, false), "default is neither");
+        let d = a_dir();
+        assert_eq!(flags(&["-x", "+d", &d]), (true, true), "bare -x is both");
+        assert_eq!(flags(&["-xf", "+d", &d]), (true, false));
+        assert_eq!(flags(&["-xl", "+d", &d]), (false, true));
+        assert_eq!(flags(&["-xfl", "+d", &d]), (true, true));
+        assert_eq!(flags(&["+d", &d]), (false, false), "default is neither");
     }
     #[test]
     fn dash_z_takes_an_optional_context_the_way_dash_k_does() {
@@ -2526,11 +2614,12 @@ mod tests {
             let (_, sel) = columns(argv).unwrap();
             (sel.cross_filesystems, sel.cross_symlinks)
         };
-        assert_eq!(xover(&["+d", "/tmp", "-x", "f"]), (true, false));
-        assert_eq!(xover(&["+d", "/tmp", "-x", "l"]), (false, true));
-        assert_eq!(xover(&["-x", "+d", "/tmp"]), (true, true));
+        let d = a_dir();
+        assert_eq!(xover(&["+d", &d, "-x", "f"]), (true, false));
+        assert_eq!(xover(&["+d", &d, "-x", "l"]), (false, true));
+        assert_eq!(xover(&["-x", "+d", &d]), (true, true));
         assert_eq!(
-            columns(&["+d", "/tmp", "-x", "/tmp"]).unwrap_err(),
+            columns(&["+d", &d, "-x", "/tmp"]).unwrap_err(),
             "unknown cross-over option: /"
         );
         assert_eq!(

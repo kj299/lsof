@@ -56,6 +56,11 @@ ledger — those are the kit's, on purpose.
   fixture S  a TCP listener, an established TCP pair, an unconnected and a
              connected UDP socket, a unix socket and a file: every shape the
              `-s TCP:` filter treats differently
+  fixture R  paths to spell: relative and absolute links, a link through
+             `..` to /dev/shm, names that are not UTF-8, a loop, a dangling
+             link; and a holder of a file on /dev/shm, a pipe, an eventfd and
+             an unlinked file, named by `/proc/R/fd/N`. Its cases may set a
+             `cwd`, since how the C spells `rel` or `.` is the question
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -1024,6 +1029,87 @@ def mount_point_socket_holder(work: str) -> Fixture:
     )
 
 
+def path_spelling_holder(work: str) -> Fixture:
+    """Paths spelt the way the C's `Readlink()` spells them (DIVERGENCES 62,
+    63, 65, 74-78). The C replaces only a path's symbolic links and leaves the
+    rest as typed, so a relative path stays relative and `/dev/shm/.` is not
+    `/dev/shm`; lsof-rs had used `canonicalize()`.
+
+    `spell/` holds `rel/` (the cwd, with `x` held and `y` not), `rel-link ->
+    rel`, `abs-link -> <spell>/rel`, `deep/a/b/up -> ../../../rel`, `shm-rel`
+    (a relative link, through `..`, to `/dev/shm`), `nu/` with files named by
+    the bytes 0xff (held) and 0xfe (not), `dangle -> <spell>/nosuch/f`,
+    `loop1 <-> loop2`, `xd/` holding only `to-x -> <spell>/rel/x`, and `xl/`
+    holding only `lnk -> <spell>/rel`. The holder keeps, on fixed fds: 10
+    rel/x, 11 rel/, 12 nu/, 13 nu/0xff, 14 /dev/shm/, 15 an unlinked file on
+    /dev/shm, 16/17 a pipe, 18 an eventfd, 19 an unlinked file here, 20 an
+    AF_UNIX socket, 21 xd/, 22 xl/. Holding each directory a case expands
+    leaves one entry unlocated, so `-V` prints one line, whose order is not
+    in question (DIVERGENCES 52)."""
+    rdir = os.path.join(work, "spell")
+    rel = os.path.join(rdir, "rel")
+    os.makedirs(rel)
+    for name in ("x", "y"):
+        with open(os.path.join(rel, name), "w") as f:
+            f.write(name + "\n")
+    os.symlink("rel", os.path.join(rdir, "rel-link"))
+    os.symlink(rel, os.path.join(rdir, "abs-link"))
+    os.makedirs(os.path.join(rdir, "deep", "a", "b"))
+    os.symlink("../../../rel", os.path.join(rdir, "deep", "a", "b", "up"))
+    os.symlink(os.path.relpath(SHM, rdir), os.path.join(rdir, "shm-rel"))
+    nu = os.path.join(rdir, "nu")
+    os.makedirs(nu)
+    for b in (b"\xff", b"\xfe"):
+        with open(os.path.join(nu.encode(), b), "w") as f:
+            f.write("nu\n")
+    os.symlink(os.path.join(rdir, "nosuch", "f"), os.path.join(rdir, "dangle"))
+    os.symlink("loop2", os.path.join(rdir, "loop1"))
+    os.symlink("loop1", os.path.join(rdir, "loop2"))
+    os.makedirs(os.path.join(rdir, "xd"))
+    os.symlink(os.path.join(rel, "x"), os.path.join(rdir, "xd", "to-x"))
+    os.makedirs(os.path.join(rdir, "xl"))
+    os.symlink(rel, os.path.join(rdir, "xl", "lnk"))
+    # A link named as /dev/shm's mount source is named (`tmpfs`), so that
+    # `+f -- tmpfs` from here is an argument `Readlink()` turns into
+    # `elsewhere`, while the source, a name and no path, stays `tmpfs`.
+    shm_source = mount_source(SHM)
+    if "/" not in shm_source:
+        os.symlink("elsewhere", os.path.join(rdir, shm_source))
+    py = (
+        "import os,socket,sys,time\n"
+        "R=sys.argv[1].encode()\n"
+        "def keep(fd,at):\n"
+        "    if fd!=at:\n"
+        "        os.dup2(fd,at); os.close(fd)\n"
+        "D=os.O_RDONLY|os.O_DIRECTORY\n"
+        "os.chdir(os.path.join(R,b'rel'))\n"
+        "keep(os.open(os.path.join(R,b'rel',b'x'),os.O_RDONLY),10)\n"
+        "keep(os.open(os.path.join(R,b'rel'),D),11)\n"
+        "keep(os.open(os.path.join(R,b'nu'),D),12)\n"
+        "keep(os.open(os.path.join(R,b'nu',b'\\xff'),os.O_RDONLY),13)\n"
+        "keep(os.open(b'/dev/shm',D),14)\n"
+        "shm=b'/dev/shm/lsof-rs-diff-%d' % os.getpid()\n"
+        "keep(os.open(shm,os.O_RDWR|os.O_CREAT|os.O_EXCL,0o600),15); os.unlink(shm)\n"
+        "r,w=os.pipe(); keep(r,16); keep(w,17)\n"
+        "keep(os.eventfd(0),18)\n"
+        "g=os.path.join(R,b'gone')\n"
+        "keep(os.open(g,os.O_RDWR|os.O_CREAT,0o600),19); os.unlink(g)\n"
+        "keep(socket.socket(socket.AF_UNIX).detach(),20)\n"
+        "keep(os.open(os.path.join(R,b'xd'),D),21)\n"
+        "keep(os.open(os.path.join(R,b'xl'),D),22)\n"
+        "open(os.path.join(R,b'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "R(path spellings)",
+        [sys.executable, "-c", py, rdir],
+        cwd=rdir,
+        # 0,1,2 + fds 10..22.
+        expect_fds=16,
+        expect_comm=os.path.basename(sys.executable).encode()[:15],
+    )
+
+
 # The two credential shapes fixture W holds: (real, effective) uid. The C
 # shows the effective one -- the owner of `/proc/<pid>/` -- and lsof-rs had
 # shown the real one, so each shape reads differently in the two (DIVERGENCES
@@ -1228,7 +1314,8 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     m = mount_ns_holder(work)
     w = owner_holder(work)
     ms = mount_point_socket_holder(work)
-    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms
+    r = path_spelling_holder(work)
+    return a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r
 
 
 # -------------------------------------------------------------------- matrix
@@ -1275,6 +1362,10 @@ def render_matrix(template_path: str, subs: dict[str, str]) -> list[dict]:
         args = [substitute(str(a), subs) for a in c.get("args", [])]
         rendered = dict(c)
         rendered["args"] = args
+        # A case that names a relative path starts where the path means
+        # something; the kit runner gives both binaries this directory.
+        if "cwd" in c:
+            rendered["cwd"] = substitute(str(c["cwd"]), subs)
         # Every case compares its whitespace too, unless it says otherwise:
         # lsof's table layout is output, and collapsing blanks hid a column
         # that was left-aligned in lsof-rs and right-aligned in the C for as
@@ -1319,7 +1410,8 @@ def preflight_locale() -> None:
 
 
 def _raw_args(matrix_path: str, name: str) -> list:
-    """The args of `name` as written in the matrix, before substitution.
+    """The args of `name` as written in the matrix, before substitution, and
+    its `cwd` if it has one.
 
     Used to tell which cases mention `{J}` so they can be dropped when the
     namespace fixture could not start. Reading the file again is cheap and
@@ -1331,7 +1423,9 @@ def _raw_args(matrix_path: str, name: str) -> list:
         doc = tomllib.load(f)
     for case in doc.get("case", []):
         if case.get("name") == name:
-            return [str(a) for a in case.get("args", [])]
+            return [str(a) for a in case.get("args", [])] + (
+                [str(case["cwd"])] if "cwd" in case else []
+            )
     return []
 
 
@@ -1350,7 +1444,7 @@ def run(args) -> int:
     (
         a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
         offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
-        flagfds, sockpaths, mntns, owner, mntsock,
+        flagfds, sockpaths, mntns, owner, mntsock, spellings,
     ) = fixtures
     # Every fixture that needs a capability the runner may not have, with the
     # matrix placeholder its cases use and the reason to print when it is
@@ -1371,6 +1465,29 @@ def run(args) -> int:
         # W's cases name {W} and {WR} together; both go with it.
         "W": (owner, "not root, and no passwordless sudo"),
         "WR": (owner, "not root, and no passwordless sudo"),
+        # A case that spells /dev/shm differently asks whether the spelling
+        # still names the file system; where /dev/shm is no mount point, both
+        # binaries would answer "a directory" and MATCH on nothing.
+        "SHMMNT": (
+            spellings if is_mount_point(SHM) else None,
+            f"{SHM} is not a mount point here",
+        ),
+        "SHMREL": (
+            spellings if is_mount_point(SHM) else None,
+            f"{SHM} is not a mount point here",
+        ),
+        "SHMDIR": (
+            spellings if is_mount_point(SHM) else None,
+            f"{SHM} is not a mount point here",
+        ),
+        "SHMBASE": (
+            spellings if is_mount_point(SHM) else None,
+            f"{SHM} is not a mount point here",
+        ),
+        "SHMSRC": (
+            spellings if is_mount_point(SHM) and "/" not in mount_source(SHM) else None,
+            f"{SHM} is not a mount point here, or its source is a path",
+        ),
     }
     # How fixture U's cases run as a user who cannot read it; see
     # `unprivileged_prefix`. Root with no way down skips them.
@@ -1413,7 +1530,7 @@ def run(args) -> int:
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
-                mntsock,
+                mntsock, spellings,
             )
             if f is not None
         ]:
@@ -1512,6 +1629,13 @@ def run(args) -> int:
                 "MFILE": os.path.join(mntns.cwd if mntns else work, "mnt", "f"),
                 "MSMNT": SHM,
                 "MSLINK": os.path.join(work, "mntsock", "shm-link"),
+                "R": str(spellings.pid),
+                "RDIR": spellings.cwd,
+                "SHMMNT": SHM,
+                "SHMDIR": os.path.dirname(SHM),
+                "SHMBASE": os.path.basename(SHM),
+                "SHMREL": os.path.join(spellings.cwd, "shm-rel"),
+                "SHMSRC": mount_source(SHM),
                 # Last, so they replace the placeholder pid the optional
                 # fixtures' entries above gave them.
                 **{k: str(v) for k, v in owners.items()},

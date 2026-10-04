@@ -43,7 +43,7 @@ impl Backend for LinuxBackend {
         "linux"
     }
 
-    fn identify_path(&self, path: &str) -> Option<(String, String)> {
+    fn identify_path(&self, path: &std::path::Path) -> Option<(String, String)> {
         // The same two cells a row carries, produced by the same code, so the
         // comparison in selection is a plain equality test. `metadata` follows
         // symlinks, which is right: lsof identifies the file a name resolves
@@ -55,7 +55,7 @@ impl Backend for LinuxBackend {
         Some((files::dev_cell(&md), md.ino().to_string()))
     }
 
-    fn path_fs_device(&self, path: &str) -> Option<u64> {
+    fn path_fs_device(&self, path: &std::path::Path) -> Option<u64> {
         // lstat, not stat: `arg.c` tests the entry's OWN st_dev before it
         // decides whether to resolve a symlink, so a link pointing at another
         // file system is judged by where the link is, not where it goes.
