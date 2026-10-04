@@ -8,7 +8,7 @@ keeping lsof's command-line surface and output formats.
 
 The inherited C tree is **not** legacy being replaced in place. It is the
 **differential oracle**: CI builds `lsof` from this tree on every run and diffs
-it against `lsof-rs` over 87 cases on the same host, at the same instant, so
+it against `lsof-rs`, case by case, on the same host and at the same instant, so
 the port is validated against the reference implementation itself rather than
 against a substitute.
 
@@ -28,12 +28,14 @@ against a substitute.
 | Backend | State |
 |---|---|
 | **Windows** (Rust) | Complete and field-validated — see [releases](https://github.com/kj299/lsof/releases) |
-| **Linux** (Rust) | Phase L2 — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files, locks |
-| **C oracle** | Built on Linux (differential) and macOS (`build.yml`) |
+| **Linux** (Rust) | L0–L3 done — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files, locks, mount points, and the differential against the C. Open: naming netlink and AF_VSOCK sockets, and the OPEN rows of `DIVERGENCES.md`. Not in a release yet; build from source |
+| **C oracle** | Built and tested by `build.yml` on Ubuntu 22.04, Ubuntu 24.04 and macOS; built again from this tree by the differential job |
 
-Known, deliberate differences between the two implementations are tracked in
-[`lsof-rs/DIVERGENCES.md`](lsof-rs/DIVERGENCES.md); everything else must match,
-stdout and exit code alike.
+Every known difference between the two implementations is a numbered row in
+[`lsof-rs/DIVERGENCES.md`](lsof-rs/DIVERGENCES.md): deliberate choices, C defects
+the port does not reproduce, and open gaps still to fix. The differential fails
+on any difference without a row. It compares stdout and exit code, and stderr
+where a case asks.
 
 ## Building
 
@@ -46,8 +48,10 @@ cd lsof-rs && cargo build --release
 The C oracle:
 
 ```
-autoreconf -vif && ./configure && make
+autoreconf -vif && ./configure && make lsof
 ```
+
+(`make` alone also builds the man page, which needs groff's `soelim`.)
 
 ## How lsof works
 
@@ -70,5 +74,5 @@ cat     18083 yamato    2u   CHR  136,3       0t0        6 /dev/pts/3
 lsof was originally developed and maintained by Vic Abell, and is maintained
 upstream by the [lsof-org team](https://github.com/lsof-org/lsof), from which
 this repository is forked. Original documentation is preserved in the `00*`
-files at the root and rendered in [`docs/`](docs/). Attribution and licensing
+files at the root and in [`docs/`](docs/). Attribution and licensing
 are unchanged — see [`COPYING`](COPYING) and [`00CREDITS`](00CREDITS).

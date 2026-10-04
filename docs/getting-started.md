@@ -10,25 +10,23 @@ If the prebuilt binary from package manager misses some feature or malfunctions,
 
 You can retrieve lsof sources from [GitHub Releases](https://github.com/lsof-org/lsof/releases) or via git. lsof currently uses two build systems:
 
-- Legacy: supports more OSes
-- Autotools(experimental): supports Linux/Darwin/FreeBSD
+- Legacy (`./Configure`)
+- Autotools (`./configure`)
+
+In this repository both reach the same seven dialects. (HP-UX, SCO OpenServer and
+UnixWare, which only the legacy system supported, were removed here in PR #81.)
 
 ### Legacy build system
 
-You should use the legacy build system if you are building lsof on old OSes or do not want to risk. The legacy build system supports the following UNIX dialects:
+The legacy build system supports the following UNIX dialects:
 
 - aix|aixgcc              : IBM AIX xlc (aix) or gcc (aixgcc)
 - darwin                  : Apple Darwin
 - freebsd                 : FreeBSD
-- hpux|hpuxgcc            : HP-UX cc (hpux) or gcc (hpuxgcc)
 - linux                   : Linux
 - netbsd                  : NetBSD
 - openbsd                 : OpenBSD
-- osr|sco                 : SCO OpenServer < 6.0.0, SCO developer's compiler
-- osrgcc|scogcc           : SCO OpenServer < 6.0.0, gcc compiler
-- osr6                    : SCO OpenServer 6.0.0, SCO compiler
 - solaris|solariscc       : Solaris gcc (solaris) or cc (solariscc)
-- unixware|uw             : SCO|Caldera UnixWare
 
 You can build lsof with the following commands:
 
@@ -45,12 +43,16 @@ bash check.bash <dialect>
 
 ### Autotools-based build system
 
-Since 4.97.0, lsof introduces a new experimental autotools-based build system. It supports the following OSes:
+Since 4.97.0, lsof has an autotools-based build system. In this repository its
+`configure.ac` supports the following OSes:
 
 - Linux
 - Darwin
 - FreeBSD
 - NetBSD
+- OpenBSD
+- Solaris
+- AIX
 
 Build dependencies:
 

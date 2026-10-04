@@ -789,8 +789,9 @@ possibilities
 			in the lfile structure definition in common.h.
 			This contains the file system's inode number
 			and may be needed when searching the kernel
-			name cache.  See dialects/osr/dproc.c for
-			an example.
+			name cache.  See lib/dialects/sun/dproc.c for
+			an example (upstream named dialects/osr/dproc.c,
+			which this repository no longer has).
 
     HASFSTRUCT		indicates the dialect has a file structure
 			the listing of whose element values can be

@@ -1,5 +1,10 @@
 # Contributing
 
+> This page describes upstream lsof's process ([lsof-org/lsof](https://github.com/lsof-org/lsof)).
+> In this repository the C tree is kept as the differential oracle for
+> [lsof-rs](../lsof-rs/), and changes to it are rare; see the top-level
+> [README](../README.md).
+
 You can contribute to lsof via pull requests at [GitHub](https://github.com/lsof-org/lsof).
 
 ## Commit message
