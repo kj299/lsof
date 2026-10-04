@@ -33,8 +33,9 @@ Here is a brief description of the files in this subdirectory:
 
     00README		this file
 
-    Add2TestDB          a script to add the identity of the current
-			test to TestDB
+    Add2TestDB          upstream's script to add the identity of the
+			current test to TestDB (not shipped here:
+			PR #81 removed it)
 
     CkTestDB		a script to check the identity of this
 			dialect against the TestDB file
