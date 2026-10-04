@@ -4,7 +4,11 @@
 > P1–P5 below are done. Of what this page called L2, what is left is naming
 > netlink and AF_VSOCK sockets (DIVERGENCES 22, waiting on a decision) and the
 > options `-S` and `-b` (DIVERGENCES 94). DIVERGENCES 9 and 21, listed as not
-> scheduled below, are resolved. The current list of differences is
+> scheduled below, are resolved. [2026-10-04: and two socket rows this page
+> called done or folded into 22 are open: a raw socket, which the C types `raw`
+> from `/proc/net/raw` where lsof-rs types it IPv4 (DIVERGENCES 108), and a
+> *bound* netlink socket, which `/proc/net/netlink` does list and the C types
+> `netlink` (109). Measured by the retrospective; see §3.] The current list of differences is
 > [`../DIVERGENCES.md`](../DIVERGENCES.md).
 
 Written 2026-09-15, after measuring rather than reading. Companion to
@@ -23,7 +27,7 @@ Linux gap at all.**
 | `maps` → `mem` rows | **done** | `mem REG … /usr/lib/x86_64-linux-gnu/libc.so.6`, byte-identical to the C |
 | `/proc/locks` → lock column | **done** | DIVERGENCES item 7, closed 2026-09-05 |
 | named anon inodes | **done** | `[eventfd:6]`, `[eventpoll]`, `[timerfd]`, `[signalfd]`, `inotify`, `[pidfd:1153]` — all byte-identical |
-| raw / netlink | **partly — see §3** | raw is resolved; packet landed 2026-09-20 (P3), netlink is the one remaining row |
+| raw / netlink | **partly — see §3** | raw is resolved; packet landed 2026-09-20 (P3), netlink is the one remaining row. [2026-10-04: raw is not — DIVERGENCES 108; and a bound netlink socket is a table row — 109] |
 
 Plus two items L2 acquired later and also delivered: the mount table
 (`mounts.rs`, DIVERGENCES 15) and per-namespace socket reads (DIVERGENCES 16).
@@ -197,6 +201,11 @@ whose table lookup misses, so the same decision governs netlink, AF_VSOCK, and
 every family added later. **This is still the owner's call, not a porting
 decision** — `getxattr` has no `std` API, so it means `unsafe` FFI or a
 dependency in a crate documented as needing neither.
+
+[2026-10-04: true of an *unbound* netlink socket, which is what that fixture
+held. A bound one is listed in `/proc/net/netlink`, and the C types it
+`netlink`, named by its protocol (`ROUTE`), from that table: measured by the
+retrospective, DIVERGENCES 109. That part needs no decision.]
 
 ## 4. The options that are genuinely missing
 
@@ -373,4 +382,4 @@ needs a decision from the owner before any of it can be written.
 > unreadable link is TYPE `unknown`; `UNKN*` is `-e`'s. See DIVERGENCES,
 > "Fixed by reporting what could not be read". DIVERGENCES 21 closed the same
 > day, and so did 32, the `-s` filter, which the 21 audit found. What `-e`
-> still owes on mapped files is DIVERGENCES 40.
+> still owes on mapped files is DIVERGENCES 40 (resolved 2026-10-04).

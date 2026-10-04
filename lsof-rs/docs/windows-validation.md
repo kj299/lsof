@@ -13,8 +13,8 @@ both this plan and the harness, run by hand, cover that: a live system-wide run
 in both privilege modes, on real hardware.
 
 Example outputs below are **representative** (real PIDs/paths will differ). A
-case passes if the shape matches and the cross-check agrees. Since 1.0.1 the
-table is laid out as the C lays it out: COMMAND is cut to nine characters
+case passes if the shape matches and the cross-check agrees. In builds after
+1.0.1 (not in a release yet) the table is laid out as the C lays it out: COMMAND is cut to nine characters
 (`explorer.`, `powershel`) and columns are right-aligned, which the older
 samples here do not show (DIVERGENCES 3, 35).
 

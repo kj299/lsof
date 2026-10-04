@@ -14,8 +14,9 @@ It ships **two data-acquisition backends** behind one platform seam:
 | **Linux** | **L0–L3 done** — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files (`mem`/`DEL`), locks, anon-inode kinds, mount points, and the differential against the C in CI. Not in a release yet: build from source | `/proc` |
 
 Everything above the seam — the selection engine, all three output formats, the
-argument parser — is shared, which is why adding Linux took one additive enum
-variant in the core and no changes anywhere else. A few parser rules differ by
+argument parser — is shared. Adding Linux's first phase took one additive enum
+variant in the core; matching the C since has added to the backend trait (path
+identity, mounts, user lookup) and to the model (locks, tasks, device files). A few parser rules differ by
 platform, as the dialects do: `-c` and `-g` on Windows; the `+c` limit, `-T w`
 and `+f g` on Linux. See [`docs/linux-l2-plan.md`](docs/linux-l2-plan.md) for
 what is left on Linux, and the OPEN rows of [`DIVERGENCES.md`](DIVERGENCES.md).
@@ -128,8 +129,11 @@ item is shipped or a documented closed gate — and the release criteria are in
   link to it) names the file system; `mnt` from `/` or `/mnt/.` names the
   directory (#65); ✅ sockets in another network namespace are named from
   that namespace's own tables (#16), and packet sockets have their `pack` row.
-  ⬜ What remains is naming netlink and AF_VSOCK sockets, which have no
-  `/proc/net` table to read (#22, waiting on a decision).
+  ⬜ What remains for sockets: a socket no `/proc/net` table lists, an
+  AF_VSOCK, ping or unbound netlink socket, which the C names from an
+  extended attribute (#22, waiting on a decision); and two families whose
+  tables lsof-rs does not read as the C does, raw sockets (`raw`, #108) and
+  bound netlink sockets (`netlink`, #109).
 - ✅ **L3** — the C-vs-Rust differential as a CI gate
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed
@@ -274,11 +278,14 @@ On Linux, `cargo test --all` includes the Linux backend's own tests, some of
 which read this host's live `/proc` rather than a fixture — the cheapest way to
 keep the parsing honest against a real kernel.
 
-Every parser that takes text from outside the process has a cargo-fuzz target
-under [`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
+The parsers of text from outside the process have cargo-fuzz targets under
+[`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
 `/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
 `/etc/passwd` readers; the Windows backend's name parsers; and the escaper that
-every one of them feeds. The contract is
+every one of them feeds. Four have none, and
+[`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the Windows PEB reader, the
+ETW payload parsers, the path speller (`readlink::resolve_with`) and the
+`/etc/passwd` name lookup behind `-u NAME`. The contract is
 *no panic on any input*; CI smoke-runs all of them on every PR and soaks them
 nightly. The `proc_net` target found a real panic in the IPv6 decoder in its
 first seconds.
@@ -293,7 +300,9 @@ CI (`.github/workflows/lsof-rs-ci.yml`) runs eight jobs: lints, rustdoc and
 tests on Linux; build, tests, a socket differential and the smoke suite on
 `windows-latest`; cargo-deny; a fuzz smoke of every target; the differential
 against the C, with its resource gate; Miri over the portable crates and over
-the Linux backend; and ASan over the Windows backend.
+the Linux backend; and ASan over the Windows backend. Each blocks a merge but
+Miri over the Linux backend, which is observe-first: it reports, and cannot
+fail the build.
 
 For end-to-end validation on a real Windows host (concrete commands + expected
 output, cross-checked against native oracles — `Get-NetTCPConnection`,

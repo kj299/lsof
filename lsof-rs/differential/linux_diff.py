@@ -74,6 +74,7 @@ ledger — those are the kit's, on purpose.
              the access modes that grant neither read nor write
   fixture Y  AF_UNIX sockets a path argument finds by the path they are
              bound to (through a link, a relative spelling, a replaced file)
+  fixture T  a mapped file with a TAB in its name, which the C cuts there
 
   These need a capability the runner may lack. Without it, the fixture is
   unavailable and its cases are skipped by name, not failed:
@@ -93,7 +94,6 @@ ledger — those are the kit's, on purpose.
              (root, or passwordless sudo)
   fixture RN an io_uring ring, a mapping named by no path, and a file
              planted under that name (a kernel that allows io_uring)
-  fixture T  a mapped file with a TAB in its name, which the C cuts there
   fixture U  (above) runs its cases as a user who cannot read it
   fixture W  two processes whose real and effective uids differ, one each
              way (root, or passwordless sudo)

@@ -11,6 +11,26 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **A retrospective of 2026-09-02 → 2026-10-04 put every file against the
+  project's purpose, and recorded what it measured.** Ten new rows in
+  DIVERGENCES (108–117). Three are security differences from the C: every
+  run but `-f` `stat`s every mount point in-process with no timeout, `-i`
+  included, so a hung NFS server stops it and automount points get mounted
+  (110); a `+d`/`+D` entry is `stat`ed twice, and a link swapped in between
+  gives it another file's identity (111); an `-i` error message prints its
+  argument raw (112). The threat model gained the inputs it had not listed:
+  the mount points it `stat`s, the Windows process and module names, and
+  reverse DNS. And gates that passed while checking less than they claimed
+  were closed (porting-kit LESSONS #082): CI's fuzz smoke fails when it finds
+  no targets, and a PR that edits only `DIVERGENCES.md` or `THREAT-MODEL.md`
+  runs the gates that read them.
+- **The first kill table that can be run again**, `mutants/mapped-rows.toml`:
+  PR #121's 30 mutants as data, all killed when run on master. CI checks on
+  every PR that each still fits the code (porting-kit LESSONS #083).
+- **rustdoc runs with `-D warnings`** on Linux and Windows (PR #120): a doc
+  link to a renamed or removed item fails the build.
+
 ### Fixed
 - **Every mapped file is listed, as the C lists it** (DIVERGENCES 95).
   lsof-rs dropped a mapping it could not `stat`, or whose `stat` named another
@@ -592,6 +612,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   shipping features as deferred. They now describe L2 as delivered and name
   what is genuinely left: packet sockets (closeable), netlink (blocked on
   DIVERGENCES 22), the `UNKN*` rows, and `-e`/`-x`/`-X`/`-Z`/`-N`/`-S`/`-b`.
+  *[Packet sockets, the `UNKN*` rows and `-e`/`-x`/`-X`/`-N` shipped later in
+  this release; netlink is DIVERGENCES 22 for an unbound socket and 109 for a
+  bound one. Kept as written.]*
 
 ### Security
 - **`lsof-cli` now carries `#![forbid(unsafe_code)]`** — on *both* of its crate
@@ -1194,7 +1217,8 @@ named". Kept as written.*
   retrospective found this port had reached 1.0 without. It carries the four
   ledgered cases with the phase or decision that closes each, the record of
   what the gate found, and the C-flaw scan's 127 findings marked — honestly —
-  as untriaged.
+  as untriaged. *[Triaged later in this release: DIVERGENCES, "The C-flaw scan
+  — triaged". Kept as written.]*
 - **Linux backend** (`lsof-backend-linux`), phases **L0** and **L1**.
   Dependency-free and `#![forbid(unsafe_code)]` — `/proc` is a filesystem, so
   no FFI is involved.
@@ -1308,7 +1332,10 @@ named". Kept as written.*
   green runs (two, 54 tests each, zero UB findings), with the promotion PR
   itself the third. Scope is the `forbid(unsafe_code)` crates: `lsof-core` and
   `lsof-cli`. The Windows backend needs Windows and the Linux backend reads
-  live `/proc`, so those two rows stay open in `progress.json`. The nightly is
+  live `/proc`, so those two rows stay open in `progress.json` *[both were
+  ticked later in this release: the Windows backend's by ASan, the Linux
+  backend's by a miri job that is observe-first, which reports and cannot fail
+  a build. Kept as written.]* The nightly is
   **pinned** (`nightly-2026-08-31`, the build that produced the green runs): a
   hard gate must fail only for the code's reasons, so a newer miri is a
   deliberate bump rather than a surprise red on someone else's PR.

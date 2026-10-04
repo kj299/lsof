@@ -30,6 +30,9 @@ version = "1.0.1"
 edition = "2021"
 license = "LicenseRef-lsof"
 repository = "https://github.com/kj299/lsof"
+# The build's minimum, checked 2026-10-04: `cargo +1.82 build --workspace`
+# succeeds. The tests need 1.87 (`std::io::pipe`, `ErrorKind::ExecutableFileBusy`),
+# which `cargo test` on 1.82 reports; no CI job builds with 1.82.
 rust-version = "1.82"
 
 [profile.release]

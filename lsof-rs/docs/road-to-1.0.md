@@ -205,7 +205,9 @@ unelevated, since they need the Administrator-only ETW/EStats path).
    turn*, up to 2 s apiece — worst case `2 s × process count`, unbounded in
    aggregate. Unelevated it is invisible (foreign `OpenProcess` fails
    instantly); elevated, `SeDebugPrivilege` makes every read genuinely succeed
-   and some of them slow. Hosted CI never sees it because runners have a small,
+   and some of them slow. [2026-10-04: the administrator's token does; the
+   extras phase runs before the handle scan, the only code that enables
+   `SeDebugPrivilege`, at 1.0.1 as now. Read from the code; not re-measured.] Hosted CI never sees it because runners have a small,
    idle process set.
 
 So the defect is **pre-existing — v0.4.0 has it too, and passed on timing

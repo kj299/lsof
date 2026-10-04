@@ -231,7 +231,9 @@ impl SocketTable {
 
     /// `/proc/net/raw` shares the inet layout with one difference that matters:
     /// the local address's second half is **not** a port, it is the IP protocol
-    /// number. That is how ICMP is identified — there is no `/proc/net/icmp`.
+    /// number. That is how ICMP is identified on a raw socket. (`/proc/net/icmp`
+    /// exists too, for ping sockets; the C reads it and this backend does not:
+    /// DIVERGENCES 22 and 108.)
     fn load_raw(&mut self, path: &str, v6: bool) {
         if let Some(text) = crate::text::read_lossy(path) {
             self.parse_raw(&text, v6);
@@ -690,9 +692,10 @@ impl NetnsTables {
     /// The protocol name for `inode` as `pid`'s own namespace sees it —
     /// `TCP`, `UDP`, `RAW`, `UNIX` — or `None` when this port cannot tell.
     ///
-    /// `None` is not the same as "no such socket": a family with no
-    /// `/proc/net` table (AF_VSOCK, netlink, packet) lands here too, and the C
-    /// still names it from an xattr this crate has no safe way to read.
+    /// `None` is not the same as "no such socket": a socket no `/proc/net`
+    /// table lists (AF_VSOCK, an unbound netlink socket, a ping socket) lands
+    /// here too, and the C still names it from an xattr this crate has no safe
+    /// way to read.
     pub fn protocol_for(&self, pid: u32, inode: u64) -> Option<String> {
         let ns = self
             .by_pid
