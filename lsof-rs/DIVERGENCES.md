@@ -240,7 +240,13 @@ relative path, and `subprocess` resolved it from the case's `cwd`, so the
 first case with one found no binary. Every local run had hidden it: as root
 the harness wraps both binaries in scripts named by absolute paths, and the
 non-root run had been given absolute ones. The runner now resolves a relative
-binary path from where it runs, and a self-test fails without that.
+binary path from where it runs, and a self-test fails without that. The same
+run's Windows smoke suite failed two cases, rightly: `+D %TEMP%` selected
+nothing, and a held file named by its 8.3 path was not located. Windows
+matches names, so its path arguments and `+D` trees must be in the long form
+its backend reports, and the first version had kept that form for `-V`'s
+names only. They are canonicalised again before selection, on a backend that
+matches names alone, and a unit test pins which lists are.
 
 **Forty-eight cases, 381 in all, 0 unexplained.** Fixture R holds the
 spellings and the files they name. The cases cover the mount point spelt

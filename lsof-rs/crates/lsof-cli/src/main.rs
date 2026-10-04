@@ -216,7 +216,7 @@ fn without_trailing_slashes(path: &[u8]) -> &[u8] {
 /// `/proc/PID/fd/N` link is the text it holds (DIVERGENCES 65). lsof-rs had
 /// used `canonicalize()`, which made `lsof mnt` a file system and followed
 /// such a link to the file behind it. Where names are matched instead
-/// (Windows), the long-form name the backend reports.
+/// (Windows), the argument as [`spell_names_as_reported`] left it.
 fn spell_path(typed: &str, identified: bool) -> Result<OsString, ReadlinkError> {
     #[cfg(unix)]
     if identified {
@@ -226,9 +226,22 @@ fn spell_path(typed: &str, identified: bool) -> Result<OsString, ReadlinkError> 
         return Ok(OsString::from_vec(path));
     }
     let _ = identified;
-    let mut path = typed.to_string();
-    canonicalize_selector(&mut path);
-    Ok(path.into())
+    Ok(typed.into())
+}
+
+/// On a backend that matches names (Windows), the path arguments and the `+D`
+/// trees in the long form the backend reports, which is what selection
+/// compares a row's name with; see [`canonicalize_selector`]. Without it an
+/// 8.3 short name (`RUNNER~1`, the hosted runner's `%TEMP%`) selects nothing.
+/// A backend that identifies files needs none of it: the C's spelling is
+/// [`spell_path`]'s.
+fn spell_names_as_reported(sel: &mut Selection) {
+    if sel.paths_identified {
+        return;
+    }
+    for p in sel.paths.iter_mut().chain(sel.dir_trees.iter_mut()) {
+        canonicalize_selector(p);
+    }
 }
 
 /// One `+d`/`+D` directory and what is in it, entered as the C's
@@ -766,6 +779,7 @@ fn main() {
             }
         }
         let esc = Escaper::for_host();
+        spell_names_as_reported(&mut sel);
         let identified = sel.paths_identified;
         let mut survived = 0usize;
         for typed in sel.paths.clone() {
@@ -1095,6 +1109,45 @@ mod tests {
         let mut missing = "definitely/not/a/real/path-xyzzy".to_string();
         canonicalize_selector(&mut missing);
         assert_eq!(missing, "definitely/not/a/real/path-xyzzy");
+    }
+
+    /// Where names are matched, the path arguments and the `+D` trees are
+    /// selected by their long form; `+d` stays as typed, as it always has. A
+    /// backend that identifies files keeps every argument as typed, for
+    /// `Readlink()` to spell. The Windows smoke suite found this dropped: `+D
+    /// %TEMP%`, an 8.3 name on the runner, selected nothing.
+    #[test]
+    fn names_are_spelt_as_reported_only_where_names_are_matched() {
+        use super::spell_names_as_reported;
+        use lsof_core::Selection;
+        let missing = "definitely/not/a/real/path-xyzzy".to_string();
+        let dir = std::env::temp_dir();
+        let typed = dir.join(".").to_string_lossy().into_owned();
+        let selection = |identified: bool| Selection {
+            paths: vec![typed.clone(), missing.clone()],
+            dir_trees: vec![typed.clone()],
+            dirs_one_level: vec![typed.clone()],
+            paths_identified: identified,
+            ..Default::default()
+        };
+        let mut sel = selection(false);
+        spell_names_as_reported(&mut sel);
+        let long = {
+            let mut p = typed.clone();
+            super::canonicalize_selector(&mut p);
+            p
+        };
+        assert_ne!(
+            long, typed,
+            "the test needs a spelling canonicalize changes"
+        );
+        assert_eq!(sel.paths, [long.clone(), missing.clone()]);
+        assert_eq!(sel.dir_trees, [long]);
+        assert_eq!(sel.dirs_one_level, std::slice::from_ref(&typed));
+        let mut sel = selection(true);
+        spell_names_as_reported(&mut sel);
+        assert_eq!(sel.paths, [typed.clone(), missing]);
+        assert_eq!(sel.dir_trees, [typed]);
     }
 
     #[test]
