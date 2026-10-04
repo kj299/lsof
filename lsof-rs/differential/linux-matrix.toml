@@ -297,7 +297,11 @@ args = ["-n", "-P", "-a", "-U", "-FtiPnT", "-p", "{B}"]
 
 # ------------------------------------------------------------ mapped files
 # Rows that come from /proc/<pid>/maps rather than from an fd. Fixture E holds
-# one live mapped library and one deleted while still mapped.
+# one live mapped library and one deleted while still mapped, and every other
+# kind of mapping an unprivileged process can make (see `mapping_holder`):
+# each is a row in the C, whatever a `stat` of it says, where lsof-rs dropped
+# the ones it could not `stat` (DIVERGENCES 95) and typed every one `REG`
+# (48).
 
 [[case]]
 # The DEL row: a file unlinked but still mapped, which is what `lsof | grep DEL`
@@ -314,6 +318,36 @@ args = ["-n", "-P", "-a", "-p", "{E}"]
 # so `-F D` is the only place a wrong decoding shows.
 name = "mappings-fields-F"
 args = ["-n", "-P", "-F", "-a", "-p", "{E}"]
+
+[[case]]
+# NLINK: 2 for the relinked file, 1 for /dev/zero, and blank where only the
+# maps line speaks (`tab`, the io_uring ring, the DEL rows).
+name = "mappings-plus-L"
+args = ["-n", "-P", "+L", "-a", "-d", "mem,DEL", "-p", "{E}"]
+
+[[case]]
+# `-w` mutes the `(stat: …)` the C adds for what it could not `stat`, and
+# keeps the row.
+name = "mappings-minus-w-mutes-the-reasons"
+args = ["-n", "-P", "-w", "-a", "-d", "mem,DEL", "-p", "{E}"]
+
+[[case]]
+# The fields a mapped device and a lock show in: `r` (the device /dev/zero
+# names), `D` (the devtmpfs it lives on), no `s`; `l` on the `mem` and `DEL`
+# rows of the locked files.
+name = "mappings-device-and-lock-fields"
+args = ["-n", "-P", "-FfatDsiklnr", "-a", "-d", "mem,DEL", "-p", "{E}"]
+
+[[case]]
+# A path argument naming a device finds its mapping: the row is `CHR`, with
+# the device's identity.
+name = "mappings-path-argument-finds-a-mapped-device"
+args = ["-n", "-P", "-a", "-p", "{E}", "/dev/zero"]
+
+[[case]]
+# The relinked file is `mem`, with its size, and a path argument finds it.
+name = "mappings-path-argument-finds-a-relinked-mapping"
+args = ["-n", "-P", "-a", "-p", "{E}", "{ERELINK}"]
 
 # ------------------------------------------------- COMMAND column width (H)
 # THE DEFAULT WIDTH. The C caps COMMAND at CMDL (9) unless `+c` says
@@ -585,6 +619,31 @@ args = ["-n", "-P", "-V", "-a", "-p", "{M}", "{MMNT}"]
 name = "path-another-mount-namespace-process-rows"
 args = ["-n", "-P", "-a", "-d", "cwd,3", "-p", "{M}"]
 
+# What a process in another mount namespace has mapped (DIVERGENCES 95). The
+# C `stat`s each mapping through `/proc/<pid>/map_files/`, not by its path,
+# which here names another file or none. As root that reaches each file --
+# the deleted `g` too, which is then `mem`, not `DEL`. As anyone else
+# following those links is refused, and EVERY mapping, libraries included,
+# is a row saying `(stat: Operation not permitted)`. lsof-rs `stat`ed the
+# paths and dropped what did not match. Both answers are the C's; which one
+# a run sees depends on who runs it.
+
+[[case]]
+name = "mapped-in-another-mount-namespace"
+args = ["-n", "-P", "-a", "-d", "mem,DEL", "-p", "{M}"]
+
+[[case]]
+name = "mapped-in-another-mount-namespace-minus-w"
+args = ["-n", "-P", "-w", "-a", "-d", "mem,DEL", "-p", "{M}"]
+
+[[case]]
+name = "mapped-in-another-mount-namespace-plus-L"
+args = ["-n", "-P", "+L", "-a", "-d", "mem,DEL", "-p", "{M}"]
+
+[[case]]
+name = "mapped-in-another-mount-namespace-fields"
+args = ["-n", "-P", "-FfatDsiklnr", "-a", "-d", "mem,DEL", "-p", "{M}"]
+
 # A file-system argument finds a socket bound at exactly the path typed
 # (DIVERGENCES 60, from the review). Fixture MS binds one at `/dev/shm`, free
 # in its own mount namespace, where a tmpfs covers `/dev`; here that path is a
@@ -612,6 +671,85 @@ args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "-f", "--", "{MSMNT}"]
 # path, which is not the bound path: no socket, and `-V` names the link.
 name = "path-fs-arg-through-a-symlink-is-not-the-bound-path"
 args = ["-n", "-P", "-V", "-a", "-p", "{MS}", "{MSLINK}"]
+
+[[case]]
+# `-e` takes a plain prefix (`isefsys()`): `-e /dev/shm` exempts MS's
+# `/dev/shmx/f` (fd 4) and its mapping of `/dev/shmx/m`, which are not under
+# it. lsof-rs required a path-component boundary, never measured.
+name = "exempt-is-a-plain-prefix"
+args = ["-n", "-P", "-e", "{MSMNT}", "-a", "-d", "4,mem", "-p", "{MS}"]
+
+# ----------------------------------------------- -e and mapped files (EM)
+# `-e` exempts mappings too (DIVERGENCES 40). Fixture EM maps a file on
+# /dev/shm, maps another it then unlinks, and holds a third open. The C does
+# not `stat` an exempted mapping: `UNKNmem` (`UNKNdel` for the unlinked one),
+# DEVICE and NODE from the maps line, NAME with `(-e /dev/shm)`. lsof-rs
+# `stat`ed them and printed `REG`.
+
+[[case]]
+name = "exempt-mappings-are-unkn"
+args = ["-n", "-P", "-e", "{EMFS}", "-a", "-p", "{EM}"]
+
+[[case]]
+# `-F D` is the maps line's device; no size, no link count, no lock.
+name = "exempt-mappings-fields"
+args = ["-n", "-P", "-e", "{EMFS}", "-FfatDsiklnr", "-a", "-p", "{EM}"]
+
+[[case]]
+# `enter_efsys()` drops a trailing slash: NAME says `(-e /dev/shm)`.
+name = "exempt-path-loses-its-trailing-slash"
+args = ["-n", "-P", "-e", "{EMFSSLASH}", "-a", "-d", "mem,DEL,3", "-p", "{EM}"]
+
+[[case]]
+# An exempted row was never `stat`ed, and the C never asks whether a path
+# argument names it: the live mapping, held nowhere else, is not found, and
+# the run exits 1. lsof-rs found it by its maps device and inode.
+name = "exempt-mapping-is-never-located"
+args = ["-n", "-P", "-e", "{EMFS}", "{EMLIVE}"]
+
+[[case]]
+name = "exempt-mapping-is-never-located-V"
+args = ["-n", "-P", "-V", "-e", "{EMFS}", "-a", "-p", "{EM}", "{EMLIVE}"]
+
+[[case]]
+# ORed with `-p`, EM's rows print, and the path is still not located.
+name = "exempt-mapping-or-p"
+args = ["-n", "-P", "-e", "{EMFS}", "-p", "{EM}", "{EMLIVE}"]
+
+[[case]]
+# Nor does a file-system argument find an exempted row.
+name = "exempt-rows-are-on-no-file-system"
+args = ["-n", "-P", "-e", "{EMFS}", "-a", "-p", "{EM}", "{EMFS}"]
+
+[[case]]
+# The control: without `-e`, the mapping is found by its path.
+name = "exempt-mapping-control-without-e"
+args = ["-n", "-P", "-a", "-p", "{EM}", "{EMLIVE}"]
+
+# ------------------------------------------ paths that name another file (P)
+# Fixture P maps three files whose paths the harness then covers, as root: a
+# tmpfs over the directory of one, another tmpfs (with a file of the same
+# name) over the directory of the next, and another file bound over the
+# third. The C keeps each row, with the maps line's device and inode, and
+# says why it could not describe more -- `(stat: No such file or directory)`,
+# `(path dev=0,N, inode=M)`, `(path inode=N)` -- unless `-w`. lsof-rs
+# dropped them (DIVERGENCES 95).
+
+[[case]]
+name = "path-notes"
+args = ["-n", "-P", "-a", "-d", "mem", "-p", "{P}"]
+
+[[case]]
+name = "path-notes-minus-w"
+args = ["-n", "-P", "-w", "-a", "-d", "mem", "-p", "{P}"]
+
+[[case]]
+name = "path-notes-plus-L"
+args = ["-n", "-P", "+L", "-a", "-d", "mem", "-p", "{P}"]
+
+[[case]]
+name = "path-notes-fields"
+args = ["-n", "-P", "-FfatDsikln", "-a", "-d", "mem", "-p", "{P}"]
 
 # ------------------------------------------------- path spellings, as the C's
 # A path argument, a `+d`/`+D` directory and a mount's source are spelt by the
@@ -948,9 +1086,18 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{G}"]
 # The lock character lsof appends to the FD cell: `3uW` for a whole-file write
 # lock, `4uw` for a partial one, and `R`/`r` for the read equivalents. Fixture
 # F holds one of each, which is every character /proc/locks can produce (it
-# reports only shared-vs-exclusive and the byte range).
+# reports only shared-vs-exclusive and the byte range). And the locks the C
+# shows where lsof-rs showed none: `cwd-R` and `txt-R`, on its cwd and
+# executable; `W` on every /dev/null fd, its stdio included, for the flock on
+# /dev/null's devtmpfs inode, which lsof-rs looked up by the device the node
+# names; and `r` on the file with three ranges, the latest kind new to it.
 name = "locks-fd-suffix"
 args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{F}"]
+
+[[case]]
+# The same locks in `-F l`.
+name = "locks-fields-l"
+args = ["-n", "-P", "-Ffatl", "-a", "-d", "^mem", "-p", "{F}"]
 
 # ---------------------------------------------------------- hostile COMMANDs
 # A process names itself, and until DIVERGENCES.md #10 was closed lsof-rs
@@ -1610,6 +1757,33 @@ args = ["-n", "-P", "-a", "-p", "{B}", "-U"]
 # Fields without the name, which is where the display differs.
 name = "nonutf8-mapped-file-keeps-the-mem-rows"
 args = ["-n", "-P", "-a", "-p", "{X}", "-d", "mem", "-Ffi"]
+
+[[case]]
+# Fixture T maps `tab<TAB>here`. The C ends a maps path at the TAB and reads
+# `tab`, a name that is no file here -- `(stat: No such file or directory)`,
+# no size -- and that would be another file's if one were there. lsof-rs
+# keeps the whole name and describes the file. C-DEFECT 103, not reproduced;
+# ledgered. No path argument: the C would print the argument's name (item
+# 17), and the cut would not show.
+name = "mapped-name-with-a-tab-kept-whole-in-lsof-rs"
+args = ["-n", "-P", "-a", "-d", "mem", "-p", "{T}"]
+
+# ------------------------------------------------ a mapping named by no path
+# Fixture RN maps an io_uring ring, which the kernel names
+# `anon_inode:[io_uring]`. The C `stat`s that name relative to its own
+# working directory; from `plant/`, which holds a file of that name, it
+# describes the planted file in the ring's place. lsof-rs never `stat`s a
+# name that is no path (C-DEFECT 102, not reproduced).
+
+[[case]]
+name = "mapping-named-by-no-path-not-stated-in-lsof-rs"
+cwd = "{RNPLANT}"
+args = ["-n", "-P", "-a", "-d", "mem", "-p", "{RN}"]
+
+[[case]]
+# The control: where nothing is planted, both say what the C says.
+name = "mapping-named-by-no-path-where-nothing-is-planted"
+args = ["-n", "-P", "-a", "-d", "mem", "-p", "{RN}"]
 
 # ------------------------------------------ search items: -c, -u, -g, -p (item 21)
 # Fixture H's command, `abcdefghijklmno`, is the only one on the host with

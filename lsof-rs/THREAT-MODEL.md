@@ -93,6 +93,24 @@ be. `etw.rs` parses AFD event payloads (`parse_afd_create`, `parse_afd_address`,
 `parse_sockaddr`) that any process's socket activity shapes; the parsing checks
 its bounds, but it is Windows-only code and no fuzzer reaches it.
 
+**A mapped file is `stat`ed by a name its owner chose.** Each distinct
+mapping in `/proc/PID/maps` is described by a `stat`: of its path, or, for a
+process in another mount namespace (the inodes of `/proc/self/ns/mnt` and
+`/proc/PID/ns/mnt` differ), of its link under `/proc/PID/map_files/`, which the
+kernel follows into that namespace for `CAP_SYS_ADMIN` alone; to anyone else
+the row says `(stat: Operation not permitted)`, as the C's does. Two of the C's
+habits here lsof-rs does not keep (DIVERGENCES 102, 103). The C `stat`s a
+mapping's name that is no path, such as `anon_inode:[io_uring]`, relative to
+its own working directory, so a file planted under that name in the directory
+lsof runs in, often a shared one like `/tmp`, is described in the mapping's
+place, and a link planted there into a hung file system stops the run;
+lsof-rs never `stat`s such a name. And the C ends a mapping's name at a TAB,
+so a library its owner named `libssl.so`, a TAB and more passes for the real
+`libssl.so`; lsof-rs keeps the whole name. A `stat` of a real path can still
+block on a hung file system, as an fd's can, and `-b`, the C's guard against
+that, is refused (DIVERGENCES 94). `-e` exempts by a plain prefix of the
+path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
+
 **The environment surface is two variables.** The C `lsof` reads considerably
 more, including the personal device-cache path; lsof-rs's whole environment
 surface is the two trace switches above. The device cache is not ported (it is a

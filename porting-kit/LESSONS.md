@@ -3716,3 +3716,27 @@ finding it is supposed to produce.
 - **Section amended:** `porting-kit/harnesses/ci/porting-ci.template.yml`,
   `porting-kit/harnesses/diff-fuzz/diff_fuzz.py`,
   `.github/workflows/lsof-rs-ci.yml` (rustdoc steps), Makefile · check-kit.
+
+## 081. A fixture that mounted something changed a case that never named it
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (the differential's fixture P, DIVERGENCES 95)
+- **What happened:** to show what the C prints for a mapping whose path now
+  names another file, a new fixture had the harness mount over three mapped
+  paths, as root, in the host's mount namespace, the only one both binaries
+  read. One was a bind mount of a file on the root file system, and a bind
+  mount carries its file system's source into the mount table. So `/`'s
+  source named two mounts, and `fs-arg-plus-f-by-mount-source`, a case about
+  `/` that names no such fixture, diverged: it had met an open difference
+  (DIVERGENCES 84) the fixture made reachable. Every new case matched; only
+  the run of the whole matrix showed it. The fix bound a file from a tmpfs
+  of the fixture's own, whose source is a name no other case uses.
+- **The rule.** A fixture that changes state other cases read (the mount
+  table, `/dev/shm`, a sysctl, the lock table) is an input to every case,
+  not only its own. Give what it makes names nothing else uses, undo it in
+  the harness's `finally`, and judge a new fixture by the whole matrix, never
+  by its own cases.
+- **Kit change:** none to the kit's code. lsof-rs's
+  `differential/linux_diff.py` says, at fixture P, why its bind mount comes
+  from a tmpfs.
+- **Section amended:** `lsof-rs/differential/linux_diff.py` (fixture P).

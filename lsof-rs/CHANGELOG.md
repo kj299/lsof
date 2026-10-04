@@ -11,6 +11,43 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Every mapped file is listed, as the C lists it** (DIVERGENCES 95).
+  lsof-rs dropped a mapping it could not `stat`, or whose `stat` named another
+  file, where the C keeps the row with the maps line's device and inode and
+  says why in NAME: `(stat: …)` or `(path …)`, muted by `-w`. Most were a
+  container's. For a process in another mount namespace the C `stat`s each
+  mapping through `/proc/PID/map_files/`: as root that describes it, and as
+  anyone else every mapping reads `(stat: Operation not permitted)`. lsof-rs
+  `stat`ed the paths, found the host's files or none, and dropped what did not
+  match. A deleted file that its path names again is `mem`, as in the C.
+- **A mapped device is `CHR` or `BLK`** (DIVERGENCES 48), with the device it
+  names and no size, and a path argument naming the device finds it. lsof-rs
+  printed `REG`, the devtmpfs's number and a size of 0.
+- **`-e` exempts mapped files** (DIVERGENCES 40): `UNKNmem` and `UNKNdel` rows
+  from the maps line, which no path argument finds. And `-e` matches a plain
+  prefix, its trailing slash dropped, as the C's does (DIVERGENCES 98):
+  `-e /dev/shm` exempts `/dev/shmx/f`.
+- **Lock letters wherever the C shows them** (DIVERGENCES 96, 97): on `cwd`,
+  `txt`, `mem` and `DEL` rows, and on device nodes, looked up by the file's
+  own device rather than the device a node names. With several of a process's
+  locks on one file, the letter is the latest kind new to the file, as the C
+  chains them; lsof-rs took the last line of `/proc/locks`.
+- **Maps lines read as the C reads them** (DIVERGENCES 99): io_uring and
+  packet-socket rings are rows, and a name ending in a space or a CR keeps
+  it. A `DEL` row's `-F D` is `makedev()`'s past minor 255 (DIVERGENCES 100).
+
+### Security
+- **A mapped file's name cannot pass for another file's, or stall the run.**
+  Two of the C's habits are not reproduced (DIVERGENCES 102, 103). The C
+  `stat`s a mapping's name that is no path, such as `anon_inode:[io_uring]`,
+  relative to its working directory, so a file planted under that name in
+  `/tmp` is described in the ring's place, and a link planted there into a
+  hung file system stops the run; lsof-rs never `stat`s such a name. The C
+  also ends a name at a TAB, so `libssl.so`, a TAB and more reads as the real
+  `libssl.so`; lsof-rs keeps the whole name, as it already did for a socket's
+  path (DIVERGENCES 66).
+
 ### Changed
 - **`-V` names path search items in the C's order**: last given first, and a
   `+d`/`+D` expansion backwards, its directory after its entries, the latest

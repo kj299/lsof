@@ -595,6 +595,14 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-e", "/", "-p", "PID"]
 covers = ["opt:e", "type:UNKNcwd", "type:UNKNrtd", "type:UNKNtxt", "type:UNKNfd"]
 
 [[case]]
+# Fixture EM's mappings on /dev/shm, exempted: the C types the mapped file
+# UNKNmem and the one unlinked UNKNdel, from the maps line alone (DIVERGENCES
+# 40).
+name = "linux/differential-exempt-mappings-are-unkn"
+args = ["-n", "-P", "-e", "/dev/shm", "-a", "-p", "PID"]
+covers = ["opt:e", "type:UNKNmem", "type:UNKNdel"]
+
+[[case]]
 # Fixture U, which cannot be read by the user lsof runs as: the `unknown` rows
 # the C prints for each link and the NOFD row for the fd table.
 name = "linux/differential-unreadable-rows-say-what-could-not-be-read"
