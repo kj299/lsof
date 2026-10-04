@@ -1,5 +1,11 @@
 # lsof-rs — research-grade gaps: phased approach
 
+> **Status: closed.** Every item below shipped or was closed as a platform
+> limit; the roadmap has no open items (see the end). Current limits are in
+> [`known-limitations.md`](known-limitations.md). Where this record says a
+> socket row reports `u`, that is now its `-F` `a` field and JSON `access` key;
+> the table shows `unk` alone (DIVERGENCES 35).
+
 These are the Phase 1–4 findings that can't be closed with a small, well-trodden
 change. Each has a **spike → implement → polish** plan with an explicit
 **decision gate** (so we don't sink effort into a dead end), and memory-safety

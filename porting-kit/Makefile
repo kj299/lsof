@@ -71,6 +71,10 @@ check-kit:
 	@echo "== control coverage =="; $(PY) $(H)/control-coverage/check_controls.py \
 	    --controls CLAUDE.md --gate ../.github/workflows/lsof-rs-ci.yml \
 	    --gate ../lsof-rs/differential/linux_diff.py
+	@# The template a new port copies must wire the same controls: it once ran
+	@# four fewer, so a port built from it failed this check on its first run.
+	@echo "== control coverage (template) =="; $(PY) $(H)/control-coverage/check_controls.py \
+	    --controls CLAUDE.md --gate $(H)/ci/porting-ci.template.yml
 	@# Documented commands are code: they get pasted. Every `--flag` the operative
 	@# docs attribute to a kit harness must exist in that harness's source.
 	@echo "== doc flags ==";        $(PY) $(H)/doc-check/check_doc_flags.py .

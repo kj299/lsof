@@ -1,13 +1,22 @@
 # lsof-rs — known limitations
 
-What v0.1.0 deliberately does **not** show, and why. Each item links to the
-engineering spike record in [`research-roadmap.md`](research-roadmap.md) where
-applicable. The omissions are platform-API limits, not implementation bugs —
-emitting fabricated data would be misleading, so we don't.
+What lsof-rs does **not** show, or shows differently from the C, and why. Each
+item links to the engineering spike record in
+[`research-roadmap.md`](research-roadmap.md) where applicable. The Windows
+omissions are platform-API limits, not implementation bugs — emitting fabricated
+data would be misleading, so we don't. The complete list of differences from the
+C, with each one's status, is [`../DIVERGENCES.md`](../DIVERGENCES.md); the ones
+a user is likely to meet are summarised under [Open differences from the
+C](#open-differences-from-the-c) below.
+
+On **Linux** the first three sections do not apply: a socket row carries its fd
+number, `-U` and raw sockets come from `/proc/net` without Administrator (and
+`--etw` is accepted and ignored), and the lock column is read from
+`/proc/locks`.
 
 ## Sockets
 
-### Socket rows show `unk` for FD
+### On Windows, socket rows show `unk` for FD
 
 Internet sockets are enumerated via `GetExtendedTcpTable` /
 `GetExtendedUdpTable`, which give the owning **PID** and the endpoint
@@ -17,15 +26,16 @@ specific endpoint requires reading the AFD endpoint's address — only reachable
 through undocumented AFD IOCTLs (what Process Hacker / TCPView do at a
 driver-adjacent level).
 
-**What we show instead:** the access character is rendered as `u` (read/write),
-which matches lsof's display for sockets. The owning PID, protocol, addresses,
-ports, and TCP state are all accurate.
+**What we show instead:** the FD cell is `unk`, with no access letter: the table
+prints one only after a descriptor number (DIVERGENCES 35). `-F`'s `a` field and
+JSON's `access` key report `u`. The owning PID, protocol, addresses, ports, and
+TCP state are all accurate.
 
-**Path forward:** an ETW (`Microsoft-Windows-TCPIP`) consumer is the safe,
-public-ish path and is the next open roadmap item — see
-[`research-roadmap.md`](research-roadmap.md) §5.
+**Path forward:** none in user mode. The ETW spike
+([`research-roadmap.md`](research-roadmap.md) §5) found no event that carries
+the handle value; mapping an AFD endpoint to a handle needs a kernel driver.
 
-### `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX are ETW-sourced
+### On Windows, `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX are ETW-sourced
 
 There is no public IP Helper table for raw sockets (`SOCK_RAW`), ICMP, or
 AF_UNIX endpoints. Those families are recoverable through a short ETW capture
@@ -38,7 +48,7 @@ the ~2 s window are seen — it is a sample, not a table dump.
 
 ## Files
 
-### No byte-range lock column
+### On Windows, no byte-range lock column
 
 lsof shows lock state (`R`/`W`/`r`/`w`/`u`/`X`/`x`) for ranges held via
 `fcntl`/`flock`. On Windows, the only API that **enumerates** a file's locks is
@@ -55,8 +65,9 @@ granted-access mask, which is accurate but coarser than lsof's lock state.
 
 The `OFFSET` column (`-o`) uses `NtQueryInformationFile(FilePositionInformation)`
 on a duplicated handle (which shares the owner's file object). It works for
-seekable files; non-seekable handles (pipes, sockets, character devices)
-report blank, which matches lsof's behavior. Since 2026-09-25 `-o` is lsof's
+seekable files; Windows reads a position only for disk files, so pipes,
+sockets and character devices show a blank OFFSET, where the C on Linux shows
+`0t0`. Since 2026-09-25 `-o` is lsof's
 column on every platform — headed `OFFSET`, blank where there is no offset
 rather than falling back to the size (DIVERGENCES 6).
 
@@ -64,8 +75,8 @@ rather than falling back to the size (DIVERGENCES 6).
 
 ### Some processes are inaccessible without elevation
 
-By design — lsof-rs runs as the current user (`asInvoker` manifest) and never
-auto-elevates. Protected processes, processes owned by other users, and
+By design — lsof-rs runs as the current user (as invoker, the MSVC default) and
+never auto-elevates. Protected processes, processes owned by other users, and
 processes for which the token can't `OpenProcess` simply don't appear in the
 results. The CLI prints a one-line hint about re-running as Administrator
 when a system-wide switch is used; `-V` reports how many processes were
@@ -102,7 +113,8 @@ is not available here; bounded-and-slightly-incomplete beats unbounded.
 
 ### Released `lsof.exe` is unsigned
 
-Until [code signing](code-signing.md) lands, the distributed binary triggers:
+Signing is deferred by choice (see [code-signing.md](code-signing.md)), so the
+distributed binary triggers:
 
 - **Windows SmartScreen** on first run ("More info → Run anyway"), and
 - **Microsoft Defender** PUA / hacktool false-positives, which can block the
@@ -170,25 +182,59 @@ One entry in that ledger has since been **closed rather than recorded**, because
 it was a security fix and not a compatibility choice: control characters in
 COMMAND and NAME were printed raw, so a process or file named with an ANSI
 escape sequence drove the terminal of whoever ran lsof-rs. Both cells (and
-USER) now go through the C's `safestrprt()` rules on every platform; the only
-deliberate difference is that the backslash stays a path separator on Windows.
+USER) now go through the C's `safestrprt()` rules on every platform. The
+deliberate differences: the backslash stays a path separator on Windows, and two
+C defects are not copied — the C prints a thread name raw under `-F M`
+(DIVERGENCES 59), and mis-sizes a column holding a byte ≥ 0x80
+(`hostile-comm-utf8-table`). A newline in a command name (58) and the escaping
+of a login name (70) are still open.
 `+c 0`, which the C documents as "print every character", was also read as a
 cap of zero and is now unlimited. Both are checked against the C oracle by the
 differential's hostile-name fixtures.
 
-A fourth difference is deliberate and stays: **lsof-rs never resolves hostnames
-or service names**, so it behaves as though `-n -P` were always given. The core
-renders the numeric form it is handed (`model::SocketInfo::display_name`), and
-resolution is documented there as a backend concern. The C resolves by default,
-so `192.0.2.2:43378->160.79.104.10:443` here is
-`192.0.2.2:43378->api.anthropic.com:https` there. Resolution costs DNS traffic
-from a diagnostic tool, which is a poor default for the environments this runs
-in; `-n`/`-P` are accepted and are no-ops.
+A fourth difference is deliberate and stays: **on Linux, lsof-rs never resolves
+host names or service names**, so it behaves as though `-n -P` were always
+given, and both flags change nothing there. The core renders the numeric form it
+is handed (`model::SocketInfo::display_name`), and resolution is a backend
+concern. The C resolves by default, so `192.0.2.2:43378->160.79.104.10:443` here
+is `192.0.2.2:43378->api.anthropic.com:https` there. Resolution costs DNS
+traffic from a diagnostic tool, which is a poor default for the environments
+this runs in. **On Windows** lsof-rs resolves both by default (reverse DNS
+through `GetNameInfoW`, bounded at 2 s), and `-n` and `-P` turn that off. On
+both, an `-i` address or port must be numeric: `-i@localhost` and `-i:http` are
+refused (DIVERGENCES 38).
+
+## Open differences from the C
+
+The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
+meet. Each number is a row there, with the measurement behind it.
+
+- **Refused, where the C works:** `-c /regex/`, and host or service names in
+  `-i` (38); `-b` and `-S` (94); a path argument that is not UTF-8 (92); `-Z`,
+  where SELinux is mounted (29: the CONTEXT column is not built).
+- **Linux:** `-E`/`+E` are accepted and ignored (56); netlink and AF_VSOCK
+  sockets, and a TCP socket that is bound but not listening, show as `SOCK`
+  `socket:[N]` (22, waiting on a decision); a login name is read from
+  `/etc/passwd` only, so an LDAP or SSSD account can be named by its UID alone
+  (39); `-e` does not exempt mapped files (40); a mapped device file is typed
+  `REG` (48); a mapping that cannot be `stat`ed has no row (95).
+- **Output shape:** the JSON from `-J`/`-j` has lsof-rs's own schema, not the
+  C's (91), and under `-K` a task's object repeats its process's (61); a byte
+  that is not UTF-8 prints as U+FFFD, where the C prints `\xff` (93); `-F`,
+  `-J` or `-j` with `-t` is accepted, where the C refuses it (90).
+- **Deliberate:** options after the first file name are still options (12);
+  NAME shows the name the process opened, not the one you asked about (17); a
+  `+d`/`+D` walk stops at 200,000 entries or 16 MiB of names, and says so (81).
+- **Rarer:** large UIDs (68) and the padding of a multibyte login name (71).
+  The rest, including the stderr-only differences, are in the ledger.
 
 ## Where these limitations are tracked
 
 - **Spike records** (closed gates with the engineering reasoning):
   [`docs/research-roadmap.md`](research-roadmap.md) §1 (socket-FD /
-  AF_UNIX / raw), §2 (byte-range locks).
-- **Open work items**: §5 (ETW-based socket→FD correlation),
-  plus the [code-signing tracking doc](code-signing.md).
+  AF_UNIX / raw), §2 (byte-range locks), §5 (ETW: no handle value in any event).
+- **Open differences from the C:** the rows of
+  [`../DIVERGENCES.md`](../DIVERGENCES.md) marked OPEN, DEBT or DECISION
+  PENDING.
+- **Signing:** deferred by choice; see the
+  [code-signing tracking doc](code-signing.md).

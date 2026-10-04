@@ -2,13 +2,19 @@
 
 Scopes what "secure" means for this port, and tells the port loop which modules
 touch untrusted input (fuzz those first) and which cross a privilege boundary
-(audit those hardest). Written against the tree as of 2026-09-20; every claim
-below was checked against the code rather than inferred from the C's design.
+(audit those hardest). Written against the tree as of 2026-09-20, and checked
+against the code again on 2026-10-04, when a drift audit corrected the claims
+below that had stopped being true. Every claim was checked against the code
+rather than inferred from the C's design.
 
 `lsof` reports which files processes have open. It is an **observer**: it never
-writes to the system it inspects, never spawns a subprocess, and has no network
-listener. Its risk is therefore asymmetric — almost all of it is in *reading
-hostile data* and in *what it discloses*, not in what it changes.
+spawns a subprocess and has no network listener. On Linux it writes nothing. On
+Windows two opt-in paths change transient state: an elevated `-T q` or `-T w`
+turns EStats collection on for each selected TCP connection — other processes'
+included — reads it, and turns it off again; and `--etw` (which `-U`, `-iICMP`
+and `-iRAW` imply) starts and stops a named ETW session for about two seconds.
+Its risk is therefore asymmetric — almost all of it is in *reading hostile data*
+and in *what it discloses*, not in what it changes.
 
 ## 1. Assets — what are we protecting?
 
@@ -27,13 +33,13 @@ by care.
 
 **The accuracy of the report.** Not confidentiality, but a real asset: this tool
 is used during incident response. A row that is silently wrong, or an entry
-silently dropped, can send an investigation the wrong way. Two of the three
+silently dropped, can send an investigation the wrong way. Several of the
 C-defects in §6 are exactly this failure — output that is quietly incomplete
 rather than visibly broken. Accuracy is therefore in scope for the differential
 gate, not just correctness-as-taste.
 
-**The host it runs on.** Only indirectly: lsof-rs does not modify the host, so
-this reduces to not being a vector — not executing attacker data, not passing it
+**The host it runs on.** Only indirectly: lsof-rs changes nothing on the host
+but the two transient Windows states above, so this reduces to not being a vector — not executing attacker data, not passing it
 to a shell (no subprocess is ever spawned), and not corrupting its own memory.
 
 ## 2. Trust boundaries — where does untrusted data cross in?
@@ -45,16 +51,18 @@ it is a gap, not a formatting choice.
 | Entry point | Source | Trust | Ported module | Fuzz target |
 |---|---|---|---|---|
 | CLI args, the selection grammar | invoking user or a calling script | untrusted | `lsof-cli`, `lsof-core` | `parse_args` |
-| `/proc/PID/stat`, `status`, `comm`, `cmdline` | **any local user's process** | **hostile** | `lsof-backend-linux::process` | `proc_status` |
+| `/proc/PID/status`, `/proc/PID/task/TID/status` (the command is the `Name:` line) | **any local user's process** | **hostile** | `lsof-backend-linux::process` | `proc_status` |
 | `/proc/PID/fd/N` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape` |
 | `/proc/PID/fdinfo/N` | kernel, per-fd | untrusted | `lsof-backend-linux::files` | `proc_fdinfo` |
 | `/proc/PID/maps` | kernel + mapped filenames | **hostile** | `lsof-backend-linux::maps` | `proc_maps` |
-| `/proc/net/{tcp,udp,raw,unix,icmp,netlink,packet}` | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
-| `/proc/self/mounts`, mountinfo | kernel + mount namespace | untrusted | `lsof-backend-linux::mounts` | `proc_mounts` |
+| `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
+| `/proc/self/mounts` | kernel + mount namespace | untrusted | `lsof-backend-linux::mounts` | `proc_mounts` |
 | `/proc/locks` | kernel | untrusted | `lsof-backend-linux::locks` | `proc_locks` |
-| `/etc/passwd`, `/etc/group` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` |
-| Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` | `windows_names` |
+| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` |
+| path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
+| Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
 | Another process's PEB, via `ReadProcessMemory` | **the target process** | **hostile** | `lsof-backend-windows::peb` | none — see below |
+| ETW AFD event payloads (`--etw`, `-U`, `-iICMP`, `-iRAW`; Administrator) | **any process's socket activity** | **hostile** | `lsof-backend-windows::etw` | none — see below |
 | `LSOF_RS_TRACE`, `WINLSOF_TRACE` | operator | trusted-ish | tracing setup | not applicable |
 
 Three things about this table are worth saying out loud, because they are the
@@ -75,6 +83,15 @@ write its own PEB, so the lengths and pointers read there are attacker-chosen.
 The code bounds each read and treats failure as "no cwd", but the input is not
 currently driven by a fuzzer the way the `/proc` parsers are. Recorded here
 rather than left to be discovered.
+
+**Two later rows have no fuzz target either.** `lsof-core::readlink` spells a
+path as the C's `Readlink()` does, following links whose targets any local user
+chooses. It is bounded (20 links, 4096 bytes), and when it landed it was compared
+with the C's own function over 543,840 random spellings, but that was a one-off
+run: no cargo-fuzz target drives `resolve_with`, although it is pure and could
+be. `etw.rs` parses AFD event payloads (`parse_afd_create`, `parse_afd_address`,
+`parse_sockaddr`) that any process's socket activity shapes; the parsing checks
+its bounds, but it is Windows-only code and no fuzzer reaches it.
 
 **The environment surface is two variables.** The C `lsof` reads considerably
 more, including the personal device-cache path; lsof-rs's whole environment
@@ -110,14 +127,17 @@ pattern: a named privilege (`SeDebugPrivilege`) is enabled for *only* the
 lifetime of the guard and removed on drop. It is enabled around the specific call
 that needs it, only when the switches in use require system-wide data — never
 globally, and never at all for queries like `-i` that work in the plain user
-context. `is_elevated()` reads `TokenElevation` purely to tailor a user-facing
-hint; by its own contract it never causes a privilege to be enabled.
+context. `is_elevated()` reads `TokenElevation`. Its answer picks the
+user-facing hint, and it gates the guard: `handles::enumerate` enables
+`SeDebugPrivilege` only when the token is already elevated and the query is not
+`-i` or `-U` alone, and EStats collection (§ above) needs the same. Nothing
+elevates the process itself.
 
 The audit hotspots on Windows are therefore: the guard's drop path (a privilege
 left enabled is the failure), `handles.rs` where the guard is taken, and `peb.rs`
 where elevation buys the ability to read another process's memory. That crate
-holds essentially all of the port's `unsafe` — roughly 153 blocks against 3 in
-the Linux backend, 4 in the CLI and 2 in core — which is why the unsafe-audit and
+holds all of the port's `unsafe` — 139 blocks by `audit_unsafe.py`, every one
+documented; the other three crates forbid it — which is why the unsafe-audit and
 sanitizer gates are pointed at it.
 
 ## 4. Attacker capabilities we defend against
@@ -125,7 +145,7 @@ sanitizer gates are pointed at it.
 - **Supplies arbitrary bytes at any boundary in §2** — a process name of raw
   high bytes, a filename that is not valid UTF-8, a `/proc/net` line with
   unexpected field counts. Defence: no panic and no UB on any input. Enforced by
-  the fuzz gate over the ten targets listed above, plus `forbid(unsafe_code)` on
+  the fuzz gate over every target listed above, plus `forbid(unsafe_code)` on
   the three portable crates.
 - **Supplies bytes chosen to break the renderer rather than the parser.** Column
   widths are computed from attacker-controlled strings. Getting this wrong
@@ -134,8 +154,13 @@ sanitizer gates are pointed at it.
   differential's byte-level comparison, which since this refresh distinguishes
   `\xff` from `\xfe` instead of collapsing both to U+FFFD.
 - **Supplies pathological sizes** — implausible lengths in a PEB, huge fd counts,
-  a very long path. Defence: checked arithmetic (`arithmetic_side_effects` is
-  denied workspace-wide, so `i + 1` does not compile), bounded reads in `peb.rs`.
+  a very long path, a tree of links to itself. Defence: bounded reads in
+  `peb.rs`; a `+d`/`+D` walk stops after 200,000 entries or 16 MiB of their
+  names, and says so (DIVERGENCES 81); `Readlink()`'s own limits, 20 links and
+  4096 bytes. Arithmetic is **not** lint-checked: the workspace does not enable
+  `clippy::arithmetic_side_effects`, and the release profile does not set
+  `overflow-checks`, so an overflow there wraps rather than panics. (This line
+  used to claim the lint was denied workspace-wide; it never was.)
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit
   between `readdir` and the read of its entries, and a PID can be recycled.
   Defence: treat every per-process read as fallible and skip, never abort the
@@ -181,9 +206,9 @@ against itself.
 ### 6a. Confirmed defects, already triaged
 
 The kit's rule is that the C is a specification which may itself be buggy, and
-that a defect found in it is triaged rather than faithfully re-implemented. Three
-are recorded in [`DIVERGENCES.md`](DIVERGENCES.md) as **`C-DEFECT`**, each naming
-the C code so the triage can be checked:
+that a defect found in it is triaged rather than faithfully re-implemented.
+[`DIVERGENCES.md`](DIVERGENCES.md) records each one as **`C-DEFECT`**, naming the
+C code so the triage can be checked. The ones that bear on this model:
 
 - **`hostile-comm-utf8-table`** — the C mis-sizes a table column when a process
   `comm` contains bytes ≥ 0x80. The scan below independently re-finds this at its
@@ -205,11 +230,27 @@ the C code so the triage can be checked:
 - **`Readlink()` keeps a link count across arguments** after one gives up as
   too long, so the next argument's chain of 20 links is refused (DIVERGENCES 80).
   Not reproduced.
+- **`-F M` prints a thread's name raw** while `c` and the TASKCMD column are
+  escaped (DIVERGENCES 59). Any process can name a thread, so the C lets it write
+  an escape sequence to the terminal of whoever runs lsof — the §4 renderer
+  capability again. Not reproduced: lsof-rs escapes it as it escapes `c`.
+- **`-s UDP:` with any state name segfaults the C** (ledgered as
+  `states-udp-names-crash-the-c`, item 32). Not reproduced: lsof-rs refuses the
+  value.
+- **`-u 4294967296` selects root's processes**: `enter_uid()` sums digits into a
+  `uid_t` with no overflow check (`search-u-overflow-wraps-to-root-in-the-c`).
+  `-p` and `-g` wrap the same way. Not reproduced: lsof-rs refuses a number that
+  does not fit.
+- **Quietly wrong rows**, the accuracy asset of §1: a task's PID hidden under
+  `-t` (57), a socket path cut at its first space (66), an argument `socket`
+  finding every unbound AF_UNIX socket (67), and `/proc/self` read as the
+  child the C forks (89). None reproduced.
 
 ### 6b. The Phase-0 flaw scan
 
 Report: [`coverage/c-flaw-scan.json`](coverage/c-flaw-scan.json), from
-`porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py src lib/*.c lib/dialects/linux`.
+`python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py src lib/*.c
+lib/dialects/linux --json`, run from the repository root.
 
 The harness says of itself that it is "deliberately noisy: every hit is a
 *question* for the porter". So the raw count is not a finding; the triage is.
@@ -218,7 +259,7 @@ The first run produced **113** hits. Triaging them found a fifth of the output w
 text that never executes, so the scanner was fixed before the numbers were written
 down (§6d) — the report above is the post-fix run, **98** hits.
 
-**26 of those are in code this platform does not compile.** Verified in the headers
+**28 of those are in code this platform does not compile.** Verified in the headers
 rather than assumed:
 
 - `lib/dvch.c` — the whole body is inside `#if defined(HASDCACHE)`, and
@@ -228,15 +269,18 @@ rather than assumed:
   reference build does not compile.)
 - `lib/rnam.c`, `lib/rnch.c`, `lib/rnmh.c` — each guarded by
   `HASNCACHE && USE_LIB_RN{AM,CH,MH}`, all four commented out for Linux. Dead.
+- `lib/rmnt.c`, `lib/rnmt.c` — guarded by `USE_LIB_READMNT` and by `HASNCACHE &&
+  USE_LIB_RNMT`, both commented out for Linux (`machine.h`). Dead. (This page
+  counted them live until 2026-10-04.)
 - `lib/dialects/linux/tests/ux.c` — a test program, not linked into `lsof`.
 
-That leaves **72 in the binary the differential actually compares against**:
+That leaves **70 in the binary the differential actually compares against**:
 
 | Category | Live | Triage |
 |---|---|---|
-| `int-overflow-mul` | 42 | **0 confirmed.** 14 are `calloc(n, sizeof(T))` with compile-time constants, and C11 requires `calloc` to detect the product overflowing. The rest are `realloc(ptr, len)` — one size argument, no multiplication at the call, so not the pattern this category describes. Whether the arithmetic *upstream* can overflow is a real question the scanner did not ask and this pass did not answer; the `dsock.c` address-assembly sites (`plen + len + 2`, from `/proc/net` data) are where I would start. |
-| `toctou` | 18 | **0 confirmed.** All 18 are now real `stat`/`lstat` calls on `/proc` paths — the 15 that were comments and string literals are gone with the scanner fix. A race there needs a PID recycled between the stat and the open; §4 already names it, and the consequence for a read-only reporter is a wrong or missing row, not a compromise. |
-| `unbounded-copy` | 5 | **0 confirmed.** The two in `dproc.c` are bounded three lines above the call, where the scanner cannot see: `:1815` copies into a buffer `malloc`'d to `strlen(p)+1` on the preceding line; `:1919` appends a postfix into space `snp_eventpoll` reserved up front (`len -= (tfd_count == EPOLL_MAX_TFDS) ? 4 : 1`, plus the NUL). `dsock.c:1091` copies a string literal. `dmnt.c:307` and `rmnt.c:185` copy into fields sized from the source length. |
+| `int-overflow-mul` | 41 | **0 confirmed.** 14 are `calloc(n, sizeof(T))` with compile-time constants, and C11 requires `calloc` to detect the product overflowing. The rest are `realloc(ptr, len)` — one size argument, no multiplication at the call, so not the pattern this category describes. Whether the arithmetic *upstream* can overflow is a real question the scanner did not ask and this pass did not answer; the `dsock.c` address-assembly sites (`plen + len + 2`, from `/proc/net` data) are where I would start. |
+| `toctou` | 18 | **0 confirmed.** All 18 are now real calls — the 15 that were comments and string literals are gone with the scanner fix. About half are `stat`/`lstat` on `/proc` paths; the rest are on `/dev`, `/etc/passwd`, mapped-file and socket paths, and the path-argument wrappers, and `misc.c:994` is `access()`. A race there needs a PID recycled between the stat and the open; §4 already names it, and the consequence for a read-only reporter is a wrong or missing row, not a compromise. |
+| `unbounded-copy` | 4 | **0 confirmed.** The two in `dproc.c` are bounded three lines above the call, where the scanner cannot see: `:1815` copies into a buffer `malloc`'d to `strlen(p)+1` on the preceding line; `:1919` appends a postfix into space `snp_eventpoll` reserved up front (`len -= (tfd_count == EPOLL_MAX_TFDS) ? 4 : 1`, plus the NUL). `dsock.c:1091` copies a string literal. `dmnt.c:307` copies into a field sized from the source length. |
 | `format-string` | 4 | **0 confirmed.** `ACCESSERRFMT` is a string-literal macro (`lib/common.h:273`). `SzOffFmt_dv` and `InodeFmt_d` are non-literal but program-constructed — built by `sv_fmt_str()` in `src/main.c` from compile-time `SZOFFTYPE` options, never from input. The `src/usage.c` hit is the scanner joining lines across an `#if`. |
 | `signed-char-compare` | 3 | **1 confirmed, 1 latent, 1 false.** Detail below — this is the category that earns the scan. |
 
@@ -264,8 +308,9 @@ count:
   On a platform where `char` is unsigned (AArch64 Linux, where lsof also builds)
   the branch flips to `putchar(val)` and a raw high byte lands in the JSON
   document, which is not valid UTF-8. Not reproduced by lsof-rs and not
-  reproducible by it: `render/escape.rs` and `render/json.rs` escape over UTF-8
-  `char`s via `\u{:04x}`, so there is no signed-byte branch to get wrong.
+  reproducible by it: `render/json.rs` escapes a control character as
+  `\u{:04x}` over UTF-8 `char`s, and `render/escape.rs` prints a byte it cannot
+  print as `\xNN`; neither has a signed-byte branch to get wrong.
 
 ### 6d. What the scan says about the scanner
 

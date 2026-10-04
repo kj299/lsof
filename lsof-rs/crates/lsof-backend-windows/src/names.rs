@@ -4,7 +4,7 @@
 //! shows: an NT device path into a drive letter, a `\\?\` final path into a
 //! clean one, a kernel object type name into an lsof TYPE code, a UTF-16
 //! buffer into a `String`. None of it calls Win32 — the Win32 calls live in
-//! [`crate::handles`] and friends and pass their results through here.
+//! `crate::handles` and friends and pass their results through here.
 //!
 //! # Why this module is not `#[cfg(windows)]`
 //!

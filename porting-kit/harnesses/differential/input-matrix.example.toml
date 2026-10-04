@@ -3,8 +3,12 @@
 # IS the behavioral contract. Grow it every time a bug escapes (add the case
 # that would have caught it). A .json matrix with the same shape works too.
 #
-# Each [[case]] runs both binaries with `args` (and optional stdin/env/
-# timeout), normalizes both outputs (see normalize.py), and diffs. Cover the
+# Each [[case]] runs both binaries with `args`, normalizes both outputs (see
+# normalize.py), and diffs. Optional keys: `stdin`, or `stdin_b64` for raw bytes
+# a TOML string cannot spell; `env`; `timeout`; `cwd` (both binaries start there,
+# and it must exist); `keep_whitespace = true` (compare spacing too, for a case
+# about alignment); `with_stderr = true` (compare this case's stderr as well).
+# diff_run.py's docstring is the reference for each. Cover the
 # axes that matter for a rewrite: empty/edge inputs, large inputs, every
 # output format, every flag, and - critically - the malformed/hostile inputs
 # that exercise the safety improvements over C. Control bytes use TOML \u.

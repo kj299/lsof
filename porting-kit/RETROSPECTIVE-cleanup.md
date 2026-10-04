@@ -101,10 +101,13 @@ force; a check does.*
    two from this arc. LESSONS #048's procedure — first to land keeps its numbers,
    the other block shifts as a unit, the renumber scoped to files citing the moved
    entry — resolves each one, but by hand at every merge, and nothing prevents
-   the next. An append-only log with a shared counter and several concurrent
+   the next. [2026-10-04: by then `harnesses/lessons/resolve_collision.py`
+   (LESSONS #057, 2026-09-20) already did the renumber; a person still runs it
+   at each merge, and the collisions still come.] An append-only log with a shared counter and several concurrent
    writers will keep colliding.
 3. **"A vendored kit cannot see its host" was fixed per harness.** Four days
-   after #90, another session found the same blind spot in
+   after #90 [2026-10-04: the same day — #90 merged 2026-09-20 08:01 and #100 at
+   20:00, -0400], another session found the same blind spot in
    `check_lessons_pinned` and fixed it by copying `--also-scan`, spelling
    included. The fix spread by imitation; the class is still open for the next
    harness that walks files.

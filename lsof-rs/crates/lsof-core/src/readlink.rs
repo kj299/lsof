@@ -21,7 +21,7 @@
 //!   `$PWD/rel/y`.
 //!
 //! The algorithm is [`resolve_with`], over bytes, with the link reader passed
-//! in, so it is tested without a file system; [`resolve`] reads real links.
+//! in, so it is tested without a file system; `resolve` (Unix) reads real links.
 
 /// `MAXSYMLINKS` as the C is built on Linux: glibc's `<sys/param.h>` defines
 /// it as 20, ahead of `lib/misc.c`'s fallback of 32. Measured:
@@ -32,7 +32,7 @@ pub const MAXSYMLINKS: usize = 20;
 /// gives up on a path that would not fit with its terminating NUL.
 pub const MAXPATHLEN: usize = 4096;
 
-/// Why [`resolve`] gave up. The C says why and drops the path: a path argument
+/// Why `resolve` (Unix) gave up. The C says why and drops the path: a path argument
 /// is then no search item, and a `+d`/`+D` ends the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadlinkError {
@@ -56,7 +56,7 @@ impl ReadlinkError {
     }
 }
 
-/// [`resolve`], with `read_link(prefix)` supplying the target of the symbolic
+/// `resolve` (Unix), with `read_link(prefix)` supplying the target of the symbolic
 /// link at `prefix`, or `None` where there is none.
 pub fn resolve_with(
     arg: &[u8],

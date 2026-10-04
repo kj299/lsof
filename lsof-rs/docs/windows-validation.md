@@ -4,15 +4,19 @@ This plan validates the `lsof-rs` (`lsof.exe`) build end-to-end on a real
 Windows 10/11 x64 host, cross-checking every feature against a native Windows
 "oracle" (`Get-Process`, `Get-NetTCPConnection`, `netstat`) — all native, no
 downloads. For routine validation prefer the automated
-[smoke harness](../smoketest/README.md) (the same checks, self-fixtured, ~59
-cases); this doc is the **guided manual walkthrough** of the same ground, for
-when you want to see and poke each behavior yourself. CI already proves the
-code compiles, lints, and that the pure helper logic unit-tests pass on
-`windows-latest`; both this plan and the harness cover the part CI cannot: a
-live system-wide run in both privilege modes.
+[smoke harness](../smoketest/README.md) (the same checks, self-fixtured); this
+doc is the **guided manual walkthrough** of the same ground, for when you want to
+see and poke each behavior yourself. CI runs the smoke harness on every PR,
+elevated, on `windows-latest`, with the socket differential and ASan. What it
+cannot run is the unelevated pass — hosted runners are always Administrator — so
+both this plan and the harness, run by hand, cover that: a live system-wide run
+in both privilege modes, on real hardware.
 
 Example outputs below are **representative** (real PIDs/paths will differ). A
-case passes if the shape matches and the cross-check agrees.
+case passes if the shape matches and the cross-check agrees. Since 1.0.1 the
+table is laid out as the C lays it out: COMMAND is cut to nine characters
+(`explorer.`, `powershel`) and columns are right-aligned, which the older
+samples here do not show (DIVERGENCES 3, 35).
 
 ## 0. Build & setup
 
@@ -35,7 +39,7 @@ cases (§8) in a PowerShell started with "Run as administrator".
 
 | # | Command | Expected |
 |---|---|---|
-| T1 | `& $lsof -v` | `lsof-rs <current version> (memory-safe lsof for Windows)` |
+| T1 | `& $lsof -v` | `lsof-rs <current version> (memory-safe lsof)` (`(memory-safe lsof for Windows)` up to v1.0.1) |
 | T2 | `& $lsof -h` | usage text listing `-p -u -c -i -a -n -P -t -F -J -j -r` and `+D` |
 
 ---
@@ -184,7 +188,7 @@ Stop-Process $p.Id
 Representative output: `cmd.exe 1234 DOMAIN\alice cwd DIR C: C:\Windows`
 
 **Pass:** the `cwd` row shows `C:\Windows`. (If absent, see Known limitations —
-64-bit offsets / access.)
+a denied read, or one past the time budget.)
 
 ---
 
@@ -269,8 +273,10 @@ stops on Ctrl-C.
   table; correlating it would require matching against the handle table.
 - **Some details need elevation** — unprivileged runs can't read other users' /
   protected processes' handles (by design; matches lsof needing root).
-- **`cwd` is 64-bit, best-effort** — it uses documented x64 PEB offsets and
-  `PROCESS_VM_READ`; 32-bit (WOW64) targets or denied reads yield no `cwd` row.
-- **Hang-prone handles** — names for `0x0012019F` handles are resolved on a
-  worker thread with a 100 ms timeout, so a rare one may show no name.
+- **`cwd` is best-effort** — it reads the PEB of 64-bit and 32-bit (WOW64)
+  targets with `PROCESS_VM_READ`; a denied read, or one past the 5-second
+  budget, yields no `cwd` row.
+- **Hang-prone handles** — each handle is classified on a worker thread
+  abandoned after 200 ms (its name query after 100 ms), so a rare handle may be
+  missing or nameless.
 - **No `rtd`** — Windows has no per-process root directory.

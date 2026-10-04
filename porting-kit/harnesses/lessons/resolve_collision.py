@@ -3,7 +3,8 @@
 the same numbers, and the block that landed second must move.
 
 `LESSONS.md` is append-only, and its next number is shared mutable state that
-git cannot merge (LESSONS #048). Two branches each append `## 050.`; the merge
+git cannot merge (LESSONS #048), and resolving it by hand five times is how this
+harness came to be written (LESSONS #057). Two branches each append `## 050.`; the merge
 conflicts; and the procedure #048 recorded — the side that landed first keeps
 its numbers, the other block shifts as a unit, every citation to the shifted
 block is repointed — was then carried out by hand five times on one pull

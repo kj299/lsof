@@ -3,9 +3,12 @@
 # rewrite is safety, so the pipeline centers on proving it. Keep a small OS row if
 # your port is cross-platform; it is not the focus.
 #
-# Gates (each PLAYBOOK Phase 4 / cross-cutting control):
-#   build+test | clippy -D warnings | unsafe-audit (HARD FAIL) | miri |
-#   sanitizers | fuzz smoke | supply-chain (audit + deny) | differential
+# Gates (each PLAYBOOK Phase 4 / cross-cutting control). Every control CLAUDE.md
+# declares is invoked below; `make check-kit` runs control-coverage over this file,
+# so a control added there and not wired here fails the kit (LESSONS #080):
+#   build+test | clippy -D warnings | unsafe contained + documented (HARD FAIL) |
+#   c-flaw scanner self-test | ledgers | threat model (HARD FAIL) | miri | asan |
+#   fuzz smoke | supply-chain (audit + deny) | differential | coverage
 name: porting-ci
 
 # LESSONS #5 — path-scope CI to what it actually builds. During a gradual port the
@@ -69,9 +72,15 @@ jobs:
         with: { python-version: "3.11" }
       # Fails the build if ANY `unsafe {}` block lacks a // SAFETY: comment.
       - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/
+      # Fails unless every crate named here forbids `unsafe_code` on every target
+      # root, in a form rustc applies (LESSONS #065). Name each portable crate.
+      - run: python3 porting-kit/harnesses/unsafe-audit/check_forbid_unsafe.py crates/core
+      # The flaw scanner is a Phase 0 tool, but its rules are code: run its own
+      # self-test so a change to the kit cannot silently weaken it.
+      - run: python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
 
   ledgers:
-    name: ledgers exist (progress, divergences, fuzz target, sanitizer job)
+    name: ledgers exist (progress, divergences, fuzz target, sanitizers per unit) + threat model
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +90,12 @@ jobs:
       # shipped 1.0 with three of the four absent while every gate was green,
       # because no gate looked. A control that is asserted but never checked
       # does not exist. Waive one only with a reason: --allow NAME=WHY.
+      # It also requires a sanitizer step that runs `cargo … -p <unit>` for every
+      # unit progress.json tracks (san-crates), so name each unit in the miri
+      # (or ASan) command below — the units are cargo packages.
       - run: python3 porting-kit/harnesses/ledgers/check_ledgers.py . --ci-dir .github/workflows
+      # Hard fail: a missing file, a leftover placeholder or a deleted section.
+      - run: python3 porting-kit/harnesses/threat-model/check_threat_model.py THREAT-MODEL.md
 
   miri:
     name: miri (UB in unsafe)
@@ -104,18 +118,21 @@ jobs:
       # that touches a real tmpdir (mkdir/chdir/realpath) aborts under the
       # default; lsof-rs's first miri run did exactly that after 14 tests had
       # already passed. Disabling isolation keeps every soundness check.
-      - run: cargo +nightly miri test
+      # Name every unit progress.json tracks: check_ledgers' san-crates looks for
+      # `-p <unit>` in a sanitizer step, and a workspace-wide run names none.
+      - run: cargo +nightly miri test -p <unit>
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
 
   sanitizers:
-    name: sanitizers (asan + ubsan)
+    name: sanitizers (asan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      # rustc has no UB sanitizer: the harness's `ubsan` mode runs Miri, which
+      # the miri job already does. ASan is the one for the FFI layer.
       - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh asan .
-      - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh ubsan .
 
   fuzz-smoke:
     name: fuzz (60s smoke per target)
@@ -147,8 +164,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      # Build both, then diff over the input matrix. If the C reference can't run
-      # here, replace --oracle with the golden-replay wrapper (harnesses/golden).
+      # Build both, then diff over the input matrix. The oracle must run here:
+      # harnesses/golden replays captured stdout only, so it cannot stand in for
+      # a live C binary in this job.
       - run: |
           cargo build --release
           # ./build-c-oracle.sh   # your C build
@@ -156,3 +174,12 @@ jobs:
             --oracle ./c-oracle --rust ./target/release/<binary> \
             --matrix porting-kit/harnesses/differential/input-matrix.example.toml \
             --ledger DIVERGENCES.md
+      # The matrix must cover the C's whole surface: every option letter and TYPE
+      # code the C can emit, less waivers that carry reasons (LESSONS #8, #012).
+      # Build the inventory once with --extract-options/--extract-types and
+      # --emit-inventory, then run this once per platform the port targets.
+      - run: |
+          python3 porting-kit/harnesses/coverage/coverage_gate.py \
+            --inventory feature-inventory.toml \
+            --matrix porting-kit/harnesses/differential/input-matrix.example.toml \
+            --platform linux

@@ -16,25 +16,26 @@ name: porting-kit
 # PLAYBOOK + LESSONS change with zero checks of any kind, because the only
 # workflow watching porting-kit/ filtered on `harnesses/**` and excluded `.md`.
 #
-# So the trigger here is `porting-kit/**` with NO markdown exclusion: the
-# failure this gate exists for was markdown-only. This is deliberately its own
-# workflow rather than a job in lsof-rs-ci.yml, because that workflow's matrix
-# (the native Windows jobs, the memory-safety gates, the 87-case differential)
-# is far too heavy to fire on a prose edit to the playbook. check-kit is
-# python3 + bash with no toolchain, so this job is seconds.
+# So this workflow has no markdown exclusion — and, since the change below, no
+# path filter at all: the failure this gate exists for was markdown-only. This
+# is deliberately its own workflow rather than a job in lsof-rs-ci.yml, because
+# that workflow's matrix (the native Windows jobs, the memory-safety gates, the
+# differential against the C) is far too heavy to fire on a prose edit to the
+# playbook. check-kit is python3 + bash with no toolchain, so this job is cheap.
 #
-# Note for anyone editing this comment: check_ledgers.py decides the
-# memory-safety ledger is satisfied by regex-matching the NAMES of those tools
-# against every workflow file, without distinguishing a comment from a job. An
-# earlier draft of this header named them in passing and thereby made THIS file
-# the reported evidence for that ledger — a workflow that runs none of them.
-# Do not name them here; lsof-rs-ci.yml is where they belong.
+# Note for anyone editing this comment: check_ledgers.py once decided the
+# memory-safety ledger was satisfied by regex-matching the NAMES of those tools
+# against every workflow file, comments included. An earlier draft of this
+# header named them in passing and thereby made THIS file the reported evidence
+# for that ledger — a workflow that runs none of them. It now reads executable
+# text only (cb778b4), but the rule stands: name them in lsof-rs-ci.yml, where
+# they run, not here.
 # The path filter is GONE, and its absence is load-bearing.
 #
 # `check_lesson_refs.py` used to walk only `porting-kit/`, so a trigger of
 # `porting-kit/**` covered everything the gate could see. It now walks the whole
-# repository (`--also-scan ..`), because 52 of this repo's 214 lesson citations
-# live outside the kit — in the workflows beside this one, in backend sources,
+# repository (`--also-scan ..`), because a sixth of this repo's lesson
+# citations live outside the kit — in the workflows beside this one, in backend sources,
 # Cargo manifests and fuzz targets. A gate that checks `lsof-rs/**` while firing
 # only on `porting-kit/**` is not a gate: deleting a lesson entry and breaking a
 # citation in `lsof-rs/` are two commits that would each pass.

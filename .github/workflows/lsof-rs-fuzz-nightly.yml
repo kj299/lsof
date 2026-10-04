@@ -1,8 +1,9 @@
 name: lsof-rs nightly fuzz
 
 # Deep fuzzing on a schedule — the long-budget counterpart to lsof-rs-ci.yml's
-# 45-second PR smoke. Same target (the hand-rolled argument parser must never
-# panic on adversarial input), 40x the budget, plus a corpus that accumulates
+# 45-second-per-target PR smoke. The same targets (every one `cargo fuzz list`
+# reports; none may panic on adversarial input), 30 minutes split across them,
+# plus a corpus that accumulates
 # across nights via the cache: each run restores the newest previous corpus,
 # fuzzes on top of it, and saves the grown corpus for the next night.
 #
@@ -49,8 +50,9 @@ jobs:
       - name: deep fuzz every target
         # The 30-minute budget is split evenly across whatever `cargo fuzz list`
         # reports, so a target added to fuzz/Cargo.toml is soaked nightly
-        # without touching this file. Five targets today: the argv parser and
-        # the Linux backend's four /proc and /etc/passwd text parsers.
+        # without touching this file. Today they are the argv parser, the Linux
+        # backend's /proc, mount-table and /etc/passwd parsers, the renderer's
+        # escaper and the Windows backend's name parsers.
         run: |
           targets=$(cargo fuzz list)
           n=$(echo "$targets" | wc -w)

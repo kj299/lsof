@@ -8,11 +8,12 @@ against one fixture process at the same instant, and diff through the kit's
 `diff_run.py`. Every fidelity finding in phases L0 and L1 came from doing this
 by hand; this makes it a gate.
 
-Why a wrapper at all: the kit's runner has no per-case fixture hook (only argv,
-stdin, env, timeout), and lsof's interesting behavior is about *which process*
-it is pointed at. So this script stands up two self-owned fixture processes,
-substitutes their PIDs into the matrix, and hands the rendered matrix to the kit
-runner unchanged. Nothing here re-implements comparison, normalization, or the
+Why a wrapper at all: the kit's runner has no per-case fixture hook (a case has
+argv, stdin or stdin_b64, env, timeout, cwd, keep_whitespace and with_stderr),
+and lsof's interesting behavior is about *which process* it is pointed at. So
+this script stands up self-owned fixture processes, substitutes their PIDs,
+paths and port into the matrix, and hands the rendered matrix to the kit runner
+unchanged. Nothing here re-implements comparison, normalization, or the
 ledger — those are the kit's, on purpose.
 
   fixture A  a sleeper with a known cwd and fds 3 (regular file, write),
@@ -61,6 +62,28 @@ ledger — those are the kit's, on purpose.
              link; and a holder of a file on /dev/shm, a pipe, an eventfd and
              an unlinked file, named by `/proc/R/fd/N`. Its cases may set a
              `cwd`, since how the C spells `rel` or `.` is the question
+  fixture N  files of every link count `+L` tells apart (0, 1, 2), with a
+             socket pair and a pipe beside them
+  fixture V  device nodes of four majors (/dev/null, /dev/urandom, a pty
+             pair, and a block device where one can be opened), for `-F r`
+  fixture Q  an fd for each open flag the C names, for `+f g` / `+f G`, and
+             the access modes that grant neither read nor write
+  fixture Y  AF_UNIX sockets a path argument finds by the path they are
+             bound to (through a link, a relative spelling, a replaced file)
+
+  Seven more need a capability the runner may lack. Without it, the fixture
+  is unavailable and its cases are skipped by name, not failed:
+  fixture J  a TCP listener in its own network namespace (CAP_SYS_ADMIN)
+  fixture K  AF_PACKET sockets in this namespace (CAP_NET_RAW)
+  fixture L  a packet socket and two AF_UNIX sockets in a foreign user and
+             network namespace (unprivileged user namespaces)
+  fixture M  a cwd and an open file on a tmpfs mounted in a mount namespace
+             of its own (unprivileged user namespaces)
+  fixture MS a unix socket bound at a path that is a mount point here,
+             `/dev/shm` (a /dev/shm mount and user namespaces)
+  fixture U  (above) runs its cases as a user who cannot read it
+  fixture W  two processes whose real and effective uids differ, one each
+             way (root, or passwordless sudo)
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -71,8 +94,8 @@ string — the kernel takes comm from the exec'd file's name, so no prctl and no
 helper binary are needed, and the string is passed as bytes so no locale is
 consulted on the way in.
 
-All four are stable for the run's duration and hold nothing that changes size,
-so the two binaries see identical state. Because PIDs, inodes and devices are
+Every fixture is stable for the run's duration and holds nothing that changes
+size, so the two binaries see identical state. Because PIDs, inodes and devices are
 then identical on both sides, the kit's default masking rules are all that is
 needed; `--mask-numbers` is deliberately NOT used — it would hide exactly the
 cells this gate exists to compare. Whitespace is compared too, on every case
@@ -86,11 +109,11 @@ is locale-independent and matches the UTF-8 behavior. The runner's default
 locale is not part of the contract, so it is pinned here, and its absence is
 infra.
 
-Every case passes `-a`. lsof ORs its list options unless `-a` ANDs them
-(Lsof.8: "list options that are specifically stated are ORed"); lsof-rs applies
-file-level selectors unconditionally. That divergence is recorded in
-DIVERGENCES.md and exercised by one deliberately un-`-a`'d case there; every
-other case must mean the same thing to both binaries, so `-a` is not optional.
+Most cases pass `-a`. lsof ORs its list options unless `-a` ANDs them
+(Lsof.8: "list options that are specifically stated are ORed"), so a case
+that means to look at one fixture says `-a`. The cases that leave it out are
+the ones about OR itself, search items, path arguments and option errors,
+which lsof-rs now treats as the C does (DIVERGENCES 4).
 
 Exit contract (LESSONS #6 — a broken harness must never read as a port bug):
   0  every case MATCH or DIVERGE(ledgered)
@@ -1044,8 +1067,9 @@ def path_spelling_holder(work: str) -> Fixture:
     rel/x, 11 rel/, 12 nu/, 13 nu/0xff, 14 /dev/shm/, 15 an unlinked file on
     /dev/shm, 16/17 a pipe, 18 an eventfd, 19 an unlinked file here, 20 an
     AF_UNIX socket, 21 xd/, 22 xl/. Holding each directory a case expands
-    leaves one entry unlocated, so `-V` prints one line, whose order is not
-    in question (DIVERGENCES 52)."""
+    leaves one entry unlocated, so `-V` prints one line there. `vord/` is
+    the opposite: `a`, `b` and `sub/c`, none held, for the cases about the
+    order `-V` reports them in (DIVERGENCES 52)."""
     rdir = os.path.join(work, "spell")
     rel = os.path.join(rdir, "rel")
     os.makedirs(rel)
@@ -1069,6 +1093,10 @@ def path_spelling_holder(work: str) -> Fixture:
     os.symlink(os.path.join(rel, "x"), os.path.join(rdir, "xd", "to-x"))
     os.makedirs(os.path.join(rdir, "xl"))
     os.symlink(rel, os.path.join(rdir, "xl", "lnk"))
+    os.makedirs(os.path.join(rdir, "vord", "sub"))
+    for name in ("a", "b", os.path.join("sub", "c")):
+        with open(os.path.join(rdir, "vord", name), "w") as f:
+            f.write("vord\n")
     # A link named as /dev/shm's mount source is named (`tmpfs`), so that
     # `+f -- tmpfs` from here is an argument `Readlink()` turns into
     # `elsewhere`, while the source, a name and no path, stays `tmpfs`.

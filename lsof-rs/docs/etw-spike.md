@@ -1,5 +1,9 @@
 # ETW spike — confirm `Microsoft-Windows-TCPIP` / `AFD` events carry FD/endpoint data
 
+> **Record.** This spike ran on 2026-06-22. No event carries the handle value,
+> so the FD goal closed; the AFD capture it measured became `--etw`
+> (Administrator). Results: [research roadmap §5](research-roadmap.md).
+
 This is the **P1 spike** for [research roadmap item §5](research-roadmap.md): an
 ETW-based path to attach real handle values and access modes to socket rows
 (replacing today's `unk`).

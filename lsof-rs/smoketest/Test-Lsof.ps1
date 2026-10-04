@@ -10,9 +10,9 @@
     representative set of options and asserts observable behavior. Each run is
     bounded by a timeout so a regressed hang fails fast instead of freezing.
 
-    For the full ~37-case validation (pipes, mapped files, WOW64 cwd, modules,
-    Restart Manager, every output format, and a handle64 oracle cross-check),
-    use Invoke-LsofRsSmokeTest.ps1 -Binary <path> instead.
+    For the full validation (pipes, mapped files, WOW64 cwd, modules, Restart
+    Manager, every output format, and cross-checks against Get-Process and
+    Get-NetTCPConnection), use Invoke-LsofRsSmokeTest.ps1 -Binary <path> instead.
 
 .PARAMETER Bin
     Path to the lsof.exe to test.

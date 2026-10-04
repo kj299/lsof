@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #070.
+# Local: #070, #077.
 # Re-cited: #1->#001, #4->#004, #6->#036, #8->#043, #9->#044, #11->#045,
 #          #14->#037, #16->#050, #48->#069, #50->#072; #36 by title (no
 #          entry in this log).
@@ -13,9 +13,10 @@ ones live in a ledger (DIVERGENCES.md) that suppresses them on future runs.
 Two comparison modes:
   * same-binary-both-platforms: --oracle and --rust are real binaries.
   * oracle-substitution: when the reference can't run here, point --oracle at a
-    wrapper that emits the captured golden output (see harnesses/golden) — and
-    exits with the captured `<case>.rc` code, so exit-code fidelity survives
-    the substitution.
+    wrapper that emits the captured output and exits with the captured status,
+    so exit-code fidelity survives the substitution. No such wrapper ships, and
+    harnesses/golden/golden.py captures stdout only, not the exit status
+    (LESSONS #072), so a port that needs this mode writes both.
 
 Timeouts are failures, not behavior (the liveness backstop, LESSONS #001): a case
 where the RUST side exceeds its timeout gets the verdict TIMEOUT — never MATCH,
@@ -482,7 +483,7 @@ def _self_test():
           res[2] is False and res[0] == "")
 
     # `cwd`: both sides start in the case's directory, so a relative argument
-    # means the same file to each. `pwd` prints where it started.
+    # means the same file to each (LESSONS #077). `pwd` prints where it started.
     pwd_bin = "/bin/pwd" if os.path.exists("/bin/pwd") else "pwd"
     with tempfile.TemporaryDirectory() as cwd_dir:
         real = os.path.realpath(cwd_dir)

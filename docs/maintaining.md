@@ -1,5 +1,10 @@
 # Maintaining
 
+> This page describes upstream lsof's maintenance and release process
+> ([lsof-org/lsof](https://github.com/lsof-org/lsof)). In this repository the C tree
+> is kept as the differential oracle for [lsof-rs](../lsof-rs/), whose releases
+> come from `.github/workflows/lsof-rs-release.yml`.
+
 ## The basic rules
 
 a Dialect maintainer can do as one's want as far as what one's will do
@@ -138,17 +143,12 @@ A dialect maintainer can release a new version of lsof FOR YOUR
 DIALECT without getting permission from maintainers of the other
 dialects.  So we can work asynchronously.
 
-### Install ksh
+### Making the archive
 
-The script for making an archive needs ksh.
-
-
-### Implement "make dist" for your favorite dialect
-
-See https://github.com/lsof-org/lsof/pull/131 how @masatake does for
-linux dialect.
-
-Merge the changes.
+The legacy `make dist` target (lsof-org/lsof PR #131) called ksh scripts under
+`support/`, which this repository removed in PR #81, so in this repository it
+fails; use the autotools `make dist` described below. (Upstream's steps here
+were "Install ksh" and "Implement make dist for your favorite dialect".)
 
 
 ### Update the version and release date in the source tree if you need
@@ -159,7 +159,9 @@ You should update the version and release date in the following files:
 - version
 - configure.ac
 
-And then re-generated `docs/manpapage.md` by running `manpage.sh` in `docs` folder.
+And then regenerate `docs/manpage.md`: build `lsof.man` with the autotools `make
+lsof.man` (it needs groff's `soelim`), then run `sh manpage.sh` in the `docs`
+folder (it needs `nroff` and `col`).
 
 The version number has following form MAJOR.MINOR.MICRO.  When making a
 release, update the version number.  If the change from the last release

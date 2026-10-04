@@ -25,7 +25,6 @@
 	    Bug Reports
 	    The 00FAQ File
 	    The lsof-l Mailing List
-	    Field Output Example Scripts
 	    Field Output C Library
 	Testing Lsof
 	Dialect Notes
@@ -116,6 +115,7 @@ want to look at them anyway.  Pay particular attention to the
 definitions that are discussed in the Security section of this
 file.  Please read that section.
 
+You should also think about where you will install lsof and its
 man page, and whom you will let execute lsof.  Please read the
 Installing Lsof section of this file for information on installation
 considerations.
@@ -139,13 +139,12 @@ If you want the Makefile to install lsof and its man page, you will
 have to create an appropriate install rule.
 
 Lsof may be configured using UNIX dialect abbreviations from the
-following table.  Alternative abbreviations are indicated by a
-separating `|'.   For example, for SCO OpenServer you can use either
-the ``osr'' or the ``sco'' abbreviation:
+following table.  For example, for Linux:
 
-	$ Configure osr
-    or
-	$ Configure sco
+	$ Configure linux
+
+(This repository removed the HP-UX, SCO OpenServer and UnixWare dialects
+and their abbreviations in PR #81: nothing here builds them.)
 
  Abbreviations		UNIX Dialect
  -------------		------------
@@ -154,24 +153,11 @@ the ``osr'' or the ``sco'' abbreviation:
     aixgcc		IBM AIX 5.[12] and 5.3-ML1 using gcc
     darwin		Apple Darwin 7.x and 8.x for Power Macintosh systems
     freebsd		FreeBSD 4.x, 4.1x, 5.x and [67].x
-    hpux		HP-UX 11.00, 11.11 and 11.23, using HP's C
-			Compiler, both /dev/kmem-based and PSTAT-based
-    hpuxgcc		HP-UX 11.00, 11.11 and 11.23, using gcc, both
-			/dev/kmem-based and PSTAT-based
     linux		Linux 2.1.72 and above for x86-based systems
     netbsd		NetBSD 1.[456], 2.x and 3.x
     openbsd		OpenBSD 2.[89] and 3.[0-9]
-    osr			SCO OpenServer Release 5.0.6, using the C compiler
-			from the SCO developer's kit
-    osrgcc		SCO OpenServer Release 5.0.6, using gcc
-    osr6		SCO Openserver 6.0.0, using the SCO C compiler
-    sco			SCO OpenServer Release 5.0.6, using the C compiler
-			from the SCO developer's kit
-    scogcc		SCO OpenServer Release 5.0.6, using gcc
     solaris		Solaris 2.x, 7, 8, 9 and 10 using gcc
     solariscc		Solaris 2.x, 7, 8, 9 and 10 using Sun's cc
-    unixware		SCO|Caldera UnixWare 7.1.4
-    uw			SCO|Caldera UnixWare 7.1.4
 
 If you have an earlier version of a dialect not named in the above
 list, lsof may still work on your system.  I have no way of testing
@@ -624,15 +610,6 @@ For more information about it, including instructions on how to
 subscribe, read the 00LSOF-L file of the lsof distribution.
 
 
-Field Output Example Scripts
-============================
-
-Example AWK and Perl 4 or 5 scripts for post-processing lsof field
-output are locate in the scripts sub-directory of the lsof distribution.
-The scripts sub-directory contains a 00README file with information
-about the scripts.
-
-
 Field Output C Library
 ======================
 
@@ -701,6 +678,10 @@ about using the LT_LSOF_PATH environment variable to do that.
 =============
 Dialect Notes
 =============
+
+(The HP-UX, SCO OpenServer and UnixWare notes below describe dialects
+whose sources this repository removed in PR #81. They are kept as
+upstream wrote them.)
 
 
 AFS

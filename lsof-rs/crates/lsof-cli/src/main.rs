@@ -2,8 +2,8 @@
 //!
 //! Parses lsof-compatible options, asks the platform [`Backend`] to gather
 //! processes and their open files, applies the selection, and renders the
-//! chosen format. On Windows it uses the native backend; on other hosts it
-//! falls back to the mock backend so the pipeline runs anywhere.
+//! chosen format. On Windows and Linux it uses the native backend; on any
+//! other host it falls back to the mock backend so the pipeline runs anywhere.
 //!
 //! `#![forbid(unsafe_code)]`: the CLI only ever calls the backends, never the
 //! platform. A bin and a lib in one package are two crates and the attribute
@@ -93,90 +93,111 @@ fn wants_privilege_hint(elevated: bool, selection: &Selection, format: &Format) 
 }
 
 fn usage() -> String {
+    // Real newlines, not `\n\` continuations: a continuation also eats the
+    // next line's leading spaces, which printed every line flush left.
     format!(
-        "lsof-rs {ver} - a memory-safe, Windows-native lsof (list open files)\n\
-\n\
-USAGE:\n\
-    lsof [options]\n\
-\n\
-SELECTION:\n\
-    -p <pids>     select by PID (comma separated; ^pid excludes)\n\
-    -u <users>    select by owning user, login name or UID (^ excludes)\n\
-    -c <cmd>      select by command name: a prefix (case-insensitive substring\n\
-                  on Windows); ^cmd excludes. -c /regex/ is not supported\n\
-    -g [pgids]    process groups: the PGID column, and with pgids, selection\n\
-                  (^ excludes). On Windows: select children of these PPIDs\n\
-    -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD,fd (every number),\n\
-                  numbers, a-b ranges; all ^excluded or none. Repeats add up\n\
-    -i [spec]     Internet sockets; spec = [46][tcp|udp|icmp|raw][@addr][:ports]\n\
-                  ports may be a list and ranges (:22,80,1000-2000); each -i\n\
-                  is its own item, ORed. Host and service names are not resolved\n\
-                  (icmp/raw come from the ETW capture; needs Admin)\n\
-    -s [p:s]      TCP and UDP sockets by TCP state: TCP:LISTEN,ESTABLISHED\n\
-                  lists only those, TCP:^TIME_WAIT excludes one; each listed\n\
-                  state is a search item. A bare -s shows sizes, in a SIZE column\n\
-    -U            list UNIX-domain (AF_UNIX) sockets (via ETW; needs Admin)\n\
-    -K            list each process's threads as `task` rows (TID in NODE)\n\
-    -T [fqsw]     TCP info on socket rows: q=queue, s=state, w=window\n\
-                  (q/w need Administrator; IPv4 + IPv6; bare -T = qs)\n\
-    -a            AND the selectors together (default is OR); needs one\n\
-    <path>        find who has this FILE open, matched by identity (a hard\n\
-                  link to it counts); +d <dir> = the dir and its entries,\n\
-                  +D <dir> = the whole tree beneath it\n\
-                  A MOUNT POINT's absolute path (or the block device it\n\
-                  was mounted from, or a link to either) selects every open\n\
-                  file on that filesystem; `/mnt/.` or a relative `mnt`\n\
-                  names the directory alone.\n\
-    -f / +f       never / always read a path argument as a file system;\n\
-                  +f also accepts a non-block mount source, and complains\n\
-                  if an argument names no mount\n\
-\n\
-OUTPUT:\n\
-    -n            do not resolve host names\n\
-    -P            do not resolve port names (show numeric ports)\n\
-    -R            add a PPID (parent PID) column\n\
-    -o [n]        an OFFSET column (0t<decimal>, 0x<hex> past n digits, default 8);\n\
-                  -o <n> alone sets the digit limit and keeps SIZE/OFF\n\
-    -t            terse: PIDs only\n\
-    -E            pipe endpoint info: append peer server/client PID+command\n\
-                  to pipe NAMEs (GetNamedPipe*ProcessId)\n\
-    +E            same, and also list the peer processes' own pipe rows\n\
-    -l            numeric USER (show SID string instead of resolved name)\n\
-    +L [count]    an NLINK (link count) column; with a count, also select the\n\
-                  files with fewer links (`+L 1` = unlinked but still open).\n\
-                  -L: no NLINK column (the default)\n\
-    +f g / +f G   (Linux) a FILE-FLAG column: each file's open flags by name\n\
-                  (W,AP,LG), or in hex; -f g hides it again\n\
-    -V            verbose: report inaccessible / unmatched search items\n\
-    -F [fields]   field (machine-readable) output; 0 = NUL terminators;\n\
-                  -F ? lists the field letters\n\
-    -J            aggregated JSON object\n\
-    -j            JSON Lines (one object per file)\n\
-    -r [delay]    repeat every <delay>s (default 15) until interrupted\n\
-    +c <n>        cap COMMAND column width at <n> characters\n\
-\n\
-MISCELLANEOUS:\n\
-    -Q            quiet: mute search failures, exit status included\n\
-    -w / +w       leave out / report files that cannot be read, and suppress /\n\
-                  enable non-fatal stderr warnings (default: report, on)\n\
-    -O            no-op (Unix-specific perf hint; accepted for portability)\n\
-    --            end of options; remaining args are paths\n\
-\n\
-    --etw         (Windows, opt-in) short ETW capture against the AFD\n\
-                  provider to extend `-i` coverage to socket families\n\
-                  IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).\n\
-                  Needs Administrator.\n\
-    --unicode     emit UTF-8 (switches the Windows console to CP 65001 at\n\
-                  startup). Default is plain ASCII output — safer on PS 5.1\n\
-                  and legacy cmd.exe whose default console is Windows-1252.\n\
-    --ascii       force ASCII output (the default; flag kept for symmetry).\n\
-\n\
-    -h, -?, --help    show this help\n\
-    -v, --version     show version\n\
-\n\
-Without elevation, lsof-rs shows the processes you can access; run as\n\
-Administrator for a system-wide view. Privileges are requested only for the\n\
-specific operations that need them.\n",
+        "lsof-rs {ver} - a memory-safe lsof (list open files)
+
+USAGE:
+    lsof [options] [--] [path ...]
+
+SELECTION:
+    -p <pids>     select by PID (comma separated; ^pid excludes)
+    -u <users>    select by owning user, login name or UID (^ excludes)
+    -c <cmd>      select by command name: a prefix (case-insensitive substring
+                  on Windows); ^cmd excludes. -c /regex/ is not supported
+    -g [pgids]    process groups: the PGID column, and with pgids, selection
+                  (^ excludes). On Windows: select children of these PPIDs
+    -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD,unk,fd (every number),
+                  numbers, a-b ranges; all ^excluded or none. Repeats add up
+    -i [spec]     Internet sockets; spec = [46][tcp|udp|icmp|raw][@addr][:ports]
+                  ports may be a list and ranges (:22,80,1000-2000); each -i
+                  is its own item, ORed. Host and service names are refused.
+                  On Windows icmp/raw come from the ETW capture (Administrator)
+    -s [p:s]      TCP and UDP sockets by TCP state: TCP:LISTEN,ESTABLISHED
+                  lists only those, TCP:^TIME_WAIT excludes one; each listed
+                  state is a search item. A bare -s shows sizes, in a SIZE
+                  column
+    -U            list UNIX-domain (AF_UNIX) sockets (on Windows through ETW,
+                  which needs Administrator)
+    -N            list NFS files
+    -K [i]        list threads: on Linux in TID and TASKCMD columns, as the C
+                  does; on Windows as `task` rows, the TID in NODE. -K i: none
+    -T [fqsw]     TCP info on socket rows: s=state, q=queue sizes, w=window
+                  (Windows); f is accepted and shows nothing. The letters
+                  select: -T alone shows none, +T the state alone (the
+                  default). On Windows q and w need Administrator
+    -a            AND the selectors together (default is OR); needs one
+    <path>        find who has this FILE open; +d <dir> = the dir and its
+                  entries, +D <dir> = the whole tree beneath it.
+                  On Linux a path matches by identity (a hard link to it
+                  counts), and a MOUNT POINT's absolute path (or the block
+                  device it was mounted from, or a link to either) selects
+                  every open file on that file system; `/mnt/.` or a
+                  relative `mnt` names the directory alone. On Windows a
+                  path matches by name
+    -x [fl]       with +d/+D: cross into other file systems (f), follow
+                  symbolic links (l); -x alone does both
+    -f / +f       never / always read a path argument as a file system;
+                  +f also accepts a non-block mount source, and complains
+                  if an argument names no mount
+
+OUTPUT:
+    -n            do not resolve host names (Windows; Linux never does)
+    -P            do not resolve port names (Windows; Linux never does)
+    -R            add a PPID (parent PID) column
+    -o [n]        an OFFSET column (0t<decimal>, 0x<hex> past n digits,
+                  default 8); -o <n> alone sets the digit limit and keeps
+                  SIZE/OFF
+    -H            human-readable sizes in the SIZE column (2.0M); -F and the
+                  JSON forms keep bytes
+    -t            terse: PIDs only
+    -E            (Windows) pipe endpoint info: append peer server/client
+                  PID+command to pipe NAMEs (GetNamedPipe*ProcessId)
+    +E            same, and also list the peer processes' own pipe rows.
+                  Linux accepts -E and +E and ignores them
+    -l            numeric USER: the UID on Linux, the SID string on Windows
+    +L [count]    an NLINK (link count) column; with a count, also select the
+                  files with fewer links (`+L 1` = unlinked but still open).
+                  -L: no NLINK column (the default)
+    +f g / +f G   (Linux) a FILE-FLAG column: each file's open flags by name
+                  (W,AP,LG), or in hex; -f g hides it again
+    -V            verbose: report inaccessible / unmatched search items
+    -F [fields]   field (machine-readable) output; 0 = NUL terminators;
+                  -F ? lists the field letters
+    -J            aggregated JSON object
+    -j            JSON Lines (one object per file)
+    -r [delay]    repeat every <delay>s (default 15) until interrupted
+    +c <n>        cap COMMAND column width at <n> characters
+
+MISCELLANEOUS:
+    -Q            quiet: mute search failures, exit status included
+    -w / +w       leave out / report files that cannot be read, and suppress /
+                  enable non-fatal stderr warnings (default: report, on)
+    -X            toggle: leave TCP and UDP sockets unidentified, without
+                  reading their tables; -i is refused while it is on
+    -e <fs>       do not stat files on this mounted file system; they show
+                  as UNKN... rows
+    -Z            SELinux security contexts: not supported (exits 1)
+    -O            no-op (Unix-specific perf hint; accepted for portability)
+    --            end of options; remaining args are paths
+
+    --etw         (Windows, opt-in) short ETW capture against the AFD
+                  provider to extend `-i` coverage to socket families
+                  IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).
+                  Needs Administrator. Linux accepts it and ignores it
+    --unicode     (Windows) switch the console to UTF-8 (CP 65001) at
+                  startup. The output is the same either way: a printable
+                  non-ASCII name prints as it is
+    --ascii       accepted; changes nothing
+
+    -h, -?, --help    show this help
+    -v, --version     show version
+
+Without elevation, lsof-rs shows the processes you can access; run as
+Administrator (Windows) or root (Linux) for a system-wide view. On Windows,
+privileges are enabled only for the operations that need them.
+",
         ver = env!("CARGO_PKG_VERSION")
     )
 }
@@ -467,7 +488,14 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     // a directory whose every entry is open exits 0, and adding one unopened
     // file makes it 1. Identity is what "located" means, so a file queried
     // through a hard link counts as found under its other name.
-    for (item, &hit) in sel.path_items.iter().zip(&located.paths) {
+    //
+    // Last entered, first reported: `ck_file_arg()` PREPENDS each item to
+    // `Sfile`, which the report walks. So bare paths come last given first,
+    // then each `+d`/`+D` expansion backwards — its entries before the
+    // directory itself — the latest option first (DIVERGENCES 52). The items
+    // are entered in the C's order (`+d`/`+D` first, each walked as
+    // `enter_dir` walks), so reversing them is the C's report.
+    for (item, &hit) in sel.path_items.iter().zip(&located.paths).rev() {
         let PathItem {
             fs_device,
             name: display,
@@ -710,10 +738,7 @@ fn main() {
             return;
         }
         Action::Version => {
-            println!(
-                "lsof-rs {} (memory-safe lsof for Windows)",
-                env!("CARGO_PKG_VERSION")
-            );
+            println!("lsof-rs {} (memory-safe lsof)", env!("CARGO_PKG_VERSION"));
             return;
         }
         Action::Run {
@@ -823,6 +848,14 @@ fn main() {
         }
         let esc = Escaper::for_host();
         spell_names_as_reported(&mut sel);
+        // `+d`/`+D` first: the C expands them as it parses its options, so
+        // their entries are search items before any bare path is, their
+        // warnings come before a bare path's status error, and they come even
+        // when every bare path is then dropped. The order matters to `-V`,
+        // which reports the items last-entered first (DIVERGENCES 52).
+        for dir in sel.dir_args.clone() {
+            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc);
+        }
         let identified = sel.paths_identified;
         let mut survived = 0usize;
         for typed in sel.paths.clone() {
@@ -919,9 +952,6 @@ fn main() {
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             std::process::exit(1);
         }
-        for dir in sel.dir_args.clone() {
-            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc);
-        }
         sel
     };
 
@@ -943,6 +973,11 @@ fn main() {
     // Captured before `run_cycle` takes `selection`: `-Q` decides the exit
     // status, and the closure needs the selection itself.
     let quiet = selection.quiet;
+    // The C reports what it did not locate once, after its repeat loop, and a
+    // plain `-r` loop ends only on a signal, which kills it first: under `-r`
+    // there is no report at all (DIVERGENCES 54). lsof-rs refuses `+r` and a
+    // repeat count, the two ways the C's loop can end by itself.
+    let repeating = repeat.is_some();
 
     let run_cycle = move || -> usize {
         let gathered = match env.backend.gather(&selection) {
@@ -961,7 +996,11 @@ fn main() {
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
         let esc = Escaper::for_host();
-        let misses = unlocated(&selection, &located, esc);
+        let misses = if repeating {
+            Vec::new()
+        } else {
+            unlocated(&selection, &located, esc)
+        };
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
@@ -1007,8 +1046,10 @@ fn main() {
             Format::JsonLines => sink.write_all(json::render_lines(&procs).as_bytes()),
         };
         // `-V`'s lines follow the listing, on the same stream, as the C's do.
+        // `-Q` does not mute them: it changes only the exit status, as the
+        // C's `FsearchErr` does (DIVERGENCES 53).
         let written = written.and_then(|()| {
-            if selection.verbose && !selection.quiet {
+            if selection.verbose {
                 for m in &misses {
                     writeln!(sink, "{m}")?;
                 }
@@ -1193,6 +1234,24 @@ mod tests {
         assert_eq!(sel.dir_trees, [typed]);
     }
 
+    /// The help keeps its layout: an option four columns in, its wrapped
+    /// lines eighteen, and nothing past eighty. A `\n\` continuation in the
+    /// literal eats the next line's leading spaces, which once printed every
+    /// line flush left.
+    #[test]
+    fn the_help_keeps_its_indentation_and_width() {
+        let help = super::usage();
+        assert!(help
+            .lines()
+            .any(|l| l.starts_with("    -p <pids>     select by PID")));
+        assert!(help
+            .lines()
+            .any(|l| l.starts_with("                  on Windows); ^cmd excludes")));
+        for line in help.lines() {
+            assert!(line.chars().count() <= 80, "too wide: {line:?}");
+        }
+    }
+
     /// A walk stops at whichever limit it meets first, entries or the bytes
     /// of their names, and never goes below either.
     #[test]
@@ -1281,7 +1340,9 @@ mod tests {
 
     /// A path item `Selection::locate` did not mark is reported in its own
     /// words, as typed: `no file use located`, or `no file system use
-    /// located` for one that named a file system (DIVERGENCES 60).
+    /// located` for one that named a file system (DIVERGENCES 60) — and the
+    /// last one entered first, as the C walks the list it prepended to
+    /// (DIVERGENCES 52).
     #[test]
     fn an_unlocated_path_is_reported_as_typed() {
         use lsof_core::render::Escaper;
@@ -1311,8 +1372,8 @@ mod tests {
         assert_eq!(
             lines(vec![false, false]),
             [
-                "lsof: no file use located: ./x",
-                "lsof: no file system use located: mnt"
+                "lsof: no file system use located: mnt",
+                "lsof: no file use located: ./x"
             ]
         );
         assert_eq!(

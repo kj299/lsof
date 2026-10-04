@@ -21,7 +21,9 @@ faithfully re-implement a vulnerability. Maximize safety controls.
 
 **Do Phase 0 now** and report before writing any Rust:
 1. Inventory the C: modules, LOC, external deps, the syscall/FFI/ioctl surface,
-   global mutable state, macros, build system. Seed the tracker:
+   global mutable state, macros, build system. Seed the tracker with one unit
+   per crate you plan, since `check_ledgers.py` matches each unit against a
+   sanitizer step's `cargo … -p <unit>`:
    `python3 porting-kit/harnesses/progress/progress.py init --modules <list>`.
 2. Run the C-flaw scan and triage it:
    `python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py <c-src-dirs>`.
@@ -40,5 +42,7 @@ because it wasn't spiked first).
 begin porting modules until the order is agreed.
 
 When you do build, copy `porting-kit/skeleton/` for the workspace shape, wire
-`porting-kit/harnesses/ci/porting-ci.template.yml` into CI, and run
+`porting-kit/harnesses/ci/porting-ci.template.yml` into CI (it invokes every
+control `CLAUDE.md` declares; fill in its `<unit>` and `<binary>` placeholders),
+and run
 `make -C porting-kit check-kit` to confirm the harnesses work in this repo.

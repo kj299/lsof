@@ -1,12 +1,14 @@
 //! `lsof-backend-windows` — the Windows "dialect" for lsof-rs.
 //!
 //! Implements [`lsof_core::Backend`] using native Win32/NT APIs (Toolhelp for
-//! processes, IP Helper for sockets, and — in Phase 3 — the NT handle table for
-//! open files), all behind a strict least-privilege model (see [`privilege`]).
+//! processes, IP Helper and ETW for sockets, the NT handle table for open
+//! files), all behind a strict least-privilege model (see the `privilege`
+//! module).
 //!
-//! Everything here is gated on `#[cfg(windows)]`; on other hosts the crate
-//! compiles to an empty shell so the workspace builds and `lsof-core` stays
-//! testable. The CLI selects this backend only when built for Windows.
+//! Everything but the pure name parsers in `names` is gated on
+//! `#[cfg(windows)]`; on other hosts the crate compiles to little more than an
+//! empty shell, so the workspace builds and `names` can be fuzzed on Linux. The
+//! CLI selects this backend only when built for Windows.
 
 #![cfg_attr(not(windows), allow(unused))]
 

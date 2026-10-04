@@ -28,24 +28,16 @@ Actively maintained and supported:
 Not maintained for lack of maintainers but pull requests are welcome:
 
 - IBM AIX
-- HP-UX
-- SCO OpenServer
-- UnixWare
 
-lsof is tested in ci on the following platforms:
+(Upstream also lists HP-UX, SCO OpenServer and UnixWare here. Their sources were
+removed from this repository in PR #81, since nothing here builds them.)
 
-- Alpine Linux 3.17
-- Arch Linux
-- CentOS 8/9
-- Debian 11
-- Fedora 36/37
-- FreeBSD 12/13/14
-- macOS Big Sur
-- NixOS
-- openSUSE Leap 15
-- Ubuntu 18.04/20.04/22.04
-- NetBSD 9
-- OpenBSD 7
+In this repository, `.github/workflows/build.yml` builds and tests lsof on
+Ubuntu 22.04, Ubuntu 24.04 and macOS. `.cirrus.yml` (FreeBSD) and `.builds/`
+(NetBSD, OpenBSD) are configured as well; whether those services run depends on
+the Cirrus and sourcehut set-up of the repository that hosts them. (Upstream's
+list here — Alpine, Arch, CentOS, Debian, Fedora, NixOS, openSUSE and older
+Ubuntu — came from a CircleCI configuration this repository no longer has.)
 
 Additionally, lsof is tested by maintainers manually on the following platforms:
 

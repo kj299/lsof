@@ -186,7 +186,7 @@ def _self_test():
         check("below the floor → UNMEASURABLE (not a false pass)",
               res[0]["verdict"] == "UNMEASURABLE")
 
-        # NOISY (RETROSPECTIVE-kit-audit §6 item 5): a side whose own repeats
+        # NOISY (RETROSPECTIVE-kit-audit §6 item 5, in the c2rust-port lineage): a side whose own repeats
         # disagree can't support a verdict. The jitter script alternates
         # 0.02s/0.2s via a counter file → spread ≈ 1.6, far over --noise 0.5.
         cnt = os.path.join(d, "cnt")

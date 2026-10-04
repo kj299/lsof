@@ -34,7 +34,7 @@ vulnerability. Maximize safety controls.
 
 | You want to… | Read / run |
 |---|---|
-| Understand the whole process | [`PLAYBOOK.md`](PLAYBOOK.md) (≤400 lines) |
+| Understand the whole process | [`PLAYBOOK.md`](PLAYBOOK.md) |
 | Run a port well (tokens, efficiency, security, backlog) | [`OPERATING-GUIDE.md`](OPERATING-GUIDE.md) |
 | Lift this kit into its own repo over SSH (two git commands) | [`scripts/lift-to-c2rust-port.sh`](scripts/lift-to-c2rust-port.sh) |
 | Kick off a new port | paste [`PROMPTS/00-new-port-kickoff.md`](PROMPTS/00-new-port-kickoff.md) |
@@ -50,7 +50,10 @@ vulnerability. Maximize safety controls.
 `skills/` holds Claude Code skills that operationalize the kit — each a thin wrapper
 that reads the authoritative docs and runs the real harness commands (never a
 divergent restatement). `skills/check_skills.py` (run by `make check-kit`) fails if
-any skill references a kit path that no longer exists, so they can't drift.
+any skill references a kit path that no longer exists. It checks paths only:
+`harnesses/doc-check/check_doc_flags.py` checks the flags the docs attribute to a
+harness, and nothing yet checks a skill's categories, subcommands or ledger
+formats against the harness it describes.
 
 | Skill | Use it to |
 |---|---|
@@ -76,11 +79,12 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/golden/golden.py` | capture/version/replay the oracle; flag oracle nondeterminism | CI |
 | `harnesses/coverage/coverage_gate.py` | the matrix exercises the C's whole surface: every option letter and TYPE code the C can emit, less waivers that carry reasons and can be scoped to a platform. A value-taking option must also be given its value as the next word, which is a second path through a port's parser (LESSONS #071) | CI |
 | `harnesses/fuzz/gen_fuzz_target.sh` | scaffold a cargo-fuzz target per module | CI smoke + nightly |
-| `harnesses/sanitizers/run_sanitizers.sh` | Miri / ASan / UBSan / TSan over the unsafe layer | CI |
+| `harnesses/sanitizers/run_sanitizers.sh` | Miri / ASan / TSan over the unsafe layer (rustc has no UB sanitizer: the `ubsan` mode runs Miri) | CI |
 | `harnesses/supply-chain/run_supply_chain.sh` | `cargo audit` + `cargo deny` | CI |
 | `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting | Phase 0 |
 | `harnesses/progress/progress.py` | per-module status table incl. safety gates | tracking |
-| `harnesses/ledgers/check_ledgers.py` | the ledgers the playbook mandates actually exist (progress, divergences, fuzz target, sanitizer job) | CI |
+| `harnesses/ledgers/check_ledgers.py` | the ledgers the playbook mandates actually exist (progress, divergences, fuzz target, a sanitizer job, and a sanitizer step running `cargo … -p <unit>` for every unit `progress.json` tracks) | CI |
+| `harnesses/platforms/check_platforms.py` | every platform the build system can select is built by some CI provider, or waived in `platforms.toml` with a reason | CI |
 | `harnesses/diff-fuzz/diff_fuzz.py` | differential FUZZING: same mutated input to C and Rust, every divergence triaged — finds what the fixed matrix never covered | CI (short) + nightly (long) |
 | `harnesses/probe/probe.py` | probe-then-port: generate a module's test expectations from a fingerprinted oracle transcript, and re-verify it | Phase 4 |
 | `harnesses/lessons/check_lesson_refs.py` | every `LESSONS #NN` citation resolves to an entry that exists | CI |
@@ -93,7 +97,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/lessons/check_imports.py` | an IMPORTED entry's cross-references were re-cited to *this* log — a number from a sibling lineage resolves and still means another lesson | CI |
 | `harnesses/doc-check/check_lessons_pinned.py` | the other direction: every file a lesson's `Section amended` names must cite that lesson back, so `check-kit` is the lessons' regression suite. An unrecognised `Section amended (…)` spelling fails rather than voiding the entry, and `--also-scan ..` reaches the host repo, because a vendored kit's lessons amend workflows that live outside it | CI |
 | `harnesses/lessons/resolve_collision.py` | two branches appended to the log and took the same numbers: rebuild the merge from git, renumber the block that landed second, repoint its citations by *line provenance*, and refuse what only a human can decide (an ambiguous line, a split range, a displaced paragraph) | merge-time |
-| `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
+| `harnesses/ci/porting-ci.template.yml` | wires every control `CLAUDE.md` declares into GitHub Actions; `make check-kit` runs control-coverage over it, so a control added without wiring fails the kit | — |
 
 ```
 make check-kit      # smoke-test every harness (python3 + bash only, no toolchain)

@@ -145,8 +145,10 @@ of the lines in the config.cflags file produced by the lsof Configure
 script.  The entries can be considered "lsof dialect footprints,"
 hereafter simply called "dialect footprints" or just "footprints."
 
-Two shell scripts support TestDB.  The first, Add2TestDB, will add
-a footprint to TestDB.  I don't recommend you use this script.
+Two shell scripts support TestDB.  (This repository ships only the
+second, CkTestDB: Add2TestDB was removed in PR #81, so add a footprint
+by editing TestDB, as the next paragraph describes.)  The first,
+Add2TestDB, will add a footprint to TestDB.  I don't recommend you use this script.
 Mostly it's for my use when I find that the test suite has been
 validated on a new dialect.
 
@@ -341,7 +343,8 @@ uses to compile the C programs in the test suite.  As with the
 compiler file, config.cc, the make rules incorporate the contents
 of this file into C compiler options with `cat config.cflags`.
 
-This file is also used by the Add2TestDB and CkTestDB shell scripts
+This file is also used by the CkTestDB shell script (and upstream's
+Add2TestDB, not shipped here)
 to build and match footprints.  (See "B.2. Test Data Base and
 Scripts.")
 
@@ -1003,8 +1006,7 @@ base, footprints, and the scripts that support them.
 If you are able to run the test suite on dialect versions other
 than the ones listed above, please send e-mail to <abe@purdue.edu>,
 indicating the dialect version where you were able to run the test
-suite.  Please send me the footprint formed by CkTestDB, or run
-the Add2TestDB script and send me the footprint it reports.
+suite.  Please send me the footprint formed by CkTestDB.
 
 If you encounter problems compiling the tests or running them on
 a dialect version listed above, please send e-mail to <abe@purdue.edu>,

@@ -23,10 +23,11 @@ If applicable, paste program output text here to help explain your problem.
 
 **Environment (please complete the following information):**
 
- - Kernel: [e.g. Linux]
- - OS: [e.g. Debian]
- - lsof Version: [e.g. 4.xx.x]
- - Origin: [e.g. installed by package manager, built from release tarball or git]
+ - Implementation: [lsof-rs (the Rust port) or the C lsof]
+ - Version: [the first line of `lsof -v`, e.g. `lsof-rs 1.0.1 (memory-safe lsof)`]
+ - OS: [e.g. Windows 11 build 26200, or Debian 12 with Linux 6.1]
+ - Elevated: [run as Administrator or root, or not]
+ - Origin: [the release `lsof.exe`, or built from source at commit ...]
 
 **Additional context**
 Add any other context about the problem here.

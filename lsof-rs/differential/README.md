@@ -21,7 +21,7 @@ Two pieces, split so the logic is testable off-Windows:
 |---|---|---|
 | `oracle_diff.py` | any host | Parse lsof-rs (`-J` **or** `-F`) + the oracle JSON, canonicalize both identically, set-diff, honor the ledger, exit non-zero on unledgered divergence. Pure stdlib. |
 | `capture.ps1` | windows | Stand up self-owned fixtures, capture lsof-rs's view **and** `Get-NetTCPConnection`/`Get-NetUDPEndpoint`, invoke the comparator. Built-in cmdlets only — no Sysinternals, no elevation, no third-party Actions. |
-| `ledger.json` | — | Intentional-divergence rules (empty for the fixture gate; see below). |
+| `ledger.json` | — | Intentional-divergence rules: one, for the `BOUND` sockets NSI reports and IP Helper does not (see below). |
 | `test_oracle_diff.py` | any host | Unit tests over the comparator, using the **verbatim** mock-backend output of the real binary. |
 
 **Why the capture is fixture-scoped.** lsof-rs and the oracle are sampled a few
@@ -66,9 +66,9 @@ differential surfaced on its first Windows run: lsof-rs enumerates via
 transient **`BOUND`** sockets that the NSI source behind `Get-NetTCPConnection`
 does (a .NET client leaves a dual-stack `BOUND` IPv6 shadow). That is a documented
 data-source difference, not a bug — so `{"state":"BOUND","side":"missing"}` is
-ledgered. The ledger also covers the broader machine-wide mode and other
-API-attributed gaps (e.g. connected-UDP foreign address, which IP Helper does not
-expose) when this is pointed at live traffic.
+ledgered. Pointed at live traffic, other API gaps would need rules of their own —
+a connected UDP socket's foreign address, which IP Helper does not expose, for
+one. None is ledgered today.
 
 ## Exit codes
 
@@ -95,12 +95,12 @@ python3 lsof-rs/differential/test_oracle_diff.py
 ```
 
 CI wires `capture.ps1` into the `windows` job of `.github/workflows/lsof-rs-ci.yml`.
-It runs on every PR on a real `windows-latest` runner, but starts **non-gating**
-(`continue-on-error: true`): its flake vectors are environment- and
-timing-dependent and can't be proven safe from a local run, so it observes for a
-few green runs before being promoted to a hard gate (remove `continue-on-error`).
-That is the retrospective's "fix → then pin the test that would have caught it",
-finally on its way to being enforced instead of only practiced.
+It runs on every PR on a real `windows-latest` runner, as a **hard gate**. It
+landed non-gating (`continue-on-error: true`) — its flake vectors are
+environment- and timing-dependent and can't be proven safe from a local run — and
+was promoted after consecutive green runs. That is the retrospective's "fix →
+then pin the test that would have caught it", enforced instead of only
+practiced.
 
 ## Lineage
 
@@ -123,13 +123,15 @@ instant, diffed through `porting-kit/harnesses/differential/diff_run.py` with
 
 | File | Role |
 |---|---|
-| `linux_diff.py` | Stand up ten self-owned fixtures (**A** cwd + a regular file, a hostile-named file, a directory and a FIFO on fds 3/4/5/6; **B** a TCP listener, a UDP socket, an AF_UNIX listener; **C** and **D** sleepers whose COMMAND holds one of every character class the C escapes — ASCII controls, then é and the 8-bit CSI; **E** mapped libraries, one unlinked; **F** whole-file and partial read/write locks; **G** the four named anon_inode kinds; **H** a 15-character COMMAND, the Linux `comm` ceiling, so the column cap is visible; **I** two `prctl(PR_SET_NAME)` threads, so `-K` has something to list; **J** a TCP listener inside its own network namespace, the only fixture whose sockets the caller's `/proc/net` cannot see — skipped, not failed, on a runner without `CAP_SYS_ADMIN` for `unshare --net`), substitute their PIDs into the matrix, run the kit runner under `LC_ALL=C.UTF-8` (the C's `safestrprt()` is locale-dependent; lsof-rs matches its UTF-8 behavior), tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra (a missing binary, a fixture that did not come up, the locale not installed). |
-| `linux-matrix.toml` | 13 cases. Every one carries `-a` (lsof ORs list options otherwise — see the ledger) and `-n -P` (lsof-rs never resolves names). File cases pass `-d ^mem` so they measure their own surface; `files-mem-rows` measures that gap and is ledgered as L2 debt. |
+| `linux_diff.py` | Stand up self-owned fixture processes — files, sockets, hostile command names and file names, mapped libraries, locks, anon inodes, threads, zombies, unreadable processes, paths to spell, and more; its docstring lists every one (`linux_diff.py --help`). Seven need a capability a runner may lack (network, user and mount namespaces, `CAP_NET_RAW`, root); without it the fixture's cases are skipped by name, not failed. Substitute their PIDs, paths and port into the matrix, run the kit runner under `LC_ALL=C.UTF-8` (the C's `safestrprt()` is locale-dependent; lsof-rs matches its UTF-8 behavior), tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra (a missing binary, a fixture that did not come up, the locale not installed). CI runs its `--self-test` first. |
+| `linux-matrix.toml` | The cases. Most carry `-a` (lsof ORs list options otherwise) and, where a socket can appear, `-n -P` (lsof-rs on Linux never resolves names); the cases about OR itself, search items, paths and option errors do not. Most file cases pass `-d ^mem` so they measure their own surface, and a few compare the `mem` rows. A case may set `cwd` (where both binaries start), `env`, and `with_stderr` (compare stderr too). |
+| `resource_gate.py` | Peak RSS and wall time of both binaries, for `-i` and a whole-host scan, under a load of synthetic processes it spawns, with a meter it validates at both ends first. Ceilings are rust/C ratios (`-i`: RSS 2.00x, wall 1.60x; whole-host: 1.30x, 1.40x). CI passes `--warn-wall`: RSS blocks, wall reports. Exit 0 within the ceilings, 1 over one or with no valid measurement, 2 usage. |
 
 Why the fixture matters: both binaries see the **same** process, so PIDs, inodes,
-devices and sizes are identical on both sides and the kit's default
-whitespace-only normalization is all that is needed. Numbers are never masked
-here — they are exactly the cells this gate exists to compare.
+devices and sizes are identical on both sides and the kit's default masking rules
+(hex pointers, clock times) are all that is needed. Numbers are never masked here
+— they are exactly the cells this gate exists to compare — and whitespace is
+compared too: `render_matrix` gives every case `keep_whitespace` (DIVERGENCES 35).
 
 ```sh
 # from the repo root: build the oracle (binary target only; the man page

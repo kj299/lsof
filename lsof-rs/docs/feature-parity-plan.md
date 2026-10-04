@@ -17,9 +17,15 @@ in both privilege modes); later releases deepened individual switches
 the per-row notes describe the mapping as it was designed, and match what
 was built.
 
+> **Since then (corrected 2026-10-04).** The Linux backend made several of the
+> rows below marked N/A real on Linux: `-e`, `-f`/`+f` (and `+f g`/`+f G`),
+> `-N`, `-x` and `-X`; `-H` was implemented in the core for both platforms, and
+> `-Z` gives the C's answer on both. Those rows now say so. For what each option does today, read
+> `lsof -h` and [`../DIVERGENCES.md`](../DIVERGENCES.md).
+
 ## Source of truth
 
-Upstream lsof's authoritative SYNOPSIS (from `../docs/manpage.md`):
+Upstream lsof's authoritative SYNOPSIS (from `../../docs/manpage.md`):
 
 ```
 lsof [ -?abChHlnNOPQRtUvVX ] [ -A A ] [ -c c ] [ +c c ] [ +|-d d ]
@@ -30,7 +36,7 @@ lsof [ -?abChHlnNOPQRtUvVX ] [ -A A ] [ -c c ] [ +c c ] [ +|-d d ]
      [ -Z [Z] ] [ -- ] [names]
 ```
 
-47 distinct options in total. Per `docs/options.md`, options are also classified
+47 distinct options in total. Per `../../docs/options.md`, options are also classified
 as Selection / Output / Precautionary / Miscellaneous.
 
 ## Inventory — status & Windows mapping
@@ -47,21 +53,21 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `+d d` | sel | ✅ shipped | Directory tree (non-recursive) |
 | `-D D` | prec | ❌ N/A | Device cache `/dev` — Unix-only |
 | `+D D` | sel | ✅ shipped | Directory tree (recursive) |
-| `-e s` | prec | ❌ N/A | Filesystem exempt — Unix mount-table thing |
+| `-e s` | prec | ❌ N/A on Windows; ✅ Linux 2026-09-20 | Filesystem exempt — Unix mount-table thing (DIVERGENCES 27) |
 | `-E` | out | ✅ shipped | Pipe endpoint info: pipe NAMEs gain ` (server=PID,cmd client=PID,cmd)` via the documented `GetNamedPipe{Server,Client}ProcessId` APIs (works for anonymous pipes too; no elevation needed for your own processes) |
 | `+E` | out | ✅ shipped | Same, plus the peer processes' own pipe rows are displayed even when they match no selector |
-| `-f [cfgGn]` | misc | ❌ mostly N/A | Filesystem-detail sub-flags; Unix-specific internals |
+| `-f [cfgGn]` | misc | ❌ mostly N/A | Filesystem-detail sub-flags; Unix-specific internals. A bare `-f`/`+f` forces how a path argument is read, on both platforms (DIVERGENCES 15); `g`/`G` are Linux's FILE-FLAG column (46) |
 | `+f [cfgGn]` | misc | ❌ mostly N/A | Same |
 | `-F [f]` | out | ✅ shipped | Field output (with `-F0` for NUL) |
 | `-g [s]` | sel | ✅ shipped (5A) | Process *group* filter. Windows has no PGID — map to PPID (select children of PPID) and document as a Windows extension of `-g` semantics. On Linux it is the C's option since 2026-09-25: PGID selection, `^` exclusion, and the PGID column (DIVERGENCES 21). |
 | `-h` | misc | ✅ shipped | Help |
 | `-?` | misc | ✅ shipped (5A) | Alias for `-h` — one-line add |
-| `-H` | out | ❌ N/A | Legacy "headers" toggle on certain dialects |
-| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|icmp|raw][@host][:port]`; `icmp`/`raw` are ETW-sourced (imply the Administrator-only capture) |
-| `-J` | out | ✅ shipped | JSON aggregated (lsof-rs extension, matches upstream's new format) |
-| `-j` | out | ✅ shipped | JSON Lines (lsof-rs extension) |
+| `-H` | out | ✅ shipped 2026-09-19 | Human-readable sizes in the SIZE column, in `lsof-core`, so both platforms. It was never a headers toggle |
+| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|icmp|raw][@addr][:ports]` (host and service names are refused, DIVERGENCES 38); `icmp`/`raw` are ETW-sourced (imply the Administrator-only capture) |
+| `-J` | out | ✅ shipped | JSON aggregated. The C has `-J` too, with another schema (DIVERGENCES 91) |
+| `-j` | out | ✅ shipped | JSON Lines. The C has `-j` too, with another schema (DIVERGENCES 91) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |
-| `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one row per thread under the process, with thread ID and start address. |
+| `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one `task` row per thread under the process, the TID in NODE. On Linux, TID and TASKCMD columns, as the C (DIVERGENCES 33). |
 | `-l` | out | ✅ shipped (5A) | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
 | `-L [l]` | out | ✅ shipped (5A) | **No link count column** — the default; `-L` takes no count. Shipped reading `-L` as "show the column", which is `+L`'s meaning; corrected 2026-09-26 (DIVERGENCES 41). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
 | `+L [l]` | sel | ✅ shipped (5A) | **The link count column**, and with `l`, also select files whose link count is known and < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too). A row with no count (a socket, a pipe) is never selected (DIVERGENCES 42). |
@@ -69,13 +75,13 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `+m [m]` | misc | ❌ N/A | Mount supplement output |
 | `+|-M` | misc | ❌ N/A | Portmapper — Unix RPC |
 | `-n` | out | ✅ shipped | No host name resolution |
-| `-N` | sel | ❌ N/A | NFS-file listing |
+| `-N` | sel | ❌ N/A on Windows; ✅ Linux 2026-09-20 | NFS-file listing (DIVERGENCES 28) |
 | `-o [o]` | out | ✅ shipped | The `OFFSET` column, and `-o <digits>`'s hex limit (DIVERGENCES 6) |
 | `-O` | prec | ✅ shipped (5A) | "Avoid fork" — Unix-specific perf flag; safe to accept as a documented no-op for portability |
 | `-p s` | sel | ✅ shipped | PID filter (comma-separated, accepts `^excl`) |
 | `-P` | out | ✅ shipped | Numeric port instead of service name |
 | `-Q` | misc | ✅ shipped (5A) | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
-| `+|-r [t]` | misc | ✅ shipped | Repeat (default 15s) |
+| `+|-r [t]` | misc | ✅ shipped (`-r`) | Repeat (default 15s). `+r` is refused |
 | `-R` | out | ✅ shipped | PPID column |
 | `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. Since 2026-09-25 the C's: names checked against the platform's table, each included state a search item, and TCP lists applied to every socket with a TCP state — UDP too on Linux (DIVERGENCES 32). |
 | `-S [t]` | prec | ❌ N/A | `lstat`/`readlink` timeout — Unix; we have our own bounded model |
@@ -86,10 +92,10 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-v` | misc | ✅ shipped | Version banner |
 | `-V` | misc | ✅ shipped | Verbose unmatched-search reporting |
 | `+|-w` | misc | ✅ shipped (5A) | Warning enable/disable. We mostly already suppress; add the toggle. |
-| `-x [fl]` | misc | ❌ N/A | Cross-mount FS traversal — Unix mount table |
-| `-X` | out | ❌ N/A | Cross-over info — Linux epoll bridge |
+| `-x [fl]` | misc | ❌ N/A on Windows; ✅ Linux 2026-09-20 | Cross-mount FS traversal for `+d`/`+D` — Unix mount table (DIVERGENCES 26) |
+| `-X` | out | ❌ N/A on Windows; ✅ Linux 2026-09-20 | On Linux, skip the TCP/UDP tables and leave those sockets unidentified (DIVERGENCES 25, 45) |
 | `-z [z]` | sel | ❌ N/A | Solaris zones |
-| `-Z [Z]` | sel | ❌ N/A | SELinux contexts |
+| `-Z [Z]` | sel | ❌ N/A; the C's gate 2026-09-20 | SELinux contexts. Both platforms answer as the C does where SELinux is not mounted, `-Z limited to SELinux`, exit 1; the CONTEXT column is debt (DIVERGENCES 29) |
 | `--` | misc | ✅ shipped (5A) | End-of-options sentinel — one-line parser change so `lsof -- -file` lets you name a file that starts with `-` |
 | `<bare>` | sel | ✅ shipped | Path/name lookup via Restart Manager |
 
@@ -147,10 +153,10 @@ Switches that need new Windows API work, or significant data-model expansion:
 
 ## Out of scope (Unix-only — accept-and-no-op or reject)
 
-`-A`, `-b`, `-C`, `-D`, `-e`, `-f/+f`, `-H`, `-k`, `-m/+m`, `+M`, `-N`, `-S`,
-`-x`, `-X`, `-z`, `-Z`. The parser should produce a clear error
-("unsupported on Windows: -X") rather than silently ignoring; that's better
-than appearing to accept and surprising the user.
+`-A`, `-b`, `-C`, `-D`, `-k`, `-m/+m`, `+M`, `-S`, `-z`. Each is refused,
+`lsof: unsupported option: -A`, rather than silently ignored; that's better than
+appearing to accept and surprising the user. (This list once also held `-e`,
+`-f/+f`, `-H`, `-N`, `-x`, `-X` and `-Z`; see the note at the top.)
 
 ## Sequencing
 
@@ -161,8 +167,9 @@ than appearing to accept and surprising the user.
    ✅ **done**; ~~`-U` (UNIX-domain filter, backed by the ETW AFD path)~~
    ✅ **done**; ~~`-E`/`+E` (pipe endpoint info via
    `GetNamedPipe{Server,Client}ProcessId`)~~ ✅ **done** — **Phase 5B complete.**
-4. **Smoke-test additions** — extend `Invoke-LsofRsSmokeTest.ps1` with one
-   case per new Phase 5A switch (target: 37 → ~50 cases).
+4. ~~**Smoke-test additions** — extend `Invoke-LsofRsSmokeTest.ps1` with one
+   case per new Phase 5A switch (target: 37 → ~50 cases).~~ ✅ **done** — the
+   suite has grown well past that since.
 
 ## What I'm NOT promising
 
@@ -171,5 +178,5 @@ than appearing to accept and surprising the user.
   shape just grows new keys, never renames or removes.
 - **No surprise CLI-behavior changes**: existing scripts that use the v0.1.0
   surface keep working exactly. Phase 5 is *additive*.
-- **No silent acceptance of irrelevant Unix switches**: `-Z` etc. error out
-  with a clear "unsupported on Windows" message rather than getting ignored.
+- **No silent acceptance of irrelevant Unix switches**: they error out with a
+  clear `unsupported option` message rather than getting ignored.

@@ -1,14 +1,11 @@
-//! lsof-compatible option parsing for the MVP switch set.
+//! lsof-compatible option parsing, read the way the C's `main.c` reads it.
 //!
-//! Supported: `-p` (PIDs), `-i` (Internet, with `[46][proto][@host][:port]`),
-//! `-u` (users), `-c` (command), `-d` (FD filter), `-a` (AND), `-n` / `-P`
-//! (host/port resolution), `-R` (PPID column), `-o` (file offset), `-t`
-//! (terse), `-V` (verbose),
-//! `-F[fields]` (field output, `-F0` = NUL), `-J` / `-j` (JSON), `-r` (repeat),
-//! and `-v` / `-h`. Flags may be clustered (e.g. `-ai`); value options take the
-//! rest of the token or the next argument (e.g. `-p123` or `-p 123`). A bare
-//! path argument is an exact-file lookup; `+D`/`+d <dir>` is a directory-tree
-//! lookup.
+//! The options are the ones `lsof -h` lists (`usage()` in `main.rs`). Flags may
+//! be clustered (e.g. `-ai`); a value option takes the rest of the token or the
+//! next argument (e.g. `-p123` or `-p 123`), and an optional value is taken
+//! from the next argument only when that argument does not open an option. A
+//! bare path argument names a file; `+d <dir>` names a directory and its
+//! entries, `+D <dir>` the whole tree beneath it.
 
 use std::ffi::OsString;
 
@@ -130,7 +127,7 @@ fn digits_value(digits: &str) -> usize {
     })
 }
 
-/// Parse the argument list (excluding argv[0]).
+/// Parse the argument list (excluding `argv[0]`).
 pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     let mut sel = Selection::default();
     let mut format = Format::Table;

@@ -315,6 +315,70 @@ fn the_walk_warns_of_a_link_it_cannot_follow() {
     miri,
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
 )]
+fn the_walk_warns_before_a_bare_paths_status_error() {
+    // The C expands `+d` as it parses its options, before it looks at a bare
+    // path: the walk's warning comes first, and still comes when the status
+    // error then drops the last bare path and ends the run (DIVERGENCES 52,
+    // 82). Measured against the C, byte for byte.
+    let dir = Scratch::new("walk-first");
+    std::fs::create_dir(dir.0.join("d")).unwrap();
+    std::os::unix::fs::symlink("self", dir.0.join("d").join("self")).unwrap();
+    let out = lsof_in(&dir.0, &os(&["-x", "l", "+d", "d", "/nonexistent"]));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "lsof: WARNING: can't stat(d/self) symbolc link: Too many levels of symbolic links\n\
+         lsof: status error on /nonexistent: No such file or directory\n"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's output"
+)]
+fn minus_v_reports_under_minus_q_and_never_under_minus_r() {
+    use std::io::BufRead;
+    let dir = Scratch::new("verbose");
+    for f in ["a", "b"] {
+        std::fs::write(dir.0.join(f), "").unwrap();
+    }
+    // `-Q` changes the exit status alone, as the C's `FsearchErr` does
+    // (DIVERGENCES 53), and the report runs last given first (52).
+    let out = lsof_in(&dir.0, &os(&["-V", "-Q", "a", "b"]));
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lsof: no file use located: b\nlsof: no file use located: a\n"
+    );
+    // Under `-r` the C reports only after its loop, and a plain `-r` loop
+    // ends only on a signal, which kills it first: no report at all (54).
+    // The first two lines are therefore two cycles' markers, where lsof-rs
+    // had printed the report before each.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .current_dir(&dir.0)
+        .args(["-V", "-r", "1", "a"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run lsof");
+    let stdout = child.stdout.take().expect("stdout");
+    let first: Vec<String> = std::io::BufReader::new(stdout)
+        .lines()
+        .take(2)
+        .map(|l| l.expect("a line"))
+        .collect();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(first, ["=======", "======="]);
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
 fn an_empty_path_argument_is_a_status_error() {
     // The C's `Readlink("")` reads a buffer it never wrote, and in practice
     // searches for the argument before it again (a C-DEFECT, DIVERGENCES 79).

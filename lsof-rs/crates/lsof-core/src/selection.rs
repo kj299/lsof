@@ -69,7 +69,7 @@ impl SelKinds {
     /// process's own entry has it only when the process has tasks of its own
     /// (`dproc.c`: `Fand && ht && pidts`): so `lsof -K -a -p N` lists a
     /// multi-threaded N with its tasks and a single-threaded N not at all,
-    /// both measured (DIVERGENCES 33). See [`Selection::entry_kinds`].
+    /// both measured (DIVERGENCES 33). See `Selection::entry_kinds`.
     pub const TASK: Self = Self(1 << 9);
     /// `-N`, the C's `SELNFS`.
     pub const NFS: Self = Self(1 << 10);

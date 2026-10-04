@@ -1,6 +1,6 @@
 [package]
 name = "lsof-core"
-description = "Platform-agnostic core for a memory-safe, Windows-native lsof: data model, selection engine, output renderers (table / -F field / JSON), and the Backend trait that platform dialects implement."
+description = "Platform-agnostic core for lsof-rs, a memory-safe lsof: data model, selection engine, output renderers (table / -F field / JSON), and the Backend trait that platform dialects implement."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

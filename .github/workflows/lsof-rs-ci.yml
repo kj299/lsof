@@ -1,16 +1,17 @@
 name: lsof-rs CI
 
-# CI for the Rust, memory-safe, Windows-native lsof rewrite under lsof-rs/.
-# The portable core builds and tests on Linux; the native Windows backend is
-# built and tested on a real windows-latest runner (the paths that can't be
-# linked off-Windows).
+# CI for lsof-rs, the memory-safe Rust port under lsof-rs/. The core, the CLI
+# and the Linux backend build and test on Linux, where the port is also diffed
+# against the C built from this tree; the native Windows backend builds and
+# tests on a real windows-latest runner (the paths that can't be linked
+# off-Windows).
 #
 # Two trigger notes, both about not burning runner time:
 #
 # `push` is limited to master. Without that, every PR ran this workflow twice —
 # once for the branch push and once for the pull_request — so a PR showed 8
 # check runs, including the native-Windows job (release build + socket
-# differential + the 59-case smoke suite) twice over. The pull_request run
+# differential + the smoke suite) twice over. The pull_request run
 # covers the branch; this one covers master after a merge.
 #
 # The `!` negations skip documentation-only changes: a markdown edit cannot
@@ -19,14 +20,14 @@ name: lsof-rs CI
 # files. (A docs-only PR therefore shows no checks at all — correct, but worth
 # knowing before turning on required status checks.)
 #
-# `porting-kit/harnesses/**` is in the list because four of the gates below ARE
-# kit harnesses: a change to one of them changes what this workflow enforces,
+# `porting-kit/harnesses/**` is in the list because several of the gates below
+# ARE kit harnesses: a change to one of them changes what this workflow enforces,
 # and until it was added, editing a harness ran nothing at all.
 #
 # The C oracle's own sources are in the list for the same reason, one level
 # deeper. The differential job below builds the oracle FROM THIS TREE
-# (`autoreconf -vif && ./configure && make lsof`) and then diffs 87 cases
-# against it, so the C sources are an input to *this* pipeline, not only to
+# (`autoreconf -vif && ./configure && make lsof`) and then diffs every case in
+# linux-matrix.toml against it, so the C sources are an input to *this* pipeline, not only to
 # build.yml's. Scoping "the Rust workflow to the Rust paths and the C workflow
 # to the C paths" — which is how the kit phrased it — leaves the differential
 # comparing against an oracle whose definition can move without it re-running.
@@ -101,7 +102,15 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: test (portable core + CLI via mock backend)
+      - name: rustdoc (no broken doc links)
+        # A doc comment that links to a renamed or removed item is drift the
+        # compiler does not see: eight such links had piled up, one naming a
+        # function that no longer existed. rustdoc sees them (porting-kit
+        # LESSONS #080).
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items --workspace
+      - name: test (core, CLI and the Linux backend)
         run: cargo test --all
       - name: unsafe contained (forbid(unsafe_code) on every portable crate)
         # Contained first, then documented. The unsafe-audit step below checks
@@ -118,8 +127,8 @@ jobs:
         run: python3 ../porting-kit/harnesses/unsafe-audit/check_forbid_unsafe.py crates/lsof-core crates/lsof-cli crates/lsof-backend-linux
       - name: unsafe-audit (// SAFETY on every unsafe block)
         # Toolchain-free text scan from the porting kit. HARD gate: every unsafe
-        # block in the backend carries a // SAFETY: justification (131/131), so
-        # a new undocumented block fails CI.
+        # block in the backend carries a // SAFETY: justification, so a new
+        # undocumented block fails CI.
         run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src
 
       - name: coverage gate (test surface vs the C's feature surface)
@@ -149,7 +158,7 @@ jobs:
           done
 
       - name: c-flaw scanner self-test
-        # Four of the gates in this job are porting-kit harnesses, and a change
+        # Most of the gates in this job are porting-kit harnesses, and a change
         # to one of them changes what CI enforces — but nothing ran the flaw
         # scanner's own `--self-test`, so its rules were unverified. It has
         # negative cases too: an `(unsigned char)` cast must NOT flag, a struct
@@ -184,6 +193,12 @@ jobs:
           components: clippy
       - name: clippy (windows)
         run: cargo clippy --all-targets -- -D warnings
+      - name: rustdoc (windows)
+        # The Windows backend's modules exist only here, so their doc links
+        # are checked only here.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items --workspace
       - name: build (native Win32 backend)
         run: cargo build --all
       - name: test
@@ -199,7 +214,7 @@ jobs:
         # and the one known data-source divergence (BOUND sockets) is ledgered.
         shell: pwsh
         run: ./differential/capture.ps1 -Bin target/release/lsof.exe
-      - name: live smoke test (67 cases over self-owned fixtures)
+      - name: live smoke test (over self-owned fixtures)
         # The end-to-end harness: stands up real fixtures (held file at a known
         # offset, named pipe with a connected client, mapped data file, TCP
         # v4/v6 + UDP sockets, child processes with a known cwd) and exercises
@@ -235,7 +250,7 @@ jobs:
 
   supply-chain:
     # control-coverage: exempt harnesses/supply-chain/run_supply_chain.sh -- runs `cargo deny check` against lsof-rs/deny.toml, this port's own policy, not the harness's template
-    # Same caveat as the miri exemption above: the capability runs, the harness
+    # Same caveat as the miri job's exemption below: the capability runs, the harness
     # does not, so the harness's own rot is this repo's to catch in check-kit
     # (it is in the gate-mutation table for exactly that reason).
     name: supply-chain (cargo-deny)
@@ -262,9 +277,11 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: fuzz every target (short smoke)
         # Adversarial input into every parser that takes text from outside the
-        # process: the hand-rolled option parser (argv) and the Linux backend's
-        # /proc/net tables, /proc/<pid>/status, fdinfo and /etc/passwd readers
-        # (kernel- and user-supplied text; `Name:` is attacker-settable). None
+        # process: the hand-rolled option parser (argv), the Linux backend's
+        # /proc/net tables, /proc/<pid>/status, fdinfo, maps, /proc/locks,
+        # mount-table and /etc/passwd readers (kernel- and user-supplied text;
+        # `Name:` is attacker-settable), the renderer's escaper, and the Windows
+        # backend's name parsers. None
         # may panic. The loop is over `cargo fuzz list`, so a target added to
         # fuzz/Cargo.toml is gated here without touching this file — a target
         # that exists but is not run is the LESSONS #019 failure again. Short
@@ -315,7 +332,7 @@ jobs:
           ./lsof -v 2>&1 | grep revision
       - name: build lsof-rs
         run: cargo build --release --bin lsof
-      - name: allow unprivileged user namespaces (fixture L)
+      - name: allow unprivileged user namespaces (fixtures L, M, MS)
         # KEPT DELIBERATELY. This step relaxes a kernel security setting on the
         # runner, so it was put to the repository's owner rather than left as a
         # porting decision; the answer on 2026-09-20 was to keep it. Do not
@@ -346,7 +363,7 @@ jobs:
         # hide the reason, so the status is echoed instead.
         run: |
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 ||             echo "sysctl absent — nothing to relax on this kernel"
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; fixture L will report itself unavailable"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; fixtures L, M and MS will report themselves unavailable"
           if unshare --user --map-root-user --net true 2>&1; then
             echo "probe OK: unprivileged user+net namespaces work, fixture L will run"
           else
@@ -364,7 +381,7 @@ jobs:
       - name: resource gate (peak RSS and wall, under a load it creates)
         # P5. The differential above proves the OUTPUT is right and can say
         # nothing about what it cost: delete the socket-only collection path
-        # and all 109 cases still MATCH, because the rows it skips are rows
+        # and every case still MATCHes, because the rows it skips are rows
         # selection was going to drop anyway. This is the only control that
         # fails on that.
         #
@@ -411,9 +428,9 @@ jobs:
     # This comment used to say the Linux backend "reads live /proc, which miri
     # cannot interpose". That was FALSE, and nothing had ever tested it: with
     # -Zmiri-disable-isolation miri runs that crate's suite fine. Measured on
-    # the pinned nightly below, 48 of its 50 tests pass; the two that do not
-    # are miri shim artefacts, are `#[cfg_attr(miri, ignore)]` at the test with
-    # the measurement that justifies it, and still run under plain `cargo test`.
+    # the pinned nightly below, 48 of its 50 tests passed when this was
+    # written; a test miri cannot run is `#[cfg_attr(miri, ignore)]` at the
+    # test, with the reason, and still runs under plain `cargo test`.
     # The lsof-backend-linux arm is the separate miri-linux job below, and
     # separate ON PURPOSE -- see the note there.
     #
@@ -525,7 +542,7 @@ jobs:
     timeout-minutes: 30
     # HARD GATE. This is the last of the playbook's four exit criteria that this
     # port had never executed: miri covers the forbid(unsafe_code) crates, and
-    # the ~150 unsafe blocks in the Windows backend — every one of them an FFI
+    # the unsafe blocks in the Windows backend — every one of them an FFI
     # call with a hand-sized buffer — had never been under a sanitizer at all
     # (see the miri job's scope note).
     #

@@ -174,6 +174,8 @@ Format per entry:
 - **Section amended:** harnesses/ci/porting-ci.template.yml (`on:` triggers);
   the `porting-kit-audit` skill (CI-hygiene gate). General rule for PLAYBOOK ·
   Phase 3 (skeleton/CI): scope every workflow to the paths it actually builds.
+  [2026-10-04: no PLAYBOOK text was written; the rule lives in
+  OPERATING-GUIDE.md and the template's `on:` comment.]
 
 ## Meta — three dry-run passes, three distinct classes of gap
 
@@ -555,7 +557,9 @@ the emphasized half.
   until proven backend-local. The scope doc for the Linux backend had said
   exactly this ("start L3's harness immediately after L0") and it was not
   done; the findings above came from diffs run by hand.
-- **Section amended:** PLAYBOOK · Phase 2 (oracle) + Phase 4 step 2.
+- **Section amended:** PLAYBOOK · Phase 2 (oracle) + Phase 4 step 2. [2026-10-04:
+  the change, 9573c68, edited Phase 2 and the cross-cutting table; Phase 4 step 2
+  carries none of it.]
 
 ## 018. A waiver whose reason names a platform expires the day you add that platform — silently
 
@@ -578,7 +582,8 @@ the emphasized half.
   red on `linux`). Linux-side gaps are recorded as `DEBT (Lx)` naming the phase
   that closes them, not re-waived — a waiver claims "never", which was untrue.
 - **Section amended:** PLAYBOOK · cross-cutting controls (coverage row) +
-  Phase 4 step 2.
+  Phase 4 step 2. [2026-10-04: 9573c68 edited only the coverage row; Phase 4
+  step 2 carries none of it.]
 
 ## 019. A control the kit asserts but never checks for does not exist — the three missing ledgers
 
@@ -803,7 +808,8 @@ the emphasized half.
     field glued to the next set's first. The port's own golden test asserted
     the wrong rule in so many words ("the last field of a set is
     NL-terminated, NOT NUL"), which is #019 again: a golden test pins what its
-    author believed.
+    author believed. [2026-10-04: that is #017's sentence; #019 is the ledgers
+    lesson.]
   * `i` and `P` are **one cell under two names**, chosen by a single
     discriminant. Implementing them as two independent fields gave AF_UNIX rows
     both a `P` they should not have and no `i` they should.
@@ -835,6 +841,8 @@ the emphasized half.
   not only to CI. (Here `parse_status` had grown from a tuple into a struct and
   `proc_status.rs` had not compiled since — caught locally only because the
   sweep ran every target by hand.)
+- **Section amended:** none recorded when written. [2026-10-04: the kit change
+  above is a method; no kit file names it.]
 
 ## 025. Triage the flaw scan early — its findings are mostly about the scanner
 
@@ -968,7 +976,8 @@ the emphasized half.
   **when an assertion says "never contains X", ask what legitimate input
   contains X** — and prefer pinning a transformation with constructed inputs
   over asserting an absolute about a live one.
-- **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases);
+- **Section amended:** `porting-kit/PLAYBOOK.md` (Phase 3, differential cases
+  [2026-10-04: the text is in Phase 4, step 2]);
   lsof-rs `DIVERGENCES.md` (the `-K` section carries the kill table).
 
 ---
@@ -2328,7 +2337,8 @@ the emphasized half.
   wired into `make check-kit`. `skills/porting-kit-audit/SKILL.md` now runs the
   ledger instead of describing the procedure.
 - **Section amended:** `porting-kit/harnesses/platforms/`, `porting-kit/Makefile`,
-  `porting-kit/skills/porting-kit-audit/SKILL.md`
+  `porting-kit/skills/porting-kit-audit/SKILL.md`; and, named 2026-10-04 so this
+  gate can hold it, `porting-kit/harnesses/platforms/check_platforms.py`
 
 ## 055. `continue-on-error` is a step property; `timeout-minutes` is a job property
 
@@ -2358,11 +2368,17 @@ for every access a `/proc`-reading crate makes. A sanitizer arm over a crate
 whose whole job is reading `/proc` is not priced like one over a pure library,
 and that is a reason to isolate it rather than a reason to skip it.
 
-**Kit change:** PLAYBOOK Phase 4 — the observe-first promotion rule
-(LESSONS #013) now says *job*, not *step*, and says why.
-**Section amended:** PLAYBOOK · Phase 4 gate 4.
+- **Date:** 2026-09-20 [added 2026-10-04, from git: 8a4b2ea]
+- **Codebase:** lsof-rs (Rust; CI)
+- **Kit change:** PLAYBOOK Phase 4 — the observe-first promotion rule
+  (LESSONS #013) now says *job*, not *step*, and says why.
+- **Section amended:** PLAYBOOK · Phase 4 gate 4. [2026-10-04: the text is in
+  PLAYBOOK · Cross-cutting safety controls, trap (d), where 8a4b2ea put it.]
 
 ## 056. A fuzz target can name a parser it never reaches — plant a fault and watch
+
+- **Date:** 2026-09-20 [added 2026-10-04, from git: 03f22cc]
+- **Codebase:** lsof-rs (Rust; the Linux backend's fuzz targets)
 
 **What happened.** `/proc/net/packet` got a parser, and the repository's
 `proc_net` fuzz target got a line calling it. Sixty seconds, 133,262 runs, no
@@ -2534,7 +2550,8 @@ gate you have not seen fail is a gate you have not tested.
   because one row would pin only their union (#050).
 - **Section amended:** README · harness table and the vendoring note; Makefile ·
   check-kit; harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
-  OPERATING-GUIDE · closing note.
+  OPERATING-GUIDE · closing note; and, named 2026-10-04 so this gate can hold it,
+  `porting-kit/harnesses/lessons/resolve_collision.py`.
 - **Follow-up, 2026-09-20 — the cherry-pick case.** A picked commit's base is a
   *branch* commit, not a master one, so a citation in it means what the **fork**
   called that number — and the fork's own appended lessons have since landed
@@ -2636,6 +2653,9 @@ gate you have not seen fail is a gate you have not tested.
   README · harness table and the not-vendored list.
 
 ## 059. A mutation that does not apply looks exactly like a mutation that is not caught
+
+- **Date:** 2026-09-20 [added 2026-10-04, from git: 37b170c]
+- **Codebase:** lsof-rs (Rust; mutation testing of the differential)
 
 **What happened.** Three times in one increment, the *instrument* failed and the
 failure read as a result. The worst was a mutation test on a differential case:
@@ -3014,7 +3034,7 @@ finding it is supposed to produce.
   |---|---|---|
   | `lsof-core` | `lib.rs` | attribute **and** manifest lint |
   | `lsof-cli` | `lib.rs`, `main.rs` | attribute, in **each** root |
-  | `lsof-backend-linux` | `lib.rs` (attribute at line 94) | attribute |
+  | `lsof-backend-linux` | `lib.rs` (attribute at line 94; line 91 on 2026-10-04) | attribute |
 
   `lsof-cli` is the case the every-root rule exists for: a binary beside a
   library is its own crate, and a `forbid` in `lib.rs` does nothing for
@@ -3602,7 +3622,9 @@ finding it is supposed to produce.
   local run had hidden by passing absolute paths. PLAYBOOK Phase 4, step 2,
   asks for every spelling of a path and for the C's own helper as the
   oracle.
-- **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.
+- **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2; and,
+  named 2026-10-04 so this gate can hold it,
+  `porting-kit/harnesses/differential/diff_run.py`.
 
 ## 078. Two cases that listed nothing matched for the wrong reason, and a C-DEFECT was the C's option parsing
 
@@ -3653,3 +3675,44 @@ finding it is supposed to produce.
 - **Kit change:** SECURITY-CHECKLIST, per module: "Bounded cost on hostile
   input".
 - **Section amended:** SECURITY-CHECKLIST · Per module (Phase 4 gates).
+
+## 080. A doc that restates the code is a second copy, and the copy drifts
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs and this kit (an audit of every document, after the
+  item 62 work merged)
+- **What happened:** every claim in the repository's documents was checked
+  against the code, CI and the binary, and about 200 had stopped being true.
+  Most were counts restated in prose: "87 cases" (387), a smoke suite of
+  "~50", "59", "65" or "67" cases (75), "five" fuzz targets (ten), "131/131"
+  unsafe blocks (139). Each was true once and edited by nobody since. The rest
+  were worse. The threat model claimed a lint, `arithmetic_side_effects`,
+  "denied workspace-wide", that no manifest ever set; said lsof-rs never
+  writes to the system it inspects, which an elevated `-T q` and `--etw` do
+  on Windows; and listed `/proc` files it does not read. The help text, laid
+  out as an indented table, printed flush left all its life: each line ended
+  `\n\`, and a Rust string continuation eats the next line's leading spaces.
+  The CI template a new port copies failed this kit's own control-coverage
+  check. The documented fuzz-ledger form broke the ledger at its second
+  entry. A README's field-validation sentence had been raised from 59 cases to
+  67 by later changes, with no new field run behind it. Every gate was green:
+  the threat-model gate checks headings and placeholders, `check_doc_flags`
+  flags, `check_skills` paths — the shape of a document, never its truth.
+- **The rule.** A document that restates what the code knows is a second copy,
+  and a second copy drifts. Point at the source instead (the docstring `--help`
+  prints, `cargo fuzz list`, the matrix), state a count only where a check
+  derives it, or date it. Where a claim cannot be derived, audit it as this was
+  audited: for each sentence, find the line of code, the CI step or the run
+  that makes it true. A security document comes first: a control it claims and
+  nothing enforces is worse than silence.
+- **Kit change:** `make check-kit` runs control-coverage over
+  `harnesses/ci/porting-ci.template.yml`, which now invokes every control
+  `CLAUDE.md` declares; the fuzz-ledger form is backtick-quoted wherever it is
+  documented, and `diff_fuzz.py`'s self-test writes two quoted entries;
+  `scan_c_flaws.py` no longer lists a category it never emits. In lsof-rs,
+  rustdoc runs in CI with `-D warnings` on Linux and Windows, and a unit test
+  pins the help text's layout. Counts in living documents were removed or
+  dated rather than updated.
+- **Section amended:** `porting-kit/harnesses/ci/porting-ci.template.yml`,
+  `porting-kit/harnesses/diff-fuzz/diff_fuzz.py`,
+  `.github/workflows/lsof-rs-ci.yml` (rustdoc steps), Makefile · check-kit.

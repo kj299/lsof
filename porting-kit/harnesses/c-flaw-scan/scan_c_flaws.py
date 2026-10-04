@@ -17,13 +17,15 @@ Categories flagged (CWE in parens):
   stack-vla-alloca  alloca / variable-length arrays              (CWE-770)
   int-overflow-mul  malloc(a * b) style size math                (CWE-190)
   command-exec      system/popen/exec* with composed strings     (CWE-78)
-  unchecked-malloc  malloc/calloc/realloc result used w/o check   (CWE-690) [weak]
   toctou            access()/stat() then open()/fopen()          (CWE-367)
   signed-char-compare  a char (signed on most ABIs) compared with a
                     numeric literal without an (unsigned char) cast (CWE-195)
 
+No check flags an unchecked malloc result (CWE-690): this docstring once listed
+one, and no code ever emitted it.
+
 Usage:
-  scan_c_flaws.py PATH [PATH ...] [--json] [--self-test]
+  scan_c_flaws.py PATH [PATH ...] [--json] [--strict] [--self-test]
 Exit: 0 always (this is an inventory, not a gate) unless --strict (then 1 if hits).
 """
 from __future__ import annotations

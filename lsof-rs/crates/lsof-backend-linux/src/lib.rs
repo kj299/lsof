@@ -1,7 +1,7 @@
-//! Linux data-acquisition backend for lsof-rs — **Phase L2**.
+//! Linux data-acquisition backend for lsof-rs — phases L0 to L3 are done.
 //!
-//! Implements [`lsof_core::backend::Backend`] over `/proc`, which is the whole
-//! data source: process identity from `/proc/<pid>/status`, open files from
+//! Implements [`lsof_core::backend::Backend`] over `/proc`, with `/etc/passwd`
+//! for login names: process identity from `/proc/<pid>/status`, open files from
 //! `/proc/<pid>/fd` (plus the `cwd`/`root`/`exe` magic links), file attributes
 //! from `stat`, and sockets from `/proc/net/*`.
 //! `std::os::unix::fs::MetadataExt` exposes every field needed, so this crate
@@ -21,9 +21,10 @@
 //!   once per gather and indexed by inode; an fd whose link target is
 //!   `socket:[N]` is resolved by that key into a real TYPE (`IPv4`/`IPv6`/
 //!   `unix`), protocol, addresses and TCP state. **`-i` and `-U` work**, in
-//!   every form the core supports (`-iTCP:443`, `-i@host`, `-i4`/`-i6`,
+//!   every form the core supports (`-iTCP:443`, `-i@addr`, `-i4`/`-i6`,
 //!   `-iUDP`, `-iICMP`, `-iRAW`), as does `-T q`.
-//! * **L2** — everything the scope document deferred, and it has all landed:
+//! * **L2** — everything the scope document deferred has landed but naming
+//!   netlink sockets (below):
 //!   `mem` rows and the `DEL` marking from `/proc/<pid>/maps`, the lock column
 //!   from `/proc/locks`, named `anon_inode` kinds (`[eventfd:6]`, `[pidfd:N]`,
 //!   `[eventpoll]`, …), the mount table behind `-f`/`+f` and the mount-point
@@ -41,8 +42,9 @@
 //! effort. Packet sockets were the other half of that pair and are done.
 //!
 //! Also open: `-e` on mapped files (DIVERGENCES 40 — the C prints them as
-//! `UNKNmem` without `stat`ing them; the cwd/rtd/txt/fd half is done), and
-//! the options `-S` and `-b`. `lsof-rs/docs/linux-l2-plan.md` measures each;
+//! `UNKNmem` without `stat`ing them; the cwd/rtd/txt/fd half is done), the
+//! `-Z` CONTEXT column, the options `-S` and `-b`, and the rows of
+//! `lsof-rs/DIVERGENCES.md` still OPEN for this backend. `lsof-rs/docs/linux-l2-plan.md` measures each;
 //! the `DEBT` entries in `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are
 //! what the coverage gate prints on every run.
 //!
@@ -75,7 +77,7 @@
 //! # Privilege
 //!
 //! Unprivileged, `/proc/<pid>/fd` is readable only for your own processes;
-//! others appear with identity but no files. As root, everything is readable.
+//! others appear with rows saying why (above). As root, everything is readable.
 //! That is the direct analog of the Windows backend's elevation split, and it
 //! needs no privilege to be *requested* — Linux grants it by uid, so there is
 //! nothing here matching `SeDebugPrivilege`'s enable/disable dance.
@@ -85,8 +87,9 @@
 //! Everything is gated on `#[cfg(target_os = "linux")]`; on any other host this
 //! crate compiles to an empty shell, exactly as `lsof-backend-windows` does off
 //! Windows. That is what keeps `cargo check --target x86_64-pc-windows-gnu
-//! --all-targets` — the cross-check CI runs from Linux — green with both
-//! backends in one workspace.
+//! --all-targets` green from Linux with both backends in one workspace. CI
+//! does not run that check; its windows job builds the Windows backend
+//! natively.
 
 #![forbid(unsafe_code)]
 

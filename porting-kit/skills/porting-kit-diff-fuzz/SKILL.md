@@ -19,7 +19,8 @@ addition for a security-critical port."
 ## When
 After the matrix differential is green (a port that fails fixed cases isn't ready
 to fuzz). Run a short budget per module/PR and a long `--max-time` sweep nightly.
-Needs a runnable C oracle (or a golden-replay wrapper, `porting-kit/harnesses/golden`).
+Needs a runnable C oracle. Captured golden output cannot stand in: `golden.py`
+stores stdout for the inputs it captured, and the fuzzer's inputs never were.
 
 ## Procedure
 1. **Run it** against both binaries, seeded from the real corpus:
@@ -35,8 +36,10 @@ Needs a runnable C oracle (or a golden-replay wrapper, `porting-kit/harnesses/go
 3. **Triage each finding** exactly like a matrix divergence: fix the Rust, OR — if
    the C is the buggy side — record the intentional fix-of-C-defect in
    `DIVERGENCES.md`. Fuzz findings are suppressed **only by fingerprint** (an
-   arbitrary input has no stable name), so the entry MUST be pinned:
-   `- [x] fuzz:<desc> [sha256:<fingerprint>]: <why + CWE>`.
+   arbitrary input has no stable name), so the entry MUST be pinned, with the
+   name in backticks: ``- [x] `fuzz:<desc>` [sha256:<fingerprint>]: <why + CWE>``.
+   Unquoted, the name ends at its first `:`, every fuzz entry is named `fuzz`,
+   and the second one stops `diff_run.py` and `diff_fuzz.py` alike.
 4. **Pin the reproducer as a matrix case** (fix-forward, then immediately pin): add
    the minimized input to the golden/matrix so `diff_run.py` covers it forever, not
    just this fuzz seed.

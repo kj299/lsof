@@ -385,53 +385,11 @@ ksh       16642      abe    0u  VCHR    26,   0     0t6461        360 /dev/pts/0
 
 ### The idrlogin.perl[5] Scripts
 
-There's another, perhaps easier way, to go about the job of
-tracing a network connection.  The lsof distribution contains
-two Perl scripts, idrlogin.perl (Perl 4) and idrlogin.perl5
-(Perl 5), that use lsof field output to display values for
-shells that are parented by rlogind, sshd, or telnetd, or
-connected directly to TCP sockets.  The lsof test suite contains
-a C library that can be adapted for use with C programs that
-need to call lsof and process its field output.
-
-The two Perl scripts use the lsof -R option; it causes the
-paRent process ID (PPID) to be listed in the lsof output.  The
-scripts identify all shell processes -- e.g., ones whose command
-names end in ``sh'' -- and determine if: 1) the ultimate ancestor
-process before a PID greater than 2 (e.g., init's PID is 1) is
-rlogind, sshd, or telnetd; or 2) the shell process has open
-TCP socket files.
-
-Here's an example of output from idlogin.perl on a Solaris 2.4
-system:
-
-```shell
-centurion: 1 = cd src/lsof4/scripts
-centurion: 2 = ./idrlogin.perl
-Login    Shell       PID Via           PID TTY        From
-oboyle   ksh       12640 in.telnetd  12638 pts/5      opal.cc.purdue.edu
-icdtest  ksh       15158 in.rlogind  15155 pts/6      localhost
-sh       csh       18207 in.rlogind  18205 pts/1      babylon5.cc.purdue.edu
-root     csh       18242 in.rlogind  18205 pts/1      babylon5.cc.purdue.edu
-trouble  ksh       19208 in.rlogind  18205 pts/1      babylon5.cc.purdue.edu
-abe      ksh       21334 in.rlogind  21332 pts/2      lsof.itap.purdue.edu
-```
-
-The scripts assume that its parent directory contains an
-executable lsof.  If you decide to use one of the scripts, you
-may want to customize it for your local lsof and perl paths.
-
-Note that processes executing as remote shells are also
-identified.
-
-Here's another example from a UnixWare 7.1.0 system.
-
-```shell
-tweeker: 1 = cd src/lsof4/scripts
-tweeker: 9 = ./idrlogin.perl
-Login    Shell       PID Via           PID TTY        From
-abe      ksh        9438 in.telnetd   9436 pts/3      lsof.itap.purdue.edu
-```
+Upstream's lsof distribution carried two Perl scripts, idrlogin.perl and
+idrlogin.perl5, that did this job from lsof's field output (`-R` for the
+parent process ID). This repository does not ship them: its `scripts/`
+directory was removed with the other files that do not build or test it. The
+field output they read is described under "Output for Other Programs" below.
 
 ## Watching an Ftp or Rcp Transfer
 

@@ -321,9 +321,9 @@ Parsing Lsof Output with Another Program
 ========================================
 
 The lsof -F option directs it to produce "field" output that can
-easily be parsed by another program.  The lsof distribution contains
-sample awk, perl 4, and perl 5 scripts in its scripts subdirectory
-that show how to post-process field output.
+easily be parsed by another program.  (Upstream's distribution
+carries sample awk and Perl scripts for this in a scripts
+subdirectory; this repository does not ship them.)
 
 
 Repeat Mode
@@ -338,9 +338,7 @@ Repeat mode is more efficient when combined with lsof's selection
 options, since they limit lsof overhead.
 
 It's possible to use lsof's field output options to supply repeat
-mode output to another process for its manipulation.  The scripts
-subdirectory of the lsof distribution has sample Perl scripts
-showing how to consume lsof repeat mode output from a pipe.
+mode output to another process for its manipulation.
 
 
 Distribution Restrictions
@@ -385,16 +383,12 @@ GUARANTEED TO WORK ON A DIFFERENT SOLARIS 1.X ARCHITECTURE.
 Distribution Contents
 =====================
 
-The lsof distribution is checked for completeness when it is
-constructed and by the Inventory script when you run the Configure
-script.  (See The Inventory Script section of the 00README file of
-this distribution.)
-
 Lsof is organized in these parts:
 
     *  The main lsof directory, containing common sources,
-       configuration and setup scripts and three subdirectories:
-       dialects/, lib/, and scripts/.
+       configuration and setup scripts, and the lib/ subdirectory,
+       which holds the dialects in lib/dialects/.  (This repository
+       does not ship upstream's scripts/ subdirectory.)
 
        Lsof is compiled in the main lsof directory after configuration.
        The selected dialect sources are copied or linked from the
@@ -420,10 +414,6 @@ Lsof is organized in these parts:
        their own versions of them.  The lib/ functions are enabled
        and customized with #define's in the dialect machine.h header
        files.
-
-    *  The scripts/ subdirectory contains sample scripts for
-       processing lsof field (-F) output.  The scripts are written
-       in AWK, Perl 4, and Perl 5.
 
 The 00PORTING file of the lsof distribution has more information
 on lsof components, configuration, and construction.

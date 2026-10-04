@@ -62,10 +62,6 @@ test = false
 doc = false
 bench = false
 
-# The renderer's escaping (lsof-core, `render::escape`) — the security boundary
-# the parser targets point at. Its contract is the inverse of theirs: whatever
-# they pass through verbatim must leave here unable to drive a terminal.
-
 [[bin]]
 name = "proc_locks"
 path = "fuzz_targets/proc_locks.rs"
@@ -90,6 +86,9 @@ test = false
 doc = false
 bench = false
 
+# The renderer's escaping (lsof-core, `render::escape`) — the security boundary
+# the parser targets point at. Its contract is the inverse of theirs: whatever
+# they pass through verbatim must leave here unable to drive a terminal.
 [[bin]]
 name = "render_escape"
 path = "fuzz_targets/render_escape.rs"
