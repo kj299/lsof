@@ -62,8 +62,8 @@ impl Backend for LinuxBackend {
         std::fs::symlink_metadata(path).ok().map(|m| m.dev())
     }
 
-    fn mounts(&self) -> Vec<lsof_core::MountEntry> {
-        mounts::load()
+    fn mounts(&self, sources: bool) -> Vec<lsof_core::MountEntry> {
+        mounts::load(sources)
     }
 
     fn identifies_paths(&self) -> bool {

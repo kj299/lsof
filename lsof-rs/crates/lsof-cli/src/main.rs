@@ -244,6 +244,41 @@ fn spell_names_as_reported(sel: &mut Selection) {
     }
 }
 
+/// How many entries a `+d`/`+D` walk takes, and how many bytes of their
+/// names. The C walks on: a tree of 200,000 entries and more is taken whole,
+/// and two links to `.` under `-x l` make 2^40 paths it never finishes. lsof-rs
+/// stops, and says so (DIVERGENCES 81). Names count as well as entries: under
+/// `-x l` a link to `.` makes every name longer than the last, and 200,000
+/// of them reached a gigabyte.
+const WALK_ENTRIES: usize = 200_000;
+const WALK_NAME_BYTES: usize = 16 << 20;
+
+/// What a walk has left of [`WALK_ENTRIES`] and [`WALK_NAME_BYTES`].
+struct WalkBudget {
+    entries: usize,
+    bytes: usize,
+}
+
+impl WalkBudget {
+    fn new() -> Self {
+        WalkBudget {
+            entries: WALK_ENTRIES,
+            bytes: WALK_NAME_BYTES,
+        }
+    }
+
+    /// Take one entry with a name of `len` bytes, or `false` if that would
+    /// exceed either limit.
+    fn take(&mut self, len: usize) -> bool {
+        if self.entries == 0 || self.bytes < len {
+            return false;
+        }
+        self.entries -= 1;
+        self.bytes -= len;
+        true
+    }
+}
+
 /// One `+d`/`+D` directory and what is in it, entered as the C's
 /// `enter_dir()` enters them (`arg.c`): the directory under the name
 /// `Readlink()` gave it when the option was checked, then each entry as that
@@ -283,8 +318,8 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
     // than guessing.
     let dir_fs = backend.path_fs_device(&base);
     let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
-    let mut stack = vec![base];
-    let mut budget = 200_000usize; // a tree walk is not a licence to hang
+    let mut budget = WalkBudget::new();
+    let mut stack = vec![base.clone()];
     while let Some(dn) = stack.pop() {
         let entries = match std::fs::read_dir(&dn) {
             Ok(entries) => entries,
@@ -300,13 +335,19 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
             }
         };
         for e in entries.flatten() {
-            if budget == 0 {
-                return;
-            }
-            budget -= 1;
             // `dn`, a `/` unless it ends in one, and the entry's name: the C's
             // spelling, and `DirEntry::path()`'s.
             let path = e.path();
+            if !budget.take(path.as_os_str().len()) {
+                if dir.warn {
+                    eprintln!(
+                        "lsof: WARNING: stopped walking {} after {} entries",
+                        shown(&base),
+                        WALK_ENTRIES - budget.entries
+                    );
+                }
+                return;
+            }
             // The entry is `lstat`ed first; then the two cross-over rules, in
             // the C's order (`arg.c`):
             //
@@ -714,9 +755,11 @@ fn main() {
         // `lsof /dev/vda` means the root filesystem — and then selects every
         // open file on it. `-f` forbids that reading, `+f` forces it and
         // widens the source test to any mount source.
+        // Only a bare path argument is compared with a mount's source, so
+        // only a run that names one asks the backend to spell the sources.
         let mounts = match sel.filesystem_args {
             FilesystemArgs::NeverFilesystem => Vec::new(),
-            _ => env.backend.mounts(),
+            _ => env.backend.mounts(!sel.paths.is_empty()),
         };
         sel.paths_identified = env.backend.identifies_paths();
         // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
@@ -1148,6 +1191,27 @@ mod tests {
         spell_names_as_reported(&mut sel);
         assert_eq!(sel.paths, [typed.clone(), missing]);
         assert_eq!(sel.dir_trees, [typed]);
+    }
+
+    /// A walk stops at whichever limit it meets first, entries or the bytes
+    /// of their names, and never goes below either.
+    #[test]
+    fn a_walk_budget_counts_entries_and_name_bytes() {
+        use super::{WalkBudget, WALK_ENTRIES, WALK_NAME_BYTES};
+        let mut b = WalkBudget::new();
+        let mut taken = 0;
+        while b.take(1) {
+            taken += 1;
+        }
+        assert_eq!(taken, WALK_ENTRIES);
+        let mut b = WalkBudget::new();
+        assert!(b.take(WALK_NAME_BYTES - 1));
+        assert!(b.take(1));
+        assert!(!b.take(1), "no bytes left");
+        assert_eq!(b.entries, WALK_ENTRIES - 2);
+        let mut b = WalkBudget::new();
+        assert!(!b.take(WALK_NAME_BYTES + 1), "one name past the limit");
+        assert_eq!((b.entries, b.bytes), (WALK_ENTRIES, WALK_NAME_BYTES));
     }
 
     #[test]

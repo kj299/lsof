@@ -1226,7 +1226,11 @@ mod tests {
     /// not `stat`. The differential covers the real thing — a process made
     /// unreadable with `PR_SET_DUMPABLE` — on the paths a host can reach.
     fn fake_proc(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lsof_rs_unreadable_{tag}_{}", self_pid()));
+        // The canonical temp directory: the `-e` tests compare a walk through
+        // the kernel's spelling with a prefix, and a symlinked TMPDIR (macOS)
+        // made the two differ.
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tmp.join(format!("lsof_rs_unreadable_{tag}_{}", self_pid()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

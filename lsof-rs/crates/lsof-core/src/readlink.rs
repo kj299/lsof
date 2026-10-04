@@ -66,8 +66,15 @@ pub fn resolve_with(
     // The C recurses, pushing each new spelling onto a stack it counts
     // (`Readlink_sx`); it refuses the next change once it holds MAXSYMLINKS.
     let mut changes = 0;
+    // How much of `path`, from its start, the last reading found to hold no
+    // link and copied as it was. Reading it again asks the same questions and
+    // gets the same answers, so it is not asked: the C does ask, and a chain
+    // of 20 links at the end of a long path cost it 21 readings of the whole
+    // path, each a `readlink(2)` per prefix (a mount source a user chose did
+    // that to every lsof run; see DIVERGENCES 62's review).
+    let mut plain = 0;
     loop {
-        let next = one_pass(&path, &mut read_link)?;
+        let (next, next_plain) = one_pass(&path, plain, &mut read_link)?;
         if next == path {
             return Ok(path);
         }
@@ -76,15 +83,24 @@ pub fn resolve_with(
         }
         changes += 1;
         path = next;
+        plain = next_plain;
     }
 }
 
 /// One reading of `arg`, component by component: the body of the C's loop.
+/// The first `plain` bytes are known to hold no link. Returns the assembly and
+/// how much of it, from its start, was copied from `arg` before any link.
 fn one_pass(
     arg: &[u8],
+    plain: usize,
     read_link: &mut impl FnMut(&[u8]) -> Option<Vec<u8>>,
-) -> Result<Vec<u8>, ReadlinkError> {
+) -> Result<(Vec<u8>, usize), ReadlinkError> {
     let mut out: Vec<u8> = Vec::with_capacity(arg.len());
+    // The end of the components copied before the first link, and whether an
+    // absolute link threw the assembly away, which leaves nothing copied.
+    let mut kept = 0;
+    let mut linked_yet = false;
+    let mut restarted = false;
     // A component runs from `start` (its leading `/`, if any) to the next `/`
     // after its first byte, so `//x` is the components `/`, `/x`.
     let mut start = 0;
@@ -102,17 +118,24 @@ fn one_pass(
         // The C reads at most `MAXPATHLEN` bytes of a link. Linux never gives
         // more than `PATH_MAX - 1`, so that cut never happens, and a target
         // longer than it could not be read again anyway.
-        let target = read_link(prefix);
+        let target = if end <= plain {
+            None
+        } else {
+            read_link(prefix)
+        };
         let (piece, linked): (&[u8], bool) = match &target {
             // An absolute target replaces everything assembled so far.
             Some(t) if t.first() == Some(&b'/') => {
                 out.clone_from(t);
+                linked_yet = true;
+                restarted = true;
                 start = end;
                 continue;
             }
             Some(t) => (t, true),
             None => (&arg[start..end], false),
         };
+        linked_yet |= linked;
         // A `/` between the assembly and the piece, unless one is there: the
         // piece brings its own, or the assembly ends in one. The first
         // component gets one only when it was a link whose own path started
@@ -131,9 +154,12 @@ fn one_pass(
             out.push(b'/');
         }
         out.extend_from_slice(piece);
+        if !linked_yet {
+            kept = end;
+        }
         start = end;
     }
-    Ok(out)
+    Ok((out, if restarted { 0 } else { kept }))
 }
 
 /// `arg` as the C's `Readlink()` spells it, reading the host's links.
@@ -255,6 +281,37 @@ mod tests {
     }
 
     #[test]
+    fn what_a_reading_found_plain_is_not_read_again() {
+        // A chain of 20 links at the end of a path of 100 components: one
+        // reading of the path, then one `readlink` per link, where reading the
+        // whole path again each time cost 21 x 101.
+        let stem = "a/".repeat(100);
+        let mut table: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        for i in 0..20 {
+            table.insert(
+                format!("{stem}l{i}").into_bytes(),
+                format!("l{}", i + 1).into_bytes(),
+            );
+        }
+        let mut asked = 0;
+        let got = resolve_with(format!("{stem}l0").as_bytes(), |p| {
+            asked += 1;
+            table.get(p).cloned()
+        });
+        assert_eq!(got.unwrap(), format!("{stem}l20").into_bytes());
+        assert_eq!(asked, 101 + 20);
+        // An absolute link keeps nothing of the assembly: the next reading
+        // starts with its target, whose first component, `/q`, is a link of
+        // its own though `/a` was not.
+        let links: &[(&str, &[u8])] = &[("/a/abs", b"/q/l"), ("/q", b"/r")];
+        assert_eq!(ok(links, "/a/abs"), "/r/l");
+        // A relative link keeps what came before it, and only that: `a/c`,
+        // which replaced `a/b`, is read, and is a link.
+        let links: &[(&str, &[u8])] = &[("a/b", b"c/l"), ("a/c", b"d")];
+        assert_eq!(ok(links, "a/b"), "a/d/l");
+    }
+
+    #[test]
     fn twenty_changes_are_allowed_and_the_twenty_first_is_refused() {
         // l0 -> l1 -> ... -> lN: N changes, then a reading that changes
         // nothing.
@@ -355,7 +412,10 @@ mod tests {
     #[test]
     fn resolve_reads_the_hosts_links() {
         use std::os::unix::ffi::OsStrExt;
-        let dir = std::env::temp_dir().join(format!("lsof-rs-readlink-{}", std::process::id()));
+        // The canonical temp directory: under a symlinked TMPDIR (macOS)
+        // `Readlink()` rightly replaces the link, and this compares spellings.
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tmp.join(format!("lsof-rs-readlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("rel")).unwrap();
         std::os::unix::fs::symlink("rel", dir.join("rel-link")).unwrap();

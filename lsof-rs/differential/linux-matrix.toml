@@ -784,6 +784,48 @@ name = "path-link-loop-under-dash-Q"
 cwd = "{RDIR}"
 args = ["-F", "pf", "-Q", "-a", "-p", "{R}", "loop1", "rel/x"]
 
+# The messages themselves, with stderr compared (`with_stderr`): the status
+# error names the path `Readlink()` made, and `+f` names the argument as
+# typed. `-w` mutes the C's warnings about the host -- a mount it cannot
+# `stat` as a user who is not root -- and neither of these.
+
+[[case]]
+name = "path-stderr-status-error-names-the-path"
+cwd = "{RDIR}"
+args = ["-w", "-F", "pf", "-a", "-p", "{R}", "{RDIR}/nosuch", "rel/x"]
+with_stderr = true
+
+[[case]]
+# `status error on <spell>/nosuch/f`, the link's target.
+name = "path-stderr-status-error-names-a-links-target"
+cwd = "{RDIR}"
+args = ["-w", "-F", "pf", "-a", "-p", "{R}", "dangle", "rel/x"]
+with_stderr = true
+
+[[case]]
+# `status error on /proc/R/fd/pipe:[N]`.
+name = "path-stderr-status-error-names-a-pipes-link-text"
+args = ["-w", "-F", "pf", "-a", "-p", "{R}", "/proc/{R}/fd/16", "{RDIR}/rel/x"]
+with_stderr = true
+
+[[case]]
+# `status error on <spell>/gone (deleted)`.
+name = "path-stderr-status-error-names-a-deleted-files-link-text"
+args = ["-w", "-F", "pf", "-a", "-p", "{R}", "/proc/{R}/fd/19", "{RDIR}/rel/x"]
+with_stderr = true
+
+[[case]]
+name = "path-stderr-not-a-file-system-names-the-argument-as-typed"
+cwd = "{RDIR}"
+args = ["-w", "-F", "pf", "-a", "-p", "{R}", "+f", "--", "{SHMMNT}", "rel"]
+with_stderr = true
+
+[[case]]
+name = "path-stderr-not-a-file-system-for-a-relative-mount-point"
+cwd = "{SHMDIR}"
+args = ["-w", "-F", "pf", "-a", "-p", "{R}", "+f", "--", "{SHMBASE}"]
+with_stderr = true
+
 [[case]]
 # A `+d`/`+D` the C cannot use ends the run as it parses: usage, exit 1,
 # nothing listed (DIVERGENCES 74). lsof-rs had warned and listed the rest.

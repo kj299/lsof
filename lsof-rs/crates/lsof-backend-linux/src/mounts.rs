@@ -18,7 +18,9 @@ use lsof_core::MountEntry;
 
 /// Read and stat the host's mount table. Unreadable or unstattable rows are
 /// dropped rather than guessed at: a mount we cannot measure cannot be matched.
-pub fn load() -> Vec<MountEntry> {
+/// With `sources`, each mount's source is spelt as well; see
+/// [`lsof_core::Backend::mounts`].
+pub fn load(sources: bool) -> Vec<MountEntry> {
     let Ok(text) = std::fs::read("/proc/self/mounts") else {
         return Vec::new();
     };
@@ -31,7 +33,11 @@ pub fn load() -> Vec<MountEntry> {
             // device file to ask. A directory we cannot stat (a mount we lack
             // permission to traverse) is dropped.
             let device = std::fs::metadata(&row.dir).ok()?.dev();
-            let (source, source_is_block) = source(row.source);
+            let (source, source_is_block) = if sources {
+                source(row.source)
+            } else {
+                (None, false)
+            };
             Some(MountEntry {
                 dir: row.dir,
                 source,
@@ -211,7 +217,10 @@ mod tests {
             (Some("/dev/null".into()), false)
         );
         // One Readlink() gives up on matches nothing.
-        let dir = std::env::temp_dir().join(format!("lsof-rs-mnt-src-{}", std::process::id()));
+        // The canonical temp directory: a symlinked TMPDIR would be replaced
+        // by `Readlink()`, and this compares spellings.
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tmp.join(format!("lsof-rs-mnt-src-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::os::unix::fs::symlink("l2", dir.join("l1")).unwrap();
@@ -241,8 +250,14 @@ mod tests {
     fn the_live_table_is_readable_and_holds_the_root() {
         // A Linux host always has `/` mounted; an empty table would mean the
         // read or the parse silently dropped everything.
-        let m = load();
+        let m = load(true);
         assert!(!m.is_empty(), "expected a non-empty mount table");
+        // A source is spelt when asked for, and not otherwise: `/proc` and the
+        // root file system each have one.
+        assert!(m.iter().any(|e| e.source.is_some()), "{m:?}");
+        assert!(load(false)
+            .iter()
+            .all(|e| e.source.is_none() && !e.source_is_block));
         assert!(m.iter().any(|e| e.dir == "/"), "no root mount: {m:?}");
         // Every entry's device must match what stat says about its directory.
         for e in &m {

@@ -47,6 +47,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   (DIVERGENCES 78). **This changes Windows too.**
 - **When every bare path argument is dropped, the run ends** (DIVERGENCES
   77), whatever `+d`/`+D` supplied, as in the C.
+- **A `+d`/`+D` walk that stops at lsof-rs's limit says so** (DIVERGENCES
+  81): `WARNING: stopped walking DIR after N entries`, unless `-w` came
+  first. The limit, which the C does not have, is 200,000 entries or, new,
+  16 MiB of their names: a tree of links to itself under `-x l` had reached a
+  gigabyte. **This changes Windows too.**
 - **`-a` with nothing to AND is refused**, as the C refuses it (DIVERGENCES
   50): `lsof: no select options to AND via -a`, exit 1. A bare `-a`, or one
   with only exclusions (`-a -p ^1`), `-K i` or `-s`, had listed the whole
@@ -186,6 +191,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 - **`+d`/`+D` entries are named as the C names them** (DIVERGENCES 63): from
   the directory's own spelling, so `+D rel` reports `rel/y`, not
   `$PWD/rel/y`, and `+d rel-link` reports `rel/y`.
+- **`+d`/`+D` with nothing after them** say `+d not followed by a directory
+  path`, the C's words, muted by an earlier `-w`.
+- **A run that names no path reads no mount source.** Only a path argument is
+  compared with one, and spelling a source a user chose could be made slow.
 - **A `+d`/`+D` entry whose name is not UTF-8 is found** (DIVERGENCES 65),
   and `-V` names one it did not find byte for byte (`nu/\xfe`). Names had been
   made lossy, which found nothing. The mount table is read as bytes too.

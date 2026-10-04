@@ -3626,3 +3626,30 @@ finding it is supposed to produce.
 - **Kit change:** PLAYBOOK Phase 4, step 2, adds both checks to the paragraph
   on cases whose outcome is silence.
 - **Section amended:** PLAYBOOK · Phase 4 "The module port loop", step 2.
+
+## 079. A faithful port brought the C's costs with it, to input a user chose
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (path spelling, DIVERGENCES 65, 78, 81)
+- **What happened:** porting the C's `Readlink()` and its `+D` walk carried
+  two costs that the code they replaced did not have. The review found both
+  by measuring with input a user could choose. First, lsof-rs reads the mount
+  table on every run, and now spelt each mount's source with `Readlink()`.
+  That re-reads the whole path once per link it replaces, a `readlink(2)` per
+  prefix each time. A FUSE source of 3,894 bytes ending in 20 links took 2 s
+  per mount on every run; `canonicalize()` had taken 0.1 s. Second, `+D`
+  now follows links under `-x l`, as the C does. A tree of links to itself
+  makes each name longer than the last, and the walk's limit of 200,000
+  entries let it reach 1.1 GB. Neither cost showed up in the differential or
+  the unit tests, which measure answers, not costs. The fixes do the work
+  only where it is needed, since only a path argument is compared with a
+  source. They skip what a reading already found to hold no link, and they
+  bound the walk in bytes as well as entries. The answers are the same as
+  before, checked on 148,320 spellings against the C's own `Readlink()`.
+- **The rule.** A port that takes on the C's behaviour takes on its costs.
+  For a routine that runs on data a user can choose, measure its time and
+  memory on the worst such input at each place it runs. Run it only where
+  its answer is used, and bound what it keeps by size, not only by count.
+- **Kit change:** SECURITY-CHECKLIST, per module: "Bounded cost on hostile
+  input".
+- **Section amended:** SECURITY-CHECKLIST · Per module (Phase 4 gates).

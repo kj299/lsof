@@ -58,7 +58,8 @@ pub struct MountEntry {
     /// What was mounted, as the C's `Readlink()` spells it when it is a path
     /// — `/dev/vda`, or `/dev/mapper/../dm-0` for a link that is relative —
     /// or the name itself when it is none, like `tmpfs` or `proc`. `None`
-    /// when a path could not be read.
+    /// when the table was read without sources ([`Backend::mounts`]), or a
+    /// path could not be read.
     pub source: Option<OsString>,
     /// Whether [`Self::source`] names a block device. lsof accepts a mount's
     /// *source* as a file-system argument only when it is one — `lsof /dev/vda`
@@ -150,7 +151,13 @@ pub trait Backend {
     /// `ck_file_arg`). The rule itself is portable and lives in the CLI —
     /// what a backend supplies is the table. A platform with no such table
     /// returns an empty one, and every path argument is then a plain file.
-    fn mounts(&self) -> Vec<MountEntry> {
+    ///
+    /// Each mount's [`MountEntry::source`] is filled in only with `sources`:
+    /// only a path argument is compared with one, and spelling a source can
+    /// cost what a user who chose it wants it to cost (the C's `Readlink()`
+    /// re-reads a long chain of links up to 21 times), so a run that names
+    /// no path pays nothing for it.
+    fn mounts(&self, _sources: bool) -> Vec<MountEntry> {
         Vec::new()
     }
 

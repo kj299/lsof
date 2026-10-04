@@ -12,7 +12,11 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("lsof-rs-{name}-{}", std::process::id()));
+        // The canonical temp directory: under a symlinked TMPDIR (macOS) the
+        // C's spelling of a path replaces the link, and these tests compare
+        // spellings.
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).expect("a temp directory");
+        let dir = tmp.join(format!("lsof-rs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("make a scratch directory");
         Scratch(dir)
@@ -323,4 +327,31 @@ fn an_empty_path_argument_is_a_status_error() {
         String::from_utf8_lossy(&out.stderr),
         "lsof: status error on : No such file or directory\n"
     );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn a_walk_stops_at_its_budget_and_says_so() {
+    // Two links to `.` under `-x l` make a tree the C never finishes; lsof-rs
+    // stops at its budget of names, quickly, and says so (DIVERGENCES 81).
+    // The names are long so the bytes, not the entries, run out first.
+    let dir = Scratch::new("walk-budget");
+    std::fs::create_dir(dir.0.join("d")).unwrap();
+    for c in ["a", "b"] {
+        std::os::unix::fs::symlink(".", dir.0.join("d").join(c.repeat(250))).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let out = lsof_in(&dir.0, &os(&["-a", "-p", "1", "-x", "l", "+D", "d"]));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("lsof: WARNING: stopped walking d after ")),
+        "{err}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    let out = lsof_in(&dir.0, &os(&["-w", "-a", "-p", "1", "-x", "l", "+D", "d"]));
+    assert!(out.stderr.is_empty(), "-w mutes it");
 }

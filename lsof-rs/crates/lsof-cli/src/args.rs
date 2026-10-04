@@ -245,14 +245,13 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                 // runs where it meets them (see [`enter_dir`]).
                 'd' | 'D' if plus => {
                     let rest: String = chars[j + 1..].iter().collect();
+                    // With no word left the C's `enter_dir()` gets no path,
+                    // and says so in its own words, muted by `-w`.
                     let value = if !rest.is_empty() {
                         rest
                     } else {
                         i += 1;
-                        if i >= args.len() {
-                            return Err(format!("option +{c} requires a path"));
-                        }
-                        args[i].clone()
+                        args.get(i).cloned().unwrap_or_default()
                     };
                     let dir = enter_dir(&value, c == 'D', &sel)?;
                     sel.dir_args.push(dir);
@@ -2179,13 +2178,15 @@ mod tests {
         let walks = |a: &[&str]| run(a).0.dir_args;
         assert!(!walks(&["+d", &d])[0].recursive);
         assert!(walks(&["+D", &d])[0].recursive);
-        // The error text names the option the user actually typed.
-        assert!(parse(vec!["+d".into()])
-            .unwrap_err()
-            .contains("+d requires a path"));
-        assert!(parse(vec!["+D".into()])
-            .unwrap_err()
-            .contains("+D requires a path"));
+        // With nothing after it, the C's own words, for `+D` too, and an
+        // earlier `-w` mutes them.
+        for argv in [&["+d"][..], &["+D"]] {
+            assert_eq!(
+                parse(argv.iter().map(|s| s.to_string()).collect()).unwrap_err(),
+                "+d not followed by a directory path"
+            );
+        }
+        assert_eq!(parse(vec!["-w".into(), "+D".into()]).unwrap_err(), "");
     }
 
     #[test]
