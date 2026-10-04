@@ -52,9 +52,19 @@ disagreeing, and it names the C code so anyone can check the triage.
 - [x] search-p-overflow-wraps-in-the-c [sha256:8285c127bd0a]: C-DEFECT, not
   reproduced — item 49's twin of the `-u` overflow above. `enter_id()` sums
   a PID's digits in an `int` with no overflow check, so `-p 4294967296` is
-  PID 0, which `-V` reports as not located, and 4294967297 is PID 1. lsof-rs
-  refuses an ID that does not fit in 32 bits, as `illegal process ID`. The
-  exit is 1 in both; only the `-V` line differs.
+  PID 0, which `-V` reports as not located. lsof-rs refuses an ID that does
+  not fit in 32 bits, as `illegal process ID`. In this case the exit is 1 in
+  both and only the `-V` line differs; where the wrap lands on a live
+  process, the C lists it and exits 0 (`-p 4294967297` is PID 1, and
+  `-g 4294967296` every PGID-0 process). Between 2^31 and 2^32 the C's `-V`
+  prints the ID negative.
+- [x] fd-number-over-int-max-wraps-in-the-c: C-DEFECT, not reproduced — item
+  51's twin of the `-p` overflow. `enter_fd_lst()` and `ckfd_range()` sum a
+  `-d` number's digits in an `int` too, so 4294967299 is fd 3 to the C, and
+  a range's ends wrap as well (`2147483648-5` is fds 0 to 5). lsof-rs
+  refuses a `-d` number past `INT_MAX`. Where the wrap ends in the C's own
+  refusal (`0-2147483648`, low >= high) the two agree. Not pinned: the diff
+  holds the PID.
 - [x] path-bare-hardlink: DECISION — the NAME cell only. Both binaries find
   the same fd on the same inode when a file is queried through a hard link;
   they disagree on what to call it. The C substitutes **the name you asked
@@ -134,6 +144,11 @@ and `-u ^`. Two more of the readers' rules came with them:
   (`illegal process ID: 1 2`); lsof-rs had split `-p` and `-g` at spaces too.
 - A `-u` item may be 32 bytes at most after its `^` (`LOGINML`), whatever
   it holds: 33 digits are refused, where lsof-rs read them as a UID.
+- A UID both selected and excluded, `-u ,^` among them, ends the run while
+  the C parses `-u`, so before it acts on `-h` or `-v`. lsof-rs found the
+  conflict only when it resolved users, after printing the help; it now
+  finds a numeric one while it parses. A login name still waits for the
+  backend (row 73).
 
 One difference stays: the C sums the digits of `-p` and `-g` in an `int`
 with no overflow check, so `-p 4294967296` is PID 0 and `-p 4294967297` PID
@@ -153,6 +168,9 @@ kinds. The rest of `enter_fd_lst()`'s grammar came with it:
   nothing to AND, and `-d ""` is an error;
 - a range needs digits on both sides of its last `-`, and a low end below
   its high one: `3-3` is refused, where lsof-rs took it as fd 3;
+- a number is at most `INT_MAX`. The C's `int` wraps a larger one, so
+  `-d 4294967299` is fd 3 to it: a C-DEFECT, not reproduced, ledgered as
+  `fd-number-over-int-max-wraps-in-the-c`. lsof-rs refuses it;
 - the names are the C's table. `fd` is every numbered descriptor, `unk` one
   of unknown kind, and the names of other dialects' kinds (`ltx`, `ctty`,
   `jd.`, …) are accepted and select nothing here. lsof-rs refused all but
@@ -166,39 +184,59 @@ an exclusion-only `-d`, `-K`, and `+L` with any count, `+L0` too, set one.
 lsof-rs listed the whole host. It now asks `Selection::specified()`, which
 already mirrored the C's flags. `-h` and `-v` still come first.
 
-**Error messages quote the argument escaped**, as the C's `safestrprt()`
-prints it: `-p $'1\e[2J'` reports `illegal process ID: 1^[[2J`.
+**An argument a message quotes is escaped where the C escapes it**, with
+`safestrprt()`: `-p $'1\e[2J'` reports `illegal process ID: 1^[[2J`, and so
+do a `-d` range and a long `-u` name. The `-d` mixture message quotes the
+item raw, as the C's `fprintf()` does.
 
 These rules hold on Windows too, where the C has no say. A space in a `-p`
 or `-g` list is refused there now, and a script that relied on it must use
-commas; a mixed `-d` list and a bare `-a` are refused as well.
+commas; a mixed `-d` list and a bare `-a` are refused as well. An empty item
+is ID 0 there too: `-p ,` is the System Idle Process, `-g ,` its children,
+and `-u ,` a user named `0`, as Windows reads every `-u` value by name.
 
 ### What the gate gained
 
-Thirty-six differential cases, 331 in all, 0 unexplained; one is the
-ledgered overflow. Fixture A carries the `-p`, `-g` and `-d` cases, and
-fixture W, whose two processes' owners are known, the `-u` ones. Against
-master's binary, 29 of the 36 diverge. Of the other seven, four are
-controls, the overflow diverges there too, and two `,^` cases end in a
-refusal on master for another reason: the same empty stdout and exit 1.
+Forty differential cases, 335 in all, 0 unexplained; two are the ledgered
+overflows. Fixture A carries the `-p`, `-g` and `-d` cases, and fixture W,
+whose two processes' owners are known, the `-u` ones. The suite passes run
+as root and as a user who is not root but has passwordless sudo. Against
+master's binary, 29 of the 40 diverge, and the two overflows diverge there
+too. Of the other nine, six are controls, and three end in a refusal on
+master for another reason: the same empty stdout and exit 1.
 
 Unit tests pin every rule above, spelling by spelling, and two integration
 tests run the binary for what only stderr shows: the argument escaped, and
 the refusal `-t` mutes ending the run all the same.
 
-Mutants: 21, all killed. Each item's rules have their own: the `-d` list
-kept to its last option, a mixture allowed or made loud under `-t`, an empty
-item entered, `-d ""` allowed, `3-3` allowed, `fd` or another dialect's name
-refused, a leading `-` taken, duplicates kept; an empty `-p` item skipped or
-made illegal, a space splitting, a lone `^` refused; an empty `-u` item
-dropped, the length unchecked, counted with its `^`, or off by one; the `-a`
-check gone; and the stderr message printed raw, or printed when muted. The
-two `,^` cases that master matches by accident are not hollow: they kill the
-mutants that skip an empty item.
+Mutants: 26, all killed. The first run had 21; after the review's fixes,
+24 ran against the final code, 19 of the first and 5 new (the other two
+targeted code the fixes removed). Each item's rules have their own: the
+`-d` list kept to its last option, a mixture allowed or made loud under
+`-t`, an empty item entered, `-d ""` allowed, `3-3` allowed, a number past
+`INT_MAX` taken, `fd` or another dialect's name refused, a leading `-`
+taken; an empty `-p` item skipped or made illegal, a space splitting, a
+lone `^` refused; an empty `-u` item dropped, the length unchecked, counted
+with its `^`, or off by one; a UID conflict found only after `-h`; the `-a`
+check gone; and each quoted argument left raw, or a muted message printed.
+The two `,^` cases that master matches by accident are not hollow: they
+kill the mutants that skip an empty item.
 
-**The review.** An independent sweep against the C and master, and a
-reading of the change, was still running when this was first committed; its
-findings are recorded here when it reports.
+**The review.** An independent sweep ran 648 spellings against the C and
+master, and 2,900 more drawn at random over the four lists, and read the
+change. Everything matched but these, each now fixed or recorded:
+- `-u ,^ -h` printed the help and exited 0, where the C refuses the
+  conflict first. Fixed for numeric UIDs; a login name is row 73.
+- A `-d` number past `INT_MAX`: the first version saturated it, so
+  `-d 0-18446744073709551616` was every fd where the C refuses the range.
+  Now refused, and the C's wrap ledgered.
+- The overflow entry's text claimed only the `-V` line differs; a wrap that
+  lands on a live PID lists it in the C. Corrected.
+- The first version looked each `-d` item up in the list before adding it:
+  102,852 items took 6.6 s, master 0.04 s, the C 10.2 s. Repeats are kept
+  now, which no output can show, and the same list takes 0.05 s.
+- It escaped every error message whole, so a message built with `{:?}`
+  (`-e`) was escaped twice. Arguments are escaped where they are quoted.
 
 Not gated by the differential: the stderr messages, which unit and
 integration tests pin, and Windows, where no oracle runs. The same parser
@@ -2606,6 +2644,7 @@ likely right; it is a compatibility decision, not a backend phase.
 | 70 | a **login name** is what glibc returns, cut to 32 bytes (`LOGINML`), printed raw in USER and `-F L`, and re-read when `/etc/passwd` changes between `-r` cycles | lsof-rs parses `/etc/passwd` itself, by its own rules (no blank-stripping, comments, `+`/`-` entries or field checks), keeps the whole name, escapes it, and reads the file once | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. The raw print is arguably a C-DEFECT like item 59: a name can hold an escape sequence. Item 39 is the NSS sources beyond the file. |
 | 71 | USER is padded by **bytes**, so `jöhn` fills a 5-wide column | pads by characters after sizing by bytes, so a multibyte name is shifted one column per extra byte | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. USER is the one padded column that can hold multibyte text unescaped. |
 | 72 | under `-K -a`, a **zombie leader's** tasks are still read, with the leader's owner, so they locate `-u` and `-p` though they fail the AND | reads tasks only for processes that pass the AND, and has no entry for a zombie, so `user ID not located` (exit 1) where the C exits 0 | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. Only a zombie leader shows it; item 33's task scope holds for a live process, which keeps its own entry. |
+| 73 | a `-u` error the C finds while it parses — a login name `getpwnam()` cannot resolve, or a login name and a UID both selected and excluded — ends the run before `-h`, `-v` or `-F ?` is acted on: nothing on stdout, exit 1 | resolves login names after acting on those, so `lsof -u nosuchuser -h` prints the help and exits 0. A numeric UID's conflict is found while parsing, as in the C (`-u ,^ -h` exits 1) | **OPEN — found 2026-10-03** by the item 49/69 review, and on master for every spelling with a name. Resolving a name needs the backend, which the run builds after `-h`, `-v` and `-F ?` are handled. |
 | 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of

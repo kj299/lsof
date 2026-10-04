@@ -469,11 +469,12 @@ fn main() {
     let action = match parse(argv) {
         Ok(a) => a,
         Err(e) => {
-            // Escaped, as `safestrprt()` prints an argument back. An error
-            // the C makes in silence under `-w` or `-t` comes back empty: the
-            // run still ends, with the usage hint alone.
+            // An argument is escaped where the message quotes it, as the C
+            // escapes it with `safestrprt()` where it does. An error the C
+            // makes in silence under `-w` or `-t` comes back empty: the run
+            // still ends, with the usage hint alone.
             if !e.is_empty() {
-                eprintln!("lsof: {}", Escaper::for_host().text(&e));
+                eprintln!("lsof: {e}");
             }
             eprintln!("Try 'lsof -h' for usage.");
             std::process::exit(1);

@@ -1484,6 +1484,17 @@ name = "search-u-zero-included-and-excluded-is-fatal"
 args = ["-t", "-u", ",^"]
 
 [[case]]
+# The C finds that conflict while it parses -u, so before it acts on -h: no
+# help, and exit 1. lsof-rs had printed the help and exited 0.
+name = "search-u-conflict-beats-help"
+args = ["-u", ",^", "-h"]
+
+[[case]]
+# The same for -p, which lsof-rs already checked while it parsed.
+name = "search-p-conflict-beats-help"
+args = ["-p", "{A},^{A}", "-h"]
+
+[[case]]
 # A -u item longer than a login name can be, 32 bytes (`LOGINML`), is refused
 # whatever it holds; lsof-rs read these 33 digits as UID 0.
 name = "search-u-33-characters-are-refused"
@@ -1551,6 +1562,18 @@ args = ["-n", "-P", "-a", "-p", "{A}", "-d", "foo"]
 # A range's low end must be below its high: lsof-rs took 3-3 as fd 3.
 name = "fd-range-low-not-below-high-is-fatal"
 args = ["-n", "-P", "-a", "-p", "{A}", "-d", "3-3"]
+
+[[case]]
+# A range past INT_MAX ends the run in both: the C's `int` wraps the high
+# end below the low one, and lsof-rs refuses a number it cannot hold.
+name = "fd-range-past-int-max-is-fatal"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "0-2147483648"]
+
+[[case]]
+# LEDGERED (C-DEFECT). The C's `int` wraps 4294967299 to fd 3, and lists it.
+# lsof-rs refuses a -d number past INT_MAX.
+name = "fd-number-over-int-max-wraps-in-the-c"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "4294967299"]
 
 # -------------------------------------------------- -a with nothing to AND
 # `main.c` refuses -a when no selection flag is set: nothing on stdout, exit

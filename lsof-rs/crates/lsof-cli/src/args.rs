@@ -12,7 +12,7 @@
 
 use lsof_core::model::tcp_state_table;
 use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
-use lsof_core::render::{FileFlags, Format, DEFAULT_OFFSET_DIGITS};
+use lsof_core::render::{Escaper, FileFlags, Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
     CommandMatch, CommandWidth, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs, Protocol,
@@ -678,6 +678,22 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
     // item, reported once if it is not found.
     dedup_ids(&mut sel.pids, &sel.pid_excludes, "PID")?;
     dedup_ids(&mut sel.pgids, &sel.pgid_excludes, "PGID")?;
+    // A UID both selected and excluded, found as the C finds it: while it
+    // parses, so before `-h` or `-v` is acted on. A login name waits for the
+    // backend to resolve it (DIVERGENCES 73).
+    let uid = |v: &String| {
+        (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| v.parse::<u32>().ok())
+            .flatten()
+    };
+    if let Some(both) = sel
+        .users
+        .iter()
+        .filter_map(uid)
+        .find(|u| sel.user_excludes.iter().filter_map(uid).any(|x| x == *u))
+    {
+        return Err(format!("UID {both} has been included and excluded."));
+    }
     // A state both included and excluded, from any two `-s` options. The C
     // checks this once every option is read and names the state as its table
     // spells it, first by table order.
@@ -797,13 +813,12 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
             Some((lo, hi)) => FdSpec::Range(lo, hi),
             None => fd_named(body)?,
         };
-        let list = if exclude {
-            &mut f.exclude
+        // A repeat is kept, not looked for: matching takes the first hit, and
+        // a search per item made a long list quadratic to enter.
+        if exclude {
+            f.exclude.push(spec);
         } else {
-            &mut f.include
-        };
-        if !list.contains(&spec) {
-            list.push(spec);
+            f.include.push(spec);
         }
     }
     Ok(())
@@ -812,24 +827,42 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
 /// `ckfd_range()`: digits on both sides of an item's last `-`, the low end
 /// below the high one. `3-3` is refused, and `1-` is a high end of 0.
 fn fd_range(item: &str, dash: usize) -> Result<(u64, u64), String> {
+    let shown = Escaper::for_host().text(item);
     if dash == 0 {
-        return Err(format!("illegal FD range for -d: {item}"));
+        return Err(format!("illegal FD range for -d: {shown}"));
     }
     let number = |digits: &str| {
-        digits
-            .bytes()
-            .try_fold(0u64, |n, b| {
-                b.is_ascii_digit()
-                    .then(|| n.saturating_mul(10).saturating_add(u64::from(b - b'0')))
-            })
-            .ok_or_else(|| format!("non-digit in -d FD range: {item}"))
+        if digits.bytes().all(|b| b.is_ascii_digit()) {
+            fd_number(digits, item)
+        } else {
+            Err(format!("non-digit in -d FD range: {shown}"))
+        }
     };
     let lo = number(&item[..dash])?;
     let hi = number(&item[dash + 1..])?;
     if lo >= hi {
-        return Err(format!("-d FD range's low >= its high: {item}"));
+        return Err(format!("-d FD range's low >= its high: {shown}"));
     }
     Ok((lo, hi))
+}
+
+/// A `-d` number, all digits, of at most `INT_MAX`. The C sums the digits in
+/// an `int` with no overflow check, so a larger one wraps: `-d 4294967299` is
+/// fd 3 to it. Refused here instead, a C-DEFECT not reproduced.
+fn fd_number(digits: &str, item: &str) -> Result<u64, String> {
+    const INT_MAX: u64 = i32::MAX as u64;
+    digits
+        .bytes()
+        .try_fold(0u64, |n, b| {
+            let n = n * 10 + u64::from(b - b'0');
+            (n <= INT_MAX).then_some(n)
+        })
+        .ok_or_else(|| {
+            format!(
+                "-d FD number exceeds INT_MAX: {}",
+                Escaper::for_host().text(item)
+            )
+        })
 }
 
 /// The names of FD kinds the C's table has for dialects other than Linux's
@@ -843,10 +876,7 @@ const OTHER_DIALECTS_FD_NAMES: [&str; 10] = [
 /// `fd` is every numbered descriptor, 0 to `INT_MAX`.
 fn fd_named(name: &str) -> Result<FdSpec, String> {
     if name.bytes().all(|b| b.is_ascii_digit()) {
-        let n = name.bytes().fold(0u64, |n, b| {
-            n.saturating_mul(10).saturating_add(u64::from(b - b'0'))
-        });
-        return Ok(FdSpec::Num(n));
+        return Ok(FdSpec::Num(fd_number(name, name)?));
     }
     Ok(match name {
         "cwd" => FdSpec::Named(FdKind::Cwd),
@@ -889,7 +919,11 @@ fn parse_id_list(value: &str, what: &str) -> Result<Vec<(bool, u32)>, String> {
             None
         };
         let Some(id) = id else {
-            return Err(format!("illegal {what}: {value}"));
+            // `safestrprt(p, …)`: the whole argument, escaped.
+            return Err(format!(
+                "illegal {what}: {}",
+                Escaper::for_host().text(value)
+            ));
         };
         ids.push((excl, id));
         rest = tail;
@@ -938,7 +972,10 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                     None => (false, item),
                 };
                 if name.len() > LOGINML {
-                    return Err(format!("-u login name > {LOGINML} characters: {item}"));
+                    return Err(format!(
+                        "-u login name > {LOGINML} characters: {}",
+                        Escaper::for_host().text(item)
+                    ));
                 }
                 let name = if name.is_empty() { "0" } else { name };
                 if excl {
@@ -1518,11 +1555,6 @@ mod tests {
             f.exclude,
             [FdSpec::Named(FdKind::Cwd), FdSpec::Named(FdKind::Rtd)]
         );
-        assert_eq!(
-            fd(&["-d", "3,3", "-d", "3"]).unwrap().unwrap().include,
-            [FdSpec::Num(3)],
-            "a repeat is one entry"
-        );
         // An item of the other kind, in one list or across two, is refused,
         // and named: a range as the C reads it.
         assert_eq!(
@@ -1573,6 +1605,48 @@ mod tests {
             fd(&["-d", "01"]).unwrap().unwrap().include,
             [FdSpec::Num(1)]
         );
+        // A number is at most `INT_MAX`: the C's `int` wraps a larger one.
+        assert_eq!(
+            fd(&["-d", "2147483647"]).unwrap().unwrap().include,
+            [FdSpec::Num(2147483647)]
+        );
+        for item in [
+            "2147483648",
+            "4294967299",
+            "0-2147483648",
+            "99999999999999999999-1",
+        ] {
+            assert_eq!(
+                fd(&["-d", item]).unwrap_err(),
+                format!("-d FD number exceeds INT_MAX: {item}")
+            );
+        }
+        // An argument these messages quote comes back escaped.
+        assert_eq!(
+            fd(&["-d", "1-2\x1b"]).unwrap_err(),
+            "non-digit in -d FD range: 1-2^["
+        );
+    }
+
+    /// A UID both selected and excluded ends the run before `-h` or `-v` is
+    /// acted on, as the C finds it while it parses `-u`. Login names are
+    /// resolved later, by the backend (DIVERGENCES 73).
+    #[test]
+    fn a_uid_selected_and_excluded_beats_help_and_version() {
+        let both = Err("UID 0 has been included and excluded.".to_string());
+        for argv in [
+            &["-u", ",^", "-h"][..],
+            &["-h", "-u", ",^"],
+            &["-u", "^,0", "-v"],
+            &["-u", "0,^00"],
+        ] {
+            let got = parse(argv.iter().map(|s| s.to_string()).collect()).map(|_| ());
+            assert_eq!(got, both, "{argv:?}");
+        }
+        assert!(matches!(
+            parse(vec!["-u".into(), "0,^root".into(), "-h".into()]),
+            Ok(Action::Help)
+        ));
     }
 
     /// `-p`, `-g` and `-u` lists as the C reads them (DIVERGENCES 49, 69):
@@ -1622,6 +1696,12 @@ mod tests {
         assert_eq!(sel(&["-u", &long[1..]]).unwrap().users, [&long[1..]]);
         let excl = format!("^{}", &long[1..]);
         assert_eq!(sel(&["-u", &excl]).unwrap().user_excludes, [&long[1..]]);
+        // The refusal quotes the item escaped.
+        let hostile = format!("{}\x1b[2J", "a".repeat(30));
+        assert_eq!(
+            sel(&["-u", &hostile]).unwrap_err(),
+            format!("-u login name > 32 characters: {}^[[2J", "a".repeat(30))
+        );
     }
 
     /// `-a` with nothing to AND is refused, as the C refuses it (DIVERGENCES

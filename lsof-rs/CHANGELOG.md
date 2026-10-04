@@ -158,14 +158,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **Repeated `-d` options add up**, as in the C (DIVERGENCES 51): `-d 3 -d 4`
   selects both fds, where lsof-rs kept only the last `-d`. The C's names are
-  accepted, `fd` (every numbered fd) among them, and a range needs its low
-  end below its high one.
+  accepted, `fd` (every numbered fd) among them, a range needs its low end
+  below its high one, and a number past `INT_MAX` is refused (the C's `int`
+  wraps it).
 - **An empty item in a `-p`, `-g` or `-u` list is ID 0** (DIVERGENCES 49,
   69): `lsof -p ,` looks for PID 0 and exits 1, where lsof-rs listed the
   whole host, `-u ,` selects root, and a `^` alone excludes ID 0. A `-u` item
-  over 32 bytes is refused, as no login name is that long.
-- **Error messages quote the argument escaped**, as the C's `safestrprt()`
-  does, so a control character in an argument cannot reach the terminal.
+  over 32 bytes is refused, as no login name is that long, and a UID both
+  selected and excluded is refused before `-h` or `-v` is acted on.
+- **An argument an error message quotes is escaped** where the C escapes it
+  with `safestrprt()`: an illegal `-p` or `-g` list, a `-d` range, a long
+  `-u` name. A control character there no longer reaches the terminal.
 - **A process's owner is its effective uid** (DIVERGENCES 55), as the C takes
   it from the owner of `/proc/<pid>/`. A process running with real uid 0 and
   effective uid 65534 showed `root` and escaped `-u nobody`; the USER column,
