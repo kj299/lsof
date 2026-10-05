@@ -97,8 +97,9 @@ whole phase therefore runs concurrently under a **single 5-second budget**;
 whatever has not reported by then is omitted, and the run continues.
 
 In practice every process reports in well under the budget. It can bite on a
-heavily loaded machine *when elevated*, because `SeDebugPrivilege` makes these
-reads genuinely succeed against hundreds of processes rather than failing fast —
+heavily loaded machine *when elevated*, because an administrator's token makes
+these reads genuinely succeed against hundreds of processes rather than failing
+fast (`SeDebugPrivilege` is enabled later, for the handle scan alone) —
 so a few processes may show no `cwd`/`txt`/`mem` rows. Set `LSOF_RS_TRACE=1` to
 see a `per-process extras N/M within budget` line whenever anything was dropped.
 (On a binary from v1.0.1 or earlier the variable is `WINLSOF_TRACE`, the name
@@ -212,16 +213,23 @@ meet. Each number is a row there, with the measurement behind it.
 - **Refused, where the C works:** `-c /regex/`, and host or service names in
   `-i` (38); `-b` and `-S` (94); a path argument that is not UTF-8 (92); `-Z`,
   where SELinux is mounted (29: the CONTEXT column is not built).
-- **Linux:** `-E`/`+E` are accepted and ignored (56); netlink and AF_VSOCK
-  sockets, and a TCP socket that is bound but not listening, show as `SOCK`
-  `socket:[N]` (22, waiting on a decision); a login name is read from
-  `/etc/passwd` only, so an LDAP or SSSD account can be named by its UID alone
-  (39); run as non-root, a device that a process in another mount namespace
-  maps is not found by its path (101).
+- **Linux, and worth knowing before running it on a busy host:** every run but
+  `-f` `stat`s every mount point, in-process and with no timeout, `-i`
+  included: a hung NFS server stops it, and each run mounts every automount
+  point it lists (110). The C bounds those `stat`s and skips them under `-i`.
+- **Linux:** `-E`/`+E` are accepted and ignored (56); AF_VSOCK, ping and
+  unbound netlink sockets, and a TCP socket that is bound but not listening,
+  show as `SOCK` `socket:[N]` (22, waiting on a decision); a raw socket is
+  `IPv4`/`IPv6` and a bound netlink socket `SOCK`, where the C reads their
+  tables (108, 109); a login name is read from `/etc/passwd` only, so an LDAP
+  or SSSD account can be named by its UID alone (39); run as non-root, a device
+  that a process in another mount namespace maps is not found by its path
+  (101); `-f` with `-e` is refused (113).
 - **Output shape:** the JSON from `-J`/`-j` has lsof-rs's own schema, not the
   C's (91), and under `-K` a task's object repeats its process's (61); a byte
   that is not UTF-8 prints as U+FFFD, where the C prints `\xff` (93); `-F`,
-  `-J` or `-j` with `-t` is accepted, where the C refuses it (90).
+  `-J` or `-j` with `-t` is accepted, where the C refuses it (90); `-h` writes
+  its help to stdout, where the C writes the usage to stderr (114).
 - **Deliberate:** options after the first file name are still options (12);
   NAME shows the name the process opened, not the one you asked about (17); a
   `+d`/`+D` walk stops at 200,000 entries or 16 MiB of names, and says so (81).

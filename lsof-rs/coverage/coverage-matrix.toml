@@ -432,7 +432,7 @@ covers = ["type:unknown"]
 [[case]]
 name = "linux/type-codes-from-st_mode"
 args = []
-covers = ["type:REG", "type:DIR", "type:CHR", "type:BLK", "type:FIFO", "type:SOCK", "type:LINK", "type:unknown"]
+covers = ["type:REG", "type:DIR", "type:CHR", "type:BLK", "type:FIFO", "type:SOCK", "type:LINK"]
 
 [[case]]
 name = "linux/device-node-rdev"
@@ -577,6 +577,23 @@ covers = ["type:unix"]
 # written, and each turned out to be larger than the plan sized it — `-X` does
 # not skip TCP/UDP files, `-x` is the switch for a `+d` rule lsof-rs had
 # backwards, and `-e` is a whole row shape rather than argument validation.
+[[case]]
+# Fixture G's anonymous inodes (eventpoll, eventfd, inotify, pidfd): TYPE
+# a_inode, as the C types them. Until 2026-10-04 `type:a_inode` was still on
+# the Linux waiver, so deleting this fixture would have failed nothing.
+name = "linux/differential-anon-inode-kinds"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:a_inode"]
+
+[[case]]
+# Fixture L's sockets, in a user and network namespace of their own: TYPE
+# sock, NAME the kernel's `protocol: …`. Fixture L runs on CI (fixture J's
+# netns twin needs CAP_SYS_ADMIN and does not), so this is the case that holds
+# `type:sock`, which had been waived as well.
+name = "linux/differential-userns-sockets-show-the-kernels-protocol-name"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:sock"]
+
 [[case]]
 name = "linux/differential-opt-X-degrades-inet-rows"
 args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-p", "PID"]

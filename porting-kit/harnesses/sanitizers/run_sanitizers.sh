@@ -51,7 +51,10 @@ is_valid_san() {
 }
 
 if [[ "${1:-}" == "--check" ]]; then
-  bash -n "$0" && echo "PASS  script syntax ok"
+  # `bash -n "$0" && echo PASS` could not fail this check: under `set -e` a
+  # failing command inside an `&&` list does not stop the script (LESSONS #082).
+  if bash -n "$0"; then echo "PASS  script syntax ok"
+  else echo "FAIL  this script does not parse"; exit 1; fi
   # POSITIVE fixture: the sanitizers this script actually dispatches to.
   for s in address thread; do
     is_valid_san "$s" || { echo "FAIL  is_valid_san rejects a real sanitizer: $s"; exit 1; }

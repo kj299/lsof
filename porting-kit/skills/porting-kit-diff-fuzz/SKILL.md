@@ -7,7 +7,8 @@ description: Differential-fuzz a C-to-Rust port — feed the same mutated input 
 
 <!-- KIT-IMPORT: from the c2rust-port lineage of this kit.
      Re-cited: #1->#001, #4->#004, #6->#036, #8->#043;
-     #16, #28, #42 and #43 by title (no entries in this log). -->
+     #16, #28, #42 and #43 by title (no entries in this log).
+     Local: #084 (argv mode). -->
 
 Wraps `porting-kit/harnesses/diff-fuzz/diff_fuzz.py`. Complements the fixed-matrix
 differential (`porting-kit-oracle` / `diff_run.py`) and the crash-only fuzz gate
@@ -29,6 +30,12 @@ stores stdout for the inputs it captured, and the fuzzer's inputs never were.
    --max-time 300`
    Inputs are fuzzed on stdin by default; fixed argv goes in `--args`. `--seed N`
    makes the run reproducible; `--iterations N` bounds it instead of wall-clock.
+   **A tool whose input is its command line** fuzzes argv instead:
+   `--argv-inventory <coverage inventory>` draws options from the C's own option
+   letters, spelt every way getopt offers them, with `--args` as a fixed prefix
+   (anchor it to a fixture), `--argv-value` for values only your fixtures make
+   sense of, and `--argv-exclude` for letters that cannot be compared (one that
+   repeats for ever). Run it from an empty directory (LESSONS #084).
 2. **Read verdicts, not corpora** (the token-firewall rule): the tool prints one
    line per *distinct* divergence (deduped and minimized), not per input. Use
    `--json` for machine output. Each finding is saved as `<fp>.input` (the smallest

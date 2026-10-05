@@ -1521,6 +1521,13 @@ the emphasized half.
   harnesses/golden/golden.py, harnesses/c-flaw-scan/scan_c_flaws.py,
   harnesses/ci/porting-ci.template.yml (+ their self-tests).
 
+*[2026-10-04, here: of this entry's fixes, the fuzz CI's refusal of an empty
+target list and the sanitizer job's `rust-src` reached this copy only now, in
+the CI template and lsof-rs's CI (this log's entry 082). Still not here: `golden.py`'s
+refusal to capture a timed-out golden and its `.rc` sidecars, which PLAYBOOK
+Phase 2 now warns about; and the "gates fail closed" sentence in PLAYBOOK and
+PROMPTS/90 step 0. Imported entries describe the source lineage's kit.]*
+
 ---
 
 ## 037. An allow-list must ASSERT the accepted state, not merely SUPPRESS it
@@ -1578,6 +1585,11 @@ the emphasized half.
   and RETROSPECTIVE-kit-audit.md (the finding inventory + the v1.x backlog of
   what was NOT fixed).
 
+*[2026-10-04, here: neither fix is in this copy. `audit_unsafe.py` still
+counts a `SAFETY:` inside a string literal (clippy's
+`undocumented_unsafe_blocks` is the backstop), and `scan_c_flaws.py` has no
+`memcpy`/`memmove` rule; the primary line's scanner does.]*
+
 ---
 
 ## 038. The C is a SPEC, and only the oracle knows what it says
@@ -1622,6 +1634,9 @@ the emphasized half.
 - **Section amended (source lineage):** PROMPTS/10-module-port.md · step 0; PLAYBOOK · Phase 4
   entry criteria; skills/porting-kit-module/SKILL.md; RETROSPECTIVE-cjson.md · §2.
 
+*[2026-10-04, here: probe-then-port is in none of this copy's process docs;
+`probe.py` runs only its self-test, as README says.]*
+
 ---
 
 ## 039. A gate that has nothing to check is not a passing gate
@@ -1658,6 +1673,13 @@ the emphasized half.
   0-block report); ports/cjson/check.sh; .github/workflows/check-kit.yml;
   RETROSPECTIVE-cjson.md · §3.
 
+*[2026-10-04, here: `audit_unsafe.py` says NOTHING-TO-AUDIT since this log's
+entry 082, and exits 2 on a path that is not there, which entry 036 calls
+failing closed. The two remedies are not opposed: an input that really holds nothing
+is reported, an input that is not there is refused. Neither side's audit emits
+`blocks_found`, so the progress guard this entry describes cannot fire on
+either.]*
+
 ---
 
 ## 040. Scope each increment's differential to what it can decide
@@ -1686,6 +1708,9 @@ the emphasized half.
 - **Section amended (source lineage):** PLAYBOOK · Phase 2 "Do"; PROMPTS/00-new-port-kickoff.md;
   skills/porting-kit-oracle/SKILL.md; ports/cjson/oracle/gen_corpus.py (the worked
   reference); RETROSPECTIVE-cjson.md · §4.
+
+*[2026-10-04, here: PLAYBOOK Phase 2 does not tag corpus vectors by
+module; the change is the source lineage's.]*
 
 ---
 
@@ -1725,6 +1750,9 @@ the emphasized half.
   (step 1b); PLAYBOOK · Phase 4 entry criteria; PROMPTS/10-module-port.md ·
   step 0; skills/porting-kit-module/SKILL.md · step 0.
 
+*[2026-10-04, here: the harness is vendored; the steps that make a port use
+it (PROMPTS/10 step 0, the module skill) are not.]*
+
 ---
 
 ## 042. Verifying the artifacts that exist says nothing about the one that is missing
@@ -1760,6 +1788,9 @@ the emphasized half.
 - **Section amended (source lineage):** harnesses/probe/probe.py (`cmd_coverage` + self-test);
   ports/cjson/check.sh (step 1b coverage); PLAYBOOK · Phase 4 entry criteria;
   PROMPTS/10-module-port.md · step 0; RETROSPECTIVE-probe-harness.md · §3.
+
+*[2026-10-04, here: as for the entry above — `probe.py coverage` exists; no
+process doc here asks for it.]*
 
 ---
 ## 043. An acceptance list that matches by name becomes a permanent mute button
@@ -2089,6 +2120,14 @@ the emphasized half.
   a ledger asserting that every platform the build system can select is either
   built by some CI config or explicitly waived — named here, not built.
 - **Section amended:** `porting-kit/skills/porting-kit-audit/SKILL.md`
+
+*[2026-10-04: on this fork the three providers named here never ran. The
+GitHub API shows only Actions (and claude) check suites, and no commit status,
+on every commit since the fork that was checked: upstream's `.cirrus.yml` and
+`.builds/` came with the fork, and no one connected Cirrus or sourcehut to it.
+The lesson stands — a status list is one provider's view — but its evidence
+here was upstream's CI, and the dialects it kept are waived now
+(LESSONS #082).]*
 
 ---
 
@@ -2567,6 +2606,11 @@ gate you have not seen fail is a gate you have not tested.
   have hit it, which turned out to cite none of the moved entries — the first
   change to this tool made ahead of the failure instead of after it.
 
+*[2026-10-04: the ledger this entry built read `.cirrus.yml` and
+`.builds/` as evidence, and certified FreeBSD, NetBSD and OpenBSD as CI-built;
+no provider runs those files for this fork. A config file is a claim; the
+evidence is a run. Fixed in the manifest (LESSONS #082).]*
+
 ---
 
 ## 058. A skip counter is where a gate hides
@@ -2706,6 +2750,11 @@ finding it is supposed to produce.
   ad-hoc script. Recorded here so the next person writing one starts from the
   requirement.
 - **Section amended:** none — this is a method entry.
+
+*[2026-10-04: met for a port's own mutants by
+`harnesses/port-mutation/mutate_port.py`, which refuses an edit that does not
+apply (LESSONS #083). The kit's gates had had `mutate_gates.py`, which enforces
+the same, since the day before this entry.]*
 
 ---
 
@@ -3745,3 +3794,183 @@ finding it is supposed to produce.
   from a tmpfs; its flocks on shared files are shared and never wait; and a
   run records each mount as it makes it and undoes them all on SIGTERM.
 - **Section amended:** `lsof-rs/differential/linux_diff.py` (fixture P).
+
+---
+
+## 082. Asked what it does with input that is missing, misspelt, empty or only described, a gate this repo runs passed nine times
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs and this kit (the retrospective of 2026-09-02 → 2026-10-04)
+- **What happened:** the retrospective's integrity sweep put one question to
+  each gate that runs on this repository's real input: what does it do when
+  its input is missing, misspelt, empty, or present only as a description?
+  Nine passed where they should have failed:
+  - `audit_unsafe.py`, the hard gate on the Windows backend's 139 `unsafe`
+    blocks, given a directory that is not there, printed `unsafe blocks: 0`
+    and exited 0. CI passes it a literal path; a rename would have passed.
+  - `diff_run.py` ignored a case key it did not know, so `with_stdrr = true`
+    or `keep_whitespce = true` ran the case without the comparison it named,
+    and it still MATCHed. The matrix uses `cwd`, `with_stderr` and `env`.
+  - control-coverage counted `scan_c_flaws.py --self-test` as running the
+    control: the self-test runs the scanner on its own fixtures, never on the
+    C. And its comment filter, the reason it reads only executable text,
+    could be deleted with its self-test still green, while on this repo's
+    real files that deletion turns two exemptions into runs.
+  - check-kit ran `check_skeleton.sh --check`, which runs no cargo, and never
+    the mode that does, while the note it printed read as though it had.
+    The skeleton every port copies, and the tests that pin LESSONS #063 and
+    #067 in it, had never been built by anything automatic.
+  - `bash -n "$0" && echo PASS` sat in three `--check` blocks: under
+    `set -e` a failing command inside an `&&` list does not stop the script,
+    so a script that did not parse passed its own check.
+  - CI's fuzz smoke, `for t in $(cargo fuzz list)`, ran zero targets and
+    passed when that listing failed or was empty.
+  - The platform ledger counted three BSD dialects as built by CI because
+    upstream's `.cirrus.yml` and `.builds/` are in the tree. No provider runs
+    them for this fork: the GitHub API shows only Actions check suites and no
+    commit statuses on any commit since the fork. The repo-cleanup arc's
+    decision to keep those dialects rested on the same reading.
+  - The coverage gate measured an inventory whose `[features]` table was
+    misspelt as `features: 0 … UNCOVERED: 0`, and passed.
+  - `lsof-rs-ci.yml` excluded `lsof-rs/**.md` from its triggers as "a
+    markdown edit cannot affect the gates", but `DIVERGENCES.md` is the
+    differential's ledger and `THREAT-MODEL.md` the threat-model gate's
+    input: a PR editing only those ran neither gate.
+
+  Most of these are LESSONS #036 and #039 again — a gate that finds nothing
+  to check must say so — in harnesses those lessons were never applied to.
+  The kit's decision sweep (LESSONS #069) could not find them: it forces the
+  decisions of *verdict* functions, and every one of these lived in the code
+  that reads a gate's input, which the sweep calls plumbing.
+- **The rule.** For every gate, feed it a missing path, a misspelt key, an
+  empty input and a description of the thing in place of the thing, and make
+  each a failure (exit 2 for "cannot judge") with a fixture that proves it. A
+  fail-open fixed in one harness is open in the others until something
+  enumerates them: when you fix one, sweep the class.
+- **Kit change:** `audit_unsafe.py` refuses a path that is missing or not
+  Rust, counts the files it read, says NOTHING-TO-AUDIT for zero blocks, and
+  skips cargo's build directory by its `CACHEDIR.TAG` rather than any
+  directory named `target`. `diff_run.py` refuses an unknown case key.
+  `check_controls.py` does not count a `--self-test` or `--check` invocation
+  as a run, and carries the primary line's comment fixtures. check-kit runs
+  the skeleton gate's real mode and checks that the skeleton's `cli` forbids
+  `unsafe` too. The three `bash -n` lines fail. The platform ledger lists only
+  the CI that runs here and waives the three BSD dialects. The coverage gate
+  refuses an empty inventory with exit 2. `mutate_gates.py` has a row for
+  each new verdict, and the CI template runs the flaw scanner on the C, not
+  only its self-test. In lsof-rs's CI: the fuzz smoke fails on an empty or
+  failing target list, the two ledgers wake the gates that read them, and the
+  scanner's control is exempted in writing, pointing at its committed triage.
+- **Section amended:** `harnesses/unsafe-audit/audit_unsafe.py`;
+  `harnesses/differential/diff_run.py`; `harnesses/control-coverage/check_controls.py`;
+  `harnesses/coverage/coverage_gate.py`; `harnesses/skeleton-check/check_skeleton.sh`;
+  `harnesses/supply-chain/run_supply_chain.sh`; `harnesses/sanitizers/run_sanitizers.sh`;
+  `harnesses/gate-mutation/mutate_gates.py`; `harnesses/ci/porting-ci.template.yml`;
+  `skeleton/crates/cli/src/main.rs`; `harnesses/platforms/platforms.toml`;
+  `Makefile` · check-kit; `.github/workflows/lsof-rs-ci.yml`.
+
+---
+
+## 083. The kill tables were prose: 233 mutants, and not one could be run again
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (the Linux parity arc, 2026-09-25 → 2026-10-04)
+- **What happened:** PLAYBOOK Phase 4 asks each change to mutate the cases it
+  wrote and record a kill table (LESSONS #026). lsof-rs did, sixteen times:
+  DIVERGENCES.md records at least 233 mutants, every one killed. Each change
+  wrote its own throwaway script in a scratch directory, eight different
+  scripts in eight shapes, and none was committed. So the tables are claims:
+  no one can run them again, and a later change that left one of those cases
+  checking nothing would go unnoticed. LESSONS #059 had asked for a helper
+  "when the kit grows a mutation harness" and deferred it; the kit had one
+  for its own gates, `mutate_gates.py`, and none for a port. Each script
+  re-learned #059 (an edit that does not apply reads as a survivor) and #066
+  (a mutant left in place reads as a kill). The retrospective converted the
+  last change's 30 mutants to a file and ran them against master: all 30
+  killed, and the table had moved since the PR recorded it — 17 killed by the
+  differential alone, 12 by it and a unit test, 1 by unit tests alone, where
+  the PR said 18, 11 and 1, because a unit test added in review caught one
+  more. Only a table that runs again can show that.
+- **The rule.** A mutant is evidence only if it can be run again. Commit the
+  mutants with the change, as data, beside the cases they prove; run them
+  with a harness that refuses an edit that does not apply, restores every file
+  it touched and checks it did, and rebuilds at the end so no mutant's binary
+  is left behind.
+- **Kit change:** `harnesses/port-mutation/mutate_port.py` (new): a mutants
+  file (TOML: build, gates, mutants as `file`/`old`/`new` edits), verdicts
+  KILLED / SURVIVED / DOES-NOT-APPLY / NOBUILD / INFRA, a baseline that must be
+  green, restoration checked by hash and on SIGTERM, `--apply-only` for a
+  per-PR check that every mutant still fits the code. Its verdict function is
+  in the mutation table, with all 16 of its decisions pinned. The module skill
+  names it; lsof-rs commits its first mutants file,
+  `lsof-rs/mutants/mapped-rows.toml`, and CI checks that its mutants apply.
+- **Section amended:** `harnesses/port-mutation/mutate_port.py`;
+  `harnesses/gate-mutation/mutate_gates.py`; `Makefile` · check-kit;
+  `skills/porting-kit-module/SKILL.md`; `.github/workflows/lsof-rs-ci.yml`.
+
+---
+
+## 084. The differential fuzzer could not reach the input this port parses
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (the Linux parity arc) and this kit
+- **What happened:** `diff_fuzz.py`, which the operating guide calls "the
+  highest-value single addition for a security-critical port", fuzzes stdin,
+  with argv fixed. lsof does not read stdin; its parser is its command line.
+  So the harness could not be pointed at this port, and the option-parsing
+  divergences of the arc were found by hand, one measured case at a time,
+  across PRs #112 to #118: getopt's spellings, a `+` word as a cluster, an
+  empty list item, a value attached or in the next word. The retrospective
+  spiked an argv fuzzer: random option words drawn from the coverage
+  inventory, anchored to one fixture process with `-a -p PID`. Against the
+  lsof-rs built from the merge before PR #112, 1,500 vectors in about a
+  minute found 52 distinct divergences, 34 of which the following eight days
+  then fixed by hand. Against master it found nothing new: every signature
+  was a recorded row.
+- **The rule.** Point the differential fuzzer at the surface the port parses.
+  For a command-line tool that is argv, and the C's own option letters, from
+  the coverage gate's inventory, are its alphabet.
+- **Kit change:** `diff_fuzz.py` gains an argv mode: `--argv-inventory`
+  (options and which take a value, from a coverage-gate inventory),
+  `--argv-value`, `--argv-exclude`, `--argv-words`. Vectors put options
+  first and at most one operand last, the order getopt reads; minimizing drops
+  whole words; a finding is saved as `<fp>.argv`. `--max-time` alone now runs
+  for its time (a default of 1000 iterations had capped every timed run), and
+  a zero budget is refused. Fixed arguments that start with `-` go after `--`:
+  `--args -a -p 1` was read as options of the harness, so a command-line
+  tool's fixed argv could never be passed — found by the mode's first real
+  run, which then found four divergences no one had recorded (DIVERGENCES
+  114–117). The diff-fuzz skill describes the mode.
+- **Section amended:** `harnesses/diff-fuzz/diff_fuzz.py`;
+  `skills/porting-kit-diff-fuzz/SKILL.md`.
+
+---
+
+## 085. The loop that found the bugs was not the loop the playbook described
+
+- **Date:** 2026-10-04
+- **Codebase:** lsof-rs (the Linux parity arc, 2026-09-02 → 2026-10-04)
+- **What happened:** the arc's changes ran a loop the playbook did not name.
+  First the C was measured, by hand, on fixtures: as root and as `nobody`,
+  inside namespaces and out. Then the Rust was written, then differential
+  cases and mutants, then a second agent was asked to find what the change got
+  wrong and to measure each suspicion against the C, and every finding became
+  a ledger row, fixed or not. Of the 44 DIVERGENCES rows that say how they were
+  found, 22 were found by that review, 9 while measuring the C for a change,
+  and 10 by this retrospective. The playbook's Phase 4 loop had no step that
+  measures the C before the Rust is written, and its last step, "review &
+  merge", did not say what a review is. Each rule found wrong after a merge
+  (LESSONS #074–#078) was one reasoned about rather than measured. And the
+  progress table said "done" for all four units from 2026-09-20 while 37 more
+  rows were found in October: a gate state says the gates ran, not that the
+  port matches.
+- **The rule.** Measure the C before writing a rule. Have a second reader,
+  with no stake in the change, try to break it against the C, and record what
+  they find as rows. Read "done" in the progress table as "gated"; the open
+  rows are the work that remains.
+- **Kit change:** PLAYBOOK Phase 4 says to measure the C before the loop, and
+  its step 6 says what the review is and what it produces. Phase 4 step 2's
+  detail moved to `MATRIX-CHECKLIST.md` and the CI and release mechanics to
+  `CI-AND-RELEASE.md`, which took the playbook from 462 lines to under the
+  ~400 that `CLAUDE.md` asks.
+- **Section amended:** PLAYBOOK · Phase 4 (before the loop; step 6).

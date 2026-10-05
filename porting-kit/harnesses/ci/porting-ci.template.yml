@@ -78,6 +78,11 @@ jobs:
       # The flaw scanner is a Phase 0 tool, but its rules are code: run its own
       # self-test so a change to the kit cannot silently weaken it.
       - run: python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test
+      # And run it on the C. The self-test runs the scanner on its own fixtures,
+      # which is not the control (LESSONS #082). An inventory, not a verdict:
+      # it exits 0, and a hit it reports that the committed triage lacks is a
+      # change in the C to read. Point it at the C sources the port reads.
+      - run: python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py c-src/
 
   ledgers:
     name: ledgers exist (progress, divergences, fuzz target, sanitizers per unit) + threat model
@@ -130,6 +135,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        # `run_sanitizers.sh asan` builds std with the sanitizer (-Zbuild-std),
+        # which needs the std sources: without rust-src the job is red on its
+        # first run, whatever the code (LESSONS #036's fix, imported 2026-10-04).
+        with: { components: rust-src }
       # rustc has no UB sanitizer: the harness's `ubsan` mode runs Miri, which
       # the miri job already does. ASan is the one for the FFI layer.
       - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh asan .
@@ -140,10 +149,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo install cargo-fuzz
-      # Short smoke in CI; schedule a nightly deep run separately.
+      - run: cargo install cargo-fuzz --locked
+      # Short smoke in CI; schedule a nightly deep run separately. The list is
+      # taken on its own line, so a failing `cargo fuzz list` stops the job, and
+      # an empty one fails it: `for t in $(...)` ran zero targets and passed
+      # (LESSONS #036, #082).
       - run: |
-          for t in $(cargo fuzz list 2>/dev/null); do
+          targets=$(cargo fuzz list)
+          [ -n "$targets" ] || { echo "::error::no cargo-fuzz targets"; exit 1; }
+          for t in $targets; do
             cargo fuzz run "$t" -- -max_total_time=60
           done
 

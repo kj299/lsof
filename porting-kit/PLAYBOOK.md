@@ -99,7 +99,11 @@ lsof-rs's phase order was sound; its one miss was not spiking the hang first.
 **Do:**
 - Lock the C binary at a known commit. Capture golden outputs across a
   **documented input matrix** (`harnesses/differential/input-matrix.example.toml`)
-  with `harnesses/golden/golden.py capture`.
+  with `harnesses/golden/golden.py capture`. *This copy's `golden.py`
+  compares stdout only and stores a hung oracle's `<<TIMEOUT>>` as a golden
+  (LESSONS #072); until the primary line's version, which keeps exit codes
+  and refuses a hang, is imported, judge exit codes and hangs with
+  `diff_run.py` against a live oracle.*
 - **Detect oracle nondeterminism up front** — `golden.py` runs each input N times
   and flags fields that vary (PIDs, timestamps, addresses, ordering). Those feed
   the normalization rules (`harnesses/differential/normalize.py`), so a real
@@ -213,9 +217,10 @@ preflight clean; **the ledgers exist and CI checks that they do** —
 1.0 with none of the first three and no sanitizer job, because nothing failed
 without them (LESSONS #19).
 **Artifacts:** the workspace; CI config from `harnesses/ci/porting-ci.template.yml`.
-**lsof failure modes this prevents:** scattered `unsafe` (lsof-rs kept 0 in core /
-144 in the sys layer — but only 91 documented; the gate makes the gap a build
-failure). Tracing added reactively at hang-fix step 4 of 5.
+**lsof failure modes this prevents:** scattered `unsafe` (lsof-rs kept 0 in core
+and 131 real blocks in the sys layer, 51 of them undocumented — LESSONS #1
+counted them; the 144/91 first quoted were grep hits; the gate makes the gap a
+build failure). Tracing added reactively at hang-fix step 4 of 5.
 
 ---
 
@@ -239,6 +244,12 @@ check** — is there an adjacent, reachable goal? (lsof-rs's ETW spike couldn't 
 the "real FD" but pivoted to extending `-i` to raw/ICMP/AF_UNIX, which shipped).
 A closed sub-goal must not kill the shippable one beside it.
 
+**Before the loop, measure the C** (LESSONS #085). For each rule the module
+must get right, run the C on the inputs that tell the readings apart, as each
+user it serves (root and not, inside a namespace and out), and write down what
+it does before writing the Rust. In lsof-rs every rule found wrong after
+merging was one reasoned about rather than measured.
+
 Then the loop — each step is a CI-enforced gate:
 
 1. **Port** into `core` (or a safe wrapper in `sys`). Translate C idioms to Rust:
@@ -248,79 +259,51 @@ Then the loop — each step is a CI-enforced gate:
 2. **Differential-test** against the oracle (`harnesses/differential/diff_run.py`).
    A divergence is a *triage*, not an auto-fail: {Rust bug → fix} vs {C bug →
    log in `DIVERGENCES.md`, keep the safe behavior}. The verdict is **stdout AND
-   exit code** (LESSONS #4): a rewrite that prints the right thing but returns
-   the wrong status is not a match — lsof exits 1 on no-match and scripts branch
-   on it; `--ignore-exit` opts out for tools without stable codes. This gate is
-   also the **liveness backstop** (LESSONS #1): a hang is not UB, so sanitizers
-   won't see it — the harness's per-case timeout marks a wedged run as
-   `<<TIMEOUT>>` and fails it. Treat a timeout as a design smell (an unbounded
-   blocking call on the hot path) — the lsof-rs fix was to *avoid* the blocking
-   call, not wrap it. Two things this gate can't see on its own — **coverage**
-   and **an oracle that won't run on the target** (LESSONS #6, #8). The
-   differential only checks the inputs in the matrix: a green run over a matrix
-   that omits a feature class proves nothing about that class (lsof-rs's socket
-   diff was green while every non-File handle type was silently dropped — no
-   fixture ever created one). **What the tool can see is such a class**: a
-   harness that can read every fixture never compares what the tool prints
-   when it cannot read one, and for a tool that reports on system state that
-   path is output. Give the matrix a fixture the tool cannot read, and run those
-   cases as a user who cannot read it; probe that from the demoted side, and
-   SKIP when it does not hold (LESSONS #068). Enumerate the C's feature surface and give each a
-   case — **enforced by `harnesses/coverage/coverage_gate.py`**: bootstrap the
-   inventory from the C (`--extract-options`/`--extract-types`), curate it, and
-   the gate exits 1 on any feature no matrix case exercises (waivers carry
-   reasons). A value-taking option counts twice, because getopt offers it two
-   spellings and a port can parse one of them: the gate requires a case that
-   gives it the value as the next word (`-F pn`) as well as one naming the
-   letter at all (LESSONS #071). When the reference binary can't run on the target platform, switch to
-   **oracle-substitution** (diff against a native tool over self-owned fixtures)
-   with a three-way exit contract — match / divergence / infra-error — so a
-   broken harness can't read as a port bug. Both modes are in the matrix header.
-   **A fallback is a feature of its own** (LESSONS #075): for each fallback,
-   exemption or second matching rule, name the input it is for, and give the
-   matrix a case where it must fire for that input and one where another input
-   must not reach it. lsof-rs compared NAMEs to find sockets by path; a socket's
-   NAME carries a `type=` tail, so the comparison never found one and fired only
-   for a file of the same name in another mount namespace.
-   **An empty list item is input too** (LESSONS #076): for every list-valued
-   option, give the matrix an empty item in each position (`,`, `,x`, `x,`,
-   `x,,y`), a lone prefix (`^`), a separator the oracle does not name, a
-   repeated option and items of mixed kinds. lsof-rs split its lists with
-   `filter(|s| !s.is_empty())`, and the C read an empty `-p` item as PID 0.
-   **Spell a path every way a user types it** (LESSONS #077): relative (a case
-   names the directory it runs in, `cwd`), `.`, `..`, doubled and trailing
-   slashes, links with relative and absolute targets, a link's text (`/proc`).
-   Where the C spells or parses an input with a helper of its own, port the
-   helper, and compile the C's own function into a harness as its oracle.
-   Finally, **mutate the cases you just wrote** (LESSONS #26): for each one, name
-   the change it is meant to catch, make that change, and confirm the case turns
-   red — then record the result as a kill table, one row per case. A case no
-   mutant kills is a comment. This matters most for cases whose expected outcome
-   is *silence* (an error exit, an empty listing, a suppressed column), because
-   there are several ways to be silent and only one of them is the behavior under
-   test: lsof-rs's `lsof -K x` case compared an empty stdout and an exit 1 that
-   the two binaries reached for opposite reasons, and it took the mutant that
-   should have killed it to expose both the hollow case and a real bug behind it.
-   A case that claims something about what is listed needs something to list
-   that the claim would change, and a C-DEFECT that depends on where an
-   argument stands needs the options first, where the C reads them as options
-   (LESSONS #078).
+   exit code** (LESSONS #4): lsof exits 1 on no-match and scripts branch on it;
+   `--ignore-exit` opts out for tools without stable codes. The per-case timeout
+   is the **liveness backstop** (LESSONS #1): a hang is not UB, so sanitizers
+   won't see it, and the fix is to design the blocking call out, not wrap it.
+   A green run says nothing about inputs the matrix lacks (LESSONS #6, #8), so
+   the matrix is designed: every feature of the C (`coverage_gate.py`, a
+   value-taking option counted twice, LESSONS #071), what the tool cannot read
+   (LESSONS #068), and the inputs that tell two readings of a rule apart — a
+   fallback's own input (LESSONS #075), empty list items (LESSONS #076), every
+   spelling of a path (LESSONS #077), a silent case silent for the right reason
+   (LESSONS #078), a fixture's effect on every other case (LESSONS #081). The
+   checklist, with the lsof-rs failure behind each, is
+   [`MATRIX-CHECKLIST.md`](MATRIX-CHECKLIST.md). Past the matrix, fuzz both
+   binaries with the same inputs — on argv for a command-line tool (LESSONS
+   #084). When the reference can't run on the target, switch to
+   **oracle-substitution** with a three-way exit contract (match / divergence /
+   infra-error), so a broken harness can't read as a port bug.
+   Finally, **mutate the rules you just wrote** (LESSONS #26): one plausible
+   wrong version of each, committed as a mutants file and run with
+   `harnesses/port-mutation/mutate_port.py` (LESSONS #083). A mutant no case
+   kills is a case that checks nothing.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker. **This applies per backend crate, and "input" includes text
    the OS hands you** (LESSONS #21): `/proc` lines, registry values, `sysctl`
    output. lsof-rs fuzzed the first backend's argument parser and none of the
    second backend's seven `/proc` parsers — a `forbid(unsafe_code)` crate can
-   still panic on a hostile `Name:` field.
+   still panic on a hostile `Name:` field. And a target that names a parser must
+   reach it: plant a fault in the parser and watch the target find it (LESSONS
+   #056).
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
    logic and, for the `sys` layer, ASan (and TSan if threaded); rustc has no UB
    sanitizer, so the harness's `ubsan` mode runs Miri. lsof-rs's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
-6. **Review & merge.** Update the `progress` table (the module advances
-   `ported` → `differential` → `fuzzed` → `sanitized` → `unsafe_audited`, the
-   names `progress.py set` takes).
+6. **Review, then merge.** The review is a second reader — a person, or an
+   agent with no stake in the change — asked to find what it got wrong and to
+   measure each suspicion against the C (LESSONS #085). Each finding becomes a
+   ledger row before the merge, fixed or not: in lsof-rs's last arc this review
+   found half the rows that recorded how they were found. Then update the
+   `progress` table (the module advances `ported` → `differential` → `fuzzed` →
+   `sanitized` → `unsafe_audited`, the names `progress.py set` takes). A module
+   at `unsafe_audited` has cleared its gates, not matched the C: its open
+   ledger rows are the work that remains.
 
 **Entry criteria:** skeleton + oracle.
 **Exit criteria (per module):** all six gates green; `progress` row fully ticked.
@@ -353,25 +336,11 @@ undocumented unsafe (gate 5).
 - Keep the C runnable as the oracle through one release overlap; only then retire.
 - Ship the `DIVERGENCES.md` as user-facing release notes ("behaviors we
   deliberately changed, and why") — the security fixes are a *feature*.
-- **Design the release trigger with a human-button fallback** (LESSONS #14):
-  lsof-rs's release workflow fires on a tag push *or* `workflow_dispatch` with a
-  tag input, and the dispatch path — where `gh release create --target
-  $GITHUB_SHA` makes the tag server-side — is what shipped v0.3.0 when the
-  automated session turned out to lack both tag-push and dispatch permission.
-  Preflight those permissions before declaring release-ready (Phase 3), and
-  verify the *published* release from its public page rather than the API — a
-  quota-free check that also proves what users actually see (assets, target
-  SHA, checksum).
-- Long automated sessions: treat the platform **API quota as a budgeted
-  resource**. lsof-rs's release day stalled a merge for ~an hour on an
-  exhausted hourly limit; back off in growing intervals rather than hammering,
-  and prefer public-page reads (no quota) for state checks while it recovers.
-- **A release workflow that can fire twice will publish two truths** (LESSONS
-  #22): lsof-rs's 1.0.1 notes carried one SHA-256 and the asset another, from a
-  double dispatch. Declare a `concurrency` group keyed on the tag; produce the
-  checksum and the notes in the *same run* that uploads the asset; and confirm
-  from the public page that the published checksum matches the published file
-  before announcing.
+- **Release mechanics** — [`CI-AND-RELEASE.md`](CI-AND-RELEASE.md): a release
+  trigger with a human-button fallback, permissions preflighted (LESSONS #14);
+  the published release verified from its public page; the API quota treated
+  as a budget; and one `concurrency` group per tag, the checksum written by
+  the run that uploads the asset (LESSONS #22).
 
 **Entry criteria:** all target modules merged & gated.
 **Exit criteria:** Rust is the shipped artifact; supply-chain clean; divergences
@@ -392,6 +361,8 @@ kept both trees side by side — preserve that discipline.
 | No panics on untrusted input | `fuzz/` (`cargo-fuzz`) | CI smoke + nightly deep |
 | No vulnerable/untrusted deps | `supply-chain/run_supply_chain.sh` (`cargo audit`,`cargo deny`) | CI |
 | No silent behavior drift | `differential/diff_run.py` + `DIVERGENCES.md` | CI |
+| Cases that check something | `port-mutation/mutate_port.py`, the mutants committed with the change; `--apply-only` on every PR (LESSONS #083) | per change + CI |
+| Cost close to the C's | `perf/perf_gate.py` (wall-time ratio over the matrix), or a gate of the port's own under a load it creates: lsof-rs's matrix needs fixtures this runner cannot start, and a cost that scales is invisible at ambient scale (LESSONS #061, #062) | CI |
 | Matrix covers the C's surface | `coverage/coverage_gate.py` (inventory vs matrix), **run once per platform** with `--platform` — a waiver whose reason names a platform (`platforms = [...]`) expires the day that platform is added, silently unless scoped (LESSONS #18) | CI |
 | The mandated ledgers exist | `ledgers/check_ledgers.py` — progress file, divergence ledger, ≥1 fuzz target, a sanitizer job, and a sanitizer run per tracked unit (LESSONS #19, #21) | CI |
 | The threat model is filled in | `threat-model/check_threat_model.py THREAT-MODEL.md` | **hard-fail CI** |
@@ -402,57 +373,19 @@ See `harnesses/ci/porting-ci.template.yml` for the wiring (control-coverage chec
 it in `check-kit`) and
 `make -C porting-kit check-kit` to smoke-test every harness.
 
-**When a gate can only run in CI** — a platform backend you can't build on the
-dev host (lsof-rs's Windows crate on a Linux box) — land it *observe-first*
-(continue-on-error) and read a few real runs before promoting it to a hard gate,
-so a flaky harness doesn't wedge every PR (LESSONS #9). Two traps: (a) give an
-infra/harness error a **distinct exit code** from a real failure, or the noise
-trains you to ignore red; (b) **a superseded CI run is not a passed run** — rapid
-pushes cancel in-flight runs, so "I saw green" can mean an *earlier* commit while
-the head commit's gate never finished. Before calling a CI-only-validated change
-green, confirm the head SHA has a *completed* run — lsof-rs's `too_many_arguments`
-clippy error slipped in exactly this way: its Windows run was cancelled by the
-next push and the lint surfaced only two commits later. And (c) **while a gate
-is in observe mode, job status is meaningless** — `continue-on-error` shows a
-green job over a failing step, so verdicts must be read from the step's own
-log or uploaded artifact (upload results with `if: always()`, or observing is
-theater). And (d) **put the trial arm in its own JOB, never a step inside a
-gated one** — `continue-on-error` exempts a step's own failure, but
-`timeout-minutes`, runner loss and cancellation are *job* properties and cross
-that boundary. lsof-rs added an observe-first miri step to its promoted miri
-job; the step ran long, the job's 25-minute timeout fired, and the hard gate
-went from success to **cancelled** on the trial arm's first run — broken by
-something labelled as not blocking (LESSONS #055). Isolation is what makes
-"this does not block" true, and it makes a generous timeout on the trial arm
-free. Promotion mechanics that worked (LESSONS #13): the bar is
-*consecutive log-verified green runs*; flip the flag **in its own PR**, so the
-newly-hard gate must pass on the promotion PR itself before it can merge — the
-promotion is validated by the mechanism it enables.
-
+**When a gate can only run in CI**, land it *observe-first* and promote it on
+consecutive log-verified green runs, in its own PR (LESSONS #9, #13). The four
+traps — a distinct exit code for infra errors, a superseded run is not a passed
+run, an observing job's status is meaningless, and a trial arm belongs in its
+own job because a job's timeout crosses `continue-on-error` (LESSONS #055) —
+are in [`CI-AND-RELEASE.md`](CI-AND-RELEASE.md).
 ---
 
 ### Renaming the port
 
-A mechanical rename fails quietly, so it gets three passes (LESSONS #20 —
-lsof-rs's `winlsof` → `lsof-rs`, 92 files, four breakages found *after* pass 1):
-
-1. **Inventory case-insensitively** (`find -iname`, `git grep -i`); pass 1
-   missed `Invoke-WinlsofSmokeTest.ps1` on a case-sensitive `find`.
-2. **Convert by identifier context, never one rule**: `SCREAMING_` → `NEW_`,
-   `snake_` → `new_`, kebab → kebab, PascalCase → PascalCase. One rule produced a
-   Python variable named `lsof-rs` (does not parse) and a .NET namespace
-   `Lsof-rsNative` (hyphens are illegal there).
-3. **Protect what must keep the old name** and verify it against the remote:
-   published tags (rewriting them makes dead links — the protection regex must
-   cover *both* sides of a compare URL), user-facing env vars (alias, don't
-   rename — a v1.0.1 binary only knows `WINLSOF_TRACE`), historical entries
-   that describe a shipped artifact. Fire the release trigger on both prefixes.
-4. **Pass 2 — verify by executing, per category**: syntax-check every tracked
-   script (`py_compile`, `bash -n`), build, run every harness, resolve every
-   path a workflow names. Reading the diff found none of the four.
-5. **Pass 3 — adversarial**: grep for the old name and justify every survivor;
-   resolve every markdown link; then push a code-only change and confirm the CI
-   path filters still select it — the failure that never announces itself.
+Three passes, never one (LESSONS #20): inventory case-insensitively, convert
+by identifier context, protect published names; then verify by executing and
+adversarially. The procedure is in [`CI-AND-RELEASE.md`](CI-AND-RELEASE.md).
 
 ## The compounding loop
 

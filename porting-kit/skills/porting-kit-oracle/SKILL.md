@@ -26,6 +26,9 @@ semantic-comparison stage, not build time — "it builds" tells you almost nothi
 3. **Capture + version the golden corpus**, flagging oracle nondeterminism so you
    normalize it instead of enshrining it:
    `python3 porting-kit/harnesses/golden/golden.py capture --oracle <c-bin> --matrix <m> --corpus <dir>`
+   This copy's `golden.py` compares stdout only and stores a hung oracle's
+   output as a golden (PLAYBOOK Phase 2): judge exit codes and hangs with
+   `diff_run.py` against a live oracle until the primary's version is imported.
 4. **Tune normalization** (`porting-kit/harnesses/differential/normalize.py`) so
    PIDs/timestamps/pointers/ephemeral-ports are masked *identically* on both sides —
    whatever you erase from C you must erase from Rust, or you manufacture a divergence.

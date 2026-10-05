@@ -1,0 +1,294 @@
+# Mutants for "build every mapping's row as the C does" (PR #121,
+# DIVERGENCES 95, 48, 40 and 96-107): one per rule, each a plausible way to
+# get that rule wrong. The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/mapped-rows.toml
+#
+# It needs the C oracle built at ../lsof (README: Building), and root or
+# passwordless sudo for every fixture to come up; CI runs only --apply-only,
+# which checks that each mutant still fits the code. Run 2026-10-04 against
+# master: 30 of 30 killed, 17 by the differential alone, 12 by it and a unit
+# test, 1 (makedev-legacy) by unit tests alone. The PR had recorded 18, 11 and
+# 1: a unit test added in its review catches one more.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+
+[[run.gate]]
+name = "differential"
+cmd = ["python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+
+[[mutant]]
+name = "only-absolute-paths"
+rule = "a maps path need not start with `/`: rings and relative names are rows (99)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        let Some((maj, min)) = std::str::from_utf8(dev).ok().and_then(parse_dev) else {'''
+new = '''        if !path.starts_with(b"/") {
+            continue;
+        }
+        let Some((maj, min)) = std::str::from_utf8(dev).ok().and_then(parse_dev) else {'''
+
+[[mutant]]
+name = "path-trimmed"
+rule = "a maps path keeps trailing blanks and CR (99)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''            Some(start) => &rest[start..],'''
+new = '''            Some(start) => rest[start..].trim_ascii(),'''
+
+[[mutant]]
+name = "path-cut-at-tab"
+rule = "a maps path keeps its TAB, unlike the C (103, C-DEFECT)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''            Some(start) => &rest[start..],'''
+new = '''            Some(start) => {
+                let p = &rest[start..];
+                &p[..p.iter().position(|&b| b == b'\t').unwrap_or(p.len())]
+            }'''
+
+[[mutant]]
+name = "names-that-are-no-path-stated"
+rule = "a name that is no path is never stat()ed (102, C-DEFECT)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        _ if !bytes.starts_with(b"/") => Err(std::io::Error::from_raw_os_error(ENOENT)),
+'''
+new = ''''''
+
+[[mutant]]
+name = "mappings-not-exempted"
+rule = "-e exempts mapped files: UNKNmem/UNKNdel rows (40)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''files::exempt_match(bytes, ctx.exempt)'''
+new = '''files::exempt_match(bytes, &[])'''
+
+[[mutant]]
+name = "no-map-files"
+rule = "another mount namespace is stat()ed through /proc/PID/map_files (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        (true, Some((start, end))) => {'''
+new = '''        (false, Some((start, end))) => {'''
+
+[[mutant]]
+name = "no-stat-reason"
+rule = "a mapping stat() cannot describe says why in NAME (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        Err(e) => from_maps(m, Some(format!("(stat: {})", errno_text(&e)))),'''
+new = '''        Err(_) => from_maps(m, None),'''
+
+[[mutant]]
+name = "reason-not-muted-by-w"
+rule = "-w mutes the (stat: ...) reason (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''why.filter(|_| !m.deleted && !ctx.omit_unreadable)'''
+new = '''why.filter(|_| !m.deleted)'''
+
+[[mutant]]
+name = "reason-on-deleted"
+rule = "a deleted mapping never has a reason (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''why.filter(|_| !m.deleted && !ctx.omit_unreadable)'''
+new = '''why.filter(|_| !ctx.omit_unreadable)'''
+
+[[mutant]]
+name = "deleted-always-DEL"
+rule = "a deleted file the path names again is mem (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''            _ => from_stat(m.path, &md, pid, ctx),'''
+new = '''            _ if m.deleted => from_maps(m, None),
+            _ => from_stat(m.path, &md, pid, ctx),'''
+
+[[mutant]]
+name = "path-note-format"
+rule = "the (path dev=..., inode=...) wording (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''format!("(path dev={dev}, inode={ino})")'''
+new = '''format!("(path dev={dev},inode={ino})")'''
+
+[[mutant]]
+name = "devices-typed-REG"
+rule = "a mapped device is CHR/BLK (48)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''    let ty = files::type_from_mode(md.mode());'''
+new = '''    let ty = FileType::Regular;'''
+
+[[mutant]]
+name = "devices-have-a-size"
+rule = "a mapped device has no size (48)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''            u32::try_from(md.rdev()).ok().and_then(NonZeroU32::new),
+            None,'''
+new = '''            u32::try_from(md.rdev()).ok().and_then(NonZeroU32::new),
+            Some(md.size()),'''
+
+[[mutant]]
+name = "no-lock-on-maps-rows"
+rule = "a row from the maps line shows its lock (96)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''            lock: ctx.locks.get(&(pid, m.dev, m.inode)).copied(),'''
+new = '''            lock: None,'''
+
+[[mutant]]
+name = "no-lock-on-stat-rows"
+rule = "a stat()ed mapping shows its lock (96)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        lock: ctx.locks.get(&(pid, md.dev(), md.ino())).copied(),'''
+new = '''        lock: None,'''
+
+[[mutant]]
+name = "exempt-component-boundary"
+rule = "-e is a plain byte prefix (98)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''.find(|e| path.starts_with(e.as_bytes()))'''
+new = '''.find(|e| under_mount(path, e))'''
+
+[[mutant]]
+name = "lock-by-device-cell"
+rule = "a lock is found by st_dev, not the device a node names (96)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let dev = f.fs_device?;'''
+new = '''    let dev = f.rdev.map(|r| u64::from(r.get())).or(f.fs_device)?;'''
+
+[[mutant]]
+name = "no-lock-on-specials"
+rule = "cwd/rtd/txt rows show their locks (96)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                    pid,
+                    ctx,
+                ) {
+                    f.lock = lock_of(ctx.locks, pid, &f);
+                    out.push(f);'''
+new = '''                    pid,
+                    ctx,
+                ) {
+                    out.push(f);'''
+
+[[mutant]]
+name = "raw-type-is-unknown"
+rule = "an unknown st_mode type prints as its raw octal, 0000 (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        _ => FileType::Other(format!("{:04o}", (mode >> 12) & 0xf)),'''
+new = '''        _ => FileType::Unknown,'''
+
+[[mutant]]
+name = "makedev-legacy"
+rule = "a DEL row's -F D is makedev()'s, past minor 255 (100)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    ((major & 0xfff) << 8)
+        | ((major & 0xffff_f000) << 32)
+        | (minor & 0xff)
+        | ((minor & 0xffff_ff00) << 12)'''
+new = '''    (major << 8) | minor'''
+
+[[mutant]]
+name = "executable-mapping-listed"
+rule = "the executable's own mapping is not a mem row"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''.and_then(|f| Some((f.fs_device?, f.node.as_deref()?.parse::<u64>().ok()?)));'''
+new = '''.and_then(|_| None::<(u64, u64)>);'''
+
+[[mutant]]
+name = "last-lock-line-wins"
+rule = "of several locks on a file, the latest kind new to it shows (97)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/locks.rs"
+old = '''        if *had & bit == 0 {'''
+new = '''        if *had & bit == 0 || true {'''
+
+[[mutant]]
+name = "exempt-rows-selected-by-path"
+rule = "an exempt row is never selected by a path argument (40)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if f.is_exempt() {
+            return false;
+        }'''
+new = ''''''
+
+[[mutant]]
+name = "exempt-rows-located"
+rule = "an exempt row never locates a search item (40)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if f.is_exempt() {
+            return; // never'''
+new = '''        if false {
+            return; // never'''
+
+[[mutant]]
+name = "exempt-first-given"
+rule = "with nested -e paths the last given names the row (104)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        .iter()
+        .rev()
+        .find(|e| path.starts_with(e.as_bytes()))'''
+new = '''        .iter()
+        .find(|e| path.starts_with(e.as_bytes()))'''
+
+[[mutant]]
+name = "exempt-repeat-kept"
+rule = "-e repeated is entered once (104)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if !sel.exempt_fs.iter().any(|e| e == trimmed) {
+                        sel.exempt_fs.push(trimmed.to_string());
+                    }'''
+new = '''                    sel.exempt_fs.push(trimmed.to_string());'''
+
+[[mutant]]
+name = "exempt-relative-accepted"
+rule = "-e that is no path is an error (105)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if !value.starts_with('/') {'''
+new = '''                    if false {'''
+
+[[mutant]]
+name = "mapped-socket-named-from-its-netns"
+rule = "a mapped socket no table here knows is `can't identify protocol` (95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''    if ctx.socks.get(md.ino()).is_some() {'''
+new = '''    if true {'''
+
+[[mutant]]
+name = "unidentified-socket-device-as-d"
+rule = "-F D of an unidentified socket is D0x9 (106)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            fs_device: meta.map(MetadataExt::dev),'''
+new = '''            fs_device: None,'''
+
+[[mutant]]
+name = "exempt-path-keeps-its-slash"
+rule = "-e drops a trailing slash (98)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''let trimmed = match value.trim_end_matches('/') {'''
+new = '''let trimmed = match value.as_str() {'''

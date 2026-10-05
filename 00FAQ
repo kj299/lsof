@@ -12,6 +12,11 @@ ______________________________________________________________________
 This file contains frequently asked questions about lsof and answers
 to them.
 
+(This repository removed upstream's Customize script and scripts/
+subdirectory in PR #81. Where an answer below suggests Customize,
+edit the dialect's machine.h instead; the field-output example
+scripts it names are not shipped.)
+
 Vic Abell <abe@purdue.edu>
 October 13, 2014
 ______________________________________________________________________

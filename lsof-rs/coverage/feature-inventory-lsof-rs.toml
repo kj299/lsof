@@ -1,4 +1,4 @@
-# feature-inventory — lsof-rs (the Windows Rust port of lsof)
+# feature-inventory — lsof-rs (the Rust port of lsof, Windows and Linux)
 #
 # [features] is the C's FULL enumerated surface, extracted from src/main.c and
 # lib/print.c by the kit's coverage gate, plus lsof-rs's own Windows-native TYPE
@@ -7,8 +7,10 @@
 # noticed, and the waiver list is a reviewable record of every conscious
 # exclusion (LESSONS #8 — nothing is dropped silently).
 #
-# Gate:  python3 ../../porting-kit/harnesses/coverage/coverage_gate.py \
-#          --inventory feature-inventory-lsof-rs.toml --matrix coverage-matrix.toml
+# Gate, once per platform (a waiver can be scoped to one; see README.md):
+#        python3 ../../porting-kit/harnesses/coverage/coverage_gate.py \
+#          --inventory feature-inventory-lsof-rs.toml --matrix coverage-matrix.toml \
+#          --platform linux     (and again with --platform windows)
 
 [features]
 options = [
@@ -187,12 +189,12 @@ reason = "Unix socket families not reachable on Windows"
 
 [[waive]]
 ids = [
-  "type:a_inode", "type:ax25", "type:icmp", "type:inet", "type:ipx",
+  "type:ax25", "type:icmp", "type:inet", "type:ipx",
   "type:key", "type:netlink", "type:raw", "type:raw6",
-  "type:rte", "type:sock", "type:x.25"
+  "type:rte", "type:x.25"
 ]
 platforms = ["linux"]
-reason = "DEBT (L2): L1 resolves TCP/UDP/raw/unix sockets into IPv4/IPv6/unix rows, but these are lsof's per-FAMILY type codes; an fd in a family not read here still shows the unresolved SOCK row. `type:pack` came off this list when /proc/net/packet shipped. `type:netlink` cannot follow it the same way: an unbound netlink socket is absent from /proc/net/netlink entirely, and the C names it from the `system.sockprotoname` xattr — the open decision in DIVERGENCES #22."
+reason = "DEBT (L2): lsof's per-family type codes for families lsof-rs does not read. A raw socket is typed IPv4 or IPv6 where the C types it raw from /proc/net/raw (DIVERGENCES 108), a bound netlink socket is SOCK where the C types it netlink from /proc/net/netlink (109), and a socket no table lists, an unbound netlink or a ping socket among them, is named by the C from its `system.sockprotoname` xattr (22). `type:pack` came off this list when /proc/net/packet shipped; `type:a_inode` and `type:sock`, which lsof-rs emits as the C does, came off it on 2026-10-04, when a retrospective found them still listed."
 
 [[waive]]
 ids = [

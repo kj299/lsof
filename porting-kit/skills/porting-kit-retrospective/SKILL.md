@@ -31,7 +31,8 @@ A port that ships without this wastes its most valuable output.
    **Keep the skills in integrity with the kit** — if you renamed a harness or changed a
    flag, update every skill that references it (the skills-integrity check enforces this).
 4. **Append to `porting-kit/LESSONS.md`** — one entry per lesson in the required format
-   (date, codebase, lesson, section amended). If the kit had the lesson but it didn't
+   (date, codebase, what happened, the rule, kit change, section amended — the fields
+   at the top of `LESSONS.md`). If the kit had the lesson but it didn't
    fire, say why (friction? unclear? not wired to CI?).
 4c. **Diff this vendored kit against the primary line** (LESSONS #064): `cmp` each
    shared file under `harnesses/` and `skills/`; for each difference that is not just

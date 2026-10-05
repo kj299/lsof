@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Re-cited: #4->#004, #6->#036, #8->#043, #14->#037;
-#          #16 and #36 by title (no entries in this log).
-# Local: #080.
+# Re-cited: #4->#004, #6->#036, #8->#043, #14->#037, #16->#050;
+#          #36 by title (no entry in this log).
+# Local: #080, #084.
 """Differential fuzzing — feed the SAME generated input to the C oracle and the
 Rust rewrite and compare, over thousands of mutated inputs. The fixed matrix
 (diff_run.py) checks the cases you thought of; this finds the semantic
@@ -29,9 +29,27 @@ Determinism: everything random is driven by `--seed` (default 0), so a run is
 on STDIN by default (the parse/decode surface the port must harden); fixed argv
 comes from `--args`.
 
+ARGV MODE (`--argv-inventory FILE`). A tool whose input is its command line has
+its parser on argv, and stdin never reaches it. In this mode the fuzzed input is
+the words after `--args`: options drawn from a coverage-gate feature inventory
+(its `options` letters, and which of them `takes_value`), spelt every way getopt
+offers them (`-x`, `+x`, a cluster, a value attached or in the next word, a
+value from a list of awkward ones plus `--argv-value`), options first and at
+most one operand last. Minimizing drops whole words. lsof-rs found its
+option-parsing divergences by hand over a week; this mode, run for a minute
+against the binary from before that week, finds 34 of them (LESSONS #084).
+Run it from an empty directory: a value of `.` names the directory it runs in,
+and a tool that walks a tree walks that one. `--argv-exclude` drops letters
+that cannot be compared (one that repeats for ever, one that prints a build
+stamp, one that writes a cache file).
+
 Usage:
   diff_fuzz.py --oracle PATH --rust PATH [--seed N] [--iterations N | --max-time S]
                [--args A ...] [--seed-file F ...] [--matrix M]
+               [--argv-inventory TOML [--argv-exclude LETTERS]
+                [--argv-value V ...] [--argv-words N]] [-- FIXED-ARGV ...]
+  Fixed arguments that start with `-`, as a command-line tool's do, go after
+  `--`: `--args -a -p 1` reads `-a` as an option of this script.
                [--ledger DIVERGENCES.md] [--findings-dir DIR]
                [--timeout S] [--max-findings N] [--sort] [--mask-numbers]
                [--ignore-exit] [--with-stderr] [--json]
@@ -97,6 +115,79 @@ def _splice(a: bytes, c: bytes, rng: random.Random) -> bytes:
     return a[: rng.randrange(len(a) + 1)] + c[rng.randrange(len(c) + 1):]
 
 
+# Values an option is given in argv mode: empty and lone separators, list
+# shapes with an empty item, a lone negation prefix, numbers at the edges of
+# 32 and 64 bits, a format specifier, an escape sequence. `/` and `..` are
+# left out on purpose: a tree-walking option given either walks a whole disk.
+INTERESTING_VALUES = ["", ",", "^", "-", "--", "0", "1", "-1", "2147483648",
+                      "4294967296", "x", "a,b", ",x", "x,", "x,,y", " ", ".",
+                      "/nonexistent", "%s", "\x1b[31m"]
+
+
+def load_argv_alphabet(path, exclude="", values=()):
+    """The option alphabet for argv mode, from a coverage-gate feature
+    inventory: its single-letter `options`, less `exclude`, and which of them
+    `takes_value`. One with no letter left is an error, not an empty alphabet:
+    a fuzzer over nothing reports nothing, and that reads as a pass."""
+    import tomllib
+    with open(path, "rb") as fh:
+        feats = tomllib.load(fh).get("features", {})
+    letters = [o for o in feats.get("options", [])
+               if isinstance(o, str) and len(o) == 1 and o not in exclude]
+    if not letters:
+        raise ValueError(f"{path}: no option letters to fuzz")
+    takes = {o for o in feats.get("takes_value", []) if o in letters}
+    return {"letters": letters, "takes_value": takes,
+            "values": INTERESTING_VALUES + list(values)}
+
+
+def _option_words(alpha, rng):
+    """One option, as getopt offers it: `-x` or `+x`, a cluster, and a value
+    attached (`-pVAL`) or in the next word (`-p VAL`)."""
+    pre = rng.choice("-+")
+    k = rng.choice(alpha["letters"])
+    if k not in alpha["takes_value"] and rng.random() < 0.3:
+        k += rng.choice(alpha["letters"])
+    if k[-1] in alpha["takes_value"] or rng.random() < 0.1:
+        v = rng.choice(alpha["values"])
+        return [pre + k + v] if rng.random() < 0.5 else [pre + k, v]
+    return [pre + k]
+
+
+def _gen_argv(alpha, rng, max_words=4):
+    """Options first, then at most one operand: the order getopt reads, so a
+    finding is about what an option means, not about where a parser stops."""
+    words = []
+    for _ in range(rng.randint(1, max_words)):
+        words += _option_words(alpha, rng)
+    if rng.random() < 0.2:
+        words.append(rng.choice(alpha["values"]))
+    return tuple(words)
+
+
+def _mutate_argv(argv, alpha, rng, max_words=4):
+    w = list(argv)
+    op = rng.randrange(6)
+    if op == 0 or not w:                    # insert an option
+        i = rng.randrange(len(w) + 1)
+        w[i:i] = _option_words(alpha, rng)
+    elif op == 1 and len(w) > 1:            # drop a word
+        del w[rng.randrange(len(w))]
+    elif op == 2:                           # give a word another value
+        i = rng.randrange(len(w))
+        w[i] = (w[i][:2] if w[i][:1] in ("-", "+") else "") + rng.choice(alpha["values"])
+    elif op == 3:                           # flip a word's prefix
+        i = rng.randrange(len(w))
+        if w[i][:1] in ("-", "+"):
+            w[i] = ("+" if w[i][0] == "-" else "-") + w[i][1:]
+    elif op == 4:                           # say a word twice
+        i = rng.randrange(len(w))
+        w.insert(i, w[i])
+    else:                                   # start again
+        w = list(_gen_argv(alpha, rng, max_words))
+    return tuple(w)
+
+
 def _seeds(seed_files, matrix_path):
     """Assemble the seed corpus: explicit files, plus every `stdin` in a matrix,
     plus built-in defaults so an empty corpus still fuzzes something."""
@@ -128,7 +219,11 @@ def _seeds(seed_files, matrix_path):
     return out
 
 
-def _case_for(data: bytes, args, timeout):
+def _case_for(data, args, timeout):
+    if isinstance(data, tuple):
+        # argv mode: the fuzzed words follow the fixed ones; stdin is empty.
+        return {"name": "fuzz", "args": list(args) + list(data),
+                "stdin_bytes": b"", "timeout": timeout}
     # Feed the EXACT fuzz bytes via stdin_bytes — run_one writes them verbatim.
     # (The old latin-1-decode-then-run_one-utf-8-encode round-trip silently
     # mangled every 0x80-0xFF byte, so the fuzzer never actually exercised the
@@ -187,7 +282,10 @@ def _minimize(data, oracle, rust, args, opts, budget):
 def fuzz(oracle, rust, opts):
     rng = random.Random(opts["seed"])
     known_fps = {fp for fp in D.load_ledger(opts["ledger"]).values() if fp}
-    corpus = _seeds(opts["seed_files"], opts["matrix"])
+    alpha = opts.get("argv")
+    words = opts.get("argv_words", 4)
+    corpus = ([_gen_argv(alpha, rng, words) for _ in range(8)] if alpha
+              else _seeds(opts["seed_files"], opts["matrix"]))
     findings = []        # unique by minimized-input fingerprint
     seen_fp = set()
     suppressed = 0
@@ -205,7 +303,7 @@ def fuzz(oracle, rust, opts):
         iters += 1
         data = rng.choice(corpus)
         for _ in range(rng.randint(1, 4)):
-            data = _mutate(data, rng)
+            data = _mutate_argv(data, alpha, rng, words) if alpha else _mutate(data, rng)
         if rng.random() < 0.15:
             data = _splice(data, rng.choice(corpus), rng)
 
@@ -233,11 +331,16 @@ def fuzz(oracle, rust, opts):
             # Filename is the hex fingerprint — no attacker-controlled bytes in
             # the path (the harness assumes a hostile host).
             stem = os.path.join(opts["findings_dir"], fp[:12])
-            with open(stem + ".input", "wb") as fh:
-                fh.write(mini)
+            if alpha:
+                with open(stem + ".argv", "w", encoding="utf-8") as fh:
+                    json.dump(list(mini), fh)
+                rec["saved"] = stem + ".argv"
+            else:
+                with open(stem + ".input", "wb") as fh:
+                    fh.write(mini)
+                rec["saved"] = stem + ".input"
             with open(stem + ".diff", "w", encoding="utf-8") as fh:
                 fh.write(res["diff"] or "")
-            rec["saved"] = stem + ".input"
         findings.append(rec)
 
     return {"iterations": iters, "elapsed_s": round(time.time() - start, 3),
@@ -318,8 +421,8 @@ def _self_test():
         # crashing the self-test: red must come from a FAILED CHECK, not from a
         # Traceback — crash-red is indistinguishable from harness-broken-red, so
         # a mutation sweep cannot tell a killed mutant from a broken harness.
-        # (The sweep itself, `gate-mutation`, is a later stage of the kit
-        # refresh; this guard is what makes this file legible to it.)
+        # (The gate-mutation sweep depends on exactly that: this guard is what
+        # makes this file legible to it.)
         first = summary["findings"][0] if summary["findings"] else {}
         check("minimizes to the single triggering byte '%'",
               first.get("input_repr") == repr(b"%"))
@@ -384,16 +487,72 @@ def _self_test():
         check("matrix seeding picks up a `stdin_b64` case's raw bytes",
               raw in got and b"plain" in got)
 
+        # ARGV MODE. The oracle prints its arguments; "Rust" prints them too,
+        # except that it refuses any `+` word holding the letter q, as a port
+        # refuses a spelling getopt accepts. The fuzzer must find that from
+        # the inventory alone and shrink it to that one word.
+        inv = os.path.join(d, "inventory.toml")
+        open(inv, "w").write('[features]\noptions = ["a", "b", "q"]\n'
+                             'takes_value = ["b"]\n')
+        aoracle = os.path.join(d, "aoracle.py")
+        open(aoracle, "w").write(
+            "#!/usr/bin/env python3\nimport sys\nprint(' '.join(sys.argv[1:]))\n")
+        os.chmod(aoracle, 0o755)
+        arust = os.path.join(d, "arust.py")
+        open(arust, "w").write(
+            "#!/usr/bin/env python3\nimport sys\n"
+            "bad = [w for w in sys.argv[1:] if w.startswith('+') and 'q' in w]\n"
+            "sys.exit('unsupported: ' + bad[0]) if bad else print(' '.join(sys.argv[1:]))\n")
+        os.chmod(arust, 0o755)
+        alpha = load_argv_alphabet(inv)
+        check("argv alphabet: the inventory's letters, and which take a value",
+              alpha["letters"] == ["a", "b", "q"] and alpha["takes_value"] == {"b"})
+        argv_opts = dict(base_opts, argv=alpha, max_findings=5)
+        summary = fuzz(aoracle, aoracle, argv_opts)
+        check("argv mode: oracle vs itself → zero findings", len(summary["findings"]) == 0)
+        afdir = os.path.join(d, "afindings")
+        summary = fuzz(aoracle, arust, dict(argv_opts, max_findings=1, findings_dir=afdir))
+        first = summary["findings"][0] if summary["findings"] else {}
+        word = first.get("input_repr", "")
+        check("argv mode finds the refused spelling, shrunk to the one word",
+              word.startswith("('+") and "q" in word and word.endswith("',)"))
+        saved = first.get("saved", "")
+        check("argv mode saves the words as a reproducer that re-triggers",
+              saved.endswith(".argv") and _is_finding(_judge(
+                  tuple(json.load(open(saved))), aoracle, arust, [], argv_opts)["verdict"]))
+        empty = os.path.join(d, "empty.toml")
+        open(empty, "w").write('[features]\noptions = ["q"]\n')
+        check("an alphabet with every letter excluded is an error, not a clean run",
+              main(["--oracle", aoracle, "--rust", arust, "--argv-inventory", empty,
+                    "--argv-exclude", "q"]) == 2)
+        check("fixed arguments that start with `-` go after `--`",
+              _split_fixed(["--oracle", "o", "--", "-a", "-p", "1"])
+              == (["--oracle", "o"], ["-a", "-p", "1"]))
+        check("argv mode refuses stdin seeds rather than ignoring them",
+              main(["--oracle", aoracle, "--rust", arust, "--argv-inventory", inv,
+                    "--seed-file", inv]) == 2)
+
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
 
+def _split_fixed(argv):
+    """(this script's arguments, the fixed argv after `--`). argparse cannot take
+    `--args -a -p 1`: it reads `-a` as an option here, so a command-line tool's
+    fixed arguments were impossible to pass."""
+    if "--" in argv:
+        i = argv.index("--")
+        return argv[:i], argv[i + 1:]
+    return argv, []
+
+
 def main(argv=None):
+    argv, fixed = _split_fixed(list(sys.argv[1:] if argv is None else argv))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--oracle", help="C reference binary (or golden-replay wrapper)")
+    ap.add_argument("--oracle", help="C reference binary (a live one: a golden replay cannot answer a generated input)")
     ap.add_argument("--rust", help="Rust binary under test")
     ap.add_argument("--seed", type=int, default=0, help="PRNG seed (reproducible runs)")
-    ap.add_argument("--iterations", type=int, default=1000, help="max inputs to try")
+    ap.add_argument("--iterations", type=int, default=None, help="max inputs to try (1000 when no --max-time is given)")
     ap.add_argument("--max-time", type=float, default=None, help="wall-clock budget (s); stops with --iterations, whichever first")
     ap.add_argument("--args", nargs="*", default=[], help="fixed argv passed to both binaries")
     ap.add_argument("--seed-file", nargs="*", dest="seed_files", default=[], help="seed corpus files")
@@ -407,9 +566,14 @@ def main(argv=None):
     ap.add_argument("--mask-numbers", action="store_true")
     ap.add_argument("--ignore-exit", action="store_true")
     ap.add_argument("--with-stderr", action="store_true")
+    ap.add_argument("--argv-inventory", help="fuzz argv, not stdin: options from this coverage-gate inventory")
+    ap.add_argument("--argv-exclude", default="", help="option letters argv mode never uses")
+    ap.add_argument("--argv-value", action="append", default=[], help="a value argv mode may give an option (repeatable)")
+    ap.add_argument("--argv-words", type=int, default=4, help="most options in one generated vector")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
+    args.args = list(args.args) + fixed
 
     if args.self_test:
         return _self_test()
@@ -417,16 +581,35 @@ def main(argv=None):
         ap.print_usage(sys.stderr)
         print("error: --oracle and --rust are required (or --self-test)", file=sys.stderr)
         return 2
+    # --max-time alone runs until the time is up: a default iteration count
+    # used to stop every timed run at 1000 inputs, whatever time it was given.
     if args.max_time is None and args.iterations is None:
-        print("error: give --iterations or --max-time", file=sys.stderr)
+        args.iterations = 1000
+    if (args.iterations is not None and args.iterations <= 0) or \
+            (args.max_time is not None and args.max_time <= 0):
+        print("error: a zero budget fuzzes nothing, and would report clean", file=sys.stderr)
         return 2
 
+    alpha = None
+    if args.argv_inventory:
+        # Seeds are stdin bytes; argv mode makes its own vectors. Taking both
+        # would silently ignore one of them.
+        if args.seed_files or args.matrix:
+            print("error: --argv-inventory fuzzes argv; --seed-file and --matrix "
+                  "seed stdin and cannot be combined with it", file=sys.stderr)
+            return 2
+        try:
+            alpha = load_argv_alphabet(args.argv_inventory, args.argv_exclude, args.argv_value)
+        except (OSError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     opts = dict(seed=args.seed, iterations=args.iterations, max_time=args.max_time,
                 args=args.args, seed_files=args.seed_files, matrix=args.matrix,
                 ledger=args.ledger, findings_dir=args.findings_dir, timeout=args.timeout,
                 max_findings=args.max_findings, minimize_budget=args.minimize_budget,
                 sort=args.sort, mask_numbers=args.mask_numbers,
-                ignore_exit=args.ignore_exit, with_stderr=args.with_stderr)
+                ignore_exit=args.ignore_exit, with_stderr=args.with_stderr,
+                argv=alpha, argv_words=args.argv_words)
     summary = fuzz(args.oracle, args.rust, opts)
     _report(summary, args.json)
     return 1 if summary["findings"] else 0

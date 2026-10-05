@@ -52,6 +52,8 @@ OPERATIVE_DOCS = [
     "OPERATING-GUIDE.md",
     "SECURITY-CHECKLIST.md",
     "ARCHITECTURE-TEMPLATE.md",
+    "MATRIX-CHECKLIST.md",
+    "CI-AND-RELEASE.md",
     "PROMPTS",
     "skills",
     "skeleton",

@@ -8,8 +8,8 @@
    *what and why, with evidence*.
 2. **An executable "porting kit"** distilled from a real completed C→Rust port
    (lsof-rs — `lsof` reimplemented in Rust) plus the self-patching
-   retrospectives that followed it (four when this was written; `LESSONS.md` held
-   79 entries on 2026-10-04). This supplies the *how*: runnable harnesses that mechanically
+   retrospectives that followed it (four when this was written; `LESSONS.md` is
+   the running count). This supplies the *how*: runnable harnesses that mechanically
    enforce the plan, a proactive flaw-hunt, and a loop that improves the playbook
    after every port.
 
@@ -289,7 +289,7 @@ eliminate `static mut` via `Cell`/`RefCell`/thread-locals; run clippy fixes to a
 fixed point.
 
 **`Adds:` the divergence ledger is that "written policy," mechanized.** Option (2)
-and every security fix lands as a `- [x] <case>: <why + CWE>` entry that the Step
+and every security fix lands as a `- [x] <case> [sha256:<fingerprint>]: <why + CWE>` entry that the Step
 0.5 differential reads and suppresses — so the *decision* is enforced (unledgered
 divergence = failing CI) and *shipped* to users as release notes ("behaviors we
 deliberately changed, and why"). The security fixes over the C are a feature; say

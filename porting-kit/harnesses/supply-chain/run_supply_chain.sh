@@ -22,7 +22,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 have_deny_template() { test -f "$1/deny.template.toml"; }
 
 if [[ "${1:-}" == "--check" ]]; then
-  bash -n "$0" && echo "PASS  script syntax ok"
+  # `bash -n "$0" && echo PASS` could not fail this check: under `set -e` a
+  # failing command inside an `&&` list does not stop the script (LESSONS #082).
+  if bash -n "$0"; then echo "PASS  script syntax ok"
+  else echo "FAIL  this script does not parse"; exit 1; fi
   if ! have_deny_template "$HERE"; then
     echo "FAIL  deny.template.toml missing — the cargo-deny policy this gate applies is gone"
     exit 1

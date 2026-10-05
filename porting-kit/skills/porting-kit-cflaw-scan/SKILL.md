@@ -21,7 +21,8 @@ directive "the C may be buggy — don't re-port a CVE" (RETROSPECTIVE §9).
    gets muted. If you improve the scanner, run its self-test:
    `python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py --self-test`
 3. **Triage every hit**: does the Rust port close it? For each confirmed flaw, add a
-   `DIVERGENCES.md` entry — `- [x] <case>: <why + CWE>` — so the fix is (a) planned,
+   `DIVERGENCES.md` entry — `- [x] <case> [sha256:<fingerprint>]: <why + CWE>`, the
+   fingerprint the differential prints once a case exists — so the fix is (a) planned,
    (b) surfaced (never silently patched — the most dangerous UB option), and (c)
    shipped as a release note. This is the "decide in writing what you do with UB"
    policy, mechanized.

@@ -9,10 +9,11 @@
 # the platform list is discovered from the tree, so adding a dialect and
 # forgetting this file is a failure, not a silent omission.
 #
-# Written after LESSONS #049: four of these six were live, tested platforms and
-# three are tested by providers that never appear in a GitHub check list. Had
-# this ledger existed, the deletion that entry describes would have been refused
-# by a gate rather than by an investigation.
+# Written after LESSONS #049, which found four of these dialects tested by CI
+# and three of them by providers that never appear in a GitHub check list. That
+# was upstream's CI. This fork inherited the config files and never connected
+# the providers, so on this repository those three are built by nothing; see
+# [ci] (LESSONS #082).
 
 repo_root = "../../.."
 
@@ -23,14 +24,20 @@ repo_root = "../../.."
 dirs = ["lib/dialects/*"]
 
 [ci]
-# Providers, found by looking for their config files rather than by reading any
-# one provider's status list (LESSONS #049). Three of the entries below are the
-# whole point: .cirrus.yml and .builds/ never show up as GitHub check runs.
+# The CI configurations that RUN for this repository. A config file is a claim
+# that a provider builds something; the evidence is a run (LESSONS #082).
+#
+# .cirrus.yml (FreeBSD) and .builds/*.yml (NetBSD, OpenBSD on sourcehut) are
+# upstream lsof's and came with the fork, but no provider runs them here: on
+# 2026-10-04 the GitHub API showed only GitHub Actions (and claude) check
+# suites, and zero commit statuses, on master's head and on every commit since
+# the fork that was checked, including PR #81's merge. Listing them below made
+# this ledger certify three dialects as CI-built on the strength of their text.
+# Connect Cirrus CI and builds.sr.ht to this repository, record a run, and add
+# them back.
 globs = [
     ".github/workflows/*.yml",
     ".github/workflows/*.yaml",
-    ".cirrus.yml",
-    ".builds/*.yml",
     ".travis.yml",
     "appveyor.yml",
     ".gitlab-ci.yml",
@@ -38,7 +45,7 @@ globs = [
 
 [platforms.linux]
 # build.yml: the legacy Configure path and the autotools build, on two Ubuntu
-# releases. Also the oracle the 87-case differential compares lsof-rs against.
+# releases. Also the oracle lsof-rs's differential compares against.
 built_by = ["Configure linux"]
 
 [platforms.darwin]
@@ -46,18 +53,18 @@ built_by = ["Configure linux"]
 built_by = ["Configure -n darwin", "check\\.bash darwin"]
 
 [platforms.freebsd]
-# .cirrus.yml — two FreeBSD images, and the only place make distcheck runs on a
-# BSD. Invisible to GitHub's check list.
-built_by = ["Configure -n freebsd", "freebsd-\\d"]
+# .cirrus.yml would build it (two FreeBSD images, make distcheck), if Cirrus CI
+# ran for this repository. It does not; see [ci].
+waived = "upstream's .cirrus.yml is here, but no Cirrus CI runs it for this fork; kept as source, not gated"
 
 [platforms.netbsd]
-# .builds/netbsd.yml — sourcehut, netbsd/9.x. Invisible to GitHub's check list.
-built_by = ["netbsd/"]
+# .builds/netbsd.yml would build it on sourcehut, if builds.sr.ht ran for this
+# repository. It does not; see [ci].
+waived = "upstream's .builds/netbsd.yml is here, but no sourcehut build runs it for this fork; kept as source, not gated"
 
 [platforms.openbsd]
-# .builds/openbsd.yml — sourcehut, openbsd/7.2, Configure + make + check.bash.
-# Invisible to GitHub's check list.
-built_by = ["Configure -n openbsd", "openbsd/"]
+# .builds/openbsd.yml would build it on sourcehut. It does not run here; see [ci].
+waived = "upstream's .builds/openbsd.yml is here, but no sourcehut build runs it for this fork; kept as source, not gated"
 
 [platforms.aix]
 waived = "no AIX runner on any provider we use; kept as source, not gated"

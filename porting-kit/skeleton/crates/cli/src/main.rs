@@ -7,6 +7,10 @@
 //! Output goes through [`exit_on_write_error`], not `println!`: see there
 //! (LESSONS #063).
 
+// `cli` is portable: the unsafe layer is `sys`, alone. Forbidden here as in
+// `core`, and checked the same way (LESSONS #065, #082).
+#![forbid(unsafe_code)]
+
 use std::io::{self, BufWriter, Read, Write};
 
 fn main() {

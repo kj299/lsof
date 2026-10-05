@@ -67,7 +67,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-J` | out | ✅ shipped | JSON aggregated. The C has `-J` too, with another schema (DIVERGENCES 91) |
 | `-j` | out | ✅ shipped | JSON Lines. The C has `-j` too, with another schema (DIVERGENCES 91) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |
-| `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one `task` row per thread under the process, the TID in NODE. On Linux, TID and TASKCMD columns, as the C (DIVERGENCES 33). |
+| `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one `task` row per thread under the process, the TID in NODE. On Linux, TID and TASKCMD columns, as the C (DIVERGENCES 18). |
 | `-l` | out | ✅ shipped (5A) | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
 | `-L [l]` | out | ✅ shipped (5A) | **No link count column** — the default; `-L` takes no count. Shipped reading `-L` as "show the column", which is `+L`'s meaning; corrected 2026-09-26 (DIVERGENCES 41). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
 | `+L [l]` | sel | ✅ shipped (5A) | **The link count column**, and with `l`, also select files whose link count is known and < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too). A row with no count (a socket, a pipe) is never selected (DIVERGENCES 42). |

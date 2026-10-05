@@ -27,6 +27,11 @@ write the decision gate before coding, and do a pivot check before declaring it 
    A divergence is a *triage*: fix the Rust, OR record an intentional fix-of-C-defect
    in `DIVERGENCES.md`. Verdict = stdout AND exit code; a timeout = a design smell
    (design the blocking call out, don't wrap it).
+   Then **mutate the rules you just wrote**, one mutant per rule, as data: a
+   mutants file committed with the change, run with
+   `python3 porting-kit/harnesses/port-mutation/mutate_port.py <mutants.toml>`. Every
+   mutant must be KILLED; a survivor is a case that checks nothing. The file is
+   the kill table: anyone can run it again (LESSONS #083).
 3. **Fuzz** the input surface:
    `bash porting-kit/harnesses/fuzz/gen_fuzz_target.sh <module> --crate <crate>`
    then `cargo fuzz run <module> -- -max_total_time=60`. Any panic/crash blocks.

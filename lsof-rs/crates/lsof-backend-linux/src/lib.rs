@@ -34,12 +34,15 @@
 //!
 //! # What it does not cover yet
 //!
-//! One object type the C names and this backend does not: a **netlink**
-//! socket. An unbound one never appears in `/proc/net/netlink` at all, so
-//! there is no table to read, and the C names it from the
-//! `system.sockprotoname` extended attribute instead — which has no `std`
-//! API. It waits on the decision recorded as DIVERGENCES item 22, not on
-//! effort. Packet sockets were the other half of that pair and are done.
+//! Sockets the C names and this backend does not. A socket no `/proc/net`
+//! table lists — AF_VSOCK, an unbound **netlink** socket, a ping socket — the
+//! C names from the `system.sockprotoname` extended attribute, which has no
+//! `std` API; that waits on the decision recorded as DIVERGENCES item 22, not
+//! on effort. Two families do have tables this backend does not read as the C
+//! does: a *bound* netlink socket is listed in `/proc/net/netlink`, which the
+//! C types `netlink` (item 109), and a raw socket, which the C types `raw`
+//! from `/proc/net/raw` where this backend types it IPv4 or IPv6 (item 108).
+//! Packet sockets are done.
 //!
 //! Also open: the `-Z` CONTEXT column, the options `-S` and `-b`, and the rows of
 //! `lsof-rs/DIVERGENCES.md` still OPEN for this backend. `lsof-rs/docs/linux-l2-plan.md` measures each;
@@ -115,7 +118,7 @@ pub use backend::LinuxBackend;
 
 /// The pure text parsers, exposed for the cargo-fuzz targets in `../../fuzz`.
 ///
-/// Every function here takes `&str` and touches no file: each is the parsing
+/// Every function here takes text or bytes and touches no file: each is the parsing
 /// half of a `read → parse` split, so that the exact code path the backend runs
 /// on kernel-supplied text can be driven with arbitrary bytes. This module exists
 /// only under the `fuzzing` feature, which the CLI never enables; it is not API.

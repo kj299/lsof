@@ -39,7 +39,8 @@ retrospective and **patch the Porting Kit** with what you learned.
    - update `ARCHITECTURE-TEMPLATE.md` / prompts if the shape or loop changed.
 
 4. **Append to `LESSONS.md`** — one entry per lesson, in the required format
-   (date, codebase, lesson, playbook section amended). If the kit already had
+   (date, codebase, what happened, the rule, kit change, section amended — the
+   fields at the top of `LESSONS.md`). If the kit already had
    the lesson but it didn't fire, say why (friction? unclear? not wired to CI?).
 
 4c. **Diff every shared harness against the primary line** (LESSONS #064). This
@@ -53,6 +54,9 @@ retrospective and **patch the Porting Kit** with what you learned.
          cmp -s "$f" "$PRIMARY/$f" || echo "$f"; done
 
    Most differences are renumbered `LESSONS #N` citations — the logs diverge.
+   Never take the primary's `harnesses/differential/diff_run.py` whole: this
+   copy's reads `cwd` and `with_stderr`, which lsof-rs's cases use, and the
+   primary's ignores both (found by the 2026-10-04 retrospective's step 4c).
    For each that is not: a fix the primary has (import it: `KIT-IMPORT:`
    header, every citation re-cited, `check_imports.py` enforces it), a fix this
    copy has (send it), or a deliberate divergence (say so in the README).

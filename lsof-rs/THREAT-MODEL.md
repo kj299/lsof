@@ -53,16 +53,24 @@ it is a gap, not a formatting choice.
 | CLI args, the selection grammar | invoking user or a calling script | untrusted | `lsof-cli`, `lsof-core` | `parse_args` |
 | `/proc/PID/status`, `/proc/PID/task/TID/status` (the command is the `Name:` line) | **any local user's process** | **hostile** | `lsof-backend-linux::process` | `proc_status` |
 | `/proc/PID/fd/N` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape` |
+| `/proc/PID/{cwd,root,exe}` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape` |
+| `/proc/PID/ns/{net,mnt}` (compared by inode, never parsed), `/proc/self/status` | kernel | untrusted | `lsof-backend-linux::net`, `::maps`, `::process` | not applicable |
 | `/proc/PID/fdinfo/N` | kernel, per-fd | untrusted | `lsof-backend-linux::files` | `proc_fdinfo` |
 | `/proc/PID/maps` | kernel + mapped filenames | **hostile** | `lsof-backend-linux::maps` | `proc_maps` |
 | `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
 | `/proc/self/mounts` | kernel + mount namespace | untrusted | `lsof-backend-linux::mounts` | `proc_mounts` |
+| each mount directory, `stat`ed (an NFS, FUSE or automount point among them) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | not applicable: a liveness hazard, not a parser; see below |
+| a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |
 | `/proc/locks` | kernel | untrusted | `lsof-backend-linux::locks` | `proc_locks` |
 | `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
 | Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
 | Another process's PEB, via `ReadProcessMemory` | **the target process** | **hostile** | `lsof-backend-windows::peb` | none — see below |
 | ETW AFD event payloads (`--etw`, `-U`, `-iICMP`, `-iRAW`; Administrator) | **any process's socket activity** | **hostile** | `lsof-backend-windows::etw` | none — see below |
+| Toolhelp process names (`szExeFile`), module paths (`szExePath`), mapped-file names (`GetMappedFileNameW`) | **any local process** | **hostile** | `lsof-backend-windows::process`, `::modules`, `::mapped` | `windows_names` (covers `wide_to_string`) |
+| account names (`LookupAccountSidW`), Restart Manager results | the OS, a domain controller | untrusted | `lsof-backend-windows::process`, `::restart` | none |
+| IP Helper tables, TCP EStats | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-windows::sockets`, `::tcpinfo` | none: fixed-layout OS structures, bounds-checked |
+| reverse DNS names (`GetNameInfoW`), on by default; `-n` turns it off | **whoever answers for the peer's PTR record** | **hostile** | `lsof-backend-windows::resolve` | none; see below |
 | `LSOF_RS_TRACE`, `WINLSOF_TRACE` | operator | trusted-ish | tracing setup | not applicable |
 
 Three things about this table are worth saying out loud, because they are the
@@ -110,6 +118,55 @@ so a library its owner named `libssl.so`, a TAB and more passes for the real
 block on a hung file system, as an fd's can, and `-b`, the C's guard against
 that, is refused (DIVERGENCES 94). `-e` exempts by a plain prefix of the
 path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
+
+**A mount directory is `stat`ed on every run, in-process, with no timeout**
+(DIVERGENCES 110, found 2026-10-04). The C reads the mount table only when a
+run needs it, `stat`s each directory through a child process under a 15 s
+`alarm()`, skips `autofs`, `pipefs`, `sockfs` and automounter sources, and
+never `stat`s an `-e` mount; under `-i` alone it `stat`s none. lsof-rs
+`statx()`es every mount directory on every run but `-f`, `-i` included, without
+`AT_NO_AUTOMOUNT`. So a hung NFS or CIFS server stops `lsof -i :22`, the moment
+someone runs lsof to find out why a mount hangs; a FUSE file system whose daemon
+never answers, mounted `allow_other` by an unprivileged user where that is
+permitted, does the same to root's runs (not measured here: no FUSE on the
+host); and every run mounts each automount point it lists, which changes the
+host it is only meant to read. This is the largest open security difference
+from the C, and the next piece of work: read the device from
+`/proc/self/mountinfo` instead of a `stat`, load the table only when a run
+needs it, skip what the C skips, and bound any `stat` that remains as the
+Windows backend bounds its blocking calls. A bound AF_UNIX socket's path is
+`stat`ed the same way when a path argument is given.
+
+**A `+d`/`+D` entry is `stat`ed twice** (DIVERGENCES 111). The walk `lstat`s
+each entry, then `stat`s the same path again, following links, to identify it.
+A local user who can rename in the walked directory can swap a link in between,
+so the entry takes another file's identity, even on another device past `-x f`,
+and the processes holding that file are listed under the walked tree. The C
+makes one `lstat` and uses it. It matters most for root walking a directory
+others can write, such as `/tmp`.
+
+**An `-i` error message prints its argument raw** (DIVERGENCES 112). Every
+other message that quotes an argument escapes it, as the C's `safestrprt()`
+does; `-i`'s parser does not, so `lsof -i "$untrusted"` can write terminal
+control sequences to stderr.
+
+**Reverse DNS on Windows tells a resolver which peers the host talks to.** It
+is the default there, as in the C (Linux behaves as if `-n` were always given).
+The names that come back are chosen by whoever answers for the peer's address,
+and they are escaped like any name; each lookup is bounded to 2 s.
+
+**Memory under input someone else sizes** (found 2026-10-04, from the code, not
+yet measured at scale). lsof-rs reads `/proc/net/*`, `/proc/PID/maps` and each
+`fdinfo` whole, where the C reads them a line at a time; it keeps two strings
+per socket and, for each foreign network namespace, that namespace's whole
+socket table until the run ends, although only the protocol name is read from
+it; its maps reader removes repeats with a linear scan per mapping, as the C
+does, but over lines it has already copied; and listing a process's tasks
+copies the process's rows for each task before discarding them. A host with a
+million sockets, a process with 65,530 mappings of long names, an epoll fd
+watching a million fds, or a JVM with a thousand threads makes these costs
+visible; the resource gate's 400 synthetic processes cannot. DIVERGENCES 30
+and 81 hold what was measured.
 
 **The environment surface is two variables.** The C `lsof` reads considerably
 more, including the personal device-cache path; lsof-rs's whole environment
