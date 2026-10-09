@@ -33,8 +33,10 @@ dirs = ["lib/dialects/*"]
 # suites, and zero commit statuses, on master's head and on every commit since
 # the fork that was checked, including PR #81's merge. Listing them below made
 # this ledger certify three dialects as CI-built on the strength of their text.
-# Connect Cirrus CI and builds.sr.ht to this repository, record a run, and add
-# them back.
+# On 2026-10-09 the maintainer decided to keep FreeBSD, NetBSD and OpenBSD
+# waived rather than connect Cirrus CI and builds.sr.ht (RETROSPECTIVE-lsof.md
+# section 12.7, item 6). Connecting them, recording a run and adding them back
+# is what would gate them again.
 globs = [
     ".github/workflows/*.yml",
     ".github/workflows/*.yaml",
@@ -55,16 +57,16 @@ built_by = ["Configure -n darwin", "check\\.bash darwin"]
 [platforms.freebsd]
 # .cirrus.yml would build it (two FreeBSD images, make distcheck), if Cirrus CI
 # ran for this repository. It does not; see [ci].
-waived = "upstream's .cirrus.yml is here, but no Cirrus CI runs it for this fork; kept as source, not gated"
+waived = "upstream's .cirrus.yml is here, but no Cirrus CI runs it for this fork; kept as source, not gated, on the maintainer's decision (2026-10-09)"
 
 [platforms.netbsd]
 # .builds/netbsd.yml would build it on sourcehut, if builds.sr.ht ran for this
 # repository. It does not; see [ci].
-waived = "upstream's .builds/netbsd.yml is here, but no sourcehut build runs it for this fork; kept as source, not gated"
+waived = "upstream's .builds/netbsd.yml is here, but no sourcehut build runs it for this fork; kept as source, not gated, on the maintainer's decision (2026-10-09)"
 
 [platforms.openbsd]
 # .builds/openbsd.yml would build it on sourcehut. It does not run here; see [ci].
-waived = "upstream's .builds/openbsd.yml is here, but no sourcehut build runs it for this fork; kept as source, not gated"
+waived = "upstream's .builds/openbsd.yml is here, but no sourcehut build runs it for this fork; kept as source, not gated, on the maintainer's decision (2026-10-09)"
 
 [platforms.aix]
 waived = "no AIX runner on any provider we use; kept as source, not gated"

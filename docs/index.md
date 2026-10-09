@@ -34,8 +34,9 @@ removed from this repository in PR #81, since nothing here builds them.)
 
 In this repository, `.github/workflows/build.yml` builds and tests lsof on
 Ubuntu 22.04, Ubuntu 24.04 and macOS. `.cirrus.yml` (FreeBSD) and `.builds/`
-(NetBSD, OpenBSD) are configured as well; whether those services run depends on
-the Cirrus and sourcehut set-up of the repository that hosts them. (Upstream's
+(NetBSD, OpenBSD) are upstream's and kept, but no Cirrus or sourcehut build runs
+them for this repository; FreeBSD, NetBSD and OpenBSD are waived in
+`porting-kit/harnesses/platforms/platforms.toml` (decided 2026-10-09). (Upstream's
 list here — Alpine, Arch, CentOS, Debian, Fedora, NixOS, openSUSE and older
 Ubuntu — came from a CircleCI configuration this repository no longer has.)
 
