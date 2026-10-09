@@ -15,13 +15,13 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lsof_cli::args::{parse, Action};
+use lsof_cli::args::{parse_with, Action};
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, DirArg, FilesystemArgs, Located, PathItem, Selection, TaskMode, UidSel,
-    UserLookup,
+    errno_text, Backend, DirArg, FilesystemArgs, Located, PathItem, SafeFs, Selection, TaskMode,
+    UidSel, UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -179,7 +179,15 @@ MISCELLANEOUS:
     -e <fs>       do not stat files on this mounted file system; they show
                   as UNKN... rows
     -Z            SELinux security contexts: not supported (exits 1)
-    -O            no-op (Unix-specific perf hint; accepted for portability)
+    -b            make none of the calls that can block on a file system
+                  (stat, lstat, readlink) for a path given or a mount point;
+                  say so unless -w. A path argument then fails, and +d/+D
+                  after it ends the run
+    -O            make those calls in lsof itself, with no time limit
+                  (*RISKY*: a file system that does not answer hangs lsof)
+    -S [t]        give each of those calls t seconds (default 15, at least
+                  2), in a helper process (Linux; elsewhere they are made in
+                  lsof). One that times out fails: `Connection timed out`
     --            end of options; remaining args are paths
 
     --etw         (Windows, opt-in) short ETW capture against the AFD
@@ -238,15 +246,15 @@ fn without_trailing_slashes(path: &[u8]) -> &[u8] {
 /// used `canonicalize()`, which made `lsof mnt` a file system and followed
 /// such a link to the file behind it. Where names are matched instead
 /// (Windows), the argument as [`spell_names_as_reported`] left it.
-fn spell_path(typed: &str, identified: bool) -> Result<OsString, ReadlinkError> {
+fn spell_path(typed: &str, identified: bool, fs: &SafeFs) -> Result<OsString, ReadlinkError> {
     #[cfg(unix)]
     if identified {
         use std::os::unix::ffi::OsStringExt;
-        let mut path = lsof_core::readlink::resolve(typed.as_ref())?.into_vec();
+        let mut path = lsof_core::readlink::resolve(typed.as_ref(), fs)?.into_vec();
         path.truncate(without_trailing_slashes(&path).len());
         return Ok(OsString::from_vec(path));
     }
-    let _ = identified;
+    let _ = (identified, fs);
     Ok(typed.into())
 }
 
@@ -307,7 +315,16 @@ impl WalkBudget {
 /// So `+D rel` reports `rel/y`, not `$PWD/rel/y`, `+d rel-link` reports
 /// `rel/y` (DIVERGENCES 63), and an entry whose name is not UTF-8 is found by
 /// it, where a lossy name had found nothing (DIVERGENCES 65).
-fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper) {
+///
+/// Every call it makes on the tree — the directory's own `stat`, each
+/// listing, each entry's `lstat` and `stat` — goes through the bounded layer
+/// under the `-b`, `-O` and `-S` given before the option (DIVERGENCES 94):
+/// an entry on a file system that does not answer is a `can't lstat(P):
+/// Connection timed out` and the walk goes on, as the C's (its first
+/// timeout, DIVERGENCES 118). The calls are the ones it made before;
+/// DIVERGENCES 111 takes the second `stat` out. Its warnings go where the
+/// layer's do, stderr, so that a test can hold them.
+fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper, fs: &SafeFs) {
     fn enter(sel: &mut Selection, path: &Path, id: Option<(String, String)>) {
         if let Some(id) = &id {
             sel.path_ids.insert(id.clone());
@@ -319,6 +336,7 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
             name: path.as_os_str().to_os_string(),
         });
     }
+    let fs = fs.with(dir.blocking, dir.warn);
     let identified = sel.paths_identified;
     // Where names are matched, a `+D` keeps the long-form name it had.
     let base = if identified || !dir.recursive {
@@ -328,44 +346,55 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
         canonicalize_selector(&mut p);
         PathBuf::from(p)
     };
-    let id = backend.identify_path(&base);
-    if identified && id.is_none() {
+    // A file is identified by a `stat` that follows links; where names are
+    // matched there is nothing to identify, and no call is made.
+    let identify = |path: &Path| -> Option<Option<(String, String)>> {
+        if !identified {
+            return Some(None);
+        }
+        fs.stat(path).ok().map(|st| backend.identify_stat(&st))
+    };
+    let Some(id) = identify(&base) else {
         // Gone since the option was checked.
         return;
-    }
+    };
     enter(sel, &base, id);
     // The directory's own file system, for the cross-over rule below. `None`
-    // on a backend with no such notion, which switches the rule off rather
-    // than guessing.
-    let dir_fs = backend.path_fs_device(&base);
+    // where names are matched, which switches the rule off rather than
+    // guessing.
+    let dir_fs = if identified {
+        fs.lstat(&base).ok().map(|st| st.dev)
+    } else {
+        None
+    };
     let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
     let mut budget = WalkBudget::new();
     let mut stack = vec![base.clone()];
     while let Some(dn) = stack.pop() {
-        let entries = match std::fs::read_dir(&dn) {
-            Ok(entries) => entries,
+        let names = match fs.read_dir(&dn) {
+            Ok(names) => names,
             Err(e) => {
                 if dir.warn && e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
+                    fs.tell(&format!(
                         "lsof: WARNING: can't opendir({}): {}",
                         shown(&dn),
                         errno_text(&e)
-                    );
+                    ));
                 }
                 continue;
             }
         };
-        for e in entries.flatten() {
+        for name in names {
             // `dn`, a `/` unless it ends in one, and the entry's name: the C's
             // spelling, and `DirEntry::path()`'s.
-            let path = e.path();
+            let path = dn.join(&name);
             if !budget.take(path.as_os_str().len()) {
                 if dir.warn {
-                    eprintln!(
+                    fs.tell(&format!(
                         "lsof: WARNING: stopped walking {} after {} entries",
                         shown(&base),
                         WALK_ENTRIES - budget.entries
-                    );
+                    ));
                 }
                 return;
             }
@@ -381,58 +410,56 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
             //         (DIVERGENCES 78).
             //
             // `-x` is the one in force when the option was checked
-            // (DIVERGENCES 75).
-            let dev = backend.path_fs_device(&path);
-            if identified && dev.is_none() {
-                // `lstat` failed: gone, or not ours to see.
-                if dir.warn {
-                    if let Err(err) = std::fs::symlink_metadata(&path) {
-                        if err.kind() != std::io::ErrorKind::NotFound {
-                            eprintln!(
-                                "lsof: WARNING: can't lstat({}): {}",
-                                shown(&path),
-                                errno_text(&err)
-                            );
-                        }
+            // (DIVERGENCES 75). The type is the `lstat`'s, never the listing's
+            // `d_type`, as the C's is.
+            let st = match fs.lstat(&path) {
+                Ok(st) => Some(st),
+                // `lstat` failed: gone, not ours to see, or timed out. The
+                // C's words, with that call's own error.
+                Err(err) if identified => {
+                    if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                        fs.tell(&format!(
+                            "lsof: WARNING: can't lstat({}): {}",
+                            shown(&path),
+                            errno_text(&err)
+                        ));
                     }
+                    continue;
                 }
-                continue;
-            }
+                // Where names are matched, the name is still an item.
+                Err(_) => None,
+            };
             if !dir.cross_filesystems {
-                if let (Some(d), Some(e_dev)) = (dir_fs, dev) {
-                    if d != e_dev {
+                if let (Some(d), Some(st)) = (dir_fs, st) {
+                    if d != st.dev {
                         continue;
                     }
                 }
             }
-            let Ok(kind) = e.file_type() else {
-                continue;
-            };
-            let is_dir = if kind.is_symlink() {
+            let is_dir = if st.is_some_and(|st| st.is_symlink()) {
                 if !dir.cross_symlinks {
                     continue;
                 }
-                match std::fs::metadata(&path) {
-                    Ok(m) => m.is_dir(),
+                match fs.stat(&path) {
+                    Ok(st) => st.is_dir(),
                     Err(err) => {
                         // The C's words, its spelling included.
                         if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
-                            eprintln!(
+                            fs.tell(&format!(
                                 "lsof: WARNING: can't stat({}) symbolc link: {}",
                                 shown(&path),
                                 errno_text(&err)
-                            );
+                            ));
                         }
                         continue;
                     }
                 }
             } else {
-                kind.is_dir()
+                st.is_some_and(|st| st.is_dir())
             };
-            let id = backend.identify_path(&path);
-            if identified && id.is_none() {
+            let Some(id) = identify(&path) else {
                 continue;
-            }
+            };
             if dir.recursive && is_dir {
                 stack.push(path.clone());
             }
@@ -683,6 +710,17 @@ fn exit_on_write_error(r: std::io::Result<()>) {
 }
 
 fn main() {
+    // The bounded layer's helper is this binary, re-executed with an argument
+    // no user types (`lsof_backend_linux::safefs`). It is served before
+    // anything else is looked at — options, the locale, the environment,
+    // which the helper does not have — and nothing else.
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(lsof_backend_linux::safefs::HELPER_ARG))
+    {
+        std::process::exit(lsof_backend_linux::safefs::serve());
+    }
+
     // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
     // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —
     // `lsof /tmp/$'\xff'` exited 101 with a panic message. lsof-rs keeps
@@ -712,7 +750,17 @@ fn main() {
         lsof_backend_windows::enable_utf8_console();
     }
 
-    let action = match parse(argv) {
+    // Where a path the user named is `stat`ed and its links read: a helper
+    // process that gives each call `-S` seconds (DIVERGENCES 94, 110). One
+    // per run, started by the first call that needs it — a `+d` while the
+    // options are parsed, or the mount table — and ended with the run.
+    #[cfg(target_os = "linux")]
+    let calls = lsof_backend_linux::safefs::Helper::new();
+    #[cfg(not(target_os = "linux"))]
+    let calls = lsof_core::InProcess;
+    let fs = SafeFs::new(&calls, &lsof_core::safefs::to_stderr);
+
+    let action = match parse_with(argv, &fs) {
         Ok(a) => a,
         Err(e) => {
             // An argument is escaped where the message quotes it, as the C
@@ -782,10 +830,22 @@ fn main() {
         // widens the source test to any mount source.
         // Only a bare path argument is compared with a mount's source, so
         // only a run that names one asks the backend to spell the sources.
-        let mounts = match sel.filesystem_args {
-            FilesystemArgs::NeverFilesystem => Vec::new(),
-            _ => env.backend.mounts(!sel.paths.is_empty()),
+        //
+        // The C reads the table at the first `+d`/`+D`, while it is still
+        // reading its options, so the `-b`, `-O`, `-S` and `-w` in force there
+        // are the ones its `stat`s are made under: `+d D -b` examines every
+        // mount, `-b +d D` never gets that far. Without one, the options as
+        // they ended. `None` is a table not read at all.
+        let table_fs = match sel.dir_args.first() {
+            Some(first) => fs.with(first.blocking, first.warn),
+            None => fs.with(sel.blocking, !sel.omit_unreadable),
         };
+        let mounts = match sel.filesystem_args {
+            FilesystemArgs::NeverFilesystem => None,
+            _ => Some(env.backend.mounts(!sel.paths.is_empty(), &table_fs)),
+        };
+        let table_empty = mounts.as_ref().is_some_and(Vec::is_empty);
+        let mounts = mounts.unwrap_or_default();
         sel.paths_identified = env.backend.identifies_paths();
         // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
         // `is_selinux_enabled()` — a check for a mounted selinuxfs, not for
@@ -824,8 +884,11 @@ fn main() {
         // `-e`/`+e` name a MOUNT POINT, and the C checks that before it does
         // anything else: `lsof: "-e /nosuch" is not a mounted file system.`,
         // then exit 1. A trailing slash is tolerated (`-e /dev/shm/` was
-        // accepted), so the comparison is made on a normalised form.
-        for e in &sel.exempt_fs {
+        // accepted), so the comparison is made on a normalised form. It
+        // checks only a table that holds something (`main.c`: `if ((mp =
+        // readmnt(ctx)))`): under `-b`, which drops every mount it would
+        // `stat`, `-b -e /nosuch` exits 0 (measured).
+        for e in sel.exempt_fs.iter().filter(|_| !table_empty) {
             let want = {
                 let t = e.trim_end_matches('/');
                 if t.is_empty() {
@@ -854,12 +917,15 @@ fn main() {
         // when every bare path is then dropped. The order matters to `-V`,
         // which reports the items last-entered first (DIVERGENCES 52).
         for dir in sel.dir_args.clone() {
-            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc);
+            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc, &fs);
         }
         let identified = sel.paths_identified;
+        // A bare path is examined under the options as they ended, as the C
+        // examines it once they are all read (`ck_file_arg()`).
+        let arg_fs = fs.with(sel.blocking, !sel.omit_unreadable);
         let mut survived = 0usize;
         for typed in sel.paths.clone() {
-            let path = match spell_path(&typed, identified) {
+            let path = match spell_path(&typed, identified, &arg_fs) {
                 Ok(path) => path,
                 Err(e) => {
                     // A warning: `-w` mutes it, `-Q` does not.
@@ -913,8 +979,16 @@ fn main() {
                 survived += 1;
                 continue;
             }
-            match env.backend.identify_path(Path::new(&path)) {
-                Some(id) => {
+            // ONE `stat`, bounded, and its own error if it fails: a path on
+            // a file system that does not answer is `Connection timed out`
+            // after `-S` seconds, and under `-b` `Resource temporarily
+            // unavailable` (DIVERGENCES 94). lsof-rs had `stat`ed a failed
+            // argument a second time, unbounded, to word the message.
+            match arg_fs
+                .stat(Path::new(&path))
+                .map(|st| env.backend.identify_stat(&st))
+            {
+                Ok(Some(id)) => {
                     sel.path_ids.insert(id.clone());
                     sel.path_names.insert(typed.as_str().into());
                     sel.path_items.push(PathItem {
@@ -924,19 +998,26 @@ fn main() {
                     });
                     survived += 1;
                 }
-                None => {
+                // A backend that identifies paths always says what a `stat`
+                // found; one that did not would leave the name to match.
+                Ok(None) => {
+                    sel.path_items.push(PathItem {
+                        id: None,
+                        fs_device: None,
+                        name,
+                    });
+                    survived += 1;
+                }
+                Err(e) => {
                     // Named as the C names it, by its `Readlink()`: a link
                     // to `/nonexistent/f` is `status error on
                     // /nonexistent/f`, and a `/proc/PID/fd/N` pipe is `status
-                    // error on /proc/PID/fd/pipe:[N]`.
+                    // error on /proc/PID/fd/pipe:[N]`. `-w` does not mute it.
                     if !sel.quiet {
-                        let why = std::fs::metadata(&path)
-                            .err()
-                            .map(|e| errno_text(&e))
-                            .unwrap_or_else(|| "status error".to_string());
                         eprintln!(
-                            "lsof: status error on {}: {why}",
-                            esc.bytes(path.as_encoded_bytes())
+                            "lsof: status error on {}: {}",
+                            esc.bytes(path.as_encoded_bytes()),
+                            errno_text(&e)
                         );
                     }
                     dropped_an_argument = true;
@@ -952,6 +1033,11 @@ fn main() {
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             std::process::exit(1);
         }
+        // Every bounded call this run makes is made by now. A helper killed
+        // while one outlived its limit still holds what it opened for it, on
+        // the file system that did not answer: the scan must not `stat` that
+        // (DIVERGENCES 123), or it waits there itself.
+        sel.helpers = lsof_core::FsCalls::helper_pids(&calls);
         sel
     };
 
@@ -1087,6 +1173,10 @@ fn main() {
             } else {
                 0
             };
+            // The helper is idle; closing its pipe ends it. Kept until now so
+            // that, like the C's child, it is there when lsof lists itself.
+            #[cfg(target_os = "linux")]
+            calls.finish();
             #[cfg(windows)]
             lsof_backend_windows::exit_now(code);
             #[cfg(not(windows))]
@@ -1381,5 +1471,164 @@ mod tests {
             ["lsof: no file system use located: mnt"]
         );
         assert!(lines(vec![true, true]).is_empty());
+    }
+
+    /// A walk over a tree held in memory: each call it makes, through the
+    /// bounded layer, with the limit `-S` gave where the `+D` stood; an
+    /// entry whose `lstat` times out is said in the C's words and the walk
+    /// goes on to the next; `-w` there mutes it (DIVERGENCES 94, 118). The
+    /// tree is spelt with `/`; the walk joins names with the host's separator
+    /// (`\\` on Windows), which the tree reads as `/`.
+    #[test]
+    fn a_walk_makes_every_call_through_the_layer_and_goes_on_past_a_timeout() {
+        use lsof_core::safefs::{timed_out, Blocking, FileStat, FsCalls};
+        use lsof_core::{Backend, DirArg, Escaper, SafeFs, Selection};
+        use std::cell::RefCell;
+        use std::ffi::OsString;
+        use std::io;
+        use std::path::Path;
+
+        struct Tree(RefCell<Vec<(&'static str, String, u32)>>);
+        impl Tree {
+            fn note(&self, call: &'static str, p: &Path, limit: u32) -> String {
+                let p = p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+                self.0.borrow_mut().push((call, p.clone(), limit));
+                p
+            }
+            fn node(p: &str, follow: bool) -> io::Result<FileStat> {
+                let (mode, ino) = match p {
+                    "/w" | "/w/sub" => (0o040_755, p.len() as u64),
+                    "/w/a" => (0o100_644, 2),
+                    "/w/hung" => return Err(timed_out()),
+                    "/w/l" if !follow => (0o120_777, 3),
+                    "/w/l" => (0o100_644, 2),
+                    _ => return Err(io::Error::from(io::ErrorKind::NotFound)),
+                };
+                Ok(FileStat {
+                    dev: 1,
+                    ino,
+                    mode,
+                    ..FileStat::default()
+                })
+            }
+        }
+        impl FsCalls for Tree {
+            fn stat(&self, p: &Path, limit: u32) -> io::Result<FileStat> {
+                Tree::node(&self.note("stat", p, limit), true)
+            }
+            fn lstat(&self, p: &Path, limit: u32) -> io::Result<FileStat> {
+                Tree::node(&self.note("lstat", p, limit), false)
+            }
+            fn readlink(&self, p: &Path, limit: u32) -> io::Result<OsString> {
+                self.note("readlink", p, limit);
+                Err(io::Error::from(io::ErrorKind::InvalidInput))
+            }
+            fn read_dir(&self, p: &Path, limit: u32) -> io::Result<Vec<OsString>> {
+                match self.note("read_dir", p, limit).as_str() {
+                    "/w" => Ok(["a", "hung", "l", "sub"].map(OsString::from).to_vec()),
+                    _ => Ok(Vec::new()),
+                }
+            }
+        }
+        struct Ids;
+        impl Backend for Ids {
+            fn name(&self) -> &str {
+                "ids"
+            }
+            fn identify_stat(&self, st: &FileStat) -> Option<(String, String)> {
+                Some((st.dev.to_string(), st.ino.to_string()))
+            }
+            fn identifies_paths(&self) -> bool {
+                true
+            }
+            fn gather(
+                &self,
+                _: &Selection,
+            ) -> Result<Vec<lsof_core::model::Process>, lsof_core::BackendError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let tree = Tree(RefCell::new(Vec::new()));
+        let said = RefCell::new(Vec::<String>::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&tree, &say);
+        let dir = DirArg {
+            recursive: true,
+            dir: "/w".into(),
+            cross_filesystems: false,
+            cross_symlinks: true,
+            warn: true,
+            blocking: Blocking {
+                limit: 7,
+                ..Blocking::default()
+            },
+        };
+        let mut sel = Selection {
+            paths_identified: true,
+            ..Selection::default()
+        };
+        super::expand_dir(&mut sel, &dir, &Ids, Escaper::for_host(), &fs);
+        let made = tree.0.take();
+        for (c, p, limit) in &made {
+            assert_eq!(*limit, 7, "{c} {p}: the limit where +D stood");
+        }
+        let calls: Vec<(&str, &str)> = made.iter().map(|(c, p, _)| (*c, p.as_str())).collect();
+        assert_eq!(
+            calls,
+            [
+                ("stat", "/w"),
+                ("lstat", "/w"),
+                ("read_dir", "/w"),
+                ("lstat", "/w/a"),
+                ("stat", "/w/a"),
+                ("lstat", "/w/hung"),
+                ("lstat", "/w/l"),
+                ("stat", "/w/l"),
+                ("stat", "/w/l"),
+                ("lstat", "/w/sub"),
+                ("stat", "/w/sub"),
+                ("read_dir", "/w/sub"),
+            ]
+        );
+        // Exactly the C's words; under miri, whose strerror adds `(os error
+        // 110)`, those words first.
+        let hung = Path::new("/w").join("hung");
+        let want = format!(
+            "lsof: WARNING: can't lstat({}): Connection timed out",
+            hung.display()
+        );
+        let warned = said.borrow();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(
+            warned[0] == want || (cfg!(miri) && warned[0].starts_with(&want)),
+            "{warned:?}"
+        );
+        drop(warned);
+        let items: Vec<String> = sel
+            .path_items
+            .iter()
+            .map(|i| {
+                i.name
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/")
+            })
+            .collect();
+        assert_eq!(
+            items,
+            ["/w", "/w/a", "/w/l", "/w/sub"],
+            "on past the timeout"
+        );
+
+        // `-w` where the `+D` stood mutes it; nothing else changes.
+        said.borrow_mut().clear();
+        let quiet = DirArg { warn: false, ..dir };
+        let mut sel = Selection {
+            paths_identified: true,
+            ..Selection::default()
+        };
+        super::expand_dir(&mut sel, &quiet, &Ids, Escaper::for_host(), &fs);
+        assert!(said.borrow().is_empty(), "{:?}", said.borrow());
+        assert_eq!(sel.path_items.len(), 4);
     }
 }

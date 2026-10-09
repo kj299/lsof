@@ -211,12 +211,28 @@ The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
 - **Refused, where the C works:** `-c /regex/`, and host or service names in
-  `-i` (38); `-b` and `-S` (94); a path argument that is not UTF-8 (92); `-Z`,
-  where SELinux is mounted (29: the CONTEXT column is not built).
+  `-i` (38); a path argument that is not UTF-8 (92); `-Z`, where SELinux is
+  mounted (29: the CONTEXT column is not built).
 - **Linux, and worth knowing before running it on a busy host:** every run but
-  `-f` `stat`s every mount point, in-process and with no timeout, `-i`
-  included: a hung NFS server stops it, and each run mounts every automount
-  point it lists (110). The C bounds those `stat`s and skips them under `-i`.
+  `-f` `stat`s every mount point, `-i` included, where the C skips them under
+  `-i` alone (110). Since 2026-10-09 each such `stat`, each `readlink` of a
+  path it was given, and a `+d`/`+D` walk's calls are made in a helper process
+  that gives each `-S` seconds (15): a hung NFS server or FUSE daemon costs a
+  run that limit per call that meets it (the mount, then a path argument on
+  it, then each walk entry there) and not the run, and no automount point is
+  mounted (94, 118). The helper it killed then waits in the kernel, as `lsof`
+  in state D, until the file system answers or goes away, holding the
+  descriptor its call opened there, and it is in lsof's own listing (123).
+  lsof-rs never `stat`s that descriptor; the C's lsof listing the host, or any
+  other tool that `stat`s `/proc/PID/fd/N`, waits on it. A process's own
+  files are `stat`ed in lsof with no limit, as the C does without an NFS mount
+  (124), and `-O` makes every call that way. lsof-rs drops a mount it cannot
+  `stat` without the C's warning (87), and under `-b` names each mount it
+  avoids once where the C names it with four lines. Under `-i` alone the
+  helper is a cost the C does not pay: under a descriptor limit with no room
+  for its pipes `lsof -i` ends `can't open pipes` (110). A `+D` walk makes a
+  helper round trip per call: about 0.1 ms an entry, three times the C's
+  (111).
 - **Linux:** `-E`/`+E` are accepted and ignored (56); AF_VSOCK, ping and
   unbound netlink sockets, and a TCP socket that is bound but not listening,
   show as `SOCK` `socket:[N]` (22, waiting on a decision); a raw socket is

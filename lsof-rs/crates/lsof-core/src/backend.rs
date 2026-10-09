@@ -7,7 +7,6 @@
 //! from selection and rendering.
 
 use std::ffi::OsString;
-use std::path::Path;
 
 use crate::model::Process;
 use crate::selection::Selection;
@@ -112,34 +111,27 @@ pub trait Backend {
     /// A short human-readable name (e.g. `"windows"`, `"mock"`).
     fn name(&self) -> &str;
 
-    /// The `(DEVICE, NODE)` identity of the file at `path`, rendered exactly as
-    /// this backend renders those cells on a row — so the comparison in
-    /// [`Selection::path_matches`](crate::selection::Selection) is a plain
-    /// equality test and the formatting lives with the code that produces it.
+    /// The `(DEVICE, NODE)` identity of the file a `stat` described, rendered
+    /// exactly as this backend renders those cells on a row — so the
+    /// comparison in [`Selection::path_matches`](crate::selection::Selection)
+    /// is a plain equality test and the formatting lives with the code that
+    /// produces it.
     ///
     /// This is what makes a path argument mean what lsof means by it: `lsof
     /// /a/hardlink` finds the file even though it was opened under its other
     /// name, and `lsof /some/dir` matches that directory and *not* the files
-    /// beneath it. A backend that cannot cheaply identify a path returns
-    /// `None`, and selection falls back to comparing names.
+    /// beneath it. A backend that cannot identify files returns `None`, and
+    /// selection falls back to comparing names.
     ///
-    /// A `Path`, not a `str`: on Linux a name may hold any byte but `/` and
-    /// NUL, and a lossy spelling names another file, or none.
-    fn identify_path(&self, _path: &Path) -> Option<(String, String)> {
-        None
-    }
-
-    /// The **filesystem** device a path lives on, without following a final
-    /// symlink — `lstat(2)`'s `st_dev`.
-    ///
-    /// Distinct from the device cell [`Self::identify_path`] returns, which is
-    /// `st_rdev` for a device node: `/dev/null` lives on devtmpfs but *is*
-    /// `1,3`. `+d`/`+D` needs the former, because the C's rule is "don't leave
-    /// the directory's file system unless `-x`/`-x f` says to".
-    ///
-    /// `None` where the platform has no such notion, which switches that rule
-    /// off rather than guessing at it.
-    fn path_fs_device(&self, _path: &Path) -> Option<u64> {
+    /// The `stat` itself is the caller's, made through the bounded layer
+    /// ([`crate::safefs::SafeFs`]) under the `-b`/`-O`/`-S` in force where the
+    /// path was named, so a path on a file system that does not answer costs
+    /// a timeout and not the run, and a failed `stat` is reported with that
+    /// call's own error. Until 2026-10-09 this took a path and `stat`ed it
+    /// here, in-process and unbounded, and a `+d`/`+D` walk asked for an
+    /// entry's file system through a second method, `path_fs_device`, which
+    /// is now the caller's `lstat`.
+    fn identify_stat(&self, _st: &crate::safefs::FileStat) -> Option<(String, String)> {
         None
     }
 
@@ -157,11 +149,17 @@ pub trait Backend {
     /// cost what a user who chose it wants it to cost (the C's `Readlink()`
     /// re-reads a long chain of links up to 21 times), so a run that names
     /// no path pays nothing for it.
-    fn mounts(&self, _sources: bool) -> Vec<MountEntry> {
+    ///
+    /// Every `stat` and `readlink` of a mount point or a source goes through
+    /// `fs`, the bounded layer under the options the C reads its table with:
+    /// a mount whose file system does not answer is dropped after the `-S`
+    /// limit, where it had stopped the run, and under `-b` none is examined
+    /// (DIVERGENCES 94, 110).
+    fn mounts(&self, _sources: bool, _fs: &crate::safefs::SafeFs) -> Vec<MountEntry> {
         Vec::new()
     }
 
-    /// Whether [`Backend::identify_path`] works on this platform.
+    /// Whether [`Backend::identify_stat`] works on this platform.
     ///
     /// Selection needs this stated rather than inferred. "Did any path resolve
     /// to an identity?" looks like the same question and is not: a run whose

@@ -97,6 +97,19 @@ ledger — those are the kit's, on purpose.
   fixture U  (above) runs its cases as a user who cannot read it
   fixture W  two processes whose real and effective uids differ, one each
              way (root, or passwordless sudo)
+  fixture FH a FUSE file system that does not answer `stat` of its root
+             (`fuse_hang.py`: hold, or delay), mounted at {FUSE} in a mount
+             namespace of its own for each binary run, for `-S`, `-b` and
+             `-O`: root (or passwordless sudo), `unshare`, /dev/fuse, and a
+             kernel that does not end a held request itself. Its cases set
+             LSOF_DIFF_FUSE to the server's mode, and only the states where
+             the C itself terminates are cases: the C hangs where a request
+             is held and it `stat`s it (DIVERGENCES 118), which
+             `crates/lsof-cli/tests/bounded_calls.rs` pins for lsof-rs alone
+
+A case may also set LSOF_DIFF_NOFILE: both binaries then run under that
+descriptor limit (`ulimit -n`), for what a run does when it cannot open
+another descriptor.
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -891,22 +904,155 @@ def unprivileged_prefix() -> list | None:
     ]
 
 
-def unprivileged_wrapper(work: str, name: str, binary: str, prefix: list) -> str:
+def unprivileged_wrapper(
+    work: str, name: str, binary: str, prefix: list | None, fuse: str | None = None
+) -> str:
     """A script that runs `binary` through `prefix` when the case's
-    environment sets LSOF_DIFF_UNPRIVILEGED, and directly otherwise. The kit
-    runner takes one path per side for every case and only its environment
-    varies per case, so this is how one case runs as another user. It `exec`s
-    either way: the process lsof runs as is the binary itself."""
+    environment sets LSOF_DIFF_UNPRIVILEGED, under fixture FH's FUSE mount
+    when it sets LSOF_DIFF_FUSE (`fuse`, the script [`fuse_wrap`] wrote), and
+    directly otherwise. The kit runner takes one path per side for every case
+    and only its environment varies per case, so this is how one case runs as
+    another user, or beside a file system the rest never see. It `exec`s
+    either way: the process lsof runs as is the binary itself, or for FH the
+    namespace's shell, which waits for it and takes the server down."""
     path = os.path.join(work, name)
-    argv = " ".join(shlex.quote(a) for a in [*prefix, binary])
+    lines = ["#!/bin/sh\n"]
+    # A case that sets LSOF_DIFF_NOFILE runs under that descriptor limit,
+    # whatever else it sets: both binaries, the same limit.
+    lines.append('if [ -n "$LSOF_DIFF_NOFILE" ]; then ulimit -n "$LSOF_DIFF_NOFILE" || exit 2; fi\n')
+    if fuse is not None:
+        # The mode travels as an argument and LC_ALL by `env`: `sudo` would
+        # drop both from the environment.
+        root = " ".join(shlex.quote(a) for a in (root_prefix() or []))
+        lines.append(
+            'if [ -n "$LSOF_DIFF_FUSE" ]; then exec '
+            f'{root} env LC_ALL="$LC_ALL" unshare -m --propagation private '
+            f'sh {shlex.quote(fuse)} "$LSOF_DIFF_FUSE" {shlex.quote(binary)} "$@"; fi\n'
+        )
+    if prefix is not None:
+        argv = " ".join(shlex.quote(a) for a in [*prefix, binary])
+        lines.append(f'if [ -n "$LSOF_DIFF_UNPRIVILEGED" ]; then exec {argv} "$@"; fi\n')
+    lines.append(f'exec {shlex.quote(binary)} "$@"\n')
+    with open(path, "w") as f:
+        f.write("".join(lines))
+    os.chmod(path, 0o755)
+    return path
+
+
+FUSE_HANG = os.path.join(HERE, "fuse_hang.py")
+
+
+def fuse_wrap(work: str, mountpoint: str) -> str:
+    """The script fixture FH's cases run in, already in a mount namespace of
+    their own (`unshare -m --propagation private`): mount `fuse_hang.py` at
+    `mountpoint` in the mode its first argument gives, run the rest, then
+    take the server down — which aborts the connection and so frees anything
+    still waiting on it, a helper lsof-rs killed included — and exit as the
+    binary did. A server that does not come up is not a result: the line it
+    prints carries this shell's pid, so the two sides differ and the case
+    fails loudly instead of MATCHing on two fixture failures. Nothing here
+    keeps a directory, file or mapping on the mount, and the server ends
+    itself after `--lifetime` should anything outlive the case."""
+    path = os.path.join(work, "fuse-wrap.sh")
     with open(path, "w") as f:
         f.write(
             "#!/bin/sh\n"
-            f'if [ -n "$LSOF_DIFF_UNPRIVILEGED" ]; then exec {argv} "$@"; fi\n'
-            f'exec {shlex.quote(binary)} "$@"\n'
+            "mode=$1; shift\n"
+            f"ready={shlex.quote(os.path.dirname(mountpoint))}/ready.$$\n"
+            f"{shlex.quote(sys.executable)} -I {shlex.quote(FUSE_HANG)} "
+            f"{shlex.quote(mountpoint)} $mode --ready \"$ready\" --lifetime 120 "
+            "--log /dev/null </dev/null >/dev/null 2>&1 &\n"
+            "srv=$!\n"
+            "i=0\n"
+            'while [ ! -e "$ready" ]; do\n'
+            "    i=$((i+1))\n"
+            '    if [ $i -gt 200 ]; then kill $srv; echo "linux_diff: no FUSE server ($$)"; exit 2; fi\n'
+            "    sleep 0.05\n"
+            "done\n"
+            'rm -f "$ready"\n'
+            '"$@"\n'
+            "rc=$?\n"
+            "kill $srv\n"
+            "wait $srv\n"
+            "exit $rc\n"
         )
     os.chmod(path, 0o755)
     return path
+
+
+def fuse_unavailable() -> str | None:
+    """Why fixture FH cannot run here, or None."""
+    if root_prefix() is None:
+        return "not root, and no passwordless sudo"
+    if not os.path.exists("/dev/fuse"):
+        return "no /dev/fuse"
+    if shutil.which("unshare") is None:
+        return "no unshare"
+    # A kernel that ends a held request by itself (6.14+, when either is set)
+    # would end a hang for the wrong reason.
+    for knob in ("default_request_timeout", "max_request_timeout"):
+        try:
+            with open(f"/proc/sys/fs/fuse/{knob}") as f:
+                if f.read().strip() not in ("", "0"):
+                    return f"fs.fuse.{knob} is set: the kernel would end a held request"
+        except OSError:
+            pass
+    return None
+
+
+def fuse_probe(work: str) -> Fixture:
+    """Fixture FH's probe: in a mount namespace of its own, mount
+    `fuse_hang.py` at {FUSE} in serve mode, `stat` it, take it down, and only
+    then say `ready` — so a host where FUSE cannot be mounted skips the FH
+    cases by name rather than failing them. It sleeps on afterwards, holding
+    nothing on the mount, which is gone with its namespace's server."""
+    fdir = os.path.join(work, "fh")
+    os.makedirs(os.path.join(fdir, "fuse"))
+    script = (
+        "set -u\n"
+        f"cd /\n"
+        f"{shlex.quote(sys.executable)} -I {shlex.quote(FUSE_HANG)} "
+        f"{shlex.quote(os.path.join(fdir, 'fuse'))} --mode serve "
+        f"--ready {shlex.quote(os.path.join(fdir, 'probe-ready'))} --lifetime 30 "
+        "--log /dev/null </dev/null >/dev/null 2>&1 &\n"
+        "s=$!\n"
+        "i=0\n"
+        f"while [ ! -e {shlex.quote(os.path.join(fdir, 'probe-ready'))} ]; do\n"
+        "    i=$((i+1)); [ $i -gt 100 ] && { kill $s; exit 3; }; sleep 0.05\n"
+        "done\n"
+        f"{shlex.quote(sys.executable)} -c 'import os,sys; os.stat(sys.argv[1])' "
+        f"{shlex.quote(os.path.join(fdir, 'fuse'))} || {{ kill $s; exit 4; }}\n"
+        "kill $s; wait $s\n"
+        f"touch {shlex.quote(os.path.join(fdir, 'ready'))}\n"
+        "exec sleep 600\n"
+    )
+    why = fuse_unavailable()
+    return Fixture(
+        "FH(fuse)",
+        [*(root_prefix() or []), "unshare", "-m", "--propagation", "private", "sh", "-c", script],
+        cwd=fdir,
+        expect_fds=3,
+        optional=True,
+        unavailable=why,
+    )
+
+
+def fuse_ready(fx: Fixture) -> None:
+    """Wait for FH's probe, or say why it is unavailable."""
+    ready = os.path.join(fx.cwd, "ready")
+    deadline = time.monotonic() + 10.0
+    while not os.path.exists(ready):
+        if fx.proc is not None and fx.proc.poll() is not None:
+            raise FixtureUnavailable(f"{fx.name}: no FUSE mount here (probe rc={fx.proc.returncode})")
+        if time.monotonic() > deadline:
+            raise FixtureUnavailable(f"{fx.name}: the FUSE probe did not finish within 10s")
+        time.sleep(0.02)
+
+
+def needs_fuse(case: dict) -> bool:
+    """Whether a case runs under fixture FH: it says so in its environment,
+    whether or not an argument names {FUSE} (`-i` alone does not)."""
+    return "LSOF_DIFF_FUSE" in case.get("env", {})
 
 
 def stat_state(pid: int) -> str:
@@ -1660,9 +1806,10 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     pn = path_note_holder(work)
     rn = relative_name_holder(work)
     t = tab_name_holder(work)
+    fh = fuse_probe(work)
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
-        em, pn, rn, t,
+        em, pn, rn, t, fh,
     )
 
 
@@ -1808,7 +1955,7 @@ def run(args) -> int:
             a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
             offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
-            relnames, tabname,
+            relnames, tabname, fuseprobe,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -1833,6 +1980,7 @@ def run(args) -> int:
             "EMLIVE": (exmaps, f"{SHM} is not a mount point here"),
             "P": (pathnotes, "not root, and no passwordless sudo, to mount over its paths"),
             "RN": (relnames, "no io_uring here"),
+            "FUSE": (fuseprobe, fuse_unavailable() or "no FUSE mount here"),
             # W's cases name {W} and {WR} together; both go with it.
             "W": (owner, "not root, and no passwordless sudo"),
             "WR": (owner, "not root, and no passwordless sudo"),
@@ -1901,6 +2049,13 @@ def run(args) -> int:
             started_optional["P"],
             started_optional["RN"],
         )
+        # FH is usable once its probe has mounted and stat()ed the server.
+        if started_optional["FUSE"] is not None:
+            try:
+                fuse_ready(started_optional["FUSE"])
+            except FixtureUnavailable as unavailable:
+                print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                optional["FUSE"] = (None, optional["FUSE"][1])
         # P maps its files only once its tmpfs is there.
         if pathnotes is not None:
             try:
@@ -2047,6 +2202,9 @@ def run(args) -> int:
                 # Never created -- the point is that stat() fails on it.
                 "NOPE": os.path.join(work, "search", "absent.txt"),
                 "ADIR": a.cwd,
+                "FUSE": os.path.join(fuseprobe.cwd, "fuse"),
+                # The mount point's parent, for a walk that meets it.
+                "FUSEDIR": fuseprobe.cwd,
                 "ASUB": os.path.join(a.cwd, "sub"),
                 "AXDIR": os.path.join(a.cwd, "xdir"),
                 "PORT": port,
@@ -2061,6 +2219,8 @@ def run(args) -> int:
                 for c in cases
                 if any(token in a for a in _raw_args(args.matrix, c["name"]))
             ]
+            if key == "FUSE":
+                dropped += [c["name"] for c in cases if needs_fuse(c) and c["name"] not in dropped]
             cases = [c for c in cases if c["name"] not in dropped]
             if dropped:
                 print(
@@ -2071,9 +2231,15 @@ def run(args) -> int:
         with open(matrix_json, "w") as f:
             json.dump({"case": cases}, f, indent=1)
         oracle, rust = args.oracle, args.rust
-        if prefix:
-            oracle = unprivileged_wrapper(work, "oracle.sh", os.path.abspath(oracle), prefix)
-            rust = unprivileged_wrapper(work, "rust.sh", os.path.abspath(rust), prefix)
+        fuse = (
+            fuse_wrap(work, os.path.join(fuseprobe.cwd, "fuse"))
+            if optional["FUSE"][0] is not None
+            else None
+        )
+        nofile = any("LSOF_DIFF_NOFILE" in c.get("env", {}) for c in cases)
+        if prefix or fuse or nofile:
+            oracle = unprivileged_wrapper(work, "oracle.sh", os.path.abspath(oracle), prefix or None, fuse)
+            rust = unprivileged_wrapper(work, "rust.sh", os.path.abspath(rust), prefix or None, fuse)
         cmd = [
             sys.executable, KIT_RUNNER,
             "--oracle", oracle,
@@ -2180,6 +2346,26 @@ def self_test() -> int:
                 check(f"{label} -> exit 2", False)
             except SystemExit as e:
                 check(f"{label} -> exit 2", e.code == EXIT_INFRA)
+
+    # FH's cases are known by their environment, `-i` alone naming no {FUSE}.
+    check("a case that sets LSOF_DIFF_FUSE needs fixture FH",
+          needs_fuse({"args": ["-i"], "env": {"LSOF_DIFF_FUSE": "--mode hold"}}))
+    check("a case that does not, does not", not needs_fuse({"args": ["{FUSE}"]}))
+    with tempfile.TemporaryDirectory() as td:
+        # The FH branch comes first, and the plain one is always last.
+        w = unprivileged_wrapper(td, "w.sh", "/bin/true", None, "/x/fuse-wrap.sh")
+        with open(w) as f:
+            text = f.read()
+        check("the wrapper runs an FH case in a private mount namespace",
+              "LSOF_DIFF_FUSE" in text and "unshare -m --propagation private" in text)
+        check("the wrapper runs any other case directly", text.rstrip().endswith('exec /bin/true "$@"'))
+        check("the wrapper sets a case's descriptor limit first",
+              text.index("LSOF_DIFF_NOFILE") < text.index("LSOF_DIFF_FUSE"))
+        wrap = fuse_wrap(td, os.path.join(td, "fuse"))
+        with open(wrap) as f:
+            text = f.read()
+        check("the FH script takes the server down after the binary",
+              text.index('"$@"') < text.rindex("kill $srv"))
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

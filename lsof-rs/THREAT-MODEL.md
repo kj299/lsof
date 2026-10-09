@@ -40,7 +40,9 @@ gate, not just correctness-as-taste.
 
 **The host it runs on.** Only indirectly: lsof-rs changes nothing on the host
 but the two transient Windows states above, so this reduces to not being a vector — not executing attacker data, not passing it
-to a shell (no subprocess is ever spawned), and not corrupting its own memory.
+to a shell (the one subprocess is lsof-rs's own bounded helper on Linux: the
+same binary, a fixed argument, no shell and no environment; §2, DIVERGENCES
+94), and not corrupting its own memory.
 
 ## 2. Trust boundaries — where does untrusted data cross in?
 
@@ -124,27 +126,68 @@ place, and a link planted there into a hung file system stops the run;
 lsof-rs never `stat`s such a name. And the C ends a mapping's name at a TAB,
 so a library its owner named `libssl.so`, a TAB and more passes for the real
 `libssl.so`; lsof-rs keeps the whole name. A `stat` of a real path can still
-block on a hung file system, as an fd's can, and `-b`, the C's guard against
-that, is refused (DIVERGENCES 94). `-e` exempts by a plain prefix of the
-path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
+block on a hung file system, as an fd's can: a process's own files are
+`stat`ed in lsof with no limit, as the C `stat`s them when its mount table
+lists no NFS mount (DIVERGENCES 124), and `-b` guards in both only the paths a
+user names and the mount table, not these. `-e` exempts by a plain prefix of
+the path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
 
-**A mount directory is `stat`ed on every run, in-process, with no timeout**
-(DIVERGENCES 110, found 2026-10-04). The C reads the mount table only when a
-run needs it, `stat`s each directory through a child process under a 15 s
-`alarm()`, skips `autofs`, `pipefs`, `sockfs` and automounter sources, and
-never `stat`s an `-e` mount; under `-i` alone it `stat`s none. lsof-rs
-`statx()`es every mount directory on every run but `-f`, `-i` included, without
-`AT_NO_AUTOMOUNT`. So a hung NFS or CIFS server stops `lsof -i :22`, the moment
-someone runs lsof to find out why a mount hangs; a FUSE file system whose daemon
-never answers, mounted `allow_other` by an unprivileged user where that is
-permitted, does the same to root's runs (not measured here: no FUSE on the
-host); and every run mounts each automount point it lists, which changes the
-host it is only meant to read. This is the largest open security difference
-from the C, and the next piece of work: read the device from
-`/proc/self/mountinfo` instead of a `stat`, load the table only when a run
-needs it, skip what the C skips, and bound any `stat` that remains as the
-Windows backend bounds its blocking calls. A bound AF_UNIX socket's path is
-`stat`ed the same way when a path argument is given.
+**A mount directory is `stat`ed on every run, through a bounded helper**
+(DIVERGENCES 110; its timeout half fixed 2026-10-09 by 94). The C reads the
+mount table only when a run needs it, `stat`s each directory through a child
+process under a 15 s `alarm()`, skips `autofs`, `pipefs`, `sockfs` and
+automounter sources, and never `stat`s an `-e` mount; under `-i` alone it
+`stat`s none. Its alarm works once per run (118), so a mount that never answers
+hangs it all the same. lsof-rs `stat`s every mount directory on every run but
+`-f`, `-i` included, and since 2026-10-09 makes each `stat` and each source's
+`readlink` in a helper process that gets `-S` seconds (15) for it: a hung NFS
+or CIFS server, or a FUSE daemon that never answers (measured with
+`differential/fuse_hang.py`), costs a run that limit per call that meets it —
+the mount, a path argument on it, each walk entry there; one `Readlink()`
+costs at most one — and lsof exits, is reaped, and closes its output; the
+helper it killed waits in the kernel instead, with one of lsof's threads
+reading its pipe until lsof exits. `-b` makes no such call. The `stat` opens the path `O_PATH`,
+which, like `stat(2)`, mounts no automount point, where std's `statx` did.
+What stays open is the rest of 110, the next piece of work: lsof-rs still
+reads the table under `-i` alone, so a hung server costs `lsof -i :22` the
+limit where it costs the C nothing; it still `stat`s an `-e` mount and the
+types the C skips; and it says nothing of a mount it drops (87). A bound
+AF_UNIX socket's path, like a process's files, is `stat`ed in lsof with no
+limit (124).
+
+**The bounded calls run in a second process** (DIVERGENCES 94, 123). lsof
+re-executes its own image, `/proc/self/exe` — never the binary's path, which
+anyone who can write its directory could replace between lsof's start and
+the helper's; run through the dynamic loader, the loader is that image and is
+given the program's path, as lsof was — with one fixed argument, an empty
+environment, lsof's working directory (as the C's forked child has it, so a
+relative path names the same file), `/dev/null` as stderr and two pipes as
+stdin and stdout.
+The helper serves only on pipes; every frame is length-checked on both sides
+before anything is allocated, and lsof takes no reply from a process that did
+not greet it with the protocol's magic and version. A user who runs the
+hidden argument by hand gets nothing they could not do anyway: the helper
+`stat`s and reads links as its caller, and lsof-rs is never setuid on Linux
+(§3). The helper names lsof's `/proc/PID` for `/proc/self`, however a path
+spells its way there, by the pids procfs gives (DIVERGENCES 89). One killed
+on a timeout can stay in state D until the file system answers or its
+connection is aborted, holding its pipes, `/dev/null`, and any descriptor
+lsof was given without close-on-exec, which std cannot close: a reader waiting
+for EOF on such an inherited pipe waits as long. The C's child, a fork, holds
+the same. It also holds what its call opened, which the C's child does not:
+the `O_PATH` descriptor of a `stat` (std's one `stat` that mounts no
+automount point) or a directory it was listing, on the file system that did
+not answer. **Whatever `stat`s `/proc/HELPER/fd/N` meanwhile waits there
+too**: measured, before lsof-rs learned to skip them, its own whole-host run
+hung on its killed helper's fd 3, and the C's `lsof -p HELPER` does. lsof-rs
+neither `stat`s nor lists a helper's close-on-exec descriptors — exactly the
+ones it opened; its pipes, `/dev/null` and what it inherited are not — for
+this run's helpers by pid and another run's when it runs the same file
+(`/proc/PID/exe`) with the helper's argument; a program that only names
+itself so is not skipped. Another tool, the C's lsof, or an lsof-rs that is
+not the same file, waits on it until the file system answers; so does any of
+them on an lsof `-O` waiting in its own `stat`, which holds the same
+descriptor (119).
 
 **A `+d`/`+D` entry is `stat`ed twice** (DIVERGENCES 111). The walk `lstat`s
 each entry, then `stat`s the same path again, following links, to identify it.
@@ -197,8 +240,10 @@ because it keeps needing it. That design exists because the C reads kernel
 memory. lsof-rs's Linux backend reads **only `/proc`**, so it needs no such
 privilege: it is installed as an ordinary unprivileged binary, never calls
 `setuid`/`setgid`/`seteuid`, and enumerates exactly what the invoking user is
-already permitted to read. Verified by grep across the crates: no `setuid`,
-no `setgid`, and no `Command::new` anywhere in non-test code.
+already permitted to read. Verified by grep across the crates: no `setuid`
+and no `setgid` anywhere in non-test code, and one `Command::new`, the bounded
+helper's (§2, DIVERGENCES 94): the same binary as the same user, with nothing
+gained.
 
 The backend is additionally `#![forbid(unsafe_code)]`, as are `lsof-core` and
 `lsof-cli`, so the Linux path cannot reach libc's privilege calls even by
@@ -335,6 +380,13 @@ C code so the triage can be checked. The ones that bear on this model:
 - **`-s UDP:` with any state name segfaults the C** (ledgered as
   `states-udp-names-crash-the-c`, item 32). Not reproduced: lsof-rs refuses the
   value.
+- **The bounded calls are bounded once per run** (DIVERGENCES 118):
+  `handleint()` `longjmp`s out with `SIGALRM` left blocked, so after the first
+  timeout a `stat` on a file system that does not answer hangs the C; under
+  `-O` a call that outlives the limit and returns crashes it (119); a timed-out
+  `readlink` is read as a one-byte link from a buffer nothing filled (120); and
+  `avoiding stat(P)` prints a path raw (122). None reproduced: every call is
+  bounded on its own, and the path is escaped.
 - **`-u 4294967296` selects root's processes**: `enter_uid()` sums digits into a
   `uid_t` with no overflow check (`search-u-overflow-wraps-to-root-in-the-c`).
   `-p` and `-g` wrap the same way. Not reproduced: lsof-rs refuses a number that

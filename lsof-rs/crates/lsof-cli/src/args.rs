@@ -13,10 +13,11 @@ use lsof_core::model::tcp_state_table;
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
 use lsof_core::render::{Escaper, FileFlags, Format, DEFAULT_OFFSET_DIGITS};
+use lsof_core::safefs::{TMLIMIT, TMLIMMIN};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
     errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec,
-    FilesystemArgs, Protocol, Selection, TaskMode, TcpInfoFlags,
+    FilesystemArgs, Protocol, SafeFs, Selection, TaskMode, TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -127,8 +128,20 @@ fn digits_value(digits: &str) -> usize {
     })
 }
 
-/// Parse the argument list (excluding `argv[0]`).
-pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
+/// Parse the argument list (excluding `argv[0]`), examining a `+d`/`+D`
+/// directory in this process and warning on stderr: what the tests and the
+/// fuzz target use. `lsof` itself parses with [`parse_with`], over its
+/// bounded layer.
+pub fn parse(args: Vec<String>) -> Result<Action, String> {
+    parse_with(args, &SafeFs::in_process())
+}
+
+/// Parse the argument list (excluding `argv[0]`). A `+d`/`+D` directory is
+/// examined where it stands, as the C's `enter_dir()` examines it, through
+/// `fs` under the `-b`, `-O`, `-S` and `-w` given before it; a warning the C
+/// prints while it parses (`-S time (N) changed to 2`, `avoiding stat(P)`)
+/// goes to `fs`'s sink at once, before any error the parse then returns.
+pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> {
     let mut sel = Selection::default();
     let mut format = Format::Table;
     let mut want_help = false;
@@ -250,7 +263,7 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                         i += 1;
                         args.get(i).cloned().unwrap_or_default()
                     };
-                    let dir = enter_dir(&value, c == 'D', &sel)?;
+                    let dir = enter_dir(&value, c == 'D', &sel, fs)?;
                     sel.dir_args.push(dir);
                     if c == 'd' {
                         sel.dirs_one_level.push(value);
@@ -518,8 +531,43 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
                     j = chars.len();
                     continue;
                 }
-                'O' => { /* `-O` ("avoid fork"): Unix-specific perf hint; accept
-                     and document as a no-op for portability. */
+                // `-b`/`+b`: make no call that can block (`main.c`: the
+                // prefix is not consulted). It beats `-O` (DIVERGENCES 94).
+                'b' => sel.blocking.avoid = true,
+                // `-O`: make those calls in-process, with no time limit; `+O`
+                // undoes it, and the last one wins (`main.c`:
+                // `lsof_avoid_forking(ctx, (GOp == '-') ? 1 : 0)`, measured
+                // by counting forks: `-O +O` forks, `+O -O` does not).
+                'O' => sel.blocking.in_process = !plus,
+                'S' => {
+                    // `-S [t]` / `+S [t]`, the prefix ignored: the seconds a
+                    // bounded call may take. The value is `-o`'s shape
+                    // (`main.c`): only leading digits, and none, or a word
+                    // that opens an option, is the default, 15. Below 2 it is
+                    // raised to 2 with a warning printed there and then,
+                    // whatever `-w` or `-t` say, once per such `-S` (all
+                    // measured). The C sums the digits in an `int` and
+                    // wraps: `-S 4294967295` warns `(-1)`, `-S 4294967297`
+                    // warns `(1)`. Here they stop at `INT_MAX`, a C-DEFECT
+                    // not reproduced (DIVERGENCES 121), and a limit that
+                    // large waits as long as the system does (no deadline is
+                    // computed that could overflow).
+                    let digits = take_digits(&chars, &mut j, &mut args, &mut i, prefix);
+                    sel.blocking.limit = match digits {
+                        None => TMLIMIT,
+                        Some(d) => {
+                            let n = digits_value(&d).min(i32::MAX as usize) as u32;
+                            if n < TMLIMMIN {
+                                fs.tell(&format!(
+                                    "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
+                                ));
+                                TMLIMMIN
+                            } else {
+                                n
+                            }
+                        }
+                    };
+                    continue;
                 }
                 // `+T` is `-T`'s inverse only in the no-letter case: with
                 // letters, `main.c` reads them identically and the prefix is
@@ -784,15 +832,18 @@ pub fn parse(mut args: Vec<String>) -> Result<Action, String> {
 /// A `+d`/`+D` directory, checked as the C's `enter_dir()` checks it
 /// (`arg.c`), where the option stands: the C expands it while it parses.
 ///
-/// The directory is spelt by `Readlink()` (DIVERGENCES 63), then `stat`ed. A
-/// value that is empty or starts an option, one `Readlink()` gives up on, one
-/// that cannot be `stat`ed and one that is no directory each end the run, as a
-/// usage error: before anything is listed, `-Q` or not, and ahead of `-h` and
-/// `-v`. lsof-rs had warned and carried on (DIVERGENCES 74). The message is
-/// muted by a `-w` or `-t` given before the option, the C's `Fwarn` as it
-/// stands then, and the run still ends; and the `-x` given so far is the one
-/// its walk obeys (DIVERGENCES 75).
-fn enter_dir(value: &str, recursive: bool, sel: &Selection) -> Result<DirArg, String> {
+/// The directory is spelt by `Readlink()` (DIVERGENCES 63), then `stat`ed,
+/// each through the bounded layer under the `-b`, `-O` and `-S` given so far
+/// — under `-b` neither is made, and the C says so (DIVERGENCES 94). A value
+/// that is empty or starts an option, one `Readlink()` gives up on, one that
+/// cannot be `stat`ed (a timeout and `-b` included) and one that is no
+/// directory each end the run, as a usage error: before anything is listed,
+/// `-Q` or not, and ahead of `-h` and `-v`. lsof-rs had warned and carried on
+/// (DIVERGENCES 74). The message is muted by a `-w` or `-t` given before the
+/// option, the C's `Fwarn` as it stands then, and the run still ends; and the
+/// `-x` given so far is the one its walk obeys (DIVERGENCES 75), as are the
+/// `-b`, `-O` and `-S`.
+fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Result<DirArg, String> {
     let warn = !sel.omit_unreadable;
     let said = |message: String| if warn { message } else { String::new() };
     let esc = Escaper::for_host();
@@ -800,21 +851,23 @@ fn enter_dir(value: &str, recursive: bool, sel: &Selection) -> Result<DirArg, St
     if value.is_empty() || value.starts_with('+') || value.starts_with('-') {
         return Err(said("+d not followed by a directory path".to_string()));
     }
-    let dir = resolve_dir(value).map_err(|e| said(e.message(&esc.text(value))))?;
+    let fs = fs.with(sel.blocking, warn);
+    let dir = resolve_dir(value, &fs).map_err(|e| said(e.message(&esc.text(value))))?;
     let shown = || esc.bytes(dir.as_encoded_bytes()).into_owned();
-    match std::fs::metadata(&dir) {
+    match fs.stat(std::path::Path::new(&dir)) {
         Err(e) => Err(said(format!(
             "WARNING: can't stat({}): {}",
             shown(),
             errno_text(&e)
         ))),
-        Ok(m) if !m.is_dir() => Err(said(format!("WARNING: not a directory: {}", shown()))),
+        Ok(st) if !st.is_dir() => Err(said(format!("WARNING: not a directory: {}", shown()))),
         Ok(_) => Ok(DirArg {
             recursive,
             dir,
             cross_filesystems: sel.cross_filesystems,
             cross_symlinks: sel.cross_symlinks,
             warn,
+            blocking: sel.blocking,
         }),
     }
 }
@@ -822,12 +875,12 @@ fn enter_dir(value: &str, recursive: bool, sel: &Selection) -> Result<DirArg, St
 /// A `+d`/`+D` directory as the C spells it: its `Readlink()`. Windows has no
 /// such reading, and keeps it as typed.
 #[cfg(unix)]
-fn resolve_dir(value: &str) -> Result<OsString, ReadlinkError> {
-    lsof_core::readlink::resolve(value.as_ref())
+fn resolve_dir(value: &str, fs: &SafeFs) -> Result<OsString, ReadlinkError> {
+    lsof_core::readlink::resolve(value.as_ref(), fs)
 }
 
 #[cfg(not(unix))]
-fn resolve_dir(value: &str) -> Result<OsString, ReadlinkError> {
+fn resolve_dir(value: &str, _fs: &SafeFs) -> Result<OsString, ReadlinkError> {
     Ok(value.into())
 }
 
@@ -1197,10 +1250,10 @@ fn optional_value(chars: &[char], j: usize, args: &[String], i: &mut usize) -> O
     Some(word)
 }
 
-/// An optional value whose meaning is its leading digits — `-o`, `-r` and
-/// `+L` each read theirs digit by digit and stop at the first that is not one
-/// (`main.c`) — taken, with what follows the digits given back, and the scan
-/// left where the C's `GetOpt` resumes:
+/// An optional value whose meaning is its leading digits — `-o`, `-r`, `-S`
+/// and `+L` each read theirs digit by digit and stop at the first that is
+/// not one (`main.c`) — taken, with what follows the digits given back, and
+/// the scan left where the C's `GetOpt` resumes:
 ///
 /// * attached (`-o3t`), the letters after the digits are options again, so
 ///   the cluster goes on at the first of them — at the value's first letter
@@ -2194,6 +2247,227 @@ mod tests {
         let d = a_dir();
         assert_eq!(dirs(&["+D", &d]), vec![d.clone()]);
         assert!(paths(&["+D", &d]).is_empty());
+    }
+
+    /// Parse as `lsof` does, over the in-process layer, and hand back what
+    /// the parse printed on the way (the `-S` warning, `-b`'s messages).
+    fn parse_saying(argv: &[&str]) -> (Result<Action, String>, Vec<String>) {
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &say);
+        let got = parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs);
+        (got, said.into_inner())
+    }
+
+    /// The `-b`/`-O`/`-S` a run ends with, and what the parse printed.
+    fn blocking(argv: &[&str]) -> (lsof_core::Blocking, Vec<String>) {
+        match parse_saying(argv) {
+            (Ok(Action::Run { selection, .. }), said) => (selection.blocking, said),
+            (other, _) => panic!("expected Run for {argv:?}, got {other:?}"),
+        }
+    }
+
+    /// `-S [t]`, every spelling measured against the C (DIVERGENCES 94): the
+    /// value is only leading digits, attached or the next word; none, or a
+    /// word that opens an option, is 15; what follows the digits is options
+    /// again; the last `-S` wins, and `+S` is `-S`.
+    #[test]
+    fn dash_s_upper_takes_its_seconds_as_the_c_does() {
+        let limit = |argv: &[&str]| blocking(argv).0.limit;
+        assert_eq!(limit(&[]), 15);
+        assert_eq!(limit(&["-S"]), 15);
+        assert_eq!(limit(&["-S", "-p", "1"]), 15);
+        assert_eq!(limit(&["-S", "2"]), 2);
+        assert_eq!(limit(&["-S2"]), 2);
+        assert_eq!(limit(&["-S", "00000000000000000000000000002"]), 2);
+        assert_eq!(limit(&["-S", "3", "-S"]), 15);
+        assert_eq!(limit(&["-S", "3", "-S", "5"]), 5);
+        assert_eq!(limit(&["+S", "7"]), 7);
+        assert_eq!(limit(&["+S7"]), 7);
+        // What follows the digits is option letters under the same prefix.
+        for argv in [&["-S", "3t"][..], &["-S3t"]] {
+            let (got, _) = parse_saying(argv);
+            match got {
+                Ok(Action::Run { selection, .. }) => {
+                    assert!(selection.terse && selection.blocking.limit == 3, "{argv:?}")
+                }
+                other => panic!("{argv:?}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            parse_saying(&["-Sx", "-p", "1"]).0.err().as_deref(),
+            Some("-x must accompany +d or +D")
+        );
+        // A word with no digits is not the value: it is a name, and the
+        // limit is the default.
+        let (got, _) = parse_saying(&["-S", "x"]);
+        match got {
+            Ok(Action::Run { selection, .. }) => {
+                assert_eq!(
+                    (selection.blocking.limit, selection.paths),
+                    (15, vec!["x".into()])
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        // `--` opens an option, so it is not the value: what follows is names.
+        let (got, _) = parse_saying(&["-S", "--", "-p", "1"]);
+        match got {
+            Ok(Action::Run { selection, .. }) => {
+                assert_eq!(selection.paths, ["-p", "1"]);
+                assert_eq!(selection.blocking.limit, 15);
+            }
+            other => panic!("{other:?}"),
+        }
+        // `-S -1`: a bare `-S`, then `-1`, which is no option (the C says
+        // `illegal option character: 1`).
+        assert_eq!(
+            parse_saying(&["-S", "-1"]).0.err().as_deref(),
+            Some("unsupported option: -1")
+        );
+    }
+
+    /// Below 2 the limit is 2, with the C's warning, printed while the parse
+    /// runs and whatever `-w` or `-t` say, once for each such `-S`.
+    #[test]
+    fn dash_s_upper_below_two_warns_whatever_dash_w_says() {
+        let warn = |n: u32| format!("lsof: WARNING: -S time ({n}) changed to 2");
+        assert_eq!(
+            blocking(&["-S", "0"]),
+            (
+                lsof_core::Blocking {
+                    limit: 2,
+                    ..Default::default()
+                },
+                vec![warn(0)]
+            )
+        );
+        assert_eq!(blocking(&["-S1"]).1, [warn(1)]);
+        for argv in [
+            &["-w", "-S", "1"][..],
+            &["-S", "1", "-w"],
+            &["-t", "-S", "1"],
+            &["-wS1"],
+            &["-S1w"],
+        ] {
+            assert_eq!(
+                blocking(argv),
+                (
+                    lsof_core::Blocking {
+                        limit: 2,
+                        ..Default::default()
+                    },
+                    vec![warn(1)]
+                ),
+                "{argv:?}"
+            );
+        }
+        assert_eq!(blocking(&["-S", "1", "-S", "0"]).1, [warn(1), warn(0)]);
+        assert!(
+            blocking(&["-S", "2"]).1.is_empty(),
+            "2 is the minimum, not below it"
+        );
+        // Printed before an error the parse then finds, as the C prints it.
+        let (got, said) = parse_saying(&["-S", "0x"]);
+        assert_eq!(got.err().as_deref(), Some("-x must accompany +d or +D"));
+        assert_eq!(said, [warn(0)]);
+    }
+
+    /// The C sums `-S`'s digits in an `int`: `4294967295` is -1 and warns,
+    /// `4294967297` is 1 and warns, `99999999999` is 1215752191 (all
+    /// measured, `strace -e alarm` for the last).
+    /// lsof-rs stops at `INT_MAX` and says nothing (DIVERGENCES 121), and a
+    /// limit that large computes no deadline that could overflow.
+    #[test]
+    fn dash_s_upper_saturates_where_the_c_wraps() {
+        for v in [
+            "2147483647",
+            "2147483648",
+            "4294967295",
+            "4294967297",
+            "99999999999",
+            "99999999999999999999",
+        ] {
+            let (b, said) = blocking(&["-S", v]);
+            assert_eq!(b.limit, i32::MAX as u32, "{v}");
+            assert!(said.is_empty(), "{v}: {said:?}");
+        }
+    }
+
+    /// `-b` and `+b` avoid; `-O` makes the calls in-process and `+O` undoes
+    /// it, the last one winning; `-b` beats `-O` whichever comes first
+    /// (measured: `-bO` and `-Ob` both make no call).
+    #[test]
+    fn dash_b_and_dash_o_upper_set_the_mode_as_the_c_does() {
+        let b = |argv: &[&str]| {
+            let b = blocking(argv).0;
+            (b.avoid, b.in_process)
+        };
+        assert_eq!(b(&[]), (false, false));
+        assert_eq!(b(&["-b"]), (true, false));
+        assert_eq!(b(&["+b"]), (true, false));
+        assert_eq!(b(&["-O"]), (false, true));
+        assert_eq!(b(&["+O"]), (false, false));
+        assert_eq!(b(&["-O", "+O"]), (false, false));
+        assert_eq!(b(&["+O", "-O"]), (false, true));
+        assert_eq!(b(&["-bO"]), (true, true));
+        assert_eq!(b(&["-Ob"]), (true, true));
+        // A -b says nothing while it parses, a run with no path named.
+        assert!(blocking(&["-b", "-p", "1"]).1.is_empty());
+    }
+
+    /// A `+d`/`+D` is examined where it stands, under the `-b`, `-O`, `-S`
+    /// and `-w` given before it, and its walk keeps them (DIVERGENCES 94):
+    /// `-b +d D` ends the run, after the C's two `avoiding` lines, and `-w`
+    /// mutes all three; `+d D -b` changes nothing for it.
+    #[test]
+    fn a_plus_d_is_examined_under_the_options_before_it() {
+        let d = a_dir();
+        let (got, said) = parse_saying(&["-b", "+d", &d]);
+        // `Resource temporarily unavailable`, in the C library's words (miri's
+        // shim adds its own `(os error 11)`, so the text is asked for).
+        let eagain = errno_text(&lsof_core::safefs::would_block());
+        assert_eq!(
+            got.err(),
+            Some(format!("WARNING: can't stat({d}): {eagain}"))
+        );
+        // Windows reads no links there (`resolve_dir`), so it avoids none.
+        let mut avoided = Vec::new();
+        if cfg!(unix) {
+            avoided.push(format!("lsof: avoiding readlink({d}): -b was specified."));
+        }
+        avoided.push(format!("lsof: avoiding stat({d}): -b was specified."));
+        assert_eq!(said, avoided);
+        let (got, said) = parse_saying(&["-w", "-b", "+D", &d]);
+        assert_eq!(got.err().as_deref(), Some(""));
+        assert!(said.is_empty(), "{said:?}");
+        let (got, said) = parse_saying(&["+d", &d, "-b", "-S", "9"]);
+        let Ok(Action::Run { selection, .. }) = got else {
+            panic!("{got:?}")
+        };
+        assert!(said.is_empty(), "{said:?}");
+        assert_eq!(
+            selection.dir_args[0].blocking,
+            lsof_core::Blocking::default()
+        );
+        assert!(selection.blocking.avoid && selection.blocking.limit == 9);
+        let held = |argv: &[&str]| {
+            run(argv)
+                .0
+                .dir_args
+                .iter()
+                .map(|a| a.blocking)
+                .collect::<Vec<_>>()
+        };
+        let at = |limit, in_process| lsof_core::Blocking {
+            avoid: false,
+            in_process,
+            limit,
+        };
+        assert_eq!(
+            held(&["-S", "4", "+d", &d, "-O", "-S", "6", "+D", &d, "+O"]),
+            [at(4, false), at(6, true)]
+        );
     }
 
     /// The C expands a `+d`/`+D` where it stands, so each keeps the `-x` and

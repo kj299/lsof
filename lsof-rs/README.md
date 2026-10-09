@@ -174,6 +174,23 @@ rules, byte for byte, are in `lsof-core`'s `render::escape`, pinned by golden
 tests, fuzzed (`render_escape`), and checked against the C on every Linux CI
 run.
 
+**A file system that does not answer costs a run `-S` seconds per call, not
+the run.** On Linux every `stat`, `lstat`, `readlink` and directory listing
+lsof-rs makes on a path it was given — an argument, a `+d`/`+D` tree, a mount
+point — runs in a helper process (the same binary, re-executed) that gets
+`-S [t]` seconds for it, 15 by default and at least 2; one that runs out fails
+with `Connection timed out` and the helper is replaced. Each such call costs
+its limit: a hung mount costs every run that reads the mount table 15 s, a
+path argument on it 15 s more. A hung NFS mount or a stuck FUSE daemon used
+to stop every run but `-f`, `lsof -i :22` included. `-b` makes none of those
+calls and says so, and `-O` makes them in lsof itself with no limit, as the C
+documents both. The C's own timeout fires once per run and then hangs;
+lsof-rs bounds every call ([`DIVERGENCES.md`](DIVERGENCES.md) #94, #118). A
+helper killed on a timeout waits in the kernel until the file system answers,
+holding the descriptor its call opened there: lsof-rs never `stat`s it, but
+another tool that does — the C's lsof listing the host — waits as well
+(#123).
+
 Both phases were diffed by hand against the real C `lsof` 4.95.0 on the same
 host, and that diff is the reason to trust them: **`-i`, `-iTCP:443`,
 `-i@127.0.0.1`, `-i4` and `-iUDP` all return the same row count as the C, and

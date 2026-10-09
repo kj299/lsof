@@ -43,27 +43,22 @@ impl Backend for LinuxBackend {
         "linux"
     }
 
-    fn identify_path(&self, path: &std::path::Path) -> Option<(String, String)> {
+    fn identify_stat(&self, st: &lsof_core::FileStat) -> Option<(String, String)> {
         // The same two cells a row carries, produced by the same code, so the
-        // comparison in selection is a plain equality test. `metadata` follows
-        // symlinks, which is right: lsof identifies the file a name resolves
-        // to, and that is what a process holding it will report.
-        let md = std::fs::metadata(path).ok()?;
+        // comparison in selection is a plain equality test. The caller's
+        // `stat` followed symlinks, which is right: lsof identifies the file a
+        // name resolves to, and that is what a process holding it reports.
         // DEVICE means st_rdev for a device node and st_dev for everything
         // else, and a row is built the same way — so `lsof /dev/null` must
         // compare 1,3 against 1,3, not against the devtmpfs it lives on.
-        Some((files::dev_cell(&md), md.ino().to_string()))
+        Some((
+            files::dev_cell_of(st.mode, st.dev, st.rdev),
+            st.ino.to_string(),
+        ))
     }
 
-    fn path_fs_device(&self, path: &std::path::Path) -> Option<u64> {
-        // lstat, not stat: `arg.c` tests the entry's OWN st_dev before it
-        // decides whether to resolve a symlink, so a link pointing at another
-        // file system is judged by where the link is, not where it goes.
-        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
-    }
-
-    fn mounts(&self, sources: bool) -> Vec<lsof_core::MountEntry> {
-        mounts::load(sources)
+    fn mounts(&self, sources: bool, fs: &lsof_core::SafeFs) -> Vec<lsof_core::MountEntry> {
+        mounts::load(sources, fs)
     }
 
     fn identifies_paths(&self) -> bool {
@@ -141,6 +136,12 @@ impl Backend for LinuxBackend {
         // sockets. The big one is the mapped-file walk: under `-i` the C opens
         // no `/proc/<pid>/maps` at all, and this port was opening one per
         // process and parsing every mapping, to drop the rows at selection.
+        // lsof-rs's helpers, this run's and any another run left waiting on
+        // a file system: what each opened for a call is not `stat`ed.
+        let helpers = crate::safefs::HelperFds::among(
+            &sel.helpers,
+            procs.iter().map(|p| (p.pid, p.command.as_str())),
+        );
         let ctx = files::GatherCtx {
             socks: &socks,
             locks: &locks,
@@ -150,6 +151,7 @@ impl Backend for LinuxBackend {
             omit_unreadable: sel.omit_unreadable,
             bound_paths: sel.has_path_filter(),
             mnt_ns: std::fs::metadata("/proc/self/ns/mnt").ok().map(|m| m.ino()),
+            helpers: &helpers,
         };
 
         for p in procs.iter_mut() {
