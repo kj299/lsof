@@ -2155,6 +2155,24 @@ mod tests {
         assert!(parse(vec!["-rx".into()]).is_err());
     }
 
+    /// The C accumulates `-r`'s digits in an `int` (main.c:779-783) and wraps:
+    /// `-r 4294967297` repeats every second, as `-r 1` does (measured: 4
+    /// `=======` markers in 3.5 s from both). lsof-rs saturates; a regression
+    /// to a plain `n * 10 + d` would panic here, as it would in the release
+    /// build, which checks overflow. The count saturates at `usize::MAX`
+    /// (`digits_value`): `u64::MAX` on a 64-bit target, 4294967295 on a 32-bit
+    /// one (run under miri for i686-unknown-linux-gnu).
+    #[test]
+    fn repeat_interval_saturates_rather_than_wrapping() {
+        let saturated = Some(usize::MAX as u64);
+        assert_eq!(repeat(&["-r99999999999999999999"]), saturated);
+        assert_eq!(repeat(&["-r", "99999999999999999999"]), saturated);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(repeat(&["-r4294967297"]), Some(4294967297));
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(repeat(&["-r4294967297"]), saturated);
+    }
+
     fn paths(argv: &[&str]) -> Vec<String> {
         match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
             Action::Run { selection, .. } => selection.paths,

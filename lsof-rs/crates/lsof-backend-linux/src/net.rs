@@ -371,6 +371,14 @@ impl SocketTable {
         let Ok(bytes) = std::fs::read(path) else {
             return;
         };
+        self.parse_unix_bytes(bytes);
+    }
+
+    /// The parsing half of [`Self::load_unix`], over the file's bytes: the
+    /// text, and for a path that is not UTF-8 its raw bytes as well. Pure;
+    /// must never panic, and fuzzed (`proc_net`), because the raw path is
+    /// reached only from here.
+    pub fn parse_unix_bytes(&mut self, bytes: Vec<u8>) {
         match String::from_utf8(bytes) {
             Ok(text) => self.parse_unix(&text),
             // A stray byte costs that byte's display, never the table (see
@@ -402,7 +410,12 @@ impl SocketTable {
                 continue;
             };
             // The path is the last field, so it runs to the end of the line.
-            let start = shown.len() - path.len();
+            // Checked although `path` is a tail of `shown`: the bytes are a
+            // name whoever bound the socket chose, and the release build
+            // panics on an underflow.
+            let Some(start) = shown.len().checked_sub(path.len()) else {
+                continue;
+            };
             if !line.get(..start).is_some_and(<[u8]>::is_ascii) {
                 continue;
             }
@@ -412,8 +425,8 @@ impl SocketTable {
         }
     }
 
-    /// The parsing half of [`Self::load_unix`]. Pure; must never panic — the
-    /// path column is arbitrary bytes chosen by whoever bound the socket.
+    /// The text half of [`Self::parse_unix_bytes`]. Pure; must never panic —
+    /// the path column is arbitrary bytes chosen by whoever bound the socket.
     pub fn parse_unix(&mut self, text: &str) {
         for line in text.lines().skip(1) {
             // The path is the last field and may itself contain spaces, so the

@@ -40,6 +40,10 @@ fuzz_target!(|data: &[u8]| {
     }
     let mut t = SocketTable::default();
     t.parse_unix(&text);
+    // And as `load_unix` reads it: the bytes, so a line that is not UTF-8
+    // also takes the raw-path pass, which only this entry point reaches.
+    let mut t = SocketTable::default();
+    t.parse_unix_bytes(data.to_vec());
     // /proc/net/packet twice. The bare input exercises the header check that
     // drops a table whose columns moved; with the real header prepended it
     // exercises the row parser behind it, which a corpus grown from empty

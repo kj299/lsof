@@ -65,7 +65,7 @@ it is a gap, not a formatting choice.
 | `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
 | Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
-| Another process's PEB, via `ReadProcessMemory` | **the target process** | **hostile** | `lsof-backend-windows::peb` | none — see below |
+| Another process's PEB, via `ReadProcessMemory` | **the target process** | **hostile** | `lsof-backend-windows::peb` (the Win32 calls), `::peb_walk` (the walk) | `windows_peb` (covers `peb_walk`) |
 | ETW AFD event payloads (`--etw`, `-U`, `-iICMP`, `-iRAW`; Administrator) | **any process's socket activity** | **hostile** | `lsof-backend-windows::etw` | none — see below |
 | Toolhelp process names (`szExeFile`), module paths (`szExePath`), mapped-file names (`GetMappedFileNameW`) | **any local process** | **hostile** | `lsof-backend-windows::process`, `::modules`, `::mapped` | `windows_names` (covers `wide_to_string`) |
 | account names (`LookupAccountSidW`), Restart Manager results | the OS, a domain controller | untrusted | `lsof-backend-windows::process`, `::restart` | none |
@@ -84,15 +84,24 @@ this family of tools. `/proc/net/tcp` is one step further out: its contents are
 shaped by whoever sent packets to this host. These are not "semi-trusted config
 files"; they are adversary-controlled inputs reached without authentication.
 
-**The PEB row has no fuzz target, and that is a known gap.** `peb.rs` walks
-another process's memory at documented `RTL_USER_PROCESS_PARAMETERS` offsets via
+**The PEB walk follows pointers the target wrote.** `peb.rs` reads another
+process's memory at documented `RTL_USER_PROCESS_PARAMETERS` offsets via
 `ReadProcessMemory`, for both 64-bit and WOW64 targets. The *target* process can
-write its own PEB, so the lengths and pointers read there are attacker-chosen.
-The code bounds each read and treats failure as "no cwd", but the input is not
-currently driven by a fuzzer the way the `/proc` parsers are. Recorded here
-rather than left to be discovered.
+write its own PEB, so the length and pointers read there are attacker-chosen.
+The walk is the portable `peb_walk.rs`: every address is computed with
+`checked_add` after `usize::try_from`, and one that does not fit is no `cwd`
+row, as a failed read is. Until 2026-10-09 this row had no fuzz target, and the
+walk added its offsets with a plain `+`: a `ProcessParameters` above
+`0xFFFF_FFFF_FFFF_FFC7` wrapped, so lsof read the `DosPath` from an address in
+`0x0..0x37` (with overflow checks on, it panicked that pid's worker instead).
+With a stand-in reader on Linux, a string planted there named the row; whether
+a Windows process can map those first bytes was not measured. Now the
+`windows_peb` fuzz target runs the walk on Linux over arbitrary memory images
+and checks that every read is at the unwrapped address, unit tests pin the
+wrapped pointer, and `clippy::arithmetic_side_effects` is denied in `peb.rs`
+and `peb_walk.rs`.
 
-**Two later rows have no fuzz target either.** `lsof-core::readlink` spells a
+**Two later rows have no fuzz target.** `lsof-core::readlink` spells a
 path as the C's `Readlink()` does, following links whose targets any local user
 chooses. It is bounded (20 links, 4096 bytes), and when it landed it was compared
 with the C's own function over 543,840 random spellings, but that was a one-off
@@ -211,7 +220,7 @@ elevates the process itself.
 The audit hotspots on Windows are therefore: the guard's drop path (a privilege
 left enabled is the failure), `handles.rs` where the guard is taken, and `peb.rs`
 where elevation buys the ability to read another process's memory. That crate
-holds all of the port's `unsafe` — 139 blocks by `audit_unsafe.py`, every one
+holds all of the port's `unsafe` — 137 blocks by `audit_unsafe.py`, every one
 documented; the other three crates forbid it — which is why the unsafe-audit and
 sanitizer gates are pointed at it.
 
@@ -228,14 +237,28 @@ sanitizer gates are pointed at it.
   the live C defect in §6. Defence: `render_escape` fuzz target, and the
   differential's byte-level comparison, which since this refresh distinguishes
   `\xff` from `\xfe` instead of collapsing both to U+FFFD.
-- **Supplies pathological sizes** — implausible lengths in a PEB, huge fd counts,
-  a very long path, a tree of links to itself. Defence: bounded reads in
-  `peb.rs`; a `+d`/`+D` walk stops after 200,000 entries or 16 MiB of their
-  names, and says so (DIVERGENCES 81); `Readlink()`'s own limits, 20 links and
-  4096 bytes. Arithmetic is **not** lint-checked: the workspace does not enable
-  `clippy::arithmetic_side_effects`, and the release profile does not set
-  `overflow-checks`, so an overflow there wraps rather than panics. (This line
-  used to claim the lint was denied workspace-wide; it never was.)
+- **Supplies pathological sizes** — implausible lengths or pointers in a PEB,
+  huge fd counts, a very long path, a tree of links to itself. Defence: bounded,
+  checked reads in `peb_walk.rs`; a `+d`/`+D` walk stops after 200,000 entries
+  or 16 MiB of their names, and says so (DIVERGENCES 81); `Readlink()`'s own
+  limits, 20 links and 4096 bytes. Arithmetic on values from other processes
+  and the kernel is checked: the PEB walk, the query-buffer growth in
+  `handles.rs` and the TDH bounds check in `etw.rs` (both through `sizes.rs`),
+  and the ETW callback's counters saturate, since a panic cannot unwind out of
+  that callback. A query buffer larger than the call's `u32` length can
+  describe is the query failing: told a truncated length, the call never
+  succeeded, and each round allocated twice the last. The release profile
+  sets `overflow-checks`, so an overflow the audit missed panics rather than
+  wraps; CI and the release workflow fail a build where any workspace crate,
+  or the binary, lacks them (`differential/overflow_gate.py`). A panic is
+  still a denial of service: exit 101 in the main thread, the loss of a pid's
+  `cwd`, module and mapped rows in a Windows per-pid worker.
+  `clippy::arithmetic_side_effects` is denied in `peb.rs`, `peb_walk.rs`,
+  `sizes.rs`, `handles.rs` and `etw.rs` only, not workspace-wide (the Windows
+  clippy job is what holds the last four's call sites, since nothing on Linux
+  compiles them), and it does not see variable shifts, `abs`, `pow` or `sum`,
+  so review still has to. (This line once claimed the lint was denied
+  workspace-wide; it never was.)
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit
   between `readdir` and the read of its entries, and a PID can be recycled.
   Defence: treat every per-process read as fallible and skip, never abort the

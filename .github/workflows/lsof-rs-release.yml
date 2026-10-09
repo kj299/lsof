@@ -106,6 +106,21 @@ jobs:
       - name: Build release binary (native MSVC)
         run: cargo build --release --bin lsof
 
+      # The binary shipped here must carry the overflow checks [profile.release]
+      # sets, in every crate (lsof-rs-ci.yml explains the two signals). This
+      # build is not the CI one, so CI passing is not proof; the script reruns
+      # the build above with --message-format=json, which rebuilds nothing. A
+      # tag from before 2026-10-09 has neither the flag nor the script, and a
+      # rebuild of one ships what it always did.
+      - name: Overflow checks reached the release binary
+        shell: pwsh
+        run: |
+          if (Test-Path differential/overflow_gate.py) {
+            python differential/overflow_gate.py
+          } else {
+            Write-Output "this tree predates overflow-checks in the release profile: nothing to check"
+          }
+
       # Must run BEFORE the SHA-256 is computed in "Publish release" — the
       # Authenticode signature changes the binary's bytes.
       - name: Sign lsof.exe (Azure Artifact Signing)

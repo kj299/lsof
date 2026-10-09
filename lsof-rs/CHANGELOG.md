@@ -64,6 +64,30 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `D0x9` where lsof-rs printed `d0,9`.
 
 ### Security
+- **An integer overflow panics instead of wrapping, and a hostile process can
+  cause neither.** The release profile sets `overflow-checks` (the
+  maintainer's decision, 2026-10-09), and CI and the release workflow fail a
+  build where any workspace crate, or the binary, lacks them
+  (`differential/overflow_gate.py`). First, arithmetic on values from other
+  processes and the kernel was made checked. On Windows the `cwd` walk added
+  field offsets to the `ProcessParameters` pointer the target writes into its
+  own PEB: one
+  above `0xFFFF_FFFF_FFFF_FFC7` wrapped, and lsof-rs read the `cwd` from an
+  address in `0x0..0x37` (with a stand-in reader on Linux, a string planted
+  there named the row; whether Windows lets a process map those bytes was not
+  measured); with the flag alone it would have panicked that process's worker
+  instead. The walk is now the portable `peb_walk.rs`, checked, unit-tested
+  and fuzzed on Linux (`windows_peb`); an address that does not fit is no
+  `cwd` row. Query-buffer growth and the TDH bounds check in front of
+  `slice::from_raw_parts`, which could wrap only with a 32-bit `usize`, are
+  checked (`sizes.rs`), and a query buffer larger than the call's `u32` length
+  can describe is the query failing, where it was told a truncated length and
+  grew toward 256 GiB; the ETW callback's counters saturate, since a panic
+  cannot unwind out of it. `clippy::arithmetic_side_effects` is denied in
+  `peb.rs`, `peb_walk.rs`, `sizes.rs`, `handles.rs` and `etw.rs`. The Linux
+  unix-socket raw-path pass checks its one subtraction and is now fuzzed
+  (`proc_net`). Cost on Linux: +0.49% binary size, +0.5% instructions; the
+  differential is unchanged (408 MATCH, 17 ledgered).
 - **A mapped file's name cannot pass for another file's, or stall the run.**
   Two of the C's habits are not reproduced (DIVERGENCES 102, 103). The C
   `stat`s a mapping's name that is no path, such as `anon_inode:[io_uring]`,

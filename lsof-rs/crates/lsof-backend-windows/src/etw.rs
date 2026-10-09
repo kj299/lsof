@@ -14,9 +14,16 @@
 //! `--etw` is opt-in, never default; a setup failure (e.g. not enough
 //! privilege) is reported via stderr and the rest of `gather` continues.
 
+// Event payloads and TDH's schema buffers are written by other processes and
+// the kernel, so arithmetic here is checked or saturating, and a plain `+` or
+// `*` is refused: the release build checks overflow, and a panic in
+// `event_callback` cannot unwind out of it. The Windows clippy job is what
+// holds these sites.
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
-use std::mem::{size_of, zeroed};
+use std::mem::{size_of, size_of_val, zeroed};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::slice;
 use std::sync::Mutex;
@@ -34,6 +41,7 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
     TRACE_EVENT_INFO, WNODE_FLAG_TRACED_GUID,
 };
 
+use crate::sizes::props_fit;
 use crate::util::trace;
 
 // --- AFD socket families and protocols we recognize ---
@@ -311,9 +319,13 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
     let id = r.EventHeader.EventDescriptor.Id;
     let version = r.EventHeader.EventDescriptor.Version;
     let pid = r.EventHeader.ProcessId;
+    // Saturating, not `+=`: a panic cannot unwind out of this `extern
+    // "system"` callback and would abort the process, and the release build
+    // checks overflow.
     if let Ok(mut s) = state.summary.lock() {
-        s.total += 1;
-        *s.by_event_id.entry(id).or_insert(0) += 1;
+        s.total = s.total.saturating_add(1);
+        let n = s.by_event_id.entry(id).or_insert(0);
+        *n = n.saturating_add(1);
     }
     // First time we see this (Id, Version) → ask TDH for the schema and
     // stash a rendered string. The mutex is fine here: this runs at most once
@@ -568,7 +580,14 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
     // trailing `[EVENT_PROPERTY_INFO; 1]` flexible member, so size_of would skip
     // property[0] and run one entry past the array.
     let props_start = core::mem::offset_of!(TRACE_EVENT_INFO, EventPropertyInfoArray);
-    if props_start + count * size_of::<EVENT_PROPERTY_INFO>() > buf.len() {
+    // `count` is the buffer's own claim, so the end is computed checked
+    // (`sizes::props_fit`): a wrapped one would pass this check.
+    if !props_fit(
+        props_start,
+        count,
+        size_of::<EVENT_PROPERTY_INFO>(),
+        buf.len(),
+    ) {
         return Some("  (schema larger than buffer)".to_string());
     }
     let props: &[EVENT_PROPERTY_INFO] =
@@ -602,19 +621,16 @@ unsafe fn dump_event_schema(record: *const EVENT_RECORD) -> Option<String> {
 /// returning a `String`. Used to pull property and event names out of the
 /// trailing string area of `TRACE_EVENT_INFO`.
 fn read_wide_at(buf: &[u8], offset: usize) -> String {
-    if offset >= buf.len() {
+    // `offset` is the schema's own claim: past the end is no name. Pairs of
+    // bytes from it, without index arithmetic; an odd last byte is dropped.
+    let Some(tail) = buf.get(offset..) else {
         return String::new();
-    }
-    let mut chars = Vec::new();
-    let mut i = offset;
-    while i + 1 < buf.len() {
-        let c = u16::from_le_bytes([buf[i], buf[i + 1]]);
-        if c == 0 {
-            break;
-        }
-        chars.push(c);
-        i += 2;
-    }
+    };
+    let chars: Vec<u16> = tail
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&c| c != 0)
+        .collect();
     String::from_utf16_lossy(&chars)
 }
 
@@ -650,9 +666,10 @@ pub fn capture(duration: Duration) -> Option<Summary> {
         .chain(std::iter::once(0))
         .collect();
 
-    let props_size = size_of::<EVENT_TRACE_PROPERTIES>();
-    let name_bytes = session_name_wide.len() * 2;
-    let total_size = props_size + name_bytes;
+    // The properties, then the name. Ours, so tens of bytes; checked because
+    // this module takes no unchecked arithmetic.
+    let total_size = size_of::<EVENT_TRACE_PROPERTIES>()
+        .checked_add(size_of_val(session_name_wide.as_slice()))?;
 
     // Best-effort stop of any stale session under our name (e.g. a prior
     // `lsof --etw` killed mid-run that didn't clean up). Result is ignored:
