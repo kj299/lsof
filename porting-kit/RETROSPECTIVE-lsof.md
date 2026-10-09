@@ -919,9 +919,15 @@ the next port's target.
    process; otherwise a hostile process could make lsof-rs panic.
 4. **Rows 91 (`-J`'s schema) and 94 (`-b`, `-S`)**, both DECISION PENDING; row
    101 (a path argument that names a device); and `DEL` against `mem` for a
-   container's deleted library (DIVERGENCES, "For you to decide").
-5. **`default.nix` and `mkdocs.yml`**, whose consumers are gone.
+   container's deleted library (DIVERGENCES, "Decided: `mem`, as the C prints
+   it") [2026-10-09: the maintainer decided lsof-rs keeps matching the C].
+5. **`default.nix` and `mkdocs.yml`**, whose consumers are gone. [2026-10-09:
+   deleted on the maintainer's decision, with `docs/requirements.in` and
+   `docs/requirements.txt`, which only mkdocs read, and `.gitignore`'s `/site`,
+   mkdocs's output. `docs/manpage.sh` stays: it regenerates `docs/manpage.md`.]
 6. **Connect Cirrus CI and sourcehut, or keep the three BSD dialects waived.**
+   [2026-10-09: the maintainer decided to keep them waived;
+   `harnesses/platforms/platforms.toml` records it.]
 7. **Kit work that needs a design:** signed `+X`/`-X` ids in the coverage gate;
    coverage per platform rather than shared; a check that the normalizer's masks
    hide nothing a case means to compare; a guard against optional fixtures

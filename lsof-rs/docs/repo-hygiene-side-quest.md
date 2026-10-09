@@ -28,6 +28,10 @@ building, testing, or documenting the oracle and the port?**
 | `AFSConfig`, `Customize`, `zipme`, `Doxyfile`, `HOW_TO_*.rst`, `0..README.BEFORE.README.FIRST` | 7 | Unreachable under `Configure -n` (what CI uses), or hardcoded to a maintainer's machine, or redirect stubs nothing links to |
 | `.travis.yml`, `.circleci/`, `.readthedocs.yaml` | 3 | CI and docs builds this fork does not own |
 
+Followed on 2026-10-09, on the maintainer's decision: `default.nix`, read only by
+`.circleci/`'s `nixos` job, and `mkdocs.yml` with `docs/requirements.{in,txt}`,
+read only by `.readthedocs.yaml`. Their consumers went in this pass.
+
 **The inventory triangle is worth singling out.** `00MANIFEST` is a literal file
 listing that still described the pre-autotools layout — `dialects/`, root-level
 `main.c`, `scripts/*.perl5`. **223 of its 280 entries already dangled** before

@@ -4,9 +4,9 @@ CI provider, or waived on the record.
 
 This is the executable form of the control LESSONS #049 named and did not build
 (LESSONS #054: the harness that enforces a lesson can contain the lesson).
-That entry found four of six `lsof` dialects were live, tested platforms and that
-three of them are tested by Cirrus and sourcehut, which never appear in a GitHub
-check list. The procedure it left behind — "enumerate CI providers, not check
+That entry found four of six `lsof` dialects claimed as live, tested platforms,
+three of them by Cirrus and sourcehut, which never appear in a GitHub check list
+(and, LESSONS #082 found, never ran for this fork). The procedure it left behind — "enumerate CI providers, not check
 runs" — was a sentence in a skill, and by LESSONS #033's standard a sentence
 nothing executes is a note, not a control. This fails a build instead.
 

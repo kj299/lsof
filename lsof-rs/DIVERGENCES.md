@@ -175,7 +175,7 @@ mapping is described, and as anyone else every one, the libraries included, is
 a row saying `(stat: Operation not permitted)`. Through `map_files` a deleted
 file is described too: as root, the C prints a container's unlinked library
 `mem`, with its size and a link count of 0, not `DEL`. lsof-rs matches all of
-it; see "For you to decide" below about the last.
+it; see "Decided: `mem`, as the C prints it" below about the last.
 
 **A file the path names again is `mem`.** The C `stat`s a deleted mapping's
 path as well. If it names the same inode again (the file was relinked), the
@@ -278,14 +278,17 @@ device and the inode, and lsof-rs, looking for the device `/dev/zero` names
 entry and bound socket, in the core and both backends, so it is recorded here
 rather than changed with the rows.
 
-### For you to decide
+### Decided: `mem`, as the C prints it (2026-10-09)
 
 A deleted mapping in another mount namespace is `mem`, not `DEL`, when the C
 runs as root, because `map_files` describes it, and `DEL` when it does not.
 `lsof | grep DEL`, the usual way to find what still runs a library an upgrade
 replaced, then misses a container's when root runs it, though `+L1` finds it
-(NLINK 0). lsof-rs matches the C. Keeping `DEL` instead would be a C-DEFECT
-row and a one-line change.
+(NLINK 0). lsof-rs matches the C, and on 2026-10-09 the maintainer decided it
+keeps doing so; keeping `DEL` instead would have been a C-DEFECT row. Measured
+that day, both binaries byte-identical: as root a container's unlinked mapping
+is `mem` with NLINK 0 and `-d DEL` selects nothing; as `nobody` it is `DEL`; in
+lsof's own namespace it is `DEL` either way.
 
 ### What the gate gained
 

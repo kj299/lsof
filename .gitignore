@@ -74,7 +74,6 @@ autotools.h
 lockf_owner.h
 lockf.h
 lsof.man
-/site
 lib/dialects/netbsd/include
 /solaris11
 
