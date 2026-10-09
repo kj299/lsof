@@ -504,9 +504,9 @@ fn what_the_parse_says_comes_in_the_cs_order() {
 /// A helper that cannot be started ends the run, in the C's words for the
 /// step that failed: under a descriptor limit its pipes cannot be made, and
 /// the C says `can't open pipes: Too many open files` (measured with
-/// `ulimit -n 5`), exit 1. The limit leaves three descriptors above the
-/// highest one the shell holds, whatever the runner passed down: enough to
-/// load the binary, not for the helper's pipes.
+/// `ulimit -n 5`), exit 1. The limit leaves exactly three descriptor numbers
+/// free below it ([`limit_leaving_free`]): enough to load the binary, not for
+/// the helper's pipes.
 #[test]
 #[cfg_attr(
     miri,
@@ -516,7 +516,8 @@ fn no_helper_no_run() {
     let out = Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "max=$(ls /proc/$$/fd | sort -n | tail -1) && ulimit -n $((max + 3)) && exec '{}' -a -d cwd -p 1 /",
+            "ulimit -n {} && exec '{}' -a -d cwd -p 1 /",
+            limit_leaving_free(3),
             env!("CARGO_BIN_EXE_lsof")
         ))
         .output()
@@ -527,6 +528,39 @@ fn no_helper_no_run() {
         String::from_utf8_lossy(&out.stderr),
         "lsof: can't open pipes: Too many open files\n"
     );
+}
+
+/// The `ulimit -n` under which a child of this process starts with exactly
+/// `free` descriptor numbers to open: past its stdin, stdout and stderr, and
+/// past every descriptor this process holds without close-on-exec, which the
+/// child inherits (`flags:` in fdinfo, octal; `O_CLOEXEC` is `02000000` on
+/// x86 and arm). Counted, not taken as the highest one plus `free`: a CI
+/// runner passed one down at a high number, which left the gap below it
+/// free, and the helper started.
+fn limit_leaving_free(free: usize) -> usize {
+    let mut held: std::collections::BTreeSet<usize> = [0, 1, 2].into();
+    for entry in std::fs::read_dir("/proc/self/fd")
+        .expect("/proc/self/fd")
+        .flatten()
+    {
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<usize>() else {
+            continue;
+        };
+        let flags = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+            .ok()
+            .and_then(|info| {
+                let f = info.lines().find_map(|l| l.strip_prefix("flags:"))?;
+                u32::from_str_radix(f.trim(), 8).ok()
+            });
+        if flags.is_some_and(|f| f & 0o2_000_000 == 0) {
+            held.insert(fd);
+        }
+    }
+    let last = (0..)
+        .filter(|fd| !held.contains(fd))
+        .nth(free - 1)
+        .expect("a free descriptor number");
+    last + 1
 }
 
 /// A process to list, killed and reaped when it goes out of scope.

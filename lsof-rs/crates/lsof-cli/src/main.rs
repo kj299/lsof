@@ -1476,7 +1476,9 @@ mod tests {
     /// A walk over a tree held in memory: each call it makes, through the
     /// bounded layer, with the limit `-S` gave where the `+D` stood; an
     /// entry whose `lstat` times out is said in the C's words and the walk
-    /// goes on to the next; `-w` there mutes it (DIVERGENCES 94, 118).
+    /// goes on to the next; `-w` there mutes it (DIVERGENCES 94, 118). The
+    /// tree is spelt with `/`; the walk joins names with the host's separator
+    /// (`\\` on Windows), which the tree reads as `/`.
     #[test]
     fn a_walk_makes_every_call_through_the_layer_and_goes_on_past_a_timeout() {
         use lsof_core::safefs::{timed_out, Blocking, FileStat, FsCalls};
@@ -1489,7 +1491,7 @@ mod tests {
         struct Tree(RefCell<Vec<(&'static str, String, u32)>>);
         impl Tree {
             fn note(&self, call: &'static str, p: &Path, limit: u32) -> String {
-                let p = p.to_string_lossy().into_owned();
+                let p = p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
                 self.0.borrow_mut().push((call, p.clone(), limit));
                 p
             }
@@ -1591,18 +1593,26 @@ mod tests {
         );
         // Exactly the C's words; under miri, whose strerror adds `(os error
         // 110)`, those words first.
-        let want = "lsof: WARNING: can't lstat(/w/hung): Connection timed out";
+        let hung = Path::new("/w").join("hung");
+        let want = format!(
+            "lsof: WARNING: can't lstat({}): Connection timed out",
+            hung.display()
+        );
         let warned = said.borrow();
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            warned[0] == want || (cfg!(miri) && warned[0].starts_with(want)),
+            warned[0] == want || (cfg!(miri) && warned[0].starts_with(&want)),
             "{warned:?}"
         );
         drop(warned);
         let items: Vec<String> = sel
             .path_items
             .iter()
-            .map(|i| i.name.to_string_lossy().into_owned())
+            .map(|i| {
+                i.name
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/")
+            })
             .collect();
         assert_eq!(
             items,

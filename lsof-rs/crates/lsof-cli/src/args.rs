@@ -2431,13 +2431,13 @@ mod tests {
             got.err(),
             Some(format!("WARNING: can't stat({d}): {eagain}"))
         );
-        assert_eq!(
-            said,
-            [
-                format!("lsof: avoiding readlink({d}): -b was specified."),
-                format!("lsof: avoiding stat({d}): -b was specified."),
-            ]
-        );
+        // Windows reads no links there (`resolve_dir`), so it avoids none.
+        let mut avoided = Vec::new();
+        if cfg!(unix) {
+            avoided.push(format!("lsof: avoiding readlink({d}): -b was specified."));
+        }
+        avoided.push(format!("lsof: avoiding stat({d}): -b was specified."));
+        assert_eq!(said, avoided);
         let (got, said) = parse_saying(&["-w", "-b", "+D", &d]);
         assert_eq!(got.err().as_deref(), Some(""));
         assert!(said.is_empty(), "{said:?}");
