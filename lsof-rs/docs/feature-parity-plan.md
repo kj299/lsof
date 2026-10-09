@@ -45,7 +45,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 |---|---|---|---|
 | `-a` | sel | ✅ shipped | AND combinator |
 | `-A A` | sel | ❌ N/A | AFS NWA mode (HP-UX); not portable |
-| `-b` | prec | ❌ N/A | "avoid blocking kernel" — superseded by our own bounded-worker model |
+| `-b` | prec | ✅ shipped 2026-10-09 | Make no call that can block (`stat`, `lstat`, `readlink`) on a path a user names or a mount point, and say so unless `-w`; a path argument is then a status error (DIVERGENCES 94). Windows: accepted; its own handle queries are bounded by its worker model |
 | `-c c` | sel | ✅ shipped | Match by command/image name |
 | `+c c` | out | ✅ shipped (5A) | Max command-name width in the COMMAND column — small render tweak |
 | `-C` | prec | ❌ N/A | Kernel name cache; Unix-only |
@@ -77,14 +77,14 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-n` | out | ✅ shipped | No host name resolution |
 | `-N` | sel | ❌ N/A on Windows; ✅ Linux 2026-09-20 | NFS-file listing (DIVERGENCES 28) |
 | `-o [o]` | out | ✅ shipped | The `OFFSET` column, and `-o <digits>`'s hex limit (DIVERGENCES 6) |
-| `-O` | prec | ✅ shipped (5A) | "Avoid fork" — Unix-specific perf flag; safe to accept as a documented no-op for portability |
+| `-O` | prec | ✅ shipped (5A); real 2026-10-09 | Make those calls in lsof, with no time limit (*risky*); `+O` undoes it. Was a no-op until DIVERGENCES 94. Windows: the calls are in-process anyway |
 | `-p s` | sel | ✅ shipped | PID filter (comma-separated, accepts `^excl`) |
 | `-P` | out | ✅ shipped | Numeric port instead of service name |
 | `-Q` | misc | ✅ shipped (5A) | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
 | `+|-r [t]` | misc | ✅ shipped (`-r`) | Repeat (default 15s). `+r` is refused |
 | `-R` | out | ✅ shipped | PPID column |
 | `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. Since 2026-09-25 the C's: names checked against the platform's table, each included state a search item, and TCP lists applied to every socket with a TCP state — UDP too on Linux (DIVERGENCES 32). |
-| `-S [t]` | prec | ❌ N/A | `lstat`/`readlink` timeout — Unix; we have our own bounded model |
+| `-S [t]` | prec | ✅ shipped 2026-10-09 | Each of those calls gets t seconds (15, at least 2) in a helper process on Linux, and fails with `Connection timed out` after (DIVERGENCES 94). Windows: accepted, and changes nothing; the calls are in-process |
 | `-t` | out | ✅ shipped | Terse PIDs only |
 | `-T [t]` | out | ✅ shipped | TCP/TPI info: `-Tfqsw` = follow / queue lengths / state / TCP window. Windows: state is free; queue/window via `GetPerTcp{,6}ConnectionEStats` (per-connection extended stats, IPv4 + IPv6, ESTABLISHED-only, queue/window need admin). `f` (follow) accepted as no-op. |
 | `-u s` | sel | ✅ shipped | User filter |
@@ -117,7 +117,7 @@ output-encoding flags were added after hardware feedback on console garbling.
 | **`-g [s]`** | S | document Windows semantics ("select children of PPID(s)"); reuses existing PID-set parser |
 | **`-Q`** | S | suppress "no matching open files" stderr; exit 0 even on empty result set |
 | **`-w` / `+w`** | S | toggle the privilege-hint stderr line |
-| **`-O`** | S | accept and no-op (with optional verbose-mode note) — pure portability |
+| **`-O`** | S | accept and no-op (with optional verbose-mode note) — pure portability [2026-10-09: no longer a no-op; see the inventory] |
 | **`+c c`** | S | column-width cap on COMMAND in `table::render` |
 | **`-?`** | S | alias to `-h` |
 | **`--`** | S | end-of-options in argparse |
@@ -153,10 +153,11 @@ Switches that need new Windows API work, or significant data-model expansion:
 
 ## Out of scope (Unix-only — accept-and-no-op or reject)
 
-`-A`, `-b`, `-C`, `-D`, `-k`, `-m/+m`, `+M`, `-S`, `-z`. Each is refused,
+`-A`, `-C`, `-D`, `-k`, `-m/+m`, `+M`, `-z`. Each is refused,
 `lsof: unsupported option: -A`, rather than silently ignored; that's better than
 appearing to accept and surprising the user. (This list once also held `-e`,
-`-f/+f`, `-H`, `-N`, `-x`, `-X` and `-Z`; see the note at the top.)
+`-f/+f`, `-H`, `-N`, `-x`, `-X` and `-Z`; see the note at the top; and `-b`
+and `-S`, until 2026-10-09.)
 
 ## Sequencing
 

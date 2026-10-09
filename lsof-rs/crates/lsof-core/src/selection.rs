@@ -632,6 +632,10 @@ pub struct DirArg {
     pub cross_symlinks: bool,
     /// Whether the walk's warnings print: the C's `!Fwarn` as it stood.
     pub warn: bool,
+    /// `-b`, `-O` and `-S` as they stood: the C examines the directory, and
+    /// walks it, where the option stands, so `-b +d D` fails and `+d D -b`
+    /// does not, and a `-S` after it does not bound its walk.
+    pub blocking: crate::safefs::Blocking,
 }
 
 /// The full set of user-specified filters for one run.
@@ -707,8 +711,8 @@ pub struct Selection {
     /// same arguments as typed, for a backend that matches names.
     pub dir_args: Vec<DirArg>,
     /// The `(DEVICE, NODE)` identities named by the path arguments, resolved
-    /// once at startup through [`Backend::identify_path`](crate::Backend) and
-    /// expanded for `+d`/`+D`.
+    /// once at startup from one bounded `stat` each, through
+    /// [`Backend::identify_stat`](crate::Backend), and expanded for `+d`/`+D`.
     ///
     /// lsof matches a path argument by **what the file is, not what it is
     /// called** — which is why it finds a file queried through a hard link and
@@ -761,6 +765,18 @@ pub struct Selection {
     /// because `-t` must not silence the Windows privilege hint: that hint is
     /// on stderr, and `kill $(lsof -t …)` reads stdout.
     pub omit_unreadable: bool,
+    /// `-b`, `-O` and `-S [t]`: how a path the user named is `stat`ed, and
+    /// its links read — avoided, in-process, or bounded by a time limit (see
+    /// [`crate::safefs`]). The last of `-O` and `+O` wins, `-b` beats both,
+    /// and a `+d`/`+D` keeps its own copy as it stood.
+    pub blocking: crate::safefs::Blocking,
+    /// The processes this run started to make its bounded calls
+    /// ([`crate::safefs::FsCalls::helper_pids`]), set once those calls are
+    /// made. A helper killed while a call outlived its limit holds what it
+    /// opened for that call, on the file system that did not answer, and a
+    /// scan that `stat`ed it would wait there too; the backend lists such a
+    /// helper without `stat`ing what it opened (DIVERGENCES 123).
+    pub helpers: Vec<u32>,
     /// `-f` / `+f`: whether a path argument may name a file system.
     pub filesystem_args: FilesystemArgs,
     /// Whether the backend identifies paths by `(device, node)`

@@ -735,6 +735,39 @@ name = "linux/differential-states-value-as-its-own-word"
 args = ["-n", "-P", "-a", "-p", "PID", "-s", "TCP:LISTEN"]
 covers = ["type:IPv4"]
 
+# ---------- linux differential: the bounded calls, -b -S -O (DIVERGENCES 94)
+
+[[case]]
+name = "linux/differential-opt-S-seconds-as-the-next-word"
+args = ["-S", "2", "-n", "-P", "-a", "-d", "cwd", "-p", "PID"]
+covers = ["type:DIR"]
+
+[[case]]
+name = "linux/differential-opt-S-zero-warns"
+args = ["-S", "0", "-n", "-P", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-opt-b-under-w-lists-as-without"
+args = ["-b", "-w", "-n", "-P", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-opt-b-path-argument-is-a-status-error"
+args = ["-b", "-w", "FILE"]
+
+[[case]]
+name = "linux/differential-opt-O-makes-the-calls-in-lsof"
+args = ["-O", "-n", "-P", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+# Fixture FH: a FUSE root that answers `stat` after 3 s, past `-S 2`.
+name = "linux/differential-fh-delay-path-argument-times-out"
+args = ["-S", "2", "FUSE/."]
+
+[[case]]
+# Fixture FH: a FUSE root that never answers; `-b` makes no call on it.
+name = "linux/differential-fh-hold-b-under-w"
+args = ["-b", "-w", "-n", "-P", "-a", "-d", "cwd", "-p", "PID"]
+
 # ------------------- linux differential: -X toggles, -F r (DIVERGENCES 45, 47)
 
 [[case]]

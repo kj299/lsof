@@ -2,8 +2,8 @@
 
 > **Record (written 2026-09-15, notes to 2026-09-25; status added 2026-10-04).**
 > P1–P5 below are done. Of what this page called L2, what is left is naming
-> netlink and AF_VSOCK sockets (DIVERGENCES 22, waiting on a decision) and the
-> options `-S` and `-b` (DIVERGENCES 94). DIVERGENCES 9 and 21, listed as not
+> netlink and AF_VSOCK sockets (DIVERGENCES 22, waiting on a decision) [and
+> the options `-S` and `-b` (DIVERGENCES 94), done 2026-10-09]. DIVERGENCES 9 and 21, listed as not
 > scheduled below, are resolved. [2026-10-04: and two socket rows this page
 > called done or folded into 22 are open: a raw socket, which the C types `raw`
 > from `/proc/net/raw` where lsof-rs types it IPv4 (DIVERGENCES 108), and a
@@ -210,7 +210,8 @@ retrospective, DIVERGENCES 109. That part needs no decision.]
 ## 4. The options that are genuinely missing
 
 > 2026-09-20: `-H` (P1) and `-Z -N -x -X -e` (P4) are done; `-S` and `-b` are
-> still refused.
+> still refused. [2026-10-09: done, and not as recommended below: the
+> maintainer decided to implement them, as the C documents them.]
 
 Swept every option in the C's usage line against both binaries:
 
@@ -231,6 +232,13 @@ the C `stat()`s paths that can hang on a dead NFS mount. This port reads
 is currently single-threaded and `forbid(unsafe_code)` is a real posture change
 for a narrow case. **Recommend waiving them as a design decision with that
 reasoning, not carrying them as debt.**
+
+[2026-10-09: the premise was wrong. This port `stat`ed every mount point on
+every run, and one that never answered stopped `lsof -i :22` (DIVERGENCES 110).
+A thread does not bound such a call on Linux: measured, a process whose thread
+waits on a FUSE request is not reaped, and its stdout stays open. A helper
+process does, and needs neither `unsafe` nor a crate; `-b`, `-O` and `-S` came
+with it (DIVERGENCES 94).]
 
 ## 5. Performance and memory
 
@@ -372,7 +380,7 @@ pre-P5 binary the wall half read 1.58x, 1.47x and 1.43x on a 1.60x ceiling
 across runs and never once caught the regression, while the RSS half caught it
 every time at 2.34–2.44x on 2.00x; that is why the split is where it is.
 
-**Not scheduled, and deliberately:** `-S`/`-b` (§4), the `UNKN*` errno rows
+**Not scheduled, and deliberately:** `-S`/`-b` (§4) [2026-10-09: done], the `UNKN*` errno rows
 (DIVERGENCES, still real debt), DIVERGENCES 21 (`-c`/`-u`/`-g` as search
 items), DIVERGENCES 9 (`opendir` access `u`), and DIVERGENCES 22 — which now
 carries netlink as well as AF_VSOCK, and is the one item on this page that

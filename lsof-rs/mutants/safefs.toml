@@ -1,0 +1,500 @@
+# Mutants for "bound the calls that can block, and take -b, -S and -O"
+# (DIVERGENCES 94, the timeout half of 110, and 118-123): one per rule, each a
+# plausible way to get that rule wrong. The kill table is this file, run
+# (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/safefs.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root: the
+# differential runs in a mount namespace of its own (`unshare -m`) because
+# fixtures P and FH mount, FH mounts a FUSE server, and the unit gate's
+# `bounded_calls` tests do the same and skip without root. CI runs only
+# --apply-only, which checks that each mutant still fits the code.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1200
+
+# ------------------------------------------------------------ the helper --
+
+[[mutant]]
+name = "call-outlives-its-limit"
+rule = "a bounded call gets -S seconds, not more (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        let wait = Duration::from_secs(u64::from(limit));'''
+new = '''        let wait = Duration::from_secs(u64::from(limit) + 3);'''
+
+[[mutant]]
+name = "timed-out-helper-not-killed"
+rule = "a helper whose call timed out is killed before it is dropped (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if let Some(mut live) = self.live.take() {
+            let _ = live.child.kill();
+            self.killed.push(live.child);'''
+new = '''        if let Some(live) = self.live.take() {
+            self.killed.push(live.child);'''
+
+[[mutant]]
+name = "timed-out-helper-kept"
+rule = "the call after a timeout starts a fresh helper (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if let Some(mut live) = self.live.take() {
+            let _ = live.child.kill();
+            self.killed.push(live.child);
+        }'''
+new = '''        if let Some(live) = self.live.as_mut() {
+            let _ = live.child.kill();
+        }'''
+
+[[mutant]]
+name = "greeting-not-checked"
+rule = "no reply is taken from a process that did not greet as lsof-rs's helper (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''            Ok((R_HELLO, payload)) if payload == hello() => Ok(()),'''
+new = '''            Ok(_) => Ok(()),'''
+
+[[mutant]]
+name = "oversized-frame-taken"
+rule = "a frame longer than MAX_FRAME is refused before anything is allocated (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    if !kinds.contains(&head[0]) || len > MAX_FRAME {'''
+new = '''    if !kinds.contains(&head[0]) {'''
+
+[[mutant]]
+name = "helper-works-in-the-root"
+rule = "the helper works in lsof's directory, as the C's forked child does, so a relative path names what it names for lsof (94, 123)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        .env_clear()
+        .stdin(Stdio::piped())'''
+new = '''        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::piped())'''
+
+[[mutant]]
+name = "proc-self-paths-are-the-helpers"
+rule = "a path through /proc/self names lsof's /proc/PID, not the helper's (89)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        let lsofs = as_lsof_names_it(&path, matches!(op, OP_STAT | OP_READ_DIR), view);'''
+new = '''        let lsofs: Option<Vec<u8>> = None;'''
+
+[[mutant]]
+name = "proc-self-only-as-spelt"
+rule = "however a path spells its way to /proc/self, it is lsof's (89)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    if !may_lead_through_self(path, &view.cwd) {'''
+new = '''    if !path.starts_with(b"/proc/self/") {'''
+
+[[mutant]]
+name = "proc-self-pids-from-getpid"
+rule = "the pids a /proc/self is spelt with are procfs's, not getpid()'s (89)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''            pids: helper.zip(lsof).map(|(helper, lsof)| Pids { helper, lsof }),'''
+new = '''            pids: helper.zip(lsof).map(|_| Pids {
+                helper: std::process::id(),
+                lsof: std::os::unix::process::parent_id(),
+            }),'''
+
+[[mutant]]
+name = "helper-named-exe"
+rule = "the helper takes lsof's command name, as the C's child has it (123)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''            let _ = std::fs::write("/proc/self/comm", name.strip_suffix(b"\n").unwrap_or(&name));'''
+new = '''            let _ = name;'''
+
+[[mutant]]
+name = "loader-not-named"
+rule = "run through the dynamic loader, the helper is started through it (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    (cut > 0 && !given.is_empty() && started[cut..] == *given).then(|| &started[1..cut])'''
+new = '''    (false && cut > 0 && !given.is_empty() && started[cut..] == *given).then(|| &started[1..cut])'''
+
+[[mutant]]
+name = "helper-fds-stated"
+rule = "a scan never stats what a helper opened for a call (123)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        self.pids.contains(&pid) && flags.map_or(fd > 2, |f| f & O_CLOEXEC != 0)'''
+new = '''        false && self.pids.contains(&pid) && flags.map_or(fd > 2, |f| f & O_CLOEXEC != 0)'''
+
+[[mutant]]
+name = "another-runs-helper-stated"
+rule = "a helper another run of this file left waiting is one too (123)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''            if argv.len() == 3'''
+new = '''            if false && argv.len() == 3'''
+
+[[mutant]]
+name = "own-helpers-not-told"
+rule = "the scan knows this run's helpers by pid, whatever their command line (123)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        sel.helpers = lsof_core::FsCalls::helper_pids(&calls);'''
+new = '''        sel.helpers = Vec::new();'''
+
+[[mutant]]
+name = "greeting-unbounded"
+rule = "a helper that never greets costs the limit, not more (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        let greeting = live.next(wait);'''
+new = '''        let greeting = live.next(Duration::from_secs(1 << 30));'''
+
+[[mutant]]
+name = "foreign-greeter-left-running"
+rule = "a process that does not greet as the helper is killed (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''            failed => {
+                state.abandon();'''
+new = '''            failed => {
+                state.live = None;'''
+
+[[mutant]]
+name = "request-length-unchecked"
+rule = "a path no frame can carry is refused before a helper is started (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if path.len() > MAX_FRAME {
+            return Err(name_too_long());
+        }
+        let wait'''
+new = '''        let wait'''
+
+[[mutant]]
+name = "listing-flushed-only-at-its-end"
+rule = "names that come slowly are sent as they come, each frame within the limit (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if since.elapsed() >= FLUSH_EVERY {'''
+new = '''        if false && since.elapsed() >= FLUSH_EVERY {'''
+
+[[mutant]]
+name = "empty-names-frame-taken"
+rule = "an empty frame of names is refused: it would let a listing run on at no cost (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    if b.is_empty() {
+        return None;
+    }
+    while !b.is_empty() {'''
+new = '''    while !b.is_empty() {'''
+
+[[mutant]]
+name = "listing-count-uncapped"
+rule = "a listing past READ_DIR_MAX_NAMES is refused (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if len == 0 || len > MAX_NAME || names.len() == READ_DIR_MAX_NAMES {'''
+new = '''        if len == 0 || len > MAX_NAME {'''
+
+[[mutant]]
+name = "listing-bytes-uncapped"
+rule = "a listing past READ_DIR_MAX_BYTES is refused (94)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if *bytes > READ_DIR_MAX_BYTES {'''
+new = '''        if false && *bytes > READ_DIR_MAX_BYTES {'''
+
+[[mutant]]
+name = "proc-self-link-is-the-helpers"
+rule = "the helper reads /proc/self as lsof's pid (89)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        b"self" if target == helper.as_bytes() => lsof.into_bytes(),'''
+new = '''        b"self" if false => lsof.into_bytes(),'''
+
+# ------------------------------------------------------------- the layer --
+
+[[mutant]]
+name = "dash-b-makes-the-stat"
+rule = "-b makes no stat (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''    pub fn stat(&self, path: &Path) -> io::Result<FileStat> {
+        match self.blocking.mode() {
+            Mode::Avoid => {
+                self.avoiding("stat", Self::shown(path));
+                Err(would_block())
+            }'''
+new = '''    pub fn stat(&self, path: &Path) -> io::Result<FileStat> {
+        match self.blocking.mode() {
+            Mode::Avoid => {
+                self.avoiding("stat", Self::shown(path));
+                self.calls.stat(path, self.blocking.limit)
+            }'''
+
+[[mutant]]
+name = "dash-b-message-raw"
+rule = "avoiding stat(P) escapes P, where the C prints it raw (122)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''                Escaper::for_host().bytes(path)'''
+new = '''                String::from_utf8_lossy(path)'''
+
+[[mutant]]
+name = "dash-b-message-not-muted"
+rule = "-w and -t mute -b's messages (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''        if self.warn {
+            (self.say)(&format!('''
+new = '''        if true {
+            (self.say)(&format!('''
+
+[[mutant]]
+name = "dash-b-reads-each-component"
+rule = "under -b Readlink() reads nothing, says so once, and keeps the path (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/readlink.rs"
+old = '''        fs.avoiding("readlink", arg.as_bytes());
+        return Ok(arg.to_os_string());
+    }'''
+new = '''        fs.avoiding("readlink", arg.as_bytes());
+    }'''
+
+[[mutant]]
+name = "dash-o-beats-dash-b"
+rule = "-b beats -O, in either order (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''        if self.avoid {
+            Mode::Avoid
+        } else if self.in_process {
+            Mode::InProcess'''
+new = '''        if self.in_process {
+            Mode::InProcess
+        } else if self.avoid {
+            Mode::Avoid'''
+
+[[mutant]]
+name = "etimedout-another-errno"
+rule = "a timeout is ETIMEDOUT, Connection timed out (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''    pub const ETIMEDOUT: i32 = 110;'''
+new = '''    pub const ETIMEDOUT: i32 = 62;'''
+
+[[mutant]]
+name = "eagain-another-errno"
+rule = "an avoided call is EWOULDBLOCK, Resource temporarily unavailable (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''    pub const EAGAIN: i32 = 11;'''
+new = '''    pub const EAGAIN: i32 = 35;'''
+
+[[mutant]]
+name = "lstat-follows-links"
+rule = "lstat describes a last link itself: O_PATH | O_NOFOLLOW (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''            sys::O_PATH | sys::O_NOFOLLOW'''
+new = '''            sys::O_PATH'''
+
+[[mutant]]
+name = "stat-by-std-metadata"
+rule = "a stat opens the path O_PATH and asks the descriptor, which mounts no automount point (94, 110)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''    if sys::KNOWN && !cfg!(miri) {'''
+new = '''    if false && sys::KNOWN && !cfg!(miri) {'''
+
+[[mutant]]
+name = "read-dir-ignores-S"
+rule = "a listing gets the -S in force, like every call (94)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''            Mode::Bounded(limit) => self.calls.read_dir(path, limit),'''
+new = '''            Mode::Bounded(_) => self.calls.read_dir(path, TMLIMIT),'''
+
+[[mutant]]
+name = "readlink-reads-past-a-timeout"
+rule = "one Readlink() reads no more of the path after a component times out (120)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/readlink.rs"
+old = '''                gave_up = crate::safefs::is_timed_out(&e);'''
+new = '''                gave_up = false && crate::safefs::is_timed_out(&e);'''
+
+# ------------------------------------------------------------- the options --
+
+[[mutant]]
+name = "S-clamp-takes-two"
+rule = "-S below 2 is 2, with a warning; 2 itself warns nothing (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            if n < TMLIMMIN {'''
+new = '''                            if n <= TMLIMMIN {'''
+
+[[mutant]]
+name = "S-warning-muted-by-w"
+rule = "-S's warning prints whatever -w and -t say (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            if n < TMLIMMIN {
+                                fs.tell(&format!(
+                                    "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
+                                ));'''
+new = '''                            if n < TMLIMMIN {
+                                if !sel.omit_unreadable {
+                                    fs.tell(&format!(
+                                        "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
+                                    ));
+                                }'''
+
+[[mutant]]
+name = "S-below-two-kept"
+rule = "-S below 2 is raised to 2 (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                                TMLIMMIN
+                            } else {
+                                n'''
+new = '''                                n
+                            } else {
+                                n'''
+
+[[mutant]]
+name = "S-digits-wrap"
+rule = "-S's digits stop at INT_MAX where the C's wrap (121)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            let n = digits_value(&d).min(i32::MAX as usize) as u32;'''
+new = '''                            let n = digits_value(&d) as u32;'''
+
+[[mutant]]
+name = "plus-b-ignored"
+rule = "+b is -b (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                'b' => sel.blocking.avoid = true,'''
+new = '''                'b' => sel.blocking.avoid = !plus,'''
+
+[[mutant]]
+name = "dash-O-ignored"
+rule = "-O makes the calls in lsof, with no limit (94, 119)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                'O' => sel.blocking.in_process = !plus,'''
+new = '''                'O' => {}'''
+
+[[mutant]]
+name = "plus-O-does-not-undo"
+rule = "+O undoes -O; the last one wins (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                'O' => sel.blocking.in_process = !plus,'''
+new = '''                'O' => sel.blocking.in_process = true,'''
+
+[[mutant]]
+name = "plus-d-examined-under-no-options"
+rule = "a +d/+D directory is examined under the -b/-O/-S given before it (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let fs = fs.with(sel.blocking, warn);'''
+new = '''    let fs = fs.with(lsof_core::Blocking::default(), warn);'''
+
+[[mutant]]
+name = "plus-d-walk-forgets-its-options"
+rule = "a +d/+D walk keeps the -b/-O/-S given before the option (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            blocking: sel.blocking,'''
+new = '''            blocking: lsof_core::Blocking::default(),'''
+
+# ------------------------------------------------------- where it applies --
+
+[[mutant]]
+name = "path-argument-readlink-unbounded"
+rule = "a path argument's Readlink() goes through the bounded layer (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        let mut path = lsof_core::readlink::resolve(typed.as_ref(), fs)?.into_vec();'''
+new = '''        let fs = fs.with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns());
+        let mut path = lsof_core::readlink::resolve(typed.as_ref(), &fs)?.into_vec();'''
+
+[[mutant]]
+name = "mount-source-stat-unbounded"
+rule = "a mount source is stat()ed through the bounded layer (94, 110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            let is_block = fs
+                .stat(Path::new(&path))'''
+new = '''            let is_block = fs
+                .with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns())
+                .stat(Path::new(&path))'''
+
+[[mutant]]
+name = "walk-entry-lstat-unbounded"
+rule = "a walk's lstat of each entry goes through the bounded layer, with the -S where +D stood (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            let st = match fs.lstat(&path) {'''
+new = '''            let st = match fs.with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns()).lstat(&path) {'''
+
+[[mutant]]
+name = "walk-stops-at-a-failed-lstat"
+rule = "a walk entry whose lstat fails is warned of and the walk goes on (94, 118)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                            errno_text(&err)
+                        ));
+                    }
+                    continue;
+                }
+                // Where names are matched, the name is still an item.'''
+new = '''                            errno_text(&err)
+                        ));
+                    }
+                    break;
+                }
+                // Where names are matched, the name is still an item.'''
+
+[[mutant]]
+name = "walk-lstat-warning-dropped"
+rule = "a walk entry whose lstat fails says can't lstat(P) in the C's words, unless -w (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                    if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                        fs.tell(&format!(
+                            "lsof: WARNING: can't lstat({}): {}",'''
+new = '''                    if false && dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                        fs.tell(&format!(
+                            "lsof: WARNING: can't lstat({}): {}",'''
+
+[[mutant]]
+name = "mount-table-under-the-final-options"
+rule = "the mount table is read under the options of the first +d/+D, as the C reads it there (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            Some(first) => fs.with(first.blocking, first.warn),'''
+new = '''            Some(_) => fs.with(sel.blocking, !sel.omit_unreadable),'''
+
+[[mutant]]
+name = "e-checked-against-an-empty-table"
+rule = "an empty mount table is checked against no -e (main.c: if ((mp = readmnt(ctx)))) (94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        for e in sel.exempt_fs.iter().filter(|_| !table_empty) {'''
+new = '''        for e in sel.exempt_fs.iter().filter(|_| true) {'''

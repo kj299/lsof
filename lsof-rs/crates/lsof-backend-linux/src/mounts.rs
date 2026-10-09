@@ -12,15 +12,24 @@
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::path::Path;
 
-use lsof_core::MountEntry;
+use lsof_core::{MountEntry, SafeFs};
 
 /// Read and stat the host's mount table. Unreadable or unstattable rows are
 /// dropped rather than guessed at: a mount we cannot measure cannot be matched.
 /// With `sources`, each mount's source is spelt as well; see
 /// [`lsof_core::Backend::mounts`].
-pub fn load(sources: bool) -> Vec<MountEntry> {
+///
+/// Every `stat` and `readlink` here goes through `fs`, the bounded layer: the
+/// C makes them with `statsafely()` and `Readlink()` (`dmnt.c`). A mount
+/// point on a file system that does not answer — a FUSE daemon that is stuck,
+/// a hard NFS mount whose server is gone — is dropped once the `-S` limit
+/// passes, where its `statx` had held every run but `-f` for as long as it
+/// lasted (DIVERGENCES 110), and a `stat` there never mounts an automount
+/// point. Under `-b` none is made: every mount is dropped, each with its
+/// `avoiding stat(DIR)` unless `-w`.
+pub fn load(sources: bool, fs: &SafeFs) -> Vec<MountEntry> {
     let Ok(text) = std::fs::read("/proc/self/mounts") else {
         return Vec::new();
     };
@@ -31,10 +40,10 @@ pub fn load(sources: bool) -> Vec<MountEntry> {
             // source: it is what every file on the filesystem reports as
             // `st_dev`, and for a bind mount or a pseudo-filesystem there is no
             // device file to ask. A directory we cannot stat (a mount we lack
-            // permission to traverse) is dropped.
-            let device = std::fs::metadata(&row.dir).ok()?.dev();
+            // permission to traverse, one that timed out) is dropped.
+            let device = fs.stat(Path::new(&row.dir)).ok()?.dev;
             let (source, source_is_block) = if sources {
-                source(row.source)
+                source(row.source, fs)
             } else {
                 (None, false)
             };
@@ -59,15 +68,15 @@ pub fn load(sources: bool) -> Vec<MountEntry> {
 /// `/dev/mapper/../dm-0`, the spelling the same link gives an argument; and a
 /// file in the working directory named like a source turned the name into a
 /// path.
-fn source(raw: OsString) -> (Option<OsString>, bool) {
+fn source(raw: OsString, fs: &SafeFs) -> (Option<OsString>, bool) {
     if raw.as_bytes().first() != Some(&b'/') {
         return (Some(raw), false);
     }
-    match lsof_core::readlink::resolve(&raw) {
+    match lsof_core::readlink::resolve(&raw, fs) {
         Ok(path) => {
-            let is_block = std::fs::metadata(&path)
-                .map(|m| m.file_type().is_block_device())
-                .unwrap_or(false);
+            let is_block = fs
+                .stat(Path::new(&path))
+                .is_ok_and(|st| st.is_block_device());
             (Some(path), is_block)
         }
         Err(_) => (None, false),
@@ -210,10 +219,11 @@ mod tests {
     #[test]
     fn a_source_that_is_a_name_is_kept_as_it_stands() {
         // `tmpfs`, `proc`: no Readlink(), and never a block device.
-        assert_eq!(source("tmpfs".into()), (Some("tmpfs".into()), false));
+        let fs = SafeFs::in_process();
+        assert_eq!(source("tmpfs".into(), &fs), (Some("tmpfs".into()), false));
         // A path is Readlink()'s spelling: here it holds no link.
         assert_eq!(
-            source("/dev/null".into()),
+            source("/dev/null".into(), &fs),
             (Some("/dev/null".into()), false)
         );
         // One Readlink() gives up on matches nothing.
@@ -225,13 +235,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::os::unix::fs::symlink("l2", dir.join("l1")).unwrap();
         std::os::unix::fs::symlink("l1", dir.join("l2")).unwrap();
-        assert_eq!(source(dir.join("l1").into_os_string()), (None, false));
+        assert_eq!(source(dir.join("l1").into_os_string(), &fs), (None, false));
         // A relative link is replaced where it stands, `..` and all.
         std::os::unix::fs::symlink("../null", dir.join("rel")).unwrap();
         let mut want = dir.clone().into_os_string();
         want.push("/../null");
         assert_eq!(
-            source(dir.join("rel").into_os_string()),
+            source(dir.join("rel").into_os_string(), &fs),
             (Some(want), false)
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -250,12 +260,14 @@ mod tests {
     fn the_live_table_is_readable_and_holds_the_root() {
         // A Linux host always has `/` mounted; an empty table would mean the
         // read or the parse silently dropped everything.
-        let m = load(true);
+        use std::os::unix::fs::MetadataExt;
+        let fs = SafeFs::in_process();
+        let m = load(true, &fs);
         assert!(!m.is_empty(), "expected a non-empty mount table");
         // A source is spelt when asked for, and not otherwise: `/proc` and the
         // root file system each have one.
         assert!(m.iter().any(|e| e.source.is_some()), "{m:?}");
-        assert!(load(false)
+        assert!(load(false, &fs)
             .iter()
             .all(|e| e.source.is_none() && !e.source_is_block));
         assert!(m.iter().any(|e| e.dir == "/"), "no root mount: {m:?}");
@@ -265,6 +277,139 @@ mod tests {
                 assert_eq!(md.dev(), e.device, "device mismatch for {:?}", e.dir);
             }
         }
+    }
+
+    /// Every mount point is `stat`ed through the bounded layer, with the
+    /// limit `-S` gave, and one it could not `stat` is dropped; under `-b`
+    /// none is `stat`ed and the table is empty, each mount saying so unless
+    /// `-w` (DIVERGENCES 94, 110).
+    #[test]
+    fn every_mount_point_is_stated_through_the_bounded_layer() {
+        use lsof_core::safefs::{timed_out, Blocking, FileStat, FsCalls};
+        use std::cell::RefCell;
+        struct Hung(RefCell<Vec<(OsString, u32)>>);
+        impl FsCalls for Hung {
+            fn stat(&self, p: &Path, limit: u32) -> std::io::Result<FileStat> {
+                self.0.borrow_mut().push((p.as_os_str().to_owned(), limit));
+                if p == Path::new("/") {
+                    Ok(FileStat::default())
+                } else {
+                    Err(timed_out())
+                }
+            }
+            fn lstat(&self, _: &Path, _: u32) -> std::io::Result<FileStat> {
+                unreachable!("a mount point is stat()ed")
+            }
+            fn readlink(&self, _: &Path, _: u32) -> std::io::Result<OsString> {
+                Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+            }
+            fn read_dir(&self, _: &Path, _: u32) -> std::io::Result<Vec<OsString>> {
+                unreachable!()
+            }
+        }
+        let hung = Hung(RefCell::new(Vec::new()));
+        let said = RefCell::new(Vec::<String>::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let four = Blocking {
+            limit: 4,
+            ..Blocking::default()
+        };
+        let fs = SafeFs::new(&hung, &say).with(four, true);
+        let m = load(false, &fs);
+        assert!(m.iter().all(|e| e.dir == "/"), "only / answered: {m:?}");
+        let asked = hung.0.borrow();
+        assert!(
+            asked.len() > 1 && asked.iter().all(|(_, l)| *l == 4),
+            "{asked:?}"
+        );
+        drop(asked);
+        assert!(said.borrow().is_empty());
+        hung.0.borrow_mut().clear();
+        let b = Blocking {
+            avoid: true,
+            ..four
+        };
+        assert!(load(true, &fs.with(b, true)).is_empty());
+        assert!(hung.0.borrow().is_empty(), "-b made a call");
+        let lines = said.borrow().clone();
+        assert!(
+            !lines.is_empty()
+                && lines.iter().all(|l| l.starts_with("lsof: avoiding stat(")
+                    && l.ends_with("): -b was specified.")),
+            "{lines:?}"
+        );
+        said.borrow_mut().clear();
+        assert!(load(true, &fs.with(b, false)).is_empty());
+        assert!(said.borrow().is_empty(), "-w mutes them");
+    }
+
+    /// A source that is a path is read as `Readlink()` reads it, and then
+    /// `stat`ed for whether it is a block device, every call through the
+    /// bounded layer with the limit `-S` gave: a source on a file system that
+    /// does not answer costs the limit, not the run.
+    #[test]
+    fn a_source_is_read_and_stated_through_the_bounded_layer() {
+        use lsof_core::safefs::{Blocking, FileStat, FsCalls};
+        use std::cell::RefCell;
+        struct Calls(RefCell<Vec<(&'static str, OsString, u32)>>);
+        impl FsCalls for Calls {
+            fn stat(&self, p: &Path, limit: u32) -> std::io::Result<FileStat> {
+                self.0
+                    .borrow_mut()
+                    .push(("stat", p.as_os_str().to_owned(), limit));
+                Ok(FileStat {
+                    mode: 0o060_660,
+                    ..FileStat::default()
+                })
+            }
+            fn lstat(&self, _: &Path, _: u32) -> std::io::Result<FileStat> {
+                unreachable!("a source is stat()ed")
+            }
+            fn readlink(&self, p: &Path, limit: u32) -> std::io::Result<OsString> {
+                self.0
+                    .borrow_mut()
+                    .push(("readlink", p.as_os_str().to_owned(), limit));
+                if p == Path::new("/dev/disk/x") {
+                    Ok("../../vda".into())
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                }
+            }
+            fn read_dir(&self, _: &Path, _: u32) -> std::io::Result<Vec<OsString>> {
+                unreachable!()
+            }
+        }
+        let calls = Calls(RefCell::new(Vec::new()));
+        let fs = SafeFs::new(&calls, &lsof_core::safefs::to_stderr).with(
+            Blocking {
+                limit: 4,
+                ..Blocking::default()
+            },
+            true,
+        );
+        assert_eq!(
+            source("/dev/disk/x".into(), &fs),
+            (Some("/dev/disk/../../vda".into()), true)
+        );
+        let made = calls.0.take();
+        assert!(made.iter().all(|(_, _, limit)| *limit == 4), "{made:?}");
+        let made: Vec<(&str, &str)> = made
+            .iter()
+            .map(|(c, p, _)| (*c, p.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("readlink", "/dev"),
+                ("readlink", "/dev/disk"),
+                ("readlink", "/dev/disk/x"),
+                // Reread past what held no link (`readlink::resolve_with`).
+                ("readlink", "/dev/disk/.."),
+                ("readlink", "/dev/disk/../.."),
+                ("readlink", "/dev/disk/../../vda"),
+                ("stat", "/dev/disk/../../vda"),
+            ]
+        );
     }
     #[test]
     fn the_file_system_type_is_field_three() {

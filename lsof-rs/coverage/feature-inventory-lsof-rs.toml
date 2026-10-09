@@ -95,12 +95,12 @@ reason = "portmapper / NFS — Unix RPC and NFS have no Windows analogue"
 [[waive]]
 id = "opt:S"
 platforms = ["windows"]
-reason = "lstat/readlink timeout — lsof-rs has its own bounded-worker model"
+reason = "stat/readlink timeout — accepted on Windows since 2026-10-09 and changes nothing there: the bounded layer has no helper on Windows, which makes those calls in-process and bounds its own blocking handle queries by its worker model; no Windows test can observe a limit"
 
 [[waive]]
 id = "opt:b"
 platforms = ["windows"]
-reason = "\"avoid blocking kernel\" — superseded by lsof-rs's bounded-worker model"
+reason = "\"avoid blocking kernel\" — accepted on Windows since 2026-10-09, where it avoids the same calls (a +d/+D directory's stat); the Windows smoke harness has no case for it, and its blocking handle queries are bounded by the worker model instead"
 
 [[waive]]
 ids = ["opt:X", "opt:Z"]
@@ -133,15 +133,9 @@ id = "opt:Z"
 platforms = ["linux"]
 reason = "DEBT (L2), NARROWED 2026-09-20: the gate ships and matches the C — `is_selinux_enabled()` is a MOUNTED-selinuxfs test, and lsof-rs answers `-Z limited to SELinux` with exit 1 exactly as the C does where it is not. What is missing is the CONTEXT column itself, and it is missing ON PURPOSE: `print.c:902` puts it among the PROCESS columns with a width grown to the longest value, and no host available to this port has SELinux enabled, so its position relative to USER and FD cannot be observed. Writing it from the source means guessing a layout whose errors would be silent. lsof-rs refuses loudly instead; see DIVERGENCES."
 
-[[waive]]
-id = "opt:S"
-platforms = ["linux"]
-reason = "DEBT (L2): the C's stat/readlink timeout; L0 relies on /proc being non-blocking, which is true for local FS and not for a hung NFS mount"
-
-[[waive]]
-id = "opt:b"
-platforms = ["linux"]
-reason = "DEBT (L2): pairs with -S; no avoid-blocking mode implemented"
+# `opt:S` and `opt:b` were DEBT (L2) here until 2026-10-09 (DIVERGENCES 94):
+# the bounded layer and its options, covered by the `opt-S-*`, `opt-b-*` and
+# `fh-*` cases of the Linux differential.
 
 # 2. TYPE codes of other dialects, or unreachable on Windows. Grouped `ids`
 #    share a reason; every id is still named explicitly — no globs, so a

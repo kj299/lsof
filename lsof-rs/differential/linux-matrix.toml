@@ -2754,6 +2754,420 @@ args = ["-V", "-Q", "-p", "999999999"]
 # (DIVERGENCES 54, no report under `-r`, needs a signal to end the run, which
 # a case cannot send; lsof-cli/tests/arguments.rs pins it.)
 
+# ---------------------------------------------- bounded calls: -b, -S, -O
+# The C's `statsafely()`, `lstatsafely()` and `Readlink()`, and the options
+# that govern them (DIVERGENCES 94). `-S`'s value is `-o`'s shape: only
+# leading digits, the next word when it opens with one, 15 when there is
+# none; below 2 it is raised to 2 with a warning printed while the options
+# are read, which neither -w nor -t mutes. stderr is compared wherever the
+# case alone fixes the C's; under -b without -w the C names every mount it
+# avoids, so those cases follow the host's table, the same for both.
+
+[[case]]
+name = "opt-S-alone-is-the-default"
+args = ["-S", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-seconds-as-the-next-word"
+args = ["-S", "2", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-seconds-attached"
+args = ["-S2", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-plus-S-is-dash-S"
+args = ["+S", "7", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A bare -S after a value is the default again; the last one wins.
+name = "opt-S-the-last-wins"
+args = ["-S", "3", "-S", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-zero-warns"
+args = ["-S", "0", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-one-warns-under-w"
+args = ["-w", "-S", "1", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-warns-under-t"
+args = ["-t", "-S", "0", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-warns-once-per-option"
+args = ["-S", "1", "-S", "0", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# The C stops at INT_MAX's own spelling without a wrap: 2147483647 seconds.
+name = "opt-S-int-max-is-taken"
+args = ["-S", "2147483647", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# What follows the digits is option letters again, under the same prefix.
+name = "opt-S-digits-then-terse"
+args = ["-S", "3t", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-attached-digits-then-terse"
+args = ["-S3t", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# Attached, a letter is an option: `-x` with no +d, a usage error. stdout and
+# the status alone: the usage text is lsof-rs's own (DIVERGENCES 114). The
+# parse is pinned by args.rs, dash_s_upper_takes_its_seconds_as_the_c_does.
+name = "opt-S-attached-letter-is-an-option"
+args = ["-Sx", "-p", "{A}"]
+
+[[case]]
+# Before a word with no digits -S is bare, and the word is a name: here
+# the last argument, so no option comes after it (DIVERGENCES 12).
+name = "opt-S-word-without-digits-is-a-name"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}", "-S", "{NOPE}"]
+with_stderr = true
+
+[[case]]
+name = "opt-S-before-double-dash"
+args = ["-S", "--", "{NOPE}"]
+with_stderr = true
+
+[[case]]
+# `-1` opens an option, so it is no value, and `1` is no option letter. The
+# parse is pinned by args.rs, dash_s_upper_takes_its_seconds_as_the_c_does.
+name = "opt-S-minus-one-is-no-value"
+args = ["-S", "-1", "-p", "{A}"]
+
+[[case]]
+# The warning comes out while the options are read, before the error; the
+# order is pinned by tests/arguments.rs, what_the_parse_says_comes_in_the_cs_order
+# (the usage after it is lsof-rs's own).
+name = "opt-S-zero-then-a-letter"
+args = ["-S", "0x", "-p", "{A}"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 121): the C sums the digits in an int,
+# so 4294967295 is -1 and warns `(-1) changed to 2`; lsof-rs stops at
+# INT_MAX and says nothing.
+name = "opt-S-wraps-negative-in-the-c"
+args = ["-S", "4294967295", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 121): ...and 4294967297 is 1.
+name = "opt-S-wraps-to-one-in-the-c"
+args = ["-S", "4294967297", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# Twenty digits: the C's sum wraps to 1661992959, no warning; lsof-rs's stops
+# at INT_MAX, no warning, and computes no deadline that could overflow.
+name = "opt-S-twenty-digits-run-as-any-other"
+args = ["-S", "99999999999999999999", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# -b and -w: no call, nothing said, the listing unchanged.
+name = "opt-b-under-w-lists-as-without"
+args = ["-b", "-w", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "opt-plus-b-is-dash-b"
+args = ["+b", "-w", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# -t sets the C's Fwarn, which mutes -b's lines too.
+name = "opt-b-under-t-says-nothing"
+args = ["-b", "-t", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): per mount the C says
+# `avoiding readlink(DIR)`, `avoiding stat(DIR)` and the two lines of its
+# `can't stat()` warning; lsof-rs reads no mount directory's link yet and
+# has no such warning (87), so it says `avoiding stat(DIR)` alone.
+name = "opt-b-names-every-mount-it-avoids"
+args = ["-b", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A path argument under -b is a status error that -w does not mute.
+name = "opt-b-path-argument-is-a-status-error"
+args = ["-b", "-w", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# Under -b the table is empty, so a mount point is no file system.
+name = "opt-b-mount-point-is-no-file-system"
+args = ["-b", "-w", "/"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): the C reads the argument's links
+# (`avoiding readlink(ARG)`) before it reads its table, lsof-rs after.
+name = "opt-b-path-argument-says-what-it-avoided"
+args = ["-b", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# -b beats -O, in either order.
+name = "opt-b-beats-O"
+args = ["-bO", "-w", "{FILE}"]
+with_stderr = true
+
+[[case]]
+name = "opt-O-then-b-avoids"
+args = ["-Ob", "-w", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# A +d after -b is fatal: its directory cannot be stat()ed. Its lines and
+# their order are pinned by tests/arguments.rs,
+# what_the_parse_says_comes_in_the_cs_order, and args.rs,
+# a_plus_d_is_examined_under_the_options_before_it.
+name = "opt-b-before-plus-d-ends-the-run"
+args = ["-b", "-w", "+d", "{ADIR}"]
+
+[[case]]
+# ...and a -b after it changes nothing for it, nor for the mount table the
+# C reads there: nothing is said.
+name = "opt-plus-d-before-b-is-not-avoided"
+args = ["+d", "{ADIR}", "-b", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# With nothing in its table the C checks no -e: `-b -e /nosuch` runs.
+name = "opt-b-e-is-not-checked-against-an-empty-table"
+args = ["-b", "-w", "-e", "/nosuch", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): the C enters an -e mount without
+# stat()ing it, so under -b its table holds /dev/shm and it checks /nosuch;
+# lsof-rs stat()s every mount, so its table is empty and it checks nothing.
+name = "opt-b-e-mounted-and-not"
+args = ["-b", "-w", "-e", "{SHMMNT}", "-e", "/nosuch", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "opt-b-i-alone-under-w"
+args = ["-b", "-w", "-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): under -i alone the C reads no
+# mount table, so -b has nothing to avoid; lsof-rs reads it.
+name = "opt-b-i-alone-reads-no-mount-table"
+args = ["-b", "-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): under -i alone the C reads no
+# mount table and so starts no child; lsof-rs reads it, through a helper
+# whose pipes a limit of seven descriptors leaves no room for: `can't open
+# pipes`, exit 1, where the C lists.
+name = "opt-i-alone-under-a-descriptor-limit"
+args = ["-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
+env = { LSOF_DIFF_NOFILE = "7" }
+with_stderr = true
+
+[[case]]
+# -O: the calls in lsof itself. The same listing on a file system that
+# answers, as lsof-rs gave before item 94, when -O was a no-op: where the
+# call is made is pinned by lsof-core's safefs.rs,
+# the_options_choose_where_a_call_is_made, and the spellings by args.rs,
+# dash_b_and_dash_o_upper_set_the_mode_as_the_c_does.
+name = "opt-O-makes-the-calls-in-lsof"
+args = ["-O", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# As the case above, and pinned by the same tests.
+name = "opt-plus-O-undoes-dash-O"
+args = ["-O", "+O", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# As the cases above, and pinned by the same tests.
+name = "opt-O-path-argument"
+args = ["-O", "-n", "-P", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 89): the C reads links in its child, so
+# `/proc/self` is the child and this is a status error on its pipe. lsof-rs
+# reads them in a helper too since DIVERGENCES 94, and the helper names
+# lsof's `/proc/PID` for its own: lsof's stdin, which the runner makes
+# /dev/null, which is A's fd 0.
+name = "path-proc-self-is-lsof-in-lsof-rs"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "0", "/proc/self/fd/0"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 89): the same through `/dev/stdin`, a link
+# to `/proc/self/fd/0` that `Readlink()` reads as typed.
+name = "path-dev-stdin-is-lsof-in-lsof-rs"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "0", "/dev/stdin"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 89): the same spelt `/proc//self`, which
+# the helper had read as its own (item 94's review); every other spelling is
+# tests/arguments.rs, a_path_through_proc_self_is_lsof_however_it_is_spelt.
+name = "path-proc-doubled-slash-self-is-lsof-in-lsof-rs"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "0", "/proc//self/fd/0"]
+
+# ------------------------------------------------- bounded calls: fixture FH
+# A FUSE root that does not answer `stat` (fuse_hang.py), mounted at {FUSE}
+# in a mount namespace of each run's own. Only what the C finishes: under
+# `--mode hold` it hangs wherever it stat()s the root (its child waits and
+# its alarm cannot end that, DIVERGENCES 118), so the hold cases are those
+# it never stat()s it in; `--mode delay` answers after a delay, which the C
+# does finish. LSOF_DIFF_FUSE is the server's mode.
+
+[[case]]
+name = "fh-hold-b-under-w"
+args = ["-b", "-w", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode hold" }
+with_stderr = true
+
+[[case]]
+name = "fh-hold-b-path-argument"
+args = ["-b", "-w", "{FUSE}"]
+env = { LSOF_DIFF_FUSE = "--mode hold" }
+with_stderr = true
+
+[[case]]
+# The usage after it is lsof-rs's own; the lines before it are pinned by
+# tests/arguments.rs, what_the_parse_says_comes_in_the_cs_order.
+name = "fh-hold-b-plus-D-ends-the-run"
+args = ["-b", "-w", "+D", "{FUSE}"]
+env = { LSOF_DIFF_FUSE = "--mode hold" }
+
+[[case]]
+# The C reads no table under -i alone; lsof-rs gives the hung mount its
+# two seconds and drops it. The same sockets, and nothing said.
+name = "fh-hold-i-alone"
+args = ["-S", "2", "-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
+env = { LSOF_DIFF_FUSE = "--mode hold" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): the C never stat()s an -e mount;
+# lsof-rs stat()s it, drops it when it times out, and then refuses the -e.
+name = "fh-hold-e-mount-is-never-stated-in-the-c"
+args = ["-S", "2", "-e", "{FUSE}", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode hold" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# The mount's stat outlives -S 2: the C gives up when it returns, lsof-rs
+# at two seconds; under -w both say nothing and list the rest.
+name = "fh-delay-S2-under-w"
+args = ["-w", "-S", "2", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# LEDGERED (DEBT, DIVERGENCES 110 next): the C warns `can't stat() fuse.hang
+# file system DIR` and `Output information may be incomplete.` (87).
+name = "fh-delay-S2-warns-in-the-c"
+args = ["-S", "2", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# An answer within the limit is taken, and nothing is said.
+name = "fh-delay-answers-in-time"
+args = ["-S", "3", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 1" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# The mount's stat answered, the argument's timed out: `Connection timed
+# out`, which -w does not mute either.
+name = "fh-delay-path-argument-times-out"
+args = ["-S", "2", "{FUSE}/."]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3 --answer-first 1" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# A +D whose directory times out ends the run. stdout and the status alone:
+# the usage after the warning is lsof-rs's own. Where the directory never
+# answers, tests/bounded_calls.rs pins the warning.
+name = "fh-delay-plus-D-times-out"
+args = ["-S", "2", "+D", "{FUSE}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
+timeout = 30
+
+[[case]]
+# A +D over the mount point's parent: the table's stat of the mount is
+# answered, the walk's lstat of it outlives -S 2, and both say `can't
+# lstat(...)` in the C's words and walk on; nothing there is open.
+name = "fh-delay-plus-D-walk-times-out"
+args = ["-S", "2", "+D", "{FUSEDIR}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3 --answer-first 1" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 118): after its first timeout the C's
+# SIGALRM stays blocked, so the argument's stat is waited out and succeeds;
+# lsof-rs bounds it too, and says `Connection timed out`.
+name = "fh-delay-second-stat-unbounded-in-the-c"
+args = ["-w", "-S", "2", "{FUSE}/."]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# -O waits for the file system, in both, as lsof-rs did before item 94; the
+# limit -O ignores is pinned by tests/bounded_calls.rs,
+# an_answer_in_time_is_taken_and_dash_o_has_no_limit.
+name = "fh-delay-O-waits"
+args = ["-O", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 119): under -O the C's alarm cannot end
+# the wait, and when the stat returns its handler longjmps to a jmp_buf no
+# setjmp filled: SIGSEGV, exit 139. lsof-rs waits and lists.
+name = "fh-delay-O-crashes-in-the-c"
+args = ["-O", "-S", "2", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 120): a timed-out readlink is a one-byte
+# link to the C, read from a buffer nothing filled, and the argument becomes
+# another path; lsof-rs keeps the component, and the stat of it times out.
+name = "fh-delay-readlink-timeout-in-the-c"
+args = ["-V", "-S", "2", "{FUSE}/lnk"]
+env = { LSOF_DIFF_FUSE = "--mode delay --delay 3 --symlink lnk=/etc --hang-op readlink" }
+with_stderr = true
+timeout = 30
+
 # ------------------------------------------------------------- exit contract
 
 [[case]]

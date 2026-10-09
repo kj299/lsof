@@ -18,6 +18,7 @@ pub mod mock;
 pub mod model;
 pub mod readlink;
 pub mod render;
+pub mod safefs;
 pub mod selection;
 pub mod service;
 
@@ -27,6 +28,7 @@ pub use model::{
     TcpState, UnixState,
 };
 pub use render::Escaper;
+pub use safefs::{Blocking, FileStat, FsCalls, InProcess, SafeFs};
 pub use selection::{
     CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs,
     InetFilter, InetSpec, Located, PathItem, Selection, StateFilter, TaskMode, TcpInfoFlags,

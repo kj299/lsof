@@ -23,12 +23,18 @@ const S_IFIFO: u32 = 0o010000;
 
 /// The DEVICE cell for a stat result: `st_rdev` for a device node (a
 /// character or block special names *its own* device), `st_dev` for everything
-/// else (the filesystem the file lives on). Shared with `identify_path` so a
+/// else (the filesystem the file lives on). Shared with `identify_stat` so a
 /// path argument and the row it should match are rendered by one rule.
 pub(crate) fn dev_cell(md: &std::fs::Metadata) -> String {
-    match type_from_mode(md.mode()) {
-        FileType::Chr | FileType::Block => dev_string(md.rdev()),
-        _ => dev_string(md.dev()),
+    dev_cell_of(md.mode(), md.dev(), md.rdev())
+}
+
+/// [`dev_cell`] from the three numbers it reads, as a bounded `stat` returns
+/// them ([`lsof_core::FileStat`]).
+pub(crate) fn dev_cell_of(mode: u32, dev: u64, rdev: u64) -> String {
+    match type_from_mode(mode) {
+        FileType::Chr | FileType::Block => dev_string(rdev),
+        _ => dev_string(dev),
     }
 }
 
@@ -408,6 +414,9 @@ pub struct GatherCtx<'a> {
     /// read once: a process whose own differs has its mappings `stat`ed
     /// through `map_files` (see [`crate::maps::rows_for`]).
     pub mnt_ns: Option<u64>,
+    /// lsof-rs's helpers among the processes, whose descriptors opened for a
+    /// call are neither `stat`ed nor listed ([`crate::safefs::HelperFds`]).
+    pub helpers: &'a crate::safefs::HelperFds,
 }
 
 /// The lock `pid` holds on the file a row was built from, as the C's
@@ -855,6 +864,12 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
     for (num, name) in fds {
         let p = format!("{base}/fd/{name}");
         let info = fdinfo_for(base, &name);
+        // What an lsof-rs helper opened for a call: the file a call could not
+        // examine in time, which a `stat` here would wait on as the helper
+        // does. Not listed (DIVERGENCES 123).
+        if ctx.helpers.skips(pid, num, info.flags) {
+            continue;
+        }
         let target = match std::fs::read_link(&p) {
             Ok(target) => target,
             Err(e) => {
@@ -939,6 +954,7 @@ mod tests {
                 omit_unreadable: false,
                 bound_paths: false,
                 mnt_ns: None,
+                helpers: &crate::safefs::HelperFds::default(),
             },
         )
     }
@@ -1049,6 +1065,7 @@ mod tests {
                 omit_unreadable: false,
                 bound_paths: false,
                 mnt_ns: None,
+                helpers: &crate::safefs::HelperFds::default(),
             },
         );
         assert!(
@@ -1357,6 +1374,7 @@ mod tests {
                 omit_unreadable,
                 bound_paths: false,
                 mnt_ns: None,
+                helpers: &crate::safefs::HelperFds::default(),
             },
         )
     }
@@ -1710,6 +1728,7 @@ mod tests {
             omit_unreadable: false,
             bound_paths: true,
             mnt_ns: None,
+            helpers: &crate::safefs::HelperFds::default(),
         };
         let id = |f: OpenFile| f.socket.and_then(|s| s.bound).and_then(|b| b.id);
         let first = row(

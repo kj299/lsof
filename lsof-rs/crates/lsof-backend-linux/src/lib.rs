@@ -23,6 +23,11 @@
 //!   `unix`), protocol, addresses and TCP state. **`-i` and `-U` work**, in
 //!   every form the core supports (`-iTCP:443`, `-i@addr`, `-i4`/`-i6`,
 //!   `-iUDP`, `-iICMP`, `-iRAW`), as does `-T q`.
+//! * **Bounded calls** (`safefs`): every `stat`, `lstat`, `readlink` and
+//!   directory listing lsof makes on a path it was given — an argument, a
+//!   `+d`/`+D` tree, a mount point — runs in a helper process that gives it
+//!   `-S` seconds, so a file system that never answers costs a run that limit
+//!   per call that meets it, and not the run (DIVERGENCES 94, 110, 118).
 //! * **L2** — everything the scope document deferred has landed but naming
 //!   netlink sockets (below):
 //!   `mem` rows and the `DEL` marking from `/proc/<pid>/maps`, the lock column
@@ -44,7 +49,7 @@
 //! from `/proc/net/raw` where this backend types it IPv4 or IPv6 (item 108).
 //! Packet sockets are done.
 //!
-//! Also open: the `-Z` CONTEXT column, the options `-S` and `-b`, and the rows of
+//! Also open: the `-Z` CONTEXT column and the rows of
 //! `lsof-rs/DIVERGENCES.md` still OPEN for this backend. `lsof-rs/docs/linux-l2-plan.md` measures each;
 //! the `DEBT` entries in `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are
 //! what the coverage gate prints on every run.
@@ -108,6 +113,8 @@ mod mounts;
 mod net;
 #[cfg(target_os = "linux")]
 mod process;
+#[cfg(target_os = "linux")]
+pub mod safefs;
 #[cfg(target_os = "linux")]
 mod text;
 #[cfg(target_os = "linux")]

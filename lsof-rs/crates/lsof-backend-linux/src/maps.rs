@@ -626,6 +626,7 @@ mod tests {
             omit_unreadable: false,
             bound_paths: false,
             mnt_ns: None,
+            helpers: &crate::safefs::HelperFds::default(),
         };
         let f = socket_mapping(&md, std::process::id(), &ctx);
         assert_eq!(f.fd, FdType::Mem);

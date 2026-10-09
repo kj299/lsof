@@ -11,6 +11,72 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **A file system that does not answer costs lsof-rs a time limit per call
+  instead of the run** (DIVERGENCES 94, and the timeout half of 110). Every
+  run but `-f` `stat`ed every mount point in-process with no limit, so a hung
+  NFS server or a stuck FUSE daemon stopped `lsof -p`, `lsof -i :22` and the
+  rest for good, left in state D; and std's `statx` mounted every automount
+  point it listed. Each `stat`, `lstat`, `readlink` and directory listing
+  lsof-rs makes on a path it was given — an argument, its links, a `+d`/`+D`
+  tree, a mount point or source — now runs in a helper process, this binary
+  re-executed from `/proc/self/exe` (through the loader, if lsof was run by
+  naming it) with pipes, no environment and lsof's working directory, which
+  gets `-S` seconds (15) per call: one that runs out is killed and replaced,
+  and the call fails with `Connection timed out`. Each such call costs its
+  limit, one after another: a hung mount costs every run that reads the table
+  15 s, and a path argument on it 15 s more; one `Readlink()` stops reading at
+  its first timeout, so it costs one. Measured against a FUSE server that
+  holds every request (`differential/fuse_hang.py`): `lsof -S 2 -p P` and a
+  whole-host `lsof -S 2` end in 2.0 s with their listing, twice in a row,
+  where they had hung. A thread could not have done it: a process whose thread
+  waits on such a request is not reaped and its stdout stays open. The `stat`
+  is `O_PATH` and the descriptor's metadata, which mounts no automount point;
+  a helper killed while it waits keeps that descriptor until the file system
+  answers, and lsof-rs never `stat`s a helper's descriptors (anything else
+  that does waits there too: 123). The C's own timeout fires once per run and
+  then hangs (118); its `-O` crashes when a call returns late (119); a
+  timed-out `readlink` is a one-byte link to it (120): none reproduced.
+
+### Added
+- **`-b`/`+b`, `-S [t]`/`+S [t]`, and `-O`/`+O` as the C reads them**
+  (DIVERGENCES 94). `-b` makes none of those calls, says `avoiding stat(P)` /
+  `avoiding readlink(P)` unless `-w`, and fails them with `Resource
+  temporarily unavailable`: a path argument is a status error, a `+d`/`+D`
+  after it ends the run, the mount table is empty. `-O` makes them in lsof
+  with no limit (it was a no-op), `+O` undoes it, and `-b` beats it. `-S`
+  takes leading digits as `-o` does; below 2 is 2, with the C's warning,
+  which nothing mutes. A `+d`/`+D` keeps the options given before it, as the
+  C examines it there. `-S`'s digits stop at `INT_MAX` where the C's wrap
+  (121); the C prints `avoiding stat(P)` raw, lsof-rs escapes it (122).
+  `/proc/self` read through the helper is still lsof (89), however a path
+  spells its way there. A helper that cannot be started ends the run: `can't
+  open pipes` or `can't fork`, as the C says.
+- **Differential fixture FH** — `fuse_hang.py` mounted in a private mount
+  namespace per run, root or passwordless sudo — and 57 cases for `-b`, `-S`,
+  `-O` and the helper (a case may set `LSOF_DIFF_NOFILE`, a descriptor
+  limit); `crates/lsof-cli/tests/bounded_calls.rs` for what the C cannot
+  finish; `mutants/safefs.toml`.
+
+### Changed
+- **lsof-rs runs a second process**, its helper, on every run that reads the
+  mount table or names a path: it appears in lsof's own listing as `lsof`,
+  in lsof's working directory with fds 0 and 1 on pipes like the C's forked
+  child, and fd 2 on `/dev/null` unlike it (123). One killed on a timeout
+  waits in state D until the file system answers or goes away, holding the
+  descriptor its call opened; lsof-rs lists it without `stat`ing that. Under
+  `-i` alone this costs what the C does not pay: the C reads no table there
+  (110, next), so a descriptor limit with no room for the helper's pipes ends
+  `lsof -i` (`can't open pipes`), where the C lists.
+- **`lsof_core::Selection` has `helpers`** and **`FsCalls` has
+  `helper_pids`**: the processes the bounded layer started, which the Linux
+  backend lists without `stat`ing what they opened for a call.
+- **`lsof-core`'s `Backend` trait**: `identify_path` and `path_fs_device` are
+  gone; `identify_stat` formats an identity from a `FileStat` the caller
+  `stat`ed through the bounded layer (`lsof_core::safefs`), and `mounts` takes
+  that layer. A path argument is `stat`ed once, and its status error is that
+  call's error; it had been `stat`ed a second time to word it.
+
 ### Changed
 - **A retrospective of 2026-09-02 → 2026-10-04 put every file against the
   project's purpose, and recorded what it measured.** Ten new rows in

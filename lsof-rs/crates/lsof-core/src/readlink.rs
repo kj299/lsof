@@ -162,14 +162,48 @@ fn one_pass(
     Ok((out, if restarted { 0 } else { kept }))
 }
 
-/// `arg` as the C's `Readlink()` spells it, reading the host's links.
+/// `arg` as the C's `Readlink()` spells it, reading the host's links through
+/// the bounded layer ([`crate::safefs`]): each component's `readlink(2)` is
+/// one call there, as the C makes each in its child
+/// (`doinchild(doreadlink)`), so a component on a file system that does not
+/// answer costs `-S` seconds, not the run. A call that fails, by timing out
+/// too, leaves the component as it is, which is what the C does with a
+/// failure; it reads a timeout as a one-byte link instead (DIVERGENCES 120).
+///
+/// After a timeout nothing more is read: the rest of the path is kept as it
+/// stands, and costs nothing. Every later prefix is reached through the one
+/// that did not answer — and a restart's, after an absolute link, would be
+/// read on the same file system no sooner — so each would cost `-S` again
+/// and leave another helper waiting: measured on a mount whose `LOOKUP`
+/// never answers, `lsof -S 2 FUSE/x/x/x/x/x` took 12 s, and a mount source of
+/// ten such components made every `lsof PATH` 22 s. The C documents a limit
+/// per call, and its own hangs at the second (DIVERGENCES 118); lsof-rs
+/// bounds one `Readlink()` by one limit (DIVERGENCES 120).
+///
+/// Under `-b` nothing is read: the C says `avoiding readlink(ARG)`, escaped,
+/// unless `-w`, and keeps `arg` as it is (`lib/misc.c`).
 #[cfg(unix)]
-pub fn resolve(arg: &std::ffi::OsStr) -> Result<std::ffi::OsString, ReadlinkError> {
+pub fn resolve(
+    arg: &std::ffi::OsStr,
+    fs: &crate::SafeFs,
+) -> Result<std::ffi::OsString, ReadlinkError> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    if fs.blocking().avoid {
+        fs.avoiding("readlink", arg.as_bytes());
+        return Ok(arg.to_os_string());
+    }
+    let mut gave_up = false;
     resolve_with(arg.as_bytes(), |prefix| {
-        std::fs::read_link(std::ffi::OsStr::from_bytes(prefix))
-            .ok()
-            .map(|t| t.into_os_string().into_vec())
+        if gave_up {
+            return None;
+        }
+        match fs.readlink(std::path::Path::new(std::ffi::OsStr::from_bytes(prefix))) {
+            Ok(target) => Some(target.into_vec()),
+            Err(e) => {
+                gave_up = crate::safefs::is_timed_out(&e);
+                None
+            }
+        }
     })
     .map(std::ffi::OsString::from_vec)
 }
@@ -427,9 +461,95 @@ mod tests {
             v.extend_from_slice(s.as_bytes());
             std::ffi::OsString::from(std::str::from_utf8(&v).unwrap())
         };
-        let got = resolve(&p("/rel-link/x")).unwrap();
+        let fs = crate::SafeFs::in_process();
+        let got = resolve(&p("/rel-link/x"), &fs).unwrap();
         assert_eq!(got, p("/rel/x"));
-        assert_eq!(resolve(&p("/l1")), Err(ReadlinkError::TooManyLinks));
+        assert_eq!(resolve(&p("/l1"), &fs), Err(ReadlinkError::TooManyLinks));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every component's `readlink` goes through the bounded layer, with the
+    /// limit `-S` gave (the C's `doinchild(doreadlink)` per component), and a
+    /// component whose call fails, a timeout included, is kept as it is;
+    /// after a timeout, the rest of the path is not read.
+    #[cfg(unix)]
+    #[test]
+    fn each_component_is_read_through_the_bounded_layer() {
+        use crate::safefs::{Blocking, FileStat, FsCalls};
+        use std::cell::RefCell;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+        struct Slow(RefCell<Vec<(Vec<u8>, u32)>>);
+        impl FsCalls for Slow {
+            fn stat(&self, _: &Path, _: u32) -> std::io::Result<FileStat> {
+                unreachable!()
+            }
+            fn lstat(&self, _: &Path, _: u32) -> std::io::Result<FileStat> {
+                unreachable!()
+            }
+            fn readlink(&self, p: &Path, limit: u32) -> std::io::Result<OsString> {
+                let p = p.as_os_str().as_bytes().to_vec();
+                self.0.borrow_mut().push((p.clone(), limit));
+                if p == b"/m/lnk" {
+                    Err(crate::safefs::timed_out())
+                } else if p == b"/m/rel" {
+                    Ok("lnk".into())
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                }
+            }
+            fn read_dir(&self, _: &Path, _: u32) -> std::io::Result<Vec<OsString>> {
+                unreachable!()
+            }
+        }
+        let slow = Slow(RefCell::new(Vec::new()));
+        let said = RefCell::new(Vec::<String>::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let three = Blocking {
+            limit: 3,
+            ..Blocking::default()
+        };
+        let fs = crate::SafeFs::new(&slow, &say).with(three, true);
+        assert_eq!(
+            resolve("/m/lnk/x/y".as_ref(), &fs).unwrap(),
+            "/m/lnk/x/y",
+            "a timed-out link is kept, not read as one"
+        );
+        // ...and nothing after it is read: each would wait as long again.
+        assert_eq!(
+            *slow.0.borrow(),
+            [(b"/m".to_vec(), 3), (b"/m/lnk".to_vec(), 3)]
+        );
+        slow.0.borrow_mut().clear();
+        // A link that fails some other way stops nothing.
+        assert_eq!(resolve("/x/y".as_ref(), &fs).unwrap(), "/x/y");
+        assert_eq!(
+            *slow.0.borrow(),
+            [(b"/x".to_vec(), 3), (b"/x/y".to_vec(), 3)]
+        );
+        slow.0.borrow_mut().clear();
+        assert_eq!(resolve("/m/rel".as_ref(), &fs).unwrap(), "/m/lnk");
+        // `-b`: nothing read, the argument as it is, and one message for it.
+        let b = Blocking {
+            avoid: true,
+            ..three
+        };
+        slow.0.borrow_mut().clear();
+        assert_eq!(
+            resolve("/m/rel\x1b".as_ref(), &fs.with(b, true)).unwrap(),
+            "/m/rel\x1b"
+        );
+        assert!(slow.0.borrow().is_empty());
+        assert_eq!(
+            *said.borrow(),
+            ["lsof: avoiding readlink(/m/rel^[): -b was specified."]
+        );
+        said.borrow_mut().clear();
+        assert_eq!(
+            resolve("/m/rel".as_ref(), &fs.with(b, false)).unwrap(),
+            "/m/rel"
+        );
+        assert!(said.borrow().is_empty(), "-w mutes it");
     }
 }
