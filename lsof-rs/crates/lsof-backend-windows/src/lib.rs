@@ -5,10 +5,11 @@
 //! files), all behind a strict least-privilege model (see the `privilege`
 //! module).
 //!
-//! Everything but the pure name parsers in `names` is gated on
+//! Everything but the pure parts — the name parsers in `names`, the PEB walk in
+//! `peb_walk` and the size arithmetic in `sizes` — is gated on
 //! `#[cfg(windows)]`; on other hosts the crate compiles to little more than an
-//! empty shell, so the workspace builds and `names` can be fuzzed on Linux. The
-//! CLI selects this backend only when built for Windows.
+//! empty shell, so the workspace builds and those modules are tested and
+//! fuzzed on Linux. The CLI selects this backend only when built for Windows.
 
 #![cfg_attr(not(windows), allow(unused))]
 
@@ -18,15 +19,18 @@ mod backend;
 mod etw;
 #[cfg(windows)]
 mod handles;
-// NOT `#[cfg(windows)]`: these are pure string transforms over text Windows
-// hands us, and the fuzz job that must cover them runs on Linux.
 #[cfg(windows)]
 mod mapped;
 #[cfg(windows)]
 mod modules;
+// NOT `#[cfg(windows)]`: these are pure string transforms over text Windows
+// hands us, and the fuzz job that must cover them runs on Linux.
 mod names;
 #[cfg(windows)]
 mod peb;
+// NOT `#[cfg(windows)]` either: the walk over memory the target process wrote,
+// unit-tested and fuzzed (`windows_peb`) on Linux; `peb` feeds it.
+mod peb_walk;
 #[cfg(windows)]
 mod privilege;
 #[cfg(windows)]
@@ -35,6 +39,9 @@ mod process;
 mod resolve;
 #[cfg(windows)]
 mod restart;
+// NOT `#[cfg(windows)]`: checked buffer sizes and bounds from counts the kernel
+// reports, so their overflow tests run on Linux.
+mod sizes;
 #[cfg(windows)]
 mod sockets;
 #[cfg(windows)]
@@ -87,16 +94,17 @@ pub fn exit_now(code: u32) -> ! {
     std::process::exit(code as i32)
 }
 
-/// The crate's text parsers, exposed for `cargo-fuzz`.
+/// The crate's text parsers and PEB walk, exposed for `cargo-fuzz`.
 ///
 /// Unlike the Linux backend's `fuzz_api` this is **not** `cfg(windows)`: the
-/// fuzz job runs on Linux, and the point of [`crate::names`] is that these
-/// functions need no Windows to run. Gated on the feature alone so an ordinary
-/// build still exposes nothing.
+/// fuzz job runs on Linux, and the point of `crate::names` and
+/// `crate::peb_walk` is that these functions need no Windows to run. Gated on
+/// the feature alone so an ordinary build still exposes nothing. (Not links:
+/// both modules are private, which rustdoc refuses from a public item.)
 ///
 /// A panic here is a denial of service against the tool that is supposed to be
-/// diagnosing one (porting-kit LESSONS #021), and every input below is a
-/// string the operating system chose, not the user.
+/// diagnosing one (porting-kit LESSONS #021), and every input below was chosen
+/// by the operating system or by another process, not the user.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzz_api {
@@ -104,4 +112,5 @@ pub mod fuzz_api {
         device_to_dos, drive_of, normalize_final, pipe_display, short_type_code, wide_to_string,
         win_type_to_filetype,
     };
+    pub use crate::peb_walk::{cwd32, cwd64};
 }

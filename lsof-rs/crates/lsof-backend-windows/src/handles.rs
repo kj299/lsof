@@ -31,8 +31,15 @@
 //! runs simply see fewer processes (the owner `OpenProcess` calls fail), exactly
 //! like lsof without root.
 
+// The sizes here are the kernel's figures (the handle table's, a name's, a
+// path's), so arithmetic on them is checked (`sizes`), and a plain `+` or `*`
+// is refused: the release build checks overflow, so one would panic where it
+// used to wrap. The Windows clippy job is what holds these call sites.
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::mem::size_of_val;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,6 +54,7 @@ use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPip
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
 
 use crate::privilege::PrivilegeGuard;
+use crate::sizes::next_cap;
 use crate::util::{trace, wide_to_string, OwnedHandle};
 // The crate's pure text-parsing surface. It lives in a portable module so
 // the Linux-hosted fuzz job can reach it -- see `crate::names`.
@@ -294,15 +302,17 @@ fn query_all_handles() -> Option<Vec<u64>> {
     let mut cap: usize = 1 << 20; // 1 MiB to start
     for _ in 0..8 {
         let mut buf = vec![0u64; cap / 8];
+        // The allocation's exact byte size (`cap / 8` floors, so `cap` itself
+        // could exceed it), as the call's `u32`; `next_cap` keeps it in range.
+        let len = u32::try_from(size_of_val(buf.as_slice())).ok()?;
         let mut ret = 0u32;
-        // SAFETY: the length passed equals buf.len()*8 — the exact byte size of
-        // the allocation (`cap / 8` floors, so `cap` itself could exceed it) — so
-        // the class never writes past the buffer.
+        // SAFETY: `len` is the exact byte size of the allocation, so the class
+        // never writes past the buffer.
         let status = unsafe {
             NtQuerySystemInformation(
                 SYSTEM_EXTENDED_HANDLE_INFORMATION,
                 buf.as_mut_ptr() as *mut c_void,
-                (buf.len() * 8) as u32,
+                len,
                 &mut ret,
             )
         };
@@ -310,7 +320,10 @@ fn query_all_handles() -> Option<Vec<u64>> {
             return Some(buf);
         }
         if status == STATUS_INFO_LENGTH_MISMATCH {
-            cap = (cap * 2).max(ret as usize + 4096);
+            // Checked: `ret` is the kernel's figure, and a size that does not
+            // fit, or that the call's `u32` length cannot describe, is an
+            // unreadable handle table, not a panic or an ever larger buffer.
+            cap = next_cap(cap, ret, 4096)?;
             continue;
         }
         return None;
@@ -357,17 +370,18 @@ fn query_object_string(handle: HANDLE, class: i32) -> Option<String> {
     let mut cap: usize = 0x1000;
     for _ in 0..6 {
         let mut buf = vec![0u64; cap / 8];
+        // As in `query_all_handles`: the exact byte size, as the call's `u32`.
+        let len = u32::try_from(size_of_val(buf.as_slice())).ok()?;
         let mut ret = 0u32;
-        // SAFETY: handle is a live duplicated handle; the length passed equals
-        // buf.len()*8 — the exact allocation size (`cap / 8` floors, so `cap`
-        // could exceed it for a non-8-multiple cap) — so NtQueryObject never
-        // overruns the buffer.
+        // SAFETY: handle is a live duplicated handle; `len` is the exact
+        // allocation size (`cap / 8` floors, so `cap` could exceed it for a
+        // non-8-multiple cap), so NtQueryObject never overruns the buffer.
         let status = unsafe {
             NtQueryObject(
                 handle,
                 class,
                 buf.as_mut_ptr() as *mut c_void,
-                (buf.len() * 8) as u32,
+                len,
                 &mut ret,
             )
         };
@@ -378,7 +392,7 @@ fn query_object_string(handle: HANDLE, class: i32) -> Option<String> {
             || status == STATUS_BUFFER_OVERFLOW
             || status == STATUS_BUFFER_TOO_SMALL
         {
-            cap = (cap * 2).max(ret as usize + 256);
+            cap = next_cap(cap, ret, 256)?;
             continue;
         }
         return None;
@@ -747,7 +761,9 @@ fn final_path(dup: HANDLE) -> Option<String> {
         return None;
     }
     if len as usize >= buf.len() {
-        buf = vec![0u16; len as usize + 1];
+        // `len` is the size the call asked for; `+ 1` is checked so that a
+        // `u32::MAX` on a 32-bit `usize` is no path rather than a panic.
+        buf = vec![0u16; (len as usize).checked_add(1)?];
         // SAFETY: as above, with a buffer grown to the reported size.
         len = unsafe { GetFinalPathNameByHandleW(dup, buf.as_mut_ptr(), buf.len() as u32, 0) };
         if len == 0 || len as usize >= buf.len() {
@@ -787,11 +803,10 @@ pub(crate) fn build_dos_map() -> Vec<(String, String)> {
     let mut map = Vec::new();
     // SAFETY: no arguments; returns a bitmask of present drive letters.
     let drives = unsafe { GetLogicalDrives() };
-    for i in 0..26u32 {
+    for (i, letter) in (0..26u32).zip('A'..='Z') {
         if drives & (1 << i) == 0 {
             continue;
         }
-        let letter = (b'A' + i as u8) as char;
         let dos = format!("{letter}:");
         let devname: Vec<u16> = format!("{dos}\0").encode_utf16().collect();
         let mut target = [0u16; 512];

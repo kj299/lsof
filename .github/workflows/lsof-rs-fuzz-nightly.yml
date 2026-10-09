@@ -52,7 +52,7 @@ jobs:
         # reports, so a target added to fuzz/Cargo.toml is soaked nightly
         # without touching this file. Today they are the argv parser, the Linux
         # backend's /proc, mount-table and /etc/passwd parsers, the renderer's
-        # escaper and the Windows backend's name parsers.
+        # escaper and the Windows backend's name parsers and PEB walk.
         run: |
           targets=$(cargo fuzz list)
           n=$(echo "$targets" | wc -w)

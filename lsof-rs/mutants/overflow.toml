@@ -1,0 +1,181 @@
+# Mutants for "overflow-checks in the release profile, after the arithmetic on
+# values from other processes and the kernel is checked" (2026-10-09): one per
+# rule, each the code as it read before or a plausible way to get it wrong.
+# The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/overflow.toml
+#
+# It needs neither the C oracle nor root: the gates are unit tests, clippy (on
+# Linux and for x86_64-pc-windows-gnu) and the release build itself. Nothing on
+# Linux runs the Windows-only call sites (peb.rs, handles.rs, etw.rs); what
+# holds them is `clippy::arithmetic_side_effects`, denied in each, which the
+# Windows clippy job runs, so that is their gate here. CI runs only
+# --apply-only, which checks that each mutant still fits the code. Run
+# 2026-10-09: 16 of 16 killed. The unit tests killed 10 (7 alone); the Windows
+# clippy 7 (4 alone, the Windows call sites); the Linux clippy 3 (none alone);
+# the overflow gate 2, alone: the flag deleted, and the flag overridden for one
+# crate, which the panic message alone does not see (lsof-cli still supplies
+# it).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-windows", "-p", "lsof-cli"]
+
+[[run.gate]]
+name = "clippy"
+cmd = ["cargo", "clippy", "-p", "lsof-backend-windows", "--all-targets", "--", "-D", "warnings"]
+
+# The Windows CI job's clippy step, for the crate whose call sites it holds.
+[[run.gate]]
+name = "clippy-windows"
+cmd = ["cargo", "clippy", "-p", "lsof-backend-windows", "--all-targets", "--target", "x86_64-pc-windows-gnu", "--", "-D", "warnings"]
+
+# The CI step "overflow checks reached the release binary", as a gate.
+[[run.gate]]
+name = "overflow-gate"
+cmd = ["python3", "differential/overflow_gate.py"]
+infra = [2]
+
+[[mutant]]
+name = "peb-field-plain-add"
+rule = "a field address on a pointer the target wrote is checked, not `+` (peb.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/peb_walk.rs"
+old = '''    usize::try_from(base).ok()?.checked_add(off)
+'''
+new = '''    Some(base as usize + off)
+'''
+
+[[mutant]]
+name = "peb-field-wraps"
+rule = "a field address that does not fit is unreadable, never the address the wrap lands on"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/peb_walk.rs"
+old = '''    usize::try_from(base).ok()?.checked_add(off)
+'''
+new = '''    Some((base as usize).wrapping_add(off))
+'''
+
+[[mutant]]
+name = "peb64-base-wraps"
+rule = "PEB + 0x20 is checked: a base at the top is unreadable"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/peb_walk.rs"
+old = '''peb.checked_add(PEB64_PARAMS)?'''
+new = '''peb.wrapping_add(PEB64_PARAMS)'''
+
+[[mutant]]
+name = "peb32-base-wraps"
+rule = "PEB32 + 0x10 is checked: a base at the top is unreadable"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/peb_walk.rs"
+old = '''peb32.checked_add(PEB32_PARAMS)?'''
+new = '''peb32.wrapping_add(PEB32_PARAMS)'''
+
+[[mutant]]
+name = "next-cap-plain-mul"
+rule = "query-buffer growth is checked, not `cap * 2` (handles.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/sizes.rs"
+old = '''    let next = cap.checked_mul(2)?.max(needed);'''
+new = '''    let next = (cap * 2).max(needed);'''
+
+[[mutant]]
+name = "next-cap-wraps"
+rule = "a buffer size that does not fit is the query failing, not a smaller buffer"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/sizes.rs"
+old = '''    let next = cap.checked_mul(2)?.max(needed);'''
+new = '''    let next = cap.wrapping_mul(2).max(needed);'''
+
+[[mutant]]
+name = "next-cap-past-u32"
+rule = "a buffer the call's u32 length cannot describe is the query failing, not a truncated length"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/sizes.rs"
+old = '''    u32::try_from(next).is_ok().then_some(next)'''
+new = '''    Some(next)'''
+
+[[mutant]]
+name = "props-fit-plain"
+rule = "the TDH bounds check is checked arithmetic, not `start + count * elem` (etw.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/sizes.rs"
+old = '''    count
+        .checked_mul(elem)
+        .and_then(|n| n.checked_add(start))
+        .is_some_and(|end| end <= len)'''
+new = '''    start + count * elem <= len'''
+
+[[mutant]]
+name = "props-fit-strict"
+rule = "a property array may end exactly at the buffer's end"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/sizes.rs"
+old = '''.is_some_and(|end| end <= len)'''
+new = '''.is_some_and(|end| end < len)'''
+
+[[mutant]]
+name = "digit-count-wraps"
+rule = "-r, -o and +L counts saturate where the C's int or long wraps"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''n.saturating_mul(10).saturating_add(usize::from(b - b'0'))'''
+new = '''n.wrapping_mul(10).wrapping_add(usize::from(b - b'0'))'''
+
+[[mutant]]
+name = "etw-counter-plain-add"
+rule = "the ETW callback's counters saturate: a panic cannot unwind out of it (etw.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/etw.rs"
+old = '''        s.total = s.total.saturating_add(1);'''
+new = '''        s.total += 1;'''
+
+[[mutant]]
+name = "handles-growth-plain"
+rule = "the handle-table buffer grows through next_cap, not `cap * 2` (handles.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/handles.rs"
+old = '''            cap = next_cap(cap, ret, 4096)?;'''
+new = '''            cap = (cap * 2).max(ret as usize + 4096);'''
+
+[[mutant]]
+name = "handles-len-plain"
+rule = "the length passed is the allocation's size converted checked, not `buf.len() * 8` (handles.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/handles.rs"
+old = '''        // could exceed it), as the call's `u32`; `next_cap` keeps it in range.
+        let len = u32::try_from(size_of_val(buf.as_slice())).ok()?;'''
+new = '''        // could exceed it), as the call's `u32`; `next_cap` keeps it in range.
+        let len = (buf.len() * 8) as u32;'''
+
+[[mutant]]
+name = "final-path-plain-add"
+rule = "the grown path buffer's `+ 1` is checked (handles.rs before)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/handles.rs"
+old = '''        buf = vec![0u16; (len as usize).checked_add(1)?];'''
+new = '''        buf = vec![0u16; len as usize + 1];'''
+
+[[mutant]]
+name = "release-package-override"
+rule = "every workspace crate carries overflow checks, not only the one that leaves the message in the binary"
+[[mutant.edit]]
+file = "Cargo.toml"
+old = '''overflow-checks = true'''
+new = '''overflow-checks = true
+
+[profile.release.package.lsof-backend-linux]
+overflow-checks = false'''
+
+[[mutant]]
+name = "release-without-overflow-checks"
+rule = "the release profile sets overflow-checks, and the shipped binary carries them"
+[[mutant.edit]]
+file = "Cargo.toml"
+old = '''overflow-checks = true'''
+new = '''overflow-checks = false'''

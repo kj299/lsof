@@ -281,11 +281,11 @@ keep the parsing honest against a real kernel.
 The parsers of text from outside the process have cargo-fuzz targets under
 [`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
 `/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
-`/etc/passwd` readers; the Windows backend's name parsers; and the escaper that
-every one of them feeds. Four have none, and
-[`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the Windows PEB reader, the
-ETW payload parsers, the path speller (`readlink::resolve_with`) and the
-`/etc/passwd` name lookup behind `-u NAME`. The contract is
+`/etc/passwd` readers; the Windows backend's name parsers and PEB walk; and the
+escaper that every one of them feeds. Three have none, and
+[`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the ETW payload parsers, the
+path speller (`readlink::resolve_with`) and the `/etc/passwd` name lookup behind
+`-u NAME`. The contract is
 *no panic on any input*; CI smoke-runs all of them on every PR and soaks them
 nightly. The `proc_net` target found a real panic in the IPv6 decoder in its
 first seconds.

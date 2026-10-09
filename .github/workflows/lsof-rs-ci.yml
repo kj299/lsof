@@ -225,6 +225,12 @@ jobs:
         run: cargo test --all
       - name: build release binary
         run: cargo build --release --bin lsof
+      - name: overflow checks reached the release binary
+        # The Windows half of the check the differential-linux job explains,
+        # by the same script: here it covers lsof-backend-windows, whose code
+        # follows pointers other processes wrote (peb_walk.rs). lsof-rs-release.yml
+        # runs it again on the lsof.exe it ships.
+        run: python differential/overflow_gate.py
       - name: socket differential (oracle-substitution vs Get-NetTCPConnection)
         # Compares lsof-rs's `-i` socket SET against the OS's own table over
         # self-owned fixtures (see differential/README.md). Built-in cmdlets +
@@ -301,9 +307,9 @@ jobs:
         # /proc/net tables, /proc/<pid>/status, fdinfo, maps, /proc/locks,
         # mount-table and /etc/passwd readers (kernel- and user-supplied text;
         # `Name:` is attacker-settable), the renderer's escaper, and the Windows
-        # backend's name parsers. None
-        # may panic. The loop is over `cargo fuzz list`, so a target added to
-        # fuzz/Cargo.toml is gated here without touching this file — a target
+        # backend's name parsers and PEB walk (pointers another process wrote).
+        # None may panic. The loop is over `cargo fuzz list`, so a target added
+        # to fuzz/Cargo.toml is gated here without touching this file — a target
         # that exists but is not run is the LESSONS #019 failure again. Short
         # time-box per target gates every PR; the nightly runs long.
         #
@@ -366,6 +372,20 @@ jobs:
           ./lsof -v 2>&1 | grep revision
       - name: build lsof-rs
         run: cargo build --release --bin lsof
+      - name: overflow checks reached the release binary
+        # [profile.release] sets overflow-checks, so an overflow the audit of
+        # remote and kernel values missed panics instead of wrapping into a
+        # wrong address or count. Losing the flag fails nothing else: on every
+        # input that does not overflow the binary behaves the same. Two
+        # signals, as neither sees every way to lose it: cargo's per-crate
+        # profile report sees a [profile.release.package.<crate>] override,
+        # which leaves the panic message in the binary (lsof-cli still
+        # supplies it), and the message `attempt to add with overflow` sees
+        # RUSTFLAGS='-C overflow-checks=off', which the report does not show.
+        # Each measured 2026-10-09 to fail the gate (differential/README.md).
+        run: |
+          python3 differential/overflow_gate.py --self-test
+          python3 differential/overflow_gate.py
       - name: allow unprivileged user namespaces (fixtures L, M, MS)
         # KEPT DELIBERATELY. This step relaxes a kernel security setting on the
         # runner, so it was put to the repository's owner rather than left as a

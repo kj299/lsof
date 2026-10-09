@@ -129,7 +129,7 @@ found in the results.
 | `inet-icmp-family-dash-i`, `inet-raw-family-dash-i`, `unix-sockets-dash-U` | `etw.rs` (Administrator) |
 | `port-service-name-https` (port names by default) | `resolve.rs`, `lsof-core/src/service.rs`, `sockets.rs::format_socket` |
 | `tcp-info-selects-not-adds-dash-T`, `tcp-info-window-dash-T`, `tcp-info-window-v6-dash-T`, `tcp-info-fields-dash-T`, `tcp-info-json-dash-T` | `tcpinfo.rs` (EStats; Administrator) |
-| `cwd-64bit`, `cwd-wow64-32bit` | `peb.rs` (`read_cwd64`/`read_cwd32`) |
+| `cwd-64bit`, `cwd-wow64-32bit` | `peb.rs` (`cwd`), `peb_walk.rs` (`cwd64`/`cwd32`) |
 | `modules-txt-image`, `modules-mem-dll` | `modules.rs` |
 | `named-file-who-has-open`, `plus-D-directory-tree`, `filesystem-args-dash-f-plus-f` | `restart.rs`, `selection.rs` paths and dir trees |
 | `tasks-dash-K`, `tasks-dash-K-i-suppresses`, `tasks-dash-K-terse`, `tasks-dash-K-with-a-held-file`, `tasks-not-listed-by-default` | `threads.rs`, `selection.rs` |
