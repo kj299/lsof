@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #086.
+# Local: #087.
 # Re-cited: #7 by title (no entry in this log).
 """Doc-flag drift check — every flag the docs attribute to a kit harness must
 exist in that harness's source. Documented commands are code: they get pasted.
@@ -111,7 +111,7 @@ def run(kit_root):
     docs = sorted(_iter_doc_files(kit_root))
     # A root with no harness or no document checks nothing: given a path that
     # did not exist, this printed "0 ... checked, 0 drifted" and passed
-    # (LESSONS #086). Exit 2, the kit's "cannot judge".
+    # (LESSONS #087). Exit 2, the kit's "cannot judge".
     if not scripts or not docs:
         print(f"error: {kit_root}: found {len(scripts)} harness script(s) and "
               f"{len(docs)} document(s) — the wrong KIT_ROOT? A check that reads "
@@ -163,7 +163,7 @@ def _self_test():
         open(os.path.join(root, "README.md"), "w").write(
             "`tool.py --real-flag` then `other.py --other-flag`\n")
         check("per-script attribution on one line", run(root) == 0)
-    # Nothing to read is "cannot judge", never a pass (LESSONS #086).
+    # Nothing to read is "cannot judge", never a pass (LESSONS #087).
     import contextlib
     import io
     with tempfile.TemporaryDirectory() as root, contextlib.redirect_stderr(io.StringIO()):

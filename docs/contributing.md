@@ -24,7 +24,7 @@ across dialects.
 C sources should be formatted by `clang-format`, e.g.:
 
 ```shell
-clang-format -i lib/dialcets/linux/dsock.c
+clang-format -i lib/dialects/linux/dsock.c
 # or
 git-clang-format
 ```

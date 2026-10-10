@@ -3,8 +3,8 @@
 //! A [`Backend`] is the Rust analog of an lsof dialect's `gather_proc_info()`
 //! hook: it knows how to enumerate the system's processes and their open files
 //! on one platform. The portable code in this crate drives a `&dyn Backend`,
-//! so the Windows implementation (and any future Linux one) is fully decoupled
-//! from selection and rendering.
+//! so the Windows and Linux implementations are fully decoupled from
+//! selection and rendering.
 
 use std::ffi::OsString;
 
@@ -126,8 +126,9 @@ pub trait Backend {
     /// This is what makes a path argument mean what lsof means by it: `lsof
     /// /a/hardlink` finds the file even though it was opened under its other
     /// name, and `lsof /some/dir` matches that directory and *not* the files
-    /// beneath it. A backend that cannot identify files returns `None`, and
-    /// selection falls back to comparing names.
+    /// beneath it. A backend that cannot identify files says so through
+    /// [`Backend::identifies_paths`], and selection then compares names; a
+    /// `None` from one that can is matched by nothing.
     ///
     /// The `stat` itself is the caller's, made through the bounded layer
     /// ([`crate::safefs::SafeFs`]) under the `-b`/`-O`/`-S` in force where the

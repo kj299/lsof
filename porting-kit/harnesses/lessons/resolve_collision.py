@@ -645,7 +645,7 @@ def _self_test():
         def g(*args, ok=True):
             # No auto-maintenance: git 2.47+ runs it detached after a commit or a
             # merge, and on CI one held a lock in a fixture repo's objects/ while
-            # the temporary directory was being removed (LESSONS #086).
+            # the temporary directory was being removed (LESSONS #087).
             p = subprocess.run(
                 ["git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                  "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",

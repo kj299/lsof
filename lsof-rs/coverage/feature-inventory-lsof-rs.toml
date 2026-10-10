@@ -100,7 +100,7 @@ reason = "stat/readlink timeout — accepted on Windows since 2026-10-09 and cha
 [[waive]]
 id = "opt:b"
 platforms = ["windows"]
-reason = "\"avoid blocking kernel\" — accepted on Windows since 2026-10-09, where it avoids the same calls (a +d/+D directory's stat); the Windows smoke harness has no case for it, and its blocking handle queries are bounded by the worker model instead"
+reason = "\"avoid blocking kernel\" — accepted on Windows since 2026-10-09, where it avoids the same calls (a +d/+D directory's stat); the Windows smoke harness has no case for it (the portable unit test `a_plus_d_is_examined_under_the_options_before_it` runs there and pins its `avoiding stat(D)` line), and its blocking handle queries are bounded by the worker model instead"
 
 [[waive]]
 ids = ["opt:X", "opt:Z"]
@@ -112,11 +112,12 @@ ids = ["opt:e", "opt:f", "opt:m", "opt:x"]
 platforms = ["windows"]
 reason = "mount-table concepts (exempt FS, FS detail, mtab supplement, cross-mount walk) — Windows has no mount table in this sense"
 
-# 1c. COVERAGE DEBT on Linux. These are the waivers above whose justification
-#     was "Unix-only" — true of Windows, false here. The C implements every one
-#     of them on Linux; this port does not, yet. They are declared as debt with
-#     the phase that closes them, NOT re-waived as out of scope: a waiver says
-#     "we will never do this", and that would be untrue.
+# 1c. Linux-scoped option waivers. These are the waivers above whose
+#     justification was "Unix-only" — true of Windows, false here. Of them, -m
+#     and -M are absent from this C's Linux build too (NOT IN THE DIALECT), and
+#     -Z is the one still DEBT, declared with what closes it, NOT re-waived as
+#     out of scope: a waiver says "we will never do this", and that would be
+#     untrue. (-S and -b left this section when they shipped, 2026-10-09.)
 
 [[waive]]
 id = "opt:m"

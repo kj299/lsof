@@ -94,7 +94,7 @@ def cmd_ingest(path, unsafe_jsons):
         rep = json.load(open(jf, encoding="utf-8"))
         # A report that audited no block (a forbid-unsafe crate, or the wrong
         # path) is not evidence of a clean unsafe surface (LESSONS #036's
-        # 0-of-0): `documented` is the count audit_unsafe.py writes (LESSONS #086).
+        # 0-of-0): `documented` is the count audit_unsafe.py writes (LESSONS #087).
         audited = rep.get("documented")
         if not (isinstance(audited, int) and audited > 0):
             continue
@@ -149,7 +149,7 @@ def _self_test():
 
         clean = os.path.join(d, "sockets.json")
         # The keys audit_unsafe.py --json writes. These fixtures used to carry a
-        # `total` it never wrote, and nothing refused a 0-of-0 report (LESSONS #086).
+        # `total` it never wrote, and nothing refused a 0-of-0 report (LESSONS #087).
         open(clean, "w").write(json.dumps({"documented": 12, "undocumented": 0}))
         dirty = os.path.join(d, "handles.json")
         open(dirty, "w").write(json.dumps({"documented": 6, "undocumented": 3}))
@@ -174,7 +174,7 @@ def _self_test():
         check("ingest never skips gates: a `ported` module stays put",
               load(q)["modules"]["process"] == "ported")
 
-        # 0-of-0 (LESSONS #086): audit_unsafe.py's own report on a crate with no
+        # 0-of-0 (LESSONS #087): audit_unsafe.py's own report on a crate with no
         # unsafe block, and a report with no count at all, advance nothing.
         import subprocess
         audit = os.path.join(os.path.dirname(os.path.abspath(__file__)),

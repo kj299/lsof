@@ -1237,6 +1237,168 @@ name = "path-plus-D-descends-through-a-link-under-dash-x-l"
 cwd = "{RDIR}"
 args = ["-F", "pf", "-V", "-a", "-p", "{R}", "-x", "l", "+D", "xl"]
 
+[[case]]
+# What a walk cannot read (DIVERGENCES 111), run as a user who is not root
+# (LSOF_DIFF_UNPRIVILEGED; -p {U} drops the case where there is none): `nr`
+# cannot be opened and `ny/x` cannot be `lstat`ed, so `ny/x` is no search
+# item and `-V` names `nr`, `ny`, `f` and `d` alone; the links are passed over
+# unread without `-x l`. stdout and the status only: as that user the C also
+# warns of each mount under the work directory it cannot `stat` (87), which
+# lsof-rs does not. Both print `can't opendir(d/nr): Permission denied` and
+# `can't lstat(d/ny/x): Permission denied` (measured 2026-10-10).
+name = "walk-unprivileged-what-it-cannot-lstat-is-no-item"
+cwd = "{RDIR}/walk"
+args = ["-F", "pf", "-V", "-a", "-p", "{U}", "+D", "d"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# ...and under `-x l`, no link that cannot be followed is an item: `lk`
+# (its target is under `nr`: `can't stat(d/lk) symbolc link: Permission
+# denied`), `loop` and `dg`.
+name = "walk-unprivileged-x-l-a-link-it-cannot-follow-is-no-item"
+cwd = "{RDIR}/walk"
+args = ["-F", "pf", "-V", "-a", "-p", "{U}", "-x", "l", "+d", "d"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# The same walk as the runner, root where the differential runs as root: `lk`
+# is followed and entered as `nr/y`, unlocated, and the one warning is
+# `can't stat(d/loop) symbolc link: Too many levels of symbolic links`, the
+# C's spelling; `dg` dangles, and an `ENOENT` says nothing.
+name = "walk-x-l-says-what-it-cannot-follow"
+cwd = "{RDIR}/walk"
+args = ["-F", "pf", "-V", "-a", "-p", "{R}", "-x", "l", "+d", "d"]
+with_stderr = true
+
+# ------------------------------------------- a walk entry renamed (WRACE)
+# An entry of a `+d`/`+D` walk is what its ONE `lstat` says: the `-x f` test,
+# the link rule, whether it is descended into, and its identity
+# (`arg.c:1014,1077`; DIVERGENCES 111); the directory is what its option's
+# one `stat` says (`arg.c:876,905,915`). These rename an entry while strace
+# holds that `lstat` (`walk_race.py`: the C's `newfstatat`, lsof-rs's `openat`
+# O_PATH|O_NOFOLLOW, delayed 3 s, the swap made once strace says the delay has
+# begun and checked against strace's stamp of it), or the directory while
+# strace holds the `openat` of its listing; each binary's run starts from a
+# fresh {WRACEDIR}. WRACE holds `odir` (fd 3), `odir/f` (fd 4) and a file on
+# /dev/shm (fd 5). `-F pf` keeps row 17's NAME out of it; stderr is compared,
+# for `can't opendir`.
+
+[[case]]
+# A regular file becomes a link to the /dev/shm file just after its `lstat`:
+# the C enters the file the `lstat` saw, which no one holds. lsof-rs `stat`ed
+# the name again and listed fd 5, on another file system, with no `-x f`.
+name = "walk-race-reg-to-link-after-lstat"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "reg-to-link-after" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# The same, just before the `lstat`: it sees a link, which is passed over
+# without `-x l`, so only the directory is a search item.
+name = "walk-race-reg-to-link-before-lstat"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "reg-to-link-before" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# After the `lstat`, under `-x l`: the `lstat` saw a file, so there is no link
+# to follow. lsof-rs listed fd 5 here too.
+name = "walk-race-reg-to-link-under-x-l"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "-x", "l", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "reg-to-link-after" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# A directory becomes a file before its `lstat`: the file is entered, not
+# descended into, and nothing is said. A walk that took the listing's
+# `d_type` printed `can't opendir(...): Not a directory`.
+name = "walk-race-dir-to-file"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+D", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "dir-to-file" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# A file becomes a directory before its `lstat`: `+D` descends into it and
+# finds `hl`, a hard link to `odir/f`, fd 4. By `d_type` it was missed.
+name = "walk-race-file-to-dir"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+D", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "file-to-dir" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# A directory becomes a link to `odir` just after its `lstat`. Both descend,
+# as the listing opens the name and follows the link (a residual the C shares,
+# THREAT-MODEL.md), and find `odir/f` as `sub/f`, fd 4; `sub` is still the
+# directory the `lstat` saw, unlocated. lsof-rs had `stat`ed it again and
+# listed fd 3, `odir`, as `sub`.
+name = "walk-race-dir-to-link-descends"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+D", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "dir-to-link" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# A regular file is replaced just after its `lstat` by a hard link to
+# `odir/f`, fd 4, on the same file system, so `-x f` cannot tell them apart:
+# the C enters the file the `lstat` saw, unlocated. lsof-rs `stat`ed the name
+# again and listed fd 4.
+name = "walk-race-reg-to-hardlink-after-lstat"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "reg-to-hardlink-after" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# A regular file renamed away just after its `lstat` is still the item that
+# call saw, reported unlocated. lsof-rs's second `stat` failed, and it dropped
+# the entry in silence.
+name = "walk-race-reg-gone-after-lstat"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "reg-gone-after" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# The directory itself becomes a link to `odir` between its option's `stat`
+# and its listing: the listing follows the link and finds `odir/f`, fd 4, as
+# `V/f` (THREAT-MODEL's second residual, the C's too), but the directory's
+# own item is still what the option's `stat` saw, unlocated. lsof-rs had
+# `stat`ed it again at walk time and listed fd 3, `odir`, as the directory.
+name = "walk-race-top-to-link"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "top-to-link" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# The directory is renamed away before its listing: the C enters it before
+# `OpenDir()` (`arg.c:915,930`), the listing's ENOENT says nothing, and it is
+# reported unlocated. lsof-rs had dropped it, exit 0.
+name = "walk-race-top-gone"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACEDIR}"]
+env = { LSOF_DIFF_RACE = "top-gone" }
+with_stderr = true
+timeout = 60
+
+[[case]]
+# No race: a link to the /dev/shm file, on the walked file system. `-x f` is
+# judged on the link's own device, before it is followed (`arg.c:1029-1047`),
+# so `-x l` alone enters the file it leads to, fd 5.
+name = "walk-x-l-follows-a-link-off-the-file-system"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "-x", "l", "+d", "{WRACELINKS}"]
+with_stderr = true
+
+[[case]]
+# ...and without `-x l` the link is passed over.
+name = "walk-a-link-off-the-file-system-is-passed-over"
+args = ["-F", "pf", "-V", "-a", "-p", "{WRACE}", "+d", "{WRACELINKS}"]
+with_stderr = true
+
 # ----------------------------------------------------------- anonymous inodes
 [[case]]
 # Fds with no filesystem identity: the kernel names them `anon_inode:<kind>`

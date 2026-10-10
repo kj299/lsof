@@ -183,7 +183,8 @@ MISCELLANEOUS:
                   (stat, lstat, readlink) for a path given or a mount point;
                   say so unless -w. A path argument then fails, and +d/+D
                   after it ends the run
-    -O            make those calls in lsof itself, with no time limit
+    -O / +O       make / stop making those calls in lsof itself, with no
+                  time limit
                   (*RISKY*: a file system that does not answer hangs lsof)
     -S [t]        give each of those calls t seconds (default 15, at least
                   2), in a helper process (Linux; elsewhere they are made in
@@ -316,14 +317,18 @@ impl WalkBudget {
 /// `rel/y` (DIVERGENCES 63), and an entry whose name is not UTF-8 is found by
 /// it, where a lossy name had found nothing (DIVERGENCES 65).
 ///
-/// Every call it makes on the tree — the directory's own `stat`, each
-/// listing, each entry's `lstat` and `stat` — goes through the bounded layer
-/// under the `-b`, `-O` and `-S` given before the option (DIVERGENCES 94):
-/// an entry on a file system that does not answer is a `can't lstat(P):
-/// Connection timed out` and the walk goes on, as the C's (its first
-/// timeout, DIVERGENCES 118). The calls are the ones it made before;
-/// DIVERGENCES 111 takes the second `stat` out. Its warnings go where the
-/// layer's do, stderr, so that a test can hold them.
+/// Each entry is described by ONE `lstat`, as the C's (`arg.c:1014`): it
+/// decides the `-x f` test, whether the entry is a link, whether it is
+/// descended into, and what it is (DIVERGENCES 111). Only a link under `-x
+/// l` gets one more call, the `stat` that follows it, and that result then
+/// stands for the entry. The directory itself is what the option's one
+/// `stat` said ([`DirArg::stat`]); the walk only lists it. Every call it
+/// makes — each listing, each `lstat`, each follow — goes through the
+/// bounded layer under the `-b`, `-O` and `-S` given before the option
+/// (DIVERGENCES 94): an entry on a file system that does not answer is a
+/// `can't lstat(P): Connection timed out` and the walk goes on, as the C's
+/// (its first timeout, DIVERGENCES 118). Its warnings go where the layer's
+/// do, stderr, so that a test can hold them.
 fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper, fs: &SafeFs) {
     fn enter(sel: &mut Selection, path: &Path, id: Option<FileId>) {
         if let Some(id) = id {
@@ -346,31 +351,20 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
         canonicalize_selector(&mut p);
         PathBuf::from(p)
     };
-    // A file is identified by a `stat` that follows links, as its `st_dev`
-    // and inode (DIVERGENCES 101): the C's `ck_file_arg()` keeps those of the
-    // `stat` it was handed (`arg.c:1077`), so a device node in `+d /dev` is
-    // the node, on devtmpfs. For an entry that is no link that is its own
-    // `lstat`'s pair; the second call is DIVERGENCES 111. Where names are
-    // matched there is nothing to identify, and no call is made.
-    let identify = |path: &Path| -> Option<Option<FileId>> {
-        if !identified {
-            return Some(None);
-        }
-        fs.stat(path).ok().map(|st| backend.identify_stat(&st))
-    };
-    let Some(id) = identify(&base) else {
-        // Gone since the option was checked.
-        return;
-    };
-    enter(sel, &base, id);
-    // The directory's own file system, for the cross-over rule below. `None`
-    // where names are matched, which switches the rule off rather than
-    // guessing.
-    let dir_fs = if identified {
-        fs.lstat(&base).ok().map(|st| st.dev)
+    // The directory is the option's one `stat` (`arg.c:876`): its device and
+    // inode are its search item's (`arg.c:915`), and its `st_dev` is `ddev`,
+    // the file system every entry is held to unless `-x f` (`arg.c:905`),
+    // through a followed link too. Nothing at walk time asks again, so a
+    // directory gone since is still the item the C enters, before it tries
+    // to open it (`arg.c:915,930`), and is reported unlocated. Where names
+    // are matched there is no identity, and `ddev` is `None`, which switches
+    // the `-x f` rule off rather than guessing.
+    let (top, ddev) = if identified {
+        (backend.identify_stat(&dir.stat), Some(dir.stat.dev))
     } else {
-        None
+        (None, None)
     };
+    enter(sel, &base, top);
     let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
     let mut budget = WalkBudget::new();
     let mut stack = vec![base.clone()];
@@ -402,8 +396,8 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
                 }
                 return;
             }
-            // The entry is `lstat`ed first; then the two cross-over rules, in
-            // the C's order (`arg.c`):
+            // The entry is `lstat`ed, once; then the two cross-over rules, in
+            // the C's order (`arg.c:1029-1061`):
             //
             //   unless -x / -x f, skip an entry whose st_dev is not the
             //         directory's — do not leave this file system;
@@ -415,7 +409,7 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
             //
             // `-x` is the one in force when the option was checked
             // (DIVERGENCES 75). The type is the `lstat`'s, never the listing's
-            // `d_type`, as the C's is.
+            // `d_type`, as the C's is (`arg.c:1038,1067`).
             let st = match fs.lstat(&path) {
                 Ok(st) => Some(st),
                 // `lstat` failed: gone, not ours to see, or timed out. The
@@ -433,38 +427,49 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
                 // Where names are matched, the name is still an item.
                 Err(_) => None,
             };
+            // The link's own device, before it is followed: a link here to a
+            // file elsewhere is entered under `-x l` alone (`arg.c:1035`).
             if !dir.cross_filesystems {
-                if let (Some(d), Some(st)) = (dir_fs, st) {
+                if let (Some(d), Some(st)) = (ddev, st) {
                     if d != st.dev {
                         continue;
                     }
                 }
             }
-            let is_dir = if st.is_some_and(|st| st.is_symlink()) {
-                if !dir.cross_symlinks {
-                    continue;
-                }
-                match fs.stat(&path) {
-                    Ok(st) => st.is_dir(),
-                    Err(err) => {
-                        // The C's words, its spelling included.
-                        if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
-                            fs.tell(&format!(
-                                "lsof: WARNING: can't stat({}) symbolc link: {}",
-                                shown(&path),
-                                errno_text(&err)
-                            ));
-                        }
+            // Under `-x l` a link is followed by one `stat`, whose result
+            // replaces the `lstat` (`arg.c:1047`): it is what the entry is,
+            // and whether it is descended into. The name stays the link's.
+            let st = match st {
+                Some(st) if st.is_symlink() => {
+                    if !dir.cross_symlinks {
                         continue;
                     }
+                    match fs.stat(&path) {
+                        Ok(st) => Some(st),
+                        Err(err) => {
+                            // The C's words, its spelling included.
+                            if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                                fs.tell(&format!(
+                                    "lsof: WARNING: can't stat({}) symbolc link: {}",
+                                    shown(&path),
+                                    errno_text(&err)
+                                ));
+                            }
+                            continue;
+                        }
+                    }
                 }
+                st => st,
+            };
+            // The identity of the call just made, never of another: a second
+            // `stat` would describe whatever the name led to by then. The C
+            // hands `ck_file_arg()` this one (`arg.c:1077`).
+            let id = if identified {
+                st.and_then(|st| backend.identify_stat(&st))
             } else {
-                st.is_some_and(|st| st.is_dir())
+                None
             };
-            let Some(id) = identify(&path) else {
-                continue;
-            };
-            if dir.recursive && is_dir {
+            if dir.recursive && st.is_some_and(|st| st.is_dir()) {
                 stack.push(path.clone());
             }
             enter(sel, &path, id);
@@ -756,8 +761,9 @@ fn main() {
 
     // Where a path the user named is `stat`ed and its links read: a helper
     // process that gives each call `-S` seconds (DIVERGENCES 94, 110). One
-    // per run, started by the first call that needs it — a `+d` while the
-    // options are parsed, or the mount table — and ended with the run.
+    // at a time, started by the first call that needs it — a `+d` while the
+    // options are parsed, the mount table, or a path argument — replaced
+    // after a call that times out, and ended with the run.
     #[cfg(target_os = "linux")]
     let calls = lsof_backend_linux::safefs::Helper::new();
     #[cfg(not(target_os = "linux"))]
@@ -1003,7 +1009,8 @@ fn main() {
                     survived += 1;
                 }
                 // A backend that identifies paths always says what a `stat`
-                // found; one that did not would leave the name to match.
+                // found; a `None` here is an item nothing matches, since names
+                // are compared only where paths are not identified.
                 Ok(None) => {
                     sel.path_items.push(PathItem {
                         id: None,
@@ -1573,6 +1580,8 @@ mod tests {
                 limit: 7,
                 ..Blocking::default()
             },
+            // What the option's `stat` of `/w` said.
+            stat: Tree::node("/w", true).unwrap(),
         };
         let mut sel = Selection {
             paths_identified: true,
@@ -1584,20 +1593,18 @@ mod tests {
             assert_eq!(*limit, 7, "{c} {p}: the limit where +D stood");
         }
         let calls: Vec<(&str, &str)> = made.iter().map(|(c, p, _)| (*c, p.as_str())).collect();
+        // One `lstat` an entry, one `stat` more for the link `-x l` follows,
+        // and none of the directory itself, which the option `stat`ed
+        // (DIVERGENCES 111): the C's calls (`arg.c:876,930,1014,1047`).
         assert_eq!(
             calls,
             [
-                ("stat", "/w"),
-                ("lstat", "/w"),
                 ("read_dir", "/w"),
                 ("lstat", "/w/a"),
-                ("stat", "/w/a"),
                 ("lstat", "/w/hung"),
                 ("lstat", "/w/l"),
                 ("stat", "/w/l"),
-                ("stat", "/w/l"),
                 ("lstat", "/w/sub"),
-                ("stat", "/w/sub"),
                 ("read_dir", "/w/sub"),
             ]
         );
@@ -1629,8 +1636,10 @@ mod tests {
             ["/w", "/w/a", "/w/l", "/w/sub"],
             "on past the timeout"
         );
-        // Each is its `stat`'s device and inode (DIVERGENCES 101); the link,
-        // its target's (4), not its own (3).
+        // Each is its one call's device and inode (DIVERGENCES 101, 111):
+        // the directory's from the option's `stat`, an entry's from its
+        // `lstat`, and the link's from the `stat` that followed it, its
+        // target's (4), not its own (3).
         let ids: Vec<Option<(u64, u64)>> = sel
             .path_items
             .iter()
@@ -1651,5 +1660,522 @@ mod tests {
         super::expand_dir(&mut sel, &quiet, &Ids, Escaper::for_host(), &fs);
         assert!(said.borrow().is_empty(), "{:?}", said.borrow());
         assert_eq!(sel.path_items.len(), 4);
+    }
+
+    /// The walk's rules (DIVERGENCES 111), each on a tree held in memory
+    /// whose `lstat` and `stat` of one path may answer differently, as a
+    /// rename between two calls makes them answer: a walk that asked twice
+    /// would take the second answer, and these tests see which it took.
+    /// Every call is logged. The tree is spelt with `/`; the walk joins with
+    /// the host's separator, which the log reads as `/`.
+    mod walk {
+        use lsof_core::safefs::{FileStat, FsCalls};
+        use lsof_core::{errno_text, Backend, DirArg, Escaper, SafeFs, Selection};
+        use std::cell::RefCell;
+        use std::ffi::OsString;
+        use std::io;
+        use std::path::Path;
+
+        // `EACCES`, `ENOTDIR` and `ELOOP`. Their words are whatever this
+        // host's `strerror` says, which is what lsof prints, so a test asks
+        // `errno_text` for them rather than spelling them.
+        const EACCES: i32 = 13;
+        const ENOTDIR: i32 = 20;
+        const ELOOP: i32 = 40;
+
+        /// One answer of the tree: a file, an error number, or gone.
+        #[derive(Clone, Copy, Debug)]
+        pub enum Is {
+            St(FileStat),
+            Errno(i32),
+            Gone,
+        }
+
+        impl Is {
+            fn answer(self) -> io::Result<FileStat> {
+                match self {
+                    Is::St(st) => Ok(st),
+                    Is::Errno(n) => Err(io::Error::from_raw_os_error(n)),
+                    Is::Gone => Err(io::Error::from(io::ErrorKind::NotFound)),
+                }
+            }
+        }
+
+        fn st(dev: u64, ino: u64, mode: u32) -> FileStat {
+            FileStat {
+                dev,
+                ino,
+                mode,
+                ..FileStat::default()
+            }
+        }
+        pub fn reg(dev: u64, ino: u64) -> Is {
+            Is::St(st(dev, ino, 0o100_644))
+        }
+        pub fn dir(dev: u64, ino: u64) -> Is {
+            Is::St(st(dev, ino, 0o040_755))
+        }
+        pub fn lnk(dev: u64, ino: u64) -> Is {
+            Is::St(st(dev, ino, 0o120_777))
+        }
+
+        /// The top directory as the option's one `stat` saw it: device 1,
+        /// inode 1. The tree's own answers for `/v` differ from it, so an
+        /// item that carried them would show it.
+        pub fn top() -> FileStat {
+            st(1, 1, 0o040_755)
+        }
+
+        #[derive(Default)]
+        pub struct Tree {
+            /// A path, its `lstat` and its `stat`.
+            pub nodes: Vec<(&'static str, Is, Is)>,
+            /// A directory's names, or the error its listing fails with. Any
+            /// other path is no directory, and its listing fails as one does.
+            pub lists: Vec<(&'static str, Result<Vec<&'static str>, Is>)>,
+            log: RefCell<Vec<(&'static str, String)>>,
+        }
+
+        impl Tree {
+            fn note(&self, call: &'static str, p: &Path) -> String {
+                let p = p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+                self.log.borrow_mut().push((call, p.clone()));
+                p
+            }
+            fn node(&self, p: &str) -> Option<(Is, Is)> {
+                self.nodes
+                    .iter()
+                    .find(|(n, _, _)| *n == p)
+                    .map(|(_, l, s)| (*l, *s))
+            }
+            /// Each call the walk made, in order.
+            pub fn calls(&self) -> Vec<(&'static str, String)> {
+                self.log.borrow().clone()
+            }
+            /// How many times the walk made `call` of `p`.
+            pub fn count(&self, call: &str, p: &str) -> usize {
+                self.log
+                    .borrow()
+                    .iter()
+                    .filter(|(c, q)| *c == call && q == p)
+                    .count()
+            }
+        }
+
+        impl FsCalls for Tree {
+            fn stat(&self, p: &Path, _: u32) -> io::Result<FileStat> {
+                let p = self.note("stat", p);
+                self.node(&p).map_or(Is::Gone, |(_, s)| s).answer()
+            }
+            fn lstat(&self, p: &Path, _: u32) -> io::Result<FileStat> {
+                let p = self.note("lstat", p);
+                self.node(&p).map_or(Is::Gone, |(l, _)| l).answer()
+            }
+            fn readlink(&self, p: &Path, _: u32) -> io::Result<OsString> {
+                self.note("readlink", p);
+                Err(io::Error::from(io::ErrorKind::InvalidInput))
+            }
+            fn read_dir(&self, p: &Path, _: u32) -> io::Result<Vec<OsString>> {
+                let p = self.note("read_dir", p);
+                match self.lists.iter().find(|(n, _)| *n == p) {
+                    Some((_, Ok(names))) => Ok(names.iter().map(OsString::from).collect()),
+                    Some((_, Err(e))) => e.answer().map(|_| Vec::new()),
+                    None => Err(io::Error::from_raw_os_error(ENOTDIR)),
+                }
+            }
+        }
+
+        /// A backend that identifies a file by its device and inode, as
+        /// Linux's does.
+        struct Ids;
+        impl Backend for Ids {
+            fn name(&self) -> &str {
+                "ids"
+            }
+            fn identify_stat(&self, st: &FileStat) -> Option<lsof_core::FileId> {
+                Some(lsof_core::FileId {
+                    dev: st.dev,
+                    ino: st.ino,
+                })
+            }
+            fn identifies_paths(&self) -> bool {
+                true
+            }
+            fn gather(
+                &self,
+                _: &Selection,
+            ) -> Result<Vec<lsof_core::model::Process>, lsof_core::BackendError> {
+                Ok(Vec::new())
+            }
+        }
+
+        /// What a walk entered: each item's name, with `/`, and identity.
+        pub type Items = Vec<(String, Option<(u64, u64)>)>;
+
+        /// `+d /v`, or `+D /v` when `recursive`, under the `-x` that `x`
+        /// spells (`""`, `"f"`, `"l"` or `"fl"`), with warnings on unless
+        /// `-w` stood before it, on a backend that identifies files or, with
+        /// `identified` false, one that matches names. What it entered, and
+        /// what it said.
+        pub fn walk_as(
+            tree: &Tree,
+            recursive: bool,
+            x: &str,
+            warn: bool,
+            identified: bool,
+        ) -> (Items, Vec<String>) {
+            let said = RefCell::new(Vec::<String>::new());
+            let say = |l: &str| said.borrow_mut().push(l.to_string());
+            let fs = SafeFs::new(tree, &say);
+            let arg = DirArg {
+                recursive,
+                dir: "/v".into(),
+                cross_filesystems: x.contains('f'),
+                cross_symlinks: x.contains('l'),
+                warn,
+                blocking: lsof_core::Blocking::default(),
+                stat: top(),
+            };
+            let mut sel = Selection {
+                paths_identified: identified,
+                ..Selection::default()
+            };
+            super::super::expand_dir(&mut sel, &arg, &Ids, Escaper::for_host(), &fs);
+            let items = sel
+                .path_items
+                .iter()
+                .map(|i| {
+                    let name = i
+                        .name
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    (name, i.id.map(|id| (id.dev, id.ino)))
+                })
+                .collect();
+            (items, said.into_inner())
+        }
+
+        pub fn walk(tree: &Tree, recursive: bool, x: &str) -> (Items, Vec<String>) {
+            walk_as(tree, recursive, x, true, true)
+        }
+
+        fn item(name: &str, id: (u64, u64)) -> (String, Option<(u64, u64)>) {
+            (name.to_string(), Some(id))
+        }
+
+        /// A warning in the C's words: `lsof: WARNING: can't CALL(P)TAIL:
+        /// E`, `P` spelt as the walk spells it, `E` this host's words for the
+        /// error.
+        fn warning(call: &str, name: &str, tail: &str, e: io::Error) -> String {
+            let p = Path::new("/v").join(name);
+            format!(
+                "lsof: WARNING: can't {call}({}){tail}: {}",
+                p.display(),
+                errno_text(&e)
+            )
+        }
+
+        /// T1: an entry is what its one `lstat` says. Its `stat` names
+        /// another file, on another device, which a second call would have
+        /// found; no such call is made.
+        #[test]
+        fn an_entry_is_identified_by_its_one_lstat() {
+            let tree = Tree {
+                nodes: vec![("/v/e", reg(1, 10), reg(2, 99))],
+                lists: vec![("/v", Ok(vec!["e"]))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&tree, false, "");
+            assert_eq!(items, [item("/v", (1, 1)), item("/v/e", (1, 10))]);
+            assert!(said.is_empty(), "{said:?}");
+            assert_eq!(tree.count("lstat", "/v/e"), 1);
+            assert_eq!(tree.count("stat", "/v/e"), 0, "{:?}", tree.calls());
+        }
+
+        /// T2: a link, by its `lstat`, is passed over without `-x l`, with no
+        /// other call and nothing said, whatever it leads to.
+        #[test]
+        fn a_link_by_its_lstat_is_skipped_without_x_l() {
+            let tree = Tree {
+                nodes: vec![("/v/l", lnk(1, 3), reg(1, 5))],
+                lists: vec![("/v", Ok(vec!["l"]))],
+                ..Tree::default()
+            };
+            for x in ["", "f"] {
+                let (items, said) = walk(&tree, true, x);
+                assert_eq!(items, [item("/v", (1, 1))], "-x {x}");
+                assert!(said.is_empty(), "{said:?}");
+            }
+            assert_eq!(tree.count("stat", "/v/l"), 0, "{:?}", tree.calls());
+        }
+
+        /// T3: `+D` descends into what the `lstat` calls a directory, and
+        /// into nothing else, whatever a `stat` would say now: a name that
+        /// is a file to its `lstat` is not listed, so no `can't opendir` is
+        /// said of it, and one that is a directory to its `lstat` is. `+d`
+        /// descends into none.
+        #[test]
+        fn descent_is_decided_by_the_lstat_mode() {
+            let tree = || Tree {
+                nodes: vec![
+                    ("/v/d", dir(1, 20), reg(1, 21)),
+                    ("/v/f", reg(1, 30), dir(1, 31)),
+                    ("/v/d/in", reg(1, 22), reg(1, 23)),
+                    ("/v/f/hidden", reg(1, 32), reg(1, 32)),
+                ],
+                lists: vec![
+                    ("/v", Ok(vec!["d", "f"])),
+                    ("/v/d", Ok(vec!["in"])),
+                    ("/v/f", Ok(vec!["hidden"])),
+                ],
+                ..Tree::default()
+            };
+            let t = tree();
+            let (items, said) = walk(&t, true, "");
+            assert_eq!(
+                items,
+                [
+                    item("/v", (1, 1)),
+                    item("/v/d", (1, 20)),
+                    item("/v/f", (1, 30)),
+                    item("/v/d/in", (1, 22)),
+                ]
+            );
+            assert!(said.is_empty(), "{said:?}");
+            assert_eq!(t.count("read_dir", "/v/d"), 1);
+            assert_eq!(t.count("read_dir", "/v/f"), 0, "{:?}", t.calls());
+            assert_eq!(t.count("stat", "/v/d") + t.count("stat", "/v/f"), 0);
+            let t = tree();
+            let (items, _) = walk(&t, false, "");
+            assert_eq!(items.len(), 3, "{items:?}");
+            assert_eq!(t.count("read_dir", "/v/d"), 0, "{:?}", t.calls());
+        }
+
+        /// T4: under `-x l` a link is followed by exactly one `stat`, and
+        /// that `stat` is the entry: its identity, on another device here,
+        /// and the directory `+D` then lists, by the link's name.
+        #[test]
+        fn under_x_l_a_link_is_followed_exactly_once() {
+            let tree = Tree {
+                nodes: vec![
+                    ("/v/l", lnk(1, 3), dir(2, 7)),
+                    ("/v/l/x", reg(1, 8), reg(1, 8)),
+                ],
+                lists: vec![("/v", Ok(vec!["l"])), ("/v/l", Ok(vec!["x"]))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&tree, true, "l");
+            assert_eq!(
+                items,
+                [
+                    item("/v", (1, 1)),
+                    item("/v/l", (2, 7)),
+                    item("/v/l/x", (1, 8)),
+                ]
+            );
+            assert!(said.is_empty(), "{said:?}");
+            assert_eq!(tree.count("lstat", "/v/l"), 1);
+            assert_eq!(tree.count("stat", "/v/l"), 1, "{:?}", tree.calls());
+            assert_eq!(tree.count("read_dir", "/v/l"), 1);
+        }
+
+        /// T5: `-x f` is judged on the `lstat`'s device, the link's own, and
+        /// before the link is followed: a link on the directory's file
+        /// system to a file on another is entered under `-x l` alone, as
+        /// that file; a file on another file system is passed over without
+        /// `-x f`, and entered with it.
+        #[test]
+        fn x_f_is_judged_on_the_lstat_device() {
+            let tree = || Tree {
+                nodes: vec![
+                    ("/v/l", lnk(1, 3), reg(2, 8)),
+                    ("/v/r", reg(2, 9), reg(2, 9)),
+                    ("/v/far", lnk(2, 4), reg(1, 5)),
+                ],
+                lists: vec![("/v", Ok(vec!["l", "r", "far"]))],
+                ..Tree::default()
+            };
+            let t = tree();
+            let (items, said) = walk(&t, false, "l");
+            assert_eq!(items, [item("/v", (1, 1)), item("/v/l", (2, 8))]);
+            assert!(said.is_empty(), "{said:?}");
+            // A link on another file system is passed over before it is
+            // followed.
+            assert_eq!(t.count("stat", "/v/far"), 0, "{:?}", t.calls());
+            let (items, _) = walk(&tree(), false, "fl");
+            assert_eq!(
+                items,
+                [
+                    item("/v", (1, 1)),
+                    item("/v/l", (2, 8)),
+                    item("/v/r", (2, 9)),
+                    item("/v/far", (1, 5)),
+                ]
+            );
+            let (items, _) = walk(&tree(), false, "f");
+            assert_eq!(items, [item("/v", (1, 1)), item("/v/r", (2, 9))]);
+        }
+
+        /// T6: every entry is held to the top directory's file system, its
+        /// option-time `st_dev`, those of a directory reached through a
+        /// link to another file system too, until `-x f`.
+        #[test]
+        fn ddev_is_the_top_directory_device_throughout() {
+            let tree = || Tree {
+                nodes: vec![
+                    ("/v/l", lnk(1, 3), dir(2, 7)),
+                    ("/v/l/x", reg(2, 8), reg(2, 8)),
+                    ("/v/l/y", reg(1, 9), reg(1, 9)),
+                ],
+                lists: vec![("/v", Ok(vec!["l"])), ("/v/l", Ok(vec!["x", "y"]))],
+                ..Tree::default()
+            };
+            let (items, _) = walk(&tree(), true, "l");
+            assert_eq!(
+                items,
+                [
+                    item("/v", (1, 1)),
+                    item("/v/l", (2, 7)),
+                    item("/v/l/y", (1, 9)),
+                ]
+            );
+            let (items, _) = walk(&tree(), true, "fl");
+            assert_eq!(
+                items,
+                [
+                    item("/v", (1, 1)),
+                    item("/v/l", (2, 7)),
+                    item("/v/l/x", (2, 8)),
+                    item("/v/l/y", (1, 9)),
+                ]
+            );
+        }
+
+        /// T7: an entry whose `lstat` fails is said once, in the C's words
+        /// and with that call's error, unless it is gone; it is no search
+        /// item, it is not asked again, and the walk goes on.
+        #[test]
+        fn an_lstat_error_warns_once_unless_enoent() {
+            let tree = Tree {
+                nodes: vec![
+                    ("/v/a", Is::Errno(EACCES), reg(1, 10)),
+                    ("/v/b", Is::Gone, reg(1, 11)),
+                    ("/v/c", reg(1, 12), reg(1, 12)),
+                ],
+                lists: vec![("/v", Ok(vec!["a", "b", "c"]))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&tree, true, "fl");
+            assert_eq!(items, [item("/v", (1, 1)), item("/v/c", (1, 12))]);
+            let e = io::Error::from_raw_os_error(EACCES);
+            assert_eq!(said, [warning("lstat", "a", "", e)]);
+            for p in ["/v/a", "/v/b"] {
+                assert_eq!(tree.count("lstat", p), 1, "{p}");
+                assert_eq!(tree.count("stat", p), 0, "{p}");
+            }
+        }
+
+        /// T8: a link `-x l` cannot follow is said in the C's words, its
+        /// spelling included (`symbolc`), unless it dangles; it is no search
+        /// item either way.
+        #[test]
+        fn a_follow_error_warns_symbolc_unless_enoent() {
+            let tree = Tree {
+                nodes: vec![
+                    ("/v/loop", lnk(1, 3), Is::Errno(ELOOP)),
+                    ("/v/dangle", lnk(1, 4), Is::Gone),
+                ],
+                lists: vec![("/v", Ok(vec!["loop", "dangle"]))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&tree, true, "l");
+            assert_eq!(items, [item("/v", (1, 1))]);
+            let e = io::Error::from_raw_os_error(ELOOP);
+            assert_eq!(said, [warning("stat", "loop", " symbolc link", e)]);
+        }
+
+        /// T10: the walk makes no call on the top directory but its listing.
+        /// The directory's item is what the option's `stat` said, and it is
+        /// entered before it is listed, so one gone since is still the item,
+        /// unlocated, and its listing's `ENOENT` says nothing; another
+        /// listing error is said in the C's words.
+        #[test]
+        fn the_top_directory_is_not_stated_at_walk_time() {
+            let tree = Tree {
+                nodes: vec![("/v", dir(9, 90), dir(9, 91))],
+                lists: vec![("/v", Ok(vec![]))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&tree, true, "fl");
+            assert_eq!(items, [item("/v", (1, 1))]);
+            assert!(said.is_empty(), "{said:?}");
+            assert_eq!(tree.calls(), [("read_dir", "/v".to_string())]);
+            let gone = Tree {
+                lists: vec![("/v", Err(Is::Gone))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&gone, false, "");
+            assert_eq!(items, [item("/v", (1, 1))]);
+            assert!(said.is_empty(), "{said:?}");
+            let shut = Tree {
+                lists: vec![("/v", Err(Is::Errno(EACCES)))],
+                ..Tree::default()
+            };
+            let (items, said) = walk(&shut, false, "");
+            assert_eq!(items, [item("/v", (1, 1))]);
+            let want = format!(
+                "lsof: WARNING: can't opendir(/v): {}",
+                errno_text(&io::Error::from_raw_os_error(EACCES))
+            );
+            assert_eq!(said, [want]);
+        }
+
+        /// T11: a `-w` given before the option mutes every warning its walk
+        /// would give, and changes nothing else.
+        #[test]
+        fn dash_w_before_the_option_mutes_every_walk_warning() {
+            let tree = || Tree {
+                nodes: vec![
+                    ("/v/a", Is::Errno(EACCES), reg(1, 10)),
+                    ("/v/loop", lnk(1, 3), Is::Errno(ELOOP)),
+                    ("/v/d", dir(1, 20), dir(1, 20)),
+                    ("/v/c", reg(1, 12), reg(1, 12)),
+                ],
+                lists: vec![
+                    ("/v", Ok(vec!["a", "loop", "d", "c"])),
+                    ("/v/d", Err(Is::Errno(EACCES))),
+                ],
+                ..Tree::default()
+            };
+            let (loud, said) = walk_as(&tree(), true, "l", true, true);
+            assert_eq!(said.len(), 3, "{said:?}");
+            let (quiet, said) = walk_as(&tree(), true, "l", false, true);
+            assert!(said.is_empty(), "{said:?}");
+            assert_eq!(quiet, loud);
+        }
+
+        /// Where names are matched (Windows), the walk is by name, as it
+        /// was: nothing is identified, so no entry is `stat`ed for it; an
+        /// entry whose `lstat` fails is still an item, and nothing is said;
+        /// and there is no device to hold an entry to, so `-x f` is moot.
+        #[test]
+        fn where_names_are_matched_the_walk_is_by_name() {
+            let tree = Tree {
+                nodes: vec![
+                    ("/v/a", Is::Errno(EACCES), reg(1, 10)),
+                    ("/v/r", reg(2, 9), reg(3, 9)),
+                    ("/v/l", lnk(1, 3), dir(2, 7)),
+                ],
+                lists: vec![("/v", Ok(vec!["a", "r", "l"])), ("/v/l", Ok(vec![]))],
+                ..Tree::default()
+            };
+            let (items, said) = walk_as(&tree, true, "l", true, false);
+            let names: Vec<&str> = items.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["/v", "/v/a", "/v/r", "/v/l"]);
+            assert!(items.iter().all(|(_, id)| id.is_none()), "{items:?}");
+            assert!(said.is_empty(), "{said:?}");
+            assert_eq!(tree.count("stat", "/v/r"), 0);
+            assert_eq!(tree.count("read_dir", "/v/l"), 1);
+        }
     }
 }

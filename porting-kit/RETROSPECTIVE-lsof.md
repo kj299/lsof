@@ -898,7 +898,8 @@ primary's `main`, was deleted.
 gate). None of them looks at what the port does to the system it reads. Row 110
 is the sharpest case. With a hung NFS server, lsof-rs hangs where the C gives
 up after 15 s, and listing an automount point mounts it; on a healthy host the
-two print the same bytes. A reader with the code open found it, and `strace`
+two print the same bytes. [2026-10-09: both fixed with row 94; measured, the
+C's own timeout works once per run and then hangs (row 118).] A reader with the code open found it, and `strace`
 confirmed it. The same tool had found the 578 maps files of LESSONS #062.
 
 The candidate control is a **syscall differential**. Run each matrix case under
@@ -913,14 +914,25 @@ the next port's target.
 1. **The next version.** Master's binary says 1.0.1 while the CHANGELOG's
    Unreleased section holds breaking changes; by semver that is 2.0.0.
 2. **Row 110 first.** Stat mounts in a child under a timeout, with
-   `AT_NO_AUTOMOUNT`, and none under `-i`.
+   `AT_NO_AUTOMOUNT`, and none under `-i`. [2026-10-09: the timeout half is
+   done, with row 94: every `stat` and `readlink` of a mount point or source
+   runs in a helper process under `-S` (15 s), and its `O_PATH` stat mounts no
+   automount point. Reading no table under `-i` alone is still OPEN in row
+   110.]
 3. **`overflow-checks`.** Turning them on in the release profile needs
    `checked_add` first in `peb.rs`, which adds offsets read from the target
    process; otherwise a hostile process could make lsof-rs panic.
+   [2026-10-09: done on the maintainer's decision: the PEB walk (now
+   `peb_walk.rs`) adds with `checked_add`, the release profile sets
+   `overflow-checks = true`, and `differential/overflow_gate.py` checks the
+   release binary in CI and before a release is published.]
 4. **Rows 91 (`-J`'s schema) and 94 (`-b`, `-S`)**, both DECISION PENDING; row
    101 (a path argument that names a device); and `DEL` against `mem` for a
    container's deleted library (DIVERGENCES, "Decided: `mem`, as the C prints
-   it") [2026-10-09: the maintainer decided lsof-rs keeps matching the C].
+   it") [2026-10-09: the maintainer decided lsof-rs keeps matching the C on
+   `DEL` against `mem`. They also decided rows 94 and 101, both since
+   resolved (`-b`, `-S` and `-O` as the C reads them; a file found by its
+   `st_dev` and inode), and row 91: the C's schema, in 2.0.0, still to do].
 5. **`default.nix` and `mkdocs.yml`**, whose consumers are gone. [2026-10-09:
    deleted on the maintainer's decision, with `docs/requirements.in` and
    `docs/requirements.txt`, which only mkdocs read, and `.gitignore`'s `/site`,

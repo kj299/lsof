@@ -279,7 +279,9 @@ Then the loop — each step is a CI-enforced gate:
    Finally, **mutate the rules you just wrote** (LESSONS #26): one plausible
    wrong version of each, committed as a mutants file and run with
    `harnesses/port-mutation/mutate_port.py` (LESSONS #083). A mutant no case
-   kills is a case that checks nothing.
+   kills is a case that checks nothing. A run killed mid-gate leaves a journal
+   for `--restore`; `--check-clean` proves no mutant that `--apply-only` passes
+   is left in the tree (LESSONS #086).
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker. **This applies per backend crate, and "input" includes text

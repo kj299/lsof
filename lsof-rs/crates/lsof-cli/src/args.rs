@@ -834,15 +834,16 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
 ///
 /// The directory is spelt by `Readlink()` (DIVERGENCES 63), then `stat`ed,
 /// each through the bounded layer under the `-b`, `-O` and `-S` given so far
-/// — under `-b` neither is made, and the C says so (DIVERGENCES 94). A value
-/// that is empty or starts an option, one `Readlink()` gives up on, one that
-/// cannot be `stat`ed (a timeout and `-b` included) and one that is no
-/// directory each end the run, as a usage error: before anything is listed,
-/// `-Q` or not, and ahead of `-h` and `-v`. lsof-rs had warned and carried on
-/// (DIVERGENCES 74). The message is muted by a `-w` or `-t` given before the
-/// option, the C's `Fwarn` as it stands then, and the run still ends; and the
-/// `-x` given so far is the one its walk obeys (DIVERGENCES 75), as are the
-/// `-b`, `-O` and `-S`.
+/// — under `-b` neither is made, and the C says so (DIVERGENCES 94). That one
+/// `stat` is all the walk knows of the directory ([`DirArg::stat`],
+/// DIVERGENCES 111). A value that is empty or starts an option, one
+/// `Readlink()` gives up on, one that cannot be `stat`ed (a timeout and `-b`
+/// included) and one that is no directory each end the run, as a usage
+/// error: before anything is listed, `-Q` or not, and ahead of `-h` and `-v`.
+/// lsof-rs had warned and carried on (DIVERGENCES 74). The message is muted
+/// by a `-w` or `-t` given before the option, the C's `Fwarn` as it stands
+/// then, and the run still ends; and the `-x` given so far is the one its
+/// walk obeys (DIVERGENCES 75), as are the `-b`, `-O` and `-S`.
 fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Result<DirArg, String> {
     let warn = !sel.omit_unreadable;
     let said = |message: String| if warn { message } else { String::new() };
@@ -861,13 +862,16 @@ fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Resu
             errno_text(&e)
         ))),
         Ok(st) if !st.is_dir() => Err(said(format!("WARNING: not a directory: {}", shown()))),
-        Ok(_) => Ok(DirArg {
+        // The C keeps this one `stat` for the walk (`arg.c:905,915`), so the
+        // walk does not ask again (DIVERGENCES 111).
+        Ok(st) => Ok(DirArg {
             recursive,
             dir,
             cross_filesystems: sel.cross_filesystems,
             cross_symlinks: sel.cross_symlinks,
             warn,
             blocking: sel.blocking,
+            stat: st,
         }),
     }
 }
@@ -2491,6 +2495,26 @@ mod tests {
         assert_eq!(held(&["-w", "+d", &d]), [(false, false, false)]);
         assert_eq!(held(&["-t", "+D", &d]), [(false, false, false)]);
         assert_eq!(held(&["-w", "+w", "+d", &d]), [(false, false, true)]);
+    }
+
+    /// The one `stat` that examined a `+d`/`+D` directory is kept for its
+    /// walk, which asks nothing more of the directory but its listing: the
+    /// C's `statsafely(dn)` (`arg.c:876`) is its `ddev` and its identity
+    /// (`arg.c:905,915`; DIVERGENCES 111). Its device, inode and type are
+    /// compared; its link count and size may change under a test that runs
+    /// beside others in the same directory.
+    #[test]
+    fn a_plus_d_keeps_the_stat_that_examined_it() {
+        let d = a_dir();
+        let want = lsof_core::safefs::stat_now(std::path::Path::new(&d), true).unwrap();
+        for opt in ["+d", "+D"] {
+            let got = run(&[opt, &d]).0.dir_args[0].stat;
+            assert_eq!(
+                (got.dev, got.ino, got.mode),
+                (want.dev, want.ino, want.mode)
+            );
+            assert!(got.is_dir(), "{opt}");
+        }
     }
 
     #[test]
