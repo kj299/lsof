@@ -4026,11 +4026,19 @@ the same, since the day before this entry.]*
   is that harness's own 0-of-0 report. The diff-fuzz skill and docstring,
   the CI template, `run_supply_chain.sh`, `CI-AND-RELEASE.md`, the
   architecture template and PROMPTS/00 say what the code and workflow do.
+  This change's first CI run went red on neither: the decision sweep's
+  `collision-ambiguity` mutant crashed `resolve_collision.py`'s self-test in
+  the cleanup of a fixture repository (`Directory not empty: 'objects'`). The
+  runner's git (2.55) runs auto-maintenance detached after a commit or a
+  merge, and it was still holding its lock in `objects/` when the directory
+  was removed; a local git 2.43 runs it in the foreground, so no local run
+  could show it. The fixture's git now runs with auto-maintenance off.
   Reported, not changed: lsof-rs's DIVERGENCES row 110 still describes the
   in-process `statx()` that 790f1d0 replaced, and the "don't wrap the blocking
   call" rule (PLAYBOOK, the module and diff-fuzz skills) has no lesson
   reconciling it with 790f1d0's killable helper process.
 - **Section amended:** harnesses/doc-check/check_doc_flags.py ·
   run, self-test; harnesses/progress/progress.py · cmd_ingest, self-test;
+  harnesses/lessons/resolve_collision.py · self-test;
   README.md · banner; CI-AND-RELEASE.md · Releasing; ARCHITECTURE-TEMPLATE.md ·
   Why this shape; PROMPTS/00-new-port-kickoff.md; skills/porting-kit-diff-fuzz/SKILL.md.
