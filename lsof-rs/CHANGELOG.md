@@ -37,6 +37,23 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   that does waits there too: 123). The C's own timeout fires once per run and
   then hangs (118); its `-O` crashes when a call returns late (119); a
   timed-out `readlink` is a one-byte link to it (120): none reproduced.
+- **A `+d`/`+D` entry is what its one `lstat` says, as in the C**
+  (DIVERGENCES 111). The walk `lstat`ed each entry and then `stat`ed the path
+  again, following links, to identify it, so a local user who could rename in
+  the walked directory could swap a link in between: the entry took another
+  file's identity, on another file system too, past `-x f`, and the processes
+  holding that file were listed under the walked tree. Now its identity comes
+  from that one call, as its type, the `-x f` test and the link rule already
+  did (94); a link `-x l` follows gets exactly one `stat` more, whose result
+  stands for the entry, its identity included; and the directory is the
+  `stat` the option made, its identity and file system, not made again. So an
+  entry renamed away or replaced just after its `lstat` is the file that call
+  saw, reported unlocated as the C reports it, where lsof-rs had dropped it or
+  listed the new file's holders; a directory replaced by a link before its
+  listing keeps the identity its option saw; and a directory gone since its
+  option is reported unlocated, where lsof-rs had dropped it. The walk makes
+  half the helper round trips: `+D /usr/lib` (17,742 entries) takes 1.39 s
+  where it took 2.48 s (the C 0.86 s, `-O` 0.13 s).
 
 ### Added
 - **`-b`/`+b`, `-S [t]`/`+S [t]`, and `-O`/`+O` as the C reads them**
@@ -61,6 +78,18 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   descriptor on a bound unix socket's file (SF), with fixture J's socket of
   another network namespace. And `mutants/path-identity.toml`, ten mutants,
   all killed.
+- **Differential fixture WRACE** (`differential/walk_race.py`) and 12 cases
+  for how a `+d`/`+D` walk takes an entry and its directory (DIVERGENCES 111):
+  an entry renamed while strace holds its `lstat`, before the call runs or
+  after, or the directory while strace holds its listing, from a fresh
+  directory for each binary (a case sets `LSOF_DIFF_RACE`; a swap that misses
+  the delay, by strace's own stamp, fails the case), and a link off the walked
+  file system under `-x l`. Skipped by name without an strace that can trace
+  and delay a call; CI's Linux jobs now install strace. Three cases more walk
+  fixture R's `walk/d`, which a user who is not root cannot read or follow in
+  part. The test `a_walk_entry_is_stated_once` counts each walked path's calls
+  under strace, in the helper and under `-O`; and `mutants/dir-walk.toml`,
+  eight mutants, all killed.
 - **Differential fixture FH** — `fuse_hang.py` mounted in a private mount
   namespace per run, root or passwordless sudo — and 57 cases for `-b`, `-S`,
   `-O` and the helper (a case may set `LSOF_DIFF_NOFILE`, a descriptor
@@ -81,6 +110,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `-i` alone this costs what the C does not pay: the C reads no table there
   (110, next), so a descriptor limit with no room for the helper's pipes ends
   `lsof -i` (`can't open pipes`), where the C lists.
+- **`lsof_core::DirArg` has `stat`**: the one `FileStat` the option made of
+  its directory, which is the directory's identity and the walk's file system
+  (`ddev`), so the walk asks nothing more of it but its listing (DIVERGENCES
+  111).
 - **`lsof_core::Selection` has `helpers`** and **`FsCalls` has
   `helper_pids`**: the processes the bounded layer started, which the Linux
   backend lists without `stat`ing what they opened for a call.

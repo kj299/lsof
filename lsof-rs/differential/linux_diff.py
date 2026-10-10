@@ -65,7 +65,9 @@ ledger — those are the kit's, on purpose.
              `..` to /dev/shm, names that are not UTF-8, a loop, a dangling
              link; and a holder of a file on /dev/shm, a pipe, an eventfd and
              an unlinked file, named by `/proc/R/fd/N`. Its cases may set a
-             `cwd`, since how the C spells `rel` or `.` is the question
+             `cwd`, since how the C spells `rel` or `.` is the question.
+             Beside them, a tree a walk cannot read or follow in part, for
+             a user who is not root (`walk/d`)
   fixture N  files of every link count `+L` tells apart (0, 1, 2), with a
              socket pair and a pipe beside them
   fixture V  device nodes of four majors (/dev/null, /dev/urandom, a pty
@@ -120,6 +122,14 @@ ledger — those are the kit's, on purpose.
   fixture DN a regular file, and a device node naming its file system with
              the same inode, on two tmpfs mounted here (root, or
              passwordless sudo)
+  fixture WRACE a holder of a directory and a file in it, beside the
+             directory {WRACEDIR} a `+d`/`+D` walks, and of a file on
+             /dev/shm: for a walk whose entry is renamed while strace holds
+             its `lstat`, or whose directory is while strace holds its
+             listing (`walk_race.py`; DIVERGENCES 111). Its cases set
+             LSOF_DIFF_RACE to the scenario, and each binary's run starts
+             from a fresh {WRACEDIR} (strace that can trace and inject a
+             delay, and a /dev/shm on another file system)
 
 A case may also set LSOF_DIFF_NOFILE: both binaries then run under that
 descriptor limit (`ulimit -n`), for what a run does when it cannot open
@@ -169,6 +179,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import pwd
@@ -176,6 +187,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -920,21 +932,35 @@ def unprivileged_prefix() -> list | None:
 
 
 def unprivileged_wrapper(
-    work: str, name: str, binary: str, prefix: list | None, fuse: str | None = None
+    work: str,
+    name: str,
+    binary: str,
+    prefix: list | None,
+    fuse: str | None = None,
+    race: list | None = None,
 ) -> str:
     """A script that runs `binary` through `prefix` when the case's
     environment sets LSOF_DIFF_UNPRIVILEGED, under fixture FH's FUSE mount
-    when it sets LSOF_DIFF_FUSE (`fuse`, the script [`fuse_wrap`] wrote), and
+    when it sets LSOF_DIFF_FUSE (`fuse`, the script [`fuse_wrap`] wrote),
+    under fixture WRACE's `walk_race.py` (`race`, its argv up to the
+    scenario, this side's included) when it sets LSOF_DIFF_RACE, and
     directly otherwise. The kit runner takes one path per side for every case
     and only its environment varies per case, so this is how one case runs as
     another user, or beside a file system the rest never see. It `exec`s
     either way: the process lsof runs as is the binary itself, or for FH the
-    namespace's shell, which waits for it and takes the server down."""
+    namespace's shell, which waits for it and takes the server down, or for
+    WRACE the script, which exits as lsof did."""
     path = os.path.join(work, name)
     lines = ["#!/bin/sh\n"]
     # A case that sets LSOF_DIFF_NOFILE runs under that descriptor limit,
     # whatever else it sets: both binaries, the same limit.
     lines.append('if [ -n "$LSOF_DIFF_NOFILE" ]; then ulimit -n "$LSOF_DIFF_NOFILE" || exit 2; fi\n')
+    if race is not None:
+        argv = " ".join(shlex.quote(a) for a in race)
+        lines.append(
+            'if [ -n "$LSOF_DIFF_RACE" ]; then exec '
+            f'{argv} "$LSOF_DIFF_RACE" {shlex.quote(binary)} "$@"; fi\n'
+        )
     if fuse is not None:
         # The mode travels as an argument and LC_ALL by `env`: `sudo` would
         # drop both from the environment.
@@ -1748,6 +1774,100 @@ def prepare_devnode(dn: Fixture, mounted: list[str]) -> None:
     open(os.path.join(dn.cwd, "go"), "w").close()
 
 
+WALK_RACE = os.path.join(HERE, "walk_race.py")
+
+
+def race_unavailable(work: str) -> str | None:
+    """Why fixture WRACE cannot run here, or None. It needs an strace that
+    can trace a child and delay one of its calls -- asked by doing so, as
+    the cases will: an `lstat` delayed at its exit is written `(DELAYED)`
+    -- and a /dev/shm on a file system of its own, where its link leads off
+    the walked one."""
+    strace = shutil.which("strace")
+    if strace is None:
+        return "no strace"
+    if not is_mount_point(SHM):
+        return f"{SHM} is not a mount point here"
+    try:
+        if os.stat(SHM).st_dev == os.stat(work).st_dev:
+            return f"{SHM} is the work directory's file system"
+        probe = subprocess.run(
+            [
+                strace, "-qq", "-o", "/dev/stdout", "-P", "/", "-e", "signal=none",
+                "-e", "trace=newfstatat", "-e", "inject=newfstatat:delay_exit=1:when=1",
+                sys.executable, "-I", "-c", "import os; os.lstat('/')",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as why:
+        return f"strace cannot run here: {_why(why)}"
+    if probe.returncode != 0 or b"(DELAYED)" not in probe.stdout:
+        return "strace cannot trace or delay a call here: " + _why(
+            Exception(probe.stderr.decode(errors="replace").strip() or f"rc={probe.returncode}")
+        )
+    return None
+
+
+def walk_race_holder(work: str) -> Fixture:
+    """Fixture WRACE (DIVERGENCES 111): a holder of `odir`, of `odir/f` and
+    of a file on /dev/shm, the three things a swapped-in name can lead a
+    walk to -- a directory a link names, a file a hard link names, and a
+    file on another file system. The walked directory, {WRACEDIR}, is made
+    by `walk_race.py` for each run, so it holds nothing of the fixture's.
+    In this directory's realpath, since strace's `-P` is given the path
+    lsof `lstat`s, byte for byte. Beside it, {WRACELINKS} holds only a link
+    to the /dev/shm file, for a walk with no race: under `-x l` alone the
+    C enters the file, since `-x f` is judged on the link's own device."""
+    wdir = os.path.realpath(os.path.join(work, "wrace"))
+    os.makedirs(os.path.join(wdir, "odir"))
+    with open(os.path.join(wdir, "odir", "f"), "w") as f:
+        f.write("f\n")
+    unavailable = race_unavailable(wdir)
+    shm = wdir
+    if unavailable is None:
+        shm = tempfile.mkdtemp(prefix="lsof-rs-diff-", dir=SHM)
+        OUTSIDE_WORK.append(shm)
+    with open(os.path.join(shm, "secret"), "w") as f:
+        f.write("s\n")
+    os.makedirs(os.path.join(wdir, "links"))
+    os.symlink(os.path.join(shm, "secret"), os.path.join(wdir, "links", "to-secret"))
+    py = (
+        "import os,sys,time\n"
+        "d,s=sys.argv[1],sys.argv[2]\n"
+        "keep=[os.open(os.path.join(d,'odir'),os.O_RDONLY|os.O_DIRECTORY),\n"
+        "      os.open(os.path.join(d,'odir','f'),os.O_RDONLY),\n"
+        "      os.open(os.path.join(s,'secret'),os.O_RDONLY)]\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "WRACE(walk race)",
+        [sys.executable, "-c", py, wdir, shm],
+        cwd=wdir,
+        # 0,1,2 + odir, odir/f, the secret.
+        expect_fds=6,
+        optional=True,
+        unavailable=unavailable,
+    )
+
+
+def race_argv(fx: Fixture, side: str) -> list[str]:
+    """`walk_race.py`'s argv up to the scenario, for one side: `c`, the
+    oracle, or `rs`."""
+    return [
+        sys.executable, "-I", WALK_RACE,
+        "--root", fx.cwd,
+        "--secret", os.path.join(fx.argv[4], "secret"),
+        "--side", side,
+    ]
+
+
+def needs_race(case: dict) -> bool:
+    """Whether a case runs under fixture WRACE's swapper."""
+    return "LSOF_DIFF_RACE" in case.get("env", {})
+
+
 def _why(why: Exception) -> str:
     """An exception, with a failed command's stderr."""
     err = getattr(why, "stderr", b"") or b""
@@ -1785,7 +1905,17 @@ def path_spelling_holder(work: str) -> Fixture:
     AF_UNIX socket, 21 xd/, 22 xl/. Holding each directory a case expands
     leaves one entry unlocated, so `-V` prints one line there. `vord/` is
     the opposite: `a`, `b` and `sub/c`, none held, for the cases about the
-    order `-V` reports them in (DIVERGENCES 52)."""
+    order `-V` reports them in (DIVERGENCES 52).
+
+    `walk/d/` is what a `+d`/`+D` walk cannot read or follow (DIVERGENCES
+    111), none of it held: `nr/` unreadable (`can't opendir`), `ny/`
+    readable but not searchable, so its `x` cannot be `lstat`ed (`can't
+    lstat`, and `x` is no item), `lk -> nr/y`, a link a user who is not
+    root cannot follow (`can't stat(...) symbolc link`), `loop -> loop`,
+    which no one can, `dg -> nosuch`, which dangles (silent), and `f`. Its
+    cases start in `walk/`, which is everyone's; the work directory above it
+    is not, and the working directory is set before the uid is dropped.
+    [`unlock`] gives the modes back before the work directory is removed."""
     rdir = os.path.join(work, "spell")
     rel = os.path.join(rdir, "rel")
     os.makedirs(rel)
@@ -1813,6 +1943,19 @@ def path_spelling_holder(work: str) -> Fixture:
     for name in ("a", "b", os.path.join("sub", "c")):
         with open(os.path.join(rdir, "vord", name), "w") as f:
             f.write("vord\n")
+    wd = os.path.join(rdir, "walk", "d")
+    for sub in ("nr", "ny"):
+        os.makedirs(os.path.join(wd, sub))
+    for name in ("f", os.path.join("nr", "y"), os.path.join("ny", "x")):
+        with open(os.path.join(wd, name), "w") as f:
+            f.write("walk\n")
+    os.symlink(os.path.join("nr", "y"), os.path.join(wd, "lk"))
+    os.symlink("loop", os.path.join(wd, "loop"))
+    os.symlink("nosuch", os.path.join(wd, "dg"))
+    os.chmod(os.path.join(wd, "nr"), 0o000)
+    os.chmod(os.path.join(wd, "ny"), 0o644)
+    os.chmod(wd, 0o755)
+    os.chmod(os.path.dirname(wd), 0o755)
     # A link named as /dev/shm's mount source is named (`tmpfs`), so that
     # `+f -- tmpfs` from here is an argument `Readlink()` turns into
     # `elsewhere`, while the source, a name and no path, stays `tmpfs`.
@@ -1859,6 +2002,23 @@ def path_spelling_holder(work: str) -> Fixture:
 # shown the real one, so each shape reads differently in the two (DIVERGENCES
 # 55). 65534 is `nobody` on every runner this harness uses.
 OWNER_SHAPES = {"W": (0, 65534), "WR": (65534, 0)}
+
+
+def unlock(top: str) -> None:
+    """Give the owner back read, write and search on every directory under
+    `top` that a fixture took them from (R's `walk/d/nr` and `walk/d/ny`),
+    so that a runner that is not root can remove what it made. A link is
+    never followed: R's lead off the work directory, to /dev/shm among
+    others. What cannot be changed is left to `rmtree`."""
+    for root, dirs, _ in os.walk(top):
+        for d in dirs:
+            path = os.path.join(root, d)
+            try:
+                st = os.lstat(path)
+                if stat.S_ISDIR(st.st_mode) and st.st_mode & 0o700 != 0o700:
+                    os.chmod(path, stat.S_IMODE(st.st_mode) | 0o700)
+            except OSError:
+                pass
 
 
 def root_prefix() -> list | None:
@@ -2070,9 +2230,10 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     ptg = devpts_instance_holder(work)
     dn = devnode_holder(work)
     sf = socket_file_holder(work)
+    wr = walk_race_holder(work)
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
-        em, pn, rn, t, fh, mz, pth, ptg, dn, sf,
+        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr,
     )
 
 
@@ -2219,7 +2380,7 @@ def run(args) -> int:
             offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
-            sockfiles,
+            sockfiles, walkrace,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -2256,6 +2417,10 @@ def run(args) -> int:
             "DNT": (devnode, "not root, and no passwordless sudo, to mount and mknod"),
             "RN": (relnames, "no io_uring here"),
             "FUSE": (fuseprobe, fuse_unavailable() or "no FUSE mount here"),
+            # WRACE's cases name the holder and the walked directory.
+            "WRACE": (walkrace, walkrace.unavailable or "the holder did not come up"),
+            "WRACEDIR": (walkrace, walkrace.unavailable or "the holder did not come up"),
+            "WRACELINKS": (walkrace, walkrace.unavailable or "the holder did not come up"),
             # W's cases name {W} and {WR} together; both go with it.
             "W": (owner, "not root, and no passwordless sudo"),
             "WR": (owner, "not root, and no passwordless sudo"),
@@ -2358,7 +2523,7 @@ def run(args) -> int:
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
-                ptyhost, ptyguest, devnode,
+                ptyhost, ptyguest, devnode, optional["WRACE"][0],
             )
             if f is not None
         ]:
@@ -2515,6 +2680,9 @@ def run(args) -> int:
                 # The file system SF's socket file is on, by its mount point.
                 "SFFS": mount_point_of(sockfiles.cwd),
                 "AXDIR": os.path.join(a.cwd, "xdir"),
+                # Made afresh by `walk_race.py` for each binary's run.
+                "WRACEDIR": os.path.join(walkrace.cwd, "V"),
+                "WRACELINKS": os.path.join(walkrace.cwd, "links"),
                 "PORT": port,
             },
         )
@@ -2529,6 +2697,8 @@ def run(args) -> int:
             ]
             if key == "FUSE":
                 dropped += [c["name"] for c in cases if needs_fuse(c) and c["name"] not in dropped]
+            if key == "WRACE":
+                dropped += [c["name"] for c in cases if needs_race(c) and c["name"] not in dropped]
             cases = [c for c in cases if c["name"] not in dropped]
             if dropped:
                 print(
@@ -2545,9 +2715,16 @@ def run(args) -> int:
             else None
         )
         nofile = any("LSOF_DIFF_NOFILE" in c.get("env", {}) for c in cases)
-        if prefix or fuse or nofile:
-            oracle = unprivileged_wrapper(work, "oracle.sh", os.path.abspath(oracle), prefix or None, fuse)
-            rust = unprivileged_wrapper(work, "rust.sh", os.path.abspath(rust), prefix or None, fuse)
+        race = optional["WRACE"][0] is not None and any(needs_race(c) for c in cases)
+        if prefix or fuse or nofile or race:
+            oracle = unprivileged_wrapper(
+                work, "oracle.sh", os.path.abspath(oracle), prefix or None, fuse,
+                race_argv(walkrace, "c") if race else None,
+            )
+            rust = unprivileged_wrapper(
+                work, "rust.sh", os.path.abspath(rust), prefix or None, fuse,
+                race_argv(walkrace, "rs") if race else None,
+            )
         cmd = [
             sys.executable, KIT_RUNNER,
             "--oracle", oracle,
@@ -2576,6 +2753,7 @@ def run(args) -> int:
         if args.keep_fixtures:
             print(f"linux_diff: fixtures kept under {work} " + " ".join(OUTSIDE_WORK))
         else:
+            unlock(work)
             shutil.rmtree(work, ignore_errors=True)
             for outside in OUTSIDE_WORK:
                 shutil.rmtree(outside, ignore_errors=True)
@@ -2659,6 +2837,8 @@ def self_test() -> int:
     check("a case that sets LSOF_DIFF_FUSE needs fixture FH",
           needs_fuse({"args": ["-i"], "env": {"LSOF_DIFF_FUSE": "--mode hold"}}))
     check("a case that does not, does not", not needs_fuse({"args": ["{FUSE}"]}))
+    check("a case that sets LSOF_DIFF_RACE needs fixture WRACE",
+          needs_race({"args": [], "env": {"LSOF_DIFF_RACE": "dir-to-link"}}))
     with tempfile.TemporaryDirectory() as td:
         # The FH branch comes first, and the plain one is always last.
         w = unprivileged_wrapper(td, "w.sh", "/bin/true", None, "/x/fuse-wrap.sh")
@@ -2669,6 +2849,32 @@ def self_test() -> int:
         check("the wrapper runs any other case directly", text.rstrip().endswith('exec /bin/true "$@"'))
         check("the wrapper sets a case's descriptor limit first",
               text.index("LSOF_DIFF_NOFILE") < text.index("LSOF_DIFF_FUSE"))
+        w = unprivileged_wrapper(td, "r.sh", "/bin/true", None, None, ["race.py", "--side", "rs"])
+        with open(w) as f:
+            text = f.read()
+        check("the wrapper runs a WRACE case through the swapper, this side's",
+              'exec race.py --side rs "$LSOF_DIFF_RACE" /bin/true "$@"' in text)
+        # The swapper times its swap from strace's stamp of the delayed call,
+        # never from when it saw the stop: one that saw it late (a loaded
+        # host, a stall) raced nothing, and must say so rather than pass.
+        spec = importlib.util.spec_from_file_location("walk_race", WALK_RACE)
+        wr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wr)
+        log = os.path.join(td, "trace")
+        with open(log, "w") as f:
+            f.write('7 100.250000 openat(AT_FDCWD, "/v/x", O_PATH) = 3\n'
+                    '7 101.500000 openat(AT_FDCWD, "/v/x", O_PATH) = 3 (DELAYED)\n')
+        check("the swapper takes a delay_exit stamp from the (DELAYED) line",
+              wr.delay_began(log, "/v/x", "exit", "openat") == 101.5)
+        with open(log, "w") as f:
+            f.write('7 100.250000 newfstatat(AT_FDCWD, "/v/x", ')
+        check("the swapper takes a delay_enter stamp from the call it has begun",
+              wr.delay_began(log, "/v/x", "enter", "newfstatat") == 100.25)
+        check("...and none from a call on another path",
+              wr.delay_began(log, "/v/y", "enter", "newfstatat") is None)
+        check("a swap early in the delay raced", wr.missed(100.0, 100.4, 3.0) is None)
+        check("a swap late in the delay did not", wr.missed(100.0, 102.2, 3.0) is not None)
+        check("a swap after the delay did not", wr.missed(100.0, 103.6, 3.0) is not None)
         wrap = fuse_wrap(td, os.path.join(td, "fuse"))
         with open(wrap) as f:
             text = f.read()

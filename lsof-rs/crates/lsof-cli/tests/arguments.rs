@@ -420,6 +420,50 @@ fn a_walk_stops_at_its_budget_and_says_so() {
     assert!(out.stderr.is_empty(), "-w mutes it");
 }
 
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn a_walk_entry_past_path_max_is_file_name_too_long() {
+    // An entry whose path is 4097 bytes or more: the C's child takes at most
+    // `MAXPATHLEN + 1` bytes of argument (`lib/misc.c` `doinchild()`), exits
+    // on a longer one, and the C reports its own lost child as the `lstat`'s
+    // error, `No child processes`, which no `lstat` returned (`File name too
+    // long` under `-O`, where it makes the call itself). lsof-rs reports the
+    // kernel's answer, by default and under `-O` (a C-DEFECT, DIVERGENCES
+    // 127). The tree is built by relative steps, as no absolute path to its
+    // bottom fits in PATH_MAX.
+    let dir = Scratch::new("walk-deep");
+    let level = "d".repeat(250);
+    // `d`, 16 levels of `/` and 250 bytes, `/` and 82: 4100 bytes.
+    let leaf = "e".repeat(82);
+    let script = format!(
+        "set -e; mkdir d; cd d; for i in $(seq 16); do mkdir {level}; cd {level}; done; : > {leaf}"
+    );
+    let made = Command::new("sh")
+        .current_dir(&dir.0)
+        .args(["-c", &script])
+        .status()
+        .expect("run sh");
+    assert!(made.success(), "build the tree");
+    let entry = format!("d{}/{leaf}", format!("/{level}").repeat(16));
+    assert_eq!(entry.len(), 4100);
+    for extra in [&[][..], &["-O"]] {
+        let mut args = vec!["-a", "-p", "1"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["+D", "d"]);
+        let out = lsof_in(&dir.0, &os(&args));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("lsof: WARNING: can't lstat({entry}): File name too long\n"),
+            "{extra:?}"
+        );
+    }
+    let out = lsof_in(&dir.0, &os(&["-w", "-a", "-p", "1", "+D", "d"]));
+    assert!(out.stderr.is_empty(), "-w mutes it");
+}
+
 /// `-b` (DIVERGENCES 94, 122): a path argument is neither read nor `stat`ed,
 /// lsof says so, and the status error follows, every one of them escaped —
 /// where the C prints `avoiding stat(P)` raw. `-f` because lsof-rs then reads
@@ -819,6 +863,159 @@ fn a_stat_opens_the_path_o_path_and_never_statx_it() {
                 || l.contains("lstat(")),
             "{extra:?}: a stat of the path itself: {on_it:#?}"
         );
+    }
+}
+
+/// Each `lstat` (`L`) and `stat` (`F`) a traced lsof made of a path, in
+/// order, read from an `strace -f` log of `openat`, `statx`, `newfstatat`,
+/// `fstat`, `stat` and `lstat`. lsof-rs makes one as `stat_now` does: the
+/// path opened `O_PATH`, with `O_NOFOLLOW` for an `lstat`, and then, in the
+/// same process, the descriptor asked (`statx(fd, "", AT_EMPTY_PATH)`, or
+/// `fstat`). A `stat` of the path by name, which lsof-rs never makes, is a
+/// `B`. A call cut in two by another process's (`<unfinished ...>`, `<...
+/// resumed>`) is joined first.
+fn stat_profile(log: &str) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let mut profile: HashMap<String, String> = HashMap::new();
+    // (pid, fd) -> the path an `O_PATH` open gave it, and its letter.
+    let mut open: HashMap<(String, String), (String, char)> = HashMap::new();
+    let mut cut: HashMap<String, String> = HashMap::new();
+    let quoted = |s: &str| -> Option<String> {
+        let start = s.find('"')? + 1;
+        let len = s[start..].find('"')?;
+        Some(s[start..start + len].to_string())
+    };
+    for line in log.lines() {
+        let Some((pid, call)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let mut call = call.trim_start().to_string();
+        if let Some(head) = call.strip_suffix(" <unfinished ...>") {
+            cut.insert(pid.to_string(), head.to_string());
+            continue;
+        }
+        if call.starts_with("<... ") {
+            let Some((_, rest)) = call.split_once("resumed>") else {
+                continue;
+            };
+            call = cut.remove(pid).unwrap_or_default() + rest;
+        }
+        let Some((_, ret)) = call.rsplit_once(" = ") else {
+            continue;
+        };
+        let ok = !ret.starts_with('-');
+        let (name, args) = call.split_once('(').unwrap_or_default();
+        let first = args.split(',').next().unwrap_or_default();
+        match name {
+            "openat" => {
+                let fd = ret.split_whitespace().next().unwrap_or_default();
+                let key = (pid.to_string(), fd.to_string());
+                // Any open that gives the descriptor ends what it was.
+                open.remove(&key);
+                if let (true, true, Some(path)) = (ok, args.contains("O_PATH"), quoted(args)) {
+                    let letter = if args.contains("O_NOFOLLOW") {
+                        'L'
+                    } else {
+                        'F'
+                    };
+                    open.insert(key, (path, letter));
+                }
+            }
+            "statx" | "newfstatat" | "stat" | "lstat" if args.contains('"') => {
+                if args.contains("\"\"") && args.contains("AT_EMPTY_PATH") {
+                    if let Some((path, letter)) = open.get(&(pid.to_string(), first.to_string())) {
+                        profile.entry(path.clone()).or_default().push(*letter);
+                    }
+                } else if let Some(path) = quoted(args) {
+                    profile.entry(path).or_default().push('B');
+                }
+            }
+            "fstat" => {
+                if let Some((path, letter)) = open.get(&(pid.to_string(), first.to_string())) {
+                    profile.entry(path.clone()).or_default().push(*letter);
+                }
+            }
+            _ => {}
+        }
+    }
+    profile
+}
+
+/// A `+d`/`+D` entry is described by its one `lstat`, and a link `-x l`
+/// follows by one `stat` more; the directory itself is the option's one
+/// `stat`, and the walk asks it nothing but its listing (DIVERGENCES 111).
+/// That is the C's profile, measured (`arg.c:876,1014,1047`): `L` an
+/// entry, `LF` a followed link, `F` the directory, where lsof-rs had made
+/// `LF`, `LFF` and `FFL`. Pinned with `strace -f`, so in the helper that
+/// makes the calls and, under `-O`, in lsof itself; and with no `stat` of
+/// any of them by name. The tree has no socket (a socket's bound path is
+/// `stat`ed for its row), and `-a -p` keeps the scan to this test. Skipped
+/// where there is no `strace` that can trace.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+)]
+fn a_walk_entry_is_stated_once() {
+    let scratch = Scratch::new("walk-once");
+    let d = scratch.0.join("d");
+    std::fs::create_dir_all(d.join("sub")).expect("mkdir d/sub");
+    std::fs::write(d.join("reg"), b"").expect("make d/reg");
+    std::fs::write(d.join("sub/in"), b"").expect("make d/sub/in");
+    std::os::unix::fs::symlink("reg", d.join("lnk")).expect("make d/lnk");
+    let top = d.to_str().expect("a UTF-8 scratch path").to_string();
+    let me = std::process::id().to_string();
+    for in_process in [false, true] {
+        for follow in [false, true] {
+            let trace = scratch.0.join("trace");
+            let _ = std::fs::remove_file(&trace);
+            let mut args = vec!["-n", "-P", "-a", "-p", &me];
+            if in_process {
+                args.push("-O");
+            }
+            if follow {
+                args.extend(["-x", "l"]);
+            }
+            args.extend(["+D", &top]);
+            let out = Command::new("strace")
+                .args(["-f", "-qq", "-e"])
+                .arg("trace=execve,openat,statx,newfstatat,fstat,stat,lstat")
+                .arg("-o")
+                .arg(&trace)
+                .arg(env!("CARGO_BIN_EXE_lsof"))
+                .args(&args)
+                .output();
+            let Ok(out) = out else {
+                eprintln!("skipped: no strace");
+                return;
+            };
+            let log = std::fs::read_to_string(&trace).unwrap_or_default();
+            if !log.contains("execve(") {
+                eprintln!(
+                    "skipped: strace could not trace: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                return;
+            }
+            let how = format!("{args:?}");
+            // Nothing here is open in this test, so nothing is located.
+            assert_eq!(out.status.code(), Some(1), "{how}: {out:?}");
+            let profile = stat_profile(&log);
+            let of = |rel: &str| {
+                let path = if rel.is_empty() {
+                    top.clone()
+                } else {
+                    format!("{top}/{rel}")
+                };
+                profile.get(&path).cloned().unwrap_or_default()
+            };
+            let link = if follow { "LF" } else { "L" };
+            assert_eq!(
+                [of(""), of("reg"), of("sub"), of("sub/in"), of("lnk")],
+                ["F", "L", "L", "L", link],
+                "{how}: the directory, reg, sub, sub/in, lnk"
+            );
+        }
     }
 }
 

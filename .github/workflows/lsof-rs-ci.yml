@@ -118,6 +118,12 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --document-private-items --workspace
+      - name: strace, for the tests that pin which calls lsof makes
+        # `a_walk_entry_is_stated_once` (DIVERGENCES 111) and
+        # `a_stat_opens_the_path_o_path_and_never_statx_it` (110) count lsof's
+        # calls under strace, and without it skip, saying so: installed here so
+        # that they gate.
+        run: sudo apt-get update -qq && sudo apt-get install -y strace
       - name: test (core, CLI and the Linux backend)
         run: cargo test --all
       - name: committed mutants still apply
@@ -361,8 +367,11 @@ jobs:
         # (`make lsof`, the binary target alone — the docs step needs groff and
         # the oracle needs no manual).
         working-directory: .
+        # strace is fixture WRACE's (DIVERGENCES 111), which skips its cases
+        # by name without it.
         run: |
-          sudo apt-get install -y pkg-config
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config strace
           autoreconf -vif
           ./configure
           make -j"$(nproc)" lsof

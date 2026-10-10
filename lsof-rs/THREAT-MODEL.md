@@ -200,13 +200,44 @@ not the same file, waits on it until the file system answers; so does any of
 them on an lsof `-O` waiting in its own `stat`, which holds the same
 descriptor (119).
 
-**A `+d`/`+D` entry is `stat`ed twice** (DIVERGENCES 111). The walk `lstat`s
-each entry, then `stat`s the same path again, following links, to identify it.
-A local user who can rename in the walked directory can swap a link in between,
-so the entry takes another file's identity, even on another device past `-x f`,
-and the processes holding that file are listed under the walked tree. The C
-makes one `lstat` and uses it. It matters most for root walking a directory
-others can write, such as `/tmp`.
+**A `+d`/`+D` entry was `stat`ed twice** (DIVERGENCES 111, resolved
+2026-10-10). The walk `lstat`ed each entry, then `stat`ed the same path again,
+following links, to identify it. A local user who could rename in the walked
+directory could swap a link in between, so the entry took another file's
+identity, even on another device past `-x f`, and the processes holding that
+file were listed under the walked tree (measured: a file renamed into a link to
+a file on a tmpfs, during the first call). It mattered most for root walking a
+directory others can write, such as `/tmp`. Now an entry is what its one
+`lstat` says, as the C's (`arg.c:1014,1077`): its identity, the `-x f` test,
+whether it is a link and whether `+D` descends into it all come from that call,
+an `O_PATH|O_NOFOLLOW` open and a `stat` of the descriptor, which a rename
+after it cannot change, and never from the listing's `d_type`. A link `-x l`
+follows gets one `stat` more, whose result stands for the entry. The directory
+itself is the option's one `stat`. `differential/walk_race.py` renames entries
+while strace holds that call, before it runs and after, and the directory while
+strace holds its listing, and lsof-rs does what the C does in each.
+
+Two exposures remain, both the C's as well, since both walk by name:
+
+- **A directory is listed by its name, after its `lstat`.** One that is
+  swapped for a link between the two is listed through the link, wherever the
+  renamer points it, by the C's `opendir()` as by lsof-rs's listing (measured:
+  `walk-race-dir-to-link-descends`). Each entry found there is still `lstat`ed
+  and held to the top directory's file system unless `-x f`, and the
+  directory's own item keeps the identity its `lstat` saw. Opening it
+  `O_NOFOLLOW` and comparing identities would close this beyond the C; it is
+  not done.
+- **The top directory's identity is taken when the option is parsed, and its
+  listing made later.** For the first `+d`/`+D` both read the mount table in
+  between: the C's `ck_file_arg()` reads and `stat`s it before `OpenDir()`
+  (`arg.c:184,915`; 117 calls between the two here, 30 `stat`s and 86
+  `readlink`s, measured with strace), lsof-rs once its options are parsed
+  (67). For a later one the C has the table already and opens the directory
+  straight after its `stat`, where lsof-rs lists it after the table and every
+  walk before it, since it walks after parsing (DIVERGENCES 82). A directory
+  renamed in that window is listed as whatever is then at the name, under the
+  identity the `stat` saw (measured: `walk-race-top-to-link`, the same in
+  both).
 
 **A path argument named files on other file systems** (DIVERGENCES 101,
 resolved 2026-10-09). lsof-rs identified a file by its DEVICE cell and inode,

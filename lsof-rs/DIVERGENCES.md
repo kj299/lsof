@@ -245,6 +245,169 @@ disagreeing, and it names the C code so anyone can check the triage.
   incomplete.`; lsof-rs drops the mount in silence. Not pinned: the work
   directory.
 
+## Fixed by describing a walk entry by its one `lstat` (2026-10-10)
+
+Item 111, a security row (integrity of the listing). The C describes a
+`+d`/`+D` entry by ONE `lstatsafely()` (`arg.c:1014`), and that one `struct
+stat` decides four things: the `-x f` test against `ddev` (`arg.c:1029-1037`),
+whether the entry is a link (`arg.c:1038`), whether `+D` stacks it
+(`arg.c:1067`), and what it is, since `ck_file_arg()` is handed it and makes
+no `stat` of its own (`arg.c:1077`, `263-264`). A link gets one call more, a
+`statsafely()` that follows it, under `-x l` only (`arg.c:1047`), whose result
+replaces the `lstat` for the identity and the descent; the item keeps the
+link's name. The directory itself is the one `statsafely(dn)` its option
+made (`arg.c:876`): its `st_dev` is `ddev` for the whole walk (`arg.c:905`),
+its device and inode its own item, entered before `OpenDir()` (`arg.c:915,
+930`), and the C asks nothing more of it.
+
+lsof-rs had `lstat`ed each entry and then `stat`ed the path again, following
+links, for its identity; a link under `-x l` twice more, once for the
+descent and once for the identity; and the directory twice more at walk time.
+Measured with `strace -f` on `+D d` (`L` an `lstat`, `F` a `stat` that
+follows; an `O_PATH` open and a `stat` of the descriptor count as one):
+
+| path | the C | lsof-rs before | now |
+|---|---|---|---|
+| `d`, the directory | `F` | `FFL` | `F` |
+| a file or a directory in it | `L` | `LF` | `L` |
+| a link, under `-x l` | `LF` | `LFF` | `LF` |
+
+So a rename between two calls gave the entry the second one's file. Measured
+with a regular file renamed into a link to a file on a tmpfs while the first
+call was held (strace delay injection), and no `-x` at all: the C enters the
+file the `lstat` saw and reports it unlocated; lsof-rs listed the processes
+holding the tmpfs file, on another file system, and counted the entry
+located. A directory renamed into a link to another directory just after its
+`lstat` made lsof-rs report that other directory under the entry's name.
+
+The fix is the C's walk, with no call added or rerouted: every call stays the
+bounded layer's, under the `-b`, `-O`, `-S` and `-w` of the option (94).
+
+* **An entry is its one `lstat`**: the `O_PATH|O_NOFOLLOW` open and the
+  descriptor's `stat`, which a rename after the open cannot change. Its
+  device is judged against `ddev` before the link rule, so a link on the
+  walked file system to a file elsewhere is entered under `-x l` alone, as
+  that file, and a link on another file system is passed over unfollowed. The
+  type is that call's, never the listing's `d_type` (the listing returns
+  names only since 94).
+* **A link under `-x l` is followed once**, and that `stat` is the entry: its
+  identity, and whether `+D` descends. `can't stat(P) symbolc link: E`, the
+  C's spelling, unless the link dangles.
+* **The directory is `DirArg::stat`**, the option's one `stat`, kept by the
+  parser: its identity and `ddev`. The walk makes no call on it but its
+  listing, so a directory gone since its option is still the item, reported
+  unlocated, and its listing's `ENOENT` says nothing, as in the C; lsof-rs had
+  returned without entering it.
+* **A failed `lstat`** is `can't lstat(P): E` unless `ENOENT`, from that one
+  call, and the entry is no item; a timed-out one says `Connection timed out`
+  and the walk goes on (94, 118). Where names are matched (Windows) nothing
+  is identified, so no entry is `stat`ed for it, a failed `lstat` still
+  leaves the name an item, and `-x f` has no device to judge.
+
+The walk makes half the helper round trips it did. `+D /usr/lib` (17,742
+entries, `-a -p 1`, median of 7, 2026-10-10): 1.39 s by default where it took
+2.48 s, 0.13 s under `-O` (0.15 s), and 0.86 s in the C, which makes each
+`lstat` in its child too. The figures of 2026-10-09 (1.84 s, 0.15 s and 0.65
+s) were taken another day; these were measured in turn, in one loop.
+
+### What stays open
+
+Both shared with the C, and in THREAT-MODEL: a stacked directory is listed by
+its name, so one swapped for a link after its `lstat` is listed through the
+link (the C's `opendir()` follows it too; its entries are still each
+`lstat`ed and held to `ddev`, and the directory keeps the identity its
+`lstat` saw); and the directory's identity is taken when its option is
+parsed and its listing made later. For the first `+d`/`+D` both read the mount
+table in between (the C in `ck_file_arg()`, `arg.c:184,915`: 117 calls between
+`statsafely(dn)` and `OpenDir(dn)` here, measured with strace; lsof-rs 67);
+for a later one the C lists the directory straight after its `stat`, where
+lsof-rs lists it after the table and every walk before it (82). Opening a stacked
+directory `O_NOFOLLOW` and comparing identities would go beyond the C, and is
+not done. Where the walk prints its warnings, after the options rather than
+among them, is item 82.
+
+### What the gate gained
+
+* **Unit tests**: `crates/lsof-cli/src/main.rs` `walk`, over a tree held in
+  memory whose `lstat` and `stat` of one path answer differently, as a rename
+  makes them: `an_entry_is_identified_by_its_one_lstat`,
+  `a_link_by_its_lstat_is_skipped_without_x_l`,
+  `descent_is_decided_by_the_lstat_mode`,
+  `under_x_l_a_link_is_followed_exactly_once`,
+  `x_f_is_judged_on_the_lstat_device`,
+  `ddev_is_the_top_directory_device_throughout`,
+  `an_lstat_error_warns_once_unless_enoent`,
+  `a_follow_error_warns_symbolc_unless_enoent`,
+  `the_top_directory_is_not_stated_at_walk_time`,
+  `dash_w_before_the_option_mutes_every_walk_warning` and
+  `where_names_are_matched_the_walk_is_by_name`; the call log of
+  `a_walk_makes_every_call_through_the_layer_and_goes_on_past_a_timeout` is
+  now the C's; `args.rs` `a_plus_d_keeps_the_stat_that_examined_it`.
+* **`tests/arguments.rs` `a_walk_entry_is_stated_once`**: the table above,
+  counted under `strace -f` (an `O_PATH` open followed, in the same process,
+  by a `stat` of its descriptor is one call), in the helper and under `-O`,
+  with and without `-x l`, and no `stat` of any walked path by name. Run on
+  the binary before this change it fails with `FFL`, `LF`. Skipped, saying
+  so, without an strace that can trace; CI's Linux jobs now install one.
+* **Fixture WRACE** (`differential/walk_race.py`) and 12 cases: an entry
+  renamed while strace holds its `lstat` (the C's `newfstatat`, lsof-rs's
+  `openat`, 3 s), or the directory while it holds the `openat` of its
+  listing, the swap made when strace's log says the delay has begun and
+  checked against strace's own stamp of the call, so that a swap the host
+  made late fails the case rather than racing nothing:
+  `walk-race-reg-to-link-after-lstat`, `-before-lstat`, `-under-x-l`,
+  `walk-race-reg-to-hardlink-after-lstat`, `walk-race-reg-gone-after-lstat`,
+  `walk-race-dir-to-file`, `walk-race-file-to-dir`,
+  `walk-race-dir-to-link-descends`, `walk-race-top-to-link`,
+  `walk-race-top-gone`; and, with no race, a link on the walked file system to
+  WRACE's file on /dev/shm, entered under `-x l` alone and passed over
+  without it. All MATCH. The binary before this change DIVERGEs on seven
+  (`reg-to-link-after-lstat`, `-under-x-l`, `reg-to-hardlink-after-lstat`,
+  `reg-gone-after-lstat`, `dir-to-link-descends`, `top-to-link`,
+  `top-gone`); `dir-to-file`, `file-to-dir`, `reg-to-link-before-lstat` and
+  the two `-x l` cases pin the `lstat`'s type and the `-x f` test before
+  the follow, which 94 had already taken from the `lstat` rather than
+  `d_type`. Measured on 4 CPUs (2026-10-10), the swap checked against strace's
+  stamp: 60 of 60 runs of the ten race cases (six rounds) matched the C at
+  load averages up to 15, none with a swap missed, and the binary before this
+  change DIVERGEd on the same seven in each of two rounds, at loads of 3 and
+  15; the first six cases had matched 108 of 108 runs before the four were
+  added.
+* **Fixture R's `walk/d`**, which a user who is not root cannot read or
+  follow in part, and three cases: as that user, `ny/x`, which cannot be
+  `lstat`ed, and the links `-x l` cannot follow are no items
+  (`walk-unprivileged-what-it-cannot-lstat-is-no-item`,
+  `walk-unprivileged-x-l-a-link-it-cannot-follow-is-no-item`; stdout and the
+  status, since the C, as that user, also warns of each mount under the work
+  directory it cannot `stat`, 87); and as root the one warning, `can't
+  stat(d/loop) symbolc link: Too many levels of symbolic links`, stderr
+  compared (`walk-x-l-says-what-it-cannot-follow`). Both binaries print
+  `can't opendir(d/nr): Permission denied` and `can't lstat(d/ny/x):
+  Permission denied` as `nobody` (measured 2026-10-10).
+* **`tests/arguments.rs` `a_walk_entry_past_path_max_is_file_name_too_long`**:
+  an entry of 4,100 bytes is `can't lstat(P): File name too long`, by
+  default and under `-O`, where the C says `No child processes` (127).
+* **`mutants/dir-walk.toml`**: eight mutants, one per rule, all killed (the
+  full run, as root): an entry identified by a second `stat`, a followed
+  link that keeps its `lstat`, a link followed twice, `-x f` judged after
+  the follow, the `symbolc` warning dropped, an entry whose `lstat` failed
+  entered, the directory `stat`ed again at walk time, and `ddev` from a
+  walk-time `lstat`.
+  Each fails two unit tests or more, and six fail the differential too, run
+  again after this item's review added cases: WRACE's entry races, its
+  `walk-race-top-to-link`, the `-x l` link off the file system, the root walk
+  that compares the `symbolc` warning, and the walk as `nobody` over an entry
+  it cannot `lstat` (the kill table, case by case, heads the file). Two fall
+  to the unit gate alone: a link followed twice, and `ddev` from a walk-time
+  `lstat` of the directory, each of which answers what the one call did unless
+  the name changes between the two in a way no case arranges, so only a count
+  of the calls sees them. The walk mutants of `mutants/safefs.toml`
+  (`walk-entry-lstat-unbounded`, `walk-stops-at-a-failed-lstat`,
+  `walk-lstat-warning-dropped`, `plus-d-walk-forgets-its-options`) and
+  `path-identity.toml` still apply unchanged, and the four, run again in full
+  against this walk after the review's cases were added, are still killed,
+  three by the differential as well.
+
 ## Fixed by finding a file by its `st_dev` and inode (2026-10-09)
 
 Item 101. The C identifies a path argument by two numbers of its `stat(2)`,
@@ -313,8 +476,10 @@ is", corrected there).
 * **`Backend::identify_stat`** returns a `FileId`: the `stat`'s `st_dev` and
   `st_ino` on Linux, from the one bounded `stat` a path argument is given
   (item 94), whose own error is the status error. A `+d`/`+D` entry is the
-  pair of the `stat` that identifies it; that the walk still makes a second
-  `stat` to get it is item 111, the next step. A socket file's is
+  pair of its one `lstat`, or of the one `stat` that follows it if it is a
+  link under `-x l`, and the directory the pair of its option's `stat`: the
+  second `stat` the walk then still made for it went with item 111, the step
+  after this one (2026-10-10). A socket file's is
   `md.dev()` and `md.ino()`, as it was in all but type.
 * **What did not change**: a file-system argument still matches a row's
   `fs_device` with the mount's device (`dfile.c:242-276`), a socket's aside,
@@ -3547,7 +3712,7 @@ C-DEFECT not reproduced.
 | 79 | `lsof ''`: `Readlink("")` never enters its loop, and compares and copies a buffer it never wrote — in practice the previous argument's spelling, so `lsof rel/x ''` searches for `rel/x` twice | `stat`s the empty path: `status error on : No such file or directory`, and drops it | **C-DEFECT, not reproduced — found 2026-10-04** by comparing `Readlink()` with its port. An integration test pins lsof-rs's answer; no differential case, as the C's is undefined. |
 | 80 | `Readlink()`'s link count (`Readlink_sx`) is not reset when a re-reading gives up as too long, so the next argument starts with links counted: after such an argument, a chain of exactly 20 links is refused (`too many (> 20) symbolic links`) | counts each argument's links on its own | **C-DEFECT, not reproduced — found 2026-10-04** reading `lib/misc.c`, then measured. |
 | 81 | a `+d`/`+D` tree is walked whole, whatever its size: two links to `.` under `-x l` make 2^40 paths, and the C does not finish | stops after 200,000 entries or 16 MiB of their names, and says so: `WARNING: stopped walking DIR after N entries`, unless a `-w` came before the option | **DECISION — 2026-10-04**, from the item 62 review. The entry limit is older, and was silent. Once `+D` followed links under `-x l` (78), 200,000 entries of a tree of links to itself, each name longer than the last, reached 1.1 GB in 5 s; the byte limit stops it at 26 MB in 0.13 s. A tree past either limit is searched in part, and the warning says so. |
-| 82 | a `+d`/`+D` walk's warnings (`can't opendir`, `can't lstat`, `can't stat(…) symbolc link`) are printed as the C parses its options: before a bare path's status error, and before an option error, `-h`, `-v` or `-F ?` ends the run | walks after parsing, so a run that ends during parsing prints none | **OPEN — found 2026-10-04** by the item 62 review; narrowed the same day by item 52's fix, which walks before the bare paths, so the warnings now precede their status errors and survive their dropping every bare path. stderr only. The walk needs the backend to identify what it finds, and the run builds that after parsing. |
+| 82 | a `+d`/`+D` walk's warnings (`can't opendir`, `can't lstat`, `can't stat(…) symbolc link`) are printed as the C parses its options: before a bare path's status error, and before an option error, `-h`, `-v` or `-F ?` ends the run | walks after parsing, so a run that ends during parsing prints none | **OPEN — found 2026-10-04** by the item 62 review; narrowed the same day by item 52's fix, which walks before the bare paths, so the warnings now precede their status errors and survive their dropping every bare path. stderr only. The walk needs the backend to identify what it finds, and the run builds that after parsing. Measured on the C 2026-10-10, with a link loop in D: `-x l +d D -S 0` prints D's `can't stat(D/loop) symbolc link: Too many levels of symbolic links` before `-S time (0) changed to 2`, where lsof-rs prints it after; `-x l +d D +d /nonexist` and `-x l +d D -u nosuchuser` print it before their error (`can't stat(/nonexist)`, `can't get UID for nosuchuser`), where lsof-rs prints none, its run ending at the parse. Item 111 left the walk where it was. |
 | 83 | every option error the C finds is printed before the usage: `lsof -x +d nonexist` adds `-x must accompany +d or +D`, `lsof +d dangle -p abc` prints both | prints the first error and stops | **OPEN — found 2026-10-04** by the item 62 review. stderr only: exit 1 and nothing listed in both. It was so before this change too (`-p abc -x z`). Since item 94 the parse-time lines after the first error are lost too (measured 2026-10-09): `-p abc -S0` and `+d /nonexist -S0` lose `WARNING: -S time (0) changed to 2`, and `-p abc -b +d D` loses `avoiding readlink(D)`, `avoiding stat(D)` and `can't stat(D): Resource temporarily unavailable`. |
 | 84 | a bind mount of a block device (the same device on another directory) is a second search item: `lsof /dev/vda` and `+f -- /dev/vda` locate one and report the other, `no file system use located: /dev/vda`, exit 1 | one item per device: exit 0 | **OPEN — found 2026-10-04** by the item 62 review, on master too. Common in containers. Arguably the same bookkeeping as item 17's two names for one file; the maintainer's call. |
 | 85 | the mount reader keeps the first row for each mounted-on directory but `/` (`dmnt.c`), so after an overmount the covering mount's source names nothing: `+f -- SOURCE` is `not a file system` | keeps every row: the covering source names the file system | **OPEN — found 2026-10-04** by the item 62 review, on master too. |
@@ -3576,7 +3741,7 @@ C-DEFECT not reproduced.
 | 108 | a **raw** socket is typed `raw` and named from `/proc/net/raw`: its local address and protocol, the remote, and the state, `00000000:0001->00000000:0000 st=07`; `-F` is `traw` | `IPv4`, named like an inet socket, `ICMP *:0`; `-F` is `tIPv4 PICMP` | **OPEN — found 2026-10-04** by the retrospective's audit, measured on an `AF_INET`/`IPPROTO_ICMP` raw socket. `docs/linux-l2-plan.md` had called raw resolved. Not measured for `raw6`: this host has no IPv6. |
 | 109 | a **bound netlink** socket is typed `netlink` and named by its protocol from `/proc/net/netlink`: `netlink … ROUTE` | `SOCK 0,9 0 … socket:[N]`: lsof-rs reads no netlink table | **OPEN — found 2026-10-04** by the retrospective's audit, measured on a bound `NETLINK_ROUTE` socket. The table exists and lists bound sockets, so this is not item 22's case, which is a socket no table lists. |
 | 110 | the mount table's directories are `stat`ed **only when a run needs them, each through a child process under a 15 s `alarm()`** (`statsafely()`), skipping `autofs`, `pipefs`, `sockfs` and automounter sources, and never an `-e` mount: under `-i` alone the C `stat`s none | ~~every mount directory is `statx()`ed **in-process, with no timeout, on every run but `-f`**, `-i` included, without `AT_NO_AUTOMOUNT`: a hung NFS server stops `lsof -i :22`, and each run mounts every automount point it lists~~ every mount directory is `stat`ed (`O_PATH`, which mounts no automount point) on every run but `-f`, `-i` included, each call in the helper and bounded by `-S` (15 s) | **OPEN, security (availability) — found 2026-10-04** by the retrospective's audit. Measured with `strace`: under `-n -P -i :22` the C `stat`s no mount directory and lsof-rs one `statx` per mount; a plain `-p` run of the C makes 137 `alarm(15)` calls from a forked child. Items 87, 88 and 94 cover parts of this (a warning, the `-e` source, `-b`/`-S`); this row is the whole. See THREAT-MODEL. **The timeout half resolved 2026-10-09** (item 94): every mount point and source `stat` and `readlink` is bounded by `-S` (15 s) in a helper process, `-b` makes none, and a `stat` no longer mounts an automount point (`O_PATH`, as `stat(2)` does not either). What stays OPEN is when the C reads the table (not under `-i` alone, where lsof-rs's helper is then a cost the C does not pay: a mount that does not answer costs `lsof -i :22` the limit, and a descriptor limit with no room for the helper's pipes ends it, `opt-i-alone-under-a-descriptor-limit`), what it skips (`autofs`, `pipefs`, `sockfs`, automounter sources, and the `stat` of an `-e` mount), and its warning (87): the next step. |
-| 111 | a `+d`/`+D` entry is `lstat`ed **once**, and that `stat` describes it | `lstat`ed, then `stat`ed again **following links** to identify it: a rename between the two gives the entry another file's identity, on another device too, past `-x f` | **OPEN, security (integrity of the listing) — found 2026-10-04** by the retrospective's audit; measured with `strace` (two `statx` for one regular file, the second without `AT_SYMLINK_NOFOLLOW`; the C one `newfstatat`). It matters for root walking a directory others can write. See THREAT-MODEL. Since item 94 every one of those calls is a round trip to the helper: `+D /usr/lib` (17,743 entries) took 1.84 s by default, 0.15 s under `-O` and 0.65 s in the C, which makes each entry's `lstat` in its child too (measured 2026-10-09, item 94's review); taking the second `stat` out halves the trips. |
+| 111 | a `+d`/`+D` entry is `lstat`ed **once**, and that `stat` describes it | ~~`lstat`ed, then `stat`ed again **following links** to identify it: a rename between the two gives the entry another file's identity, on another device too, past `-x f`~~ | **resolved 2026-10-10** — see "Fixed by describing a walk entry by its one `lstat`" above. Found 2026-10-04 by the retrospective's audit; a security row (integrity of the listing), for root walking a directory others can write (THREAT-MODEL). The `strace` profile is now the C's — `F` for the directory, `L` for an entry, `LF` for a link under `-x l`, where lsof-rs made `FFL`, `LF` and `LFF` — pinned by `a_walk_entry_is_stated_once`, in the helper and under `-O`; fixture WRACE's ten race cases (an entry renamed while strace holds its `lstat`, or the directory while it holds the listing) match the C, seven of them DIVERGEing on the binary before. `+D /usr/lib` (17,742 entries, side by side, 2026-10-10): 1.39 s by default where it took 2.48 s, 0.13 s under `-O`, 0.86 s in the C. |
 | 112 | an `-i` error message **escapes** the argument it quotes (`safestrprt()`): `-i $'@[1::\e[2J'` writes no ESC byte | prints the argument **raw**: one ESC byte on stderr | **OPEN, security (terminal injection) — found 2026-10-04** by the retrospective's audit, measured. The other messages that quote an argument escape it; `-i`'s parser is the exception. The message text differs too (`unacceptable Internet address` against `unterminated [`). |
 | 113 | `-e` is accepted **under `-f`**: the C reads the mount table for `-e` whatever `-f` says | refused: under `-f` lsof-rs reads no mount table, so `-f -e /dev/shm -- /nonexistent` says `"-e /dev/shm" is not a mounted file system.` | **OPEN — found 2026-10-04** by the retrospective's audit, measured. Both exit 1 on that command, for different reasons. |
 | 114 | `-h` writes the usage to **stderr**, and exits 0 | writes its help to **stdout**, exit 0 | **OPEN — found 2026-10-04** by the first run of the kit's argv-mode differential fuzzer. A script reading `lsof -h 2>/dev/null` gets nothing from the C and the help from lsof-rs. The text differs as well: lsof-rs lists its own options, not the C's usage. `-F ?` already goes to stderr, as the C's does. |
@@ -3592,6 +3757,7 @@ C-DEFECT not reproduced.
 | 124 | when the mount table lists an NFS mount (`HasNFS`), the C makes every per-file `stat` as well — cwd, rtd, txt, each fd's `lstat` and `stat`, mapped files, unix-socket paths — through `statsafely()`, and on a failure names it `(stat: <error>)` | per-process `stat`s are made in lsof, unbounded, NFS or not, as the C makes them without NFS | **OPEN — recorded 2026-10-09** by item 94. Not measurable here: this kernel has no NFS (`/proc/filesystems`). The C source: `dmnt.c:497-500`, `dproc.c:963-976,1010-1023,1059-1074,1178-1210,1542-1551,1817-1830`, `dsock.c:3210-3213`. |
 | 125 | a row locates **one** search item: `is_file_named()` tries the file arguments, then the file-system ones, marks the first that names the row and returns (`dfile.c`), so a file-system argument whose only open file another argument also names is `no file system use located`, exit 1 | marks every item a row matches: exit 0 | **OPEN — found 2026-10-09** measuring item 101: `lsof -V -a -p H T T/f`, `T` a tmpfs whose only open file is H's `T/f`, in either order, and with `-d 99`, which prints no row. The mechanism of item 17's two names for one file (a DECISION: not reproduced) and item 84's one source naming two file systems; the maintainer's call. Ledgered as `path-file-and-its-file-system-one-item-per-row-in-the-c`, unpinned (the work directory). |
 | 126 | an `O_PATH` descriptor on a socket file (its link a path, its `stat` `S_IFSOCK`) is a socket no table names: `process_proc_sock()` finds no table entry and no `system.sockprotoname`, so `sock`, SIZE/OFF `0t0`, NAME `can't identify protocol` (`(-X specified)` under `-X`; `dsock.c:4145-4166`) | typed by its `stat`: `SOCK`, SIZE `0`, its path for NAME | **OPEN — found 2026-10-10** reviewing item 101, measured as root in a private mount namespace: `lsof -FftDsoin -a -p P -d 6` gives `tsock D0xfe00 o0t0 i2042142 ncan't identify protocol` in the C and `tSOCK D0xfe00 s0 o0t0 i2042142 n…/s.sock` in lsof-rs. Which rows a path finds does not depend on it (item 101: neither finds the descriptor by the file's device and inode). Closing it needs no `getxattr()`: a socket file's own inode never carries the attribute, so the row is `can't identify protocol`, item 22's row built for a path rather than `socket:[N]`. (The C first looks its `st_ino` up in the protocol tables (`dsock.c:3454` and after), so a socket file whose inode number equals a listed socket's would print that socket: a coincidence of numbers on two file systems, not to be reproduced.) Ledgered as `sock-file-held-by-path-row-in-the-c`. |
+| 127 | a `+d`/`+D` entry whose path is **4097 bytes or longer** is `can't lstat(P): No child processes`: `doinchild()` sends its child the path, the child's `r_arg` holds `MAXPATHLEN + 1` bytes and it exits on a longer one, and the parent reports its failed read of the reply as `ECHILD`, the error of an `lstat` no one made (`lib/misc.c:256-430`); under `-O`, which makes the call in lsof, `File name too long` | `can't lstat(P): File name too long`, the kernel's `ENAMETOOLONG`, by default and under `-O`; the entry is no item in either | **C-DEFECT, not reproduced — found 2026-10-10** by item 111's review, measured: an entry of 4097 and of 4100 bytes says `No child processes` in the C and `File name too long` in lsof-rs, one of 4096 bytes `File name too long` in both (the C's child takes it, and the kernel refuses it), and the listing and exit status are the same. The walk alone shows it: a path argument that long is `readlink() path too long` in both, before any `stat`, and a link that long cannot be `lstat`ed to be followed. Pinned by `crates/lsof-cli/tests/arguments.rs`, `a_walk_entry_past_path_max_is_file_name_too_long`; no differential case (the work directory). |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden
