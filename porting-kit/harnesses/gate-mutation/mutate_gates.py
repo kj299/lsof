@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082, #083 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082, #083, #086 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
@@ -125,6 +125,23 @@ MUTATIONS = [
      "old": '    if killers:\n        return "KILLED"',
      "new": '    if True:\n        return "KILLED"',
      "why": "every mutant counts as killed: a kill table of survivors reads all green",
+     "cmd": ["harnesses/port-mutation/mutate_port.py", "--self-test"]},
+
+    # A run killed outright leaves a journal, and --restore writes only a file
+    # that holds exactly one journaled mutant (LESSONS #086). Neutralized, a
+    # file changed by hand since the kill is written over.
+    {"gate": "port-mutation-restore", "file": "harnesses/port-mutation/mutate_port.py",
+     "old": '    return ("b", names) if names else ("c", [])',
+     "new": '    return ("b", names or ["?"])',
+     "why": "a file changed by hand after a killed run is restored over: the change is lost",
+     "cmd": ["harnesses/port-mutation/mutate_port.py", "--self-test"]},
+
+    # The clean-tree proof (LESSONS #086): an inserted line keeps its `old`,
+    # so only reverting its `new` can see it left in the tree.
+    {"gate": "port-mutation-clean", "file": "harnesses/port-mutation/mutate_port.py",
+     "old": "        elif pre != []:\n            live.append(_where(rel, text, pre))",
+     "new": "        elif False:\n            live.append(_where(rel, text, pre))",
+     "why": "an inserted line left in the tree passes --check-clean, and a full run tests it as the baseline",
      "cmd": ["harnesses/port-mutation/mutate_port.py", "--self-test"]},
 
     {"gate": "unsafe-audit", "file": "harnesses/unsafe-audit/audit_unsafe.py",

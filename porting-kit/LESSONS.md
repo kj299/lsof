@@ -3974,3 +3974,85 @@ the same, since the day before this entry.]*
   `CI-AND-RELEASE.md`, which took the playbook from 462 lines to under the
   ~400 that `CLAUDE.md` asks.
 - **Section amended:** PLAYBOOK · Phase 4 (before the loop; step 6).
+
+---
+
+## 086. A run killed outright left a mutant in the tree, and the check that cleared it had looked at nothing
+
+- **Date:** 2026-10-10
+- **Codebase:** lsof-rs (its mutants files, run with this kit's `mutate_port.py`, 2026-10-09 → 2026-10-10)
+- **What happened:** a container restart killed a full run of
+  `mutate_port.py` in the middle of a gate. The harness kept the files a
+  mutant touches only in memory (`Tree.snap`). It restored them after each
+  mutant and on SIGINT, SIGTERM and SIGHUP, but a SIGKILL runs no handler (a
+  container restart, the OOM killer, `kill -9` of a stuck run), so the last
+  mutant stayed in the source tree and nothing recorded that it had. The tree
+  was then checked with a hand-written script that read the mutants file's
+  `mutants` key. The key is `mutant` (`[[mutant]]`), so the script iterated
+  over nothing, checked nothing and reported 0 anomalies. A snapshot of the
+  tree taken during a later run carried a live mutant,
+  `dev: if st.rdev != 0 { st.rdev } else { st.dev },`
+  (`identify-stat-names-the-device`, `mutants/path-identity.toml`), into
+  review agents' reading. The tree finally committed was clean, but only
+  because the next full run's baseline went green. That is an inference
+  nothing in the harness made, and it fails on any mutant the gates
+  survive. The right check existed all along: `--apply-only` requires every
+  mutant's `old` to occur exactly once, and that mutant's `old` occurred 0
+  times. But it was not the check that was run, and it was not complete
+  either. Of lsof-rs's 105 committed mutants, 3 insert lines and keep their
+  `old` (`only-absolute-paths`, `deleted-always-DEL`,
+  `release-package-override`), so `--apply-only` would have passed with any
+  of them left in place. Six more have a `new` that occurs more than once in
+  the file they edit (two delete code, and their empty `new` occurs
+  everywhere), so a check that counts `new` text answers by coincidence.
+- **The rule.** A check that can find nothing must prove it looked: it says
+  how many things it checked, and zero checked is a failure, not a pass
+  (LESSONS #039, in a script written in a hurry). Ask the tool that owns the
+  data rather than a private parser of its file: `load` refuses a misspelt
+  key, and a hand parser skips it. And state that a tool keeps in memory dies
+  with the process: what it must undo after a kill has to be on disk before
+  the change that needs undoing.
+- **Kit change:** `mutate_port.py` writes a journal,
+  `<run.dir>/.mutate_port.journal/`, before its first write of a mutant: a
+  manifest (the writer's pid and start time, the mutants file, and for each
+  touched file its path, the SHA-256 of its original bytes and every
+  mutant's edits to it) and a copy of each original. The journal is built
+  under another name, each piece fsynced, renamed into place whole, and
+  removed only after the final restore has been checked and fsynced; a
+  journal that cannot be removed then is exit 2, saying so. Every invocation
+  looks for it before it touches the tree. A live writer is refused (exit 2):
+  it is the process with the journal's pid that started when the journal
+  records (clock ticks and boot id under /proc, else the start `ps` gives),
+  whatever its name, so a run started through a link is still a run.
+  For a dead writer, each file is reported as back to its original, holding
+  exactly one journaled mutant (named), or changed some other way (exit 2).
+  `--restore` puts back only the second kind, checks each by SHA-256, never
+  touches the third, and removes the journal once neither is left. A journal
+  that is not whole is never used. While it exists the journal is the lock,
+  so a second run over the same run.dir refuses, and no ignore rule hides it
+  from `git status`. `--check-clean` is the one-command proof that no mutant
+  is left, for every mutant that read CLEAN on the tree it was run against.
+  It requires no journal and every mutant's `old` exactly once, and it finds
+  an inserted line left in place by reverting its `new` and applying it
+  again. It never counts `new`, prints how many mutants and files it
+  checked, and writes nothing to the tree. A mutant whose own edit re-forms
+  its `old` (`0x1000` → `0x100` over `0x10000`) cannot be told from the tree
+  at all: it reads AMBIGUOUS (exit 1) on its clean tree, and once applied it
+  may read CLEAN, so it must be re-anchored before it is committed; what a
+  run killed outright left is the journal's to say, not the tree's.
+  `--apply-only` makes the same checks, so CI's run of it fails on a
+  committed mutant. A full run refuses a tree that reads LIVE (an inserted
+  line); any other mutant left in place reads DOES-NOT-APPLY, with a hint
+  that the tree may hold it, and the run goes on, so the proof is
+  `--check-clean`, not a green baseline. The self-tests SIGKILL a run's
+  process group mid-gate and restore from its journal, refuse a live writer
+  (whatever it is called, even in its baseline, and with no /proc), never
+  use a half-written journal, and never touch a file changed by hand.
+  Gate-mutation pins the restore cases and the inserted-line check, and all
+  23 decisions in the three swept verdict functions (46 decision mutants,
+  each decision forced true and then false). The primary line
+  (kj299/c2rust-port) carries the same harness and needs the same change. Its
+  maintainer upstreams it there, and no one else may push to it.
+- **Section amended:** `harnesses/port-mutation/mutate_port.py`;
+  `harnesses/gate-mutation/mutate_gates.py`; PLAYBOOK · Phase 4 step 2;
+  `skills/porting-kit-module/SKILL.md`; README · harness table.
