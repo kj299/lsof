@@ -27,11 +27,11 @@ matrix one.
 Determinism: everything random is driven by `--seed` (default 0), so a run is
 100% reproducible and a reported finding always reproduces. The input is fuzzed
 on STDIN by default (the parse/decode surface the port must harden); fixed argv
-comes from `--args`.
+comes from `--args`, or after a final `--` for arguments that start with `-`.
 
 ARGV MODE (`--argv-inventory FILE`). A tool whose input is its command line has
 its parser on argv, and stdin never reaches it. In this mode the fuzzed input is
-the words after `--args`: options drawn from a coverage-gate feature inventory
+the words after the fixed argv: options drawn from a coverage-gate feature inventory
 (its `options` letters, and which of them `takes_value`), spelt every way getopt
 offers them (`-x`, `+x`, a cluster, a value attached or in the next word, a
 value from a list of awkward ones plus `--argv-value`), options first and at
@@ -47,13 +47,14 @@ Usage:
   diff_fuzz.py --oracle PATH --rust PATH [--seed N] [--iterations N | --max-time S]
                [--args A ...] [--seed-file F ...] [--matrix M]
                [--argv-inventory TOML [--argv-exclude LETTERS]
-                [--argv-value V ...] [--argv-words N]] [-- FIXED-ARGV ...]
-  Fixed arguments that start with `-`, as a command-line tool's do, go after
-  `--`: `--args -a -p 1` reads `-a` as an option of this script.
+                [--argv-value V ...] [--argv-words N]]
                [--ledger DIVERGENCES.md] [--findings-dir DIR]
                [--timeout S] [--max-findings N] [--sort] [--mask-numbers]
-               [--ignore-exit] [--with-stderr] [--json]
+               [--ignore-exit] [--with-stderr] [--json] [-- FIXED-ARGV ...]
   diff_fuzz.py --self-test
+  Fixed arguments that start with `-`, as a command-line tool's do, go after a
+  final `--`: `--args -a -p 1` reads `-a` as an option of this script, and every
+  word after `--` is fixed argv, so it comes last.
 
 Exit: 0 = no new (unledgered) divergence; 1 = at least one finding; 2 = usage.
 """
@@ -558,7 +559,7 @@ def main(argv=None):
     ap.add_argument("--seed-file", nargs="*", dest="seed_files", default=[], help="seed corpus files")
     ap.add_argument("--matrix", help="also seed the corpus from a matrix's stdin fields")
     ap.add_argument("--ledger", default="DIVERGENCES.md", help="known-intentional-divergence ledger")
-    ap.add_argument("--findings-dir", help="write <fp>.input / <fp>.diff reproducers here")
+    ap.add_argument("--findings-dir", help="write <fp>.input (<fp>.argv in argv mode) / <fp>.diff reproducers here")
     ap.add_argument("--timeout", type=float, default=10, help="per-run timeout (s); a rust hang is a finding")
     ap.add_argument("--max-findings", type=int, default=25, help="stop after this many distinct findings")
     ap.add_argument("--minimize-budget", type=int, default=200, help="max shrink steps per finding")

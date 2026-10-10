@@ -37,9 +37,13 @@ promotion is validated by the mechanism it enables.
 
 - **Design the release trigger with a human-button fallback** (LESSONS #14):
   lsof-rs's release workflow fires on a tag push *or* `workflow_dispatch` with a
-  tag input, and the dispatch path — where `gh release create --target
-  $GITHUB_SHA` makes the tag server-side — is what shipped v0.3.0 when the
-  automated session turned out to lack both tag-push and dispatch permission.
+  tag input, and the dispatch path — where `gh release create --target` makes
+  the tag server-side — is what shipped v0.3.0 when the automated session
+  turned out to lack both tag-push and dispatch permission. Target the tag's
+  own commit when the tag exists, not `$GITHUB_SHA`, the branch a dispatch ran
+  from: a dispatch for an existing tag otherwise republishes that branch's head
+  under the old version. lsof-rs's workflow builds from the tag, and replaces a
+  published release only when its `replace` input is ticked.
   Preflight those permissions before declaring release-ready (Phase 3), and
   verify the *published* release from its public page rather than the API — a
   quota-free check that also proves what users actually see (assets, target

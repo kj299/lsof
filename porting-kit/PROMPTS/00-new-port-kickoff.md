@@ -43,6 +43,7 @@ begin porting modules until the order is agreed.
 
 When you do build, copy `porting-kit/skeleton/` for the workspace shape, wire
 `porting-kit/harnesses/ci/porting-ci.template.yml` into CI (it invokes every
-control `CLAUDE.md` declares; fill in its `<unit>` and `<binary>` placeholders),
+control `CLAUDE.md` declares; fill in its `<unit>` and `<binary>` placeholders,
+the `c-src/` it scans and the `./c-oracle` it diffs against),
 and run
 `make -C porting-kit check-kit` to confirm the harnesses work in this repo.

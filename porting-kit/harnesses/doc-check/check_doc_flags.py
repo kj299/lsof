@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
+# Local: #087.
 # Re-cited: #7 by title (no entry in this log).
 """Doc-flag drift check — every flag the docs attribute to a kit harness must
 exist in that harness's source. Documented commands are code: they get pasted.
@@ -107,9 +108,18 @@ def _doc_claims(line, known_scripts):
 
 def run(kit_root):
     scripts = _find_scripts(kit_root)
+    docs = sorted(_iter_doc_files(kit_root))
+    # A root with no harness or no document checks nothing: given a path that
+    # did not exist, this printed "0 ... checked, 0 drifted" and passed
+    # (LESSONS #087). Exit 2, the kit's "cannot judge".
+    if not scripts or not docs:
+        print(f"error: {kit_root}: found {len(scripts)} harness script(s) and "
+              f"{len(docs)} document(s) — the wrong KIT_ROOT? A check that reads "
+              f"nothing must not pass", file=sys.stderr)
+        return 2
     sources = {}
     problems, checked = [], 0
-    for doc in sorted(_iter_doc_files(kit_root)):
+    for doc in docs:
         rel = os.path.relpath(doc, kit_root)
         for lineno, line in enumerate(open(doc, encoding="utf-8"), 1):
             for script, flag in _doc_claims(line, scripts):
@@ -153,6 +163,18 @@ def _self_test():
         open(os.path.join(root, "README.md"), "w").write(
             "`tool.py --real-flag` then `other.py --other-flag`\n")
         check("per-script attribution on one line", run(root) == 0)
+    # Nothing to read is "cannot judge", never a pass (LESSONS #087).
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory() as root, contextlib.redirect_stderr(io.StringIO()):
+        check("a KIT_ROOT that does not exist is exit 2",
+              run(os.path.join(root, "gone")) == 2)
+        open(os.path.join(root, "README.md"), "w").write("run `tool.py --x`\n")
+        check("documents but no harness script is exit 2", run(root) == 2)
+        os.remove(os.path.join(root, "README.md"))
+        os.makedirs(os.path.join(root, "harnesses", "x"))
+        open(os.path.join(root, "harnesses", "x", "tool.py"), "w").write("pass\n")
+        check("a harness script but no document is exit 2", run(root) == 2)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

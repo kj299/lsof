@@ -1,4 +1,5 @@
-# Safety-first CI for a C-to-Rust port. Copy to .github/workflows/ci.yml and tune.
+# Safety-first CI for a C-to-Rust port. Copy to .github/workflows/porting-ci.yml
+# (the name its own path filters below watch) and tune.
 # The matrix is organized around SAFETY GATES, not OS coverage — the point of the
 # rewrite is safety, so the pipeline centers on proving it. Keep a small OS row if
 # your port is cross-platform; it is not the focus.
@@ -7,7 +8,7 @@
 # declares is invoked below; `make check-kit` runs control-coverage over this file,
 # so a control added there and not wired here fails the kit (LESSONS #080):
 #   build+test | clippy -D warnings | unsafe contained + documented (HARD FAIL) |
-#   c-flaw scanner self-test | ledgers | threat model (HARD FAIL) | miri | asan |
+#   c-flaw scan (self-test + the C) | ledgers | threat model (HARD FAIL) | miri | asan |
 #   fuzz smoke | supply-chain (audit + deny) | differential | coverage
 name: porting-ci
 
