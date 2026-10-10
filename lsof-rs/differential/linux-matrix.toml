@@ -644,6 +644,155 @@ args = ["-n", "-P", "+L", "-a", "-d", "mem,DEL", "-p", "{M}"]
 name = "mapped-in-another-mount-namespace-fields"
 args = ["-n", "-P", "-FfatDsiklnr", "-a", "-d", "mem,DEL", "-p", "{M}"]
 
+# A path argument finds a file by its `st_dev` and inode (DIVERGENCES 101):
+# the C compares the argument's with each row's `Lf->dev` and `Lf->inode`,
+# what `-F D` and `-F i` print (`dfile.c`), whatever the file's type. For a
+# device node that is the node, on the file system holding it, and never the
+# device it names, which the DEVICE cell shows. lsof-rs compared the DEVICE
+# cell and inode, and so missed a row and found others.
+#
+# Missed: as anyone but root, the C cannot follow M's `map_files`, and its
+# `/dev/zero` mapping is the maps line's `mem REG 0,6 4 /dev/zero (stat:
+# Operation not permitted)`, which `lsof /dev/zero` finds by devtmpfs's 0,6
+# and inode 4. lsof-rs looked for `1,5` and said `no file use located`. A
+# root runner `stat`s the mapping (`CHR 1,5`), and both always found that;
+# fixture MZ is the first shape on every runner, its cases run as the user
+# it runs as.
+
+[[case]]
+name = "path-device-mapped-in-another-mount-namespace"
+args = ["-n", "-P", "-V", "-a", "-p", "{M}", "/dev/zero"]
+
+[[case]]
+name = "path-device-mapped-in-another-mount-namespace-terse"
+args = ["-t", "-a", "-p", "{M}", "/dev/zero"]
+
+[[case]]
+name = "path-device-mapped-in-another-mount-namespace-fields"
+args = ["-n", "-P", "-FftDi", "-a", "-p", "{M}", "/dev/zero"]
+
+[[case]]
+name = "path-device-mapping-found-by-its-maps-line"
+args = ["-n", "-P", "-V", "-a", "-p", "{MZ}", "/dev/zero"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# The C prints the pid and exits 0; lsof-rs printed nothing and exited 1.
+name = "path-device-mapping-found-by-its-maps-line-terse"
+args = ["-t", "-a", "-p", "{MZ}", "/dev/zero"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+name = "path-device-mapping-found-by-its-maps-line-fields"
+args = ["-n", "-P", "-FftDi", "-a", "-p", "{MZ}", "/dev/zero"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# A `+d` entry is its `lstat`'s device and inode too (`arg.c`): `+d /dev`
+# lists the mapping beside MZ's `/dev/null` fds. Exit 1 in both, for the
+# entries nothing holds.
+name = "path-device-mapping-found-by-plus-d"
+args = ["-n", "-P", "-a", "-p", "{MZ}", "+d", "/dev"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+# Found where the C finds nothing: PTG holds the pty of PTH's index N in a
+# devpts instance of its own, whose row reads like PTH's, `CHR 136,N ...
+# N+3` (devpts numbers a pty's inode N+3 in every instance), on another file
+# system: `D` differs. `lsof /dev/pts/N` is PTH's row in the C; lsof-rs also
+# listed PTG's, and with PTG alone listed it where the C says `no file use
+# located`. A container's own `/dev/null` was the same.
+
+[[case]]
+name = "path-pty-of-another-devpts-is-another-file"
+args = ["-n", "-P", "-V", "-a", "-p", "{PTH},{PTG}", "{PTS}"]
+
+[[case]]
+name = "path-pty-of-another-devpts-alone-is-not-located"
+args = ["-n", "-P", "-V", "-a", "-p", "{PTG}", "{PTS}"]
+
+[[case]]
+name = "path-pty-of-another-devpts-fields"
+args = ["-n", "-P", "-FpftDi", "-a", "-p", "{PTH},{PTG}", "{PTS}"]
+
+# Both ways between a file and a node naming its file system: DN's `t/y` is
+# inode 3 on tmpfs `t`, and `u/node` (held `O_PATH`) is `c` of `t`'s device,
+# inode 3 on `u`. Each argument finds its own file only; lsof-rs found both
+# with either. A block device beside the file system it backs is this shape
+# (measured with a loop device, which no fixture binds).
+
+[[case]]
+name = "path-file-is-not-a-node-naming-its-file-system"
+args = ["-n", "-P", "-V", "-a", "-p", "{DN}", "{DNFILE}"]
+
+[[case]]
+name = "path-node-is-not-a-file-on-the-file-system-it-names"
+args = ["-n", "-P", "-V", "-a", "-p", "{DN}", "{DNNODE}"]
+
+[[case]]
+# The node alone, in fields: `D` its own file system, `r` the one it names.
+name = "path-node-fields-are-its-own-file-system"
+args = ["-n", "-P", "-FftDir", "-a", "-p", "{DN}", "{DNNODE}"]
+
+[[case]]
+# LEDGERED (DIVERGENCES 125, OPEN). `t` is a mount point, so a file-system
+# argument, and `t/y` is the only file DN has on it. The C's
+# `is_file_named()` marks one search item per row, the file argument first,
+# so `t` is reported `no file system use located` and the run exits 1, in
+# either order. lsof-rs marks both and exits 0.
+name = "path-file-and-its-file-system-one-item-per-row-in-the-c"
+args = ["-n", "-P", "-V", "-a", "-p", "{DN}", "{DNT}", "{DNFILE}"]
+
+# A socket is found by no path through its own device and inode, nor by its
+# file system: the C hands every socket to `process_proc_sock()`, which
+# compares only an AF_UNIX socket's bound path (DIVERGENCES 101). Rows no
+# table describes keep a device and an inode for `-F D` and `-F i`, and
+# lsof-rs found them by those. SF's fd 3 is a TCP socket bound and never
+# listening, fd 4 a unix socket bound at {SFSOCK}, fd 5 an `O_PATH`
+# descriptor on that socket file; J's fd 3, a listener in a network
+# namespace of its own. Their own rows differ in TYPE and NAME (items 22,
+# 126), so no case prints them, and none passes `-V`, which would report
+# fds 0 and 1, the same `/dev/null`, as item 17 does.
+
+[[case]]
+# `-x l` makes the `+d` walk follow `/proc/SF/fd/3` to the socket. The C
+# prints nothing and exits 1; lsof-rs printed `f3 tSOCK D0x9 i<N>`.
+name = "sock-no-table-names-is-no-plus-d-entry"
+args = ["-n", "-P", "-FftDi", "-a", "-p", "{SF}", "-d", "3", "-x", "l", "+d", "/proc/{SF}/fd"]
+
+[[case]]
+name = "sock-no-table-names-is-no-plus-d-entry-terse"
+args = ["-t", "-a", "-p", "{SF}", "-d", "3", "-x", "l", "+d", "/proc/{SF}/fd"]
+
+[[case]]
+# The `sock … protocol: TCP` row of another network namespace, the same.
+name = "netns-socket-is-no-plus-d-entry"
+args = ["-n", "-P", "-FftDi", "-a", "-p", "{J}", "-d", "3", "-x", "l", "+d", "/proc/{J}/fd"]
+
+[[case]]
+# The listener, by its bound path; not fd 5, the socket file's own device
+# and inode.
+name = "sock-file-held-by-path-is-not-found-by-it"
+args = ["-n", "-P", "-Fft", "-a", "-p", "{SF}", "{SFSOCK}"]
+
+[[case]]
+# Nothing printed; exit 0 in both, the file system located by SF's cwd.
+name = "sock-file-held-by-path-is-not-on-its-file-system"
+args = ["-n", "-P", "-Fft", "-a", "-p", "{SF}", "-d", "5", "{SFFS}"]
+
+[[case]]
+# `/proc/SF/fd/5` leads to the socket file: the listener is found by it,
+# fd 5 is not. Exit 1 in both, for the entries nothing names.
+name = "sock-file-held-by-path-is-no-plus-d-entry"
+args = ["-n", "-P", "-Fft", "-a", "-p", "{SF}", "-d", "4,5", "-x", "l", "+d", "/proc/{SF}/fd"]
+
+[[case]]
+# LEDGERED (DIVERGENCES 126, OPEN). The row itself: the C's
+# `process_proc_sock()` names no protocol for a socket file reached by its
+# path, `tsock`, `o0t0`, `ncan't identify protocol`; lsof-rs types it by
+# its `stat`, `tSOCK`, `s0`, and its path for NAME.
+name = "sock-file-held-by-path-row-in-the-c"
+args = ["-n", "-P", "-FftDsoin", "-a", "-p", "{SF}", "-d", "5"]
+
 # A file-system argument finds a socket bound at exactly the path typed
 # (DIVERGENCES 60, from the review). Fixture MS binds one at `/dev/shm`, free
 # in its own mount namespace, where a tmpfs covers `/dev`; here that path is a

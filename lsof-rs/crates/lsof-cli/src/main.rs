@@ -20,8 +20,8 @@ use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, DirArg, FilesystemArgs, Located, PathItem, SafeFs, Selection, TaskMode,
-    UidSel, UserLookup,
+    errno_text, Backend, DirArg, FileId, FilesystemArgs, Located, PathItem, SafeFs, Selection,
+    TaskMode, UidSel, UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -325,9 +325,9 @@ impl WalkBudget {
 /// DIVERGENCES 111 takes the second `stat` out. Its warnings go where the
 /// layer's do, stderr, so that a test can hold them.
 fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper, fs: &SafeFs) {
-    fn enter(sel: &mut Selection, path: &Path, id: Option<(String, String)>) {
-        if let Some(id) = &id {
-            sel.path_ids.insert(id.clone());
+    fn enter(sel: &mut Selection, path: &Path, id: Option<FileId>) {
+        if let Some(id) = id {
+            sel.path_ids.insert(id);
             sel.path_names.insert(path.as_os_str().to_os_string());
         }
         sel.path_items.push(PathItem {
@@ -346,9 +346,13 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
         canonicalize_selector(&mut p);
         PathBuf::from(p)
     };
-    // A file is identified by a `stat` that follows links; where names are
+    // A file is identified by a `stat` that follows links, as its `st_dev`
+    // and inode (DIVERGENCES 101): the C's `ck_file_arg()` keeps those of the
+    // `stat` it was handed (`arg.c:1077`), so a device node in `+d /dev` is
+    // the node, on devtmpfs. For an entry that is no link that is its own
+    // `lstat`'s pair; the second call is DIVERGENCES 111. Where names are
     // matched there is nothing to identify, and no call is made.
-    let identify = |path: &Path| -> Option<Option<(String, String)>> {
+    let identify = |path: &Path| -> Option<Option<FileId>> {
         if !identified {
             return Some(None);
         }
@@ -989,7 +993,7 @@ fn main() {
                 .map(|st| env.backend.identify_stat(&st))
             {
                 Ok(Some(id)) => {
-                    sel.path_ids.insert(id.clone());
+                    sel.path_ids.insert(id);
                     sel.path_names.insert(typed.as_str().into());
                     sel.path_items.push(PathItem {
                         id: Some(id),
@@ -1440,7 +1444,10 @@ mod tests {
         let sel = Selection {
             path_items: vec![
                 PathItem {
-                    id: Some(("254,0".into(), "11".into())),
+                    id: Some(lsof_core::FileId {
+                        dev: 0xfe00,
+                        ino: 11,
+                    }),
                     fs_device: None,
                     name: "./x".into(),
                 },
@@ -1498,10 +1505,10 @@ mod tests {
             fn node(p: &str, follow: bool) -> io::Result<FileStat> {
                 let (mode, ino) = match p {
                     "/w" | "/w/sub" => (0o040_755, p.len() as u64),
-                    "/w/a" => (0o100_644, 2),
+                    "/w/a" => (0o100_644, 4),
                     "/w/hung" => return Err(timed_out()),
                     "/w/l" if !follow => (0o120_777, 3),
-                    "/w/l" => (0o100_644, 2),
+                    "/w/l" => (0o100_644, 4),
                     _ => return Err(io::Error::from(io::ErrorKind::NotFound)),
                 };
                 Ok(FileStat {
@@ -1535,8 +1542,11 @@ mod tests {
             fn name(&self) -> &str {
                 "ids"
             }
-            fn identify_stat(&self, st: &FileStat) -> Option<(String, String)> {
-                Some((st.dev.to_string(), st.ino.to_string()))
+            fn identify_stat(&self, st: &FileStat) -> Option<lsof_core::FileId> {
+                Some(lsof_core::FileId {
+                    dev: st.dev,
+                    ino: st.ino,
+                })
             }
             fn identifies_paths(&self) -> bool {
                 true
@@ -1618,6 +1628,17 @@ mod tests {
             items,
             ["/w", "/w/a", "/w/l", "/w/sub"],
             "on past the timeout"
+        );
+        // Each is its `stat`'s device and inode (DIVERGENCES 101); the link,
+        // its target's (4), not its own (3).
+        let ids: Vec<Option<(u64, u64)>> = sel
+            .path_items
+            .iter()
+            .map(|i| i.id.map(|id| (id.dev, id.ino)))
+            .collect();
+        assert_eq!(
+            ids,
+            [Some((1, 2)), Some((1, 4)), Some((1, 4)), Some((1, 6))]
         );
 
         // `-w` where the `+D` stood mutes it; nothing else changes.

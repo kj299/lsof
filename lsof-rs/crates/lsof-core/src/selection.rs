@@ -596,9 +596,9 @@ pub struct Located {
 /// item the C reports on (an `Sfile` entry).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PathItem {
-    /// The `(DEVICE, NODE)` of the file it names, when the backend resolved
-    /// it.
-    pub id: Option<(String, String)>,
+    /// The identity (`st_dev`, inode) of the file it names, when the backend
+    /// resolved it.
+    pub id: Option<crate::model::FileId>,
     /// Set when it named a **file system**: any file on it locates it, as it
     /// has no identity of its own.
     pub fs_device: Option<u64>,
@@ -710,7 +710,7 @@ pub struct Selection {
     /// [`Selection::dirs_one_level`] and [`Selection::dir_trees`] keep the
     /// same arguments as typed, for a backend that matches names.
     pub dir_args: Vec<DirArg>,
-    /// The `(DEVICE, NODE)` identities named by the path arguments, resolved
+    /// The identities (`st_dev`, inode) named by the path arguments, resolved
     /// once at startup from one bounded `stat` each, through
     /// [`Backend::identify_stat`](crate::Backend), and expanded for `+d`/`+D`.
     ///
@@ -720,7 +720,7 @@ pub struct Selection {
     /// no path was given, or when the backend cannot identify paths; in the
     /// latter case selection falls back to matching names, which is what the
     /// Windows backend still does.
-    pub path_ids: std::collections::HashSet<(String, String)>,
+    pub path_ids: std::collections::HashSet<crate::model::FileId>,
     /// Every path argument as it was typed, and every entry a `+d`/`+D`
     /// expansion produced: the C's `aname`s, which it compares with an
     /// AF_UNIX socket's bound path when the socket file's identity did not
@@ -1054,9 +1054,11 @@ impl Selection {
         // The comparison is against the FILESYSTEM device, never the DEVICE
         // cell: that cell shows `st_rdev` for a device node, so keying on it
         // made `lsof /` match every character device on the host. This is why
-        // the rule waited for `OpenFile::fs_device` to exist.
+        // the rule waited for `OpenFile::fs_device` to exist. Not a socket's,
+        // which the C never compares: an `O_PATH` descriptor on a socket file
+        // was listed under that file's file system (DIVERGENCES 101).
         if !self.path_fs_devices.is_empty() {
-            if let Some(dev) = f.fs_device {
+            if let Some(dev) = f.searched_fs_device() {
                 if self.path_fs_devices.contains(&dev) {
                     return true;
                 }
@@ -1065,9 +1067,17 @@ impl Selection {
         // Identity next: a path argument names a *file*, and lsof matches the
         // file it names however that file is reached. `+d`/`+D` were already
         // expanded into this set, so a directory tree is just more identities.
+        //
+        // The row's identity is its `st_dev` and inode, the C's `Lf->dev ==
+        // s->dev && Lf->inode == s->i` (`dfile.c`), with no regard to its
+        // type. Not the DEVICE cell, which is `st_rdev` for a device node:
+        // keyed on it, a mapping of `/dev/zero` the C finds by its maps line
+        // (`REG 0,6`) was missed, and a node with the same device number and
+        // inode on another file system was found — another devpts's pty of
+        // the same index, a container's `/dev/null` (DIVERGENCES 101).
         if self.paths_identified {
-            if let (Some(dev), Some(node)) = (f.device.as_deref(), f.node.as_deref()) {
-                if self.path_ids.contains(&(dev.to_string(), node.to_string())) {
+            if let Some(id) = f.file_id() {
+                if self.path_ids.contains(&id) {
                     return true;
                 }
             }
@@ -1086,7 +1096,7 @@ impl Selection {
                 .as_deref()
                 .and_then(|s| s.bound.as_deref())
                 .is_some_and(|b| {
-                    b.id.as_ref().is_some_and(|id| self.path_ids.contains(id))
+                    b.id.is_some_and(|id| self.path_ids.contains(&id))
                         || b.path
                             .as_ref()
                             .is_some_and(|p| self.path_names.contains(OsStr::new(p)))
@@ -1571,7 +1581,7 @@ impl Selection {
 /// makes an item of every entry under it, and a whole host has thousands of
 /// files.
 struct PathIndex<'a> {
-    by_id: HashMap<(&'a str, &'a str), Vec<usize>>,
+    by_id: HashMap<crate::model::FileId, Vec<usize>>,
     by_fs: HashMap<u64, Vec<usize>>,
     /// Every item by its name as typed, for a socket's bound path: the C
     /// compares that with every argument, a file system's included.
@@ -1596,11 +1606,7 @@ impl<'a> PathIndex<'a> {
             ix.by_name.entry(item.name.as_os_str()).or_default().push(i);
             match (&item.id, item.fs_device) {
                 (_, Some(dev)) => ix.by_fs.entry(dev).or_default().push(i),
-                (Some((d, n)), None) => ix
-                    .by_id
-                    .entry((d.as_str(), n.as_str()))
-                    .or_default()
-                    .push(i),
+                (Some(id), None) => ix.by_id.entry(*id).or_default().push(i),
                 (None, None) if !identified => {
                     ix.by_prefix
                         .push((i, item.name.to_string_lossy().to_ascii_lowercase()));
@@ -1627,18 +1633,20 @@ impl<'a> PathIndex<'a> {
                 hits[i] = true;
             }
         };
-        if let (Some(d), Some(n)) = (f.device.as_deref(), f.node.as_deref()) {
-            hit(self.by_id.get(&(d, n)));
+        // By the row's `st_dev` and inode, and its file system, as
+        // `path_matches` selects it: a socket's are never compared.
+        if let Some(id) = f.file_id() {
+            hit(self.by_id.get(&id));
         }
-        if let Some(dev) = f.fs_device {
+        if let Some(dev) = f.searched_fs_device() {
             hit(self.by_fs.get(&dev));
         }
         if let Some(b) = f.socket.as_deref().and_then(|s| s.bound.as_deref()) {
             if let Some(path) = &b.path {
                 hit(self.by_name.get(OsStr::new(path)));
             }
-            if let Some((d, n)) = &b.id {
-                hit(self.by_id.get(&(d.as_str(), n.as_str())));
+            if let Some(id) = &b.id {
+                hit(self.by_id.get(id));
             }
         }
         if !self.by_prefix.is_empty() && selected() {
@@ -2455,12 +2463,12 @@ mod tests {
     fn a_path_argument_matches_identity_not_a_name_prefix() {
         // lsof matches a path by what the file IS. The identity set is filled
         // by the CLI from the backend, so here it stands in directly: a row
-        // whose (DEVICE, NODE) is in the set matches whatever it is called,
+        // whose (`st_dev`, inode) is in the set matches whatever it is called,
         // and a row merely *named* under the query does not.
-        use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
+        use crate::model::{AccessMode, FdType, FileId, FileType, OpenFile, Process};
         let row = |name: &str, dev: &str, node: &str| OpenFile {
             rdev: None,
-            fs_device: None,
+            fs_device: Some(7),
             file_flags: None,
             lock: None,
             fd: FdType::Handle(3),
@@ -2482,7 +2490,7 @@ mod tests {
             paths_identified: true,
             ..Default::default()
         };
-        sel.path_ids.insert(("C:".into(), "42".into()));
+        sel.path_ids.insert(FileId { dev: 7, ino: 42 });
         let p = Process {
             tid: None,
             task_command: None,
@@ -2508,6 +2516,226 @@ mod tests {
         assert_eq!(got[0].files[0].node.as_deref(), Some("42"));
     }
 
+    /// A row as a path argument sees it: on file system `fs`, inode `ino`,
+    /// showing `device` in its DEVICE cell.
+    fn identified_row(
+        fd: crate::model::FdType,
+        file_type: crate::model::FileType,
+        fs: Option<u64>,
+        device: &str,
+        ino: &str,
+    ) -> crate::model::OpenFile {
+        crate::model::OpenFile {
+            rdev: None,
+            fs_device: fs,
+            file_flags: None,
+            lock: None,
+            fd,
+            access: crate::model::AccessMode::Read,
+            file_type,
+            name: "/dev/zero".into(),
+            device: Some(device.into()),
+            size: None,
+            offset: None,
+            node: Some(ino.into()),
+            links: None,
+            socket: None,
+        }
+    }
+
+    fn one_process(files: Vec<crate::model::OpenFile>) -> Process {
+        Process {
+            tid: None,
+            task_command: None,
+            uid: None,
+            pgid: None,
+            pid: 7,
+            ppid: None,
+            command: "x".into(),
+            user: None,
+            endpoint_peer: false,
+            unlisted: false,
+            files,
+        }
+    }
+
+    /// The selection a path argument with identity `id` makes, as the CLI
+    /// fills it.
+    fn naming(id: crate::model::FileId) -> Selection {
+        let mut sel = Selection {
+            paths: vec!["/dev/zero".into()],
+            paths_identified: true,
+            path_items: vec![PathItem {
+                id: Some(id),
+                fs_device: None,
+                name: "/dev/zero".into(),
+            }],
+            ..Default::default()
+        };
+        sel.path_ids.insert(id);
+        sel
+    }
+
+    #[test]
+    fn a_device_node_argument_is_its_own_inode_not_the_device_it_names() {
+        // DIVERGENCES 101. `/dev/zero` is inode 4 on devtmpfs 0,6 and names
+        // device 1,5. The C finds a row by `st_dev` and inode (`dfile.c`):
+        // the fd's `CHR 1,5` row (devtmpfs in `fs_device`), and a mapping it
+        // could not `stat` (another mount namespace, as non-root), which is
+        // `REG 0,6` from its maps line. Not a node naming 1,5 with inode 4 on
+        // another file system (a container's own `/dev`, 0,41). Keyed on the
+        // DEVICE cell, lsof-rs missed the second and found the third.
+        use crate::model::{FdType, FileId, FileType};
+        let sel = naming(FileId { dev: 0x6, ino: 4 });
+        let maps = identified_row(FdType::Mem, FileType::Regular, Some(0x6), "0,6", "4");
+        let fd = identified_row(FdType::Handle(3), FileType::Chr, Some(0x6), "1,5", "4");
+        let twin = identified_row(FdType::Handle(4), FileType::Chr, Some(0x29), "1,5", "4");
+        let got = sel.apply(vec![one_process(vec![
+            maps.clone(),
+            fd.clone(),
+            twin.clone(),
+        ])]);
+        let fds: Vec<&FdType> = got[0].files.iter().map(|f| &f.fd).collect();
+        assert_eq!(fds, [&FdType::Mem, &FdType::Handle(3)], "{got:#?}");
+        assert_eq!(sel.locate(&[one_process(vec![maps])]).paths, [true]);
+        assert_eq!(sel.locate(&[one_process(vec![fd])]).paths, [true]);
+        assert_eq!(
+            sel.locate(&[one_process(vec![twin])]).paths,
+            [false],
+            "another file system's node locates nothing"
+        );
+    }
+
+    #[test]
+    fn a_file_is_not_a_device_named_after_its_file_system() {
+        // DIVERGENCES 101, the other way round: a regular file, inode 3 on
+        // the tmpfs 0,41 (0x29), and a node elsewhere (0x2a) that names
+        // device 0,41 and has inode 3 too. The file argument finds the file;
+        // the node's DEVICE cell and inode, `0,41` and 3, are not its
+        // identity. Measured against the C with an `O_PATH` node and a block
+        // device next to the file system it backs.
+        use crate::model::{FdType, FileId, FileType};
+        let sel = naming(FileId { dev: 0x29, ino: 3 });
+        let node = identified_row(FdType::Handle(4), FileType::Chr, Some(0x2a), "0,41", "3");
+        let file = identified_row(
+            FdType::Handle(5),
+            FileType::Regular,
+            Some(0x29),
+            "0,41",
+            "3",
+        );
+        let got = sel.apply(vec![one_process(vec![node.clone(), file])]);
+        let fds: Vec<&FdType> = got[0].files.iter().map(|f| &f.fd).collect();
+        assert_eq!(fds, [&FdType::Handle(5)], "{got:#?}");
+        assert_eq!(sel.locate(&[one_process(vec![node])]).paths, [false]);
+    }
+
+    #[test]
+    fn an_exempt_row_and_a_socket_from_the_tables_have_no_identity() {
+        // `-e` keeps a mapping's maps-line device and inode on its row, but
+        // the C never `stat`s it nor asks whether a path names it
+        // (`isefsys()`); a socket the tables describe has no `fs_device`, the
+        // C handing it to `process_proc_sock()` before `is_file_named()`.
+        use crate::model::{FdType, FileId, FileType};
+        let id = FileId { dev: 0x6, ino: 4 };
+        let live = identified_row(FdType::Mem, FileType::Regular, Some(0x6), "0,6", "4");
+        assert_eq!(live.file_id(), Some(id));
+        let exempt = crate::model::OpenFile {
+            file_type: FileType::Exempt("mem"),
+            ..live.clone()
+        };
+        assert_eq!(
+            (exempt.file_id(), exempt.searched_fs_device()),
+            (None, None)
+        );
+        let sock = crate::model::OpenFile {
+            fs_device: None,
+            node: Some("1234".into()),
+            ..live.clone()
+        };
+        assert_eq!(sock.file_id(), None);
+        // A NODE that is no inode, the protocol of an Internet socket.
+        let tcp = crate::model::OpenFile {
+            node: Some("TCP".into()),
+            ..live
+        };
+        assert_eq!(tcp.file_id(), None);
+        let sel = naming(id);
+        assert!(sel
+            .apply(vec![one_process(vec![exempt.clone()])])
+            .is_empty());
+        assert_eq!(sel.locate(&[one_process(vec![exempt])]).paths, [false]);
+    }
+
+    #[test]
+    fn a_socket_no_table_names_is_found_by_no_path_and_no_file_system() {
+        // DIVERGENCES 101. The C hands every socket to `process_proc_sock()`
+        // (`dnode.c`), which never asks `is_file_named()` about its own device
+        // and inode. Rows no table describes keep them for `-F D` and `-F i`:
+        // `sock`, sockfs 0,9, the socket's inode (a TCP socket bound but not
+        // listening, reached by `-x l +d /proc/PID/fd`), and `SOCK`, a socket
+        // file's on 0x29 (an `O_PATH` descriptor on it, reached by its path
+        // and its file system). Measured: the C lists neither, and locates no
+        // argument by them. lsof-rs listed both.
+        use crate::model::{FdType, FileId, FileType};
+        let unnamed = identified_row(
+            FdType::Handle(3),
+            FileType::Socket("sock"),
+            Some(0x9),
+            "0,9",
+            "1432541",
+        );
+        let held = identified_row(
+            FdType::Handle(5),
+            FileType::Socket("SOCK"),
+            Some(0x29),
+            "0,41",
+            "2",
+        );
+        for row in [&unnamed, &held] {
+            assert_eq!((row.file_id(), row.searched_fs_device()), (None, None));
+            assert!(row.fs_device.is_some(), "`-F D` still prints it");
+        }
+        // A regular file on 0x29 is found by both, so the argument is real.
+        let file = identified_row(
+            FdType::Handle(6),
+            FileType::Regular,
+            Some(0x29),
+            "0,41",
+            "2",
+        );
+        for (id, row) in [
+            (
+                FileId {
+                    dev: 0x9,
+                    ino: 1432541,
+                },
+                &unnamed,
+            ),
+            (FileId { dev: 0x29, ino: 2 }, &held),
+        ] {
+            let sel = naming(id);
+            assert!(sel.apply(vec![one_process(vec![row.clone()])]).is_empty());
+            assert_eq!(sel.locate(&[one_process(vec![row.clone()])]).paths, [false]);
+        }
+        let mut fs = Selection {
+            paths: vec!["/mnt".into()],
+            paths_identified: true,
+            path_items: vec![PathItem {
+                id: None,
+                fs_device: Some(0x29),
+                name: "/mnt".into(),
+            }],
+            ..Default::default()
+        };
+        fs.path_fs_devices.insert(0x29);
+        let got = fs.apply(vec![one_process(vec![held.clone(), file.clone()])]);
+        let fds: Vec<&FdType> = got[0].files.iter().map(|f| &f.fd).collect();
+        assert_eq!(fds, [&FdType::Handle(6)], "{got:#?}");
+        assert_eq!(fs.locate(&[one_process(vec![held])]).paths, [false]);
+        assert_eq!(fs.locate(&[one_process(vec![file])]).paths, [true]);
+    }
+
     #[test]
     fn a_path_finds_no_file_by_name_and_a_unix_socket_by_its_bound_path() {
         // DIVERGENCES 60. With identities, the C matches a file by device and
@@ -2516,11 +2744,14 @@ mod tests {
         // socket is, by the path it is bound to: the socket file's identity
         // there, or, with no socket file there, the path as typed.
         use crate::model::{
-            AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SocketInfo,
+            AccessMode, BoundPath, FdType, FileId, FileType, OpenFile, Process, Protocol,
+            SocketInfo,
         };
+        // Every row is on 0,41 (`fs_device` 0x29); a socket's bound path is
+        // what finds it, not its own sockfs identity.
         let row = |name: &str, node: &str, bound: Option<BoundPath>| OpenFile {
             rdev: None,
-            fs_device: None,
+            fs_device: Some(0x29),
             file_flags: None,
             lock: None,
             fd: FdType::Handle(3),
@@ -2550,15 +2781,22 @@ mod tests {
             paths_identified: true,
             ..Default::default()
         };
-        // Here, /d/mnt and /d/link's target are files with these identities.
-        sel.path_ids.insert(("254,0".into(), "10".into()));
-        sel.path_ids.insert(("254,0".into(), "11".into()));
+        // Here, /d/mnt and /d/link's target are files on 254,0 (0xfe00)
+        // with these inodes.
+        sel.path_ids.insert(FileId {
+            dev: 0xfe00,
+            ino: 10,
+        });
+        sel.path_ids.insert(FileId {
+            dev: 0xfe00,
+            ino: 11,
+        });
         for p in &sel.paths {
             sel.path_names.insert(p.into());
         }
-        let bound = |path: &str, id: Option<(&str, &str)>| BoundPath {
+        let bound = |path: &str, id: Option<(u64, u64)>| BoundPath {
             path: Some(path.into()),
-            id: id.map(|(d, n)| (d.into(), n.into())),
+            id: id.map(|(dev, ino)| FileId { dev, ino }),
         };
         let p = Process {
             tid: None,
@@ -2578,7 +2816,7 @@ mod tests {
                 row(
                     "/d/s.sock type=STREAM",
                     "500",
-                    Some(bound("/d/s.sock", Some(("254,0", "11")))),
+                    Some(bound("/d/s.sock", Some((0xfe00, 11)))),
                 ),
                 // Bound at /d/gone.sock, where no socket file is: the path.
                 row(
@@ -2608,8 +2846,10 @@ mod tests {
         // DIVERGENCES 60. The C marks a path argument while it builds the
         // file, before `-a` is applied, for any process it examines: by
         // identity, by file system, or by an AF_UNIX socket's bound path.
+        // Every row is on file system 9, whatever its DEVICE cell shows.
         use crate::model::{
-            AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SocketInfo,
+            AccessMode, BoundPath, FdType, FileId, FileType, OpenFile, Process, Protocol,
+            SocketInfo,
         };
         let row = |fd: u64, dev: &str, node: &str, bound: Option<BoundPath>| OpenFile {
             rdev: None,
@@ -2649,8 +2889,8 @@ mod tests {
             unlisted: false,
             files,
         };
-        let item = |id: Option<(&str, &str)>, fs: Option<u64>, name: &str| PathItem {
-            id: id.map(|(d, n)| (d.into(), n.into())),
+        let item = |id: Option<(u64, u64)>, fs: Option<u64>, name: &str| PathItem {
+            id: id.map(|(dev, ino)| FileId { dev, ino }),
             fs_device: fs,
             name: name.into(),
         };
@@ -2665,17 +2905,17 @@ mod tests {
             }),
             paths_identified: true,
             path_items: vec![
-                item(Some(("254,0", "11")), None, "/d/link-to-s.sock"),
+                item(Some((0xfe00, 11)), None, "/d/link-to-s.sock"),
                 item(None, Some(42), "/d/m"),
-                item(Some(("254,0", "99")), None, "/d/f.txt"),
-                item(Some(("254,0", "77")), None, "/d/g.txt"),
+                item(Some((9, 99)), None, "/d/f.txt"),
+                item(Some((9, 77)), None, "/d/g.txt"),
                 item(None, Some(9), "/fs"),
             ],
             ..Default::default()
         };
-        let bound = |path: &str, id: Option<(&str, &str)>| BoundPath {
+        let bound = |path: &str, id: Option<(u64, u64)>| BoundPath {
             path: Some(path.into()),
-            id: id.map(|(d, n)| (d.into(), n.into())),
+            id: id.map(|(dev, ino)| FileId { dev, ino }),
         };
         let gathered = [
             proc_(
@@ -2685,7 +2925,7 @@ mod tests {
                         3,
                         "0xffff",
                         "500",
-                        Some(bound("/d/s.sock", Some(("254,0", "11")))),
+                        Some(bound("/d/s.sock", Some((0xfe00, 11)))),
                     ),
                     row(4, "0xffff", "501", Some(bound("/d/m", None))),
                     row(5, "254,0", "99", None),
@@ -2768,23 +3008,23 @@ mod tests {
         // file of the same name, which can only be another file, nor one the
         // path filter takes for another argument (a hard link to `/real`)
         // whose name happens to start with it.
-        let real = ("0,1".to_string(), "7".to_string());
+        let real = crate::model::FileId { dev: 1, ino: 7 };
         let mut sel = Selection {
             paths: vec!["/gone".into(), "/real".into()],
             paths_identified: true,
             path_items: vec![
                 item("/gone"),
                 PathItem {
-                    id: Some(real.clone()),
+                    id: Some(real),
                     ..item("/real")
                 },
             ],
             ..Default::default()
         };
-        sel.path_ids.insert(real.clone());
+        sel.path_ids.insert(real);
         let mut link = file("/gone-too");
-        link.device = Some(real.0.clone());
-        link.node = Some(real.1.clone());
+        link.fs_device = Some(real.dev);
+        link.node = Some(real.ino.to_string());
         let mut q = p("/gone");
         q.files.push(link);
         assert_eq!(sel.locate(&[q]).paths, [false, true]);

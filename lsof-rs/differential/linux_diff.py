@@ -75,6 +75,10 @@ ledger — those are the kit's, on purpose.
   fixture Y  AF_UNIX sockets a path argument finds by the path they are
              bound to (through a link, a relative spelling, a replaced file)
   fixture T  a mapped file with a TAB in its name, which the C cuts there
+  fixture SF sockets no table describes, which no path finds by their own
+             device and inode: a TCP socket bound and never listening, and
+             an `O_PATH` descriptor on the file of a unix socket bound at
+             {SFSOCK}, on the file system mounted at {SFFS}
 
   These need a capability the runner may lack. Without it, the fixture is
   unavailable and its cases are skipped by name, not failed:
@@ -106,6 +110,16 @@ ledger — those are the kit's, on purpose.
              the C itself terminates are cases: the C hangs where a request
              is held and it `stat`s it (DIVERGENCES 118), which
              `crates/lsof-cli/tests/bounded_calls.rs` pins for lsof-rs alone
+  fixture MZ /dev/zero mapped in a user and mount namespace of its own, made
+             by the user its cases run as (U's): a row the C finds by the
+             maps line's device and inode (user namespaces; a root runner
+             needs setpriv and nobody)
+  fixture PTH a pty from this host's /dev/ptmx, at {PTS}
+  fixture PTG the same pty index in a devpts instance of its own (user
+             namespaces, and devpts mountable in one)
+  fixture DN a regular file, and a device node naming its file system with
+             the same inode, on two tmpfs mounted here (root, or
+             passwordless sudo)
 
 A case may also set LSOF_DIFF_NOFILE: both binaries then run under that
 descriptor limit (`ulimit -n`), for what a run does when it cannot open
@@ -158,6 +172,7 @@ import argparse
 import json
 import os
 import pwd
+import re
 import shlex
 import shutil
 import signal
@@ -1303,6 +1318,174 @@ def mount_ns_holder(work: str) -> Fixture:
     )
 
 
+def userns_device_mapping_holder(work: str) -> Fixture:
+    """`/dev/zero` mapped by a process in a user and mount namespace of its
+    own, made by the user the cases run as (DIVERGENCES 101).
+
+    Fixture M maps `/dev/zero` too, but M is the runner's, and a root runner
+    can follow `/proc/M/map_files/` and so `stat`s the mapping: `mem CHR 1,5`
+    in both binaries. Anyone else cannot (that takes `CAP_SYS_ADMIN`), and
+    the C's row is the maps line's: `mem REG 0,6 4 /dev/zero (stat:
+    Operation not permitted)`. `lsof /dev/zero` finds it, since the C
+    compares the argument's `st_dev` and inode, devtmpfs's `0,6` and 4, with
+    the row's (`dfile.c`). lsof-rs compared the DEVICE cell, `1,5` for the
+    node, with the row's `0,6`, and said `no file use located`. MZ is that
+    row on every runner: started through the same prefix as fixture U's
+    cases (`nobody` on a root runner, the runner itself otherwise), and its
+    cases run that way too.
+
+    Its directory is everyone's, since it writes `ready` there as that user;
+    the work directory above it is not, and it is reached as its working
+    directory, which is set before the prefix drops the uid."""
+    zdir = os.path.join(work, "userns-zero")
+    os.makedirs(zdir)
+    os.chmod(zdir, 0o777)
+    prefix = unprivileged_prefix()
+    py = MMAP_PRELUDE + (
+        "mp('/dev/zero')\n"
+        "open('ready','w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "MZ(userns /dev/zero)",
+        [
+            *(prefix or []), "unshare", "--user", "--map-root-user", "--mount",
+            "--propagation", "private", sys.executable, "-c", py,
+        ],
+        cwd=zdir,
+        # 0,1,2 under python's own comm: until then the pid is still
+        # `setpriv` or `unshare`, and a namespace that could not be made
+        # exits there, which reads as unavailable rather than broken.
+        expect_fds=3,
+        expect_comm=os.path.basename(sys.executable).encode()[:15],
+        optional=True,
+        unavailable=None if prefix is not None else "root, and no setpriv/nobody to drop to",
+    )
+
+
+def pty_holder(work: str) -> Fixture:
+    """A pty from this host's `/dev/ptmx`: the master and `/dev/pts/N`, whose
+    path it writes to `pts` (DIVERGENCES 101, with fixture PTG)."""
+    hdir = os.path.join(work, "pty")
+    os.makedirs(hdir)
+    py = (
+        "import os,time\n"
+        "m,s=os.openpty()\n"
+        "open('pts.tmp','w').write(os.ttyname(s)); os.rename('pts.tmp','pts')\n"
+        "open('ready','w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "PTH(pty)", [sys.executable, "-c", py], cwd=hdir, expect_fds=5, optional=True
+    )
+
+
+def devpts_instance_holder(work: str) -> Fixture:
+    """The same pty index in a devpts instance of its own (DIVERGENCES 101).
+
+    In a user and mount namespace of its own it mounts a new devpts on
+    `/dev/pts` and opens ptys through its `ptmx` until one has fixture PTH's
+    index N, keeping that one's `/dev/pts/N`. devpts numbers a pty's inode
+    N+3 in every instance, and the device it names is 136,N in all of them,
+    so its row shows what PTH's does, `CHR 136,N ... N+3`, on another file
+    system. The C finds a file by `st_dev` and inode, so `lsof /dev/pts/N`
+    here lists PTH's row and not this one; lsof-rs compared the DEVICE cell
+    and inode, and listed both. Unavailable without unprivileged user
+    namespaces, or where devpts cannot be mounted in one."""
+    gdir = os.path.join(work, "devpts")
+    os.makedirs(gdir)
+    py = (
+        "import ctypes,fcntl,os,struct,sys,time\n"
+        "give_up=time.monotonic()+5\n"
+        "while not os.path.exists(sys.argv[1]):\n"
+        "    if time.monotonic()>give_up: sys.exit(3)\n"
+        "    time.sleep(0.01)\n"
+        "want=int(open(sys.argv[1]).read().rsplit('/',1)[1])\n"
+        "libc=ctypes.CDLL(None,use_errno=True)\n"
+        "libc.mount.argtypes=[ctypes.c_char_p]*3+[ctypes.c_ulong,ctypes.c_char_p]\n"
+        "if libc.mount(b'devpts',b'/dev/pts',b'devpts',0,b'newinstance,ptmxmode=0666,mode=0620'):\n"
+        "    sys.exit(4)\n"
+        "keep=[]\n"
+        "while True:\n"
+        "    m=os.open('/dev/pts/ptmx',os.O_RDWR|os.O_NOCTTY)\n"
+        "    keep.append(m)\n"
+        "    fcntl.ioctl(m,0x40045431,struct.pack('i',0))\n"  # TIOCSPTLCK: unlock
+        "    n=struct.unpack('I',fcntl.ioctl(m,0x80045430,b'\\0'*4))[0]\n"  # TIOCGPTN
+        "    if n>=want: break\n"
+        "if n!=want: sys.exit(5)\n"
+        "keep.append(os.open('/dev/pts/%d'%n,os.O_RDWR|os.O_NOCTTY))\n"
+        "open('ready','w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "PTG(devpts instance)",
+        [
+            "unshare", "--user", "--map-root-user", "--mount", "--propagation",
+            "private", sys.executable, "-c", py, os.path.join(work, "pty", "pts"),
+        ],
+        cwd=gdir,
+        # 0,1,2 + a master and a slave at least: past the mount, which is
+        # what fails where devpts cannot be mounted (an exit, so unavailable).
+        expect_fds=5,
+        expect_comm=os.path.basename(sys.executable).encode()[:15],
+        optional=True,
+    )
+
+
+def socket_file_holder(work: str) -> Fixture:
+    """Sockets no table describes, which no path finds by their own device and
+    inode (DIVERGENCES 101).
+
+    The C hands every socket to `process_proc_sock()` (`dnode.c:700-705`),
+    which never asks `is_file_named()` about the socket's own device and
+    inode, nor its file system: the one comparison it makes is of an AF_UNIX
+    socket's bound path (`dsock.c:3726-3750`). Two rows here keep a device
+    and an inode all the same, which `-F D` and `-F i` print:
+
+    fd 3 is a TCP socket bound and never listening, so in no `/proc/net`
+    table (`sock … protocol: TCP` in the C, `SOCK socket:[N]` in lsof-rs:
+    item 22), on sockfs. `+d /proc/SF/fd` under `-x l` follows the link of
+    its entry to it.
+
+    fd 5 is an `O_PATH` descriptor on `s.sock`, where fd 4 listens: its link
+    is that path and its `stat` the socket file's (`sock … can't identify
+    protocol` in the C, `SOCK …/s.sock` in lsof-rs: item 126). `lsof s.sock`
+    finds fd 4 by its bound path and not fd 5, and the file system holding
+    it, `{SFFS}`, does not find fd 5 either.
+
+    lsof-rs found both by their own device and inode, and fd 5 by its file
+    system. Unprivileged, so on every runner."""
+    sdir = os.path.join(work, "sockfiles")
+    os.makedirs(sdir)
+    py = (
+        "import os,socket,time\n"
+        "t=socket.socket(); t.bind(('127.0.0.1',0))\n"
+        "u=socket.socket(socket.AF_UNIX); u.bind('s.sock'); u.listen(1)\n"
+        "o=os.open('s.sock',os.O_PATH)\n"
+        "if (t.fileno(),u.fileno(),o)!=(3,4,5): raise SystemExit(3)\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture("SF(socket files)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)
+
+
+def mount_point_of(path: str) -> str:
+    """The mount point of the file system holding `path`: the longest
+    directory in `/proc/self/mounts` that is `path` or above it, which the C
+    and lsof-rs both take as a file-system argument."""
+    path = os.path.realpath(path)
+    best = "/"
+    with open("/proc/self/mounts") as f:
+        for line in f:
+            parts = line.split(" ")
+            if len(parts) < 2:
+                continue
+            # The table escapes a space, a tab, a newline and a backslash.
+            mnt = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), parts[1])
+            if (path == mnt or path.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best):
+                best = mnt
+    return best
+
+
 # A mount point every Linux runner has: glibc keeps POSIX shared memory there.
 # Fixture MS binds a socket at exactly this path.
 SHM = "/dev/shm"
@@ -1489,6 +1672,80 @@ def cover_paths(p: Fixture, mounted: list[str]) -> None:
         )
     except (subprocess.CalledProcessError, OSError) as why:
         raise FixtureUnavailable(f"{p.name}: could not mount over its paths: {_why(why)}")
+
+
+def devnode_holder(work: str) -> Fixture:
+    """A regular file and a device node that names the file system it is on,
+    with the same inode (DIVERGENCES 101).
+
+    `t` and `u` are tmpfs the harness mounts ([`prepare_devnode`]): `t/y` is
+    the file, inode 3 on `t`, and `u/node` is `c MAJ,MIN` of `t`'s own device,
+    inode 3 on `u`, which the holder keeps `O_PATH` (opening a node with no
+    driver otherwise fails). So the node's row shows `CHR` with the DEVICE
+    cell `t`'s device and the NODE 3: what the file's row shows. The C finds
+    a file by `st_dev` and inode, so `lsof t/y` lists the file and `lsof
+    u/node` the node; lsof-rs compared the DEVICE cell and inode and listed
+    both for each. A block device beside the file system it backs is the same
+    shape, measured with a loop device, which no fixture opens: it would bind
+    a device every process on the host shares.
+
+    The mounts are made in this mount namespace, as fixture P's, so root or
+    passwordless sudo, and `mknod` takes root as well. Unavailable when
+    tmpfs does not number the two `3` (a kernel whose tmpfs inodes are
+    global), since the cases would then show nothing."""
+    ddir = os.path.join(work, "devnode")
+    for sub in ("t", "u"):
+        os.makedirs(os.path.join(ddir, sub))
+    py = (
+        "import os,sys,time\n"
+        "d=sys.argv[1]\n"
+        "give_up=time.monotonic()+60\n"
+        "while not os.path.exists(os.path.join(d,'go')):\n"
+        "    if time.monotonic()>give_up: sys.exit(3)\n"
+        "    time.sleep(0.01)\n"
+        "y=open(os.path.join(d,'t','y'))\n"
+        "n=os.open(os.path.join(d,'u','node'),os.O_PATH)\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n"
+    )
+    return Fixture(
+        "DN(device node)",
+        [sys.executable, "-c", py, ddir],
+        cwd=ddir,
+        expect_fds=3,
+        optional=True,
+        unavailable=None if root_prefix() is not None else "not root, and no passwordless sudo",
+    )
+
+
+def prepare_devnode(dn: Fixture, mounted: list[str]) -> None:
+    """Mount fixture DN's two tmpfs, this user's, make `t/x`, `t/y`, `u/a`
+    and, as root, `u/node` naming `t`'s device, and let it open them (`go`).
+    What is mounted goes into `mounted` as it is made, for [`uncover`]."""
+    own = f"uid={os.getuid()},gid={os.getgid()}"
+    t, u = os.path.join(dn.cwd, "t"), os.path.join(dn.cwd, "u")
+    node = os.path.join(u, "node")
+    try:
+        _mount(["-t", "tmpfs", "-o", own, "lsofdiff", t], mounted)
+        _mount(["-t", "tmpfs", "-o", own, "lsofdiff", u], mounted)
+        # In this order: tmpfs numbers its root 1 and each new inode after.
+        for f in (os.path.join(t, "x"), os.path.join(t, "y"), os.path.join(u, "a")):
+            open(f, "w").close()
+        dev = os.stat(t).st_dev
+        subprocess.run(
+            [*(root_prefix() or []), "mknod", node, "c", str(os.major(dev)), str(os.minor(dev))],
+            check=True,
+            capture_output=True,
+        )
+        y, n = os.stat(os.path.join(t, "y")), os.stat(node)
+    except (subprocess.CalledProcessError, OSError) as why:
+        raise FixtureUnavailable(f"{dn.name}: could not make its file systems: {_why(why)}")
+    if (y.st_ino, y.st_dev) != (n.st_ino, n.st_rdev):
+        raise FixtureUnavailable(
+            f"{dn.name}: y is inode {y.st_ino} on {y.st_dev:#x}, "
+            f"the node inode {n.st_ino} naming {n.st_rdev:#x}"
+        )
+    open(os.path.join(dn.cwd, "go"), "w").close()
 
 
 def _why(why: Exception) -> str:
@@ -1807,9 +2064,15 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     rn = relative_name_holder(work)
     t = tab_name_holder(work)
     fh = fuse_probe(work)
+    mz = userns_device_mapping_holder(work)
+    # PTH before PTG: PTG reads the index PTH got.
+    pth = pty_holder(work)
+    ptg = devpts_instance_holder(work)
+    dn = devnode_holder(work)
+    sf = socket_file_holder(work)
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
-        em, pn, rn, t, fh,
+        em, pn, rn, t, fh, mz, pth, ptg, dn, sf,
     )
 
 
@@ -1955,7 +2218,8 @@ def run(args) -> int:
             a, b, c, d, e, lk, anon, longcmd, threads, netns, packet, userns,
             offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
-            relnames, tabname, fuseprobe,
+            relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
+            sockfiles,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -1979,6 +2243,17 @@ def run(args) -> int:
             "EMFSSLASH": (exmaps, f"{SHM} is not a mount point here"),
             "EMLIVE": (exmaps, f"{SHM} is not a mount point here"),
             "P": (pathnotes, "not root, and no passwordless sudo, to mount over its paths"),
+            # MZ's cases run as the user it runs as, as U's do.
+            "MZ": (userzero, "root, and no setpriv/nobody to drop to, or no user namespaces"),
+            # PT's cases name the host's pty and the other instance's holder
+            # together; PTS is the path, known only when both came up.
+            "PTH": (ptyhost, "no pty here"),
+            "PTG": (ptyguest, "no unprivileged user namespaces, or no devpts in one"),
+            "PTS": (ptyguest, "no unprivileged user namespaces, or no devpts in one"),
+            "DN": (devnode, "not root, and no passwordless sudo, to mount and mknod"),
+            "DNFILE": (devnode, "not root, and no passwordless sudo, to mount and mknod"),
+            "DNNODE": (devnode, "not root, and no passwordless sudo, to mount and mknod"),
+            "DNT": (devnode, "not root, and no passwordless sudo, to mount and mknod"),
             "RN": (relnames, "no io_uring here"),
             "FUSE": (fuseprobe, fuse_unavailable() or "no FUSE mount here"),
             # W's cases name {W} and {WR} together; both go with it.
@@ -2036,7 +2311,7 @@ def run(args) -> int:
         started_optional = {k: v[0] for k, v in optional.items()}
         (
             netns, packet, userns, unreadable, mntns, owner, mntsock, exmaps, pathnotes,
-            relnames,
+            relnames, userzero, ptyhost, ptyguest, devnode,
         ) = (
             started_optional["J"],
             started_optional["K"],
@@ -2048,6 +2323,10 @@ def run(args) -> int:
             started_optional["EM"],
             started_optional["P"],
             started_optional["RN"],
+            started_optional["MZ"],
+            started_optional["PTH"],
+            started_optional["PTG"],
+            started_optional["DN"],
         )
         # FH is usable once its probe has mounted and stat()ed the server.
         if started_optional["FUSE"] is not None:
@@ -2064,12 +2343,22 @@ def run(args) -> int:
                 print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
                 optional["P"] = (None, optional["P"][1])
                 pathnotes = None
+        # DN opens its file and node only once they are there.
+        if devnode is not None:
+            try:
+                prepare_devnode(devnode, covered)
+            except FixtureUnavailable as unavailable:
+                print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                for key in ("DN", "DNFILE", "DNNODE", "DNT"):
+                    optional[key] = (None, optional[key][1])
+                devnode = None
         for fx in [
             f
             for f in (
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
-                mntsock, spellings, exmaps, pathnotes, relnames, tabname,
+                mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
+                ptyhost, ptyguest, devnode,
             )
             if f is not None
         ]:
@@ -2117,6 +2406,15 @@ def run(args) -> int:
                     file=sys.stderr,
                 )
                 optional["U"] = (None, optional["U"][1])
+        # PTG has PTH's index only when PTH came up, and says which in PTH's
+        # `pts`; without PTH it has given up and gone.
+        pts = os.path.join(work, "no-pts")
+        if ptyhost is None:
+            for key in ("PTG", "PTS"):
+                optional[key] = (None, optional[key][1])
+        elif optional["PTG"][0] is not None:
+            with open(os.path.join(ptyhost.cwd, "pts")) as f:
+                pts = f.read()
         # {FILE} is a path only fixture A holds; {PORT} is fixture B's
         # listener. Both name exactly one fixture, which is what makes the
         # un-`-a`ed OR cases deterministic.
@@ -2206,6 +2504,16 @@ def run(args) -> int:
                 # The mount point's parent, for a walk that meets it.
                 "FUSEDIR": fuseprobe.cwd,
                 "ASUB": os.path.join(a.cwd, "sub"),
+                # PTH's pty, which PTG has the index of too.
+                "PTS": pts,
+                "DNFILE": os.path.join(devnode.cwd if devnode else work, "t", "y"),
+                "DNNODE": os.path.join(devnode.cwd if devnode else work, "u", "node"),
+                # DN's `t`, a mount point: a file-system argument.
+                "DNT": os.path.join(devnode.cwd if devnode else work, "t"),
+                "SF": str(sockfiles.pid),
+                "SFSOCK": os.path.join(sockfiles.cwd, "s.sock"),
+                # The file system SF's socket file is on, by its mount point.
+                "SFFS": mount_point_of(sockfiles.cwd),
                 "AXDIR": os.path.join(a.cwd, "xdir"),
                 "PORT": port,
             },

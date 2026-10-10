@@ -197,6 +197,19 @@ and the processes holding that file are listed under the walked tree. The C
 makes one `lstat` and uses it. It matters most for root walking a directory
 others can write, such as `/tmp`.
 
+**A path argument named files on other file systems** (DIVERGENCES 101,
+resolved 2026-10-09). lsof-rs identified a file by its DEVICE cell and inode,
+and a device node's DEVICE cell is the device it names, which nodes on other
+file systems name too. So `lsof -t /dev/pts/N`, which an operator may hand to
+`kill`, also gave every process holding pty N of another devpts instance:
+devpts numbers pty N inode N+3 in every instance, and any local user who can
+make a user namespace can mount one and open pty N there (measured as
+`nobody`). A container's own `/dev/null` was the host's too. And a mapping of
+a node the C could not `stat` was missed, so `lsof /dev/zero` run as non-root
+said nothing of a container's. The identity is now the C's, `st_dev` and the
+inode, a node's on the file system that holds it, so another instance's pty
+is another file.
+
 **An `-i` error message prints its argument raw** (DIVERGENCES 112). Every
 other message that quotes an argument escapes it, as the C's `safestrprt()`
 does; `-i`'s parser does not, so `lsof -i "$untrusted"` can write terminal

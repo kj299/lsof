@@ -2,14 +2,16 @@
 # DIVERGENCES 95, 48, 40 and 96-107): one per rule, each a plausible way to
 # get that rule wrong. The kill table is this file, run (porting-kit LESSONS #083):
 #
-#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/mapped-rows.toml
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/mapped-rows.toml
 #
-# It needs the C oracle built at ../lsof (README: Building), and root or
-# passwordless sudo for every fixture to come up; CI runs only --apply-only,
-# which checks that each mutant still fits the code. Run 2026-10-04 against
-# master: 30 of 30 killed, 17 by the differential alone, 12 by it and a unit
-# test, 1 (makedev-legacy) by unit tests alone. The PR had recorded 18, 11 and
-# 1: a unit test added in its review catches one more.
+# It needs the C oracle built at ../lsof (README: Building), and root: the
+# differential runs in a mount namespace of its own (`unshare -m`), since
+# fixtures P and DN mount in the run's namespace (run bare, they mounted on
+# the host while it lasted), and root brings every fixture up. CI runs only
+# --apply-only, which checks that each mutant still fits the code. Run
+# 2026-10-04 against master: 30 of 30 killed, 17 by the differential alone, 12
+# by it and a unit test, 1 (makedev-legacy) by unit tests alone. The PR had
+# recorded 18, 11 and 1: a unit test added in its review catches one more.
 
 [run]
 dir = ".."
@@ -21,7 +23,7 @@ cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "ls
 
 [[run.gate]]
 name = "differential"
-cmd = ["python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
 infra = [2]
 
 [[mutant]]

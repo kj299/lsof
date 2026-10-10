@@ -428,7 +428,7 @@ fn socket_mapping(md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> Open
         lock: None,
         fd: FdType::Mem,
         access: AccessMode::Unknown,
-        file_type: FileType::Other("sock".into()),
+        file_type: FileType::Socket("sock"),
         name: ctx.ns.unidentified().to_string(),
         device: Some(files::dev_string(md.dev())),
         size: None,
@@ -636,6 +636,10 @@ mod tests {
             "getxattr() of `socket:[N]` fails"
         );
         assert_eq!(f.fs_device, Some(md.dev()), "`-F` gives its device as `D`");
+        // But no path finds it by that device and its inode, nor by its file
+        // system: the C hands a socket to `process_proc_sock()`, which never
+        // compares them (DIVERGENCES 101).
+        assert_eq!((f.file_id(), f.searched_fs_device()), (None, None));
         assert_eq!(
             (f.size, f.offset, f.links, f.lock),
             (None, None, None, None)
@@ -647,6 +651,46 @@ mod tests {
             socket_mapping(&md, std::process::id(), &ctx).name,
             "can't identify protocol (-X specified)"
         );
+    }
+
+    #[test]
+    fn a_mapping_the_c_could_not_stat_is_found_by_its_maps_line() {
+        // DIVERGENCES 101: a mapping whose `stat` fails (as non-root, every
+        // mapping of a process in another mount namespace; here, a path that
+        // is no longer there) is `REG` with the maps line's device and inode,
+        // and a path argument finds it by them: `lsof /dev/zero` lists the
+        // `REG 0,6 4` row of a container's `/dev/zero` mapping, in the C and
+        // now in lsof-rs, whose DEVICE cell (`0,6`) is not the `1,5` the
+        // node names. A deleted one keeps them too.
+        let socks = crate::net::SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = crate::net::NetnsTables::new(false);
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+            helpers: &crate::safefs::HelperFds::default(),
+        };
+        let maps = parse_maps(
+            "0-1 r--p 0 00:06 4 /nonexistent-lsof-rs/zero\n\
+             1-2 r--p 0 01:2c 9 /nonexistent-lsof-rs/gone (deleted)\n",
+        );
+        let want = [
+            (files::makedev(0, 6), 4, FdType::Mem),
+            (files::makedev(1, 44), 9, FdType::Deleted),
+        ];
+        assert_eq!(maps.len(), want.len());
+        for (m, (dev, ino, fd)) in maps.into_iter().zip(want) {
+            let row = mapping_row(m, std::process::id(), false, &ctx);
+            assert_eq!(row.fd, fd);
+            assert_eq!(row.file_type, FileType::Regular);
+            assert_eq!(row.file_id(), Some(lsof_core::FileId { dev, ino }));
+        }
     }
 
     #[test]

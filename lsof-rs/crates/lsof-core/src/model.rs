@@ -160,6 +160,15 @@ pub enum FileType {
     /// file-system argument and no `-N` ever selects it, whatever device and
     /// inode it shows (see [`OpenFile::is_exempt`]).
     Exempt(&'static str),
+    /// A socket no table describes, with its TYPE code: `sock`, the C's
+    /// `LSOF_FILE_SOCKET` (a protocol the owner's namespace names, or `can't
+    /// identify protocol`), or `SOCK`, where lsof-rs still types a socket by
+    /// its `stat` and the C says `sock` (DIVERGENCES 22, 126). The C hands
+    /// every socket to `process_proc_sock()` before `is_file_named()`
+    /// (`dnode.c`), so no path, `+d`/`+D` entry or file-system argument
+    /// finds one by its own device and inode, whatever they are (see
+    /// [`OpenFile::is_socket`]).
+    Socket(&'static str),
     /// No type was ever set: the C's `LSOF_FILE_NONE`, which only its `NOFD`
     /// row carries. The table prints what the C's fallback formats for it —
     /// the raw type number in octal, `%04o`, so `0000` — and `-F` omits the
@@ -189,6 +198,7 @@ impl FileType {
             FileType::Token => "TOKN".into(),
             FileType::Other(code) => code.clone(),
             FileType::Exempt(kind) => format!("UNKN{kind}"),
+            FileType::Socket(code) => (*code).into(),
             FileType::Unknown => "unknown".into(),
             FileType::NoType => "0000".into(),
         }
@@ -423,11 +433,39 @@ pub struct BoundPath {
     /// no argument can be, so that its U+FFFD form cannot pass for another
     /// socket's path that really holds U+FFFD.
     pub path: Option<String>,
-    /// `(DEVICE, NODE)` of the file at `path`, when it is a socket file:
+    /// The identity of the socket file at `path` (its `st_dev` and inode, as
+    /// `dsock.c` keeps `sb_dev` and `sb_ino`), when it is a socket file:
     /// what a path argument's own identity is compared with. `None` when
     /// the path is not absolute, cannot be stat'ed, or is no longer a
     /// socket (a file put in its place after the bind).
-    pub id: Option<(String, String)>,
+    pub id: Option<FileId>,
+}
+
+/// What a file is, as the C's `is_file_named()` compares it (`dfile.c`):
+/// the device of the file system holding it, `st_dev`, and its inode —
+/// `Lf->dev` and `Lf->inode`, which `-F D` and `-F i` print.
+///
+/// A device node's is the node's own, on the file system that holds it, and
+/// never the device it names (`st_rdev`, which the DEVICE cell shows):
+/// `/dev/zero` is `(0,6, 4)` on this host's devtmpfs, not `1,5`. lsof-rs had
+/// keyed on the DEVICE cell, which missed a mapping of the node the C finds
+/// by its maps line (`mem REG 0,6 4 /dev/zero`), and found a node in another
+/// file system whose device number and inode equalled another file's: the
+/// same pty index in another devpts instance, a container's `/dev/null`
+/// (DIVERGENCES 101).
+///
+/// A path argument, a `+d`/`+D` entry and an AF_UNIX socket's bound path
+/// each get one from a `stat` ([`crate::Backend::identify_stat`]); a row
+/// carries one in [`OpenFile::fs_device`] and [`OpenFile::node`]
+/// ([`OpenFile::file_id`]). Plain numbers, so that a platform whose files
+/// are told apart by another pair (a volume serial and a file index) can
+/// fill it too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FileId {
+    /// `st_dev`: the file system the file is on.
+    pub dev: u64,
+    /// `st_ino`.
+    pub ino: u64,
 }
 
 /// Extended per-connection TCP statistics for `-T` (Windows EStats). Each
@@ -583,6 +621,47 @@ impl OpenFile {
     /// nothing and exits 1.
     pub fn is_exempt(&self) -> bool {
         matches!(self.file_type, FileType::Exempt(_))
+    }
+
+    /// True for a socket's row: one a table describes ([`OpenFile::socket`])
+    /// and one none does ([`FileType::Socket`]). The C hands every `S_IFSOCK`
+    /// to `process_proc_sock()` and returns (`dnode.c:700-705`), which never
+    /// asks `is_file_named()` about the socket's own device and inode; only
+    /// an AF_UNIX socket's bound path is compared (`dsock.c:3726-3750`,
+    /// [`BoundPath`]). So none is found by its own identity or file system:
+    /// measured, the C passes by a TCP socket no table lists under `-x l +d
+    /// /proc/PID/fd`, and an `O_PATH` descriptor on a socket file under that
+    /// file's path and under its file system (DIVERGENCES 101).
+    pub fn is_socket(&self) -> bool {
+        self.socket.is_some() || matches!(self.file_type, FileType::Socket(_))
+    }
+
+    /// The file system a file-system argument finds this row on:
+    /// [`OpenFile::fs_device`], the C's `Lf->dev` as `is_file_named()`
+    /// compares it with a mount's (`dfile.c:242-276`). `None` for a row the
+    /// C never asks about: one `-e` exempted, never `stat`ed (`isefsys()`),
+    /// and a socket ([`OpenFile::is_socket`]), whose `fs_device` `-F D` still
+    /// prints.
+    pub fn searched_fs_device(&self) -> Option<u64> {
+        if self.is_exempt() || self.is_socket() {
+            return None;
+        }
+        self.fs_device
+    }
+
+    /// What a path argument finds this row by: [`OpenFile::fs_device`] and
+    /// the inode in [`OpenFile::node`], the C's `Lf->dev` and `Lf->inode`
+    /// (`dnode.c`), which `-F D` and `-F i` print. For a mapping the C could
+    /// not `stat` they are the maps line's, and that row is found too.
+    ///
+    /// `None` where [`OpenFile::searched_fs_device`] is (an `-e` row, a
+    /// socket, whether or not a table names it), and for a row with no
+    /// device or no numeric inode: a file that could not be read.
+    pub fn file_id(&self) -> Option<FileId> {
+        Some(FileId {
+            dev: self.searched_fs_device()?,
+            ino: self.node.as_deref()?.parse().ok()?,
+        })
     }
 }
 

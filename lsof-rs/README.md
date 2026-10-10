@@ -146,11 +146,16 @@ item is shipped or a documented closed gate — and the release criteria are in
   does not reproduce.
 
 **A path argument names a file, not a prefix.** `lsof /path/to/file` matches
-that file by its `(device, inode)`, so a hard link to it counts and a different
-file that merely *starts with* the same text does not. Naming a directory
-matches the directory, not everything inside it — `+d <dir>` adds its immediate
-entries and `+D <dir>` the whole tree. lsof-rs used one string-prefix match for
-all three, which both invented rows and missed them.
+that file by its `st_dev` and inode, what `-F D` and `-F i` print, so a hard
+link to it counts and a different file that merely *starts with* the same text
+does not. A device node is the node: `lsof /dev/zero` finds a mapping of it
+lsof could not `stat`, by the maps line's device and inode, and not a node of
+the same number on another file system (a container's `/dev`, another devpts
+instance's pty). A socket is found by the path it is bound to, and never by
+its own device and inode. Naming a directory matches the directory, not
+everything inside it — `+d <dir>` adds its immediate entries and `+D <dir>`
+the whole tree. lsof-rs used one string-prefix match for all three, which both
+invented rows and missed them.
 
 **Selection follows lsof's OR rule.** lsof ORs its list options unless `-a`
 ANDs them, so `lsof -d ^mem -p PID` lists the whole host in real lsof — and now
