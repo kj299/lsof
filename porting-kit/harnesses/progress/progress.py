@@ -92,6 +92,12 @@ def cmd_ingest(path, unsafe_jsons):
     clean_files = set()
     for jf in unsafe_jsons:
         rep = json.load(open(jf, encoding="utf-8"))
+        # A report that audited no block (a forbid-unsafe crate, or the wrong
+        # path) is not evidence of a clean unsafe surface (LESSONS #036's
+        # 0-of-0): `documented` is the count audit_unsafe.py writes (LESSONS #086).
+        audited = rep.get("documented")
+        if not (isinstance(audited, int) and audited > 0):
+            continue
         if rep.get("undocumented", 1) == 0:
             clean_files.add(os.path.basename(jf))
     # Heuristic: match module names appearing in the report path.
@@ -142,11 +148,13 @@ def _self_test():
         cmd_set(q, "process", "differential")
 
         clean = os.path.join(d, "sockets.json")
-        open(clean, "w").write(json.dumps({"undocumented": 0, "total": 12}))
+        # The keys audit_unsafe.py --json writes. These fixtures used to carry a
+        # `total` it never wrote, and nothing refused a 0-of-0 report (LESSONS #086).
+        open(clean, "w").write(json.dumps({"documented": 12, "undocumented": 0}))
         dirty = os.path.join(d, "handles.json")
-        open(dirty, "w").write(json.dumps({"undocumented": 3, "total": 9}))
+        open(dirty, "w").write(json.dumps({"documented": 6, "undocumented": 3}))
         silent = os.path.join(d, "process.json")
-        open(silent, "w").write(json.dumps({"total": 4}))  # no `undocumented` key
+        open(silent, "w").write(json.dumps({"documented": 4}))  # no `undocumented` key
 
         cmd_ingest(q, [clean, dirty, silent])
         st = load(q)
@@ -161,10 +169,35 @@ def _self_test():
         # the chain must not jump the gates it has not passed.
         cmd_set(q, "process", "ported")
         p_clean = os.path.join(d, "process-clean.json")
-        open(p_clean, "w").write(json.dumps({"undocumented": 0}))
+        open(p_clean, "w").write(json.dumps({"documented": 2, "undocumented": 0}))
         cmd_ingest(q, [p_clean])
         check("ingest never skips gates: a `ported` module stays put",
               load(q)["modules"]["process"] == "ported")
+
+        # 0-of-0 (LESSONS #086): audit_unsafe.py's own report on a crate with no
+        # unsafe block, and a report with no count at all, advance nothing.
+        import subprocess
+        audit = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "unsafe-audit", "audit_unsafe.py")
+        crate = os.path.join(d, "forbid-crate")
+        os.makedirs(crate)
+        with open(os.path.join(crate, "lib.rs"), "w") as fh:
+            fh.write("fn safe_only() {}\n")
+        zero = os.path.join(d, "zero.json")
+        with open(zero, "w") as fh:
+            fh.write(subprocess.run([sys.executable, audit, crate, "--json"],
+                                    capture_output=True, text=True).stdout)
+        nocount = os.path.join(d, "nocount.json")
+        open(nocount, "w").write(json.dumps({"undocumented": 0}))
+        cmd_init(q, ["zero", "nocount"])
+        cmd_set(q, "zero", "sanitized")
+        cmd_set(q, "nocount", "sanitized")
+        cmd_ingest(q, [zero, nocount])
+        st = load(q)
+        check("a 0-of-0 report (audit_unsafe.py's own) does NOT advance",
+              st["modules"]["zero"] == "sanitized")
+        check("a report with no `documented` count does NOT advance",
+              st["modules"]["nocount"] == "sanitized")
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

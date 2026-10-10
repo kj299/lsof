@@ -24,8 +24,9 @@ workspace/
 
 - **`forbid(unsafe_code)` on `core` is the keystone.** It converts "is the unsafe
   contained?" from a recurring review question into a compile-time guarantee. In
-  the retrospective, `core` had **0** unsafe and the sys layer **144** — but only
-  91 documented. The split is what let the audit gate target exactly one crate.
+  winlsof, `core` had **0** unsafe and the sys layer **131** real blocks, 51 of
+  them undocumented (LESSONS #001; the 144/91 first quoted were grep hits). The
+  split is what let the audit gate target exactly one crate.
 - **RAII is the bug-killer.** The two most leak-prone C idioms — `close(fd)` and
   drop-privilege — become `Drop` impls (`OwnedResource` in the skeleton is the
   `OwnedHandle`/`PrivilegeGuard` analog). Use-after-free, double-free, leak, and

@@ -13,9 +13,9 @@
 > enforces that; a file carrying a `KIT-IMPORT:` header must account for every
 > citation in it. Do not `cp -r` the other kit over this one. Above all, never
 > copy the primary's `harnesses/differential/diff_run.py` over this one's: this
-> runner reads a case's `cwd` and `with_stderr` (41 of lsof-rs's cases set the
-> first, 6 the second), and the primary's ignores both, so those cases would
-> weaken without a word.
+> runner reads a case's `cwd` and `with_stderr`, which lsof-rs's matrix sets on
+> many cases, and the primary's does not take either, so those cases would
+> weaken or stop loading.
 >
 > **This copy's `make check-kit` is bound to this repository.** Its control
 > coverage reads lsof-rs's CI and differential, and its platform ledger reads

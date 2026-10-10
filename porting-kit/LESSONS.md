@@ -3974,3 +3974,63 @@ the same, since the day before this entry.]*
   `CI-AND-RELEASE.md`, which took the playbook from 462 lines to under the
   ~400 that `CLAUDE.md` asks.
 - **Section amended:** PLAYBOOK · Phase 4 (before the loop; step 6).
+
+---
+
+## 086. Six days after the audit, the audit's own count was wrong, and a changed flag had no doc that followed it
+
+- **Date:** 2026-10-10
+- **Codebase:** this kit, re-checked against its code after LESSONS #080 and
+  #085's audit of 2026-10-04, and against the primary line's entries 054 and 055
+  (the same questions put to that copy)
+- **What happened:** a second pass put every claim in this kit's documents to
+  the code again. Most of what the 2026-10-04 audit fixed still held. What had
+  drifted came from changes made since, and from the audit itself:
+  - The README's banner, written by that audit, said 41 of lsof-rs's cases set
+    `cwd` and 6 set `with_stderr`. A later change added 47 `with_stderr` cases.
+    LESSONS #080's rule is to point at the source rather than restate a count;
+    the change that wrote the rule wrote the count.
+  - 34330f5 moved a command-line tool's fixed argv to after `--`, because
+    `--args -a` is read as an option of the harness. The diff-fuzz skill and the
+    harness's own docstring still said fixed argv goes in `--args`, and the
+    usage text put `[-- FIXED-ARGV ...]` in the middle of the synopsis, though
+    every word after `--` is fixed argv. `check_doc_flags.py` passed: it checks
+    that a documented flag exists, not that it is still used the way the doc
+    says. Argv-mode findings are saved as `<fp>.argv`; the skill and `--help`
+    said `<fp>.input`.
+  - `CI-AND-RELEASE.md` taught `gh release create --target $GITHUB_SHA` for the
+    dispatch path. lsof-rs's release workflow had stopped doing that: a dispatch
+    for an existing tag published the branch's head under the old version, so it
+    now builds from the tag's commit and replaces a published release only when
+    asked.
+  - Smaller: the CI template said to copy it to `ci.yml` while its own path
+    filters watch `porting-ci.yml`; `run_supply_chain.sh --check` was documented
+    as never failing, and fails; the architecture template kept the 144/91 grep
+    count that PLAYBOOK had corrected to 131/51.
+
+  And two fail-opens the primary line had just closed in its copy were open
+  here. `check_doc_flags.py`, given a root that does not exist, printed "0
+  checked, 0 drifted" and passed. `progress.py` advanced a module on an unsafe
+  report that audited no block, and its self-test could not see it: its
+  fixtures carried a `total` key, which `audit_unsafe.py` has never written.
+- **The rule.** LESSONS #080's rule binds the change that states it: an audit
+  that fixes counts must not write new ones. When a change alters how an
+  existing flag or argument is used, not only its name, search every document
+  for it and re-read each mention, because the flag checker sees names. And
+  build a fixture from what the producer really writes; a hand-written report
+  with a key the producer never emits tests nothing.
+- **Kit change:** the claims above are fixed where they stood; the banner no
+  longer counts cases. `check_doc_flags.py` exits 2 on a root with no harness
+  or no document. `progress.py` refuses a report whose `documented` count is
+  missing or zero, its fixtures use the keys `audit_unsafe.py` writes, and one
+  is that harness's own 0-of-0 report. The diff-fuzz skill and docstring,
+  the CI template, `run_supply_chain.sh`, `CI-AND-RELEASE.md`, the
+  architecture template and PROMPTS/00 say what the code and workflow do.
+  Reported, not changed: lsof-rs's DIVERGENCES row 110 still describes the
+  in-process `statx()` that 790f1d0 replaced, and the "don't wrap the blocking
+  call" rule (PLAYBOOK, the module and diff-fuzz skills) has no lesson
+  reconciling it with 790f1d0's killable helper process.
+- **Section amended:** harnesses/doc-check/check_doc_flags.py ·
+  run, self-test; harnesses/progress/progress.py · cmd_ingest, self-test;
+  README.md · banner; CI-AND-RELEASE.md · Releasing; ARCHITECTURE-TEMPLATE.md ·
+  Why this shape; PROMPTS/00-new-port-kickoff.md; skills/porting-kit-diff-fuzz/SKILL.md.

@@ -28,18 +28,21 @@ stores stdout for the inputs it captured, and the fuzzer's inputs never were.
    `python3 porting-kit/harnesses/diff-fuzz/diff_fuzz.py --oracle <c> --rust <rust>
    --seed-file corpus/* --matrix <m> --ledger DIVERGENCES.md --findings-dir fuzz-findings
    --max-time 300`
-   Inputs are fuzzed on stdin by default; fixed argv goes in `--args`. `--seed N`
-   makes the run reproducible; `--iterations N` bounds it instead of wall-clock.
+   Inputs are fuzzed on stdin by default; fixed argv goes in `--args`, or after a
+   final `--` for arguments that start with `-`. `--seed N` makes the run
+   reproducible; `--max-time` alone runs for its time, `--iterations N` bounds it
+   by count, and both stop at whichever comes first.
    **A tool whose input is its command line** fuzzes argv instead:
    `--argv-inventory <coverage inventory>` draws options from the C's own option
-   letters, spelt every way getopt offers them, with `--args` as a fixed prefix
-   (anchor it to a fixture), `--argv-value` for values only your fixtures make
+   letters, spelt every way getopt offers them, with the fixed argv as a prefix
+   (anchor it to a fixture: `-- -a -p <PID>`), `--argv-value` for values only your fixtures make
    sense of, and `--argv-exclude` for letters that cannot be compared (one that
    repeats for ever). Run it from an empty directory (LESSONS #084).
 2. **Read verdicts, not corpora** (the token-firewall rule): the tool prints one
    line per *distinct* divergence (deduped and minimized), not per input. Use
    `--json` for machine output. Each finding is saved as `<fp>.input` (the smallest
-   reproducer) + `<fp>.diff` under `--findings-dir` — committable.
+   reproducer; `<fp>.argv`, a JSON list of words, in argv mode) + `<fp>.diff` under
+   `--findings-dir` — committable.
 3. **Triage each finding** exactly like a matrix divergence: fix the Rust, OR — if
    the C is the buggy side — record the intentional fix-of-C-defect in
    `DIVERGENCES.md`. Fuzz findings are suppressed **only by fingerprint** (an
@@ -85,7 +88,7 @@ stores stdout for the inputs it captured, and the fuzzer's inputs never were.
   fail-closed timeout handling (LESSONS #036), and the ledger fingerprint (LESSONS #043)
   are identical to the matrix differential.
 - Determinism: a finding always reproduces — re-run with the same `--seed`, or just
-  feed the saved `<fp>.input` back through `diff_run.py`.
+  feed the saved `<fp>.input`, or the words in `<fp>.argv`, back through `diff_run.py`.
 
 ## Integrity
 Paths/flags must match `diff_fuzz.py`. If they drift, fix the reference and re-run

@@ -7,7 +7,8 @@
 # Usage:
 #   run_supply_chain.sh [CRATE_DIR]     # run the real gate (needs the tools)
 #   run_supply_chain.sh --check         # smoke: validate this script + config,
-#                                       # report tool availability, never fail
+#                                       # report tool availability; fails if the
+#                                       # script does not parse or the config is gone
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
