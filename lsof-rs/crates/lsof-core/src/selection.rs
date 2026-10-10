@@ -636,6 +636,13 @@ pub struct DirArg {
     /// walks it, where the option stands, so `-b +d D` fails and `+d D -b`
     /// does not, and a `-S` after it does not bound its walk.
     pub blocking: crate::safefs::Blocking,
+    /// The one `stat` (following links) the option made of [`DirArg::dir`]:
+    /// the C's `statsafely(dn, &sb)` (`arg.c:876`), which is all it ever
+    /// learns of the directory itself. Its `st_dev` is the walk's `ddev`
+    /// (`arg.c:905`) and its device and inode the directory's own search
+    /// item (`arg.c:915`); the walk makes no other call on the directory
+    /// but its listing (DIVERGENCES 111).
+    pub stat: crate::safefs::FileStat,
 }
 
 /// The full set of user-specified filters for one run.
@@ -779,13 +786,15 @@ pub struct Selection {
     pub helpers: Vec<u32>,
     /// `-f` / `+f`: whether a path argument may name a file system.
     pub filesystem_args: FilesystemArgs,
-    /// Whether the backend identifies paths by `(device, node)`
-    /// ([`Backend::identifies_paths`](crate::backend::Backend::identifies_paths)).
+    /// Whether the backend identifies paths by `st_dev` and inode
+    /// ([`FileId`](crate::model::FileId);
+    /// [`Backend::identifies_paths`](crate::backend::Backend::identifies_paths)).
     /// When it does not, path selection compares names instead.
     pub paths_identified: bool,
     /// Devices of the filesystems named by path arguments. A file whose
-    /// [`OpenFile::fs_device`] is in here matches the `SELNM` kind, which is
-    /// how naming a mount point selects everything open on it.
+    /// [`OpenFile::searched_fs_device`] (its `fs_device`, never a socket's or an
+    /// `-e` row's) is in here matches the `SELNM` kind, which is how naming a
+    /// mount point selects everything open on it.
     pub path_fs_devices: std::collections::HashSet<u64>,
     /// `+c <n>`: how much of the command name the COMMAND column shows.
     /// Defaults to [`CommandWidth::Standard`] — a plain `lsof` run caps it.

@@ -7,9 +7,11 @@ against the code again on 2026-10-04, when a drift audit corrected the claims
 below that had stopped being true. Every claim was checked against the code
 rather than inferred from the C's design.
 
-`lsof` reports which files processes have open. It is an **observer**: it never
-spawns a subprocess and has no network listener. On Linux it writes nothing. On
-Windows two opt-in paths change transient state: an elevated `-T q` or `-T w`
+`lsof` reports which files processes have open. It is an **observer**: it has no
+network listener, and the one process it starts is, on Linux, its own bounded
+helper (the same binary, re-executed; §2, DIVERGENCES 94). On Linux it writes
+nothing but that helper's command name. On Windows two opt-in paths change
+transient state: an elevated `-T q` or `-T w`
 turns EStats collection on for each selected TCP connection — other processes'
 included — reads it, and turns it off again; and `--etw` (which `-U`, `-iICMP`
 and `-iRAW` imply) starts and stops a named ETW session for about two seconds.
@@ -39,7 +41,9 @@ rather than visibly broken. Accuracy is therefore in scope for the differential
 gate, not just correctness-as-taste.
 
 **The host it runs on.** Only indirectly: lsof-rs changes nothing on the host
-but the two transient Windows states above, so this reduces to not being a vector — not executing attacker data, not passing it
+but the two transient Windows states above and, on Linux, a helper killed on a
+timeout, which stays in state D holding the descriptor its call opened until the
+file system answers (§2, DIVERGENCES 123), so this reduces to not being a vector — not executing attacker data, not passing it
 to a shell (the one subprocess is lsof-rs's own bounded helper on Linux: the
 same binary, a fixed argument, no shell and no environment; §2, DIVERGENCES
 94), and not corrupting its own memory.
@@ -64,7 +68,8 @@ it is a gap, not a formatting choice.
 | each mount directory, `stat`ed (an NFS, FUSE or automount point among them) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | not applicable: a liveness hazard, not a parser; see below |
 | a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |
 | `/proc/locks` | kernel | untrusted | `lsof-backend-linux::locks` | `proc_locks` |
-| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` |
+| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`); none for `parse_passwd_names`, behind `-u NAME` |
+| the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
 | Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
 | Another process's PEB, via `ReadProcessMemory` | **the target process** | **hostile** | `lsof-backend-windows::peb` (the Win32 calls), `::peb_walk` (the walk) | `windows_peb` (covers `peb_walk`) |
@@ -103,7 +108,7 @@ and checks that every read is at the unwrapped address, unit tests pin the
 wrapped pointer, and `clippy::arithmetic_side_effects` is denied in `peb.rs`
 and `peb_walk.rs`.
 
-**Two later rows have no fuzz target.** `lsof-core::readlink` spells a
+**Four later rows have no fuzz target.** `lsof-core::readlink` spells a
 path as the C's `Readlink()` does, following links whose targets any local user
 chooses. It is bounded (20 links, 4096 bytes), and when it landed it was compared
 with the C's own function over 543,840 random spellings, but that was a one-off
@@ -111,6 +116,12 @@ run: no cargo-fuzz target drives `resolve_with`, although it is pure and could
 be. `etw.rs` parses AFD event payloads (`parse_afd_create`, `parse_afd_address`,
 `parse_sockaddr`) that any process's socket activity shapes; the parsing checks
 its bounds, but it is Windows-only code and no fuzzer reaches it.
+`users::parse_passwd_names`, behind `-u NAME`, follows `parse_passwd`'s rules for
+a malformed line, but only `parse_passwd` has a target. The bounded helper's
+frame decoders (`read_frame`, `decode_stat`, `decode_error`, `decode_names`)
+check every length before they allocate and are unit-tested with malformed,
+short, oversized and foreign frames (DIVERGENCES 94), but no fuzzer drives
+them.
 
 **A mapped file is `stat`ed by a name its owner chose.** Each distinct
 mapping in `/proc/PID/maps` is described by a `stat`: of its path, or, for a
@@ -189,13 +200,44 @@ not the same file, waits on it until the file system answers; so does any of
 them on an lsof `-O` waiting in its own `stat`, which holds the same
 descriptor (119).
 
-**A `+d`/`+D` entry is `stat`ed twice** (DIVERGENCES 111). The walk `lstat`s
-each entry, then `stat`s the same path again, following links, to identify it.
-A local user who can rename in the walked directory can swap a link in between,
-so the entry takes another file's identity, even on another device past `-x f`,
-and the processes holding that file are listed under the walked tree. The C
-makes one `lstat` and uses it. It matters most for root walking a directory
-others can write, such as `/tmp`.
+**A `+d`/`+D` entry was `stat`ed twice** (DIVERGENCES 111, resolved
+2026-10-10). The walk `lstat`ed each entry, then `stat`ed the same path again,
+following links, to identify it. A local user who could rename in the walked
+directory could swap a link in between, so the entry took another file's
+identity, even on another device past `-x f`, and the processes holding that
+file were listed under the walked tree (measured: a file renamed into a link to
+a file on a tmpfs, during the first call). It mattered most for root walking a
+directory others can write, such as `/tmp`. Now an entry is what its one
+`lstat` says, as the C's (`arg.c:1014,1077`): its identity, the `-x f` test,
+whether it is a link and whether `+D` descends into it all come from that call,
+an `O_PATH|O_NOFOLLOW` open and a `stat` of the descriptor, which a rename
+after it cannot change, and never from the listing's `d_type`. A link `-x l`
+follows gets one `stat` more, whose result stands for the entry. The directory
+itself is the option's one `stat`. `differential/walk_race.py` renames entries
+while strace holds that call, before it runs and after, and the directory while
+strace holds its listing, and lsof-rs does what the C does in each.
+
+Two exposures remain, both the C's as well, since both walk by name:
+
+- **A directory is listed by its name, after its `lstat`.** One that is
+  swapped for a link between the two is listed through the link, wherever the
+  renamer points it, by the C's `opendir()` as by lsof-rs's listing (measured:
+  `walk-race-dir-to-link-descends`). Each entry found there is still `lstat`ed
+  and held to the top directory's file system unless `-x f`, and the
+  directory's own item keeps the identity its `lstat` saw. Opening it
+  `O_NOFOLLOW` and comparing identities would close this beyond the C; it is
+  not done.
+- **The top directory's identity is taken when the option is parsed, and its
+  listing made later.** For the first `+d`/`+D` both read the mount table in
+  between: the C's `ck_file_arg()` reads and `stat`s it before `OpenDir()`
+  (`arg.c:184,915`; 117 calls between the two here, 30 `stat`s and 86
+  `readlink`s, measured with strace), lsof-rs once its options are parsed
+  (67). For a later one the C has the table already and opens the directory
+  straight after its `stat`, where lsof-rs lists it after the table and every
+  walk before it, since it walks after parsing (DIVERGENCES 82). A directory
+  renamed in that window is listed as whatever is then at the name, under the
+  identity the `stat` saw (measured: `walk-race-top-to-link`, the same in
+  both).
 
 **A path argument named files on other file systems** (DIVERGENCES 101,
 resolved 2026-10-09). lsof-rs identified a file by its DEVICE cell and inode,
@@ -313,8 +355,8 @@ sanitizer gates are pointed at it.
   `cwd`, module and mapped rows in a Windows per-pid worker.
   `clippy::arithmetic_side_effects` is denied in `peb.rs`, `peb_walk.rs`,
   `sizes.rs`, `handles.rs` and `etw.rs` only, not workspace-wide (the Windows
-  clippy job is what holds the last four's call sites, since nothing on Linux
-  compiles them), and it does not see variable shifts, `abs`, `pow` or `sum`,
+  clippy job is the only one that lints `peb.rs`, `handles.rs` and `etw.rs`,
+  which nothing on Linux compiles), and it does not see variable shifts, `abs`, `pow` or `sum`,
   so review still has to. (This line once claimed the lint was denied
   workspace-wide; it never was.)
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit

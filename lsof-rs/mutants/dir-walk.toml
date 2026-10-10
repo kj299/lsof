@@ -1,0 +1,181 @@
+# Mutants for "describe a +d/+D entry by its one lstat" (DIVERGENCES 111):
+# one per rule, each a plausible way to get that rule wrong. The kill table
+# is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/dir-walk.toml
+#
+# It needs the C oracle built at ../lsof (README: Building), strace (the
+# unit gate's `a_walk_entry_is_stated_once` and the differential's fixture
+# WRACE skip without it), `setpriv` and `nobody` (the cases that walk as a
+# user who is not root are dropped without them) and root: the differential
+# runs in a mount namespace of its own (`unshare -m`) because fixtures P, DN
+# and FH mount, and the unit gate's `bounded_calls` tests do the same and
+# skip without root. CI runs only --apply-only, which checks that each mutant
+# still fits the code.
+#
+# Run 2026-10-10, as root, after item 111's review added cases: 8 of 8
+# KILLED, all by the unit gate, six by the differential as well. The unit
+# tests that fail, measured one mutant at a time, and the walk cases that
+# DIVERGE (each mutant applied alone against the walk cases of the matrix):
+#
+#   entry-identified-by-a-second-stat  an_entry_is_identified_by_its_one_lstat,
+#       descent_is_decided_by_the_lstat_mode, under_x_l_..._exactly_once,
+#       a_walk_makes_every_call_..., a_walk_entry_is_stated_once (strace);
+#       walk-race-reg-to-link-after-lstat, -under-x-l,
+#       walk-race-reg-to-hardlink-after-lstat, walk-race-dir-to-link-descends
+#   followed-link-keeps-the-lstat      under_x_l_..._exactly_once,
+#       x_f_is_judged_on_the_lstat_device, ddev_is_the_top_..._throughout,
+#       where_names_are_matched_..., a_walk_stops_at_its_budget_and_says_so;
+#       walk-x-l-follows-a-link-off-the-file-system,
+#       path-plus-D-descends-through-a-link-under-dash-x-l,
+#       path-plus-d-dash-x-before-it-does
+#   link-followed-twice                under_x_l_..._exactly_once,
+#       a_walk_makes_every_call_..., a_walk_entry_is_stated_once
+#   x-f-judged-after-the-follow        x_f_is_judged_on_the_lstat_device,
+#       ddev_is_the_top_..._throughout, under_x_l_..._exactly_once;
+#       walk-x-l-follows-a-link-off-the-file-system
+#   symbolc-warning-dropped            a_follow_error_warns_symbolc_unless_enoent,
+#       dash_w_before_..., the_walk_warns_of_a_link_it_cannot_follow,
+#       the_walk_warns_before_a_bare_paths_status_error;
+#       walk-x-l-says-what-it-cannot-follow (stderr)
+#   lstat-failure-entered              an_lstat_error_warns_once_unless_enoent,
+#       a_walk_makes_every_call_...;
+#       walk-unprivileged-what-it-cannot-lstat-is-no-item (as nobody)
+#   top-restated-at-walk-time          the_top_directory_is_not_stated_at_walk_time,
+#       a_walk_entry_is_stated_once, and every walk test (the item's identity);
+#       walk-race-top-to-link
+#   ddev-from-a-walk-time-lstat        the_top_directory_is_not_stated_at_walk_time,
+#       x_f_is_judged_on_the_lstat_device, ddev_is_the_top_..._throughout,
+#       a_walk_makes_every_call_..., a_walk_entry_is_stated_once
+#
+# Two fall to the unit gate alone. A second follow of a link answers what the
+# first did unless the link is renamed between the two, and no race case
+# renames a link under -x l; a walk-time `lstat` of the directory gives the
+# option's `st_dev` unless its name is by then on another file system (a mount
+# over it, or a link in its place when it is itself a mount point), which no
+# case arranges. Only a count of the calls sees either, which the unit gate's
+# call log and `a_walk_entry_is_stated_once` make.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1500
+
+# ------------------------------------------------------------- the entry --
+
+[[mutant]]
+name = "entry-identified-by-a-second-stat"
+rule = "an entry is identified by its one lstat, never by a stat made after it (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                st.and_then(|st| backend.identify_stat(&st))'''
+new = '''                st.and_then(|_| fs.stat(&path).ok())
+                    .and_then(|st| backend.identify_stat(&st))'''
+
+[[mutant]]
+name = "followed-link-keeps-the-lstat"
+rule = "under -x l the one follow replaces the lstat, for the identity and the descent (111, 78)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                    match fs.stat(&path) {
+                        Ok(st) => Some(st),'''
+new = '''                    match fs.stat(&path) {
+                        Ok(_) => Some(st),'''
+
+[[mutant]]
+name = "link-followed-twice"
+rule = "under -x l a link is followed by exactly one stat (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                    match fs.stat(&path) {'''
+new = '''                    match fs.stat(&path).and_then(|_| fs.stat(&path)) {'''
+
+[[mutant]]
+name = "x-f-judged-after-the-follow"
+rule = "-x f is judged on the lstat's device, the link's own, before it is followed (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            if !dir.cross_filesystems {
+                if let (Some(d), Some(st)) = (ddev, st) {
+                    if d != st.dev {
+                        continue;
+                    }
+                }
+            }
+'''
+new = ''
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            // The identity of the call just made, never of another: a second'''
+new = '''            if !dir.cross_filesystems {
+                if let (Some(d), Some(st)) = (ddev, st) {
+                    if d != st.dev {
+                        continue;
+                    }
+                }
+            }
+            // The identity of the call just made, never of another: a second'''
+
+[[mutant]]
+name = "symbolc-warning-dropped"
+rule = "a link -x l cannot follow says can't stat(P) symbolc link: E, unless ENOENT or -w (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                            if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                                fs.tell(&format!(
+                                    "lsof: WARNING: can't stat({}) symbolc link: {}",'''
+new = '''                            if false && dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                                fs.tell(&format!(
+                                    "lsof: WARNING: can't stat({}) symbolc link: {}",'''
+
+[[mutant]]
+name = "lstat-failure-entered"
+rule = "an entry whose lstat fails is no search item where files are identified (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                            errno_text(&err)
+                        ));
+                    }
+                    continue;
+                }
+                // Where names are matched, the name is still an item.'''
+new = '''                            errno_text(&err)
+                        ));
+                    }
+                    None
+                }
+                // Where names are matched, the name is still an item.'''
+
+# ---------------------------------------------------------- the directory --
+
+[[mutant]]
+name = "top-restated-at-walk-time"
+rule = "the directory is the option's one stat, and the walk does not stat it again (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        (backend.identify_stat(&dir.stat), Some(dir.stat.dev))'''
+new = '''        (
+            fs.stat(&base).ok().and_then(|st| backend.identify_stat(&st)),
+            Some(dir.stat.dev),
+        )'''
+
+[[mutant]]
+name = "ddev-from-a-walk-time-lstat"
+rule = "ddev is the st_dev of the option's one stat of the directory, for the whole walk (111)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        (backend.identify_stat(&dir.stat), Some(dir.stat.dev))'''
+new = '''        (
+            backend.identify_stat(&dir.stat),
+            fs.lstat(&base).ok().map(|st| st.dev),
+        )'''

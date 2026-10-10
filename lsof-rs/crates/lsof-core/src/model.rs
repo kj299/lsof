@@ -422,10 +422,11 @@ pub struct SocketInfo {
     pub bound: Option<Box<BoundPath>>,
 }
 
-/// The path an AF_UNIX socket is bound to, which the C searches as well as
-/// the row's own identity (`dsock.c`): a path argument finds the socket when
-/// it names the socket file at that path, or, failing that, when it is the
-/// path itself as typed.
+/// The path an AF_UNIX socket is bound to: the only thing the C finds a
+/// socket by (`dsock.c:3726-3750`), never the row's own identity
+/// ([`OpenFile::is_socket`]). A path argument finds the socket when it names
+/// the socket file at that path, or, failing that, when it is the path itself
+/// as typed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundPath {
     /// The bound path, as the kernel reports it: what a path argument typed

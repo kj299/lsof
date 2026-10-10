@@ -6,7 +6,8 @@
 #
 # It needs the C oracle built at ../lsof (README: Building) and root: the
 # differential runs in a mount namespace of its own (`unshare -m`) because
-# fixtures P, DN and FH mount there, and DN comes up only for root; as root,
+# fixtures P and DN mount in the run's namespace (FH mounts in one of its own
+# per binary run), and DN comes up only for root or passwordless sudo; as root,
 # MZ's cases run as `nobody` (`setpriv`), which cannot `stat` its mapping. CI
 # runs only --apply-only, which checks that each mutant still fits the code.
 #

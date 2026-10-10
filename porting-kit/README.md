@@ -14,7 +14,7 @@
 > citation in it. Do not `cp -r` the other kit over this one. Above all, never
 > copy the primary's `harnesses/differential/diff_run.py` over this one's: this
 > runner reads a case's `cwd` and `with_stderr` (41 of lsof-rs's cases set the
-> first, 6 the second), and the primary's ignores both, so those cases would
+> first, 53 the second), and the primary's ignores both, so those cases would
 > weaken without a word.
 >
 > **This copy's `make check-kit` is bound to this repository.** Its control
@@ -96,7 +96,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/ledgers/check_ledgers.py` | the ledgers the playbook mandates actually exist (progress, divergences, fuzz target, a sanitizer job, and a sanitizer step running `cargo … -p <unit>` for every unit `progress.json` tracks) | CI |
 | `harnesses/platforms/check_platforms.py` | every platform the build system can select is built by some CI provider, or waived in `platforms.toml` with a reason | CI |
 | `harnesses/diff-fuzz/diff_fuzz.py` | differential FUZZING: same mutated input to C and Rust, every divergence triaged — finds what the fixed matrix never covered. Stdin by default; `--argv-inventory` fuzzes the command line from the C's own option letters (LESSONS #084) | CI (short) + nightly (long) |
-| `harnesses/port-mutation/mutate_port.py` | the port's own mutants, committed as data: each a plausible way to get one rule wrong, run against the port's gates; KILLED / SURVIVED / DOES-NOT-APPLY / NOBUILD / INFRA, files restored and checked, `--apply-only` to check every mutant still fits the code. A kill table that can be run again (LESSONS #083) | per change; `--apply-only` in this repo's CI |
+| `harnesses/port-mutation/mutate_port.py` | the port's own mutants, committed as data: each a plausible way to get one rule wrong, run against the port's gates; KILLED / SURVIVED / DOES-NOT-APPLY / NOBUILD / INFRA, files restored and checked, `--apply-only` to check every mutant still fits the code. A kill table that can be run again (LESSONS #083). A journal on disk, so a run killed outright is named by the next and undone by `--restore`; `--check-clean` proves no mutant is left in the tree, for every mutant that read CLEAN where it was written: one whose own edit re-forms its `old` reads AMBIGUOUS and must be re-anchored (LESSONS #086) | per change; `--apply-only` in this repo's CI |
 | `harnesses/probe/probe.py` | probe-then-port: generate a module's test expectations from a fingerprinted oracle transcript, and re-verify it | Phase 4 |
 | `harnesses/lessons/check_lesson_refs.py` | every `LESSONS #NN` citation resolves to an entry that exists | CI |
 | `harnesses/threat-model/check_threat_model.py` | a port must not reach cutover with an unfilled threat model — missing file, leftover placeholder or deleted section all hard-fail | **hard-fail CI** |

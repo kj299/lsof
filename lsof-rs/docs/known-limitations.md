@@ -230,9 +230,10 @@ meet. Each number is a row there, with the measurement behind it.
   `stat` without the C's warning (87), and under `-b` names each mount it
   avoids once where the C names it with four lines. Under `-i` alone the
   helper is a cost the C does not pay: under a descriptor limit with no room
-  for its pipes `lsof -i` ends `can't open pipes` (110). A `+D` walk makes a
-  helper round trip per call: about 0.1 ms an entry, three times the C's
-  (111).
+  for its pipes `lsof -i` ends `can't open pipes` (110). A `+D` walk makes
+  one helper round trip per entry, its `lstat`, and one more for a link `-x l`
+  follows: about 0.08 ms an entry, 1.6 times the C's (`+D /usr/lib`, 17,742
+  entries, 1.39 s against 0.86 s; `-O` 0.13 s; 94, 111).
 - **Linux:** `-E`/`+E` are accepted and ignored (56); AF_VSOCK, ping and
   unbound netlink sockets, and a TCP socket that is bound but not listening,
   show as `SOCK` `socket:[N]` (22, waiting on a decision), and an `O_PATH`
