@@ -386,12 +386,13 @@ jobs:
         run: |
           python3 differential/overflow_gate.py --self-test
           python3 differential/overflow_gate.py
-      - name: allow unprivileged user namespaces (fixtures L, M, MS)
+      - name: allow unprivileged user namespaces (fixtures L, M, MS, MZ, PTG)
         # KEPT DELIBERATELY. This step relaxes a kernel security setting on the
         # runner, so it was put to the repository's owner rather than left as a
         # porting decision; the answer on 2026-09-20 was to keep it. Do not
         # remove it as suspicious-looking CI: removing it silently un-gates
-        # DIVERGENCES item 24, whose two mutants pass every unit test.
+        # DIVERGENCES item 24, whose two mutants pass every unit test, and
+        # fixtures MZ and PTG (item 101's user-namespace cases) need it too.
         #
         # MEASURED, NOT ASSUMED: on head 195d7eb this runner skipped
         #
@@ -417,7 +418,7 @@ jobs:
         # hide the reason, so the status is echoed instead.
         run: |
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 ||             echo "sysctl absent — nothing to relax on this kernel"
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; fixtures L, M and MS will report themselves unavailable"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; fixtures L, M, MS, MZ and PTG will report themselves unavailable"
           if unshare --user --map-root-user --net true 2>&1; then
             echo "probe OK: unprivileged user+net namespaces work, fixture L will run"
           else
@@ -538,8 +539,9 @@ jobs:
     # isolated and blocks nothing, which is the whole point of it being a job.
     #
     # What it is NOT free of is wall time. At 20-43 min this is the longest job
-    # in the workflow either way (the fuzz smoke, next longest, is ~8), so the
-    # check suite stays yellow that long on every push. If that becomes worth
+    # in the workflow either way (the fuzz smoke, next longest, is ~12: eleven
+    # targets at 60 s each, and their build), so the check suite stays yellow
+    # that long on every push. If that becomes worth
     # fixing, the lever is NARROWING WHAT IT RUNS -- the live-/proc tests are
     # what generate the ~5700 warnings, and the pure parsers are where the UB
     # and leak surface actually is -- not raising this number again.

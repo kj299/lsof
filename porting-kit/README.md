@@ -14,7 +14,7 @@
 > citation in it. Do not `cp -r` the other kit over this one. Above all, never
 > copy the primary's `harnesses/differential/diff_run.py` over this one's: this
 > runner reads a case's `cwd` and `with_stderr` (41 of lsof-rs's cases set the
-> first, 6 the second), and the primary's ignores both, so those cases would
+> first, 53 the second), and the primary's ignores both, so those cases would
 > weaken without a word.
 >
 > **This copy's `make check-kit` is bound to this repository.** Its control

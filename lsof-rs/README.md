@@ -54,7 +54,7 @@ independent code and per-OS "dialect" backends:
 | Crate | Role |
 |---|---|
 | `lsof-core` | Platform-agnostic: data model (`Process`/`OpenFile` ≈ lsof's `lproc`/`lfile`), the selection/filter engine, the output renderers (table / `-F` / JSON), and the `Backend` trait (the "dialect" seam). **Zero dependencies, `#![forbid(unsafe_code)]`, fully unit-tested on any host.** |
-| `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper and ETW, file handles via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows, but for its pure name parsers, which are fuzzed on Linux. |
+| `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper and ETW, file handles via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows, but for its pure name parsers, PEB walk and buffer-size checks (`names.rs`, `peb_walk.rs`, `sizes.rs`), which are tested on Linux, and the first two fuzzed there. |
 | `lsof-backend-linux` | The Linux "dialect": implements `Backend` over `/proc`. **Dependency-free and `#![forbid(unsafe_code)]`** — `/proc` is a filesystem and `std::os::unix::fs::MetadataExt` supplies every stat field, so no FFI is involved at all. Compiled only on Linux. |
 | `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). **Dependency-free and `#![forbid(unsafe_code)]`** — on both of its crate roots, since a bin and a lib in one package are two crates and the attribute does not cross between them. |
 
@@ -304,10 +304,10 @@ The parsers of text from outside the process have cargo-fuzz targets under
 [`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
 `/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
 `/etc/passwd` readers; the Windows backend's name parsers and PEB walk; and the
-escaper that every one of them feeds. Three have none, and
+escaper that every one of them feeds. Four have none, and
 [`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the ETW payload parsers, the
-path speller (`readlink::resolve_with`) and the `/etc/passwd` name lookup behind
-`-u NAME`. The contract is
+path speller (`readlink::resolve_with`), the `/etc/passwd` name lookup behind
+`-u NAME`, and the bounded helper's frame decoders. The contract is
 *no panic on any input*; CI smoke-runs all of them on every PR and soaks them
 nightly. The `proc_net` target found a real panic in the IPv6 decoder in its
 first seconds.

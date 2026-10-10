@@ -73,7 +73,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `safefs.toml` do: fixture DN mounts two tmpfs in the run's namespace, as P
   does, and run bare their mounts were the host's while it lasted.
 - **lsof-rs runs a second process**, its helper, on every run that reads the
-  mount table or names a path: it appears in lsof's own listing as `lsof`,
+  mount table or names a path, unless `-b` or `-O` is given: it appears in lsof's own listing as `lsof`,
   in lsof's working directory with fds 0 and 1 on pipes like the C's forked
   child, and fd 2 on `/dev/null` unlike it (123). One killed on a timeout
   waits in state D until the file system answers or goes away, holding the
@@ -109,7 +109,8 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   DIVERGENCES (108–117). Three are security differences from the C: every
   run but `-f` `stat`s every mount point in-process with no timeout, `-i`
   included, so a hung NFS server stops it and automount points get mounted
-  (110); a `+d`/`+D` entry is `stat`ed twice, and a link swapped in between
+  (110; *[its timeout and automount half was fixed later in this release: see
+  Security, above]*); a `+d`/`+D` entry is `stat`ed twice, and a link swapped in between
   gives it another file's identity (111); an `-i` error message prints its
   argument raw (112). The threat model gained the inputs it had not listed:
   the mount points it `stat`s, the Windows process and module names, and
@@ -747,8 +748,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   shipping features as deferred. They now describe L2 as delivered and name
   what is genuinely left: packet sockets (closeable), netlink (blocked on
   DIVERGENCES 22), the `UNKN*` rows, and `-e`/`-x`/`-X`/`-Z`/`-N`/`-S`/`-b`.
-  *[Packet sockets, the `UNKN*` rows and `-e`/`-x`/`-X`/`-N` shipped later in
-  this release; netlink is DIVERGENCES 22 for an unbound socket and 109 for a
+  *[Packet sockets, the `UNKN*` rows, `-e`/`-x`/`-X`/`-N` and `-S`/`-b`
+  shipped later in this release, and `-Z` refuses as the C does where SELinux
+  is off (its CONTEXT column is DEBT, DIVERGENCES 29); netlink is DIVERGENCES 22 for an unbound socket and 109 for a
   bound one. Kept as written.]*
 
 ### Security
@@ -1155,7 +1157,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   returning `st_dev` made `lsof /dev/null` find the row and then report it as an
   unlocated search item, exiting 1. And **every expanded entry is a search
   item** — `+d dir` exits 0 when all its entries are open and 1 when one is not,
-  which a single unopened file flips.
+  which a single unopened file flips. *[The first detail was wrong, corrected
+  2026-10-09 (DIVERGENCES 101): it failed because rows had no `st_dev` then;
+  the identity is now `st_dev` and the inode (`FileId`). Kept as written.]*
 
 ### Added
 - **Linux phase L2, three of its four parts** — each verified against the C

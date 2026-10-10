@@ -585,7 +585,8 @@ fn reader(mut from: ChildStdout) -> io::Result<Receiver<Option<Frame>>> {
 /// How a helper is started: the command, ready but for spawning.
 pub type Launcher = Box<dyn Fn() -> Command + Send + Sync>;
 
-/// What to do when no helper can be started: in lsof, the C's `can't fork`
+/// What to do when no helper can be started: in lsof, the C's words for the
+/// step that failed ([`cannot_start`]: `can't open pipes` or `can't fork`)
 /// and exit 1.
 pub type OnFailure = Box<dyn Fn(&io::Error) + Send + Sync>;
 

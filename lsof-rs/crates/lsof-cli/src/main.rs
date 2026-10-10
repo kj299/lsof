@@ -183,7 +183,8 @@ MISCELLANEOUS:
                   (stat, lstat, readlink) for a path given or a mount point;
                   say so unless -w. A path argument then fails, and +d/+D
                   after it ends the run
-    -O            make those calls in lsof itself, with no time limit
+    -O / +O       make / stop making those calls in lsof itself, with no
+                  time limit
                   (*RISKY*: a file system that does not answer hangs lsof)
     -S [t]        give each of those calls t seconds (default 15, at least
                   2), in a helper process (Linux; elsewhere they are made in
@@ -321,9 +322,10 @@ impl WalkBudget {
 /// under the `-b`, `-O` and `-S` given before the option (DIVERGENCES 94):
 /// an entry on a file system that does not answer is a `can't lstat(P):
 /// Connection timed out` and the walk goes on, as the C's (its first
-/// timeout, DIVERGENCES 118). The calls are the ones it made before;
-/// DIVERGENCES 111 takes the second `stat` out. Its warnings go where the
-/// layer's do, stderr, so that a test can hold them.
+/// timeout, DIVERGENCES 118). The calls are the ones it made before, each
+/// entry's second, link-following `stat` included: taking that one out is
+/// DIVERGENCES 111, still OPEN. Its warnings go where the layer's do, stderr,
+/// so that a test can hold them.
 fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper, fs: &SafeFs) {
     fn enter(sel: &mut Selection, path: &Path, id: Option<FileId>) {
         if let Some(id) = id {
@@ -756,8 +758,9 @@ fn main() {
 
     // Where a path the user named is `stat`ed and its links read: a helper
     // process that gives each call `-S` seconds (DIVERGENCES 94, 110). One
-    // per run, started by the first call that needs it — a `+d` while the
-    // options are parsed, or the mount table — and ended with the run.
+    // at a time, started by the first call that needs it — a `+d` while the
+    // options are parsed, the mount table, or a path argument — replaced
+    // after a call that times out, and ended with the run.
     #[cfg(target_os = "linux")]
     let calls = lsof_backend_linux::safefs::Helper::new();
     #[cfg(not(target_os = "linux"))]
@@ -1003,7 +1006,8 @@ fn main() {
                     survived += 1;
                 }
                 // A backend that identifies paths always says what a `stat`
-                // found; one that did not would leave the name to match.
+                // found; a `None` here is an item nothing matches, since names
+                // are compared only where paths are not identified.
                 Ok(None) => {
                     sel.path_items.push(PathItem {
                         id: None,

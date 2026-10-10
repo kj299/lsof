@@ -1,7 +1,7 @@
 name: lsof-rs nightly fuzz
 
 # Deep fuzzing on a schedule — the long-budget counterpart to lsof-rs-ci.yml's
-# 45-second-per-target PR smoke. The same targets (every one `cargo fuzz list`
+# 60-second-per-target PR smoke. The same targets (every one `cargo fuzz list`
 # reports; none may panic on adversarial input), 30 minutes split across them,
 # plus a corpus that accumulates
 # across nights via the cache: each run restores the newest previous corpus,

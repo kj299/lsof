@@ -1,6 +1,6 @@
 # lsof-rs — what is actually left for the Linux backend
 
-> **Record (written 2026-09-15, notes to 2026-09-25; status added 2026-10-04).**
+> **Record (written 2026-09-15, notes to 2026-09-25; status added 2026-10-04; `-S`/`-b` notes 2026-10-09).**
 > P1–P5 below are done. Of what this page called L2, what is left is naming
 > netlink and AF_VSOCK sockets (DIVERGENCES 22, waiting on a decision) [and
 > the options `-S` and `-b` (DIVERGENCES 94), done 2026-10-09]. DIVERGENCES 9 and 21, listed as not

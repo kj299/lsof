@@ -7,9 +7,13 @@
 #
 # It needs the C oracle built at ../lsof (README: Building) and root: the
 # differential runs in a mount namespace of its own (`unshare -m`) because
-# fixtures P and FH mount, FH mounts a FUSE server, and the unit gate's
-# `bounded_calls` tests do the same and skip without root. CI runs only
-# --apply-only, which checks that each mutant still fits the code.
+# fixtures P and DN mount in the run's namespace, FH mounts a FUSE server (in a
+# namespace of its own per binary run), and the unit gate's `bounded_calls`
+# tests mount one too and skip without root. CI runs only --apply-only, which
+# checks that each mutant still fits the code.
+#
+# Run 2026-10-09, as root with --first-kill: 49 of 49 killed, 47 by the unit
+# gate and 2 by the differential.
 
 [run]
 dir = ".."

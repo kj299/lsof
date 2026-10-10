@@ -101,8 +101,8 @@ ledger — those are the kit's, on purpose.
   fixture U  (above) runs its cases as a user who cannot read it
   fixture W  two processes whose real and effective uids differ, one each
              way (root, or passwordless sudo)
-  fixture FH a FUSE file system that does not answer `stat` of its root
-             (`fuse_hang.py`: hold, or delay), mounted at {FUSE} in a mount
+  fixture FH a FUSE file system that does not answer `stat` of its root,
+             or in one case a link's `readlink` (`fuse_hang.py`: hold, or delay), mounted at {FUSE} in a mount
              namespace of its own for each binary run, for `-S`, `-b` and
              `-O`: root (or passwordless sudo), `unshare`, /dev/fuse, and a
              kernel that does not end a held request itself. Its cases set

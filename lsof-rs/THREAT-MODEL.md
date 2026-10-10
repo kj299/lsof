@@ -7,9 +7,11 @@ against the code again on 2026-10-04, when a drift audit corrected the claims
 below that had stopped being true. Every claim was checked against the code
 rather than inferred from the C's design.
 
-`lsof` reports which files processes have open. It is an **observer**: it never
-spawns a subprocess and has no network listener. On Linux it writes nothing. On
-Windows two opt-in paths change transient state: an elevated `-T q` or `-T w`
+`lsof` reports which files processes have open. It is an **observer**: it has no
+network listener, and the one process it starts is, on Linux, its own bounded
+helper (the same binary, re-executed; §2, DIVERGENCES 94). On Linux it writes
+nothing but that helper's command name. On Windows two opt-in paths change
+transient state: an elevated `-T q` or `-T w`
 turns EStats collection on for each selected TCP connection — other processes'
 included — reads it, and turns it off again; and `--etw` (which `-U`, `-iICMP`
 and `-iRAW` imply) starts and stops a named ETW session for about two seconds.
@@ -39,7 +41,9 @@ rather than visibly broken. Accuracy is therefore in scope for the differential
 gate, not just correctness-as-taste.
 
 **The host it runs on.** Only indirectly: lsof-rs changes nothing on the host
-but the two transient Windows states above, so this reduces to not being a vector — not executing attacker data, not passing it
+but the two transient Windows states above and, on Linux, a helper killed on a
+timeout, which stays in state D holding the descriptor its call opened until the
+file system answers (§2, DIVERGENCES 123), so this reduces to not being a vector — not executing attacker data, not passing it
 to a shell (the one subprocess is lsof-rs's own bounded helper on Linux: the
 same binary, a fixed argument, no shell and no environment; §2, DIVERGENCES
 94), and not corrupting its own memory.
@@ -64,7 +68,8 @@ it is a gap, not a formatting choice.
 | each mount directory, `stat`ed (an NFS, FUSE or automount point among them) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | not applicable: a liveness hazard, not a parser; see below |
 | a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |
 | `/proc/locks` | kernel | untrusted | `lsof-backend-linux::locks` | `proc_locks` |
-| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` |
+| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`); none for `parse_passwd_names`, behind `-u NAME` |
+| the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
 | Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
 | Another process's PEB, via `ReadProcessMemory` | **the target process** | **hostile** | `lsof-backend-windows::peb` (the Win32 calls), `::peb_walk` (the walk) | `windows_peb` (covers `peb_walk`) |
@@ -103,7 +108,7 @@ and checks that every read is at the unwrapped address, unit tests pin the
 wrapped pointer, and `clippy::arithmetic_side_effects` is denied in `peb.rs`
 and `peb_walk.rs`.
 
-**Two later rows have no fuzz target.** `lsof-core::readlink` spells a
+**Four later rows have no fuzz target.** `lsof-core::readlink` spells a
 path as the C's `Readlink()` does, following links whose targets any local user
 chooses. It is bounded (20 links, 4096 bytes), and when it landed it was compared
 with the C's own function over 543,840 random spellings, but that was a one-off
@@ -111,6 +116,12 @@ run: no cargo-fuzz target drives `resolve_with`, although it is pure and could
 be. `etw.rs` parses AFD event payloads (`parse_afd_create`, `parse_afd_address`,
 `parse_sockaddr`) that any process's socket activity shapes; the parsing checks
 its bounds, but it is Windows-only code and no fuzzer reaches it.
+`users::parse_passwd_names`, behind `-u NAME`, follows `parse_passwd`'s rules for
+a malformed line, but only `parse_passwd` has a target. The bounded helper's
+frame decoders (`read_frame`, `decode_stat`, `decode_error`, `decode_names`)
+check every length before they allocate and are unit-tested with malformed,
+short, oversized and foreign frames (DIVERGENCES 94), but no fuzzer drives
+them.
 
 **A mapped file is `stat`ed by a name its owner chose.** Each distinct
 mapping in `/proc/PID/maps` is described by a `stat`: of its path, or, for a
@@ -313,8 +324,8 @@ sanitizer gates are pointed at it.
   `cwd`, module and mapped rows in a Windows per-pid worker.
   `clippy::arithmetic_side_effects` is denied in `peb.rs`, `peb_walk.rs`,
   `sizes.rs`, `handles.rs` and `etw.rs` only, not workspace-wide (the Windows
-  clippy job is what holds the last four's call sites, since nothing on Linux
-  compiles them), and it does not see variable shifts, `abs`, `pow` or `sum`,
+  clippy job is the only one that lints `peb.rs`, `handles.rs` and `etw.rs`,
+  which nothing on Linux compiles), and it does not see variable shifts, `abs`, `pow` or `sum`,
   so review still has to. (This line once claimed the lint was denied
   workspace-wide; it never was.)
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit
