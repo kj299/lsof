@@ -733,7 +733,17 @@ fn the_helper_is_named_and_placed_as_lsof_is() {
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    let comm = std::fs::read_to_string(format!("/proc/{helper}/comm"));
+    // Found by its argument the moment it execs, it is still `exe` until
+    // `serve()` takes lsof's name, a few milliseconds later and before it
+    // greets (so lsof, which waits for the greeting, never lists it as
+    // `exe`). Read once at once, this had failed now and then.
+    let comm = loop {
+        let comm = std::fs::read_to_string(format!("/proc/{helper}/comm"));
+        if comm.as_deref().is_ok_and(|c| c == "lsof\n") || std::time::Instant::now() >= deadline {
+            break comm;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     let cwd = std::fs::read_link(format!("/proc/{helper}/cwd"));
     let fds: Vec<String> = (0..3)
         .map(|fd| {

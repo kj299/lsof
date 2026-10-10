@@ -1,0 +1,138 @@
+# Mutants for "find a file by its st_dev and inode" (DIVERGENCES 101): one
+# per rule, each a plausible way to get that rule wrong. The kill table is
+# this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/path-identity.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root: the
+# differential runs in a mount namespace of its own (`unshare -m`) because
+# fixtures P, DN and FH mount there, and DN comes up only for root; as root,
+# MZ's cases run as `nobody` (`setpriv`), which cannot `stat` its mapping. CI
+# runs only --apply-only, which checks that each mutant still fits the code.
+#
+# Run 2026-10-10: 10 of 10 killed, 9 by the differential and a unit test, 1
+# (exempt-rows-identified) by a unit test alone, as it must be (below). The
+# three socket mutants fail 6, 5 and 1 cases on fixtures SF and J (J's
+# needs `unshare --net`), and a unit test each on every runner.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1200
+
+[[mutant]]
+name = "identity-is-the-device-cell"
+rule = "a file is its st_dev and inode, a device node's too, never st_rdev (101)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            dev: self.searched_fs_device()?,'''
+new = '''            dev: self.rdev.map(|r| u64::from(r.get())).or(self.searched_fs_device())?,'''
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            dev: st.dev,'''
+new = '''            dev: match st.mode & 0o170_000 {
+                0o020_000 | 0o060_000 => st.rdev,
+                _ => st.dev,
+            },'''
+
+[[mutant]]
+name = "identify-stat-names-the-device"
+rule = "a device node argument is the node, not the device it names (101)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            dev: st.dev,'''
+new = '''            dev: if st.rdev != 0 { st.rdev } else { st.dev },'''
+
+[[mutant]]
+name = "identity-is-the-inode-alone"
+rule = "the same inode on another file system is another file (101, 60)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            dev: self.searched_fs_device()?,'''
+new = '''            dev: self.searched_fs_device().map(|_| 0)?,'''
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            dev: st.dev,'''
+new = '''            dev: 0,'''
+
+# The unit gate alone kills this one, and only it can: `path_matches` and
+# `PathIndex::mark` return before they ask an `-e` row for its identity or
+# its file system (no rule of theirs may meet one), so the check in
+# `searched_fs_device()` is a second guard that changes no output.
+[[mutant]]
+name = "exempt-rows-identified"
+rule = "an -e row was never stat()ed and has no identity (101, 40)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''        if self.is_exempt() || self.is_socket() {'''
+new = '''        if self.is_socket() {'''
+
+[[mutant]]
+name = "socket-rows-identified"
+rule = "the C compares no socket's own device and inode, nor its file system (101)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''        if self.is_exempt() || self.is_socket() {'''
+new = '''        if self.is_exempt() {'''
+
+[[mutant]]
+name = "a-socket-file-held-by-path-is-a-file"
+rule = "a descriptor that stat()s as a socket is a socket, whatever its link (101)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        S_IFSOCK => FileType::Socket("SOCK"),'''
+new = '''        S_IFSOCK => FileType::Other("SOCK".into()),'''
+
+[[mutant]]
+name = "an-unresolved-socket-is-a-file"
+rule = "a socket another namespace names is a socket, on sockfs or not (101, 16)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            file_type: FileType::Socket("sock"),'''
+new = '''            file_type: FileType::Other("sock".into()),'''
+
+[[mutant]]
+name = "maps-row-without-its-device"
+rule = "a mapping the C could not stat is found by its maps line's device (101, 95)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        OpenFile {
+            rdev: None,
+            fs_device: Some(m.dev),
+            file_flags: None,
+            lock: ctx.locks.get'''
+new = '''        OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: ctx.locks.get'''
+
+[[mutant]]
+name = "a-device-node-row-locates-nothing"
+rule = "a row locates by the identity it is selected by, a device node's too (101)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        // `path_matches` selects it: a socket's are never compared.
+        if let Some(id) = f.file_id() {'''
+new = '''        // `path_matches` selects it: a socket's are never compared.
+        if let Some(id) = f.file_id().filter(|_| f.rdev.is_none()) {'''
+
+[[mutant]]
+name = "socket-file-by-its-rdev"
+rule = "a socket file at a bound path is its st_dev and inode, like any file (101, 60)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    md.file_type().is_socket().then(|| lsof_core::FileId {
+        dev: md.dev(),'''
+new = '''    md.file_type().is_socket().then(|| lsof_core::FileId {
+        dev: md.rdev(),'''

@@ -52,6 +52,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `/proc/self` read through the helper is still lsof (89), however a path
   spells its way there. A helper that cannot be started ends the run: `can't
   open pipes` or `can't fork`, as the C says.
+- **Differential fixtures MZ, PTH/PTG, DN and SF** and 21 cases for how a
+  path argument identifies a file (DIVERGENCES 101): `/dev/zero` mapped in a
+  user and mount namespace made by the user the cases run as; a host pty and
+  the same index in a devpts instance of its own; a file and an `O_PATH` node
+  naming its tmpfs with the same inode (root, mounts as fixture P's); and, on
+  every runner, a TCP socket bound and never listening and an `O_PATH`
+  descriptor on a bound unix socket's file (SF), with fixture J's socket of
+  another network namespace. And `mutants/path-identity.toml`, ten mutants,
+  all killed.
 - **Differential fixture FH** — `fuse_hang.py` mounted in a private mount
   namespace per run, root or passwordless sudo — and 57 cases for `-b`, `-S`,
   `-O` and the helper (a case may set `LSOF_DIFF_NOFILE`, a descriptor
@@ -59,6 +68,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   finish; `mutants/safefs.toml`.
 
 ### Changed
+- **`mutants/mapped-rows.toml` runs its differential in a mount namespace of
+  its own** (`unshare -m`, so as root), as `path-identity.toml` and
+  `safefs.toml` do: fixture DN mounts two tmpfs in the run's namespace, as P
+  does, and run bare their mounts were the host's while it lasted.
 - **lsof-rs runs a second process**, its helper, on every run that reads the
   mount table or names a path: it appears in lsof's own listing as `lsof`,
   in lsof's working directory with fds 0 and 1 on pipes like the C's forked
@@ -72,10 +85,23 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `helper_pids`**: the processes the bounded layer started, which the Linux
   backend lists without `stat`ing what they opened for a call.
 - **`lsof-core`'s `Backend` trait**: `identify_path` and `path_fs_device` are
-  gone; `identify_stat` formats an identity from a `FileStat` the caller
+  gone; `identify_stat` gives a file's identity from a `FileStat` the caller
   `stat`ed through the bounded layer (`lsof_core::safefs`), and `mounts` takes
   that layer. A path argument is `stat`ed once, and its status error is that
   call's error; it had been `stat`ed a second time to word it.
+- **`lsof_core::FileId`** (`{dev, ino}`, `Copy`, `Hash`) is a file's
+  identity: `Backend::identify_stat` returns one where it returned the DEVICE
+  and NODE cells as text, and `Selection::path_ids`, `PathItem::id` and
+  `BoundPath::id` hold them. `OpenFile::file_id()` is a row's: its
+  `fs_device` and inode, `None` for an `-e` row, for a socket's row, and for
+  one with no device or no numeric inode. A backend whose files have another
+  pair of numbers can fill it (DIVERGENCES 101).
+- **`FileType::Socket(code)`** types a socket no table describes (`sock`, or
+  `SOCK` where lsof-rs still types it by its `stat`), which was
+  `FileType::Other`; the TYPE codes are unchanged. **`OpenFile::is_socket()`**
+  says a row is a socket, a table's or not, and
+  **`OpenFile::searched_fs_device()`** is the `fs_device` a file-system
+  argument compares, `None` for an `-e` row and a socket (DIVERGENCES 101).
 
 ### Changed
 - **A retrospective of 2026-09-02 → 2026-10-04 put every file against the
@@ -98,6 +124,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   link to a renamed or removed item fails the build.
 
 ### Fixed
+- **A path argument finds a file by its `st_dev` and inode, a device node's
+  too** (DIVERGENCES 101), as the C compares them (`dfile.c`): what `-F D` and
+  `-F i` print. lsof-rs compared the DEVICE cell, which is the device a node
+  names, and so missed and invented rows. Missed: run as non-root, `lsof
+  /dev/zero` said `no file use located` beside a container mapping it, whose
+  row is the maps line's `REG 0,6 4`; as root, a node's mapping whose path is
+  covered or deleted; `+d /dev` the same. Invented: a node whose device
+  number and inode equal another file's device and inode — `/dev/pts/N`
+  listed the pty of that index in every other devpts instance (devpts numbers
+  pty N inode N+3 in each), and a container's own `/dev/null`, and a block
+  device was found by a file on the file system it backs. A `+d`/`+D` entry
+  and a unix socket's bound path are identified the same way. And a socket is
+  found by its bound path alone, as the C hands every socket to
+  `process_proc_sock()`: lsof-rs had found one no table names by its own
+  device and inode (`-x l +d /proc/PID/fd` listed a TCP socket bound and not
+  listening, or another network namespace's), and an `O_PATH` descriptor on
+  a socket file under the file's path and its file system. One row still
+  locates every argument that names it, where the C's locates one: a file and
+  its file system named together exit 0 where the C exits 1 (125, open).
 - **Every mapped file is listed, as the C lists it** (DIVERGENCES 95).
   lsof-rs dropped a mapping it could not `stat`, or whose `stat` named another
   file, where the C keeps the row with the maps line's device and inode and

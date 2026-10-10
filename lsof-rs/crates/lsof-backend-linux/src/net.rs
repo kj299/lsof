@@ -83,7 +83,7 @@ pub struct SocketTable {
     /// the first time a row asks and kept: every fd that holds the socket, in
     /// every process and task, asks the same question, which the C asks once
     /// per `/proc/net/unix` line. Empty unless the run names a path.
-    bound_ids: std::cell::RefCell<HashMap<u64, Option<(String, String)>>>,
+    bound_ids: std::cell::RefCell<HashMap<u64, Option<lsof_core::FileId>>>,
 }
 
 impl SocketTable {
@@ -159,13 +159,13 @@ impl SocketTable {
     pub fn bound_id(
         &self,
         inode: u64,
-        find: impl FnOnce() -> Option<(String, String)>,
-    ) -> Option<(String, String)> {
+        find: impl FnOnce() -> Option<lsof_core::FileId>,
+    ) -> Option<lsof_core::FileId> {
         if let Some(id) = self.bound_ids.borrow().get(&inode) {
-            return id.clone();
+            return *id;
         }
         let id = find();
-        self.bound_ids.borrow_mut().insert(inode, id.clone());
+        self.bound_ids.borrow_mut().insert(inode, id);
         id
     }
 

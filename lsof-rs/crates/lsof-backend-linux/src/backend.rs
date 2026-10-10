@@ -43,18 +43,22 @@ impl Backend for LinuxBackend {
         "linux"
     }
 
-    fn identify_stat(&self, st: &lsof_core::FileStat) -> Option<(String, String)> {
-        // The same two cells a row carries, produced by the same code, so the
-        // comparison in selection is a plain equality test. The caller's
-        // `stat` followed symlinks, which is right: lsof identifies the file a
-        // name resolves to, and that is what a process holding it reports.
-        // DEVICE means st_rdev for a device node and st_dev for everything
-        // else, and a row is built the same way — so `lsof /dev/null` must
-        // compare 1,3 against 1,3, not against the devtmpfs it lives on.
-        Some((
-            files::dev_cell_of(st.mode, st.dev, st.rdev),
-            st.ino.to_string(),
-        ))
+    fn identify_stat(&self, st: &lsof_core::FileStat) -> Option<lsof_core::FileId> {
+        // `st_dev` and `st_ino`, whatever the file is: the C keeps those two
+        // of the argument's `stat` (`arg.c:285,297`) and compares them with a
+        // row's `Lf->dev` and `Lf->inode` (`dfile.c:226-237`), which a row
+        // carries as `fs_device` and `node`. Its `st_rdev` branch needs the
+        // same device and inode as well (`dfile.c:281-295`), so a device
+        // node is never found by the device it names: `lsof /dev/null` is
+        // devtmpfs's `0,6` and the node's inode, which the fd's `CHR 1,3` row
+        // has in `fs_device`, and which a mapping the C could not `stat` has
+        // from its maps line (DIVERGENCES 101). The caller's `stat` followed
+        // symlinks, which is right: lsof identifies the file a name resolves
+        // to, and that is what a process holding it reports.
+        Some(lsof_core::FileId {
+            dev: st.dev,
+            ino: st.ino,
+        })
     }
 
     fn mounts(&self, sources: bool, fs: &lsof_core::SafeFs) -> Vec<lsof_core::MountEntry> {
@@ -230,6 +234,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identify_stat_is_st_dev_and_inode_for_a_device_node() {
+        // DIVERGENCES 101: `/dev/zero` measured here as st_dev 0,6, inode 4,
+        // st_rdev 1,5. The identity is the node on devtmpfs, which the fd's
+        // `CHR 1,5` row and a mapping's `REG 0,6` row both carry, never the
+        // device the node names.
+        let zero = lsof_core::FileStat {
+            dev: 0x6,
+            ino: 4,
+            rdev: 0x105,
+            mode: 0o020_666,
+            ..lsof_core::FileStat::default()
+        };
+        let b = LinuxBackend::new();
+        assert_eq!(
+            b.identify_stat(&zero),
+            Some(lsof_core::FileId { dev: 0x6, ino: 4 })
+        );
+        // Whatever the type: a regular file, a directory, a socket file.
+        for mode in [0o100_644, 0o040_755, 0o140_777, 0o060_660] {
+            let st = lsof_core::FileStat { mode, ..zero };
+            assert_eq!(b.identify_stat(&st).map(|id| id.dev), Some(0x6), "{mode:o}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri has no O_PATH; the rule is pinned above")]
+    fn identify_stat_of_dev_null_is_where_the_node_lives() {
+        // The live node, through the bounded layer's own `stat`.
+        let md = std::fs::metadata("/dev/null").unwrap();
+        let st = lsof_core::safefs::stat_now(std::path::Path::new("/dev/null"), true).unwrap();
+        let id = LinuxBackend::new().identify_stat(&st).unwrap();
+        assert_eq!((id.dev, id.ino), (md.dev(), md.ino()));
+        assert_ne!(id.dev, md.rdev(), "not 1,3, the device it names");
+    }
+
+    #[test]
     fn gathers_this_host_and_includes_self() {
         let sel = Selection::default();
         let procs = LinuxBackend::new().gather(&sel).expect("gather succeeds");
@@ -303,7 +343,7 @@ mod tests {
         // by its protocol (`protocol: TCP`), with no `SocketInfo`: a socket all
         // the same, and one any host running a container has.
         let foreign = |f: &lsof_core::model::OpenFile| {
-            f.file_type == lsof_core::model::FileType::Other("sock".into())
+            f.file_type == lsof_core::model::FileType::Socket("sock")
         };
         let non_socket: Vec<String> = procs
             .iter()

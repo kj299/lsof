@@ -73,6 +73,22 @@ disagreeing, and it names the C code so anyone can check the triage.
   depend on which name it bound first — with two names for one inode in a
   `+d` expansion, the other is reported unlocated and the run exits 1. See
   item 17.
+- [x] path-file-and-its-file-system-one-item-per-row-in-the-c: DECISION
+  (item 125, OPEN: the maintainer's call) — fixture DN's `t/y` is its only
+  file on the tmpfs mounted at `t`, and both are arguments. The C's
+  `is_file_named()` tries the file items, then the file-system ones, marks
+  the first that names the row and returns (`dfile.c`), so the row locates
+  `t/y` alone: `no file system use located: t`, exit 1, in either order.
+  lsof-rs marks every item a row matches and exits 0. The same rows. Item
+  17's bookkeeping, between a file and its file system. Not pinned: the
+  message holds the work directory.
+- [x] sock-file-held-by-path-row-in-the-c: DEBT (item 126, OPEN) — fixture
+  SF's fd 5 is an `O_PATH` descriptor on the socket file its fd 4 is bound
+  at. The C hands it to `process_proc_sock()`, which no table helps and
+  whose `getxattr()` of a socket file fails: `tsock`, `o0t0`, `ncan't
+  identify protocol`. lsof-rs types it by its `stat`: `tSOCK`, `s0`, `o0t0`
+  and the path for NAME. Neither finds it by a path (item 101). Not pinned:
+  the diff's context is the pid, and its NAME the work directory.
 - [x] hostile-comm-utf8-table: C-DEFECT, not reproduced — the C sizes the
   COMMAND column with `safestrlen()` (`lib/misc.c`), which compares each
   `char` with `0x20`; `char` is signed on x86-64, so every byte ≥ 0x80 is
@@ -229,6 +245,164 @@ disagreeing, and it names the C code so anyone can check the triage.
   incomplete.`; lsof-rs drops the mount in silence. Not pinned: the work
   directory.
 
+## Fixed by finding a file by its `st_dev` and inode (2026-10-09)
+
+Item 101. The C identifies a path argument by two numbers of its `stat(2)`,
+`st_dev` and `st_ino` (`arg.c:285-298`), and finds a row whose `Lf->dev` and
+`Lf->inode` are those two (`dfile.c:226-237`): what `-F D` and `-F i` print.
+It looks at nothing else. A device node is the node, on the file system that
+holds it: `/dev/zero` is devtmpfs's `0,6` and inode 4, not the `1,5` it names
+(its `st_rdev` branch, `dfile.c:281-295`, needs the same device and inode as
+well, so it never widens a match). The same two numbers identify a `+d`/`+D`
+entry (`arg.c:1014,1077`) and the socket file at an AF_UNIX socket's bound
+path (`dsock.c:3200-3218,3726-3730`). A row the C cannot `stat` keeps the
+maps line's device and inode, typed `REG` (`dproc.c:1567-1569,1616-1618`),
+and is found by them.
+
+lsof-rs compared the DEVICE and NODE cells as text, and the DEVICE cell is
+`st_rdev` for a device node. Measured against the C, as root and as `nobody`,
+in private mount namespaces:
+
+| what | the C | lsof-rs before |
+|---|---|---|
+| `lsof /dev/zero`, run as non-root, beside a process in another mount namespace that maps it | `mem REG 0,6 4 /dev/zero (stat: Operation not permitted)`, exit 0; `-t` its pid | `no file use located`, exit 1; `-t` nothing — **missed** |
+| as root, a node's mapping whose path is covered, or deleted and linked elsewhere | `mem REG 0,41 2 …/zero (stat: No such file or directory)`, `DEL REG 0,41 3 …/dz2` | nothing, exit 1 — **missed** |
+| `+d /dev` beside the first | that row | not — **missed** |
+| `/dev/pts/N` beside a process holding pty N of its own devpts instance | the host's row (`D0x1b i3`) | that and the other instance's (`D0x29 i3`); the other alone where the C says `no file use located` — **invented** |
+| a container's `/dev` (a tmpfs, null and zero `mknod`ed, inodes 3 and 4), root | `no file use located` for both | its rows — **invented** |
+| `/dev/loop0` (0,6, inode 97, names 7,0) beside `f` (7,0, inode 97) on the file system it backs | each finds itself | either finds both — **invented** |
+| an `O_PATH`-held `c 0,41` (inode 3 on 0,42) beside `y` (0,41, inode 3) | each finds itself | either finds both — **invented** |
+| `-x l +d /proc/PID/fd`, whose entry leads to a socket no table lists (a TCP socket bound and never listening; a listener in another network namespace) | nothing for that fd, exit 1; `-t` nothing | `f3 tSOCK D0x9 i<N>` (`tsock` for the other namespace's); `-t` its pid — **invented** (found in review) |
+| an `O_PATH` descriptor on the socket file a unix listener is bound at, under that file's path | the listener alone | the listener and the descriptor (`SOCK …/s.sock`) — **invented** (found in review) |
+| the same descriptor under the file system holding the socket file | not listed | listed — **invented** (found in review) |
+
+Every other shape where the two disagreed is one where a node's `st_rdev` and
+inode equal another file's `st_dev` and inode, or where the C could not `stat`
+a node's mapping. The last three are sockets: the C hands every `S_IFSOCK` to
+`process_proc_sock()` and returns (`dnode.c:700-705`), and that compares only
+an AF_UNIX socket's bound path (`dsock.c:3726-3750`), never the socket's own
+device and inode, nor its file system. The pty is the one that always
+happens: devpts numbers pty N inode N+3 in every instance, and the device
+136,N in all of them.
+
+The fix is the C's rule. Rows already carried its numbers: `OpenFile::
+fs_device` is what `-F D` prints, equal to the C's `D` on every row measured
+(fd, cwd, rtd and txt rows, `stat`ed mappings, maps-line and `DEL` rows), and
+`node` the inode. The attempt of 2026-09-05 that compared `st_dev` failed
+because rows had no `st_dev` then ("Fixed by matching a path by what the file
+is", corrected there).
+
+* **`lsof_core::FileId`** `{dev, ino}`, a `Copy` pair of numbers, is the
+  identity everywhere: `Selection::path_ids`, `PathItem::id`, `BoundPath::id`.
+* **`OpenFile::file_id()`** is a row's: `fs_device` and the inode in `node`.
+  `None` for an `-e` row, which the C never `stat`s nor compares (`isefsys()`),
+  for a socket's row, and for a row with no device or no numeric inode (a file
+  that could not be read). A socket is `OpenFile::is_socket()`: a row a table
+  describes, or one typed `FileType::Socket`, which the Linux backend gives
+  the rows no table describes. Those keep a device and an inode for `-F D` and
+  `-F i`: the `sock` row of another network namespace, of `-X` and of a
+  mapped socket (sockfs's), item 22's `SOCK socket:[N]`, and an `O_PATH`
+  descriptor on a socket file (the file's own, on the file system holding
+  it). A path can lead to either: a `+d`/`+D` walk under `-x l` follows
+  `/proc/PID/fd/N` to sockfs, and a socket file is a plain path. The first
+  draft of this change exempted the table's sockets alone, on the claim that
+  no path could `stat` to the others; review measured the three rows above.
+* **`OpenFile::searched_fs_device()`** is the same gate for a file-system
+  argument: `fs_device`, `None` for an `-e` row and a socket. Selection and
+  locating ask it, and `file_id()` is built on it.
+* **`Backend::identify_stat`** returns a `FileId`: the `stat`'s `st_dev` and
+  `st_ino` on Linux, from the one bounded `stat` a path argument is given
+  (item 94), whose own error is the status error. A `+d`/`+D` entry is the
+  pair of the `stat` that identifies it; that the walk still makes a second
+  `stat` to get it is item 111, the next step. A socket file's is
+  `md.dev()` and `md.ino()`, as it was in all but type.
+* **What did not change**: a file-system argument still matches a row's
+  `fs_device` with the mount's device (`dfile.c:242-276`), a socket's aside,
+  and `-e` rows still match nothing.
+
+A path argument that names a file by another spelling than the process opened
+it by (a bind, a covered path, a hard link) now finds it as the C does, and
+NAME is still the opened path, not the argument: item 17's decision, which the
+cases below avoid by naming files as they were opened or by leaving out `n`.
+
+### What stays open
+
+One row locates one search item in the C (125, OPEN): `is_file_named()`
+returns at the first item that names a row, file items before file-system
+ones, so `lsof -V T T/f`, where `T/f` is the only file open on the mount `T`,
+lists the row and says `no file system use located: T`, exit 1. lsof-rs marks
+both and exits 0. Item 17's bookkeeping, between a file and its file system;
+the maintainer's call, ledgered on fixture DN.
+
+An `O_PATH` descriptor on a socket file is its own row in the C (126, OPEN,
+found in review): `sock`, `0t0` and `can't identify protocol`, as
+`process_proc_sock()` makes a socket no table names, where lsof-rs types it by
+its `stat`, `SOCK` with a size of 0 and its path for NAME. Which rows are
+found does not depend on it; it is ledgered on fixture SF.
+
+### What the gate gained
+
+* **Unit tests**: `lsof-core/src/selection.rs`
+  `a_device_node_argument_is_its_own_inode_not_the_device_it_names` (the REG
+  maps row and the CHR fd row found, a twin node on another file system
+  neither selected nor locating),
+  `a_file_is_not_a_device_named_after_its_file_system`,
+  `an_exempt_row_and_a_socket_from_the_tables_have_no_identity`,
+  `a_socket_no_table_names_is_found_by_no_path_and_no_file_system` (a `sock`
+  and a `SOCK` row neither selected nor locating, by identity or by file
+  system, beside a regular file that is), and the earlier path tests on
+  numeric identities; `lsof-backend-linux`
+  `identify_stat_is_st_dev_and_inode_for_a_device_node`,
+  `identify_stat_of_dev_null_is_where_the_node_lives` (`backend.rs`),
+  `a_mapping_the_c_could_not_stat_is_found_by_its_maps_line` and a mapped
+  socket's lack of one (`maps.rs`), the bound socket's identity,
+  `a_socket_file_held_by_path_is_found_by_no_path` and
+  `a_socket_only_its_namespace_names_is_found_by_no_path` (`files.rs`), and a
+  walk's identities (`main.rs`).
+* **Fixtures** in the differential: **MZ** maps `/dev/zero` in a user and
+  mount namespace made by the user its cases run as (`nobody` on a root
+  runner), so the row 101 found exists on every runner; **PTH** and **PTG**
+  hold pty N of this host and of a devpts instance of PTG's own (user
+  namespaces); **DN** holds a file and an `O_PATH` node naming its tmpfs with
+  the same inode (root or passwordless sudo, mounts in the run's namespace, as
+  fixture P); **SF**, on every runner, holds a TCP socket bound and never
+  listening (fd 3), a unix listener bound at `s.sock` (fd 4) and an `O_PATH`
+  descriptor on that socket file (fd 5). No fixture binds a loop device:
+  fixture V already opens `/dev/loop0`, a device the whole host shares.
+* **21 cases**: `path-device-mapped-in-another-mount-namespace*` on fixture M
+  (as root both `stat` the mapping; on CI's unprivileged runner they are row
+  101), `path-device-mapping-found-by-*` on MZ (`-V`, `-t`, `-F`, `+d /dev`),
+  `path-pty-of-another-devpts-*` on PT, `path-file-is-not-a-node-*`,
+  `path-node-is-not-a-file-*` and `path-node-fields-are-its-own-file-system`
+  on DN, `sock-no-table-names-is-no-plus-d-entry` (and `-terse`) and
+  `sock-file-held-by-path-is-*` (its path, its file system, a `+d` entry) on
+  SF, and `netns-socket-is-no-plus-d-entry` on J, all MATCH; and
+  `path-file-and-its-file-system-one-item-per-row-in-the-c`, 125's, and
+  `sock-file-held-by-path-row-in-the-c`, 126's. Run as root with the binary
+  before this change, the 10 on MZ, PT and DN and the 6 on SF and J DIVERGE
+  and the 3 on M MATCH (measured; the binary of the first draft of this
+  change, which exempted the table's sockets alone, fails the 6 too). The
+  whole matrix, in a private mount namespace as root: 503 cases, 469 MATCH,
+  34 ledgered, none unexplained.
+* **`mutants/path-identity.toml`: ten mutants, one per rule, all killed**
+  (the full run, as root). Nine fall to the differential as well as to unit
+  tests. Measured against the matrix before the socket cases: a row keyed on
+  `st_rdev`, the old rule, fails the 10 cases on MZ, PT and DN; an argument
+  identified by the device it names 14, among them
+  `mappings-path-argument-finds-a-mapped-device`, the three on M and two `+d
+  -x f` cases; the inode alone 12, among them item 60's unix sockets found
+  through a symlink; a maps-line row without its device 7; a device node's
+  row that locates nothing 8; a socket file identified by `st_rdev` item
+  60's three. Against the whole matrix: a socket's row given an identity and
+  a file system fails the 6 socket cases; a descriptor that `stat`s as a
+  socket typed as a file, the 5 on SF; another namespace's `sock` row typed
+  as a file, J's one (and a unit test on every runner). The tenth, an `-e`
+  row given an identity, falls to a unit test alone, and must:
+  `path_matches` and `PathIndex::mark` return before they ask an `-e` row
+  for an identity or a file system, since no rule of theirs may meet one, so
+  `searched_fs_device()`'s own check is a second guard and changes no
+  output.
+
 ## Fixed by bounding the calls that can block, and taking -b, -S and -O (2026-10-09)
 
 Item 94, and the half of item 110 that is about time. A `stat` of a path on a
@@ -365,7 +539,7 @@ device number of a `DEL` row (100). A review of the change found three more,
 older, next to it: which of two `-e` paths names a row (104), an `-e` that is
 no path (105), and an unidentified socket's device (106). Two things the C
 does there lsof-rs does not reproduce (102, 103, and a minor 107), and one
-more stays open (101).
+more stayed open (101, since resolved).
 
 **A mapping is a row, whatever a `stat` of it says** (item 95). The C's
 `process_proc_map()` makes a row of every distinct mapping that has a path and
@@ -480,15 +654,19 @@ On Windows nothing changes: it has no maps file, no `/proc/locks` and no `-e`.
 
 ### What stays open
 
-Item 101. lsof-rs identifies a file by its DEVICE cell and inode, where the C
-uses `st_dev` and the inode for every file, device nodes included. The two
-agree but for a row whose device lsof-rs could not `stat`: as non-root, a
-process in another mount namespace that maps `/dev/zero` has a `REG 0,6` row
-from the maps line, which the C's `lsof /dev/zero` finds by the devtmpfs's
-device and the inode, and lsof-rs, looking for the device `/dev/zero` names
-(`1,5`), does not. The identity is carried by every path argument, `+d`/`+D`
-entry and bound socket, in the core and both backends, so it is recorded here
-rather than changed with the rows.
+Item 101, resolved since (2026-10-09; see "Fixed by finding a file by its
+`st_dev` and inode"). lsof-rs identified a file by its DEVICE cell and inode,
+where the C uses `st_dev` and the inode for every file, device nodes
+included. This said the two agreed but for a row whose device lsof-rs could
+not `stat`: as non-root, a process in another mount namespace that maps
+`/dev/zero` has a `REG 0,6` row from the maps line, which the C's `lsof
+/dev/zero` finds by the devtmpfs's device and the inode, and lsof-rs, looking
+for the device `/dev/zero` names (`1,5`), did not. That understated it:
+measuring the fix found rows lsof-rs listed and the C does not, wherever a
+node's `st_rdev` and inode equal another file's `st_dev` and inode. The
+identity is carried by every path argument, `+d`/`+D` entry and bound socket,
+in the core and both backends, so it was recorded here rather than changed
+with the rows.
 
 ### Decided: `mem`, as the C prints it (2026-10-09)
 
@@ -2668,7 +2846,8 @@ rs:  python3 6241 root 3r REG 254,0 4 1908956 .../outside/target.txt
 
 `+d` had been over-selecting since the path work landed. The filesystem half
 needed a new `Backend::path_fs_device` hook, because the device cell
-`identify_path` returns is `st_rdev` for a device node — `/dev/null` is `1,3`,
+`identify_path` returned is `st_rdev` for a device node (until item 101 made
+the identity `st_dev` and the inode, 2026-10-09) — `/dev/null` is `1,3`,
 not the devtmpfs it sits on.
 
 ### `-e` is a row shape, not argument validation
@@ -3051,11 +3230,17 @@ unchanged except that `+d` there now stops at one level too.
 
 Two things this cost, both worth recording:
 
-- **The identity has to be the DEVICE cell, not `st_dev`.** A row shows
+- ~~**The identity has to be the DEVICE cell, not `st_dev`.**~~ A row shows
   `st_rdev` for a device node and `st_dev` for everything else, so an
   `identify_path` that returned `st_dev` made `lsof /dev/null` compare `0,6`
   against the row's `1,3` — the row was found and then reported as an
-  unlocated search item, exiting 1. Both now render through one function.
+  unlocated search item, exiting 1. Both then rendered through one function.
+  **Corrected 2026-10-09 (item 101):** the attempt failed because it changed
+  one side. Rows had no `st_dev` of their own then; once they did
+  (`OpenFile::fs_device`, which `-F D` prints), comparing `st_dev` and the
+  inode on both sides is the C's rule, and the DEVICE cell was wrong both
+  ways: it missed a mapping the C could not `stat` (`REG 0,6`) and found a
+  node on another file system with the same device number and inode.
 - **Every expanded entry is a search item.** `+d dir` exits 0 when every entry
   is open and 1 when one is not — verified by adding a single unopened file to
   a directory and watching the exit status flip. The reporting is identity-based
@@ -3378,7 +3563,7 @@ C-DEFECT not reproduced.
 | 98 | `-e` matches a **plain prefix** (`-e /dev/shm` exempts `/dev/shmx/f`), and its trailing slashes are dropped: `(-e /dev/shm)` | ~~a path-component boundary; the slash kept~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. The boundary was an assumption from 2026-09-20 that nothing had measured. |
 | 99 | a maps line's path is the rest of the line, **untrimmed**, and **need not start with `/`**: an io_uring or packet-socket ring is a row | ~~only a path starting with `/`; blanks and a CR trimmed from the end~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. |
 | 100 | a row the maps line alone describes has the device `makedev()` builds: `-F D` is `0x10002d` for device `0,301` | ~~256 times the major plus the minor: `0x12d`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Only past minor 255, which a container host reaches. |
-| 101 | a path argument finds a file by its **`st_dev` and inode**, a device node's too | by its DEVICE cell (for a device node, the device it names) and inode: the same answer but for a row whose device lsof-rs could not `stat`. Run as non-root, a process in another mount namespace that maps `/dev/zero` has a `REG 0,6` row, which `lsof /dev/zero` finds in the C and not in lsof-rs | **OPEN — found 2026-10-04** measuring item 95. The identity is carried by every path argument, `+d`/`+D` entry and bound socket, in the core and both backends. |
+| 101 | a path argument, a `+d`/`+D` entry and an AF_UNIX socket's bound path find a file by its **`st_dev` and inode** (`arg.c:285-298`, `dfile.c:226-237`), what `-F D` and `-F i` print, whatever its type: a device node is the node, on the file system holding it. A socket is found by its bound path alone, never by its own device and inode nor its file system (`dnode.c:700-705`) | ~~by its DEVICE cell (for a device node, the device it names) and inode~~, which **missed** rows and **invented** them. Missed: a mapping of a device node the C cannot `stat` is `REG` with its maps line's device (as non-root, `/dev/zero` mapped in another mount namespace, `REG 0,6 4`; as root, a node's mapping whose path is covered, or deleted and linked elsewhere), and `+d /dev` missed it too. Invented: a node whose `st_rdev` and inode equal another file's `st_dev` and inode — a container's `/dev/null`, the same pty index in another devpts instance (always: devpts numbers a pty N+3), a block device beside a file on the file system it backs, an `O_PATH`-held `c 0,X` beside a file on `0,X`; and, found in review, a socket no table names under `-x l +d /proc/PID/fd`, and an `O_PATH` descriptor on a socket file under the file's path and its file system | **resolved 2026-10-09** — see "Fixed by finding a file by its `st_dev` and inode" above. Found 2026-10-04 measuring item 95; the invented half found measuring this, as root and as `nobody`, in private mount namespaces. |
 | 102 | a mapping's name that is **no path** (`anon_inode:[io_uring]`) is `stat`ed relative to lsof's working directory: a file planted there under that name is described in the mapping's place, `(path dev=254,0, inode=…)`, and a link there into a hung file system stops the run | never `stat`ed: `(stat: No such file or directory)`, what the C prints where nothing is planted | **C-DEFECT, not reproduced — found 2026-10-04** measuring item 99. Ledgered as `mapping-named-by-no-path-not-stated-in-lsof-rs`. |
 | 103 | a maps path **ends at a TAB** (`get_fields()`): `libssl.so<TAB>x` is `libssl.so (stat: …)`, or the real `libssl.so`'s `(path …)` | keeps the whole name | **C-DEFECT, not reproduced — found 2026-10-04** measuring item 99; the maps twin of item 66. Ledgered as `mapped-name-with-a-tab-kept-whole-in-lsof-rs`. |
 | 104 | when two `-e` paths cover a file, NAME gives the one **named last** (the C puts each at the head of its list), and a repeat keeps its first place: `-e / -e /dev` says `(-e /dev)` of `/dev/zero` | ~~the one named first~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found by the change's review; on fd rows since 2026-09-20, and on mapped files with this change. |
@@ -3402,6 +3587,8 @@ C-DEFECT not reproduced.
 | 122 | `avoiding stat(P): -b was specified.` prints `P` **raw**, where the same run escapes it in `avoiding readlink(P)` and in the status error: a path named `e<ESC>[2Jx` puts an ESC byte on the terminal | escapes it (`^[`) | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:1011,1519`: `fprintf("%s")`, not `safestrprt()`). Measured with `od -c` on `-b -f -- 'e\033[2Jx'`. No differential case can isolate it while the C names every mount under `-b` (the ledgered `opt-b-*` cases); `crates/lsof-cli/tests/arguments.rs` pins it. Item 112's class, which joins it here. |
 | 123 | the child that reads links and `stat`s is a **fork**: in lsof's own listing it has the parent's command name and working directory, fds 0r and 1w on two pipes and nothing else, and the parent holds the other ends (fds 5w and 6r here) | the helper is the binary **re-executed** (`/proc/self/exe`; through the loader when lsof was run by naming it): the same command name (it takes its parent's) and working directory (it inherits lsof's), fds 0r and 1w on two pipes, but it has `/dev/null` on fd 2, and it holds any fd lsof was given without close-on-exec, which std cannot close; lsof holds the other ends at its own numbers. It runs on every run that reads the mount table (every one but `-f`). While it waits on a call it holds what the call opened: the `O_PATH` descriptor of a `stat` (decision 3: the one std `stat` that mounts no automount point) or a directory being listed; killed there, it keeps it until the file system answers, and **anything that `stat`s `/proc/HELPER/fd/N` meanwhile waits too** — the C's lsof listing the host, another tool, and an lsof-rs that is not the same file. lsof-rs itself neither `stat`s nor lists a helper's close-on-exec descriptors, which are exactly those (its pipes, `/dev/null` and what it inherited are not close-on-exec): this run's helpers by pid, another run's when it runs this same file (`/proc/PID/exe`) with the helper's argument and lsof's command name. And lsof has a second thread per helper started, which reads its replies (one stays, blocked in a pipe `read`, for each helper killed): `-K` lists them as tasks (TASKCMD `lsof-safe`), so `lsof -K -a -c lsof` lists lsof, where the C, single-threaded, lists nothing | **DECISION — 2026-10-09** (item 94). `/dev/null` because std has no closed stdio; the exec because a thread blocked on FUSE cannot be abandoned (measured); pipes, so that the helper's fds 0 and 1 are FIFOs as the C's child's are, and std gives a pipe read no timeout, hence the thread (a socket would have needed none, and shown as `unix`). The working directory had been `/`, with a relative path sent through `/proc/<lsof>/cwd`; the review found that named another process's directory in a pid namespace sharing the host's `/proc`, so the helper now works where lsof does, as the C's child. The descriptor a waiting helper holds was found the same way: `lsof -S 2` beside a mount that never answered dropped the mount and then hung on its own killed helper's fd 3 (and so did the C's `lsof -b -w -p HELPER`); `crates/lsof-cli/tests/bounded_calls.rs`, `a_killed_helper_holds_nothing_a_scan_waits_on`, pins that two whole-host runs in a row, a `+D` and a path argument each end within their limits. Measured with `lsof -n -P -a -c lsof -d 0-9,cwd` and `-K -a -c lsof -d cwd` for both binaries. |
 | 124 | when the mount table lists an NFS mount (`HasNFS`), the C makes every per-file `stat` as well — cwd, rtd, txt, each fd's `lstat` and `stat`, mapped files, unix-socket paths — through `statsafely()`, and on a failure names it `(stat: <error>)` | per-process `stat`s are made in lsof, unbounded, NFS or not, as the C makes them without NFS | **OPEN — recorded 2026-10-09** by item 94. Not measurable here: this kernel has no NFS (`/proc/filesystems`). The C source: `dmnt.c:497-500`, `dproc.c:963-976,1010-1023,1059-1074,1178-1210,1542-1551,1817-1830`, `dsock.c:3210-3213`. |
+| 125 | a row locates **one** search item: `is_file_named()` tries the file arguments, then the file-system ones, marks the first that names the row and returns (`dfile.c`), so a file-system argument whose only open file another argument also names is `no file system use located`, exit 1 | marks every item a row matches: exit 0 | **OPEN — found 2026-10-09** measuring item 101: `lsof -V -a -p H T T/f`, `T` a tmpfs whose only open file is H's `T/f`, in either order, and with `-d 99`, which prints no row. The mechanism of item 17's two names for one file (a DECISION: not reproduced) and item 84's one source naming two file systems; the maintainer's call. Ledgered as `path-file-and-its-file-system-one-item-per-row-in-the-c`, unpinned (the work directory). |
+| 126 | an `O_PATH` descriptor on a socket file (its link a path, its `stat` `S_IFSOCK`) is a socket no table names: `process_proc_sock()` finds no table entry and no `system.sockprotoname`, so `sock`, SIZE/OFF `0t0`, NAME `can't identify protocol` (`(-X specified)` under `-X`; `dsock.c:4145-4166`) | typed by its `stat`: `SOCK`, SIZE `0`, its path for NAME | **OPEN — found 2026-10-10** reviewing item 101, measured as root in a private mount namespace: `lsof -FftDsoin -a -p P -d 6` gives `tsock D0xfe00 o0t0 i2042142 ncan't identify protocol` in the C and `tSOCK D0xfe00 s0 o0t0 i2042142 n…/s.sock` in lsof-rs. Which rows a path finds does not depend on it (item 101: neither finds the descriptor by the file's device and inode). Closing it needs no `getxattr()`: a socket file's own inode never carries the attribute, so the row is `can't identify protocol`, item 22's row built for a path rather than `socket:[N]`. (The C first looks its `st_ino` up in the protocol tables (`dsock.c:3454` and after), so a socket file whose inode number equals a listed socket's would print that socket: a coincidence of numbers on two file systems, not to be reproduced.) Ledgered as `sock-file-held-by-path-row-in-the-c`. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

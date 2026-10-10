@@ -235,12 +235,14 @@ meet. Each number is a row there, with the measurement behind it.
   (111).
 - **Linux:** `-E`/`+E` are accepted and ignored (56); AF_VSOCK, ping and
   unbound netlink sockets, and a TCP socket that is bound but not listening,
-  show as `SOCK` `socket:[N]` (22, waiting on a decision); a raw socket is
-  `IPv4`/`IPv6` and a bound netlink socket `SOCK`, where the C reads their
-  tables (108, 109); a login name is read from `/etc/passwd` only, so an LDAP
-  or SSSD account can be named by its UID alone (39); run as non-root, a device
-  that a process in another mount namespace maps is not found by its path
-  (101); `-f` with `-e` is refused (113).
+  show as `SOCK` `socket:[N]` (22, waiting on a decision), and an `O_PATH`
+  descriptor on a socket file as `SOCK` and its path, where the C says `sock`
+  and `can't identify protocol` (126); a raw socket is `IPv4`/`IPv6` and a
+  bound netlink socket `SOCK`, where the C reads their tables (108, 109); a
+  login name is read from `/etc/passwd` only, so an LDAP or SSSD account can
+  be named by its UID alone (39); `-f` with `-e` is refused (113); a file
+  named by a path argument and its file system named by another locate both,
+  where the C's row locates the file alone and the run exits 1 (125).
 - **Output shape:** the JSON from `-J`/`-j` has lsof-rs's own schema, not the
   C's (91), and under `-K` a task's object repeats its process's (61); a byte
   that is not UTF-8 prints as U+FFFD, where the C prints `\xff` (93); `-F`,

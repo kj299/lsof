@@ -24,8 +24,8 @@ pub mod service;
 
 pub use backend::{errno_text, Backend, BackendError, MountEntry, Privilege, UserLookup};
 pub use model::{
-    AccessMode, BoundPath, FdType, FileType, OpenFile, Process, Protocol, SockState, SocketInfo,
-    TcpState, UnixState,
+    AccessMode, BoundPath, FdType, FileId, FileType, OpenFile, Process, Protocol, SockState,
+    SocketInfo, TcpState, UnixState,
 };
 pub use render::Escaper;
 pub use safefs::{Blocking, FileStat, FsCalls, InProcess, SafeFs};

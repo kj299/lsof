@@ -111,11 +111,17 @@ pub trait Backend {
     /// A short human-readable name (e.g. `"windows"`, `"mock"`).
     fn name(&self) -> &str;
 
-    /// The `(DEVICE, NODE)` identity of the file a `stat` described, rendered
-    /// exactly as this backend renders those cells on a row — so the
-    /// comparison in [`Selection::path_matches`](crate::selection::Selection)
-    /// is a plain equality test and the formatting lives with the code that
-    /// produces it.
+    /// The identity of the file a `stat` described: its `st_dev` and
+    /// `st_ino`, as the C keeps them for a path argument (`arg.c`,
+    /// `ck_file_arg()`: `sfp->dev = sb.st_dev`, `sfp->i = sb.st_ino`), and
+    /// never the DEVICE cell. A device node is the file that holds it, not
+    /// the device it names: `lsof /dev/zero` finds a row whose
+    /// [`OpenFile::file_id`](crate::model::OpenFile::file_id) is devtmpfs's
+    /// `0,6` and inode 4, the fd's `CHR 1,5` and a mapping's `REG 0,6` alike,
+    /// and not a node with that device and inode on another file system
+    /// (DIVERGENCES 101). The number is the same kind as a row's
+    /// [`OpenFile::fs_device`](crate::model::OpenFile::fs_device) and a
+    /// mount's [`MountEntry::device`], so selection compares numbers.
     ///
     /// This is what makes a path argument mean what lsof means by it: `lsof
     /// /a/hardlink` finds the file even though it was opened under its other
@@ -130,8 +136,9 @@ pub trait Backend {
     /// call's own error. Until 2026-10-09 this took a path and `stat`ed it
     /// here, in-process and unbounded, and a `+d`/`+D` walk asked for an
     /// entry's file system through a second method, `path_fs_device`, which
-    /// is now the caller's `lstat`.
-    fn identify_stat(&self, _st: &crate::safefs::FileStat) -> Option<(String, String)> {
+    /// is now the caller's `lstat`. Until then too it returned the DEVICE and
+    /// NODE cells as text, `st_rdev` for a device node.
+    fn identify_stat(&self, _st: &crate::safefs::FileStat) -> Option<crate::model::FileId> {
         None
     }
 

@@ -23,18 +23,13 @@ const S_IFIFO: u32 = 0o010000;
 
 /// The DEVICE cell for a stat result: `st_rdev` for a device node (a
 /// character or block special names *its own* device), `st_dev` for everything
-/// else (the filesystem the file lives on). Shared with `identify_stat` so a
-/// path argument and the row it should match are rendered by one rule.
+/// else (the filesystem the file lives on). What is shown, and only that: a
+/// path argument finds a row by its `st_dev` and inode, a device node's too
+/// (`OpenFile::file_id`; DIVERGENCES 101).
 pub(crate) fn dev_cell(md: &std::fs::Metadata) -> String {
-    dev_cell_of(md.mode(), md.dev(), md.rdev())
-}
-
-/// [`dev_cell`] from the three numbers it reads, as a bounded `stat` returns
-/// them ([`lsof_core::FileStat`]).
-pub(crate) fn dev_cell_of(mode: u32, dev: u64, rdev: u64) -> String {
-    match type_from_mode(mode) {
-        FileType::Chr | FileType::Block => dev_string(rdev),
-        _ => dev_string(dev),
+    match type_from_mode(md.mode()) {
+        FileType::Chr | FileType::Block => dev_string(md.rdev()),
+        _ => dev_string(md.dev()),
     }
 }
 
@@ -75,7 +70,10 @@ pub(crate) fn type_from_mode(mode: u32) -> FileType {
         // network namespace, or a family not read (netlink, packet). The row is
         // still real, and its `socket:[inode]` name is the key that would
         // resolve it, so it is reported unresolved rather than guessed at.
-        S_IFSOCK => FileType::Other("SOCK".into()),
+        // Or an `O_PATH` descriptor on a socket file, whose link is its path.
+        // A socket either way, which no path finds by its own device and
+        // inode (`OpenFile::is_socket`; DIVERGENCES 101).
+        S_IFSOCK => FileType::Socket("SOCK"),
         // Any other format, `0` included — an anonymous inode, which a
         // mapping in another mount namespace reaches through `map_files`: the
         // C's `LSOF_FILE_UNKNOWN_RAW`, the format's number in octal (`0000`),
@@ -342,11 +340,11 @@ fn metadata_outside(path: &[u8], exempt: &[String]) -> Option<std::fs::Metadata>
     }
 }
 
-/// `(DEVICE, NODE)` of the socket file at an AF_UNIX socket's bound path, as
-/// the C takes it (`dsock.c`): only an absolute path, `stat`ed in this
-/// process's mount namespace, and only when what is there is a socket — a
-/// file put in its place after the bind identifies nothing, and leaves the
-/// path to be matched as typed.
+/// The identity (`st_dev`, inode) of the socket file at an AF_UNIX socket's
+/// bound path, as the C takes it (`dsock.c:3200-3218`, `sb_dev` and `sb_ino`):
+/// only an absolute path, `stat`ed in this process's mount namespace, and
+/// only when what is there is a socket — a file put in its place after the
+/// bind identifies nothing, and leaves the path to be matched as typed.
 ///
 /// Under a `-e`, the path is walked a component at a time
 /// ([`metadata_outside`]), and a socket file the walk would reach only
@@ -358,7 +356,7 @@ fn metadata_outside(path: &[u8], exempt: &[String]) -> Option<std::fs::Metadata>
 /// (`SocketTable::raw_path`): the `path` shown then holds U+FFFD, which names
 /// no file, and stat'ing it would lose the socket the way `maps` once lost a
 /// mapped file.
-fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<(String, String)> {
+fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<lsof_core::FileId> {
     use std::os::unix::fs::FileTypeExt;
     if !path.starts_with('/') {
         return None;
@@ -369,9 +367,10 @@ fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<(
     } else {
         metadata_outside(bytes, exempt)?
     };
-    md.file_type()
-        .is_socket()
-        .then(|| (dev_cell(&md), md.ino().to_string()))
+    md.file_type().is_socket().then(|| lsof_core::FileId {
+        dev: md.dev(),
+        ino: md.ino(),
+    })
 }
 
 /// The C's `UNKN*` TYPE code for an fd kind — `UNKNfd`, `UNKNcwd`, `UNKNrtd`,
@@ -472,8 +471,9 @@ pub(crate) fn socket_row(
             // printing and the C shows `0t0`. Its device is the socket's
             // file system's, which the C records (`Lf->dev`), so `-F` gives
             // it as `D0x9`, not as the `d` string a socket from a table
-            // gets (measured).
-            file_type: FileType::Other("sock".into()),
+            // gets (measured). Typed a socket, whose device and inode no path
+            // finds it by (DIVERGENCES 101).
+            file_type: FileType::Socket("sock"),
             name,
             device: meta.map(dev_cell),
             size: None,
@@ -960,6 +960,15 @@ mod tests {
     }
 
     use super::*;
+
+    /// What a path argument naming the file `md` describes finds it by: its
+    /// `st_dev` and inode, a socket file's too (DIVERGENCES 101).
+    fn file_id(md: &std::fs::Metadata) -> lsof_core::FileId {
+        lsof_core::FileId {
+            dev: md.dev(),
+            ino: md.ino(),
+        }
+    }
 
     #[test]
     fn mode_maps_to_lsof_type_codes() {
@@ -1539,7 +1548,7 @@ mod tests {
             .iter()
             .find(|f| f.fd == FdType::Handle(3))
             .expect("a row for fd 3");
-        assert_eq!(s.file_type, FileType::Other("SOCK".into()), "{s:?}");
+        assert_eq!(s.file_type, FileType::Socket("SOCK"), "{s:?}");
         assert_eq!(s.links, None, "a socket has no link count: {s:?}");
         let cwd = rows
             .iter()
@@ -1547,6 +1556,78 @@ mod tests {
             .expect("a cwd row");
         assert_eq!(cwd.links, Some(1), "anything else keeps its count: {cwd:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri supports only AF_INET and AF_INET6 sockets")]
+    fn a_socket_file_held_by_path_is_found_by_no_path() {
+        // DIVERGENCES 101. An fd whose link is a socket file's path (an
+        // `O_PATH` descriptor on it) `stat`s as that file, on the file system
+        // holding it. The C hands it to `process_proc_sock()` all the same,
+        // which never asks whether a path argument names it, by identity or
+        // by file system: `lsof S` lists the socket bound at S and not this
+        // fd, and `lsof MNT` does not list it (measured). `-F D` still
+        // prints its device.
+        let dir = fake_proc("sockfile");
+        let sock = dir.join("bound.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::os::unix::fs::symlink(&sock, dir.join("fd").join("3")).unwrap();
+        let md = std::fs::metadata(&sock).unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let s = rows
+            .iter()
+            .find(|f| f.fd == FdType::Handle(3))
+            .expect("a row for fd 3");
+        assert!(s.is_socket(), "{s:?}");
+        assert_eq!(
+            (s.fs_device, s.node.as_deref()),
+            (Some(md.dev()), Some(md.ino().to_string().as_str())),
+            "its cells are the socket file's"
+        );
+        assert_eq!((s.file_id(), s.searched_fs_device()), (None, None), "{s:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri supports only AF_INET and AF_INET6 sockets")]
+    fn a_socket_only_its_namespace_names_is_found_by_no_path() {
+        // DIVERGENCES 101. A socket this namespace's tables do not know is a
+        // `sock` row named by the owner's namespace (`protocol: TCP`, fixture
+        // J) or, under `-X`, not named at all. It keeps sockfs's device and
+        // its inode for `-F D` and `-F i`, which the C never compares: `-x l
+        // +d /proc/PID/fd` does not find it (measured). An empty table and
+        // `-X`, which asks no namespace, stand in for the other namespace.
+        use std::os::fd::AsRawFd;
+        let s = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        let md = std::fs::metadata(format!("/proc/self/fd/{}", s.as_raw_fd())).unwrap();
+        let socks = SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = net::NetnsTables::new(true);
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+            helpers: &crate::safefs::HelperFds::default(),
+        };
+        let f = socket_row(
+            md.ino(),
+            &FdType::Handle(3),
+            &FdInfo::default(),
+            Some(&md),
+            self_pid(),
+            &ctx,
+        )
+        .expect("`-X` names it");
+        assert_eq!(f.file_type.code(), "sock");
+        assert_eq!(f.fs_device, Some(md.dev()), "`-F D` prints its device");
+        assert!(f.is_socket(), "{f:?}");
+        assert_eq!((f.file_id(), f.searched_fs_device()), (None, None), "{f:?}");
     }
 
     #[test]
@@ -1586,10 +1667,7 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let path = sock.to_str().unwrap();
         let md = std::fs::metadata(&sock).unwrap();
-        assert_eq!(
-            socket_file_id(path, None, &[]),
-            Some((dev_cell(&md), md.ino().to_string()))
-        );
+        assert_eq!(socket_file_id(path, None, &[]), Some(file_id(&md)));
         // A regular file in its place identifies nothing.
         let plain = dir.join("plain");
         std::fs::write(&plain, b"x").unwrap();
@@ -1614,16 +1692,13 @@ mod tests {
                 std::os::unix::net::UnixListener::bind(std::ffi::OsStr::from_bytes(&raw)).unwrap();
             let shown = String::from_utf8_lossy(&raw).into_owned();
             let md = std::fs::metadata(std::ffi::OsStr::from_bytes(&raw)).unwrap();
-            assert_eq!(
-                socket_file_id(&shown, Some(&raw), &[]),
-                Some((dev_cell(&md), md.ino().to_string()))
-            );
+            assert_eq!(socket_file_id(&shown, Some(&raw), &[]), Some(file_id(&md)));
             assert_eq!(socket_file_id(&shown, None, &[]), None);
         }
         // Under a `-e` elsewhere the socket is still found, through a symlink
         // too; under one that covers it, by no spelling, since each would
         // look its name up in the exempted file system.
-        let id = Some((dev_cell(&md), md.ino().to_string()));
+        let id = Some(file_id(&md));
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::os::unix::fs::symlink(&dir, dir.join("sub/up")).unwrap();
         let d = dir.to_str().unwrap();
@@ -1740,10 +1815,7 @@ mod tests {
             &ctx,
         );
         let md = std::fs::metadata(&path).unwrap();
-        assert_eq!(
-            first.and_then(id),
-            Some((dev_cell(&md), md.ino().to_string()))
-        );
+        assert_eq!(first.and_then(id), Some(file_id(&md)));
         std::fs::remove_file(&path).unwrap();
         let second = row(
             &link,
@@ -1753,10 +1825,7 @@ mod tests {
             0,
             &ctx,
         );
-        assert_eq!(
-            second.and_then(id),
-            Some((dev_cell(&md), md.ino().to_string()))
-        );
+        assert_eq!(second.and_then(id), Some(file_id(&md)));
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
