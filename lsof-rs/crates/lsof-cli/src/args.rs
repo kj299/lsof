@@ -3266,14 +3266,18 @@ mod tests {
     fn json_file_flags_follow_the_cs_defaults() {
         let ff = |argv: &[&str]| json(argv).file_flags;
         assert_eq!(ff(&["-J"]), FileFlags::Names);
-        assert_eq!(ff(&["-J", "+fG"]), FileFlags::Hex);
-        assert_eq!(ff(&["-J", "-fG"]), FileFlags::Hex);
-        assert_eq!(ff(&["+fG", "-J"]), FileFlags::Hex);
-        assert_eq!(ff(&["-J", "-fg"]), FileFlags::Names);
-        assert_eq!(ff(&["-J", "+fg"]), FileFlags::Names);
         assert_eq!(ff(&["-J", "-F"]), FileFlags::Hex);
-        assert_eq!(ff(&["-J", "-F", "-fg"]), FileFlags::Off);
         assert_eq!(ff(&["-J", "-FG"]), FileFlags::Hex);
+        // The -f letters exist only where file flags are recorded; elsewhere
+        // they are refused (the_file_flags_letters_are_refused_where_none_are_recorded).
+        if cfg!(target_os = "linux") {
+            assert_eq!(ff(&["-J", "+fG"]), FileFlags::Hex);
+            assert_eq!(ff(&["-J", "-fG"]), FileFlags::Hex);
+            assert_eq!(ff(&["+fG", "-J"]), FileFlags::Hex);
+            assert_eq!(ff(&["-J", "-fg"]), FileFlags::Names);
+            assert_eq!(ff(&["-J", "+fg"]), FileFlags::Names);
+            assert_eq!(ff(&["-J", "-F", "-fg"]), FileFlags::Off);
+        }
     }
 
     #[test]
