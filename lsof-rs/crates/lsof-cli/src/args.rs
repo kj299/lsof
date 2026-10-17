@@ -3343,6 +3343,9 @@ mod tests {
             &["-i", "-p", "^1"],
             &["-i", "-u", "^root"],
             &["-i", "-c", "^x"],
+            // `-g ^1` is a PGID exclusion on Linux; on Windows `-g` takes
+            // parent PIDs and refuses `^`, so the case is Linux's alone.
+            #[cfg(not(windows))]
             &["-i", "-g", "^1"],
             &["-i", "-g"],
             &["-i", "-K", "i"],
@@ -3546,9 +3549,18 @@ mod tests {
                     .collect()
             )
             .unwrap_err(),
-            "can't include and exclude TCP state: ESTABLISHED\n\
-             lsof: can't include and exclude TCP state: LISTEN\n\
-             lsof: -x must accompany +d or +D"
+            // Each conflicting state in the order of the platform's state
+            // table: the C's (Linux) has ESTABLISHED before LISTEN, the
+            // Windows table (MIB_TCP_STATE) LISTEN first.
+            if cfg!(windows) {
+                "can't include and exclude TCP state: LISTEN\n\
+                 lsof: can't include and exclude TCP state: ESTABLISHED\n\
+                 lsof: -x must accompany +d or +D"
+            } else {
+                "can't include and exclude TCP state: ESTABLISHED\n\
+                 lsof: can't include and exclude TCP state: LISTEN\n\
+                 lsof: -x must accompany +d or +D"
+            }
         );
         // `-hx` is `-x`'s error, not the help.
         assert_eq!(
