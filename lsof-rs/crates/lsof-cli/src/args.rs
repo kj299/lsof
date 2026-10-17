@@ -3325,7 +3325,10 @@ mod tests {
     /// The C reads its mount table iff some `-e`/`+e` was given or the run is
     /// not `-i` alone (`Selinet`): every form below measured by counting
     /// the C's `alarm(15)` calls (none, or one per request of its child), the
-    /// negated and value-less ones included (DIVERGENCES 110).
+    /// negated and value-less ones included (DIVERGENCES 110). Linux's
+    /// alone: only it has a mount table, and the Windows parser reads `-g` as
+    /// parent PIDs, with a value it requires.
+    #[cfg(target_os = "linux")]
     #[test]
     fn needs_mount_table_is_the_cs_selinet() {
         let d = a_dir();
@@ -3343,9 +3346,6 @@ mod tests {
             &["-i", "-p", "^1"],
             &["-i", "-u", "^root"],
             &["-i", "-c", "^x"],
-            // `-g ^1` is a PGID exclusion on Linux; on Windows `-g` takes
-            // parent PIDs and refuses `^`, so the case is Linux's alone.
-            #[cfg(not(windows))]
             &["-i", "-g", "^1"],
             &["-i", "-g"],
             &["-i", "-K", "i"],
