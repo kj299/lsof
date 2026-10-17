@@ -65,7 +65,7 @@ it is a gap, not a formatting choice.
 | `/proc/PID/maps` | kernel + mapped filenames | **hostile** | `lsof-backend-linux::maps` | `proc_maps` |
 | `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
 | `/proc/self/mounts` | kernel + mount namespace | untrusted | `lsof-backend-linux::mounts` | `proc_mounts` |
-| each mount directory, `stat`ed (an NFS, FUSE or automount point among them) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | not applicable: a liveness hazard, not a parser; see below |
+| each mount directory, and its source, read through `Readlink()` and `stat`ed on a run that reads the table (an NFS or FUSE mount among them; never an autofs one, nor an `-e`/`+e` one) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | `proc_mounts` drives the table's rules under `-b`; the calls are a liveness hazard, not a parser: see below |
 | a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |
 | `/proc/locks` | kernel | untrusted | `lsof-backend-linux::locks` | `proc_locks` |
 | `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`); none for `parse_passwd_names`, behind `-u NAME` |
@@ -143,28 +143,34 @@ lists no NFS mount (DIVERGENCES 124), and `-b` guards in both only the paths a
 user names and the mount table, not these. `-e` exempts by a plain prefix of
 the path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
 
-**A mount directory is `stat`ed on every run, through a bounded helper**
-(DIVERGENCES 110; its timeout half fixed 2026-10-09 by 94). The C reads the
-mount table only when a run needs it, `stat`s each directory through a child
-process under a 15 s `alarm()`, skips `autofs`, `pipefs`, `sockfs` and
-automounter sources, and never `stat`s an `-e` mount; under `-i` alone it
-`stat`s none. Its alarm works once per run (118), so a mount that never answers
-hangs it all the same. lsof-rs `stat`s every mount directory on every run but
-`-f`, `-i` included, and since 2026-10-09 makes each `stat` and each source's
-`readlink` in a helper process that gets `-S` seconds (15) for it: a hung NFS
-or CIFS server, or a FUSE daemon that never answers (measured with
-`differential/fuse_hang.py`), costs a run that limit per call that meets it —
-the mount, a path argument on it, each walk entry there; one `Readlink()`
-costs at most one — and lsof exits, is reaped, and closes its output; the
-helper it killed waits in the kernel instead, with one of lsof's threads
-reading its pipe until lsof exits. `-b` makes no such call. The `stat` opens the path `O_PATH`,
-which, like `stat(2)`, mounts no automount point, where std's `statx` did.
-What stays open is the rest of 110, the next piece of work: lsof-rs still
-reads the table under `-i` alone, so a hung server costs `lsof -i :22` the
-limit where it costs the C nothing; it still `stat`s an `-e` mount and the
-types the C skips; and it says nothing of a mount it drops (87). A bound
-AF_UNIX socket's path, like a process's files, is `stat`ed in lsof with no
-limit (124).
+**A mount directory is `stat`ed only when the run needs the table, through a
+bounded helper** (DIVERGENCES 110, resolved 2026-10-17; its timeout half
+2026-10-09 by 94). lsof-rs reads the mount table as the C does: only when a
+run needs it — not under `-i` alone, unless `-e` or `+e` is given — once,
+where the C first needs it; it skips `autofs`, `pipefs`, `sockfs` and
+automounter entries before asking anything of them, never `stat`s an
+`-e`/`+e` mount or its source, and `stat`s each other directory once, after
+its `Readlink()` (a later row of one it could not `stat` is tried again, as
+the C tries it: a directory listed twice that cannot be `stat`ed is asked
+twice, by both, measured). Every call is made in a helper process that gets
+`-S` seconds (15) for it, where the C's child is under an `alarm()` that works
+once per run (118): a hung NFS or CIFS server, or a FUSE daemon that never
+answers (measured with `differential/fuse_hang.py`), costs a run that reads
+the table that limit per call that meets it — the mount, a path argument on
+it, each walk entry there; one `Readlink()` costs at most one — and lsof
+exits, is reaped, and closes its output, with the C's warning that it could
+not `stat` the mount; the helper it killed waits in the kernel instead, with
+one of lsof's threads reading its pipe until lsof exits. `lsof -i :22` and
+`lsof -e MOUNT` ask such a mount nothing, and `-i` alone starts no helper
+(measured). `-b` makes no such call. The `stat` opens the path `O_PATH`,
+which, like `stat(2)`, mounts no automount point, where std's `statx` did, so
+a path argument naming one does not mount it either (fixture AUTOFS). The
+table is read whole up to 64 MiB of `/proc/self/mounts`, which a user who may
+mount can lengthen; past it, mounts are left out (129). What stays open:
+the C's mount warnings and `Readlink()` messages quote names a mounter chose,
+which lsof-rs escapes (`^[`), as the C does but in its raw `avoiding stat(P)`
+and `-e` messages (122). A bound AF_UNIX socket's path, like a process's
+files, is `stat`ed in lsof with no limit (124).
 
 **The bounded calls run in a second process** (DIVERGENCES 94, 123). lsof
 re-executes its own image, `/proc/self/exe` — never the binary's path, which
@@ -229,12 +235,13 @@ Two exposures remain, both the C's as well, since both walk by name:
   not done.
 - **The top directory's identity is taken when the option is parsed, and its
   listing made later.** For the first `+d`/`+D` both read the mount table in
-  between: the C's `ck_file_arg()` reads and `stat`s it before `OpenDir()`
-  (`arg.c:184,915`; 117 calls between the two here, 30 `stat`s and 86
-  `readlink`s, measured with strace), lsof-rs once its options are parsed
-  (67). For a later one the C has the table already and opens the directory
-  straight after its `stat`, where lsof-rs lists it after the table and every
-  walk before it, since it walks after parsing (DIVERGENCES 82). A directory
+  between, at the option: the C's `ck_file_arg()` reads and `stat`s it before
+  `OpenDir()` (`arg.c:184,915`; 117 calls between the two here, 30 `stat`s and
+  86 `readlink`s, measured with strace), lsof-rs right after the option's
+  `stat` too (110). lsof-rs still lists the directory once every option is
+  parsed and the users are resolved, after the walks before it, since it
+  walks after parsing (DIVERGENCES 82); for a later one the C has the table
+  already and opens the directory straight after its `stat`. A directory
   renamed in that window is listed as whatever is then at the name, under the
   identity the `stat` saw (measured: `walk-race-top-to-link`, the same in
   both).
@@ -252,10 +259,22 @@ said nothing of a container's. The identity is now the C's, `st_dev` and the
 inode, a node's on the file system that holds it, so another instance's pty
 is another file.
 
-**An `-i` error message prints its argument raw** (DIVERGENCES 112). Every
-other message that quotes an argument escapes it, as the C's `safestrprt()`
-does; `-i`'s parser does not, so `lsof -i "$untrusted"` can write terminal
-control sequences to stderr.
+**An `-i` error message printed its argument raw** (DIVERGENCES 112,
+resolved 2026-10-17). `lsof -i "$untrusted"` could write terminal control
+sequences to stderr: `-i $'@[1::\e[2J'` wrote one ESC byte. The C escapes the
+argument after `-i ` with `safestrprt()`, and lsof-rs's parser now reads the
+spec as the C's `enter_network_address()` does and quotes it the same way:
+`unacceptable Internet address in: -i @[1::^[[2J`, byte for byte (measured on
+217 malformed specs). Several other messages quoted an argument raw too, the
+`+c`, `-r` and `-c` refusals among them; and the C itself prints raw the
+`-i` protocol, host and service it names in parentheses, an option letter
+(`%c`), `-K`'s value, the `-c` conflict, every `-s` message and the `-d`
+mixture's item (a C-DEFECT, 122). Every message lsof-rs prints that quotes an
+argument now goes through one constructor that escapes it, and a property
+test runs every option letter, under both prefixes, its value attached and as
+the next word, with hostile values, asserting that no error and no line the
+parse prints holds a control character (U+2028 and U+2029 included); the
+`parse_args` fuzz target asserts the same of every error it reaches.
 
 **Reverse DNS on Windows tells a resolver which peers the host talks to.** It
 is the default there, as in the C (Linux behaves as if `-n` were always given).
@@ -432,6 +451,12 @@ C code so the triage can be checked. The ones that bear on this model:
   escaped (DIVERGENCES 59). Any process can name a thread, so the C lets it write
   an escape sequence to the terminal of whoever runs lsof — the §4 renderer
   capability again. Not reproduced: lsof-rs escapes it as it escapes `c`.
+- **The C prints part of some argument errors raw**: `-i`'s protocol, host
+  and service names, an unknown option letter (`%c`), `-K`'s value, the `-c`
+  conflict, every `-s` message, the `-d` mixture's item, both `-e` messages
+  and `avoiding stat(P)` (DIVERGENCES 122). A caller that passes an untrusted
+  value to lsof lets it write to the terminal of whoever reads stderr. Not
+  reproduced: lsof-rs escapes each as `safestrprt()` escapes the rest (112).
 - **`-s UDP:` with any state name segfaults the C** (ledgered as
   `states-udp-names-crash-the-c`, item 32). Not reproduced: lsof-rs refuses the
   value.

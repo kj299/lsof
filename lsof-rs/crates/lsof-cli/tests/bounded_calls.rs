@@ -236,9 +236,108 @@ echo "helpers=$(helpers)"
         "one killed helper, waiting: {got:?}"
     );
     assert_eq!(get(&got, "after_teardown"), "", "the abort frees it");
-    // Nothing on stderr yet: the warning the C prints for a mount it cannot
-    // `stat` is DIVERGENCES 87's.
-    assert_eq!(std::fs::read(dir.0.join("err")).unwrap(), b"");
+    // The C's warning for a mount it cannot `stat`, and nothing else
+    // (DIVERGENCES 87): the mount's type as the kernel lists it.
+    assert_eq!(
+        String::from_utf8_lossy(&std::fs::read(dir.0.join("err")).unwrap()),
+        cannot_stat(&dir.0.join("fuse"), "\n")
+    );
+    drop(sleeper);
+}
+
+/// The C's warning for a mount whose `stat` failed, here FUSE's, which
+/// `fuse_hang.py` mounts as type `fuse.hang`: its two lines, each ended by
+/// `end`.
+fn cannot_stat(mount: &Path, end: &str) -> String {
+    format!(
+        "lsof: WARNING: can't stat() fuse.hang file system {}{end}      \
+         Output information may be incomplete.{end}",
+        mount.display()
+    )
+}
+
+/// Under `-i` alone the C reads no mount table (`Selinet`), so a mount that
+/// never answers costs it nothing, and now lsof-rs neither: no helper is
+/// started and no request reaches the file system. An `-e` of the mount
+/// reads the table but never `stat`s that mount: no request either, and no
+/// warning (DIVERGENCES 110). Nor does `-Z`, which the C refuses where it
+/// reads it, before any table: lsof-rs decides it from the table's types,
+/// read as text, and examines no mount (DIVERGENCES 29).
+#[test]
+#[cfg_attr(miri, ignore = "miri cannot spawn a process")]
+fn inet_alone_and_an_exempt_mount_ask_nothing_of_it() {
+    if let Some(why) = unavailable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let dir = Scratch::new("fuse-inet");
+    let sleeper = Sleeper(
+        Command::new("sleep")
+            .arg("120")
+            .current_dir("/")
+            .spawn()
+            .expect("start a sleeper"),
+    );
+    let pid = sleeper.0.id();
+    let Some(got) = in_namespace(
+        &dir,
+        "--mode hold",
+        &format!(
+            r#"run() {{
+    t0=$(now)
+    "$LSOF" -S 2 "$@" >/dev/null 2>'{err}'
+    rc=$?
+    t1=$(now)
+    echo "$name.rc=$rc"
+    echo "$name.ms=$(( (t1 - t0) / 1000000 ))"
+    echo "$name.err=$(tr '\n' '|' < '{err}')"
+}}
+name=inet run -n -P -i TCP:1
+name=exempt run -e "$FUSE" -a -d cwd -p {pid}
+name=selinux run -Z -a -d cwd -p {pid}
+# A repeating run stays: any helper it started is there to be seen.
+"$LSOF" -r 30 -S 2 -n -P -i TCP:1 >/dev/null 2>&1 &
+lp=$!
+sleep 1
+echo "repeating=$(helpers)"
+kill $lp; wait $lp
+echo "held=$(grep -c HELD "$LOG")"
+echo "helpers=$(helpers)"
+"#,
+            err = dir.0.join("err").display(),
+        ),
+    ) else {
+        return;
+    };
+    // No TCP socket on port 1: exit 1 and nothing said, at once.
+    assert_eq!(get(&got, "inet.rc"), "1", "{got:?}");
+    assert_eq!(
+        get(&got, "repeating"),
+        "",
+        "-i alone started a helper: {got:?}"
+    );
+    assert_eq!(get(&got, "exempt.rc"), "0", "{got:?}");
+    for name in ["inet", "exempt"] {
+        let ms: u64 = get(&got, &format!("{name}.ms")).parse().unwrap();
+        assert!(ms < 1500, "{name} waited {ms} ms: {got:?}");
+        assert_eq!(get(&got, &format!("{name}.err")), "", "{got:?}");
+    }
+    // Refused, as SELinux is not enabled here (or, where it is, as lsof-rs
+    // has no CONTEXT column), at once and with no warning of the mount.
+    assert_eq!(get(&got, "selinux.rc"), "1", "{got:?}");
+    let ms: u64 = get(&got, "selinux.ms").parse().unwrap();
+    assert!(ms < 1500, "-Z waited {ms} ms: {got:?}");
+    let err = get(&got, "selinux.err");
+    assert!(
+        err.starts_with("lsof: -Z ") && !err.contains("can't stat()"),
+        "{got:?}"
+    );
+    assert_eq!(
+        get(&got, "held"),
+        "0",
+        "a request reached the mount: {got:?}"
+    );
+    assert_eq!(get(&got, "helpers"), "", "{got:?}");
     drop(sleeper);
 }
 
@@ -408,20 +507,22 @@ echo "helpers=$(helpers)"
         assert_eq!(get(&got, "loader.rc"), "0", "{got:?}");
         assert!((2000..3500).contains(&ms("loader")), "{got:?}");
     }
+    let fuse = dir.0.join("fuse");
+    // Each run says the table's warning for the mount (DIVERGENCES 87).
+    let warned = cannot_stat(&fuse, "|");
     for host in ["host1", "host2"] {
         assert_eq!(get(&got, &format!("{host}.rc")), "0", "{got:?}");
         assert!((2000..3500).contains(&ms(host)), "{host}: {got:?}");
         let lines: u64 = get(&got, &format!("{host}.lines")).parse().unwrap();
         assert!(lines > 1, "{host} listed nothing: {got:?}");
-        assert_eq!(get(&got, &format!("{host}.err")), "", "{got:?}");
+        assert_eq!(get(&got, &format!("{host}.err")), warned, "{got:?}");
     }
     // The table's limit (read at the `+D`), then the walk's `lstat`'s.
     assert!((4000..5500).contains(&ms("walk")), "{got:?}");
-    let fuse = dir.0.join("fuse");
     assert_eq!(
         get(&got, "walk.err"),
         format!(
-            "lsof: WARNING: can't lstat({}): Connection timed out|",
+            "{warned}lsof: WARNING: can't lstat({}): Connection timed out|",
             fuse.display()
         ),
         "{got:?}"
@@ -432,7 +533,7 @@ echo "helpers=$(helpers)"
     assert_eq!(
         get(&got, "args.err"),
         format!(
-            "lsof: status error on {}/.: Connection timed out|",
+            "{warned}lsof: status error on {}/.: Connection timed out|",
             fuse.display()
         ),
         "{got:?}"

@@ -160,10 +160,14 @@ pub enum FileType {
     /// file-system argument and no `-N` ever selects it, whatever device and
     /// inode it shows (see [`OpenFile::is_exempt`]).
     Exempt(&'static str),
-    /// A socket no table describes, with its TYPE code: `sock`, the C's
-    /// `LSOF_FILE_SOCKET` (a protocol the owner's namespace names, or `can't
-    /// identify protocol`), or `SOCK`, where lsof-rs still types a socket by
-    /// its `stat` and the C says `sock` (DIVERGENCES 22, 126). The C hands
+    /// A socket that is no Internet, AF_UNIX or packet socket to the C, with
+    /// its TYPE code: `sock`, the C's `LSOF_FILE_SOCKET` (a protocol the
+    /// owner's namespace names, or `can't identify protocol`); `SOCK`, where
+    /// lsof-rs still types a socket by its `stat` and the C says `sock`
+    /// (DIVERGENCES 22, 126); or `raw` and `raw6`, the C's `LSOF_FILE_RAW`
+    /// and `LSOF_FILE_RAW6`, a raw socket `/proc/net/raw` or `raw6` lists,
+    /// named from that table's text and never selected by `-i` (DIVERGENCES
+    /// 108). The C hands
     /// every socket to `process_proc_sock()` before `is_file_named()`
     /// (`dnode.c`), so no path, `+d`/`+D` entry or file-system argument
     /// finds one by its own device and inode, whatever they are (see
@@ -220,6 +224,14 @@ impl FileType {
 pub enum Protocol {
     Tcp,
     Udp,
+    /// UDP-Lite (`IPPROTO_UDPLITE`), from Linux's `/proc/net/udplite` and
+    /// `udplite6`: the third protocol the C's `-i` names, and the third it
+    /// reads those tables for (`dsock.c` `get_tcpudp(…, 2, …)`). Its own
+    /// variant rather than an `Other` name, because the C treats it as UDP's
+    /// sibling: an Internet socket, with queues and a state number `-s TCP:`
+    /// tests, but never a state it prints (measured; see
+    /// [`SocketInfo::shown_state`]).
+    UdpLite,
     Other(&'static str),
 }
 
@@ -228,6 +240,7 @@ impl Protocol {
         match self {
             Protocol::Tcp => "TCP",
             Protocol::Udp => "UDP",
+            Protocol::UdpLite => "UDPLITE",
             Protocol::Other(s) => s,
         }
     }
@@ -486,10 +499,13 @@ impl SocketInfo {
     /// The state lsof prints for this socket. A UDP socket shows one only when
     /// it is `ESTABLISHED`: the C's UDP state table on Linux registers that
     /// one name (`build_IPstates()`), so an unconnected socket — whose
-    /// [`SocketInfo::state`] is `CLOSE` — prints none. Every renderer asks this,
-    /// never the field.
+    /// [`SocketInfo::state`] is `CLOSE` — prints none. A UDP-Lite socket
+    /// shows none at all: the C has no state table for it, and a connected
+    /// one prints no `(ESTABLISHED)` and no `TST=` (measured). Every renderer
+    /// asks this, never the field.
     pub fn shown_state(&self) -> Option<SockState> {
         match (self.protocol, self.state) {
+            (Protocol::UdpLite, _) => None,
             (Protocol::Udp, Some(SockState::Tcp(t))) if t != TcpState::Established => None,
             (_, state) => state,
         }

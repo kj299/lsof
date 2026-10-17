@@ -86,6 +86,13 @@ ledger — those are the kit's, on purpose.
   unavailable and its cases are skipped by name, not failed:
   fixture J  a TCP listener in its own network namespace (CAP_SYS_ADMIN)
   fixture K  AF_PACKET sockets in this namespace (CAP_NET_RAW)
+  fixture RAW a raw ICMP and a raw IPPROTO_RAW socket in this namespace,
+             typed `raw` and never selected by `-i` (CAP_NET_RAW)
+  fixture UDPL a UDP-Lite socket bound to 127.0.0.1:{UDPLPORT} and one
+             connected to it (a kernel with UDP-Lite)
+  fixture NSRAW a raw ICMP and a bound UDP-Lite socket in a foreign user and
+             network namespace, named by the kernel's protocol names
+             (unprivileged user namespaces, and UDP-Lite)
   fixture L  a packet socket, with a mapped ring, and two AF_UNIX sockets in
              a foreign user, network and mount namespace (unprivileged user
              namespaces)
@@ -122,6 +129,25 @@ ledger — those are the kit's, on purpose.
   fixture DN a regular file, and a device node naming its file system with
              the same inode, on two tmpfs mounted here (root, or
              passwordless sudo)
+  fixture MT a mount table of its own (`mt-wrap.sh`, table mode), mounted
+             under the work directory in a mount namespace of its own for
+             each binary run:
+             a plain tmpfs {MTPLAIN} and a link to it {LINK_TO_MTPLAIN}, a
+             directory mounted over twice (`src_dup_bottom`, then
+             `src_dup_top`), a mount hidden under its over-mounted parent
+             whose link names the plain one (`src_hidden`), an over-mounted
+             mount no one can `stat` ({MTGONE}), a mount behind a link loop, one
+             ({MTLOOPSRC}) whose source is a link loop ({MTL1}), an automounter's
+             `server:(pid1234)` ({MTPIDSRC}), one named with ESC and LF, and a
+             directory {MTD} for `+d`: what the C's `readmnt()` skips, reads,
+             `stat`s and warns of (DIVERGENCES 87, 110). Its cases set
+             LSOF_DIFF_MT to `table`; root (or passwordless sudo) and
+             `unshare`. Nothing keeps a cwd, descriptor or mapping on it: its
+             cases name host-side processes ({A}, {PORT})
+  fixture AUTOFS an autofs direct mount {MTAUTO} whose daemon never answers
+             (`autofs_hold.py`), in the same way (LSOF_DIFF_MT `autofs`): the
+             C never `stat`s an autofs mount, and nothing may trigger it; the
+             wrapper fails a run that did. Root and an autofs kernel
   fixture WRACE a holder of a directory and a file in it, beside the
              directory {WRACEDIR} a `+d`/`+D` walks, and of a file on
              /dev/shm: for a walk whose entry is renamed while strace holds
@@ -938,13 +964,15 @@ def unprivileged_wrapper(
     prefix: list | None,
     fuse: str | None = None,
     race: list | None = None,
+    mt: str | None = None,
 ) -> str:
     """A script that runs `binary` through `prefix` when the case's
     environment sets LSOF_DIFF_UNPRIVILEGED, under fixture FH's FUSE mount
     when it sets LSOF_DIFF_FUSE (`fuse`, the script [`fuse_wrap`] wrote),
     under fixture WRACE's `walk_race.py` (`race`, its argv up to the
-    scenario, this side's included) when it sets LSOF_DIFF_RACE, and
-    directly otherwise. The kit runner takes one path per side for every case
+    scenario, this side's included) when it sets LSOF_DIFF_RACE, beside
+    fixture MT's or AUTOFS's mounts (`mt`, the script [`mt_wrap`] wrote)
+    when it sets LSOF_DIFF_MT, and directly otherwise. The kit runner takes one path per side for every case
     and only its environment varies per case, so this is how one case runs as
     another user, or beside a file system the rest never see. It `exec`s
     either way: the process lsof runs as is the binary itself, or for FH the
@@ -969,6 +997,13 @@ def unprivileged_wrapper(
             'if [ -n "$LSOF_DIFF_FUSE" ]; then exec '
             f'{root} env LC_ALL="$LC_ALL" unshare -m --propagation private '
             f'sh {shlex.quote(fuse)} "$LSOF_DIFF_FUSE" {shlex.quote(binary)} "$@"; fi\n'
+        )
+    if mt is not None:
+        root = " ".join(shlex.quote(a) for a in (root_prefix() or []))
+        lines.append(
+            'if [ -n "$LSOF_DIFF_MT" ]; then exec '
+            f'{root} env LC_ALL="$LC_ALL" unshare -m --propagation private '
+            f'sh {shlex.quote(mt)} "$LSOF_DIFF_MT" {shlex.quote(binary)} "$@"; fi\n'
         )
     if prefix is not None:
         argv = " ".join(shlex.quote(a) for a in [*prefix, binary])
@@ -1094,6 +1129,146 @@ def needs_fuse(case: dict) -> bool:
     """Whether a case runs under fixture FH: it says so in its environment,
     whether or not an argument names {FUSE} (`-i` alone does not)."""
     return "LSOF_DIFF_FUSE" in case.get("env", {})
+
+
+AUTOFS_HOLD = os.path.join(HERE, "autofs_hold.py")
+
+# The cases that run beside a mount of their own, each in a mount namespace
+# of its own, by the environment that says so: fixture FH's FUSE mount,
+# WRACE's swapper, MT's table. Each makes the wrapper `exec`, so a case sets
+# one at most.
+EXEC_ENVS = ("LSOF_DIFF_FUSE", "LSOF_DIFF_RACE", "LSOF_DIFF_MT")
+
+
+def mt_wrap(work: str, base: str) -> str:
+    """The script fixture MT's and AUTOFS's cases run in, already in a mount
+    namespace of their own: mount a tmpfs at `base` and, in `table` mode,
+    the mounts fixture MT lists on it, or in `autofs` mode an autofs direct
+    mount at `base/auto` whose daemon (`autofs_hold.py`, in a session of its
+    own) never answers; run the rest; and exit as the binary did, or 3 with
+    a line on stderr when the automount was triggered, which no binary may
+    do. A table that does not come up is not a result: the line it prints
+    carries this shell's pid, so the two sides differ. Everything is the
+    namespace's, gone with it; nothing here keeps a directory, file or
+    mapping on a mount. The daemon, in a session of its own, outlives a
+    case that timed out (whose wrapper alone is killed) by 120 s at most,
+    as fixture FH's server does: then it answers whatever waits on the
+    mount and goes, and the namespace with it."""
+    path = os.path.join(work, "mt-wrap.sh")
+    b = shlex.quote(base)
+    with open(path, "w") as f:
+        f.write(
+            "#!/bin/sh\n"
+            "mode=$1; shift\n"
+            f"B={b}\n"
+            "cd /\n"
+            'mount -t tmpfs lsof-rs-mt "$B" || { echo "linux_diff: no MT table ($$)"; exit 2; }\n'
+            'if [ "$mode" = autofs ]; then\n'
+            '    mkdir "$B/auto"\n'
+            f"    setsid {shlex.quote(sys.executable)} -I {shlex.quote(AUTOFS_HOLD)} "
+            '"$B/auto" "$B/auto.ready" "$B/auto.state" --lifetime 120 </dev/null >/dev/null 2>&1 &\n'
+            "    i=0\n"
+            '    while [ ! -s "$B/auto.ready" ]; do\n'
+            "        i=$((i+1))\n"
+            '        if [ $i -gt 200 ]; then echo "linux_diff: no autofs mount ($$)"; exit 2; fi\n'
+            "        sleep 0.05\n"
+            "    done\n"
+            "else\n"
+            '    cd "$B" || exit 2\n'
+            "    mkdir plain dup hp hp/m gone gone/m x x/m loopsrc pidsrc d g\n"
+            "    ln -s l2 l1; ln -s l1 l2\n"
+            "    mount -t tmpfs src_plain plain\n"
+            "    mount -t tmpfs src_dup_bottom dup\n"
+            "    mount -t tmpfs src_dup_top dup\n"
+            "    mount -t tmpfs src_hidden hp/m\n"
+            "    mount -t tmpfs src_hp_top hp\n"
+            '    ln -s "$B/plain" hp/m\n'
+            "    mount -t tmpfs src_gone gone/m\n"
+            "    mount -t tmpfs src_gone_top gone\n"
+            "    mount -t tmpfs src_xm x/m\n"
+            "    mount -t tmpfs src_xtop x\n"
+            "    ln -s m2 x/m; ln -s m x/m2\n"
+            '    mount -t tmpfs "$B/l1" loopsrc\n'
+            "    mount -t tmpfs 'server:(pid1234)' pidsrc\n"
+            "    esc=$(printf 'g/\\033[2J x\\ny')\n"
+            '    mkdir "$esc"\n'
+            '    mount -t tmpfs src_esc "$esc"\n'
+            "    mount -t tmpfs src_gtop g\n"
+            '    ln -s "$B/plain" link-to-plain\n'
+            "    cd /\n"
+            "fi\n"
+            '"$@"\n'
+            "rc=$?\n"
+            'if [ "$mode" = autofs ]; then\n'
+            '    kill "$(cat "$B/auto.ready")"\n'
+            "    i=0\n"
+            '    while [ ! -e "$B/auto.state" ] && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.05; done\n'
+            '    if [ "$(cat "$B/auto.state" 2>/dev/null)" != quiet ]; then\n'
+            '        echo "linux_diff: the autofs mount was triggered ($$)" >&2; rc=3\n'
+            "    fi\n"
+            '    umount -l "$B/auto"\n'
+            "fi\n"
+            'umount -l "$B"\n'
+            "exit $rc\n"
+        )
+    os.chmod(path, 0o755)
+    return path
+
+
+def mt_unavailable() -> str | None:
+    """Why fixture MT cannot run here, or None."""
+    if root_prefix() is None:
+        return "not root, and no passwordless sudo"
+    if shutil.which("unshare") is None:
+        return "no unshare"
+    return None
+
+
+def mt_probe(work: str, wrap: str, mode: str) -> Fixture:
+    """Fixture MT's (or AUTOFS's) probe: in a mount namespace of its own, run
+    `mt-wrap.sh` in `mode` around `true`, and only once it has mounted and
+    taken everything down say `ready` — so a host that cannot mount the
+    table skips its cases by name rather than failing them. It sleeps on
+    afterwards, holding nothing on any mount."""
+    pdir = os.path.join(work, f"mtprobe-{mode}")
+    os.makedirs(pdir)
+    script = (
+        f"sh {shlex.quote(wrap)} {mode} true || exit 3\n"
+        f"touch {shlex.quote(os.path.join(pdir, 'ready'))}\n"
+        "exec sleep 600\n"
+    )
+    why = mt_unavailable()
+    if why is None and mode == "autofs":
+        with open("/proc/filesystems") as f:
+            if not any(line.split()[-1:] == ["autofs"] for line in f):
+                why = "no autofs in this kernel"
+    return Fixture(
+        "MT(mount table)" if mode == "table" else "AUTOFS(autofs)",
+        [*(root_prefix() or []), "unshare", "-m", "--propagation", "private", "sh", "-c", script],
+        cwd=pdir,
+        expect_fds=3,
+        optional=True,
+        unavailable=why,
+    )
+
+
+def mt_ready(fx: Fixture) -> None:
+    """Wait for an MT or AUTOFS probe, or say why it is unavailable."""
+    ready = os.path.join(fx.cwd, "ready")
+    deadline = time.monotonic() + 10.0
+    while not os.path.exists(ready):
+        if fx.proc is not None and fx.proc.poll() is not None:
+            raise FixtureUnavailable(f"{fx.name}: its mounts could not be made (rc={fx.proc.returncode})")
+        if time.monotonic() > deadline:
+            raise FixtureUnavailable(f"{fx.name}: the probe did not finish within 10s")
+        time.sleep(0.02)
+
+
+def needs_mt(case: dict, mode: str) -> bool:
+    """Whether a case runs beside fixture MT's table (`table`) or AUTOFS's
+    mount (`autofs`): it says so in its environment, whether or not an
+    argument names one of their paths."""
+    return case.get("env", {}).get("LSOF_DIFF_MT") == mode
 
 
 def stat_state(pid: int) -> str:
@@ -1233,6 +1408,102 @@ def userns_socket_holder(work: str) -> Fixture:
         ],
         cwd=udir,
         expect_fds=6,  # 0,1,2 + packet, unix stream, unix dgram
+        optional=True,
+    )
+
+
+def raw_holder(work: str) -> Fixture:
+    """Raw sockets in THIS network namespace -- the `raw` row (DIVERGENCES 108).
+
+    One `IPPROTO_ICMP` and one `IPPROTO_RAW`, the two a host most often holds
+    (ping, a routing daemon). The C types each `raw`, leaves DEVICE blank, puts
+    the inode in NODE and names it from `/proc/net/raw`'s own text
+    (`00000000:0001->00000000:0000 st=07`), and no `-i` selects it, while
+    `-i icmp` and `-i raw` are `unknown protocol name`. A process of its own,
+    since fixture K's cases list every fd K holds.
+
+    `SOCK_RAW` needs CAP_NET_RAW, as K's packet sockets do; without it the
+    fixture is unavailable and its cases are skipped by name.
+    """
+    rdir = os.path.join(work, "raw")
+    os.makedirs(rdir)
+    py = (
+        "import os,socket,time\n"
+        "i=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP)\n"
+        "r=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_RAW)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % rdir
+    )
+    return Fixture(
+        "RAW(raw sockets)",
+        [sys.executable, "-c", py],
+        cwd=rdir,
+        expect_fds=5,  # 0,1,2 + raw ICMP, raw IPPROTO_RAW
+        optional=True,
+    )
+
+
+def udplite_holder(work: str) -> Fixture:
+    """UDP-Lite sockets, bound and connected -- `UDPLITE` rows.
+
+    The C reads `/proc/net/udplite` as it reads `udp` (`get_tcpudp(…, 2, …)`):
+    an `IPv4` row with NODE `UDPLITE`, never a state printed (a connected one
+    has no `(ESTABLISHED)`), its number kept for `-s TCP:`, queues for `-T q`,
+    and `-i udplite` selects it where `-i udp` does not. fd 3 is bound to
+    127.0.0.1 and publishes its port ({UDPLPORT}); fd 4 is connected to it;
+    fd 5 is never bound, so it is in no table and the C names it from
+    `system.sockprotoname`, `sock … protocol: UDP-Lite` (DIVERGENCES 22).
+
+    Needs no privilege, but a kernel with UDP-Lite (`IPPROTO_UDPLITE`, 136):
+    without one `socket()` fails and the cases are skipped by name.
+    """
+    udir = os.path.join(work, "udplite")
+    os.makedirs(udir)
+    py = (
+        "import os,socket,time\n"
+        "a=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); a.bind(('127.0.0.1',0))\n"
+        "b=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); b.bind(('127.0.0.1',0))\n"
+        "b.connect(a.getsockname())\n"
+        "c=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136)\n"
+        "open(os.path.join(%r,'port'),'w').write(str(a.getsockname()[1]))\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (udir, udir)
+    )
+    return Fixture(
+        "UDPL(udplite)",
+        [sys.executable, "-c", py],
+        cwd=udir,
+        expect_fds=6,  # 0,1,2 + bound, connected, unbound
+        optional=True,
+    )
+
+
+def userns_raw_holder(work: str) -> Fixture:
+    """A raw ICMP and a UDP-Lite socket inside a foreign network namespace.
+
+    Fixture L's shape (`unshare --user --map-root-user --net`, so CAP_NET_RAW
+    inside the namespace and no privilege on the host) for the two protocols
+    this item reads: `/proc/net/*` here misses both, and the C names each from
+    `system.sockprotoname`, the kernel's `struct proto` name -- `RAW` for the
+    raw ICMP socket (lsof-rs had said `ICMP`) and `UDP-Lite` (measured). The
+    UDP-Lite socket is bound (to 0.0.0.0: the namespace's loopback is down),
+    since an unbound one is in no table, and lsof-rs then names it from none
+    (DIVERGENCES 22).
+    """
+    ndir = os.path.join(work, "nsraw")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "i=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP)\n"
+        "u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); u.bind(('0.0.0.0',0))\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ndir
+    )
+    return Fixture(
+        "NSRAW(userns raw and udplite)",
+        ["unshare", "--user", "--map-root-user", "--net", sys.executable, "-c", py],
+        cwd=ndir,
+        expect_fds=5,  # 0,1,2 + raw ICMP, UDP-Lite
         optional=True,
     )
 
@@ -2102,6 +2373,21 @@ def owners_ready(w: Fixture) -> dict[str, int]:
     raise FixtureUnavailable(f"{w.name}: credentials not in place within 5s")
 
 
+def udplite_port(fx: Fixture | None) -> str:
+    """The port fixture UDPL's bound socket published, or "0" without UDPL,
+    whose cases are then dropped."""
+    if fx is None:
+        return "0"
+    try:
+        with open(os.path.join(fx.cwd, "port")) as f:
+            port = f.read().strip()
+    except OSError as e:
+        infra(f"fixture UDPL did not publish its port: {e}")
+    if not port.isdigit():
+        infra(f"fixture UDPL published a non-numeric port: {port!r}")
+    return port
+
+
 def make_fixtures(work: str) -> tuple[Fixture, ...]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
@@ -2206,6 +2492,9 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     j = netns_listener(work)
     k = packet_holder(work)
     ln = userns_socket_holder(work)
+    raw = raw_holder(work)
+    udpl = udplite_holder(work)
+    nsraw = userns_raw_holder(work)
     o = offset_holder(work)
     x = non_utf8_holder(work)
     z = zombie_holder(work)
@@ -2231,9 +2520,15 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     dn = devnode_holder(work)
     sf = socket_file_holder(work)
     wr = walk_race_holder(work)
+    # MT's and AUTOFS's base: a directory here, mounted over in each run's
+    # namespace, where the cases' paths ({MTPLAIN}...) lead.
+    os.makedirs(os.path.join(work, "mt"))
+    mtwrap = mt_wrap(work, os.path.join(work, "mt"))
+    mt = mt_probe(work, mtwrap, "table")
+    af = mt_probe(work, mtwrap, "autofs")
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
-        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr,
+        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw,
     )
 
 
@@ -2380,7 +2675,7 @@ def run(args) -> int:
             offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
-            sockfiles, walkrace,
+            sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -2391,6 +2686,11 @@ def run(args) -> int:
             "J": (netns, "no CAP_SYS_ADMIN for `unshare --net`"),
             "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
             "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
+            "RAW": (rawsocks, "no CAP_NET_RAW for SOCK_RAW"),
+            # UDPL's cases name its port too.
+            "UDPL": (udplite, "no UDP-Lite in this kernel"),
+            "UDPLPORT": (udplite, "no UDP-Lite in this kernel"),
+            "NSRAW": (nsraw, "no unprivileged user namespaces, or no UDP-Lite in this kernel"),
             "U": (unreadable, "no user here that cannot read a non-dumpable process"),
             # M's paths name a plain directory here whether or not M came up; a
             # case naming one without M would MATCH on nothing, so they go with it.
@@ -2417,6 +2717,17 @@ def run(args) -> int:
             "DNT": (devnode, "not root, and no passwordless sudo, to mount and mknod"),
             "RN": (relnames, "no io_uring here"),
             "FUSE": (fuseprobe, fuse_unavailable() or "no FUSE mount here"),
+            # MT's and AUTOFS's cases are known by their environment too
+            # (`needs_mt`); these are their paths.
+            "MT": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTPLAIN": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTGONE": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTD": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTPIDSRC": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTL1": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTLOOPSRC": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "LINK_TO_MTPLAIN": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTAUTO": (autofsprobe, autofsprobe.unavailable or "no autofs mount here"),
             # WRACE's cases name the holder and the walked directory.
             "WRACE": (walkrace, walkrace.unavailable or "the holder did not come up"),
             "WRACEDIR": (walkrace, walkrace.unavailable or "the holder did not come up"),
@@ -2476,7 +2787,7 @@ def run(args) -> int:
         started_optional = {k: v[0] for k, v in optional.items()}
         (
             netns, packet, userns, unreadable, mntns, owner, mntsock, exmaps, pathnotes,
-            relnames, userzero, ptyhost, ptyguest, devnode,
+            relnames, userzero, ptyhost, ptyguest, devnode, rawsocks, udplite, nsraw,
         ) = (
             started_optional["J"],
             started_optional["K"],
@@ -2492,6 +2803,9 @@ def run(args) -> int:
             started_optional["PTH"],
             started_optional["PTG"],
             started_optional["DN"],
+            started_optional["RAW"],
+            started_optional["UDPL"],
+            started_optional["NSRAW"],
         )
         # FH is usable once its probe has mounted and stat()ed the server.
         if started_optional["FUSE"] is not None:
@@ -2500,6 +2814,19 @@ def run(args) -> int:
             except FixtureUnavailable as unavailable:
                 print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
                 optional["FUSE"] = (None, optional["FUSE"][1])
+        # MT and AUTOFS, once their probes have mounted and taken it down.
+        for probe_key, keys in (
+            ("MT", ("MT", "MTPLAIN", "MTGONE", "MTD", "MTPIDSRC", "MTL1", "MTLOOPSRC",
+                    "LINK_TO_MTPLAIN")),
+            ("MTAUTO", ("MTAUTO",)),
+        ):
+            if started_optional[probe_key] is not None:
+                try:
+                    mt_ready(started_optional[probe_key])
+                except FixtureUnavailable as unavailable:
+                    print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                    for key in keys:
+                        optional[key] = (None, optional[key][1])
         # P maps its files only once its tmpfs is there.
         if pathnotes is not None:
             try:
@@ -2523,7 +2850,8 @@ def run(args) -> int:
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
-                ptyhost, ptyguest, devnode, optional["WRACE"][0],
+                ptyhost, ptyguest, devnode, optional["WRACE"][0], rawsocks, udplite,
+                nsraw,
             )
             if f is not None
         ]:
@@ -2666,6 +2994,15 @@ def run(args) -> int:
                 "NOPE": os.path.join(work, "search", "absent.txt"),
                 "ADIR": a.cwd,
                 "FUSE": os.path.join(fuseprobe.cwd, "fuse"),
+                # MT's and AUTOFS's, under the base `mt-wrap.sh` mounts over.
+                "MTPLAIN": os.path.join(work, "mt", "plain"),
+                "MTGONE": os.path.join(work, "mt", "gone", "m"),
+                "MTD": os.path.join(work, "mt", "d"),
+                "MTPIDSRC": os.path.join(work, "mt", "pidsrc"),
+                "MTL1": os.path.join(work, "mt", "l1"),
+                "MTLOOPSRC": os.path.join(work, "mt", "loopsrc"),
+                "LINK_TO_MTPLAIN": os.path.join(work, "mt", "link-to-plain"),
+                "MTAUTO": os.path.join(work, "mt", "auto"),
                 # The mount point's parent, for a walk that meets it.
                 "FUSEDIR": fuseprobe.cwd,
                 "ASUB": os.path.join(a.cwd, "sub"),
@@ -2684,6 +3021,8 @@ def run(args) -> int:
                 "WRACEDIR": os.path.join(walkrace.cwd, "V"),
                 "WRACELINKS": os.path.join(walkrace.cwd, "links"),
                 "PORT": port,
+                # UDPL's bound socket, which its connected one names too.
+                "UDPLPORT": udplite_port(udplite),
             },
         )
         for key, (fx, why) in optional.items():
@@ -2699,6 +3038,10 @@ def run(args) -> int:
                 dropped += [c["name"] for c in cases if needs_fuse(c) and c["name"] not in dropped]
             if key == "WRACE":
                 dropped += [c["name"] for c in cases if needs_race(c) and c["name"] not in dropped]
+            if key == "MT":
+                dropped += [c["name"] for c in cases if needs_mt(c, "table") and c["name"] not in dropped]
+            if key == "MTAUTO":
+                dropped += [c["name"] for c in cases if needs_mt(c, "autofs") and c["name"] not in dropped]
             cases = [c for c in cases if c["name"] not in dropped]
             if dropped:
                 print(
@@ -2716,14 +3059,19 @@ def run(args) -> int:
         )
         nofile = any("LSOF_DIFF_NOFILE" in c.get("env", {}) for c in cases)
         race = optional["WRACE"][0] is not None and any(needs_race(c) for c in cases)
-        if prefix or fuse or nofile or race:
+        mt = (
+            os.path.join(work, "mt-wrap.sh")
+            if any(needs_mt(c, "table") or needs_mt(c, "autofs") for c in cases)
+            else None
+        )
+        if prefix or fuse or nofile or race or mt:
             oracle = unprivileged_wrapper(
                 work, "oracle.sh", os.path.abspath(oracle), prefix or None, fuse,
-                race_argv(walkrace, "c") if race else None,
+                race_argv(walkrace, "c") if race else None, mt,
             )
             rust = unprivileged_wrapper(
                 work, "rust.sh", os.path.abspath(rust), prefix or None, fuse,
-                race_argv(walkrace, "rs") if race else None,
+                race_argv(walkrace, "rs") if race else None, mt,
             )
         cmd = [
             sys.executable, KIT_RUNNER,
@@ -2880,6 +3228,72 @@ def self_test() -> int:
             text = f.read()
         check("the FH script takes the server down after the binary",
               text.index('"$@"') < text.rindex("kill $srv"))
+        w = unprivileged_wrapper(td, "m.sh", "/bin/true", None, None, None, "/x/mt-wrap.sh")
+        with open(w) as f:
+            text = f.read()
+        check("the wrapper runs an MT case in a private mount namespace",
+              "LSOF_DIFF_MT" in text and "unshare -m --propagation private sh /x/mt-wrap.sh" in text)
+        wrap = mt_wrap(td, os.path.join(td, "mt"))
+        with open(wrap) as f:
+            text = f.read()
+        check("the MT script mounts before the binary and unmounts after it",
+              text.index("mount -t tmpfs lsof-rs-mt") < text.index('"$@"') < text.rindex('umount -l "$B"'))
+        check("the MT script fails a run that triggered the automount",
+              "rc=3" in text and text.index('"$@"') < text.index("auto.state\" 2>/dev/null"))
+        check("the AUTOFS daemon is given a lifetime of its own",
+              "--lifetime" in text.split("autofs_hold.py", 1)[-1].split("\n", 1)[0])
+        # ...which ends it, says so, and answers what waits on the mount, so
+        # a case that timed out leaves no namespace behind (root only).
+        why = mt_unavailable()
+        if why is None:
+            with open("/proc/filesystems") as f:
+                if not any(line.split()[-1:] == ["autofs"] for line in f):
+                    why = "no autofs in this kernel"
+        if why is None:
+            base = os.path.join(td, "afs")
+            os.makedirs(base)
+            b = shlex.quote(base)
+            script = (
+                "cd /\n"
+                f"mount -t tmpfs lsof-rs-afs-life {b} || exit 2\n"
+                f"mkdir {b}/auto\n"
+                f"setsid {shlex.quote(sys.executable)} -I {shlex.quote(AUTOFS_HOLD)} "
+                f"{b}/auto {b}/ready {b}/state --lifetime 1 </dev/null >/dev/null 2>&1 &\n"
+                "i=0\n"
+                f"while [ ! -s {b}/ready ]; do i=$((i+1)); [ $i -gt 200 ] && exit 2; sleep 0.05; done\n"
+                f"hp=$(cat {b}/ready)\n"
+                # A lookup under a direct mount triggers it, and waits.
+                f"timeout 10 ls {b}/auto/x >/dev/null 2>&1; echo \"waiter=$?\"\n"
+                "i=0\n"
+                "while kill -0 $hp 2>/dev/null && [ $i -lt 50 ]; do i=$((i+1)); sleep 0.1; done\n"
+                "if kill -0 $hp 2>/dev/null; then echo daemon=alive; kill $hp; else echo daemon=gone; fi\n"
+                f"echo \"state=$(cat {b}/state)\"\n"
+                f"umount -l {b}\n"
+            )
+            r = subprocess.run(
+                [*(root_prefix() or []), "unshare", "-m", "--propagation", "private", "sh", "-c", script],
+                capture_output=True, text=True, timeout=60,
+            )
+            got = dict(line.split("=", 1) for line in r.stdout.split() if "=" in line)
+            check("the AUTOFS daemon ends at its lifetime, saying `timeout`",
+                  got.get("daemon") == "gone" and got.get("state") == "timeout")
+            check("...and what waited on its mount is answered, not left waiting",
+                  got.get("waiter") not in (None, "0", "124"))
+        else:
+            print(f"SKIP  the AUTOFS daemon's lifetime ({why})")
+    check("a case that sets LSOF_DIFF_MT table needs fixture MT",
+          needs_mt({"args": ["-V", "+f", "--", "src_dup_top"], "env": {"LSOF_DIFF_MT": "table"}}, "table"))
+    check("...and not AUTOFS", not needs_mt({"env": {"LSOF_DIFF_MT": "table"}}, "autofs"))
+    # Each of these makes the wrapper `exec`, so a case that set two would
+    # run under the first alone and say nothing of the second.
+    try:
+        import tomllib
+        with open(os.path.join(HERE, "linux-matrix.toml"), "rb") as f:
+            matrix = tomllib.load(f).get("case", [])
+        two = [c["name"] for c in matrix if sum(k in c.get("env", {}) for k in EXEC_ENVS) > 1]
+        check("no case sets two of " + ", ".join(EXEC_ENVS) + (f": {two}" if two else ""), not two)
+    except ImportError:
+        check("tomllib to read the matrix (Python 3.11+)", False)
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

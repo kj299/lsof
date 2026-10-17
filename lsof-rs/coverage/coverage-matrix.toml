@@ -87,10 +87,21 @@ args = ["-u", "USER"]
 [[case]]
 name = "core/inet-etw-families"
 # args::tests::inet_etw_families_icmp_raw (icmp/raw parse like tcp/udp, the
-# [46] prefix composes, needs_etw reports the ETW implication) plus
-# selection::tests::inet_etw_family_filters_icmp_raw (ICMP matches the v4+v6
-# codes, RAW is exact, family narrows). Portable, every push.
+# [46] prefix composes, needs_etw reports the ETW implication; UDP-Lite does
+# not imply it), `#[cfg(windows)]` since 2026-10-17: the windows CI runner
+# only. selection::tests::inet_etw_family_filters_icmp_raw (ICMP matches the
+# v4+v6 codes, RAW is exact, family narrows) stays portable, every push.
 args = ["-iICMP"]
+
+[[case]]
+name = "core/inet-icmp-raw-refused-on-linux"
+# The Linux twin, args::tests::icmp_and_raw_are_not_protocols_on_linux:
+# `-i icmp` and `-i raw` are the C's `unknown protocol name` there, a raw
+# socket being no Internet file to it (DIVERGENCES 108, 112). With
+# dash_i_errors_are_the_cs_words_and_escape_the_argument,
+# dash_i_accepts_what_the_c_accepts and dash_i_has_the_cs_100_address_limit:
+# `-i` in the C's grammar and words. Every non-Windows push.
+args = ["-i", "icmp"]
 
 [[case]]
 name = "core/repeat-delay-as-the-next-word"
@@ -430,6 +441,14 @@ covers = ["type:unknown"]
 # backend was already emitting.
 
 [[case]]
+name = "linux/raw-socket-row"
+# ../differential/linux-matrix.toml raw-socket-row and raw-socket-fields:
+# fixture RAW's raw ICMP and IPPROTO_RAW sockets, typed `raw` with the C's
+# NAME, DEVICE and `-F` (DIVERGENCES 108). raw6 has no fixture: no IPv6 here.
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:raw"]
+
+[[case]]
 name = "linux/type-codes-from-st_mode"
 args = []
 covers = ["type:REG", "type:DIR", "type:CHR", "type:BLK", "type:FIFO", "type:SOCK", "type:LINK"]
@@ -618,6 +637,19 @@ covers = ["opt:e", "type:UNKNcwd", "type:UNKNrtd", "type:UNKNtxt", "type:UNKNfd"
 name = "linux/differential-exempt-mappings-are-unkn"
 args = ["-n", "-P", "-e", "/dev/shm", "-a", "-p", "PID"]
 covers = ["opt:e", "type:UNKNmem", "type:UNKNdel"]
+
+[[case]]
+# +e: exempt as -e, its path as typed, and NAME `(+e /dev/shm)` (DIVERGENCES
+# 88).
+name = "linux/differential-exempt-plus-e-names-its-sign"
+args = ["-n", "-P", "+e", "/dev/shm", "-a", "-d", "mem,DEL,3", "-p", "PID"]
+covers = ["opt:e"]
+
+[[case]]
+# -e reads its path's links: a link to a mount names it (DIVERGENCES 88).
+name = "linux/differential-mt-e-link-to-a-mount"
+args = ["-e", "LINK", "-n", "-P", "-a", "-d", "0", "-p", "PID"]
+covers = ["opt:e"]
 
 [[case]]
 # Fixture U, which cannot be read by the user lsof runs as: the `unknown` rows

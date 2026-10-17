@@ -8,6 +8,7 @@
 //! entries, `+D <dir>` the whole tree beneath it.
 
 use std::ffi::OsString;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use lsof_core::model::tcp_state_table;
 use lsof_core::readlink::ReadlinkError;
@@ -16,8 +17,9 @@ use lsof_core::render::{Escaper, FileFlags, Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::safefs::{TMLIMIT, TMLIMMIN};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
-    errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec,
-    FilesystemArgs, Protocol, SafeFs, Selection, TaskMode, TcpInfoFlags,
+    errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, ExemptFs, FdFilter, FdKind,
+    FdSpec, FilesystemArgs, MountRequest, MountTable, Protocol, SafeFs, Selection, TaskMode,
+    TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -35,7 +37,35 @@ pub enum Action {
         format: Format,
         repeat: Option<u64>,
         columns: Columns,
+        /// The mount table, when the parse read it: at the first `+d`/`+D`,
+        /// or for the `-e` check, where the C reads it ([`parse_with`]).
+        /// `None` is a table not read yet.
+        mounts: Option<MountTable>,
     },
+}
+
+/// What reads the mount table for the parser, under the options in force
+/// where it is read ([`lsof_core::Backend::mount_table`]).
+pub type MountReader<'a> = &'a dyn Fn(&MountRequest, &SafeFs) -> MountTable;
+
+/// The mount table, read through `mounts` under the options as `sel` holds
+/// them where it is read: its `-e`/`+e` list, which it neither `stat`s nor,
+/// for `+e`, reads the links of, and the `-b`, `-O`, `-S` and `-w` the
+/// bounded layer `fs` is viewed under. The parser reads it so at the first
+/// `+d`/`+D` and for the `-e` check, and `lsof` at the first path argument or
+/// before it lists.
+pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -> MountTable {
+    let req = MountRequest {
+        exempt: sel.exempt_fs.clone(),
+    };
+    mounts(&req, &fs.with(sel.blocking, !sel.omit_unreadable))
+}
+
+/// The table [`parse`] reads: none. A test or a fuzz input holding `+d /` or
+/// `-e /` examines no host mount, in-process and with no time limit, and
+/// none that does not answer can hold it.
+fn no_mounts(_: &MountRequest, _: &SafeFs) -> MountTable {
+    MountTable::default()
 }
 
 /// What the table's columns show. Pure presentation: nothing here selects a
@@ -128,12 +158,35 @@ fn digits_value(digits: &str) -> usize {
     })
 }
 
+/// A user-supplied argument as an error message quotes it: escaped, as the
+/// C's `safestrprt(…, 1)` prints it (lib/misc.c:1385-1453), so that no byte
+/// of it can drive the terminal of whoever reads the message. Where the C
+/// prints such an argument raw (`%s`, `%c`: `-i`'s protocol, host and
+/// service, the option letters, `-K`, `-s`, `-c`'s conflict, `-e`, the `-d`
+/// mixture), that is a C-DEFECT not reproduced (DIVERGENCES 112, 122).
+/// Every message that quotes an argument goes through this or [`quoting`],
+/// and `no_option_error_holds_a_control_character` holds every option to it.
+fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
+    Escaper::for_host().text(arg)
+}
+
+/// [`shown`] for an argument kept as bytes (a path `Readlink()` spelt).
+fn shown_bytes(arg: &[u8]) -> std::borrow::Cow<'_, str> {
+    Escaper::for_host().bytes(arg)
+}
+
+/// An error message that ends with the argument it quotes: `message`, then
+/// `arg` [`shown`], the C's `fprintf(stderr, message); safestrprt(arg, …)`.
+fn quoting(message: &str, arg: &str) -> String {
+    format!("{message}{}", shown(arg))
+}
+
 /// Parse the argument list (excluding `argv[0]`), examining a `+d`/`+D`
-/// directory in this process and warning on stderr: what the tests and the
-/// fuzz target use. `lsof` itself parses with [`parse_with`], over its
-/// bounded layer.
+/// directory in this process and warning on stderr, and reading no mount
+/// table: what the tests and the fuzz target use. `lsof` itself parses with
+/// [`parse_with`], over its bounded layer and the host's table.
 pub fn parse(args: Vec<String>) -> Result<Action, String> {
-    parse_with(args, &SafeFs::in_process())
+    parse_with(args, &SafeFs::in_process(), &no_mounts)
 }
 
 /// Parse the argument list (excluding `argv[0]`). A `+d`/`+D` directory is
@@ -141,8 +194,25 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
 /// `fs` under the `-b`, `-O`, `-S` and `-w` given before it; a warning the C
 /// prints while it parses (`-S time (N) changed to 2`, `avoiding stat(P)`)
 /// goes to `fs`'s sink at once, before any error the parse then returns.
-pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> {
+///
+/// The mount table is read through `mounts` where the C reads it while it
+/// parses: at the first `+d`/`+D` whose directory checked out (its
+/// `ck_file_arg()`, `arg.c:915`), under the options and the `-e`/`+e` list
+/// as they stand there; else for the `-e` check, once every option is read
+/// (`main.c:1137-1160`). Its warnings come where the C's do: `+d D -S 0`
+/// prints them before the `-S` warning, `-S 0 +d D` after, `+d D -w` prints
+/// them and `-w +d D` does not (measured). The table goes back with the run
+/// ([`Action::Run`]); a run that needs it and read none here reads it later.
+pub fn parse_with(
+    mut args: Vec<String>,
+    fs: &SafeFs,
+    mounts: MountReader<'_>,
+) -> Result<Action, String> {
     let mut sel = Selection::default();
+    // The C's `readmnt()` reads once, where it is first needed (`dmnt.c`:
+    // `if (Lmi || Lmist) return (Lmi)`).
+    let mut table: Option<MountTable> = None;
+    let read_table = |sel: &Selection| read_mount_table(sel, fs, mounts);
     let mut format = Format::Table;
     let mut want_help = false;
     let mut want_version = false;
@@ -243,11 +313,10 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
             match c {
                 // The C gives these a `+` meaning lsof-rs does not implement
                 // (`+n`/`+P` resolve names, `+r` repeats until nothing is
-                // open, `+e` still reads links, and `+J`/`+j` are errors there
-                // too), so the `+` spelling is refused rather than read as the
-                // `-` one.
-                'n' | 'P' | 'r' | 'e' | 'J' | 'j' if plus => {
-                    return Err(format!("unsupported option: +{c}"))
+                // open, and `+J`/`+j` are errors there too), so the `+`
+                // spelling is refused rather than read as the `-` one.
+                'n' | 'P' | 'r' | 'J' | 'j' if plus => {
+                    return Err(quoting("unsupported option: +", &c.to_string()))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
                 // `+D` descends the whole tree. lsof distinguishes them. Both
@@ -264,6 +333,13 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                         args.get(i).cloned().unwrap_or_default()
                     };
                     let dir = enter_dir(&value, c == 'D', &sel, fs)?;
+                    // The C reads its mount table here, at the first `+d`/`+D`
+                    // whose directory checked out (`ck_file_arg()` from
+                    // `enter_dir()`, `arg.c:915`), under the `-b`, `-O`,
+                    // `-S`, `-w` and `-e`/`+e` given so far.
+                    if table.is_none() {
+                        table = Some(read_table(&sel));
+                    }
                     sel.dir_args.push(dir);
                     if c == 'd' {
                         sel.dirs_one_level.push(value);
@@ -273,21 +349,30 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                     j = chars.len();
                     continue;
                 }
-                // `+c <n>`: cap the COMMAND column at n characters.
+                // `+c <n>`: cap the COMMAND column at n characters. The
+                // value is attached or the next word, whatever it is; one
+                // that is missing, empty or opens with anything but a digit
+                // is the C's `+c not followed by width number`, which quotes
+                // nothing (`main.c:316-326`; measured for `+c` last, `+c ''`,
+                // `+c x`, `+cx` and `+c -p`). Then `atoi()`: the leading
+                // digits are the width and the rest is ignored, so `+c 1x`
+                // is `+c 1` (measured), the digits saturating where `atoi()`
+                // wraps (DIVERGENCES 121).
                 'c' if plus => {
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
-                        rest
+                        Some(rest)
                     } else {
                         i += 1;
-                        if i >= args.len() {
-                            return Err("option +c requires a width".to_string());
-                        }
-                        args[i].clone()
+                        args.get(i).cloned()
                     };
-                    let n: usize = value
-                        .parse()
-                        .map_err(|_| format!("invalid +c width: {value}"))?;
+                    let digits = value.as_deref().map_or("", |v| {
+                        &v[..v.bytes().take_while(u8::is_ascii_digit).count()]
+                    });
+                    if digits.is_empty() {
+                        return Err("+c not followed by width number".to_string());
+                    }
+                    let n = digits_value(digits);
                     // The C refuses a width wider than the longest command name
                     // the system can report, rather than accepting a number it
                     // could never fill.
@@ -330,7 +415,8 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                             .starts_with(['c', 'm'])
                         {
                             return Err(format!(
-                                "-r {word}: a repeat count (c) and marker format (m) are not supported"
+                                "-r {}: a repeat count (c) and marker format (m) are not supported",
+                                shown(&word)
                             ));
                         }
                     }
@@ -407,6 +493,9 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                     // word, and the C takes that word WHATEVER it is — a
                     // missing value is reported by quoting what it found:
                     // `lsof: -e not followed by a file system path: "-p"`.
+                    // With no word at all the C quotes a null pointer,
+                    // `"(null)"` (undefined behaviour, a C-DEFECT): here
+                    // `""`.
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
@@ -416,33 +505,10 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                                 i += 1;
                                 next.clone()
                             }
-                            other => {
-                                return Err(format!(
-                                    "-e not followed by a file system path: {:?}",
-                                    other.map(String::as_str).unwrap_or("")
-                                ))
-                            }
+                            other => other.cloned().unwrap_or_default(),
                         }
                     };
-                    // A file system path starts with `/`, or it is the
-                    // missing value's error: `-e dev/` and `-e ""` are
-                    // `-e not followed by a file system path: "dev/"`, exit 1
-                    // (measured), where lsof-rs had exempted every file for
-                    // an empty one.
-                    if !value.starts_with('/') {
-                        return Err(format!("-e not followed by a file system path: {value:?}"));
-                    }
-                    // Without its trailing slashes, and once, as
-                    // `enter_efsys()` keeps it: `-e /dev/shm/` is printed
-                    // `(-e /dev/shm)`, and reported `"-e /dev/shm" is not a
-                    // mounted file system.` (both measured). `/` stays `/`.
-                    let trimmed = match value.trim_end_matches('/') {
-                        "" => "/",
-                        t => t,
-                    };
-                    if !sel.exempt_fs.iter().any(|e| e == trimmed) {
-                        sel.exempt_fs.push(trimmed.to_string());
-                    }
+                    enter_exempt(&mut sel, &value, plus, fs)?;
                     j = chars.len();
                     continue;
                 }
@@ -464,7 +530,10 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                                     'f' => sel.cross_filesystems = true,
                                     'l' => sel.cross_symlinks = true,
                                     other => {
-                                        return Err(format!("unknown cross-over option: {other}"))
+                                        return Err(quoting(
+                                            "unknown cross-over option: ",
+                                            &other.to_string(),
+                                        ))
                                     }
                                 }
                             }
@@ -522,7 +591,10 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                                         flags_hex = c == 'G';
                                     }
                                     other => {
-                                        return Err(format!("unknown file struct option: {other}"))
+                                        return Err(quoting(
+                                            "unknown file struct option: ",
+                                            &other.to_string(),
+                                        ))
                                     }
                                 }
                             }
@@ -597,7 +669,9 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                         None => sel.tasks = TaskMode::Always,
                         // `strcasecmp`, so `-K I` is `-K i`.
                         Some(v) if v.eq_ignore_ascii_case("i") => sel.tasks = TaskMode::Never,
-                        Some(v) => return Err(format!("-K not followed by i (but by {v})")),
+                        Some(v) => {
+                            return Err(format!("-K not followed by i (but by {})", shown(&v)))
+                        }
                     }
                     j = chars.len();
                     continue;
@@ -623,7 +697,7 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                         None | Some("0") => true,
                         Some(list) => {
                             if let Some(bad) = list.chars().find(|f| !field_known(*f)) {
-                                return Err(format!("unknown field: {bad}"));
+                                return Err(quoting("unknown field: ", &bad.to_string()));
                             }
                             false
                         }
@@ -669,9 +743,10 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                     // `-i [spec]`: the spec is attached or the next word, and
                     // a word that opens an option is not one (`main.c`). So
                     // `-i :80` is the spec `:80` — lsof-rs had read it as a
-                    // bare `-i` and a file called `:80`.
-                    let spec = optional_value(&chars, j, &args, &mut i).unwrap_or_default();
-                    parse_inet(&mut sel, &spec)?;
+                    // bare `-i` and a file called `:80`. No spec is the bare
+                    // form; an empty one (`-i ''`) is a spec, and incomplete.
+                    let spec = optional_value(&chars, j, &args, &mut i);
+                    parse_inet(&mut sel, spec.as_deref())?;
                     j = chars.len();
                     continue;
                 }
@@ -735,7 +810,12 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                     j = chars.len();
                     continue;
                 }
-                other => return Err(format!("unsupported option: {prefix}{other}")),
+                other => {
+                    return Err(quoting(
+                        &format!("unsupported option: {prefix}"),
+                        &other.to_string(),
+                    ))
+                }
             }
             j += 1;
         }
@@ -763,14 +843,22 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
     {
         return Err(format!("UID {both} has been included and excluded."));
     }
-    // A state both included and excluded, from any two `-s` options. The C
-    // checks this once every option is read and names the state as its table
-    // spells it, first by table order.
-    if let Some(both) = tcp_state_table()
+    // What the C finds wrong once every option is read, it reports all of,
+    // in its order (`main.c:1060-1160`), and only then acts on `-h`, `-v` or
+    // `-F ?`, or ends the run: `lsof -o -s -x -e /nosuch` prints three errors,
+    // `-e /nosuch -h` and `-hx` exit 1 without the help (measured;
+    // DIVERGENCES 83, 115). Main prints the first `lsof: `.
+    let mut errors: Vec<String> = Vec::new();
+    // Whether some were printed already, ahead of the mount table's lines.
+    let mut told = false;
+    // A state both included and excluded, from any two `-s` options, each
+    // named as the C's table spells it, in table order (measured: `LISTEN`
+    // and `ESTABLISHED` both, `ESTABLISHED` first, the kernel's 1 before 10).
+    for both in tcp_state_table()
         .iter()
-        .find(|st| states.include.contains(st) && states.exclude.contains(st))
+        .filter(|st| states.include.contains(st) && states.exclude.contains(st))
     {
-        return Err(format!(
+        errors.push(format!(
             "can't include and exclude TCP state: {}",
             both.as_str()
         ));
@@ -786,7 +874,58 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
-        return Err("-o and -s are mutually exclusive".to_string());
+        errors.push("-o and -s are mutually exclusive".to_string());
+    }
+    // [json91: `-F and -t are mutually exclusive` goes here, `main.c:1095`.]
+    //
+    // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
+    // alone rather than accepting a switch that would do nothing
+    // (`main.c:1122`). Checked here so the two may arrive in either order.
+    if (sel.cross_filesystems || sel.cross_symlinks)
+        && sel.dirs_one_level.is_empty()
+        && sel.dir_trees.is_empty()
+    {
+        errors.push("-x must accompany +d or +D".to_string());
+    }
+    // [json91: `-J and -j are mutually exclusive` and `-J/-j and -t are
+    // mutually exclusive` go here, `main.c:1126-1133`.]
+    //
+    // Each `-e`/`+e` must name a mounted file system, which the C checks
+    // last, whatever came before (`main.c:1137-1160`): it reads the table
+    // here if no `+d` did, `-h` or `-v` or not, and checks only a table that
+    // holds something (`if ((mp = readmnt(ctx)))`) — under `-b`, which
+    // records an `-e` mount alone, `-b -e /nosuch` exits 0. A path is
+    // compared exactly with each directory as `Readlink()` spelt it, and
+    // every one that names none is reported, the last given first (the C
+    // prepends to its list): measured, `-e /nosuch1 -e /nosuch2` says
+    // `/nosuch2` first. The path is the one stored, `-e`'s through
+    // `Readlink()` and the word `-e` for `+e` too (`"-e /nonexist/x"` for a
+    // link to it); escaped, where the C prints it raw (DIVERGENCES 122).
+    if !sel.exempt_fs.is_empty() {
+        if table.is_none() {
+            // The C prints each error where it finds it, so those found so
+            // far come before what the table says as it is read: measured,
+            // `-e /nosuch -x f` prints `-x must accompany +d or +D`, then a
+            // mount's `can't stat()` warning, then the `-e` error.
+            for e in errors.drain(..) {
+                fs.tell(&format!("lsof: {e}"));
+                told = true;
+            }
+        }
+        let table = table.get_or_insert_with(|| read_table(&sel));
+        if !table.entries.is_empty() {
+            for e in sel.exempt_fs.iter().rev() {
+                if !table.entries.iter().any(|m| m.dir == e.path) {
+                    errors.push(format!(
+                        "\"-e {}\" is not a mounted file system.",
+                        shown_bytes(e.path.as_encoded_bytes())
+                    ));
+                }
+            }
+        }
+    }
+    if told || !errors.is_empty() {
+        return Err(errors.join("\nlsof: "));
     }
     if want_help {
         return Ok(Action::Help);
@@ -805,15 +944,6 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
     if sel.skip_inet_tables && sel.inet.enabled {
         return Err("-i is useless when -X is specified.".to_string());
     }
-    // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
-    // alone rather than accepting a switch that would do nothing
-    // (`main.c:1122`). Checked here so the two may arrive in either order.
-    if (sel.cross_filesystems || sel.cross_symlinks)
-        && sel.dirs_one_level.is_empty()
-        && sel.dir_trees.is_empty()
-    {
-        return Err("-x must accompany +d or +D".to_string());
-    }
     // `-a` with nothing to AND is a usage error, and the run never starts:
     // `main.c` refuses `-a` when its selection flags are all clear
     // (DIVERGENCES 50). Exclusions set none, so `-a -p ^1` or `-a -K i` is
@@ -826,7 +956,64 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
         format,
         repeat,
         columns,
+        mounts: table,
     })
+}
+
+/// One `-e`/`+e`, entered as the C's `enter_efsys()` enters it (`arg.c:576-629`)
+/// where the option stands. The value must be a path from the root, for `+e`
+/// too, or it is `-e not followed by a file system path: "V"` (escaped, where
+/// the C prints it raw, DIVERGENCES 122); `-e`'s is spelt by `Readlink()`,
+/// through `fs` under the `-b`, `-O`, `-S` and `-w` given so far, so `-b -e
+/// /dev/shm` says `avoiding readlink(/dev/shm)` there and `-e /dev/shm -b`
+/// does not, and a value `Readlink()` gives up on is its message; `+e`'s is
+/// kept as typed. Either message is muted by a `-w` or `-t` given before the
+/// option, the C's `Fwarn` as it stands then, and still ends the run (all
+/// measured). Then the trailing slashes go (`/` stays `/`), and a path entered
+/// already is not entered again: the first keeps its sign (`+e X -e X` is
+/// `+e`'s). On Windows the value is kept as typed, as `+d`'s is.
+fn enter_exempt(sel: &mut Selection, value: &str, plus: bool, fs: &SafeFs) -> Result<(), String> {
+    let at = AtOption::new(sel, fs);
+    if !value.starts_with('/') {
+        return Err(at.said(format!(
+            "-e not followed by a file system path: \"{}\"",
+            shown(value)
+        )));
+    }
+    let path = if plus {
+        OsString::from(value)
+    } else {
+        at.readlink(value)?
+    };
+    let path = without_trailing_slashes(path);
+    if !sel.exempt_fs.iter().any(|e| e.path == path) {
+        sel.exempt_fs.push(ExemptFs { path, plus });
+    }
+    Ok(())
+}
+
+/// `path` less the slashes that end it, keeping one: `enter_efsys()`'s
+/// "Remove terminating `/' characters from paths longer than one".
+fn without_trailing_slashes(path: OsString) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = path.into_vec();
+        while bytes.len() > 1 && bytes.last() == Some(&b'/') {
+            bytes.pop();
+        }
+        OsString::from_vec(bytes)
+    }
+    #[cfg(not(unix))]
+    match path.into_string() {
+        Ok(mut s) => {
+            while s.len() > 1 && s.ends_with('/') {
+                s.pop();
+            }
+            s.into()
+        }
+        Err(p) => p,
+    }
 }
 
 /// A `+d`/`+D` directory, checked as the C's `enter_dir()` checks it
@@ -845,23 +1032,20 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
 /// then, and the run still ends; and the `-x` given so far is the one its
 /// walk obeys (DIVERGENCES 75), as are the `-b`, `-O` and `-S`.
 fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Result<DirArg, String> {
-    let warn = !sel.omit_unreadable;
-    let said = |message: String| if warn { message } else { String::new() };
-    let esc = Escaper::for_host();
+    let at = AtOption::new(sel, fs);
     // The C's own words, for `+D` too.
     if value.is_empty() || value.starts_with('+') || value.starts_with('-') {
-        return Err(said("+d not followed by a directory path".to_string()));
+        return Err(at.said("+d not followed by a directory path".to_string()));
     }
-    let fs = fs.with(sel.blocking, warn);
-    let dir = resolve_dir(value, &fs).map_err(|e| said(e.message(&esc.text(value))))?;
-    let shown = || esc.bytes(dir.as_encoded_bytes()).into_owned();
-    match fs.stat(std::path::Path::new(&dir)) {
-        Err(e) => Err(said(format!(
+    let dir = at.readlink(value)?;
+    let shown = || at.esc.bytes(dir.as_encoded_bytes()).into_owned();
+    match at.fs.stat(std::path::Path::new(&dir)) {
+        Err(e) => Err(at.said(format!(
             "WARNING: can't stat({}): {}",
             shown(),
             errno_text(&e)
         ))),
-        Ok(st) if !st.is_dir() => Err(said(format!("WARNING: not a directory: {}", shown()))),
+        Ok(st) if !st.is_dir() => Err(at.said(format!("WARNING: not a directory: {}", shown()))),
         // The C keeps this one `stat` for the walk (`arg.c:905,915`), so the
         // walk does not ask again (DIVERGENCES 111).
         Ok(st) => Ok(DirArg {
@@ -869,10 +1053,47 @@ fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Resu
             dir,
             cross_filesystems: sel.cross_filesystems,
             cross_symlinks: sel.cross_symlinks,
-            warn,
+            warn: at.warn,
             blocking: sel.blocking,
             stat: st,
         }),
+    }
+}
+
+/// What an option that names a path (`+d`/`+D`, `-e`) is read under where it
+/// stands, as the C reads it there: its `Fwarn` as it is then, which makes
+/// an error it would print said in silence (the error comes back empty, and
+/// still ends the run), and the bounded layer under the `-b`, `-O`, `-S` and
+/// `-w` given so far.
+struct AtOption<'a> {
+    warn: bool,
+    fs: SafeFs<'a>,
+    esc: Escaper,
+}
+
+impl<'a> AtOption<'a> {
+    fn new(sel: &Selection, fs: &SafeFs<'a>) -> Self {
+        let warn = !sel.omit_unreadable;
+        AtOption {
+            warn,
+            fs: fs.with(sel.blocking, warn),
+            esc: Escaper::for_host(),
+        }
+    }
+
+    /// `message`, unless the C would say it in silence.
+    fn said(&self, message: String) -> String {
+        if self.warn {
+            message
+        } else {
+            String::new()
+        }
+    }
+
+    /// `value` as `Readlink()` spells it, or the C's message for why it
+    /// gave up, naming `value` escaped.
+    fn readlink(&self, value: &str) -> Result<OsString, String> {
+        resolve_dir(value, &self.fs).map_err(|e| self.said(e.message(&self.esc.text(value))))
     }
 }
 
@@ -926,12 +1147,15 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
                 return Err(String::new());
             }
             let kind = |x: bool| if x { "exclude" } else { "include" };
-            let shown = match range {
+            // The item escaped, where the C prints it raw (`arg.c`,
+            // `enter_fd_lst()`: `%s`), a C-DEFECT not reproduced
+            // (DIVERGENCES 122).
+            let item = match range {
                 Some((lo, hi)) => format!("{lo}-{hi}"),
-                None => body.to_string(),
+                None => shown(body).into_owned(),
             };
             return Err(format!(
-                "{} in an {} -d list: {}{shown}",
+                "{} in an {} -d list: {}{item}",
                 kind(exclude),
                 kind(was),
                 if exclude { "^" } else { "" }
@@ -955,21 +1179,20 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
 /// `ckfd_range()`: digits on both sides of an item's last `-`, the low end
 /// below the high one. `3-3` is refused, and `1-` is a high end of 0.
 fn fd_range(item: &str, dash: usize) -> Result<(u64, u64), String> {
-    let shown = Escaper::for_host().text(item);
     if dash == 0 {
-        return Err(format!("illegal FD range for -d: {shown}"));
+        return Err(quoting("illegal FD range for -d: ", item));
     }
     let number = |digits: &str| {
         if digits.bytes().all(|b| b.is_ascii_digit()) {
             fd_number(digits, item)
         } else {
-            Err(format!("non-digit in -d FD range: {shown}"))
+            Err(quoting("non-digit in -d FD range: ", item))
         }
     };
     let lo = number(&item[..dash])?;
     let hi = number(&item[dash + 1..])?;
     if lo >= hi {
-        return Err(format!("-d FD range's low >= its high: {shown}"));
+        return Err(quoting("-d FD range's low >= its high: ", item));
     }
     Ok((lo, hi))
 }
@@ -985,12 +1208,7 @@ fn fd_number(digits: &str, item: &str) -> Result<u64, String> {
             let n = n * 10 + u64::from(b - b'0');
             (n <= INT_MAX).then_some(n)
         })
-        .ok_or_else(|| {
-            format!(
-                "-d FD number exceeds INT_MAX: {}",
-                Escaper::for_host().text(item)
-            )
-        })
+        .ok_or_else(|| quoting("-d FD number exceeds INT_MAX: ", item))
 }
 
 /// The names of FD kinds the C's table has for dialects other than Linux's
@@ -1048,10 +1266,7 @@ fn parse_id_list(value: &str, what: &str) -> Result<Vec<(bool, u32)>, String> {
         };
         let Some(id) = id else {
             // `safestrprt(p, …)`: the whole argument, escaped.
-            return Err(format!(
-                "illegal {what}: {}",
-                Escaper::for_host().text(value)
-            ));
+            return Err(quoting(&format!("illegal {what}: "), value));
         };
         ids.push((excl, id));
         rest = tail;
@@ -1100,10 +1315,21 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                     None => (false, item),
                 };
                 if name.len() > LOGINML {
-                    return Err(format!(
-                        "-u login name > {LOGINML} characters: {}",
-                        Escaper::for_host().text(item)
-                    ));
+                    // The C echoes the item with `safestrprtn()`, which has no
+                    // multibyte path: `é` is `\xc3\xa9` even under C.UTF-8
+                    // (measured), where `shown()` keeps it. Its cut at the
+                    // item's length is not reproduced (DIVERGENCES 133).
+                    let mut echo = String::new();
+                    for c in shown(item).chars() {
+                        if c.is_ascii() {
+                            echo.push(c);
+                        } else {
+                            for b in c.to_string().bytes() {
+                                echo.push_str(&format!("\\x{b:02x}"));
+                            }
+                        }
+                    }
+                    return Err(format!("-u login name > {LOGINML} characters: {echo}"));
                 }
                 let name = if name.is_empty() { "0" } else { name };
                 if excl {
@@ -1125,7 +1351,8 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             }
             if value.starts_with('/') {
                 return Err(format!(
-                    "-c {value}: regular expressions (-c /RE/) are not implemented"
+                    "-c {}: regular expressions (-c /RE/) are not implemented",
+                    shown(value)
                 ));
             }
             let (excl, name) = match value.strip_prefix('^') {
@@ -1134,11 +1361,14 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                 None => (false, value),
             };
             // A name longer than the kernel keeps can never match, and the C
-            // says so rather than accepting it (`lsof_select_process()`).
+            // says so rather than accepting it (`lsof_select_process()`),
+            // quoting the name with `safestrprt(…, 2)`: a space is `\x20`
+            // there, as in COMMAND (`lib/lsof.c:178-182`, measured).
             if let Some(max) = MAX_COMMAND_WIDTH {
                 if name.len() > max {
                     return Err(format!(
-                        "\"-c {name}\" length ({}) > what system provides ({max})",
+                        "\"-c {}\" length ({}) > what system provides ({max})",
+                        Escaper::for_host().text_spaced(name),
                         name.len()
                     ));
                 }
@@ -1148,7 +1378,13 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             } else {
                 (&mut sel.commands, &sel.command_excludes)
             };
+            // Found here, at the option, as the C finds it: its
+            // `lsof_select_process()` refuses the second name as it is
+            // entered (`lib/lsof.c:155-165`), so `main.c:1042`'s check once
+            // every option is read never finds one. The C then reads on, as
+            // after any error in its loop; lsof-rs stops (DIVERGENCES 83).
             if other.iter().any(|o| o == name) {
+                let name = shown(name);
                 return Err(format!("-c^{name} and -c{name} conflict."));
             }
             this.push(name.to_string());
@@ -1318,7 +1554,10 @@ fn parse_tcp_info(letters: &str, plus: bool) -> Result<TcpInfoFlags, String> {
             's' => flags.state = true,
             'w' if HAS_TCP_WINDOW => flags.window = true,
             other => {
-                return Err(format!("unsupported TCP/TPI info selection: {other}"));
+                return Err(quoting(
+                    "unsupported TCP/TPI info selection: ",
+                    &other.to_string(),
+                ));
             }
         }
     }
@@ -1343,14 +1582,14 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
     let proto = match lower.as_deref() {
         Some("tcp:") => "TCP",
         Some("udp:") => "UDP",
-        _ => return Err(format!("unknown -s protocol: \"{value}\"")),
+        _ => return Err(format!("unknown -s protocol: \"{}\"", shown(value))),
     };
     let names = &value[4..];
     if names.is_empty() {
-        return Err(format!("no {proto} state names in: {value}"));
+        return Err(quoting(&format!("no {proto} state names in: "), value));
     }
     if proto == "UDP" {
-        return Err(format!("no UDP state names available: {value}"));
+        return Err(quoting("no UDP state names available: ", value));
     }
     for term in names.split(',') {
         let (exclude, name) = match term.strip_prefix('^') {
@@ -1358,14 +1597,14 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
             None => (false, term),
         };
         if name.is_empty() {
-            return Err(format!("NULL TCP state name in: {value}"));
+            return Err(quoting("NULL TCP state name in: ", value));
         }
         let Some(state) = tcp_state_table()
             .iter()
             .copied()
             .find(|st| st.as_str().eq_ignore_ascii_case(name))
         else {
-            return Err(format!("unknown TCP state name: {name}"));
+            return Err(quoting("unknown TCP state name: ", name));
         };
         let list = if exclude {
             &mut filter.exclude
@@ -1374,132 +1613,266 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
         };
         if list.contains(&state) {
             let which = if exclude { "exclusion" } else { "inclusion" };
-            return Err(format!("duplicate TCP {which}: {name}"));
+            return Err(quoting(&format!("duplicate TCP {which}: "), name));
         }
         list.push(state);
     }
     Ok(())
 }
 
-/// Parse an `-i` spec: `[46][proto][@host][:ports]`. An empty one, or one
-/// that is only `4` or `6`, is the bare form — every Internet file — and
-/// anything else is an address specification of its own (see
-/// [`lsof_core::InetFilter`]).
+/// The most address specifications the C takes, across every `-i`:
+/// `MAXNWAD` (`lib/common.h:359`), counted in its units ([`parse_inet`]).
+const MAXNWAD: usize = 100;
+
+/// Parse an `-i` spec, `[46][proto][@host][:ports]`, as the C's
+/// `enter_network_address()` parses it (`arg.c:1189-1611`), in its order and
+/// with its words. No spec (`-i` alone, or before a word that opens an
+/// option), and one that is only `4` or `6`, is the bare form — every
+/// Internet file; anything else is an address specification of its own (see
+/// [`lsof_core::InetFilter`]), `-i ''` included.
 ///
-/// What the C resolves and lsof-rs does not is refused, not guessed: a host
-/// NAME (`@localhost`) and a service NAME (`:http`). lsof-rs never resolves
-/// names (DIVERGENCES, "Deliberate, and staying"), and it had been reading
-/// both as a pattern that matched nothing (a host) or as no constraint at all
-/// (a service, and a port range) — so `-i:http` listed every Internet file,
-/// measured, where the C lists port 80.
-fn parse_inet(sel: &mut Selection, spec: &str) -> Result<(), String> {
-    let text = spec.to_string();
+/// * A leading `4` or `6` is the spec's version; with none, a bare form given
+///   before lends it its own (`else if (Fnet) ft = FnetTy`).
+/// * The protocol is the whole word up to `@` or `:`, `tcp`, `udp` or
+///   `udplite` in any case: `tcpx` is `unknown protocol name (tcpx)`. `icmp`
+///   and `raw` are the Windows port's own (ETW families) and nothing on
+///   Linux, where the C refuses them (measured; DIVERGENCES 108).
+/// * After `@`, an IPv4 address is the C's `isIPv4addr()` ([`ipv4_addr`]:
+///   decimal, leading zeros allowed); `[` takes the text up to the LAST `]`
+///   as an IPv6 address, never all zero, a v4-mapped one being that IPv4
+///   address; an address of the version the spec excludes is prohibited.
+///   Anything else is a host name, which the C looks up and lsof-rs never
+///   does: refused, not guessed (DIVERGENCES 38). So are the numeric forms
+///   glibc reads without DNS (`@127.1`).
+/// * The ports are `:` and then entries split by `,`: digits, or a range of
+///   them, each entry checked and entered from left to right, so the first
+///   error is the leftmost's. A range's end below its start (`:1-`, `:5-1`)
+///   and anything but digits after the first digit are `unacceptable port
+///   specification`; an empty entry, `invalid service name`. A port past
+///   65535 is no error: it matches nothing (the C's `int`). A service name
+///   is refused as a host name is: `-i:http` had listed every Internet file,
+///   where the C lists port 80.
+/// * A spec with no protocol, no address (or `0.0.0.0`) and no port is
+///   `incomplete`; and past [`MAXNWAD`] entries, counting each port entry as
+///   one and a spec with none as one, as `enter_nwad()` enters them, the
+///   spec that crosses it is refused.
+///
+/// Each message is the C's, quoting the spec as the C does, escaped
+/// ([`quoting`]), and the token in parentheses too, which the C prints raw
+/// (DIVERGENCES 112, 122).
+fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
+    // `main.c:586-593`: no value, or one that opens an option, is `Fnet = 1;
+    // FnetTy = 0`.
+    let Some(spec) = spec else {
+        sel.inet.add_all(None);
+        return Ok(());
+    };
+    let unacceptable_address = || quoting("unacceptable Internet address in: -i ", spec);
+    let unacceptable_port = || quoting("unacceptable port specification in: -i ", spec);
     let mut s = spec;
     let mut family = None;
-    match s.chars().next() {
-        Some('4') => {
-            family = Some(4);
-            s = &s[1..];
+    if let Some(rest) = s.strip_prefix(['4', '6']) {
+        family = Some(if s.starts_with('4') { 4 } else { 6 });
+        if rest.is_empty() {
+            sel.inet.add_all(family);
+            return Ok(());
         }
-        Some('6') => {
-            family = Some(6);
-            s = &s[1..];
-        }
-        _ => {}
-    }
-    if s.is_empty() {
-        sel.inet.add_all(family);
-        return Ok(());
-    }
-    sel.inet.enabled = true;
-    // An address spec with no version of its own takes the bare form's, if
-    // one came before it (`arg.c`: `else if (Fnet) ft = FnetTy`).
-    if family.is_none() && sel.inet.all {
+        s = rest;
+    } else if sel.inet.all {
         family = sel.inet.all_family;
     }
 
-    let low = s.to_ascii_lowercase();
     let mut proto = None;
-    for (name, p) in [
-        ("tcp", Protocol::Tcp),
-        ("udp", Protocol::Udp),
-        // ETW-only families (no IP Helper table): the filter implies the AFD
-        // capture — see InetFilter::needs_etw. `-iICMP` covers v4 + v6 ICMP;
-        // narrow with the `[46]` prefix (`-i6ICMP`), like TCP/UDP.
-        ("icmp", Protocol::Other("ICMP")),
-        ("raw", Protocol::Other("RAW")),
-    ] {
-        if low.starts_with(name) {
-            proto = Some(p);
-            s = &s[name.len()..];
-            break;
-        }
+    if !s.is_empty() && !s.starts_with(['@', ':']) {
+        let end = s.find(['@', ':']).unwrap_or(s.len());
+        let token = &s[..end];
+        proto = Some(inet_protocol(token).ok_or_else(|| {
+            format!(
+                "unknown protocol name ({}) in: -i {}",
+                shown(token),
+                shown(spec)
+            )
+        })?);
+        s = &s[end..];
     }
 
     let mut host = None;
     if let Some(after) = s.strip_prefix('@') {
-        // `[::1]` brackets an IPv6 address, whose colons are not the port's.
-        let (h, rest) = if let Some(inner) = after.strip_prefix('[') {
-            let close = inner
-                .find(']')
-                .ok_or_else(|| format!("unterminated [ in: -i {text}"))?;
-            (&inner[..close], &inner[close + 1..])
+        if after.is_empty() || after.starts_with(':') {
+            return Err(unacceptable_address());
+        }
+        if let Some((octets, rest)) = ipv4_addr(after) {
+            if family == Some(6) {
+                return Err(quoting("IPv4 addresses are prohibited: -i ", spec));
+            }
+            host = Some(IpAddr::V4(octets));
+            s = rest;
+        } else if let Some(inner) = after.strip_prefix('[') {
+            if family == Some(4) {
+                return Err(quoting("IPv6 addresses are prohibited: -i ", spec));
+            }
+            // `strrchr()`: the last `]`, so `[::1]]` is no address.
+            let close = inner.rfind(']').ok_or_else(unacceptable_address)?;
+            // Rust's reading of an IPv6 address is glibc's `inet_pton()`'s:
+            // the two agree on 20,045 strings (measured).
+            let ip: Ipv6Addr = inner[..close].parse().map_err(|_| unacceptable_address())?;
+            if ip.is_unspecified() {
+                return Err(unacceptable_address());
+            }
+            host = Some(match ip.to_ipv4_mapped() {
+                Some(_) if family == Some(6) => {
+                    return Err(quoting("IPv4 addresses are prohibited: -i ", spec))
+                }
+                Some(v4) => IpAddr::V4(v4),
+                None => IpAddr::V6(ip),
+            });
+            s = &inner[close + 1..];
         } else {
-            match after.find(':') {
-                Some(c) => (&after[..c], &after[c..]),
-                None => (after, ""),
-            }
-        };
-        if !h.is_empty() {
-            let ip: std::net::IpAddr = h.parse().map_err(|_| {
-                format!("host names are not resolved: -i {text} (give the address)")
-            })?;
-            // An all-zero address is no constraint at all to the C
-            // (`is_nw_addr()` skips the comparison when every byte is 0).
-            if !ip.is_unspecified() {
-                host = Some(ip);
-            }
+            return Err(quoting("host names are not resolved: -i ", spec) + " (give the address)");
         }
-        s = rest;
     }
+    // An all-zero address is no constraint at all to the C (`is_nw_addr()`
+    // skips the comparison when every byte is 0), and no address to its
+    // incomplete-specification check.
+    let host = host.filter(|ip| !ip.is_unspecified());
 
+    // What every earlier `-i` entered, in `enter_nwad()`'s units.
+    let mut entries: usize = sel.inet.specs.iter().map(|s| s.ports.len().max(1)).sum();
+    let mut enter = |ports: &mut Vec<(u32, u32)>, range: Option<(u32, u32)>| {
+        if range.is_none() && proto.is_none() && host.is_none() {
+            return Err(quoting(
+                "incomplete Internet address specification: -i ",
+                spec,
+            ));
+        }
+        if entries >= MAXNWAD {
+            return Err(quoting(
+                &format!("network address limit ({MAXNWAD}) exceeded: -i "),
+                spec,
+            ));
+        }
+        entries += 1;
+        ports.extend(range);
+        Ok(())
+    };
     let mut ports = Vec::new();
-    if let Some(list) = s.strip_prefix(':') {
-        for part in list.split(',').filter(|p| !p.is_empty()) {
-            let num = |t: &str| -> Result<u16, String> {
-                if t.bytes().all(|b| b.is_ascii_digit()) {
-                    t.parse::<u16>()
-                        .map_err(|_| format!("port out of range in: -i {text}"))
-                } else {
-                    Err(format!(
-                        "service names are not resolved: -i {text} (give the port number)"
-                    ))
+    if s.is_empty() {
+        enter(&mut ports, None)?;
+    } else {
+        let list = match s.strip_prefix(':') {
+            Some(list) if !list.is_empty() => list.as_bytes(),
+            _ => return Err(unacceptable_port()),
+        };
+        // `arg.c:1461-1580`, one entry a pass. A port's digits saturate
+        // where the C's `int` wraps (DIVERGENCES 121).
+        let mut at = 0;
+        while at < list.len() {
+            let (mut start, mut end, mut range) = (0u32, 0u32, false);
+            // The entry's start, and after a `-` the range's end.
+            while let Some(&c) = list.get(at) {
+                if !c.is_ascii_digit() {
+                    // A service name runs to the next `,` and may hold a `-`:
+                    // none at all is the C's `invalid service name`.
+                    if c == b',' {
+                        return Err(quoting("invalid service name: -i ", spec));
+                    }
+                    return Err(quoting("service names are not resolved: -i ", spec)
+                        + " (give the port number)");
                 }
-            };
-            let range = match part.split_once('-') {
-                Some((lo, hi)) => (num(lo)?, num(hi)?),
-                None => {
-                    let p = num(part)?;
-                    (p, p)
+                while let Some(&c) = list.get(at) {
+                    match c {
+                        b',' => break,
+                        b'-' if range => return Err(unacceptable_port()),
+                        b'-' => {
+                            range = true;
+                            break;
+                        }
+                        b'0'..=b'9' => {
+                            let n = if range { &mut end } else { &mut start };
+                            *n = n.saturating_mul(10).saturating_add(u32::from(c - b'0'));
+                            at += 1;
+                        }
+                        _ => return Err(unacceptable_port()),
+                    }
                 }
-            };
-            if range.0 > range.1 {
-                return Err(format!("bad port range in: -i {text}"));
+                match list.get(at) {
+                    None | Some(b',') => break,
+                    // The `-`: the range's end follows, if anything does.
+                    Some(_) => at += 1,
+                }
             }
-            ports.push(range);
+            if !range {
+                end = start;
+            }
+            if end < start {
+                return Err(unacceptable_port());
+            }
+            enter(&mut ports, Some((start, end)))?;
+            // Past the `,` that ended the entry: a trailing one ends the list.
+            at += 1;
         }
-    } else if !s.is_empty() {
-        return Err(format!("unknown protocol name ({s}) in: -i {text}"));
     }
 
+    sel.inet.enabled = true;
     sel.inet.specs.push(lsof_core::InetSpec {
-        text,
+        text: spec.to_string(),
         proto,
         family,
         ports,
         host,
     });
     Ok(())
+}
+
+/// An `-i` protocol, as the C compares it: the whole word, in any case
+/// (`strcasecmp()`, `arg.c:1295-1303`).
+fn inet_protocol(token: &str) -> Option<Protocol> {
+    let is = |name: &str| token.eq_ignore_ascii_case(name);
+    Some(if is("tcp") {
+        Protocol::Tcp
+    } else if is("udp") {
+        Protocol::Udp
+    } else if is("udplite") {
+        Protocol::UdpLite
+    // ETW-only families (no IP Helper table): the filter implies the AFD
+    // capture — see InetFilter::needs_etw. `-iICMP` covers v4 + v6 ICMP;
+    // narrow with the `[46]` prefix (`-i6ICMP`), like TCP/UDP.
+    } else if cfg!(windows) && is("icmp") {
+        Protocol::Other("ICMP")
+    } else if cfg!(windows) && is("raw") {
+        Protocol::Other("RAW")
+    } else {
+        return None;
+    })
+}
+
+/// The C's `isIPv4addr()` (`arg.c:2075-2141`): from a leading digit to `:`
+/// or the end, exactly four decimal octets of at most 255 between three
+/// dots, a leading zero no octal (`0177.0.0.1` is 177.0.0.1, measured). The
+/// address, and what follows it; `None` for anything else, which the C then
+/// takes for a host name. The octets saturate where the C's `int` wraps.
+fn ipv4_addr(s: &str) -> Option<(Ipv4Addr, &str)> {
+    let end = s.find(':').unwrap_or(s.len());
+    let (text, rest) = s.split_at(end);
+    if !text.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    let mut parts = text.split('.');
+    for octet in &mut octets {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let value = part.bytes().fold(0u32, |v, b| {
+            v.saturating_mul(10).saturating_add(u32::from(b - b'0'))
+        });
+        *octet = u8::try_from(value).ok()?;
+    }
+    parts
+        .next()
+        .is_none()
+        .then_some((Ipv4Addr::from(octets), rest))
 }
 
 #[cfg(test)]
@@ -1526,7 +1899,14 @@ mod tests {
     /// value's error; kept without its trailing slashes, and once.
     #[test]
     fn dash_e_takes_a_path_once_without_its_trailing_slashes() {
-        let fs = |argv: &[&str]| columns(argv).map(|(_, s)| s.exempt_fs);
+        let fs = |argv: &[&str]| {
+            columns(argv).map(|(_, s)| {
+                s.exempt_fs
+                    .into_iter()
+                    .map(|e| e.path.into_string().unwrap())
+                    .collect::<Vec<_>>()
+            })
+        };
         assert_eq!(fs(&["-e", "/dev/shm/"]).unwrap(), ["/dev/shm"]);
         assert_eq!(fs(&["-e", "///"]).unwrap(), ["/"]);
         assert_eq!(
@@ -1858,6 +2238,17 @@ mod tests {
             sel(&["-u", &hostile]).unwrap_err(),
             format!("-u login name > 32 characters: {}^[[2J", "a".repeat(30))
         );
+        // `safestrprtn()` has no multibyte path: a printable `é` is its bytes
+        // in hex, as the C prints it under C.UTF-8 (measured), and a C1
+        // control is as `shown()` has it.
+        let accented = format!("{}é\u{9b}b", "a".repeat(30));
+        assert_eq!(
+            sel(&["-u", &accented]).unwrap_err(),
+            format!(
+                "-u login name > 32 characters: {}\\xc3\\xa9\\xc2\\x9bb",
+                "a".repeat(30)
+            )
+        );
     }
 
     /// `-a` with nothing to AND is refused, as the C refuses it (DIVERGENCES
@@ -1956,6 +2347,24 @@ mod tests {
         );
         // A prefix of the other is not the same name, and is no conflict.
         assert!(err(&["-c", "sle", "-c", "^sleep"]).is_none());
+        // Found at the option, where the C finds it, not once every option
+        // is read: the first line is the C's either way round, and a name
+        // excluded twice is one conflict (measured). Its later errors are
+        // lost, as after every error found in the loop: `-c^x -cx -x` says
+        // nothing of `-x`, where the C adds `-x must accompany +d or +D`
+        // (DIVERGENCES 83).
+        for (argv, first) in [
+            (&["-c^x", "-cx", "-x", "q"][..], "-c^x and -cx conflict."),
+            (
+                &["-x", "q", "-c^x", "-cx"][..],
+                "unknown cross-over option: q",
+            ),
+            (&["-c^x", "-c^x", "-cx"][..], "-c^x and -cx conflict."),
+            (&["-c^x", "-cx", "-x"][..], "-c^x and -cx conflict."),
+            (&["-c^x", "-cx", "-o", "-s"][..], "-c^x and -cx conflict."),
+        ] {
+            assert_eq!(err(argv).as_deref(), Some(first), "{argv:?}");
+        }
         if cfg!(target_os = "linux") {
             // `comm` holds 15 bytes; the C refuses 16 with this text, for an
             // exclusion too (and names it without the `^`).
@@ -2111,6 +2520,12 @@ mod tests {
         assert_eq!(sel.inet.specs[0].family, Some(6));
         // An all-zero address constrains nothing, to the C.
         assert_eq!(run(&["-i@0.0.0.0:80"]).0.inet.specs[0].host, None);
+        // No spec is the bare form; an empty one is a spec, and incomplete.
+        assert!(run(&["-i"]).0.inet.all);
+        assert_eq!(
+            parse(vec!["-i".into(), String::new()]).unwrap_err(),
+            "incomplete Internet address specification: -i "
+        );
     }
 
     /// `-i4`, `-i6` and a bare `-i` combine the C's asymmetric way.
@@ -2130,18 +2545,277 @@ mod tests {
     }
 
     /// What the C resolves and lsof-rs does not is refused rather than
-    /// matched wrongly: `-i:http` had listed every Internet file.
+    /// matched wrongly: `-i:http` had listed every Internet file. A host name
+    /// is any address that is not the C's own IPv4 or bracketed IPv6 form,
+    /// numeric shorthand glibc reads without DNS included (DIVERGENCES 38).
     #[test]
     fn names_the_c_would_resolve_are_refused() {
         let err = |a: &str| parse(vec![a.to_string()]).err().unwrap_or_default();
-        assert!(err("-i:http").contains("service names are not resolved"));
-        assert!(err("-i@localhost").contains("host names are not resolved"));
-        assert!(err("-i:70000").contains("out of range"));
-        assert!(err("-i:9-1").contains("bad port range"));
-        assert!(err("-iSCTP").contains("unknown protocol"));
-        assert!(err("-i@[::1").contains("unterminated"));
+        for spec in [
+            ":http", "TCP:http", ":1-http", ":-1", ":1--2", ":x-y", ":80,http",
+        ] {
+            assert_eq!(
+                err(&format!("-i{spec}")),
+                format!("service names are not resolved: -i {spec} (give the port number)")
+            );
+        }
+        for spec in [
+            "@localhost",
+            "@127.1",
+            "@1.2.3",
+            "@1.2.3.4x",
+            "@1.2.3.256",
+            "@0x7f.0.0.1",
+        ] {
+            assert_eq!(
+                err(&format!("-i{spec}")),
+                format!("host names are not resolved: -i {spec} (give the address)")
+            );
+        }
+        // Accepted now, as the C accepts it: a port is the C's `int`.
+        assert!(err("-i:70000").is_empty());
+        assert_eq!(err("-i:9-1"), "unacceptable port specification in: -i :9-1");
+        assert_eq!(err("-iSCTP"), "unknown protocol name (SCTP) in: -i SCTP");
+        assert_eq!(err("-i@[::1"), "unacceptable Internet address in: -i @[::1");
     }
 
+    /// Every `-i` refusal in the C's words, each measured against the C 4.99.6
+    /// under C.UTF-8, the argument escaped as its `safestrprt()` escapes it,
+    /// and the protocol in parentheses too, which the C prints raw
+    /// (DIVERGENCES 112, 122).
+    #[test]
+    fn dash_i_errors_are_the_cs_words_and_escape_the_argument() {
+        let err = |argv: &[&str]| {
+            parse(argv.iter().map(|s| s.to_string()).collect())
+                .err()
+                .unwrap_or_else(|| panic!("{argv:?} must be refused"))
+        };
+        let address = "unacceptable Internet address in: -i ";
+        let port = "unacceptable port specification in: -i ";
+        for (spec, want) in [
+            ("@[1::\x1b[2J", format!("{address}@[1::^[[2J")),
+            ("@", format!("{address}@")),
+            ("@:80", format!("{address}@:80")),
+            ("6@", format!("{address}6@")),
+            ("tcp@", format!("{address}tcp@")),
+            ("tcp@:80", format!("{address}tcp@:80")),
+            ("@[", format!("{address}@[")),
+            ("@[]", format!("{address}@[]")),
+            ("@[::]", format!("{address}@[::]")),
+            ("@[::]:80", format!("{address}@[::]:80")),
+            ("@[zz::1]", format!("{address}@[zz::1]")),
+            ("@[1:2:3]", format!("{address}@[1:2:3]")),
+            ("@[::1]]:80", format!("{address}@[::1]]:80")),
+            ("@[1::\u{9b}", format!("{address}@[1::\\xc2\\x9b")),
+            ("@[1::\u{e9}", format!("{address}@[1::\u{e9}")),
+            (
+                "6@1.2.3.4",
+                "IPv4 addresses are prohibited: -i 6@1.2.3.4".into(),
+            ),
+            (
+                "6@[::ffff:1.2.3.4]",
+                "IPv4 addresses are prohibited: -i 6@[::ffff:1.2.3.4]".into(),
+            ),
+            (
+                "6@[::ffff:0.0.0.0]",
+                "IPv4 addresses are prohibited: -i 6@[::ffff:0.0.0.0]".into(),
+            ),
+            (
+                "4@[::1]",
+                "IPv6 addresses are prohibited: -i 4@[::1]".into(),
+            ),
+            ("4@[", "IPv6 addresses are prohibited: -i 4@[".into()),
+            (":", format!("{port}:")),
+            ("4:", format!("{port}4:")),
+            ("TCP:", format!("{port}TCP:")),
+            ("@1.2.3.4:", format!("{port}@1.2.3.4:")),
+            ("@[::1]x", format!("{port}@[::1]x")),
+            (":1x", format!("{port}:1x")),
+            (":1-", format!("{port}:1-")),
+            (":5-1", format!("{port}:5-1")),
+            (":1-2-3", format!("{port}:1-2-3")),
+            (":1\r", format!("{port}:1\\r")),
+            (":1x,y", format!("{port}:1x,y")),
+            (":,80", "invalid service name: -i :,80".into()),
+            (":80,,81", "invalid service name: -i :80,,81".into()),
+            (":,\x1b[2J", "invalid service name: -i :,^[[2J".into()),
+            (":1,,\x1b", "invalid service name: -i :1,,^[".into()),
+            // An octet's digits saturate where the C's `int` wraps
+            // (4294967297 is 1 to it): too large, so no IPv4 address, and a
+            // host name (DIVERGENCES 121).
+            (
+                "@4294967297.0.0.1",
+                "host names are not resolved: -i @4294967297.0.0.1 (give the address)".into(),
+            ),
+            (
+                "@99999999999.0.0.1",
+                "host names are not resolved: -i @99999999999.0.0.1 (give the address)".into(),
+            ),
+            (":1-,5", "invalid service name: -i :1-,5".into()),
+            ("", "incomplete Internet address specification: -i ".into()),
+            (
+                "@0.0.0.0",
+                "incomplete Internet address specification: -i @0.0.0.0".into(),
+            ),
+            (
+                "@[::ffff:0.0.0.0]",
+                "incomplete Internet address specification: -i @[::ffff:0.0.0.0]".into(),
+            ),
+            ("foo:80", "unknown protocol name (foo) in: -i foo:80".into()),
+            (
+                "foo@1.2.3.4",
+                "unknown protocol name (foo) in: -i foo@1.2.3.4".into(),
+            ),
+            ("tcpx", "unknown protocol name (tcpx) in: -i tcpx".into()),
+            ("tcp6", "unknown protocol name (tcp6) in: -i tcp6".into()),
+            ("46", "unknown protocol name (6) in: -i 46".into()),
+            (
+                "TCP :80",
+                "unknown protocol name (TCP ) in: -i TCP :80".into(),
+            ),
+            (
+                "a\x1b[2J",
+                "unknown protocol name (a^[[2J) in: -i a^[[2J".into(),
+            ),
+            (
+                ":a\x1b[2J",
+                "service names are not resolved: -i :a^[[2J (give the port number)".into(),
+            ),
+            (
+                "@h\x1b[2J.invalid",
+                "host names are not resolved: -i @h^[[2J.invalid (give the address)".into(),
+            ),
+        ] {
+            assert_eq!(err(&["-i", spec]), want, "{spec:?}");
+        }
+        // The version a bare form lends a spec with none of its own, and two
+        // versions that widen it back to both (measured).
+        assert_eq!(
+            err(&["-i4", "-i", "@[::1]"]),
+            "IPv6 addresses are prohibited: -i @[::1]"
+        );
+        assert_eq!(
+            err(&["-i", "-i4", "-i", "@[::1]"]),
+            "IPv6 addresses are prohibited: -i @[::1]"
+        );
+        assert_eq!(
+            err(&["-i6", "-i", "@1.2.3.4"]),
+            "IPv4 addresses are prohibited: -i @1.2.3.4"
+        );
+        // Entries are judged from left to right: the first bad one names the
+        // error.
+        assert_eq!(err(&["-i", ":,1x"]), "invalid service name: -i :,1x");
+        assert_eq!(err(&["-i", ":1x,,"]), format!("{port}:1x,,"));
+    }
+
+    /// What the C accepts, which lsof-rs refused (measured, in OR form against
+    /// a sleeper, `-p S -i SPEC`).
+    #[test]
+    fn dash_i_accepts_what_the_c_accepts() {
+        let spec = |argv: &[&str]| run(argv).0.inet.specs.pop().expect("one spec");
+        assert_eq!(spec(&["-i", ":99999"]).ports, [(99999, 99999)]);
+        assert_eq!(spec(&["-i", ":1-65536"]).ports, [(1, 65536)]);
+        assert_eq!(spec(&["-i", ":0-"]).ports, [(0, 0)]);
+        assert_eq!(spec(&["-i", ":80,"]).ports, [(80, 80)]);
+        // Past `u32` the digits saturate, where the C's `int` wraps
+        // (`:4294967376` is its port 80): a port nothing has.
+        assert_eq!(spec(&["-i", ":4294967376"]).ports, [(u32::MAX, u32::MAX)]);
+        for argv in [&["-i", "udplite"][..], &["-i", "UDPLITE:53"][..]] {
+            assert_eq!(spec(argv).proto, Some(Protocol::UdpLite), "{argv:?}");
+        }
+        assert_eq!(spec(&["-i", "4tcp"]).proto, Some(Protocol::Tcp));
+        assert_eq!(spec(&["-i", "TCP"]).proto, Some(Protocol::Tcp));
+        for (arg, want) in [
+            ("@127.000.000.001", "127.0.0.1"),
+            ("@01.2.3.4", "1.2.3.4"),
+            ("@0177.0.0.1", "177.0.0.1"),
+            ("@[::ffff:1.2.3.4]", "1.2.3.4"),
+            ("@[::1]:80", "::1"),
+            ("@[::1]", "::1"),
+        ] {
+            assert_eq!(
+                spec(&["-i", arg]).host,
+                Some(want.parse().unwrap()),
+                "{arg}"
+            );
+        }
+        let zero = spec(&["-i", "TCP@0.0.0.0"]);
+        assert_eq!((zero.host, zero.proto), (None, Some(Protocol::Tcp)));
+        let zero = spec(&["-i", "@0.0.0.0:80"]);
+        assert_eq!((zero.host, zero.ports), (None, vec![(80, 80)]));
+        // `-i4 -i6` is both versions again, so an IPv6 address is allowed.
+        assert_eq!(spec(&["-i4", "-i6", "-i", "@[::1]"]).family, None);
+        assert_eq!(spec(&["-i6", "-i", "-i", "@1.2.3.4"]).family, None);
+    }
+
+    /// `MAXNWAD`: 100 entries in all, each port entry one and a spec without
+    /// ports one, the spec that crosses it named (measured).
+    #[test]
+    fn dash_i_has_the_cs_100_address_limit() {
+        let list = |n: u32| (1..=n).map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+        let limit = "network address limit (100) exceeded: -i ";
+        assert_eq!(
+            run(&["-i", &format!(":{}", list(100))]).0.inet.specs[0]
+                .ports
+                .len(),
+            100
+        );
+        let l101 = format!(":{}", list(101));
+        assert_eq!(
+            parse(vec!["-i".into(), l101.clone()]).unwrap_err(),
+            format!("{limit}{l101}")
+        );
+        let singles: Vec<String> = (1..=101).map(|p| format!("-i:{p}")).collect();
+        assert_eq!(parse(singles[..100].to_vec()).map(|_| ()), Ok(()));
+        assert_eq!(parse(singles).unwrap_err(), format!("{limit}:101"));
+        // A spec with no port is one entry too (`enter_nwad()` once): 100
+        // `-i tcp` are accepted and the 101st refused, as the C does
+        // (measured).
+        let tcps: Vec<String> = (0..101).flat_map(|_| ["-i".into(), "tcp".into()]).collect();
+        assert_eq!(parse(tcps[..200].to_vec()).map(|_| ()), Ok(()));
+        assert_eq!(parse(tcps).unwrap_err(), format!("{limit}tcp"));
+        let argv = |tail: &str| {
+            vec![
+                "-i".to_string(),
+                format!(":{}", list(100)),
+                "-i".into(),
+                tail.into(),
+            ]
+        };
+        assert_eq!(parse(argv("TCP")).unwrap_err(), format!("{limit}TCP"));
+        // The bare forms enter nothing.
+        assert!(parse(argv("4")).is_ok());
+        // The entry's own error comes first; the limit, before a later one's.
+        let l100x = format!(":{},1x", list(100));
+        assert_eq!(
+            parse(vec!["-i".into(), l100x.clone()]).unwrap_err(),
+            format!("unacceptable port specification in: -i {l100x}")
+        );
+        let l101x = format!(":{},1x", list(101));
+        assert_eq!(
+            parse(vec!["-i".into(), l101x.clone()]).unwrap_err(),
+            format!("{limit}{l101x}")
+        );
+    }
+
+    /// `icmp` and `raw` are the Windows port's ETW families; on Linux they are
+    /// no protocol to the C, which types a raw socket `raw` and never selects
+    /// one by `-i` (measured; DIVERGENCES 108).
+    #[cfg(not(windows))]
+    #[test]
+    fn icmp_and_raw_are_not_protocols_on_linux() {
+        for p in ["icmp", "ICMP", "raw", "6icmp", "RAW:1"] {
+            let token = p.trim_start_matches('6').split(':').next().unwrap();
+            assert_eq!(
+                parse(vec!["-i".into(), p.into()]).unwrap_err(),
+                format!("unknown protocol name ({token}) in: -i {p}")
+            );
+        }
+        // UDP-Lite is a table Linux reads, and implies no capture.
+        assert!(!run(&["-iudplite"]).0.inet.needs_etw());
+    }
+
+    #[cfg(windows)]
     #[test]
     fn inet_etw_families_icmp_raw() {
         // Roadmap §5 P3: RAW/ICMP are ETW-only families; the spec accepts
@@ -2159,9 +2833,168 @@ mod tests {
         assert_eq!(sel.inet.specs[0].proto, Some(Protocol::Other("RAW")));
         assert!(sel.inet.needs_etw());
 
-        // TCP/UDP/plain -i never imply the capture.
+        // TCP/UDP/UDP-Lite/plain -i never imply the capture.
         assert!(!run(&["-iTCP"]).0.inet.needs_etw());
+        assert!(!run(&["-iudplite"]).0.inet.needs_etw());
         assert!(!run(&["-i"]).0.inet.needs_etw());
+    }
+
+    /// `+c` with no width, an empty one or one that opens with anything but
+    /// a digit is the C's `+c not followed by width number`, which quotes
+    /// nothing; `+c 1x` is `atoi()`'s 1 (all measured).
+    #[test]
+    fn plus_c_takes_atois_width_and_quotes_nothing() {
+        let err = |argv: &[&str]| parse(argv.iter().map(|s| s.to_string()).collect()).err();
+        for argv in [
+            &["+c"][..],
+            &["+c", ""][..],
+            &["+c", "x"][..],
+            &["+cx"][..],
+            &["+c", "-p", "1"][..],
+            &["+c", "\x1b[2J"][..],
+            &["+c", " 1"][..],
+        ] {
+            assert_eq!(
+                err(argv).as_deref(),
+                Some("+c not followed by width number"),
+                "{argv:?}"
+            );
+        }
+        let width = |argv: &[&str]| run(argv).0.command_width;
+        assert_eq!(width(&["+c", "1x"]), CommandWidth::Chars(1));
+        assert_eq!(width(&["+c1\x1b[2J"]), CommandWidth::Chars(1));
+        assert_eq!(width(&["+c", "0"]), CommandWidth::Unlimited);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                err(&["+c", "16x"]).as_deref(),
+                Some("+c 16 > what system provides (15)")
+            );
+        }
+    }
+
+    /// The `-c` length message quotes the name with `safestrprt(…, 2)`: a
+    /// space is `\x20` and a control byte escaped, é raw (measured).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_c_length_message_is_safestrprt_flags_2() {
+        let err = |v: &str| parse(vec!["-c".into(), v.into()]).unwrap_err();
+        assert_eq!(
+            err("aaaaaaaaaaaaaa\x1b[2J"),
+            "\"-c aaaaaaaaaaaaaa^[[2J\" length (18) > what system provides (15)"
+        );
+        assert_eq!(
+            err("a ba ba ba ba ba b"),
+            "\"-c a\\x20ba\\x20ba\\x20ba\\x20ba\\x20ba\\x20b\" length (18) > what system provides (15)"
+        );
+        assert_eq!(
+            err("\u{e9} a\\\x7f\u{9b}bbbbbbbbbbb"),
+            "\"-c \u{e9}\\x20a\\\\\\x7f\\xc2\\x9bbbbbbbbbbbb\" length (19) > what system provides (15)"
+        );
+    }
+
+    /// No option's error, and no line a parse tells its sink, holds a control
+    /// character (U+2028 and U+2029 included): every argument a message
+    /// quotes is escaped, where the C prints several raw (DIVERGENCES 112,
+    /// 122). Every letter, known or not, under both prefixes, its value
+    /// attached and as the next word; then the conflicts and the lines said
+    /// while parsing. A parse's error may hold several, joined by
+    /// `"\nlsof: "`, and no other newline.
+    #[test]
+    fn no_option_error_holds_a_control_character() {
+        let long = format!("{}\x1b[2J", "a".repeat(40));
+        let hostile = [
+            "\x1b[2J",
+            "a\x1b[2J",
+            "1\x1b[2J",
+            "TCP:\x1b",
+            "TCP:LISTEN,\x1b",
+            "UDP:\x1b",
+            "^x\x1b",
+            "^\x1b",
+            "/x\x1b[2J",
+            "/no\x1b[2Jsuch/",
+            "\r",
+            "\x7f",
+            "\u{9b}",
+            "\u{2028}",
+            "\u{2029}x",
+            ":1\x1b",
+            "@[1::\x1b",
+            "@h\x1b",
+            "4\x1b",
+            "m\x1b",
+            "1-\x1b",
+            "c\x1b",
+            ",\x1b[2J",
+            "1,,\x1b",
+            ":,\x1b[2J",
+            ":1,,\x1b",
+            long.as_str(),
+        ];
+        let bad = |s: &str| {
+            s.chars()
+                .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+        };
+        let check = |argv: Vec<String>| {
+            let said = std::cell::RefCell::new(Vec::new());
+            let sink = |l: &str| said.borrow_mut().push(l.to_string());
+            let fs = SafeFs::new(&lsof_core::InProcess, &sink);
+            // A table that holds `/` alone, so that an `-e` of anything else
+            // is the not-mounted error.
+            let reader = |_: &MountRequest, _: &SafeFs| MountTable {
+                entries: vec![lsof_core::MountEntry {
+                    dir: "/".into(),
+                    device: Some(1),
+                    source_resolved: None,
+                    source_is_block: false,
+                    kind: lsof_core::MountKind::Regular,
+                }],
+                ..MountTable::default()
+            };
+            if let Err(e) = parse_with(argv.clone(), &fs, &reader) {
+                for piece in e.split("\nlsof: ") {
+                    assert!(!bad(piece), "{argv:?}: {e:?}");
+                }
+            }
+            for line in said.into_inner() {
+                assert!(!bad(&line), "{argv:?} said {line:?}");
+            }
+        };
+        for letter in ('a'..='z').chain('A'..='Z').chain(['?', '0', '\x1b']) {
+            for prefix in ['-', '+'] {
+                for value in hostile {
+                    check(vec![format!("{prefix}{letter}{value}")]);
+                    check(vec![format!("{prefix}{letter}"), value.to_string()]);
+                    // After `-b`, the `+d`/`-e` paths are named as avoided.
+                    check(vec![
+                        "-b".into(),
+                        format!("{prefix}{letter}"),
+                        value.to_string(),
+                    ]);
+                }
+            }
+        }
+        for value in hostile {
+            let v = value.to_string();
+            for argv in [
+                vec!["-c".into(), v.clone(), "-c".into(), format!("^{v}")],
+                vec!["-c".into(), format!("^{v}"), "-c".into(), v.clone()],
+                vec!["-d".into(), format!("1,^{v}")],
+                vec!["-d".into(), format!("^1,{v}")],
+                vec![
+                    "-s".into(),
+                    format!("TCP:{v}"),
+                    "-s".into(),
+                    format!("TCP:^{v}"),
+                ],
+                vec!["-e".into(), v.clone(), "-e".into(), format!("/{v}")],
+                vec!["+e".into(), format!("/{v}"), "-x".into(), "q".into()],
+                vec!["-S".into(), "0".into(), "+d".into(), v.clone()],
+                vec!["-i".into(), format!(":{v}"), "-i".into(), format!("{v}@1")],
+            ] {
+                check(argv);
+            }
+        }
     }
 
     #[test]
@@ -2259,7 +3092,11 @@ mod tests {
         let said = std::cell::RefCell::new(Vec::new());
         let say = |l: &str| said.borrow_mut().push(l.to_string());
         let fs = SafeFs::new(&lsof_core::InProcess, &say);
-        let got = parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs);
+        let got = parse_with(
+            argv.iter().map(|s| s.to_string()).collect(),
+            &fs,
+            &no_mounts,
+        );
         (got, said.into_inner())
     }
 
@@ -2826,7 +3663,6 @@ mod tests {
             ("+n", "unsupported option: +n"),
             ("+P", "unsupported option: +P"),
             ("+r", "unsupported option: +r"),
-            ("+e", "unsupported option: +e"),
             ("+J", "unsupported option: +J"),
             ("+aq", "unsupported option: +q"),
             ("+", "unsupported option: +"),
@@ -3061,5 +3897,385 @@ mod tests {
         let (cols, sel) = columns(&["+f", "--", "x"]).unwrap();
         assert_eq!(cols.file_flags, FileFlags::Off);
         assert_eq!(sel.filesystem_args, FilesystemArgs::AlwaysFilesystem);
+    }
+
+    /// Parse over the in-process layer with `table` for the host's mount
+    /// table, and hand back what the parse printed, each table read as a
+    /// line naming the `-e`/`+e` list and options it was read under, and the
+    /// lines the table itself says (`say`).
+    fn parse_over(
+        argv: &[&str],
+        table: &[&str],
+        say: &[&str],
+    ) -> (Result<Action, String>, Vec<String>) {
+        let said = std::cell::RefCell::new(Vec::new());
+        let sink = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &sink);
+        let reader = |req: &MountRequest, fs: &SafeFs| {
+            let exempt: Vec<String> = req
+                .exempt
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}{}",
+                        if e.plus { '+' } else { '-' },
+                        e.path.to_string_lossy()
+                    )
+                })
+                .collect();
+            fs.tell(&format!(
+                "READ exempt={exempt:?} warn={} avoid={}",
+                fs.warns(),
+                fs.blocking().avoid
+            ));
+            for l in say {
+                if fs.warns() {
+                    fs.tell(l);
+                }
+            }
+            MountTable {
+                entries: table
+                    .iter()
+                    .map(|d| lsof_core::MountEntry {
+                        dir: (*d).into(),
+                        device: Some(1),
+                        source_resolved: Some("src".into()),
+                        source_is_block: false,
+                        kind: lsof_core::MountKind::Regular,
+                    })
+                    .collect(),
+                ..MountTable::default()
+            }
+        };
+        let got = parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs, &reader);
+        (got, said.into_inner())
+    }
+
+    /// The C reads its mount table iff some `-e`/`+e` was given or the run is
+    /// not `-i` alone (`Selinet`): every form below measured by counting
+    /// the C's `alarm(15)` calls (none, or one per request of its child), the
+    /// negated and value-less ones included (DIVERGENCES 110). Linux's
+    /// alone: only it has a mount table, and the Windows parser reads `-g` as
+    /// parent PIDs, with a value it requires.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn needs_mount_table_is_the_cs_selinet() {
+        let d = a_dir();
+        let no_table: &[&[&str]] = &[
+            &["-i"],
+            &["-i", "TCP:22"],
+            &["-i", "@127.0.0.1"],
+            &["-i", "4"],
+            &["-i", "UDP"],
+            &["-n", "-P", "-i", ":22"],
+            &["-i", "-s", "TCP:LISTEN"],
+            &["-i", "-T"],
+            &["-t", "-i"],
+            &["-a", "-i"],
+            &["-i", "-p", "^1"],
+            &["-i", "-u", "^root"],
+            &["-i", "-c", "^x"],
+            &["-i", "-g", "^1"],
+            &["-i", "-g"],
+            &["-i", "-K", "i"],
+            &["-i", "+L"],
+            &["-i", "-E"],
+            &["-i", "+E"],
+            &["-i", "-w", "-n", "-P", "-l", "-R", "-o", "-T"],
+        ];
+        let table: &[&[&str]] = &[
+            &["-i", "-d", "^3"],
+            &["-i", "-g", "1"],
+            &["-i", "-K"],
+            &["-i", "-U"],
+            &["-i", "-N"],
+            &["-i", "-e", "/x"],
+            &["-i", "+e", "/x"],
+            &["-i", "+L1"],
+            &["-i", "-p", "1"],
+            &["-i", "-a", "-p", "1"],
+            &["-i", "-u", "0"],
+            &["-i", "-c", "x"],
+            &["/dev/null", "-i"],
+            &["-s", "TCP:LISTEN"],
+            &["-U"],
+            &["-t"],
+            &["-N"],
+            &["-t", "-p", "1"],
+            &["-f", "--", "/"],
+            &["+f", "--", "/dev"],
+            &["+d", &d],
+            &["-i", "+D", &d],
+            &[],
+        ];
+        let needs = |argv: &[&str]| match parse(argv.iter().map(|s| s.to_string()).collect()) {
+            Ok(Action::Run { selection, .. }) => selection.needs_mount_table(),
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        for argv in no_table {
+            assert!(!needs(argv), "{argv:?} reads no table in the C");
+        }
+        for argv in table {
+            assert!(needs(argv), "{argv:?} reads the table in the C");
+        }
+        // `-i -x f` is no table case: a usage error in both.
+        assert_eq!(
+            parse(vec!["-i".into(), "-x".into(), "f".into()]).unwrap_err(),
+            "-x must accompany +d or +D"
+        );
+    }
+
+    /// `-e` is spelt by `Readlink()` where it stands, under the `-b` and `-w`
+    /// given before it; `+e` is taken as typed; a path entered twice keeps
+    /// the sign it was first given (DIVERGENCES 88; measured).
+    #[cfg(unix)]
+    #[test]
+    fn dash_e_reads_its_links_and_plus_e_does_not() {
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tmp.join(format!("lsof-rs-args-e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("/nonexist/x", dir.join("bad")).unwrap();
+        std::os::unix::fs::symlink("l2", dir.join("l1")).unwrap();
+        std::os::unix::fs::symlink("l1", dir.join("l2")).unwrap();
+        let bad = dir.join("bad").to_string_lossy().into_owned();
+        let l1 = dir.join("l1").to_string_lossy().into_owned();
+        let exempt = |argv: &[&str]| match parse_over(argv, &[], &[]) {
+            (Ok(Action::Run { selection, .. }), _) => selection
+                .exempt_fs
+                .into_iter()
+                .map(|e| (e.path.into_string().unwrap(), e.plus))
+                .collect::<Vec<_>>(),
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        assert_eq!(exempt(&["-e", &bad]), [("/nonexist/x".to_string(), false)]);
+        assert_eq!(exempt(&["+e", &bad]), [(bad.clone(), true)]);
+        assert_eq!(
+            exempt(&["+e", "/m/", "-e", "/m"]),
+            [("/m".to_string(), true)]
+        );
+        assert_eq!(
+            exempt(&["-e", "/m", "+e", "/m//"]),
+            [("/m".to_string(), false)]
+        );
+        // A link loop is its message, muted by a `-w` before it alone.
+        let looped = format!("too many (> 20) symbolic links in readlink() path: {l1}");
+        assert_eq!(parse_over(&["-e", &l1], &[], &[]).0.unwrap_err(), looped);
+        assert_eq!(parse_over(&["-w", "-e", &l1], &[], &[]).0.unwrap_err(), "");
+        assert!(
+            parse_over(&["+e", &l1], &[], &[]).0.is_ok(),
+            "+e reads no link"
+        );
+        // `-b` before it: `avoiding readlink(P)` there, and P kept as typed.
+        let (got, said) = parse_over(&["-b", "-e", &bad], &[], &[]);
+        assert!(got.is_ok());
+        assert_eq!(
+            said[0],
+            format!("lsof: avoiding readlink({bad}): -b was specified.")
+        );
+        let (_, said) = parse_over(&["-e", "/dev/shm", "-b"], &[], &[]);
+        assert!(said.iter().all(|l| l.starts_with("READ")), "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `-e not followed by a file system path` quotes the value escaped,
+    /// `+e`'s too, and is muted by a `-w` or `-t` before the option, where
+    /// the run still ends (measured: `-w -e dev/` and `-t -e dev/` print only
+    /// the usage, `-e dev/ -w` the message).
+    #[test]
+    fn a_relative_exempt_path_is_refused_and_muted_by_w_before_it() {
+        let err = |argv: &[&str]| parse_over(argv, &[], &[]).0.unwrap_err();
+        assert_eq!(
+            err(&["-e", "dev/"]),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+        assert_eq!(
+            err(&["+e", "dev/"]),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+        assert_eq!(
+            err(&["-e", "-p", "1"]),
+            r#"-e not followed by a file system path: "-p""#
+        );
+        assert_eq!(
+            err(&["-p", "1", "-e"]),
+            r#"-e not followed by a file system path: """#
+        );
+        assert_eq!(
+            err(&["-e", "d\x1b[2J"]),
+            r#"-e not followed by a file system path: "d^[[2J""#
+        );
+        assert_eq!(err(&["-w", "-e", "dev/"]), "");
+        assert_eq!(err(&["-t", "-e", "dev/"]), "");
+        assert_eq!(err(&["-w", "-e", "-p", "1"]), "");
+        assert_eq!(
+            err(&["-t", "+w", "-e", "dev/"]),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+    }
+
+    /// The `-e` check runs once every option is read, before `-h` and `-v`
+    /// are acted on, after the other end-of-parse errors, against a table
+    /// read there if no `+d` read it; and only a table that holds something.
+    /// Every bad path is reported, the last given first, escaped, and the
+    /// errors are one, joined as the C prints them (DIVERGENCES 83, 115).
+    #[test]
+    fn every_unmounted_exempt_path_is_an_error_after_the_others() {
+        let mounted = ["/m", "/n"];
+        let err = |argv: &[&str]| parse_over(argv, &mounted, &[]).0.unwrap_err();
+        assert_eq!(
+            err(&["-e", "/nosuch1", "-e", "/m", "+e", "/nosuch2"]),
+            "\"-e /nosuch2\" is not a mounted file system.\n\
+             lsof: \"-e /nosuch1\" is not a mounted file system."
+        );
+        assert_eq!(
+            err(&["-e", "/nosuch", "-h"]),
+            "\"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(
+            err(&["-v", "-e", "/nosuch"]),
+            "\"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(
+            err(&["-e", "/no\x1b[2J"]),
+            "\"-e /no^[[2J\" is not a mounted file system."
+        );
+        // What comes before the `-e` check is printed before the table is
+        // read for it, and so before what the table says; one read already
+        // leaves them all to the end.
+        let warned = ["lsof: WARNING: can't stat() tmpfs file system /gone"];
+        let (got, said) = parse_over(&["-e", "/nosuch", "-x", "f"], &mounted, &warned);
+        assert_eq!(
+            got.unwrap_err(),
+            "\"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(said[0], "lsof: -x must accompany +d or +D");
+        assert!(
+            said[1].starts_with("READ ") && said[2] == warned[0],
+            "{said:?}"
+        );
+        let (got, said) = parse_over(&["-o", "-s", "-x", "-e", "/m"], &mounted, &[]);
+        assert_eq!(got.unwrap_err(), "", "printed already, and still an error");
+        assert_eq!(
+            said[..2],
+            [
+                "lsof: -o and -s are mutually exclusive",
+                "lsof: -x must accompany +d or +D"
+            ]
+        );
+        let d = a_dir();
+        let (got, said) = parse_over(&["+d", &d, "-e", "/nosuch", "-o", "-s"], &mounted, &warned);
+        assert_eq!(
+            got.unwrap_err(),
+            "-o and -s are mutually exclusive\nlsof: \"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(said.len(), 2, "the read at +d, and its line: {said:?}");
+        assert_eq!(
+            parse(
+                ["-s", "TCP:LISTEN,^LISTEN,ESTABLISHED,^ESTABLISHED", "-x"]
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect()
+            )
+            .unwrap_err(),
+            // Each conflicting state in the order of the platform's state
+            // table: the C's (Linux) has ESTABLISHED before LISTEN, the
+            // Windows table (MIB_TCP_STATE) LISTEN first.
+            if cfg!(windows) {
+                "can't include and exclude TCP state: LISTEN\n\
+                 lsof: can't include and exclude TCP state: ESTABLISHED\n\
+                 lsof: -x must accompany +d or +D"
+            } else {
+                "can't include and exclude TCP state: ESTABLISHED\n\
+                 lsof: can't include and exclude TCP state: LISTEN\n\
+                 lsof: -x must accompany +d or +D"
+            }
+        );
+        // `-hx` is `-x`'s error, not the help.
+        assert_eq!(
+            parse(vec!["-hx".into()]).unwrap_err(),
+            "-x must accompany +d or +D"
+        );
+        assert!(matches!(
+            parse_over(&["-h", "-e", "/m"], &mounted, &[]).0,
+            Ok(Action::Help)
+        ));
+        // A mounted path, and `-f` changes nothing about it (DIVERGENCES 113).
+        assert!(parse_over(&["-f", "-e", "/m", "-e", "/n/"], &mounted, &[])
+            .0
+            .is_ok());
+        // An empty table checks nothing: `-b -e /nosuch` runs.
+        assert!(parse_over(&["-e", "/nosuch"], &[], &[]).0.is_ok());
+    }
+
+    /// The table is read once, where the C reads it: at the first `+d`/`+D`,
+    /// under the `-w`, `-b` and `-e`/`+e` given before it, its lines there;
+    /// else for the `-e` check, under the options as they ended; else not
+    /// at all while parsing (DIVERGENCES 82, 87, 110).
+    #[test]
+    fn the_table_is_read_at_the_first_plus_d_under_the_options_there() {
+        let d = a_dir();
+        let warned = ["lsof: WARNING: can't stat() tmpfs file system /gone"];
+        let said = |argv: &[&str]| parse_over(argv, &["/m"], &warned).1;
+        let read = |exempt: &str, warn: bool, avoid: bool| {
+            format!("READ exempt={exempt} warn={warn} avoid={avoid}")
+        };
+        // `+d D -w` warns; `-w +d D` does not; one read for two `+d`.
+        assert_eq!(
+            said(&["+d", &d, "-w", "+D", &d]),
+            [read("[]", true, false), warned[0].into()]
+        );
+        assert_eq!(said(&["-w", "+d", &d]), [read("[]", false, false)]);
+        // `+d D -e M` reads with no `-e`; `-e M +d D` with it.
+        assert_eq!(
+            said(&["+d", &d, "-e", "/m"]),
+            [read("[]", true, false), warned[0].into()]
+        );
+        assert_eq!(
+            said(&["-e", "/m", "+d", &d])[0],
+            read("[\"-/m\"]", true, false)
+        );
+        assert_eq!(
+            said(&["+e", "/m", "+d", &d])[0],
+            read("[\"+/m\"]", true, false)
+        );
+        // Before a later option's parse-time line, and after an earlier one's.
+        assert_eq!(
+            said(&["+d", &d, "-S", "0"]),
+            [
+                read("[]", true, false),
+                warned[0].into(),
+                "lsof: WARNING: -S time (0) changed to 2".into()
+            ]
+        );
+        assert_eq!(
+            said(&["-S", "0", "+d", &d])[0],
+            "lsof: WARNING: -S time (0) changed to 2"
+        );
+        // No `+d`: read for the `-e` check, under the options as they ended.
+        assert_eq!(said(&["-e", "/m", "-w"]), [read("[\"-/m\"]", false, false)]);
+        assert_eq!(
+            said(&["-e", "/m", "-b", "-w"]),
+            [read("[\"-/m\"]", false, true)]
+        );
+        // Neither: not read while parsing, `-h` or not.
+        assert!(said(&["-p", "1"]).is_empty());
+        assert!(said(&["-h"]).is_empty());
+        // A `+d` whose directory fails reads none.
+        assert!(parse_over(&["+d", "/nonexistent-dir"], &["/m"], &warned)
+            .1
+            .iter()
+            .all(|l| !l.starts_with("READ")));
+        // The table travels with the run.
+        match parse_over(&["+d", &d], &["/m"], &[]).0 {
+            Ok(Action::Run {
+                mounts: Some(t), ..
+            }) => assert_eq!(t.entries.len(), 1),
+            other => panic!("{other:?}"),
+        }
+        match parse_over(&["-p", "1"], &["/m"], &[]).0 {
+            Ok(Action::Run { mounts, .. }) => assert!(mounts.is_none()),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -45,7 +45,7 @@ fn plus_f_reports_a_plain_directory_as_typed_and_escaped() {
         .args(["+f", "--", "./plain", "esc\x1b[2J"])
         .output()
         .expect("run lsof");
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
         err.contains("lsof: not a file system: ./plain\n"),
@@ -73,7 +73,7 @@ fn a_status_error_escapes_the_argument() {
         .arg("no\x1b[2Jsuch")
         .output()
         .expect("run lsof");
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
         err.contains("lsof: status error on no^[[2Jsuch: No such file or directory\n"),
@@ -95,7 +95,7 @@ fn a_parse_error_escapes_the_argument_it_quotes() {
         .args(["-p", "1\x1b[2J"])
         .output()
         .expect("run lsof");
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
         err.contains("lsof: illegal process ID: 1^[[2J\n"),
@@ -104,6 +104,100 @@ fn a_parse_error_escapes_the_argument_it_quotes() {
     assert!(
         !out.stderr.contains(&0x1b),
         "a raw ESC reached stderr: {err:?}"
+    );
+}
+
+/// Run the binary with `args`, from nowhere in particular.
+fn lsof(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .args(args)
+        .output()
+        .expect("run lsof")
+}
+
+/// `out` ended the parse with exactly `message` and the usage hint, nothing
+/// listed, and no raw ESC on stderr.
+fn refused_with(out: &std::process::Output, message: &str) {
+    let err = stderr_of(out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(out.stdout.is_empty(), "{err}");
+    assert_eq!(err, format!("lsof: {message}\nTry 'lsof -h' for usage.\n"));
+    assert!(
+        !out.stderr.contains(&0x1b),
+        "a raw ESC reached stderr: {err:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn an_inet_error_escapes_the_argument_it_quotes() {
+    // DIVERGENCES 112: the C's words, and its `safestrprt()` of the spec.
+    // lsof-rs had said `unterminated [` and written the ESC raw.
+    refused_with(
+        &lsof(&["-i", "@[1::\x1b[2J"]),
+        "unacceptable Internet address in: -i @[1::^[[2J",
+    );
+    refused_with(
+        &lsof(&["-i", ":1\x1b[2J"]),
+        "unacceptable port specification in: -i :1^[[2J",
+    );
+    refused_with(
+        &lsof(&["-i", ""]),
+        "incomplete Internet address specification: -i ",
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn an_inet_name_error_escapes_the_name_too() {
+    // The C prints the protocol, host and service names raw before the
+    // escaped spec (DIVERGENCES 122); lsof-rs escapes both.
+    refused_with(
+        &lsof(&["-i", "a\x1b[2J"]),
+        "unknown protocol name (a^[[2J) in: -i a^[[2J",
+    );
+    refused_with(
+        &lsof(&["-i", ":a\x1b[2J"]),
+        "service names are not resolved: -i :a^[[2J (give the port number)",
+    );
+    refused_with(
+        &lsof(&["-i", "@h\x1b[2J"]),
+        "host names are not resolved: -i @h^[[2J (give the address)",
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn plus_c_quotes_nothing() {
+    // lsof-rs had said `invalid +c width: ` and the value, raw.
+    for args in [&["+c", "\x1b[2J"][..], &["+c"][..], &["+cx"][..]] {
+        refused_with(&lsof(args), "+c not followed by width number");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn the_c_length_message_escapes_the_name() {
+    // `safestrprt(…, 2)`: a space is `\x20` too (measured).
+    refused_with(
+        &lsof(&["-c", "aaaaaaaaaaaaaa\x1b[2J"]),
+        "\"-c aaaaaaaaaaaaaa^[[2J\" length (18) > what system provides (15)",
+    );
+    refused_with(
+        &lsof(&["-c", "a ba ba ba ba ba b"]),
+        "\"-c a\\x20ba\\x20ba\\x20ba\\x20ba\\x20ba\\x20b\" length (18) > what system provides (15)",
     );
 }
 
@@ -124,14 +218,32 @@ fn a_refusal_the_c_makes_in_silence_under_dash_t_still_ends_the_run() {
     let out = run(&["-t", "-d", "3,^4"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "Try 'lsof -h' for usage.\n"
-    );
+    assert_eq!(stderr_of(&out), "Try 'lsof -h' for usage.\n");
     let out = run(&["-d", "3,^4"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr)
-        .starts_with("lsof: exclude in an include -d list: ^4\n"));
+    assert!(stderr_of(&out).starts_with("lsof: exclude in an include -d list: ^4\n"));
+}
+
+/// What lsof said on stderr, less the mount table's warnings: on a host
+/// where the user running the tests cannot `stat` some mount, every run that
+/// reads the table says, as the C does, `lsof: WARNING: can't stat() TYPE file
+/// system DIR` and `      Output information may be incomplete.` of it
+/// (DIVERGENCES 87). Exactly that pair is tolerated, nothing else.
+fn stderr_of(out: &std::process::Output) -> String {
+    let text = String::from_utf8_lossy(&out.stderr);
+    let mut kept = String::new();
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("lsof: WARNING: can't stat() ")
+            && line.contains(" file system ")
+            && lines.peek() == Some(&"      Output information may be incomplete.\n")
+        {
+            lines.next();
+            continue;
+        }
+        kept.push_str(line);
+    }
+    kept
 }
 
 /// Run the binary in `dir` with `args`, which may hold any bytes.
@@ -167,7 +279,7 @@ fn a_status_error_names_the_path_readlink_made() {
     )
     .unwrap();
     let out = lsof_in(&dir.0, &os(&["dangle", "nudangle"]));
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(out.stdout.is_empty());
     assert_eq!(
@@ -196,19 +308,15 @@ fn readlink_gives_up_as_the_c_does_and_minus_w_mutes_it() {
     );
     let out = lsof_in(&dir.0, &os(&["loop1", &long]));
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    assert_eq!(stderr_of(&out), said);
     // A warning: `-w` mutes it, and the arguments are still dropped.
     let out = lsof_in(&dir.0, &os(&["-w", "loop1", &long]));
     assert_eq!(out.status.code(), Some(1));
-    assert!(
-        out.stderr.is_empty(),
-        "{:?}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(stderr_of(&out).is_empty(), "{:?}", stderr_of(&out));
     // `-Q` mutes the search failure, not the warning.
     let out = lsof_in(&dir.0, &os(&["-Q", "loop1", &long]));
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stderr), said);
+    assert_eq!(stderr_of(&out), said);
 }
 
 #[test]
@@ -230,11 +338,7 @@ fn a_plus_d_the_c_cannot_use_ends_the_run_as_it_parses() {
         let out = lsof_in(&dir.0, &os(args));
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!("{said}{usage}"),
-            "{args:?}"
-        );
+        assert_eq!(stderr_of(&out), format!("{said}{usage}"), "{args:?}");
     };
     let cannot_stat = format!(
         "lsof: WARNING: can't stat({}): No such file or directory\n",
@@ -271,13 +375,10 @@ fn plus_f_drops_what_is_no_file_system() {
     std::fs::create_dir(dir.0.join("plain")).unwrap();
     let out = lsof_in(&dir.0, &os(&["+f", "--", "plain"]));
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "lsof: not a file system: plain\n"
-    );
+    assert_eq!(stderr_of(&out), "lsof: not a file system: plain\n");
     let out = lsof_in(&dir.0, &os(&["-Q", "+f", "--", "plain"]));
     assert_eq!(out.status.code(), Some(0));
-    assert!(out.stderr.is_empty() && out.stdout.is_empty());
+    assert!(stderr_of(&out).is_empty() && out.stdout.is_empty());
 }
 
 #[test]
@@ -294,18 +395,18 @@ fn the_walk_warns_of_a_link_it_cannot_follow() {
     std::os::unix::fs::symlink("self", dir.0.join("d").join("self")).unwrap();
     let out = lsof_in(&dir.0, &os(&["-x", "l", "+d", "d"]));
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
+        stderr_of(&out),
         "lsof: WARNING: can't stat(d/self) symbolc link: Too many levels of symbolic links\n"
     );
     // A `-w` after the option does not reach the walk the option began.
     let out = lsof_in(&dir.0, &os(&["-x", "l", "+d", "d", "-w"]));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("symbolc link"));
+    assert!(stderr_of(&out).contains("symbolc link"));
     for args in [&["+d", "d"][..], &["-w", "-x", "l", "+d", "d"]] {
         let out = lsof_in(&dir.0, &os(args));
         assert!(
-            out.stderr.is_empty(),
+            stderr_of(&out).is_empty(),
             "{args:?}: {:?}",
-            String::from_utf8_lossy(&out.stderr)
+            stderr_of(&out)
         );
     }
 }
@@ -327,7 +428,7 @@ fn the_walk_warns_before_a_bare_paths_status_error() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
+        stderr_of(&out),
         "lsof: WARNING: can't stat(d/self) symbolc link: Too many levels of symbolic links\n\
          lsof: status error on /nonexistent: No such file or directory\n"
     );
@@ -388,7 +489,7 @@ fn an_empty_path_argument_is_a_status_error() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
+        stderr_of(&out),
         "lsof: status error on : No such file or directory\n"
     );
 }
@@ -409,7 +510,7 @@ fn a_walk_stops_at_its_budget_and_says_so() {
     }
     let started = std::time::Instant::now();
     let out = lsof_in(&dir.0, &os(&["-a", "-p", "1", "-x", "l", "+D", "d"]));
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = stderr_of(&out);
     assert!(
         err.lines()
             .any(|l| l.starts_with("lsof: WARNING: stopped walking d after ")),
@@ -417,7 +518,7 @@ fn a_walk_stops_at_its_budget_and_says_so() {
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(60));
     let out = lsof_in(&dir.0, &os(&["-w", "-a", "-p", "1", "-x", "l", "+D", "d"]));
-    assert!(out.stderr.is_empty(), "-w mutes it");
+    assert!(stderr_of(&out).is_empty(), "-w mutes it");
 }
 
 #[test]
@@ -455,20 +556,23 @@ fn a_walk_entry_past_path_max_is_file_name_too_long() {
         args.extend_from_slice(&["+D", "d"]);
         let out = lsof_in(&dir.0, &os(&args));
         assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
+            stderr_of(&out),
             format!("lsof: WARNING: can't lstat({entry}): File name too long\n"),
             "{extra:?}"
         );
     }
     let out = lsof_in(&dir.0, &os(&["-w", "-a", "-p", "1", "+D", "d"]));
-    assert!(out.stderr.is_empty(), "-w mutes it");
+    assert!(stderr_of(&out).is_empty(), "-w mutes it");
 }
 
 /// `-b` (DIVERGENCES 94, 122): a path argument is neither read nor `stat`ed,
 /// lsof says so, and the status error follows, every one of them escaped —
-/// where the C prints `avoiding stat(P)` raw. `-f` because lsof-rs then reads
-/// no mount table, so the three lines stand alone (the C still names every
-/// mount it avoids). `-w` mutes the first two, never the status error.
+/// where the C prints `avoiding stat(P)` raw. Between the first two lines the
+/// mount table is read, as the C reads it at the first argument `Readlink()`
+/// spelt, under `-f` too (DIVERGENCES 110, 113): each mount says it avoided
+/// its `readlink` and its `stat` and that it could not be `stat`ed, in four
+/// lines, which depend on the host and are checked for their shape. `-w`
+/// mutes all but the status error.
 #[test]
 #[cfg_attr(
     miri,
@@ -486,12 +590,38 @@ fn dash_b_avoids_a_path_argument_and_says_so_escaped() {
     };
     let out = run(&["-b", "-f", "--", "e\x1b[2Jx"]);
     assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(lines.len() >= 3, "{err}");
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "lsof: avoiding readlink(e^[[2Jx): -b was specified.\n\
-         lsof: avoiding stat(e^[[2Jx): -b was specified.\n\
-         lsof: status error on e^[[2Jx: Resource temporarily unavailable\n"
+        lines[0],
+        "lsof: avoiding readlink(e^[[2Jx): -b was specified."
     );
+    assert_eq!(
+        lines[lines.len() - 2..],
+        [
+            "lsof: avoiding stat(e^[[2Jx): -b was specified.",
+            "lsof: status error on e^[[2Jx: Resource temporarily unavailable",
+        ]
+    );
+    let table = &lines[1..lines.len() - 2];
+    assert!(!table.is_empty() && table.len() % 4 == 0, "{err}");
+    for mount in table.chunks(4) {
+        let dir = mount[0]
+            .strip_prefix("lsof: avoiding readlink(")
+            .and_then(|l| l.strip_suffix("): -b was specified."))
+            .unwrap_or_else(|| panic!("{mount:?}"));
+        assert_eq!(
+            mount[1],
+            format!("lsof: avoiding stat({dir}): -b was specified.")
+        );
+        assert!(
+            mount[2].starts_with("lsof: WARNING: can't stat() ")
+                && mount[2].ends_with(&format!(" file system {dir}")),
+            "{mount:?}"
+        );
+        assert_eq!(mount[3], "      Output information may be incomplete.");
+    }
     let out = run(&["-b", "-w", "-f", "--", "e\x1b[2Jx"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
@@ -523,7 +653,7 @@ fn what_the_parse_says_comes_in_the_cs_order() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
+        stderr_of(&out),
         "lsof: avoiding readlink(d): -b was specified.\n\
          lsof: avoiding stat(d): -b was specified.\n\
          lsof: WARNING: can't stat(d): Resource temporarily unavailable\n\
@@ -531,14 +661,11 @@ fn what_the_parse_says_comes_in_the_cs_order() {
     );
     let out = run(&["-w", "-b", "+d", "d"]);
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "Try 'lsof -h' for usage.\n"
-    );
+    assert_eq!(stderr_of(&out), "Try 'lsof -h' for usage.\n");
     let out = run(&["-S", "0x", "-p", "1"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
+        stderr_of(&out),
         "lsof: WARNING: -S time (0) changed to 2\n\
          lsof: -x must accompany +d or +D\n\
          Try 'lsof -h' for usage.\n"
@@ -569,7 +696,7 @@ fn no_helper_no_run() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
+        stderr_of(&out),
         "lsof: can't open pipes: Too many open files\n"
     );
 }
@@ -672,7 +799,7 @@ fn a_path_through_proc_self_is_lsof_however_it_is_spelt() {
             out.status.code(),
             Some(0),
             "{arg} from {cwd}: {}",
-            String::from_utf8_lossy(&out.stderr)
+            stderr_of(&out)
         );
         assert!(
             text.lines()
@@ -711,17 +838,8 @@ fn run_through_the_loader_the_helper_is_too() {
         .output()
         .expect("run lsof through the loader");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{loader}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        out.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_eq!(out.status.code(), Some(0), "{loader}: {}", stderr_of(&out));
+    assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
     assert!(
         text.lines()
             .any(|l| l.starts_with("sleep") && l.ends_with("/dev/null")),
@@ -842,10 +960,7 @@ fn a_stat_opens_the_path_o_path_and_never_statx_it() {
             return;
         };
         let Ok(text) = std::fs::read_to_string(&trace) else {
-            eprintln!(
-                "skipped: strace could not trace: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            eprintln!("skipped: strace could not trace: {}", stderr_of(&out));
             return;
         };
         let quoted = format!("\"{shown}\"");
@@ -991,10 +1106,7 @@ fn a_walk_entry_is_stated_once() {
             };
             let log = std::fs::read_to_string(&trace).unwrap_or_default();
             if !log.contains("execve(") {
-                eprintln!(
-                    "skipped: strace could not trace: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
+                eprintln!("skipped: strace could not trace: {}", stderr_of(&out));
                 return;
             }
             let how = format!("{args:?}");
@@ -1069,15 +1181,158 @@ fn proc_self_is_lsof_in_a_pid_namespace_too() {
         .output()
         .expect("run lsof in a pid namespace");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
     assert!(
         text.lines()
             .any(|l| l.starts_with("sleep") && l.ends_with(file.to_str().unwrap())),
         "{text}"
+    );
+}
+
+/// What the C prints as it reads its mount table, in its order, where the
+/// differential can only compare stdout and the status: a run that ends in
+/// the usage (DIVERGENCES 83, 87, 110, 114, 115). In a mount namespace of the
+/// test's own, a tmpfs mounted over the one at `gone/m`, which no one can
+/// `stat` then; nothing is held on either. Root only (`unshare -m`), skipped,
+/// saying why, otherwise.
+///
+/// * `+d D -e GONE`: the table is read at the `+d`, before the `-e`, so GONE
+///   is `stat`ed and warned of, and then the `-e` is refused; `-e GONE +d D`
+///   neither warns nor refuses (critic gap 0).
+/// * every unmounted `-e` is refused, the last given first, after the
+///   table's lines (critic gap 1, m1);
+/// * an error found once every option is read, before the `-e` check, comes
+///   before the table's lines, which that check reads (m9).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+)]
+fn a_mount_table_of_its_own_says_what_the_c_says() {
+    let works = Command::new("unshare")
+        .args(["-m", "--propagation", "private", "true"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !works {
+        eprintln!("skipped: no `unshare -m` here (root only)");
+        return;
+    }
+    let dir = Scratch::new("own-table");
+    let base = dir.0.join("t");
+    std::fs::create_dir(&base).expect("make the base");
+    let script = format!(
+        r#"set -u
+B='{base}'; LSOF='{lsof}'
+cd /
+mount -t tmpfs lsof-rs-own-table "$B" || {{ echo "nomount"; exit 0; }}
+mkdir -p "$B/gone/m" "$B/d"
+mount -t tmpfs src_gone "$B/gone/m"
+mount -t tmpfs src_gone_top "$B/gone"
+run() {{
+    "$LSOF" "$@" -a -p 1 -d cwd >/dev/null 2>"$B.err"
+    echo "rc=$?"
+    tr '\n' '|' < "$B.err"; echo
+}}
+run +d "$B/d" -e "$B/gone/m"
+run -e "$B/gone/m" +d "$B/d"
+run -e /nosuch1 -e /nosuch2
+run -e /nosuch -x f
+umount -l "$B"
+"#,
+        base = base.display(),
+        lsof = env!("CARGO_BIN_EXE_lsof"),
+    );
+    let out = Command::new("timeout")
+        .args([
+            "60",
+            "unshare",
+            "-m",
+            "--propagation",
+            "private",
+            "sh",
+            "-c",
+        ])
+        .arg(&script)
+        .output()
+        .expect("run the namespace");
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.starts_with("nomount") {
+        eprintln!("skipped: tmpfs could not be mounted here");
+        return;
+    }
+    let gone = base.join("gone/m");
+    let warned = format!(
+        "lsof: WARNING: can't stat() tmpfs file system {}|      Output information may be incomplete.|",
+        gone.display()
+    );
+    let refused = |p: &str| format!("lsof: \"-e {p}\" is not a mounted file system.|");
+    let usage = "Try 'lsof -h' for usage.|";
+    let want = [
+        "rc=1".to_string(),
+        format!("{warned}{}{usage}", refused(&gone.display().to_string())),
+        // `d` holds nothing: the search fails, and nothing is said.
+        "rc=1".to_string(),
+        String::new(),
+        "rc=1".to_string(),
+        format!(
+            "{warned}{}{}{usage}",
+            refused("/nosuch2"),
+            refused("/nosuch1")
+        ),
+        "rc=1".to_string(),
+        format!(
+            "lsof: -x must accompany +d or +D|{warned}{}{usage}",
+            refused("/nosuch")
+        ),
+    ];
+    let got: Vec<&str> = text.lines().collect();
+    assert_eq!(got, want, "{text}");
+    // Nothing of the namespace outlives it.
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    assert!(!mounts.contains(&base.display().to_string()), "{mounts}");
+}
+
+/// `-f` only stops a path argument from naming a file system: the table is
+/// read for `-e` under it too, and a mounted `-e` is accepted. lsof-rs had
+/// read no table under `-f` and refused it, exit 1 (DIVERGENCES 113).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+)]
+fn dash_f_dash_e_of_a_mount_is_accepted() {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    if !mounts
+        .lines()
+        .any(|l| l.split(' ').nth(1) == Some("/dev/shm"))
+    {
+        eprintln!("skipped: /dev/shm is not a mount point here");
+        return;
+    }
+    let me = std::process::id().to_string();
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .args(["-w", "-f", "-e", "/dev/shm", "-a", "-d", "cwd", "-p", &me])
+        .output()
+        .expect("run lsof");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .args([
+            "-w",
+            "-f",
+            "-e",
+            "/nonexistent-mount",
+            "-a",
+            "-d",
+            "cwd",
+            "-p",
+            &me,
+        ])
+        .output()
+        .expect("run lsof");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr_of(&out),
+        "lsof: \"-e /nonexistent-mount\" is not a mounted file system.\nTry 'lsof -h' for usage.\n"
     );
 }

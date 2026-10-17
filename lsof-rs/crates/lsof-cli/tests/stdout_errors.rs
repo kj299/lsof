@@ -16,6 +16,26 @@ fn self_pid() -> String {
     std::process::id().to_string()
 }
 
+/// What lsof said on stderr, less the mount table's warnings: where the user
+/// running the tests cannot `stat` some mount, a run that reads the table
+/// says so, as the C does (DIVERGENCES 87). Exactly that pair is tolerated.
+fn stderr_of(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut kept = String::new();
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("lsof: WARNING: can't stat() ")
+            && line.contains(" file system ")
+            && lines.peek() == Some(&"      Output information may be incomplete.\n")
+        {
+            lines.next();
+            continue;
+        }
+        kept.push_str(line);
+    }
+    kept
+}
+
 #[test]
 #[cfg_attr(
     miri,
@@ -44,7 +64,7 @@ fn a_normal_run_writes_its_table_and_exits_0() {
         "a header and this process's rows: {text}"
     );
     assert!(
-        out.stderr.is_empty(),
+        stderr_of(&out.stderr).is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -73,7 +93,7 @@ fn a_closed_pipe_exits_141_and_says_nothing() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        out.stderr.is_empty(),
+        stderr_of(&out.stderr).is_empty(),
         "a closed pipe is not an error to report: {}",
         String::from_utf8_lossy(&out.stderr)
     );

@@ -1,0 +1,424 @@
+# Mutants for "read the mount table only when a run needs it, and as the C's
+# readmnt() reads it" (DIVERGENCES 110, with 87, 88, 113 and 115): one per
+# rule, each a plausible way to get that rule wrong. The kill table is this
+# file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/mounts.toml
+#
+# It needs the C oracle built at ../lsof (README: Building), strace, and
+# root: the unit gate's namespace tests (tests/bounded_calls.rs, a FUSE mount
+# that never answers; tests/arguments.rs, a table of its own) skip without
+# it, and the differential's fixtures MT, AUTOFS and FH mount in namespaces of
+# their own. CI runs only --apply-only, which checks that each mutant still
+# fits the code. The empty-table gate of the -e check is mutated in
+# safefs.toml (e-checked-against-an-empty-table), and the reading of the
+# table at the first +d (mount-table-under-the-final-options) there too.
+#
+# Run 2026-10-17, as root with --first-kill: 36 of 36 killed, 35 by the unit
+# gate and dash-n-on-every-mount by the differential. The item's review added
+# four (load-reads-unbounded, types-reads-unbounded, z-reads-the-stated-table,
+# duplicate-test-scans-the-entries) and re-anchored five on code it reshaped;
+# run again in full, as root with --first-kill: 40 of 40 killed, 39 by the
+# unit gate and dash-n-on-every-mount by the differential (z-reads-the-stated-
+# table by the audit as well, run alone without --first-kill).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+timeout = 900
+
+[[run.gate]]
+name = "audit"
+cmd = ["python3", "differential/mount_stat_audit.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 600
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1800
+
+# ----------------------------------------------------- what is skipped --
+
+[[mutant]]
+name = "skip-list-misses-autofs"
+rule = "autofs, pipefs and sockfs mounts are skipped before anything is asked: an autofs mount is never stat()ed (110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        || [&b"autofs"[..], b"pipefs", b"sockfs"]'''
+new = '''        || [&b"pipefs"[..], b"sockfs"]'''
+
+[[mutant]]
+name = "automounter-any-colon"
+rule = "an automounter's source is one whose FIRST ':' is followed by (pid (110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    let automounter = src.iter().position(|&b| b == b':').is_some_and(|colon| {'''
+new = '''    let automounter = src.iter().rposition(|&b| b == b':').is_some_and(|colon| {'''
+
+[[mutant]]
+name = "automounter-case-sensitive"
+rule = "(pid is compared in any case, strncasecmp (110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            .is_some_and(|w| w.eq_ignore_ascii_case(b"(pid"))'''
+new = '''            .is_some_and(|w| w == b"(pid")'''
+
+[[mutant]]
+name = "two-field-line-kept"
+rule = "a line of fewer than three fields is no mount (get_fields < 3) (110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let (Some(source), Some(dir), Some(fstype)) = (f.next(), f.next(), f.next()) else {'''
+new = '''        let (Some(source), Some(dir), Some(fstype)) = (f.next(), f.next(), f.next().or(Some(&b"none"[..]))) else {'''
+
+[[mutant]]
+name = "mounts-read-unbounded"
+rule = "/proc/self/mounts is read up to a cap, cut at a whole line (110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        .take(cap.saturating_add(1))'''
+new = '''        .take(u64::MAX)'''
+
+[[mutant]]
+name = "load-reads-unbounded"
+rule = "the table's mounts are read through the cap, not around it (129; the item's review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    resolve_table(&parse_mounts(&read_capped(path, cap)), req, fs)'''
+new = '''    resolve_table(&parse_mounts(&std::fs::read(path).unwrap_or_default()), req, fs)'''
+
+[[mutant]]
+name = "types-reads-unbounded"
+rule = "-Z's types are read through the cap, not around it (129; the item's review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    read_capped(path, cap)
+        .split(|&b| b == b'\n')'''
+new = '''    std::fs::read(path)
+        .unwrap_or_default()
+        .split(|&b| b == b'\n')'''
+
+[[mutant]]
+name = "duplicate-test-scans-the-entries"
+rule = "the duplicate test is a lookup, not a scan of the entries per row: a table the cap lets in costs time linear in its rows (110; the item's review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let duplicate = recorded.get(&dir).copied();'''
+new = '''        let duplicate = table.entries.iter().position(|m| m.dir == dir);'''
+
+# -------------------------------------------------------- -e and +e mounts --
+
+[[mutant]]
+name = "exempt-mount-stated"
+rule = "an -e/+e mount is never stat()ed, and recorded with no device (88, 110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let (no_readlink, no_stat) = exempt.map_or((false, false), |e| (e.plus, true));'''
+new = '''        let (no_readlink, no_stat) = exempt.map_or((false, false), |e| (e.plus, false));'''
+
+[[mutant]]
+name = "plus-e-dir-readlinked"
+rule = "a +e mount's directory is not read through Readlink() (88)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let dir = if no_readlink {'''
+new = '''        let dir = if false && no_readlink {'''
+
+[[mutant]]
+name = "exempt-source-stated"
+rule = "an -e mount's source is read but not stat()ed (88)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            let is_block = exempt.is_none()
+                && fs'''
+new = '''            let is_block = true
+                && fs'''
+
+[[mutant]]
+name = "plus-e-source-read"
+rule = "a +e mount's source is not read through Readlink() either (88)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    if exempt.is_some_and(|e| e.plus) || raw.as_bytes().first() != Some(&b'/') {'''
+new = '''    if raw.as_bytes().first() != Some(&b'/') {'''
+
+# ---------------------------------------------- duplicates and the types --
+
+[[mutant]]
+name = "duplicate-recorded-again"
+rule = "a directory listed twice is the first row's, the later one neither stat()ed nor read (110)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            if !replaces {
+                continue;
+            }'''
+new = '''            if !replaces && false {
+                continue;
+            }'''
+
+[[mutant]]
+name = "root-never-replaced"
+rule = "an NFS row replaces a / that is not NFS (dmnt.c:510-518; source only)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            let replaces = dir.as_bytes() == b"/" && table.entries[i].kind != MountKind::Nfs && nfs;'''
+new = '''            let replaces = dir.as_bytes() == b"/" && table.entries[i].kind != MountKind::Nfs && false;'''
+
+[[mutant]]
+name = "nfs3-is-not-nfs"
+rule = "nfs, nfs3 and nfs4 are NFS (110, -N)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    [&b"nfs"[..], b"nfs3", b"nfs4"]'''
+new = '''    [&b"nfs"[..], b"nfs4"]'''
+
+[[mutant]]
+name = "nfs-case-sensitive"
+rule = "an NFS type is compared in any case, strcasecmp (110, -N)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    [&b"nfs"[..], b"nfs3", b"nfs4"]
+        .iter()
+        .any(|t| ty.eq_ignore_ascii_case(t))'''
+new = '''    [&b"nfs"[..], b"nfs3", b"nfs4"]
+        .iter()
+        .any(|t| ty == *t)'''
+
+[[mutant]]
+name = "has-nfs-only-when-recorded"
+rule = "HasNFS is 1 for an NFS row seen and not recorded (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        if nfs && table.has_nfs == 0 {
+            table.has_nfs = 1;
+        }'''
+new = ''''''
+
+[[mutant]]
+name = "mqueue-case-insensitive"
+rule = "mqueue is exactly mqueue, strcmp (110, row 128)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        } else if line.fstype.as_bytes() == b"mqueue" {'''
+new = '''        } else if line.fstype.as_bytes().eq_ignore_ascii_case(b"mqueue") {'''
+
+# ------------------------------------------------------------ the warnings --
+
+[[mutant]]
+name = "stat-warning-not-muted"
+rule = "-w and -t mute the can't stat() warning (87)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                Err(_) => {
+                    if fs.warns() {'''
+new = '''                Err(_) => {
+                    if true {'''
+
+[[mutant]]
+name = "stat-warning-one-line"
+rule = "the can't stat() warning is followed by Output information may be incomplete. (87)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                            esc.bytes(dir.as_bytes())
+                        ));
+                        fs.tell(INCOMPLETE);'''
+new = '''                            esc.bytes(dir.as_bytes())
+                        ));'''
+
+[[mutant]]
+name = "dir-readlink-failure-one-line"
+rule = "a mount directory Readlink() gives up on says so, then Output information may be incomplete. (87, 86)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                            e.message(&esc.bytes(line.dir.as_bytes()))
+                        ));
+                        fs.tell(INCOMPLETE);'''
+new = '''                            e.message(&esc.bytes(line.dir.as_bytes()))
+                        ));'''
+
+[[mutant]]
+name = "source-readlink-failure-silent"
+rule = "a source Readlink() gives up on says so, with no second line, unless -w (87)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            if fs.warns() {
+                fs.tell(&format!("lsof: {}", e.message(&esc.bytes(raw.as_bytes()))));
+            }'''
+new = ''''''
+
+# ------------------------------------------------- when the table is read --
+
+[[mutant]]
+name = "inet-only-without-addresses"
+rule = "-i with an address is -i alone too (SELNA, Selinet) (110)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        !given.is_empty() && given.without(SelKinds::NET.union(SelKinds::NA)).is_empty()'''
+new = '''        !given.is_empty() && given.without(SelKinds::NET).is_empty()'''
+
+[[mutant]]
+name = "inet-only-without-bare-i"
+rule = "a bare -i is -i alone (SELNET, Selinet) (110)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        !given.is_empty() && given.without(SelKinds::NET.union(SelKinds::NA)).is_empty()'''
+new = '''        !given.is_empty() && given.without(SelKinds::NA).is_empty()'''
+
+[[mutant]]
+name = "inet-only-when-nothing-is-selected"
+rule = "a run with no selector is every file, and reads the table: -s TCP:LISTEN alone, -t (110)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        !given.is_empty() && given.without(SelKinds::NET.union(SelKinds::NA)).is_empty()'''
+new = '''        given.without(SelKinds::NET.union(SelKinds::NA)).is_empty()'''
+
+[[mutant]]
+name = "e-reads-no-table-under-i"
+rule = "an -e or +e reads the table even under -i alone (main.c:1137) (110)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        !self.exempt_fs.is_empty() || !self.inet_only()'''
+new = '''        !self.inet_only()'''
+
+[[mutant]]
+name = "table-read-under-i-alone"
+rule = "-i alone reads no table and starts no helper (110)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        if table.is_none() && needs_table {
+            table = Some(read_table(&sel));
+        }
+        // `-N` selects'''
+new = '''        if table.is_none() {
+            table = Some(read_table(&sel));
+        }
+        // `-N` selects'''
+
+[[mutant]]
+name = "table-not-read-before-listing"
+rule = "a run that reads the table and names no path reads it before it lists (initialize()) (87, 110)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        if table.is_none() && needs_table {
+            table = Some(read_table(&sel));
+        }
+        // `-N` selects'''
+new = '''        // `-N` selects'''
+
+[[mutant]]
+name = "table-not-read-for-a-path"
+rule = "a path argument reads the table, at the first one Readlink() spells (110, 113)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            let mounted = &table.get_or_insert_with(|| read_table(&sel)).entries;'''
+new = '''            let mounted = table.as_ref().map_or(&[][..], |t| &t.entries[..]);'''
+
+[[mutant]]
+name = "plus-d-read-without-the-e-list"
+rule = "the table is read under the -e/+e list as it stands where it is read (88, 110)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        exempt: sel.exempt_fs.clone(),'''
+new = '''        exempt: Vec::new(),'''
+
+# ----------------------------------------------------------- -e and +e --
+
+[[mutant]]
+name = "e-not-readlinked"
+rule = "-e's path is read through Readlink() where the option stands (88)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let path = if plus {'''
+new = '''    let path = if true {'''
+
+[[mutant]]
+name = "e-readlinked-under-no-options"
+rule = "-e's Readlink() is made under the -b, -O, -S and -w given before it (88, 94)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        at.readlink(value)?'''
+new = '''        AtOption::new(&Selection::default(), fs).readlink(value)?'''
+
+[[mutant]]
+name = "relative-e-not-muted"
+rule = "-e not followed by a file system path is muted by a -w or -t before it, and still ends the run (m8)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        return Err(at.said(format!(
+            "-e not followed by a file system path: \"{}\"",'''
+new = '''        return Err((format!(
+            "-e not followed by a file system path: \"{}\"",'''
+
+[[mutant]]
+name = "plus-e-names-a-minus"
+rule = "a file on a +e mount says (+e PATH) (88)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        if e.plus { '+' } else { '-' },'''
+new = '''        '-','''
+
+# ------------------------------------------------------------ the -e check --
+
+[[mutant]]
+name = "unmounted-e-first-given-first"
+rule = "every unmounted -e is refused, the last given first (m1)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            for e in sel.exempt_fs.iter().rev() {'''
+new = '''            for e in sel.exempt_fs.iter() {'''
+
+[[mutant]]
+name = "errors-after-the-table"
+rule = "an end-of-parse error found before the -e check is printed before the table it reads (m9)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            for e in errors.drain(..) {
+                fs.tell(&format!("lsof: {e}"));
+                told = true;
+            }'''
+new = ''''''
+
+[[mutant]]
+name = "help-before-the-end-of-parse-errors"
+rule = "-h with an end-of-parse error is the error, exit 1 (115)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if told || !errors.is_empty() {'''
+new = '''    if !want_help && (told || !errors.is_empty()) {'''
+
+[[mutant]]
+name = "tcp-state-conflict-first-only"
+rule = "every TCP state both included and excluded is reported, in table order (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        .filter(|st| states.include.contains(st) && states.exclude.contains(st))
+    {'''
+new = '''        .filter(|st| states.include.contains(st) && states.exclude.contains(st))
+        .take(1)
+    {'''
+
+# -------------------------------------------------------------------- -Z --
+
+[[mutant]]
+name = "z-reads-the-stated-table"
+rule = "-Z asks the table's types alone, as text, and examines no mount: the C refuses it before any table (29, 110; the item's review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            let enabled = env.backend.has_mount_type("selinuxfs");'''
+new = '''            let enabled = !env.backend.mount_table(&MountRequest::default(), &fs.with(sel.blocking, !sel.omit_unreadable)).entries.is_empty() && env.backend.has_mount_type("selinuxfs");'''
+
+# -------------------------------------------------------------------- -N --
+
+[[mutant]]
+name = "dash-n-on-every-mount"
+rule = "-N selects the files of NFS mounts alone (110)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                if let (MountKind::Nfs, Some(dev)) = (m.kind, m.device) {'''
+new = '''                if let (MountKind::Regular, Some(dev)) = (m.kind, m.device) {'''

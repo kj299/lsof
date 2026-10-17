@@ -6,7 +6,8 @@
 > the options `-S` and `-b` (DIVERGENCES 94), done 2026-10-09]. DIVERGENCES 9 and 21, listed as not
 > scheduled below, are resolved. [2026-10-04: and two socket rows this page
 > called done or folded into 22 are open: a raw socket, which the C types `raw`
-> from `/proc/net/raw` where lsof-rs types it IPv4 (DIVERGENCES 108), and a
+> from `/proc/net/raw` where lsof-rs types it IPv4 (DIVERGENCES 108; resolved
+> 2026-10-17: typed and named as the C types it, and never selected by `-i`), and a
 > *bound* netlink socket, which `/proc/net/netlink` does list and the C types
 > `netlink` (109). Measured by the retrospective; see §3.] The current list of differences is
 > [`../DIVERGENCES.md`](../DIVERGENCES.md).
@@ -27,7 +28,7 @@ Linux gap at all.**
 | `maps` → `mem` rows | **done** | `mem REG … /usr/lib/x86_64-linux-gnu/libc.so.6`, byte-identical to the C |
 | `/proc/locks` → lock column | **done** | DIVERGENCES item 7, closed 2026-09-05 |
 | named anon inodes | **done** | `[eventfd:6]`, `[eventpoll]`, `[timerfd]`, `[signalfd]`, `inotify`, `[pidfd:1153]` — all byte-identical |
-| raw / netlink | **partly — see §3** | raw is resolved; packet landed 2026-09-20 (P3), netlink is the one remaining row. [2026-10-04: raw is not — DIVERGENCES 108; and a bound netlink socket is a table row — 109] |
+| raw / netlink | **partly — see §3** | raw is resolved; packet landed 2026-09-20 (P3), netlink is the one remaining row. [2026-10-04: raw is not — DIVERGENCES 108; and a bound netlink socket is a table row — 109] [2026-10-17: raw is, as the C types it — 108; UDP-Lite is read too] |
 
 Plus two items L2 acquired later and also delivered: the mount table
 (`mounts.rs`, DIVERGENCES 15) and per-namespace socket reads (DIVERGENCES 16).

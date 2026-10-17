@@ -152,10 +152,22 @@ ids = [
   "type:PMAP", "type:PMEM", "type:PMPS", "type:PNTF", "type:POBJ",
   "type:PODR", "type:POLP", "type:POPF", "type:POPG", "type:PORT",
   "type:PREG", "type:PRMP", "type:PROCDSC", "type:PRTD", "type:PSGA",
-  "type:PSIN", "type:PSTA", "type:PSXMQ", "type:PSXSEM", "type:PSXSHM",
+  "type:PSIN", "type:PSTA", "type:PSXSEM", "type:PSXSHM",
   "type:PTS", "type:PUSG", "type:PW", "type:PXMP"
 ]
 reason = "Solaris /proc file types — no Windows equivalent"
+
+# PSXMQ is Linux's too, so it is not the Solaris waiver's (where it had sat,
+# unscoped, until 2026-10-17): a waiver on Windows, debt on Linux.
+[[waive]]
+id = "type:PSXMQ"
+platforms = ["windows"]
+reason = "a POSIX message queue's descriptor on Linux's mqueue file system — Windows has neither"
+
+[[waive]]
+id = "type:PSXMQ"
+platforms = ["linux"]
+reason = "DEBT (DIVERGENCES 128): the Linux dialect types a regular file on the mqueue file system the mount table records PSXMQ (dnode.c:815-819), and lsof-rs types it REG. The table records that file system's device (mqueue_device) since item 110, 2026-10-17; typing the descriptor is a later step."
 
 [[waive]]
 ids = [
@@ -185,11 +197,11 @@ reason = "Unix socket families not reachable on Windows"
 [[waive]]
 ids = [
   "type:ax25", "type:icmp", "type:inet", "type:ipx",
-  "type:key", "type:netlink", "type:raw", "type:raw6",
+  "type:key", "type:netlink", "type:raw6",
   "type:rte", "type:x.25"
 ]
 platforms = ["linux"]
-reason = "DEBT (L2): lsof's per-family type codes for families lsof-rs does not read. A raw socket is typed IPv4 or IPv6 where the C types it raw from /proc/net/raw (DIVERGENCES 108), a bound netlink socket is SOCK where the C types it netlink from /proc/net/netlink (109), and a socket no table lists, an unbound netlink or a ping socket among them, is named by the C from its `system.sockprotoname` xattr (22). `type:pack` came off this list when /proc/net/packet shipped; `type:a_inode` and `type:sock`, which lsof-rs emits as the C does, came off it on 2026-10-04, when a retrospective found them still listed."
+reason = "DEBT (L2): lsof's per-family type codes for families lsof-rs does not read, or has no fixture for. `type:raw6` is typed as the C types it since 2026-10-17 (DIVERGENCES 108), but no case covers it: this host has no IPv6, so no raw6 socket to hold or measure (`type:raw` came off this list then, covered by fixture RAW). A bound netlink socket is SOCK where the C types it netlink from /proc/net/netlink (109), and a socket no table lists, an unbound netlink or a ping socket among them, is named by the C from its `system.sockprotoname` xattr (22). `type:pack` came off this list when /proc/net/packet shipped; `type:a_inode` and `type:sock`, which lsof-rs emits as the C does, came off it on 2026-10-04, when a retrospective found them still listed."
 
 [[waive]]
 ids = [

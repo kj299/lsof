@@ -63,7 +63,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-h` | misc | ✅ shipped | Help |
 | `-?` | misc | ✅ shipped (5A) | Alias for `-h` — one-line add |
 | `-H` | out | ✅ shipped 2026-09-19 | Human-readable sizes in the SIZE column, in `lsof-core`, so both platforms. It was never a headers toggle |
-| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|icmp|raw][@addr][:ports]` (host and service names are refused, DIVERGENCES 38); `icmp`/`raw` are ETW-sourced (imply the Administrator-only capture) |
+| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|udplite][@addr][:ports]`, read in the C's grammar and words, the argument escaped in every message (DIVERGENCES 112); host and service names are refused (38). On Windows `icmp`/`raw` too, ETW-sourced (they imply the Administrator-only capture); on Linux they are the C's `unknown protocol name`, a raw socket being the C's `raw` row, which no `-i` selects (108) |
 | `-J` | out | ✅ shipped | JSON aggregated. The C has `-J` too, with another schema (DIVERGENCES 91) |
 | `-j` | out | ✅ shipped | JSON Lines. The C has `-j` too, with another schema (DIVERGENCES 91) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |

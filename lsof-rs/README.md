@@ -64,7 +64,7 @@ independent code and per-OS "dialect" backends:
 |---|---|
 | `/proc` PID scan, COMMAND, PPID | `CreateToolhelp32Snapshot` + `Process32NextW` |
 | owner uid → USER | process token → `GetTokenInformation(TokenUser)` → `LookupAccountSidW` |
-| `/proc/net/{tcp,udp}{,6}` (`-i`) | `GetExtendedTcpTable` / `GetExtendedUdpTable` (`*_OWNER_PID`, v4+v6) |
+| `/proc/net/{tcp,udp,udplite}{,6}` (`-i`) | `GetExtendedTcpTable` / `GetExtendedUdpTable` (`*_OWNER_PID`, v4+v6) |
 | `/proc/<pid>/fd/*` open files | `NtQuerySystemInformation` + `NtQueryObject` |
 | inode / `st_ino` | `GetFileInformationByHandle` file index |
 
@@ -75,7 +75,10 @@ independent code and per-OS "dialect" backends:
 - ✅ **Phase 0** — workspace, `Backend` trait, least-privilege scaffolding, CI.
 - ✅ **Phase 1** — process + owner enumeration; `-p` / `-c` / `-u` / `-t`.
 - ✅ **Phase 2** — TCP/UDP (v4+v6) with owning PID; `-i [46][tcp|udp][@addr][:port]`,
-  `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`) output.
+  `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`) output. `-i` reads its
+  spec in the C's grammar and words, and every message that quotes an
+  argument escapes it (DIVERGENCES 112); `icmp` and `raw` are this port's
+  ETW families, on Windows only.
 - ✅ **Phase 3** — system-wide open *file handle* enumeration via the NT handle
   table (`NtQuerySystemInformation` + `DuplicateHandle` + `NtQueryObject`):
   regular files, directories, named pipes, and char devices, with drive-letter
@@ -114,10 +117,12 @@ item is shipped or a documented closed gate — and the release criteria are in
   `/proc/<pid>/fd` plus the `cwd`/`root`/`exe` links; types, DEVICE, SIZE,
   NODE and NLINK from `stat`. Enough for `-p`, `-c`, `-u`, `-t`, `-d`, `-a`,
   `-R`, bare paths and `+D`/`+d`.
-- ✅ **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}` is read
-  once per gather and indexed by inode; an fd whose target is `socket:[N]`
-  resolves by that key into a real TYPE, protocol, addresses and TCP state.
-  **`-i` and `-U` work** in every form the core supports, as does `-T q`.
+- ✅ **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,udplite,udplite6,raw,raw6,unix}`
+  is read once per gather and indexed by inode; an fd whose target is
+  `socket:[N]` resolves by that key into a real TYPE, protocol, addresses and
+  TCP state. **`-i` and `-U` work** in every form the C takes but host and
+  service names (#38), `-i udplite` included, as does `-T q`; a raw socket is the C's `raw` row, which no `-i`
+  selects (#108).
 - ✅ **L2** — `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock
   column (`3uW`) from `/proc/locks`; ✅ named `anon_inode` kinds
   (`[eventpoll:4,6]`, `[eventfd:6]`, `[pidfd:N]`); ✅ **path arguments matched
@@ -131,9 +136,8 @@ item is shipped or a documented closed gate — and the release criteria are in
   that namespace's own tables (#16), and packet sockets have their `pack` row.
   ⬜ What remains for sockets: a socket no `/proc/net` table lists, an
   AF_VSOCK, ping or unbound netlink socket, which the C names from an
-  extended attribute (#22, waiting on a decision); and two families whose
-  tables lsof-rs does not read as the C does, raw sockets (`raw`, #108) and
-  bound netlink sockets (`netlink`, #109).
+  extended attribute (#22, waiting on a decision); and bound netlink sockets,
+  whose table lsof-rs does not read (`netlink`, #109).
 - ✅ **L3** — the C-vs-Rust differential as a CI gate
   ([`differential/linux_diff.py`](differential/linux_diff.py)): the C built
   from **this tree** and lsof-rs, run against the same fixture process, diffed
@@ -185,9 +189,12 @@ lsof-rs makes on a path it was given — an argument, a `+d`/`+D` tree, a mount
 point — runs in a helper process (the same binary, re-executed) that gets
 `-S [t]` seconds for it, 15 by default and at least 2; one that runs out fails
 with `Connection timed out` and the helper is replaced. Each such call costs
-its limit: a hung mount costs every run that reads the mount table 15 s, a
-path argument on it 15 s more. A hung NFS mount or a stuck FUSE daemon used
-to stop every run but `-f`, `lsof -i :22` included. `-b` makes none of those
+its limit: a hung mount costs every run that reads the mount table 15 s, with
+the C's warning that it could not `stat` it, a path argument on it 15 s more.
+A hung NFS mount or a stuck FUSE daemon used to stop every run but `-f`. As
+in the C, `-i` alone reads no mount table, so it asks such a mount nothing and
+starts no helper, and the table's automount points and `-e`/`+e` mounts are
+never `stat`ed (#110). `-b` makes none of those
 calls and says so, and `-O` makes them in lsof itself with no limit, as the C
 documents both. The C's own timeout fires once per run and then hangs;
 lsof-rs bounds every call ([`DIVERGENCES.md`](DIVERGENCES.md) #94, #118). A

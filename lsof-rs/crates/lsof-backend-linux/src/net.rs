@@ -32,17 +32,27 @@ use lsof_core::model::{FileType, Protocol, SocketInfo, TcpExtInfo, TcpState, Uni
 /// One resolved socket: what the fd row becomes once the inode is matched.
 pub struct SocketEntry {
     pub file_type: FileType,
-    pub info: SocketInfo,
+    /// What the row's socket is to the selection and the TCP/TPI columns.
+    /// `None` for a raw socket, which the C types `raw` and keeps no Internet
+    /// record for (`dsock.c:3530-3580`): no address, protocol, state or
+    /// queue, so `-i`, `-s` and `-T` never see it (DIVERGENCES 108).
+    pub info: Option<SocketInfo>,
     /// The bound path of an AF_UNIX socket, when it has one. An unbound
     /// (anonymous) socket has none, and lsof then shows only the `type=` suffix.
     pub path: Option<String>,
     /// The DEVICE cell. lsof fills it differently per family: an internet
     /// socket shows its inode, an AF_UNIX socket the kernel's socket pointer
-    /// (the leading `Num` column of `/proc/net/unix`, printed as `0x…`).
-    pub device: String,
+    /// (the leading `Num` column of `/proc/net/unix`, printed as `0x…`), and
+    /// a raw socket nothing.
+    pub device: Option<String>,
     /// The NODE cell — the protocol name (`TCP`/`UDP`) for internet sockets,
-    /// the inode for AF_UNIX. Again lsof's own split, not ours.
+    /// the inode for AF_UNIX and raw sockets. Again lsof's own split, not
+    /// ours.
     pub node: String,
+    /// The NAME cell, for the one family whose NAME is the table's own text:
+    /// a raw socket's `local->remote st=NN` (`dsock.c:3542-3575`). `None`
+    /// for the rest, which build theirs from `info` and the `type=` tail.
+    pub name: Option<String>,
     /// The `type=…` tail lsof puts in NAME, for the two families that have
     /// one: AF_UNIX's ` type=STREAM` and AF_PACKET's `type=SOCK_RAW`. For a
     /// unix row the state is **not** part of it — the C keeps that in
@@ -64,10 +74,15 @@ pub struct SocketEntry {
     /// | AF_UNIX, `SOCK_STREAM` | `UNIX-STREAM` | `unix` |
     /// | AF_UNIX, dgram or seqpacket | `UNIX` | `unix` |
     /// | AF_PACKET | `PACKET` | `packet` |
+    /// | UDP-Lite | `UDP-Lite` | `UDPLITE` |
+    /// | raw, `IPPROTO_ICMP` too | `RAW` | none |
     ///
     /// The kernel names these after the `struct proto` the socket uses rather
     /// than after its family — `unix_stream_proto` and `unix_dgram_proto` —
     /// which is why `SOCK_SEQPACKET` reports `UNIX` and not `UNIX-SEQPACKET`.
+    /// An IPv6 socket's `struct proto` has a name of its own: `TCPv6`,
+    /// `UDPv6`, `UDPLITEv6`, `RAWv6` (the kernel's `tcpv6_prot` and its
+    /// siblings; not measured, this host having no IPv6).
     pub kernel_proto: &'static str,
 }
 
@@ -107,11 +122,15 @@ impl SocketTable {
         // does keep its `raw` row under `-X`.
         if !skip_inet {
             // Absent files are normal, not an error: a host built without IPv6
-            // has no /proc/net/tcp6 at all.
+            // has no /proc/net/tcp6 at all, and one without UDP-Lite no
+            // /proc/net/udplite.
             t.load_inet("/proc/net/tcp", Protocol::Tcp, false, want_queues);
             t.load_inet("/proc/net/tcp6", Protocol::Tcp, true, want_queues);
             t.load_inet("/proc/net/udp", Protocol::Udp, false, want_queues);
             t.load_inet("/proc/net/udp6", Protocol::Udp, true, want_queues);
+            // `dsock.c:3838-3843, 3946-3951`, gated by `Fxopt` as UDP is.
+            t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);
+            t.load_inet("/proc/net/udplite6", Protocol::UdpLite, true, want_queues);
             t.load_raw("/proc/net/raw6", true);
         }
         t.load_raw("/proc/net/raw", false);
@@ -138,6 +157,8 @@ impl SocketTable {
         t.load_inet(&format!("{base}/tcp6"), Protocol::Tcp, true, false);
         t.load_inet(&format!("{base}/udp"), Protocol::Udp, false, false);
         t.load_inet(&format!("{base}/udp6"), Protocol::Udp, true, false);
+        t.load_inet(&format!("{base}/udplite"), Protocol::UdpLite, false, false);
+        t.load_inet(&format!("{base}/udplite6"), Protocol::UdpLite, true, false);
         t.load_raw(&format!("{base}/raw"), false);
         t.load_raw(&format!("{base}/raw6"), true);
         t.load_packet(&format!("{base}/packet"));
@@ -196,13 +217,16 @@ impl SocketTable {
             // table, which for UDP registers `ESTABLISHED` alone
             // (`build_IPstates()`), so the model holds the number and
             // `SocketInfo::shown_state` hides every value but that one.
-            let state = match proto {
-                Protocol::Tcp | Protocol::Udp => Some(tcp_state(f[INET_STATE]).into()),
-                _ => None,
-            };
+            // UDP-Lite's tables are UDP's, and the C reads them alike
+            // (`get_tcpudp(…, 2, …)`): `-s TCP:` tests its number too
+            // (measured: a connected one is `-s TCP:ESTABLISHED`'s), though
+            // it never prints one (`SocketInfo::shown_state`).
+            let udp_like = matches!(proto, Protocol::Udp | Protocol::UdpLite);
+            let numbered = proto == Protocol::Tcp || udp_like;
+            let state = numbered.then(|| tcp_state(f[INET_STATE]).into());
             // Both tables carry `tx_queue:rx_queue`, and lsof reports the
-            // queues for UDP just as it does for TCP.
-            let tcp = if queues && matches!(proto, Protocol::Tcp | Protocol::Udp) {
+            // queues for UDP and UDP-Lite just as it does for TCP.
+            let tcp = if queues && numbered {
                 parse_queues(f[INET_QUEUES])
             } else {
                 None
@@ -211,29 +235,34 @@ impl SocketTable {
                 inode,
                 SocketEntry {
                     file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },
-                    info: SocketInfo {
+                    info: Some(SocketInfo {
                         bound: None,
                         protocol: proto,
                         local,
                         remote,
                         state,
                         tcp,
-                    },
+                    }),
                     path: None,
-                    device: inode.to_string(),
+                    device: Some(inode.to_string()),
                     node: proto.as_str().to_string(),
+                    name: None,
                     type_suffix: None,
-                    kernel_proto: proto.as_str(),
+                    kernel_proto: inet_kernel_proto(proto, v6),
                 },
             );
         }
     }
 
-    /// `/proc/net/raw` shares the inet layout with one difference that matters:
-    /// the local address's second half is **not** a port, it is the IP protocol
-    /// number. That is how ICMP is identified on a raw socket. (`/proc/net/icmp`
-    /// exists too, for ping sockets; the C reads it and this backend does not:
-    /// DIVERGENCES 22 and 108.)
+    /// `/proc/net/raw` and `raw6`: raw sockets, `IPPROTO_ICMP` and
+    /// `IPPROTO_RAW` alike. The table shares the inet layout, but the C reads
+    /// no address from it: it types the row `raw` (`raw6`), puts the inode in
+    /// NODE, leaves DEVICE blank, and names it with the table's own text,
+    /// `local_address->rem_address st=st` (`get_raw()`, `dsock.c:3530-3580`;
+    /// measured `00000000:0001->00000000:0000 st=07` for a raw ICMP socket).
+    /// It is no Internet file to the C, so no `-i` selects it, and `-F` gives
+    /// its NODE as `i` (DIVERGENCES 108). (`/proc/net/icmp` lists ping
+    /// sockets; the C reads it and this backend does not: DIVERGENCES 22.)
     fn load_raw(&mut self, path: &str, v6: bool) {
         if let Some(text) = crate::text::read_lossy(path) {
             self.parse_raw(&text, v6);
@@ -250,35 +279,22 @@ impl SocketTable {
             let Some(inode) = f[INET_INODE].parse::<u64>().ok() else {
                 continue;
             };
-            let protocol = match f[INET_LOCAL]
-                .split_once(':')
-                .and_then(|(_, p)| u16::from_str_radix(p, 16).ok())
-            {
-                Some(1) => Protocol::Other("ICMP"),
-                Some(58) => Protocol::Other("ICMPV6"),
-                _ => Protocol::Other("RAW"),
-            };
-            // Zero the "port", which is the protocol number here — reporting it
-            // as a port would make `-i :1` match every ICMP socket.
-            let local = parse_addr(f[INET_LOCAL], v6).map(|a| SocketAddr::new(a.ip(), 0));
-            let remote = parse_addr(f[INET_REMOTE], v6).map(|a| SocketAddr::new(a.ip(), 0));
+            let name = format!("{}->{} st={}", f[INET_LOCAL], f[INET_REMOTE], f[INET_STATE]);
             self.by_inode.insert(
                 inode,
                 SocketEntry {
-                    file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },
-                    info: SocketInfo {
-                        bound: None,
-                        protocol,
-                        local,
-                        remote,
-                        state: None,
-                        tcp: None,
-                    },
+                    // The C's LSOF_FILE_RAW and LSOF_FILE_RAW6.
+                    file_type: FileType::Socket(if v6 { "raw6" } else { "raw" }),
+                    info: None,
                     path: None,
-                    device: inode.to_string(),
-                    node: protocol.as_str().to_string(),
+                    device: None,
+                    node: inode.to_string(),
+                    name: Some(name),
                     type_suffix: None,
-                    kernel_proto: protocol.as_str(),
+                    // `raw_prot` and `rawv6_prot`, whatever the IP protocol:
+                    // measured, a raw ICMP socket in another namespace is
+                    // `protocol: RAW` to the C.
+                    kernel_proto: if v6 { "RAWv6" } else { "RAW" },
                 },
             );
         }
@@ -346,7 +362,7 @@ impl SocketTable {
                     // The C's LSOF_FILE_PACKET. Lowercase, like `unix` and
                     // `sock` and unlike `IPv4` — lsof's own casing.
                     file_type: FileType::Other("pack".into()),
-                    info: SocketInfo {
+                    info: Some(SocketInfo {
                         bound: None,
                         // The family, not the ethernet protocol: the latter is
                         // the NODE cell, and `-F P` reads it from there. Same
@@ -356,10 +372,11 @@ impl SocketTable {
                         remote: None,
                         state: None,
                         tcp: None,
-                    },
+                    }),
                     path: None,
-                    device: inode.to_string(),
+                    device: Some(inode.to_string()),
                     node: packet_node(proto),
+                    name: None,
                     type_suffix: Some(socket_type_suffix(ty)),
                     kernel_proto: "PACKET",
                 },
@@ -446,22 +463,36 @@ impl SocketTable {
                 inode,
                 SocketEntry {
                     file_type: FileType::Unix,
-                    info: SocketInfo {
+                    info: Some(SocketInfo {
                         bound: None,
                         protocol: Protocol::Other("unix"),
                         local: None,
                         remote: None,
                         state: Some(unix_state(f[UNIX_FLAGS], f[UNIX_STATE]).into()),
                         tcp: None,
-                    },
+                    }),
                     path: f.get(UNIX_PATH).map(|s| s.to_string()),
-                    device,
+                    device: Some(device),
                     node: inode.to_string(),
+                    name: None,
                     type_suffix: Some(unix_suffix(f[UNIX_TYPE])),
                     kernel_proto: unix_kernel_proto(f[UNIX_TYPE]),
                 },
             );
         }
+    }
+}
+
+/// What the kernel calls an Internet socket in `system.sockprotoname`: its
+/// `struct proto`'s name, `UDP-Lite` for UDP-Lite (measured) and the IPv6
+/// protocols' own (`net/ipv6/tcp_ipv6.c` and its siblings; unmeasured here).
+fn inet_kernel_proto(proto: Protocol, v6: bool) -> &'static str {
+    match (proto, v6) {
+        (Protocol::Tcp, true) => "TCPv6",
+        (Protocol::Udp, true) => "UDPv6",
+        (Protocol::UdpLite, false) => "UDP-Lite",
+        (Protocol::UdpLite, true) => "UDPLITEv6",
+        (proto, _) => proto.as_str(),
     }
 }
 
@@ -1004,6 +1035,92 @@ mod tests {
         assert_eq!(tcp_state("").as_str(), "UNKNOWN");
     }
 
+    /// `/proc/net/udplite` as the kernel wrote it for a bound and a connected
+    /// UDP-Lite socket (measured 2026-10-10), read as the C reads it: an
+    /// IPv4 row with NODE `UDPLITE`, the state number kept for `-s TCP:` and
+    /// never shown, the queues under `-T q`, and `UDP-Lite` for the
+    /// kernel's name of it.
+    #[test]
+    fn a_udplite_socket_is_udps_sibling_and_shows_no_state() {
+        let text = "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops            \n\
+ 7429: 0100007F:A3E8 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 390777 2 0000000076cf7996 0        \n\
+ 7525: 0100007F:8448 0100007F:A3E8 01 00000000:00000000 00:00000000 00000000     0        0 390780 2 00000000c3d7de0c 0        \n";
+        let mut t = SocketTable::default();
+        t.parse_inet(text, Protocol::UdpLite, false, true);
+        let bound = t.get(390777).expect("bound");
+        assert_eq!(bound.file_type, FileType::Ipv4);
+        assert_eq!(bound.node, "UDPLITE");
+        assert_eq!(bound.device.as_deref(), Some("390777"));
+        assert_eq!(bound.kernel_proto, "UDP-Lite");
+        let info = bound.info.as_ref().unwrap();
+        assert_eq!(info.display_name(false, false), "127.0.0.1:41960");
+        assert_eq!(info.filter_state(), Some(TcpState::Close));
+        assert_eq!(info.shown_state(), None);
+        assert!(info.tcp.is_some(), "the queues, under -T q");
+        let conn = t.get(390780).expect("connected").info.as_ref().unwrap();
+        assert_eq!(
+            conn.display_name(false, false),
+            "127.0.0.1:33864->127.0.0.1:41960"
+        );
+        assert_eq!(conn.filter_state(), Some(TcpState::Established));
+        assert_eq!(conn.shown_state(), None, "no (ESTABLISHED), measured");
+        let mut t6 = SocketTable::default();
+        t6.parse_inet(text, Protocol::UdpLite, true, false);
+        assert_eq!(t6.get(390777).map(|e| e.kernel_proto), Some("UDPLITEv6"));
+    }
+
+    /// `/proc/net/raw` as the kernel wrote it for a raw ICMP and a raw
+    /// `IPPROTO_RAW` socket (measured 2026-10-10): typed `raw`, DEVICE blank,
+    /// the inode in NODE, the table's own text for NAME, no `SocketInfo`, and
+    /// `RAW` for the kernel's name of either (DIVERGENCES 108).
+    #[test]
+    fn a_raw_socket_is_named_from_its_table_line() {
+        let text = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+  85: 00000000:0001 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 390778 2 00000000400092a3 0\n\
+ 246: 00000000:00FF 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 390779 2 000000005c481855 0\n\
+ 247: short line\n";
+        let mut t = SocketTable::default();
+        t.parse_raw(text, false);
+        assert_eq!(t.by_inode.len(), 2);
+        for (inode, name) in [
+            (390778, "00000000:0001->00000000:0000 st=07"),
+            (390779, "00000000:00FF->00000000:0000 st=07"),
+        ] {
+            let e = t.get(inode).unwrap();
+            assert_eq!(e.file_type, FileType::Socket("raw"));
+            assert_eq!(e.name.as_deref(), Some(name));
+            assert_eq!(e.node, inode.to_string());
+            assert!(e.device.is_none() && e.info.is_none());
+            assert_eq!(e.kernel_proto, "RAW");
+        }
+        let mut t6 = SocketTable::default();
+        t6.parse_raw(text, true);
+        let e = t6.get(390778).unwrap();
+        assert_eq!(
+            (&e.file_type, e.kernel_proto),
+            (&FileType::Socket("raw6"), "RAWv6")
+        );
+    }
+
+    #[test]
+    fn the_v6_tables_name_their_kernel_protocols() {
+        let line = "  sl local rem st q x x x uid t inode\n 0: 00000000000000000000000001000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 77\n";
+        for (proto, v6, want) in [
+            (Protocol::Tcp, false, "TCP"),
+            (Protocol::Tcp, true, "TCPv6"),
+            (Protocol::Udp, false, "UDP"),
+            (Protocol::Udp, true, "UDPv6"),
+        ] {
+            let mut t = SocketTable::default();
+            t.parse_inet(line, proto, v6, false);
+            assert_eq!(
+                t.get(77).map(|e| e.kernel_proto),
+                Some(want),
+                "{proto:?} {v6}"
+            );
+        }
+    }
+
     #[test]
     fn a_udp_socket_keeps_its_state_for_dash_s_and_shows_only_established() {
         // Measured against the C: an unconnected UDP socket (st 07) prints no
@@ -1020,10 +1137,10 @@ mod tests {
             false,
             false,
         );
-        let idle = &t.get(5101).expect("unconnected").info;
+        let idle = t.get(5101).expect("unconnected").info.as_ref().unwrap();
         assert_eq!(idle.filter_state(), Some(TcpState::Close));
         assert_eq!(idle.shown_state(), None, "prints no state");
-        let conn = &t.get(5102).expect("connected").info;
+        let conn = t.get(5102).expect("connected").info.as_ref().unwrap();
         assert_eq!(conn.filter_state(), Some(TcpState::Established));
         assert_eq!(conn.shown_state().map(|s| s.as_str()), Some("ESTABLISHED"));
     }
@@ -1101,6 +1218,7 @@ mod tests {
             match &e.file_type {
                 FileType::Ipv4 | FileType::Ipv6 | FileType::Unix => {}
                 FileType::Other(c) if c == "pack" => {}
+                FileType::Socket("raw" | "raw6") => {}
                 other => panic!("unexpected socket file type {other:?}"),
             }
         }
@@ -1158,26 +1276,28 @@ mod tests {
         // backwards is invisible without a real diff against the C:
         //   inet  DEVICE = inode, NODE = protocol
         //   unix  DEVICE = kernel socket pointer, NODE = inode
+        //   raw   DEVICE blank, NODE = inode
         let t = SocketTable::load(false, false);
         for e in t.by_inode.values() {
+            let device = e.device.as_deref().unwrap_or_default();
             match &e.file_type {
                 FileType::Ipv4 | FileType::Ipv6 => {
                     assert!(
-                        e.device.parse::<u64>().is_ok(),
+                        device.parse::<u64>().is_ok(),
                         "inet DEVICE should be the inode, got {:?}",
-                        e.device
+                        device
                     );
                     assert!(
-                        ["TCP", "UDP", "RAW", "ICMP", "ICMPV6"].contains(&e.node.as_str()),
+                        ["TCP", "UDP", "UDPLITE"].contains(&e.node.as_str()),
                         "inet NODE should be the protocol, got {:?}",
                         e.node
                     );
                 }
                 FileType::Unix => {
                     assert!(
-                        e.device.starts_with("0x"),
+                        device.starts_with("0x"),
                         "unix DEVICE should be the kernel pointer, got {:?}",
-                        e.device
+                        device
                     );
                     assert!(
                         e.node.parse::<u64>().is_ok(),
@@ -1189,9 +1309,9 @@ mod tests {
                 FileType::Other(c) if c == "pack" => {
                     // pack  DEVICE = inode, NODE = ethernet protocol
                     assert!(
-                        e.device.parse::<u64>().is_ok(),
+                        device.parse::<u64>().is_ok(),
                         "pack DEVICE should be the inode, got {:?}",
-                        e.device
+                        device
                     );
                     assert!(
                         !e.node.is_empty() && e.node.len() <= IPROTO_MAX,
@@ -1204,6 +1324,15 @@ mod tests {
                             .is_some_and(|t| t.starts_with("type=")),
                         "pack rows carry a type= tail"
                     );
+                }
+                FileType::Socket("raw" | "raw6") => {
+                    assert!(e.device.is_none(), "a raw DEVICE is blank");
+                    assert!(
+                        e.node.parse::<u64>().is_ok(),
+                        "raw NODE should be the inode, got {:?}",
+                        e.node
+                    );
+                    assert!(e.info.is_none(), "a raw row is no Internet file");
                 }
                 other => panic!("unexpected socket file type {other:?}"),
             }
@@ -1263,7 +1392,9 @@ mod tests {
         // so a plain run must not populate it.
         let t = SocketTable::load(false, false);
         assert!(
-            t.by_inode.values().all(|e| e.info.tcp.is_none()),
+            t.by_inode
+                .values()
+                .all(|e| e.info.as_ref().is_none_or(|i| i.tcp.is_none())),
             "load(false) must leave TcpExtInfo unset"
         );
     }
@@ -1289,11 +1420,14 @@ sk               RefCnt Type Proto  Iface R Rmem   User   Inode
         t.parse_packet(PACKET_TABLE);
         let e = t.get(1399).expect("inode 1399");
         assert_eq!(e.file_type.code(), "pack");
-        assert_eq!(e.device, "1399", "DEVICE is the inode");
+        assert_eq!(e.device.as_deref(), Some("1399"), "DEVICE is the inode");
         assert_eq!(e.node, "ALL", "NODE is the ethernet protocol");
         assert_eq!(e.type_suffix.as_deref(), Some("type=SOCK_RAW"));
         assert!(e.path.is_none(), "a packet socket is never bound to a path");
-        assert!(e.info.state.is_none(), "and has no state to print");
+        assert!(
+            e.info.as_ref().unwrap().state.is_none(),
+            "and has no state to print"
+        );
         assert_eq!(t.get(1400).unwrap().node, "IP");
         assert_eq!(
             t.get(1400).unwrap().type_suffix.as_deref(),
@@ -1467,14 +1601,13 @@ sk               RefCnt Type Proto  Iface R Rmem   User   Inode
         let t = SocketTable::load(false, true);
         for e in t.by_inode.values() {
             match &e.file_type {
-                // Ipv4 survives only via /proc/net/raw, which -X does not gate
-                // (dsock.c:3530 has no guard where :3761 does). Ipv6 must not:
-                // raw6 IS gated, and tcp/tcp6/udp/udp6 are never loaded here.
-                FileType::Ipv4 => assert_eq!(
-                    e.node, "ICMP",
-                    "the only Ipv4 rows left under -X come from /proc/net/raw"
-                ),
-                FileType::Ipv6 => panic!("-X must gate every IPv6 inet table"),
+                // `raw` survives, from /proc/net/raw, which -X does not gate
+                // (dsock.c:3530 has no guard where :3761 does). `raw6` must
+                // not: raw6 IS gated, and tcp/tcp6/udp/udp6/udplite/udplite6
+                // are never loaded here.
+                FileType::Socket("raw") => {}
+                FileType::Socket("raw6") => panic!("-X must gate /proc/net/raw6"),
+                FileType::Ipv4 | FileType::Ipv6 => panic!("-X must gate every inet table"),
                 FileType::Unix => {}
                 FileType::Other(c) if c == "pack" => {}
                 other => panic!("unexpected socket file type under -X: {other:?}"),

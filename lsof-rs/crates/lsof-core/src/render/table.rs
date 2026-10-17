@@ -48,12 +48,15 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
         return String::new();
     }
     // Only a row the C keeps a TCP/TPI record for: `Lf->lts.type >= 0`, which
-    // the Linux dialect sets for TCP, UDP and AF_UNIX sockets and for nothing
-    // else. A packet, raw or ICMP row gets no separator — measured once the
-    // differential compared whitespace (DIVERGENCES 35): lsof-rs had ended
-    // every packet-socket NAME with a space the C does not print.
-    let annotated =
-        matches!(sock.protocol, Protocol::Tcp | Protocol::Udp) || f.file_type == FileType::Unix;
+    // the Linux dialect sets for TCP, UDP, UDP-Lite and AF_UNIX sockets and
+    // for nothing else. A packet, raw or ICMP row gets no separator — measured
+    // once the differential compared whitespace (DIVERGENCES 35): lsof-rs had
+    // ended every packet-socket NAME with a space the C does not print. A
+    // UDP-Lite row gets one, and its queues under `-T q` (measured).
+    let annotated = matches!(
+        sock.protocol,
+        Protocol::Tcp | Protocol::Udp | Protocol::UdpLite
+    ) || f.file_type == FileType::Unix;
     if !annotated {
         return String::new();
     }

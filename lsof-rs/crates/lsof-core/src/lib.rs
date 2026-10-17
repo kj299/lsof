@@ -22,7 +22,10 @@ pub mod safefs;
 pub mod selection;
 pub mod service;
 
-pub use backend::{errno_text, Backend, BackendError, MountEntry, Privilege, UserLookup};
+pub use backend::{
+    errno_text, Backend, BackendError, MountEntry, MountKind, MountRequest, MountTable, Privilege,
+    UserLookup,
+};
 pub use model::{
     AccessMode, BoundPath, FdType, FileId, FileType, OpenFile, Process, Protocol, SockState,
     SocketInfo, TcpState, UnixState,
@@ -30,7 +33,7 @@ pub use model::{
 pub use render::Escaper;
 pub use safefs::{Blocking, FileStat, FsCalls, InProcess, SafeFs};
 pub use selection::{
-    CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec, FilesystemArgs,
-    InetFilter, InetSpec, Located, PathItem, Selection, StateFilter, TaskMode, TcpInfoFlags,
-    UidSel, DEFAULT_COMMAND_WIDTH,
+    CommandMatch, CommandWidth, DirArg, EndpointMode, ExemptFs, FdFilter, FdKind, FdSpec,
+    FilesystemArgs, InetFilter, InetSpec, Located, PathItem, Selection, StateFilter, TaskMode,
+    TcpInfoFlags, UidSel, DEFAULT_COMMAND_WIDTH,
 };
