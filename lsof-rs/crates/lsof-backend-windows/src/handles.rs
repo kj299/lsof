@@ -244,7 +244,7 @@ pub fn enumerate(
         // queries + GetFileType) on a worker thread. Any of those can block on a
         // synchronous handle, so abandoning a wedged worker after the timeout
         // keeps one bad handle from freezing enumeration.
-        let Some(mut d) = describe_bounded(
+        let Some(d) = describe_bounded(
             source.raw(),
             e.handle_value as HANDLE,
             Arc::clone(&dos_map),
@@ -256,33 +256,36 @@ pub fn enumerate(
         ) else {
             continue; // inaccessible, untypeable, a bare socket, or timed out
         };
-        // `-E`/`+E`: append the pipe's peer info to NAME and remember the peer
-        // PIDs so `+E` can pull in their rows.
+        // `-E`/`+E`: remember the peer PIDs so `+E` can pull in their rows;
+        // their info is appended to NAME below.
+        let mut suffix = None;
         if let (Some(cmds), Some((server, client))) = (endpoints, d.pipe_peers) {
             peers.extend([server, client].into_iter().flatten());
-            if let Some(sfx) = endpoint_suffix(server, client, cmds) {
-                d.name.push_str(&sfx);
-            }
+            suffix = endpoint_suffix(server, client, cmds);
         }
-        out.push((
-            pid,
-            OpenFile {
-                rdev: None,
-                fs_device: None,
-                file_flags: None,
-                lock: None,
-                fd: FdType::Handle(e.handle_value as u64),
-                access: access_from_granted(e.granted_access),
-                file_type: d.file_type,
-                name: d.name,
-                device: d.device,
-                size: d.size,
-                offset: d.offset,
-                node: d.node,
-                links: d.links,
-                socket: None,
-            },
-        ));
+        let mut f = OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(e.handle_value as u64),
+            access: access_from_granted(e.granted_access),
+            file_type: d.file_type,
+            name: d.name,
+            device: d.device,
+            size: d.size,
+            offset: d.offset,
+            node: d.node,
+            links: d.links,
+            socket: None,
+            name_addition: None,
+        };
+        // The endpoint text is the C's `Lf->nma` (its `+E` text is an
+        // addition too), which JSON leaves out.
+        if let Some(sfx) = suffix {
+            f.add_name_addition(sfx.trim_start_matches(' '));
+        }
+        out.push((pid, f));
     }
     trace(&format!("handles: scan done ({} file handles)", out.len()));
 

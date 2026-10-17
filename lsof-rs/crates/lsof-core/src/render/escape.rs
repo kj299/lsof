@@ -36,7 +36,7 @@
 //! newline. That is right where `\` is a rare character and wrong where it is
 //! the path separator — on Windows every NAME is `C:\…`, and doubling each
 //! separator would make the common case unreadable to close an ambiguity the
-//! JSON formats (`-J`/`-j`, escaped per the JSON grammar) already close. So the
+//! JSON formats (`-J`/`-j`, the C's `json_puts_escaped()` rules) already close. So the
 //! backslash is the one platform-dependent rule; the CLI passes
 //! [`Escaper::for_host`].
 //!
@@ -155,8 +155,10 @@ fn escaped_width(c: char, mode: Mode, backslash: bool) -> usize {
 /// What glibc's `iswprint()` rejects among the characters a `&str` can hold:
 /// the C0 and C1 control blocks (`char::is_control`, category Cc) and the two
 /// Unicode line separators (categories Zl and Zp). Everything else that is
-/// non-ASCII is text in a UTF-8 locale.
-fn is_unprintable_unicode(c: char) -> bool {
+/// non-ASCII is text in a UTF-8 locale. JSON escapes the same set
+/// (`render/json.rs`), so a name or command a terminal cannot show raw in the
+/// table is never raw in `-J`/`-j` either.
+pub(crate) fn is_unprintable_unicode(c: char) -> bool {
     c.is_control() || c == '\u{2028}' || c == '\u{2029}'
 }
 

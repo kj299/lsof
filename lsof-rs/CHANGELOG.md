@@ -11,6 +11,39 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-10-17
+
+### Changed — BREAKING (2.0.0)
+- **`-J` and `-j` print the C's JSON schema** (DIVERGENCES 91, 61, 90; 68
+  closed). The C has had `-J`/`-j` since its PR #353; lsof-rs printed a
+  schema of its own, so every consumer of lsof-rs's JSON must move:
+
+  | 1.x key | 2.0.0 |
+  |---|---|
+  | — | `lsof_version` at the top of `-J` (lsof-rs's own version) |
+  | `user` | `uid` (a number, unsigned) and `login` (absent under `-l` or with no account) |
+  | — | `pgid`, and under `-K` a task's `tid` and `task_cmd` |
+  | `node` | `inode`, or `protocol` on a socket's row (its NODE) |
+  | `links` | `nlink` |
+  | `size` (number) | `size` (decimal string) |
+  | `protocol`, `local`, `remote`, `state` | `protocol` (from NODE); the addresses in `name`, the `-F n` text; `tcp_info.state` |
+  | `tcp_queue_recv`, `tcp_queue_send`, `tcp_window` | `tcp_info.recv_queue`, `send_queue`, `read_window` |
+  | — | `offset` (decimal string), `flags`, `lock`, `device_number`, `raw_device` (`-F r`) |
+
+  Keys come in the C's order, each printed only when known; `name` never
+  holds what the table adds after it (`(readlink: …)`, `(stat: …)`, `(-e
+  FS)`, NOFD's whole name). An Internet row keeps a `name` and DEL, C1 and
+  U+2028/2029 stay escaped, where the C does neither (C-DEFECT, 134, 135).
+- **`-F` selects JSON's keys**, before or after `-J`/`-j` (a later `-F` no
+  longer replaces JSON). With no selection: the C's default set, flags
+  always shown, every `tcp_info` member, so Linux reads socket queues.
+- **Refused, in the C's words and order**: `-t` with `-F`, `-J` or `-j`
+  (`-F and -t are mutually exclusive`, `-J/-j and -t are mutually
+  exclusive`), `-J` with `-j`, and `+J`/`+j` (`+J is not supported`, the
+  parse reading on).
+- **`-j -r`** prints a blank line after each cycle, as the C does (137).
+- JSON is written a process at a time, not built whole.
+
 ### Security
 - **No argument a message quotes reaches the terminal raw** (DIVERGENCES 112,
   122). `lsof -i $'@[1::\e[2J'` wrote `unterminated [ in: -i @[1::` and a raw
@@ -237,6 +270,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   link to a renamed or removed item fails the build.
 
 ### Fixed
+- **A command ending in a carriage return keeps it.** `/proc/<pid>/status`
+  was read with `str::lines()`, which also drops a `\r` before the line's
+  `\n`, so a process named `tail\r` was listed as `tail` and `-c
+  $'tail\r'` selected nothing; the C prints `tail\r` (`-F c` `ctail\r`) and
+  selects it. The file is now split on `\n` alone (fixture CR).
 - **A raw socket is the C's `raw` row** (DIVERGENCES 108): TYPE `raw`
   (`raw6`), DEVICE blank, the inode in NODE, NAME `/proc/net/raw`'s own
   `00000000:0001->00000000:0000 st=07`, `-F` `traw … i<inode>`, and `protocol:
@@ -2112,7 +2150,8 @@ Foundation; see `../COPYING`). No source is shared with the C tree;
 behavior and CLI surface are compatible where the concepts map onto
 Windows.
 
-[Unreleased]: https://github.com/kj299/lsof/compare/winlsof-v1.0.1...HEAD
+[Unreleased]: https://github.com/kj299/lsof/compare/lsof-rs-v2.0.0...HEAD
+[2.0.0]: https://github.com/kj299/lsof/compare/winlsof-v1.0.1...lsof-rs-v2.0.0
 [1.0.1]: https://github.com/kj299/lsof/compare/winlsof-v1.0.0...winlsof-v1.0.1
 [1.0.0]: https://github.com/kj299/lsof/compare/winlsof-v0.4.0...winlsof-v1.0.0
 [0.4.0]: https://github.com/kj299/lsof/compare/winlsof-v0.3.0...winlsof-v0.4.0

@@ -251,14 +251,15 @@ pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [ExemptFs]) -> Option<&'
         .find(|e| path.starts_with(e.path.as_bytes()))
 }
 
-/// What NAME adds for a file on the exempt file system `e`: ` (-e PATH)`, or
-/// ` (+e PATH)` for one `+e` named (`dproc.c`, `isefsys()`: `"(%ce %s)",
+/// What NAME adds for a file on the exempt file system `e` (the C's
+/// `Lf->nma`, which JSON leaves out): `(-e PATH)`, or `(+e PATH)` for one
+/// `+e` named (`dproc.c`, `isefsys()`: `"(%ce %s)",
 /// ep->rdlnk ? '+' : '-'`; measured: `+e /dev/shm` names a file there
 /// `(+e /dev/shm)`). The path as `enter_efsys()` kept it: `-e`'s through
 /// `Readlink()`, so `-e LINK-TO-/dev/shm` says `(-e /dev/shm)`.
 pub(crate) fn exempt_note(e: &ExemptFs) -> String {
     format!(
-        " ({}e {})",
+        "({}e {})",
         if e.plus { '+' } else { '-' },
         e.path.to_string_lossy()
     )
@@ -499,6 +500,7 @@ pub(crate) fn socket_row(
             node: Some(inode.to_string()),
             links: None,
             socket: None,
+            name_addition: None,
         });
     }
     let e = socks.get(inode)?;
@@ -547,6 +549,7 @@ pub(crate) fn socket_row(
         node: Some(e.node.clone()),
         links: None,
         socket: sock,
+        name_addition: None,
     })
 }
 
@@ -594,7 +597,7 @@ fn row(
     if let Some(t) = target.as_ref() {
         if let Some(e) = exempt_match(t.as_os_str().as_bytes(), exempt) {
             let kind = unkn_suffix(&fd);
-            return Some(OpenFile {
+            let mut f = OpenFile {
                 rdev: None,
                 fs_device: None,
                 file_flags: info.flags,
@@ -602,7 +605,7 @@ fn row(
                 fd,
                 access: AccessMode::Unknown,
                 file_type: FileType::Exempt(kind),
-                name: format!("{}{}", t.to_string_lossy(), exempt_note(e)),
+                name: t.to_string_lossy().into_owned(),
                 device: Some("UNKNOWN".to_string()),
                 size: None,
                 // Pass the fdinfo position through rather than defaulting it:
@@ -613,7 +616,10 @@ fn row(
                 node: None,
                 links: None,
                 socket: None,
-            });
+                name_addition: None,
+            };
+            f.add_name_addition(&exempt_note(e));
+            return Some(f);
         }
     }
     let meta = std::fs::metadata(link);
@@ -624,7 +630,7 @@ fn row(
     // that call fails only in the same race, and costs a syscall per fd on
     // every run, so lsof-rs makes the one call.
     let stat_failure = match &meta {
-        Err(e) if !ctx.omit_unreadable => Some(format!(" (stat: {})", errno_text(e))),
+        Err(e) if !ctx.omit_unreadable => Some(format!("(stat: {})", errno_text(e))),
         _ => None,
     };
     let meta = meta.ok();
@@ -705,11 +711,8 @@ fn row(
         None => (FileType::Unknown, None, None, None, None, None),
     };
 
-    let mut name = name_for_target(&name, info);
-    if let Some(why) = stat_failure {
-        name.push_str(&why);
-    }
-    Some(OpenFile {
+    let name = name_for_target(&name, info);
+    let mut f = OpenFile {
         rdev,
         fs_device,
         file_flags: info.flags,
@@ -724,7 +727,13 @@ fn row(
         node,
         links,
         socket: None,
-    })
+        name_addition: None,
+    };
+    // The C's `Lf->nma`, which JSON leaves out.
+    if let Some(why) = stat_failure {
+        f.add_name_addition(&why);
+    }
+    Some(f)
 }
 
 /// The row for a file that is there but could not be read: TYPE `unknown`,
@@ -736,8 +745,8 @@ fn row(
 /// instead, so a process nothing could read looked like a process with
 /// nothing open. `info` is what fdinfo gave for a numbered fd — nothing, in
 /// every case but a race, since the same permission guards both.
-fn unreadable(name: String, fd: FdType, info: &FdInfo) -> OpenFile {
-    OpenFile {
+fn unreadable((name, why): (String, Option<String>), fd: FdType, info: &FdInfo) -> OpenFile {
+    let mut f = OpenFile {
         rdev: None,
         fs_device: None,
         file_flags: info.flags,
@@ -752,7 +761,14 @@ fn unreadable(name: String, fd: FdType, info: &FdInfo) -> OpenFile {
         node: None,
         links: None,
         socket: None,
+        name_addition: None,
+    };
+    // What was tried and why it failed is the C's `Lf->nma`, which JSON
+    // leaves out: its `name` is the link alone.
+    if let Some(why) = why {
+        f.add_name_addition(&why);
     }
+    f
 }
 
 /// NAME for a link that could not be read: the path, then the call and the C
@@ -763,11 +779,19 @@ fn unreadable(name: String, fd: FdType, info: &FdInfo) -> OpenFile {
 /// alone. That is a kernel thread, which has no executable — `kthreadd 2 root
 /// txt unknown /proc/2/exe` — and saying `No such file or directory` on
 /// every one of them would be noise.
-fn unreadable_name(link: &str, fd: &FdType, err: &std::io::Error, root_owned: bool) -> String {
+fn unreadable_name(
+    link: &str,
+    fd: &FdType,
+    err: &std::io::Error,
+    root_owned: bool,
+) -> (String, Option<String>) {
     if *fd == FdType::Txt && err.kind() == std::io::ErrorKind::NotFound && root_owned {
-        link.to_string()
+        (link.to_string(), None)
     } else {
-        format!("{link} (readlink: {})", errno_text(err))
+        (
+            link.to_string(),
+            Some(format!("(readlink: {})", errno_text(err))),
+        )
     }
 }
 
@@ -865,7 +889,10 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
                     fd: FdType::NoFd,
                     file_type: FileType::NoType,
                     ..unreadable(
-                        format!("{base}/fd (opendir: {})", errno_text(&e)),
+                        (
+                            String::new(),
+                            Some(format!("{base}/fd (opendir: {})", errno_text(&e))),
+                        ),
                         FdType::NoFd,
                         &FdInfo::default(),
                     )
@@ -1376,8 +1403,8 @@ mod tests {
             path: "/dev/shm".into(),
             plus: true,
         };
-        assert_eq!(exempt_note(&plus), " (+e /dev/shm)");
-        assert_eq!(exempt_note(&shm[0]), " (-e /dev/shm)");
+        assert_eq!(exempt_note(&plus), "(+e /dev/shm)");
+        assert_eq!(exempt_note(&shm[0]), "(-e /dev/shm)");
     }
 
     #[test]

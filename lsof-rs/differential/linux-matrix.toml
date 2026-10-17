@@ -1087,6 +1087,19 @@ cwd = "{RDIR}"
 args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "deep/a/b/up"]
 
 [[case]]
+# The C names a row a file argument locates by that argument, as typed:
+# `nrel/x`, where lsof-rs prints the path fd 10 was opened by (row 139, OPEN;
+# row 17 is its hard-link half).
+name = "path-relative-argument-names-the-row-in-the-c"
+cwd = "{RDIR}"
+args = ["-F", "pfn", "-a", "-p", "{R}", "rel/x"]
+
+[[case]]
+name = "path-relative-argument-names-the-json-row-in-the-c"
+cwd = "{RDIR}"
+args = ["-J", "-a", "-p", "{R}", "rel/x"]
+
+[[case]]
 # `+D` had resolved its directory to an absolute path: `$PWD/rel/y`.
 name = "path-plus-D-relative-stays-relative"
 cwd = "{RDIR}"
@@ -3987,3 +4000,351 @@ timeout = 20
 # lsof-rs bug once (LESSONS #4); the kit runner diffs the code, not just stdout.
 name = "no-match-exit-code"
 args = ["-n", "-P", "-a", "-p", "999999999"]
+
+# ------------------------------------------------------------ JSON (-J / -j)
+# The C's schema (DIVERGENCES 91, lsof-rs 2.0.0): `{"lsof_version":V,
+# "processes":[...]}` for -J, one object per file for -j, each key one -F
+# letter. linux_diff.py passes linux-rules.json, the kit's default masks plus
+# `lsof_version`, which is each binary's own; nothing else is masked. A case
+# that diverges does so for a ledgered reason: an Internet row's `name`, the
+# escapes the C writes raw (both C-DEFECT, rows 134 and 135), or an existing
+# row (22, 93, 126). Every lsof-rs -J/-j output here is also parsed as JSON.
+
+[[case]]
+name = "json-files-J"
+args = ["-J", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-files-j"
+args = ["-j", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+# mem and DEL rows, a relinked file, names with a trailing space and a CR,
+# locks, /dev/zero and an io_uring ring, whose `(stat: …)` is the C's
+# addition and so no part of `name`.
+name = "json-mem-and-del"
+args = ["-J", "-a", "-p", "{E}"]
+
+[[case]]
+# `name` is the link alone: `(readlink: …)` and NOFD's `(opendir: …)` are
+# additions (`{"fd":"NOFD"}`).
+name = "json-unreadable"
+args = ["-J", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+name = "json-unreadable-lines"
+args = ["-j", "-p", "{U}"]
+env = { LSOF_DIFF_UNPRIVILEGED = "1" }
+
+[[case]]
+# tid and task_cmd on a task's object, none on the process's (closes 61).
+name = "json-tasks"
+args = ["-J", "-K", "-a", "-d", "cwd", "-p", "{I}"]
+
+[[case]]
+name = "json-tasks-lines"
+args = ["-j", "-K", "-a", "-d", "cwd,0", "-p", "{I}"]
+
+[[case]]
+# flags by name by default, in hex after the last -f letter G or under -F,
+# none under -F -fg; -fg alone cannot hide them.
+name = "json-flags"
+args = ["-J", "-a", "-p", "{Q}"]
+
+[[case]]
+name = "json-flags-plus-fG"
+args = ["-J", "+fG", "-a", "-p", "{Q}"]
+
+[[case]]
+name = "json-flags-minus-fg"
+args = ["-J", "-fg", "-a", "-p", "{Q}"]
+
+[[case]]
+name = "json-flags-under-F"
+args = ["-J", "-F", "-a", "-p", "{Q}"]
+
+[[case]]
+name = "json-flags-under-F-fg"
+args = ["-J", "-F", "-fg", "-a", "-p", "{Q}"]
+
+[[case]]
+name = "json-flags-FG"
+args = ["-J", "-FG", "-a", "-p", "{Q}"]
+
+[[case]]
+# -F selects JSON's keys in either order; p and m alone select nothing, a 0
+# does.
+name = "json-field-selection-J-first"
+args = ["-J", "-Fpcfn", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-F-first"
+args = ["-Fpcfn", "-J", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-n"
+args = ["-J", "-Fn", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-c"
+args = ["-J", "-Fc", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-p"
+args = ["-J", "-Fp", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-pm"
+args = ["-J", "-Fpm", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-p0"
+args = ["-J", "-Fp0", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-lines-c"
+args = ["-j", "-Fc", "-a", "-d", "^mem", "-p", "{A}"]
+
+[[case]]
+name = "json-field-selection-raw-device"
+args = ["-J", "-F", "-Fr", "-a", "-p", "{V}"]
+
+[[case]]
+# A plain decimal offset whatever -o says (`print.c:1965`).
+name = "json-offset"
+args = ["-J", "-o", "2", "-a", "-d", "^mem", "-p", "{O}"]
+
+[[case]]
+name = "json-noop-H"
+args = ["-J", "-H", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-o"
+args = ["-J", "-o", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-s"
+args = ["-J", "-s", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-L"
+args = ["-J", "-L", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-plus-L"
+args = ["-J", "+L", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-R-g"
+args = ["-J", "-R", "-g", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-plus-c-0"
+args = ["-J", "+c", "0", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-noop-l"
+args = ["-J", "-l", "-a", "-d", "^mem,^4", "-p", "{A}"]
+
+[[case]]
+name = "json-plus-L1"
+args = ["-J", "+L1", "-a", "-p", "{N}"]
+
+[[case]]
+name = "json-locks"
+args = ["-J", "-a", "-d", "^mem", "-p", "{F}"]
+
+[[case]]
+name = "json-devices"
+args = ["-J", "-a", "-p", "{V}"]
+
+[[case]]
+name = "json-anon-inodes"
+args = ["-J", "-a", "-d", "^mem", "-p", "{G}"]
+
+[[case]]
+# protocol "ALL", the inode as device, no tcp_info.
+name = "json-packet"
+args = ["-J", "-a", "-d", "^mem", "-p", "{K}"]
+
+[[case]]
+# Raw sockets: inode, not protocol, and no tcp_info (`inp_ty` 1).
+name = "json-raw"
+args = ["-J", "-a", "-d", "^mem", "-p", "{RAW}"]
+
+[[case]]
+# A name, a command and a socket path that are not UTF-8: U+FFFD keeps the
+# document valid where the C writes the raw byte (93).
+name = "json-non-utf8"
+args = ["-j", "-a", "-p", "{X}"]
+
+[[case]]
+# `(-e FS)` is an addition: no part of `name`.
+name = "json-exempt"
+args = ["-J", "-e", "{EMFS}", "-a", "-p", "{EM}"]
+
+[[case]]
+name = "json-exempt-plus-e"
+args = ["-J", "+e", "{EMFS}", "-a", "-d", "mem,DEL,3", "-p", "{EM}"]
+
+[[case]]
+# -V's lines follow the document on stdout, as the C writes them.
+name = "json-search-V"
+args = ["-J", "-V", "-p", "999999999"]
+
+[[case]]
+name = "json-search-empty-envelope"
+args = ["-J", "-p", "999999999"]
+
+[[case]]
+name = "json-search-lines-empty"
+args = ["-j", "-p", "999999999"]
+
+[[case]]
+name = "json-search-Q"
+args = ["-J", "-Q", "-p", "999999999"]
+
+[[case]]
+name = "json-search-file"
+args = ["-J", "{FILE}"]
+
+[[case]]
+name = "json-search-nope"
+args = ["-J", "{NOPE}"]
+
+[[case]]
+name = "json-search-Q-nope"
+args = ["-J", "-Q", "{NOPE}"]
+
+[[case]]
+name = "json-search-lines-Q-nope"
+args = ["-j", "-Q", "{NOPE}"]
+
+[[case]]
+# A unix row's tcp_info is always `{}` in the C (it reads a state the unix
+# path never sets), and so in lsof-rs.
+name = "json-sockets-unix"
+args = ["-J", "-U", "-a", "-p", "{B}"]
+
+[[case]]
+# The Internet rows, with no `name` key: everything else must match.
+name = "json-sockets-inet-fields"
+args = ["-J", "-FpfatdDsoiPGT", "-i", "-a", "-p", "{B}"]
+
+[[case]]
+# The whole rows: lsof-rs adds the -F n text as `name` (134).
+name = "json-sockets-inet"
+args = ["-j", "-n", "-P", "-i", "-a", "-p", "{B}"]
+
+[[case]]
+name = "json-sockets-states"
+args = ["-J", "-n", "-P", "-a", "-d", "^mem", "-p", "{S}"]
+
+[[case]]
+name = "json-sockets-states-fields"
+args = ["-J", "-FpftPT", "-a", "-d", "^mem", "-p", "{S}"]
+
+[[case]]
+# -T has no effect on default JSON.
+name = "json-tcp-info-T"
+args = ["-J", "-T", "-U", "-a", "-p", "{B}"]
+
+[[case]]
+name = "json-tcp-info-Tq-default"
+args = ["-j", "-Tq", "-n", "-P", "-i", "-a", "-p", "{B}"]
+
+[[case]]
+# Under a -F selection a later bare -T empties tcp_info...
+name = "json-tcp-info-F-T"
+args = ["-J", "-FpftT", "-T", "-a", "-p", "{B}"]
+
+[[case]]
+# ...-T q leaves the queues alone...
+name = "json-tcp-info-FT-Tq"
+args = ["-J", "-FpfT", "-Tq", "-a", "-p", "{B}"]
+
+[[case]]
+# ...and without the T letter there is no tcp_info at all.
+name = "json-tcp-info-no-T-letter"
+args = ["-J", "-Fpft", "-Tq", "-a", "-p", "{B}"]
+
+[[case]]
+name = "json-udplite"
+args = ["-J", "-a", "-d", "3-4", "-p", "{UDPL}"]
+
+[[case]]
+# Queues, never a state, bound or connected.
+name = "json-udplite-fields"
+args = ["-j", "-FpftPT", "-a", "-d", "3-4", "-p", "{UDPL}"]
+
+[[case]]
+# DEL, escaped by lsof-rs and raw from the C (135).
+name = "json-hostile-name"
+args = ["-j", "-a", "-d", "4", "-p", "{A}"]
+
+[[case]]
+name = "json-hostile-command-ascii"
+args = ["-j", "-Fc", "-a", "-d", "cwd", "-p", "{C}"]
+
+[[case]]
+name = "json-hostile-command-non-ascii"
+args = ["-j", "-Fc", "-a", "-d", "cwd", "-p", "{D}"]
+
+[[case]]
+# Fixture CR's comm ends in a CR. `str::lines()` dropped it from
+# `/proc/<pid>/status`'s `Name:` line, so lsof-rs printed `crcomm` and `-c`
+# could not select it; the C keeps it (process.rs parse_status).
+name = "command-trailing-cr-json"
+args = ["-j", "-Fc", "-a", "-d", "cwd", "-p", "{CR}"]
+
+[[case]]
+name = "command-trailing-cr-table"
+args = ["+c", "0", "-a", "-d", "cwd", "-p", "{CR}"]
+
+[[case]]
+name = "command-trailing-cr-selected-by-c"
+args = ["-Fpc", "-a", "-d", "cwd", "-c", "crcomm\r"]
+
+[[case]]
+# The refusals: nothing on stdout, exit 1 (the C appends its usage to
+# stderr; the parser's tests pin the words and their order).
+name = "json-option-error-J-t"
+args = ["-J", "-t"]
+
+[[case]]
+name = "json-option-error-t-J"
+args = ["-t", "-J"]
+
+[[case]]
+name = "json-option-error-j-t"
+args = ["-j", "-t"]
+
+[[case]]
+name = "json-option-error-J-j"
+args = ["-J", "-j"]
+
+[[case]]
+name = "json-option-error-plus-J"
+args = ["+J"]
+
+[[case]]
+name = "json-option-error-plus-j"
+args = ["+j"]
+
+[[case]]
+name = "json-option-error-o-s-J-t"
+args = ["-o", "-s", "-J", "-t"]
+
+[[case]]
+# -F and -t (closes 90 for -F).
+name = "json-option-error-F-t"
+args = ["-F", "-t"]
+
+[[case]]
+# A whole-host -J reads no mount table under -i alone, and stats no autofs.
+name = "json-autofs-never-stated"
+args = ["-J", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "autofs" }
+with_stderr = true
+timeout = 20

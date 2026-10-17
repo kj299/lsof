@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use lsof_core::model::tcp_state_table;
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
-use lsof_core::render::{Escaper, FileFlags, Format, DEFAULT_OFFSET_DIGITS};
+use lsof_core::render::{Escaper, FileFlags, Format, JsonFormat, DEFAULT_OFFSET_DIGITS};
 use lsof_core::safefs::{TMLIMIT, TMLIMMIN};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
@@ -148,6 +148,60 @@ impl FieldChoice {
     }
 }
 
+/// What `-J`/`-j` print, from what `-F`, `-T` and `-f` chose (`main.c:1163-1179`).
+///
+/// With a `-F` selection — any letter but `p` and `m`, a `0`, or a bare `-F`
+/// — JSON prints those fields, as `-F` would, under `-T` and `-f` as they
+/// stand. Without one, the C applies its default set once every option is
+/// read (`select_default_fields()`), which also forces the file flags on
+/// (in hex only if the last of `-f`'s `g`/`G` was `G`, so `-J -fg` is `-J`)
+/// and every TCP/TPI member, so `-J -Tq` is `-J` (measured). Those members
+/// are what Linux must collect, the queues included; Windows keeps what
+/// `-T` asked for, since its extended statistics write per-connection state
+/// and need Administrator.
+fn json_format(
+    fields: &FieldChoice,
+    lines: bool,
+    flags_hex: bool,
+    file_flags: FileFlags,
+    sel: &mut Selection,
+) -> Format {
+    let has_fields =
+        fields.defaults || fields.nul || fields.letters.iter().any(|c| !matches!(c, 'p' | 'm'));
+    if has_fields {
+        let only = match fields.format() {
+            Format::Fields { only, .. } => only,
+            _ => None,
+        };
+        return Format::Json(JsonFormat {
+            lines,
+            only,
+            file_flags,
+            tcp_show: sel.tcp_info(),
+        });
+    }
+    if cfg!(target_os = "linux") {
+        let t = sel.tcp_info_opt.get_or_insert(TcpInfoFlags::default());
+        t.state = true;
+        t.queue = true;
+    }
+    Format::Json(JsonFormat {
+        lines,
+        only: None,
+        file_flags: if flags_hex {
+            FileFlags::Hex
+        } else {
+            FileFlags::Names
+        },
+        tcp_show: TcpInfoFlags {
+            state: true,
+            queue: true,
+            window: true,
+            options: false,
+        },
+    })
+}
+
 /// A run of ASCII digits as a count, saturating rather than wrapping. The C
 /// accumulates `-o`'s digits in an `int` and overflows it (undefined
 /// behaviour); any limit past the 20 digits a 64-bit offset can have means
@@ -204,16 +258,46 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
 /// them and `-w +d D` does not (measured). The table goes back with the run
 /// ([`Action::Run`]); a run that needs it and read none here reads it later.
 pub fn parse_with(
+    args: Vec<String>,
+    fs: &SafeFs,
+    mounts: MountReader<'_>,
+) -> Result<Action, String> {
+    // What the C reports while it reads the options and reads on after
+    // (`+J is not supported`), before whatever ends the parse: measured,
+    // `-o -s +J` prints the `+J` line first.
+    let mut early = Vec::new();
+    let parsed = parse_options(args, fs, mounts, &mut early);
+    let rest = match parsed {
+        Ok(_) if early.is_empty() => return parsed,
+        Ok(_) => None,
+        Err(e) => Some(e),
+    };
+    Err(early
+        .into_iter()
+        .chain(rest.filter(|e| !e.is_empty()))
+        .collect::<Vec<_>>()
+        .join("\nlsof: "))
+}
+
+/// [`parse_with`], with the errors the C reports and reads on after left in
+/// `early`.
+fn parse_options(
     mut args: Vec<String>,
     fs: &SafeFs,
     mounts: MountReader<'_>,
+    early: &mut Vec<String>,
 ) -> Result<Action, String> {
     let mut sel = Selection::default();
     // The C's `readmnt()` reads once, where it is first needed (`dmnt.c`:
     // `if (Lmi || Lmist) return (Lmi)`).
     let mut table: Option<MountTable> = None;
     let read_table = |sel: &Selection| read_mount_table(sel, fs, mounts);
-    let mut format = Format::Table;
+    // `-F` given at all, and `-J`/`-j`: the C's `Ffield` and its `Fjson`
+    // and `Fjsonl`, independent of each other, so `-F` and `-J` combine in
+    // either order (`-J -Fpcfn` is `-Fpcfn -J`, measured).
+    let mut fields_given = false;
+    let mut json_doc = false;
+    let mut json_lines = false;
     let mut want_help = false;
     let mut want_version = false;
     let mut repeat: Option<u64> = None;
@@ -313,9 +397,11 @@ pub fn parse_with(
             match c {
                 // The C gives these a `+` meaning lsof-rs does not implement
                 // (`+n`/`+P` resolve names, `+r` repeats until nothing is
-                // open, and `+J`/`+j` are errors there too), so the `+`
-                // spelling is refused rather than read as the `-` one.
-                'n' | 'P' | 'r' | 'J' | 'j' if plus => {
+                // open), so the `+` spelling is refused rather than read as
+                // the `-` one.
+                // `+J`/`+j`: the C says so and reads on (`main.c:567-584`).
+                'J' | 'j' if plus => early.push(format!("+{c} is not supported")),
+                'n' | 'P' | 'r' if plus => {
                     return Err(quoting("unsupported option: +", &c.to_string()))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
@@ -424,8 +510,8 @@ pub fn parse_with(
                     repeat = Some(delay.map_or(15, |d| digits_value(&d) as u64));
                     continue;
                 }
-                'J' => format = Format::Json,
-                'j' => format = Format::JsonLines,
+                'J' => json_doc = true,
+                'j' => json_lines = true,
                 'R' => columns.ppid = true,
                 'o' => {
                     // `-o [digits]`. The value is optional and only ever
@@ -735,7 +821,7 @@ pub fn parse_with(
                         t.state = true;
                         t.queue = true;
                     }
-                    format = fields.format();
+                    fields_given = true;
                     j = chars.len();
                     continue;
                 }
@@ -876,7 +962,12 @@ pub fn parse_with(
     if (columns.offset || fields_offset) && columns.size {
         errors.push("-o and -s are mutually exclusive".to_string());
     }
-    // [json91: `-F and -t are mutually exclusive` goes here, `main.c:1095`.]
+    // `-J` and `-j` set the C's `Ffield` too, so they are refused with `-t`
+    // in `-F`'s words as well as their own (`main.c:1095`, measured).
+    let json = json_doc || json_lines;
+    if (fields_given || json) && sel.terse {
+        errors.push("-F and -t are mutually exclusive".to_string());
+    }
     //
     // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
     // alone rather than accepting a switch that would do nothing
@@ -887,8 +978,12 @@ pub fn parse_with(
     {
         errors.push("-x must accompany +d or +D".to_string());
     }
-    // [json91: `-J and -j are mutually exclusive` and `-J/-j and -t are
-    // mutually exclusive` go here, `main.c:1126-1133`.]
+    if json_doc && json_lines {
+        errors.push("-J and -j are mutually exclusive".to_string());
+    }
+    if json && sel.terse {
+        errors.push("-J/-j and -t are mutually exclusive".to_string());
+    }
     //
     // Each `-e`/`+e` must name a mounted file system, which the C checks
     // last, whatever came before (`main.c:1137-1160`): it reads the table
@@ -907,7 +1002,7 @@ pub fn parse_with(
             // far come before what the table says as it is read: measured,
             // `-e /nosuch -x f` prints `-x must accompany +d or +D`, then a
             // mount's `can't stat()` warning, then the `-e` error.
-            for e in errors.drain(..) {
+            for e in early.drain(..).chain(errors.drain(..)) {
                 fs.tell(&format!("lsof: {e}"));
                 told = true;
             }
@@ -951,6 +1046,13 @@ pub fn parse_with(
     if sel.and_mode && sel.specified().is_empty() {
         return Err("no select options to AND via -a".to_string());
     }
+    let format = if json {
+        json_format(&fields, json_lines, flags_hex, columns.file_flags, &mut sel)
+    } else if fields_given {
+        fields.format()
+    } else {
+        Format::Table
+    };
     Ok(Action::Run {
         selection: sel,
         format,
@@ -2995,6 +3097,15 @@ mod tests {
                 check(argv);
             }
         }
+        // The joined post-loop errors, each piece on its own (item 91).
+        for argv in [
+            &["-o", "-s", "-J", "-t"][..],
+            &["-J", "-j", "-t"],
+            &["+J", "+j"],
+            &["-J", "-t", "-e", "/nosuch"],
+        ] {
+            check(argv.iter().map(|s| s.to_string()).collect());
+        }
     }
 
     #[test]
@@ -3020,8 +3131,149 @@ mod tests {
                 only: Some(vec!['n'])
             }
         );
-        assert_eq!(run(&["-J"]).1, Format::Json);
-        assert_eq!(run(&["-j"]).1, Format::JsonLines);
+        assert!(matches!(
+            run(&["-J"]).1,
+            Format::Json(JsonFormat { lines: false, .. })
+        ));
+        assert!(matches!(
+            run(&["-j"]).1,
+            Format::Json(JsonFormat { lines: true, .. })
+        ));
+    }
+
+    fn json(argv: &[&str]) -> JsonFormat {
+        match run(argv).1 {
+            Format::Json(j) => j,
+            other => panic!("{argv:?}: {other:?}"),
+        }
+    }
+
+    fn refused(argv: &[&str]) -> String {
+        parse(argv.iter().map(|s| s.to_string()).collect()).unwrap_err()
+    }
+
+    /// `-J`/`-j` and `-t` (and `-F` and `-t`, DIVERGENCES 90), `-J` and `-j`,
+    /// and `+J`/`+j`: the C's words, in its order (`main.c:1091-1133`), each
+    /// found and all reported, joined as main prints them (measured).
+    #[test]
+    fn json_refusals_are_the_cs_in_its_order() {
+        let ft = "-F and -t are mutually exclusive";
+        let jt = "-J/-j and -t are mutually exclusive";
+        let jj = "-J and -j are mutually exclusive";
+        let os = "-o and -s are mutually exclusive";
+        let x = "-x must accompany +d or +D";
+        let joined = |v: &[&str]| v.join("\nlsof: ");
+        for argv in [
+            &["-J", "-t"][..],
+            &["-t", "-J"],
+            &["-j", "-t"],
+            &["-J", "-Fp0", "-t"],
+        ] {
+            assert_eq!(refused(argv), joined(&[ft, jt]), "{argv:?}");
+        }
+        for argv in [&["-F", "-t"][..], &["-t", "-F"], &["-tF"], &["-Fp", "-t"]] {
+            assert_eq!(refused(argv), ft, "{argv:?}");
+        }
+        for argv in [&["-J", "-j"][..], &["-j", "-J"], &["-Jj"]] {
+            assert_eq!(refused(argv), jj, "{argv:?}");
+        }
+        assert_eq!(refused(&["-J", "-j", "-t"]), joined(&[ft, jj, jt]));
+        assert_eq!(refused(&["-o", "-s", "-J", "-t"]), joined(&[os, ft, jt]));
+        assert_eq!(refused(&["-J", "-t", "-x"]), joined(&[ft, x, jt]));
+        // `+J`/`+j` are said where they are met, and the parse reads on.
+        assert_eq!(refused(&["+J"]), "+J is not supported");
+        assert_eq!(refused(&["+j"]), "+j is not supported");
+        assert_eq!(
+            refused(&["+J", "+j"]),
+            joined(&["+J is not supported", "+j is not supported"])
+        );
+        assert_eq!(
+            refused(&["-o", "-s", "+J"]),
+            joined(&["+J is not supported", os])
+        );
+        assert_eq!(refused(&["+J", "-h"]), "+J is not supported");
+        assert_eq!(
+            refused(&["+J", "-q"]),
+            joined(&["+J is not supported", "unsupported option: -q"])
+        );
+        // Repeating one is not a conflict.
+        assert!(!json(&["-J", "-J"]).lines);
+        assert!(json(&["-j", "-j"]).lines);
+    }
+
+    /// `-F` and `-J`/`-j` combine in either order: the C keeps `-F`'s choice
+    /// and the JSON switch apart (`-J -Fpcfn` is `-Fpcfn -J`, measured). A
+    /// selection is any letter but `p` and `m`, a `0` or a bare `-F`
+    /// (`main.c:1163-1179`); without one, the default set.
+    #[test]
+    fn dash_f_selects_json_fields_in_either_order() {
+        let only = |argv: &[&str]| json(argv).only;
+        let letters = |l: &str| Some(l.chars().collect::<Vec<_>>());
+        assert_eq!(only(&["-J", "-Fpcfn"]), letters("pcfn"));
+        assert_eq!(only(&["-Fpcfn", "-J"]), letters("pcfn"));
+        assert_eq!(only(&["-j", "-Fc"]), letters("c"));
+        assert!(json(&["-j", "-Fc"]).lines);
+        for argv in [
+            &["-J"][..],
+            &["-J", "-Fp"],
+            &["-J", "-Fpm"],
+            &["-J", "-Fm"],
+            &["-J", "-F"],
+        ] {
+            assert_eq!(only(argv), None, "{argv:?}");
+        }
+        assert_eq!(only(&["-J", "-Fp0"]), letters("p"));
+        assert_eq!(only(&["-J", "-F0"]), None);
+        // -F alone is still -F.
+        assert!(matches!(run(&["-Fn"]).1, Format::Fields { .. }));
+    }
+
+    /// `tcp_info`'s members: every one by default, whatever `-T` says, and
+    /// collected on Linux; under a `-F` selection, `-T` as given.
+    #[test]
+    fn json_tcp_info_members_follow_the_cs_defaults() {
+        let all = TcpInfoFlags {
+            state: true,
+            queue: true,
+            window: true,
+            options: false,
+        };
+        for argv in [
+            &["-J"][..],
+            &["-J", "-T"],
+            &["-J", "-Tq"],
+            &["-J", "-Ts"],
+            &["-T", "-j"],
+        ] {
+            assert_eq!(json(argv).tcp_show, all, "{argv:?}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let t = run(&["-J", "-T"]).0.tcp_info();
+            assert!(t.state && t.queue, "the queues are read: {t:?}");
+        }
+        let fq = json(&["-J", "-FpfT", "-Tq"]).tcp_show;
+        assert!(fq.queue && !fq.state, "{fq:?}");
+        assert_eq!(json(&["-J", "-F", "-T"]).tcp_show, TcpInfoFlags::default());
+        let ft = json(&["-J", "-F"]).tcp_show;
+        assert!(ft.state && ft.queue, "{ft:?}");
+    }
+
+    /// `flags`: always shown by default, by name unless the last `-f`/`+f`
+    /// letter was `G` (`-J -fg` is `-J`); under a `-F` selection, as `-F`
+    /// shows them (measured).
+    #[test]
+    fn json_file_flags_follow_the_cs_defaults() {
+        let ff = |argv: &[&str]| json(argv).file_flags;
+        assert_eq!(ff(&["-J"]), FileFlags::Names);
+        assert_eq!(ff(&["-J", "+fG"]), FileFlags::Hex);
+        assert_eq!(ff(&["-J", "-fG"]), FileFlags::Hex);
+        assert_eq!(ff(&["+fG", "-J"]), FileFlags::Hex);
+        assert_eq!(ff(&["-J", "-fg"]), FileFlags::Names);
+        assert_eq!(ff(&["-J", "+fg"]), FileFlags::Names);
+        assert_eq!(ff(&["-J", "-F"]), FileFlags::Hex);
+        assert_eq!(ff(&["-J", "-F", "-fg"]), FileFlags::Off);
+        assert_eq!(ff(&["-J", "-FG"]), FileFlags::Hex);
     }
 
     #[test]
@@ -3663,7 +3915,7 @@ mod tests {
             ("+n", "unsupported option: +n"),
             ("+P", "unsupported option: +P"),
             ("+r", "unsupported option: +r"),
-            ("+J", "unsupported option: +J"),
+            ("+J", "+J is not supported"),
             ("+aq", "unsupported option: +q"),
             ("+", "unsupported option: +"),
         ] {
@@ -3706,7 +3958,10 @@ mod tests {
         assert_eq!(fields(&["-Fn", "-F"]), only(false, None));
         assert_eq!(fields(&["-F0", "-Fn"]), only(true, None));
         assert_eq!(fields(&["-Fn", "-F0"]), only(true, None));
-        assert_eq!(fields(&["-Fn", "-J"]), Format::Json, "the last format wins");
+        assert!(
+            matches!(fields(&["-Fn", "-J"]), Format::Json(JsonFormat { only: Some(ref l), .. }) if *l == ['n']),
+            "-F selects JSON's fields"
+        );
         // `?` lists the letters, attached or not, and nothing else happens.
         for argv in [&["-F?"][..], &["-F", "?"][..], &["-F", "?", "-p", "1"][..]] {
             assert!(

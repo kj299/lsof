@@ -1891,6 +1891,7 @@ mod tests {
             node: None,
             links,
             socket: None,
+            name_addition: None,
         };
         let selects = |limit: u64, links: Option<u32>| {
             Selection {
@@ -2055,6 +2056,7 @@ mod tests {
                 state: None,
                 tcp: None,
             })),
+            name_addition: None,
         };
         let icmp4 = sock_row(FileType::Ipv4, Protocol::Other("ICMP"));
         let icmp6 = sock_row(FileType::Ipv6, Protocol::Other("ICMPV6"));
@@ -2517,6 +2519,7 @@ mod tests {
             node: Some("7".into()),
             links: None,
             socket: None,
+            name_addition: None,
         };
         let mut sel = Selection {
             paths: vec!["/".into()],
@@ -2568,6 +2571,7 @@ mod tests {
             node: Some(node.into()),
             links: None,
             socket: None,
+            name_addition: None,
         };
         let mut sel = Selection {
             paths: vec!["C:\\dir".into()],
@@ -2627,6 +2631,7 @@ mod tests {
             node: Some(ino.into()),
             links: None,
             socket: None,
+            name_addition: None,
         }
     }
 
@@ -2893,6 +2898,7 @@ mod tests {
                     tcp: None,
                 })
             }),
+            name_addition: None,
         };
         // `/d/link` is a symlink to `/d/s.sock`: only the socket file's
         // identity can find the socket through it.
@@ -2995,6 +3001,7 @@ mod tests {
                     tcp: None,
                 })
             }),
+            name_addition: None,
         };
         let proc_ = |pid: u32, files: Vec<OpenFile>| Process {
             tid: None,
@@ -3085,6 +3092,7 @@ mod tests {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         };
         let item = |name: &str| PathItem {
             name: name.into(),
@@ -3264,6 +3272,7 @@ mod tests {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         };
         let reg = OpenFile {
             fs_device: None,
@@ -3537,6 +3546,7 @@ mod tests {
                 state: Some(SockState::Tcp(state)),
                 tcp: None,
             })),
+            name_addition: None,
         }
     }
 
@@ -3861,6 +3871,7 @@ mod tests {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         }
     }
 

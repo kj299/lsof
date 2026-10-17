@@ -71,14 +71,14 @@ dependencies = [
 
 [[package]]
 name = "lsof-backend-linux"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "lsof-core",
 ]
 
 [[package]]
 name = "lsof-backend-windows"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "lsof-core",
  "windows-sys",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "lsof-cli"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "lsof-backend-linux",
  "lsof-backend-windows",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "lsof-core"
-version = "1.0.1"
+version = "2.0.0"
 
 [[package]]
 name = "lsof-rs-fuzz"

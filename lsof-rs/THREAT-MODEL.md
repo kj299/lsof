@@ -58,8 +58,8 @@ it is a gap, not a formatting choice.
 |---|---|---|---|---|
 | CLI args, the selection grammar | invoking user or a calling script | untrusted | `lsof-cli`, `lsof-core` | `parse_args` |
 | `/proc/PID/status`, `/proc/PID/task/TID/status` (the command is the `Name:` line) | **any local user's process** | **hostile** | `lsof-backend-linux::process` | `proc_status` |
-| `/proc/PID/fd/N` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape` |
-| `/proc/PID/{cwd,root,exe}` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape` |
+| `/proc/PID/fd/N` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape`, `render_json` |
+| `/proc/PID/{cwd,root,exe}` symlink targets | filesystem, any local user | **hostile** | `lsof-backend-linux::files` | `render_escape`, `render_json` |
 | `/proc/PID/ns/{net,mnt}` (compared by inode, never parsed), `/proc/self/status` | kernel | untrusted | `lsof-backend-linux::net`, `::maps`, `::process` | not applicable |
 | `/proc/PID/fdinfo/N` | kernel, per-fd | untrusted | `lsof-backend-linux::files` | `proc_fdinfo` |
 | `/proc/PID/maps` | kernel + mapped filenames | **hostile** | `lsof-backend-linux::maps` | `proc_maps` |
@@ -475,6 +475,14 @@ C code so the triage can be checked. The ones that bear on this model:
   `-t` (57), a socket path cut at its first space (66), an argument `socket`
   finding every unbound AF_UNIX socket (67), and `/proc/self` read as the
   child the C forks (89). None reproduced.
+- **JSON** (item 91, lsof-rs 2.0.0): the C's writer passes DEL, the C1
+  controls (U+009B, the 8-bit CSI) and U+2028/2029 raw into `-J`/`-j`
+  (DIVERGENCES 135), and a non-UTF-8 byte, so its document is no JSON (93);
+  its unix `tcp_info` reads `lts.state.i`, which the unix path never
+  initialises (`dsock.c:3674`, `lib/proc.c:126`), latent, `{}` in every
+  measurement (138); a uid of 2^31 or more prints negative (68). None
+  reproduced: lsof-rs escapes them, prints U+FFFD, never a unix state, and
+  the uid unsigned.
 
 ### 6b. The Phase-0 flaw scan
 
@@ -538,8 +546,13 @@ count:
   On a platform where `char` is unsigned (AArch64 Linux, where lsof also builds)
   the branch flips to `putchar(val)` and a raw high byte lands in the JSON
   document, which is not valid UTF-8. Not reproduced by lsof-rs and not
-  reproducible by it: `render/json.rs` escapes a control character as
-  `\u{:04x}` over UTF-8 `char`s, and `render/escape.rs` prints a byte it cannot
+  reproducible by it: `render/json.rs` (the C's schema since 2.0.0) escapes
+  `"`, `\` and the C0 controls as the C's `json_puts_escaped()` does (`\b`,
+  `\f`, `\n`, `\r`, `\t`, else `\u` and four lowercase hex digits), and DEL,
+  the C1 controls and U+2028/2029 the same way, which the C writes raw
+  (DIVERGENCES 135), over UTF-8 `char`s (a byte that is not UTF-8 is U+FFFD
+  already, 93); `render/json.rs` prints the name without its addition
+  (`OpenFile::base_name`), checked, never panicking on a recorded length; and `render/escape.rs` prints a byte it cannot
   print as `\xNN`; neither has a signed-byte branch to get wrong.
 
 ### 6d. What the scan says about the scanner

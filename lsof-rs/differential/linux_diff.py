@@ -222,6 +222,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 KIT_RUNNER = os.path.join(REPO, "porting-kit", "harnesses", "differential", "diff_run.py")
+KIT_NORMALIZE = os.path.join(REPO, "porting-kit", "harnesses", "differential", "normalize.py")
+# The kit's default masking rules plus one: JSON's `lsof_version`, which is
+# each binary's own (the C's 4.99.6, lsof-rs's 2.0.0; DIVERGENCES 91). A
+# rules file REPLACES the defaults, so it carries them too, and the self-test
+# checks it still equals them plus that rule.
+RULES = os.path.join(HERE, "linux-rules.json")
 
 EXIT_INFRA = 2
 
@@ -351,6 +357,10 @@ def comm(pid: int) -> bytes:
 # two binaries against each other on the live thing.
 HOSTILE_ASCII_COMM = "h\x1b[2J\r \\\x7f\t\x01z"  # ESC-sequence CR space \ DEL TAB ^A
 HOSTILE_UTF8_COMM = "h\x1b[2J\r \\\x7f\téz"  # + é (printable) + U+009B (C1 CSI)
+# A comm ENDING in CR: `str::lines()` dropped a CR before the line's '\n',
+# so lsof-rs read `/proc/<pid>/status`'s `Name:\tcrcomm\r\n` as `crcomm`;
+# the C prints `ccrcomm\r` and `-c` selects it (fixture CR).
+TRAILING_CR_COMM = "crcomm\r"
 HOSTILE_FILE = "n\x1b[31m\r\t \\\x7fé.txt"
 LOCALE = "C.UTF-8"
 
@@ -2484,6 +2494,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     b = Fixture("B(sockets)", [sys.executable, "-c", py], cwd=sdir, expect_fds=9)
     c = hostile_sleeper("C", work, HOSTILE_ASCII_COMM)
     d = hostile_sleeper("D", work, HOSTILE_UTF8_COMM)
+    cr = hostile_sleeper("CR", work, TRAILING_CR_COMM)
     e = mapping_holder(work)
     f = lock_holder(work)
     g = anon_inode_holder(work)
@@ -2528,7 +2539,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     af = mt_probe(work, mtwrap, "autofs")
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
-        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw,
+        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw, cr,
     )
 
 
@@ -2676,6 +2687,7 @@ def run(args) -> int:
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
             sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
+            crcomm,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -2936,6 +2948,7 @@ def run(args) -> int:
                 "B": str(b.pid),
                 "C": str(c.pid),
                 "D": str(d.pid),
+                "CR": str(crcomm.pid),
                 "E": str(e.pid),
                 "F": str(lk.pid),
                 "G": str(anon.pid),
@@ -3079,6 +3092,7 @@ def run(args) -> int:
             "--rust", rust,
             "--matrix", matrix_json,
             "--ledger", args.ledger,
+            "--rules", RULES,
         ]
         if args.json:
             cmd.append("--json")
@@ -3093,7 +3107,10 @@ def run(args) -> int:
             # The kit runner sys.exit()s with a message on its own infra errors
             # (missing binary, unparseable matrix); those are not verdicts.
             infra(f"kit runner exited {p.returncode}")
-        return p.returncode
+        bad = invalid_json_cases(cases, rust)
+        for name, why in bad:
+            print(f"linux_diff: {name}: lsof-rs printed invalid JSON: {why}")
+        return 1 if bad else p.returncode
     finally:
         for fx in fixtures:
             fx.stop()
@@ -3105,6 +3122,33 @@ def run(args) -> int:
             shutil.rmtree(work, ignore_errors=True)
             for outside in OUTSIDE_WORK:
                 shutil.rmtree(outside, ignore_errors=True)
+
+
+def json_lines_of(out: str) -> list:
+    """The JSON values a -J/-j run printed: every line but -V's `lsof: …`
+    lines, which follow the document on stdout as the C writes them, and -r's
+    blank separators."""
+    return [json.loads(l) for l in out.split("\n") if l and not l.startswith("lsof: ")]
+
+
+def invalid_json_cases(cases: list, rust: str) -> list:
+    """Run lsof-rs again for every case that asks for JSON, and parse what it
+    prints: each -J document and -j line must be one JSON value (DIVERGENCES
+    91). The C's need not be: it writes a raw 0xff byte (93)."""
+    bad = []
+    for c in cases:
+        args = c.get("args", [])
+        if not ({"-J", "-j"} & set(args)) or c.get("env", {}).get("LSOF_DIFF_MT"):
+            continue
+        r = subprocess.run(
+            [rust, *args], capture_output=True, timeout=c.get("timeout", 60),
+            env={**os.environ, "LC_ALL": LOCALE, **c.get("env", {})}, cwd=c.get("cwd"),
+        )
+        try:
+            json_lines_of(r.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            bad.append((c["name"], str(e)))
+    return bad
 
 
 def self_test() -> int:
@@ -3295,6 +3339,29 @@ def self_test() -> int:
     except ImportError:
         check("tomllib to read the matrix (Python 3.11+)", False)
 
+    check("json_lines_of skips -V's lines and -r's blanks",
+          json_lines_of('{"a":1}\nlsof: process ID not located: 9\n\n{"b":2}\n') == [{"a": 1}, {"b": 2}])
+    try:
+        json_lines_of('{"a":"\xff"\n')
+        check("json_lines_of refuses what is not JSON", False)
+    except ValueError:
+        check("json_lines_of refuses what is not JSON", True)
+    # The rules file is the kit's defaults plus the lsof_version rule, so a
+    # kit update to the defaults fails here instead of silently changing every
+    # comparison.
+    dumped = subprocess.run(
+        [sys.executable, KIT_NORMALIZE, "--dump-default-rules"],
+        capture_output=True, text=True, timeout=60,
+    )
+    with open(RULES) as f:
+        rules = json.load(f)
+    version_rule = {
+        "name": "lsof-version",
+        "regex": '"lsof_version":"[^"]*"',
+        "replacement": '"lsof_version":"<V>"',
+    }
+    check("linux-rules.json is the kit's default rules plus lsof_version",
+          dumped.returncode == 0 and rules == json.loads(dumped.stdout) + [version_rule])
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

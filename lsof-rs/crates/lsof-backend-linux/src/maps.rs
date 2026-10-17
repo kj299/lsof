@@ -274,7 +274,7 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
         FdType::Mem
     };
     if let Some(e) = files::exempt_match(bytes, ctx.exempt) {
-        return OpenFile {
+        let mut f = OpenFile {
             rdev: None,
             fs_device: Some(m.dev),
             file_flags: None,
@@ -282,21 +282,24 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
             file_type: FileType::Exempt(files::unkn_suffix(&gone)),
             fd: gone,
             access: AccessMode::Unknown,
-            name: format!("{}{}", m.path, files::exempt_note(e)),
+            name: m.path,
             device: Some(m.device),
             size: None,
             offset: None,
             node: Some(m.inode.to_string()),
             links: None,
             socket: None,
+            name_addition: None,
         };
+        f.add_name_addition(&files::exempt_note(e));
+        return f;
     }
     let stat = stat_mapping(bytes, m.range, pid, foreign);
     // What the maps line alone says, with the reason the `stat` could not
     // say more — none for a deleted mapping, whose path is expected to fail.
     let from_maps = |m: Mapping, why: Option<String>| {
         let why = why.filter(|_| !m.deleted && !ctx.omit_unreadable);
-        OpenFile {
+        let mut f = OpenFile {
             rdev: None,
             fs_device: Some(m.dev),
             file_flags: None,
@@ -304,17 +307,20 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
             fd: gone.clone(),
             access: AccessMode::Unknown,
             file_type: FileType::Regular,
-            name: match why {
-                Some(why) => format!("{} {why}", m.path),
-                None => m.path,
-            },
+            name: m.path,
             device: Some(m.device),
             size: None,
             offset: None,
             node: Some(m.inode.to_string()),
             links: None,
             socket: None,
+            name_addition: None,
+        };
+        // The reason is the C's `Lf->nma`, which JSON leaves out.
+        if let Some(why) = why {
+            f.add_name_addition(&why);
         }
+        f
     };
     match stat {
         Err(e) => from_maps(m, Some(format!("(stat: {})", errno_text(&e)))),
@@ -401,6 +407,7 @@ fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>
         node: Some(md.ino().to_string()),
         links: u32::try_from(md.nlink()).ok(),
         socket: None,
+        name_addition: None,
     }
 }
 
@@ -436,6 +443,7 @@ fn socket_mapping(md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> Open
         node: Some(md.ino().to_string()),
         links: None,
         socket: None,
+        name_addition: None,
     }
 }
 

@@ -17,7 +17,7 @@ use lsof_backend_linux::fuzz_api::parse_status;
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     let command = parse_status(&text).command;
-    // The command came from a single `Name:` line, so `str::lines` guarantees
+    // The command came from a single `Name:` line, split on '\n', so
     // the LINE held no '\n'. The parser then undoes the kernel's escaping of
     // that line — `\n` (two characters) back to a newline, `\\` back to `\` —
     // because the C reads the comm raw from `stat` and both binaries must

@@ -40,10 +40,12 @@ live, where a full close would instead orphan an unattributable pid-0
 `TIME_WAIT`. A host without `::1` degrades the IPv6 class with a warning rather
 than failing (hosted runners always have it).
 
-**Why JSON is the gate.** lsof-rs's `-J` emits structured `local`/`remote`/`state`
-already, so it maps onto the oracle without fragile string-splitting. The `-F`
-parser is kept and tested too (it proves the scriptable contract), but the gate
-runs on `-J`.
+**Why JSON is the gate.** lsof-rs's `-J` is the C's schema since 2.0.0: the
+state is `tcp_info.state` and the family `type`, and the endpoints are the
+socket's `name` (the `-F n` text, which lsof-rs keeps on an Internet row where
+the C prints none: DIVERGENCES 134), split as the `-F` parser splits `n`. The
+`-F` parser is kept and tested too (it proves the scriptable contract), but the
+gate runs on `-J`.
 
 ## Canonicalization (both sides, identically)
 

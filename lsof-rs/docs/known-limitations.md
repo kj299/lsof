@@ -159,9 +159,10 @@ likewise gained two: the cut happens at the resulting **column width**, never
 narrower than the `COMMAND` header — so `+c 5` prints seven characters — and a
 `+c` wider than the longest command name the system can report is an error.
 
-`-T` does not gate JSON: `-J` / `-j` remain the full structured dump, with
-`state` and `tcp_*` keys whenever the model holds them. `-T` is about the
-table's NAME annotation and `-F`'s `T` tokens, which is where the C applies it.
+`-T` does not narrow default JSON: `-J` / `-j` print every `tcp_info` member
+the model holds, as the C does (it applies its default field set after every
+option). Under a `-F` selection, `-T` narrows `tcp_info` as it narrows `-F`'s
+`T` tokens (since 2.0.0, the C's schema).
 
 Since 2026-09-02 the Linux differential runs as a CI gate and keeps the full
 list in [`../DIVERGENCES.md`](../DIVERGENCES.md), which adds six more found the
@@ -249,10 +250,10 @@ meet. Each number is a row there, with the measurement behind it.
   be named by its UID alone (39); a file
   named by a path argument and its file system named by another locate both,
   where the C's row locates the file alone and the run exits 1 (125).
-- **Output shape:** the JSON from `-J`/`-j` has lsof-rs's own schema, not the
-  C's (91), and under `-K` a task's object repeats its process's (61); a byte
-  that is not UTF-8 prints as U+FFFD, where the C prints `\xff` (93); `-F`,
-  `-J` or `-j` with `-t` is accepted, where the C refuses it (90); `-h` writes
+- **Output shape:** `-J`/`-j` print the C's schema since 2.0.0 (91), but an
+  Internet row keeps a `name` (134) and DEL, C1 and U+2028/2029 are escaped
+  (135), both C-DEFECT; a byte that is not UTF-8 prints as U+FFFD, where the
+  C prints `\xff` (93); `-h` writes
   its help to stdout, where the C writes the usage to stderr (114).
 - **Deliberate:** options after the first file name are still options (12);
   NAME shows the name the process opened, not the one you asked about (17); a

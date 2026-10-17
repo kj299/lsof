@@ -8,7 +8,8 @@
     self-owned fixtures (IPv4 loopback: a TCP listener, an established pair, a
     half-closed pair pinned in CLOSE_WAIT/FIN_WAIT2, and a bound UDP socket;
     IPv6 loopback: a TCP listener and an established pair), captures lsof-rs's
-    `-i -J` view AND the equivalent
+    `-i -J` view (the C's schema since 2.0.0: endpoints in `name`, the state in
+    `tcp_info.state`) AND the equivalent
     Get-NetTCPConnection / Get-NetUDPEndpoint view, and hands both to the
     portable comparator (oracle_diff.py), which fails on any unledgered set
     divergence. Scoping to this process's pid and to the fixture ports makes the

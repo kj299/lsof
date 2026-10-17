@@ -1,7 +1,7 @@
 //! End-to-end renderer checks over the deterministic mock data set.
 
 use lsof_core::mock::sample_processes;
-use lsof_core::render::{fields, json, table, TableOpts};
+use lsof_core::render::{fields, json, table, FileFlags, JsonFormat, TableOpts};
 use lsof_core::{Escaper, TcpInfoFlags};
 
 #[test]
@@ -210,6 +210,7 @@ fn table_offset_with_dash_o() {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         }],
     };
     // Default prefers size; -o prefers the offset (0t<dec>).
@@ -254,6 +255,7 @@ fn the_size_off_column_has_three_modes() {
         node: Some("1".into()),
         links: None,
         socket: None,
+        name_addition: None,
     };
     let p = Process {
         tid: None,
@@ -400,6 +402,7 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         }],
     };
     let f = fields::render(
@@ -460,6 +463,7 @@ fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         }],
     }
 }
@@ -560,6 +564,7 @@ fn a_task_row_is_distinguishable_from_a_thread_handle() {
         node: Some("4242".into()),
         links: None,
         socket: None,
+        name_addition: None,
     };
     let p = Process {
         tid: None,
@@ -622,6 +627,7 @@ fn table_command_width_caps() {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         }],
     };
     // +c 4: the COMMAND cell is truncated to 4 chars; the full name is gone.
@@ -682,6 +688,7 @@ fn fields_skips_empty_name() {
             node: Some("4242".into()),
             links: None,
             socket: None,
+            name_addition: None,
         }],
     };
     let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
@@ -791,6 +798,7 @@ fn windows_object_types_render() {
         node: None,
         links: None,
         socket: None,
+        name_addition: None,
     };
     let p = Process {
         tid: None,
@@ -853,18 +861,46 @@ fn repeat_marker_is_format_aware() {
         .repeat_marker(),
         "m\0\n"
     );
-    assert_eq!(Format::Json.repeat_marker(), "");
-    assert_eq!(Format::JsonLines.repeat_marker(), "");
+    // A `-J` document ends in its own newline; the C prints one more after
+    // each `-j` cycle (measured: an empty `-j -r` cycle is `\n` alone).
+    let jf = |lines| {
+        Format::Json(JsonFormat {
+            lines,
+            only: None,
+            file_flags: FileFlags::Names,
+            tcp_show: TcpInfoFlags::DEFAULT,
+        })
+    };
+    assert_eq!(jf(false).repeat_marker(), "");
+    assert_eq!(jf(true).repeat_marker(), "\n");
+}
+
+/// What `-J`/`-j` print with no `-F` selection: the C's default set, flags
+/// by name and every TCP/TPI member.
+fn dj() -> json::JsonOpts<'static> {
+    json::JsonOpts {
+        only: None,
+        tcp_show: TcpInfoFlags {
+            state: true,
+            queue: true,
+            window: true,
+            options: false,
+        },
+        file_flags: FileFlags::Names,
+        numeric_ids: false,
+        version: "9.9.9",
+    }
 }
 
 #[test]
 fn json_aggregated_shape() {
-    let out = json::render_aggregated(&sample_processes());
-    assert!(out.starts_with("{\"processes\":["));
-    assert!(out.ends_with("]}"));
+    let out = json::render_aggregated(&sample_processes(), &dj());
+    assert!(out.starts_with("{\"lsof_version\":\"9.9.9\",\"processes\":[{\"pid\":1000,"));
+    assert!(out.ends_with("]}]}\n"));
+    assert_eq!(out.matches('\n').count(), 1);
     assert!(out.contains("\"pid\":1500"));
     assert!(out.contains("\"protocol\":\"TCP\""));
-    assert!(out.contains("\"state\":\"LISTEN\""));
+    assert!(out.contains("\"tcp_info\":{\"state\":\"LISTEN\"}"));
     assert!(out.contains("\"command\":\"explorer.exe\""));
 }
 
@@ -872,7 +908,7 @@ fn json_aggregated_shape() {
 fn json_lines_one_per_file() {
     let procs = sample_processes();
     let total_files: usize = procs.iter().map(|p| p.files.len()).sum();
-    let out = json::render_lines(&procs);
+    let out = json::render_lines(&procs, &dj());
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), total_files);
     for l in lines {
@@ -883,7 +919,7 @@ fn json_lines_one_per_file() {
 #[test]
 fn json_escapes_backslashes() {
     // Windows paths and DOMAIN\user must be valid JSON.
-    let out = json::render_aggregated(&sample_processes());
+    let out = json::render_aggregated(&sample_processes(), &dj());
     assert!(out.contains("EXAMPLE\\\\alice"));
     assert!(out.contains("C:\\\\Users\\\\alice"));
 }
@@ -918,6 +954,7 @@ fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         }],
     }
 }
@@ -1088,10 +1125,10 @@ fn json_escapes_every_control_and_the_line_separators() {
     // and U+2028/U+2029 are escaped too, so `-j` stays one object per line and
     // a document read on a terminal cannot drive it. Decoders see the same
     // string either way.
-    let p = named("a\u{9b}b\u{2028}c\x7f\x1b", "u", "f");
-    let out = json::render_lines(&[p]);
+    let p = named("a\u{9b}b\u{2028}c\u{2029}d\x7f\x1b", "u", "f");
+    let out = json::render_lines(&[p], &dj());
     assert!(
-        out.contains("\"command\":\"a\\u009bb\\u2028c\\u007f\\u001b\""),
+        out.contains("\"command\":\"a\\u009bb\\u2028c\\u2029d\\u007f\\u001b\""),
         "{out:?}"
     );
     assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
@@ -1142,6 +1179,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
             node: Some("TCP".to_string()),
             links: None,
             socket: Some(Box::new(sock)),
+            name_addition: None,
         }],
         endpoint_peer: false,
         unlisted: false,
@@ -1278,17 +1316,19 @@ fn tcp_info_fields_tokens() {
 
 #[test]
 fn tcp_info_json_keys() {
-    let out = json::render_aggregated(&tcp_info_fixture());
-    for key in [
-        "\"tcp_window\":262144",
-        "\"tcp_queue_recv\":0",
-        "\"tcp_queue_send\":12",
-    ] {
-        assert!(out.contains(key), "JSON missing {key}: {out:?}");
-    }
+    // The C's members, in its order (`print.c:1996-2043`): read_window is
+    // `-T w`'s, which the Windows backend fills; Linux has none.
+    let out = json::render_aggregated(&tcp_info_fixture(), &dj());
+    assert!(
+        out.contains(
+            "\"tcp_info\":{\"state\":\"ESTABLISHED\",\"recv_queue\":0,\"send_queue\":12,\"read_window\":262144}"
+        ),
+        "{out:?}"
+    );
     assert!(!out.contains("(Win="), "JSON name must stay clean: {out:?}");
-    // And absent info stays absent: the plain mock sample has no tcp_* keys.
-    assert!(!json::render_aggregated(&sample_processes()).contains("tcp_window"));
+    assert!(!out.contains("write_window"), "{out:?}");
+    // And absent info stays absent: the plain mock sample has no queues.
+    assert!(!json::render_aggregated(&sample_processes(), &dj()).contains("_queue"));
 }
 
 #[test]
@@ -1379,8 +1419,9 @@ fn a_sockets_state_is_reported_once_and_in_its_own_field() {
     assert!(f.contains("TST=LISTEN\n"), "{f:?}");
     assert_eq!(f.matches("LISTEN").count(), 1, "{f:?}");
 
-    let j = json::render_aggregated(&sample_processes());
-    assert!(j.contains("\"state\":\"LISTEN\""), "{j:?}");
+    let j = json::render_aggregated(&sample_processes(), &dj());
+    assert!(j.contains("\"tcp_info\":{\"state\":\"LISTEN\"}"), "{j:?}");
+    assert_eq!(j.matches("LISTEN").count(), 1, "{j:?}");
     assert!(j.contains("\"name\":\"*:445\""), "{j:?}");
 }
 
@@ -1428,6 +1469,7 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
                 state: None,
                 tcp: None,
             })),
+            name_addition: None,
         }],
     };
     let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
@@ -1743,7 +1785,7 @@ fn human_size_is_table_only() {
         "-F must stay in raw bytes"
     );
     assert!(
-        json::render_aggregated(procs).contains("1048576"),
+        json::render_aggregated(procs, &dj()).contains("\"size\":\"1048576\""),
         "JSON must stay in raw bytes"
     );
 }
@@ -1791,6 +1833,7 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
                 state: None,
                 tcp: None,
             })),
+            name_addition: None,
         }],
     }]
 }
@@ -1843,12 +1886,13 @@ fn a_packet_row_renders_in_the_table_and_in_json() {
     assert_eq!(cells[7], "ALL", "NODE: {row:?}");
     assert_eq!(cells[8], "type=SOCK_RAW", "NAME: {row:?}");
 
-    let j = json::render_lines(&packet_row());
+    // The C's JSON: NODE is the protocol, as `-F P` prints it, and a packet
+    // row has no TCP/TPI record (measured: `"protocol":"ALL"`, no tcp_info).
+    let j = json::render_lines(&packet_row(), &dj());
     assert!(j.contains("\"type\":\"pack\""), "{j}");
-    assert!(j.contains("\"node\":\"ALL\""), "{j}");
-    // JSON is this port's own format, not the C's, and it keeps both: the
-    // family under `protocol`, the ethernet protocol under `node`.
-    assert!(j.contains("\"protocol\":\"packet\""), "{j}");
+    assert!(j.contains("\"protocol\":\"ALL\""), "{j}");
+    assert!(!j.contains("\"inode\""), "{j}");
+    assert!(!j.contains("tcp_info"), "{j}");
 }
 
 #[test]
@@ -1893,6 +1937,7 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
                 state: Some(UnixState::Connected.into()),
                 tcp: None,
             })),
+            name_addition: None,
         }],
     }];
     let out = fields::render(&procs, false, None, TcpInfoFlags::DEFAULT, Escaper::UNIX);
@@ -1937,6 +1982,7 @@ fn row(
         node: Some(node.into()),
         links: None,
         socket: None,
+        name_addition: None,
     }
 }
 
@@ -2105,8 +2151,10 @@ fn a_numeric_user_is_eight_wide_and_has_no_login_field() {
         Escaper::UNIX,
     );
     assert_eq!(f, "p496\n", "no L field for a number");
-    let j = json::render_lines(std::slice::from_ref(&p));
-    assert!(j.contains("\"user\":\"0\""), "{j}");
+    let j = json::render_lines(std::slice::from_ref(&p), &dj());
+    assert!(j.contains("\"uid\":0,"), "{j}");
+    assert!(!j.contains("\"login\""), "{j}");
+    assert!(!j.contains("\"user\""), "{j}");
 }
 
 /// NLINK's cell is formatted `" %ld"` — with its leading space — before it is
@@ -2207,4 +2255,493 @@ fn only_tcp_udp_and_unix_rows_carry_the_dash_t_separator() {
     let rows: Vec<&str> = out.lines().skip(1).collect();
     assert!(rows[0].ends_with("type=SOCK_RAW"), "{out:?}");
     assert!(rows[1].ends_with("127.0.0.1:1 "), "{out:?}");
+}
+
+// ---- The C's JSON schema (DIVERGENCES 91), each rule measured against it. ----
+
+/// A row with nothing known but its fd, type and name, for the JSON tests.
+fn jrow(fd: lsof_core::FdType, ty: lsof_core::FileType, name: &str) -> lsof_core::OpenFile {
+    lsof_core::OpenFile {
+        fd,
+        access: lsof_core::AccessMode::Unknown,
+        file_type: ty,
+        name: name.into(),
+        device: None,
+        size: None,
+        offset: None,
+        node: None,
+        links: None,
+        lock: None,
+        fs_device: None,
+        rdev: None,
+        file_flags: None,
+        socket: None,
+        name_addition: None,
+    }
+}
+
+fn jproc(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
+    lsof_core::Process {
+        tid: None,
+        task_command: None,
+        uid: Some(0),
+        pgid: Some(21683),
+        pid: 21683,
+        ppid: Some(1),
+        command: "python3".into(),
+        user: Some("root".into()),
+        endpoint_peer: false,
+        unlisted: false,
+        files,
+    }
+}
+
+fn jsock(
+    protocol: lsof_core::Protocol,
+    state: Option<lsof_core::SockState>,
+    queues: Option<(u64, u64)>,
+) -> Option<Box<lsof_core::SocketInfo>> {
+    Some(Box::new(lsof_core::SocketInfo {
+        bound: None,
+        protocol,
+        local: Some("127.0.0.1:41095".parse().unwrap()),
+        remote: None,
+        state,
+        tcp: queues.map(|(r, s)| lsof_core::model::TcpExtInfo {
+            recv_window: None,
+            recv_queue: Some(r),
+            send_queue: Some(s),
+        }),
+    }))
+}
+
+/// The files of one `-j` line: what follows the process's keys.
+fn jfile(f: lsof_core::OpenFile) -> String {
+    let p = jproc(vec![f]);
+    let line = json::render_lines(&[p], &dj());
+    let head = "{\"pid\":21683,\"pgid\":21683,\"ppid\":1,\"command\":\"python3\",\"uid\":0,\"login\":\"root\",";
+    line.strip_prefix(head)
+        .and_then(|l| l.strip_suffix("}\n"))
+        .unwrap_or_else(|| panic!("{line:?}"))
+        .to_string()
+}
+
+/// Measured: `lsof -J -p 999999` prints the envelope and a newline, and
+/// `-j` prints nothing at all.
+#[test]
+fn json_envelope_is_the_cs() {
+    assert_eq!(
+        json::render_aggregated(&[], &dj()),
+        "{\"lsof_version\":\"9.9.9\",\"processes\":[]}\n"
+    );
+    assert_eq!(json::render_lines(&[], &dj()), "");
+}
+
+/// A process with no file left is no object, in either form (`print.c:2128`).
+#[test]
+fn json_skips_a_process_with_no_files() {
+    let empty = jproc(vec![]);
+    let one = jproc(vec![jrow(
+        lsof_core::FdType::Cwd,
+        lsof_core::FileType::Dir,
+        "/",
+    )]);
+    let doc = json::render_aggregated(&[empty.clone(), one], &dj());
+    assert_eq!(doc.matches("\"pid\"").count(), 1, "{doc}");
+    assert_eq!(json::render_lines(&[empty], &dj()), "");
+}
+
+/// pid, tid, task_cmd, pgid, ppid, command, uid, login: the measured `-J -K`
+/// object of a task, `{"pid":21683,"tid":21685,"task_cmd":"fxworker",...}`.
+#[test]
+fn json_process_keys_in_the_cs_order() {
+    let mut p = jproc(vec![jrow(
+        lsof_core::FdType::Cwd,
+        lsof_core::FileType::Dir,
+        "/x",
+    )]);
+    p.tid = Some(21685);
+    p.task_command = Some("fxworker".into());
+    let doc = json::render_aggregated(&[p.clone()], &dj());
+    assert!(
+        doc.starts_with(
+            "{\"lsof_version\":\"9.9.9\",\"processes\":[{\"pid\":21683,\"tid\":21685,\"task_cmd\":\"fxworker\",\"pgid\":21683,\"ppid\":1,\"command\":\"python3\",\"uid\":0,\"login\":\"root\",\"files\":[{\"fd\":\"cwd\",\"type\":\"DIR\",\"name\":\"/x\"}]}]}\n"
+        ),
+        "{doc}"
+    );
+    // `-l`: no login key.
+    let numeric = json::JsonOpts {
+        numeric_ids: true,
+        ..dj()
+    };
+    assert!(!json::render_lines(&[p], &numeric).contains("login"));
+}
+
+/// A uid of 2^31 or more is printed as the number it is, where the C casts
+/// it to `int` and prints `-294967296` (DIVERGENCES 68, C-DEFECT).
+#[test]
+fn json_uid_is_unsigned() {
+    let mut p = jproc(vec![jrow(
+        lsof_core::FdType::Cwd,
+        lsof_core::FileType::Dir,
+        "/",
+    )]);
+    p.uid = Some(4_000_000_000);
+    p.user = None;
+    let line = json::render_lines(&[p], &dj());
+    assert!(line.contains("\"uid\":4000000000,\"fd\""), "{line}");
+}
+
+/// The measured fd 53: every file key, in `json_print_file()`'s order, with
+/// size and offset as decimal strings and nlink a number.
+#[test]
+fn json_file_keys_in_the_cs_order() {
+    use lsof_core::model::LockKind;
+    let mut f = jrow(
+        lsof_core::FdType::Handle(53),
+        lsof_core::FileType::Regular,
+        "/fx/locked.txt",
+    );
+    f.access = lsof_core::AccessMode::ReadWrite;
+    f.lock = Some(LockKind::WriteFull);
+    f.fs_device = Some(0xfe00);
+    f.device = Some("254,0".into());
+    f.size = Some(4);
+    f.offset = Some(0);
+    f.node = Some("2834481".into());
+    f.links = Some(1);
+    f.file_flags = Some(0o2 | 0o100000 | 0o2000000);
+    assert_eq!(
+        jfile(f.clone()),
+        "\"fd\":\"53\",\"access\":\"u\",\"lock\":\"W\",\"type\":\"REG\",\"device_number\":\"0xfe00\",\"size\":\"4\",\"offset\":\"0\",\"inode\":\"2834481\",\"nlink\":1,\"flags\":\"RW,LG,CX\",\"name\":\"/fx/locked.txt\""
+    );
+    // raw_device is `-F r`'s, outside the default set, after device_number.
+    f.rdev = std::num::NonZeroU32::new(0x103);
+    let only = ['r'];
+    let r = json::render_lines(
+        &[jproc(vec![f])],
+        &json::JsonOpts {
+            only: Some(&only),
+            ..dj()
+        },
+    );
+    assert_eq!(r, "{\"pid\":21683,\"raw_device\":\"0x103\"}\n");
+}
+
+/// `"offset":"123456789"` whatever `-o` says; `-F o` prints `0x75bcd15`.
+#[test]
+fn json_offset_is_decimal() {
+    let mut f = jrow(
+        lsof_core::FdType::Handle(3),
+        lsof_core::FileType::Regular,
+        "/a",
+    );
+    f.offset = Some(123_456_789);
+    assert!(jfile(f).contains("\"offset\":\"123456789\""));
+}
+
+/// A `-F` selection prints exactly those keys, and pid: measured `-J -Fc`
+/// gives `{"pid":P,"command":"python3","files":[{}]}`.
+#[test]
+fn json_field_selection() {
+    let p = jproc(vec![jrow(
+        lsof_core::FdType::Handle(33),
+        lsof_core::FileType::Regular,
+        "/r",
+    )]);
+    let only = ['c'];
+    let o = json::JsonOpts {
+        only: Some(&only),
+        ..dj()
+    };
+    assert_eq!(
+        json::render_aggregated(std::slice::from_ref(&p), &o),
+        "{\"lsof_version\":\"9.9.9\",\"processes\":[{\"pid\":21683,\"command\":\"python3\",\"files\":[{}]}]}\n"
+    );
+    assert_eq!(
+        json::render_lines(&[p], &o),
+        "{\"pid\":21683,\"command\":\"python3\"}\n"
+    );
+}
+
+/// The C's escapes: BS and FF by name, the other C0 controls as lowercase
+/// `\u00xx`; DEL, C1 and U+2028/2029 escaped too (a ledgered C-DEFECT).
+#[test]
+fn json_escapes_like_the_c() {
+    let f = jrow(
+        lsof_core::FdType::Handle(52),
+        lsof_core::FileType::Regular,
+        "h\u{1b}[31m\u{1}\t\n\"\\\u{8}\u{c}\r\u{1f}\u{7f}\u{9b}\u{2028}\u{2029}\u{fffd}",
+    );
+    assert_eq!(
+        jfile(f),
+        "\"fd\":\"52\",\"type\":\"REG\",\"name\":\"h\\u001b[31m\\u0001\\t\\n\\\"\\\\\\b\\f\\r\\u001f\\u007f\\u009b\\u2028\\u2029\u{fffd}\""
+    );
+}
+
+/// An AF_UNIX row: device the PCB address, its inode, and `"tcp_info":{}`,
+/// never a state (the C's writer reads one the unix path never sets).
+#[test]
+fn json_unix_row_has_empty_tcp_info() {
+    let mut f = jrow(
+        lsof_core::FdType::Handle(37),
+        lsof_core::FileType::Unix,
+        "type=STREAM",
+    );
+    f.access = lsof_core::AccessMode::ReadWrite;
+    f.device = Some("0x000000009408aa33".into());
+    f.offset = Some(0);
+    f.node = Some("115824".into());
+    f.socket = jsock(
+        lsof_core::Protocol::Other("unix"),
+        Some(lsof_core::UnixState::Connected.into()),
+        None,
+    );
+    assert_eq!(
+        jfile(f),
+        "\"fd\":\"37\",\"access\":\"u\",\"type\":\"unix\",\"device\":\"0x000000009408aa33\",\"offset\":\"0\",\"inode\":\"115824\",\"name\":\"type=STREAM\",\"tcp_info\":{}"
+    );
+}
+
+/// TCP: protocol, not inode, and the state and queues; UDP's state only when
+/// ESTABLISHED; UDP-Lite never one, its queues always (measured on all four).
+#[test]
+fn json_udp_state_only_when_established() {
+    use lsof_core::{Protocol, TcpState};
+    let inet = |proto: Protocol, st: Option<TcpState>| {
+        let mut f = jrow(
+            lsof_core::FdType::Handle(39),
+            lsof_core::FileType::Ipv4,
+            "127.0.0.1:41095",
+        );
+        f.device = Some("115826".into());
+        f.node = Some(proto.as_str().into());
+        f.socket = jsock(proto, st.map(Into::into), Some((7, 0)));
+        jfile(f)
+    };
+    assert_eq!(
+        inet(Protocol::Tcp, Some(TcpState::Listen)),
+        "\"fd\":\"39\",\"type\":\"IPv4\",\"device\":\"115826\",\"protocol\":\"TCP\",\"name\":\"127.0.0.1:41095\",\"tcp_info\":{\"state\":\"LISTEN\",\"recv_queue\":7,\"send_queue\":0}"
+    );
+    assert!(inet(Protocol::Udp, Some(TcpState::Close))
+        .ends_with("\"tcp_info\":{\"recv_queue\":7,\"send_queue\":0}"));
+    assert!(inet(Protocol::Udp, Some(TcpState::Established))
+        .ends_with("\"tcp_info\":{\"state\":\"ESTABLISHED\",\"recv_queue\":7,\"send_queue\":0}"));
+    for st in [TcpState::Close, TcpState::Established] {
+        let u = inet(Protocol::UdpLite, Some(st));
+        assert!(u.contains("\"protocol\":\"UDPLITE\""), "{u}");
+        assert!(
+            u.ends_with("\"tcp_info\":{\"recv_queue\":7,\"send_queue\":0}"),
+            "{u}"
+        );
+    }
+}
+
+/// A raw row (`FileType::Socket("raw")`, no SocketInfo) prints its inode,
+/// as the C's `inp_ty` 1 row does, and no protocol or tcp_info; a netlink
+/// `sock` row keeps its device number; a packet row has no tcp_info.
+#[test]
+fn json_raw_packet_netlink_have_no_tcp_info() {
+    let mut raw = jrow(
+        lsof_core::FdType::Handle(48),
+        lsof_core::FileType::Socket("raw"),
+        "00000000:0001->00000000:0000 st=07",
+    );
+    raw.access = lsof_core::AccessMode::ReadWrite;
+    raw.offset = Some(0);
+    raw.node = Some("115832".into());
+    assert_eq!(
+        jfile(raw),
+        "\"fd\":\"48\",\"access\":\"u\",\"type\":\"raw\",\"offset\":\"0\",\"inode\":\"115832\",\"name\":\"00000000:0001->00000000:0000 st=07\""
+    );
+    // device_number from fs_device itself, where searched_fs_device() is None.
+    let mut nl = jrow(
+        lsof_core::FdType::Handle(49),
+        lsof_core::FileType::Socket("sock"),
+        "protocol: NETLINK",
+    );
+    nl.fs_device = Some(9);
+    nl.device = Some("0,9".into());
+    nl.node = Some("3660206".into());
+    assert_eq!(
+        jfile(nl),
+        "\"fd\":\"49\",\"type\":\"sock\",\"device_number\":\"0x9\",\"inode\":\"3660206\",\"name\":\"protocol: NETLINK\""
+    );
+    assert!(!json::render_lines(&packet_row(), &dj()).contains("tcp_info"));
+}
+
+/// `name` is the C's `Lf->nm`: never an addition, and none at all for NOFD.
+#[test]
+fn json_name_is_the_base() {
+    let mut cwd = jrow(
+        lsof_core::FdType::Cwd,
+        lsof_core::FileType::Unknown,
+        "/proc/1/cwd",
+    );
+    cwd.add_name_addition("(readlink: Permission denied)");
+    assert_eq!(
+        jfile(cwd.clone()),
+        "\"fd\":\"cwd\",\"type\":\"unknown\",\"name\":\"/proc/1/cwd\""
+    );
+    let mut nofd = jrow(lsof_core::FdType::NoFd, lsof_core::FileType::NoType, "");
+    nofd.add_name_addition("/proc/1/fd (opendir: Permission denied)");
+    assert_eq!(jfile(nofd.clone()), "\"fd\":\"NOFD\"");
+    let mut del = jrow(
+        lsof_core::FdType::Handle(44),
+        lsof_core::FileType::Regular,
+        "/fx/d (deleted)",
+    );
+    let mut ex = jrow(
+        lsof_core::FdType::Handle(5),
+        lsof_core::FileType::Exempt("fd"),
+        "/m/f",
+    );
+    ex.add_name_addition("(-e /m)");
+    let mut plus = ex.clone();
+    plus.name = "/m/g".into();
+    plus.name_addition = None;
+    plus.add_name_addition("(+e /m)");
+    let mut st = jrow(
+        lsof_core::FdType::Mem,
+        lsof_core::FileType::Regular,
+        "/lib/x.so",
+    );
+    st.add_name_addition("(stat: No such file or directory)");
+    let mut path = st.clone();
+    path.name = "/lib/y.so".into();
+    path.name_addition = None;
+    path.add_name_addition("(path dev=0,42, inode=2)");
+    del.add_name_addition("(stat: x)");
+    let all = jproc(vec![cwd, nofd, del, ex, plus, st, path]);
+    let doc = json::render_aggregated(std::slice::from_ref(&all), &dj());
+    for bad in [
+        " (readlink: ",
+        " (stat: ",
+        " (opendir: ",
+        " (-e ",
+        " (+e ",
+        " (path ",
+    ] {
+        assert!(!doc.contains(bad), "{bad}: {doc}");
+    }
+    assert!(doc.contains("\"name\":\"/fx/d (deleted)\""), "{doc}");
+    // The table and -F still print the whole.
+    let f = fields::render(&[all], false, None, TcpInfoFlags::DEFAULT, Escaper::UNIX);
+    assert!(
+        f.contains("n/m/g (+e /m)\n") && f.contains("n/proc/1/cwd (readlink: Permission denied)\n"),
+        "{f}"
+    );
+}
+
+/// Whatever the rows, a JSON key is printed exactly when `-F` prints its
+/// letter, with the same value source: the renderers share their row
+/// predicates. The measured exceptions: a blank access or lock (`-F` prints
+/// a space, JSON no key), name (JSON's is the base, and none for NOFD), and
+/// tcp_info, which JSON prints, maybe empty, on every row with a TCP/TPI
+/// record.
+#[test]
+fn json_keys_follow_the_dash_f_letters() {
+    use lsof_core::{Protocol, TcpState};
+    let mut rows = Vec::new();
+    for p in sample_processes()
+        .into_iter()
+        .chain(packet_row())
+        .chain(tcp_info_fixture())
+    {
+        rows.extend(p.files);
+    }
+    let mut tcp = jrow(
+        lsof_core::FdType::Handle(39),
+        lsof_core::FileType::Ipv4,
+        "a:1",
+    );
+    tcp.node = Some("TCP".into());
+    tcp.device = Some("1".into());
+    tcp.socket = jsock(Protocol::Tcp, Some(TcpState::Listen.into()), Some((1, 2)));
+    rows.push(tcp);
+    let mut raw = jrow(
+        lsof_core::FdType::Handle(48),
+        lsof_core::FileType::Socket("raw"),
+        "r",
+    );
+    raw.node = Some("9".into());
+    raw.fs_device = Some(9);
+    rows.push(raw);
+    let mut unix = jrow(
+        lsof_core::FdType::Handle(37),
+        lsof_core::FileType::Unix,
+        "u",
+    );
+    unix.node = Some("8".into());
+    unix.device = Some("0x1".into());
+    unix.socket = jsock(
+        Protocol::Other("unix"),
+        Some(lsof_core::UnixState::Listen.into()),
+        None,
+    );
+    rows.push(unix);
+    let mut dev = jrow(
+        lsof_core::FdType::Handle(45),
+        lsof_core::FileType::Chr,
+        "/dev/null",
+    );
+    dev.fs_device = Some(5);
+    dev.rdev = std::num::NonZeroU32::new(0x103);
+    dev.links = Some(1);
+    dev.file_flags = Some(1);
+    dev.access = lsof_core::AccessMode::Write;
+    rows.push(dev);
+    let keys = [
+        ('f', "fd"),
+        ('a', "access"),
+        ('l', "lock"),
+        ('t', "type"),
+        ('d', "device"),
+        ('D', "device_number"),
+        ('r', "raw_device"),
+        ('s', "size"),
+        ('o', "offset"),
+        ('i', "inode"),
+        ('k', "nlink"),
+        ('P', "protocol"),
+        ('G', "flags"),
+    ];
+    let every: Vec<char> = keys.iter().map(|k| k.0).chain(['T']).collect();
+    let tcp_all = dj().tcp_show;
+    for f in rows {
+        let p = jproc(vec![f.clone()]);
+        let ff = fields::render_with_offset_digits(
+            std::slice::from_ref(&p),
+            false,
+            Some(&every),
+            tcp_all,
+            Escaper::UNIX,
+            0,
+            FileFlags::Names,
+        );
+        let j = json::render_lines(
+            &[p],
+            &json::JsonOpts {
+                only: Some(&every),
+                ..dj()
+            },
+        );
+        for (letter, key) in keys {
+            let field = ff.lines().find(|l| l.starts_with(letter));
+            let shown = match field {
+                Some(l) if matches!(letter, 'a' | 'l') => l != format!("{letter} "),
+                Some(_) => true,
+                None => false,
+            };
+            assert_eq!(
+                shown,
+                j.contains(&format!("\"{key}\":")),
+                "{letter}/{key}: {ff:?} {j:?}"
+            );
+        }
+        // Where -F prints any T token, JSON has a tcp_info object.
+        if ff.lines().any(|l| l.starts_with('T')) {
+            assert!(j.contains("\"tcp_info\":{"), "{ff:?} {j:?}");
+        }
+    }
 }

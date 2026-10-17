@@ -47,7 +47,7 @@ enum RowKey {
 
 /// Attach `-T` queue/window stats to a socket row as structured
 /// [`TcpExtInfo`] — the table renderer formats the `(Win=) (QR=) (QS=)`
-/// suffix from it, and the machine formats emit `-F` `T` tokens / JSON keys
+/// suffix from it, and the machine formats emit `-F` `T` tokens / JSON `tcp_info` members
 /// (the NAME string itself stays clean). No-op for non-TCP rows and
 /// non-established connections. `-Ts` needs nothing here — state is already
 /// on the row.

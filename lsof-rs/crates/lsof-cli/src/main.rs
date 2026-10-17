@@ -149,8 +149,8 @@ OUTPUT:
     -o [n]        an OFFSET column (0t<decimal>, 0x<hex> past n digits,
                   default 8); -o <n> alone sets the digit limit and keeps
                   SIZE/OFF
-    -H            human-readable sizes in the SIZE column (2.0M); -F and the
-                  JSON forms keep bytes
+    -H            human-readable sizes in the SIZE column (2.0M); -F, -J
+                  and -j keep bytes
     -t            terse: PIDs only
     -E            (Windows) pipe endpoint info: append peer server/client
                   PID+command to pipe NAMEs (GetNamedPipe*ProcessId)
@@ -165,8 +165,8 @@ OUTPUT:
     -V            verbose: report inaccessible / unmatched search items
     -F [fields]   field (machine-readable) output; 0 = NUL terminators;
                   -F ? lists the field letters
-    -J            aggregated JSON object
-    -j            JSON Lines (one object per file)
+    -J            one JSON object, the C's schema; -F selects its fields
+    -j            JSON Lines, one object per file (-J's keys, flattened)
     -r [delay]    repeat every <delay>s (default 15) until interrupted
     +c <n>        cap COMMAND column width at <n> characters
 
@@ -1095,7 +1095,7 @@ fn main() {
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
-        // host (DIVERGENCES 30). `-F` and JSON still build their text first.
+        // host (DIVERGENCES 30). JSON is written a process at a time; `-F` still builds its text first.
         let stdout = std::io::stdout();
         let mut sink = std::io::BufWriter::new(stdout.lock());
         let written = match &format {
@@ -1129,12 +1129,20 @@ fn main() {
                 )
                 .as_bytes(),
             ),
-            Format::Json => {
-                let mut s = json::render_aggregated(&procs);
-                s.push('\n');
-                sink.write_all(s.as_bytes())
+            Format::Json(j) => {
+                let opts = json::JsonOpts {
+                    only: j.only.as_deref(),
+                    tcp_show: j.tcp_show,
+                    file_flags: j.file_flags,
+                    numeric_ids: selection.numeric_ids,
+                    version: env!("CARGO_PKG_VERSION"),
+                };
+                if j.lines {
+                    json::write_lines(&mut sink, &procs, &opts)
+                } else {
+                    json::write_aggregated(&mut sink, &procs, &opts)
+                }
             }
-            Format::JsonLines => sink.write_all(json::render_lines(&procs).as_bytes()),
         };
         // `-V`'s lines follow the listing, on the same stream, as the C's do.
         // `-Q` does not mute them: it changes only the exit status, as the

@@ -112,8 +112,10 @@ fn json_output_is_shaped() {
 
     let out = lsof(&["-nP", &format!("-iTCP:{port}"), "-J"]);
 
+    // The C's schema (2.0.0): the envelope, the protocol from NODE, the state
+    // in tcp_info, and the port in the socket's name.
     assert!(
-        out.trim_start().starts_with("{\"processes\":["),
+        out.trim_start().starts_with("{\"lsof_version\":"),
         "expected JSON object:\n{out}"
     );
     assert!(
@@ -121,8 +123,12 @@ fn json_output_is_shaped() {
         "TCP protocol missing:\n{out}"
     );
     assert!(
-        out.contains(&format!("{port}")),
-        "port {port} missing:\n{out}"
+        out.contains("\"tcp_info\":{\"state\":\"LISTEN\""),
+        "LISTEN state missing:\n{out}"
+    );
+    assert!(
+        out.contains(&format!(":{port}\"")),
+        "port {port} missing from name:\n{out}"
     );
 
     drop(listener);

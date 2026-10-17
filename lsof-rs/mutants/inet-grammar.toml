@@ -255,7 +255,7 @@ new = ''''''
 name = "udplite-not-annotated"
 rule = "a UDP-Lite row has the TCP/TPI separator and queues (112)"
 [[mutant.edit]]
-file = "crates/lsof-core/src/render/table.rs"
+file = "crates/lsof-core/src/render/mod.rs"
 old = '''        Protocol::Tcp | Protocol::Udp | Protocol::UdpLite
     ) || f.file_type == FileType::Unix;'''
 new = '''        Protocol::Tcp | Protocol::Udp

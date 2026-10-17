@@ -14,7 +14,7 @@ in both privilege modes, on real hardware.
 
 Example outputs below are **representative** (real PIDs/paths will differ). A
 case passes if the shape matches and the cross-check agrees. In builds after
-1.0.1 (not in a release yet) the table is laid out as the C lays it out: COMMAND is cut to nine characters
+1.0.1 (2.0.0, not tagged yet) the table is laid out as the C lays it out: COMMAND is cut to nine characters
 (`explorer.`, `powershel`) and columns are right-aligned, which the older
 samples here do not show (DIVERGENCES 3, 35).
 
@@ -114,7 +114,8 @@ python   9012 DOMAIN\alice  unk IPv4              TCP  *:8765 (LISTEN)
 **Pass:** the PID lsof-rs reports for port 8765 equals
 `(Get-NetTCPConnection -LocalPort 8765).OwningProcess` and the `netstat -ano`
 PID; `STATE` matches (`LISTEN`/`ESTABLISHED`/…); `-i6` returns only `IPv6`
-rows; `-J` parses as JSON with `protocol":"TCP"` and `"state":"LISTEN"`. (The FD
+rows; `-J` parses as JSON with `"protocol":"TCP"` and `"tcp_info":{"state":"LISTEN"`
+(the C's schema since 2.0.0; the port is in `name`). (The FD
 shows `unk` — the socket handle value isn't in the MIB table; this is expected.)
 
 ---

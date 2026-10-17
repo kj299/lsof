@@ -16,7 +16,8 @@ elevation blind spot) with the per-release checkpoint that covers it.
 
 - The **CLI option surface** (every switch in `lsof -h`) and the **machine
   formats** (`-F` field codes, `-J`/`-j` JSON shapes) are stable — a breaking
-  change to any of them requires a major bump.
+  change to any of them requires a major bump. (2.0.0 is that bump: `-J`/`-j`
+  print the C's schema, DIVERGENCES 91.)
 - The platform-limit gates recorded in
   [`research-roadmap.md`](research-roadmap.md) (byte-range locks, socket-FD
   correlation) are **accepted non-goals**, not blockers. 1.0 does not wait for

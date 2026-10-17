@@ -75,7 +75,8 @@ independent code and per-OS "dialect" backends:
 - ✅ **Phase 0** — workspace, `Backend` trait, least-privilege scaffolding, CI.
 - ✅ **Phase 1** — process + owner enumeration; `-p` / `-c` / `-u` / `-t`.
 - ✅ **Phase 2** — TCP/UDP (v4+v6) with owning PID; `-i [46][tcp|udp][@addr][:port]`,
-  `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`) output. `-i` reads its
+  `-n` / `-P`; table, `-F`, and JSON (`-J` / `-j`, the C's schema since
+  2.0.0) output. `-i` reads its
   spec in the C's grammar and words, and every message that quotes an
   argument escapes it (DIVERGENCES 112); `icmp` and `raw` are this port's
   ETW families, on Windows only.
@@ -175,7 +176,8 @@ match even though the fd selector excluded them.
 and anyone can name a file, so COMMAND and NAME are text a local user chooses.
 lsof-rs prints them the way the C's `safestrprt()` does — `^[` for ESC, `\r`,
 `\t`, `\x7f`, `\xc2\x9b` for the 8-bit CSI — in the table and in `-F`, and
-escapes them per the JSON grammar in `-J`/`-j`, so a process called
+escapes them in `-J`/`-j` as the C's JSON writer does, and DEL, the C1
+controls and U+2028/2029 besides, which the C writes raw (DIVERGENCES 135), so a process called
 `h\x1b[2J` cannot clear the screen of whoever runs `lsof`. The one place
 lsof-rs differs from the C on purpose: on Windows the backslash is the path
 separator and stays `C:\Windows`, where the C would print `C:\\Windows`. The
@@ -310,8 +312,9 @@ keep the parsing honest against a real kernel.
 The parsers of text from outside the process have cargo-fuzz targets under
 [`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
 `/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
-`/etc/passwd` readers; the Windows backend's name parsers and PEB walk; and the
-escaper that every one of them feeds. Four have none, and
+`/etc/passwd` readers; the Windows backend's name parsers and PEB walk; the
+escaper that every one of them feeds; and the JSON renderer (`render_json`),
+which must print one valid line per file and decode back to what it was given. Four have none, and
 [`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the ETW payload parsers, the
 path speller (`readlink::resolve_with`), the `/etc/passwd` name lookup behind
 `-u NAME`, and the bounded helper's frame decoders. The contract is

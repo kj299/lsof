@@ -197,6 +197,7 @@ fn make_file(
         node: Some(proto.as_str().to_string()),
         links: None,
         socket: Some(Box::new(sock)),
+        name_addition: None,
     }
 }
 

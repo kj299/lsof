@@ -378,7 +378,7 @@ name = "errors-after-the-table"
 rule = "an end-of-parse error found before the -e check is printed before the table it reads (m9)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''            for e in errors.drain(..) {
+old = '''            for e in early.drain(..).chain(errors.drain(..)) {
                 fs.tell(&format!("lsof: {e}"));
                 told = true;
             }'''

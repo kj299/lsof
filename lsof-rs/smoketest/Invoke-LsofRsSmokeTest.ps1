@@ -479,7 +479,11 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Test-Case 'json-aggregated-J' 'render/-J' {
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-J') 'J'
         $j = $r.Out | ConvertFrom-Json
+        # The C's schema since 2.0.0: the version at the top, a socket's state
+        # in its tcp_info.
+        Assert ($null -ne $j.lsof_version) 'no lsof_version'
         Assert ($null -ne $j.processes) 'no processes array'
+        Assert ($null -ne $j.processes[0].files[0].tcp_info) 'no files[].tcp_info'
     }
     Test-Case 'json-lines-j' 'render/-j' {
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-j') 'jl'
@@ -762,9 +766,9 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Test-Case 'tcp-info-json-dash-T' 'render/-T -J' {
         if (-not $IsAdmin) { Skip 'EStats (window/queue) need Administrator' }
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-Tqw', '-J') 'T-json'
-        Assert-Contains $r.Out '"tcp_window":' '-Tw should emit tcp_window in JSON'
-        Assert-Contains $r.Out '"tcp_queue_recv":' '-Tq should emit tcp_queue_recv'
-        Assert-Contains $r.Out '"tcp_queue_send":' '-Tq should emit tcp_queue_send'
+        Assert-Contains $r.Out '"read_window":' '-Tw should emit tcp_info.read_window in JSON'
+        Assert-Contains $r.Out '"recv_queue":' '-Tq should emit tcp_info.recv_queue'
+        Assert-Contains $r.Out '"send_queue":' '-Tq should emit tcp_info.send_queue'
         $null = $r.Out | ConvertFrom-Json   # throws if the JSON regressed
     }
 
