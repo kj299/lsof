@@ -498,6 +498,10 @@ mod tests {
     /// kept, each directory `stat`ed once. A scan of the entries per row
     /// (the duplicate test as it was) made this 2.5e9 comparisons of paths.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "100,000 rows under the interpreter outlast CI's miri job; a timing test means nothing there"
+    )]
     fn a_long_table_keeps_each_first_row_in_linear_time() {
         let n = 50_000;
         let mut text = String::new();
