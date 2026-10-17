@@ -1,0 +1,372 @@
+# Mutants for "read -i as the C reads it, escape every argument a message
+# quotes, and read raw and UDP-Lite sockets" (DIVERGENCES 112, 108, 121, 122):
+# one per rule, each a plausible way to get that rule wrong. The kill table is
+# this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/inet-grammar.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root: the
+# differential's fixtures RAW (CAP_NET_RAW) and P and DN mount, and it runs in
+# a mount namespace of its own (`unshare -m`). CI runs only --apply-only,
+# which checks that each mutant still fits the code.
+#
+# Run 2026-10-17, as root with --first-kill (in two halves, --only): 32 of
+# 32 killed; rerun whole after the review's five (S1-S3, F3): 37 of 37,
+# 33 by the unit gate and 4 by the differential alone: the
+# UDP-Lite separator and queues (udplite-socket-queues), a raw row taken
+# for an Internet file (raw-socket-is-not-selected-by-dash-i), and
+# /proc/net/udplite unread or read under -X (udplite-socket-*), which no
+# unit test reads from the host.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1800
+
+[[mutant]]
+name = "inet-spec-not-escaped"
+rule = "every -i message quotes the spec escaped, as safestrprt() (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
+    Escaper::for_host().text(arg)'''
+new = '''fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(arg)'''
+
+[[mutant]]
+name = "protocol-in-parentheses-raw"
+rule = "the protocol the C prints raw is escaped too (112, 122)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                shown(token),
+                shown(spec)'''
+new = '''                token,
+                shown(spec)'''
+
+[[mutant]]
+name = "last-bracket-is-the-first"
+rule = "an IPv6 address runs to the LAST ] (strrchr, 112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''inner.rfind(']')'''
+new = '''inner.find(']')'''
+
+[[mutant]]
+name = "all-zero-v6-accepted"
+rule = "[::] is no address (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if ip.is_unspecified() {
+                return Err(unacceptable_address());
+            }
+'''
+new = ''''''
+
+[[mutant]]
+name = "v4-allowed-under-6"
+rule = "an IPv4 address under -i6 is prohibited (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if family == Some(6) {
+                return Err(quoting("IPv4 addresses are prohibited: -i ", spec));'''
+new = '''            if family == Some(7) {
+                return Err(quoting("IPv4 addresses are prohibited: -i ", spec));'''
+
+[[mutant]]
+name = "v6-allowed-under-4"
+rule = "an IPv6 address under -i4 is prohibited (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if family == Some(4) {'''
+new = '''            if family == Some(5) {'''
+
+[[mutant]]
+name = "inherited-family-ignored"
+rule = "a spec with no version takes the bare form's (FnetTy, 112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    } else if sel.inet.all {
+        family = sel.inet.all_family;
+    }'''
+new = '''    }'''
+
+[[mutant]]
+name = "empty-port-entry-skipped"
+rule = "an empty port entry is `invalid service name` (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if c == b',' {
+                        return Err(quoting("invalid service name: -i ", spec));
+                    }'''
+new = '''                    if c == b',' {
+                        at += 1;
+                        continue;
+                    }'''
+
+[[mutant]]
+name = "dangling-dash-accepted"
+rule = "`:1-` is a range ending at 0, below its start (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if !range {
+                end = start;
+            }'''
+new = '''            if !range || end == 0 {
+                end = start;
+            }'''
+
+[[mutant]]
+name = "port-past-65535-refused"
+rule = "a port is the C's int: :99999 is accepted and matches nothing (112, 121)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if end < start {
+                return Err(unacceptable_port());'''
+new = '''            if end < start || end > 65535 {
+                return Err(unacceptable_port());'''
+
+[[mutant]]
+name = "protocol-prefix-matched"
+rule = "the protocol is the whole word up to @ or : (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let is = |name: &str| token.eq_ignore_ascii_case(name);'''
+new = '''    let is = |name: &str| token.to_ascii_lowercase().starts_with(name);'''
+
+[[mutant]]
+name = "maxnwad-off-by-one"
+rule = "MAXNWAD: 100 entries, the 101st refused (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if entries >= MAXNWAD {'''
+new = '''        if entries > MAXNWAD {'''
+
+[[mutant]]
+name = "incomplete-check-dropped"
+rule = "no protocol, address or port is incomplete (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if range.is_none() && proto.is_none() && host.is_none() {'''
+new = '''        if range.is_none() && proto.is_none() && host.is_none() && spec.len() > 9999 {'''
+
+[[mutant]]
+name = "empty-spec-read-as-bare"
+rule = "`-i ''` is a spec, not the bare form (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    parse_inet(&mut sel, spec.as_deref())?;'''
+new = '''                    parse_inet(&mut sel, spec.as_deref().filter(|s| !s.is_empty()))?;'''
+
+[[mutant]]
+name = "leading-zero-octet-refused"
+rule = "isIPv4addr reads a leading zero as decimal (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {'''
+new = '''        if part.is_empty() || part.starts_with('0') || !part.bytes().all(|b| b.is_ascii_digit()) {'''
+
+[[mutant]]
+name = "icmp-accepted-on-linux"
+rule = "icmp is the Windows port's ETW family alone (108, 112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    } else if cfg!(windows) && is("icmp") {'''
+new = '''    } else if is("icmp") {'''
+
+[[mutant]]
+name = "plus-c-quotes-the-value"
+rule = "+c not followed by width number quotes nothing (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        return Err("+c not followed by width number".to_string());'''
+new = '''                        return Err(format!(
+                            "+c not followed by width number: {}",
+                            value.unwrap_or_default()
+                        ));'''
+
+[[mutant]]
+name = "plus-c-not-atoi"
+rule = "+c 1x is atoi()'s 1 (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        &v[..v.bytes().take_while(u8::is_ascii_digit).count()]'''
+new = '''                        if v.bytes().all(|b| b.is_ascii_digit()) { v } else { "" }'''
+
+[[mutant]]
+name = "c-length-not-flags-2"
+rule = "the -c length message is safestrprt(..., 2): a space is \\x20 (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        Escaper::for_host().text_spaced(name),'''
+new = '''                        shown(name),'''
+
+[[mutant]]
+name = "d-mixture-raw"
+rule = "the -d mixture's item is escaped, where the C prints it raw (122)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                None => shown(body).into_owned(),'''
+new = '''                None => body.to_string(),'''
+
+[[mutant]]
+name = "s-protocol-raw"
+rule = "the -s messages escape the value, where the C prints it raw (122)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        _ => return Err(format!("unknown -s protocol: \"{}\"", shown(value))),'''
+new = '''        _ => return Err(format!("unknown -s protocol: \"{}\"", value)),'''
+
+[[mutant]]
+name = "text-spaced-keeps-the-space"
+rule = "safestrprt(..., 2) escapes a space (112)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''        ' ' if mode != Mode::Text => 4,'''
+new = '''        ' ' if mode == Mode::Command => 4,'''
+
+[[mutant]]
+name = "needs-etw-for-udplite"
+rule = "UDP-Lite implies no ETW capture (112)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            .any(|s| matches!(s.proto, Some(Protocol::Other("ICMP" | "RAW"))))'''
+new = '''            .any(|s| matches!(s.proto, Some(Protocol::Other(_) | Protocol::UdpLite)))'''
+
+[[mutant]]
+name = "udplite-state-shown"
+rule = "a UDP-Lite row prints no state, (ESTABLISHED) included (112)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            (Protocol::UdpLite, _) => None,
+'''
+new = ''''''
+
+[[mutant]]
+name = "udplite-not-annotated"
+rule = "a UDP-Lite row has the TCP/TPI separator and queues (112)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        Protocol::Tcp | Protocol::Udp | Protocol::UdpLite
+    ) || f.file_type == FileType::Unix;'''
+new = '''        Protocol::Tcp | Protocol::Udp
+    ) || f.file_type == FileType::Unix;'''
+
+[[mutant]]
+name = "udplite-read-under-dash-X"
+rule = "-X gates udplite as it gates udp (dsock.c:3946, 112)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);
+            t.load_inet("/proc/net/udplite6", Protocol::UdpLite, true, want_queues);
+'''
+new = ''''''
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        t.load_raw("/proc/net/raw", false);
+        t.load_packet("/proc/net/packet");'''
+new = '''        t.load_raw("/proc/net/raw", false);
+        t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);
+        t.load_packet("/proc/net/packet");'''
+
+[[mutant]]
+name = "udplite-not-read"
+rule = "/proc/net/udplite is read (112)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);
+'''
+new = ''''''
+
+[[mutant]]
+name = "udplite-kernel-name"
+rule = "a foreign UDP-Lite socket is protocol: UDP-Lite (112)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        (Protocol::UdpLite, false) => "UDP-Lite",
+'''
+new = ''''''
+
+[[mutant]]
+name = "raw-typed-ipv4"
+rule = "a raw socket is typed raw (108)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                    file_type: FileType::Socket(if v6 { "raw6" } else { "raw" }),'''
+new = '''                    file_type: if v6 { FileType::Ipv6 } else { FileType::Ipv4 },'''
+
+[[mutant]]
+name = "raw-is-an-internet-file"
+rule = "no -i selects a raw socket (108)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''        self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6)'''
+new = '''        (self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6))
+            || self.file_type == FileType::Socket("raw")'''
+
+[[mutant]]
+name = "raw-kernel-name-icmp"
+rule = "a foreign raw ICMP socket is protocol: RAW (108)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                    kernel_proto: if v6 { "RAWv6" } else { "RAW" },'''
+new = '''                    kernel_proto: if v6 { "ICMPV6" } else { "ICMP" },'''
+
+[[mutant]]
+name = "raw-name-without-state"
+rule = "a raw NAME ends st=NN (108)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            let name = format!("{}->{} st={}", f[INET_LOCAL], f[INET_REMOTE], f[INET_STATE]);'''
+new = '''            let name = format!("{}->{}", f[INET_LOCAL], f[INET_REMOTE]);'''
+
+[[mutant]]
+name = "invalid-svc-raw"
+rule = "`invalid service name` quotes the spec escaped (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''return Err(quoting("invalid service name: -i ", spec));'''
+new = '''return Err(format!("invalid service name: -i {spec}"));'''
+
+[[mutant]]
+name = "octet-wrap"
+rule = "an IPv4 octet's digits saturate, never wrap to a valid octet (121)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            v.saturating_mul(10).saturating_add(u32::from(b - b'0'))'''
+new = '''            v.wrapping_mul(10).wrapping_add(u32::from(b - b'0'))'''
+
+[[mutant]]
+name = "octet-plain"
+rule = "an IPv4 octet's digits are checked arithmetic, no overflow panic (121)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            v.saturating_mul(10).saturating_add(u32::from(b - b'0'))'''
+new = '''            v * 10 + u32::from(b - b'0')'''
+
+[[mutant]]
+name = "entries-max1"
+rule = "a spec with no port is one entry of the 100 (112)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''s.ports.len().max(1)).sum();'''
+new = '''s.ports.len()).sum();'''
+
+[[mutant]]
+name = "u-long-name-utf8-raw"
+rule = "the -u long-name echo prints a non-ASCII byte as \\xNN, safestrprtn()'s (133)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        if c.is_ascii() {
+                            echo.push(c);'''
+new = '''                        if true {
+                            echo.push(c);'''

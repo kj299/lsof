@@ -12,6 +12,21 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Security
+- **No argument a message quotes reaches the terminal raw** (DIVERGENCES 112,
+  122). `lsof -i $'@[1::\e[2J'` wrote `unterminated [ in: -i @[1::` and a raw
+  ESC byte to stderr; so did every `-i` refusal, and `+c`, `-r` and `-c`'s.
+  `-i` is now read as the C's `enter_network_address()` reads it, in its
+  order and words, the spec quoted as its `safestrprt()` quotes it:
+  `unacceptable Internet address in: -i @[1::^[[2J`, byte for byte (59 of 67
+  malformed specs give the C's first line; the rest are names lsof-rs does
+  not resolve, 38, and a protocol the C prints raw). Every message that
+  quotes an argument goes through one constructor that escapes it, the parts
+  the C prints raw too: `-i`'s protocol, host and service names, an option
+  letter, `-K`, `-s`, the `-c` conflict and the `-d` mixture. The `-c`
+  length message is the C's `safestrprt(…, 2)`, a space `\x20`. A property
+  test runs every option letter under both prefixes, its value attached and
+  as the next word, with hostile values, and the `parse_args` fuzz target
+  checks every error it reaches: none holds a control character.
 - **`-i` alone reads no mount table and starts no helper, and no run `stat`s
   an autofs or an `-e` mount** (DIVERGENCES 110). lsof-rs read the table on
   every run but `-f`, so a mount that did not answer cost `lsof -i :22` its
@@ -73,6 +88,20 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   where it took 2.48 s (the C 0.86 s, `-O` 0.13 s).
 
 ### Added
+- **UDP-Lite sockets** (`/proc/net/udplite` and `udplite6`), as the C reads
+  them: an `IPv4`/`IPv6` row with NODE `UDPLITE`, never a state printed, its
+  number kept for `-s TCP:` and its queues for `-T q`; `-i udplite` selects
+  them, `-i udp` does not, and `-X` leaves them unread, as it does `udp`; in
+  another network namespace, `protocol: UDP-Lite`. A bound one was `SOCK
+  socket:[N]`, and `-i udplite` was refused. An unbound one is in no table,
+  so it stays `SOCK socket:[N]` where the C prints `sock … protocol:
+  UDP-Lite` from `system.sockprotoname` (DIVERGENCES 22, as an unbound UDP
+  socket).
+- **Differential fixtures RAW, UDPL and NSRAW**: raw ICMP and `IPPROTO_RAW`
+  sockets (CAP_NET_RAW), a bound and a connected UDP-Lite socket
+  (`{UDPLPORT}`), and a raw ICMP and a UDP-Lite socket in a user and network
+  namespace of their own; 50 new cases with the `-i` grammar's, and
+  `mutants/inet-grammar.toml`.
 - **`+e <fs>`**, as the C reads it (DIVERGENCES 88): exempt the file system
   from `stat`s like `-e`, its path taken as typed, and the mount's directory
   and source not read through `Readlink()`; a file there says `(+e PATH)`. It
@@ -127,6 +156,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   finish; `mutants/safefs.toml`.
 
 ### Changed
+- **`lsof-core`**: `Protocol::UdpLite` (`UDPLITE`); `InetSpec::ports` is
+  `Vec<(u32, u32)>`, the C's `int` and not a port; `Escaper::text_spaced`,
+  the C's `safestrprt(…, 2)`; `FileType::Socket` carries `raw` and `raw6`
+  too; `InetFilter::needs_etw` is true for `ICMP` and `RAW` alone.
 - **`lsof-core`'s `Backend` trait**: `mounts(sources, fs)` is
   `mount_table(&MountRequest, &SafeFs) -> MountTable`, the table as the C's
   `readmnt()` leaves it (`MountEntry` with `device: Option<u64>`, `None` for
@@ -204,6 +237,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   link to a renamed or removed item fails the build.
 
 ### Fixed
+- **A raw socket is the C's `raw` row** (DIVERGENCES 108): TYPE `raw`
+  (`raw6`), DEVICE blank, the inode in NODE, NAME `/proc/net/raw`'s own
+  `00000000:0001->00000000:0000 st=07`, `-F` `traw … i<inode>`, and `protocol:
+  RAW` in another namespace. It was `IPv4 … ICMP *:0`, and bare `-i` and `-i
+  icmp` listed it, where the C lists it under neither: on Linux `-i icmp` and
+  `-i raw` are `unknown protocol name`, as in the C (on Windows they stay the
+  ETW families). A socket held in another namespace over IPv6 is named by the
+  kernel's IPv6 protocol (`TCPv6`, `UDPv6`), which was the IPv4 one.
+- **`-i` takes what the C takes and refuses what it refuses** (DIVERGENCES
+  112, 121, 38). Accepted now: `udplite`, a port past 65535 (`:99999`, which
+  matches nothing), `:0-`, `:80,`, IPv4 octets with leading zeros
+  (`@127.000.000.001`, decimal), and a v4-mapped IPv6 address, which is that
+  IPv4 address. Refused now, each in the C's words: `@`, `:`, `TCP:`, `-i
+  ''`, `@0.0.0.0` with nothing else, `@[]` and `@[::]`, an address of the
+  version the spec (or a bare `-i4`/`-i6` before it) excludes, an empty port
+  entry, a protocol that is not the whole word (`tcpx`), and a 101st address
+  entry. A listener's `0.0.0.0:0` far end is no port 0 any more (`-i :0-`
+  had listed every listener). `+c 1x` is `+c 1`, as the C's `atoi()` reads
+  it, and a `+c` with no number says `+c not followed by width number`.
 - **The mount table is read as the C reads it** (DIVERGENCES 86, 87, 110,
   113). A mount directory that cannot be `stat`ed, or whose links
   `Readlink()` gives up on, is warned of in the C's words (`WARNING: can't

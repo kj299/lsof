@@ -172,8 +172,11 @@ pub struct InetSpec {
     pub family: Option<u8>,
     /// Restrict to these port ranges (inclusive), local or remote; empty is
     /// any port. `:22,80` and `:1-1024` are both lists of ranges here, as in
-    /// the C's `sport`/`eport`.
-    pub ports: Vec<(u16, u16)>,
+    /// the C's `sport`/`eport`. Wider than a port, as the C's `int`s are: it
+    /// takes `:99999` and `:1-65536`, and a range above 65535 matches nothing
+    /// (measured). Where the C's `int` wraps (`:4294967376` is port 80) the
+    /// value saturates here instead, and matches nothing (DIVERGENCES 121).
+    pub ports: Vec<(u32, u32)>,
     /// Restrict to this address, local or remote. The C compares the address
     /// bytes, so this is an exact comparison — never a substring match, which
     /// let `@127.0.0.1` match `127.0.0.10`.
@@ -184,11 +187,12 @@ impl InetFilter {
     /// True when a requested protocol is only visible through the ETW AFD
     /// capture — RAW and ICMP have no IP Helper table — so `-iRAW`/`-iICMP`
     /// must imply the (Administrator-only) capture the way `-U` does, or the
-    /// filter would silently match nothing.
+    /// filter would silently match nothing. Those two only: UDP-Lite, the
+    /// C's third `-i` protocol, is a table Linux reads and no ETW family.
     pub fn needs_etw(&self) -> bool {
         self.specs
             .iter()
-            .any(|s| matches!(s.proto, Some(Protocol::Other(_))))
+            .any(|s| matches!(s.proto, Some(Protocol::Other("ICMP" | "RAW"))))
     }
 
     /// A bare `-i` (`family` `None`), `-i4` or `-i6`. The C's rule for
@@ -247,8 +251,14 @@ impl InetSpec {
         }
         // The C tests each end of the connection in turn, and the address and
         // the port must match on the SAME end (`is_nw_addr()` per address).
+        // An end whose address and port are both zero is no end to it
+        // (`dsock.c`: `if (tp->faddr || tp->fport) fa = …; else fa = NULL`),
+        // so a listener's `0.0.0.0:0` far end is not port 0: measured, `-i
+        // :0-` selects no listener.
         let end_matches = |a: Option<std::net::SocketAddr>| -> bool {
-            let Some(a) = a else { return false };
+            let Some(a) = a.filter(|a| !a.ip().is_unspecified() || a.port() != 0) else {
+                return false;
+            };
             if let Some(h) = self.host {
                 if a.ip() != h {
                     return false;
@@ -258,7 +268,7 @@ impl InetSpec {
                 || self
                     .ports
                     .iter()
-                    .any(|&(lo, hi)| (lo..=hi).contains(&a.port()))
+                    .any(|&(lo, hi)| (lo..=hi).contains(&u32::from(a.port())))
         };
         if self.host.is_none() && self.ports.is_empty() {
             return true;
@@ -3530,13 +3540,30 @@ mod tests {
         }
     }
 
-    fn spec(text: &str, ports: &[(u16, u16)], host: Option<&str>) -> InetSpec {
+    fn spec(text: &str, ports: &[(u32, u32)], host: Option<&str>) -> InetSpec {
         InetSpec {
             text: text.into(),
             ports: ports.to_vec(),
             host: host.map(|h| h.parse().unwrap()),
             ..Default::default()
         }
+    }
+
+    /// Port 0 is a port the C compares, but an end that is `0.0.0.0:0` is
+    /// no end to it: a listener's far end, which the kernel writes as zero,
+    /// is not selected by `-i :0` (measured, `-i :0-` against a host's
+    /// listeners), while a remote at port 0 of a real address would be.
+    #[test]
+    fn an_all_zero_end_is_no_end_to_a_port_spec() {
+        let listener = tcp(3, 8080, Some("0.0.0.0:0"), crate::TcpState::Listen);
+        let peer = tcp(4, 8080, Some("10.0.0.1:0"), crate::TcpState::Established);
+        let zero = spec(":0-", &[(0, 0)], None);
+        assert!(!zero.matches(&listener));
+        assert!(zero.matches(&peer));
+        assert!(spec(":8080", &[(8080, 8080)], None).matches(&listener));
+        // Past 65535 nothing matches: the C's `int`, which lsof-rs saturates.
+        assert!(!spec(":99999", &[(99999, 99999)], None).matches(&listener));
+        assert!(spec(":1-65536", &[(1, 65536)], None).matches(&listener));
     }
 
     #[test]

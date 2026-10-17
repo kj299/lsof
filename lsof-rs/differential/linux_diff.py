@@ -86,6 +86,13 @@ ledger — those are the kit's, on purpose.
   unavailable and its cases are skipped by name, not failed:
   fixture J  a TCP listener in its own network namespace (CAP_SYS_ADMIN)
   fixture K  AF_PACKET sockets in this namespace (CAP_NET_RAW)
+  fixture RAW a raw ICMP and a raw IPPROTO_RAW socket in this namespace,
+             typed `raw` and never selected by `-i` (CAP_NET_RAW)
+  fixture UDPL a UDP-Lite socket bound to 127.0.0.1:{UDPLPORT} and one
+             connected to it (a kernel with UDP-Lite)
+  fixture NSRAW a raw ICMP and a bound UDP-Lite socket in a foreign user and
+             network namespace, named by the kernel's protocol names
+             (unprivileged user namespaces, and UDP-Lite)
   fixture L  a packet socket, with a mapped ring, and two AF_UNIX sockets in
              a foreign user, network and mount namespace (unprivileged user
              namespaces)
@@ -1405,6 +1412,102 @@ def userns_socket_holder(work: str) -> Fixture:
     )
 
 
+def raw_holder(work: str) -> Fixture:
+    """Raw sockets in THIS network namespace -- the `raw` row (DIVERGENCES 108).
+
+    One `IPPROTO_ICMP` and one `IPPROTO_RAW`, the two a host most often holds
+    (ping, a routing daemon). The C types each `raw`, leaves DEVICE blank, puts
+    the inode in NODE and names it from `/proc/net/raw`'s own text
+    (`00000000:0001->00000000:0000 st=07`), and no `-i` selects it, while
+    `-i icmp` and `-i raw` are `unknown protocol name`. A process of its own,
+    since fixture K's cases list every fd K holds.
+
+    `SOCK_RAW` needs CAP_NET_RAW, as K's packet sockets do; without it the
+    fixture is unavailable and its cases are skipped by name.
+    """
+    rdir = os.path.join(work, "raw")
+    os.makedirs(rdir)
+    py = (
+        "import os,socket,time\n"
+        "i=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP)\n"
+        "r=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_RAW)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % rdir
+    )
+    return Fixture(
+        "RAW(raw sockets)",
+        [sys.executable, "-c", py],
+        cwd=rdir,
+        expect_fds=5,  # 0,1,2 + raw ICMP, raw IPPROTO_RAW
+        optional=True,
+    )
+
+
+def udplite_holder(work: str) -> Fixture:
+    """UDP-Lite sockets, bound and connected -- `UDPLITE` rows.
+
+    The C reads `/proc/net/udplite` as it reads `udp` (`get_tcpudp(…, 2, …)`):
+    an `IPv4` row with NODE `UDPLITE`, never a state printed (a connected one
+    has no `(ESTABLISHED)`), its number kept for `-s TCP:`, queues for `-T q`,
+    and `-i udplite` selects it where `-i udp` does not. fd 3 is bound to
+    127.0.0.1 and publishes its port ({UDPLPORT}); fd 4 is connected to it;
+    fd 5 is never bound, so it is in no table and the C names it from
+    `system.sockprotoname`, `sock … protocol: UDP-Lite` (DIVERGENCES 22).
+
+    Needs no privilege, but a kernel with UDP-Lite (`IPPROTO_UDPLITE`, 136):
+    without one `socket()` fails and the cases are skipped by name.
+    """
+    udir = os.path.join(work, "udplite")
+    os.makedirs(udir)
+    py = (
+        "import os,socket,time\n"
+        "a=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); a.bind(('127.0.0.1',0))\n"
+        "b=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); b.bind(('127.0.0.1',0))\n"
+        "b.connect(a.getsockname())\n"
+        "c=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136)\n"
+        "open(os.path.join(%r,'port'),'w').write(str(a.getsockname()[1]))\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (udir, udir)
+    )
+    return Fixture(
+        "UDPL(udplite)",
+        [sys.executable, "-c", py],
+        cwd=udir,
+        expect_fds=6,  # 0,1,2 + bound, connected, unbound
+        optional=True,
+    )
+
+
+def userns_raw_holder(work: str) -> Fixture:
+    """A raw ICMP and a UDP-Lite socket inside a foreign network namespace.
+
+    Fixture L's shape (`unshare --user --map-root-user --net`, so CAP_NET_RAW
+    inside the namespace and no privilege on the host) for the two protocols
+    this item reads: `/proc/net/*` here misses both, and the C names each from
+    `system.sockprotoname`, the kernel's `struct proto` name -- `RAW` for the
+    raw ICMP socket (lsof-rs had said `ICMP`) and `UDP-Lite` (measured). The
+    UDP-Lite socket is bound (to 0.0.0.0: the namespace's loopback is down),
+    since an unbound one is in no table, and lsof-rs then names it from none
+    (DIVERGENCES 22).
+    """
+    ndir = os.path.join(work, "nsraw")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "i=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP)\n"
+        "u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); u.bind(('0.0.0.0',0))\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ndir
+    )
+    return Fixture(
+        "NSRAW(userns raw and udplite)",
+        ["unshare", "--user", "--map-root-user", "--net", sys.executable, "-c", py],
+        cwd=ndir,
+        expect_fds=5,  # 0,1,2 + raw ICMP, UDP-Lite
+        optional=True,
+    )
+
+
 def socket_path_holder(work: str) -> Fixture:
     """AF_UNIX sockets a path argument finds by the path they are bound to.
 
@@ -2270,6 +2373,21 @@ def owners_ready(w: Fixture) -> dict[str, int]:
     raise FixtureUnavailable(f"{w.name}: credentials not in place within 5s")
 
 
+def udplite_port(fx: Fixture | None) -> str:
+    """The port fixture UDPL's bound socket published, or "0" without UDPL,
+    whose cases are then dropped."""
+    if fx is None:
+        return "0"
+    try:
+        with open(os.path.join(fx.cwd, "port")) as f:
+            port = f.read().strip()
+    except OSError as e:
+        infra(f"fixture UDPL did not publish its port: {e}")
+    if not port.isdigit():
+        infra(f"fixture UDPL published a non-numeric port: {port!r}")
+    return port
+
+
 def make_fixtures(work: str) -> tuple[Fixture, ...]:
     fdir = os.path.join(work, "files")
     os.makedirs(os.path.join(fdir, "sub"))
@@ -2374,6 +2492,9 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     j = netns_listener(work)
     k = packet_holder(work)
     ln = userns_socket_holder(work)
+    raw = raw_holder(work)
+    udpl = udplite_holder(work)
+    nsraw = userns_raw_holder(work)
     o = offset_holder(work)
     x = non_utf8_holder(work)
     z = zombie_holder(work)
@@ -2407,7 +2528,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     af = mt_probe(work, mtwrap, "autofs")
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
-        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af,
+        em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw,
     )
 
 
@@ -2554,7 +2675,7 @@ def run(args) -> int:
             offsets, nonutf8, zombies, unreadable, states, unlinked, devices,
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
-            sockfiles, walkrace, mtprobe, autofsprobe,
+            sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -2565,6 +2686,11 @@ def run(args) -> int:
             "J": (netns, "no CAP_SYS_ADMIN for `unshare --net`"),
             "K": (packet, "no CAP_NET_RAW for AF_PACKET"),
             "L": (userns, "no unprivileged user namespaces for `unshare --user --net`"),
+            "RAW": (rawsocks, "no CAP_NET_RAW for SOCK_RAW"),
+            # UDPL's cases name its port too.
+            "UDPL": (udplite, "no UDP-Lite in this kernel"),
+            "UDPLPORT": (udplite, "no UDP-Lite in this kernel"),
+            "NSRAW": (nsraw, "no unprivileged user namespaces, or no UDP-Lite in this kernel"),
             "U": (unreadable, "no user here that cannot read a non-dumpable process"),
             # M's paths name a plain directory here whether or not M came up; a
             # case naming one without M would MATCH on nothing, so they go with it.
@@ -2661,7 +2787,7 @@ def run(args) -> int:
         started_optional = {k: v[0] for k, v in optional.items()}
         (
             netns, packet, userns, unreadable, mntns, owner, mntsock, exmaps, pathnotes,
-            relnames, userzero, ptyhost, ptyguest, devnode,
+            relnames, userzero, ptyhost, ptyguest, devnode, rawsocks, udplite, nsraw,
         ) = (
             started_optional["J"],
             started_optional["K"],
@@ -2677,6 +2803,9 @@ def run(args) -> int:
             started_optional["PTH"],
             started_optional["PTG"],
             started_optional["DN"],
+            started_optional["RAW"],
+            started_optional["UDPL"],
+            started_optional["NSRAW"],
         )
         # FH is usable once its probe has mounted and stat()ed the server.
         if started_optional["FUSE"] is not None:
@@ -2721,7 +2850,8 @@ def run(args) -> int:
                 e, lk, anon, threads, netns, packet, userns, offsets, nonutf8,
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
-                ptyhost, ptyguest, devnode, optional["WRACE"][0],
+                ptyhost, ptyguest, devnode, optional["WRACE"][0], rawsocks, udplite,
+                nsraw,
             )
             if f is not None
         ]:
@@ -2891,6 +3021,8 @@ def run(args) -> int:
                 "WRACEDIR": os.path.join(walkrace.cwd, "V"),
                 "WRACELINKS": os.path.join(walkrace.cwd, "links"),
                 "PORT": port,
+                # UDPL's bound socket, which its connected one names too.
+                "UDPLPORT": udplite_port(udplite),
             },
         )
         for key, (fx, why) in optional.items():

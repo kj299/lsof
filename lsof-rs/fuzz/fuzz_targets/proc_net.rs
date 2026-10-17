@@ -2,8 +2,8 @@
 
 // Fuzz the Linux backend's `/proc/net/*` parsers (lsof-backend-linux, `net`).
 //
-// These read kernel-written tables — tcp, tcp6, udp, udp6, raw, raw6, packet,
-// unix —
+// These read kernel-written tables — tcp, tcp6, udp, udp6, udplite,
+// udplite6, raw, raw6, packet, unix —
 // and join them to fds by inode. The kernel is trusted to write well-formed
 // text, but the port must not *depend* on that: the AF_UNIX `Path` column is
 // whatever bytes a local process bound, a future kernel may add or reorder
@@ -30,6 +30,8 @@ fuzz_target!(|data: &[u8]| {
         (Protocol::Tcp, true, true),
         (Protocol::Udp, false, false),
         (Protocol::Udp, true, true),
+        (Protocol::UdpLite, false, true),
+        (Protocol::UdpLite, true, false),
     ] {
         let mut t = SocketTable::default();
         t.parse_inet(&text, proto, v6, queues);

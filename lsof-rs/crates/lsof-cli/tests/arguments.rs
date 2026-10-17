@@ -107,6 +107,100 @@ fn a_parse_error_escapes_the_argument_it_quotes() {
     );
 }
 
+/// Run the binary with `args`, from nowhere in particular.
+fn lsof(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .args(args)
+        .output()
+        .expect("run lsof")
+}
+
+/// `out` ended the parse with exactly `message` and the usage hint, nothing
+/// listed, and no raw ESC on stderr.
+fn refused_with(out: &std::process::Output, message: &str) {
+    let err = stderr_of(out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(out.stdout.is_empty(), "{err}");
+    assert_eq!(err, format!("lsof: {message}\nTry 'lsof -h' for usage.\n"));
+    assert!(
+        !out.stderr.contains(&0x1b),
+        "a raw ESC reached stderr: {err:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn an_inet_error_escapes_the_argument_it_quotes() {
+    // DIVERGENCES 112: the C's words, and its `safestrprt()` of the spec.
+    // lsof-rs had said `unterminated [` and written the ESC raw.
+    refused_with(
+        &lsof(&["-i", "@[1::\x1b[2J"]),
+        "unacceptable Internet address in: -i @[1::^[[2J",
+    );
+    refused_with(
+        &lsof(&["-i", ":1\x1b[2J"]),
+        "unacceptable port specification in: -i :1^[[2J",
+    );
+    refused_with(
+        &lsof(&["-i", ""]),
+        "incomplete Internet address specification: -i ",
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn an_inet_name_error_escapes_the_name_too() {
+    // The C prints the protocol, host and service names raw before the
+    // escaped spec (DIVERGENCES 122); lsof-rs escapes both.
+    refused_with(
+        &lsof(&["-i", "a\x1b[2J"]),
+        "unknown protocol name (a^[[2J) in: -i a^[[2J",
+    );
+    refused_with(
+        &lsof(&["-i", ":a\x1b[2J"]),
+        "service names are not resolved: -i :a^[[2J (give the port number)",
+    );
+    refused_with(
+        &lsof(&["-i", "@h\x1b[2J"]),
+        "host names are not resolved: -i @h^[[2J (give the address)",
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn plus_c_quotes_nothing() {
+    // lsof-rs had said `invalid +c width: ` and the value, raw.
+    for args in [&["+c", "\x1b[2J"][..], &["+c"][..], &["+cx"][..]] {
+        refused_with(&lsof(args), "+c not followed by width number");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's stderr"
+)]
+fn the_c_length_message_escapes_the_name() {
+    // `safestrprt(…, 2)`: a space is `\x20` too (measured).
+    refused_with(
+        &lsof(&["-c", "aaaaaaaaaaaaaa\x1b[2J"]),
+        "\"-c aaaaaaaaaaaaaa^[[2J\" length (18) > what system provides (15)",
+    );
+    refused_with(
+        &lsof(&["-c", "a ba ba ba ba ba b"]),
+        "\"-c a\\x20ba\\x20ba\\x20ba\\x20ba\\x20ba\\x20b\" length (18) > what system provides (15)",
+    );
+}
+
 #[test]
 #[cfg_attr(
     miri,

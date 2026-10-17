@@ -11,8 +11,9 @@ C](#open-differences-from-the-c) below.
 
 On **Linux** the first three sections do not apply: a socket row carries its fd
 number, `-U` and raw sockets come from `/proc/net` without Administrator (and
-`--etw` is accepted and ignored), and the lock column is read from
-`/proc/locks`.
+`--etw` is accepted and ignored; a raw socket is the C's `raw` row, and `-i
+icmp` and `-i raw` are refused there, as the C refuses them), and the lock
+column is read from `/proc/locks`.
 
 ## Sockets
 
@@ -44,7 +45,10 @@ non-TCP/UDP socket observed during the capture window as extra `-i` rows,
 `-U` narrows the output to AF_UNIX, and `-iICMP` / `-iRAW` filter to those
 families directly (each of the three implies the capture on its own). All
 need Administrator (ETW session), and only sockets with AFD activity during
-the ~2 s window are seen — it is a sample, not a table dump.
+the ~2 s window are seen — it is a sample, not a table dump. `-iICMP` and
+`-iRAW` are this port's Windows extension: on Linux, as in the C, they are
+`unknown protocol name`, and a raw socket is listed as the C's `raw` row
+(DIVERGENCES 108).
 
 ## Files
 
@@ -239,8 +243,8 @@ meet. Each number is a row there, with the measurement behind it.
   unbound netlink sockets, and a TCP socket that is bound but not listening,
   show as `SOCK` `socket:[N]` (22, waiting on a decision), and an `O_PATH`
   descriptor on a socket file as `SOCK` and its path, where the C says `sock`
-  and `can't identify protocol` (126); a raw socket is `IPv4`/`IPv6` and a
-  bound netlink socket `SOCK`, where the C reads their tables (108, 109); a
+  and `can't identify protocol` (126); a bound netlink socket is `SOCK`,
+  where the C reads its table (109); a
   login name is read from `/etc/passwd` only, so an LDAP or SSSD account can
   be named by its UID alone (39); a file
   named by a path argument and its file system named by another locate both,

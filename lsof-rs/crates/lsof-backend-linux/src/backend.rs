@@ -348,17 +348,14 @@ mod tests {
             f.name.contains(" (readlink: ") || f.name.contains(" (opendir: ")
         };
         // A socket held in another network namespace is a `sock` row named
-        // by its protocol (`protocol: TCP`), with no `SocketInfo`: a socket all
-        // the same, and one any host running a container has.
-        let foreign = |f: &lsof_core::model::OpenFile| {
-            f.file_type == lsof_core::model::FileType::Socket("sock")
-        };
+        // by its protocol (`protocol: TCP`), and a raw socket a `raw` row
+        // named from `/proc/net/raw`, each with no `SocketInfo`: a socket all
+        // the same (`is_socket`), and one any host running a container, or
+        // a ping, has.
         let non_socket: Vec<String> = procs
             .iter()
             .flat_map(|p| p.files.iter())
-            .filter(|f| {
-                f.socket.is_none() && !f.name.starts_with("socket:[") && !unread(f) && !foreign(f)
-            })
+            .filter(|f| !f.is_socket() && !f.name.starts_with("socket:[") && !unread(f))
             .map(|f| format!("{:?} {}", f.fd, f.name))
             .collect();
         assert!(

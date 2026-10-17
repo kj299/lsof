@@ -8,6 +8,7 @@
 //! entries, `+D <dir>` the whole tree beneath it.
 
 use std::ffi::OsString;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use lsof_core::model::tcp_state_table;
 use lsof_core::readlink::ReadlinkError;
@@ -157,6 +158,29 @@ fn digits_value(digits: &str) -> usize {
     })
 }
 
+/// A user-supplied argument as an error message quotes it: escaped, as the
+/// C's `safestrprt(…, 1)` prints it (lib/misc.c:1385-1453), so that no byte
+/// of it can drive the terminal of whoever reads the message. Where the C
+/// prints such an argument raw (`%s`, `%c`: `-i`'s protocol, host and
+/// service, the option letters, `-K`, `-s`, `-c`'s conflict, `-e`, the `-d`
+/// mixture), that is a C-DEFECT not reproduced (DIVERGENCES 112, 122).
+/// Every message that quotes an argument goes through this or [`quoting`],
+/// and `no_option_error_holds_a_control_character` holds every option to it.
+fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
+    Escaper::for_host().text(arg)
+}
+
+/// [`shown`] for an argument kept as bytes (a path `Readlink()` spelt).
+fn shown_bytes(arg: &[u8]) -> std::borrow::Cow<'_, str> {
+    Escaper::for_host().bytes(arg)
+}
+
+/// An error message that ends with the argument it quotes: `message`, then
+/// `arg` [`shown`], the C's `fprintf(stderr, message); safestrprt(arg, …)`.
+fn quoting(message: &str, arg: &str) -> String {
+    format!("{message}{}", shown(arg))
+}
+
 /// Parse the argument list (excluding `argv[0]`), examining a `+d`/`+D`
 /// directory in this process and warning on stderr, and reading no mount
 /// table: what the tests and the fuzz target use. `lsof` itself parses with
@@ -292,7 +316,7 @@ pub fn parse_with(
                 // open, and `+J`/`+j` are errors there too), so the `+`
                 // spelling is refused rather than read as the `-` one.
                 'n' | 'P' | 'r' | 'J' | 'j' if plus => {
-                    return Err(format!("unsupported option: +{c}"))
+                    return Err(quoting("unsupported option: +", &c.to_string()))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
                 // `+D` descends the whole tree. lsof distinguishes them. Both
@@ -325,21 +349,30 @@ pub fn parse_with(
                     j = chars.len();
                     continue;
                 }
-                // `+c <n>`: cap the COMMAND column at n characters.
+                // `+c <n>`: cap the COMMAND column at n characters. The
+                // value is attached or the next word, whatever it is; one
+                // that is missing, empty or opens with anything but a digit
+                // is the C's `+c not followed by width number`, which quotes
+                // nothing (`main.c:316-326`; measured for `+c` last, `+c ''`,
+                // `+c x`, `+cx` and `+c -p`). Then `atoi()`: the leading
+                // digits are the width and the rest is ignored, so `+c 1x`
+                // is `+c 1` (measured), the digits saturating where `atoi()`
+                // wraps (DIVERGENCES 121).
                 'c' if plus => {
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
-                        rest
+                        Some(rest)
                     } else {
                         i += 1;
-                        if i >= args.len() {
-                            return Err("option +c requires a width".to_string());
-                        }
-                        args[i].clone()
+                        args.get(i).cloned()
                     };
-                    let n: usize = value
-                        .parse()
-                        .map_err(|_| format!("invalid +c width: {value}"))?;
+                    let digits = value.as_deref().map_or("", |v| {
+                        &v[..v.bytes().take_while(u8::is_ascii_digit).count()]
+                    });
+                    if digits.is_empty() {
+                        return Err("+c not followed by width number".to_string());
+                    }
+                    let n = digits_value(digits);
                     // The C refuses a width wider than the longest command name
                     // the system can report, rather than accepting a number it
                     // could never fill.
@@ -382,7 +415,8 @@ pub fn parse_with(
                             .starts_with(['c', 'm'])
                         {
                             return Err(format!(
-                                "-r {word}: a repeat count (c) and marker format (m) are not supported"
+                                "-r {}: a repeat count (c) and marker format (m) are not supported",
+                                shown(&word)
                             ));
                         }
                     }
@@ -496,7 +530,10 @@ pub fn parse_with(
                                     'f' => sel.cross_filesystems = true,
                                     'l' => sel.cross_symlinks = true,
                                     other => {
-                                        return Err(format!("unknown cross-over option: {other}"))
+                                        return Err(quoting(
+                                            "unknown cross-over option: ",
+                                            &other.to_string(),
+                                        ))
                                     }
                                 }
                             }
@@ -554,7 +591,10 @@ pub fn parse_with(
                                         flags_hex = c == 'G';
                                     }
                                     other => {
-                                        return Err(format!("unknown file struct option: {other}"))
+                                        return Err(quoting(
+                                            "unknown file struct option: ",
+                                            &other.to_string(),
+                                        ))
                                     }
                                 }
                             }
@@ -629,7 +669,9 @@ pub fn parse_with(
                         None => sel.tasks = TaskMode::Always,
                         // `strcasecmp`, so `-K I` is `-K i`.
                         Some(v) if v.eq_ignore_ascii_case("i") => sel.tasks = TaskMode::Never,
-                        Some(v) => return Err(format!("-K not followed by i (but by {v})")),
+                        Some(v) => {
+                            return Err(format!("-K not followed by i (but by {})", shown(&v)))
+                        }
                     }
                     j = chars.len();
                     continue;
@@ -655,7 +697,7 @@ pub fn parse_with(
                         None | Some("0") => true,
                         Some(list) => {
                             if let Some(bad) = list.chars().find(|f| !field_known(*f)) {
-                                return Err(format!("unknown field: {bad}"));
+                                return Err(quoting("unknown field: ", &bad.to_string()));
                             }
                             false
                         }
@@ -701,9 +743,10 @@ pub fn parse_with(
                     // `-i [spec]`: the spec is attached or the next word, and
                     // a word that opens an option is not one (`main.c`). So
                     // `-i :80` is the spec `:80` — lsof-rs had read it as a
-                    // bare `-i` and a file called `:80`.
-                    let spec = optional_value(&chars, j, &args, &mut i).unwrap_or_default();
-                    parse_inet(&mut sel, &spec)?;
+                    // bare `-i` and a file called `:80`. No spec is the bare
+                    // form; an empty one (`-i ''`) is a spec, and incomplete.
+                    let spec = optional_value(&chars, j, &args, &mut i);
+                    parse_inet(&mut sel, spec.as_deref())?;
                     j = chars.len();
                     continue;
                 }
@@ -767,7 +810,12 @@ pub fn parse_with(
                     j = chars.len();
                     continue;
                 }
-                other => return Err(format!("unsupported option: {prefix}{other}")),
+                other => {
+                    return Err(quoting(
+                        &format!("unsupported option: {prefix}"),
+                        &other.to_string(),
+                    ))
+                }
             }
             j += 1;
         }
@@ -866,12 +914,11 @@ pub fn parse_with(
         }
         let table = table.get_or_insert_with(|| read_table(&sel));
         if !table.entries.is_empty() {
-            let esc = Escaper::for_host();
             for e in sel.exempt_fs.iter().rev() {
                 if !table.entries.iter().any(|m| m.dir == e.path) {
                     errors.push(format!(
                         "\"-e {}\" is not a mounted file system.",
-                        esc.bytes(e.path.as_encoded_bytes())
+                        shown_bytes(e.path.as_encoded_bytes())
                     ));
                 }
             }
@@ -930,7 +977,7 @@ fn enter_exempt(sel: &mut Selection, value: &str, plus: bool, fs: &SafeFs) -> Re
     if !value.starts_with('/') {
         return Err(at.said(format!(
             "-e not followed by a file system path: \"{}\"",
-            at.esc.text(value)
+            shown(value)
         )));
     }
     let path = if plus {
@@ -1100,12 +1147,15 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
                 return Err(String::new());
             }
             let kind = |x: bool| if x { "exclude" } else { "include" };
-            let shown = match range {
+            // The item escaped, where the C prints it raw (`arg.c`,
+            // `enter_fd_lst()`: `%s`), a C-DEFECT not reproduced
+            // (DIVERGENCES 122).
+            let item = match range {
                 Some((lo, hi)) => format!("{lo}-{hi}"),
-                None => body.to_string(),
+                None => shown(body).into_owned(),
             };
             return Err(format!(
-                "{} in an {} -d list: {}{shown}",
+                "{} in an {} -d list: {}{item}",
                 kind(exclude),
                 kind(was),
                 if exclude { "^" } else { "" }
@@ -1129,21 +1179,20 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
 /// `ckfd_range()`: digits on both sides of an item's last `-`, the low end
 /// below the high one. `3-3` is refused, and `1-` is a high end of 0.
 fn fd_range(item: &str, dash: usize) -> Result<(u64, u64), String> {
-    let shown = Escaper::for_host().text(item);
     if dash == 0 {
-        return Err(format!("illegal FD range for -d: {shown}"));
+        return Err(quoting("illegal FD range for -d: ", item));
     }
     let number = |digits: &str| {
         if digits.bytes().all(|b| b.is_ascii_digit()) {
             fd_number(digits, item)
         } else {
-            Err(format!("non-digit in -d FD range: {shown}"))
+            Err(quoting("non-digit in -d FD range: ", item))
         }
     };
     let lo = number(&item[..dash])?;
     let hi = number(&item[dash + 1..])?;
     if lo >= hi {
-        return Err(format!("-d FD range's low >= its high: {shown}"));
+        return Err(quoting("-d FD range's low >= its high: ", item));
     }
     Ok((lo, hi))
 }
@@ -1159,12 +1208,7 @@ fn fd_number(digits: &str, item: &str) -> Result<u64, String> {
             let n = n * 10 + u64::from(b - b'0');
             (n <= INT_MAX).then_some(n)
         })
-        .ok_or_else(|| {
-            format!(
-                "-d FD number exceeds INT_MAX: {}",
-                Escaper::for_host().text(item)
-            )
-        })
+        .ok_or_else(|| quoting("-d FD number exceeds INT_MAX: ", item))
 }
 
 /// The names of FD kinds the C's table has for dialects other than Linux's
@@ -1222,10 +1266,7 @@ fn parse_id_list(value: &str, what: &str) -> Result<Vec<(bool, u32)>, String> {
         };
         let Some(id) = id else {
             // `safestrprt(p, …)`: the whole argument, escaped.
-            return Err(format!(
-                "illegal {what}: {}",
-                Escaper::for_host().text(value)
-            ));
+            return Err(quoting(&format!("illegal {what}: "), value));
         };
         ids.push((excl, id));
         rest = tail;
@@ -1274,10 +1315,21 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                     None => (false, item),
                 };
                 if name.len() > LOGINML {
-                    return Err(format!(
-                        "-u login name > {LOGINML} characters: {}",
-                        Escaper::for_host().text(item)
-                    ));
+                    // The C echoes the item with `safestrprtn()`, which has no
+                    // multibyte path: `é` is `\xc3\xa9` even under C.UTF-8
+                    // (measured), where `shown()` keeps it. Its cut at the
+                    // item's length is not reproduced (DIVERGENCES 133).
+                    let mut echo = String::new();
+                    for c in shown(item).chars() {
+                        if c.is_ascii() {
+                            echo.push(c);
+                        } else {
+                            for b in c.to_string().bytes() {
+                                echo.push_str(&format!("\\x{b:02x}"));
+                            }
+                        }
+                    }
+                    return Err(format!("-u login name > {LOGINML} characters: {echo}"));
                 }
                 let name = if name.is_empty() { "0" } else { name };
                 if excl {
@@ -1299,7 +1351,8 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             }
             if value.starts_with('/') {
                 return Err(format!(
-                    "-c {value}: regular expressions (-c /RE/) are not implemented"
+                    "-c {}: regular expressions (-c /RE/) are not implemented",
+                    shown(value)
                 ));
             }
             let (excl, name) = match value.strip_prefix('^') {
@@ -1308,11 +1361,14 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                 None => (false, value),
             };
             // A name longer than the kernel keeps can never match, and the C
-            // says so rather than accepting it (`lsof_select_process()`).
+            // says so rather than accepting it (`lsof_select_process()`),
+            // quoting the name with `safestrprt(…, 2)`: a space is `\x20`
+            // there, as in COMMAND (`lib/lsof.c:178-182`, measured).
             if let Some(max) = MAX_COMMAND_WIDTH {
                 if name.len() > max {
                     return Err(format!(
-                        "\"-c {name}\" length ({}) > what system provides ({max})",
+                        "\"-c {}\" length ({}) > what system provides ({max})",
+                        Escaper::for_host().text_spaced(name),
                         name.len()
                     ));
                 }
@@ -1328,6 +1384,7 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             // every option is read never finds one. The C then reads on, as
             // after any error in its loop; lsof-rs stops (DIVERGENCES 83).
             if other.iter().any(|o| o == name) {
+                let name = shown(name);
                 return Err(format!("-c^{name} and -c{name} conflict."));
             }
             this.push(name.to_string());
@@ -1497,7 +1554,10 @@ fn parse_tcp_info(letters: &str, plus: bool) -> Result<TcpInfoFlags, String> {
             's' => flags.state = true,
             'w' if HAS_TCP_WINDOW => flags.window = true,
             other => {
-                return Err(format!("unsupported TCP/TPI info selection: {other}"));
+                return Err(quoting(
+                    "unsupported TCP/TPI info selection: ",
+                    &other.to_string(),
+                ));
             }
         }
     }
@@ -1522,14 +1582,14 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
     let proto = match lower.as_deref() {
         Some("tcp:") => "TCP",
         Some("udp:") => "UDP",
-        _ => return Err(format!("unknown -s protocol: \"{value}\"")),
+        _ => return Err(format!("unknown -s protocol: \"{}\"", shown(value))),
     };
     let names = &value[4..];
     if names.is_empty() {
-        return Err(format!("no {proto} state names in: {value}"));
+        return Err(quoting(&format!("no {proto} state names in: "), value));
     }
     if proto == "UDP" {
-        return Err(format!("no UDP state names available: {value}"));
+        return Err(quoting("no UDP state names available: ", value));
     }
     for term in names.split(',') {
         let (exclude, name) = match term.strip_prefix('^') {
@@ -1537,14 +1597,14 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
             None => (false, term),
         };
         if name.is_empty() {
-            return Err(format!("NULL TCP state name in: {value}"));
+            return Err(quoting("NULL TCP state name in: ", value));
         }
         let Some(state) = tcp_state_table()
             .iter()
             .copied()
             .find(|st| st.as_str().eq_ignore_ascii_case(name))
         else {
-            return Err(format!("unknown TCP state name: {name}"));
+            return Err(quoting("unknown TCP state name: ", name));
         };
         let list = if exclude {
             &mut filter.exclude
@@ -1553,132 +1613,266 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
         };
         if list.contains(&state) {
             let which = if exclude { "exclusion" } else { "inclusion" };
-            return Err(format!("duplicate TCP {which}: {name}"));
+            return Err(quoting(&format!("duplicate TCP {which}: "), name));
         }
         list.push(state);
     }
     Ok(())
 }
 
-/// Parse an `-i` spec: `[46][proto][@host][:ports]`. An empty one, or one
-/// that is only `4` or `6`, is the bare form — every Internet file — and
-/// anything else is an address specification of its own (see
-/// [`lsof_core::InetFilter`]).
+/// The most address specifications the C takes, across every `-i`:
+/// `MAXNWAD` (`lib/common.h:359`), counted in its units ([`parse_inet`]).
+const MAXNWAD: usize = 100;
+
+/// Parse an `-i` spec, `[46][proto][@host][:ports]`, as the C's
+/// `enter_network_address()` parses it (`arg.c:1189-1611`), in its order and
+/// with its words. No spec (`-i` alone, or before a word that opens an
+/// option), and one that is only `4` or `6`, is the bare form — every
+/// Internet file; anything else is an address specification of its own (see
+/// [`lsof_core::InetFilter`]), `-i ''` included.
 ///
-/// What the C resolves and lsof-rs does not is refused, not guessed: a host
-/// NAME (`@localhost`) and a service NAME (`:http`). lsof-rs never resolves
-/// names (DIVERGENCES, "Deliberate, and staying"), and it had been reading
-/// both as a pattern that matched nothing (a host) or as no constraint at all
-/// (a service, and a port range) — so `-i:http` listed every Internet file,
-/// measured, where the C lists port 80.
-fn parse_inet(sel: &mut Selection, spec: &str) -> Result<(), String> {
-    let text = spec.to_string();
+/// * A leading `4` or `6` is the spec's version; with none, a bare form given
+///   before lends it its own (`else if (Fnet) ft = FnetTy`).
+/// * The protocol is the whole word up to `@` or `:`, `tcp`, `udp` or
+///   `udplite` in any case: `tcpx` is `unknown protocol name (tcpx)`. `icmp`
+///   and `raw` are the Windows port's own (ETW families) and nothing on
+///   Linux, where the C refuses them (measured; DIVERGENCES 108).
+/// * After `@`, an IPv4 address is the C's `isIPv4addr()` ([`ipv4_addr`]:
+///   decimal, leading zeros allowed); `[` takes the text up to the LAST `]`
+///   as an IPv6 address, never all zero, a v4-mapped one being that IPv4
+///   address; an address of the version the spec excludes is prohibited.
+///   Anything else is a host name, which the C looks up and lsof-rs never
+///   does: refused, not guessed (DIVERGENCES 38). So are the numeric forms
+///   glibc reads without DNS (`@127.1`).
+/// * The ports are `:` and then entries split by `,`: digits, or a range of
+///   them, each entry checked and entered from left to right, so the first
+///   error is the leftmost's. A range's end below its start (`:1-`, `:5-1`)
+///   and anything but digits after the first digit are `unacceptable port
+///   specification`; an empty entry, `invalid service name`. A port past
+///   65535 is no error: it matches nothing (the C's `int`). A service name
+///   is refused as a host name is: `-i:http` had listed every Internet file,
+///   where the C lists port 80.
+/// * A spec with no protocol, no address (or `0.0.0.0`) and no port is
+///   `incomplete`; and past [`MAXNWAD`] entries, counting each port entry as
+///   one and a spec with none as one, as `enter_nwad()` enters them, the
+///   spec that crosses it is refused.
+///
+/// Each message is the C's, quoting the spec as the C does, escaped
+/// ([`quoting`]), and the token in parentheses too, which the C prints raw
+/// (DIVERGENCES 112, 122).
+fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
+    // `main.c:586-593`: no value, or one that opens an option, is `Fnet = 1;
+    // FnetTy = 0`.
+    let Some(spec) = spec else {
+        sel.inet.add_all(None);
+        return Ok(());
+    };
+    let unacceptable_address = || quoting("unacceptable Internet address in: -i ", spec);
+    let unacceptable_port = || quoting("unacceptable port specification in: -i ", spec);
     let mut s = spec;
     let mut family = None;
-    match s.chars().next() {
-        Some('4') => {
-            family = Some(4);
-            s = &s[1..];
+    if let Some(rest) = s.strip_prefix(['4', '6']) {
+        family = Some(if s.starts_with('4') { 4 } else { 6 });
+        if rest.is_empty() {
+            sel.inet.add_all(family);
+            return Ok(());
         }
-        Some('6') => {
-            family = Some(6);
-            s = &s[1..];
-        }
-        _ => {}
-    }
-    if s.is_empty() {
-        sel.inet.add_all(family);
-        return Ok(());
-    }
-    sel.inet.enabled = true;
-    // An address spec with no version of its own takes the bare form's, if
-    // one came before it (`arg.c`: `else if (Fnet) ft = FnetTy`).
-    if family.is_none() && sel.inet.all {
+        s = rest;
+    } else if sel.inet.all {
         family = sel.inet.all_family;
     }
 
-    let low = s.to_ascii_lowercase();
     let mut proto = None;
-    for (name, p) in [
-        ("tcp", Protocol::Tcp),
-        ("udp", Protocol::Udp),
-        // ETW-only families (no IP Helper table): the filter implies the AFD
-        // capture — see InetFilter::needs_etw. `-iICMP` covers v4 + v6 ICMP;
-        // narrow with the `[46]` prefix (`-i6ICMP`), like TCP/UDP.
-        ("icmp", Protocol::Other("ICMP")),
-        ("raw", Protocol::Other("RAW")),
-    ] {
-        if low.starts_with(name) {
-            proto = Some(p);
-            s = &s[name.len()..];
-            break;
-        }
+    if !s.is_empty() && !s.starts_with(['@', ':']) {
+        let end = s.find(['@', ':']).unwrap_or(s.len());
+        let token = &s[..end];
+        proto = Some(inet_protocol(token).ok_or_else(|| {
+            format!(
+                "unknown protocol name ({}) in: -i {}",
+                shown(token),
+                shown(spec)
+            )
+        })?);
+        s = &s[end..];
     }
 
     let mut host = None;
     if let Some(after) = s.strip_prefix('@') {
-        // `[::1]` brackets an IPv6 address, whose colons are not the port's.
-        let (h, rest) = if let Some(inner) = after.strip_prefix('[') {
-            let close = inner
-                .find(']')
-                .ok_or_else(|| format!("unterminated [ in: -i {text}"))?;
-            (&inner[..close], &inner[close + 1..])
+        if after.is_empty() || after.starts_with(':') {
+            return Err(unacceptable_address());
+        }
+        if let Some((octets, rest)) = ipv4_addr(after) {
+            if family == Some(6) {
+                return Err(quoting("IPv4 addresses are prohibited: -i ", spec));
+            }
+            host = Some(IpAddr::V4(octets));
+            s = rest;
+        } else if let Some(inner) = after.strip_prefix('[') {
+            if family == Some(4) {
+                return Err(quoting("IPv6 addresses are prohibited: -i ", spec));
+            }
+            // `strrchr()`: the last `]`, so `[::1]]` is no address.
+            let close = inner.rfind(']').ok_or_else(unacceptable_address)?;
+            // Rust's reading of an IPv6 address is glibc's `inet_pton()`'s:
+            // the two agree on 20,045 strings (measured).
+            let ip: Ipv6Addr = inner[..close].parse().map_err(|_| unacceptable_address())?;
+            if ip.is_unspecified() {
+                return Err(unacceptable_address());
+            }
+            host = Some(match ip.to_ipv4_mapped() {
+                Some(_) if family == Some(6) => {
+                    return Err(quoting("IPv4 addresses are prohibited: -i ", spec))
+                }
+                Some(v4) => IpAddr::V4(v4),
+                None => IpAddr::V6(ip),
+            });
+            s = &inner[close + 1..];
         } else {
-            match after.find(':') {
-                Some(c) => (&after[..c], &after[c..]),
-                None => (after, ""),
-            }
-        };
-        if !h.is_empty() {
-            let ip: std::net::IpAddr = h.parse().map_err(|_| {
-                format!("host names are not resolved: -i {text} (give the address)")
-            })?;
-            // An all-zero address is no constraint at all to the C
-            // (`is_nw_addr()` skips the comparison when every byte is 0).
-            if !ip.is_unspecified() {
-                host = Some(ip);
-            }
+            return Err(quoting("host names are not resolved: -i ", spec) + " (give the address)");
         }
-        s = rest;
     }
+    // An all-zero address is no constraint at all to the C (`is_nw_addr()`
+    // skips the comparison when every byte is 0), and no address to its
+    // incomplete-specification check.
+    let host = host.filter(|ip| !ip.is_unspecified());
 
+    // What every earlier `-i` entered, in `enter_nwad()`'s units.
+    let mut entries: usize = sel.inet.specs.iter().map(|s| s.ports.len().max(1)).sum();
+    let mut enter = |ports: &mut Vec<(u32, u32)>, range: Option<(u32, u32)>| {
+        if range.is_none() && proto.is_none() && host.is_none() {
+            return Err(quoting(
+                "incomplete Internet address specification: -i ",
+                spec,
+            ));
+        }
+        if entries >= MAXNWAD {
+            return Err(quoting(
+                &format!("network address limit ({MAXNWAD}) exceeded: -i "),
+                spec,
+            ));
+        }
+        entries += 1;
+        ports.extend(range);
+        Ok(())
+    };
     let mut ports = Vec::new();
-    if let Some(list) = s.strip_prefix(':') {
-        for part in list.split(',').filter(|p| !p.is_empty()) {
-            let num = |t: &str| -> Result<u16, String> {
-                if t.bytes().all(|b| b.is_ascii_digit()) {
-                    t.parse::<u16>()
-                        .map_err(|_| format!("port out of range in: -i {text}"))
-                } else {
-                    Err(format!(
-                        "service names are not resolved: -i {text} (give the port number)"
-                    ))
+    if s.is_empty() {
+        enter(&mut ports, None)?;
+    } else {
+        let list = match s.strip_prefix(':') {
+            Some(list) if !list.is_empty() => list.as_bytes(),
+            _ => return Err(unacceptable_port()),
+        };
+        // `arg.c:1461-1580`, one entry a pass. A port's digits saturate
+        // where the C's `int` wraps (DIVERGENCES 121).
+        let mut at = 0;
+        while at < list.len() {
+            let (mut start, mut end, mut range) = (0u32, 0u32, false);
+            // The entry's start, and after a `-` the range's end.
+            while let Some(&c) = list.get(at) {
+                if !c.is_ascii_digit() {
+                    // A service name runs to the next `,` and may hold a `-`:
+                    // none at all is the C's `invalid service name`.
+                    if c == b',' {
+                        return Err(quoting("invalid service name: -i ", spec));
+                    }
+                    return Err(quoting("service names are not resolved: -i ", spec)
+                        + " (give the port number)");
                 }
-            };
-            let range = match part.split_once('-') {
-                Some((lo, hi)) => (num(lo)?, num(hi)?),
-                None => {
-                    let p = num(part)?;
-                    (p, p)
+                while let Some(&c) = list.get(at) {
+                    match c {
+                        b',' => break,
+                        b'-' if range => return Err(unacceptable_port()),
+                        b'-' => {
+                            range = true;
+                            break;
+                        }
+                        b'0'..=b'9' => {
+                            let n = if range { &mut end } else { &mut start };
+                            *n = n.saturating_mul(10).saturating_add(u32::from(c - b'0'));
+                            at += 1;
+                        }
+                        _ => return Err(unacceptable_port()),
+                    }
                 }
-            };
-            if range.0 > range.1 {
-                return Err(format!("bad port range in: -i {text}"));
+                match list.get(at) {
+                    None | Some(b',') => break,
+                    // The `-`: the range's end follows, if anything does.
+                    Some(_) => at += 1,
+                }
             }
-            ports.push(range);
+            if !range {
+                end = start;
+            }
+            if end < start {
+                return Err(unacceptable_port());
+            }
+            enter(&mut ports, Some((start, end)))?;
+            // Past the `,` that ended the entry: a trailing one ends the list.
+            at += 1;
         }
-    } else if !s.is_empty() {
-        return Err(format!("unknown protocol name ({s}) in: -i {text}"));
     }
 
+    sel.inet.enabled = true;
     sel.inet.specs.push(lsof_core::InetSpec {
-        text,
+        text: spec.to_string(),
         proto,
         family,
         ports,
         host,
     });
     Ok(())
+}
+
+/// An `-i` protocol, as the C compares it: the whole word, in any case
+/// (`strcasecmp()`, `arg.c:1295-1303`).
+fn inet_protocol(token: &str) -> Option<Protocol> {
+    let is = |name: &str| token.eq_ignore_ascii_case(name);
+    Some(if is("tcp") {
+        Protocol::Tcp
+    } else if is("udp") {
+        Protocol::Udp
+    } else if is("udplite") {
+        Protocol::UdpLite
+    // ETW-only families (no IP Helper table): the filter implies the AFD
+    // capture — see InetFilter::needs_etw. `-iICMP` covers v4 + v6 ICMP;
+    // narrow with the `[46]` prefix (`-i6ICMP`), like TCP/UDP.
+    } else if cfg!(windows) && is("icmp") {
+        Protocol::Other("ICMP")
+    } else if cfg!(windows) && is("raw") {
+        Protocol::Other("RAW")
+    } else {
+        return None;
+    })
+}
+
+/// The C's `isIPv4addr()` (`arg.c:2075-2141`): from a leading digit to `:`
+/// or the end, exactly four decimal octets of at most 255 between three
+/// dots, a leading zero no octal (`0177.0.0.1` is 177.0.0.1, measured). The
+/// address, and what follows it; `None` for anything else, which the C then
+/// takes for a host name. The octets saturate where the C's `int` wraps.
+fn ipv4_addr(s: &str) -> Option<(Ipv4Addr, &str)> {
+    let end = s.find(':').unwrap_or(s.len());
+    let (text, rest) = s.split_at(end);
+    if !text.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    let mut parts = text.split('.');
+    for octet in &mut octets {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let value = part.bytes().fold(0u32, |v, b| {
+            v.saturating_mul(10).saturating_add(u32::from(b - b'0'))
+        });
+        *octet = u8::try_from(value).ok()?;
+    }
+    parts
+        .next()
+        .is_none()
+        .then_some((Ipv4Addr::from(octets), rest))
 }
 
 #[cfg(test)]
@@ -2044,6 +2238,17 @@ mod tests {
             sel(&["-u", &hostile]).unwrap_err(),
             format!("-u login name > 32 characters: {}^[[2J", "a".repeat(30))
         );
+        // `safestrprtn()` has no multibyte path: a printable `é` is its bytes
+        // in hex, as the C prints it under C.UTF-8 (measured), and a C1
+        // control is as `shown()` has it.
+        let accented = format!("{}é\u{9b}b", "a".repeat(30));
+        assert_eq!(
+            sel(&["-u", &accented]).unwrap_err(),
+            format!(
+                "-u login name > 32 characters: {}\\xc3\\xa9\\xc2\\x9bb",
+                "a".repeat(30)
+            )
+        );
     }
 
     /// `-a` with nothing to AND is refused, as the C refuses it (DIVERGENCES
@@ -2315,6 +2520,12 @@ mod tests {
         assert_eq!(sel.inet.specs[0].family, Some(6));
         // An all-zero address constrains nothing, to the C.
         assert_eq!(run(&["-i@0.0.0.0:80"]).0.inet.specs[0].host, None);
+        // No spec is the bare form; an empty one is a spec, and incomplete.
+        assert!(run(&["-i"]).0.inet.all);
+        assert_eq!(
+            parse(vec!["-i".into(), String::new()]).unwrap_err(),
+            "incomplete Internet address specification: -i "
+        );
     }
 
     /// `-i4`, `-i6` and a bare `-i` combine the C's asymmetric way.
@@ -2334,18 +2545,277 @@ mod tests {
     }
 
     /// What the C resolves and lsof-rs does not is refused rather than
-    /// matched wrongly: `-i:http` had listed every Internet file.
+    /// matched wrongly: `-i:http` had listed every Internet file. A host name
+    /// is any address that is not the C's own IPv4 or bracketed IPv6 form,
+    /// numeric shorthand glibc reads without DNS included (DIVERGENCES 38).
     #[test]
     fn names_the_c_would_resolve_are_refused() {
         let err = |a: &str| parse(vec![a.to_string()]).err().unwrap_or_default();
-        assert!(err("-i:http").contains("service names are not resolved"));
-        assert!(err("-i@localhost").contains("host names are not resolved"));
-        assert!(err("-i:70000").contains("out of range"));
-        assert!(err("-i:9-1").contains("bad port range"));
-        assert!(err("-iSCTP").contains("unknown protocol"));
-        assert!(err("-i@[::1").contains("unterminated"));
+        for spec in [
+            ":http", "TCP:http", ":1-http", ":-1", ":1--2", ":x-y", ":80,http",
+        ] {
+            assert_eq!(
+                err(&format!("-i{spec}")),
+                format!("service names are not resolved: -i {spec} (give the port number)")
+            );
+        }
+        for spec in [
+            "@localhost",
+            "@127.1",
+            "@1.2.3",
+            "@1.2.3.4x",
+            "@1.2.3.256",
+            "@0x7f.0.0.1",
+        ] {
+            assert_eq!(
+                err(&format!("-i{spec}")),
+                format!("host names are not resolved: -i {spec} (give the address)")
+            );
+        }
+        // Accepted now, as the C accepts it: a port is the C's `int`.
+        assert!(err("-i:70000").is_empty());
+        assert_eq!(err("-i:9-1"), "unacceptable port specification in: -i :9-1");
+        assert_eq!(err("-iSCTP"), "unknown protocol name (SCTP) in: -i SCTP");
+        assert_eq!(err("-i@[::1"), "unacceptable Internet address in: -i @[::1");
     }
 
+    /// Every `-i` refusal in the C's words, each measured against the C 4.99.6
+    /// under C.UTF-8, the argument escaped as its `safestrprt()` escapes it,
+    /// and the protocol in parentheses too, which the C prints raw
+    /// (DIVERGENCES 112, 122).
+    #[test]
+    fn dash_i_errors_are_the_cs_words_and_escape_the_argument() {
+        let err = |argv: &[&str]| {
+            parse(argv.iter().map(|s| s.to_string()).collect())
+                .err()
+                .unwrap_or_else(|| panic!("{argv:?} must be refused"))
+        };
+        let address = "unacceptable Internet address in: -i ";
+        let port = "unacceptable port specification in: -i ";
+        for (spec, want) in [
+            ("@[1::\x1b[2J", format!("{address}@[1::^[[2J")),
+            ("@", format!("{address}@")),
+            ("@:80", format!("{address}@:80")),
+            ("6@", format!("{address}6@")),
+            ("tcp@", format!("{address}tcp@")),
+            ("tcp@:80", format!("{address}tcp@:80")),
+            ("@[", format!("{address}@[")),
+            ("@[]", format!("{address}@[]")),
+            ("@[::]", format!("{address}@[::]")),
+            ("@[::]:80", format!("{address}@[::]:80")),
+            ("@[zz::1]", format!("{address}@[zz::1]")),
+            ("@[1:2:3]", format!("{address}@[1:2:3]")),
+            ("@[::1]]:80", format!("{address}@[::1]]:80")),
+            ("@[1::\u{9b}", format!("{address}@[1::\\xc2\\x9b")),
+            ("@[1::\u{e9}", format!("{address}@[1::\u{e9}")),
+            (
+                "6@1.2.3.4",
+                "IPv4 addresses are prohibited: -i 6@1.2.3.4".into(),
+            ),
+            (
+                "6@[::ffff:1.2.3.4]",
+                "IPv4 addresses are prohibited: -i 6@[::ffff:1.2.3.4]".into(),
+            ),
+            (
+                "6@[::ffff:0.0.0.0]",
+                "IPv4 addresses are prohibited: -i 6@[::ffff:0.0.0.0]".into(),
+            ),
+            (
+                "4@[::1]",
+                "IPv6 addresses are prohibited: -i 4@[::1]".into(),
+            ),
+            ("4@[", "IPv6 addresses are prohibited: -i 4@[".into()),
+            (":", format!("{port}:")),
+            ("4:", format!("{port}4:")),
+            ("TCP:", format!("{port}TCP:")),
+            ("@1.2.3.4:", format!("{port}@1.2.3.4:")),
+            ("@[::1]x", format!("{port}@[::1]x")),
+            (":1x", format!("{port}:1x")),
+            (":1-", format!("{port}:1-")),
+            (":5-1", format!("{port}:5-1")),
+            (":1-2-3", format!("{port}:1-2-3")),
+            (":1\r", format!("{port}:1\\r")),
+            (":1x,y", format!("{port}:1x,y")),
+            (":,80", "invalid service name: -i :,80".into()),
+            (":80,,81", "invalid service name: -i :80,,81".into()),
+            (":,\x1b[2J", "invalid service name: -i :,^[[2J".into()),
+            (":1,,\x1b", "invalid service name: -i :1,,^[".into()),
+            // An octet's digits saturate where the C's `int` wraps
+            // (4294967297 is 1 to it): too large, so no IPv4 address, and a
+            // host name (DIVERGENCES 121).
+            (
+                "@4294967297.0.0.1",
+                "host names are not resolved: -i @4294967297.0.0.1 (give the address)".into(),
+            ),
+            (
+                "@99999999999.0.0.1",
+                "host names are not resolved: -i @99999999999.0.0.1 (give the address)".into(),
+            ),
+            (":1-,5", "invalid service name: -i :1-,5".into()),
+            ("", "incomplete Internet address specification: -i ".into()),
+            (
+                "@0.0.0.0",
+                "incomplete Internet address specification: -i @0.0.0.0".into(),
+            ),
+            (
+                "@[::ffff:0.0.0.0]",
+                "incomplete Internet address specification: -i @[::ffff:0.0.0.0]".into(),
+            ),
+            ("foo:80", "unknown protocol name (foo) in: -i foo:80".into()),
+            (
+                "foo@1.2.3.4",
+                "unknown protocol name (foo) in: -i foo@1.2.3.4".into(),
+            ),
+            ("tcpx", "unknown protocol name (tcpx) in: -i tcpx".into()),
+            ("tcp6", "unknown protocol name (tcp6) in: -i tcp6".into()),
+            ("46", "unknown protocol name (6) in: -i 46".into()),
+            (
+                "TCP :80",
+                "unknown protocol name (TCP ) in: -i TCP :80".into(),
+            ),
+            (
+                "a\x1b[2J",
+                "unknown protocol name (a^[[2J) in: -i a^[[2J".into(),
+            ),
+            (
+                ":a\x1b[2J",
+                "service names are not resolved: -i :a^[[2J (give the port number)".into(),
+            ),
+            (
+                "@h\x1b[2J.invalid",
+                "host names are not resolved: -i @h^[[2J.invalid (give the address)".into(),
+            ),
+        ] {
+            assert_eq!(err(&["-i", spec]), want, "{spec:?}");
+        }
+        // The version a bare form lends a spec with none of its own, and two
+        // versions that widen it back to both (measured).
+        assert_eq!(
+            err(&["-i4", "-i", "@[::1]"]),
+            "IPv6 addresses are prohibited: -i @[::1]"
+        );
+        assert_eq!(
+            err(&["-i", "-i4", "-i", "@[::1]"]),
+            "IPv6 addresses are prohibited: -i @[::1]"
+        );
+        assert_eq!(
+            err(&["-i6", "-i", "@1.2.3.4"]),
+            "IPv4 addresses are prohibited: -i @1.2.3.4"
+        );
+        // Entries are judged from left to right: the first bad one names the
+        // error.
+        assert_eq!(err(&["-i", ":,1x"]), "invalid service name: -i :,1x");
+        assert_eq!(err(&["-i", ":1x,,"]), format!("{port}:1x,,"));
+    }
+
+    /// What the C accepts, which lsof-rs refused (measured, in OR form against
+    /// a sleeper, `-p S -i SPEC`).
+    #[test]
+    fn dash_i_accepts_what_the_c_accepts() {
+        let spec = |argv: &[&str]| run(argv).0.inet.specs.pop().expect("one spec");
+        assert_eq!(spec(&["-i", ":99999"]).ports, [(99999, 99999)]);
+        assert_eq!(spec(&["-i", ":1-65536"]).ports, [(1, 65536)]);
+        assert_eq!(spec(&["-i", ":0-"]).ports, [(0, 0)]);
+        assert_eq!(spec(&["-i", ":80,"]).ports, [(80, 80)]);
+        // Past `u32` the digits saturate, where the C's `int` wraps
+        // (`:4294967376` is its port 80): a port nothing has.
+        assert_eq!(spec(&["-i", ":4294967376"]).ports, [(u32::MAX, u32::MAX)]);
+        for argv in [&["-i", "udplite"][..], &["-i", "UDPLITE:53"][..]] {
+            assert_eq!(spec(argv).proto, Some(Protocol::UdpLite), "{argv:?}");
+        }
+        assert_eq!(spec(&["-i", "4tcp"]).proto, Some(Protocol::Tcp));
+        assert_eq!(spec(&["-i", "TCP"]).proto, Some(Protocol::Tcp));
+        for (arg, want) in [
+            ("@127.000.000.001", "127.0.0.1"),
+            ("@01.2.3.4", "1.2.3.4"),
+            ("@0177.0.0.1", "177.0.0.1"),
+            ("@[::ffff:1.2.3.4]", "1.2.3.4"),
+            ("@[::1]:80", "::1"),
+            ("@[::1]", "::1"),
+        ] {
+            assert_eq!(
+                spec(&["-i", arg]).host,
+                Some(want.parse().unwrap()),
+                "{arg}"
+            );
+        }
+        let zero = spec(&["-i", "TCP@0.0.0.0"]);
+        assert_eq!((zero.host, zero.proto), (None, Some(Protocol::Tcp)));
+        let zero = spec(&["-i", "@0.0.0.0:80"]);
+        assert_eq!((zero.host, zero.ports), (None, vec![(80, 80)]));
+        // `-i4 -i6` is both versions again, so an IPv6 address is allowed.
+        assert_eq!(spec(&["-i4", "-i6", "-i", "@[::1]"]).family, None);
+        assert_eq!(spec(&["-i6", "-i", "-i", "@1.2.3.4"]).family, None);
+    }
+
+    /// `MAXNWAD`: 100 entries in all, each port entry one and a spec without
+    /// ports one, the spec that crosses it named (measured).
+    #[test]
+    fn dash_i_has_the_cs_100_address_limit() {
+        let list = |n: u32| (1..=n).map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+        let limit = "network address limit (100) exceeded: -i ";
+        assert_eq!(
+            run(&["-i", &format!(":{}", list(100))]).0.inet.specs[0]
+                .ports
+                .len(),
+            100
+        );
+        let l101 = format!(":{}", list(101));
+        assert_eq!(
+            parse(vec!["-i".into(), l101.clone()]).unwrap_err(),
+            format!("{limit}{l101}")
+        );
+        let singles: Vec<String> = (1..=101).map(|p| format!("-i:{p}")).collect();
+        assert_eq!(parse(singles[..100].to_vec()).map(|_| ()), Ok(()));
+        assert_eq!(parse(singles).unwrap_err(), format!("{limit}:101"));
+        // A spec with no port is one entry too (`enter_nwad()` once): 100
+        // `-i tcp` are accepted and the 101st refused, as the C does
+        // (measured).
+        let tcps: Vec<String> = (0..101).flat_map(|_| ["-i".into(), "tcp".into()]).collect();
+        assert_eq!(parse(tcps[..200].to_vec()).map(|_| ()), Ok(()));
+        assert_eq!(parse(tcps).unwrap_err(), format!("{limit}tcp"));
+        let argv = |tail: &str| {
+            vec![
+                "-i".to_string(),
+                format!(":{}", list(100)),
+                "-i".into(),
+                tail.into(),
+            ]
+        };
+        assert_eq!(parse(argv("TCP")).unwrap_err(), format!("{limit}TCP"));
+        // The bare forms enter nothing.
+        assert!(parse(argv("4")).is_ok());
+        // The entry's own error comes first; the limit, before a later one's.
+        let l100x = format!(":{},1x", list(100));
+        assert_eq!(
+            parse(vec!["-i".into(), l100x.clone()]).unwrap_err(),
+            format!("unacceptable port specification in: -i {l100x}")
+        );
+        let l101x = format!(":{},1x", list(101));
+        assert_eq!(
+            parse(vec!["-i".into(), l101x.clone()]).unwrap_err(),
+            format!("{limit}{l101x}")
+        );
+    }
+
+    /// `icmp` and `raw` are the Windows port's ETW families; on Linux they are
+    /// no protocol to the C, which types a raw socket `raw` and never selects
+    /// one by `-i` (measured; DIVERGENCES 108).
+    #[cfg(not(windows))]
+    #[test]
+    fn icmp_and_raw_are_not_protocols_on_linux() {
+        for p in ["icmp", "ICMP", "raw", "6icmp", "RAW:1"] {
+            let token = p.trim_start_matches('6').split(':').next().unwrap();
+            assert_eq!(
+                parse(vec!["-i".into(), p.into()]).unwrap_err(),
+                format!("unknown protocol name ({token}) in: -i {p}")
+            );
+        }
+        // UDP-Lite is a table Linux reads, and implies no capture.
+        assert!(!run(&["-iudplite"]).0.inet.needs_etw());
+    }
+
+    #[cfg(windows)]
     #[test]
     fn inet_etw_families_icmp_raw() {
         // Roadmap §5 P3: RAW/ICMP are ETW-only families; the spec accepts
@@ -2363,9 +2833,168 @@ mod tests {
         assert_eq!(sel.inet.specs[0].proto, Some(Protocol::Other("RAW")));
         assert!(sel.inet.needs_etw());
 
-        // TCP/UDP/plain -i never imply the capture.
+        // TCP/UDP/UDP-Lite/plain -i never imply the capture.
         assert!(!run(&["-iTCP"]).0.inet.needs_etw());
+        assert!(!run(&["-iudplite"]).0.inet.needs_etw());
         assert!(!run(&["-i"]).0.inet.needs_etw());
+    }
+
+    /// `+c` with no width, an empty one or one that opens with anything but
+    /// a digit is the C's `+c not followed by width number`, which quotes
+    /// nothing; `+c 1x` is `atoi()`'s 1 (all measured).
+    #[test]
+    fn plus_c_takes_atois_width_and_quotes_nothing() {
+        let err = |argv: &[&str]| parse(argv.iter().map(|s| s.to_string()).collect()).err();
+        for argv in [
+            &["+c"][..],
+            &["+c", ""][..],
+            &["+c", "x"][..],
+            &["+cx"][..],
+            &["+c", "-p", "1"][..],
+            &["+c", "\x1b[2J"][..],
+            &["+c", " 1"][..],
+        ] {
+            assert_eq!(
+                err(argv).as_deref(),
+                Some("+c not followed by width number"),
+                "{argv:?}"
+            );
+        }
+        let width = |argv: &[&str]| run(argv).0.command_width;
+        assert_eq!(width(&["+c", "1x"]), CommandWidth::Chars(1));
+        assert_eq!(width(&["+c1\x1b[2J"]), CommandWidth::Chars(1));
+        assert_eq!(width(&["+c", "0"]), CommandWidth::Unlimited);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                err(&["+c", "16x"]).as_deref(),
+                Some("+c 16 > what system provides (15)")
+            );
+        }
+    }
+
+    /// The `-c` length message quotes the name with `safestrprt(…, 2)`: a
+    /// space is `\x20` and a control byte escaped, é raw (measured).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_c_length_message_is_safestrprt_flags_2() {
+        let err = |v: &str| parse(vec!["-c".into(), v.into()]).unwrap_err();
+        assert_eq!(
+            err("aaaaaaaaaaaaaa\x1b[2J"),
+            "\"-c aaaaaaaaaaaaaa^[[2J\" length (18) > what system provides (15)"
+        );
+        assert_eq!(
+            err("a ba ba ba ba ba b"),
+            "\"-c a\\x20ba\\x20ba\\x20ba\\x20ba\\x20ba\\x20b\" length (18) > what system provides (15)"
+        );
+        assert_eq!(
+            err("\u{e9} a\\\x7f\u{9b}bbbbbbbbbbb"),
+            "\"-c \u{e9}\\x20a\\\\\\x7f\\xc2\\x9bbbbbbbbbbbb\" length (19) > what system provides (15)"
+        );
+    }
+
+    /// No option's error, and no line a parse tells its sink, holds a control
+    /// character (U+2028 and U+2029 included): every argument a message
+    /// quotes is escaped, where the C prints several raw (DIVERGENCES 112,
+    /// 122). Every letter, known or not, under both prefixes, its value
+    /// attached and as the next word; then the conflicts and the lines said
+    /// while parsing. A parse's error may hold several, joined by
+    /// `"\nlsof: "`, and no other newline.
+    #[test]
+    fn no_option_error_holds_a_control_character() {
+        let long = format!("{}\x1b[2J", "a".repeat(40));
+        let hostile = [
+            "\x1b[2J",
+            "a\x1b[2J",
+            "1\x1b[2J",
+            "TCP:\x1b",
+            "TCP:LISTEN,\x1b",
+            "UDP:\x1b",
+            "^x\x1b",
+            "^\x1b",
+            "/x\x1b[2J",
+            "/no\x1b[2Jsuch/",
+            "\r",
+            "\x7f",
+            "\u{9b}",
+            "\u{2028}",
+            "\u{2029}x",
+            ":1\x1b",
+            "@[1::\x1b",
+            "@h\x1b",
+            "4\x1b",
+            "m\x1b",
+            "1-\x1b",
+            "c\x1b",
+            ",\x1b[2J",
+            "1,,\x1b",
+            ":,\x1b[2J",
+            ":1,,\x1b",
+            long.as_str(),
+        ];
+        let bad = |s: &str| {
+            s.chars()
+                .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+        };
+        let check = |argv: Vec<String>| {
+            let said = std::cell::RefCell::new(Vec::new());
+            let sink = |l: &str| said.borrow_mut().push(l.to_string());
+            let fs = SafeFs::new(&lsof_core::InProcess, &sink);
+            // A table that holds `/` alone, so that an `-e` of anything else
+            // is the not-mounted error.
+            let reader = |_: &MountRequest, _: &SafeFs| MountTable {
+                entries: vec![lsof_core::MountEntry {
+                    dir: "/".into(),
+                    device: Some(1),
+                    source_resolved: None,
+                    source_is_block: false,
+                    kind: lsof_core::MountKind::Regular,
+                }],
+                ..MountTable::default()
+            };
+            if let Err(e) = parse_with(argv.clone(), &fs, &reader) {
+                for piece in e.split("\nlsof: ") {
+                    assert!(!bad(piece), "{argv:?}: {e:?}");
+                }
+            }
+            for line in said.into_inner() {
+                assert!(!bad(&line), "{argv:?} said {line:?}");
+            }
+        };
+        for letter in ('a'..='z').chain('A'..='Z').chain(['?', '0', '\x1b']) {
+            for prefix in ['-', '+'] {
+                for value in hostile {
+                    check(vec![format!("{prefix}{letter}{value}")]);
+                    check(vec![format!("{prefix}{letter}"), value.to_string()]);
+                    // After `-b`, the `+d`/`-e` paths are named as avoided.
+                    check(vec![
+                        "-b".into(),
+                        format!("{prefix}{letter}"),
+                        value.to_string(),
+                    ]);
+                }
+            }
+        }
+        for value in hostile {
+            let v = value.to_string();
+            for argv in [
+                vec!["-c".into(), v.clone(), "-c".into(), format!("^{v}")],
+                vec!["-c".into(), format!("^{v}"), "-c".into(), v.clone()],
+                vec!["-d".into(), format!("1,^{v}")],
+                vec!["-d".into(), format!("^1,{v}")],
+                vec![
+                    "-s".into(),
+                    format!("TCP:{v}"),
+                    "-s".into(),
+                    format!("TCP:^{v}"),
+                ],
+                vec!["-e".into(), v.clone(), "-e".into(), format!("/{v}")],
+                vec!["+e".into(), format!("/{v}"), "-x".into(), "q".into()],
+                vec!["-S".into(), "0".into(), "+d".into(), v.clone()],
+                vec!["-i".into(), format!(":{v}"), "-i".into(), format!("{v}@1")],
+            ] {
+                check(argv);
+            }
+        }
     }
 
     #[test]

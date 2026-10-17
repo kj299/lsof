@@ -259,10 +259,22 @@ said nothing of a container's. The identity is now the C's, `st_dev` and the
 inode, a node's on the file system that holds it, so another instance's pty
 is another file.
 
-**An `-i` error message prints its argument raw** (DIVERGENCES 112). Every
-other message that quotes an argument escapes it, as the C's `safestrprt()`
-does; `-i`'s parser does not, so `lsof -i "$untrusted"` can write terminal
-control sequences to stderr.
+**An `-i` error message printed its argument raw** (DIVERGENCES 112,
+resolved 2026-10-17). `lsof -i "$untrusted"` could write terminal control
+sequences to stderr: `-i $'@[1::\e[2J'` wrote one ESC byte. The C escapes the
+argument after `-i ` with `safestrprt()`, and lsof-rs's parser now reads the
+spec as the C's `enter_network_address()` does and quotes it the same way:
+`unacceptable Internet address in: -i @[1::^[[2J`, byte for byte (measured on
+217 malformed specs). Several other messages quoted an argument raw too, the
+`+c`, `-r` and `-c` refusals among them; and the C itself prints raw the
+`-i` protocol, host and service it names in parentheses, an option letter
+(`%c`), `-K`'s value, the `-c` conflict, every `-s` message and the `-d`
+mixture's item (a C-DEFECT, 122). Every message lsof-rs prints that quotes an
+argument now goes through one constructor that escapes it, and a property
+test runs every option letter, under both prefixes, its value attached and as
+the next word, with hostile values, asserting that no error and no line the
+parse prints holds a control character (U+2028 and U+2029 included); the
+`parse_args` fuzz target asserts the same of every error it reaches.
 
 **Reverse DNS on Windows tells a resolver which peers the host talks to.** It
 is the default there, as in the C (Linux behaves as if `-n` were always given).
@@ -439,6 +451,12 @@ C code so the triage can be checked. The ones that bear on this model:
   escaped (DIVERGENCES 59). Any process can name a thread, so the C lets it write
   an escape sequence to the terminal of whoever runs lsof — the §4 renderer
   capability again. Not reproduced: lsof-rs escapes it as it escapes `c`.
+- **The C prints part of some argument errors raw**: `-i`'s protocol, host
+  and service names, an unknown option letter (`%c`), `-K`'s value, the `-c`
+  conflict, every `-s` message, the `-d` mixture's item, both `-e` messages
+  and `avoiding stat(P)` (DIVERGENCES 122). A caller that passes an untrusted
+  value to lsof lets it write to the terminal of whoever reads stderr. Not
+  reproduced: lsof-rs escapes each as `safestrprt()` escapes the rest (112).
 - **`-s UDP:` with any state name segfaults the C** (ledgered as
   `states-udp-names-crash-the-c`, item 32). Not reproduced: lsof-rs refuses the
   value.

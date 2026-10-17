@@ -87,10 +87,21 @@ args = ["-u", "USER"]
 [[case]]
 name = "core/inet-etw-families"
 # args::tests::inet_etw_families_icmp_raw (icmp/raw parse like tcp/udp, the
-# [46] prefix composes, needs_etw reports the ETW implication) plus
-# selection::tests::inet_etw_family_filters_icmp_raw (ICMP matches the v4+v6
-# codes, RAW is exact, family narrows). Portable, every push.
+# [46] prefix composes, needs_etw reports the ETW implication; UDP-Lite does
+# not imply it), `#[cfg(windows)]` since 2026-10-17: the windows CI runner
+# only. selection::tests::inet_etw_family_filters_icmp_raw (ICMP matches the
+# v4+v6 codes, RAW is exact, family narrows) stays portable, every push.
 args = ["-iICMP"]
+
+[[case]]
+name = "core/inet-icmp-raw-refused-on-linux"
+# The Linux twin, args::tests::icmp_and_raw_are_not_protocols_on_linux:
+# `-i icmp` and `-i raw` are the C's `unknown protocol name` there, a raw
+# socket being no Internet file to it (DIVERGENCES 108, 112). With
+# dash_i_errors_are_the_cs_words_and_escape_the_argument,
+# dash_i_accepts_what_the_c_accepts and dash_i_has_the_cs_100_address_limit:
+# `-i` in the C's grammar and words. Every non-Windows push.
+args = ["-i", "icmp"]
 
 [[case]]
 name = "core/repeat-delay-as-the-next-word"
@@ -428,6 +439,14 @@ covers = ["type:unknown"]
 # these TYPE codes on Linux. Before scoping, all four sat under a waiver
 # reading "no Windows analogue" — which excused, on Linux, codes the Linux
 # backend was already emitting.
+
+[[case]]
+name = "linux/raw-socket-row"
+# ../differential/linux-matrix.toml raw-socket-row and raw-socket-fields:
+# fixture RAW's raw ICMP and IPPROTO_RAW sockets, typed `raw` with the C's
+# NAME, DEVICE and `-F` (DIVERGENCES 108). raw6 has no fixture: no IPv6 here.
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
+covers = ["type:raw"]
 
 [[case]]
 name = "linux/type-codes-from-st_mode"

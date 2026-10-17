@@ -16,7 +16,7 @@
 //! | `\b` `\f` `\n` `\r` `\t` | `\b` `\f` `\n` `\r` `\t` | C-style escape |
 //! | other `U+0000..=U+001F` | `^@` `^A` … `^[` … `^_` | caret + (c + 0x40) |
 //! | `U+007F` (DEL) | `\x7f` | hex |
-//! | space | `\x20` | COMMAND only ([`Escaper::command`]) |
+//! | space | `\x20` | COMMAND ([`Escaper::command`]) and [`Escaper::text_spaced`] |
 //! | `\` | `\\` | Unix style only — see below |
 //! | C1 controls `U+0080..=U+009F`, `U+2028`, `U+2029` | `\xc2\x9b` … | each UTF-8 byte in hex |
 //! | any other non-ASCII | raw in NAME/`-F`; `\xNN` per byte in COMMAND | see below |
@@ -75,6 +75,14 @@ impl Escaper {
         escape(s, Mode::Text, self.backslash)
     }
 
+    /// `safestrprt(s, fs, 2)`: [`Escaper::text`] with a space escaped too,
+    /// `\x20`, and printable Unicode still passed through. The C quotes the
+    /// `-c` name it refuses as too long this way (`lib/lsof.c:178-182`);
+    /// measured, `-c 'é a\\<DEL><U+009B>b…'` prints `é\x20a\\\x7f\xc2\x9bb…`.
+    pub fn text_spaced<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        escape(s, Mode::TextSpaced, self.backslash)
+    }
+
     /// [`Escaper::text`] for a name that need not be UTF-8 — a file name, a
     /// link's target — as `safestrprt()` prints one in a UTF-8 locale: where
     /// `mblen()` finds no character, the byte is printed as `\xNN`, and the
@@ -124,6 +132,8 @@ impl Escaper {
 enum Mode {
     /// `safestrprt(…, 0)`: space is text, printable Unicode passes.
     Text,
+    /// `safestrprt(…, 2)`: space is unprintable, printable Unicode passes.
+    TextSpaced,
     /// `safestrprtn(…, 2)`: space is unprintable, only ASCII passes.
     Command,
 }
@@ -133,7 +143,7 @@ enum Mode {
 fn escaped_width(c: char, mode: Mode, backslash: bool) -> usize {
     match c {
         '\\' if backslash => 2,
-        ' ' if mode == Mode::Command => 4,
+        ' ' if mode != Mode::Text => 4,
         c if (c as u32) < 0x20 => 2,
         c if c.is_ascii() && c != '\x7f' => 1,
         // DEL, or a non-ASCII character that is escaped byte by byte.
@@ -186,8 +196,9 @@ fn push(out: &mut String, c: char, mode: Mode, backslash: bool) {
             out.push((c as u8 + 0x40) as char);
         }
         c => {
-            // Space (COMMAND), DEL, and every escaped non-ASCII character: the
-            // C prints `\x%02x` for each byte it could not print.
+            // Space (COMMAND, `text_spaced`), DEL, and every escaped
+            // non-ASCII character: the C prints `\x%02x` for each byte it
+            // could not print.
             let mut buf = [0u8; 4];
             for b in c.encode_utf8(&mut buf).bytes() {
                 push_hex(out, b);
@@ -316,6 +327,20 @@ mod tests {
         }
     }
 
+    /// `safestrprt(…, 2)`, measured on the C's `-c` length message: a space
+    /// is `\x20`, é stays raw, the backslash, DEL and U+009B as in `text`.
+    #[test]
+    fn text_spaced_is_safestrprt_flags_2() {
+        assert_eq!(
+            U.text_spaced("\u{e9} a\\\x7f\u{9b}b"),
+            "\u{e9}\\x20a\\\\\\x7f\\xc2\\x9bb"
+        );
+        assert_eq!(U.text_spaced("a ba b"), "a\\x20ba\\x20b");
+        assert_eq!(U.text_spaced("aa\x1b[2J"), "aa^[[2J");
+        assert!(matches!(U.text_spaced("sleep"), Cow::Borrowed(_)));
+        assert!(matches!(U.text_spaced("café"), Cow::Borrowed(_)));
+    }
+
     #[test]
     fn output_never_holds_a_control_character() {
         let hostile: String = (0u8..=0x9f)
@@ -323,7 +348,11 @@ mod tests {
             .chain("\u{2028}\u{2029}\\ é".chars())
             .collect();
         for e in [U, W] {
-            for out in [e.text(&hostile), e.command(&hostile)] {
+            for out in [
+                e.text(&hostile),
+                e.command(&hostile),
+                e.text_spaced(&hostile),
+            ] {
                 assert!(
                     !out.chars()
                         .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
@@ -332,6 +361,7 @@ mod tests {
             }
             let cmd = e.command(&hostile);
             assert!(cmd.is_ascii() && !cmd.contains(' '), "{cmd:?}");
+            assert!(!e.text_spaced(&hostile).contains(' '));
         }
     }
 }

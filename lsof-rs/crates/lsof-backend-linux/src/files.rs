@@ -504,24 +504,29 @@ pub(crate) fn socket_row(
     let e = socks.get(inode)?;
     // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
     // anonymous socket — and every AF_PACKET socket, which never has a path —
-    // shows the tail alone.
-    let name = match &e.type_suffix {
-        Some(suffix) => match &e.path {
+    // shows the tail alone. A raw socket's is the table's text.
+    let name = match (&e.name, &e.type_suffix, &e.info) {
+        (Some(name), _, _) => name.clone(),
+        (None, Some(suffix), _) => match &e.path {
             Some(p) => format!("{p} {suffix}"),
             None => suffix.clone(),
         },
-        None => e.info.display_name(false, false),
+        (None, None, Some(info)) => info.display_name(false, false),
+        (None, None, None) => String::new(),
     };
-    let mut sock = e.info.clone();
-    if ctx.bound_paths {
-        sock.bound = e.path.as_ref().map(|path| {
-            let raw = socks.raw_path(inode);
-            Box::new(lsof_core::BoundPath {
-                path: raw.is_none().then(|| path.clone()),
-                id: socks.bound_id(inode, || socket_file_id(path, raw, ctx.exempt)),
-            })
-        });
-    }
+    // A raw socket has none: no `-i`, `-s` or `-T` looks at it.
+    let sock = e.info.clone().map(|mut sock| {
+        if ctx.bound_paths {
+            sock.bound = e.path.as_ref().map(|path| {
+                let raw = socks.raw_path(inode);
+                Box::new(lsof_core::BoundPath {
+                    path: raw.is_none().then(|| path.clone()),
+                    id: socks.bound_id(inode, || socket_file_id(path, raw, ctx.exempt)),
+                })
+            });
+        }
+        Box::new(sock)
+    });
     Some(OpenFile {
         rdev: None,
         // A socket has no filesystem device, so `-F D` has nothing to print;
@@ -534,14 +539,14 @@ pub(crate) fn socket_row(
         access: info.access(),
         file_type: e.file_type.clone(),
         name,
-        device: Some(e.device.clone()),
+        device: e.device.clone(),
         size: None,
         // lsof prints `0t0` in SIZE/OFF for every socket row — a socket has
         // no size, and its offset is meaningless but always shown.
         offset: Some(0),
         node: Some(e.node.clone()),
         links: None,
-        socket: Some(Box::new(sock)),
+        socket: sock,
     })
 }
 

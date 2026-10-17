@@ -1927,6 +1927,137 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-FtDdn", "-p", "{L}"]
 name = "userns-mapped-socket-cannot-be-named"
 args = ["-n", "-P", "-a", "-d", "mem", "-p", "{L}"]
 
+# ---------------------------------------------- raw and UDP-Lite sockets
+# DIVERGENCES 108 and the UDP-Lite half of 112. Fixture RAW holds a raw ICMP
+# socket (fd 3) and a raw IPPROTO_RAW one (fd 4): the C types each `raw`,
+# leaves DEVICE blank, puts the inode in NODE, and names it with
+# `/proc/net/raw`'s own text, `00000000:0001->00000000:0000 st=07`; `-F` is
+# `traw ... i<inode>`, with no `P`. It is no Internet file to the C, so no
+# `-i` selects it, and `-i icmp` and `-i raw` are `unknown protocol name`.
+# lsof-rs had typed it IPv4, named it `ICMP *:0`, and listed it under `-i`
+# and `-i icmp`. SKIPPED, not failed, without CAP_NET_RAW.
+
+[[case]]
+name = "raw-socket-row"
+args = ["-n", "-P", "-a", "-d", "^mem", "-p", "{RAW}"]
+
+[[case]]
+name = "raw-socket-fields"
+args = ["-n", "-P", "-a", "-d", "3-4", "-FftdDsSinPoT", "-p", "{RAW}"]
+
+[[case]]
+# `-X` leaves /proc/net/raw read (`dsock.c:3530` has no `Fxopt` guard).
+name = "raw-socket-row-under-dash-X"
+args = ["-n", "-P", "-X", "-a", "-d", "3-4", "-p", "{RAW}"]
+
+[[case]]
+name = "raw-socket-dash-d"
+args = ["-n", "-P", "-a", "-d", "3", "-p", "{RAW}"]
+
+[[case]]
+name = "raw-socket-is-not-selected-by-dash-i"
+args = ["-n", "-P", "-a", "-i", "-p", "{RAW}"]
+
+[[case]]
+name = "raw-socket-is-not-selected-by-dash-i4"
+args = ["-n", "-P", "-a", "-i4", "-p", "{RAW}"]
+
+[[case]]
+# No address of a raw row is one `-i` compares, the all-zero one included.
+name = "raw-socket-is-not-selected-by-an-address"
+args = ["-n", "-P", "-a", "-i", "@0.0.0.0:0-65535", "-p", "{RAW}"]
+
+[[case]]
+name = "raw-socket-dash-i-icmp-is-no-protocol"
+args = ["-n", "-P", "-a", "-i", "icmp", "-p", "{RAW}"]
+
+[[case]]
+name = "raw-socket-dash-i-raw-is-no-protocol"
+args = ["-n", "-P", "-a", "-i", "raw", "-p", "{RAW}"]
+
+# Fixture UDPL: a UDP-Lite socket bound to 127.0.0.1:{UDPLPORT} (fd 3) and one
+# connected to it (fd 4). The C reads /proc/net/udplite as it reads udp: IPv4,
+# DEVICE the inode, NODE `UDPLITE`, NAME a UDP socket's with its separator
+# space, and never a state, `(ESTABLISHED)` included; `-s TCP:` tests its
+# number, `-T q` shows its queues, and `-i udplite` selects it where `-i udp`
+# does not. lsof-rs had read no udplite table (`SOCK ... socket:[N]`) and
+# refused `-i udplite` (`unknown protocol name (lite)`). SKIPPED where the
+# kernel has no UDP-Lite.
+
+[[case]]
+name = "udplite-socket-row"
+args = ["-n", "-P", "-a", "-d", "3-4", "-p", "{UDPL}"]
+
+[[case]]
+# fd 5 is never bound: in no table, so the C names it from
+# `system.sockprotoname` (`sock ... protocol: UDP-Lite`) and lsof-rs, with no
+# getxattr, prints `SOCK ... socket:[N]` (DIVERGENCES 22, ledgered).
+name = "udplite-socket-unbound"
+args = ["-n", "-P", "-a", "-d", "5", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-fields"
+args = ["-n", "-P", "-a", "-d", "3-4", "-FftdDsSinPoT", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-queues"
+args = ["-n", "-P", "-a", "-d", "3-4", "-Tqs", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-s-established"
+args = ["-n", "-P", "-a", "-d", "3-4", "-s", "TCP:ESTABLISHED", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-s-close"
+args = ["-n", "-P", "-a", "-d", "3-4", "-s", "TCP:CLOSE", "-p", "{UDPL}"]
+
+[[case]]
+# `-X` gates udplite as it gates udp (`dsock.c:3946-3951`).
+name = "udplite-socket-row-under-dash-X"
+args = ["-n", "-P", "-X", "-a", "-d", "3-4", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-i"
+args = ["-n", "-P", "-a", "-i", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-i4"
+args = ["-n", "-P", "-a", "-i4", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-i-udplite"
+args = ["-n", "-P", "-a", "-i", "udplite", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-i-udplite-port"
+args = ["-n", "-P", "-a", "-i", "UDPLITE:{UDPLPORT}", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-is-not-selected-by-dash-i-udp"
+args = ["-n", "-P", "-a", "-i", "udp", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-i-address"
+args = ["-n", "-P", "-a", "-i", "@127.0.0.1", "-p", "{UDPL}"]
+
+[[case]]
+name = "udplite-socket-dash-i-port"
+args = ["-n", "-P", "-a", "-i", ":{UDPLPORT}", "-p", "{UDPL}"]
+
+# Fixture NSRAW: a raw ICMP socket (fd 3) and a bound UDP-Lite socket (fd 4)
+# in a user and network namespace of their own. The C names each from
+# `system.sockprotoname`, the kernel's `struct proto` name: `protocol: RAW`,
+# where lsof-rs had said `protocol: ICMP`, and `protocol: UDP-Lite`, where it
+# had shown `SOCK ... socket:[N]`.
+
+[[case]]
+name = "userns-raw-and-udplite-show-the-kernels-protocol-names"
+args = ["-n", "-P", "-a", "-d", "3-4", "-p", "{NSRAW}"]
+
+[[case]]
+name = "userns-raw-and-udplite-kernel-protocol-name-fields"
+args = ["-n", "-P", "-a", "-d", "3-4", "-Ftn", "-p", "{NSRAW}"]
+
 # ----------------------------------------------- the search-item contract
 # WHAT COUNTS AS A SEARCH ITEM, and what happens when one is not located.
 # Two different failures that look alike from the outside:
@@ -2567,6 +2698,129 @@ args = ["-n", "-P", "-a", "-p", "{B}", "-i", "-d", "0"]
 # C marks only the first in its list and reports the other, exit 1.
 name = "inet-first-match-only-in-the-c"
 args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:{PORT}", "-iTCP"]
+
+# ----------------------------------- -i in the C's grammar (DIVERGENCES 112)
+# `enter_network_address()`'s order and words. Option errors in OR form, as
+# the search-item cases are: the C refuses each of the first group (stdout
+# empty, exit 1) where lsof-rs had listed {A}; it accepts each of the second,
+# which lsof-rs had refused. The messages themselves, escaped, are pinned by
+# `args.rs` and `tests/arguments.rs`: the differential compares no usage
+# error's stderr.
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 121): the C's `int` port wraps, so
+# 4294967295 is -1, no port, and the spec is incomplete; lsof-rs saturates
+# it, a port no socket has, and in OR form lists {A}.
+name = "inet-port-wraps-to-none-in-the-c"
+args = ["-n", "-P", "-p", "{A}", "-i", ":4294967295"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 121): the range's end wraps to -1, below
+# its start, `unacceptable port specification` to the C; lsof-rs accepts it.
+name = "inet-port-range-end-wraps-in-the-c"
+args = ["-n", "-P", "-p", "{A}", "-i", ":1-4294967295"]
+
+[[case]]
+# Refused by both, in other words (the C: incomplete, lsof-rs: the end below
+# the saturated start): the control for the two above.
+name = "inet-port-range-start-wraps-in-the-c"
+args = ["-n", "-P", "-p", "{A}", "-i", ":4294967295-1"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 121): an octet's `int` wraps, 4294967297
+# being 1, so the C reads 1.0.0.1 and lists {A}; lsof-rs saturates the
+# octet, no IPv4 address, a host name it refuses.
+name = "inet-octet-wraps-in-the-c"
+args = ["-n", "-P", "-p", "{A}", "-i", "@4294967297.0.0.1"]
+
+[[case]]
+name = "inet-refused-lone-at"
+args = ["-n", "-P", "-p", "{A}", "-i", "@"]
+
+[[case]]
+name = "inet-refused-lone-colon"
+args = ["-n", "-P", "-p", "{A}", "-i", ":"]
+
+[[case]]
+name = "inet-refused-empty-spec"
+args = ["-n", "-P", "-p", "{A}", "-i", ""]
+
+[[case]]
+name = "inet-refused-all-zero-v6"
+args = ["-n", "-P", "-p", "{A}", "-i", "@[::]"]
+
+[[case]]
+name = "inet-refused-zero-v4-without-port"
+args = ["-n", "-P", "-p", "{A}", "-i", "@0.0.0.0"]
+
+[[case]]
+name = "inet-refused-v4-under-6"
+args = ["-n", "-P", "-p", "{A}", "-i", "6@127.0.0.1"]
+
+[[case]]
+name = "inet-refused-v6-under-4"
+args = ["-n", "-P", "-p", "{A}", "-i", "4@[::1]"]
+
+[[case]]
+name = "inet-refused-inherited-version"
+args = ["-n", "-P", "-p", "{A}", "-i4", "-i", "@[::1]"]
+
+[[case]]
+name = "inet-refused-empty-service"
+args = ["-n", "-P", "-p", "{A}", "-i", ":,80"]
+
+[[case]]
+name = "inet-refused-last-bracket"
+args = ["-n", "-P", "-p", "{A}", "-i", "@[::1]]:80"]
+
+[[case]]
+name = "inet-refused-protocol-is-a-whole-word"
+args = ["-n", "-P", "-p", "{A}", "-i", "tcpx"]
+
+[[case]]
+name = "inet-refused-icmp-on-linux"
+args = ["-n", "-P", "-p", "{A}", "-i", "icmp"]
+
+[[case]]
+name = "inet-refused-101-addresses"
+args = ["-n", "-P", "-p", "{A}", "-i", ":1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101"]
+
+[[case]]
+# The C lists A and exits 1: `:99999` is a port nothing has.
+name = "inet-accepted-port-past-65535"
+args = ["-n", "-P", "-p", "{A}", "-i", ":99999"]
+
+[[case]]
+name = "inet-accepted-range-past-65535"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:1-65536"]
+
+[[case]]
+name = "inet-accepted-zero-dash"
+args = ["-n", "-P", "-p", "{A}", "-i", ":0-"]
+
+[[case]]
+name = "inet-accepted-udplite"
+args = ["-n", "-P", "-p", "{A}", "-i", "udplite"]
+
+[[case]]
+name = "inet-accepted-v4-leading-zeros"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP@127.000.000.001:{PORT}"]
+
+[[case]]
+# `isIPv4addr()` reads a leading zero as decimal: 0127 is 127, not 87.
+name = "inet-v4-octet-leading-zero-is-decimal"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP@0127.0.0.1:{PORT}"]
+
+[[case]]
+# LEDGERED (DIVERGENCES 38). glibc reads `127.1` with no DNS; lsof-rs refuses
+# it as the host name it is to the C's own parser.
+name = "inet-aton-short-form"
+args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP@127.1:{PORT}"]
+
+[[case]]
+# Refused by both, as it always was: the control for the cases above.
+name = "inet-refused-escaped-unterminated-bracket"
+args = ["-n", "-P", "-p", "{A}", "-i", "@[1::\u001b[2J"]
 
 # ------------------------------------------------------- unreadable fixture
 # Fixture U made itself unreadable (PR_SET_DUMPABLE 0), and every case here
