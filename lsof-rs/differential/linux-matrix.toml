@@ -893,6 +893,51 @@ args = ["-n", "-P", "-e", "{EMFS}", "-e", "/", "-e", "{EMFS}", "-a", "-d", "mem,
 name = "exempt-an-empty-path-is-an-error"
 args = ["-n", "-P", "-e", "", "-a", "-d", "cwd", "-p", "{A}"]
 
+[[case]]
+# -f stops a path argument from naming a file system, nothing more: the
+# table is read for -e under -f too, and /dev/shm is mounted. The C exits
+# 0; lsof-rs had read no table under -f and refused the -e (DIVERGENCES
+# 113).
+name = "exempt-under-dash-f-is-still-a-mount"
+args = ["-n", "-P", "-f", "-e", "{EMFS}", "-a", "-d", "3", "-p", "{EM}"]
+with_stderr = true
+
+[[case]]
+# The mount of an -e is never stat()ed, so its source is no block device:
+# the source named is a plain file, here one nothing holds (DIVERGENCES 88;
+# measured: `no file use located: /dev/vda`, exit 1, in both).
+name = "exempt-mount-source-is-a-plain-file"
+args = ["-V", "-e", "/", "{ROOTSRC}"]
+with_stderr = true
+
+[[case]]
+# ...and under +f it names that mount, whose device the C records as 0: a
+# file-system item that finds nothing.
+name = "exempt-mount-source-under-plus-f-names-nothing"
+args = ["-V", "+f", "-e", "/", "--", "{ROOTSRC}"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 130): an -e after the first +d names a
+# mount the C's table stat()ed at the +d, and the C gives a file there that
+# mount directory's device and st_rdev: DEVICE 0,0 for EM's fds on /dev/shm.
+# lsof-rs keeps UNKNOWN, as for every -e row.
+name = "exempt-after-plus-d-names-a-device-in-the-c"
+args = ["-n", "-P", "+d", "{ASUB}", "-e", "{EMFS}", "-p", "{EM}"]
+
+[[case]]
+# +e: exempt, and its NAME says `(+e /dev/shm)` (DIVERGENCES 88).
+name = "exempt-plus-e-names-its-sign"
+args = ["-n", "-P", "+e", "{EMFS}", "-a", "-d", "mem,DEL,3", "-p", "{EM}"]
+with_stderr = true
+
+[[case]]
+# A path entered twice keeps the sign it was first given: `+e X -e X` is
+# `+e`'s (measured).
+name = "exempt-a-repeat-keeps-its-first-sign"
+args = ["-n", "-P", "+e", "{EMFS}", "-e", "{EMFS}", "-a", "-d", "3", "-p", "{EM}"]
+with_stderr = true
+
 # ------------------------------------------ paths that name another file (P)
 # Fixture P maps three files whose paths the harness then covers, as root: a
 # tmpfs over the directory of one, another tmpfs (with a file of the same
@@ -3208,10 +3253,9 @@ args = ["-b", "-t", "-a", "-d", "cwd", "-p", "{A}"]
 with_stderr = true
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): per mount the C says
-# `avoiding readlink(DIR)`, `avoiding stat(DIR)` and the two lines of its
-# `can't stat()` warning; lsof-rs reads no mount directory's link yet and
-# has no such warning (87), so it says `avoiding stat(DIR)` alone.
+# Per mount, in the table's order, `avoiding readlink(DIR)`, `avoiding
+# stat(DIR)` and the two lines of the `can't stat()` warning; a directory
+# listed twice says them twice (DIVERGENCES 87, 110).
 name = "opt-b-names-every-mount-it-avoids"
 args = ["-b", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
 with_stderr = true
@@ -3229,8 +3273,9 @@ args = ["-b", "-w", "/"]
 with_stderr = true
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): the C reads the argument's links
-# (`avoiding readlink(ARG)`) before it reads its table, lsof-rs after.
+# The argument's links are read first (`avoiding readlink(ARG)`), then the
+# table, at the first argument `Readlink()` spelt, then the argument's `stat`
+# is avoided (DIVERGENCES 110).
 name = "opt-b-path-argument-says-what-it-avoided"
 args = ["-b", "{FILE}"]
 with_stderr = true
@@ -3268,9 +3313,8 @@ args = ["-b", "-w", "-e", "/nosuch", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
 with_stderr = true
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): the C enters an -e mount without
-# stat()ing it, so under -b its table holds /dev/shm and it checks /nosuch;
-# lsof-rs stat()s every mount, so its table is empty and it checks nothing.
+# An -e mount is entered without a stat, so under -b the table holds
+# /dev/shm alone and /nosuch is checked, and refused (DIVERGENCES 110).
 name = "opt-b-e-mounted-and-not"
 args = ["-b", "-w", "-e", "{SHMMNT}", "-e", "/nosuch", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
 
@@ -3280,17 +3324,16 @@ args = ["-b", "-w", "-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
 with_stderr = true
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): under -i alone the C reads no
-# mount table, so -b has nothing to avoid; lsof-rs reads it.
+# Under -i alone neither reads the mount table, so -b has nothing to avoid
+# (DIVERGENCES 110).
 name = "opt-b-i-alone-reads-no-mount-table"
 args = ["-b", "-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
 with_stderr = true
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): under -i alone the C reads no
-# mount table and so starts no child; lsof-rs reads it, through a helper
-# whose pipes a limit of seven descriptors leaves no room for: `can't open
-# pipes`, exit 1, where the C lists.
+# Under -i alone neither reads the mount table, so neither starts a child
+# (lsof-rs: a helper) whose pipes a limit of seven descriptors would leave
+# no room for: both list (DIVERGENCES 110).
 name = "opt-i-alone-under-a-descriptor-limit"
 args = ["-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
 env = { LSOF_DIFF_NOFILE = "7" }
@@ -3368,18 +3411,21 @@ args = ["-b", "-w", "+D", "{FUSE}"]
 env = { LSOF_DIFF_FUSE = "--mode hold" }
 
 [[case]]
-# The C reads no table under -i alone; lsof-rs gives the hung mount its
-# two seconds and drops it. The same sockets, and nothing said.
+# Under -i alone neither reads the table, so the mount that never answers
+# costs nothing: the same sockets, and nothing said. lsof-rs had given the
+# hung mount its two seconds; that it asks the mount nothing, and starts no
+# helper, is pinned by tests/bounded_calls.rs,
+# inet_alone_and_an_exempt_mount_ask_nothing_of_it.
 name = "fh-hold-i-alone"
 args = ["-S", "2", "-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
 env = { LSOF_DIFF_FUSE = "--mode hold" }
 with_stderr = true
-timeout = 30
+timeout = 5
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): the C never stat()s an -e mount;
-# lsof-rs stat()s it, drops it when it times out, and then refuses the -e.
-name = "fh-hold-e-mount-is-never-stated-in-the-c"
+# Neither stat()s an -e mount, so the one that never answers costs nothing
+# and the run lists (DIVERGENCES 110).
+name = "fh-hold-e-mount-is-never-stated"
 args = ["-S", "2", "-e", "{FUSE}", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
 env = { LSOF_DIFF_FUSE = "--mode hold" }
 with_stderr = true
@@ -3395,9 +3441,9 @@ with_stderr = true
 timeout = 30
 
 [[case]]
-# LEDGERED (DEBT, DIVERGENCES 110 next): the C warns `can't stat() fuse.hang
+# The mount point's stat outlives -S 2: both warn `can't stat() fuse.hang
 # file system DIR` and `Output information may be incomplete.` (87).
-name = "fh-delay-S2-warns-in-the-c"
+name = "fh-delay-S2-warns"
 args = ["-S", "2", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
 env = { LSOF_DIFF_FUSE = "--mode delay --delay 3" }
 with_stderr = true
@@ -3478,6 +3524,207 @@ args = ["-V", "-S", "2", "{FUSE}/lnk"]
 env = { LSOF_DIFF_FUSE = "--mode delay --delay 3 --symlink lnk=/etc --hang-op readlink" }
 with_stderr = true
 timeout = 30
+
+# ----------------------------------------- the mount table: fixtures MT, AUTOFS
+# A table of mounts made for the purpose, in a mount namespace of each run's
+# own (`mt-wrap.sh`, LSOF_DIFF_MT): what the C's `readmnt()` skips, reads,
+# stat()s and warns of, measured mount by mount (DIVERGENCES 87, 88, 110,
+# 113). The processes the cases name are the host's ({A}, {PORT}): nothing
+# holds a mount of the table. A case whose run ends in the usage compares
+# stdout and the status alone (the usage text is lsof-rs's own, DIVERGENCES
+# 114); the order of its lines is pinned by args.rs,
+# the_table_is_read_at_the_first_plus_d_under_the_options_there and
+# every_unmounted_exempt_path_is_an_error_after_the_others, and by
+# tests/arguments.rs, a_mount_table_of_its_own_says_what_the_c_says.
+
+[[case]]
+# Every mount the C cannot stat or spell, in the table's order: the
+# over-mounted one (`can't stat()`), the one behind a link loop and the
+# source that is one (`too many (> 20) symbolic links`), and the one named
+# with ESC and LF, escaped (`^[`, `\n`). The hidden mount whose link names
+# the plain one is a duplicate, and the automounter's is skipped: neither
+# says anything.
+name = "mt-plain-run-warns-for-each-unstattable-mount"
+args = ["-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-dash-w-mutes"
+args = ["-w", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# -t sets the C's Fwarn too.
+name = "mt-dash-t-mutes"
+args = ["-t", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# -i alone reads no table: nothing said.
+name = "mt-inet-only-reads-no-table"
+args = ["-n", "-P", "-i", "TCP@127.0.0.1:{PORT}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# ...but -e makes it, and every warning comes.
+name = "mt-inet-with-e-reads-the-table"
+args = ["-n", "-P", "-i", "TCP@127.0.0.1:{PORT}", "-e", "{MTPLAIN}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# An -e mount is never stat()ed: the over-mounted one says nothing.
+name = "mt-exempt-mount-is-never-stated"
+args = ["-e", "{MTGONE}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# A directory mounted over twice is recorded once, with the first row's
+# source: the top one's names no file system.
+name = "mt-dup-top-source-is-not-a-file-system"
+args = ["-V", "+f", "--", "src_dup_top"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# ...and the bottom one's does (the control).
+name = "mt-dup-bottom-source-names-the-dir"
+args = ["-V", "+f", "--", "src_dup_bottom"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# The hidden mount's directory is spelt through its parent's link as the
+# plain mount's, a duplicate: its source names nothing.
+name = "mt-hidden-mount-source-is-not-a-file-system"
+args = ["-V", "+f", "--", "src_hidden"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# An automounter's mount (`server:(pid1234)`) is skipped outright...
+name = "mt-automounter-source-is-skipped"
+args = ["-V", "+f", "--", "server:(pid1234)"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# ...so its directory is a plain file: `no file use located`.
+name = "mt-automounter-dir-is-a-plain-file"
+args = ["-V", "{MTPIDSRC}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# The C reads its table at the first +d, under the options there: a -w
+# after it does not mute the warnings (critic gap 0).
+name = "mt-plus-d-then-w-still-warns"
+args = ["+d", "{MTD}", "-w", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# ...and an -e after it was not in force there: the over-mounted mount is
+# stat()ed, warned of, and the -e refused. The usage after it is lsof-rs's
+# own; the order is pinned (see above).
+name = "mt-plus-d-then-e-stats-and-refuses"
+args = ["+d", "{MTD}", "-e", "{MTGONE}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+
+[[case]]
+# The control: -e before the +d is in force at the read.
+name = "mt-e-then-plus-d-neither"
+args = ["-e", "{MTGONE}", "+d", "{MTD}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# The table's warnings come where it is read, before a later option's
+# parse-time line.
+name = "mt-plus-d-then-S0"
+args = ["+d", "{MTD}", "-S", "0", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# Under -b nothing but an -e mount is recorded: with none, no -e is
+# checked (critic gap 1).
+name = "mt-b-w-e-nosuch-is-not-checked"
+args = ["-b", "-w", "-e", "/nosuch", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# Every unmounted -e is refused, the last given first. Usage: stdout and
+# status.
+name = "mt-two-unmounted-e-paths"
+args = ["-e", "/nosuch1", "-e", "/nosuch2", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+
+[[case]]
+# -e reads its path's links: one to a mount names it (critic gap 12).
+name = "mt-e-link-to-a-mount"
+args = ["-e", "{LINK_TO_MTPLAIN}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-plus-e-a-mount"
+args = ["+e", "{MTPLAIN}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# +e does not: a link is no mount, refused. Usage: stdout and status.
+name = "mt-plus-e-link-is-refused"
+args = ["+e", "{LINK_TO_MTPLAIN}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+
+[[case]]
+# An -e mount's source is read, here a link loop, which says so (with no
+# second line), but not stat()ed...
+name = "mt-e-reads-a-looping-source"
+args = ["-e", "{MTLOOPSRC}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# ...and a +e mount's is not even read: nothing said of it.
+name = "mt-plus-e-reads-no-source"
+args = ["+e", "{MTLOOPSRC}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# A source `Readlink()` gave up on matches no argument; this one is itself
+# that loop, which the argument's own `Readlink()` gives up on first.
+name = "mt-looping-source-names-nothing"
+args = ["-V", "+f", "--", "{MTL1}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+# An autofs mount is never stat()ed, so never mounted, by either; the
+# wrapper fails a run that triggered it (`autofs_hold.py`).
+name = "autofs-mount-is-never-stated"
+args = ["-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "autofs" }
+with_stderr = true
+timeout = 20
+
+[[case]]
+# A path argument naming it is read and stat()ed as stat(2) does, which
+# mounts nothing.
+name = "autofs-path-arg-never-automounts"
+args = ["-f", "--", "{MTAUTO}"]
+env = { LSOF_DIFF_MT = "autofs" }
+with_stderr = true
+timeout = 20
 
 # ------------------------------------------------------------- exit contract
 

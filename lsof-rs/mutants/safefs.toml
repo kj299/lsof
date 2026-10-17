@@ -13,7 +13,11 @@
 # checks that each mutant still fits the code.
 #
 # Run 2026-10-09, as root with --first-kill: 49 of 49 killed, 47 by the unit
-# gate and 2 by the differential.
+# gate and 2 by the differential. Item 110 re-anchored three (2026-10-17):
+# mount-source-stat-unbounded, mount-table-under-the-final-options (now the
+# parser's read at the first +d) and e-checked-against-an-empty-table (now
+# the parser's -e check); each run again as root, each killed by the unit
+# gate.
 
 [run]
 dir = ".."
@@ -416,8 +420,13 @@ name = "plus-d-examined-under-no-options"
 rule = "a +d/+D directory is examined under the -b/-O/-S given before it (94)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''    let fs = fs.with(sel.blocking, warn);'''
-new = '''    let fs = fs.with(lsof_core::Blocking::default(), warn);'''
+old = '''    let at = AtOption::new(sel, fs);
+    // The C's own words, for `+D` too.'''
+new = '''    let at = AtOption {
+        fs: fs.with(lsof_core::Blocking::default(), !sel.omit_unreadable),
+        ..AtOption::new(sel, fs)
+    };
+    // The C's own words, for `+D` too.'''
 
 [[mutant]]
 name = "plus-d-walk-forgets-its-options"
@@ -443,11 +452,13 @@ name = "mount-source-stat-unbounded"
 rule = "a mount source is stat()ed through the bounded layer (94, 110)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
-old = '''            let is_block = fs
-                .stat(Path::new(&path))'''
-new = '''            let is_block = fs
-                .with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns())
-                .stat(Path::new(&path))'''
+old = '''            let is_block = exempt.is_none()
+                && fs
+                    .stat(Path::new(&path))'''
+new = '''            let is_block = exempt.is_none()
+                && fs
+                    .with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns())
+                    .stat(Path::new(&path))'''
 
 [[mutant]]
 name = "walk-entry-lstat-unbounded"
@@ -489,16 +500,19 @@ new = '''                    if false && dir.warn && err.kind() != std::io::Erro
 
 [[mutant]]
 name = "mount-table-under-the-final-options"
-rule = "the mount table is read under the options of the first +d/+D, as the C reads it there (94)"
+rule = "the mount table is read at the first +d/+D, under the options there, as the C reads it there (94, 110)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''            Some(first) => fs.with(first.blocking, first.warn),'''
-new = '''            Some(_) => fs.with(sel.blocking, !sel.omit_unreadable),'''
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if table.is_none() {
+                        table = Some(read_table(&sel));
+                    }
+                    sel.dir_args.push(dir);'''
+new = '''                    sel.dir_args.push(dir);'''
 
 [[mutant]]
 name = "e-checked-against-an-empty-table"
-rule = "an empty mount table is checked against no -e (main.c: if ((mp = readmnt(ctx)))) (94)"
+rule = "an empty mount table is checked against no -e (main.c: if ((mp = readmnt(ctx)))) (94, 110)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''        for e in sel.exempt_fs.iter().filter(|_| !table_empty) {'''
-new = '''        for e in sel.exempt_fs.iter().filter(|_| true) {'''
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if !table.entries.is_empty() {'''
+new = '''        if true {'''

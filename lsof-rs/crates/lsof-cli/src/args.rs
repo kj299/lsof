@@ -16,8 +16,9 @@ use lsof_core::render::{Escaper, FileFlags, Format, DEFAULT_OFFSET_DIGITS};
 use lsof_core::safefs::{TMLIMIT, TMLIMMIN};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
-    errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, FdFilter, FdKind, FdSpec,
-    FilesystemArgs, Protocol, SafeFs, Selection, TaskMode, TcpInfoFlags,
+    errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, ExemptFs, FdFilter, FdKind,
+    FdSpec, FilesystemArgs, MountRequest, MountTable, Protocol, SafeFs, Selection, TaskMode,
+    TcpInfoFlags,
 };
 
 /// What the CLI should do after parsing.
@@ -35,7 +36,35 @@ pub enum Action {
         format: Format,
         repeat: Option<u64>,
         columns: Columns,
+        /// The mount table, when the parse read it: at the first `+d`/`+D`,
+        /// or for the `-e` check, where the C reads it ([`parse_with`]).
+        /// `None` is a table not read yet.
+        mounts: Option<MountTable>,
     },
+}
+
+/// What reads the mount table for the parser, under the options in force
+/// where it is read ([`lsof_core::Backend::mount_table`]).
+pub type MountReader<'a> = &'a dyn Fn(&MountRequest, &SafeFs) -> MountTable;
+
+/// The mount table, read through `mounts` under the options as `sel` holds
+/// them where it is read: its `-e`/`+e` list, which it neither `stat`s nor,
+/// for `+e`, reads the links of, and the `-b`, `-O`, `-S` and `-w` the
+/// bounded layer `fs` is viewed under. The parser reads it so at the first
+/// `+d`/`+D` and for the `-e` check, and `lsof` at the first path argument or
+/// before it lists.
+pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -> MountTable {
+    let req = MountRequest {
+        exempt: sel.exempt_fs.clone(),
+    };
+    mounts(&req, &fs.with(sel.blocking, !sel.omit_unreadable))
+}
+
+/// The table [`parse`] reads: none. A test or a fuzz input holding `+d /` or
+/// `-e /` examines no host mount, in-process and with no time limit, and
+/// none that does not answer can hold it.
+fn no_mounts(_: &MountRequest, _: &SafeFs) -> MountTable {
+    MountTable::default()
 }
 
 /// What the table's columns show. Pure presentation: nothing here selects a
@@ -129,11 +158,11 @@ fn digits_value(digits: &str) -> usize {
 }
 
 /// Parse the argument list (excluding `argv[0]`), examining a `+d`/`+D`
-/// directory in this process and warning on stderr: what the tests and the
-/// fuzz target use. `lsof` itself parses with [`parse_with`], over its
-/// bounded layer.
+/// directory in this process and warning on stderr, and reading no mount
+/// table: what the tests and the fuzz target use. `lsof` itself parses with
+/// [`parse_with`], over its bounded layer and the host's table.
 pub fn parse(args: Vec<String>) -> Result<Action, String> {
-    parse_with(args, &SafeFs::in_process())
+    parse_with(args, &SafeFs::in_process(), &no_mounts)
 }
 
 /// Parse the argument list (excluding `argv[0]`). A `+d`/`+D` directory is
@@ -141,8 +170,25 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
 /// `fs` under the `-b`, `-O`, `-S` and `-w` given before it; a warning the C
 /// prints while it parses (`-S time (N) changed to 2`, `avoiding stat(P)`)
 /// goes to `fs`'s sink at once, before any error the parse then returns.
-pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> {
+///
+/// The mount table is read through `mounts` where the C reads it while it
+/// parses: at the first `+d`/`+D` whose directory checked out (its
+/// `ck_file_arg()`, `arg.c:915`), under the options and the `-e`/`+e` list
+/// as they stand there; else for the `-e` check, once every option is read
+/// (`main.c:1137-1160`). Its warnings come where the C's do: `+d D -S 0`
+/// prints them before the `-S` warning, `-S 0 +d D` after, `+d D -w` prints
+/// them and `-w +d D` does not (measured). The table goes back with the run
+/// ([`Action::Run`]); a run that needs it and read none here reads it later.
+pub fn parse_with(
+    mut args: Vec<String>,
+    fs: &SafeFs,
+    mounts: MountReader<'_>,
+) -> Result<Action, String> {
     let mut sel = Selection::default();
+    // The C's `readmnt()` reads once, where it is first needed (`dmnt.c`:
+    // `if (Lmi || Lmist) return (Lmi)`).
+    let mut table: Option<MountTable> = None;
+    let read_table = |sel: &Selection| read_mount_table(sel, fs, mounts);
     let mut format = Format::Table;
     let mut want_help = false;
     let mut want_version = false;
@@ -243,10 +289,9 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
             match c {
                 // The C gives these a `+` meaning lsof-rs does not implement
                 // (`+n`/`+P` resolve names, `+r` repeats until nothing is
-                // open, `+e` still reads links, and `+J`/`+j` are errors there
-                // too), so the `+` spelling is refused rather than read as the
-                // `-` one.
-                'n' | 'P' | 'r' | 'e' | 'J' | 'j' if plus => {
+                // open, and `+J`/`+j` are errors there too), so the `+`
+                // spelling is refused rather than read as the `-` one.
+                'n' | 'P' | 'r' | 'J' | 'j' if plus => {
                     return Err(format!("unsupported option: +{c}"))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
@@ -264,6 +309,13 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                         args.get(i).cloned().unwrap_or_default()
                     };
                     let dir = enter_dir(&value, c == 'D', &sel, fs)?;
+                    // The C reads its mount table here, at the first `+d`/`+D`
+                    // whose directory checked out (`ck_file_arg()` from
+                    // `enter_dir()`, `arg.c:915`), under the `-b`, `-O`,
+                    // `-S`, `-w` and `-e`/`+e` given so far.
+                    if table.is_none() {
+                        table = Some(read_table(&sel));
+                    }
                     sel.dir_args.push(dir);
                     if c == 'd' {
                         sel.dirs_one_level.push(value);
@@ -407,6 +459,9 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                     // word, and the C takes that word WHATEVER it is — a
                     // missing value is reported by quoting what it found:
                     // `lsof: -e not followed by a file system path: "-p"`.
+                    // With no word at all the C quotes a null pointer,
+                    // `"(null)"` (undefined behaviour, a C-DEFECT): here
+                    // `""`.
                     let rest: String = chars[j + 1..].iter().collect();
                     let value = if !rest.is_empty() {
                         rest
@@ -416,33 +471,10 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
                                 i += 1;
                                 next.clone()
                             }
-                            other => {
-                                return Err(format!(
-                                    "-e not followed by a file system path: {:?}",
-                                    other.map(String::as_str).unwrap_or("")
-                                ))
-                            }
+                            other => other.cloned().unwrap_or_default(),
                         }
                     };
-                    // A file system path starts with `/`, or it is the
-                    // missing value's error: `-e dev/` and `-e ""` are
-                    // `-e not followed by a file system path: "dev/"`, exit 1
-                    // (measured), where lsof-rs had exempted every file for
-                    // an empty one.
-                    if !value.starts_with('/') {
-                        return Err(format!("-e not followed by a file system path: {value:?}"));
-                    }
-                    // Without its trailing slashes, and once, as
-                    // `enter_efsys()` keeps it: `-e /dev/shm/` is printed
-                    // `(-e /dev/shm)`, and reported `"-e /dev/shm" is not a
-                    // mounted file system.` (both measured). `/` stays `/`.
-                    let trimmed = match value.trim_end_matches('/') {
-                        "" => "/",
-                        t => t,
-                    };
-                    if !sel.exempt_fs.iter().any(|e| e == trimmed) {
-                        sel.exempt_fs.push(trimmed.to_string());
-                    }
+                    enter_exempt(&mut sel, &value, plus, fs)?;
                     j = chars.len();
                     continue;
                 }
@@ -763,14 +795,22 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
     {
         return Err(format!("UID {both} has been included and excluded."));
     }
-    // A state both included and excluded, from any two `-s` options. The C
-    // checks this once every option is read and names the state as its table
-    // spells it, first by table order.
-    if let Some(both) = tcp_state_table()
+    // What the C finds wrong once every option is read, it reports all of,
+    // in its order (`main.c:1060-1160`), and only then acts on `-h`, `-v` or
+    // `-F ?`, or ends the run: `lsof -o -s -x -e /nosuch` prints three errors,
+    // `-e /nosuch -h` and `-hx` exit 1 without the help (measured;
+    // DIVERGENCES 83, 115). Main prints the first `lsof: `.
+    let mut errors: Vec<String> = Vec::new();
+    // Whether some were printed already, ahead of the mount table's lines.
+    let mut told = false;
+    // A state both included and excluded, from any two `-s` options, each
+    // named as the C's table spells it, in table order (measured: `LISTEN`
+    // and `ESTABLISHED` both, `ESTABLISHED` first, the kernel's 1 before 10).
+    for both in tcp_state_table()
         .iter()
-        .find(|st| states.include.contains(st) && states.exclude.contains(st))
+        .filter(|st| states.include.contains(st) && states.exclude.contains(st))
     {
-        return Err(format!(
+        errors.push(format!(
             "can't include and exclude TCP state: {}",
             both.as_str()
         ));
@@ -786,7 +826,59 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
-        return Err("-o and -s are mutually exclusive".to_string());
+        errors.push("-o and -s are mutually exclusive".to_string());
+    }
+    // [json91: `-F and -t are mutually exclusive` goes here, `main.c:1095`.]
+    //
+    // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
+    // alone rather than accepting a switch that would do nothing
+    // (`main.c:1122`). Checked here so the two may arrive in either order.
+    if (sel.cross_filesystems || sel.cross_symlinks)
+        && sel.dirs_one_level.is_empty()
+        && sel.dir_trees.is_empty()
+    {
+        errors.push("-x must accompany +d or +D".to_string());
+    }
+    // [json91: `-J and -j are mutually exclusive` and `-J/-j and -t are
+    // mutually exclusive` go here, `main.c:1126-1133`.]
+    //
+    // Each `-e`/`+e` must name a mounted file system, which the C checks
+    // last, whatever came before (`main.c:1137-1160`): it reads the table
+    // here if no `+d` did, `-h` or `-v` or not, and checks only a table that
+    // holds something (`if ((mp = readmnt(ctx)))`) — under `-b`, which
+    // records an `-e` mount alone, `-b -e /nosuch` exits 0. A path is
+    // compared exactly with each directory as `Readlink()` spelt it, and
+    // every one that names none is reported, the last given first (the C
+    // prepends to its list): measured, `-e /nosuch1 -e /nosuch2` says
+    // `/nosuch2` first. The path is the one stored, `-e`'s through
+    // `Readlink()` and the word `-e` for `+e` too (`"-e /nonexist/x"` for a
+    // link to it); escaped, where the C prints it raw (DIVERGENCES 122).
+    if !sel.exempt_fs.is_empty() {
+        if table.is_none() {
+            // The C prints each error where it finds it, so those found so
+            // far come before what the table says as it is read: measured,
+            // `-e /nosuch -x f` prints `-x must accompany +d or +D`, then a
+            // mount's `can't stat()` warning, then the `-e` error.
+            for e in errors.drain(..) {
+                fs.tell(&format!("lsof: {e}"));
+                told = true;
+            }
+        }
+        let table = table.get_or_insert_with(|| read_table(&sel));
+        if !table.entries.is_empty() {
+            let esc = Escaper::for_host();
+            for e in sel.exempt_fs.iter().rev() {
+                if !table.entries.iter().any(|m| m.dir == e.path) {
+                    errors.push(format!(
+                        "\"-e {}\" is not a mounted file system.",
+                        esc.bytes(e.path.as_encoded_bytes())
+                    ));
+                }
+            }
+        }
+    }
+    if told || !errors.is_empty() {
+        return Err(errors.join("\nlsof: "));
     }
     if want_help {
         return Ok(Action::Help);
@@ -805,15 +897,6 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
     if sel.skip_inet_tables && sel.inet.enabled {
         return Err("-i is useless when -X is specified.".to_string());
     }
-    // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it
-    // alone rather than accepting a switch that would do nothing
-    // (`main.c:1122`). Checked here so the two may arrive in either order.
-    if (sel.cross_filesystems || sel.cross_symlinks)
-        && sel.dirs_one_level.is_empty()
-        && sel.dir_trees.is_empty()
-    {
-        return Err("-x must accompany +d or +D".to_string());
-    }
     // `-a` with nothing to AND is a usage error, and the run never starts:
     // `main.c` refuses `-a` when its selection flags are all clear
     // (DIVERGENCES 50). Exclusions set none, so `-a -p ^1` or `-a -K i` is
@@ -826,7 +909,64 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
         format,
         repeat,
         columns,
+        mounts: table,
     })
+}
+
+/// One `-e`/`+e`, entered as the C's `enter_efsys()` enters it (`arg.c:576-629`)
+/// where the option stands. The value must be a path from the root, for `+e`
+/// too, or it is `-e not followed by a file system path: "V"` (escaped, where
+/// the C prints it raw, DIVERGENCES 122); `-e`'s is spelt by `Readlink()`,
+/// through `fs` under the `-b`, `-O`, `-S` and `-w` given so far, so `-b -e
+/// /dev/shm` says `avoiding readlink(/dev/shm)` there and `-e /dev/shm -b`
+/// does not, and a value `Readlink()` gives up on is its message; `+e`'s is
+/// kept as typed. Either message is muted by a `-w` or `-t` given before the
+/// option, the C's `Fwarn` as it stands then, and still ends the run (all
+/// measured). Then the trailing slashes go (`/` stays `/`), and a path entered
+/// already is not entered again: the first keeps its sign (`+e X -e X` is
+/// `+e`'s). On Windows the value is kept as typed, as `+d`'s is.
+fn enter_exempt(sel: &mut Selection, value: &str, plus: bool, fs: &SafeFs) -> Result<(), String> {
+    let at = AtOption::new(sel, fs);
+    if !value.starts_with('/') {
+        return Err(at.said(format!(
+            "-e not followed by a file system path: \"{}\"",
+            at.esc.text(value)
+        )));
+    }
+    let path = if plus {
+        OsString::from(value)
+    } else {
+        at.readlink(value)?
+    };
+    let path = without_trailing_slashes(path);
+    if !sel.exempt_fs.iter().any(|e| e.path == path) {
+        sel.exempt_fs.push(ExemptFs { path, plus });
+    }
+    Ok(())
+}
+
+/// `path` less the slashes that end it, keeping one: `enter_efsys()`'s
+/// "Remove terminating `/' characters from paths longer than one".
+fn without_trailing_slashes(path: OsString) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = path.into_vec();
+        while bytes.len() > 1 && bytes.last() == Some(&b'/') {
+            bytes.pop();
+        }
+        OsString::from_vec(bytes)
+    }
+    #[cfg(not(unix))]
+    match path.into_string() {
+        Ok(mut s) => {
+            while s.len() > 1 && s.ends_with('/') {
+                s.pop();
+            }
+            s.into()
+        }
+        Err(p) => p,
+    }
 }
 
 /// A `+d`/`+D` directory, checked as the C's `enter_dir()` checks it
@@ -845,23 +985,20 @@ pub fn parse_with(mut args: Vec<String>, fs: &SafeFs) -> Result<Action, String> 
 /// then, and the run still ends; and the `-x` given so far is the one its
 /// walk obeys (DIVERGENCES 75), as are the `-b`, `-O` and `-S`.
 fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Result<DirArg, String> {
-    let warn = !sel.omit_unreadable;
-    let said = |message: String| if warn { message } else { String::new() };
-    let esc = Escaper::for_host();
+    let at = AtOption::new(sel, fs);
     // The C's own words, for `+D` too.
     if value.is_empty() || value.starts_with('+') || value.starts_with('-') {
-        return Err(said("+d not followed by a directory path".to_string()));
+        return Err(at.said("+d not followed by a directory path".to_string()));
     }
-    let fs = fs.with(sel.blocking, warn);
-    let dir = resolve_dir(value, &fs).map_err(|e| said(e.message(&esc.text(value))))?;
-    let shown = || esc.bytes(dir.as_encoded_bytes()).into_owned();
-    match fs.stat(std::path::Path::new(&dir)) {
-        Err(e) => Err(said(format!(
+    let dir = at.readlink(value)?;
+    let shown = || at.esc.bytes(dir.as_encoded_bytes()).into_owned();
+    match at.fs.stat(std::path::Path::new(&dir)) {
+        Err(e) => Err(at.said(format!(
             "WARNING: can't stat({}): {}",
             shown(),
             errno_text(&e)
         ))),
-        Ok(st) if !st.is_dir() => Err(said(format!("WARNING: not a directory: {}", shown()))),
+        Ok(st) if !st.is_dir() => Err(at.said(format!("WARNING: not a directory: {}", shown()))),
         // The C keeps this one `stat` for the walk (`arg.c:905,915`), so the
         // walk does not ask again (DIVERGENCES 111).
         Ok(st) => Ok(DirArg {
@@ -869,10 +1006,47 @@ fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Resu
             dir,
             cross_filesystems: sel.cross_filesystems,
             cross_symlinks: sel.cross_symlinks,
-            warn,
+            warn: at.warn,
             blocking: sel.blocking,
             stat: st,
         }),
+    }
+}
+
+/// What an option that names a path (`+d`/`+D`, `-e`) is read under where it
+/// stands, as the C reads it there: its `Fwarn` as it is then, which makes
+/// an error it would print said in silence (the error comes back empty, and
+/// still ends the run), and the bounded layer under the `-b`, `-O`, `-S` and
+/// `-w` given so far.
+struct AtOption<'a> {
+    warn: bool,
+    fs: SafeFs<'a>,
+    esc: Escaper,
+}
+
+impl<'a> AtOption<'a> {
+    fn new(sel: &Selection, fs: &SafeFs<'a>) -> Self {
+        let warn = !sel.omit_unreadable;
+        AtOption {
+            warn,
+            fs: fs.with(sel.blocking, warn),
+            esc: Escaper::for_host(),
+        }
+    }
+
+    /// `message`, unless the C would say it in silence.
+    fn said(&self, message: String) -> String {
+        if self.warn {
+            message
+        } else {
+            String::new()
+        }
+    }
+
+    /// `value` as `Readlink()` spells it, or the C's message for why it
+    /// gave up, naming `value` escaped.
+    fn readlink(&self, value: &str) -> Result<OsString, String> {
+        resolve_dir(value, &self.fs).map_err(|e| self.said(e.message(&self.esc.text(value))))
     }
 }
 
@@ -1148,6 +1322,11 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
             } else {
                 (&mut sel.commands, &sel.command_excludes)
             };
+            // Found here, at the option, as the C finds it: its
+            // `lsof_select_process()` refuses the second name as it is
+            // entered (`lib/lsof.c:155-165`), so `main.c:1042`'s check once
+            // every option is read never finds one. The C then reads on, as
+            // after any error in its loop; lsof-rs stops (DIVERGENCES 83).
             if other.iter().any(|o| o == name) {
                 return Err(format!("-c^{name} and -c{name} conflict."));
             }
@@ -1526,7 +1705,14 @@ mod tests {
     /// value's error; kept without its trailing slashes, and once.
     #[test]
     fn dash_e_takes_a_path_once_without_its_trailing_slashes() {
-        let fs = |argv: &[&str]| columns(argv).map(|(_, s)| s.exempt_fs);
+        let fs = |argv: &[&str]| {
+            columns(argv).map(|(_, s)| {
+                s.exempt_fs
+                    .into_iter()
+                    .map(|e| e.path.into_string().unwrap())
+                    .collect::<Vec<_>>()
+            })
+        };
         assert_eq!(fs(&["-e", "/dev/shm/"]).unwrap(), ["/dev/shm"]);
         assert_eq!(fs(&["-e", "///"]).unwrap(), ["/"]);
         assert_eq!(
@@ -1956,6 +2142,24 @@ mod tests {
         );
         // A prefix of the other is not the same name, and is no conflict.
         assert!(err(&["-c", "sle", "-c", "^sleep"]).is_none());
+        // Found at the option, where the C finds it, not once every option
+        // is read: the first line is the C's either way round, and a name
+        // excluded twice is one conflict (measured). Its later errors are
+        // lost, as after every error found in the loop: `-c^x -cx -x` says
+        // nothing of `-x`, where the C adds `-x must accompany +d or +D`
+        // (DIVERGENCES 83).
+        for (argv, first) in [
+            (&["-c^x", "-cx", "-x", "q"][..], "-c^x and -cx conflict."),
+            (
+                &["-x", "q", "-c^x", "-cx"][..],
+                "unknown cross-over option: q",
+            ),
+            (&["-c^x", "-c^x", "-cx"][..], "-c^x and -cx conflict."),
+            (&["-c^x", "-cx", "-x"][..], "-c^x and -cx conflict."),
+            (&["-c^x", "-cx", "-o", "-s"][..], "-c^x and -cx conflict."),
+        ] {
+            assert_eq!(err(argv).as_deref(), Some(first), "{argv:?}");
+        }
         if cfg!(target_os = "linux") {
             // `comm` holds 15 bytes; the C refuses 16 with this text, for an
             // exclusion too (and names it without the `^`).
@@ -2259,7 +2463,11 @@ mod tests {
         let said = std::cell::RefCell::new(Vec::new());
         let say = |l: &str| said.borrow_mut().push(l.to_string());
         let fs = SafeFs::new(&lsof_core::InProcess, &say);
-        let got = parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs);
+        let got = parse_with(
+            argv.iter().map(|s| s.to_string()).collect(),
+            &fs,
+            &no_mounts,
+        );
         (got, said.into_inner())
     }
 
@@ -2826,7 +3034,6 @@ mod tests {
             ("+n", "unsupported option: +n"),
             ("+P", "unsupported option: +P"),
             ("+r", "unsupported option: +r"),
-            ("+e", "unsupported option: +e"),
             ("+J", "unsupported option: +J"),
             ("+aq", "unsupported option: +q"),
             ("+", "unsupported option: +"),
@@ -3061,5 +3268,373 @@ mod tests {
         let (cols, sel) = columns(&["+f", "--", "x"]).unwrap();
         assert_eq!(cols.file_flags, FileFlags::Off);
         assert_eq!(sel.filesystem_args, FilesystemArgs::AlwaysFilesystem);
+    }
+
+    /// Parse over the in-process layer with `table` for the host's mount
+    /// table, and hand back what the parse printed, each table read as a
+    /// line naming the `-e`/`+e` list and options it was read under, and the
+    /// lines the table itself says (`say`).
+    fn parse_over(
+        argv: &[&str],
+        table: &[&str],
+        say: &[&str],
+    ) -> (Result<Action, String>, Vec<String>) {
+        let said = std::cell::RefCell::new(Vec::new());
+        let sink = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &sink);
+        let reader = |req: &MountRequest, fs: &SafeFs| {
+            let exempt: Vec<String> = req
+                .exempt
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}{}",
+                        if e.plus { '+' } else { '-' },
+                        e.path.to_string_lossy()
+                    )
+                })
+                .collect();
+            fs.tell(&format!(
+                "READ exempt={exempt:?} warn={} avoid={}",
+                fs.warns(),
+                fs.blocking().avoid
+            ));
+            for l in say {
+                if fs.warns() {
+                    fs.tell(l);
+                }
+            }
+            MountTable {
+                entries: table
+                    .iter()
+                    .map(|d| lsof_core::MountEntry {
+                        dir: (*d).into(),
+                        device: Some(1),
+                        source_resolved: Some("src".into()),
+                        source_is_block: false,
+                        kind: lsof_core::MountKind::Regular,
+                    })
+                    .collect(),
+                ..MountTable::default()
+            }
+        };
+        let got = parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs, &reader);
+        (got, said.into_inner())
+    }
+
+    /// The C reads its mount table iff some `-e`/`+e` was given or the run is
+    /// not `-i` alone (`Selinet`): every form below measured by counting
+    /// the C's `alarm(15)` calls (none, or one per request of its child), the
+    /// negated and value-less ones included (DIVERGENCES 110).
+    #[test]
+    fn needs_mount_table_is_the_cs_selinet() {
+        let d = a_dir();
+        let no_table: &[&[&str]] = &[
+            &["-i"],
+            &["-i", "TCP:22"],
+            &["-i", "@127.0.0.1"],
+            &["-i", "4"],
+            &["-i", "UDP"],
+            &["-n", "-P", "-i", ":22"],
+            &["-i", "-s", "TCP:LISTEN"],
+            &["-i", "-T"],
+            &["-t", "-i"],
+            &["-a", "-i"],
+            &["-i", "-p", "^1"],
+            &["-i", "-u", "^root"],
+            &["-i", "-c", "^x"],
+            &["-i", "-g", "^1"],
+            &["-i", "-g"],
+            &["-i", "-K", "i"],
+            &["-i", "+L"],
+            &["-i", "-E"],
+            &["-i", "+E"],
+            &["-i", "-w", "-n", "-P", "-l", "-R", "-o", "-T"],
+        ];
+        let table: &[&[&str]] = &[
+            &["-i", "-d", "^3"],
+            &["-i", "-g", "1"],
+            &["-i", "-K"],
+            &["-i", "-U"],
+            &["-i", "-N"],
+            &["-i", "-e", "/x"],
+            &["-i", "+e", "/x"],
+            &["-i", "+L1"],
+            &["-i", "-p", "1"],
+            &["-i", "-a", "-p", "1"],
+            &["-i", "-u", "0"],
+            &["-i", "-c", "x"],
+            &["/dev/null", "-i"],
+            &["-s", "TCP:LISTEN"],
+            &["-U"],
+            &["-t"],
+            &["-N"],
+            &["-t", "-p", "1"],
+            &["-f", "--", "/"],
+            &["+f", "--", "/dev"],
+            &["+d", &d],
+            &["-i", "+D", &d],
+            &[],
+        ];
+        let needs = |argv: &[&str]| match parse(argv.iter().map(|s| s.to_string()).collect()) {
+            Ok(Action::Run { selection, .. }) => selection.needs_mount_table(),
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        for argv in no_table {
+            assert!(!needs(argv), "{argv:?} reads no table in the C");
+        }
+        for argv in table {
+            assert!(needs(argv), "{argv:?} reads the table in the C");
+        }
+        // `-i -x f` is no table case: a usage error in both.
+        assert_eq!(
+            parse(vec!["-i".into(), "-x".into(), "f".into()]).unwrap_err(),
+            "-x must accompany +d or +D"
+        );
+    }
+
+    /// `-e` is spelt by `Readlink()` where it stands, under the `-b` and `-w`
+    /// given before it; `+e` is taken as typed; a path entered twice keeps
+    /// the sign it was first given (DIVERGENCES 88; measured).
+    #[cfg(unix)]
+    #[test]
+    fn dash_e_reads_its_links_and_plus_e_does_not() {
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tmp.join(format!("lsof-rs-args-e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("/nonexist/x", dir.join("bad")).unwrap();
+        std::os::unix::fs::symlink("l2", dir.join("l1")).unwrap();
+        std::os::unix::fs::symlink("l1", dir.join("l2")).unwrap();
+        let bad = dir.join("bad").to_string_lossy().into_owned();
+        let l1 = dir.join("l1").to_string_lossy().into_owned();
+        let exempt = |argv: &[&str]| match parse_over(argv, &[], &[]) {
+            (Ok(Action::Run { selection, .. }), _) => selection
+                .exempt_fs
+                .into_iter()
+                .map(|e| (e.path.into_string().unwrap(), e.plus))
+                .collect::<Vec<_>>(),
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        assert_eq!(exempt(&["-e", &bad]), [("/nonexist/x".to_string(), false)]);
+        assert_eq!(exempt(&["+e", &bad]), [(bad.clone(), true)]);
+        assert_eq!(
+            exempt(&["+e", "/m/", "-e", "/m"]),
+            [("/m".to_string(), true)]
+        );
+        assert_eq!(
+            exempt(&["-e", "/m", "+e", "/m//"]),
+            [("/m".to_string(), false)]
+        );
+        // A link loop is its message, muted by a `-w` before it alone.
+        let looped = format!("too many (> 20) symbolic links in readlink() path: {l1}");
+        assert_eq!(parse_over(&["-e", &l1], &[], &[]).0.unwrap_err(), looped);
+        assert_eq!(parse_over(&["-w", "-e", &l1], &[], &[]).0.unwrap_err(), "");
+        assert!(
+            parse_over(&["+e", &l1], &[], &[]).0.is_ok(),
+            "+e reads no link"
+        );
+        // `-b` before it: `avoiding readlink(P)` there, and P kept as typed.
+        let (got, said) = parse_over(&["-b", "-e", &bad], &[], &[]);
+        assert!(got.is_ok());
+        assert_eq!(
+            said[0],
+            format!("lsof: avoiding readlink({bad}): -b was specified.")
+        );
+        let (_, said) = parse_over(&["-e", "/dev/shm", "-b"], &[], &[]);
+        assert!(said.iter().all(|l| l.starts_with("READ")), "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `-e not followed by a file system path` quotes the value escaped,
+    /// `+e`'s too, and is muted by a `-w` or `-t` before the option, where
+    /// the run still ends (measured: `-w -e dev/` and `-t -e dev/` print only
+    /// the usage, `-e dev/ -w` the message).
+    #[test]
+    fn a_relative_exempt_path_is_refused_and_muted_by_w_before_it() {
+        let err = |argv: &[&str]| parse_over(argv, &[], &[]).0.unwrap_err();
+        assert_eq!(
+            err(&["-e", "dev/"]),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+        assert_eq!(
+            err(&["+e", "dev/"]),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+        assert_eq!(
+            err(&["-e", "-p", "1"]),
+            r#"-e not followed by a file system path: "-p""#
+        );
+        assert_eq!(
+            err(&["-p", "1", "-e"]),
+            r#"-e not followed by a file system path: """#
+        );
+        assert_eq!(
+            err(&["-e", "d\x1b[2J"]),
+            r#"-e not followed by a file system path: "d^[[2J""#
+        );
+        assert_eq!(err(&["-w", "-e", "dev/"]), "");
+        assert_eq!(err(&["-t", "-e", "dev/"]), "");
+        assert_eq!(err(&["-w", "-e", "-p", "1"]), "");
+        assert_eq!(
+            err(&["-t", "+w", "-e", "dev/"]),
+            r#"-e not followed by a file system path: "dev/""#
+        );
+    }
+
+    /// The `-e` check runs once every option is read, before `-h` and `-v`
+    /// are acted on, after the other end-of-parse errors, against a table
+    /// read there if no `+d` read it; and only a table that holds something.
+    /// Every bad path is reported, the last given first, escaped, and the
+    /// errors are one, joined as the C prints them (DIVERGENCES 83, 115).
+    #[test]
+    fn every_unmounted_exempt_path_is_an_error_after_the_others() {
+        let mounted = ["/m", "/n"];
+        let err = |argv: &[&str]| parse_over(argv, &mounted, &[]).0.unwrap_err();
+        assert_eq!(
+            err(&["-e", "/nosuch1", "-e", "/m", "+e", "/nosuch2"]),
+            "\"-e /nosuch2\" is not a mounted file system.\n\
+             lsof: \"-e /nosuch1\" is not a mounted file system."
+        );
+        assert_eq!(
+            err(&["-e", "/nosuch", "-h"]),
+            "\"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(
+            err(&["-v", "-e", "/nosuch"]),
+            "\"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(
+            err(&["-e", "/no\x1b[2J"]),
+            "\"-e /no^[[2J\" is not a mounted file system."
+        );
+        // What comes before the `-e` check is printed before the table is
+        // read for it, and so before what the table says; one read already
+        // leaves them all to the end.
+        let warned = ["lsof: WARNING: can't stat() tmpfs file system /gone"];
+        let (got, said) = parse_over(&["-e", "/nosuch", "-x", "f"], &mounted, &warned);
+        assert_eq!(
+            got.unwrap_err(),
+            "\"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(said[0], "lsof: -x must accompany +d or +D");
+        assert!(
+            said[1].starts_with("READ ") && said[2] == warned[0],
+            "{said:?}"
+        );
+        let (got, said) = parse_over(&["-o", "-s", "-x", "-e", "/m"], &mounted, &[]);
+        assert_eq!(got.unwrap_err(), "", "printed already, and still an error");
+        assert_eq!(
+            said[..2],
+            [
+                "lsof: -o and -s are mutually exclusive",
+                "lsof: -x must accompany +d or +D"
+            ]
+        );
+        let d = a_dir();
+        let (got, said) = parse_over(&["+d", &d, "-e", "/nosuch", "-o", "-s"], &mounted, &warned);
+        assert_eq!(
+            got.unwrap_err(),
+            "-o and -s are mutually exclusive\nlsof: \"-e /nosuch\" is not a mounted file system."
+        );
+        assert_eq!(said.len(), 2, "the read at +d, and its line: {said:?}");
+        assert_eq!(
+            parse(
+                ["-s", "TCP:LISTEN,^LISTEN,ESTABLISHED,^ESTABLISHED", "-x"]
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect()
+            )
+            .unwrap_err(),
+            "can't include and exclude TCP state: ESTABLISHED\n\
+             lsof: can't include and exclude TCP state: LISTEN\n\
+             lsof: -x must accompany +d or +D"
+        );
+        // `-hx` is `-x`'s error, not the help.
+        assert_eq!(
+            parse(vec!["-hx".into()]).unwrap_err(),
+            "-x must accompany +d or +D"
+        );
+        assert!(matches!(
+            parse_over(&["-h", "-e", "/m"], &mounted, &[]).0,
+            Ok(Action::Help)
+        ));
+        // A mounted path, and `-f` changes nothing about it (DIVERGENCES 113).
+        assert!(parse_over(&["-f", "-e", "/m", "-e", "/n/"], &mounted, &[])
+            .0
+            .is_ok());
+        // An empty table checks nothing: `-b -e /nosuch` runs.
+        assert!(parse_over(&["-e", "/nosuch"], &[], &[]).0.is_ok());
+    }
+
+    /// The table is read once, where the C reads it: at the first `+d`/`+D`,
+    /// under the `-w`, `-b` and `-e`/`+e` given before it, its lines there;
+    /// else for the `-e` check, under the options as they ended; else not
+    /// at all while parsing (DIVERGENCES 82, 87, 110).
+    #[test]
+    fn the_table_is_read_at_the_first_plus_d_under_the_options_there() {
+        let d = a_dir();
+        let warned = ["lsof: WARNING: can't stat() tmpfs file system /gone"];
+        let said = |argv: &[&str]| parse_over(argv, &["/m"], &warned).1;
+        let read = |exempt: &str, warn: bool, avoid: bool| {
+            format!("READ exempt={exempt} warn={warn} avoid={avoid}")
+        };
+        // `+d D -w` warns; `-w +d D` does not; one read for two `+d`.
+        assert_eq!(
+            said(&["+d", &d, "-w", "+D", &d]),
+            [read("[]", true, false), warned[0].into()]
+        );
+        assert_eq!(said(&["-w", "+d", &d]), [read("[]", false, false)]);
+        // `+d D -e M` reads with no `-e`; `-e M +d D` with it.
+        assert_eq!(
+            said(&["+d", &d, "-e", "/m"]),
+            [read("[]", true, false), warned[0].into()]
+        );
+        assert_eq!(
+            said(&["-e", "/m", "+d", &d])[0],
+            read("[\"-/m\"]", true, false)
+        );
+        assert_eq!(
+            said(&["+e", "/m", "+d", &d])[0],
+            read("[\"+/m\"]", true, false)
+        );
+        // Before a later option's parse-time line, and after an earlier one's.
+        assert_eq!(
+            said(&["+d", &d, "-S", "0"]),
+            [
+                read("[]", true, false),
+                warned[0].into(),
+                "lsof: WARNING: -S time (0) changed to 2".into()
+            ]
+        );
+        assert_eq!(
+            said(&["-S", "0", "+d", &d])[0],
+            "lsof: WARNING: -S time (0) changed to 2"
+        );
+        // No `+d`: read for the `-e` check, under the options as they ended.
+        assert_eq!(said(&["-e", "/m", "-w"]), [read("[\"-/m\"]", false, false)]);
+        assert_eq!(
+            said(&["-e", "/m", "-b", "-w"]),
+            [read("[\"-/m\"]", false, true)]
+        );
+        // Neither: not read while parsing, `-h` or not.
+        assert!(said(&["-p", "1"]).is_empty());
+        assert!(said(&["-h"]).is_empty());
+        // A `+d` whose directory fails reads none.
+        assert!(parse_over(&["+d", "/nonexistent-dir"], &["/m"], &warned)
+            .1
+            .iter()
+            .all(|l| !l.starts_with("READ")));
+        // The table travels with the run.
+        match parse_over(&["+d", &d], &["/m"], &[]).0 {
+            Ok(Action::Run {
+                mounts: Some(t), ..
+            }) => assert_eq!(t.entries.len(), 1),
+            other => panic!("{other:?}"),
+        }
+        match parse_over(&["-p", "1"], &["/m"], &[]).0 {
+            Ok(Action::Run { mounts, .. }) => assert!(mounts.is_none()),
+            other => panic!("{other:?}"),
+        }
     }
 }

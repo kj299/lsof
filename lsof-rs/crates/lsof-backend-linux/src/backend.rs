@@ -61,8 +61,16 @@ impl Backend for LinuxBackend {
         })
     }
 
-    fn mounts(&self, sources: bool, fs: &lsof_core::SafeFs) -> Vec<lsof_core::MountEntry> {
-        mounts::load(sources, fs)
+    fn mount_table(
+        &self,
+        req: &lsof_core::MountRequest,
+        fs: &lsof_core::SafeFs,
+    ) -> lsof_core::MountTable {
+        mounts::load(req, fs)
+    }
+
+    fn has_mount_type(&self, fstype: &str) -> bool {
+        mounts::has_type(fstype)
     }
 
     fn identifies_paths(&self) -> bool {

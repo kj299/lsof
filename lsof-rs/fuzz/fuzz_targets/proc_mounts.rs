@@ -12,7 +12,8 @@
 // Contract: no panic on arbitrary bytes (PLAYBOOK Phase 4 gate 3, LESSONS #021).
 
 use libfuzzer_sys::fuzz_target;
-use lsof_backend_linux::fuzz_api::parse_mounts;
+use lsof_backend_linux::fuzz_api::{parse_mounts, resolve_table};
+use lsof_core::{Blocking, ExemptFs, MountRequest, SafeFs};
 
 fuzz_target!(|data: &[u8]| {
     // Bytes, as the kernel writes them: only space, tab, newline and backslash
@@ -35,4 +36,30 @@ fuzz_target!(|data: &[u8]| {
             "decode grew the text: {r:?}"
         );
     }
+
+    // The table the C's `readmnt()` makes of those lines, under `-b` and
+    // `-w`: no call reaches a file system and nothing is said, so the bytes
+    // drive the skips, the `-e`/`+e` match and the duplicate rule alone. The
+    // first line's directory is exempt, `+e` or `-e` by the input's parity.
+    // Under `-b` every other mount fails its `stat` and is dropped, and an
+    // exempt one is recorded once, with no device.
+    let quiet = SafeFs::in_process().with(
+        Blocking {
+            avoid: true,
+            ..Blocking::default()
+        },
+        false,
+    );
+    let exempt = rows
+        .first()
+        .map(|r| ExemptFs {
+            path: r.dir.clone(),
+            plus: data.len() % 2 == 0,
+        })
+        .into_iter()
+        .collect();
+    let table = resolve_table(&rows, &MountRequest { exempt }, &quiet);
+    assert!(table.entries.len() <= 1, "{table:?}");
+    assert!(table.entries.iter().all(|m| m.device.is_none()), "{table:?}");
+    assert!(table.has_nfs <= 2);
 });

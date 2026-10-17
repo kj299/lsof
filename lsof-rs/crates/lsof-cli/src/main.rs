@@ -15,13 +15,13 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lsof_cli::args::{parse_with, Action};
+use lsof_cli::args::{parse_with, read_mount_table, Action};
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
-    errno_text, Backend, DirArg, FileId, FilesystemArgs, Located, PathItem, SafeFs, Selection,
-    TaskMode, UidSel, UserLookup,
+    errno_text, Backend, DirArg, FileId, FilesystemArgs, Located, MountKind, MountRequest,
+    MountTable, PathItem, SafeFs, Selection, TaskMode, UidSel, UserLookup,
 };
 
 #[cfg(target_os = "linux")]
@@ -176,8 +176,10 @@ MISCELLANEOUS:
                   enable non-fatal stderr warnings (default: report, on)
     -X            toggle: leave TCP and UDP sockets unidentified, without
                   reading their tables; -i is refused while it is on
-    -e <fs>       do not stat files on this mounted file system; they show
-                  as UNKN... rows
+    -e <fs>       do not stat files on this mounted file system, nor the
+                  mount point; they show as UNKN... rows. <fs> is read
+                  through its links; +e <fs> is taken as typed, and the
+                  mount's links are not read either
     -Z            SELinux security contexts: not supported (exits 1)
     -b            make none of the calls that can block on a file system
                   (stat, lstat, readlink) for a path given or a mount point;
@@ -763,14 +765,26 @@ fn main() {
     // process that gives each call `-S` seconds (DIVERGENCES 94, 110). One
     // at a time, started by the first call that needs it — a `+d` while the
     // options are parsed, the mount table, or a path argument — replaced
-    // after a call that times out, and ended with the run.
+    // after a call that times out, and ended with the run. A run that makes
+    // none (`-i` alone, which reads no mount table) starts none.
     #[cfg(target_os = "linux")]
     let calls = lsof_backend_linux::safefs::Helper::new();
     #[cfg(not(target_os = "linux"))]
     let calls = lsof_core::InProcess;
     let fs = SafeFs::new(&calls, &lsof_core::safefs::to_stderr);
 
-    let action = match parse_with(argv, &fs) {
+    // The backend, made where it is first needed: by the parser, if it reads
+    // the mount table where the C does (at the first `+d`/`+D`, or for the
+    // `-e` check), else once the options are read. So `-h`, `-v` and a usage
+    // error make none (on Windows, no token is asked whether it is elevated).
+    let env_cell: std::cell::OnceCell<Env> = std::cell::OnceCell::new();
+    let parsed = {
+        let read_table = |req: &MountRequest, fs: &SafeFs| {
+            env_cell.get_or_init(make_env).backend.mount_table(req, fs)
+        };
+        parse_with(argv, &fs, &read_table)
+    };
+    let action = match parsed {
         Ok(a) => a,
         Err(e) => {
             // An argument is escaped where the message quotes it, as the C
@@ -785,7 +799,7 @@ fn main() {
         }
     };
 
-    let (selection, format, repeat, columns) = match action {
+    let (selection, format, repeat, columns, mounts) = match action {
         Action::Help => {
             print!("{}", usage());
             return;
@@ -804,9 +818,10 @@ fn main() {
             format,
             repeat,
             columns,
-        } => (selection, format, repeat, columns),
+            mounts,
+        } => (selection, format, repeat, columns, mounts),
     };
-    let env = make_env();
+    let env = env_cell.into_inner().unwrap_or_else(make_env);
     let selection = {
         let mut sel = selection;
         if let Err(errors) = resolve_users(&mut sel, env.backend.as_ref()) {
@@ -833,38 +848,17 @@ fn main() {
     let mut dropped_an_argument = false;
     let selection = {
         let mut sel = selection;
-        // lsof reads a path argument as a FILE SYSTEM name when it matches a
-        // mounted-on directory — or a block-device mount source, which is why
-        // `lsof /dev/vda` means the root filesystem — and then selects every
-        // open file on it. `-f` forbids that reading, `+f` forces it and
-        // widens the source test to any mount source.
-        // Only a bare path argument is compared with a mount's source, so
-        // only a run that names one asks the backend to spell the sources.
-        //
-        // The C reads the table at the first `+d`/`+D`, while it is still
-        // reading its options, so the `-b`, `-O`, `-S` and `-w` in force there
-        // are the ones its `stat`s are made under: `+d D -b` examines every
-        // mount, `-b +d D` never gets that far. Without one, the options as
-        // they ended. `None` is a table not read at all.
-        let table_fs = match sel.dir_args.first() {
-            Some(first) => fs.with(first.blocking, first.warn),
-            None => fs.with(sel.blocking, !sel.omit_unreadable),
-        };
-        let mounts = match sel.filesystem_args {
-            FilesystemArgs::NeverFilesystem => None,
-            _ => Some(env.backend.mounts(!sel.paths.is_empty(), &table_fs)),
-        };
-        let table_empty = mounts.as_ref().is_some_and(Vec::is_empty);
-        let mounts = mounts.unwrap_or_default();
         sel.paths_identified = env.backend.identifies_paths();
         // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
         // `is_selinux_enabled()` — a check for a mounted selinuxfs, not for
         // the `/sys/fs/selinux` directory. On a host where the directory
         // exists unmounted (this port's own test box) a presence check answers
         // "enabled" where the C answers "disabled", so the mount table is what
-        // decides, using the type `-N` already taught it to read.
+        // decides: the types it lists, read as text, with no mount examined
+        // (the C asks libselinux, which reads `/proc/mounts` the same way, and
+        // `readmnt()` has no part in it).
         if sel.selinux.is_some() {
-            let enabled = mounts.iter().any(|m| m.fstype == "selinuxfs");
+            let enabled = env.backend.has_mount_type("selinuxfs");
             if !enabled {
                 // The C's exact line, and its status.
                 eprintln!("lsof: -Z limited to SELinux");
@@ -880,45 +874,20 @@ fn main() {
             eprintln!("lsof: -Z (SELinux context) is not implemented");
             std::process::exit(1);
         }
-        // `-N` selects on file-system TYPE, so the mount table is what turns
-        // the flag into a set of devices a row can be compared against.
-        // `nfs` and `nfs4` are the two Linux spells; a type that merely starts
-        // with them (there is none today) is deliberately not matched.
-        if sel.nfs_only {
-            for m in &mounts {
-                if m.fstype == "nfs" || m.fstype == "nfs4" {
-                    sel.nfs_devices.insert(m.device);
-                }
-            }
-        }
-        // `-e`/`+e` name a MOUNT POINT, and the C checks that before it does
-        // anything else: `lsof: "-e /nosuch" is not a mounted file system.`,
-        // then exit 1. A trailing slash is tolerated (`-e /dev/shm/` was
-        // accepted), so the comparison is made on a normalised form. It
-        // checks only a table that holds something (`main.c`: `if ((mp =
-        // readmnt(ctx)))`): under `-b`, which drops every mount it would
-        // `stat`, `-b -e /nosuch` exits 0 (measured).
-        for e in sel.exempt_fs.iter().filter(|_| !table_empty) {
-            let want = {
-                let t = e.trim_end_matches('/');
-                if t.is_empty() {
-                    "/"
-                } else {
-                    t
-                }
-            };
-            // A value is UTF-8 (`main` refuses any other argument), so a
-            // mount point that is not can never be it.
-            if !mounts.iter().any(|m| {
-                m.dir
-                    .to_str()
-                    .is_some_and(|dir| dir.trim_end_matches('/') == want.trim_end_matches('/'))
-                    || (want == "/" && m.dir == "/")
-            }) {
-                eprintln!("lsof: \"-e {e}\" is not a mounted file system.");
-                std::process::exit(1);
-            }
-        }
+        // The mount table, which lsof reads once and only on a run that needs
+        // it: not under `-i` alone (`Selection::needs_mount_table`), where
+        // the C reads none and so no mount that does not answer can cost it
+        // anything. The parse read it if the C reads it while it parses (at
+        // the first `+d`/`+D`, for `-e`); else the C reads it at the first
+        // path argument `Readlink()` spells (`arg.c:184`, under `-f` too),
+        // after the arguments before it have said why they are dropped and
+        // before anything is `stat`ed, or else just before it lists
+        // (`initialize()`, `dproc.c:670`) — each under the options as they
+        // ended (DIVERGENCES 87, 110, 113).
+        let needs_table = sel.needs_mount_table();
+        let mut table: Option<MountTable> = mounts;
+        let reader = |req: &MountRequest, fs: &SafeFs| env.backend.mount_table(req, fs);
+        let read_table = |sel: &Selection| read_mount_table(sel, &fs, &reader);
         let esc = Escaper::for_host();
         spell_names_as_reported(&mut sel);
         // `+d`/`+D` first: the C expands them as it parses its options, so
@@ -953,7 +922,15 @@ fn main() {
             } else {
                 path.clone()
             };
-            let devs = filesystems_named(&mounts, &path, sel.filesystem_args);
+            // lsof reads a path argument as a FILE SYSTEM name when it
+            // matches a mounted-on directory — or a block-device mount
+            // source, which is why `lsof /dev/vda` means the root filesystem —
+            // and then selects every open file on it. `-f` forbids that
+            // reading, `+f` forces it and widens the source test to any mount
+            // source. A run that names a path always reads the table
+            // (`needs_mount_table`), here if not before.
+            let mounted = &table.get_or_insert_with(|| read_table(&sel)).entries;
+            let devs = filesystems_named(mounted, &path, sel.filesystem_args);
             if !devs.is_empty() {
                 sel.path_names.insert(typed.as_str().into());
                 for dev in devs {
@@ -1043,6 +1020,23 @@ fn main() {
         // it non-fatal.
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             std::process::exit(1);
+        }
+        if table.is_none() && needs_table {
+            table = Some(read_table(&sel));
+        }
+        // `-N` selects on file-system TYPE, so the mount table is what turns
+        // the flag into a set of devices a row can be compared against: each
+        // mount the C typed `N_NFS` (`nfs`, `nfs3`, `nfs4`, in any case), one
+        // it `stat`ed. The C also asks that `HasNFS` be 2, which it is once
+        // such a mount is recorded, and that the file's path start with the
+        // mount's directory (`dnode.c:735-744`); that path test is not made
+        // here (DIVERGENCES 124; source only: this kernel has no NFS).
+        if sel.nfs_only {
+            for m in table.iter().flat_map(|t| &t.entries) {
+                if let (MountKind::Nfs, Some(dev)) = (m.kind, m.device) {
+                    sel.nfs_devices.insert(dev);
+                }
+            }
         }
         // Every bounded call this run makes is made by now. A helper killed
         // while one outlived its limit still holds what it opened for it, on

@@ -12,6 +12,19 @@
 # 2026-10-04 against master: 30 of 30 killed, 17 by the differential alone, 12
 # by it and a unit test, 1 (makedev-legacy) by unit tests alone. The PR had
 # recorded 18, 11 and 1: a unit test added in its review catches one more.
+# Item 110 re-anchored five (2026-10-17): exempt-first-given and
+# exempt-component-boundary (files.rs, `ExemptFs`), exempt-repeat-kept,
+# exempt-relative-accepted and exempt-path-keeps-its-slash (args.rs,
+# `enter_exempt`); each run again as root, each killed by the unit gate.
+# The item's review ran the seven exempt-* mutants again: exempt-rows-selected-
+# by-path and exempt-rows-located now survive the differential, as a path
+# naming an -e mount is a file-system item with no device since item 110 and
+# no case reaches the name rule on Linux, so selection.rs gained
+# an_exempt_row_is_named_by_no_path_compared_by_name, which kills it.
+# exempt-rows-located SURVIVES, an equivalent mutant: an -e row has no
+# identity and no file system (OpenFile::file_id, searched_fs_device), and
+# mark() asks the name rule only of a row path_matches() selected, which an
+# -e row never is; the guard stays as the statement of the C's rule.
 
 [run]
 dir = ".."
@@ -161,7 +174,7 @@ name = "exempt-component-boundary"
 rule = "-e is a plain byte prefix (98)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''.find(|e| path.starts_with(e.as_bytes()))'''
+old = '''.find(|e| path.starts_with(e.path.as_bytes()))'''
 new = '''.find(|e| under_mount(path, e))'''
 
 [[mutant]]
@@ -249,27 +262,27 @@ rule = "with nested -e paths the last given names the row (104)"
 file = "crates/lsof-backend-linux/src/files.rs"
 old = '''        .iter()
         .rev()
-        .find(|e| path.starts_with(e.as_bytes()))'''
+        .find(|e| path.starts_with(e.path.as_bytes()))'''
 new = '''        .iter()
-        .find(|e| path.starts_with(e.as_bytes()))'''
+        .find(|e| path.starts_with(e.path.as_bytes()))'''
 
 [[mutant]]
 name = "exempt-repeat-kept"
 rule = "-e repeated is entered once (104)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                    if !sel.exempt_fs.iter().any(|e| e == trimmed) {
-                        sel.exempt_fs.push(trimmed.to_string());
-                    }'''
-new = '''                    sel.exempt_fs.push(trimmed.to_string());'''
+old = '''    if !sel.exempt_fs.iter().any(|e| e.path == path) {
+        sel.exempt_fs.push(ExemptFs { path, plus });
+    }'''
+new = '''    sel.exempt_fs.push(ExemptFs { path, plus });'''
 
 [[mutant]]
 name = "exempt-relative-accepted"
 rule = "-e that is no path is an error (105)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                    if !value.starts_with('/') {'''
-new = '''                    if false {'''
+old = '''    if !value.starts_with('/') {'''
+new = '''    if false {'''
 
 [[mutant]]
 name = "mapped-socket-named-from-its-netns"
@@ -292,5 +305,5 @@ name = "exempt-path-keeps-its-slash"
 rule = "-e drops a trailing slash (98)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''let trimmed = match value.trim_end_matches('/') {'''
-new = '''let trimmed = match value.as_str() {'''
+old = '''    let path = without_trailing_slashes(path);'''
+new = ''''''

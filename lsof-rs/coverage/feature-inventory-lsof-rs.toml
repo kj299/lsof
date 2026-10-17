@@ -152,10 +152,22 @@ ids = [
   "type:PMAP", "type:PMEM", "type:PMPS", "type:PNTF", "type:POBJ",
   "type:PODR", "type:POLP", "type:POPF", "type:POPG", "type:PORT",
   "type:PREG", "type:PRMP", "type:PROCDSC", "type:PRTD", "type:PSGA",
-  "type:PSIN", "type:PSTA", "type:PSXMQ", "type:PSXSEM", "type:PSXSHM",
+  "type:PSIN", "type:PSTA", "type:PSXSEM", "type:PSXSHM",
   "type:PTS", "type:PUSG", "type:PW", "type:PXMP"
 ]
 reason = "Solaris /proc file types — no Windows equivalent"
+
+# PSXMQ is Linux's too, so it is not the Solaris waiver's (where it had sat,
+# unscoped, until 2026-10-17): a waiver on Windows, debt on Linux.
+[[waive]]
+id = "type:PSXMQ"
+platforms = ["windows"]
+reason = "a POSIX message queue's descriptor on Linux's mqueue file system — Windows has neither"
+
+[[waive]]
+id = "type:PSXMQ"
+platforms = ["linux"]
+reason = "DEBT (DIVERGENCES 128): the Linux dialect types a regular file on the mqueue file system the mount table records PSXMQ (dnode.c:815-819), and lsof-rs types it REG. The table records that file system's device (mqueue_device) since item 110, 2026-10-17; typing the descriptor is a later step."
 
 [[waive]]
 ids = [

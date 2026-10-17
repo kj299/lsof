@@ -442,6 +442,16 @@ jobs:
         run: python3 differential/linux_diff.py --self-test
       - name: differential vs the C oracle
         run: python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof
+      - name: mount-table audit (which mount directories each lsof stats)
+        # DIVERGENCES 110. The differential compares what each binary prints;
+        # this traces what each asks of the mount table: the same directories
+        # stat()ed as many times, none under -i alone or -Z, every lsof-rs
+        # stat of one an O_PATH open (which mounts no automount point). A run
+        # that reads the table when it need not prints the same as one that
+        # does not, so only this step sees it. Its self-test runs first.
+        run: |
+          python3 differential/mount_stat_audit.py --self-test
+          python3 differential/mount_stat_audit.py --oracle ../lsof --rust target/release/lsof
       - name: resource gate (peak RSS and wall, under a load it creates)
         # P5. The differential above proves the OUTPUT is right and can say
         # nothing about what it cost: delete the socket-only collection path

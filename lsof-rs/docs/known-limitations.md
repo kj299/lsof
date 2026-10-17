@@ -213,27 +213,28 @@ meet. Each number is a row there, with the measurement behind it.
 - **Refused, where the C works:** `-c /regex/`, and host or service names in
   `-i` (38); a path argument that is not UTF-8 (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
-- **Linux, and worth knowing before running it on a busy host:** every run but
-  `-f` `stat`s every mount point, `-i` included, where the C skips them under
-  `-i` alone (110). Since 2026-10-09 each such `stat`, each `readlink` of a
-  path it was given, and a `+d`/`+D` walk's calls are made in a helper process
-  that gives each `-S` seconds (15): a hung NFS server or FUSE daemon costs a
-  run that limit per call that meets it (the mount, then a path argument on
-  it, then each walk entry there) and not the run, and no automount point is
-  mounted (94, 118). The helper it killed then waits in the kernel, as `lsof`
-  in state D, until the file system answers or goes away, holding the
-  descriptor its call opened there, and it is in lsof's own listing (123).
-  lsof-rs never `stat`s that descriptor; the C's lsof listing the host, or any
-  other tool that `stat`s `/proc/PID/fd/N`, waits on it. A process's own
-  files are `stat`ed in lsof with no limit, as the C does without an NFS mount
-  (124), and `-O` makes every call that way. lsof-rs drops a mount it cannot
-  `stat` without the C's warning (87), and under `-b` names each mount it
-  avoids once where the C names it with four lines. Under `-i` alone the
-  helper is a cost the C does not pay: under a descriptor limit with no room
-  for its pipes `lsof -i` ends `can't open pipes` (110). A `+D` walk makes
-  one helper round trip per entry, its `lstat`, and one more for a link `-x l`
-  follows: about 0.08 ms an entry, 1.6 times the C's (`+D /usr/lib`, 17,742
-  entries, 1.39 s against 0.86 s; `-O` 0.13 s; 94, 111).
+- **Linux, and worth knowing before running it on a busy host:** a run that
+  needs the mount table — every run but `-i` alone, and that too with `-e` —
+  reads it as the C does, and `stat`s each mount point once (again for a
+  later row of one it could not `stat`, as the C does), never an automount
+  (`autofs`) one nor an `-e`/`+e` one (110). Each such `stat`, each
+  `readlink` of a path it was given, and a `+d`/`+D` walk's calls are made in
+  a helper process that gives each `-S` seconds (15): a hung NFS server or
+  FUSE daemon costs a run that limit per call that meets it (the mount, then
+  a path argument on it, then each walk entry there) and not the run, with
+  the C's `can't stat()` warning for the mount, and no automount point is
+  mounted (87, 94, 118); the C's own timeout works once per run and then
+  hangs. `-i` alone starts no helper and asks no mount anything. The helper it
+  killed then waits in the kernel, as `lsof` in state D, until the file system
+  answers or goes away, holding the descriptor its call opened there, and it
+  is in lsof's own listing (123). lsof-rs never `stat`s that descriptor; the
+  C's lsof listing the host, or any other tool that `stat`s
+  `/proc/PID/fd/N`, waits on it. A process's own files are `stat`ed in lsof
+  with no limit, as the C does without an NFS mount (124), and `-O` makes
+  every call that way. A `+D` walk makes one helper round trip per entry, its
+  `lstat`, and one more for a link `-x l` follows: about 0.08 ms an entry, 1.6
+  times the C's (`+D /usr/lib`, 17,742 entries, 1.39 s against 0.86 s; `-O`
+  0.13 s; 94, 111).
 - **Linux:** `-E`/`+E` are accepted and ignored (56); AF_VSOCK, ping and
   unbound netlink sockets, and a TCP socket that is bound but not listening,
   show as `SOCK` `socket:[N]` (22, waiting on a decision), and an `O_PATH`
@@ -241,7 +242,7 @@ meet. Each number is a row there, with the measurement behind it.
   and `can't identify protocol` (126); a raw socket is `IPv4`/`IPv6` and a
   bound netlink socket `SOCK`, where the C reads their tables (108, 109); a
   login name is read from `/etc/passwd` only, so an LDAP or SSSD account can
-  be named by its UID alone (39); `-f` with `-e` is refused (113); a file
+  be named by its UID alone (39); a file
   named by a path argument and its file system named by another locate both,
   where the C's row locates the file alone and the run exits 1 (125).
 - **Output shape:** the JSON from `-J`/`-j` has lsof-rs's own schema, not the

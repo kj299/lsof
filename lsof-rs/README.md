@@ -185,9 +185,12 @@ lsof-rs makes on a path it was given — an argument, a `+d`/`+D` tree, a mount
 point — runs in a helper process (the same binary, re-executed) that gets
 `-S [t]` seconds for it, 15 by default and at least 2; one that runs out fails
 with `Connection timed out` and the helper is replaced. Each such call costs
-its limit: a hung mount costs every run that reads the mount table 15 s, a
-path argument on it 15 s more. A hung NFS mount or a stuck FUSE daemon used
-to stop every run but `-f`, `lsof -i :22` included. `-b` makes none of those
+its limit: a hung mount costs every run that reads the mount table 15 s, with
+the C's warning that it could not `stat` it, a path argument on it 15 s more.
+A hung NFS mount or a stuck FUSE daemon used to stop every run but `-f`. As
+in the C, `-i` alone reads no mount table, so it asks such a mount nothing and
+starts no helper, and the table's automount points and `-e`/`+e` mounts are
+never `stat`ed (#110). `-b` makes none of those
 calls and says so, and `-O` makes them in lsof itself with no limit, as the C
 documents both. The C's own timeout fires once per run and then hangs;
 lsof-rs bounds every call ([`DIVERGENCES.md`](DIVERGENCES.md) #94, #118). A

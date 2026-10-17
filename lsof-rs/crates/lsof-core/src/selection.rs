@@ -392,9 +392,16 @@ pub fn filesystems_named(mounts: &[MountEntry], path: &OsStr, mode: FilesystemAr
         .iter()
         .filter(|m| {
             m.dir == path
-                || ((any_source || m.source_is_block) && m.source.as_deref() == Some(path))
+                || ((any_source || m.source_is_block) && m.source_resolved.as_deref() == Some(path))
         })
-        .map(|m| m.device)
+        // An `-e`/`+e` mount was never `stat`ed, and the C records it, and so
+        // an item naming it, with device 0 (`dmnt.c`: `mp->dev = 0` when no
+        // `SB_DEV`; `arg.c`: `sfp->dev = mp->dev`). No file is on device 0 on
+        // Linux, whose anonymous devices start at minor 1, so the item finds
+        // nothing and `-V` says `no file system use located` of it: measured,
+        // `lsof -V -a -p P -e /dev/shm /dev/shm`, P's cwd on /dev/shm, exits 1
+        // with that line.
+        .map(|m| m.device.unwrap_or(0))
         .collect();
     devs.sort_unstable();
     devs.dedup();
@@ -608,6 +615,22 @@ pub struct PathItem {
     /// directory, a `/`, and the entry's own name, byte for byte (DIVERGENCES
     /// 63, 65). Resolved first on a backend that matches names.
     pub name: OsString,
+}
+
+/// One `-e`/`+e` file system, as the C's `enter_efsys()` keeps it (`arg.c`):
+/// an entry of its `Efsysl`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExemptFs {
+    /// The mount point: `-e`'s value as `Readlink()` spelt it where the option
+    /// stood, `+e`'s as typed, either without its trailing slashes (`/` stays
+    /// `/`). Bytes, not text: a link's target need not be UTF-8. A mount is
+    /// exempt when its directory, as the kernel lists it, is exactly this,
+    /// and a file is when its path starts with it.
+    pub path: OsString,
+    /// `+e`: no `Readlink()` at all — not of the value, nor of the mount's
+    /// directory and source when the table is read (the C's `rdlnk`). A file
+    /// on it says `(+e PATH)`, one on an `-e` mount `(-e PATH)`.
+    pub plus: bool,
 }
 
 /// One `+d`/`+D` directory, as the C's `enter_dir()` met it (`arg.c`).
@@ -827,8 +850,9 @@ pub struct Selection {
     /// `lsof: no NFS files located`.
     pub nfs_only: bool,
     /// Devices of the NFS file systems in the mount table, filled by the CLI
-    /// from [`Backend::mounts`](crate::backend::Backend::mounts). A file whose
-    /// [`OpenFile::fs_device`] is in here is an NFS file.
+    /// from [`Backend::mount_table`](crate::backend::Backend::mount_table):
+    /// each mount the C types `N_NFS`. A file whose [`OpenFile::fs_device`]
+    /// is in here is an NFS file.
     pub nfs_devices: std::collections::HashSet<u64>,
     /// `-e <fs>` / `+e <fs>`: mount points whose files must **not** be
     /// `stat(2)`ed. The C's reason is a hung NFS server; the consequence is a
@@ -849,7 +873,10 @@ pub struct Selection {
     ///   o 0t0          o 0t0        (fdinfo, kept)
     ///   n <path>       n <path> (-e /)
     /// ```
-    pub exempt_fs: Vec<String>,
+    ///
+    /// Each as `enter_efsys()` keeps it ([`ExemptFs`]), in the order given,
+    /// once: a repeat keeps the sign it was first given.
+    pub exempt_fs: Vec<ExemptFs>,
     /// `-x f` (and bare `-x`): let a `+d`/`+D` expansion cross file-system
     /// mount points. Default off — `arg.c:1029` skips an entry whose `st_dev`
     /// differs from the directory's.
@@ -1362,6 +1389,35 @@ impl Selection {
             k.insert(SelKinds::NLINK);
         }
         k
+    }
+
+    /// Whether this run asks about Internet files alone: the C's `Selinet`
+    /// (`main.c:1236-1240`). No path and no `+d`/`+D` argument, and some
+    /// selector given, every one of them `-i` (bare or with an address):
+    /// [`SelKinds::NET`] and [`SelKinds::NA`] and nothing else — a path or a
+    /// `+d`/`+D` is [`SelKinds::NM`], as the C's `GOx1 < argc` and `enter_dir()`
+    /// make them `SELNM`. Exclusions, `-s`, `-T`, `-E`, `-a` and `-t` are no
+    /// selectors, so `-i -p ^1` and `-t -i` are still `-i` alone, and `-s
+    /// TCP:LISTEN` with no `-i` is not (no selector at all is every file).
+    /// Read from what was given, before any path argument is examined:
+    /// [`Selection::path_fs_devices`] is filled from the table this decides
+    /// on.
+    pub fn inet_only(&self) -> bool {
+        let given = self.specified();
+        !given.is_empty() && given.without(SelKinds::NET.union(SelKinds::NA)).is_empty()
+    }
+
+    /// Whether the C reads its mount table on this run: always but under
+    /// `-i` alone ([`Selection::inet_only`]), and then too when an `-e` or
+    /// `+e` was given, which its check needs (`dproc.c:670-671`,
+    /// `main.c:1137-1160`). Measured, counting the `alarm(15)` around each
+    /// call of its child: none for `-i`, `-i -s TCP:LISTEN`, `-t -i`, `-a
+    /// -i`, `-i -p ^1`, `-i -u ^root`, `-i -K i` or bare `-i -g`; 116 for
+    /// `-i -d ^3`, `-i -g 1`, `-i -K`, `-i -U`, `-i -e X`, `-s TCP:LISTEN`
+    /// alone, `-t`, `-U` and a plain run. `-f` does not change it: the C
+    /// `stat`s the table under `-f` too, and checks `-e` against it.
+    pub fn needs_mount_table(&self) -> bool {
+        !self.exempt_fs.is_empty() || !self.inet_only()
     }
 
     /// Whether a backend must enumerate `p` at all — the only safe way to skip
@@ -2358,10 +2414,10 @@ mod tests {
         // a CI runner without privileges.
         let mount = |dir: &str, source: &str, block: bool, device: u64| MountEntry {
             dir: dir.into(),
-            source: Some(source.into()),
+            device: Some(device),
+            source_resolved: Some(source.into()),
             source_is_block: block,
-            device,
-            fstype: String::new(),
+            kind: crate::backend::MountKind::Regular,
         };
         let table = vec![
             mount("/", "/dev/vda", true, 100),
@@ -2412,6 +2468,18 @@ mod tests {
         assert_eq!(
             filesystems_named(&[], OsStr::new("/"), AlwaysFilesystem),
             Vec::<u64>::new()
+        );
+        // A source `Readlink()` gave up on names nothing, even under `+f`.
+        let mut lost = mount("/l", "/dev/loop", true, 50);
+        lost.source_resolved = None;
+        assert!(filesystems_named(&[lost], OsStr::new("/dev/loop"), AlwaysFilesystem).is_empty());
+        // An `-e`/`+e` mount has no device: the C's item for it has device
+        // 0, which no file is on (DIVERGENCES 110, m7).
+        let mut exempt = mount("/x", "tmpfs", false, 0);
+        exempt.device = None;
+        assert_eq!(
+            filesystems_named(&[exempt], OsStr::new("/x"), Auto),
+            vec![0]
         );
     }
 
@@ -2670,6 +2738,39 @@ mod tests {
         };
         assert_eq!(tcp.file_id(), None);
         let sel = naming(id);
+        assert!(sel
+            .apply(vec![one_process(vec![exempt.clone()])])
+            .is_empty());
+        assert_eq!(sel.locate(&[one_process(vec![exempt])]).paths, [false]);
+    }
+
+    #[test]
+    fn an_exempt_row_is_named_by_no_path_compared_by_name() {
+        // Where paths are compared by name (a backend that cannot identify
+        // files), an `-e` row still names nothing: the C never asks
+        // `is_file_named()` about it. On Linux a path naming the `-e` mount
+        // is a file-system item with no device since item 110, so only this
+        // test reaches the name rule (mapped-rows.toml's
+        // exempt-rows-selected-by-path and exempt-rows-located).
+        use crate::model::{FdType, FileType};
+        let live = identified_row(FdType::Mem, FileType::Regular, None, "0,6", "4");
+        let exempt = crate::model::OpenFile {
+            file_type: FileType::Exempt("mem"),
+            ..live.clone()
+        };
+        let sel = Selection {
+            paths: vec!["/dev/zero".into()],
+            paths_identified: false,
+            path_items: vec![PathItem {
+                id: None,
+                fs_device: None,
+                name: "/dev/zero".into(),
+            }],
+            ..Default::default()
+        };
+        // The rule is real: the same row, not exempt, is named and located.
+        assert_eq!(sel.apply(vec![one_process(vec![live.clone()])]).len(), 1);
+        assert_eq!(sel.locate(&[one_process(vec![live])]).paths, [true]);
         assert!(sel
             .apply(vec![one_process(vec![exempt.clone()])])
             .is_empty());

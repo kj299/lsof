@@ -44,32 +44,86 @@ pub enum Privilege {
     SeDebug,
 }
 
-/// One row of the host's mount table.
-///
-/// Only what the file-system-argument rule needs: which directory the mount is
-/// on, what it was mounted from, and the device number every file on it
-/// carries in [`OpenFile::fs_device`](crate::model::OpenFile::fs_device).
+/// How the C's `readmnt()` types a mount it records (`dmnt.c`, `mp->ty`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MountKind {
+    /// `nfs`, `nfs3` or `nfs4`, in any case (`strcasecmp`): `N_NFS`, what
+    /// `-N` selects files on.
+    Nfs,
+    /// Exactly `mqueue` (`strcmp`): `N_MQUEUE`. Its device is
+    /// [`MountTable::mqueue_device`].
+    Mqueue,
+    /// Anything else: `N_REGLR`.
+    #[default]
+    Regular,
+}
+
+/// One mount the host's table records, as the C's `readmnt()` records it
+/// (`dmnt.c`): which directory the mount is on, what it was mounted from, and
+/// the device number every file on it carries in
+/// [`OpenFile::fs_device`](crate::model::OpenFile::fs_device).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountEntry {
-    /// The mounted-on directory, e.g. `/` or `/boot`, byte for byte: a path
-    /// argument names the file system only when it is spelt the same.
+    /// The mounted-on directory as `Readlink()` spells it (as the kernel
+    /// does for a `+e` mount), byte for byte: a path argument names the file
+    /// system only when it is spelt the same, and an `-e`/`+e` path only when
+    /// it is this.
     pub dir: OsString,
-    /// What was mounted, as the C's `Readlink()` spells it when it is a path
-    /// — `/dev/vda`, or `/dev/mapper/../dm-0` for a link that is relative —
-    /// or the name itself when it is none, like `tmpfs` or `proc`. `None`
-    /// when the table was read without sources ([`Backend::mounts`]), or a
-    /// path could not be read.
-    pub source: Option<OsString>,
-    /// Whether [`Self::source`] names a block device. lsof accepts a mount's
-    /// *source* as a file-system argument only when it is one — `lsof /dev/vda`
-    /// means the root filesystem, while `lsof tmpfs` means nothing — unless
-    /// `+f` widens it to any source.
+    /// The `st_dev` of [`Self::dir`]'s one `stat`: what every file on the
+    /// file system reports, and of a directory mounted over twice, the top
+    /// mount's. `None` for an `-e`/`+e` mount, which is never `stat`ed (the
+    /// C records it with no device, `ds = 0`), so a file-system argument
+    /// naming it finds nothing.
+    pub device: Option<u64>,
+    /// The source as the C compares it with a path argument (`fsnmres`):
+    /// spelt by `Readlink()` when it is a path, `/dev/vda` or
+    /// `/dev/mapper/../dm-0` for a link that is relative; as it stands when
+    /// it is a name like `tmpfs`, or the mount is `+e`'s. `None` where
+    /// `Readlink()` gave up on it.
+    pub source_resolved: Option<OsString>,
+    /// Whether [`Self::source_resolved`] names a block device. lsof accepts
+    /// a mount's *source* as a file-system argument only when it is one —
+    /// `lsof /dev/vda` means the root filesystem, while `lsof tmpfs` means
+    /// nothing — unless `+f` widens it to any source. Never for an
+    /// `-e`/`+e` mount, whose source is not `stat`ed.
     pub source_is_block: bool,
-    /// The device of the mounted filesystem: the `st_dev` every file on it has.
-    pub device: u64,
-    /// The file-system type as the host names it (`ext4`, `nfs4`, `tmpfs`).
-    /// Empty where the platform does not report one. `-N` selects on it.
-    pub fstype: String,
+    /// The C's type for it: what `-N` selects on. The type's name itself is
+    /// read by nothing: `-Z` asks the host's table for one by name
+    /// ([`Backend::has_mount_type`]), and a warning names the row's own.
+    pub kind: MountKind,
+}
+
+/// The host's mount table as the C's `readmnt()` leaves it: the mounts it
+/// recorded, in the order the kernel lists them, and what it noted on the
+/// way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountTable {
+    /// Every mount recorded: one per directory, `/proc/self/mounts` order.
+    pub entries: Vec<MountEntry>,
+    /// The C's `HasNFS`: 0, none; 1, an NFS mount was listed (one dropped
+    /// as a duplicate counts); 2, one was recorded. Recorded as the C
+    /// records it, and read by nothing yet: the C makes every per-file
+    /// `stat` through its child once it is not 0, and lsof-rs does not
+    /// (DIVERGENCES 124, OPEN), whose step this is kept for.
+    pub has_nfs: u8,
+    /// The device of the last `mqueue` mount recorded (the C's
+    /// `MqueueDev`), what a POSIX message queue's descriptor is on. `None`
+    /// when there is none, or it was `-e`/`+e`'s and so never `stat`ed.
+    /// Read by nothing yet: the C types a regular file there `PSXMQ`, and
+    /// lsof-rs does not (DIVERGENCES 128, OPEN), whose step this is kept for.
+    pub mqueue_device: Option<u64>,
+}
+
+/// What a read of the mount table needs to know of the options: the
+/// `-e`/`+e` file systems entered so far, which it neither `stat`s nor,
+/// for `+e`, reads the links of. The C reads its table once, where it first
+/// needs it, under the options in force there (`-b`, `-O`, `-S` and `-w`
+/// travel in the [`SafeFs`](crate::safefs::SafeFs) view the read is made
+/// through).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountRequest {
+    /// The C's `Efsysl` as it stood.
+    pub exempt: Vec<crate::selection::ExemptFs>,
 }
 
 /// Errors a backend can report. Selection that simply yields no rows is *not*
@@ -143,28 +197,37 @@ pub trait Backend {
         None
     }
 
-    /// The host's mount table, as `mount(8)` reports it.
+    /// The host's mount table, read and examined as the C's `readmnt()` does
+    /// it (`dmnt.c`), once per run and only on a run that needs it
+    /// ([`Selection::needs_mount_table`]).
     ///
     /// lsof reads a path argument as a **file system name** when it matches a
     /// mounted-on directory, and then selects every open file on that
     /// filesystem rather than the directory alone (Lsof.8; `arg.c`'s
-    /// `ck_file_arg`). The rule itself is portable and lives in the CLI —
-    /// what a backend supplies is the table. A platform with no such table
-    /// returns an empty one, and every path argument is then a plain file.
-    ///
-    /// Each mount's [`MountEntry::source`] is filled in only with `sources`:
-    /// only a path argument is compared with one, and spelling a source can
-    /// cost what a user who chose it wants it to cost (the C's `Readlink()`
-    /// re-reads a long chain of links up to 21 times), so a run that names
-    /// no path pays nothing for it.
+    /// `ck_file_arg`); `-e` names one, and `-N` selects the files on NFS. The
+    /// rules themselves are portable and live in the CLI — what a backend
+    /// supplies is the table. A platform with no such table returns an empty
+    /// one, and every path argument is then a plain file.
     ///
     /// Every `stat` and `readlink` of a mount point or a source goes through
-    /// `fs`, the bounded layer under the options the C reads its table with:
-    /// a mount whose file system does not answer is dropped after the `-S`
-    /// limit, where it had stopped the run, and under `-b` none is examined
-    /// (DIVERGENCES 94, 110).
-    fn mounts(&self, _sources: bool, _fs: &crate::safefs::SafeFs) -> Vec<MountEntry> {
-        Vec::new()
+    /// `fs`, the bounded layer under the options in force where the C reads
+    /// its table: a mount whose file system does not answer is dropped after
+    /// the `-S` limit, with the C's warning unless `-w`, where it had stopped
+    /// the run, and under `-b` none is examined (DIVERGENCES 87, 94, 110).
+    /// What the C says while it reads (that warning, a `Readlink()` that gave
+    /// up) goes to `fs`'s sink as it is found, so it comes in order with the
+    /// rest of what the run says.
+    fn mount_table(&self, _req: &MountRequest, _fs: &crate::safefs::SafeFs) -> MountTable {
+        MountTable::default()
+    }
+
+    /// Whether the host lists a mount of type `fstype`, read from its
+    /// table's text and nothing else: no `stat` and no `readlink`. What `-Z`
+    /// asks of the table (whether a `selinuxfs` is mounted, the C's
+    /// `is_selinux_enabled()`), so that `-i -Z`, which reads no table in the
+    /// C, examines no mount here either.
+    fn has_mount_type(&self, _fstype: &str) -> bool {
+        false
     }
 
     /// Whether [`Backend::identify_stat`] works on this platform.

@@ -273,7 +273,7 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
     } else {
         FdType::Mem
     };
-    if let Some(fs) = files::exempt_match(bytes, ctx.exempt) {
+    if let Some(e) = files::exempt_match(bytes, ctx.exempt) {
         return OpenFile {
             rdev: None,
             fs_device: Some(m.dev),
@@ -282,7 +282,7 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
             file_type: FileType::Exempt(files::unkn_suffix(&gone)),
             fd: gone,
             access: AccessMode::Unknown,
-            name: format!("{} (-e {fs})", m.path),
+            name: format!("{}{}", m.path, files::exempt_note(e)),
             device: Some(m.device),
             size: None,
             offset: None,

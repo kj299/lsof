@@ -7,6 +7,7 @@ use std::path::Path;
 
 use lsof_core::errno_text;
 use lsof_core::model::{AccessMode, FdType, FileType, LockKind, OpenFile};
+use lsof_core::ExemptFs;
 
 use crate::net::{self, SocketTable};
 
@@ -226,17 +227,17 @@ pub fn name_for_target(target: &str, info: &FdInfo) -> String {
     target.to_string()
 }
 
-/// The exempted mount point a path falls under, if any (`-e`), as the C's
-/// `isefsys()` decides it: the `-e` path is a plain prefix of the file's,
-/// bytes against bytes, with no `stat`. So `/` covers everything, and
+/// The exempted mount point a path falls under, if any (`-e`/`+e`), as the
+/// C's `isefsys()` decides it: the exempt path is a plain prefix of the
+/// file's, bytes against bytes, with no `stat`. So `/` covers everything, and
 /// `/dev/shm` covers `/dev/shm/x` — and `/dev/shmx/f` too: measured, `lsof
 /// -e W/m` makes `W/mx/f` an `UNKNfd` row. lsof-rs had required a component
-/// boundary there, which nothing had measured. The CLI has trimmed the `-e`
-/// path's trailing slashes and dropped a repeat, as the C's `enter_efsys()`
-/// does, and the C puts each new path at the head of its list: when two
-/// match, the one named LAST is the one NAME gives, so `lsof -e / -e /dev`
-/// says `(-e /dev)` of `/dev/zero` (measured).
-pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [String]) -> Option<&'a str> {
+/// boundary there, which nothing had measured. The CLI has trimmed the path's
+/// trailing slashes and dropped a repeat, as the C's `enter_efsys()` does,
+/// and the C puts each new path at the head of its list: when two match, the
+/// one named LAST is the one NAME gives, so `lsof -e / -e /dev` says `(-e
+/// /dev)` of `/dev/zero` (measured).
+pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [ExemptFs]) -> Option<&'a ExemptFs> {
     // An fd whose link target is not an absolute path -- `socket:[14197]`,
     // `pipe:[…]`, `anon_inode:…` -- lives on no file system and is exempt
     // from nothing. Measured: under `-e /` the C still resolves sockets to
@@ -247,14 +248,27 @@ pub(crate) fn exempt_match<'a>(path: &[u8], exempt: &'a [String]) -> Option<&'a 
     exempt
         .iter()
         .rev()
-        .find(|e| path.starts_with(e.as_bytes()))
-        .map(String::as_str)
+        .find(|e| path.starts_with(e.path.as_bytes()))
 }
 
-/// Whether an absolute, canonical `path` is on or under the mount point `e`.
-fn under_mount(path: &[u8], e: &str) -> bool {
-    let trimmed = e.trim_end_matches('/');
-    let mp = if trimmed.is_empty() { "/" } else { trimmed }.as_bytes();
+/// What NAME adds for a file on the exempt file system `e`: ` (-e PATH)`, or
+/// ` (+e PATH)` for one `+e` named (`dproc.c`, `isefsys()`: `"(%ce %s)",
+/// ep->rdlnk ? '+' : '-'`; measured: `+e /dev/shm` names a file there
+/// `(+e /dev/shm)`). The path as `enter_efsys()` kept it: `-e`'s through
+/// `Readlink()`, so `-e LINK-TO-/dev/shm` says `(-e /dev/shm)`.
+pub(crate) fn exempt_note(e: &ExemptFs) -> String {
+    format!(
+        " ({}e {})",
+        if e.plus { '+' } else { '-' },
+        e.path.to_string_lossy()
+    )
+}
+
+/// Whether an absolute, canonical `path` is on or under the mount point `e`,
+/// whose trailing slashes the parser has already taken off (`enter_exempt`,
+/// as `enter_efsys()` does).
+fn under_mount(path: &[u8], e: &ExemptFs) -> bool {
+    let mp = e.path.as_bytes();
     mp == b"/"
         || path == mp
         || (path.len() > mp.len() && path.starts_with(mp) && path[mp.len()] == b'/')
@@ -268,7 +282,7 @@ fn under_mount(path: &[u8], e: &str) -> bool {
 /// nothing: `//`, `/./`, `..` or a symlink can lead into an exempt mount past
 /// any test on the text. The walk keeps a path with no symlink or `.` in it,
 /// which the plain prefix test is right for, and asks before each step.
-fn metadata_outside(path: &[u8], exempt: &[String]) -> Option<std::fs::Metadata> {
+fn metadata_outside(path: &[u8], exempt: &[ExemptFs]) -> Option<std::fs::Metadata> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     // The kernel's own limit on symlinks in one lookup (`MAXSYMLINKS`).
     const MAX_LINKS: usize = 40;
@@ -356,7 +370,11 @@ fn metadata_outside(path: &[u8], exempt: &[String]) -> Option<std::fs::Metadata>
 /// (`SocketTable::raw_path`): the `path` shown then holds U+FFFD, which names
 /// no file, and stat'ing it would lose the socket the way `maps` once lost a
 /// mapped file.
-fn socket_file_id(path: &str, raw: Option<&[u8]>, exempt: &[String]) -> Option<lsof_core::FileId> {
+fn socket_file_id(
+    path: &str,
+    raw: Option<&[u8]>,
+    exempt: &[ExemptFs],
+) -> Option<lsof_core::FileId> {
     use std::os::unix::fs::FileTypeExt;
     if !path.starts_with('/') {
         return None;
@@ -397,7 +415,7 @@ pub struct GatherCtx<'a> {
     pub socks: &'a SocketTable,
     pub locks: &'a crate::locks::LockTable,
     pub ns: &'a net::NetnsTables,
-    pub exempt: &'a [String],
+    pub exempt: &'a [ExemptFs],
     /// `Selection::socket_rows_only`: nothing but a socket can reach the
     /// output, so nothing but a socket is collected — and the rows that say
     /// what could not be read, which the C builds whatever it is checking.
@@ -569,7 +587,7 @@ fn row(
     // `UNKN<fd kind>`, DEVICE the literal `UNKNOWN`, and size, inode and link
     // count are absent. NAME gains ` (-e <fs>)`.
     if let Some(t) = target.as_ref() {
-        if let Some(fs) = exempt_match(t.as_os_str().as_bytes(), exempt) {
+        if let Some(e) = exempt_match(t.as_os_str().as_bytes(), exempt) {
             let kind = unkn_suffix(&fd);
             return Some(OpenFile {
                 rdev: None,
@@ -579,7 +597,7 @@ fn row(
                 fd,
                 access: AccessMode::Unknown,
                 file_type: FileType::Exempt(kind),
-                name: format!("{} (-e {fs})", t.to_string_lossy()),
+                name: format!("{}{}", t.to_string_lossy(), exempt_note(e)),
                 device: Some("UNKNOWN".to_string()),
                 size: None,
                 // Pass the fdinfo position through rather than defaulting it:
@@ -925,6 +943,17 @@ pub fn has_readable_file(base: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `-e` of each of `paths`, as the CLI keeps them.
+    fn minus(paths: &[&str]) -> Vec<ExemptFs> {
+        paths
+            .iter()
+            .map(|p| ExemptFs {
+                path: (*p).into(),
+                plus: false,
+            })
+            .collect()
+    }
+
     /// `row` with the socket-only fast path off — what every case below wants,
     /// and what the parameter meant before it existed.
     fn row_all(
@@ -934,7 +963,7 @@ mod tests {
         pid: u32,
         socks: &SocketTable,
         ns: &net::NetnsTables,
-        exempt: &[String],
+        exempt: &[ExemptFs],
     ) -> Option<OpenFile> {
         let locks = crate::locks::LockTable::default();
         // A path that is not a link (`/dev/null` itself) names its own target.
@@ -1302,26 +1331,30 @@ mod tests {
     }
     #[test]
     fn an_exempt_match_is_a_plain_prefix_and_never_a_socket() {
-        let root = vec!["/".to_string()];
-        let shm = vec!["/dev/shm".to_string()];
+        let root = minus(&["/"]);
+        let shm = minus(&["/dev/shm"]);
+        let m = |path: &[u8], ex: &[ExemptFs]| {
+            exempt_match(path, ex).map(|e| e.path.to_str().unwrap().to_string())
+        };
+        let some = |s: &str| Some(s.to_string());
 
-        assert_eq!(exempt_match(b"/usr/bin/python3", &root), Some("/"));
-        assert_eq!(exempt_match(b"/", &root), Some("/"));
-        assert_eq!(exempt_match(b"/dev/shm/x", &shm), Some("/dev/shm"));
-        assert_eq!(exempt_match(b"/dev/shm", &shm), Some("/dev/shm"));
+        assert_eq!(m(b"/usr/bin/python3", &root), some("/"));
+        assert_eq!(m(b"/", &root), some("/"));
+        assert_eq!(m(b"/dev/shm/x", &shm), some("/dev/shm"));
+        assert_eq!(m(b"/dev/shm", &shm), some("/dev/shm"));
         // A plain prefix, as the C's `isefsys()` compares: measured, `-e W/m`
         // exempts `W/mx/f`. (The CLI has trimmed `-e /dev/shm/` to this.)
-        assert_eq!(exempt_match(b"/dev/shmx", &shm), Some("/dev/shm"));
-        assert_eq!(exempt_match(b"/dev/sh", &shm), None);
-        assert_eq!(exempt_match(b"/usr/bin/python3", &shm), None);
+        assert_eq!(m(b"/dev/shmx", &shm), some("/dev/shm"));
+        assert_eq!(m(b"/dev/sh", &shm), None);
+        assert_eq!(m(b"/usr/bin/python3", &shm), None);
         // Bytes: a name that is not UTF-8 is under its mount point all the
         // same.
-        assert_eq!(exempt_match(b"/dev/shm/\xff", &shm), Some("/dev/shm"));
+        assert_eq!(m(b"/dev/shm/\xff", &shm), some("/dev/shm"));
         // The C puts each new `-e` at the head of its list: when two cover a
         // file, NAME gives the one named last (`-e / -e /dev`, measured).
-        let both = vec!["/".to_string(), "/dev".to_string()];
-        assert_eq!(exempt_match(b"/dev/zero", &both), Some("/dev"));
-        assert_eq!(exempt_match(b"/usr/lib/x", &both), Some("/"));
+        let both = minus(&["/", "/dev"]);
+        assert_eq!(m(b"/dev/zero", &both), some("/dev"));
+        assert_eq!(m(b"/usr/lib/x", &both), some("/"));
 
         // The bug the oracle caught: an fd whose target is not a path lives on
         // no file system, and `-e /` must not swallow it. Under `-e /` the C
@@ -1333,6 +1366,13 @@ mod tests {
                 "{target} is not a path"
             );
         }
+        // NAME says which sign named it, and the path as it was kept.
+        let plus = ExemptFs {
+            path: "/dev/shm".into(),
+            plus: true,
+        };
+        assert_eq!(exempt_note(&plus), " (+e /dev/shm)");
+        assert_eq!(exempt_note(&shm[0]), " (-e /dev/shm)");
     }
 
     #[test]
@@ -1709,8 +1749,8 @@ mod tests {
             format!("{d}/sub/../s.sock"),
             format!("{d}/sub/up/s.sock"),
         ];
-        let elsewhere = ["/nonexistent-fs".to_string()];
-        let exempt = [d.to_string()];
+        let elsewhere = minus(&["/nonexistent-fs"]);
+        let exempt = minus(&[d]);
         for s in &spellings {
             assert_eq!(socket_file_id(s, None, &elsewhere), id, "{s}");
             assert_eq!(socket_file_id(s, None, &exempt), None, "{s} under -e");
@@ -1733,7 +1773,7 @@ mod tests {
         std::os::unix::fs::symlink("loop1", dir.join("loop2")).unwrap();
         std::fs::create_dir(dir.join("ex")).unwrap();
         std::os::unix::fs::symlink("ex", dir.join("to-ex")).unwrap();
-        let none = ["/nonexistent-fs".to_string()];
+        let none = minus(&["/nonexistent-fs"]);
         let ino = |p: &str| metadata_outside(p.as_bytes(), &none).map(|m| m.ino());
         let want = std::fs::metadata(dir.join("a/b/f")).unwrap().ino();
         let b = std::fs::metadata(dir.join("a/b")).unwrap().ino();
@@ -1762,7 +1802,7 @@ mod tests {
                 "the kernel on {p}"
             );
         }
-        let ex = [format!("{d}/ex/")];
+        let ex = minus(&[&format!("{d}/ex")]);
         assert!(metadata_outside(format!("{d}/a/b/f").as_bytes(), &ex).is_some());
         for p in [
             format!("{d}/ex"),
@@ -1772,7 +1812,7 @@ mod tests {
         ] {
             assert!(metadata_outside(p.as_bytes(), &ex).is_none(), "{p}");
         }
-        assert!(metadata_outside(b"/", &["/".to_string()]).is_none());
+        assert!(metadata_outside(b"/", &minus(&["/"])).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
