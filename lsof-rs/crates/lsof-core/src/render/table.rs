@@ -15,9 +15,9 @@
 
 use std::io::{self, Write};
 
-use crate::model::{AccessMode, FdType, FileType, OpenFile, Process, Protocol};
+use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
 use crate::render::fflags::{self, FileFlags};
-use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
+use crate::render::{offset_text, tcp_info_socket, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 
 /// The `-T` annotation the table appends to a socket's NAME: **one**
@@ -41,9 +41,6 @@ use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 /// `print_unix()` honours only the state, and a unix row never carries queues,
 /// so selecting them yields nothing on its own.
 fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
-    let Some(sock) = f.socket.as_ref() else {
-        return String::new();
-    };
     if !show.any() {
         return String::new();
     }
@@ -53,13 +50,9 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
     // once the differential compared whitespace (DIVERGENCES 35): lsof-rs had
     // ended every packet-socket NAME with a space the C does not print. A
     // UDP-Lite row gets one, and its queues under `-T q` (measured).
-    let annotated = matches!(
-        sock.protocol,
-        Protocol::Tcp | Protocol::Udp | Protocol::UdpLite
-    ) || f.file_type == FileType::Unix;
-    if !annotated {
+    let Some(sock) = tcp_info_socket(f) else {
         return String::new();
-    }
+    };
     let mut parts: Vec<String> = Vec::new();
     if show.state {
         if let Some(st) = sock.shown_state() {
@@ -541,7 +534,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         // The suffix is generated here, so only the name itself is escaped.
         let mut name = esc.text(&f.name).into_owned();
         // The `-T` annotation is a *table* decoration: `-F` reports the same
-        // facts as `TST=`/`TQR=`/`TQS=` tokens and JSON as its own keys, so it
+        // facts as `TST=`/`TQR=`/`TQS=` tokens and JSON as its `tcp_info` object, so it
         // is appended here rather than stored in the name.
         name.push_str(&tcp_suffix(f, tcp_show));
         r.push(name);
@@ -565,6 +558,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         node: None,
         links: None,
         socket: None,
+        name_addition: None,
     };
 
     // Pass two: size every column. Each row is formatted, measured and

@@ -1,0 +1,193 @@
+# Mutants for "-J and -j print the C's JSON schema" (DIVERGENCES 91, 61, 68,
+# 90, 134-138; lsof-rs 2.0.0): one per rule, each a plausible way to get it
+# wrong. The kill table is this file, run as root from lsof-rs/:
+#
+#   python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/json-schema.toml
+#
+# The differential runs in a mount namespace of its own, as mapped-rows.toml
+# explains. Run 2026-10-17 as root: 16 of 16 killed, 11 by the unit tests
+# and the differential, 5 by the unit tests alone (the escapes, U+2029
+# among them, the -j cycle line, -T on default JSON). The item re-anchored, and ran again as
+# root, path-identity.toml maps-row-without-its-device, inet-grammar.toml
+# udplite-not-annotated (now render/mod.rs), mounts.toml
+# errors-after-the-table and mapped-rows.toml's nine maps/exempt mutants:
+# all killed but exempt-rows-located, the equivalent mutant mapped-rows.toml
+# already explains.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+
+[[mutant]]
+name = "offset-before-size"
+rule = "the file keys are in json_print_file()'s order: size, then offset"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''    if o.want('s') {
+        if let Some(s) = f.size {
+            m.str("size", &s.to_string());
+        }
+    }
+    // Plain decimal whatever `-o` says: the C prints it `PRIu64`
+    // (`print.c:1965-1970`), not as the table's `0t`/`0x`.
+    if o.want('o') {
+        if let Some(off) = f.offset {
+            m.str("offset", &off.to_string());
+        }
+    }'''
+new = '''    if o.want('o') {
+        if let Some(off) = f.offset {
+            m.str("offset", &off.to_string());
+        }
+    }
+    if o.want('s') {
+        if let Some(s) = f.size {
+            m.str("size", &s.to_string());
+        }
+    }'''
+
+[[mutant]]
+name = "offset-as-the-table-prints-it"
+rule = "offset is a plain decimal string whatever -o says (print.c:1965)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''m.str("offset", &off.to_string());'''
+new = '''m.str("offset", &crate::render::offset_text(off, 8));'''
+
+[[mutant]]
+name = "unix-row-gets-a-state"
+rule = "a unix row's tcp_info is {} (138)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''if o.tcp_show.state && f.file_type != FileType::Unix {'''
+new = '''if o.tcp_show.state {'''
+
+[[mutant]]
+name = "udplite-gets-a-state"
+rule = "a UDP-Lite row's tcp_info has queues and never a state"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            (Protocol::UdpLite, _) => None,
+'''
+new = ''''''
+
+[[mutant]]
+name = "nofd-has-a-name"
+rule = "NOFD's NAME is all addition: no name key"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''if let Some(n) = f.base_name() {'''
+new = '''if let Some(n) = f.base_name().or(Some(f.name.as_str())) {'''
+
+[[mutant]]
+name = "nlink-quoted"
+rule = "nlink is a number, size and offset strings"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''m.num("nlink", n);'''
+new = '''m.str("nlink", &n.to_string());'''
+
+[[mutant]]
+name = "uppercase-hex-escape"
+rule = "\\u escapes are lowercase hex (print.c:141)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''format_args!("\\u{:04x}", u32::from(c))'''
+new = '''format_args!("\\u{:04X}", u32::from(c))'''
+
+[[mutant]]
+name = "backspace-as-u0008"
+rule = "BS is \\b, as the C writes it"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''            '\u{8}' => o.push_str("\\b"),
+'''
+new = ''''''
+
+[[mutant]]
+name = "u2029-raw"
+rule = "U+2029 is escaped as \\u2029, like U+2028 (135): JSON shares the table's is_unprintable_unicode"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''    c.is_control() || c == '\u{2028}' || c == '\u{2029}''''
+new = '''    c.is_control() || c == '\u{2028}''''
+
+[[mutant]]
+name = "no-blank-line-after-a-j-cycle"
+rule = "-j -r prints a blank line after each cycle (137)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = '''Format::Json(j) if j.lines => "\n",'''
+new = '''Format::Json(j) if j.lines => "",'''
+
+[[mutant]]
+name = "dash-T-narrows-default-json"
+rule = "default JSON prints every TCP/TPI member, -T or not"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        tcp_show: TcpInfoFlags {
+            state: true,
+            queue: true,
+            window: true,
+            options: false,
+        },
+    })
+}'''
+new = '''        tcp_show: sel.tcp_info(),
+    })
+}'''
+
+[[mutant]]
+name = "node-is-protocol-for-any-socket"
+rule = "a raw or sock row prints its inode, not a protocol (inp_ty 1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = '''    f.socket.is_some() && f.file_type != FileType::Unix'''
+new = '''    f.is_socket() && f.file_type != FileType::Unix'''
+
+[[mutant]]
+name = "device-number-as-searched"
+rule = "device_number comes from fs_device, sockets and -e rows too"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''        if let Some(dev) = f.fs_device {
+            m.str("device_number"'''
+new = '''        if let Some(dev) = f.searched_fs_device() {
+            m.str("device_number"'''
+
+[[mutant]]
+name = "base-name-keeps-the-joining-space"
+rule = "name is the base without the space that joins its addition"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            .checked_sub(extra)'''
+new = '''            .checked_sub(extra.saturating_sub(1))'''
+
+[[mutant]]
+name = "json-with-t-accepted"
+rule = "-J/-j and -t are refused (90)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if (fields_given || json) && sel.terse {'''
+new = '''    if fields_given && sel.terse {'''
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if json && sel.terse {'''
+new = '''    if false && json && sel.terse {'''
+
+[[mutant]]
+name = "dash-F-overrides-json"
+rule = "-F and -J combine in either order"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let format = if json {'''
+new = '''    let format = if json && !fields_given {'''

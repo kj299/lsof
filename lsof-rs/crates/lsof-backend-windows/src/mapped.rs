@@ -73,6 +73,7 @@ pub fn enumerate(pid: u32, dos_map: &[(String, String)]) -> Vec<OpenFile> {
                         node: None,
                         links: None,
                         socket: None,
+                        name_addition: None,
                     });
                 }
             }

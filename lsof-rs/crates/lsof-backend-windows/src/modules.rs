@@ -80,6 +80,7 @@ fn try_enumerate(pid: u32) -> Result<Vec<OpenFile>, bool> {
             node: None,
             links: None,
             socket: None,
+            name_addition: None,
         });
         is_image = false;
         // SAFETY: same invariants as Module32FirstW.

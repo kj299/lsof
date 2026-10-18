@@ -71,6 +71,7 @@ pub fn enumerate(wanted: Option<&HashSet<u32>>) -> Vec<(u32, OpenFile)> {
                     node: Some(tid.to_string()),
                     links: None,
                     socket: None,
+                    name_addition: None,
                 },
             ));
         }

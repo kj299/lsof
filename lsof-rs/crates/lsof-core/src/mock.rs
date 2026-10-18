@@ -15,7 +15,7 @@ use crate::selection::Selection;
 ///
 /// A socket's `name` holds the endpoints and nothing else: the state is carried
 /// in `SocketInfo::state` and each renderer decides where it goes (a table
-/// suffix, a `-F` `TST=` token, a JSON key). Baking it into the name here would
+/// suffix, a `-F` `TST=` token, JSON's `tcp_info.state`). Baking it into the name here would
 /// make the table and `-F n` report it twice, which is the shape a backend has
 /// to avoid too.
 pub fn sample_processes() -> Vec<Process> {
@@ -48,6 +48,7 @@ pub fn sample_processes() -> Vec<Process> {
                     node: None,
                     links: None,
                     socket: None,
+                    name_addition: None,
                 },
                 OpenFile {
                     rdev: None,
@@ -64,6 +65,7 @@ pub fn sample_processes() -> Vec<Process> {
                     node: Some("123456".into()),
                     links: None,
                     socket: None,
+                    name_addition: None,
                 },
             ],
         },
@@ -101,6 +103,7 @@ pub fn sample_processes() -> Vec<Process> {
                         state: Some(TcpState::Listen.into()),
                         tcp: None,
                     })),
+                    name_addition: None,
                 },
                 OpenFile {
                     rdev: None,
@@ -124,6 +127,7 @@ pub fn sample_processes() -> Vec<Process> {
                         state: Some(TcpState::Established.into()),
                         tcp: None,
                     })),
+                    name_addition: None,
                 },
                 OpenFile {
                     rdev: None,
@@ -147,6 +151,7 @@ pub fn sample_processes() -> Vec<Process> {
                         state: None,
                         tcp: None,
                     })),
+                    name_addition: None,
                 },
             ],
         },

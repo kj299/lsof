@@ -96,6 +96,16 @@ test = false
 doc = false
 bench = false
 
+# The JSON renderers (DIVERGENCES 91): every string a process or a file
+# name chooses, and an addition length a backend recorded, must leave as one
+# valid JSON line per file with no control byte, and decode back exactly.
+[[bin]]
+name = "render_json"
+path = "fuzz_targets/render_json.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
 

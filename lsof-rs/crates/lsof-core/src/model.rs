@@ -622,9 +622,53 @@ pub struct OpenFile {
     /// does that too), so the row's size is paid per row for the whole run.
     /// Boxing took `OpenFile` from 320 bytes to 192 (DIVERGENCES 30).
     pub socket: Option<Box<SocketInfo>>,
+    /// How many bytes at the end of [`OpenFile::name`] are an addition rather
+    /// than the name itself — the C's `Lf->nma` beside its `Lf->nm`: the
+    /// `(readlink: …)`, `(stat: …)`, `(opendir: …)`, `(-e FS)` or `(path …)`
+    /// a backend appends, with the one space that joins it. The table and
+    /// `-F n` print the whole; JSON prints only [`OpenFile::base_name`], as
+    /// the C's `json_print_file()` prints `Lf->nm` alone (`print.c:1991`).
+    /// Set only through [`OpenFile::add_name_addition`]. Two bytes, in the
+    /// padding the row already had: it stays 192 (measured).
+    pub name_addition: Option<std::num::NonZeroU16>,
 }
 
 impl OpenFile {
+    /// NAME without its addition: the C's `Lf->nm`, which JSON's `name` is.
+    /// `None` when that is empty, as the C's is NULL for a `NOFD` row, whose
+    /// whole NAME is the addition. An addition longer than the name, or one
+    /// that would split a character, is no addition at all: the whole name,
+    /// never a panic.
+    pub fn base_name(&self) -> Option<&str> {
+        let extra = self.name_addition.map_or(0, |n| usize::from(n.get()));
+        let base = self
+            .name
+            .len()
+            .checked_sub(extra)
+            .and_then(|end| self.name.get(..end))
+            .unwrap_or(&self.name);
+        (!base.is_empty()).then_some(base)
+    }
+
+    /// Append `text` to NAME as an addition (the C's `Lf->nma`), after one
+    /// space, or alone on an empty NAME. The length is recorded so JSON can
+    /// leave it out ([`OpenFile::base_name`]); one too long to record (over
+    /// 65,535 bytes) leaves none recorded rather than a wrong one.
+    pub fn add_name_addition(&mut self, text: &str) {
+        let before = self.name.len();
+        if !self.name.is_empty() {
+            self.name.push(' ');
+        }
+        self.name.push_str(text);
+        let base = before.saturating_sub(self.name_addition.map_or(0, |n| usize::from(n.get())));
+        self.name_addition = self
+            .name
+            .len()
+            .checked_sub(base)
+            .and_then(|n| u16::try_from(n).ok())
+            .and_then(std::num::NonZeroU16::new);
+    }
+
     /// True if this file is an Internet (IPv4/IPv6) socket — the `-i` predicate.
     pub fn is_internet(&self) -> bool {
         self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6)
@@ -745,5 +789,75 @@ mod size_tests {
              row on the host — box it if most rows leave it empty",
             std::mem::size_of::<OpenFile>()
         );
+    }
+}
+
+#[cfg(test)]
+mod name_addition_tests {
+    use super::{AccessMode, FdType, FileType, OpenFile};
+
+    fn row(name: &str) -> OpenFile {
+        OpenFile {
+            fd: FdType::Cwd,
+            access: AccessMode::Unknown,
+            file_type: FileType::Unknown,
+            name: name.to_string(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            lock: None,
+            fs_device: None,
+            rdev: None,
+            file_flags: None,
+            socket: None,
+            name_addition: None,
+        }
+    }
+
+    /// The table's NAME is the whole; JSON's is the C's `Lf->nm`, the part
+    /// before the joining space.
+    #[test]
+    fn an_addition_joins_with_one_space_and_is_not_the_base() {
+        let mut f = row("/proc/1/cwd");
+        f.add_name_addition("(readlink: Permission denied)");
+        assert_eq!(f.name, "/proc/1/cwd (readlink: Permission denied)");
+        assert_eq!(f.base_name(), Some("/proc/1/cwd"));
+        // A second addition extends the first: the base stays where it was.
+        f.add_name_addition("(stat: x)");
+        assert_eq!(f.base_name(), Some("/proc/1/cwd"));
+        assert_eq!(
+            f.name,
+            "/proc/1/cwd (readlink: Permission denied) (stat: x)"
+        );
+    }
+
+    /// NOFD's whole NAME is the addition, so it has no base: the C's NULL
+    /// `Lf->nm`, which JSON leaves out.
+    #[test]
+    fn an_addition_to_an_empty_name_is_the_whole_name() {
+        let mut f = row("");
+        f.add_name_addition("/proc/1/fd (opendir: Permission denied)");
+        assert_eq!(f.name, "/proc/1/fd (opendir: Permission denied)");
+        assert_eq!(f.base_name(), None);
+        assert_eq!(row("").base_name(), None);
+        assert_eq!(row("/a").base_name(), Some("/a"));
+    }
+
+    /// One too long to record is recorded as none, never wrong and never a
+    /// panic; a recorded length past the name or inside a character gives
+    /// the whole name back.
+    #[test]
+    fn a_length_that_does_not_fit_is_no_addition() {
+        let mut f = row("/a");
+        f.add_name_addition(&"x".repeat(70_000));
+        assert_eq!(f.name_addition, None);
+        assert_eq!(f.base_name(), Some(f.name.as_str()));
+        let mut g = row("é");
+        g.name_addition = std::num::NonZeroU16::new(1);
+        assert_eq!(g.base_name(), Some("é"));
+        g.name_addition = std::num::NonZeroU16::new(9);
+        assert_eq!(g.base_name(), Some("é"));
     }
 }

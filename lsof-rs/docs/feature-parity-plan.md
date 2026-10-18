@@ -64,8 +64,8 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-?` | misc | ✅ shipped (5A) | Alias for `-h` — one-line add |
 | `-H` | out | ✅ shipped 2026-09-19 | Human-readable sizes in the SIZE column, in `lsof-core`, so both platforms. It was never a headers toggle |
 | `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|udplite][@addr][:ports]`, read in the C's grammar and words, the argument escaped in every message (DIVERGENCES 112); host and service names are refused (38). On Windows `icmp`/`raw` too, ETW-sourced (they imply the Administrator-only capture); on Linux they are the C's `unknown protocol name`, a raw socket being the C's `raw` row, which no `-i` selects (108) |
-| `-J` | out | ✅ shipped | JSON aggregated. The C has `-J` too, with another schema (DIVERGENCES 91) |
-| `-j` | out | ✅ shipped | JSON Lines. The C has `-j` too, with another schema (DIVERGENCES 91) |
+| `-J` | out | ✅ shipped | JSON aggregated, the C's schema since 2.0.0 (DIVERGENCES 91; an Internet row's `name` and the extra escapes are C-DEFECT, 134, 135) |
+| `-j` | out | ✅ shipped | JSON Lines, the C's schema since 2.0.0 (DIVERGENCES 91) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |
 | `-K [t]` | sel | ✅ shipped (5A) | **List tasks/threads.** Windows: Toolhelp32 `TH32CS_SNAPTHREAD` + `Thread32First/Next` enumerates threads per PID; render one `task` row per thread under the process, the TID in NODE. On Linux, TID and TASKCMD columns, as the C (DIVERGENCES 18). |
 | `-l` | out | ✅ shipped (5A) | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
@@ -138,7 +138,8 @@ Switches that need new Windows API work, or significant data-model expansion:
   `(Win=N)` / `(QR=N)` / `(QS=N)` suffixes on the socket NAME in the table
   (lsof's own QR/QS queue labels), and as structured data in the machine
   formats: `-F` `T` fields `TQR=`/`TQS=`/`TWR=` after `TST=`, JSON keys
-  `tcp_window`/`tcp_queue_recv`/`tcp_queue_send`.
+  `tcp_window`/`tcp_queue_recv`/`tcp_queue_send` (since 2.0.0 the C's
+  `tcp_info` object: `state`, `recv_queue`, `send_queue`, `read_window`).
 - **`-U`** — ✅ **done.** Explicit UNIX-domain filter, backed by the ETW AFD
   capture (§5): `-U` implies the (Administrator-only) capture and restricts
   output to AF_UNIX rows.
@@ -176,7 +177,9 @@ and `-S`, until 2026-10-09.)
 
 - **No new `-J`/`-j` JSON schema breakage**: every Phase 5A addition that adds a
   data field also adds it to `OpenFile`/`Process` in `lsof-core`; the JSON
-  shape just grows new keys, never renames or removes.
+  shape just grows new keys, never renames or removes. (This promise ended
+  with 2.0.0, which adopted the C's schema, DIVERGENCES 91: a major bump, as
+  `road-to-1.0.md` requires.)
 - **No surprise CLI-behavior changes**: existing scripts that use the v0.1.0
   surface keep working exactly. Phase 5 is *additive*.
 - **No silent acceptance of irrelevant Unix switches**: they error out with a

@@ -136,8 +136,27 @@ def canon_family(fam, host_hint=None):
 # Parsers -- each returns a list[SocketRow]                                    #
 # --------------------------------------------------------------------------- #
 
+def _name_endpoints(name):
+    """``local[->remote]`` from a socket's NAME (the ``-F n`` text, which
+    lsof-rs's JSON ``name`` is too), any trailing `` (STATE)`` dropped."""
+    body, _, _ = name.partition(" (")
+    if "->" in body:
+        lo, _, ro = body.partition("->")
+        lh, lp = split_endpoint(lo)
+        rh, rp = split_endpoint(ro)
+        return lh, lp, canon_remote(rh, rp)
+    lh, lp = split_endpoint(body)
+    return lh, lp, "-"
+
+
 def parse_lsof_rs_json(text):
-    """Parse lsof-rs ``-i -J`` output. Socket rows carry a ``protocol`` key."""
+    """Parse lsof-rs ``-i -J`` output, the C's schema since lsof-rs 2.0.0.
+
+    A socket row has a ``protocol`` key (its NODE); the family is its
+    ``type``, the endpoints its ``name`` (the ``-F n`` text, which lsof-rs
+    keeps where the C has none: DIVERGENCES 134) and the state
+    ``tcp_info.state``.
+    """
     text = _strip_banner(text)
     data = json.loads(text)
     rows = []
@@ -145,20 +164,15 @@ def parse_lsof_rs_json(text):
         pid = proc.get("pid")
         for f in proc.get("files", []):
             proto = f.get("protocol")
-            if not proto:
-                continue  # not a socket
-            lh, lp = split_endpoint(f["local"]) if f.get("local") else (None, None)
-            if f.get("remote"):
-                rh, rp = split_endpoint(f["remote"])
-                remote = canon_remote(rh, rp)
-            else:
-                remote = "-"
+            if not proto or not f.get("name"):
+                continue  # not an Internet socket
+            lh, lp, remote = _name_endpoints(f["name"])
             rows.append(SocketRow(
                 proto=proto.upper(),
                 family=canon_family(f.get("type"), lh),
-                local=canon_ep(lh, lp) if lh is not None else "-",
+                local=canon_ep(lh, lp),
                 remote=remote,
-                state=canon_state(f.get("state")),
+                state=canon_state((f.get("tcp_info") or {}).get("state")),
                 pid=pid,
             ))
     return rows
@@ -179,15 +193,7 @@ def parse_lsof_rs_fields(text):
     def flush():
         if not (have_sock and name is not None):
             return
-        body, _, _ = name.partition(" (")  # strip the trailing " (STATE)"
-        if "->" in body:
-            lo, _, ro = body.partition("->")
-            lh, lp = split_endpoint(lo)
-            rh, rp = split_endpoint(ro)
-            remote = canon_remote(rh, rp)
-        else:
-            lh, lp = split_endpoint(body)
-            remote = "-"
+        lh, lp, remote = _name_endpoints(name)
         rows.append(SocketRow(
             proto=(proto or "").upper(),
             family=canon_family(fam, lh),
@@ -215,8 +221,10 @@ def parse_lsof_rs_fields(text):
         elif code == "P":
             proto = val
             have_sock = True
-        elif code == "T":
-            state = val[3:] if val.startswith("ST=") else val
+        elif code == "T" and val.startswith("ST="):
+            # Only TST= is the state: -T q/w add TQR=, TQS=, TRW= tokens after
+            # it, which must not overwrite it.
+            state = val[3:]
         elif code == "n":
             name = val
     flush()

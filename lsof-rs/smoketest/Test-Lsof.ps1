@@ -110,7 +110,7 @@ try {
     Test-That 'listening socket + PID' $sockOk "port=$port"
 
     $r = Invoke-Bin @('-nP', "-iTCP:$port", '-J')
-    Test-That 'JSON output shape'     ($r.Out.TrimStart().StartsWith('{') -and ($r.Out -match '"protocol":"TCP"'))
+    Test-That 'JSON output shape'     ($r.Out.TrimStart().StartsWith('{"lsof_version":') -and ($r.Out -match '"protocol":"TCP"'))
 
     $r = Invoke-Bin @('-nP', '-i')
     Test-That 'system sockets run'    ($r.Exit -eq 0)

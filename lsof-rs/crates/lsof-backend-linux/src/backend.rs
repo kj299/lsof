@@ -344,8 +344,12 @@ mod tests {
         // them under `Ckscko` (DIVERGENCES 33): an fd closed, or a process
         // gone, between listing and reading -- which a host running other
         // tests makes routine -- is one of those, not a collected file.
+        // Asked of the addition alone (the C's `Lf->nma`), so a file whose
+        // own name holds the words is not taken for one.
         let unread = |f: &lsof_core::model::OpenFile| {
-            f.name.contains(" (readlink: ") || f.name.contains(" (opendir: ")
+            let base = f.base_name().map_or(0, str::len);
+            let addition = f.name.get(base..).unwrap_or_default();
+            addition.contains("(readlink: ") || addition.contains("(opendir: ")
         };
         // A socket held in another network namespace is a `sock` row named
         // by its protocol (`protocol: TCP`), and a raw socket a `raw` row

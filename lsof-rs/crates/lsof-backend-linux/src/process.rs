@@ -167,7 +167,11 @@ pub fn parse_status(status: &str) -> Status {
     let mut uid = None;
     let mut pgid = None;
     let mut state = None;
-    for line in status.lines() {
+    // '\n' only: `str::lines()` also drops a '\r' before it, and a comm may
+    // end in one (`prctl(PR_SET_NAME, "tail\r")`), which the C keeps: it
+    // prints `ctail\r` and `-c` matches it (measured). The kernel ends every
+    // line with a bare '\n'.
+    for line in status.split('\n') {
         if let Some(v) = line.strip_prefix("Name:") {
             // The kernel writes `Name:\t<comm>` — exactly one tab. The comm's
             // own whitespace (a trailing space is legal) is part of the name
@@ -351,7 +355,7 @@ mod tests {
         let s = "Name:\t) ) :Uid: 0\nPPid:\t1\nUid:\t0\t0\t0\t0\n";
         assert_eq!(triple(s), (") ) :Uid: 0".to_string(), Some(1), Some(0)));
         // The proc_status fuzz target's first finding, verbatim: one line, no
-        // newline, a bare '\r' mid-value. lines() yields it whole; trim() keeps
+        // newline, a bare '\r' mid-value. split('\n') yields it whole; trim() keeps
         // the interior '\r'. Faithful is correct here (DIVERGENCES.md #10 is
         // about the renderer, not this).
         let (cmd, ppid, uid) = triple("Name:PPid:\rd:Uid:");
@@ -372,6 +376,11 @@ mod tests {
             "h\x1b[2J\r \x7f\t\u{e9}\u{9b}z"
         );
         assert_eq!(parse_status("Name:\ttrailing \n").command, "trailing ");
+        // A comm ending in '\r': the kernel writes `Name:\ttail\r\n`, and the
+        // '\r' is the name's, as the C keeps it (`-F c` gives `ctail\r`).
+        let st = parse_status("Name:\ttail\r\nState:\tS (sleeping)\r\nPPid:\t7\n");
+        assert_eq!(st.command, "tail\r");
+        assert_eq!(st.ppid, Some(7));
         // Shapes the kernel never produces must be kept literally, not guessed.
         assert_eq!(unescape_comm("a\\tb"), "a\\tb");
         assert_eq!(unescape_comm("trailing\\"), "trailing\\");

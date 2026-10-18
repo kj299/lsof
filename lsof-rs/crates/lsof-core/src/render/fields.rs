@@ -37,9 +37,12 @@
 //! terminal nor forge a field or record boundary — the terminators (`\n`, or
 //! `\0` under `-F0`) cannot appear inside a value.
 
-use crate::model::{AccessMode, FdType, FileType, Process};
+use crate::model::{FdType, Process};
 use crate::render::fflags::{self, FileFlags};
-use crate::render::{offset_text, Escaper, DEFAULT_OFFSET_DIGITS};
+use crate::render::{
+    access_code, device_text, lock_code, node_is_protocol, offset_text, Escaper,
+    DEFAULT_OFFSET_DIGITS,
+};
 use crate::selection::TcpInfoFlags;
 
 /// One letter of the C's field table (`store.c`'s `FieldSel[]`).
@@ -391,15 +394,10 @@ pub fn render_with_offset_digits(
             // Empty, not absent: the C prints `a ` and `l ` so every file set
             // has the same shape.
             if want('a') {
-                let a = match f.access {
-                    AccessMode::Unknown => ' ',
-                    mode => mode.code(),
-                };
-                push!('a', &a.to_string());
+                push!('a', &access_code(f).unwrap_or(' ').to_string());
             }
             if want('l') {
-                let l = f.lock.map_or(' ', |k| k.code());
-                push!('l', &l.to_string());
+                push!('l', &lock_code(f).unwrap_or(' ').to_string());
             }
             if want('t') && f.file_type.has_code() {
                 push!('t', &f.file_type.code());
@@ -419,8 +417,8 @@ pub fn render_with_offset_digits(
             // lives on, not the 1,3 the DEVICE column shows. On Linux the two
             // are mutually exclusive — the dialect sets a device *string* only
             // for rows with no filesystem device, such as sockets.
-            if want('d') && f.fs_device.is_none() {
-                if let Some(d) = &f.device {
+            if want('d') {
+                if let Some(d) = device_text(f) {
                     push!('d', d);
                 }
             }
@@ -460,7 +458,7 @@ pub fn render_with_offset_digits(
             // NODE from the protocol — but a packet row's protocol names its
             // *family* and its NODE names the ethernet protocol, and it is the
             // latter the C prints here.
-            let node_is_protocol = f.socket.is_some() && f.file_type != FileType::Unix;
+            let node_is_protocol = node_is_protocol(f);
             if want('i') && !node_is_protocol {
                 if let Some(n) = &f.node {
                     push!('i', n);

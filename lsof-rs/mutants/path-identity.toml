@@ -107,12 +107,12 @@ name = "maps-row-without-its-device"
 rule = "a mapping the C could not stat is found by its maps line's device (101, 95)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''        OpenFile {
+old = '''        let mut f = OpenFile {
             rdev: None,
             fs_device: Some(m.dev),
             file_flags: None,
             lock: ctx.locks.get'''
-new = '''        OpenFile {
+new = '''        let mut f = OpenFile {
             rdev: None,
             fs_device: None,
             file_flags: None,

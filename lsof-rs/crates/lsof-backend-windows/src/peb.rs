@@ -111,6 +111,7 @@ pub fn cwd(pid: u32) -> Option<OpenFile> {
         node: None,
         links: None,
         socket: None,
+        name_addition: None,
     })
 }
 

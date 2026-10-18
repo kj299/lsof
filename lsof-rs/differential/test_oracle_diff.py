@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for oracle_diff.py -- runnable on any host (no Windows needed).
 
-The lsof-rs fixtures below are the *verbatim* `-i -J` and `-i -F` output of the
+The lsof-rs fixtures below are the `-i -J` (the C's schema since 2.0.0) and verbatim `-i -F` output of the
 real binary running its mock backend, so the parsers are tested against genuine
 output shapes, not hand-guessed ones. The oracle fixture is the equivalent
 Get-NetTCPConnection/Get-NetUDPEndpoint view of the same three sockets.
@@ -14,18 +14,17 @@ import unittest
 
 import oracle_diff as od
 
-# --- verbatim `target/debug/lsof -nP -i -J` (mock backend) ------------------
+# --- `-nP -i -J` over the mock backend's sockets, in the C's schema (2.0.0) --
 LSOF_RS_JSON = (
     'lsof: non-Windows build: showing sample (mock) data\n'
-    '{"processes":[{"pid":1500,"command":"server.exe","ppid":1000,'
-    '"user":"EXAMPLE\\\\alice","files":['
-    '{"fd":"72","type":"IPv4","name":"*:445 (LISTEN)","access":"u","node":"TCP",'
-    '"protocol":"TCP","local":"0.0.0.0:445","state":"LISTEN"},'
-    '{"fd":"88","type":"IPv4","name":"127.0.0.1:445->127.0.0.1:51000 (ESTABLISHED)",'
-    '"access":"u","node":"TCP","protocol":"TCP","local":"127.0.0.1:445",'
-    '"remote":"127.0.0.1:51000","state":"ESTABLISHED"},'
-    '{"fd":"96","type":"IPv6","name":"[::]:53","access":"u","node":"UDP",'
-    '"protocol":"UDP","local":"[::]:53"}]}]}'
+    '{"lsof_version":"2.0.0","processes":[{"pid":1500,"ppid":1000,"command":"server.exe",'
+    '"login":"EXAMPLE\\\\alice","files":['
+    '{"fd":"72","access":"u","type":"IPv4","protocol":"TCP","name":"*:445",'
+    '"tcp_info":{"state":"LISTEN"}},'
+    '{"fd":"88","access":"u","type":"IPv4","protocol":"TCP",'
+    '"name":"127.0.0.1:445->127.0.0.1:51000","tcp_info":{"state":"ESTABLISHED"}},'
+    '{"fd":"96","access":"u","type":"IPv6","protocol":"UDP","name":"[::]:53",'
+    '"tcp_info":{}}]}]}'
 )
 
 # --- verbatim `target/debug/lsof -nP -i -F` (mock backend) ------------------
@@ -55,6 +54,15 @@ class ParserAgreement(unittest.TestCase):
         f = sorted(od.parse_lsof_rs_fields(LSOF_RS_FIELDS))
         self.assertEqual(j, f, "JSON and -F parsers must agree on the same data")
         self.assertEqual(len(j), 3)
+
+    def test_fields_queue_tokens_do_not_replace_the_state(self):
+        # `-Tqs` prints TST= and then TQR=/TQS=/TRW=; only TST= is the state.
+        text = ("p1500\nf88\nau\ntIPv4\nPTCP\nTST=ESTABLISHED\nTQR=0\nTQS=12\nTRW=65535\n"
+                "n127.0.0.1:445->127.0.0.1:51000\n"
+                "f96\nau\ntIPv6\nPUDP\nTQR=0\nTQS=0\nn[::]:53\n")
+        rows = {r.proto: r for r in od.parse_lsof_rs_fields(text)}
+        self.assertEqual(rows["TCP"].state, "ESTABLISHED")
+        self.assertEqual(rows["UDP"].state, "-")
 
     def test_json_row_fields(self):
         rows = {r.state: r for r in od.parse_lsof_rs_json(LSOF_RS_JSON)}
@@ -204,10 +212,10 @@ class RealLedgerBoundSocket(unittest.TestCase):
     def _scenario(self):
         # lsof-rs's 4 in-scope rows (listener + established pair + UDP).
         lsof_rs = json.dumps({"processes": [{"pid": 7124, "command": "pwsh.exe", "files": [
-            {"fd": "1", "type": "IPv4", "protocol": "TCP", "local": "127.0.0.1:63268", "state": "LISTEN"},
-            {"fd": "2", "type": "IPv4", "protocol": "TCP", "local": "127.0.0.1:63268", "remote": "127.0.0.1:63269", "state": "ESTABLISHED"},
-            {"fd": "3", "type": "IPv4", "protocol": "TCP", "local": "127.0.0.1:63269", "remote": "127.0.0.1:63268", "state": "ESTABLISHED"},
-            {"fd": "4", "type": "IPv4", "protocol": "UDP", "local": "0.0.0.0:54389"}]}]})
+            {"fd": "1", "type": "IPv4", "protocol": "TCP", "name": "127.0.0.1:63268", "tcp_info": {"state": "LISTEN"}},
+            {"fd": "2", "type": "IPv4", "protocol": "TCP", "name": "127.0.0.1:63268->127.0.0.1:63269", "tcp_info": {"state": "ESTABLISHED"}},
+            {"fd": "3", "type": "IPv4", "protocol": "TCP", "name": "127.0.0.1:63269->127.0.0.1:63268", "tcp_info": {"state": "ESTABLISHED"}},
+            {"fd": "4", "type": "IPv4", "protocol": "UDP", "name": "0.0.0.0:54389", "tcp_info": {}}]}]})
         # oracle: the same 4 PLUS the IPv6 BOUND shadow on the client port.
         oracle = json.dumps([
             {"proto": "TCP", "local_addr": "127.0.0.1", "local_port": 63268, "remote_addr": "0.0.0.0", "remote_port": 0, "state": "Listen", "pid": 7124},
