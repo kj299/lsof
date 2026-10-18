@@ -374,7 +374,7 @@ pub fn render_with_offset_digits(
         }
         if want('u') {
             if let Some(uid) = p.uid {
-                push!('u', &uid.to_string());
+                push!('u', &uid_as_the_c_prints_it(uid).to_string());
             }
         }
         if want('L') {
@@ -517,6 +517,14 @@ pub fn render_with_offset_digits(
         }
     }
     out
+}
+
+/// The uid `-F u` and JSON's `uid` print: the C's `(int)Lp->uid`
+/// (`print.c:2085,2222`), so a uid of 2^31 or more is negative, 3000000000
+/// being `-1294967296` (measured; DIVERGENCES 68). Two's complement, as the
+/// C's cast is on every host it builds for, and never a panic.
+pub(crate) fn uid_as_the_c_prints_it(uid: u32) -> i32 {
+    i32::from_ne_bytes(uid.to_ne_bytes())
 }
 
 #[cfg(test)]

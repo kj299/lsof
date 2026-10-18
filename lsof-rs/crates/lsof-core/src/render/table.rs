@@ -505,12 +505,10 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
             r.push(p.pgid.map(|v| v.to_string()).unwrap_or_default());
         }
         // A name, escaped; or, where there is none, the number the way the
-        // C's `printuid()` writes it — right-aligned in `USERPRTL` (8) columns
-        // before the column's own alignment, so a numeric USER column is
-        // never narrower than eight.
+        // C's `printuid()` writes it (DIVERGENCES 68).
         r.push(match (&p.user, p.uid) {
             (Some(u), _) => esc.text(u).into_owned(),
-            (None, Some(uid)) => format!("{uid:>8}"),
+            (None, Some(uid)) => numeric_user(uid),
             (None, None) => String::new(),
         });
         r.push(fd_name(f));
@@ -589,4 +587,18 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         emit_line(w, &row_for(p, f), &widths, &cols)?;
     }
     Ok(())
+}
+
+/// A uid with no login as the C's `printuid()` writes it: `snpf(user,
+/// sizeof(user), "%*lu", USERPRTL, uid)` into `char user[USERPRTL + 1]`
+/// (`print.c:1723,1817`, `USERPRTL` 8 in `lib/common.h:456`). So it is
+/// right-aligned in eight columns, which a numeric USER column is never
+/// narrower than, and a number of more than eight digits keeps its first
+/// eight: 3000000000 is `30000000`, measured with a process `setpriv` gave
+/// that uid. Every byte is an ASCII digit or space, so the cut is a char
+/// boundary.
+pub(crate) fn numeric_user(uid: u32) -> String {
+    let mut s = format!("{uid:>8}");
+    s.truncate(8);
+    s
 }

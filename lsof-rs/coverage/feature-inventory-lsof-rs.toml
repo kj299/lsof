@@ -98,11 +98,6 @@ platforms = ["windows"]
 reason = "stat/readlink timeout — accepted on Windows since 2026-10-09 and changes nothing there: the bounded layer has no helper on Windows, which makes those calls in-process and bounds its own blocking handle queries by its worker model; no Windows test can observe a limit"
 
 [[waive]]
-id = "opt:b"
-platforms = ["windows"]
-reason = "\"avoid blocking kernel\" — accepted on Windows since 2026-10-09, where it avoids the same calls (a +d/+D directory's stat); the Windows smoke harness has no case for it (the portable unit test `a_plus_d_is_examined_under_the_options_before_it` runs there and pins its `avoiding stat(D)` line), and its blocking handle queries are bounded by the worker model instead"
-
-[[waive]]
 ids = ["opt:X", "opt:Z"]
 platforms = ["windows"]
 reason = "/proc/net socket tables and SELinux contexts — Linux kernel features with no Windows counterpart. (This reason used to read \"epoll bridge\" for `-X`; that is not what `-X` is. `machine.h:502` defines HASXOPT as \"skip TCP&UDP* files\" on this dialect, and the option gates the inet socket tables.)"

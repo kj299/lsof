@@ -1,0 +1,68 @@
+# Mutants for "print a numeric owner as the C does" (DIVERGENCES 68): one per
+# rule. The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/numeric-owner.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo: fixture W's WB process has effective uid 3000000000,
+# which only root can give it. CI runs only --apply-only.
+#
+# Run 2026-10-18 with --first-kill: 5 of 5 killed by the unit gate (the
+# golden tests), so the `owner-uid-past-2-31-*` cases were not reached; the
+# binary before this change, which printed every digit unsigned, differed
+# from the C on the same uid in each of them (measured by hand).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core"]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1200
+
+[[mutant]]
+name = "user-every-digit"
+rule = "USER keeps eight characters of a numeric owner (68)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''    s.truncate(8);'''
+new = ''''''
+
+[[mutant]]
+name = "user-unpadded"
+rule = "a numeric owner is right-aligned in eight (36, 68)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''    let mut s = format!("{uid:>8}");'''
+new = '''    let mut s = uid.to_string();'''
+
+[[mutant]]
+name = "fields-uid-unsigned"
+rule = "-F u prints (int)Lp->uid (68)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''                push!('u', &uid_as_the_c_prints_it(uid).to_string());'''
+new = '''                push!('u', &uid.to_string());'''
+
+[[mutant]]
+name = "json-uid-unsigned"
+rule = "JSON's uid is (int)Lp->uid (68)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''            m.num("uid", crate::render::fields::uid_as_the_c_prints_it(uid));'''
+new = '''            m.num("uid", uid);'''
+
+[[mutant]]
+name = "uid-cast-saturates"
+rule = "the cast wraps, as the C's does; it does not saturate (68)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''    i32::from_ne_bytes(uid.to_ne_bytes())'''
+new = '''    i32::try_from(uid).unwrap_or(i32::MAX)'''

@@ -120,7 +120,7 @@ found in the results.
 
 | Area / cases | Source exercised |
 |---|---|
-| `version`, `help-usage`, `help-alias-question`, `unknown-option-errors`, `end-of-options-dashdash`, `no-op-dash-O`, the `p4-dash-*` checks (`-N`, `-X`, `-Z`, `-e`, `-x`) | `lsof-cli/src/args.rs`, `main.rs` |
+| `version`, `help-usage`, `help-alias-question`, `unknown-option-errors`, `end-of-options-dashdash`, `no-op-dash-O`, `avoid-blocking-dash-b`, the `p4-dash-*` checks (`-N`, `-X`, `-Z`, `-e`, `-x`) | `lsof-cli/src/args.rs`, `main.rs` |
 | `process-of-self`, `terse-lists-pids`, `user-column-present`, `ppid-column-dash-R`, `numeric-ids-dash-l` | `process.rs` (Toolhelp + token→SID), `render/table.rs` |
 | `open-file-listed`, `file-offset-dash-o`, `human-size-dash-H`, `human-size-leaves-offset`, `link-count-dash-L`, `link-filter-plus-L`, `file-flags-plus-f-g` | `handles.rs` (`describe`/`final_path`/`disk_details`/`file_offset`), `render/table.rs` |
 | `named-pipe-listed`, `pipe-endpoints-dash-E`, `pipe-endpoints-plus-E` | `handles.rs` PIPE branch, `pipe_display`, the endpoint lookup |

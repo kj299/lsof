@@ -662,6 +662,18 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         $r = Invoke-Lsof @('-O', '-p', "$self") 'O'
         Assert ($r.Exit -eq 0) "-O should be accepted (exit=$($r.Exit))"
     }
+    # -b avoids the calls that could block: a +d/+D directory's stat, under
+    # the options given before it, as the C makes it where the option stands
+    # (DIVERGENCES 75, 94). So `-b +D D` ends the run, naming the call, and
+    # `+D D -b` lists as plus-D-directory-tree does. Windows reads no links
+    # there, so the stat's is the one line (the portable unit test
+    # a_plus_d_is_examined_under_the_options_before_it pins it).
+    Test-Case 'avoid-blocking-dash-b' 'misc/-b' {
+        $r = Invoke-Lsof @('-b', '+D', $env:TEMP) 'b-before'
+        Assert ($r.Exit -eq 1) "-b +D should end the run (exit=$($r.Exit))"
+        Assert-Contains $r.Err "avoiding stat($($env:TEMP)): -b was specified." 'stderr'
+        $r = Invoke-Lsof @('+D', $env:TEMP, '-b') 'b-after'; Assert-ContainsCI $r.Out 'lsof_rs_'
+    }
     Test-Case 'command-width-plus-c' 'render/+c' {
         $r = Invoke-Lsof @('+c', '4', '-p', "$self") 'plusc'
         Assert ($r.Exit -eq 0) "+c should be accepted (exit=$($r.Exit))"

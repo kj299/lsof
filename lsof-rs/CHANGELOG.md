@@ -11,6 +11,31 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — output and exit status a script may notice
+- **A row a path argument finds is named by that argument**, as the C names
+  it (DIVERGENCES 139, 17; both were the name the process opened). NAME,
+  `-F n` and JSON's `name` show the argument's `Readlink()` spelling, less
+  its trailing slashes: `lsof lnk/f.txt` prints `dir/f.txt`, `lsof ./f.txt`
+  prints `./f.txt`, and `lsof /a/hard.txt` prints `/a/hard.txt` for a file
+  the process opened as `/a/f.txt`; a `+d`/`+D` entry prints as the walk
+  spelt it. A
+  ` (deleted)` the link carried goes, as in the C; an addition such as
+  `(path dev=…)` stays. A file-system argument, a socket and an `-e` row
+  keep their names. Windows, which matches by name, is unchanged.
+- **A row locates one search item**, the one the C binds it to (17, 125,
+  84): two names for one file, a file and its file system, or two mounts of
+  one device are two items of which a row locates one, and the other is
+  reported (`-V`) and makes the run exit 1, where lsof-rs had located both
+  and exited 0. An argument naming several mounts is an item per mount.
+- **A numeric owner is printed as the C prints it** (68, reopened): USER
+  keeps eight characters (uid 3000000000 is `30000000`), and `-F u` and
+  JSON's `uid` are a signed `int` (`-1294967296`). Linux only: Windows has no
+  uid.
+
+### Added
+- The Windows smoke harness checks `-b` (`avoid-blocking-dash-b`), which
+  takes `opt:b` off the Windows coverage waivers.
+
 ## [2.0.0] — 2026-10-17
 
 ### Changed — BREAKING (2.0.0)

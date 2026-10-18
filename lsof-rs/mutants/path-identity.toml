@@ -123,10 +123,12 @@ name = "a-device-node-row-locates-nothing"
 rule = "a row locates by the identity it is selected by, a device node's too (101)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        // `path_matches` selects it: a socket's are never compared.
-        if let Some(id) = f.file_id() {'''
-new = '''        // `path_matches` selects it: a socket's are never compared.
-        if let Some(id) = f.file_id().filter(|_| f.rdev.is_none()) {'''
+old = '''        if let Some(i) = f.file_id().and_then(|id| self.by_identity(&id)) {'''
+new = '''        if let Some(i) = f
+            .file_id()
+            .filter(|_| f.rdev.is_none())
+            .and_then(|id| self.by_identity(&id))
+        {'''
 
 [[mutant]]
 name = "socket-file-by-its-rdev"
