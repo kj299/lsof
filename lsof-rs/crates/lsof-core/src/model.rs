@@ -669,6 +669,33 @@ impl OpenFile {
             .and_then(std::num::NonZeroU16::new);
     }
 
+    /// Replace NAME's base, the C's `Lf->nm`, with `base`, keeping its
+    /// addition, the C's `Lf->nma`: what a path argument does to a row it
+    /// locates ([`crate::selection::PathItem::row_name`]). An addition that
+    /// stood alone, on an empty name, is joined to the new one by a space,
+    /// as [`OpenFile::add_name_addition`] would have joined it.
+    pub fn set_base_name(&mut self, base: &str) {
+        let old = self.base_name().map_or(0, str::len);
+        // `base_name` gives the whole name back for a length it cannot use,
+        // so the tail is then empty and nothing is recorded as an addition.
+        let tail = self.name.get(old..).unwrap_or_default().to_string();
+        self.name.clear();
+        self.name.push_str(base);
+        self.name_addition = None;
+        if !tail.is_empty() {
+            if old == 0 {
+                // The addition alone: no joining space was recorded.
+                self.add_name_addition(&tail);
+            } else {
+                let joined = tail.len();
+                self.name.push_str(&tail);
+                self.name_addition = u16::try_from(joined)
+                    .ok()
+                    .and_then(std::num::NonZeroU16::new);
+            }
+        }
+    }
+
     /// True if this file is an Internet (IPv4/IPv6) socket — the `-i` predicate.
     pub fn is_internet(&self) -> bool {
         self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6)
@@ -843,6 +870,31 @@ mod name_addition_tests {
         assert_eq!(f.base_name(), None);
         assert_eq!(row("").base_name(), None);
         assert_eq!(row("/a").base_name(), Some("/a"));
+    }
+
+    /// A path argument's name replaces the base and keeps the addition
+    /// (DIVERGENCES 139): `alias (path dev=0,41, inode=2)`, measured. An
+    /// addition that stood alone is joined by a space; a length that did not
+    /// fit is no addition, and the whole name is replaced.
+    #[test]
+    fn a_new_base_keeps_the_addition() {
+        let mut f = row("/w/shadow/s");
+        f.add_name_addition("(path dev=0,41, inode=2)");
+        f.set_base_name("alias");
+        assert_eq!(f.name, "alias (path dev=0,41, inode=2)");
+        assert_eq!(f.base_name(), Some("alias"));
+        let mut g = row("/w/del.txt (deleted)");
+        g.set_base_name("keep.txt");
+        assert_eq!((g.name.as_str(), g.name_addition), ("keep.txt", None));
+        let mut h = row("");
+        h.add_name_addition("(stat: x)");
+        h.set_base_name("y");
+        assert_eq!(h.name, "y (stat: x)");
+        assert_eq!(h.base_name(), Some("y"));
+        let mut i = row("/a");
+        i.name_addition = std::num::NonZeroU16::new(9);
+        i.set_base_name("b");
+        assert_eq!((i.name.as_str(), i.name_addition), ("b", None));
     }
 
     /// One too long to record is recorded as none, never wrong and never a

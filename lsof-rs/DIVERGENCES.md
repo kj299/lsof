@@ -65,23 +65,6 @@ disagreeing, and it names the C code so anyone can check the triage.
   refuses a `-d` number past `INT_MAX`. Where the wrap ends in the C's own
   refusal (`0-2147483648`, low >= high) the two agree. Not pinned: the diff
   holds the PID.
-- [x] path-bare-hardlink: DECISION — the NAME cell only. Both binaries find
-  the same fd on the same inode when a file is queried through a hard link;
-  they disagree on what to call it. The C substitutes **the name you asked
-  about** (`hard.txt`) into NAME, lsof-rs prints **the name the process
-  actually opened** (`f.txt`). The C's choice also makes its exit status
-  depend on which name it bound first — with two names for one inode in a
-  `+d` expansion, the other is reported unlocated and the run exits 1. See
-  item 17.
-- [x] path-file-and-its-file-system-one-item-per-row-in-the-c: DECISION
-  (item 125, OPEN: the maintainer's call) — fixture DN's `t/y` is its only
-  file on the tmpfs mounted at `t`, and both are arguments. The C's
-  `is_file_named()` tries the file items, then the file-system ones, marks
-  the first that names the row and returns (`dfile.c`), so the row locates
-  `t/y` alone: `no file system use located: t`, exit 1, in either order.
-  lsof-rs marks every item a row matches and exits 0. The same rows. Item
-  17's bookkeeping, between a file and its file system. Not pinned: the
-  message holds the work directory.
 - [x] sock-file-held-by-path-row-in-the-c: DEBT (item 126, OPEN) — fixture
   SF's fd 5 is an `O_PATH` descriptor on the socket file its fd 4 is bound
   at. The C hands it to `process_proc_sock()`, which no table helps and
@@ -267,13 +250,148 @@ disagreeing, and it names the C code so anyone can check the triage.
   mapped file are not UTF-8: the C writes the raw bytes (0xff, 0xfe), so its
   output is not valid UTF-8 and so no JSON; lsof-rs writes U+FFFD and stays
   valid. Not pinned: X's pid and inodes.
-- [x] path-relative-argument-names-the-row-in-the-c: OPEN (row 139) — from
-  fixture R's `spell/`, `-F pfn rel/x` gives the C's `nrel/x`, the argument
-  as typed, and lsof-rs's `n<work>/spell/rel/x`, the path fd 10 was opened
-  by. Not pinned: the work directory.
-- [x] path-relative-argument-names-the-json-row-in-the-c: OPEN (row 139) —
-  the same row under `-J`: the C's `"name":"rel/x"`, lsof-rs's absolute
-  path. Not pinned: R's pid and the work directory.
+
+## Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does (2026-10-18)
+
+Rows 139, 17, 125 and 84, and 68. The maintainer decided on 2026-10-18 that
+lsof-rs names a row a path argument locates, and prints a numeric owner, as
+the C does; rows 17 and 68 had been a DECISION and a C-DEFECT the other way,
+and 125 and 84 are the same mechanism as 17. Every behaviour below was
+measured against the C 4.99.6 first, byte for byte, in the table, `-F n`,
+`-F0`, `-J` and `-j`.
+
+* **A row a file item locates is named by it** (139, 17).
+  `is_file_named()` copies the item's `s->name` over the row's NAME
+  (`dfile.c:301-319`): a path argument's `Readlink()`, less the slashes that
+  end it (`arg.c:160-180`); a `+d`/`+D` directory's spelling less them; an
+  entry as the walk spelt it. Measured from a directory holding `fx/reg.txt`
+  (held open from `fx` as `reg.txt`, with hard links `hard.txt` and `h2.txt`)
+  and `lnk -> fx`: `fx/reg.txt`, `./fx/reg.txt`, `fx//reg.txt`,
+  `fx/./reg.txt` and an absolute `W//fx/reg.txt` print as typed,
+  `fx/reg.txt/` and `lnk/reg.txt` print `fx/reg.txt`, `fx/hard.txt` prints
+  `fx/hard.txt`; `fx`, `fx/`, `fx//`, `lnk` and `lnk/` name the cwd `fx`,
+  `./fx` and `fx/../fx` as typed; `+d fx//` names the directory `fx` and its
+  entries `fx//reg.txt`, `+D ./fx` and `+D lnk` theirs `./fx/...` and
+  `fx/...`; `//dev/null` and `/dev/../dev/null` name both `/dev/null` rows as
+  typed, with no ` (DEVNAME)` (only a file-system item has a `devnm`,
+  `arg.c:337-368`, and such an item renames nothing); `/usr/bin//python3.11`
+  names the `txt` row; a `mem` and a `DEL` row found through another link
+  are named by it. Without `-a` (`-p P FILE`, `-U FILE`) the row is named all
+  the same: the C asks of every row it builds. The addition stays (the C's
+  `Lf->nma`, `OpenFile::name_addition`): a mapped file whose path a tmpfs
+  covers, found through a hard link `alias`, is `alias (path dev=0,41,
+  inode=2)`, or `alias (stat: No such file or directory)` with nothing at
+  the path, and `alias` under `-w` or in JSON. A ` (deleted)` is the link's
+  text, the C's `Namech`, and goes: `keep.txt` for a file deleted under its
+  other name. Nothing renames a file-system argument's rows (`s->type` 0:
+  `/`, a mount point, `+f -- SOURCE`), a socket (its NAME is entered before
+  it is asked, `dsock.c:3691`; `slnk`, a link to a bound socket, leaves the
+  bound path), or an `-e`/`+e` row (never asked). A name that is not UTF-8
+  is U+FFFD (93). `Selection::apply` names the rows it keeps through
+  `PathItem::row_name`, the new `PathItem::spelled` holding the C's
+  `s->name` where it is not `aname` (a `+d`/`+D` entry's name is held once),
+  and `OpenFile::set_base_name`, which keeps the addition.
+* **A row locates one item, the one the C's chain meets first** (17, 125,
+  84). `is_file_named()` looks the row up by device and inode among the file
+  items, then by device among the file-system ones, marks the first it meets
+  and returns. Its chains are `hashSfile()`'s: `ck_file_arg()` prepends each
+  item to `Sfile` (`arg.c:249`), and `hashSfile()` puts the first it meets
+  for a bucket at the head and each later one just after it
+  (`dfile.c:163-174`). So of the items with one key a row takes the last
+  entered when it is its bucket's head, else the first entered. Measured:
+  `fx/reg.txt fx/hard.txt` names the row `fx/hard.txt` and says `no file use
+  located: fx/reg.txt`, exit 1; three names bind the last; adding a fourth
+  argument last, `col/c9`, whose inode falls in the same bucket of
+  `SFHASHDEVINO(254, 0, ino, 4094)`, binds the first (`fx/reg.txt`), and
+  adding it first changes nothing; `+d fx` binds the last of `hard.txt`,
+  `h2.txt` and `reg.txt` in listing order and reports the other two; `+d fx
+  +D fx` and `+D fx +d fx` locate the later option's items and report every
+  one of the earlier's that the later shares; `t t` (a directory twice) and
+  `T T` (a mount point twice) report one. A file and its file system, either order: the
+  file (125). `PathIndex` reproduces the buckets (`SFHASHDEVINO` with masks
+  4093 and 1023, and `hashbyname()` with a signed `char`, for a socket found
+  by its bound path as typed, `dsock.c:3747`), checked against the C's own
+  macros compiled here, and keeps of each key only the first and last item.
+  An AF_UNIX socket is asked by its socket file's identity first and by its
+  path only when that found nothing (`dsock.c:3716-3758`), where lsof-rs
+  had marked both.
+* **One item per mount** (84). An argument naming several mounts is an item
+  per mount, two of one device included (a bind mount, one source mounted
+  twice), last listed first as `readmnt()` prepends (`dmnt.c:595,658`), a
+  match with the directory and device of an earlier one skipped
+  (`arg.c:196-206`); lsof-rs had sorted the devices and kept one of each.
+  Measured in a private mount namespace: `lsof /dev/vda` with `/` bound on
+  another directory, and `+f -- lsoftest` over two tmpfs of that source, one
+  bound again, each report `no file system use located` once, exit 1; `+f --
+  lsoftest T` twice.
+* **A numeric owner** (68). USER is `printuid()`'s `snpf(user,
+  sizeof(user), "%*lu", USERPRTL, uid)` into `char user[USERPRTL + 1]`
+  (`print.c:1723,1817`, `lib/common.h:456`): right-aligned in eight, and
+  cut to its first eight characters. `-F u` and JSON's `uid` are `(int)
+  Lp->uid` (`print.c:2085,2222`). Measured on processes `setpriv` gave the
+  uids 3000000000, 4294967294, 2147483648, 2147483647, 123456789, 12345678,
+  1234567 and 65534 (`nobody`): USER `30000000`, `42949672`, `21474836`,
+  `21474836`, `12345678`, `12345678`, ` 1234567`, `nobody` (`   65534` under
+  `-l`), the column eight wide; `u-1294967296`, `u-2`, `u-2147483648`,
+  `u2147483647`; JSON the same numbers, `login` only for `nobody`; `-u
+  3000000000` selects the first and `-u 3000000001` says `user ID not
+  located: 3000000001`; all byte for byte on stdout, `-l` and `-w` too. A uid of 4294967295 cannot be a process's (`setresuid()` reads
+  it as "unchanged"): unit tests pin its `-1`. Windows has no uid, only a
+  SID, and prints its account name or SID in USER and no `u` or `uid`: no
+  change there.
+
+### What stays open
+
+* **`lsof: no pwd entry for UID N`** on stderr (36): the C writes it once per
+  row in each pass of the table (twice per row measured here), once with `-F
+  L` or JSON, never under `-l` or `-w`; lsof-rs writes none.
+* **An NFS file** a path names keeps the ` (fsname)` the C composes only
+  when nothing renamed the row (`dnode.c:851-856`), and the C's file-system
+  match of an NFS file also compares the mount's path (`dfile.c:258-270`):
+  read from the source, not measured, no NFS here (124).
+* **Windows** matches path arguments by name; a row is named as the backend
+  reports it and every item it matches is marked, as before.
+* **Options after a name** are options in lsof-rs (12): `fx/reg.txt +D fx`
+  is a `+D` here and a second path in the C.
+
+### What the gate gained
+
+* **Unit tests**: `lsof-core` `selection.rs` `the_buckets_are_the_cs`,
+  `a_row_locates_the_one_item_the_cs_chain_meets_first`,
+  `a_located_row_is_named_by_its_item` and
+  `a_socket_whose_file_no_item_names_is_located_by_its_path`, and
+  `a_file_system_argument_names_every_mount_it_matches` and
+  `a_path_is_located_by_a_file_the_c_examines_printed_or_not` changed to the
+  C's answer; `model.rs` `a_new_base_keeps_the_addition`; `golden.rs`
+  `a_numeric_user_keeps_eight_characters` and
+  `json_and_fields_uid_is_the_cs_int` (was `json_uid_is_unsigned`).
+* **Differential**: `path-bare-hardlink`,
+  `path-relative-argument-names-the-row` (and `-json-row`) and
+  `path-file-and-its-file-system-one-item-per-row` (renamed from `-in-the-c`)
+  now MATCH, their ledger entries gone; new on fixture A
+  `path-a-file-and-its-hard-link-bind-the-last-given` and
+  `path-a-hard-link-and-its-file-bind-the-last-given`, on R
+  `path-argument-dot-and-doubled-slash-name-the-row`,
+  `path-argument-through-a-link-names-the-row-by-its-target`,
+  `path-argument-trailing-slash-is-not-in-the-name`,
+  and `path-plus-d-doubled-slash-names-the-directory-without-it` (a row
+  named while another option selects it is the unit test's: a case without
+  `-a` would list R's `nu/\xff`, row 93), on DN
+  `path-file-system-and-its-file-one-item-per-row`, on Y
+  `path-unix-socket-by-its-file-before-its-path` (and `-reversed`), on P,
+  whose listener's bound path has another socket file bound over it,
+  `path-unix-socket-by-its-path-when-no-item-has-its-file` (the bound file's
+  identity is no item's, so the path as typed is asked next,
+  `dsock.c:3731-3755`), and on W, whose third process WB has effective uid
+  3000000000, five `owner-uid-past-2-31-*`.
+* **Mutants**: `mutants/name-by-argument.toml`, 17 mutants, all killed (15
+  by the unit gate first, two by the differential alone; `id-mask-full`
+  survived until `the_buckets_are_the_cs` asked an inode whose bucket the
+  odd mask decides; `naming-where-names-are-matched`, the Windows gate,
+  only by a unit test that gives a name-matched item an identity), and `mutants/numeric-owner.toml`, 5, all killed by the
+  unit gate. Re-anchored on the new lookup and run again:
+  path-identity's `a-device-node-row-locates-nothing` (killed by both
+  gates) and mapped-rows' `exempt-rows-located` (its known equivalent).
 
 ## Fixed by adopting the C's JSON schema (2026-10-17)
 
@@ -291,7 +409,7 @@ byte for byte:
   an empty run is the envelope (`-j`: nothing).
 * **The keys**, each one `-F` letter, printed when selected and known, never
   `null`: `pid`, `tid`, `task_cmd`, `pgid`, `ppid`, `command` (whole, `+c`
-  or not), `uid` (unsigned, 68), `login`; `fd`, `access`, `lock`, `type`,
+  or not), `uid` (unsigned, 68; signed as the C's since 2026-10-18), `login`; `fd`, `access`, `lock`, `type`,
   `device`, `device_number`, `raw_device`, `size` and `offset` (decimal
   strings, whatever `-o`), `inode`, `nlink`, `protocol`, `flags`, `name`,
   `tcp_info`. `name` is the C's `Lf->nm`, without the addition the table
@@ -324,7 +442,8 @@ byte for byte:
   a normal base, a second addition, a length too long or inside a
   character); `golden.rs` `json_envelope_is_the_cs`,
   `json_skips_a_process_with_no_files`, `json_process_keys_in_the_cs_order`,
-  `json_uid_is_unsigned`, `json_file_keys_in_the_cs_order`,
+  `json_uid_is_unsigned` (since `json_and_fields_uid_is_the_cs_int`, 68),
+  `json_file_keys_in_the_cs_order`,
   `json_offset_is_decimal`, `json_field_selection`, `json_escapes_like_the_c`,
   `json_unix_row_has_empty_tcp_info`, `json_udp_state_only_when_established`
   (UDP-Lite too), `json_raw_packet_netlink_have_no_tcp_info`,
@@ -875,8 +994,9 @@ is", corrected there).
 
 A path argument that names a file by another spelling than the process opened
 it by (a bind, a covered path, a hard link) now finds it as the C does, and
-NAME is still the opened path, not the argument: item 17's decision, which the
+NAME was still the opened path, not the argument: item 17's decision, which the
 cases below avoid by naming files as they were opened or by leaving out `n`.
+Since 2026-10-18 it is the argument's, as the C's (17, 139).
 
 ### What stays open
 
@@ -885,7 +1005,8 @@ returns at the first item that names a row, file items before file-system
 ones, so `lsof -V T T/f`, where `T/f` is the only file open on the mount `T`,
 lists the row and says `no file system use located: T`, exit 1. lsof-rs marks
 both and exits 0. Item 17's bookkeeping, between a file and its file system;
-the maintainer's call, ledgered on fixture DN.
+the maintainer's call, ledgered on fixture DN. **Resolved 2026-10-18**, with
+17 and 84: one item per row, as the C's.
 
 An `O_PATH` descriptor on a socket file is its own row in the C (126, OPEN,
 found in review): `sock`, `0t0` and `can't identify protocol`, as
@@ -930,7 +1051,8 @@ found does not depend on it; it is ledgered on fixture SF.
   on DN, `sock-no-table-names-is-no-plus-d-entry` (and `-terse`) and
   `sock-file-held-by-path-is-*` (its path, its file system, a `+d` entry) on
   SF, and `netns-socket-is-no-plus-d-entry` on J, all MATCH; and
-  `path-file-and-its-file-system-one-item-per-row-in-the-c`, 125's, and
+  `path-file-and-its-file-system-one-item-per-row-in-the-c` (125's, since
+  renamed and MATCHing), and
   `sock-file-held-by-path-row-in-the-c`, 126's. Run as root with the binary
   before this change, the 10 on MZ, PT and DN and the 6 on SF and J DIVERGE
   and the 3 on M MATCH (measured; the binary of the first draft of this
@@ -4042,7 +4164,7 @@ C-DEFECT not reproduced.
 | 14 | a **path argument matches by `(device, inode)`**, and `+d` is one directory level where `+D` is the tree | ~~one lowercased string-prefix match for all three~~ **resolved 2026-09-05** | see "Fixed by matching a path by what the file is" above |
 | 15 | naming a **mount point** selects every file on the filesystem mounted there (Lsof.8: "it matches a mounted\-on directory name reported by `mount(8)`") | ~~matches only the mount point itself, so it **under-reports**~~ **resolved 2026-09-07** | Waited for `OpenFile::fs_device`, since the DEVICE cell is `st_rdev` for a device node and matching on it over-reported. Also brought `-f`/`+f` and the block-device mount source; see "Fixed by reading the mount table" above. |
 | 16 | a socket in **another network namespace** shows `sock` / `protocol: TCP`, with the OFFSET rather than a size | ~~`SOCK` / `socket:[14902]`, and a size~~ **resolved 2026-09-12** | see "Fixed by asking the socket's own namespace" above. This entry's stated cause was **wrong**: it said the C reads the target's own `/proc/<pid>/net/*`, and framed the fix as a cost-model change. The C reads the `system.sockprotoname` extended attribute instead (`dsock.c`), which is why it prints a protocol and no address. Reading the namespace's own table reaches the same answer in safe, dependency-free Rust; measured cost is **+1.0 ms** on `lsof -i` and **+0.8 ms** whole-host on a two-namespace host, and nothing at all where every socket resolves locally. |
-| 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | prints the name the process actually opened | renderer. Both find the same fd on the same inode. The C's choice also makes its exit status order-dependent: with two names for one inode in a `+d` expansion it binds the row to one and reports the other unlocated, exiting 1. **DECISION** — printing what the process opened is the more truthful answer, and it does not inherit that bookkeeping artefact; ledgered as `path-bare-hardlink`. The same rule names a row by any other spelling of its path, a relative one included: row 139 (2026-10-17). |
+| 17 | the NAME cell shows **the name you asked about**: `lsof /a/hard.txt` prints `hard.txt` for an fd the process opened as `f.txt` | ~~prints the name the process actually opened~~ **resolved 2026-10-18: the name asked about** | see "Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does" above. Was a **DECISION** (printing what the process opened, and not the C's binding, which makes the exit status depend on which name a row is bound to); reversed by the maintainer on 2026-10-18, with row 139, whose mechanism it is. Two names for one inode are two items of which a row locates one, the last given unless a colliding item heads the C's bucket, and `-V` reports the other, exit 1, as the C does (measured). Pinned by `path-bare-hardlink` and `path-a-file-and-its-hard-link-*`. |
 | 18 | on Linux each **task is a process entry of its own** — it repeats the whole file set and the table grows `TID`/`TASKCMD` columns — and the C lists them **whenever nothing else is selected**; `-K` forces it on, `-K i` off | ~~lists processes only; `-K` opts in, and the two columns do not exist~~ **resolved 2026-09-07** | see "Fixed by listing tasks the way the C decides to" above. This entry's own wording was **wrong**: it said the C lists threads "by default", full stop. It does not — give it any selector at all (`-p`, `-u`, `-c`, `-i`, `-d`, a path) and tasks disappear, columns included. The whole-host row count that made the claim (1052 vs 261) was consistent with either reading, which is why writing the ledger from one measurement is not enough. |
 | 19 | a path argument that cannot be `stat()`ed is reported and **dropped**, and if NO argument survived the run exits before listing anything; `-Q` mutes both the message and the status | ~~reported exit 1 but still printed what the other selectors matched, and `-Q` muted only the message~~ **resolved 2026-09-12** | see "Fixed by making the search-item contract the C's" above. This entry was also imprecise: it said the failure is fatal full stop. It is fatal only when EVERY path argument fails — `lsof /a/real/file /nope` prints the first file's rows and exits 1, and lsof-rs already matched there. |
 | 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. ~~**C-DEFECT**, not reproduced~~ **re-diagnosed 2026-10-04: item 12, not a defect.** The C ends its options at the first name, so in `lsof ANY_PATH +d DIR` the words `+d` and `DIR` are two more path arguments: `+d` a status error, `DIR` a plain directory, whose entries are no search items. With `+d` first the C expands DIR. See "Fixed by spelling paths as the C's `Readlink()` does" above. |
@@ -4093,7 +4215,7 @@ C-DEFECT not reproduced.
 | 65 | a path argument is resolved by the C's own `Readlink()`, which only replaces symlink components | ~~lsof-rs resolves with `canonicalize()` to recognise a mount point, and stats the typed spelling~~ **resolved 2026-10-04**, all three below | see "Fixed by spelling paths as the C's `Readlink()` does" above. Found 2026-10-03 by the item 60 review sweep, all on master too:<br>• `mnt`, `./mnt` or `mnt/.` naming a mount point from its parent: `Readlink()` leaves it relative, so the C reads a plain directory; lsof-rs reads a file system and lists everything on it.<br>• `/proc/PID/fd/N`: the C resolves the magic link as text, `pipe:[N]`, and fails to `stat` it; lsof-rs follows it and finds the pipe, the deleted file, even every `anon_inode` fd.<br>• a `+d`/`+D` entry whose name is not UTF-8: the walk converts names lossily, so it identifies nothing.<br>A fourth, `FILE/`, a trailing slash on a file, is fixed: lsof-rs drops it before the `stat`, as the C does (`arg.c`), where it had failed with `Not a directory`. |
 | 66 | a socket's bound path ends at its first space, TAB or `:`, where `get_fields()` ends a field: its NAME is `…/sp` for `…/sp ace.sock`, the full path finds nothing, and a file at the cut path finds the socket | keeps and shows the whole path, and finds the socket by it | **C-DEFECT, not reproduced — found 2026-10-03** by the item 60 review sweep. Ledgered as `path-unix-socket-with-a-space-found-in-lsof-rs`, `path-unix-socket-cut-at-a-space-in-the-c`, `path-unix-socket-with-a-colon-found-in-lsof-rs` and `path-unix-socket-cut-at-a-colon-finds-another-in-the-c`; the NAME difference was on master too. Real names have a `:`, such as an ssh control socket's (`%r@%h:%p`), and the C prints those cut; but ssh binds a temporary name and then links it into place, so the bound path names nothing and neither binary finds one by its path. |
 | 67 | an argument typed exactly `socket` finds every unbound AF_UNIX socket: with no bound path, the C compares the fd link's text, cut at `:`, with the argument (`dsock.c`) | finds none | **C-DEFECT, not reproduced — found 2026-10-03** by the item 60 review sweep. Any stat-able file called `socket` in the cwd will do. |
-| 68 | a numeric owner is printed lossily: the USER column keeps 8 digits (`printuid()`, `snpf("%*lu")` into `char user[USERPRTL+1]`, `print.c:1723, 1817`, `USERPRTL` 8 in `lib/common.h:456`), and `-F u` and the JSON `uid` print it as a signed `int` (`(int)Lp->uid`, `print.c:2085, 2222`), so 3000000000 is `30000000` and `u-1294967296` | every digit, unsigned | **C-DEFECT, not reproduced — closed 2026-10-17** (item 91; found 2026-10-03 by the item 55 review sweep). Both prints lose the owner: owners that large come from user-namespace UID ranges, and a script reading `-F u` or JSON `uid` gets another number. Measured for item 91: `setpriv --reuid=4000000000 sleep` gives `"uid":-294967296` and `u-294967296` from the C; lsof-rs prints `4000000000` in both, and every digit in the USER column. The maintainer may reopen the column half. Pinned by `golden.rs` `json_uid_is_unsigned`. |
+| 68 | a numeric owner is printed lossily: the USER column keeps 8 digits (`printuid()`, `snpf("%*lu")` into `char user[USERPRTL+1]`, `print.c:1723, 1817`, `USERPRTL` 8 in `lib/common.h:456`), and `-F u` and the JSON `uid` print it as a signed `int` (`(int)Lp->uid`, `print.c:2085, 2222`), so 3000000000 is `30000000` and `u-1294967296` | every digit, unsigned | ~~**C-DEFECT, not reproduced — closed 2026-10-17**~~ **reopened and resolved 2026-10-18: printed as the C prints it** | see "Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does" above. Found 2026-10-03 by the item 55 review sweep; closed as a C-DEFECT by item 91, lsof-rs printing every digit, unsigned; the maintainer decided on 2026-10-18 to print it as the C does, the JSON `uid`'s sign included. Measured with `setpriv` uids from 1234567 to 4294967294: USER, `-F u`, `-F L`, `-J` and `-j` byte for byte, with and without `-l`. Windows has no uid. Pinned by `golden.rs` `a_numeric_user_keeps_eight_characters` and `json_and_fields_uid_is_the_cs_int`, and the `owner-uid-past-2-31-*` cases on fixture W's WB. |
 | 69 | a `-u` list item may be **empty** (UID 0: `-u ,` and `-u ,65534` select root) or a bare `^` (excludes UID 0), and an item of 33 characters or more is refused (`LOGINML`) | ~~drops empty items, refuses `-u ^`, and resolves an item of any length~~ **resolved 2026-10-03** | see "Fixed by reading list options as the C reads them, and refusing `-a` with nothing to AND" above. |
 | 70 | a **login name** is what glibc returns, cut to 32 bytes (`LOGINML`), printed raw in USER and `-F L`, and re-read when `/etc/passwd` changes between `-r` cycles | lsof-rs parses `/etc/passwd` itself, by its own rules (no blank-stripping, comments, `+`/`-` entries or field checks), keeps the whole name, escapes it, and reads the file once | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. The raw print is arguably a C-DEFECT like item 59: a name can hold an escape sequence. Item 39 is the NSS sources beyond the file. |
 | 71 | USER is padded by **bytes**, so `jöhn` fills a 5-wide column | pads by characters after sizing by bytes, so a multibyte name is shifted one column per extra byte | **OPEN — found 2026-10-03** by the item 55 review sweep, on master too. USER is the one padded column that can hold multibyte text unescaped. |
@@ -4109,14 +4231,14 @@ C-DEFECT not reproduced.
 | 81 | a `+d`/`+D` tree is walked whole, whatever its size: two links to `.` under `-x l` make 2^40 paths, and the C does not finish | stops after 200,000 entries or 16 MiB of their names, and says so: `WARNING: stopped walking DIR after N entries`, unless a `-w` came before the option | **DECISION — 2026-10-04**, from the item 62 review. The entry limit is older, and was silent. Once `+D` followed links under `-x l` (78), 200,000 entries of a tree of links to itself, each name longer than the last, reached 1.1 GB in 5 s; the byte limit stops it at 26 MB in 0.13 s. A tree past either limit is searched in part, and the warning says so. |
 | 82 | a `+d`/`+D` walk's warnings (`can't opendir`, `can't lstat`, `can't stat(…) symbolc link`) are printed as the C parses its options: before a bare path's status error, and before an option error, `-h`, `-v` or `-F ?` ends the run | walks after parsing, so a run that ends during parsing prints none | **OPEN — found 2026-10-04** by the item 62 review; narrowed the same day by item 52's fix, which walks before the bare paths, so the warnings now precede their status errors and survive their dropping every bare path. stderr only. The walk needs the backend to identify what it finds, and the run builds that after parsing. Measured on the C 2026-10-10, with a link loop in D: `-x l +d D -S 0` prints D's `can't stat(D/loop) symbolc link: Too many levels of symbolic links` before `-S time (0) changed to 2`, where lsof-rs prints it after; `-x l +d D +d /nonexist` and `-x l +d D -u nosuchuser` print it before their error (`can't stat(/nonexist)`, `can't get UID for nosuchuser`), where lsof-rs prints none, its run ending at the parse. Item 111 left the walk where it was. Since 2026-10-17 (item 110) the mount table is read at the first `+d`/`+D`, so its lines come where the C's do; the walk still waits. And an `-e` the C refuses once every option is read ends lsof-rs's run before the walk: measured, `-x l +d D -e /nosuch` (D holding a link to itself) prints D's `can't stat(D/self) symbolc link` and then `"-e /nosuch" is not a mounted file system.` in the C, the `-e` line alone in lsof-rs; exit 1 in both, stderr only. |
 | 83 | every option error the C finds is printed before the usage: `lsof -x +d nonexist` adds `-x must accompany +d or +D`, `lsof +d dangle -p abc` prints both | prints the first error and stops | **OPEN — found 2026-10-04** by the item 62 review. stderr only: exit 1 and nothing listed in both. It was so before this change too (`-p abc -x z`). Since item 94 the parse-time lines after the first error are lost too (measured 2026-10-09): `-p abc -S0` and `+d /nonexist -S0` lose `WARNING: -S time (0) changed to 2`, and `-p abc -b +d D` loses `avoiding readlink(D)`, `avoiding stat(D)` and `can't stat(D): Resource temporarily unavailable`. **Narrowed 2026-10-17** (item 110): what the C finds once every option is read is now all printed, in its order, before the usage hint (`main.c:1060-1160`: each TCP state both included and excluded, `-o and -s`, `-x must accompany +d or +D`, then every unmounted `-e`), those found before the `-e` check ahead of the mount table's lines, which that check reads (`-e /nosuch -x f` prints the `-x` line, the table's warnings, then the `-e` line, as the C does). An error found inside the loop still ends the parse at once, so its run prints neither what the C finds later nor, under an earlier `-e`, the table the C then reads for it: `-e MOUNT -e LOOP` (LOOP a link loop) prints the loop's message alone, where the C prints it, the table's lines, and the usage (measured). `-c^X and -cX conflict.` is one of these, though `main.c:1042-1056` checks for it once every option is read: the C's `lsof_select_process()` refuses the second name as it is entered (`lib/lsof.c:155-165`), so that later check never finds one. Measured: `-c^x -cx -x q` prints the conflict, then `unknown cross-over option: q`; `-x q -c^x -cx` the reverse; `-c^x -c^x -cx` one conflict; `-c^a -c^b -ca -cb` `a`'s, then `b`'s. lsof-rs reports it at the option too, and stops there: `-c^x -cx -x` prints the conflict alone, where the C adds `-x must accompany +d or +D` (pinned by `args.rs` `dash_c_refuses_what_could_never_match`: the first line is the C's either way round). |
-| 84 | a bind mount of a block device (the same device on another directory) is a second search item: `lsof /dev/vda` and `+f -- /dev/vda` locate one and report the other, `no file system use located: /dev/vda`, exit 1 | one item per device: exit 0 | **OPEN — found 2026-10-04** by the item 62 review, on master too. Common in containers. Arguably the same bookkeeping as item 17's two names for one file; the maintainer's call. |
+| 84 | a bind mount of a block device (the same device on another directory) is a second search item: `lsof /dev/vda` and `+f -- /dev/vda` locate one and report the other, `no file system use located: /dev/vda`, exit 1 | ~~one item per device: exit 0~~ **resolved 2026-10-18: an item per mount** | see "Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does" above. Found 2026-10-04 by the item 62 review. Item 17's bookkeeping, which the maintainer decided on 2026-10-18 to reproduce: an item per mount matched, last listed first, and a row locates one of a device's. Measured in a private mount namespace with `/` bound elsewhere (`lsof /dev/vda`) and with tmpfs of one source (`+f -- lsoftest`). Pinned by `selection.rs` `a_file_system_argument_names_every_mount_it_matches` and `a_row_locates_the_one_item_the_cs_chain_meets_first`; no differential case (the mounts would change every case that names `/`). |
 | 85 | the mount reader keeps the first row for each mounted-on directory but `/` (`dmnt.c`), so after an overmount the covering mount's source names nothing: `+f -- SOURCE` is `not a file system` | keeps every row: the covering source names the file system | **OPEN — found 2026-10-04** by the item 62 review, on master too. |
 | 86 | each mount directory is spelt by `Readlink()` as well (`dmnt.c`), so a mount reached through a link that now stands in its path is named by the link's spelling | ~~compares the kernel's spelling~~ **resolved 2026-10-17** | found 2026-10-04 by the item 62 review; see "Fixed by reading the mount table when the C reads it, as it reads it" above. Measured with a mount hidden under its parent's over-mount, whose link there names another mount: the C spells it as that one, a duplicate, and drops it; so does lsof-rs (`mt-hidden-mount-source-is-not-a-file-system`). A directory `Readlink()` gives up on is dropped with its message and `Output information may be incomplete.` (87). |
 | 87 | for each mount directory it cannot `stat`, the C warns (`WARNING: can't stat() TYPE file system DIR`, then `Output information may be incomplete.`), and a source `Readlink()` gives up on prints its message, under `-f` too; `-w` mutes both | ~~says nothing~~ **resolved 2026-10-17** | found 2026-10-04 by the item 62 review; see "Fixed by reading the mount table when the C reads it, as it reads it" above. Both, and a directory `Readlink()` gives up on (its message and the second line), each escaped, in the table's order, where the table is read; `-w` and `-t` mute them, the ones before the read (`+d D -w` warns). |
 | 88 | `-e` takes its path through `Readlink()` where the option stands, and neither its mount nor that mount's source is `stat`ed (both are still read through `Readlink()`); `+e` takes its path as typed, and reads neither. `-e LINK-TO-A-MOUNT` is accepted; `+e` of it is refused; a file on a `+e` mount says `(+e PATH)` | ~~compares the `-e` path as typed, refusing a link; refuses `+e`~~ **resolved 2026-10-17** | found 2026-10-04 by the item 62 review; see "Fixed by reading the mount table when the C reads it, as it reads it" above. **Corrected 2026-10-17**: this row had said `-e` skips the source's `Readlink()`; measured, only `+e` does (`-e` of a mount whose source is a link loop prints the loop's message, `+e` of it nothing). A path argument naming an `-e` mount is a file-system item that finds nothing, and so is its source under `+f` (the C records the mount with device 0); `lsof -e MNT SOURCE` reads the source as a plain file, its mount not `stat`ed to make it a block device. |
 | 89 | `/proc/self/...` is read by a child the C forks to read links (`doinchild()`), so `self` is that child: `lsof /proc/self/fd/0 </dev/null` is a status error on the child's pipe | `self` is lsof: the same run lists every user of `/dev/null` | **C-DEFECT, not reproduced — found 2026-10-04** by the item 62 review. Since item 94 lsof-rs reads links in a helper process too, and the helper names lsof's `/proc/PID` for its own wherever a path leads through `/proc/self` or `/proc/thread-self`, however it is spelt — `/proc//self`, `//proc/./self`, `/proc/self/../self`, `self/fd/0` from `/proc`, a link to either (`/dev/fd/N`, `/dev//fd/N`, `/dev/stdin`, `/proc/net`) — and reads those two links as lsof's: a path that starts in `/proc` or `/dev` (the working directory's start, for a relative one), or holds `self`, `thread-self` or `..`, is read there as `Readlink()` reads it, a link replaced only where its target goes through one of the two (`lsof-backend-linux/src/safefs.rs`, `as_lsof_names_it`). The pids are procfs's (`/proc/self`, and `/proc/self/stat`'s ppid), so a pid namespace that shares the host's `/proc` names lsof too. The first cut matched only the literal `/proc/self` and `/proc/thread-self` and reproduced the defect for every other spelling (found by item 94's review; `tests/arguments.rs`, `a_path_through_proc_self_is_lsof_however_it_is_spelt`, pins eleven). A link made by a user elsewhere into `/proc/self` is followed by the helper's kernel, as the C's child follows it. The helper reaches lsof's entry with lsof's own credentials and capabilities (the same file, executed); measured working from a binary its user may execute but not read and from one with file capabilities, the second not dumpable. Ledgered as `path-proc-self-is-lsof-in-lsof-rs` and `path-dev-stdin-is-lsof-in-lsof-rs`. |
 | 90 | `-F`, `-J` or `-j` with `-t` is refused: `-F and -t are mutually exclusive`, and for `-J`/`-j` also `-J/-j and -t are mutually exclusive`, exit 1 | ~~accepted, exit 0~~ **resolved 2026-10-17** for `-F`, `-J` and `-j` | see "Fixed by adopting the C's JSON schema" above; cases `json-option-error-*`. |
-| 91 | `-J`/`-j` print the C's schema: `lsof_version` at the top; a process's `pid`, `pgid`, `ppid`, `command`, `uid` and `login`; a file's `fd`, `access`, `type`, `device`, `offset`, `inode`, `flags`, `name` and `tcp_info` | ~~its own: no `lsof_version` or `pgid`, `user` for `uid` and `login`, `node` for `inode`, `protocol` and `state` on a socket, and no `offset`, `flags` or `tcp_info` (measured with `-J -a -p P -d 0` on a unix socket)~~ **resolved 2026-10-17: the C's schema, in lsof-rs 2.0.0** | see "Fixed by adopting the C's JSON schema" above. Decided 2026-10-09 by the maintainer, as a breaking change; recorded 2026-10-04 by the drift audit. What lsof-rs still prints differently is rows 134 and 135 (C-DEFECT), 68, 93 and 29. |
+| 91 | `-J`/`-j` print the C's schema: `lsof_version` at the top; a process's `pid`, `pgid`, `ppid`, `command`, `uid` and `login`; a file's `fd`, `access`, `type`, `device`, `offset`, `inode`, `flags`, `name` and `tcp_info` | ~~its own: no `lsof_version` or `pgid`, `user` for `uid` and `login`, `node` for `inode`, `protocol` and `state` on a socket, and no `offset`, `flags` or `tcp_info` (measured with `-J -a -p P -d 0` on a unix socket)~~ **resolved 2026-10-17: the C's schema, in lsof-rs 2.0.0** | see "Fixed by adopting the C's JSON schema" above. Decided 2026-10-09 by the maintainer, as a breaking change; recorded 2026-10-04 by the drift audit. What lsof-rs still prints differently is rows 134 and 135 (C-DEFECT), 93 and 29; 68 is the C's since 2026-10-18. |
 | 92 | a path argument that is not UTF-8 is a path like any other: `lsof $'bad\xffname'` lists the file | refused: `an argument is not valid UTF-8, which lsof-rs cannot take`, exit 1 | **OPEN — recorded 2026-10-04** by the drift audit; the refusal replaced a panic on 2026-09-25 (see "Fixed by reading bytes: one byte had blinded a whole table" above). Names that `+d`/`+D` find are bytes since item 63; arguments are still read as text. |
 | 93 | a byte that is not UTF-8 prints as `\xff` | prints U+FFFD | **DECISION** — see "Fixed by reading bytes: one byte had blinded a whole table" above. Given a row 2026-10-04 by the drift audit; it had lived only in that section's prose. **Amended 2026-10-17 (item 91):** in JSON the C writes the raw byte too (`json_puts_escaped()` passes it, commit 40e4c7d), so its document is not valid UTF-8 and so no JSON; lsof-rs's U+FFFD keeps it valid (case `json-non-utf8`). |
 | 94 | `-b` and `-S [t]` are accepted: avoid the kernel functions that might block, and time out `stat`/`readlink` | ~~refused: `unsupported option: -b`~~ **resolved 2026-10-09**: `-b`, `+b`, `-S [t]`, `+S [t]`, and `-O`/`+O` in place of the no-op it was, each as the C reads it | see "Fixed by bounding the calls that can block, and taking -b, -S and -O" above. The maintainer decided (2026-10-09) to implement the C's documented timeout, every call bounded (Lsof.8, "BLOCKS AND TIMEOUTS"), not its measured one (118-120). |
@@ -4150,7 +4272,7 @@ C-DEFECT not reproduced.
 | 122 | `avoiding stat(P): -b was specified.` prints `P` **raw**, where the same run escapes it in `avoiding readlink(P)` and in the status error: a path named `e<ESC>[2Jx` puts an ESC byte on the terminal | escapes it (`^[`) | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:1011,1519`: `fprintf("%s")`, not `safestrprt()`). Measured with `od -c` on `-b -f -- 'e\033[2Jx'`. No differential case can isolate it while the C names every mount under `-b` (the ledgered `opt-b-*` cases); `crates/lsof-cli/tests/arguments.rs` pins it. Item 112's class, which joins it here. The two `-e` messages are of the class (item 110, measured 2026-10-17 with `-e 'no<ESC>[2Jsuch'` and `-e '/no<ESC>[2Jsuch'`): `enter_efsys()` prints a value that is no path with `"%s"` (`arg.c:586-588`) and `main.c:1154` an unmounted one with `%s`, both raw; lsof-rs escapes both (`"no^[[2Jsuch"`). **Widened 2026-10-17** (item 112): the C prints raw, each measured with an `\e[2J` value and `od -c`, `-i`'s protocol, host name and service name in `unknown protocol name (P)`, `unknown host name (H)`, `unknown service S [for P]` and `TCP=n and UDP=m S ports conflict` (`arg.c:1300-1302, 1430-1432, 1502-1504, 1519-1533`; the spec after `-i ` it escapes); the `%c` option letters (`illegal option character`, `unknown cross-over option`, `unknown file struct option`, `unknown field`, `unsupported TCP/TPI info selection`); `-K not followed by i (but by V)`; `-c^X and -cX conflict.`; every `-s` message; and the `-d` mixture's item (`exclude in an include -d list: ^2<ESC>[2J`), which an item-51 note had kept raw on purpose. lsof-rs escapes each as `safestrprt()` would. |
 | 123 | the child that reads links and `stat`s is a **fork**: in lsof's own listing it has the parent's command name and working directory, fds 0r and 1w on two pipes and nothing else, and the parent holds the other ends (fds 5w and 6r here) | the helper is the binary **re-executed** (`/proc/self/exe`; through the loader when lsof was run by naming it): the same command name (it takes its parent's) and working directory (it inherits lsof's), fds 0r and 1w on two pipes, but it has `/dev/null` on fd 2, and it holds any fd lsof was given without close-on-exec, which std cannot close; lsof holds the other ends at its own numbers. It runs on every run that makes a bounded call (one that reads the mount table, every one but `-f`, or names a path or a `+d`/`+D`), unless `-b` or `-O` is in force. While it waits on a call it holds what the call opened: the `O_PATH` descriptor of a `stat` (decision 3: the one std `stat` that mounts no automount point) or a directory being listed; killed there, it keeps it until the file system answers, and **anything that `stat`s `/proc/HELPER/fd/N` meanwhile waits too** — the C's lsof listing the host, another tool, and an lsof-rs that is not the same file. lsof-rs itself neither `stat`s nor lists a helper's close-on-exec descriptors, which are exactly those (its pipes, `/dev/null` and what it inherited are not close-on-exec): this run's helpers by pid, another run's when it runs this same file (`/proc/PID/exe`) with the helper's argument and lsof's command name. And lsof has a second thread per helper started, which reads its replies (one stays, blocked in a pipe `read`, for each helper killed): `-K` lists them as tasks (TASKCMD `lsof-safe`), so `lsof -K -a -c lsof` lists lsof, where the C, single-threaded, lists nothing | **DECISION — 2026-10-09** (item 94). `/dev/null` because std has no closed stdio; the exec because a thread blocked on FUSE cannot be abandoned (measured); pipes, so that the helper's fds 0 and 1 are FIFOs as the C's child's are, and std gives a pipe read no timeout, hence the thread (a socket would have needed none, and shown as `unix`). The working directory had been `/`, with a relative path sent through `/proc/<lsof>/cwd`; the review found that named another process's directory in a pid namespace sharing the host's `/proc`, so the helper now works where lsof does, as the C's child. The descriptor a waiting helper holds was found the same way: `lsof -S 2` beside a mount that never answered dropped the mount and then hung on its own killed helper's fd 3 (and so did the C's `lsof -b -w -p HELPER`); `crates/lsof-cli/tests/bounded_calls.rs`, `a_killed_helper_holds_nothing_a_scan_waits_on`, pins that two whole-host runs in a row, a `+D` and a path argument each end within their limits. Measured with `lsof -n -P -a -c lsof -d 0-9,cwd` and `-K -a -c lsof -d cwd` for both binaries. Since 2026-10-17 (item 110) the helper starts only on a run that reads the mount table or names a path or a `+d`/`+D`, never under `-i` alone, which reads no table in the C either: `opt-i-alone-under-a-descriptor-limit` lists in both. |
 | 124 | when the mount table lists an NFS mount (`HasNFS`), the C makes every per-file `stat` as well — cwd, rtd, txt, each fd's `lstat` and `stat`, mapped files, unix-socket paths — through `statsafely()`, and on a failure names it `(stat: <error>)` | per-process `stat`s are made in lsof, unbounded, NFS or not, as the C makes them without NFS | **OPEN — recorded 2026-10-09** by item 94. Not measurable here: this kernel has no NFS (`/proc/filesystems`). The C source: `dmnt.c:497-500`, `dproc.c:963-976,1010-1023,1059-1074,1178-1210,1542-1551,1817-1830`, `dsock.c:3210-3213`. Since 2026-10-17 (item 110) the table records `HasNFS` as the C sets it (`MountTable::has_nfs`: 1 for an NFS mount listed, 2 for one recorded), for this row's later fix. `-N` takes its devices from the mounts the C types `N_NFS` (`nfs`, `nfs3`, `nfs4`, in any case), which a `stat` recorded; the C also asks that the file's path start with the mount's directory (`dnode.c:735-744`), which is not done here: source only, as this row. |
-| 125 | a row locates **one** search item: `is_file_named()` tries the file arguments, then the file-system ones, marks the first that names the row and returns (`dfile.c`), so a file-system argument whose only open file another argument also names is `no file system use located`, exit 1 | marks every item a row matches: exit 0 | **OPEN — found 2026-10-09** measuring item 101: `lsof -V -a -p H T T/f`, `T` a tmpfs whose only open file is H's `T/f`, in either order, and with `-d 99`, which prints no row. The mechanism of item 17's two names for one file (a DECISION: not reproduced) and item 84's one source naming two file systems; the maintainer's call. Ledgered as `path-file-and-its-file-system-one-item-per-row-in-the-c`, unpinned (the work directory). |
+| 125 | a row locates **one** search item: `is_file_named()` tries the file arguments, then the file-system ones, marks the first that names the row and returns (`dfile.c`), so a file-system argument whose only open file another argument also names is `no file system use located`, exit 1 | ~~marks every item a row matches: exit 0~~ **resolved 2026-10-18: one item per row** | see "Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does" above. Found 2026-10-09 measuring item 101: `lsof -V -a -p H T T/f`, `T` a tmpfs whose only open file is H's `T/f`, in either order, and with `-d 99`, which prints no row. The mechanism of items 17 and 84, reproduced with them on the maintainer's decision of 2026-10-18. Pinned by `path-file-and-its-file-system-one-item-per-row` and `path-file-system-and-its-file-one-item-per-row` on fixture DN. |
 | 126 | an `O_PATH` descriptor on a socket file (its link a path, its `stat` `S_IFSOCK`) is a socket no table names: `process_proc_sock()` finds no table entry and no `system.sockprotoname`, so `sock`, SIZE/OFF `0t0`, NAME `can't identify protocol` (`(-X specified)` under `-X`; `dsock.c:4145-4166`) | typed by its `stat`: `SOCK`, SIZE `0`, its path for NAME | **OPEN — found 2026-10-10** reviewing item 101, measured as root in a private mount namespace: `lsof -FftDsoin -a -p P -d 6` gives `tsock D0xfe00 o0t0 i2042142 ncan't identify protocol` in the C and `tSOCK D0xfe00 s0 o0t0 i2042142 n…/s.sock` in lsof-rs. Which rows a path finds does not depend on it (item 101: neither finds the descriptor by the file's device and inode). Closing it needs no `getxattr()`: a socket file's own inode never carries the attribute, so the row is `can't identify protocol`, item 22's row built for a path rather than `socket:[N]`. (The C first looks its `st_ino` up in the protocol tables (`dsock.c:3454` and after), so a socket file whose inode number equals a listed socket's would print that socket: a coincidence of numbers on two file systems, not to be reproduced.) Ledgered as `sock-file-held-by-path-row-in-the-c`. |
 | 127 | a `+d`/`+D` entry whose path is **4097 bytes or longer** is `can't lstat(P): No child processes`: `doinchild()` sends its child the path, the child's `r_arg` holds `MAXPATHLEN + 1` bytes and it exits on a longer one, and the parent reports its failed read of the reply as `ECHILD`, the error of an `lstat` no one made (`lib/misc.c:256-430`); under `-O`, which makes the call in lsof, `File name too long` | `can't lstat(P): File name too long`, the kernel's `ENAMETOOLONG`, by default and under `-O`; the entry is no item in either | **C-DEFECT, not reproduced — found 2026-10-10** by item 111's review, measured: an entry of 4097 and of 4100 bytes says `No child processes` in the C and `File name too long` in lsof-rs, one of 4096 bytes `File name too long` in both (the C's child takes it, and the kernel refuses it), and the listing and exit status are the same. The walk alone shows it: a path argument that long is `readlink() path too long` in both, before any `stat`, and a link that long cannot be `lstat`ed to be followed. Pinned by `crates/lsof-cli/tests/arguments.rs`, `a_walk_entry_past_path_max_is_file_name_too_long`; no differential case (the work directory). |
 | 128 | a regular file on the `mqueue` file system the table records (`MqueueDev`, `fstype` exactly `mqueue`) is typed **`PSXMQ`**, a POSIX message queue (`dnode.c:815-819`), on every run that reads the table; under `-b`, which records no mount, it is `REG` | `REG` | **OPEN — found 2026-10-09** measuring item 110: `unshare -m -i`, a queue `mq_open`ed and unlinked on fd 7, `mqueue` mounted: the C `7u PSXMQ 0,43 ...`, lsof-rs `REG`; before the mount both `REG` (R10), and under `-b` the C `REG` too (item 94's c_spec[11]). The table now records `mqueue_device` (the last `mqueue` mount `stat`ed, none for an `-e` one) for the fix: a `FileType` and its rendering, a later step. |
@@ -4164,7 +4286,7 @@ C-DEFECT not reproduced.
 | 136 | `-V`'s not-located lines go to stdout after the JSON document (`-J -V -p 999999` prints the envelope, then `lsof: process ID not located: 999999`), though Lsof.8:927 says stdout is always valid JSON | the same | **followed — 2026-10-17** (item 91), measured; case `json-search-V`. Whether upstream fixes its page or its code is open. |
 | 137 | `-j -r` prints a blank line after each cycle, and an empty cycle is that line alone (`main.c:1527-1531`); `-J -r` one document per cycle | ~~no separator after `-j`~~ **resolved 2026-10-17** | see "Fixed by adopting the C's JSON schema" above; `Format::repeat_marker`, measured with `od -c` (`-j -r1 -p 999999` is `\n\n\n` in 2.5 s from both). |
 | 138 | a unix row's `tcp_info` is always `{}`: the writer looks the socket type (1/2/5) up in the TCP/UDP state tables and reads `lts.state.i`, which the unix path never sets (`dsock.c:3674`, `lib/proc.c:126`), where `-F` prints `TST=CONNECTED` | `{}`, the same | **C-DEFECT, latent, no divergence — 2026-10-17** (item 91). Measured `{}` on every unix row of 16 interleaved sockets; reading an uninitialised field could print a state some day. lsof-rs never prints one there. THREAT-MODEL §6a. |
-| 139 | a row a file argument locates is named by that argument: `is_file_named()` copies the search item's name, `Readlink()`'s spelling of it, over the row's (`snpf(Namech, Namechl, "%s", s->name)`, plus ` (DEVNAME)` for a device, `dfile.c:297-318`), so a relative, `./`, `//` or `..` spelling prints as typed, a link in it resolved, in the table, `-F n` and JSON's `name` alike | prints the path the process opened it by, absolute | **OPEN — found 2026-10-17** by item 91's fidelity review, pre-existing. Row 17 is the same mechanism and a DECISION for a hard link (the name the process opened is the truer answer); this row is the rest of it, where the argument is only another spelling of that path. Measured from a directory holding `fx/reg.txt`, held open as `reg.txt` from `fx`, and `lnk -> fx`: `-a -p P -Fn` with `fx/reg.txt`, `./fx/reg.txt`, `fx//reg.txt` and `fx/../fx/reg.txt` prints each as typed in the C, `lnk/reg.txt` prints `fx/reg.txt`, an absolute `W//fx/reg.txt` keeps its `//`; `fx` names the cwd row `fx`; `+d fx`, `+D fx` and `+D lnk` name their entries `fx`, `fx/reg.txt`, `fx/sub/deep.txt`; `-J fx/reg.txt` gives `"name":"fx/reg.txt"`. lsof-rs prints `W/fx/reg.txt` (or `W/fx`) in every one; which rows are found and the exit status agree. Not reproduced here because it would reverse row 17's decision with it: one rule names both, and the maintainer decides the pair. Ledgered as `path-relative-argument-names-the-row-in-the-c` and `path-relative-argument-names-the-json-row-in-the-c`, unpinned (the work directory). |
+| 139 | a row a file argument locates is named by that argument: `is_file_named()` copies the search item's name, `Readlink()`'s spelling of it, over the row's (`snpf(Namech, Namechl, "%s", s->name)`, plus ` (DEVNAME)` for a device, `dfile.c:297-318`), so a relative, `./`, `//` or `..` spelling prints as typed, a link in it resolved, in the table, `-F n` and JSON's `name` alike | ~~prints the path the process opened it by, absolute~~ **resolved 2026-10-18: named by the argument** | see "Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does" above. Found 2026-10-17 by item 91's fidelity review, pre-existing; the maintainer decided on 2026-10-18 that it, and row 17 with it, be done as the C does. The ` (DEVNAME)` the row once named is never added on Linux: only a file-system item has a `devnm`, and such an item renames nothing (`//dev/null` prints `//dev/null`, measured). Pinned by `path-relative-argument-names-the-row` (and `-json-row`), `path-argument-*` and `path-plus-d-doubled-slash-names-the-directory-without-it` on fixture R. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden

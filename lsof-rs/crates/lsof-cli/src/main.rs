@@ -242,6 +242,22 @@ fn without_trailing_slashes(path: &[u8]) -> &[u8] {
     &path[..end]
 }
 
+/// `path` less the slashes that end it, where it has any: a `+d`/`+D`
+/// directory's name for a row it locates. Only where files are identified,
+/// which is Unix.
+#[cfg(unix)]
+fn trimmed(path: &std::ffi::OsStr) -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_bytes();
+    let kept = without_trailing_slashes(bytes);
+    (kept.len() < bytes.len()).then(|| std::ffi::OsStr::from_bytes(kept).to_os_string())
+}
+
+#[cfg(not(unix))]
+fn trimmed(_: &std::ffi::OsStr) -> Option<OsString> {
+    None
+}
+
 /// A path argument as the C spells it before it looks at it (`arg.c`,
 /// `ck_file_arg`): its `Readlink()`, less the slashes that end it. So `FILE/`
 /// is FILE, `mnt` from `/` stays `mnt`, which no mount point is, and a
@@ -332,7 +348,7 @@ impl WalkBudget {
 /// (its first timeout, DIVERGENCES 118). Its warnings go where the layer's
 /// do, stderr, so that a test can hold them.
 fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper, fs: &SafeFs) {
-    fn enter(sel: &mut Selection, path: &Path, id: Option<FileId>) {
+    fn enter(sel: &mut Selection, path: &Path, id: Option<FileId>, spelled: Option<OsString>) {
         if let Some(id) = id {
             sel.path_ids.insert(id);
             sel.path_names.insert(path.as_os_str().to_os_string());
@@ -341,6 +357,7 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
             id,
             fs_device: None,
             name: path.as_os_str().to_os_string(),
+            spelled,
         });
     }
     let fs = fs.with(dir.blocking, dir.warn);
@@ -366,7 +383,16 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
     } else {
         (None, None)
     };
-    enter(sel, &base, top);
+    // The directory's own item is `ck_file_arg()`'s, which drops the
+    // slashes that end it from the name a row it locates is given, and only
+    // from that: `+d fx//` names the directory's row `fx` and an entry's
+    // `fx//reg.txt`, and `-V` reports `fx//` (measured).
+    let spelled = if identified {
+        trimmed(base.as_os_str())
+    } else {
+        None
+    };
+    enter(sel, &base, top, spelled);
     let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
     let mut budget = WalkBudget::new();
     let mut stack = vec![base.clone()];
@@ -474,7 +500,7 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
             if dir.recursive && st.is_some_and(|st| st.is_dir()) {
                 stack.push(path.clone());
             }
-            enter(sel, &path, id);
+            enter(sel, &path, id, None);
         }
     }
 }
@@ -939,6 +965,7 @@ fn main() {
                         id: None,
                         fs_device: Some(dev),
                         name: name.clone(),
+                        spelled: None,
                     });
                 }
                 survived += 1;
@@ -962,6 +989,7 @@ fn main() {
                     id: None,
                     fs_device: None,
                     name,
+                    spelled: None,
                 });
                 survived += 1;
                 continue;
@@ -978,10 +1006,16 @@ fn main() {
                 Ok(Some(id)) => {
                     sel.path_ids.insert(id);
                     sel.path_names.insert(typed.as_str().into());
+                    // A row it locates is named by its `Readlink()`, less
+                    // its trailing slashes (`s->name`), where `-V` reports it
+                    // as typed (`s->aname`): `lnk/reg.txt/` names the row
+                    // `fx/reg.txt` (DIVERGENCES 139).
+                    let spelled = (path != name).then_some(path);
                     sel.path_items.push(PathItem {
                         id: Some(id),
                         fs_device: None,
                         name,
+                        spelled,
                     });
                     survived += 1;
                 }
@@ -993,6 +1027,7 @@ fn main() {
                         id: None,
                         fs_device: None,
                         name,
+                        spelled: None,
                     });
                     survived += 1;
                 }
@@ -1459,11 +1494,13 @@ mod tests {
                     }),
                     fs_device: None,
                     name: "./x".into(),
+                    spelled: Some("/w/x".into()),
                 },
                 PathItem {
                     id: None,
                     fs_device: Some(42),
                     name: "mnt".into(),
+                    spelled: None,
                 },
             ],
             ..Default::default()

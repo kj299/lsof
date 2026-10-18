@@ -103,13 +103,15 @@ ledger — those are the kit's, on purpose.
              user namespaces)
   fixture EM files on /dev/shm mapped, mapped and unlinked, and held open,
              for `-e /dev/shm` (a /dev/shm mount)
-  fixture P  three mapped files whose paths are then mounted over here
-             (root, or passwordless sudo)
+  fixture P  three mapped files whose paths are then mounted over here,
+             and a unix socket whose bound path another socket file is
+             then bound over (root, or passwordless sudo)
   fixture RN an io_uring ring, a mapping named by no path, and a file
              planted under that name (a kernel that allows io_uring)
   fixture U  (above) runs its cases as a user who cannot read it
-  fixture W  two processes whose real and effective uids differ, one each
-             way (root, or passwordless sudo)
+  fixture W  three processes: two whose real and effective uids differ, one
+             each way, and one whose effective uid is past 2^31 (root, or
+             passwordless sudo)
   fixture FH a FUSE file system that does not answer `stat` of its root,
              or in one case a link's `readlink` (`fuse_hang.py`: hold, or delay), mounted at {FUSE} in a mount
              namespace of its own for each binary run, for `-S`, `-b` and
@@ -213,6 +215,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -1914,12 +1917,25 @@ def path_note_holder(work: str) -> Fixture:
     mapped ([`prepare_paths`]; the fixture waits for `go`): a file bound from
     the root file system would give the bind mount `/`'s source, and a
     source that names two file systems is DIVERGENCES 84, which would change
-    the cases that name `/` by its source (LESSONS #081)."""
+    the cases that name `/` by its source (LESSONS #081).
+
+    It also listens on a unix socket bound at `sock`, and [`cover_paths`]
+    binds another socket file, `ovl/osock` on the tmpfs over `ovl`, over that
+    path. So `sock` is a mount point, a file-system argument, and its `stat`
+    is a socket whose identity no item has: the C, finding no item by the
+    bound file's device and inode, compares the bound path with every
+    argument as typed (`dsock.c:3731-3755`) and locates the file system by
+    it. Measured: `lsof -V -a -p P sock` rc 0 in both, and lsof-rs with no
+    fall-back to the path once the identity is known reported it not
+    located. Nothing on that tmpfs is mapped, so no other row of P locates
+    it."""
     pdir = os.path.join(work, "pathnotes")
     for sub in ("ovl", "shadow", "t"):
         os.makedirs(os.path.join(pdir, sub))
     py = MMAP_PRELUDE + (
+        "import socket\n"
         "d=sys.argv[1]\n"
+        "k=socket.socket(socket.AF_UNIX); k.bind(os.path.join(d,'sock')); k.listen(1)\n"
         "give_up=time.monotonic()+60\n"
         "while not os.path.exists(os.path.join(d,'go')):\n"
         "    if time.monotonic()>give_up: sys.exit(3)\n"
@@ -1933,7 +1949,8 @@ def path_note_holder(work: str) -> Fixture:
         "P(path notes)",
         [sys.executable, "-c", py, pdir],
         cwd=pdir,
-        expect_fds=3,
+        # 0,1,2 + the listener.
+        expect_fds=4,
         optional=True,
         unavailable=None if root_prefix() is not None else "not root, and no passwordless sudo",
     )
@@ -1963,8 +1980,9 @@ def prepare_paths(p: Fixture, mounted: list[str]) -> None:
 def cover_paths(p: Fixture, mounted: list[str]) -> None:
     """Mount over fixture P's mapped paths once it holds them, as root: a
     tmpfs over `ovl` (so `ovl/hidden` is no file), one over `shadow` with a
-    new `s` in it, and `t/other` bound over `t/b`. The tmpfs are this user's
-    (`uid=`), so it writes the new `s` itself. What is mounted goes into
+    new `s` in it, `t/other` bound over `t/b`, and a socket file made at
+    `ovl/osock` bound over the listener's `sock`. The tmpfs are this user's
+    (`uid=`), so it writes the new `s` and `osock` itself. What is mounted goes into
     `mounted` as it is made; a mount that fails makes the fixture
     unavailable, and the run's `finally` undoes the rest."""
     own = f"uid={os.getuid()},gid={os.getgid()}"
@@ -1977,6 +1995,11 @@ def cover_paths(p: Fixture, mounted: list[str]) -> None:
             ["--bind", os.path.join(p.cwd, "t", "other"), os.path.join(p.cwd, "t", "b")],
             mounted,
         )
+        # Binding makes the socket file; closing leaves it, with no listener.
+        osock = os.path.join(p.cwd, "ovl", "osock")
+        with socket.socket(socket.AF_UNIX) as k:
+            k.bind(osock)
+        _mount(["--bind", osock, os.path.join(p.cwd, "sock")], mounted)
     except (subprocess.CalledProcessError, OSError) as why:
         raise FixtureUnavailable(f"{p.name}: could not mount over its paths: {_why(why)}")
 
@@ -2278,11 +2301,16 @@ def path_spelling_holder(work: str) -> Fixture:
     )
 
 
-# The two credential shapes fixture W holds: (real, effective) uid. The C
-# shows the effective one -- the owner of `/proc/<pid>/` -- and lsof-rs had
-# shown the real one, so each shape reads differently in the two (DIVERGENCES
-# 55). 65534 is `nobody` on every runner this harness uses.
-OWNER_SHAPES = {"W": (0, 65534), "WR": (65534, 0)}
+# The credential shapes fixture W holds: (real, effective) uid. The C shows
+# the effective one -- the owner of `/proc/<pid>/` -- and lsof-rs had shown
+# the real one, so W and WR read differently in the two (DIVERGENCES 55).
+# 65534 is `nobody` on every runner this harness uses. WB's effective uid has
+# no account and is past 2^31: the C prints it cut to eight digits in USER and
+# as a negative `int` in `-F u` and JSON (DIVERGENCES 68). Its real uid stays
+# 0, so that W, its parent, may signal it: with a real uid of 3000000000 too,
+# the death signal W's exit sends was refused for want of permission, and WB
+# outlived the run (measured).
+OWNER_SHAPES = {"W": (0, 65534), "WR": (65534, 0), "WB": (0, 3000000000)}
 
 
 def unlock(top: str) -> None:
@@ -2318,14 +2346,17 @@ def root_prefix() -> list | None:
 
 
 def owner_holder(work: str) -> Fixture:
-    """Two processes whose real and effective uids differ, one each way.
+    """Two processes whose real and effective uids differ, one each way, and
+    one whose uid is past 2^31.
 
-    {W} runs with real uid 0 and effective 65534, {WR} the other way round.
-    Only root can make either, so the fixture starts through `sudo -n` when
-    the runner is not root, and is unavailable when it cannot. Each writes its
+    {W} runs with real uid 0 and effective 65534, {WR} the other way round,
+    and {WB} with real uid 0 and effective 3000000000, which no account has.
+    Only root can make any, so the fixture starts through `sudo -n` when the
+    runner is not root, and is unavailable when it cannot. Each writes its
     pid before it changes its credentials -- after, it could no longer write
     here -- and dies with its parent (`PR_SET_PDEATHSIG`, set after the change,
-    which clears it), so stopping the fixture stops both."""
+    which clears it): {WR} and {WB} with {W}, and {W} with the harness, so
+    stopping the fixture stops all three."""
     wdir = os.path.join(work, "owner")
     os.makedirs(wdir)
     prefix = root_prefix()
@@ -2343,8 +2374,9 @@ def owner_holder(work: str) -> Fixture:
         "    os._exit(0)\n"
         "me=os.getpid()\n"
         "if os.fork()==0: hold('WR', %d, %d, me)\n"
+        "if os.fork()==0: hold('WB', %d, %d, me)\n"
         "hold('W', %d, %d, os.getppid())\n"
-        % (*OWNER_SHAPES["WR"], *OWNER_SHAPES["W"])
+        % (*OWNER_SHAPES["WR"], *OWNER_SHAPES["WB"], *OWNER_SHAPES["W"])
     )
     return Fixture(
         "W(owner)",
@@ -2357,9 +2389,9 @@ def owner_holder(work: str) -> Fixture:
 
 
 def owners_ready(w: Fixture) -> dict[str, int]:
-    """Wait until both of fixture W's processes run with the credentials they
-    are there for, and return their pids by matrix key. The `Uid:` line is the
-    test, not a marker file: the credentials ARE the fixture."""
+    """Wait until all three of fixture W's processes run with the credentials
+    they are there for, and return their pids by matrix key. The `Uid:` line
+    is the test, not a marker file: the credentials ARE the fixture."""
     deadline = time.monotonic() + 5.0
     pids: dict[str, int] = {}
     while time.monotonic() < deadline:
@@ -2434,10 +2466,11 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     # directory. lsof matches a path argument by the file's identity, not its
     # name, so querying this link must find the fd opened under the other one
     # -- but leaving it inside `files/` would put two names for one inode into
-    # the `+d`/`+D` expansions, where the C binds a row to whichever name it
-    # matched first and reports the other as unlocated. That is its own
-    # divergence (DIVERGENCES.md #17); keeping the link out of the tree lets
-    # the `+d`/`+D` cases measure one-level-vs-recursive, which is their job.
+    # the `+d`/`+D` expansions, where the C binds a row to one name and
+    # reports the other as unlocated (DIVERGENCES 17, which lsof-rs now does
+    # too, and `path-a-file-and-its-hard-link-*` asks); keeping the link out
+    # of the tree lets the `+d`/`+D` cases measure one-level-vs-recursive,
+    # which is their job.
     linkdir = os.path.join(work, "hardlink")
     os.makedirs(linkdir)
     # An existing file that NOTHING opens, and a path that does not exist, both
@@ -2744,9 +2777,10 @@ def run(args) -> int:
             "WRACE": (walkrace, walkrace.unavailable or "the holder did not come up"),
             "WRACEDIR": (walkrace, walkrace.unavailable or "the holder did not come up"),
             "WRACELINKS": (walkrace, walkrace.unavailable or "the holder did not come up"),
-            # W's cases name {W} and {WR} together; both go with it.
+            # W's cases name {W} and {WR} together; both go with it, and WB.
             "W": (owner, "not root, and no passwordless sudo"),
             "WR": (owner, "not root, and no passwordless sudo"),
+            "WB": (owner, "not root, and no passwordless sudo"),
             # A case that spells /dev/shm differently asks whether the spelling
             # still names the file system; where /dev/shm is no mount point, both
             # binaries would answer "a directory" and MATCH on nothing.
@@ -2883,7 +2917,7 @@ def run(args) -> int:
                 print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
                 optional["P"] = (None, optional["P"][1])
         zchild = zombies_ready(zombies)
-        # W's pids are its two processes', not the `sudo` it may run under,
+        # W's pids are its three processes', not the `sudo` it may run under,
         # and they count only once the credentials are in place.
         owners: dict[str, int] = {}
         if owner is not None:
@@ -2893,6 +2927,7 @@ def run(args) -> int:
                 print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
                 optional["W"] = (None, optional["W"][1])
                 optional["WR"] = (None, optional["WR"][1])
+                optional["WB"] = (None, optional["WB"][1])
         # U is only worth comparing if the user its cases run as really cannot
         # read it -- a runner with CAP_SYS_PTRACE could, and both binaries
         # would then MATCH on a readable process, a green that measured
@@ -3025,6 +3060,9 @@ def run(args) -> int:
                 "DNNODE": os.path.join(devnode.cwd if devnode else work, "u", "node"),
                 # DN's `t`, a mount point: a file-system argument.
                 "DNT": os.path.join(devnode.cwd if devnode else work, "t"),
+                # P's listener's bound path, with another socket file bound
+                # over it: a file-system argument.
+                "PSOCK": os.path.join(pathnotes.cwd if pathnotes else work, "sock"),
                 "SF": str(sockfiles.pid),
                 "SFSOCK": os.path.join(sockfiles.cwd, "s.sock"),
                 # The file system SF's socket file is on, by its mount point.

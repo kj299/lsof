@@ -12,7 +12,7 @@
 //! Where lsof-rs differs from the C it does so on purpose, each a C-DEFECT
 //! row in DIVERGENCES: an Internet row has a `name` (the `-F n` text), where
 //! the C prints none; DEL, the C1 controls and U+2028/U+2029 are escaped,
-//! where the C writes them raw; a uid is unsigned (row 68).
+//! where the C writes them raw.
 //!
 //! Hand-written to keep `lsof-core` dependency-free, and written into the
 //! caller's sink one process at a time rather than built whole.
@@ -142,10 +142,11 @@ fn proc_members(m: &mut Members<'_>, p: &Process, o: &JsonOpts<'_>) {
     if o.want('c') {
         m.str("command", &p.command);
     }
-    // Unsigned, where the C casts it to int (DIVERGENCES 68).
+    // Signed, as `-F u` prints it: the C's `json_print_int(sep, "uid",
+    // (int)Lp->uid)` (DIVERGENCES 68).
     if o.want('u') {
         if let Some(uid) = p.uid {
-            m.num("uid", uid);
+            m.num("uid", crate::render::fields::uid_as_the_c_prints_it(uid));
         }
     }
     if o.want('L') && !o.numeric_ids {

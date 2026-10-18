@@ -2157,6 +2157,46 @@ fn a_numeric_user_is_eight_wide_and_has_no_login_field() {
     assert!(!j.contains("\"user\""), "{j}");
 }
 
+/// A numeric USER keeps eight characters, as the C's `printuid()` writes
+/// one into `char user[USERPRTL + 1]` (DIVERGENCES 68): 3000000000 is
+/// `30000000`, 4294967294 `42949672`, and the column stays eight wide.
+/// Measured with processes `setpriv` gave those uids, with and without `-l`.
+#[test]
+fn a_numeric_user_keeps_eight_characters() {
+    use lsof_core::{AccessMode as A, FdType as Fd, FileType as T};
+    let one = |uid: u32| {
+        let mut p = python3(vec![row(
+            Fd::Cwd,
+            A::Unknown,
+            None,
+            T::Dir,
+            "254,0",
+            Some(4096),
+            None,
+            "475157",
+            "/d",
+        )]);
+        p.user = None;
+        p.uid = Some(uid);
+        p
+    };
+    let procs = [
+        one(3_000_000_000),
+        one(4_294_967_294),
+        one(12_345_678),
+        one(1_234_567),
+    ];
+    let out = table::render(&procs, TableOpts::new(Escaper::UNIX));
+    assert_eq!(
+        out,
+        "COMMAND PID     USER  FD   TYPE DEVICE SIZE/OFF   NODE NAME\n\
+         python3 496 30000000 cwd    DIR  254,0     4096 475157 /d\n\
+         python3 496 42949672 cwd    DIR  254,0     4096 475157 /d\n\
+         python3 496 12345678 cwd    DIR  254,0     4096 475157 /d\n\
+         python3 496  1234567 cwd    DIR  254,0     4096 475157 /d\n"
+    );
+}
+
 /// NLINK's cell is formatted `" %ld"` — with its leading space — before it is
 /// measured, so a five-digit count makes the column six wide. Measured on a
 /// directory holding 12343 subdirectories (12345 links).
@@ -2377,10 +2417,11 @@ fn json_process_keys_in_the_cs_order() {
     assert!(!json::render_lines(&[p], &numeric).contains("login"));
 }
 
-/// A uid of 2^31 or more is printed as the number it is, where the C casts
-/// it to `int` and prints `-294967296` (DIVERGENCES 68, C-DEFECT).
+/// A uid of 2^31 or more is printed as the C's `(int)Lp->uid` prints it,
+/// in JSON and `-F u` alike: `setpriv --reuid=4000000000` gave the C's
+/// `"uid":-294967296` and `u-294967296` (DIVERGENCES 68).
 #[test]
-fn json_uid_is_unsigned() {
+fn json_and_fields_uid_is_the_cs_int() {
     let mut p = jproc(vec![jrow(
         lsof_core::FdType::Cwd,
         lsof_core::FileType::Dir,
@@ -2388,8 +2429,25 @@ fn json_uid_is_unsigned() {
     )]);
     p.uid = Some(4_000_000_000);
     p.user = None;
-    let line = json::render_lines(&[p], &dj());
-    assert!(line.contains("\"uid\":4000000000,\"fd\""), "{line}");
+    let line = json::render_lines(std::slice::from_ref(&p), &dj());
+    assert!(line.contains("\"uid\":-294967296,\"fd\""), "{line}");
+    let f = fields::render(
+        std::slice::from_ref(&p),
+        false,
+        Some(&['u']),
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
+    assert!(f.contains("\nu-294967296\n"), "{f:?}");
+    for (uid, want) in [
+        (2_147_483_647u32, "2147483647"),
+        (2_147_483_648, "-2147483648"),
+        (4_294_967_295, "-1"),
+    ] {
+        p.uid = Some(uid);
+        let line = json::render_lines(std::slice::from_ref(&p), &dj());
+        assert!(line.contains(&format!("\"uid\":{want},")), "{line}");
+    }
 }
 
 /// The measured fd 53: every file key, in `json_print_file()`'s order, with

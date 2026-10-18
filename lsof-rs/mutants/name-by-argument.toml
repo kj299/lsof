@@ -1,0 +1,230 @@
+# Mutants for "name a located row by its search item, as the C binds it"
+# (DIVERGENCES 139, 17, 125, 84): one per rule, each a plausible way to get
+# that rule wrong. The kill table is this file, run (porting-kit LESSONS
+# #083):
+#
+#   cd lsof-rs && sudo python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/name-by-argument.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root: the
+# differential runs in a mount namespace of its own (`unshare -m`), as fixture
+# DN mounts there and comes up only for root or passwordless sudo. CI runs only
+# --apply-only, which checks that each mutant still fits the code.
+#
+# Run 2026-10-18 with --first-kill: 15 of 15 killed, 13 by the unit gate
+# first, and plus-d-directory-keeps-its-slashes and socket-by-its-path-first
+# by the differential alone (`path-plus-d-doubled-slash-names-the-directory-
+# without-it`, `path-unix-socket-by-its-file-before-its-path`). id-mask-full
+# survived the first run; `the_buckets_are_the_cs` now asks an inode whose
+# bucket the odd mask decides, and kills it.
+#
+# Added after review, run 2026-10-18 through every gate: socket-id-known-no-
+# path-fallback killed by the unit gate (`a_socket_whose_file_no_item_names_
+# is_located_by_its_path`) and the differential (`path-unix-socket-by-its-
+# path-when-no-item-has-its-file`, fixture P); naming-where-names-are-matched
+# killed by the unit gate alone (`a_located_row_is_named_by_its_item` gives a
+# name-matched item an identity, which no name-matching backend does, so no
+# differential can see it).
+#
+# Mutants the differential cannot see, and the unit tests that kill them:
+# chain-takes-the-last needs an argument whose inode falls in another's hash
+# bucket, which no fixture arranges (`a_row_locates_the_one_item_the_cs_chain_
+# meets_first`); name-hash-unsigned and id-mask-full need such a collision too
+# (`the_buckets_are_the_cs`); addition-dropped needs a located row with an
+# addition (`a_new_base_keeps_the_addition`); and the two file-system mutants
+# need two mounts of one device (`a_file_system_argument_names_every_mount_it_
+# matches`).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-core", "-p", "lsof-cli"]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1200
+
+[[mutant]]
+name = "never-renamed"
+rule = "a row a file item locates is named by it (139, 17)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if f.is_socket() {'''
+new = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if true {'''
+
+[[mutant]]
+name = "sockets-renamed"
+rule = "a socket keeps its own name: the C entered it before it asks (139)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if f.is_socket() {'''
+new = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if false {'''
+
+[[mutant]]
+name = "file-system-item-renames"
+rule = "a file-system item names no row (`if (s->type)`, 139)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''    pub fn row_name(&self) -> Option<&OsStr> {
+        if self.fs_device.is_some() {
+            return None;
+        }'''
+new = '''    pub fn row_name(&self) -> Option<&OsStr> {'''
+
+[[mutant]]
+name = "named-as-typed"
+rule = "a row is named by the item's Readlink() spelling, not as typed (139)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        Some(self.spelled.as_deref().unwrap_or(&self.name))'''
+new = '''        Some(&self.name)'''
+
+[[mutant]]
+name = "argument-not-spelled"
+rule = "a path argument's s->name is its Readlink(), less its trailing slashes (139)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                    let spelled = (path != name).then_some(path);'''
+new = '''                    let spelled = None::<OsString>;'''
+
+[[mutant]]
+name = "plus-d-directory-keeps-its-slashes"
+rule = "a +d/+D directory's own row is named without its trailing slashes (139)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let spelled = if identified {
+        trimmed(base.as_os_str())
+    } else {'''
+new = '''    let spelled = if identified {
+        None
+    } else {'''
+
+[[mutant]]
+name = "addition-dropped"
+rule = "the name's addition (Lf->nma) stays when the base is replaced (139)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''                self.name.push_str(&tail);'''
+new = ''''''
+
+[[mutant]]
+name = "chain-takes-the-first"
+rule = "of two items with one key, the bucket's head, the last entered, binds (17)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        Some(if head == Some(&span.last) {'''
+new = '''        Some(if false {'''
+
+[[mutant]]
+name = "chain-takes-the-last"
+rule = "behind another key's head, the first entered binds (17)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        Some(if head == Some(&span.last) {'''
+new = '''        Some(if true {'''
+
+[[mutant]]
+name = "file-system-before-the-file"
+rule = "a row is looked up by identity first, by file system only after (125)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if let Some(i) = f.file_id().and_then(|id| self.by_identity(&id)) {
+            return Some(i);
+        }'''
+new = '''        if let Some(dev) = f.searched_fs_device() {
+            let head = self.fs_heads.get(&dev_ino_bucket(dev, 0, FS_MASK));
+            if let Some(i) = Span::first_met(self.by_fs.get(&dev), head) {
+                return Some(i);
+            }
+        }
+        if let Some(i) = f.file_id().and_then(|id| self.by_identity(&id)) {
+            return Some(i);
+        }'''
+
+[[mutant]]
+name = "socket-by-its-path-first"
+rule = "a socket is asked by its file's identity first, by its path only after (17)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            return b
+                .id
+                .as_ref()
+                .and_then(|id| self.by_identity(id))
+                .or_else(|| {
+                    let path = OsStr::new(b.path.as_deref()?);
+                    let head = self.name_heads.get(&name_bucket(path));
+                    Span::first_met(self.by_name.get(path), head)
+                });'''
+new = '''            let by_path = b.path.as_deref().and_then(|p| {
+                let path = OsStr::new(p);
+                let head = self.name_heads.get(&name_bucket(path));
+                Span::first_met(self.by_name.get(path), head)
+            });
+            return by_path.or_else(|| b.id.as_ref().and_then(|id| self.by_identity(id)));'''
+
+[[mutant]]
+name = "name-hash-unsigned"
+rule = "hashbyname() reads a signed char (17)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        h ^= i32::from(b as i8).wrapping_shl(shift);'''
+new = '''        h ^= i32::from(b).wrapping_shl(shift);'''
+
+[[mutant]]
+name = "id-mask-full"
+rule = "SFDIHASH is 4094, so the mask is 4093 (17)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''const ID_MASK: u64 = 4093;'''
+new = '''const ID_MASK: u64 = 4095;'''
+
+[[mutant]]
+name = "one-item-per-device"
+rule = "an argument naming two mounts of one device is two items (84)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        .filter(|&found| seen.insert(found))'''
+new = '''        .filter(|&(_, dev)| seen.insert(dev))'''
+
+[[mutant]]
+name = "mounts-in-table-order"
+rule = "an argument's mounts are entered last listed first, as readmnt() prepends (84)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''    mounts
+        .iter()
+        .rev()'''
+new = '''    mounts
+        .iter()'''
+
+[[mutant]]
+name = "socket-id-known-no-path-fallback"
+rule = "a socket whose file's identity no item has is asked by its path next (dsock.c:3731-3755)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            return b
+                .id
+                .as_ref()
+                .and_then(|id| self.by_identity(id))
+                .or_else(|| {'''
+new = '''            if let Some(id) = b.id.as_ref() {
+                return self.by_identity(id);
+            }
+            return None::<usize>.or_else(|| {'''
+
+[[mutant]]
+name = "naming-where-names-are-matched"
+rule = "where paths are matched by name, no row is renamed (139)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        let naming = (self.paths_identified && !self.path_items.is_empty())'''
+new = '''        let naming = (!self.path_items.is_empty())'''

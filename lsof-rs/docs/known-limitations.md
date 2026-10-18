@@ -247,18 +247,15 @@ meet. Each number is a row there, with the measurement behind it.
   and `can't identify protocol` (126); a bound netlink socket is `SOCK`,
   where the C reads its table (109); a
   login name is read from `/etc/passwd` only, so an LDAP or SSSD account can
-  be named by its UID alone (39); a file
-  named by a path argument and its file system named by another locate both,
-  where the C's row locates the file alone and the run exits 1 (125).
+  be named by its UID alone (39).
 - **Output shape:** `-J`/`-j` print the C's schema since 2.0.0 (91), but an
   Internet row keeps a `name` (134) and DEL, C1 and U+2028/2029 are escaped
   (135), both C-DEFECT; a byte that is not UTF-8 prints as U+FFFD, where the
   C prints `\xff` (93); `-h` writes
   its help to stdout, where the C writes the usage to stderr (114).
-- **Deliberate:** options after the first file name are still options (12);
-  NAME shows the name the process opened, not the one you asked about (17); a
+- **Deliberate:** options after the first file name are still options (12); a
   `+d`/`+D` walk stops at 200,000 entries or 16 MiB of names, and says so (81).
-- **Rarer:** large UIDs (68) and the padding of a multibyte login name (71).
+- **Rarer:** the padding of a multibyte login name (71).
   The rest, including the stderr-only differences, are in the ledger.
 
 ## Where these limitations are tracked

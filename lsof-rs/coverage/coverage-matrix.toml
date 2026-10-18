@@ -396,6 +396,10 @@ name = "smoke/no-op-O"
 args = ["-O", "-p", "SELF"]
 
 [[case]]
+name = "smoke/avoid-blocking-b"
+args = ["-b", "+D", "TEMP"]
+
+[[case]]
 name = "smoke/tcp-info-T"
 args = ["-T", "-nP", "-iTCP:PORT"]
 

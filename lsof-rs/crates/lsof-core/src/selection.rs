@@ -393,13 +393,22 @@ pub enum FilesystemArgs {
 /// **Every** match, not the first: one argument can name several mounts (`+f --
 /// tmpfs` names all of them), the C makes a separate search item of each, and
 /// a run that finds files on one and nothing on the others still exits 1.
+/// One per mount, two mounts of one device included (a bind mount, or one
+/// source mounted twice), in the C's order: `readmnt()` prepends each mount
+/// to its list (`dmnt.c:595,658`), so the last listed comes first. A row
+/// locates one of a device's items, and `-V` reports the other (DIVERGENCES
+/// 84; see [`Selection::locate`]). The C skips a mount whose directory,
+/// device and inode another match had (`arg.c:196-206`); here, whose
+/// directory and device, the inode being the directory's.
 pub fn filesystems_named(mounts: &[MountEntry], path: &OsStr, mode: FilesystemArgs) -> Vec<u64> {
     if mode == FilesystemArgs::NeverFilesystem {
         return Vec::new();
     }
     let any_source = mode == FilesystemArgs::AlwaysFilesystem;
-    let mut devs: Vec<u64> = mounts
+    let mut seen = HashSet::new();
+    mounts
         .iter()
+        .rev()
         .filter(|m| {
             m.dir == path
                 || ((any_source || m.source_is_block) && m.source_resolved.as_deref() == Some(path))
@@ -411,11 +420,10 @@ pub fn filesystems_named(mounts: &[MountEntry], path: &OsStr, mode: FilesystemAr
         // nothing and `-V` says `no file system use located` of it: measured,
         // `lsof -V -a -p P -e /dev/shm /dev/shm`, P's cwd on /dev/shm, exits 1
         // with that line.
-        .map(|m| m.device.unwrap_or(0))
-        .collect();
-    devs.sort_unstable();
-    devs.dedup();
-    devs
+        .map(|m| (m.dir.as_os_str(), m.device.unwrap_or(0)))
+        .filter(|&found| seen.insert(found))
+        .map(|(_, dev)| dev)
+        .collect()
 }
 
 /// The C's `CMDL`: characters of the command name the COMMAND column shows
@@ -625,6 +633,30 @@ pub struct PathItem {
     /// directory, a `/`, and the entry's own name, byte for byte (DIVERGENCES
     /// 63, 65). Resolved first on a backend that matches names.
     pub name: OsString,
+    /// The C's `s->name`, where it is not [`PathItem::name`]: a path
+    /// argument's `Readlink()`, less the slashes that end it, and a
+    /// `+d`/`+D` directory's spelling less them (`arg.c:160-180`). `None`
+    /// where it is `name`, as it is for every `+d`/`+D` entry, so a walk's
+    /// names are held once. See [`PathItem::row_name`].
+    pub spelled: Option<OsString>,
+}
+
+impl PathItem {
+    /// What a row this item locates is named: `is_file_named()` copies the
+    /// item's `s->name` over the row's NAME (`snpf(Namech, Namechl, "%s",
+    /// s->name)`, `dfile.c:309`), so `lsof lnk/reg.txt` prints
+    /// `fx/reg.txt`, `lsof fx//reg.txt` prints `fx//reg.txt`, and a hard
+    /// link the name it was asked by (DIVERGENCES 17, 139). `None` for a
+    /// file-system item: the C leaves the row's own name (`if (s->type)`,
+    /// `dfile.c:303`). Its ` (DEVNAME)` tail is never added on Linux: only a
+    /// file-system item has a `devnm` (`arg.c:337-368`), and it never
+    /// renames; measured, `lsof //dev/null` prints `//dev/null`.
+    pub fn row_name(&self) -> Option<&OsStr> {
+        if self.fs_device.is_some() {
+            return None;
+        }
+        Some(self.spelled.as_deref().unwrap_or(&self.name))
+    }
 }
 
 /// One `-e`/`+e` file system, as the C's `enter_efsys()` keeps it (`arg.c`):
@@ -1567,6 +1599,31 @@ impl Selection {
         !self.dir_trees.is_empty() || !self.dirs_one_level.is_empty()
     }
 
+    /// Name `f` by the path item it locates, as `is_file_named()` does: it
+    /// copies the item's name over the row's (`dfile.c:301-319`) whenever it
+    /// finds one, whatever else selected the row or drops it, so `lsof -p P
+    /// fx/reg.txt` lists every file of P and names that one `fx/reg.txt`.
+    /// The table's NAME, `-F n` and JSON's `name` all show it; an addition
+    /// the backend made (`(path dev=…)`, `(stat: …)`) stays, as the C's
+    /// `Lf->nma` does, and a ` (deleted)` the link carried goes, as it is in
+    /// the C's `Namech` (measured on a file deleted under another link). A
+    /// socket keeps its own: the C has entered its name before it asks
+    /// (`dsock.c:3691`). A file-system item names nothing (DIVERGENCES 139,
+    /// 17).
+    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if f.is_socket() {
+            return;
+        }
+        let Some(name) = ix
+            .bound(f)
+            .and_then(|i| self.path_items.get(i))
+            .and_then(PathItem::row_name)
+        else {
+            return;
+        };
+        f.set_base_name(&name.to_string_lossy());
+    }
+
     /// Apply the full selection to a backend's raw output, returning the
     /// processes to display with their files already filtered.
     ///
@@ -1576,6 +1633,11 @@ impl Selection {
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
         let specified = self.specified();
         let with_tasks = pids_with_tasks(&procs);
+        // Where a path names a row, the row is named by it (see
+        // `rename_located`); only where files have identities, as only there
+        // does a row locate an item the C's way.
+        let naming = (self.paths_identified && !self.path_items.is_empty())
+            .then(|| PathIndex::new(&self.path_items, true));
         let mut out = Vec::new();
         for mut p in procs {
             if self.excludes_process(&p) {
@@ -1586,12 +1648,15 @@ impl Selection {
             // `Lf->sf = Lp->sf` (`lib/proc.c:178`).
             let inherited = self.entry_kinds(&p, &with_tasks);
             let peer_only = p.endpoint_peer && inherited.is_empty();
-            p.files.retain(|f| {
+            p.files.retain_mut(|f| {
                 // `-s` is not a list option: it can only veto. Its exclusion
                 // form is the C's `SELEXCLF`, which outranks even the OR
                 // (`lib/proc.c:572`).
                 if !self.state_matches(f) {
                     return false;
+                }
+                if let Some(ix) = &naming {
+                    self.rename_located(ix, f);
                 }
                 if specified.is_empty() {
                     return true; // AllProc
@@ -1651,20 +1716,112 @@ impl Selection {
     }
 }
 
-/// [`Selection::path_items`] indexed for [`Selection::locate`], so each file
-/// examined is looked up once rather than compared with every item: a `+D`
-/// makes an item of every entry under it, and a whole host has thousands of
-/// files.
+/// [`Selection::path_items`] indexed for [`Selection::locate`] and
+/// [`Selection::apply`], so each file examined is looked up once rather than
+/// compared with every item: a `+D` makes an item of every entry under it,
+/// and a whole host has thousands of files.
+///
+/// A row locates **one** item, the one the C's `is_file_named()` meets first
+/// (`dfile.c:212-321`): it walks the items by device and inode, then the
+/// file-system ones, each in a hash chain `hashSfile()` built, marks the
+/// first that names the row and returns. Two names for one file, one file
+/// and its file system, or one source naming two mounts of one device are
+/// so two items of which a row locates one, and `-V` reports the other
+/// (DIVERGENCES 17, 84, 125). Which one is the chain's order, reproduced
+/// here: `ck_file_arg()` prepends each item to `Sfile` (`arg.c:249`), and
+/// `hashSfile()` walks `Sfile` and puts the first it meets for a bucket at
+/// the bucket's head and each later one just after it (`dfile.c:163-174`).
+/// So a chain is the item entered last, then the rest in the order they were
+/// entered, and of the items with one key the row takes the last entered
+/// when that is the bucket's head, and else the first. Measured: `fx/reg.txt
+/// fx/hard.txt` binds `hard.txt`, and adding a third argument, a file whose
+/// inode falls in the same bucket, binds `reg.txt`.
 struct PathIndex<'a> {
-    by_id: HashMap<crate::model::FileId, Vec<usize>>,
-    by_fs: HashMap<u64, Vec<usize>>,
+    by_id: HashMap<crate::model::FileId, Span>,
+    by_fs: HashMap<u64, Span>,
     /// Every item by its name as typed, for a socket's bound path: the C
     /// compares that with every argument, a file system's included.
-    by_name: HashMap<&'a OsStr, Vec<usize>>,
+    by_name: HashMap<&'a OsStr, Span>,
+    /// The item entered last in each of the C's buckets, the head of its
+    /// chain: by device and inode, by file system, and by name.
+    id_heads: HashMap<u16, usize>,
+    fs_heads: HashMap<u16, usize>,
+    name_heads: HashMap<u16, usize>,
     /// On a backend that matches names, every item, lowercased: compared with
     /// the name of a file the path filter selects, as it is selected.
     by_prefix: Vec<(usize, String)>,
 }
+
+/// The first and the last item entered with one key: all a chain needs of
+/// them, as it meets one of the two first.
+#[derive(Clone, Copy)]
+struct Span {
+    first: usize,
+    last: usize,
+}
+
+impl Span {
+    /// Record item `i`, entered after every item recorded before it.
+    fn enter(span: Option<Span>, i: usize) -> Span {
+        Span {
+            first: span.map_or(i, |s| s.first),
+            last: i,
+        }
+    }
+
+    /// The item of this key the chain meets first, whose head is `head`.
+    fn first_met(span: Option<&Span>, head: Option<&usize>) -> Option<usize> {
+        let span = span?;
+        Some(if head == Some(&span.last) {
+            span.last
+        } else {
+            span.first
+        })
+    }
+}
+
+/// glibc's `major()` and `minor()` of a packed `dev_t`, the C's
+/// `GET_MAJ_DEV` and `GET_MIN_DEV` on Linux.
+fn dev_parts(dev: u64) -> (u64, u64) {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    (major, minor)
+}
+
+/// The C's `SFHASHDEVINO(maj, min, ino, mod)` (`dfile.c:53-55`):
+/// `(((maj + 1) * (min + 1) + ino) * 31415) & (mod - 1)`. Its `int` casts
+/// keep the low bits, which are all the mask takes, so wrapping 64-bit
+/// arithmetic gives the same bucket. `mask` is `mod - 1`: 4093 for the
+/// device-and-inode table (`SFDIHASH` is 4094, not the power of two its
+/// comment asks for, so bit 1 never counts) and 1023 for the file-system one.
+fn dev_ino_bucket(dev: u64, ino: u64, mask: u64) -> u16 {
+    let (major, minor) = dev_parts(dev);
+    let h = major
+        .wrapping_add(1)
+        .wrapping_mul(minor.wrapping_add(1))
+        .wrapping_add(ino)
+        .wrapping_mul(31415)
+        & mask;
+    // The masks are under 2^16.
+    u16::try_from(h).unwrap_or(u16::MAX)
+}
+
+/// The C's `hashbyname(nm, SFNMHASH)` (`lib/misc.c:829-840`): each byte, a
+/// signed `char` on the hosts it builds for, XORed in shifted by 0 to 7 in
+/// turn, times 31415, masked to 4096 buckets.
+fn name_bucket(name: &OsStr) -> u16 {
+    let mut h: i32 = 0;
+    let mut shift = 0u32;
+    for &b in name.as_encoded_bytes() {
+        h ^= i32::from(b as i8).wrapping_shl(shift);
+        shift = if shift == 7 { 0 } else { shift + 1 };
+    }
+    // Masked to 12 bits, so it fits.
+    u16::try_from(h.wrapping_mul(31415) & 4095).unwrap_or(u16::MAX)
+}
+
+const ID_MASK: u64 = 4093;
+const FS_MASK: u64 = 1023;
 
 impl<'a> PathIndex<'a> {
     /// With `identified`, an item with no identity is an argument that could
@@ -1675,13 +1832,28 @@ impl<'a> PathIndex<'a> {
             by_id: HashMap::new(),
             by_fs: HashMap::new(),
             by_name: HashMap::new(),
+            id_heads: HashMap::new(),
+            fs_heads: HashMap::new(),
+            name_heads: HashMap::new(),
             by_prefix: Vec::new(),
         };
         for (i, item) in items.iter().enumerate() {
-            ix.by_name.entry(item.name.as_os_str()).or_default().push(i);
+            let name = item.name.as_os_str();
+            let span = ix.by_name.get(name).copied();
+            ix.by_name.insert(name, Span::enter(span, i));
+            ix.name_heads.insert(name_bucket(name), i);
             match (&item.id, item.fs_device) {
-                (_, Some(dev)) => ix.by_fs.entry(dev).or_default().push(i),
-                (Some(id), None) => ix.by_id.entry(*id).or_default().push(i),
+                (_, Some(dev)) => {
+                    let span = ix.by_fs.get(&dev).copied();
+                    ix.by_fs.insert(dev, Span::enter(span, i));
+                    ix.fs_heads.insert(dev_ino_bucket(dev, 0, FS_MASK), i);
+                }
+                (Some(id), None) => {
+                    let span = ix.by_id.get(id).copied();
+                    ix.by_id.insert(*id, Span::enter(span, i));
+                    ix.id_heads
+                        .insert(dev_ino_bucket(id.dev, id.ino, ID_MASK), i);
+                }
                 (None, None) if !identified => {
                     ix.by_prefix
                         .push((i, item.name.to_string_lossy().to_ascii_lowercase()));
@@ -1692,39 +1864,54 @@ impl<'a> PathIndex<'a> {
         ix
     }
 
-    /// Mark every item `f` locates: one that names it (its identity), one
-    /// that named the file system it is on, and, for an AF_UNIX socket, one
-    /// that names the socket file at its bound path or is that path as typed.
-    /// With no identity to go by, by name: the file itself, or under it,
-    /// asked only of a file `selected` says the path filter takes. Only such
-    /// a name can start with an item's, and a `+D` makes an item of every
-    /// entry, so asking every file on the host would cost files x entries.
-    fn mark(&self, f: &OpenFile, hits: &mut [bool], selected: impl FnOnce() -> bool) {
+    /// The item of this identity the C's chain meets first.
+    fn by_identity(&self, id: &crate::model::FileId) -> Option<usize> {
+        let head = self.id_heads.get(&dev_ino_bucket(id.dev, id.ino, ID_MASK));
+        Span::first_met(self.by_id.get(id), head)
+    }
+
+    /// The one item `f` locates, as `is_file_named()` finds it: one that
+    /// names it (its identity), else one that named the file system it is on
+    /// (`dfile.c:226-279`). An AF_UNIX socket is asked by the socket file at
+    /// its bound path, which only a file item can name, and failing that by
+    /// that path as typed (`dsock.c:3716-3758`). Never a row `-e` exempted:
+    /// never `stat`ed, it names nothing (see `path_matches`).
+    fn bound(&self, f: &OpenFile) -> Option<usize> {
         if f.is_exempt() {
-            return; // never `stat`ed, so it names nothing (see `path_matches`)
+            return None;
         }
-        let mut hit = |found: Option<&Vec<usize>>| {
-            for &i in found.into_iter().flatten() {
-                hits[i] = true;
-            }
-        };
-        // By the row's `st_dev` and inode, and its file system, as
-        // `path_matches` selects it: a socket's are never compared.
-        if let Some(id) = f.file_id() {
-            hit(self.by_id.get(&id));
-        }
-        if let Some(dev) = f.searched_fs_device() {
-            hit(self.by_fs.get(&dev));
-        }
+        // A socket's own device and inode are never compared, nor its file
+        // system: `file_id` and `searched_fs_device` say so.
         if let Some(b) = f.socket.as_deref().and_then(|s| s.bound.as_deref()) {
-            if let Some(path) = &b.path {
-                hit(self.by_name.get(OsStr::new(path)));
-            }
-            if let Some(id) = &b.id {
-                hit(self.by_id.get(id));
-            }
+            return b
+                .id
+                .as_ref()
+                .and_then(|id| self.by_identity(id))
+                .or_else(|| {
+                    let path = OsStr::new(b.path.as_deref()?);
+                    let head = self.name_heads.get(&name_bucket(path));
+                    Span::first_met(self.by_name.get(path), head)
+                });
         }
-        if !self.by_prefix.is_empty() && selected() {
+        if let Some(i) = f.file_id().and_then(|id| self.by_identity(&id)) {
+            return Some(i);
+        }
+        let dev = f.searched_fs_device()?;
+        let head = self.fs_heads.get(&dev_ino_bucket(dev, 0, FS_MASK));
+        Span::first_met(self.by_fs.get(&dev), head)
+    }
+
+    /// Mark the item `f` locates ([`PathIndex::bound`]). With no identity to
+    /// go by, by name: every item that is the file itself, or a directory
+    /// above it, asked only of a file `selected` says the path filter takes.
+    /// Only such a name can start with an item's, and a `+D` makes an item of
+    /// every entry, so asking every file on the host would cost files x
+    /// entries.
+    fn mark(&self, f: &OpenFile, hits: &mut [bool], selected: impl FnOnce() -> bool) {
+        if let Some(i) = self.bound(f) {
+            hits[i] = true;
+        }
+        if !self.by_prefix.is_empty() && !f.is_exempt() && selected() {
             let name = f.name.to_ascii_lowercase();
             for (i, needle) in &self.by_prefix {
                 if name == *needle || name.starts_with(needle.as_str()) {
@@ -2437,7 +2624,8 @@ mod tests {
             mount("/a", "tmpfs", false, 40),
             mount("/b", "tmpfs", false, 41),
             // A duplicate row for one mount, as /proc/self/mounts really does
-            // emit for /dev/shm and /dev/pts: one device, not two items.
+            // emit for /dev/shm and /dev/pts: one item, as the C skips a
+            // match with the directory and device of one before it.
             mount("/dev/shm", "tmpfs", false, 42),
             mount("/dev/shm", "tmpfs", false, 42),
         ];
@@ -2467,10 +2655,19 @@ mod tests {
             filesystems_named(&table, OsStr::new("devtmpfs"), AlwaysFilesystem),
             vec![6]
         );
-        // One source, several mounts: EVERY device, deduplicated.
+        // One source, several mounts: EVERY mount, the last listed first.
         assert_eq!(
             filesystems_named(&table, OsStr::new("tmpfs"), AlwaysFilesystem),
-            vec![40, 41, 42]
+            vec![42, 41, 40]
+        );
+        // Two mounts of one device are two items (DIVERGENCES 84).
+        let bound = vec![
+            mount("/", "/dev/vda", true, 100),
+            mount("/srv", "/dev/vda", true, 100),
+        ];
+        assert_eq!(
+            filesystems_named(&bound, OsStr::new("/dev/vda"), Auto),
+            vec![100, 100]
         );
         // Not a mount at all.
         assert_eq!(
@@ -2661,6 +2858,7 @@ mod tests {
                 id: Some(id),
                 fs_device: None,
                 name: "/dev/zero".into(),
+                spelled: None,
             }],
             ..Default::default()
         };
@@ -2780,6 +2978,7 @@ mod tests {
                 id: None,
                 fs_device: None,
                 name: "/dev/zero".into(),
+                spelled: None,
             }],
             ..Default::default()
         };
@@ -2850,6 +3049,7 @@ mod tests {
                 id: None,
                 fs_device: Some(0x29),
                 name: "/mnt".into(),
+                spelled: None,
             }],
             ..Default::default()
         };
@@ -3020,6 +3220,7 @@ mod tests {
             id: id.map(|(dev, ino)| FileId { dev, ino }),
             fs_device: fs,
             name: name.into(),
+            spelled: None,
         };
         // `-a -p 7 -d 0`: process 7 is examined and every row of it is
         // dropped at print; process 8 fails `-p` and is never examined.
@@ -3066,10 +3267,255 @@ mod tests {
         );
         assert_eq!(
             sel.locate(&gathered).paths,
-            [true, true, true, false, true],
+            [true, true, true, false, false],
             "socket by identity, socket by the typed path, a file not printed, \
-             nothing from a process -a left out, a file system"
+             nothing from a process -a left out, and not the file system whose \
+             one file another item names (DIVERGENCES 125)"
         );
+        // With a second file on it, the file system is located by that one.
+        let mut more = gathered.to_vec();
+        more[0].files.push(row(6, "254,0", "55", None));
+        assert_eq!(sel.locate(&more).paths, [true, true, true, false, true]);
+    }
+
+    /// The C's hash buckets, from its own macros compiled on this host:
+    /// `SFHASHDEVINO(254, 0, ino, 4094)` for two inodes the C was measured to
+    /// chain together and one whose bucket the odd mask decides, an overflow
+    /// of its `int`s, the file-system table, and
+    /// `hashbyname()` with a byte past 0x7f, which is a negative `char`.
+    #[test]
+    fn the_buckets_are_the_cs() {
+        assert_eq!(dev_ino_bucket(0xfe00, 2_173_284, ID_MASK), 2757);
+        assert_eq!(dev_ino_bucket(0xfe00, 2_181_476, ID_MASK), 2757);
+        // Bit 1 of the product is set, and the mask drops it: 51 under 4095.
+        assert_eq!(dev_ino_bucket(0xfe00, 2_173_286, ID_MASK), 49);
+        let (maj, min) = (4095u64, 1_048_575u64);
+        let dev = ((maj & 0xfff) << 8) | (min & 0xff) | ((min & 0xffff_ff00) << 12);
+        assert_eq!(dev_parts(dev), (maj, min));
+        assert_eq!(dev_ino_bucket(dev, u64::MAX, ID_MASK), 1353);
+        assert_eq!(dev_ino_bucket(0xfe00, 0, FS_MASK), 73);
+        assert_eq!(name_bucket(OsStr::new("fx/reg.txt")), 3734);
+        assert_eq!(name_bucket(OsStr::new("/d/s.sock")), 3416);
+        assert_eq!(name_bucket(OsStr::new("")), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(name_bucket(OsStr::from_bytes(b"n\xff\xfeabcdefghij")), 1984);
+        }
+    }
+
+    fn file_row(fd: u64, dev: u64, ino: u64, name: &str) -> OpenFile {
+        OpenFile {
+            fd: FdType::Handle(fd),
+            access: crate::model::AccessMode::Read,
+            file_type: FileType::Regular,
+            name: name.into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some(ino.to_string()),
+            links: None,
+            lock: None,
+            fs_device: Some(dev),
+            rdev: None,
+            file_flags: None,
+            socket: None,
+            name_addition: None,
+        }
+    }
+
+    /// A path item for [`named`]: its name, its `s->name` where that
+    /// differs, its identity and its file system.
+    type Item<'a> = (&'a str, Option<&'a str>, Option<(u64, u64)>, Option<u64>);
+
+    fn named(items: &[Item<'_>]) -> Selection {
+        Selection {
+            paths_identified: true,
+            path_items: items
+                .iter()
+                .map(|&(name, spelled, id, fs)| PathItem {
+                    id: id.map(|(dev, ino)| crate::model::FileId { dev, ino }),
+                    fs_device: fs,
+                    name: name.into(),
+                    spelled: spelled.map(Into::into),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// DIVERGENCES 17, 84, 125: a row locates the one item the C's chain
+    /// meets first. Two names for one inode: the last given. With a third
+    /// item of another inode in the same bucket entered last, the first
+    /// given (both measured with `fx/reg.txt fx/hard.txt` and `col/c9`).
+    /// Two file-system items of one device: the same rule. And an item that
+    /// names the file outranks the file system it is on.
+    #[test]
+    fn a_row_locates_the_one_item_the_cs_chain_meets_first() {
+        let p = one_process(vec![file_row(3, 0xfe00, 2_173_284, "/w/fx/reg.txt")]);
+        let reg = Some((0xfe00, 2_173_284));
+        let sel = named(&[
+            ("fx/reg.txt", None, reg, None),
+            ("fx/hard.txt", None, reg, None),
+        ]);
+        assert_eq!(sel.locate(std::slice::from_ref(&p)).paths, [false, true]);
+        let sel = named(&[
+            ("fx/reg.txt", None, reg, None),
+            ("fx/hard.txt", None, reg, None),
+            ("fx/h2.txt", None, reg, None),
+        ]);
+        assert_eq!(
+            sel.locate(std::slice::from_ref(&p)).paths,
+            [false, false, true]
+        );
+        let sel = named(&[
+            ("fx/reg.txt", None, reg, None),
+            ("fx/hard.txt", None, reg, None),
+            ("col/c9", None, Some((0xfe00, 2_181_476)), None),
+        ]);
+        assert_eq!(
+            sel.locate(std::slice::from_ref(&p)).paths,
+            [true, false, false]
+        );
+        // The colliding item entered first changes nothing: the head is
+        // then one of the two.
+        let sel = named(&[
+            ("col/c9", None, Some((0xfe00, 2_181_476)), None),
+            ("fx/reg.txt", None, reg, None),
+            ("fx/hard.txt", None, reg, None),
+        ]);
+        assert_eq!(
+            sel.locate(std::slice::from_ref(&p)).paths,
+            [false, false, true]
+        );
+        // File systems: `+f -- lsoftest T`, three items on one device.
+        let sel = named(&[
+            ("lsoftest", None, None, Some(0xfe00)),
+            ("lsoftest", None, None, Some(0xfe00)),
+            ("/t", None, None, Some(0xfe00)),
+        ]);
+        assert_eq!(
+            sel.locate(std::slice::from_ref(&p)).paths,
+            [false, false, true]
+        );
+        // A file and its file system, in either order: the file.
+        for items in [
+            [
+                ("/t", None, None, Some(0xfe00)),
+                ("fx/reg.txt", None, reg, None),
+            ],
+            [
+                ("fx/reg.txt", None, reg, None),
+                ("/t", None, None, Some(0xfe00)),
+            ],
+        ] {
+            let sel = named(&items);
+            let want: Vec<bool> = items.iter().map(|i| i.3.is_none()).collect();
+            assert_eq!(sel.locate(std::slice::from_ref(&p)).paths, want);
+        }
+    }
+
+    /// DIVERGENCES 139, 17: the row a file item locates is named by the
+    /// item's `s->name`, its addition kept, in the table and JSON alike; a
+    /// file-system item, a socket and an `-e` row keep their own; and the
+    /// row is named whatever selected it.
+    #[test]
+    fn a_located_row_is_named_by_its_item() {
+        let reg = Some((0xfe00, 2_173_284));
+        let mut noted = file_row(9, 0xfe00, 2_173_284, "/w/shadow/s");
+        noted.add_name_addition("(path dev=0,41, inode=2)");
+        let deleted = file_row(4, 0xfe00, 2_173_284, "/w/del.txt (deleted)");
+        let mut exempt = file_row(5, 0xfe00, 2_173_284, "/w/e");
+        exempt.file_type = FileType::Exempt("fd");
+        let other = file_row(6, 0xfe00, 1, "/w/other");
+        let p = one_process(vec![
+            file_row(3, 0xfe00, 2_173_284, "/w/fx/reg.txt"),
+            noted,
+            deleted,
+            exempt,
+            other,
+        ]);
+        let mut sel = named(&[
+            ("lnk/reg.txt", Some("fx/reg.txt"), reg, None),
+            ("/w", None, None, Some(0xfe00)),
+        ]);
+        sel.pids = vec![7];
+        let got = sel.apply(vec![p]);
+        let names: Vec<(&str, Option<&str>)> = got[0]
+            .files
+            .iter()
+            .map(|f| (f.name.as_str(), f.base_name()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("fx/reg.txt", Some("fx/reg.txt")),
+                ("fx/reg.txt (path dev=0,41, inode=2)", Some("fx/reg.txt")),
+                ("fx/reg.txt", Some("fx/reg.txt")),
+                ("/w/e", Some("/w/e")),
+                ("/w/other", Some("/w/other")),
+            ]
+        );
+        // A socket found by its bound path keeps its own name.
+        let mut sock = file_row(7, 0xfe00, 9, "/w/sock type=STREAM");
+        sock.socket = Some(Box::new(crate::model::SocketInfo {
+            bound: Some(Box::new(crate::model::BoundPath {
+                path: Some("/w/sock".into()),
+                id: Some(crate::model::FileId {
+                    dev: 0xfe00,
+                    ino: 50,
+                }),
+            })),
+            protocol: Protocol::Other("unix"),
+            local: None,
+            remote: None,
+            state: None,
+            tcp: None,
+        }));
+        let sel = named(&[("slnk", Some("sock"), Some((0xfe00, 50)), None)]);
+        let got = sel.apply(vec![one_process(vec![sock])]);
+        assert_eq!(got[0].files[0].name, "/w/sock type=STREAM");
+        assert_eq!(
+            sel.locate(&[one_process(vec![got[0].files[0].clone()])])
+                .paths,
+            [true]
+        );
+        // Where names are matched, nothing is renamed: not even a row an item
+        // would locate by identity, had it one. No name-matching backend
+        // gives an item an identity, so only the `paths_identified` gate in
+        // `apply` keeps this row's name.
+        let mut sel = named(&[("C:\\Dir", Some("D:\\Other"), Some((1, 1)), None)]);
+        sel.paths_identified = false;
+        sel.paths = vec!["C:\\Dir".into()];
+        let got = sel.apply(vec![one_process(vec![file_row(3, 1, 1, "C:\\Dir\\f")])]);
+        assert_eq!(got[0].files[0].name, "C:\\Dir\\f");
+    }
+
+    /// A socket whose bound file has an identity no item names is asked by
+    /// its bound path next, as the C searches by path after a failed device
+    /// and inode search (`dsock.c:3731-3755`, `if (!f && (ss & SB_MODE))`).
+    /// Measured: a socket bound at `/mnt/sd/s` with another socket file
+    /// bind-mounted over that path, so the argument `/mnt/sd/s` is a file
+    /// system and no file item: `lsof -a -p H /mnt/sd/s` locates it (rc 0).
+    #[test]
+    fn a_socket_whose_file_no_item_names_is_located_by_its_path() {
+        let mut sock = file_row(3, 0xffff, 500, "/mnt/sd/s type=STREAM");
+        sock.socket = Some(Box::new(crate::model::SocketInfo {
+            bound: Some(Box::new(crate::model::BoundPath {
+                path: Some("/mnt/sd/s".into()),
+                id: Some(crate::model::FileId { dev: 0x2a, ino: 2 }),
+            })),
+            protocol: Protocol::Other("unix"),
+            local: None,
+            remote: None,
+            state: None,
+            tcp: None,
+        }));
+        let sel = named(&[
+            ("/elsewhere", None, Some((0x2a, 3)), None),
+            ("/mnt/sd/s", None, None, Some(0x2b)),
+        ]);
+        assert_eq!(sel.locate(&[one_process(vec![sock])]).paths, [false, true]);
     }
 
     #[test]

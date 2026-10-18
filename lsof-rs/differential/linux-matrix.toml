@@ -455,14 +455,23 @@ args = ["-n", "-P", "-a", "-p", "{A}", "/sys"]
 # is that fixture and nothing else on the host.
 
 [[case]]
-# LEDGERED for the NAME cell only. Identity, decisively: hard.txt is a second
-# name for f.txt, which fixture A holds on fd 3 under the FIRST name, and
-# matching by name would find nothing. Both binaries now find the same fd on
-# the same inode; they disagree on what to call it. The C substitutes the name
-# you ASKED about, lsof-rs prints the name the process actually opened
-# (DIVERGENCES.md #17).
+# Identity, decisively: hard.txt is a second name for f.txt, which fixture A
+# holds on fd 3 under the FIRST name, and matching by name would find
+# nothing. The row is named by the argument, as the C's `is_file_named()`
+# names it: hard.txt (DIVERGENCES 17; lsof-rs had printed f.txt).
 name = "path-bare-hardlink"
 args = ["-n", "-P", "{HARDLINK}"]
+
+[[case]]
+# Two names for one file are two search items, and a row locates one: the
+# last given, the head of the C's hash chain. So the row is named by it and
+# `-V` reports the other, exit 1, in either order (DIVERGENCES 17).
+name = "path-a-file-and-its-hard-link-bind-the-last-given"
+args = ["-F", "pfn", "-V", "-a", "-p", "{A}", "{FILE}", "{HARDLINK}"]
+
+[[case]]
+name = "path-a-hard-link-and-its-file-bind-the-last-given"
+args = ["-F", "pfn", "-V", "-a", "-p", "{A}", "{HARDLINK}", "{FILE}"]
 
 [[case]]
 # A directory names the directory, NOT the files under it. Fixture A holds its
@@ -504,6 +513,19 @@ args = ["-n", "-P", "-V", "{YSOCK}"]
 [[case]]
 name = "path-unix-socket-through-a-symlink"
 args = ["-n", "-P", "-V", "{YLINK}"]
+
+[[case]]
+# The socket file's identity is asked first, and its path as typed only when
+# that found nothing (`dsock.c:3716-3758`): with the bound path and a link to
+# it both given, the row locates the last given by identity, the link, and
+# `-V` reports the path, though it is the bound path as typed (DIVERGENCES
+# 17). The socket keeps its own name.
+name = "path-unix-socket-by-its-file-before-its-path"
+args = ["-n", "-P", "-V", "{YSOCK}", "{YLINK}"]
+
+[[case]]
+name = "path-unix-socket-by-its-file-before-its-path-reversed"
+args = ["-n", "-P", "-V", "{YLINK}", "{YSOCK}"]
 
 [[case]]
 # The file at gone.sock is no socket, so the path as typed decides.
@@ -734,13 +756,17 @@ name = "path-node-fields-are-its-own-file-system"
 args = ["-n", "-P", "-FftDir", "-a", "-p", "{DN}", "{DNNODE}"]
 
 [[case]]
-# LEDGERED (DIVERGENCES 125, OPEN). `t` is a mount point, so a file-system
-# argument, and `t/y` is the only file DN has on it. The C's
-# `is_file_named()` marks one search item per row, the file argument first,
-# so `t` is reported `no file system use located` and the run exits 1, in
-# either order. lsof-rs marks both and exits 0.
-name = "path-file-and-its-file-system-one-item-per-row-in-the-c"
+# `t` is a mount point, so a file-system argument, and `t/y` is the only file
+# DN has on it. The C's `is_file_named()` marks one search item per row, the
+# file argument first, so `t` is reported `no file system use located` and
+# the run exits 1, in either order. lsof-rs had marked both and exited 0
+# (DIVERGENCES 125).
+name = "path-file-and-its-file-system-one-item-per-row"
 args = ["-n", "-P", "-V", "-a", "-p", "{DN}", "{DNT}", "{DNFILE}"]
+
+[[case]]
+name = "path-file-system-and-its-file-one-item-per-row"
+args = ["-n", "-P", "-V", "-a", "-p", "{DN}", "{DNFILE}", "{DNT}"]
 
 # A socket is found by no path through its own device and inode, nor by its
 # file system: the C hands every socket to `process_proc_sock()`, which
@@ -963,6 +989,15 @@ args = ["-n", "-P", "+L", "-a", "-d", "mem", "-p", "{P}"]
 name = "path-notes-fields"
 args = ["-n", "-P", "-FfatDsikln", "-a", "-d", "mem", "-p", "{P}"]
 
+# P's listener is bound at `sock`, and another socket file is bound over that
+# path: a file-system argument whose `stat` is a socket no item names. The C
+# finds no item by the bound file's device and inode and then compares the
+# bound path with every argument as typed (dsock.c:3731-3755), so the file
+# system is located, rc 0 (DIVERGENCES 17).
+[[case]]
+name = "path-unix-socket-by-its-path-when-no-item-has-its-file"
+args = ["-n", "-P", "-V", "-a", "-p", "{P}", "{PSOCK}"]
+
 # ------------------------------------------------- path spellings, as the C's
 # A path argument, a `+d`/`+D` directory and a mount's source are spelt by the
 # C's `Readlink()` (lib/misc.c), which replaces a path's symbolic links and
@@ -972,8 +1007,8 @@ args = ["-n", "-P", "-FfatDsikln", "-a", "-d", "mem", "-p", "{P}"]
 # linux_diff.py) holds a file and the directory itself on /dev/shm, a pipe, an
 # eventfd, an unlinked file and a socket on fixed fds, and directories of
 # links and of names that are not UTF-8. `-F pf`: a row found through an
-# argument is NAMEd for the argument in the C (DIVERGENCES 17); which rows are
-# found is the question here. Each `+d`/`+D` case leaves one entry unlocated,
+# argument is NAMEd for the argument (DIVERGENCES 17, 139), which the
+# `*-names-the-row*` cases ask; which rows are found is the question here. Each `+d`/`+D` case leaves one entry unlocated,
 # so the order of `-V`'s lines (DIVERGENCES 52) is not.
 
 [[case]]
@@ -1087,17 +1122,43 @@ cwd = "{RDIR}"
 args = ["-F", "pf", "-V", "-a", "-p", "{R}", "+d", "deep/a/b/up"]
 
 [[case]]
-# The C names a row a file argument locates by that argument, as typed:
-# `nrel/x`, where lsof-rs prints the path fd 10 was opened by (row 139, OPEN;
-# row 17 is its hard-link half).
-name = "path-relative-argument-names-the-row-in-the-c"
+# A row a file argument locates is named by that argument's `Readlink()`,
+# less its trailing slashes: `nrel/x`, where lsof-rs had printed the path fd
+# 10 was opened by (DIVERGENCES 139; 17 is its hard-link half). In JSON's
+# `name` too.
+name = "path-relative-argument-names-the-row"
 cwd = "{RDIR}"
 args = ["-F", "pfn", "-a", "-p", "{R}", "rel/x"]
 
 [[case]]
-name = "path-relative-argument-names-the-json-row-in-the-c"
+name = "path-relative-argument-names-the-json-row"
 cwd = "{RDIR}"
 args = ["-J", "-a", "-p", "{R}", "rel/x"]
+
+[[case]]
+# `./`, `//` and `..` are kept, as typed.
+name = "path-argument-dot-and-doubled-slash-name-the-row"
+cwd = "{RDIR}"
+args = ["-F", "pfn", "-a", "-p", "{R}", "./rel//../rel/x"]
+
+[[case]]
+# A link in the path is read: `rel-link/x` names the row `rel/x`.
+name = "path-argument-through-a-link-names-the-row-by-its-target"
+cwd = "{RDIR}"
+args = ["-F", "pfn", "-a", "-p", "{R}", "rel-link/x"]
+
+[[case]]
+# `rel/` names the cwd and fd 11 `rel`; the table names them too.
+name = "path-argument-trailing-slash-is-not-in-the-name"
+cwd = "{RDIR}"
+args = ["-n", "-P", "-a", "-p", "{R}", "rel/"]
+
+[[case]]
+# A `+d` directory's own row drops its trailing slashes and its entries keep
+# them: `rel`, `rel//x`; `-V` reports `rel//y` as given.
+name = "path-plus-d-doubled-slash-names-the-directory-without-it"
+cwd = "{RDIR}"
+args = ["-F", "pfn", "-V", "-a", "-p", "{R}", "+d", "rel//"]
 
 [[case]]
 # `+D` had resolved its directory to an absolute path: `$PWD/rel/y`.
@@ -2955,6 +3016,31 @@ args = ["-t", "-a", "-u", "^", "-p", "{W},{WR}"]
 # 32 bytes are a name the C takes, digits and all: nobody, so W.
 name = "owner-dash-u-32-characters-are-taken"
 args = ["-t", "-a", "-u", "00000000000000000000000000065534", "-p", "{W},{WR}"]
+
+# Fixture WB's effective uid, 3000000000, has no account and is past 2^31. The C's
+# `printuid()` writes it into eight characters, so USER is `30000000`, and
+# `-F u` and JSON's `uid` print `(int)Lp->uid`, `-1294967296` (DIVERGENCES 68:
+# lsof-rs had printed every digit, unsigned).
+
+[[case]]
+name = "owner-uid-past-2-31-table"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{WB}"]
+
+[[case]]
+name = "owner-uid-past-2-31-table-numeric"
+args = ["-n", "-P", "-l", "-a", "-d", "cwd", "-p", "{WB}"]
+
+[[case]]
+name = "owner-uid-past-2-31-fields"
+args = ["-F", "pcuL", "-p", "{WB}"]
+
+[[case]]
+name = "owner-uid-past-2-31-json"
+args = ["-J", "-a", "-d", "cwd", "-p", "{WB}"]
+
+[[case]]
+name = "owner-uid-past-2-31-selected-by-number"
+args = ["-F", "pu", "-V", "-a", "-u", "3000000000", "-d", "cwd", "-p", "{WB}"]
 
 # ----------------------------------------------------------- states fixture
 # Fixture S: a TCP listener, an established TCP pair, an unconnected and a
