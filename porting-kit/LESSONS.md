@@ -4051,8 +4051,10 @@ the same, since the day before this entry.]*
   Gate-mutation pins the restore cases and the inserted-line check, and all
   23 decisions in the three swept verdict functions (46 decision mutants,
   each decision forced true and then false). The primary line
-  (kj299/c2rust-port) carries the same harness and needs the same change. Its
-  maintainer upstreams it there, and no one else may push to it.
+  (kj299/c2rust-port) carries the same harness and needed the same change. Its
+  maintainer upstreams it there, and no one else may push to it. (2026-10-21:
+  upstreamed the same day, 2026-10-10, as that line's entry 058, caa58a2; its
+  `mutate_port.py` keeps the journal, `--restore` and `--check-clean`.)
 - **Section amended:** `harnesses/port-mutation/mutate_port.py`;
   `harnesses/gate-mutation/mutate_gates.py`; PLAYBOOK · Phase 4 step 2;
   `skills/porting-kit-module/SKILL.md`; README · harness table.
