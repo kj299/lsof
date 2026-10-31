@@ -178,6 +178,21 @@ function Invoke-Lsof {
 
 function Skip([string]$reason) { throw "SKIP::$reason" }
 
+# lsof-rs reports the state Windows' TCP table gives it (MIB_TCP_STATE), as
+# netstat and Get-NetTCPConnection do. Some hosts report a listening socket in
+# another state: measured on build 26200, a TcpListener read CLOSED in all three
+# tools, elevated or not, and unelevated a state none of them could name. A case
+# that needs the word LISTEN skips there with the state Windows gave, rather
+# than fail lsof-rs for matching its own oracle.
+function Skip-UnlessListen([int]$port) {
+    $o = @(Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+        Where-Object { -not $_.RemotePort })
+    if (-not ($o | Where-Object { "$($_.State)" -eq 'Listen' })) {
+        $seen = ($o | ForEach-Object { if ("$($_.State)") { "$($_.State)" } else { '(none)' } }) -join ','
+        Skip "Windows does not report port $port as Listen (Get-NetTCPConnection: $seen)"
+    }
+}
+
 function Assert([bool]$cond, [string]$message) {
     if (-not $cond) { throw $message }
 }
@@ -352,6 +367,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
 
     # ===================== sockets =====================
     Test-Case 'tcp4-listen-by-port' 'sockets/tcp4' {
+        Skip-UnlessListen $fx.Port4
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)") 'i-tcp4'
         Assert-Contains $r.Out ":$($fx.Port4)"; Assert-Contains $r.Out 'LISTEN'; Assert-Contains $r.Out "$self"
         $o = Get-NetTCPConnection -LocalPort $fx.Port4 -State Listen -ErrorAction SilentlyContinue
@@ -365,6 +381,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     }
     Test-Case 'tcp6-listen' 'sockets/tcp6' {
         if (-not $fx.Port6) { Skip 'no IPv6 loopback' }
+        Skip-UnlessListen $fx.Port6
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port6)") 'i-tcp6'; Assert-Contains $r.Out 'IPv6'; Assert-Contains $r.Out 'LISTEN'
     }
     Test-Case 'udp4-by-port' 'sockets/udp4' {
@@ -537,6 +554,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Test-Case 'state-filter-listen' 'selection/-s' {
         # -iTCP:<port> matches the listener (LISTEN) + the established pair;
         # -sTCP:LISTEN must keep only the LISTEN row.
+        Skip-UnlessListen $fx.Port4
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-sTCP:LISTEN') 's-listen'
         Assert-Contains $r.Out 'LISTEN'
         Assert-NotContains $r.Out 'ESTABLISHED' '-sTCP:LISTEN should exclude ESTABLISHED'
