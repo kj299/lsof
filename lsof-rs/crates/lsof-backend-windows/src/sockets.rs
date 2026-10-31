@@ -16,7 +16,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
-use crate::resolve;
+use crate::hostnames::{self, HostNames};
 
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
@@ -35,11 +35,12 @@ pub fn collect() -> Vec<(u32, OpenFile)> {
 }
 
 /// Resolve a socket file's NAME in place, honoring `-n` (host) and `-P` (port).
-/// Call this only for sockets that survive selection, so reverse DNS runs the
-/// minimum number of times.
-pub fn resolve_name(file: &mut OpenFile, no_host: bool, no_port: bool) {
+/// Host names come from `hosts`, looked up once per distinct address for the
+/// whole run; an address it does not name is shown numerically. Call this only
+/// for sockets that survive selection.
+pub fn resolve_name(file: &mut OpenFile, no_host: bool, no_port: bool, hosts: &HostNames) {
     if let Some(sock) = &file.socket {
-        file.name = format_socket(sock, no_host, no_port);
+        file.name = format_socket(sock, no_host, no_port, hosts);
     }
 }
 
@@ -50,19 +51,25 @@ pub fn resolve_name(file: &mut OpenFile, no_host: bool, no_port: bool) {
 /// `SocketInfo::table_state_suffix()` and `-F` emits a separate `TST=` token:
 /// putting it in the name reports it twice in the table and in both the `n` and
 /// `T` fields of `-F`.
-fn format_socket(sock: &SocketInfo, no_host: bool, no_port: bool) -> String {
-    let mut s = endpoint(sock.local, sock.protocol, no_host, no_port);
+fn format_socket(sock: &SocketInfo, no_host: bool, no_port: bool, hosts: &HostNames) -> String {
+    let mut s = endpoint(sock.local, sock.protocol, no_host, no_port, hosts);
     if let Some(r) = sock.remote {
         if !(r.ip().is_unspecified() && r.port() == 0) {
             s.push_str("->");
-            s.push_str(&endpoint(Some(r), sock.protocol, no_host, no_port));
+            s.push_str(&endpoint(Some(r), sock.protocol, no_host, no_port, hosts));
         }
     }
     s
 }
 
 /// Format a single `host:port`, resolving each part unless suppressed.
-fn endpoint(addr: Option<SocketAddr>, proto: Protocol, no_host: bool, no_port: bool) -> String {
+fn endpoint(
+    addr: Option<SocketAddr>,
+    proto: Protocol,
+    no_host: bool,
+    no_port: bool,
+    hosts: &HostNames,
+) -> String {
     let Some(addr) = addr else {
         return "*:*".to_string();
     };
@@ -71,7 +78,7 @@ fn endpoint(addr: Option<SocketAddr>, proto: Protocol, no_host: bool, no_port: b
     } else if no_host {
         host_numeric(addr.ip())
     } else {
-        resolve::host_name(addr.ip()).unwrap_or_else(|| host_numeric(addr.ip()))
+        hostnames::cached_name(hosts, addr.ip()).unwrap_or_else(|| host_numeric(addr.ip()))
     };
     let port = if addr.port() == 0 {
         "*".to_string()

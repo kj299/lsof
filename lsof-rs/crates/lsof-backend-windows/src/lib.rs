@@ -6,7 +6,8 @@
 //! module).
 //!
 //! Everything but the pure parts — the name parsers in `names`, the PEB walk in
-//! `peb_walk` and the size arithmetic in `sizes` — is gated on
+//! `peb_walk`, the size arithmetic in `sizes` and the host-name plan in
+//! `hostnames` — is gated on
 //! `#[cfg(windows)]`; on other hosts the crate compiles to little more than an
 //! empty shell, so the workspace builds and those modules are tested and
 //! fuzzed on Linux. The CLI selects this backend only when built for Windows.
@@ -19,6 +20,10 @@ mod backend;
 mod etw;
 #[cfg(windows)]
 mod handles;
+// NOT `#[cfg(windows)]`: which runs resolve host names, and the bounded pool
+// that looks each distinct address up once, tested on Linux with a stand-in
+// lookup; `resolve` supplies the real one.
+mod hostnames;
 #[cfg(windows)]
 mod mapped;
 #[cfg(windows)]

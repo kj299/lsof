@@ -80,7 +80,7 @@ it is a gap, not a formatting choice.
 | Toolhelp process names (`szExeFile`), module paths (`szExePath`), mapped-file names (`GetMappedFileNameW`) | **any local process** | **hostile** | `lsof-backend-windows::process`, `::modules`, `::mapped` | `windows_names` (covers `wide_to_string`) |
 | account names (`LookupAccountSidW`), Restart Manager results | the OS, a domain controller | untrusted | `lsof-backend-windows::process`, `::restart` | none |
 | IP Helper tables, TCP EStats | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-windows::sockets`, `::tcpinfo` | none: fixed-layout OS structures, bounds-checked |
-| reverse DNS names (`GetNameInfoW`), on by default; `-n` turns it off | **whoever answers for the peer's PTR record** | **hostile** | `lsof-backend-windows::resolve` | none; see below |
+| reverse DNS names (`GetNameInfoW`), on by default; `-n` turns it off | **whoever answers for the peer's PTR record** | **hostile** | `lsof-backend-windows::resolve`, `::hostnames` | none; see below |
 | `LSOF_RS_TRACE`, `WINLSOF_TRACE` | operator | trusted-ish | tracing setup | not applicable |
 
 Three things about this table are worth saying out loud, because they are the
@@ -282,7 +282,10 @@ parse prints holds a control character (U+2028 and U+2029 included); the
 **Reverse DNS on Windows tells a resolver which peers the host talks to.** It
 is the default there, as in the C (Linux behaves as if `-n` were always given).
 The names that come back are chosen by whoever answers for the peer's address,
-and they are escaped like any name; each lookup is bounded to 2 s.
+and they are escaped like any name; each lookup is waited on for at most 2 s,
+each distinct address is looked up once per run, and at most 8 lookups are
+dispatched at a time (`lsof-backend-windows::hostnames`). A lookup abandoned at
+2 s may keep its OS query running until the resolver gives up.
 
 **Memory under input someone else sizes** (found 2026-10-04, from the code, not
 yet measured at scale). lsof-rs reads `/proc/net/*`, `/proc/PID/maps` and each

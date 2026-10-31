@@ -8,7 +8,6 @@
 use std::mem::size_of;
 use std::net::IpAddr;
 use std::sync::Once;
-use std::time::Duration;
 
 use windows_sys::Win32::Networking::WinSock::{
     GetNameInfoW, WSAStartup, WSAStringToAddressW, AF_INET, AF_INET6, SOCKADDR, SOCKADDR_STORAGE,
@@ -35,13 +34,24 @@ fn ensure_wsa() {
 /// resolver, and lsof resolves by default. A lookup that overruns the timeout is
 /// abandoned and falls back to the numeric address (the `-n` behavior), so one
 /// slow DNS server can never stall enumeration. The abandoned worker returns on
-/// its own once the OS resolver times out.
+/// its own once the OS resolver times out. A worker the OS refuses to start is
+/// the lookup failing: numeric, never a panic.
+///
+/// The backend calls this once per distinct address of a run, at most
+/// `hostnames::WORKERS` calls at a time (`hostnames::resolve_all`), not once
+/// per socket endpoint. A call abandoned at the timeout returns, and its pool
+/// worker moves on, while the inner thread's OS query may still run: so more
+/// queries than workers can be outstanding, one thread per address at most.
 pub fn host_name(ip: IpAddr) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(resolve_blocking(ip));
-    });
-    rx.recv_timeout(Duration::from_secs(2)).ok().flatten()
+    std::thread::Builder::new()
+        .spawn(move || {
+            let _ = tx.send(resolve_blocking(ip));
+        })
+        .ok()?;
+    rx.recv_timeout(crate::hostnames::LOOKUP_TIMEOUT)
+        .ok()
+        .flatten()
 }
 
 /// The blocking reverse-DNS lookup, run on the worker thread of [`host_name`].
