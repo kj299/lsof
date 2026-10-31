@@ -1,0 +1,26 @@
+[package]
+name = "lsof-backend-freebsd"
+description = "FreeBSD data-acquisition backend for lsof-rs: enumerates processes and their open files through sysctl(3) (kern.proc, kern.proc.filedesc, kern.lockf, the pcblists), the same records the C's FreeBSD dialect reads. Implements lsof-core's Backend trait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# No dependencies. FreeBSD's open-file data is not a filesystem, as Linux's
+# /proc is: it is sysctl(3), which std has no API for. The four libc calls this
+# crate makes (sysctl, sysctlbyname, getfsstat, statfs) are declared in
+# `src/sys.rs`, the one module allowed `unsafe`; every byte they return is
+# parsed by safe code that bounds-checks each read (`src/kinfo.rs`), so a short
+# or malformed record is skipped or refused, never read past.
+[dependencies]
+lsof-core = { path = "../lsof-core" }
+
+[features]
+# Exposes the pure record parsers through `fuzz_api` for the cargo-fuzz target
+# in ../../fuzz. Never enabled by the CLI (porting-kit PLAYBOOK Phase 4 gate 3).
+fuzzing = []
+
+[lints]
+workspace = true

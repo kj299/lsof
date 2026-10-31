@@ -151,7 +151,7 @@ jobs:
         # Toolchain-free text scan from the porting kit. HARD gate: every unsafe
         # block in the backend carries a // SAFETY: justification, so a new
         # undocumented block fails CI.
-        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src
+        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src crates/lsof-backend-freebsd/src
 
       - name: coverage gate (test surface vs the C's feature surface)
         # The question no other gate asks: are we testing everything the port
@@ -279,6 +279,33 @@ jobs:
           name: lsof-exe-windows
           path: lsof-rs/target/release/lsof.exe
           if-no-files-found: error
+
+  freebsd-cross:
+    # The FreeBSD backend type-checked, linted and documented for both x86
+    # targets FreeBSD ships, from the Linux runner: `rustup target add` brings
+    # FreeBSD's std, and `clippy` needs no linker. What it cannot do is RUN the
+    # backend -- that is .cirrus.yml's lsof_rs task, on FreeBSD VMs. Both
+    # targets because kinfo_proc has a layout per architecture (layout.rs) and
+    # kptr() cuts kernel addresses on i386, so each is its own code path.
+    name: FreeBSD backend (cross-check, x86_64 + i686)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-freebsd,i686-unknown-freebsd
+      - name: clippy (x86_64 and i686 FreeBSD, whole workspace)
+        run: |
+          for t in x86_64-unknown-freebsd i686-unknown-freebsd; do
+            echo "=== $t ==="
+            cargo clippy --target "$t" --workspace --all-targets -- -D warnings
+          done
+      - name: rustdoc (FreeBSD)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items --workspace --target x86_64-unknown-freebsd
 
   supply-chain:
     # control-coverage: exempt harnesses/supply-chain/run_supply_chain.sh -- runs `cargo deny check` against lsof-rs/deny.toml, this port's own policy, not the harness's template
@@ -525,6 +552,15 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
+      - name: miri over the FreeBSD backend's parsers and row rules
+        # Its own step, so a failure names the crate. On Linux only the pure
+        # modules of lsof-backend-freebsd build (kinfo, rows, names, mounts,
+        # users, devnames, under cfg(test)): exactly the code that reads the
+        # bytes the kernel hands its one unsafe module, which is what miri is
+        # for. The sysctl FFI itself runs only on FreeBSD (.cirrus.yml).
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly-2026-08-31 miri test -p lsof-backend-freebsd
 
   miri-linux:
     name: miri (Linux backend — observe-first)

@@ -548,6 +548,9 @@ impl FdSpec {
             (FdSpec::Named(FdKind::Del), FdType::Deleted) => true,
             (FdSpec::Named(FdKind::NoFd), FdType::NoFd) => true,
             (FdSpec::Named(FdKind::Unknown), FdType::Unknown) => true,
+            // FreeBSD's two: the C's table names them `ctty` and `jd.`.
+            (FdSpec::Named(FdKind::OtherDialect("ctty")), FdType::Ctty) => true,
+            (FdSpec::Named(FdKind::OtherDialect("jd.")), FdType::Jail) => true,
             (FdSpec::Num(n), FdType::Handle(h)) => h == n,
             (FdSpec::Range(a, b), FdType::Handle(h)) => h >= a && h <= b,
             _ => false,

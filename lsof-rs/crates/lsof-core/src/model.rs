@@ -33,6 +33,13 @@ pub enum FdType {
     /// and the reason (`/proc/1/fd (opendir: Permission denied)`), and `-d
     /// NOFD` selects it like any other FD name.
     NoFd,
+    /// The controlling terminal (`ctty`): FreeBSD's `KF_FD_TYPE_CTTY` row,
+    /// which no other backend makes. `-d ctty` selects it.
+    Ctty,
+    /// A jailed process's jail root (`jld`): FreeBSD's `KF_FD_TYPE_JAIL`.
+    /// The C prints `jld` but its `-d` knows the kind as `jd.` (`arg.c`), so
+    /// `-d jd.` selects it and `-d jld` is refused, there and here.
+    Jail,
     /// Type could not be determined.
     Unknown,
 }
@@ -49,6 +56,8 @@ impl FdType {
             FdType::Deleted => "DEL".to_string(),
             FdType::Task => "task".to_string(),
             FdType::NoFd => "NOFD".to_string(),
+            FdType::Ctty => "ctty".to_string(),
+            FdType::Jail => "jld".to_string(),
             FdType::Unknown => "unk".to_string(),
         }
     }
@@ -273,6 +282,12 @@ pub enum TcpState {
     Close,
     /// Linux's `TCP_SYN_RECV` (3).
     SynRecv,
+    /// FreeBSD's `TCPS_FIN_WAIT_1` (6), which its `tcpstates[]`
+    /// (`netinet/tcp_fsm.h`) spells `FIN_WAIT_1`, with the underscore Linux
+    /// and Windows leave out.
+    FinWaitOne,
+    /// FreeBSD's `TCPS_FIN_WAIT_2` (9): `FIN_WAIT_2`.
+    FinWaitTwo,
     Unknown,
 }
 
@@ -294,6 +309,8 @@ impl TcpState {
             TcpState::DeleteTcb => "DELETE_TCB",
             TcpState::Close => "CLOSE",
             TcpState::SynRecv => "SYN_RECV",
+            TcpState::FinWaitOne => "FIN_WAIT_1",
+            TcpState::FinWaitTwo => "FIN_WAIT_2",
             TcpState::Unknown => "UNKNOWN",
         }
     }
@@ -336,12 +353,32 @@ pub const WINDOWS_TCP_STATES: [TcpState; 12] = [
     TcpState::DeleteTcb,
 ];
 
+/// The same for FreeBSD: `tcpstates[]` of `netinet/tcp_fsm.h`, which the C
+/// takes whole (`src/ptti.c`, `TCPSTATES`), indexed by `t_state` from
+/// `TCPS_CLOSED` (0) to `TCPS_TIME_WAIT` (10). Eleven names, and two of them
+/// spelt as no other platform spells them: `FIN_WAIT_1` and `FIN_WAIT_2`.
+pub const FREEBSD_TCP_STATES: [TcpState; 11] = [
+    TcpState::Closed,
+    TcpState::Listen,
+    TcpState::SynSent,
+    TcpState::SynReceived,
+    TcpState::Established,
+    TcpState::CloseWait,
+    TcpState::FinWaitOne,
+    TcpState::Closing,
+    TcpState::LastAck,
+    TcpState::FinWaitTwo,
+    TcpState::TimeWait,
+];
+
 /// The state table of the platform this binary was built for — the names its
-/// rows print, so the only names `-s TCP:` can mean. Anything but Windows
-/// takes Linux's, the C's own.
+/// rows print, so the only names `-s TCP:` can mean. Windows and FreeBSD have
+/// their own; anything else takes Linux's, the C's own.
 pub fn tcp_state_table() -> &'static [TcpState] {
     if cfg!(windows) {
         &WINDOWS_TCP_STATES
+    } else if cfg!(target_os = "freebsd") {
+        &FREEBSD_TCP_STATES
     } else {
         &LINUX_TCP_STATES
     }

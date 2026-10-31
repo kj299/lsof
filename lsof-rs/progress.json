@@ -1,5 +1,6 @@
 {
   "modules": {
+    "lsof-backend-freebsd": "ported",
     "lsof-backend-linux": "unsafe_audited",
     "lsof-backend-windows": "unsafe_audited",
     "lsof-cli": "unsafe_audited",

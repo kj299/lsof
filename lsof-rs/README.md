@@ -1,4 +1,4 @@
-# lsof-rs — a memory-safe `lsof` in Rust (Windows, and now Linux)
+# lsof-rs — a memory-safe `lsof` in Rust (Windows, Linux, and FreeBSD)
 
 `lsof-rs` is a from-scratch **Rust** reimplementation of the classic `lsof`
 ("list open files") utility. It eliminates the memory-unsafety class of bugs
@@ -6,12 +6,13 @@ inherent to the original C (buffer overflows, use-after-free, handle leaks) by
 construction, and keeps `lsof`'s command-line surface and output formats so
 existing scripts keep working.
 
-It ships **two data-acquisition backends** behind one platform seam:
+It has **three data-acquisition backends** behind one platform seam:
 
 | Backend | Status | Data source |
 |---|---|---|
 | **Windows** | complete — [v1.0.1](https://github.com/kj299/lsof/releases), field-validated | Win32/NT: Toolhelp, IP Helper, the NT handle table, ETW |
 | **Linux** | **L0–L3 done** — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files (`mem`/`DEL`), locks, anon-inode kinds, mount points, and the differential against the C in CI. Not in a release yet: build from source | `/proc` |
+| **FreeBSD** | **F0 — written, cross-checked, not yet run on FreeBSD**: processes, every descriptor kind the C's dialect decodes, `cwd`/`rtd`/`jld`/`txt`/`ctty`, sockets with TCP state, locks, mount points. Built and linted for x86_64 and i686; see [`docs/freebsd-backend-scope.md`](docs/freebsd-backend-scope.md) | `sysctl(3)`: `kern.proc.*`, `kern.lockf`, the pcblists |
 
 Everything above the seam — the selection engine, all three output formats, the
 argument parser — is shared. Adding Linux's first phase took one additive enum
@@ -56,6 +57,7 @@ independent code and per-OS "dialect" backends:
 | `lsof-core` | Platform-agnostic: data model (`Process`/`OpenFile` ≈ lsof's `lproc`/`lfile`), the selection/filter engine, the output renderers (table / `-F` / JSON), and the `Backend` trait (the "dialect" seam). **Zero dependencies, `#![forbid(unsafe_code)]`, fully unit-tested on any host.** |
 | `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper and ETW, file handles via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows, but for its pure name parsers, PEB walk and buffer-size checks (`names.rs`, `peb_walk.rs`, `sizes.rs`), which are tested on Linux, and the first two fuzzed there. |
 | `lsof-backend-linux` | The Linux "dialect": implements `Backend` over `/proc`. **`#![forbid(unsafe_code)]`, and one dependency** — `/proc` is a filesystem and `std::os::unix::fs::MetadataExt` supplies every stat field; the one call std lacks, `getxattr(2)` (which names a socket no `/proc/net` table lists, as the C names it), is made through `rustix`, pinned exactly with only its `fs` feature, so no FFI of the crate's own is involved. Compiled only on Linux. |
+| `lsof-backend-freebsd` | The FreeBSD "dialect": implements `Backend` from the `sysctl(3)` records the C's own FreeBSD dialect reads (`kinfo_proc`, `kinfo_file`, `kinfo_lockf`, the pcblists). **No dependencies**; four libc calls declared in `src/sys.rs`, the one module allowed `unsafe` (the crate is `#![deny(unsafe_code)]`), each returning bytes that safe, bounds-checked code parses at offsets measured from FreeBSD 14.5 and 15.1's headers. Compiled only on FreeBSD, but for its parsers and row rules, which are tested, fuzzed and run under miri on Linux. |
 | `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). **No third-party dependency of its own** (the Linux backend it links brings `rustix`) **and `#![forbid(unsafe_code)]`** — on both of its crate roots, since a bin and a lib in one package are two crates and the attribute does not cross between them. |
 
 ### Mapping Unix concepts to Windows

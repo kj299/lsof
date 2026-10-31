@@ -1683,7 +1683,11 @@ const LOGINML: usize = 32;
 /// such ceiling on an image name, so nothing is rejected there.
 #[cfg(target_os = "linux")]
 const MAX_COMMAND_WIDTH: Option<usize> = Some(15);
-#[cfg(not(target_os = "linux"))]
+/// FreeBSD's dialect sets it to `MAXCOMLEN` (`dlsof.h`), 19: `ki_comm` is
+/// `COMMLEN + 1` bytes.
+#[cfg(target_os = "freebsd")]
+const MAX_COMMAND_WIDTH: Option<usize> = Some(19);
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 const MAX_COMMAND_WIDTH: Option<usize> = None;
 
 /// Whether this platform can report a socket's receive window, which is what
@@ -1693,9 +1697,10 @@ const MAX_COMMAND_WIDTH: Option<usize> = None;
 /// dialect does not define it, so `lsof -T w` there is a hard error rather
 /// than a request that quietly returns nothing. Windows reads the window from
 /// per-connection EStats, so it is real there.
-#[cfg(target_os = "linux")]
+/// FreeBSD's dialect does not define `HASTCPTPIW` either (`machine.h`).
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 const HAS_TCP_WINDOW: bool = false;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 const HAS_TCP_WINDOW: bool = true;
 
 /// Whether this platform records an open file's flags, which is what decides

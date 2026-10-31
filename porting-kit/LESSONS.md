@@ -4124,3 +4124,34 @@ the same, since the day before this entry.]*
   harnesses/lessons/resolve_collision.py · self-test;
   README.md · banner; CI-AND-RELEASE.md · Releasing; ARCHITECTURE-TEMPLATE.md ·
   Why this shape; PROMPTS/00-new-port-kickoff.md; skills/porting-kit-diff-fuzz/SKILL.md.
+
+---
+
+## 088. A third backend shared a dialect's name, and the platform ledger read it as a build of the dialect
+
+- **Date:** 2026-10-31
+- **Codebase:** lsof-rs (the FreeBSD backend, phase F0)
+- **What happened:** lsof-rs gained a FreeBSD backend, cross-checked from the
+  Linux runner (`cargo clippy --target x86_64-unknown-freebsd`) and named in
+  the unsafe-audit step (`crates/lsof-backend-freebsd/src`). The platform
+  ledger waives the C's FreeBSD dialect as built by nothing, and checks the
+  waiver by searching CI for the word `freebsd`. Both lines matched, and the
+  waiver was reported stale, though not one line of the dialect was compiled.
+  The same name stood for two things: a C dialect and a Rust backend.
+  Separately, the backend's record layouts were not transcribed from headers.
+  A probe file `offsetof()`'d every field, and clang compiled it to LLVM IR
+  against the FreeBSD 14.5 and 15.1 source trees, for amd64 and i386, where
+  each offset is a constant to read. That needed no FreeBSD host. It found
+  `kinfo_proc` laid out differently per architecture, and every other record
+  laid out the same on all four.
+- **The rule.** A waiver names what the platform is NOT built by, as narrowly
+  as the lines that share its name, and any other mention still makes it
+  stale. Measure a foreign ABI's layouts by compiling against its headers;
+  do not read them off the header text.
+- **Kit change:** `check_platforms.py` reads a waived platform's
+  `not_builds` (regexes): a CI line matching one is no evidence either way.
+  Three self-test cases pin it: the named mention leaves the waiver standing,
+  any other mention still makes it stale, and without `not_builds` the same
+  mention does. lsof's `platforms.toml` names the two lsof-rs lines.
+- **Section amended:** harnesses/platforms/check_platforms.py · _search, run,
+  self-test; harnesses/platforms/platforms.toml · platforms.freebsd.

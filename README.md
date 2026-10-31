@@ -16,7 +16,7 @@ against a substitute.
 
 | Path | What it is |
 |---|---|
-| [`lsof-rs/`](lsof-rs/) | The Rust rewrite: a Cargo workspace with a platform-agnostic core and native Windows and Linux backends |
+| [`lsof-rs/`](lsof-rs/) | The Rust rewrite: a Cargo workspace with a platform-agnostic core and native Windows, Linux and FreeBSD backends |
 | [`porting-kit/`](porting-kit/) | The reusable C→Rust porting methodology this project runs on — playbook, prompts, and the CI harnesses that enforce its gates |
 | `lib/`, `src/`, `include/` | The original C `lsof`, built unchanged as the oracle |
 | `lib/dialects/` | Per-OS C backends ("dialects"); `linux/` is the one the differential builds |
@@ -29,6 +29,7 @@ against a substitute.
 |---|---|
 | **Windows** (Rust) | Complete and field-validated — see [releases](https://github.com/kj299/lsof/releases) |
 | **Linux** (Rust) | L0–L3 done — processes, fds, `cwd`/`rtd`/`txt`, sockets (`-i`, `-U`), mapped files, locks, mount points, and the differential against the C. Open: naming netlink and AF_VSOCK sockets, and the OPEN rows of `DIVERGENCES.md`. Not in a release yet; build from source |
+| **FreeBSD** (Rust) | F0 — written from the C's FreeBSD dialect and type-checked for x86_64 and i686 FreeBSD, but not yet run on a FreeBSD host; see [`lsof-rs/docs/freebsd-backend-scope.md`](lsof-rs/docs/freebsd-backend-scope.md). Build from source on FreeBSD 14 or 15 |
 | **C oracle** | Built and tested by `build.yml` on Ubuntu 22.04, Ubuntu 24.04 and macOS; built again from this tree by the differential job |
 
 Every known difference between the two implementations is a numbered row in

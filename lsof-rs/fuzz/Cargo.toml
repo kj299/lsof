@@ -21,6 +21,9 @@ lsof-backend-linux = { path = "../crates/lsof-backend-linux", features = ["fuzzi
 # The Windows backend's `names` and `peb_walk` modules are portable on purpose,
 # so this builds and fuzzes on the Linux runner like every other target.
 lsof-backend-windows = { path = "../crates/lsof-backend-windows", features = ["fuzzing"] }
+# The FreeBSD backend's record parsers and row rules are portable on purpose
+# too: they read bytes, and build on any Unix under its `fuzzing` feature.
+lsof-backend-freebsd = { path = "../crates/lsof-backend-freebsd", features = ["fuzzing"] }
 
 [[bin]]
 name = "parse_args"
@@ -120,6 +123,15 @@ doc = false
 [[bin]]
 name = "windows_peb"
 path = "fuzz_targets/windows_peb.rs"
+test = false
+doc = false
+bench = false
+
+# The FreeBSD backend's sysctl record parsers (kinfo_file, kinfo_proc,
+# kinfo_lockf, the pcblists, statfs) and the row rules run on their output.
+[[bin]]
+name = "freebsd_kinfo"
+path = "fuzz_targets/freebsd_kinfo.rs"
 test = false
 doc = false
 bench = false

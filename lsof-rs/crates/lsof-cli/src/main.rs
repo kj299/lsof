@@ -34,11 +34,13 @@ macro_rules! say {
     };
 }
 
+#[cfg(target_os = "freebsd")]
+use lsof_backend_freebsd::FreeBsdBackend;
 #[cfg(target_os = "linux")]
 use lsof_backend_linux::LinuxBackend;
 #[cfg(windows)]
 use lsof_backend_windows::WindowsBackend;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
 use lsof_core::mock::MockBackend;
 
 /// The resolved runtime environment: a backend plus context for messaging.
@@ -74,7 +76,20 @@ fn make_env() -> Env {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "freebsd")]
+fn make_env() -> Env {
+    let backend = FreeBsdBackend::new();
+    // As on Linux, root is what makes every process's descriptor table
+    // readable: `kern.proc.filedesc` of another user's process is EPERM.
+    let elevated = backend.is_root();
+    Env {
+        backend: Box::new(backend),
+        elevated,
+        note: None,
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
 fn make_env() -> Env {
     Env {
         backend: Box::new(MockBackend),

@@ -95,8 +95,9 @@ fn mib_state(s: TcpState) -> u32 {
         TcpState::SynSent => 3,
         TcpState::SynReceived | TcpState::SynRecv => 4,
         TcpState::Established => 5,
-        TcpState::FinWait1 => 6,
-        TcpState::FinWait2 => 7,
+        // FreeBSD's spellings of the same two states.
+        TcpState::FinWait1 | TcpState::FinWaitOne => 6,
+        TcpState::FinWait2 | TcpState::FinWaitTwo => 7,
         TcpState::CloseWait => 8,
         TcpState::Closing => 9,
         TcpState::LastAck => 10,
