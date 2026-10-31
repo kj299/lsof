@@ -19,7 +19,7 @@ use lsof_core::selection::StateFilter;
 use lsof_core::{
     errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, ExemptFs, FdFilter, FdKind,
     FdSpec, FilesystemArgs, MountRequest, MountTable, Protocol, SafeFs, Selection, TaskMode,
-    TcpInfoFlags,
+    TcpInfoFlags, UidSel, UserLookup,
 };
 
 /// What the CLI should do after parsing.
@@ -61,6 +61,42 @@ pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -
     mounts(&req, &fs.with(sel.blocking, !sel.omit_unreadable))
 }
 
+/// What the parse asks the host where the C asks it while it reads its
+/// options, so that what it answers is an option error in the C's order,
+/// found before `-h`, `-v` or `-F ?` is acted on (DIVERGENCES 114):
+/// `enter_uid()` looks each `-u` login up as it meets it (`can't get UID for
+/// X`), and `-Z` is refused where it stands when SELinux is not enabled
+/// (`-Z limited to SELinux`, `main.c:1005`). `lsof -h -u nosuch` and
+/// `lsof -Z -h` exit 1 with the error and no help, measured.
+#[derive(Clone, Copy)]
+pub struct HostChecks<'a> {
+    /// `-u`'s values, each looked up as it is read
+    /// ([`lsof_core::Backend::lookup_user`]).
+    pub lookup_user: &'a dyn Fn(&str) -> UserLookup,
+    /// Whether SELinux is enabled: the C's `CntxStatus`.
+    pub selinux_enabled: &'a dyn Fn() -> bool,
+}
+
+impl HostChecks<'static> {
+    /// Nothing asked of any host: each `-u` value is kept as typed
+    /// ([`UserLookup::ByName`]) and SELinux is taken to be enabled, so `-Z`
+    /// is read for its value alone. What [`parse`] and [`parse_with`] use.
+    pub const DEFERRED: HostChecks<'static> = HostChecks {
+        lookup_user: &kept_as_typed,
+        selinux_enabled: &selinux_assumed,
+    };
+}
+
+/// [`HostChecks::DEFERRED`]'s user lookup.
+fn kept_as_typed(_: &str) -> UserLookup {
+    UserLookup::ByName
+}
+
+/// [`HostChecks::DEFERRED`]'s SELinux answer.
+fn selinux_assumed() -> bool {
+    true
+}
+
 /// The table [`parse`] reads: none. A test or a fuzz input holding `+d /` or
 /// `-e /` examines no host mount, in-process and with no time limit, and
 /// none that does not answer can hold it.
@@ -83,8 +119,9 @@ pub struct Columns {
     /// `-s` with no value: sizes and only sizes, headed `SIZE`.
     pub size: bool,
     /// `-o <digits>`: how many decimal digits an offset may have before it is
-    /// printed in hex instead (the C's `OffDecDig`); 0 means no limit.
-    pub offset_digits: usize,
+    /// printed in hex instead (the C's `OffDecDig`, an `int`, wrapped as the
+    /// C wraps it); 0 means no limit.
+    pub offset_digits: i32,
     /// `+L`: an NLINK column after SIZE/OFF. `-L` turns it off again — the
     /// C's `Fnlink`, which the prefix sets and nothing else does.
     pub nlink: bool,
@@ -202,13 +239,27 @@ fn json_format(
     })
 }
 
-/// A run of ASCII digits as a count, saturating rather than wrapping. The C
-/// accumulates `-o`'s digits in an `int` and overflows it (undefined
-/// behaviour); any limit past the 20 digits a 64-bit offset can have means
-/// "never hex", and so does the saturated value.
+/// A run of ASCII digits as a count, saturating rather than wrapping: `-r`'s
+/// delay, `+L`'s count and `-S`'s limit, which the C accumulates in an `int`
+/// and overflows. `-o`'s count is the exception, wrapped as the C wraps it
+/// ([`offset_digits_value`]).
 fn digits_value(digits: &str) -> usize {
     digits.bytes().fold(0usize, |n, b| {
         n.saturating_mul(10).saturating_add(usize::from(b - b'0'))
+    })
+}
+
+/// `-o`'s digits as the C's `main.c` sums them: `i = (i * 10) + digit` in an
+/// `int`, which wraps. Reproduced, wrap included (DIVERGENCES 117): unlike
+/// `-S`'s or `-r`'s, which would set a time, this number only chooses how an
+/// offset is spelt, and the C's choice past `INT_MAX - 2` (every offset in
+/// hex, zero as `0`) is measured and harmless to follow — `-o 4294967296`
+/// wraps to 0, no limit, and `-o 4294967297` to 1. The wrap is explicit, so
+/// the release build's overflow checks never see it.
+fn offset_digits_value(digits: &str) -> i32 {
+    digits.bytes().fold(0i32, |n, b| {
+        n.wrapping_mul(10)
+            .wrapping_add(i32::from(b.wrapping_sub(b'0')))
     })
 }
 
@@ -262,11 +313,25 @@ pub fn parse_with(
     fs: &SafeFs,
     mounts: MountReader<'_>,
 ) -> Result<Action, String> {
+    parse_with_host(args, fs, mounts, &HostChecks::DEFERRED)
+}
+
+/// [`parse_with`], asking `host` what the C asks while it parses: each `-u`
+/// login is looked up where it is read and each `-Z` checked against
+/// SELinux, their errors reported in option order with the parse's others,
+/// before `-h`, `-v` or `-F ?` is acted on ([`HostChecks`]). What `lsof`
+/// itself parses with.
+pub fn parse_with_host(
+    args: Vec<String>,
+    fs: &SafeFs,
+    mounts: MountReader<'_>,
+    host: &HostChecks<'_>,
+) -> Result<Action, String> {
     // What the C reports while it reads the options and reads on after
     // (`+J is not supported`), before whatever ends the parse: measured,
     // `-o -s +J` prints the `+J` line first.
     let mut early = Vec::new();
-    let parsed = parse_options(args, fs, mounts, &mut early);
+    let parsed = parse_options(args, fs, mounts, host, &mut early);
     let rest = match parsed {
         Ok(_) if early.is_empty() => return parsed,
         Ok(_) => None,
@@ -285,9 +350,13 @@ fn parse_options(
     mut args: Vec<String>,
     fs: &SafeFs,
     mounts: MountReader<'_>,
+    host: &HostChecks<'_>,
     early: &mut Vec<String>,
 ) -> Result<Action, String> {
     let mut sel = Selection::default();
+    // Whether errors were printed already, ahead of a line the parse printed
+    // itself ([`tell_early`]).
+    let mut told = false;
     // The C's `readmnt()` reads once, where it is first needed (`dmnt.c`:
     // `if (Lmi || Lmist) return (Lmi)`).
     let mut table: Option<MountTable> = None;
@@ -328,16 +397,6 @@ fn parse_options(
     let mut i = 0;
     while i < args.len() {
         let tok = &args[i];
-        if tok == "--help" {
-            want_help = true;
-            i += 1;
-            continue;
-        }
-        if tok == "--version" {
-            want_version = true;
-            i += 1;
-            continue;
-        }
         if tok == "--etw" {
             sel.use_etw = true;
             i += 1;
@@ -401,6 +460,14 @@ fn parse_options(
                 // the `-` one.
                 // `+J`/`+j`: the C says so and reads on (`main.c:567-584`).
                 'J' | 'j' if plus => early.push(format!("+{c} is not supported")),
+                // A `-` inside a word is no option letter to the C's
+                // `GetOpt`: it says so and reads on through the word, so
+                // `--help` is that error, then `-h`, then `-e lp` (`-e not
+                // followed by a file system path: "lp"`), exit 1, and
+                // `--version` the same with `-v` and `-e rsion` (measured).
+                // lsof-rs had taken both as GNU-style long options and exited
+                // 0 (DIVERGENCES 114).
+                '-' => early.push("illegal option character: -".to_string()),
                 'n' | 'P' | 'r' if plus => {
                     return Err(quoting("unsupported option: +", &c.to_string()))
                 }
@@ -418,6 +485,7 @@ fn parse_options(
                         i += 1;
                         args.get(i).cloned().unwrap_or_default()
                     };
+                    tell_early(fs, early, &mut told);
                     let dir = enter_dir(&value, c == 'D', &sel, fs)?;
                     // The C reads its mount table here, at the first `+d`/`+D`
                     // whose directory checked out (`ck_file_arg()` from
@@ -522,7 +590,7 @@ fn parse_options(
                     // and a file name. Note that a limit does NOT switch the
                     // offset column on: `-o 5` keeps SIZE/OFF.
                     match take_digits(&chars, &mut j, &mut args, &mut i, prefix) {
-                        Some(digits) => columns.offset_digits = digits_value(&digits),
+                        Some(digits) => columns.offset_digits = offset_digits_value(&digits),
                         None => columns.offset = true,
                     }
                     continue;
@@ -565,12 +633,26 @@ fn parse_options(
                 'X' => sel.skip_inet_tables = !sel.skip_inet_tables,
                 'N' => sel.nfs_only = true,
                 'Z' => {
-                    // `-Z [context]`. The value is attached or the next word,
-                    // and a word that opens an option is not one — the same
-                    // rule `-K` uses (`main.c`: `*GOv != '-' && *GOv != '+'`).
-                    let context = optional_value(&chars, j, &args, &mut i);
-                    let list = sel.selinux.get_or_insert_with(Vec::new);
-                    list.extend(context);
+                    if (host.selinux_enabled)() {
+                        // `-Z [context]`. The value is attached or the next
+                        // word, and a word that opens an option is not one —
+                        // the same rule `-K` uses (`main.c`: `*GOv != '-' &&
+                        // *GOv != '+'`).
+                        let context = optional_value(&chars, j, &args, &mut i);
+                        let list = sel.selinux.get_or_insert_with(Vec::new);
+                        list.extend(context);
+                    } else {
+                        // Refused where it stands, and the parse reads on
+                        // (`err = 1`). `GetOpt` hands `-Z` its value, attached
+                        // or the next word whatever it opens with (`"Z:"`),
+                        // `--` aside, and only the enabled branch gives a word
+                        // back: `-Z -h` and `-Z -u nosuch` print this line
+                        // alone, `-h -Z` prints it and no help (measured).
+                        early.push("-Z limited to SELinux".to_string());
+                        if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                            i += 1;
+                        }
+                    }
                     j = chars.len();
                     continue;
                 }
@@ -594,6 +676,7 @@ fn parse_options(
                             other => other.cloned().unwrap_or_default(),
                         }
                     };
+                    tell_early(fs, early, &mut told);
                     enter_exempt(&mut sel, &value, plus, fs)?;
                     j = chars.len();
                     continue;
@@ -716,6 +799,7 @@ fn parse_options(
                         Some(d) => {
                             let n = digits_value(&d).min(i32::MAX as usize) as u32;
                             if n < TMLIMMIN {
+                                tell_early(fs, early, &mut told);
                                 fs.tell(&format!(
                                     "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
                                 ));
@@ -731,8 +815,10 @@ fn parse_options(
                 // letters, `main.c` reads them identically and the prefix is
                 // never consulted.
                 'T' => {
-                    let letters = optional_value(&chars, j, &args, &mut i).unwrap_or_default();
-                    sel.tcp_info_opt = Some(parse_tcp_info(&letters, plus)?);
+                    // A value, even an empty one (`+T ''`), is letters: none
+                    // selects nothing, whatever the prefix (DIVERGENCES 116).
+                    let letters = optional_value(&chars, j, &args, &mut i);
+                    sel.tcp_info_opt = Some(parse_tcp_info(letters.as_deref(), plus)?);
                     j = chars.len();
                     continue;
                 }
@@ -865,7 +951,11 @@ fn parse_options(
                         }
                         args[i].clone()
                     };
-                    apply_value(&mut sel, c, &value)?;
+                    if c == 'u' {
+                        enter_users(&mut sel, &value, host, early)?;
+                    } else {
+                        apply_value(&mut sel, c, &value)?;
+                    }
                     j = chars.len();
                     continue;
                 }
@@ -935,8 +1025,6 @@ fn parse_options(
     // `-e /nosuch -h` and `-hx` exit 1 without the help (measured;
     // DIVERGENCES 83, 115). Main prints the first `lsof: `.
     let mut errors: Vec<String> = Vec::new();
-    // Whether some were printed already, ahead of the mount table's lines.
-    let mut told = false;
     // A state both included and excluded, from any two `-s` options, each
     // named as the C's table spells it, in table order (measured: `LISTEN`
     // and `ESTABLISHED` both, `ESTABLISHED` first, the kernel's 1 before 10).
@@ -1002,7 +1090,8 @@ fn parse_options(
             // far come before what the table says as it is read: measured,
             // `-e /nosuch -x f` prints `-x must accompany +d or +D`, then a
             // mount's `can't stat()` warning, then the `-e` error.
-            for e in early.drain(..).chain(errors.drain(..)) {
+            tell_early(fs, early, &mut told);
+            for e in errors.drain(..) {
                 fs.tell(&format!("lsof: {e}"));
                 told = true;
             }
@@ -1019,7 +1108,12 @@ fn parse_options(
             }
         }
     }
-    if told || !errors.is_empty() {
+    // An error the C reported and read on after (`err = 1`: `+J`, a `-`
+    // in a word, `-Z` without SELinux, an unknown `-u` login) ends the run
+    // here too, in `usage()`, before the checks below are made: `+J -a` and
+    // `-u nosuch -X -i` print their first line alone (measured). Main prints
+    // what `early` holds.
+    if told || !errors.is_empty() || !early.is_empty() {
         return Err(errors.join("\nlsof: "));
     }
     if want_help {
@@ -1388,6 +1482,100 @@ fn dedup_ids(ids: &mut Vec<u32>, excludes: &[u32], what: &str) -> Result<(), Str
     }
 }
 
+/// The errors the parse has found and read on after, printed now through
+/// `fs`'s sink, ahead of a line the parse is about to print itself — the
+/// `-S` warning, what a `+d`/`+D` or an `-e` says as it is examined, the
+/// mount table's lines — since the C prints each where it meets it:
+/// measured, `-Zx -S 0` says `-Z limited to SELinux` before `-S time (0)
+/// changed to 2`, and `-S 0 -Z` after. `told` records that the run is to end.
+fn tell_early(fs: &SafeFs, early: &mut Vec<String>, told: &mut bool) {
+    for e in early.drain(..) {
+        fs.tell(&format!("lsof: {e}"));
+        *told = true;
+    }
+}
+
+/// `-u`'s list, entered as the C's `enter_uid()` enters it: item by item,
+/// each login looked up where it is read ([`HostChecks::lookup_user`]).
+///
+/// `-u ^name` is a negation, not a selection: it excludes absolutely and
+/// takes no part in the OR/AND rule (Lsof.8). The list is `-p`'s, so an
+/// empty item is UID 0: `-u ,` selects root and `-u ^` excludes it
+/// (DIVERGENCES 69). An item longer than a login name may be, `LOGINML`
+/// bytes after its `^`, is refused whatever it holds, digits included.
+///
+/// A name the host does not know is the C's `can't get UID for X`, an error
+/// the parse reports and reads on after (`err = 1`), so `-h -u nosuch`
+/// exits 1 without the help (DIVERGENCES 114). A UID entered once on each
+/// side ends the parse at that item, as `lsof_select_uid()` makes the C's
+/// `Error()` exit there: `UID 0 has been included and excluded.` Each UID is
+/// entered once, its first spelling kept. A platform that selects by name
+/// ([`UserLookup::ByName`]) keeps the item as typed.
+fn enter_users(
+    sel: &mut Selection,
+    value: &str,
+    host: &HostChecks<'_>,
+    early: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut rest = value;
+    while !rest.is_empty() {
+        let (item, tail) = rest.split_once(',').unwrap_or((rest, ""));
+        let (excl, name) = match item.strip_prefix('^') {
+            Some(name) => (true, name),
+            None => (false, item),
+        };
+        if name.len() > LOGINML {
+            // The C echoes the item with `safestrprtn()`, which has no
+            // multibyte path: `é` is `\xc3\xa9` even under C.UTF-8
+            // (measured), where `shown()` keeps it. Its cut at the item's
+            // length is not reproduced (DIVERGENCES 133).
+            let mut echo = String::new();
+            for c in shown(item).chars() {
+                if c.is_ascii() {
+                    echo.push(c);
+                } else {
+                    for b in c.to_string().bytes() {
+                        echo.push_str(&format!("\\x{b:02x}"));
+                    }
+                }
+            }
+            return Err(format!("-u login name > {LOGINML} characters: {echo}"));
+        }
+        let name = if name.is_empty() { "0" } else { name };
+        match (host.lookup_user)(name) {
+            UserLookup::Uid(uid) => {
+                let other_side = if excl {
+                    sel.uids.iter().any(|s| s.uid == uid)
+                } else {
+                    sel.uid_excludes.contains(&uid)
+                };
+                if other_side {
+                    return Err(format!("UID {uid} has been included and excluded."));
+                }
+                if excl {
+                    if !sel.uid_excludes.contains(&uid) {
+                        sel.uid_excludes.push(uid);
+                    }
+                } else if !sel.uids.iter().any(|s| s.uid == uid) {
+                    let login =
+                        (!name.bytes().all(|b| b.is_ascii_digit())).then(|| name.to_string());
+                    sel.uids.push(UidSel { uid, login });
+                }
+            }
+            UserLookup::Unknown => early.push(format!("can't get UID for {}", shown(name))),
+            UserLookup::ByName => {
+                if excl {
+                    sel.user_excludes.push(name.to_string());
+                } else {
+                    sel.users.push(name.to_string());
+                }
+            }
+        }
+        rest = tail;
+    }
+    Ok(())
+}
+
 fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String> {
     match opt {
         'p' => {
@@ -1397,49 +1585,6 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
                 } else {
                     sel.pids.push(pid);
                 }
-            }
-        }
-        // `-u ^name` and `-c ^name` are negations, not selections: they
-        // exclude absolutely and take no part in the OR/AND rule (Lsof.8).
-        // Names are resolved to IDs after parsing, by the backend that knows
-        // how (see `main.rs`); here they are only split.
-        //
-        // The list is `-p`'s (`enter_uid()`), so an empty item is UID 0:
-        // `-u ,` selects root and `-u ^` excludes it (DIVERGENCES 69). An item
-        // longer than a login name may be, `LOGINML` bytes after its `^`, is
-        // refused whatever it holds, digits included.
-        'u' => {
-            let mut rest = value;
-            while !rest.is_empty() {
-                let (item, tail) = rest.split_once(',').unwrap_or((rest, ""));
-                let (excl, name) = match item.strip_prefix('^') {
-                    Some(name) => (true, name),
-                    None => (false, item),
-                };
-                if name.len() > LOGINML {
-                    // The C echoes the item with `safestrprtn()`, which has no
-                    // multibyte path: `é` is `\xc3\xa9` even under C.UTF-8
-                    // (measured), where `shown()` keeps it. Its cut at the
-                    // item's length is not reproduced (DIVERGENCES 133).
-                    let mut echo = String::new();
-                    for c in shown(item).chars() {
-                        if c.is_ascii() {
-                            echo.push(c);
-                        } else {
-                            for b in c.to_string().bytes() {
-                                echo.push_str(&format!("\\x{b:02x}"));
-                            }
-                        }
-                    }
-                    return Err(format!("-u login name > {LOGINML} characters: {echo}"));
-                }
-                let name = if name.is_empty() { "0" } else { name };
-                if excl {
-                    sel.user_excludes.push(name.to_string());
-                } else {
-                    sel.users.push(name.to_string());
-                }
-                rest = tail;
             }
         }
         'c' => {
@@ -1604,6 +1749,10 @@ fn optional_value(chars: &[char], j: usize, args: &[String], i: &mut usize) -> O
 ///   what follows its digits is read as option letters under the same
 ///   prefix, as the C resumes in the middle of the word. A next word with no
 ///   digits is not consumed at all: `-o /file` is `-o` and a file name.
+///   An **empty** next word is the exception: the C takes it as the value
+///   (it does not open with `-` or `+`), finds no digits and nothing after
+///   them to give back, and so consumes it — `-o ''` is `-o`, and `''` is no
+///   path (DIVERGENCES 116).
 fn take_digits(
     chars: &[char],
     j: &mut usize,
@@ -1621,6 +1770,10 @@ fn take_digits(
     }
     *j = chars.len();
     let next = args.get(*i + 1)?;
+    if next.is_empty() {
+        *i += 1;
+        return None;
+    }
     let digits: String = next.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         return None;
@@ -1637,17 +1790,19 @@ fn take_digits(
 /// Parse the letters of a `-T` / `+T` option.
 ///
 /// The letters **select**: the C zeroes `Ftcptpi` before ORing them in, so
-/// `-T q` is queues *instead of* the state, not as well as it. With no letters
+/// `-T q` is queues *instead of* the state, not as well as it. With no value
 /// the prefix decides — `-T` selects nothing, `+T` restores the state-only
-/// default.
-fn parse_tcp_info(letters: &str, plus: bool) -> Result<TcpInfoFlags, String> {
-    if letters.is_empty() {
+/// default. An empty value is a value with no letters (`main.c` tests `GOv`
+/// for NULL, not for empty): `+T ''` selects nothing, like `-T`, and a unix
+/// socket loses its `(CONNECTED)` (DIVERGENCES 116, measured).
+fn parse_tcp_info(letters: Option<&str>, plus: bool) -> Result<TcpInfoFlags, String> {
+    let Some(letters) = letters else {
         return Ok(if plus {
             TcpInfoFlags::DEFAULT
         } else {
             TcpInfoFlags::default()
         });
-    }
+    };
     let mut flags = TcpInfoFlags::default();
     for ch in letters.chars() {
         match ch {
@@ -2035,6 +2190,42 @@ mod tests {
         }
     }
 
+    /// An empty next word is an optional value, as the C's `GetOpt` offers it
+    /// (it does not open with `-` or `+`), and the options whose value is
+    /// digits or letters take it as one with none (DIVERGENCES 116, every one
+    /// measured): it is consumed, never a path, and `+T ''` selects no TCP
+    /// information at all, where `+T` alone restores the state.
+    #[test]
+    fn an_empty_word_is_an_empty_optional_value() {
+        let tcp = |argv: &[&str]| columns(argv).unwrap().1.tcp_info();
+        assert_eq!(tcp(&["+T", ""]), TcpInfoFlags::default(), "+T ''");
+        assert_eq!(tcp(&["-T", ""]), TcpInfoFlags::default(), "-T ''");
+        assert_eq!(tcp(&["-T", "+T"]), TcpInfoFlags::DEFAULT, "+T alone");
+        assert_eq!(tcp(&["+T"]), TcpInfoFlags::DEFAULT);
+        for argv in [
+            &["-o", ""][..],
+            &["-S", ""],
+            &["-L", ""],
+            &["+L", ""],
+            &["-r", ""],
+            &["-o", "", "-S", ""],
+        ] {
+            let (c, sel) = columns(argv).unwrap();
+            assert!(sel.paths.is_empty(), "{argv:?}: '' is no path");
+            if argv[0] == "-o" {
+                assert!(c.offset && c.offset_digits == 8, "{argv:?}");
+            }
+        }
+        let (_, sel) = columns(&["-S", ""]).unwrap();
+        assert_eq!(sel.blocking.limit, 15, "no digits is the default");
+        let (c, sel) = columns(&["+L", ""]).unwrap();
+        assert!(c.nlink && sel.max_links.is_none(), "+L '' is +L");
+        assert_eq!(repeat(&["-r", ""]), Some(15));
+        // Only an empty word: one with no digits is still given back.
+        let (c, sel) = columns(&["-o", "x"]).unwrap();
+        assert!(c.offset && sel.paths == ["x"]);
+    }
+
     /// `-o [digits]`, every spelling measured against the C (DIVERGENCES 6).
     /// The value is only ever digits; anything else is given back to be
     /// parsed again, which is what makes `-ot` and `-o /file` work.
@@ -2059,9 +2250,22 @@ mod tests {
         assert!(c.offset && sel.paths == ["/tmp/x"]);
         let (c, sel) = columns(&["-o", "-p", "1"]).unwrap();
         assert!(c.offset && sel.pids == [1]);
-        // The C overflows an int here; this saturates, which means "no hex".
+        // The C sums the digits in an int and wraps, and so does this
+        // (DIVERGENCES 117): past INT_MAX - 2 every offset prints in hex.
         let (c, _) = columns(&["-o", "99999999999999999999999999"]).unwrap();
-        assert_eq!(c.offset_digits, usize::MAX);
+        assert_eq!(c.offset_digits, 0xE3FF_FFFF_u32 as i32);
+        for (typed, int) in [
+            ("2147483645", 2147483645),
+            ("2147483646", 2147483646),
+            ("2147483648", i32::MIN),
+            ("4294967295", -1),
+            ("4294967296", 0),
+            ("4294967297", 1),
+            ("9999999999", 1410065407),
+        ] {
+            let (c, _) = columns(&["-o", typed]).unwrap();
+            assert_eq!(c.offset_digits, int, "-o {typed}");
+        }
     }
 
     /// `-s` is the SIZE column without a value and a state filter with one —
@@ -4534,6 +4738,252 @@ mod tests {
         }
         match parse_over(&["-p", "1"], &["/m"], &[]).0 {
             Ok(Action::Run { mounts, .. }) => assert!(mounts.is_none()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Parse over a host whose password file knows `alice` (1000) and
+    /// `root` (0), every number being its own UID, and whose SELinux is
+    /// `selinux`, as `lsof` parses ([`parse_with_host`]).
+    fn parse_on_host(argv: &[&str], selinux: bool) -> Result<Action, String> {
+        let lookup = |v: &str| match v {
+            "alice" => UserLookup::Uid(1000),
+            "root" => UserLookup::Uid(0),
+            v if v.bytes().all(|b| b.is_ascii_digit()) => {
+                v.parse().map_or(UserLookup::Unknown, UserLookup::Uid)
+            }
+            _ => UserLookup::Unknown,
+        };
+        let enabled = || selinux;
+        let host = HostChecks {
+            lookup_user: &lookup,
+            selinux_enabled: &enabled,
+        };
+        parse_with_host(
+            argv.iter().map(|s| s.to_string()).collect(),
+            &SafeFs::in_process(),
+            &no_mounts,
+            &host,
+        )
+    }
+
+    /// The lines an `Err` prints, after main's first `lsof: `.
+    fn error_lines(got: Result<Action, String>) -> Vec<String> {
+        match got {
+            Err(e) => e.split("\nlsof: ").map(str::to_string).collect(),
+            Ok(a) => panic!("expected an error, got {a:?}"),
+        }
+    }
+
+    /// DIVERGENCES 114 and 73: what the C finds wrong while it parses — an
+    /// unknown `-u` login, `-Z` without SELinux — beats `-h`, `-v` and
+    /// `-F ?`, in option order; each measured, exit 1 with no help.
+    #[test]
+    fn host_errors_found_while_parsing_beat_help_and_version() {
+        let nosuch = "can't get UID for nosuch";
+        let z = "-Z limited to SELinux";
+        for argv in [
+            &["-h", "-u", "nosuch"][..],
+            &["-u", "nosuch", "-h"],
+            &["-h", "-u", "^nosuch"],
+            &["-h", "-g", "1", "-u", "nosuch"],
+            &["-h", "-w", "-u", "nosuch"],
+            &["-h", "-t", "-u", "nosuch"],
+            &["-v", "-u", "nosuch"],
+            &["-F", "?", "-u", "nosuch"],
+            &["-u", "nosuch", "-F", "?"],
+        ] {
+            assert_eq!(
+                error_lines(parse_on_host(argv, false)),
+                [nosuch],
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            &["-h", "-Z"][..],
+            &["-Z", "-h"],
+            &["-v", "-Z"],
+            &["-F", "?", "-Z"],
+            // `-Z` takes the next word whatever it is, `--` aside.
+            &["-Z", "-u", "nosuch"],
+            &["-Z", "-x"],
+            &["-Z", "-p"],
+            &["-Z", "-Z"],
+            &["-Z", "--", "-h"],
+            &["-Z"],
+        ] {
+            assert_eq!(error_lines(parse_on_host(argv, false)), [z], "{argv:?}");
+        }
+        // Both, in the order given, and the errors found after the loop next.
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "nosuch", "-Z"], false)),
+            [nosuch, z]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-Zctx", "-x"], false)),
+            [z, "-x must accompany +d or +D"]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "nosuch", "-hx"], false)),
+            [nosuch, "-x must accompany +d or +D"]
+        );
+        // `usage()` ends the run before the checks made after it.
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "nosuch", "-X", "-i"], false)),
+            [nosuch]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "nosuch", "-a"], false)),
+            [nosuch]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["+J", "-a"], false)),
+            ["+J is not supported"]
+        );
+        // Where SELinux is enabled `-Z` gives an option word back, and the
+        // help is the help.
+        assert!(matches!(
+            parse_on_host(&["-Z", "-h"], true),
+            Ok(Action::Help)
+        ));
+        assert!(matches!(
+            parse_on_host(&["-h", "-Z"], true),
+            Ok(Action::Help)
+        ));
+        match parse_on_host(&["-Z", "ctx"], true) {
+            Ok(Action::Run { selection, .. }) => {
+                assert_eq!(selection.selinux, Some(vec!["ctx".into()]))
+            }
+            other => panic!("{other:?}"),
+        }
+        // A known login is no error, and `-h` is acted on.
+        assert!(matches!(
+            parse_on_host(&["-u", "alice", "-h"], false),
+            Ok(Action::Help)
+        ));
+        assert!(matches!(
+            parse_on_host(&["-u", "0", "-v"], false),
+            Ok(Action::Version)
+        ));
+    }
+
+    /// `enter_uid()` item by item: a UID entered on both sides ends the parse
+    /// at that item (`lsof_select_uid()`'s `Error()`), after the unknown
+    /// logins before it and before those after it; each UID is entered once,
+    /// its first spelling kept (measured: `-u nosuch,^0,0` prints both
+    /// lines, `-u 0,^0,nosuch` and `-u root,^0 -u nosuch` the conflict alone).
+    #[test]
+    fn users_are_resolved_item_by_item() {
+        let both = "UID 0 has been included and excluded.";
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "nosuch,^0,0"], false)),
+            ["can't get UID for nosuch", both]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "0,^0,nosuch"], false)),
+            [both]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "root,^0", "-u", "nosuch"], false)),
+            [both]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "^root", "-u", "0", "-h"], false)),
+            [both]
+        );
+        match parse_on_host(&["-u", "alice,1000,^5,^5,0"], false) {
+            Ok(Action::Run { selection, .. }) => {
+                assert_eq!(
+                    selection.uids,
+                    [
+                        UidSel {
+                            uid: 1000,
+                            login: Some("alice".into())
+                        },
+                        UidSel {
+                            uid: 0,
+                            login: None
+                        }
+                    ]
+                );
+                assert_eq!(selection.uid_excludes, [5]);
+                assert!(selection.users.is_empty() && selection.user_excludes.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        // A login is escaped where the message quotes it.
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "a\u{1b}b"], false)),
+            ["can't get UID for a^[b"]
+        );
+        // A platform that selects by name keeps each item as typed.
+        match parse(vec!["-u".into(), "alice,^bob".into()]) {
+            Ok(Action::Run { selection, .. }) => {
+                assert_eq!(selection.users, ["alice"]);
+                assert_eq!(selection.user_excludes, ["bob"]);
+                assert!(selection.uids.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An error the parse reads on after is printed where the C prints it,
+    /// where it meets it: before a line the parse prints itself further on
+    /// (measured: `+J -S 0` and `-Zx -S 0` say the error first, `-S 0 +J`
+    /// the warning first), and the run still ends.
+    #[test]
+    fn read_on_errors_come_before_what_the_parse_prints_after_them() {
+        let warn = "lsof: WARNING: -S time (0) changed to 2";
+        let (got, said) = parse_saying(&["+J", "-S", "0"]);
+        assert_eq!(said, ["lsof: +J is not supported", warn]);
+        assert_eq!(got.unwrap_err(), "");
+        let (got, said) = parse_saying(&["-S", "0", "+J"]);
+        assert_eq!(said, [warn]);
+        assert_eq!(got.unwrap_err(), "+J is not supported");
+        let (got, said) = parse_saying(&["--", "x"]);
+        assert!(said.is_empty() && got.is_ok());
+        let (got, said) = parse_saying(&["+J", "-S", "0", "-h"]);
+        assert_eq!(said, ["lsof: +J is not supported", warn]);
+        assert!(got.is_err(), "no help: {got:?}");
+    }
+
+    /// DIVERGENCES 114: `--help` and `--version` are no long options to the
+    /// C. A `-` in a word is `illegal option character: -`, and the word's
+    /// other letters are read on: `-h`, then `-e lp` (measured, exit 1).
+    #[test]
+    fn double_dash_words_are_refused_as_the_c_refuses_them() {
+        let dash = "illegal option character: -";
+        let cases: &[(&[&str], &[&str])] = &[
+            (
+                &["--help"],
+                &[dash, "-e not followed by a file system path: \"lp\""],
+            ),
+            (
+                &["--version"],
+                &[dash, "-e not followed by a file system path: \"rsion\""],
+            ),
+            (
+                &["-h", "--help"],
+                &[dash, "-e not followed by a file system path: \"lp\""],
+            ),
+            (&["--h"], &[dash]),
+            (&["+-h"], &[dash]),
+            (&["---"], &[dash, dash]),
+            (&["--x"], &[dash, "-x must accompany +d or +D"]),
+        ];
+        for (argv, want) in cases {
+            // What the parse printed on the way, then what main prints.
+            let (got, said) = parse_saying(argv);
+            let mut lines: Vec<String> = said
+                .iter()
+                .map(|l| l.strip_prefix("lsof: ").unwrap_or(l).to_string())
+                .collect();
+            lines.extend(error_lines(got).into_iter().filter(|l| !l.is_empty()));
+            assert_eq!(lines, *want, "{argv:?}");
+        }
+        // `--` alone still ends the options.
+        match parse(vec!["--".into(), "-h".into()]) {
+            Ok(Action::Run { selection, .. }) => assert_eq!(selection.paths, ["-h"]),
             other => panic!("{other:?}"),
         }
     }

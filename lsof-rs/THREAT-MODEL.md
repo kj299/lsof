@@ -284,15 +284,74 @@ and they are escaped like any name; each lookup is bounded to 2 s.
 **Memory under input someone else sizes** (found 2026-10-04, from the code, not
 yet measured at scale). lsof-rs reads `/proc/net/*`, `/proc/PID/maps` and each
 `fdinfo` whole, where the C reads them a line at a time; it keeps two strings
-per socket and, for each foreign network namespace, that namespace's whole
-socket table until the run ends, although only the protocol name is read from
-it; its maps reader removes repeats with a linear scan per mapping, as the C
+per socket (until 2026-10-30 it also kept, for each foreign network namespace,
+that namespace's whole socket table, to read one protocol name from it; it now
+asks the kernel for the name instead, below); its maps reader removes repeats with a linear scan per mapping, as the C
 does, but over lines it has already copied; and listing a process's tasks
 copies the process's rows for each task before discarding them. A host with a
 million sockets, a process with 65,530 mappings of long names, an epoll fd
 watching a million fds, or a JVM with a thousand threads makes these costs
 visible; the resource gate's 400 synthetic processes cannot. DIVERGENCES 30
 and 81 hold what was measured.
+
+**A socket no table lists is named by one system call, made on a descriptor
+lsof-rs pinned first** (DIVERGENCES 22). The C names such a socket — an
+unbound UDP, UDP-Lite, TCP or netlink socket, AF_VSOCK, a ping socket, any
+socket of another network namespace — with `getxattr("/proc/PID/fd/N",
+"system.sockprotoname")`, through the link of a descriptor its owner may
+replace at any moment: a file swapped in on a FUSE file system whose daemon
+does not answer would have the C wait on that daemon (FUSE forwards `system.*`
+attributes). lsof-rs opens the link `O_PATH` (which makes no file system
+call on a local or FUSE file, and follows only the kernel's own magic link),
+then reads the pinned descriptor's own link, `/proc/self/fd/K`: the kernel
+spells it from the dentry (`d_path`) without asking any file system, and only
+a sockfs inode spells `socket:[N]`. Only when it is `socket:[inode]`, the
+inode the link named, is the attribute read, through that same
+`/proc/self/fd/K`, so the call reaches sockfs, whose handler copies a
+kernel-chosen name of at most 32 bytes into a 32-byte stack buffer; anything
+longer is `ERANGE`, and the row says `can't identify protocol`. The name is
+printed through the same escaping as every NAME. The descriptor is closed
+before the row is built. Until Batch A's review the identity check was an
+`fstat` of the pinned descriptor, and FUSE answers that: a swapped-in file on
+a mount whose server never answers held it (measured with
+`differential/fuse_hang.py`); the readlink does not, and a FUSE test pins it
+(`net.rs`, `a_swapped_in_fuse_file_is_never_asked`). What is not narrowed:
+the `O_PATH` open follows the link, and a file system that revalidates a
+dentry on open (NFS, `d_weak_revalidate`) may be asked there; and the `stat`
+of each fd's link that both binaries make before any of this is unbounded,
+as it always was (above).
+
+**One third-party crate reaches the Linux binary, for that one call.**
+`getxattr(2)` has no std API; the maintainer chose (2026-10-30) a dependency
+over FFI of the crate's own, so `lsof-backend-linux` keeps
+`#![forbid(unsafe_code)]` and the port's only `unsafe` stays in the Windows
+backend. The crate is `rustix`, pinned exactly (`=1.1.5`, a release more than
+two weeks old when it was taken), with no default features and only `fs`.
+On x86_64, aarch64, arm, riscv64 and x86 Linux it issues the system call
+itself (its `linux_raw` backend, inline assembly in `rustix`, not here) and
+compiles in `bitflags` and `linux-raw-sys` alone; `libc` and `errno` are in
+the lock file for its other targets and under miri, and are not built on
+those. All five are MIT OR Apache-2.0 (rustix and linux-raw-sys also Apache
+with the LLVM exception), allowed by `deny.toml`, from crates.io only, and
+the lock pins each by checksum (`libc` held at 0.2.190, more than two weeks
+old). What lsof-rs *asks* of the crate is one call, `getxattr` on a path it
+formatted itself, but that bounds nothing a compromised release could do.
+`rustix` ships a build script (`build.rs`, 281 lines in 1.1.5) that cargo
+compiles and runs at build time, on every developer's and CI's machine, with
+their privileges; it runs `$RUSTC` (or `$RUSTC_WRAPPER`) to probe the
+compiler. It is the only crate with a build script in the Linux build
+(`bitflags` and `linux-raw-sys` have none, and `libc`'s is built only for the
+targets and the miri runs that use it). And any code linked into lsof-rs can
+run before `main` (static constructors, `.init_array`) or wherever its call
+graph reaches, inside lsof-rs, often as root, `forbid(unsafe_code)` in this
+repository notwithstanding. The mitigations are the ones that apply to any
+dependency: the version is exact (`=1.1.5`), so no release is taken without
+an edit here; `Cargo.lock` (and `fuzz/Cargo.lock`) pin each crate by
+checksum, so a crates.io artifact that changed under the same version fails
+the build; `cargo deny check` gates licences, sources (crates.io only),
+bans and advisories in CI; and a bump is a change of its own, reviewed
+(including its `build.rs`), taken at least two weeks after publication. The
+Windows binary links no new crate.
 
 **The environment surface is two variables.** The C `lsof` reads considerably
 more, including the personal device-cache path; lsof-rs's whole environment

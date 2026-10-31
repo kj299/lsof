@@ -4,7 +4,13 @@
 #
 # The whole third-party dependency tree is the `windows-sys` family
 # (windows-sys -> windows-targets -> the per-arch import-lib shims), all
-# MIT OR Apache-2.0. lsof-rs's own crates are `publish = false` with
+# MIT OR Apache-2.0, and, for the Linux backend's one `getxattr(2)`
+# (DIVERGENCES 22, 2026-10-30), `rustix` pinned at =1.1.5 with `bitflags`
+# and `linux-raw-sys` (and, for rustix's other targets only, `libc` and
+# `errno`), each MIT OR Apache-2.0 at least: rustix and linux-raw-sys are
+# `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`, which the allow
+# list below satisfies through either plain licence, so nothing new is
+# allowed for them. lsof-rs's own crates are `publish = false` with
 # LicenseRef-lsof and are skipped via `private.ignore`.
 
 [advisories]

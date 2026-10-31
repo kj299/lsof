@@ -11,6 +11,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — BREAKING
+- **`--help` and `--version` are refused**, as the C refuses them
+  (DIVERGENCES 114): they had been lsof-rs long options (help on stderr,
+  version on stdout, exit 0). To the C a `-` inside an option word is
+  `illegal option character: -`, and the word's other letters are read on,
+  so `lsof --help` prints that, then `-e not followed by a file system path:
+  "lp"` (its `-h` and `-e lp`), and exits 1; `--version` the same with
+  `"rsion"`. Use `lsof -h` and `lsof -v`. Every platform; `--etw`,
+  `--unicode` and `--ascii`, lsof-rs's own, are unchanged.
+
 ### Changed — output and exit status a script may notice
 - **A row a path argument finds is named by that argument**, as the C names
   it (DIVERGENCES 139, 17; both were the name the process opened). NAME,
@@ -31,10 +41,75 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   keeps eight characters (uid 3000000000 is `30000000`), and `-F u` and
   JSON's `uid` are a signed `int` (`-1294967296`). Linux only: Windows has no
   uid.
+- **`-h` and `-?` write the help to stderr**, and exit 0, as the C writes its
+  usage (DIVERGENCES 114): `lsof -h 2>/dev/null` prints nothing. Every
+  platform; the Windows smoke tests read it there.
+- **An unknown `-u` login and `-Z` without SELinux beat `-h`, `-v` and
+  `-F ?`** (114, 73): the C finds both while it reads its options, so
+  `lsof -h -u nosuch`, `lsof -v -Z` and `lsof -F ? -u nosuch` print the
+  error and exit 1, where lsof-rs had printed the help or version and exited
+  0. The errors come in option order, with the others the C reads on after
+  (`+J`), and end the run before `-X -i` and `-a` are checked. A refused
+  `-Z` takes the next word as its value, as the C's does (`-Z -h` is the
+  refusal alone). `-u root,^0 -u nosuch` stops at the conflict.
+- **An empty word after an option is that option's empty value** (116), as
+  the C's option scanner offers it: `+T ''` selects no TCP information (a
+  unix socket loses its `(CONNECTED)`), and `-o ''`, `-S ''`, `-L ''`, `+L
+  ''` and `-r ''` are the option alone, the `''` consumed rather than taken
+  as a path (`status error on :`, exit 1).
+- **`-o` with a digit count past 2147483645 prints every offset in hex**,
+  zero as `0`, as the C's `int` arithmetic does (117): the count is summed
+  in a wrapping `int` (`-o 4294967296` is no limit, `-o 4294967297` one
+  digit) and compared with the offset's length plus two, which wraps too.
+- **A newline in a command or thread name is `?`** (58), as the C reads it
+  from `stat`: COMMAND, TASKCMD, `-F c`, `-F M`, JSON, and what `-c` matches.
+- **USER is padded by bytes** (71): a login `jöhn` fills a five-wide column.
+- **`lsof: no pwd entry for UID N`** on stderr for an owner no password entry
+  names (36), as often as the C's `printuid()` looks it up: twice per table
+  row, once per `-F` process set with `L` and per `-J` process, once per
+  `-j` line; never under `-l`, `-w` or `-t`. Linux only. lsof-rs writes
+  them before the listing; the C writes the printing pass's where its stdout
+  buffer flushes, so on a merged stream (`2>&1`) past 4 KiB of listing the
+  lines sit elsewhere, while each stream alone is byte-identical (not
+  emulated; DIVERGENCES 36).
+- **A failing stderr no longer stops a run**: a warning or the help that
+  cannot be written is dropped, as the C's unchecked `fprintf(stderr)` does,
+  and the listing goes on (`lsof 2>/dev/full` had panicked, exit 101,
+  before its first row on a host with a nameless owner); a stderr whose
+  reader has gone exits 141, the shell's status for the C's SIGPIPE.
+- **A POSIX message queue is typed `PSXMQ`** (128): a regular file on the
+  `mqueue` file system the mount table recorded. `REG` on a run that reads
+  no table (`-i` alone) and under `-b`.
+- **A bound netlink socket is typed `netlink`** and named by its protocol
+  from `/proc/net/netlink` (`ROUTE`, `GENERIC`, `unknown protocol: 17`), with
+  no DEVICE (109); `-X` does not gate it.
+- **A socket no `/proc/net` table lists is named by the kernel**, from its
+  `system.sockprotoname` extended attribute, as the C names it (22): `sock
+  0,9 0t0 N protocol: UDP` for an unbound UDP, UDP-Lite, netlink or TCP
+  socket, a ping socket (`PING`), AF_VSOCK, and every socket in another
+  network namespace; `can't identify protocol` when the attribute cannot be
+  read. lsof-rs had printed `SOCK 0,9 0 N socket:[N]` for the first kinds,
+  and named the last by reading the other namespace's tables, which it no
+  longer does.
 
 ### Added
 - The Windows smoke harness checks `-b` (`avoid-blocking-dash-b`), which
   takes `opt:b` off the Windows coverage waivers.
+- **A dependency, for one system call**: the Linux backend makes
+  `getxattr(2)` through `rustix` (=1.1.5, no default features, `fs` only;
+  with `bitflags` and `linux-raw-sys`, MIT OR Apache-2.0), which std has no
+  API for (DIVERGENCES 22, the maintainer's decision of 2026-10-30). The
+  backend keeps `#![forbid(unsafe_code)]`. Before reading the attribute it
+  opens the fd's link `O_PATH` and checks that the pinned descriptor's own
+  `/proc/self/fd/K` link reads `socket:[N]`, the socket the link named, which
+  the kernel answers without asking any file system, so a descriptor replaced
+  meanwhile by a file on a FUSE file system that does not answer is never
+  asked (THREAT-MODEL; a FUSE test pins it).
+- Differential fixtures NLK (netlink and unlisted sockets), NSX (the same in
+  another network namespace, with a ping socket), NLC (a newline in a
+  command), MQ (POSIX message queues), and W's WJ and WA (owners a password
+  file of the run's own names, one with a multibyte login); the mount-table
+  wrapper's `passwd` and `mqueue` modes; and cases for each item above.
 
 ## [2.0.0] — 2026-10-17
 

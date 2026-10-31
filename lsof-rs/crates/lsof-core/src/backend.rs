@@ -109,8 +109,9 @@ pub struct MountTable {
     /// The device of the last `mqueue` mount recorded (the C's
     /// `MqueueDev`), what a POSIX message queue's descriptor is on. `None`
     /// when there is none, or it was `-e`/`+e`'s and so never `stat`ed.
-    /// Read by nothing yet: the C types a regular file there `PSXMQ`, and
-    /// lsof-rs does not (DIVERGENCES 128, OPEN), whose step this is kept for.
+    /// A regular file there is typed `PSXMQ`, as the C types it
+    /// (DIVERGENCES 128): the CLI hands it to the backend as
+    /// [`Selection::mqueue_device`](crate::Selection::mqueue_device).
     pub mqueue_device: Option<u64>,
 }
 

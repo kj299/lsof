@@ -4,7 +4,9 @@
 //! fuzzed (see `../../fuzz/`) independently of the `lsof` binary in `main.rs`,
 //! which remains the primary artifact.
 //!
-//! Like `lsof-core` it is dependency-free and `#![forbid(unsafe_code)]`. The
+//! Like `lsof-core` it has no third-party dependency of its own (on Linux the
+//! backend it links brings `rustix`, for one `getxattr`) and is
+//! `#![forbid(unsafe_code)]`. The
 //! attribute is per crate root, and this package builds two crates, so the
 //! binary in `main.rs` carries its own copy.
 #![forbid(unsafe_code)]

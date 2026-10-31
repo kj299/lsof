@@ -304,7 +304,8 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
 
     # ===================== CLI / parsing =====================
     Test-Case 'version' 'cli' { $r = Invoke-Lsof @('-v') 'version'; Assert-Contains $r.Out 'lsof-rs'; "exit=$($r.Exit)" }
-    Test-Case 'help-usage' 'cli' { $r = Invoke-Lsof @('-h') 'help'; Assert-Contains $r.Out 'USAGE'; Assert-Contains $r.Out '-i' }
+    # The help is on stderr, as the C writes it (DIVERGENCES 114).
+    Test-Case 'help-usage' 'cli' { $r = Invoke-Lsof @('-h') 'help'; Assert-Contains $r.Err 'USAGE' 'stderr'; Assert-Contains $r.Err '-i' 'stderr'; Assert ([string]::IsNullOrEmpty($r.Out)) 'help on stdout' }
     # A rejection test pinned to a letter expires the day the letter is
     # implemented: this case named `-Z` and went red on the first Windows run
     # after P4 gave -Z its gate (the unit test of the same name had expired the
@@ -694,7 +695,7 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         Assert ($fc.StartsWith($dc)) "the capped cell is a prefix of the full one ('$dc' vs '$fc')"
     }
     Test-Case 'help-alias-question' 'misc/-?' {
-        $r = Invoke-Lsof @('-?') 'q-help'; Assert-Contains $r.Out 'USAGE'
+        $r = Invoke-Lsof @('-?') 'q-help'; Assert-Contains $r.Err 'USAGE' 'stderr'
     }
     Test-Case 'filesystem-args-dash-f-plus-f' 'selection/-f +f' {
         # A path argument naming a MOUNT POINT selects every open file on that

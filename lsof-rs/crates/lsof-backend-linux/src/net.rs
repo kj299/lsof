@@ -6,26 +6,24 @@
 //! socket in the network namespace with its inode in a column. Read those once,
 //! index by inode, and every socket fd can be resolved by lookup.
 //!
-//! # Namespaces
+//! # What no table lists
 //!
 //! `/proc/net` resolves to the *calling* process's network namespace, so a
-//! process inside a container has its sockets in tables this one cannot see.
-//! [`NetnsTables`] is the fallback: for an inode the main table misses, it
-//! reads the owning process's own `/proc/<pid>/net/*` and caches the result by
-//! namespace, so the cost is one extra table read per distinct namespace that
-//! actually holds an unresolved socket — nothing at all on a host with one.
-//!
-//! What it recovers is the **protocol name**, not the address, because that is
-//! all the C shows: `sock … protocol: TCP`. The C gets it from the
-//! `system.sockprotoname` extended attribute rather than from any table
-//! (`dsock.c`), which is why it can name families that have no `/proc/net`
-//! file at all — see the ledger entry on AF_VSOCK. Reading the namespace's
-//! table gives this port the same answer for every family that has one, in
-//! safe dependency-free Rust, and it deliberately does not print the address
-//! it happens to learn on the way: matching the C is the contract.
+//! process inside a container has its sockets in tables this one cannot see;
+//! and some sockets are in no table at all — AF_VSOCK, which has none, and a
+//! UDP, UDP-Lite, TCP or netlink socket never bound. The C reads only its own
+//! namespace's tables and names every such socket from the
+//! `system.sockprotoname` extended attribute (`dsock.c`): `sock … protocol:
+//! TCP`, the kernel's name for the socket's `struct proto`, never an
+//! address. [`SockProtoNames`] does the same (DIVERGENCES 22): the one call
+//! std has no API for is made through `rustix`, on a descriptor pinned
+//! `O_PATH` first ([`sock_proto_name`]). Until 2026-10-30 this module read
+//! the owner's own `/proc/<pid>/net` instead, which named only families
+//! with a table.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::Path;
 
 use lsof_core::model::{FileType, Protocol, SocketInfo, TcpExtInfo, TcpState, UnixState};
 
@@ -60,30 +58,6 @@ pub struct SocketEntry {
     /// row's state comes from, so it lands in `info.state` here and reaches
     /// `-F` as a `TST=` token. A packet socket has no state at all.
     pub type_suffix: Option<String>,
-    /// The name the kernel would answer for this socket's
-    /// `system.sockprotoname` extended attribute — the *only* thing the C
-    /// prints for a socket its own `/proc/net` tables missed, which is what
-    /// [`NetnsTables::protocol_for`] reproduces (`sock … protocol: TCP`).
-    ///
-    /// It is deliberately not `info.protocol`, because for two families the
-    /// two differ, and both were measured against the C on sockets held inside
-    /// a foreign network namespace:
-    ///
-    /// | family | `system.sockprotoname` | `info.protocol` |
-    /// |---|---|---|
-    /// | AF_UNIX, `SOCK_STREAM` | `UNIX-STREAM` | `unix` |
-    /// | AF_UNIX, dgram or seqpacket | `UNIX` | `unix` |
-    /// | AF_PACKET | `PACKET` | `packet` |
-    /// | UDP-Lite | `UDP-Lite` | `UDPLITE` |
-    /// | raw, `IPPROTO_ICMP` too | `RAW` | none |
-    ///
-    /// The kernel names these after the `struct proto` the socket uses rather
-    /// than after its family — `unix_stream_proto` and `unix_dgram_proto` —
-    /// which is why `SOCK_SEQPACKET` reports `UNIX` and not `UNIX-SEQPACKET`.
-    /// An IPv6 socket's `struct proto` has a name of its own: `TCPv6`,
-    /// `UDPv6`, `UDPLITEv6`, `RAWv6` (the kernel's `tcpv6_prot` and its
-    /// siblings; not measured, this host having no IPv6).
-    pub kernel_proto: &'static str,
 }
 
 #[derive(Default)]
@@ -134,36 +108,13 @@ impl SocketTable {
             t.load_raw("/proc/net/raw6", true);
         }
         t.load_raw("/proc/net/raw", false);
+        // Not gated by `-X` either: the C reads it unconditionally
+        // (`dsock.c:3590`), and a bound netlink socket keeps its `netlink`
+        // row under `-X` (measured).
+        t.load_netlink("/proc/net/netlink");
         t.load_packet("/proc/net/packet");
         t.load_unix("/proc/net/unix");
         t
-    }
-
-    /// The same tables, read through `/proc/<pid>/net/` — that process's own
-    /// network namespace rather than this one's.
-    ///
-    /// `None` when the directory yields nothing at all (the process exited, or
-    /// its `/proc/<pid>/net` is unreadable), so the caller can cache the
-    /// failure instead of retrying per fd. Queue columns are never wanted
-    /// here: `-T` reports on sockets this process can see, and one it cannot
-    /// resolve has no queue to show.
-    pub fn load_for_pid(pid: u32) -> Option<Self> {
-        let base = format!("/proc/{pid}/net");
-        if std::fs::metadata(&base).is_err() {
-            return None;
-        }
-        let mut t = SocketTable::default();
-        t.load_inet(&format!("{base}/tcp"), Protocol::Tcp, false, false);
-        t.load_inet(&format!("{base}/tcp6"), Protocol::Tcp, true, false);
-        t.load_inet(&format!("{base}/udp"), Protocol::Udp, false, false);
-        t.load_inet(&format!("{base}/udp6"), Protocol::Udp, true, false);
-        t.load_inet(&format!("{base}/udplite"), Protocol::UdpLite, false, false);
-        t.load_inet(&format!("{base}/udplite6"), Protocol::UdpLite, true, false);
-        t.load_raw(&format!("{base}/raw"), false);
-        t.load_raw(&format!("{base}/raw6"), true);
-        t.load_packet(&format!("{base}/packet"));
-        t.load_unix(&format!("{base}/unix"));
-        Some(t)
     }
 
     pub fn get(&self, inode: u64) -> Option<&SocketEntry> {
@@ -248,7 +199,6 @@ impl SocketTable {
                     node: proto.as_str().to_string(),
                     name: None,
                     type_suffix: None,
-                    kernel_proto: inet_kernel_proto(proto, v6),
                 },
             );
         }
@@ -291,12 +241,65 @@ impl SocketTable {
                     node: inode.to_string(),
                     name: Some(name),
                     type_suffix: None,
-                    // `raw_prot` and `rawv6_prot`, whatever the IP protocol:
-                    // measured, a raw ICMP socket in another namespace is
-                    // `protocol: RAW` to the C.
-                    kernel_proto: if v6 { "RAWv6" } else { "RAW" },
                 },
             );
+        }
+    }
+
+    /// `/proc/net/netlink` — the netlink sockets the kernel has bound, which
+    /// the C types `netlink` and names by protocol (`get_netlink()`,
+    /// `dsock.c:3595-3611`, DIVERGENCES 109). An unbound netlink socket is
+    /// not listed here (its inode column is that of no socket yet), and is
+    /// named from `system.sockprotoname` instead: `sock … protocol: NETLINK`.
+    fn load_netlink(&mut self, path: &str) {
+        if let Some(text) = crate::text::read_lossy(path) {
+            self.parse_netlink(&text);
+        }
+    }
+
+    /// The parsing half of [`Self::load_netlink`]. Pure; must never panic.
+    ///
+    /// As the C reads it: a line of fewer than ten fields is skipped, header
+    /// included; the header must say `Eth` in its second column and `Inode`
+    /// in its tenth, or the whole table is dropped (the C warns
+    /// `unsupported format` and stops reading); the inode is the tenth
+    /// column, and a line whose inode is already recorded keeps the first;
+    /// the protocol is the `Eth` column through `atoi()`, so a value that is
+    /// no number is protocol 0. A row is TYPE `netlink`, no DEVICE, SIZE/OFF
+    /// `0t0`, NODE the inode and NAME the protocol's name, or `unknown
+    /// protocol: N` (measured: `ROUTE`, `KOBJECT_UEVENT`, `GENERIC`).
+    pub fn parse_netlink(&mut self, text: &str) {
+        let mut lines = text
+            .lines()
+            .filter(|l| l.split_whitespace().nth(9).is_some());
+        match lines.next() {
+            Some(h) => {
+                let f: Vec<&str> = h.split_whitespace().collect();
+                if f.get(NETLINK_ETH) != Some(&"Eth") || f.get(NETLINK_INODE) != Some(&"Inode") {
+                    return;
+                }
+            }
+            None => return,
+        }
+        for line in lines {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let (Some(eth), Some(ino)) = (f.get(NETLINK_ETH), f.get(NETLINK_INODE)) else {
+                continue;
+            };
+            let Ok(inode) = ino.parse::<u64>() else {
+                continue;
+            };
+            let proto = leading_u32(eth);
+            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {
+                // The C's LSOF_FILE_NETLINK.
+                file_type: FileType::Socket("netlink"),
+                info: None,
+                path: None,
+                device: None,
+                node: inode.to_string(),
+                name: Some(netlink_name(proto)),
+                type_suffix: None,
+            });
         }
     }
 
@@ -378,7 +381,6 @@ impl SocketTable {
                     node: packet_node(proto),
                     name: None,
                     type_suffix: Some(socket_type_suffix(ty)),
-                    kernel_proto: "PACKET",
                 },
             );
         }
@@ -476,38 +478,9 @@ impl SocketTable {
                     node: inode.to_string(),
                     name: None,
                     type_suffix: Some(unix_suffix(f[UNIX_TYPE])),
-                    kernel_proto: unix_kernel_proto(f[UNIX_TYPE]),
                 },
             );
         }
-    }
-}
-
-/// What the kernel calls an Internet socket in `system.sockprotoname`: its
-/// `struct proto`'s name, `UDP-Lite` for UDP-Lite (measured) and the IPv6
-/// protocols' own (`net/ipv6/tcp_ipv6.c` and its siblings; unmeasured here).
-fn inet_kernel_proto(proto: Protocol, v6: bool) -> &'static str {
-    match (proto, v6) {
-        (Protocol::Tcp, true) => "TCPv6",
-        (Protocol::Udp, true) => "UDPv6",
-        (Protocol::UdpLite, false) => "UDP-Lite",
-        (Protocol::UdpLite, true) => "UDPLITEv6",
-        (proto, _) => proto.as_str(),
-    }
-}
-
-/// What the kernel calls an AF_UNIX socket in `system.sockprotoname`, read
-/// from the same `Type` column as [`unix_suffix`].
-///
-/// `UNIX-STREAM` for a stream socket and `UNIX` for everything else, including
-/// `SOCK_SEQPACKET`: the name comes from the `struct proto` the socket uses,
-/// and seqpacket shares `unix_dgram_proto`. Measured against the C, which
-/// printed `protocol: UNIX-STREAM`, `protocol: UNIX` and `protocol: UNIX` for
-/// stream, dgram and seqpacket sockets held in a foreign namespace.
-pub fn unix_kernel_proto(ty: &str) -> &'static str {
-    match u32::from_str_radix(ty, 16) {
-        Ok(1) => "UNIX-STREAM",
-        _ => "UNIX",
     }
 }
 
@@ -557,6 +530,9 @@ const INET_STATE: usize = 3;
 const INET_QUEUES: usize = 4;
 const INET_INODE: usize = 9;
 //   Num RefCount Protocol Flags Type St Inode Path
+/// `/proc/net/netlink`'s columns as the C indexes them (`get_netlink()`).
+const NETLINK_ETH: usize = 1;
+const NETLINK_INODE: usize = 9;
 const PACKET_TYPE: usize = 2;
 const PACKET_PROTO: usize = 3;
 const PACKET_INODE: usize = 8;
@@ -672,54 +648,42 @@ pub fn socket_inode(target: &str) -> Option<u64> {
         .ok()
 }
 
-/// The per-namespace fallback for sockets the main table cannot see.
-///
-/// Keyed by the namespace itself (`readlink /proc/<pid>/ns/net`, e.g.
-/// `net:[4026532259]`) and not by pid, so a hundred processes sharing one
-/// container's namespace read its tables once. Built lazily: a host where
-/// every socket resolves from `/proc/net` never opens a single extra file.
-#[derive(Default)]
-pub struct NetnsTables {
-    /// `None` for a namespace whose tables could not be read at all — cached
-    /// so a permission error is paid once rather than per fd.
-    by_ns: std::cell::RefCell<HashMap<String, Option<SocketTable>>>,
-    /// pid -> its namespace, so a process holding many unresolved sockets
-    /// costs one `readlink` rather than one per fd. A proxy inside a container
-    /// is exactly that shape.
-    by_pid: std::cell::RefCell<HashMap<u32, Option<String>>>,
-    /// The calling process's own namespace. Its sockets are already in the
-    /// main table, so a process sharing it is skipped without any work.
-    own: Option<String>,
+/// What names a socket this namespace's `/proc/net` tables do not list, as
+/// the C names it (`process_proc_sock()`, `dsock.c:4145-4166`, DIVERGENCES
+/// 22): the `system.sockprotoname` extended attribute the kernel gives every
+/// socket, read through the fd's link, `sock … protocol: UDP`. That covers a
+/// family with no table at all (AF_VSOCK), a socket no table lists yet (an
+/// unbound UDP, UDP-Lite or netlink socket, a TCP socket bound and never
+/// listening, a ping socket) and a socket in another network namespace,
+/// which the C's tables, read from its own `/proc/net`, never list: each is
+/// named by the kernel's `struct proto` name (`TCP`, `UDP-Lite`, `RAW`,
+/// `UNIX-STREAM`, `PACKET`, `NETLINK`, `AF_VSOCK`, `PING`, all measured).
+/// Under `-X` the C does not look, and says so.
+pub struct SockProtoNames {
     /// `-X`. The C reads `system.sockprotoname` in exactly the branch this
     /// type stands in for, and `-X` replaces that read with a fixed string
-    /// (`dsock.c:4155`) — so under it there is nothing to look up and no
-    /// namespace to read.
+    /// (`dsock.c:4155`) — so under it there is nothing to look up.
     skip_inet: bool,
 }
 
-impl NetnsTables {
+impl SockProtoNames {
     pub fn new(skip_inet: bool) -> Self {
-        Self {
-            by_ns: std::cell::RefCell::new(HashMap::new()),
-            by_pid: std::cell::RefCell::new(HashMap::new()),
-            own: netns_of("self"),
-            skip_inet,
-        }
+        Self { skip_inet }
     }
 
-    /// The NAME cell for a socket the main table could not explain, or `None`
-    /// to leave the row as the bare `socket:[inode]` the link target gives.
-    ///
-    /// Two shapes, both the C's: `protocol: TCP` from the namespace lookup,
-    /// and under `-X` the fixed `can't identify protocol (-X specified)` —
-    /// which the C emits *instead of* reading the xattr, so the lookup is
-    /// skipped rather than performed and discarded.
-    pub fn unresolved_name(&self, pid: u32, inode: u64) -> Option<String> {
+    /// The NAME cell for socket `inode`, held by the fd whose magic link is
+    /// `link` (`/proc/PID/fd/N`), which no table lists: `protocol: TCP`,
+    /// `can't identify protocol` when the attribute cannot be read, and
+    /// under `-X` the fixed `can't identify protocol (-X specified)`, which
+    /// the C emits *instead of* reading it.
+    pub fn unlisted_name(&self, link: &Path, inode: u64) -> String {
         if self.skip_inet {
-            return Some(self.unidentified().to_string());
+            return self.unidentified().to_string();
         }
-        self.protocol_for(pid, inode)
-            .map(|proto| format!("protocol: {proto}"))
+        match sock_proto_name(link, inode) {
+            Some(proto) => format!("protocol: {proto}"),
+            None => self.unidentified().to_string(),
+        }
     }
 
     /// NAME for a socket the C cannot name: what `process_proc_sock()`
@@ -732,46 +696,82 @@ impl NetnsTables {
             "can't identify protocol"
         }
     }
+}
 
-    /// The protocol name for `inode` as `pid`'s own namespace sees it —
-    /// `TCP`, `UDP`, `RAW`, `UNIX` — or `None` when this port cannot tell.
-    ///
-    /// `None` is not the same as "no such socket": a socket no `/proc/net`
-    /// table lists (AF_VSOCK, an unbound netlink socket, a ping socket) lands
-    /// here too, and the C still names it from an xattr this crate has no safe
-    /// way to read.
-    pub fn protocol_for(&self, pid: u32, inode: u64) -> Option<String> {
-        let ns = self
-            .by_pid
-            .borrow_mut()
-            .entry(pid)
-            .or_insert_with(|| netns_of(&pid.to_string()))
-            .clone()?;
-        // Same namespace as ours: the main table already had its chance, and
-        // re-reading the identical files would only cost time.
-        if self.own.as_deref() == Some(ns.as_str()) {
-            return None;
-        }
-        let mut cache = self.by_ns.borrow_mut();
-        let table = cache
-            .entry(ns)
-            .or_insert_with(|| SocketTable::load_for_pid(pid));
-        let e = table.as_ref()?.get(inode)?;
-        // The PROTOCOL name, which is what the C shows here -- never the
-        // address, and never `node`, which is the protocol only for internet
-        // sockets. The C reads this from `system.sockprotoname`, so what has
-        // to be reproduced is the KERNEL's name for the socket, which is not
-        // always the port's own `info.protocol`: see `kernel_proto`.
-        Some(e.kernel_proto.to_string())
+/// The `system.sockprotoname` extended attribute of socket `inode`, through
+/// the fd link `link` that holds it — what the C's `getxattr(pbr,
+/// "system.sockprotoname", …)` reads, with `pbr` the same `/proc/PID/fd/N`
+/// (measured with strace). The value is the kernel's protocol name with its
+/// NUL; what precedes the first NUL is the name.
+///
+/// The C asks through the link itself, so a descriptor its owner replaced
+/// between the C's `stat` and this call is asked instead — and a file on a
+/// FUSE file system that does not answer would hold the run, since FUSE
+/// sends `system.*` attributes to its daemon. Here the link is first opened
+/// `O_PATH`, which makes no file system call on a local or FUSE file. The
+/// pinned descriptor's own link, `/proc/self/fd/K`, is then read: the kernel
+/// spells it from the dentry (`d_path`), asking no file system, and only a
+/// sockfs inode spells `socket:[N]`. Only when it is `socket:[inode]` is the
+/// attribute read, through that same `/proc/self/fd/K`, so the call reaches
+/// sockfs, whose handler only copies a name, whatever the owner does
+/// meanwhile. (An `fstat` of the pinned descriptor had been the check, and
+/// FUSE answers that one: a swapped-in file on a hung FUSE mount held it,
+/// measured with `fuse_hang.py`.) What remains: the `O_PATH` open follows
+/// the link, and a file system that revalidates a dentry on open
+/// (`d_weak_revalidate`, NFS) may be asked then; the C's own `stat` of the
+/// same link, made before, asks every file system anyway.
+///
+/// `None` when any step fails, which the C prints as `can't identify
+/// protocol`. The descriptor is closed on return.
+pub fn sock_proto_name(link: &Path, inode: u64) -> Option<String> {
+    // miri implements neither `O_PATH` nor `getxattr`; under it the row is
+    // the one a failed `getxattr()` gives.
+    if cfg!(miri) {
+        return None;
     }
+    use std::os::unix::fs::OpenOptionsExt;
+    let pinned = std::fs::OpenOptions::new()
+        .read(true)
+        // The architecture's own `O_PATH` (it is not one number on all).
+        .custom_flags(i32::try_from(rustix::fs::OFlags::PATH.bits()).ok()?)
+        .open(link)
+        .ok()?;
+    let through = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&pinned));
+    let names = std::fs::read_link(&through).ok()?;
+    if !is_socket_link(names.as_os_str().as_encoded_bytes(), inode) {
+        return None;
+    }
+    read_proto_name(|value| {
+        rustix::fs::getxattr(through.as_str(), "system.sockprotoname", value).ok()
+    })
 }
 
-/// `readlink /proc/<who>/ns/net`, the namespace's identity as a string.
-fn netns_of(who: &str) -> Option<String> {
-    std::fs::read_link(format!("/proc/{who}/ns/net"))
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
+/// Whether a descriptor's `/proc` link text names socket `inode`: exactly
+/// `socket:[inode]`, as sockfs spells it (`sockfs_dname()`).
+fn is_socket_link(text: &[u8], inode: u64) -> bool {
+    text == format!("socket:[{inode}]").as_bytes()
 }
+
+/// The protocol name `get` reads into a [`SOCKPROTONAME_MAX`]-byte buffer,
+/// which it fills as `getxattr(2)` does and says how many bytes it wrote:
+/// what precedes the first NUL, decoded lossily (the kernel chooses it, and
+/// NAME escaping prints it). `None` when `get` fails (`ERANGE` for a buffer
+/// too small, `ENODATA`, …) or claims more than the buffer.
+fn read_proto_name(get: impl FnOnce(&mut [u8]) -> Option<usize>) -> Option<String> {
+    let mut value = [0u8; SOCKPROTONAME_MAX];
+    let len = get(&mut value[..])?;
+    let value = value.get(..len)?;
+    let name = value.split(|&b| b == 0).next().unwrap_or_default();
+    Some(String::from_utf8_lossy(name).into_owned())
+}
+
+/// Room for a `system.sockprotoname` value: the kernel's `struct proto` names
+/// it from a `char name[32]`, NUL included, and `sockfs_getxattr()` copies
+/// `strlen + 1` bytes or fails with `ERANGE`, which is `can't identify
+/// protocol` (the C's buffer is the rest of its NAME buffer, so it would
+/// print a longer one; no kernel has one). Real names reach 18 bytes with the
+/// NUL (`IEEE-802.15.4-MAC`), past any this host's fixtures make.
+const SOCKPROTONAME_MAX: usize = 32;
 
 /// The NODE cell of an AF_PACKET row: the ethernet protocol's name, or its
 /// number when the table below has none.
@@ -929,6 +929,42 @@ fn ethernet_proto(proto: u32) -> Option<&'static str> {
     })
 }
 
+/// A netlink socket's NAME: its protocol's name from the C's
+/// `netlink_proto_to_str()` (`dsock.c:4291-4427`), every `NETLINK_*` the
+/// oracle's headers define, or `unknown protocol: N` for a number it has no
+/// name for (`dsock.c:3606`). The numbers are the kernel's ABI
+/// (`linux/netlink.h`); 4 is `NETLINK_SOCK_DIAG`, which the C names by its
+/// older alias, `INET_DIAG`, and 17 has no name.
+pub fn netlink_name(proto: u32) -> String {
+    let name = match proto {
+        0 => "ROUTE",
+        1 => "UNUSED",
+        2 => "USERSOCK",
+        3 => "FIREWALL",
+        4 => "INET_DIAG",
+        5 => "NFLOG",
+        6 => "XFRM",
+        7 => "SELINUX",
+        8 => "ISCSI",
+        9 => "AUDIT",
+        10 => "FIB_LOOKUP",
+        11 => "CONNECTOR",
+        12 => "NETFILTER",
+        13 => "IP6_FW",
+        14 => "DNRTMSG",
+        15 => "KOBJECT_UEVENT",
+        16 => "GENERIC",
+        18 => "SCSITRANSPORT",
+        19 => "ECRYPTFS",
+        20 => "RDMA",
+        21 => "CRYPTO",
+        22 => "SMC",
+        // `%d` of the C's `int`: a number past `INT_MAX` prints negative.
+        _ => return format!("unknown protocol: {}", proto as i32),
+    };
+    name.to_string()
+}
+
 /// C's `atoi()` on the `Type` column: leading digits, and 0 for anything else.
 ///
 /// The C reads that column with `atoi()`, which has no failure to report, so a
@@ -1051,7 +1087,6 @@ mod tests {
         assert_eq!(bound.file_type, FileType::Ipv4);
         assert_eq!(bound.node, "UDPLITE");
         assert_eq!(bound.device.as_deref(), Some("390777"));
-        assert_eq!(bound.kernel_proto, "UDP-Lite");
         let info = bound.info.as_ref().unwrap();
         assert_eq!(info.display_name(false, false), "127.0.0.1:41960");
         assert_eq!(info.filter_state(), Some(TcpState::Close));
@@ -1064,9 +1099,6 @@ mod tests {
         );
         assert_eq!(conn.filter_state(), Some(TcpState::Established));
         assert_eq!(conn.shown_state(), None, "no (ESTABLISHED), measured");
-        let mut t6 = SocketTable::default();
-        t6.parse_inet(text, Protocol::UdpLite, true, false);
-        assert_eq!(t6.get(390777).map(|e| e.kernel_proto), Some("UDPLITEv6"));
     }
 
     /// `/proc/net/raw` as the kernel wrote it for a raw ICMP and a raw
@@ -1091,34 +1123,11 @@ mod tests {
             assert_eq!(e.name.as_deref(), Some(name));
             assert_eq!(e.node, inode.to_string());
             assert!(e.device.is_none() && e.info.is_none());
-            assert_eq!(e.kernel_proto, "RAW");
         }
         let mut t6 = SocketTable::default();
         t6.parse_raw(text, true);
         let e = t6.get(390778).unwrap();
-        assert_eq!(
-            (&e.file_type, e.kernel_proto),
-            (&FileType::Socket("raw6"), "RAWv6")
-        );
-    }
-
-    #[test]
-    fn the_v6_tables_name_their_kernel_protocols() {
-        let line = "  sl local rem st q x x x uid t inode\n 0: 00000000000000000000000001000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 77\n";
-        for (proto, v6, want) in [
-            (Protocol::Tcp, false, "TCP"),
-            (Protocol::Tcp, true, "TCPv6"),
-            (Protocol::Udp, false, "UDP"),
-            (Protocol::Udp, true, "UDPv6"),
-        ] {
-            let mut t = SocketTable::default();
-            t.parse_inet(line, proto, v6, false);
-            assert_eq!(
-                t.get(77).map(|e| e.kernel_proto),
-                Some(want),
-                "{proto:?} {v6}"
-            );
-        }
+        assert_eq!(e.file_type, FileType::Socket("raw6"));
     }
 
     #[test]
@@ -1218,7 +1227,7 @@ mod tests {
             match &e.file_type {
                 FileType::Ipv4 | FileType::Ipv6 | FileType::Unix => {}
                 FileType::Other(c) if c == "pack" => {}
-                FileType::Socket("raw" | "raw6") => {}
+                FileType::Socket("raw" | "raw6" | "netlink") => {}
                 other => panic!("unexpected socket file type {other:?}"),
             }
         }
@@ -1333,6 +1342,13 @@ mod tests {
                         e.node
                     );
                     assert!(e.info.is_none(), "a raw row is no Internet file");
+                }
+                FileType::Socket("netlink") => {
+                    // netlink  DEVICE blank, NODE = inode, NAME = protocol
+                    assert!(e.device.is_none(), "a netlink DEVICE is blank");
+                    assert!(e.node.parse::<u64>().is_ok(), "{:?}", e.node);
+                    assert!(e.name.as_deref().is_some_and(|n| !n.is_empty()));
+                    assert!(e.info.is_none(), "a netlink row is no Internet file");
                 }
                 other => panic!("unexpected socket file type {other:?}"),
             }
@@ -1528,69 +1544,311 @@ sk               RefCnt Type Proto  Iface R Rmem   User   Inode
             assert!(t.by_inode.is_empty(), "accepted {text:?}");
         }
     }
+    /// The buffer the attribute is read into holds the longest name a
+    /// kernel `struct proto` can have, 31 bytes and its NUL: a smaller one
+    /// is the kernel's `ERANGE`, `can't identify protocol` for a socket the C
+    /// names (`IEEE-802.15.4-MAC`, 18 bytes, has no fixture on this host).
     #[test]
-    fn the_kernels_protocol_name_is_not_always_this_ports_protocol() {
-        // What `protocol_for` reproduces is the C reading
-        // `system.sockprotoname`, and for two families that name is neither
-        // `info.protocol` nor the NODE cell. Measured against the C on five
-        // sockets held inside a foreign network namespace, where the main
-        // table misses them and this is the only path that answers:
-        //
-        //   3u sock … protocol: PACKET        4u sock … protocol: UNIX-STREAM
-        //   5u sock … protocol: TCP           6u sock … protocol: UDP
-        //
-        // A seqpacket AF_UNIX socket reports UNIX, not UNIX-SEQPACKET.
-        assert_eq!(unix_kernel_proto("0001"), "UNIX-STREAM");
-        assert_eq!(unix_kernel_proto("0002"), "UNIX");
-        assert_eq!(unix_kernel_proto("0005"), "UNIX", "seqpacket shares dgram");
-        assert_eq!(unix_kernel_proto("zz"), "UNIX", "unreadable is still UNIX");
-
-        let mut t = SocketTable::default();
-        t.parse_packet(PACKET_TABLE);
+    fn the_attribute_buffer_holds_any_struct_proto_name() {
+        // `getxattr(2)` as sockfs answers it: the name and its NUL, or
+        // `ERANGE` (`None`) into a buffer too small.
+        let kernel = |name: &'static [u8]| {
+            move |buf: &mut [u8]| {
+                let value = [name, b"\0"].concat();
+                let room = buf.get_mut(..value.len())?;
+                room.copy_from_slice(&value);
+                Some(value.len())
+            }
+        };
+        let longest: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ01234";
+        assert_eq!(longest.len(), 31);
         assert_eq!(
-            t.get(1399).unwrap().kernel_proto,
-            "PACKET",
-            "uppercase, and not the ethernet protocol in NODE"
-        );
-        assert_eq!(t.get(1399).unwrap().node, "ALL", "NODE is unaffected");
-
-        let mut t = SocketTable::default();
-        t.parse_unix(
-            "Num RefCount Protocol Flags Type St Inode Path\n\
-                      0000: 00000002 00000000 00010000 0001 01 184 /tmp/s\n\
-                      0000: 00000002 00000000 00000000 0002 01 185 /tmp/d\n",
-        );
-        assert_eq!(t.get(184).unwrap().kernel_proto, "UNIX-STREAM");
-        assert_eq!(t.get(185).unwrap().kernel_proto, "UNIX");
-
-        let mut t = SocketTable::default();
-        t.parse_inet(
-            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
-   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000 100 0 0 10 0\n",
-            Protocol::Tcp,
-            false,
-            false,
+            read_proto_name(kernel(longest)).as_deref(),
+            Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ01234")
         );
         assert_eq!(
-            t.get(4242).unwrap().kernel_proto,
-            "TCP",
-            "for an internet socket the two names do agree"
+            read_proto_name(kernel(b"IEEE-802.15.4-MAC")).as_deref(),
+            Some("IEEE-802.15.4-MAC")
+        );
+        assert_eq!(read_proto_name(kernel(b"UDP")).as_deref(), Some("UDP"));
+        // What follows the first NUL is not the name; a failed call and a
+        // length past the buffer are no name at all.
+        assert_eq!(
+            read_proto_name(|b: &mut [u8]| {
+                b[..6].copy_from_slice(b"TCP\0xy");
+                Some(6)
+            })
+            .as_deref(),
+            Some("TCP")
+        );
+        assert_eq!(read_proto_name(|_: &mut [u8]| None), None);
+        assert_eq!(read_proto_name(|b: &mut [u8]| Some(b.len() + 1)), None);
+        // Not UTF-8: decoded lossily, never refused.
+        assert_eq!(
+            read_proto_name(|b: &mut [u8]| {
+                b[..2].copy_from_slice(b"\xff\0");
+                Some(2)
+            })
+            .as_deref(),
+            Some("\u{fffd}")
         );
     }
+
+    /// Only a descriptor whose link sockfs spells `socket:[inode]` is asked.
+    #[test]
+    fn only_the_socket_the_link_named_is_asked() {
+        assert!(is_socket_link(b"socket:[12345]", 12345));
+        assert!(is_socket_link(
+            format!("socket:[{}]", u64::MAX).as_bytes(),
+            u64::MAX
+        ));
+        for other in [
+            &b"socket:[12346]"[..],
+            b"socket:[012345]",
+            b"socket:[12345]x",
+            b"socket:[12345",
+            b"pipe:[12345]",
+            b"/tmp/socket:[12345]",
+            b"",
+        ] {
+            assert!(!is_socket_link(other, 12345), "{other:?}");
+        }
+    }
+
+    /// The inner half of [`a_swapped_in_fuse_file_is_never_asked`]: a no-op
+    /// unless that test runs this binary in its mount namespace, with a FUSE
+    /// server that never answers mounted at `LSOF_RS_HUNG_FUSE`. There the
+    /// state after a descriptor swap is made — an `O_PATH` descriptor on the
+    /// mount's root, which asks the server nothing — and `sock_proto_name`
+    /// is asked about it through `/proc/self/fd/K`.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri implements neither O_PATH nor getxattr")]
+    fn sock_proto_name_on_a_hung_fuse_file() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Some(root) = std::env::var_os("LSOF_RS_HUNG_FUSE") else {
+            return;
+        };
+        let pinned = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(i32::try_from(rustix::fs::OFlags::PATH.bits()).unwrap())
+            .open(root)
+            .unwrap();
+        println!("inner_pid={}", std::process::id());
+        let link = format!("/proc/self/fd/{}", pinned.as_raw_fd());
+        assert_eq!(sock_proto_name(Path::new(&link), 1), None);
+        println!("inner_done=1");
+    }
+
+    /// DIVERGENCES 22: `sock_proto_name` asks no file system but sockfs. A
+    /// descriptor its owner swapped onto a file on a FUSE mount whose server
+    /// never answers is refused at once, and the server is asked nothing: the
+    /// identity check is the readlink of the pinned descriptor, which the
+    /// kernel answers from the dentry. The `fstat` it replaced was a GETATTR
+    /// the server held (measured). Root only, in a private mount namespace,
+    /// with `differential/fuse_hang.py`; skipped, saying why, elsewhere.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri cannot spawn a process")]
+    fn a_swapped_in_fuse_file_is_never_asked() {
+        use std::process::Command;
+        let works = |argv: &[&str]| {
+            Command::new(argv[0])
+                .args(&argv[1..])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let root = status
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            == Some("0");
+        let timeouts_off = ["default_request_timeout", "max_request_timeout"]
+            .iter()
+            .all(|n| {
+                let v =
+                    std::fs::read_to_string(format!("/proc/sys/fs/fuse/{n}")).unwrap_or_default();
+                matches!(v.trim(), "" | "0")
+            });
+        if !root
+            || !Path::new("/dev/fuse").exists()
+            || !timeouts_off
+            || !works(&["unshare", "-m", "--propagation", "private", "true"])
+            || !works(&["python3", "-c", "pass"])
+        {
+            eprintln!("skipped: needs root, a working /dev/fuse with no request timeout, unshare -m and python3");
+            return;
+        }
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tmp.join(format!("lsof-rs-xattr-fuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fuse")).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../differential/fuse_hang.py");
+        let script = format!(
+            r#"set -u
+cd /
+python3 -I '{fixture}' '{fuse}' --mode hold --ready '{dir}/ready' --log '{dir}/log' --lifetime 60 &
+srv=$!
+i=0
+while [ ! -e '{dir}/ready' ]; do
+    i=$((i+1))
+    if [ $i -gt 200 ] || ! kill -0 $srv 2>/dev/null; then
+        echo error=no-fuse; kill $srv 2>/dev/null; exit 0
+    fi
+    sleep 0.05
+done
+LSOF_RS_HUNG_FUSE='{fuse}' '{bin}' --exact net::tests::sock_proto_name_on_a_hung_fuse_file --nocapture --test-threads 1 >'{dir}/inner' 2>&1 &
+t=$!
+i=0
+while kill -0 $t 2>/dev/null && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.05; done
+if kill -0 $t 2>/dev/null; then echo hung=1; else echo hung=0; fi
+kill $srv; wait $srv
+wait $t; echo inner_rc=$?
+"#,
+            fixture = fixture.display(),
+            fuse = dir.join("fuse").display(),
+            dir = dir.display(),
+            bin = std::env::current_exe().unwrap().display(),
+        );
+        let out = Command::new("unshare")
+            .args(["-m", "--propagation", "private", "sh", "-c", &script])
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        let inner = std::fs::read_to_string(dir.join("inner")).unwrap_or_default();
+        let log = std::fs::read_to_string(dir.join("log")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        if said.contains("error=no-fuse") {
+            eprintln!("skipped: /dev/fuse could not be mounted");
+            return;
+        }
+        assert!(said.contains("hung=0"), "{said}\n{inner}\n{log}");
+        assert!(said.contains("inner_rc=0"), "{said}\n{inner}\n{log}");
+        assert!(inner.contains("inner_done=1"), "{inner}");
+        let pid = inner
+            .lines()
+            .find_map(|l| l.split("inner_pid=").nth(1))
+            .map(|rest| {
+                rest.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("")
+            })
+            .filter(|pid| !pid.is_empty())
+            .expect("the inner test's pid");
+        let asked: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains(&format!(" pid={pid} ")) || l.ends_with(&format!(" pid={pid}")))
+            .collect();
+        assert!(asked.is_empty(), "the server was asked: {asked:?}\n{log}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri implements neither O_PATH nor getxattr")]
+    fn the_kernel_names_a_socket_by_its_struct_proto() {
+        // `system.sockprotoname`, read as `sock_proto_name` reads it, through
+        // the fd's link, for sockets std can make: the kernel's `struct proto`
+        // name, which for AF_UNIX is not the family (`unix`) but the proto a
+        // socket uses, so a stream socket is UNIX-STREAM and a datagram one
+        // UNIX. Measured against the C, which printed the same names for
+        // sockets in a foreign network namespace (fixtures L, NSRAW, J).
+        use std::os::fd::AsRawFd;
+        let name = |fd: &dyn AsRawFd| {
+            let link = format!("/proc/self/fd/{}", fd.as_raw_fd());
+            let ino = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&link).unwrap());
+            sock_proto_name(Path::new(&link), ino)
+        };
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(name(&a).as_deref(), Some("UNIX-STREAM"));
+        let d = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        assert_eq!(name(&d).as_deref(), Some("UNIX"));
+        let u = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        assert_eq!(name(&u).as_deref(), Some("UDP"));
+        let t = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert_eq!(name(&t).as_deref(), Some("TCP"));
+        // The inode the link named must be the one that answers: a
+        // descriptor replaced in between is not asked (`None`, the C's
+        // `can't identify protocol`), and neither is a file that is no
+        // socket, which a FUSE daemon could otherwise be asked about.
+        let link = format!("/proc/self/fd/{}", u.as_raw_fd());
+        assert_eq!(sock_proto_name(Path::new(&link), u64::MAX), None);
+        let f = std::fs::File::open("/proc/self/status").unwrap();
+        let link = format!("/proc/self/fd/{}", f.as_raw_fd());
+        let ino = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&link).unwrap());
+        assert_eq!(sock_proto_name(Path::new(&link), ino), None);
+        assert_eq!(sock_proto_name(Path::new("/nonexistent/lsof-rs"), 1), None);
+        // And the NAME cell around it.
+        let names = SockProtoNames::new(false);
+        let link = format!("/proc/self/fd/{}", t.as_raw_fd());
+        let ino = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&link).unwrap());
+        assert_eq!(names.unlisted_name(Path::new(&link), ino), "protocol: TCP");
+        assert_eq!(
+            names.unlisted_name(Path::new("/nonexistent/lsof-rs"), 1),
+            "can't identify protocol"
+        );
+    }
+    /// `/proc/net/netlink` as this kernel wrote it (2026-10-30) for a bound
+    /// `NETLINK_ROUTE` socket and the kernel's own, read as the C's
+    /// `get_netlink()` reads it (DIVERGENCES 109): TYPE `netlink`, no DEVICE,
+    /// NODE the inode, NAME the protocol by name or number.
+    #[test]
+    fn a_bound_netlink_socket_is_named_by_its_protocol() {
+        let text = "sk               Eth Pid        Groups   Rmem     Wmem     Dump  Locks    Drops    Inode\n\
+000000000a2cfcbb 0   7884       00000000 0        0        0     2        0        13110   \n\
+000000003d480def 4   0          00000000 0        0        0     2        0        3880    \n\
+00000000aaaaaaaa 15  1          00000001 0        0        0     2        0        13112   \n\
+00000000bbbbbbbb 17  1          00000001 0        0        0     2        0        13113   \n\
+00000000cccccccc x7  1          00000001 0        0        0     2        0        13114   \n\
+00000000dddddddd 16  1          00000001 0        0        0     2        0        13110   \n\
+short line 1 2\n\
+00000000eeeeeeee 0   1          00000001 0        0        0     2        0        notanum \n";
+        let mut t = SocketTable::default();
+        t.parse_netlink(text);
+        assert_eq!(t.by_inode.len(), 5);
+        for (inode, name) in [
+            (13110, "ROUTE"), // the first line for an inode is the one kept
+            (3880, "INET_DIAG"),
+            (13112, "KOBJECT_UEVENT"),
+            (13113, "unknown protocol: 17"),
+            (13114, "ROUTE"), // `atoi("x7")` is 0
+        ] {
+            let e = t.get(inode).unwrap();
+            assert_eq!(e.file_type, FileType::Socket("netlink"));
+            assert_eq!(e.name.as_deref(), Some(name), "{inode}");
+            assert_eq!(e.node, inode.to_string());
+            assert!(e.device.is_none() && e.info.is_none() && e.type_suffix.is_none());
+        }
+        // Columns that moved drop the table, as the C's label check does.
+        for header in [
+            "sk Proto Pid Groups Rmem Wmem Dump Locks Drops Inode\n",
+            "sk Eth Pid Groups Rmem Wmem Dump Locks Drops Ino\n",
+            "",
+        ] {
+            let mut t = SocketTable::default();
+            t.parse_netlink(&format!("{header}0 0 1 0 0 0 0 2 0 99\n"));
+            assert!(t.by_inode.is_empty(), "{header:?}");
+        }
+        assert_eq!(netlink_name(22), "SMC");
+        assert_eq!(netlink_name(23), "unknown protocol: 23");
+        assert_eq!(netlink_name(u32::MAX), "unknown protocol: -1");
+    }
+
     #[test]
     fn dash_x_replaces_the_lookup_rather_than_performing_it() {
         // `dsock.c:4155` is an if/else: under -X the C enters the fixed string
         // INSTEAD of calling getxattr. So this must answer without consulting
         // any namespace — a pid that cannot exist still gets the string.
-        let x = NetnsTables::new(true);
+        let x = SockProtoNames::new(true);
         assert_eq!(
-            x.unresolved_name(u32::MAX, 1),
-            Some("can't identify protocol (-X specified)".to_string())
+            x.unlisted_name(Path::new("/nonexistent/lsof-rs"), 1),
+            "can't identify protocol (-X specified)"
         );
-        // And without -X the same impossible pid resolves to nothing, which is
-        // what leaves the row as the bare `socket:[inode]`.
-        let plain = NetnsTables::new(false);
-        assert_eq!(plain.unresolved_name(u32::MAX, 1), None);
+        // And without -X the same impossible link is the C's failed
+        // `getxattr()`.
+        let plain = SockProtoNames::new(false);
+        assert_eq!(
+            plain.unlisted_name(Path::new("/nonexistent/lsof-rs"), 1),
+            "can't identify protocol"
+        );
     }
 
     #[test]
@@ -1609,6 +1867,8 @@ sk               RefCnt Type Proto  Iface R Rmem   User   Inode
                 FileType::Socket("raw6") => panic!("-X must gate /proc/net/raw6"),
                 FileType::Ipv4 | FileType::Ipv6 => panic!("-X must gate every inet table"),
                 FileType::Unix => {}
+                // /proc/net/netlink is read whatever -X says (`dsock.c:3590`).
+                FileType::Socket("netlink") => {}
                 FileType::Other(c) if c == "pack" => {}
                 other => panic!("unexpected socket file type under -X: {other:?}"),
             }

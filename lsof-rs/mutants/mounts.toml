@@ -20,7 +20,12 @@
 # duplicate-test-scans-the-entries) and re-anchored five on code it reshaped;
 # run again in full, as root with --first-kill: 40 of 40 killed, 39 by the
 # unit gate and dash-n-on-every-mount by the differential (z-reads-the-stated-
-# table by the audit as well, run alone without --first-kill).
+# table by the audit as well, run alone without --first-kill). Re-anchored
+# 2026-10-30 (Batch A's review): help-before-the-end-of-parse-errors, as the
+# errors the C reads on after now end the parse there too, and
+# z-reads-the-stated-table, as SELinux is asked while the parse meets -Z
+# (DIVERGENCES 114), and errors-after-the-table, as the errors the parse read
+# on after now go out through `tell_early`; each killed again.
 
 [run]
 dir = ".."
@@ -378,7 +383,8 @@ name = "errors-after-the-table"
 rule = "an end-of-parse error found before the -e check is printed before the table it reads (m9)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''            for e in early.drain(..).chain(errors.drain(..)) {
+old = '''            tell_early(fs, early, &mut told);
+            for e in errors.drain(..) {
                 fs.tell(&format!("lsof: {e}"));
                 told = true;
             }'''
@@ -389,8 +395,8 @@ name = "help-before-the-end-of-parse-errors"
 rule = "-h with an end-of-parse error is the error, exit 1 (115)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''    if told || !errors.is_empty() {'''
-new = '''    if !want_help && (told || !errors.is_empty()) {'''
+old = '''    if told || !errors.is_empty() || !early.is_empty() {'''
+new = '''    if !want_help && (told || !errors.is_empty() || !early.is_empty()) {'''
 
 [[mutant]]
 name = "tcp-state-conflict-first-only"
@@ -410,8 +416,15 @@ name = "z-reads-the-stated-table"
 rule = "-Z asks the table's types alone, as text, and examines no mount: the C refuses it before any table (29, 110; the item's review)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''            let enabled = env.backend.has_mount_type("selinuxfs");'''
-new = '''            let enabled = !env.backend.mount_table(&MountRequest::default(), &fs.with(sel.blocking, !sel.omit_unreadable)).entries.is_empty() && env.backend.has_mount_type("selinuxfs");'''
+old = '''            env_cell
+                .get_or_init(make_env)
+                .backend
+                .has_mount_type("selinuxfs")'''
+new = '''            {
+                let env = env_cell.get_or_init(make_env);
+                !env.backend.mount_table(&MountRequest::default(), &fs).entries.is_empty()
+                    && env.backend.has_mount_type("selinuxfs")
+            }'''
 
 # -------------------------------------------------------------------- -N --
 

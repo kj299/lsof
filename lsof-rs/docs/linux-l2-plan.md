@@ -9,7 +9,9 @@
 > from `/proc/net/raw` where lsof-rs types it IPv4 (DIVERGENCES 108; resolved
 > 2026-10-17: typed and named as the C types it, and never selected by `-i`), and a
 > *bound* netlink socket, which `/proc/net/netlink` does list and the C types
-> `netlink` (109). Measured by the retrospective; see §3.] The current list of differences is
+> `netlink` (109). Measured by the retrospective; see §3.] [2026-10-30: both
+> done. The owner decided 22 for a dependency, `rustix`, for the one
+> `getxattr`; 109 reads the table. Nothing of L2 is left.] The current list of differences is
 > [`../DIVERGENCES.md`](../DIVERGENCES.md).
 
 Written 2026-09-15, after measuring rather than reading. Companion to
@@ -97,7 +99,8 @@ not all miri checks. Mutated against the real crate:
 
 The **leak** case is the one that matters, and no other gate here covers it:
 this crate caches, `NetnsTables` holding a `RefCell<HashMap>` per namespace and
-per pid. The UB case only bites if someone lifts the attribute — and the first
+per pid [2026-10-30: gone with item 22; `SocketTable`'s bound-path cache is
+the `RefCell` left]. The UB case only bites if someone lifts the attribute — and the first
 attempt at that mutation was stopped by the attribute itself, so miri is the
 second line there, not the first.
 
@@ -207,6 +210,9 @@ dependency in a crate documented as needing neither.
 held. A bound one is listed in `/proc/net/netlink`, and the C types it
 `netlink`, named by its protocol (`ROUTE`), from that table: measured by the
 retrospective, DIVERGENCES 109. That part needs no decision.]
+
+[2026-10-30: decided — a dependency (`rustix`, pinned, `fs` only), so the
+backend keeps `#![forbid(unsafe_code)]`; 22 and 109 are both closed.]
 
 ## 4. The options that are genuinely missing
 
@@ -385,7 +391,8 @@ every time at 2.34–2.44x on 2.00x; that is why the split is where it is.
 (DIVERGENCES, still real debt), DIVERGENCES 21 (`-c`/`-u`/`-g` as search
 items), DIVERGENCES 9 (`opendir` access `u`), and DIVERGENCES 22 — which now
 carries netlink as well as AF_VSOCK, and is the one item on this page that
-needs a decision from the owner before any of it can be written.
+needs a decision from the owner before any of it can be written [2026-10-30:
+decided and done, through `rustix`].
 
 > **2026-09-25:** the `UNKN*` errno rows are done, and were misnamed. An
 > unreadable link is TYPE `unknown`; `UNKN*` is `-e`'s. See DIVERGENCES,

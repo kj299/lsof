@@ -91,7 +91,8 @@ try {
     Test-That 'version banner'        ($r.Out -match 'lsof-rs') "exit=$($r.Exit)"
 
     $r = Invoke-Bin @('-h')
-    Test-That 'help / usage'          (($r.Out -match 'USAGE') -and ($r.Out -match '-i'))
+    # On stderr, as the C writes it (DIVERGENCES 114); stdout stays empty.
+    Test-That 'help / usage'          (($r.Err -match 'USAGE') -and ($r.Err -match '-i') -and [string]::IsNullOrEmpty($r.Out))
 
     $r = Invoke-Bin @('-Z')
     Test-That 'bad option -> nonzero' (($r.Exit -ne $null) -and ($r.Exit -ne 0))

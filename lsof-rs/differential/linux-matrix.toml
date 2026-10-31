@@ -1810,11 +1810,9 @@ env = { LSOF_DIFF_UNPRIVILEGED = "1" }
 # cells differ from an ordinary socket row -- a lowercase `sock` TYPE, the
 # OFFSET rather than a size, and that NAME.
 #
-# lsof-rs reaches the same answer by reading the owning process's own
-# `/proc/<pid>/net/*`, cached per namespace. It could print the address it
-# learns on the way; it deliberately does not, because matching the C is the
-# contract. See the ledger entry on AF_VSOCK for the families this cannot name
-# and the xattr can.
+# lsof-rs reads the same xattr since 2026-10-30 (DIVERGENCES 22); it had
+# reached the same answer by reading the owning process's own
+# `/proc/<pid>/net/*`, which could not name a family with no table.
 #
 # SKIPPED, not failed, on a runner without CAP_SYS_ADMIN for `unshare --net`.
 
@@ -2064,8 +2062,9 @@ args = ["-n", "-P", "-a", "-d", "3-4", "-p", "{UDPL}"]
 
 [[case]]
 # fd 5 is never bound: in no table, so the C names it from
-# `system.sockprotoname` (`sock ... protocol: UDP-Lite`) and lsof-rs, with no
-# getxattr, prints `SOCK ... socket:[N]` (DIVERGENCES 22, ledgered).
+# `system.sockprotoname` (`sock ... protocol: UDP-Lite`), and so does lsof-rs
+# since it reads the xattr too (DIVERGENCES 22; it had printed `SOCK ...
+# socket:[N]`, ledgered until 2026-10-30).
 name = "udplite-socket-unbound"
 args = ["-n", "-P", "-a", "-d", "5", "-p", "{UDPL}"]
 
@@ -4434,3 +4433,377 @@ args = ["-J", "-a", "-d", "0", "-p", "{A}"]
 env = { LSOF_DIFF_MT = "autofs" }
 with_stderr = true
 timeout = 20
+
+# ------------------------------------------------------------- the help (114)
+# `-h` and `-?` write the usage to stderr and exit 0, as the C's `usage()`
+# does; stdout stays empty. lsof-rs had written its help to stdout. The texts
+# differ (lsof-rs lists its own options), so stderr is not compared here; the
+# CLI's `the_help_goes_to_stderr` test pins the stream.
+
+[[case]]
+name = "help-dash-h-writes-nothing-to-stdout"
+args = ["-h"]
+
+[[case]]
+name = "help-dash-question-writes-nothing-to-stdout"
+args = ["-?"]
+
+[[case]]
+name = "help-beside-a-selection-writes-nothing-to-stdout"
+args = ["-p", "{A}", "-h"]
+
+# ------------------------- errors found while parsing beat -h, -v, -F ? (114)
+# The C looks each -u login up, and refuses -Z where SELinux is not enabled,
+# as it meets the option, and reads on (`err = 1`): `usage()` then prints the
+# error and exits 1 before -h, -v or -F ? is acted on, and before -X -i and
+# -a are checked. lsof-rs had resolved -u and gated -Z after acting on them
+# (help, exit 0). A refused -Z takes the next word, an option too. `--help`
+# and `--version` are no long options to the C: `-` is an illegal option
+# character, and the word is read on (-h, then -e lp). The help text is
+# lsof-rs's own, so these compare stdout and the exit status; the order of
+# the lines is pinned by args.rs (host_errors_found_while_parsing_beat_help_
+# and_version, double_dash_words_are_refused_as_the_c_refuses_them). The host
+# has no SELinux (the -Z cases above assume the same).
+
+[[case]]
+name = "help-after-an-unknown-login-is-the-error"
+args = ["-h", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "help-before-an-unknown-login-is-the-error"
+args = ["-u", "lsofrs-no-such-login", "-h"]
+
+[[case]]
+name = "help-with-an-unknown-excluded-login-is-the-error"
+args = ["-h", "-u", "^lsofrs-no-such-login"]
+
+[[case]]
+name = "help-with-g-and-an-unknown-login-is-the-error"
+args = ["-h", "-g", "1", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "help-with-w-and-an-unknown-login-is-the-error"
+args = ["-h", "-w", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "help-with-t-and-an-unknown-login-is-the-error"
+args = ["-h", "-t", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "help-after-z-without-selinux-is-the-error"
+args = ["-h", "-Z"]
+
+[[case]]
+name = "help-taken-by-z-without-selinux-is-the-error"
+args = ["-Z", "-h"]
+
+[[case]]
+name = "version-with-an-unknown-login-is-the-error"
+args = ["-v", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "version-with-z-without-selinux-is-the-error"
+args = ["-v", "-Z"]
+
+[[case]]
+name = "field-help-with-an-unknown-login-is-the-error"
+args = ["-F", "?", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "field-help-with-z-without-selinux-is-the-error"
+args = ["-F", "?", "-Z"]
+
+[[case]]
+name = "unknown-login-then-z-both-errors"
+args = ["-u", "lsofrs-no-such-login", "-Z"]
+
+[[case]]
+name = "z-without-selinux-takes-the-login-option"
+args = ["-Z", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "z-without-selinux-takes-an-option-word"
+args = ["-Z", "-p", "{A}"]
+
+[[case]]
+name = "unknown-login-ends-the-run-before-dash-x-dash-i"
+args = ["-u", "lsofrs-no-such-login", "-X", "-i"]
+
+[[case]]
+name = "plus-j-ends-the-run-before-dash-a"
+args = ["+J", "-a"]
+
+[[case]]
+name = "double-dash-help-is-refused"
+args = ["--help"]
+
+[[case]]
+name = "double-dash-version-is-refused"
+args = ["--version"]
+
+[[case]]
+name = "dash-h-then-double-dash-help-is-refused"
+args = ["-h", "--help"]
+
+[[case]]
+name = "double-dash-h-is-refused"
+args = ["--h"]
+
+# ------------------------------------------- an empty optional value (116)
+# The C offers an option's optional value the next word whenever it does not
+# open with `-` or `+`, an empty one too, and the options below take it as a
+# value with no digits or letters: it is consumed, never a path. lsof-rs had
+# given `''` back as an operand, an empty path (`status error on :`, exit 1),
+# and read `+T ''` as `+T`, keeping a unix socket's `(CONNECTED)`.
+
+[[case]]
+name = "empty-value-plus-T-selects-no-tcp-info"
+args = ["-n", "-P", "-a", "-U", "+T", "", "-p", "{B}"]
+
+[[case]]
+name = "empty-value-dash-T"
+args = ["-n", "-P", "-a", "-U", "-T", "", "-p", "{B}"]
+
+[[case]]
+name = "empty-value-dash-o"
+args = ["-n", "-P", "-a", "-d", "3,4", "-o", "", "-p", "{O}"]
+
+[[case]]
+name = "empty-value-dash-S"
+args = ["-n", "-P", "-a", "-d", "3", "-S", "", "-p", "{A}"]
+
+[[case]]
+name = "empty-value-dash-L"
+args = ["-n", "-P", "-a", "-d", "3", "-L", "", "-p", "{A}"]
+
+[[case]]
+name = "empty-value-plus-L"
+args = ["-n", "-P", "-a", "-d", "3", "+L", "", "-p", "{A}"]
+
+# --------------------------------------- an offset digit count past INT_MAX (117)
+# The C sums `-o`'s digits in an `int`, which wraps, and compares the offset's
+# length with `OffDecDig + 2`, an `int` sum that wraps too: from 2147483646
+# up every offset is hex, and `%#llx` writes zero as a bare `0`. O's stdio
+# on /dev/null is at 0, fd 3 at 123456789 and fd 4 at 12. 4294967296 wraps to
+# 0, no limit; 4294967297 to 1, hex past one digit.
+
+[[case]]
+name = "offset-digits-int-max-minus-two-is-a-limit"
+args = ["-n", "-P", "-a", "-d", "0-4", "-o", "2147483645", "-o", "-p", "{O}"]
+
+[[case]]
+name = "offset-digits-past-int-max-minus-two-zero-is-0"
+args = ["-n", "-P", "-a", "-d", "0-4", "-o", "2147483646", "-o", "-p", "{O}"]
+
+[[case]]
+name = "offset-digits-past-int-max-minus-two-fields"
+args = ["-n", "-P", "-a", "-d", "0-4", "-o", "2147483647", "-o", "-Ffo", "-p", "{O}"]
+
+[[case]]
+name = "offset-digits-wrapped-negative"
+args = ["-n", "-P", "-a", "-d", "0-4", "-o", "3000000000", "-o", "-p", "{O}"]
+
+[[case]]
+name = "offset-digits-wrapped-to-zero-is-no-limit"
+args = ["-n", "-P", "-a", "-d", "0-4", "-o", "4294967296", "-o", "-p", "{O}"]
+
+[[case]]
+name = "offset-digits-wrapped-to-one"
+args = ["-n", "-P", "-a", "-d", "0-4", "-o", "4294967297", "-o", "-p", "{O}"]
+
+# -------------------------------------------- a newline in a command (58)
+# Fixture NLC's command is `nl`, a newline, `c\x` and its thread's `t`, a
+# newline, `n`. The C reads both from `stat` and makes each newline a `?`,
+# in every view of them and for `-c`; lsof-rs had printed `\n`.
+
+[[case]]
+name = "newline-comm-table"
+args = ["-n", "-P", "-a", "-d", "3", "-p", "{NLC}"]
+
+[[case]]
+name = "newline-comm-tasks-table"
+args = ["-n", "-P", "-K", "-a", "-d", "3", "-p", "{NLC}"]
+
+[[case]]
+# `M` is printed raw by the C (a C-DEFECT, DIVERGENCES 59, not reproduced),
+# so the thread's name, which holds no backslash, is the one compared here.
+name = "newline-comm-fields"
+args = ["-n", "-P", "-K", "-a", "-d", "3", "-FcM", "-p", "{NLC}"]
+
+[[case]]
+name = "newline-comm-json"
+args = ["-K", "-a", "-d", "3", "-j", "-p", "{NLC}"]
+
+[[case]]
+name = "newline-comm-selected-by-c-as-a-question-mark"
+args = ["-n", "-P", "-a", "-d", "3", "-c", "nl?c", "-p", "{NLC}"]
+
+[[case]]
+name = "newline-comm-not-selected-by-a-newline"
+args = ["-n", "-P", "-a", "-d", "3", "-c", "nl\nc", "-p", "{NLC}"]
+
+# --------------------------------------------- USER padded by bytes (71)
+# Fixture W's WJ and WA, owned by 65010 and 65011, listed beside a password
+# file in which they are `jöhn` and `ab` (`LSOF_DIFF_MT=passwd`): the C
+# pads USER by bytes, so `jöhn` fills the five-byte column `ab` is padded
+# to. lsof-rs had padded by characters, a space before `jöhn`.
+
+[[case]]
+name = "user-multibyte-login-padded-by-bytes"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{WJ},{WA}"]
+env = { LSOF_DIFF_MT = "passwd" }
+
+[[case]]
+name = "user-multibyte-login-fields"
+args = ["-F", "pcuL", "-a", "-d", "cwd", "-p", "{WJ},{WA}"]
+env = { LSOF_DIFF_MT = "passwd" }
+
+[[case]]
+name = "user-multibyte-login-selected-by-name"
+args = ["-n", "-P", "-a", "-d", "cwd", "-u", "jöhn", "-p", "{WJ},{WA}"]
+env = { LSOF_DIFF_MT = "passwd" }
+
+# ---------------------------------------- an owner with no account (36)
+# WB's owner, 3000000000, has no password entry, and the C's `printuid()`
+# says so each time it looks it up: twice per table row (as it sizes USER
+# and as it prints it), once per `-F` process set with `L`, once per `-J`
+# process and `-j` line, and never under `-w`, `-t` or `-l`. Compared on
+# stderr; lsof-rs had said nothing.
+
+[[case]]
+name = "owner-no-pwd-entry-warns-twice-per-row"
+args = ["-n", "-P", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-warns-per-field-set"
+args = ["-F", "pcuL", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-no-L-no-warning"
+args = ["-F", "pcu", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-warns-per-json-process"
+args = ["-J", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-warns-per-json-line"
+args = ["-j", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-dash-w-is-silent"
+args = ["-n", "-P", "-w", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-plus-w-after-dash-w-warns"
+args = ["-n", "-P", "-w", "+w", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-dash-t-is-silent"
+args = ["-t", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+[[case]]
+name = "owner-no-pwd-entry-dash-l-is-silent"
+args = ["-n", "-P", "-l", "-a", "-d", "cwd,rtd", "-p", "{WB}"]
+with_stderr = true
+
+# ------------------------------------------- POSIX message queues (128)
+# Fixture MQ holds two queues, fd 3 read/write and fd 4 read-only, beside an
+# `mqueue` mount of the run's own (`LSOF_DIFF_MT=mqueue`): each is a regular
+# file on that file system, which the C types `PSXMQ`. Under `-b` the table
+# records no mount and they are `REG`; an `-e` of the mount is `UNKNfd`.
+# lsof-rs had typed them `REG` throughout.
+
+[[case]]
+name = "psxmq-table"
+args = ["-n", "-P", "-a", "-d", "3,4", "-p", "{MQ}"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "psxmq-fields"
+args = ["-n", "-P", "-a", "-d", "3,4", "-FftDsSik", "-p", "{MQ}"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "psxmq-json"
+args = ["-j", "-a", "-d", "3,4", "-p", "{MQ}"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "psxmq-by-its-file-system"
+args = ["-n", "-P", "-a", "-p", "{MQ}", "{MTMQ}"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "psxmq-dash-b-records-no-mount"
+args = ["-n", "-P", "-w", "-b", "-a", "-d", "3,4", "-p", "{MQ}"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "psxmq-exempt"
+args = ["-n", "-P", "-e", "{MTMQ}", "-a", "-d", "3,4", "-p", "{MQ}"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+# On the host as it stands: an mqueue mount or none, the same to both.
+name = "psxmq-host-table"
+args = ["-n", "-P", "-a", "-d", "3,4", "-p", "{MQ}"]
+
+# ------------------------------------- netlink, and sockets no table lists (109, 22)
+# Fixture NLK: fds 3, 5 and 6 are bound netlink sockets (ROUTE, GENERIC,
+# KOBJECT_UEVENT), which `/proc/net/netlink` lists and the C types `netlink`,
+# named by protocol; fd 4 is a netlink socket never bound, 7 a UDP and 8 a
+# TCP socket never bound, which no table lists and the C names from
+# `system.sockprotoname`: `sock … protocol: NETLINK` / `UDP` / `TCP`.
+# lsof-rs had printed `SOCK … socket:[N]` for all six.
+
+[[case]]
+name = "netlink-and-unlisted-table"
+args = ["-n", "-P", "-a", "-d", "3-8", "-p", "{NLK}"]
+
+[[case]]
+name = "netlink-and-unlisted-fields"
+args = ["-n", "-P", "-a", "-d", "3-8", "-FftdDsSinPoT", "-p", "{NLK}"]
+
+[[case]]
+name = "netlink-and-unlisted-json"
+args = ["-j", "-a", "-d", "3-8", "-p", "{NLK}"]
+
+[[case]]
+# `-X` gates no netlink table, and replaces the xattr with its string.
+name = "netlink-and-unlisted-dash-X"
+args = ["-n", "-P", "-X", "-a", "-d", "3-8", "-p", "{NLK}"]
+
+[[case]]
+name = "netlink-and-unlisted-sizes-and-offsets"
+args = ["-n", "-P", "-a", "-d", "3-8", "-o", "+L", "-p", "{NLK}"]
+
+[[case]]
+# Neither is an Internet socket: `-i` selects none of them.
+name = "netlink-and-unlisted-not-selected-by-dash-i"
+args = ["-n", "-P", "-a", "-i", "-p", "{NLK}"]
+
+[[case]]
+name = "netlink-and-unlisted-not-selected-by-dash-U"
+args = ["-n", "-P", "-a", "-U", "-p", "{NLK}"]
+
+# Fixture NSX, in a user and network namespace of its own: a ping socket, a
+# bound and an unbound netlink socket, an unbound UDP socket. No table of
+# the C's own namespace lists any, so each is named from the xattr:
+# `protocol: PING`, `NETLINK` twice, `UDP`.
+
+[[case]]
+name = "userns-unlisted-sockets-named-by-the-kernel"
+args = ["-n", "-P", "-a", "-d", "3-6", "-p", "{NSX}"]
+
+[[case]]
+name = "userns-unlisted-sockets-fields"
+args = ["-n", "-P", "-a", "-d", "3-6", "-Ftn", "-p", "{NSX}"]

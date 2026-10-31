@@ -168,7 +168,7 @@ pub(crate) fn human_size(sz: u64) -> String {
 ///
 /// `human` is `-H`, and it scales **only the size**: the C humanises inside
 /// the `sz_def` branch alone, so an offset stays `0t<dec>` under `-H`.
-fn size_off_cell(f: &OpenFile, mode: SizeOff, human: bool, digits: usize) -> String {
+fn size_off_cell(f: &OpenFile, mode: SizeOff, human: bool, digits: i32) -> String {
     if mode != SizeOff::Offset {
         if let Some(s) = f.size {
             return if human { human_size(s) } else { s.to_string() };
@@ -309,7 +309,14 @@ fn emit_line<S: AsRef<str>>(
         if i == last {
             w.write_all(cell.as_bytes())?; // NAME: never padded
         } else if cols[i].right {
-            write!(w, "{cell:>width$}", width = widths[i])?;
+            // Padded by BYTES, as the C's `printf(" %*s")` pads, to the width
+            // measured in bytes: a login name `jöhn` fills a five-wide USER
+            // column (DIVERGENCES 71, measured). `{:>width$}` counts chars,
+            // and shifted every multibyte name right by one column per extra
+            // byte. USER is the one right-aligned cell that can hold
+            // multibyte text; every other one is ASCII, where the two agree.
+            let pad = widths[i].saturating_sub(cell.len());
+            write!(w, "{:pad$}{cell}", "")?;
         } else {
             write!(w, "{cell:<width$}", width = widths[i])?;
         }
@@ -337,8 +344,9 @@ pub struct TableOpts {
     /// `-s` with no value: the column shows sizes only, headed `SIZE`.
     pub show_size: bool,
     /// `-o <digits>`: offsets longer than this many decimal digits print in
-    /// hex; 0 is no limit. [`DEFAULT_OFFSET_DIGITS`] otherwise.
-    pub offset_digits: usize,
+    /// hex; 0 is no limit. [`DEFAULT_OFFSET_DIGITS`] otherwise. The C's
+    /// `int`, as `-o` left it (see [`offset_text`]).
+    pub offset_digits: i32,
     /// `-H`: render the SIZE cell as a human-readable byte count. Affects the
     /// table only — the C leaves `-F` and its JSON untouched, and so does this.
     pub human_size: bool,

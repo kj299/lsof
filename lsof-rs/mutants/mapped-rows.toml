@@ -16,6 +16,9 @@
 # exempt-component-boundary (files.rs, `ExemptFs`), exempt-repeat-kept,
 # exempt-relative-accepted and exempt-path-keeps-its-slash (args.rs,
 # `enter_exempt`); each run again as root, each killed by the unit gate.
+# Batch A re-anchored no-lock-on-specials (2026-10-30: `row()` lost its
+# unused `pid` argument, so the call fits one line); run again as root,
+# killed by the differential.
 # The item's review ran the seven exempt-* mutants again: exempt-rows-selected-
 # by-path and exempt-rows-located now survive the differential, as a path
 # naming an -e mount is a file-system item with no device since item 110 and
@@ -190,14 +193,10 @@ name = "no-lock-on-specials"
 rule = "cwd/rtd/txt rows show their locks (96)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''                    pid,
-                    ctx,
-                ) {
+old = '''                {
                     f.lock = lock_of(ctx.locks, pid, &f);
                     out.push(f);'''
-new = '''                    pid,
-                    ctx,
-                ) {
+new = '''                {
                     out.push(f);'''
 
 [[mutant]]

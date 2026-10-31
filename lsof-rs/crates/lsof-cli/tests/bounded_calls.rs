@@ -486,7 +486,10 @@ fn a_killed_helper_holds_nothing_a_scan_waits_on() {
     echo "$name.rc=$rc"
     echo "$name.ms=$(( (t1 - t0) / 1000000 ))"
     echo "$name.lines=$(printf '%s\n' "$out" | grep -c .)"
-    echo "$name.err=$(tr '\n' '|' < '{err}')"
+    # Whole-host runs: an owner no password entry names is warned about as
+    # the C warns (DIVERGENCES 36), and which ones the host has is not this
+    # test's business.
+    echo "$name.err=$(grep -v '^lsof: no pwd entry for UID ' '{err}' | tr '\n' '|')"
 }}
 LOADER=
 name=host1 run -n -P
