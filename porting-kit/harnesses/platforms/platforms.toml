@@ -58,6 +58,13 @@ built_by = ["Configure -n darwin", "check\\.bash darwin"]
 # .cirrus.yml would build it (two FreeBSD images, make distcheck), if Cirrus CI
 # ran for this repository. It does not; see [ci].
 waived = "upstream's .cirrus.yml is here, but no Cirrus CI runs it for this fork; kept as source, not gated, on the maintainer's decision (2026-10-09)"
+# LESSONS #088. What GitHub Actions does build under the name is lsof-rs's FreeBSD backend,
+# Rust, cross-checked from Linux (lsof-rs-ci.yml, `freebsd-cross`), and the
+# crate's path in the unsafe-audit step. Neither compiles a line of this
+# dialect, so neither makes the waiver stale; any other mention still does.
+# .cirrus.yml's lsof_rs_task would run that backend, and build this dialect
+# beside it, if Cirrus ran here (2026-10-31).
+not_builds = ["unknown-freebsd", "lsof-backend-freebsd"]
 
 [platforms.netbsd]
 # .builds/netbsd.yml would build it on sourcehut, if builds.sr.ht ran for this

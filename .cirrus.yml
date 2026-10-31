@@ -25,3 +25,54 @@ task:
     - make check
     - cat test-suite.log
     - make distcheck
+
+# lsof-rs on FreeBSD: the only place the FreeBSD backend's sysctl calls run.
+# GitHub's runners are Linux, macOS and Windows, so .github/workflows can
+# type-check and lint lsof-backend-freebsd (its freebsd-cross job) and run its
+# pure parsers' tests, but never its system calls. This task does, on the same
+# two releases as the C's task above.
+#
+# What gates: the backend's own tests, which read this very process's
+# descriptors and a TCP listener's state through the live sysctls and compare
+# the identity a path argument finds a file by with std's stat (the one ABI
+# assumption a cross-check cannot see: that std's `stat` and the kernel's
+# `kinfo_file` agree on st_dev and st_ino), and the core and CLI suites.
+#
+# What does not gate yet: the side-by-side run against the C built from this
+# tree. It prints both outputs and their diff for a reader; it becomes the
+# FreeBSD differential, with DIVERGENCES.md as its ledger, once the rows that
+# differ have been triaged on a real host (docs/freebsd-backend-scope.md).
+lsof_rs_task:
+  only_if: changesInclude('lsof-rs/**', 'lib/**', 'src/**', 'include/**', '.cirrus.yml')
+  freebsd_instance:
+    cpu: 2
+    matrix:
+      - image_family: freebsd-15-0-amd64-zfs
+      - image_family: freebsd-14-3
+  env:
+    PATH: ${HOME}/.cargo/bin:${PATH}
+  install_script:
+    - pkg install -y bash curl git autoconf automake libtool pkgconf
+    - curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    - rustc --version
+  kernel_src_script: |
+    if [ ! -d /usr/src/sys ]; then
+      git clone --depth 1 --branch releng/$(uname -r | cut -d- -f1) https://git.FreeBSD.org/src.git /usr/src
+    fi
+  test_script:
+    - cd lsof-rs && cargo test -p lsof-backend-freebsd -p lsof-core -p lsof-cli
+  build_script:
+    - cd lsof-rs && cargo build --release
+  side_by_side_script: |
+    autoreconf -vif >/dev/null && ./configure >/dev/null && make lsof >/dev/null
+    sleep 600 < /etc/passwd &
+    pid=$!
+    for args in "-n -P -p $pid" "-n -P -i" "-n -P -U -a -p $$" "-F pcftDsin -p $pid"; do
+      echo "=== lsof $args"
+      ./lsof $args > c.out 2>&1 || true
+      ./lsof-rs/target/release/lsof $args > rs.out 2>&1 || true
+      echo "--- C";       cat c.out
+      echo "--- lsof-rs"; cat rs.out
+      echo "--- diff";    diff c.out rs.out || true
+    done
+    kill $pid

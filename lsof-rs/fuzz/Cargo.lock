@@ -92,6 +92,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "lsof-backend-freebsd"
+version = "2.0.0"
+dependencies = [
+ "lsof-core",
+]
+
+[[package]]
 name = "lsof-backend-linux"
 version = "2.0.0"
 dependencies = [
@@ -111,6 +118,7 @@ dependencies = [
 name = "lsof-cli"
 version = "2.0.0"
 dependencies = [
+ "lsof-backend-freebsd",
  "lsof-backend-linux",
  "lsof-backend-windows",
  "lsof-core",
@@ -125,6 +133,7 @@ name = "lsof-rs-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "lsof-backend-freebsd",
  "lsof-backend-linux",
  "lsof-backend-windows",
  "lsof-cli",

@@ -92,7 +92,7 @@ def discover_ci(repo, globs):
     return out
 
 
-def _search(ci_files, repo, patterns):
+def _search(ci_files, repo, patterns, not_builds=()):
     """First (relpath, lineno, line) where a pattern matches EXECUTABLE text.
 
     Each line is passed through `executable_text()` before matching, so a
@@ -113,6 +113,10 @@ def _search(ci_files, repo, patterns):
         for lineno, raw in enumerate(text.splitlines(), 1):
             runnable = executable_text(raw).strip()
             if not runnable:
+                continue
+            # LESSONS #088: a line the ledger names as no build of the dialect (a waiver's
+            # `not_builds`) is not evidence either way.
+            if any(re.search(nb, runnable, re.I) for nb in not_builds):
                 continue
             for pat in patterns:
                 if re.search(pat, runnable, re.I):
@@ -200,7 +204,8 @@ def run(manifest_path, repo=None):
         else:
             # Property 2: a waiver is a falsifiable claim, not a mute button
             # (LESSONS #037). If CI mentions it, the waiver is stale.
-            hit = _search(ci_files, repo, [rf"\b{re.escape(a)}\b" for a in aliases])
+            hit = _search(ci_files, repo, [rf"\b{re.escape(a)}\b" for a in aliases],
+                          entry.get("not_builds", []))
             rows.append(("waived", name, "—", waived[:58]) if hit is None
                         else ("STALE", name, f"{hit[0]}:{hit[1]}", hit[2][:58]))
             if hit is not None:
@@ -266,6 +271,40 @@ def _self_test():
                   '[platforms.linux]\nbuilt_by = ["Configure linux"]\n'
                   '[platforms.bsd]\nbuilt_by = ["bsd/"]\n')
         check("a platform no CI config builds is caught", run(m, t) == 1)
+
+    # --- a waiver's `not_builds` (LESSONS #088): a mention that is NOT a build
+    # A waived dialect can share its name with something CI does build that
+    # is not the dialect: lsof-rs's FreeBSD backend, cross-checked from Linux
+    # (`--target x86_64-unknown-freebsd`), while the C's FreeBSD dialect stays
+    # unbuilt. The waiver names those lines; any other mention still makes it
+    # stale, so `not_builds` excuses exactly what it matches and no more.
+    with tempfile.TemporaryDirectory() as t:
+        m = build(t, ["linux", "bsd"],
+                  {"gh.yml": "run: ./Configure linux\n"
+                             "run: cargo clippy --target x86_64-unknown-bsd\n"},
+                  '[platforms.linux]\nbuilt_by = ["Configure linux"]\n'
+                  '[platforms.bsd]\nwaived = "no runner"\n'
+                  'not_builds = ["unknown-bsd"]\n')
+        check("a mention the waiver names as no build leaves it standing",
+              run(m, t) == 0)
+    with tempfile.TemporaryDirectory() as t:
+        m = build(t, ["linux", "bsd"],
+                  {"gh.yml": "run: ./Configure linux\n"
+                             "run: cargo clippy --target x86_64-unknown-bsd\n"
+                             "run: ./Configure -n bsd\n"},
+                  '[platforms.linux]\nbuilt_by = ["Configure linux"]\n'
+                  '[platforms.bsd]\nwaived = "no runner"\n'
+                  'not_builds = ["unknown-bsd"]\n')
+        check("...and any other mention still makes the waiver stale",
+              run(m, t) == 1)
+    with tempfile.TemporaryDirectory() as t:
+        m = build(t, ["linux", "bsd"],
+                  {"gh.yml": "run: ./Configure linux\n"
+                             "run: cargo clippy --target x86_64-unknown-bsd\n"},
+                  '[platforms.linux]\nbuilt_by = ["Configure linux"]\n'
+                  '[platforms.bsd]\nwaived = "no runner"\n')
+        check("...and without it, the same mention does",
+              run(m, t) == 1)
 
     # --- property 4: prose is not evidence (LESSONS #031) -------------------
     # Not hypothetical. The first run of this harness against the real repo

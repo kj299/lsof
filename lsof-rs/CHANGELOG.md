@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to **lsof-rs** (the Rust `lsof` reimplementation under
-[`lsof-rs/`](.), with native Windows and Linux backends). The changelog tracks
+[`lsof-rs/`](.), with native Windows, Linux and FreeBSD backends). The changelog tracks
 the new Rust workspace; the C `lsof` tree in the parent directory is its oracle,
 and changes only where PR #81 removed what does not build here. Entries below are left as written at the time, so older ones
 describe the project while it was still Windows-only.
@@ -10,6 +10,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+- **A FreeBSD backend, `lsof-backend-freebsd` (phase F0).** It reads the
+  `sysctl(3)` records the C's FreeBSD dialect reads: `kern.proc.proc`,
+  `kern.proc.filedesc`, `kern.lockf`, `kern.file` and the TCP, UDP and
+  AF_UNIX pcblists, with `statfs(2)` and `getfsstat(2)` for file systems.
+  Its rows follow the dialect's rules: vnode types (`VREG`, `VDIR`,
+  `VCHR`, …) with the file system in NAME, `cwd`/`rtd`/`jld`/`txt`/`ctty`,
+  sockets with TCP state, pipes, PTYs, kqueues, eventfds, SHM and process
+  descriptors, locks, nullfs, procfs types and device names from `/dev`.
+  FreeBSD 14 and 15, on x86_64 and i686. **Not yet run on a FreeBSD host**
+  (DIVERGENCES 140–148, `docs/freebsd-backend-scope.md`).
+- `lsof-core`: `FdType::Ctty` and `FdType::Jail`; FreeBSD's TCP state table,
+  with its `FIN_WAIT_1` and `FIN_WAIT_2` spellings.
 
 ### Changed — BREAKING
 - **`--help` and `--version` are refused**, as the C refuses them

@@ -68,6 +68,9 @@ it is a gap, not a formatting choice.
 | each mount directory, and its source, read through `Readlink()` and `stat`ed on a run that reads the table (an NFS or FUSE mount among them; never an autofs one, nor an `-e`/`+e` one) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | `proc_mounts` drives the table's rules under `-b`; the calls are a liveness hazard, not a parser: see below |
 | a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |
 | `/proc/locks` | kernel | untrusted | `lsof-backend-linux::locks` | `proc_locks` |
+| FreeBSD `kern.proc.filedesc.PID`: packed `kinfo_file` records, each with its own length, and `kf_path`, a name any local user's process chose | kernel, and **any local user's process** for the path | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
+| FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
+| FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it (DIVERGENCES 143) |
 | `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`); none for `parse_passwd_names`, behind `-u NAME` |
 | the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
@@ -324,8 +327,8 @@ as it always was (above).
 **One third-party crate reaches the Linux binary, for that one call.**
 `getxattr(2)` has no std API; the maintainer chose (2026-10-30) a dependency
 over FFI of the crate's own, so `lsof-backend-linux` keeps
-`#![forbid(unsafe_code)]` and the port's only `unsafe` stays in the Windows
-backend. The crate is `rustix`, pinned exactly (`=1.1.5`, a release more than
+`#![forbid(unsafe_code)]` and the port's `unsafe` stays in the native
+backends that cannot avoid it: Windows, and since 2026-10-31 FreeBSD (below). The crate is `rustix`, pinned exactly (`=1.1.5`, a release more than
 two weeks old when it was taken), with no default features and only `fs`.
 On x86_64, aarch64, arm, riscv64 and x86 Linux it issues the system call
 itself (its `linux_raw` backend, inline assembly in `rustix`, not here) and
@@ -352,6 +355,24 @@ the build; `cargo deny check` gates licences, sources (crates.io only),
 bans and advisories in CI; and a bump is a change of its own, reviewed
 (including its `build.rs`), taken at least two weeks after publication. The
 Windows binary links no new crate.
+
+**The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
+structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares
+`sysctl`, `sysctlbyname`, `getfsstat`, `statfs` and `geteuid` itself, in
+`src/sys.rs`, the only module where `#![deny(unsafe_code)]` is lifted. Each
+wrapper owns a byte vector of the size it tells the kernel, and returns it
+truncated to what the kernel wrote; no pointer outlives a call, and no
+returned byte is cast to a Rust type. Everything after that is safe code in
+`kinfo.rs`. Every read is bounds-checked and answers `None` past the end. A
+`kinfo_file`'s stated length is trusted only between the fixed part's size
+and the whole record's, and within what is left of the buffer; any other
+length ends the list. A `kinfo_proc` whose `ki_structsize` is not the size this
+build was measured for is refused whole, so a kernel with another layout gets
+an error rather than a wrong pid or uid in every row. No dependency was added:
+the `libc` crate was declined because its FreeBSD structs are selected per ABI
+version by `cfg`, a choice a cast would inherit silently. The parsers and the
+row rules are fuzzed (`freebsd_kinfo`) and run under miri on Linux. The FFI
+itself has run under no sanitizer, and on no FreeBSD host yet (DIVERGENCES 140).
 
 **The environment surface is two variables.** The C `lsof` reads considerably
 more, including the personal device-cache path; lsof-rs's whole environment
