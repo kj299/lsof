@@ -312,7 +312,7 @@ pub fn render_with_offset_digits(
     only: Option<&[char]>,
     tcp_show: TcpInfoFlags,
     esc: Escaper,
-    offset_digits: usize,
+    offset_digits: i32,
     file_flags: FileFlags,
 ) -> String {
     let term = if nul { '\0' } else { '\n' };

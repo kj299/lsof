@@ -453,6 +453,21 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
 covers = ["type:raw"]
 
 [[case]]
+name = "linux/netlink-and-unlisted-table"
+# ../differential/linux-matrix.toml netlink-and-unlisted-*: fixture NLK's
+# bound netlink sockets, typed `netlink` from /proc/net/netlink (DIVERGENCES
+# 109), and its unbound ones, `sock` and named from system.sockprotoname (22).
+args = ["-n", "-P", "-a", "-d", "3-8", "-p", "PID"]
+covers = ["type:netlink", "type:sock"]
+
+[[case]]
+name = "linux/psxmq-table"
+# ../differential/linux-matrix.toml psxmq-*: fixture MQ's POSIX message
+# queues beside an mqueue mount, typed `PSXMQ` (DIVERGENCES 128).
+args = ["-n", "-P", "-a", "-d", "3,4", "-p", "PID"]
+covers = ["type:PSXMQ"]
+
+[[case]]
 name = "linux/type-codes-from-st_mode"
 args = []
 covers = ["type:REG", "type:DIR", "type:CHR", "type:BLK", "type:FIFO", "type:SOCK", "type:LINK"]

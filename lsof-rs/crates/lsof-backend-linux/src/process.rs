@@ -175,8 +175,12 @@ pub fn parse_status(status: &str) -> Status {
         if let Some(v) = line.strip_prefix("Name:") {
             // The kernel writes `Name:\t<comm>` — exactly one tab. The comm's
             // own whitespace (a trailing space is legal) is part of the name
-            // and is kept; the renderer decides how to show it.
-            command = unescape_comm(v.strip_prefix('\t').unwrap_or(v));
+            // and is kept; the renderer decides how to show it. A newline is
+            // the exception: the C reads the comm from `stat` and replaces
+            // each one with `?` before anything sees it (`read_id_stat()`),
+            // so COMMAND, TASKCMD, `-F c`, `-F M`, JSON and `-c` all have
+            // `?` there (DIVERGENCES 58, measured).
+            command = unescape_comm(v.strip_prefix('\t').unwrap_or(v)).replace('\n', "?");
         } else if let Some(v) = line.strip_prefix("State:") {
             // `State:\tZ (zombie)` — the letter is all lsof reads.
             state = v.trim_start().chars().next();
@@ -368,7 +372,9 @@ mod tests {
         // What the kernel wrote for a comm of `a\b` (one backslash) and for one
         // holding a newline — observed on 6.x: `Name:\ta\\b`, `Name:\tx\ny`.
         assert_eq!(parse_status("Name:\ta\\\\b\n").command, "a\\b");
-        assert_eq!(parse_status("Name:\tx\\ny\n").command, "x\ny");
+        // ...which the C's `read_id_stat()` then makes a `?` (DIVERGENCES 58).
+        assert_eq!(parse_status("Name:\tx\\ny\n").command, "x?y");
+        assert_eq!(parse_status("Name:\t\\n\\\\n\n").command, "?\\n");
         // Raw controls and non-ASCII are not the kernel's to escape and come
         // through untouched; so does the comm's own trailing whitespace.
         assert_eq!(

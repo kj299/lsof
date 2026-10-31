@@ -3,13 +3,17 @@
 //! Implements [`lsof_core::backend::Backend`] over `/proc`, with `/etc/passwd`
 //! for login names: process identity from `/proc/<pid>/status`, open files from
 //! `/proc/<pid>/fd` (plus the `cwd`/`root`/`exe` magic links), file attributes
-//! from `stat`, and sockets from `/proc/net/*`.
-//! `std::os::unix::fs::MetadataExt` exposes every field needed, so this crate
-//! has **no dependencies** — the same posture as `lsof-core`, and it keeps the
-//! supply-chain gate's surface unchanged.
+//! from `stat`, and sockets from `/proc/net/*` and, for a socket no table
+//! lists, the kernel's `system.sockprotoname` extended attribute.
+//! `std::os::unix::fs::MetadataExt` exposes every field needed but that
+//! attribute: `getxattr(2)` has no `std` API, so this crate has **one
+//! dependency**, `rustix` (pinned, `fs` only), for that one call
+//! (DIVERGENCES 22; the maintainer chose a dependency over FFI of the crate's
+//! own, 2026-10-30). See `Cargo.toml` and `THREAT-MODEL.md`.
 //!
 //! `#![forbid(unsafe_code)]`: unlike the Windows backend, nothing here needs
-//! FFI. Reading a filesystem is safe Rust all the way down.
+//! FFI of its own. Reading a filesystem is safe Rust all the way down, and
+//! the one system call std lacks is `rustix`'s safe API.
 //!
 //! # What is covered
 //!
@@ -28,28 +32,24 @@
 //!   `+d`/`+D` tree, a mount point — runs in a helper process that gives it
 //!   `-S` seconds, so a file system that never answers costs a run that limit
 //!   per call that meets it, and not the run (DIVERGENCES 94, 110, 118).
-//! * **L2** — everything the scope document deferred has landed but naming
-//!   netlink sockets (below):
+//! * **L2** — everything the scope document deferred has landed:
 //!   `mem` rows and the `DEL` marking from `/proc/<pid>/maps`, the lock column
 //!   from `/proc/locks`, named `anon_inode` kinds (`[eventfd:6]`, `[pidfd:N]`,
 //!   `[eventpoll]`, …), the mount table behind `-f`/`+f` and the mount-point
-//!   rule, per-namespace socket reads so a container's socket is named rather
-//!   than left as a bare `socket:[inode]`, and the `pack` row from
+//!   rule, a container's socket named rather than left as a bare
+//!   `socket:[inode]` (by its namespace's tables until 2026-10-30, by the
+//!   kernel's attribute since), and the `pack` row from
 //!   `/proc/net/packet`.
+//! * **Sockets every way the C names them** (2026-10-30): a bound netlink
+//!   socket from `/proc/net/netlink`, typed `netlink` (DIVERGENCES 109), and
+//!   a socket no table of this namespace lists — AF_VSOCK, an unbound UDP,
+//!   UDP-Lite, TCP or netlink socket, a ping socket, any socket of another
+//!   network namespace — from `system.sockprotoname`, `sock … protocol: UDP`
+//!   (item 22), read through a descriptor pinned `O_PATH` (`net.rs`).
 //!
 //! # What it does not cover yet
 //!
-//! Sockets the C names and this backend does not. A socket no `/proc/net`
-//! table lists — AF_VSOCK, an unbound **netlink** socket, a ping socket — the
-//! C names from the `system.sockprotoname` extended attribute, which has no
-//! `std` API; that waits on the decision recorded as DIVERGENCES item 22, not
-//! on effort. Two families do have tables this backend does not read as the C
-//! does: a *bound* netlink socket is listed in `/proc/net/netlink`, which the
-//! C types `netlink` (item 109), and a raw socket, which the C types `raw`
-//! from `/proc/net/raw` where this backend types it IPv4 or IPv6 (item 108).
-//! Packet sockets are done.
-//!
-//! Also open: the `-Z` CONTEXT column and the rows of
+//! The `-Z` CONTEXT column and the rows of
 //! `lsof-rs/DIVERGENCES.md` still OPEN for this backend. `lsof-rs/docs/linux-l2-plan.md` measures each;
 //! the `DEBT` entries in `lsof-rs/coverage/feature-inventory-lsof-rs.toml` are
 //! what the coverage gate prints on every run.

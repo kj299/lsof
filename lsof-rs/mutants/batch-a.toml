@@ -1,0 +1,400 @@
+# Mutants for Batch A (2026-10-30): DIVERGENCES 114, 116, 117, 58, 71, 36,
+# 128, 109 and 22, one per rule. The kill table is this file, run (porting-kit
+# LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/batch-a.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo: the differential's fixtures W (WB, WJ, WA), MQ's mqueue
+# mount and the passwd overlay need it. CI runs only --apply-only.
+#
+# Run 2026-10-30 as root with --first-kill: 27 of 27 killed, 23 by the unit
+# gate and 4 by the differential alone (pwd-warnings-never, which mutates the
+# call site the unit test does not reach; psxmq-device-not-handed-on,
+# netlink-table-unread and netlink-table-gated-by-dash-X, which no unit test
+# reads from the host).
+#
+# Batch A's review (2026-10-30) re-anchored help-on-stdout (the help now goes
+# through lsof_core::safefs::write_stderr) and xattr-inode-unchecked (the
+# identity check is now the pinned descriptor's /proc link, not an fstat),
+# and added xattr-identity-by-fstat (killed only by net.rs's FUSE test, which
+# needs root and /dev/fuse), xattr-buffer-shrunk, the stderr writer's two,
+# the parse's six for -u, -Z, `--help` and the order of what it prints, and
+# users-resolved-after-help in main.rs. Run again in full, 2026-10-31, as root
+# with --first-kill: 38 of 38 killed, 34 by the unit gate and 4 by the
+# differential alone (psxmq-device-not-handed-on, netlink-table-unread,
+# netlink-table-gated-by-dash-X, and users-resolved-after-help, which mutates
+# main.rs's call the unit tests do not reach); pwd-warnings-never is now
+# killed by the unit gate, by tests/stdout_errors.rs's control run.
+#
+# Rules with no mutant here, each equivalent in what any run can show:
+# * `socket_row` builds its unlisted row only for what `stat`s as a socket (a
+#   `socket:[N]` link always does).
+# * Safety only: `sock_proto_name` reads the attribute through the pinned
+#   `/proc/self/fd/K`, not through the owner's link. Mutated to the link, every
+#   run prints the same (both name the same socket unless its owner swaps the
+#   descriptor in the microseconds between, which no run can arrange); the
+#   guard is that the swapped-in file is never asked. The readlink identity
+#   check, which xattr-identity-by-fstat and xattr-inode-unchecked pin, is
+#   what keeps a FUSE daemon from being asked at all: a non-socket descriptor
+#   is refused before any attribute is read.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# ------------------------------------------------------------------- 114
+
+[[mutant]]
+name = "help-on-stdout"
+rule = "-h writes the help to stderr (114)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            write_stderr(&usage());'''
+new = '''            print!("{}", usage());'''
+
+# ------------------------------------------------------------------- 116
+
+[[mutant]]
+name = "empty-word-given-back"
+rule = "an empty next word is an empty value, consumed (116)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if next.is_empty() {
+        *i += 1;
+        return None;
+    }'''
+new = '''    if next.is_empty() {
+        return None;
+    }'''
+
+[[mutant]]
+name = "plus-T-empty-is-plus-T"
+rule = "+T '' selects no letters, not the default (116)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''parse_tcp_info(letters.as_deref(), plus)'''
+new = '''parse_tcp_info(letters.as_deref().filter(|l| !l.is_empty()), plus)'''
+
+# ------------------------------------------------------------------- 117
+
+[[mutant]]
+name = "offset-digits-saturate"
+rule = "-o's digits are summed in a wrapping int (117)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        n.wrapping_mul(10)
+            .wrapping_add(i32::from(b.wrapping_sub(b'0')))'''
+new = '''        n.saturating_mul(10)
+            .saturating_add(i32::from(b.wrapping_sub(b'0')))'''
+
+[[mutant]]
+name = "offset-limit-plus-two-saturates"
+rule = "OffDecDig + 2 wraps (117)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = '''len > digits.wrapping_add(2)'''
+new = '''len > digits.saturating_add(2)'''
+
+[[mutant]]
+name = "hex-zero-is-0x0"
+rule = "%#llx writes zero as a bare 0 (117)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = '''        if offset == 0 {'''
+new = '''        if offset == u64::MAX && offset == 0 {'''
+
+# -------------------------------------------------------------------- 58
+
+[[mutant]]
+name = "newline-kept-in-command"
+rule = "a newline in a command is ? (58)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/process.rs"
+old = '''unescape_comm(v.strip_prefix('\t').unwrap_or(v)).replace('\n', "?")'''
+new = '''unescape_comm(v.strip_prefix('\t').unwrap_or(v))'''
+
+# -------------------------------------------------------------------- 71
+
+[[mutant]]
+name = "user-padded-by-characters"
+rule = "a right-aligned cell is padded by bytes (71)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''            let pad = widths[i].saturating_sub(cell.len());
+            write!(w, "{:pad$}{cell}", "")?;'''
+new = '''            write!(w, "{cell:>width$}", width = widths[i])?;'''
+
+# -------------------------------------------------------------------- 36
+
+[[mutant]]
+name = "pwd-warnings-never"
+rule = "an owner with no password entry is warned about (36)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        for uid in pwd_warnings(&procs, &format, &selection) {'''
+new = '''        for uid in pwd_warnings(&procs, &format, &selection).into_iter().take(0) {'''
+
+[[mutant]]
+name = "pwd-warnings-once-per-row"
+rule = "the table looks an owner up twice per row (36)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            rows.iter().chain(&rows).copied().collect()'''
+new = '''            rows'''
+
+[[mutant]]
+name = "pwd-warnings-under-dash-w"
+rule = "-w and -t silence the warning (36)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    if sel.omit_unreadable || sel.numeric_ids {'''
+new = '''    if sel.numeric_ids {'''
+
+[[mutant]]
+name = "pwd-warnings-under-dash-l"
+rule = "-l looks nothing up (36)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    if sel.omit_unreadable || sel.numeric_ids {'''
+new = '''    if sel.omit_unreadable {'''
+
+[[mutant]]
+name = "pwd-warnings-fields-without-L"
+rule = "-F looks an owner up only for L (36)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Format::Fields { only, .. } if wants_login(only.as_deref()) => {'''
+new = '''        Format::Fields { only, .. } if wants_login(only.as_deref()) || only.is_some() => {'''
+
+[[mutant]]
+name = "pwd-warnings-json-lines-per-process"
+rule = "-j looks an owner up once per line (36)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''if j.lines { p.files.len() } else { 1 }'''
+new = '''if j.lines { 1 } else { 1 }'''
+
+# ------------------------------------------------------------------- 128
+
+[[mutant]]
+name = "psxmq-never"
+rule = "a regular file on the mqueue device is PSXMQ (128)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                psxmq(type_from_mode(m.mode()), m.dev(), ctx.mqueue_device)'''
+new = '''                type_from_mode(m.mode())'''
+
+[[mutant]]
+name = "psxmq-device-not-handed-on"
+rule = "the table's mqueue device reaches the backend (128)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        sel.mqueue_device = table.as_ref().and_then(|t| t.mqueue_device);'''
+new = ''''''
+
+[[mutant]]
+name = "psxmq-any-type"
+rule = "only a regular file there is a queue (128)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if ty == FileType::Regular && mqueue == Some(dev) {'''
+new = '''    if mqueue == Some(dev) {'''
+
+# ------------------------------------------------------------------- 109
+
+[[mutant]]
+name = "netlink-table-unread"
+rule = "/proc/net/netlink is read (109)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        t.load_netlink("/proc/net/netlink");'''
+new = ''''''
+
+[[mutant]]
+name = "netlink-table-gated-by-dash-X"
+rule = "-X does not gate the netlink table (109)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        t.load_netlink("/proc/net/netlink");'''
+new = '''        if !skip_inet {
+            t.load_netlink("/proc/net/netlink");
+        }'''
+
+[[mutant]]
+name = "netlink-header-unchecked"
+rule = "a table whose columns moved is dropped (109)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                if f.get(NETLINK_ETH) != Some(&"Eth") || f.get(NETLINK_INODE) != Some(&"Inode") {'''
+new = '''                if f.get(NETLINK_ETH).is_none() {'''
+
+[[mutant]]
+name = "netlink-last-line-wins"
+rule = "the first line for an inode is kept (109)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {'''
+new = '''            self.by_inode.remove(&inode);
+            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {'''
+
+[[mutant]]
+name = "netlink-sock-diag-name"
+rule = "protocol 4 is the C's INET_DIAG (109)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        4 => "INET_DIAG",'''
+new = '''        4 => "SOCK_DIAG",'''
+
+[[mutant]]
+name = "netlink-unknown-unsigned"
+rule = "an unnamed protocol prints its number as the C's %d (109)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        _ => return format!("unknown protocol: {}", proto as i32),'''
+new = '''        _ => return format!("unknown protocol: {proto}"),'''
+
+# -------------------------------------------------------------------- 22
+
+[[mutant]]
+name = "xattr-never-read"
+rule = "a socket no table lists is named from system.sockprotoname (22)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        match sock_proto_name(link, inode) {'''
+new = '''        match sock_proto_name(link, inode).filter(|_| false) {'''
+
+[[mutant]]
+name = "xattr-read-under-dash-X"
+rule = "-X replaces the xattr with its string (22)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''    pub fn unlisted_name(&self, link: &Path, inode: u64) -> String {
+        if self.skip_inet {
+            return self.unidentified().to_string();
+        }'''
+new = '''    pub fn unlisted_name(&self, link: &Path, inode: u64) -> String {'''
+
+[[mutant]]
+name = "xattr-inode-unchecked"
+rule = "the pinned descriptor must be the socket the link named (22)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''    text == format!("socket:[{inode}]").as_bytes()'''
+new = '''    let _ = inode;
+    text.starts_with(b"socket:[")'''
+
+[[mutant]]
+name = "xattr-identity-by-fstat"
+rule = "the pinned descriptor's identity is read from its /proc link, which asks no file system; an fstat asks FUSE (22, the review's F2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''    let names = std::fs::read_link(&through).ok()?;'''
+new = '''    let _ = pinned.metadata();
+    let names = std::fs::read_link(&through).ok()?;'''
+
+[[mutant]]
+name = "xattr-buffer-shrunk"
+rule = "the attribute buffer holds the longest struct proto name, 31 bytes and its NUL (22, the review's F4)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''const SOCKPROTONAME_MAX: usize = 32;'''
+new = '''const SOCKPROTONAME_MAX: usize = 12;'''
+
+# ------------------------------------------- the review's fixes (114, 36)
+
+[[mutant]]
+name = "stderr-write-panics"
+rule = "a failed stderr write is ignored, as the C's unchecked fprintf: the listing goes on (36, the review's F1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''    let written = std::io::stderr().lock().write_all(text.as_bytes());'''
+new = '''    eprint!("{text}");
+    let written: io::Result<()> = Ok(());'''
+
+[[mutant]]
+name = "stderr-broken-pipe-ignored"
+rule = "a stderr whose reader has gone ends the run, 141, as the C's SIGPIPE (36, the review's F1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''        if e.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(141);
+        }'''
+new = '''        let _ = e;'''
+
+[[mutant]]
+name = "users-resolved-after-help"
+rule = "lsof parses over the host: -u logins are looked up, and -Z checked, while it parses (114, 73)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        parse_with_host(argv, &fs, &read_table, &host)'''
+new = '''        let _ = host;
+        parse_with_host(argv, &fs, &read_table, &HostChecks::DEFERRED)'''
+
+[[mutant]]
+name = "unknown-login-no-error"
+rule = "a -u login the host does not know is can't get UID for X, an error (114, 73)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            UserLookup::Unknown => early.push(format!("can't get UID for {}", shown(name))),'''
+new = '''            UserLookup::Unknown => {}'''
+
+[[mutant]]
+name = "z-not-gated-in-the-parse"
+rule = "-Z without SELinux is refused where the parse meets it, before -h (114)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if (host.selinux_enabled)() {'''
+new = '''                    if true {'''
+
+[[mutant]]
+name = "refused-z-takes-no-word"
+rule = "a refused -Z takes the next word, -- aside, as GetOpt hands it (114)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {'''
+new = '''                        if false {'''
+
+[[mutant]]
+name = "read-on-errors-reach-later-checks"
+rule = "an error the C reads on after ends the run in usage(), before -X -i and -a are checked (114)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if told || !errors.is_empty() || !early.is_empty() {'''
+new = '''    if told || !errors.is_empty() {'''
+
+[[mutant]]
+name = "dash-in-a-word-ends-the-parse"
+rule = "a - in an option word is illegal option character: -, and the word is read on (--help, --version; 114)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                '-' => early.push("illegal option character: -".to_string()),'''
+new = ''''''
+
+[[mutant]]
+name = "xattr-nul-kept"
+rule = "the name ends at its NUL (22)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''    let name = value.split(|&b| b == 0).next().unwrap_or_default();'''
+new = '''    let name = value;'''
+
+[[mutant]]
+name = "read-on-error-after-the-s-warning"
+rule = "an error the parse read on after is printed before the -S warning that follows it, as the C prints each where it meets it (114)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            if n < TMLIMMIN {
+                                tell_early(fs, early, &mut told);'''
+new = '''                            if n < TMLIMMIN {'''

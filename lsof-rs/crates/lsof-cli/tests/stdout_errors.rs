@@ -1,4 +1,5 @@
-//! What lsof does when its standard output fails (LESSONS #063).
+//! What lsof does when its standard output fails (LESSONS #063), or its
+//! standard error does.
 //!
 //! The table used to go out in one `print!`, and `print!` panics on any write
 //! error, so `lsof | head -1` ended with
@@ -122,4 +123,147 @@ fn any_other_write_error_is_reported_not_panicked() {
     assert_eq!(out.status.code(), Some(1), "stderr: {err}");
     assert!(err.starts_with("lsof: write error: "), "stderr: {err}");
     assert!(!err.contains("panicked"), "stderr: {err}");
+}
+
+/// A pipe whose reader is gone before lsof starts: the stdin of a `true`
+/// that has already exited. Writing to it is EPIPE every time, where
+/// dropping a reader after the spawn races lsof's first write.
+fn a_closed_pipe() -> Stdio {
+    let mut reader = Command::new("true")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn true");
+    let writer = reader.stdin.take().expect("its stdin");
+    reader.wait().expect("wait for true");
+    Stdio::from(writer)
+}
+
+fn dev_full() -> Stdio {
+    Stdio::from(
+        OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("open /dev/full"),
+    )
+}
+
+/// The help, written where the C's `usage()` writes it, to stderr: a failed
+/// write is ignored as the C ignores its unchecked `fprintf(stderr)`'s, exit
+/// 0, and a reader that has gone is the C's SIGPIPE, 141. `eprint!` had
+/// panicked on both, exit 101.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
+fn the_help_on_a_failing_stderr() {
+    for args in [&["-h"][..], &["-F", "?"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(dev_full())
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(a_closed_pipe())
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(141), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+}
+
+/// A process whose owner no password entry names, held while `f` runs: a
+/// `sleep` under a UID this host's `/etc/passwd` does not list. `None` where
+/// the tests are not run as root, which alone can start one.
+fn with_a_nameless_owner(f: impl FnOnce(u32, u32)) -> Option<()> {
+    use std::os::unix::process::CommandExt;
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let euid = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1));
+    if euid != Some("0") {
+        eprintln!("skipped: needs root to start a process under a UID with no name");
+        return None;
+    }
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let uid = (3_999_000u32..3_999_100).find(|u| {
+        !passwd
+            .lines()
+            .any(|l| l.split(':').nth(2) == Some(&u.to_string()))
+    })?;
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .uid(uid)
+        .gid(uid)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(pid, uid)));
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    Some(())
+}
+
+/// DIVERGENCES 36 made `lsof: no pwd entry for UID N` the first thing a
+/// listing writes on a host with a nameless owner, which containers often
+/// have. With stderr on a full device the C lists everything and exits 0;
+/// lsof-rs had panicked before its first row, exit 101. With stderr's
+/// reader gone the C dies of SIGPIPE: 141.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
+fn a_listing_on_a_failing_stderr() {
+    with_a_nameless_owner(|pid, uid| {
+        let pid = pid.to_string();
+        // The control: the warning is written, so the runs below meet a
+        // failing write.
+        let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .args(["-p", &pid])
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(0));
+        let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains(&format!("lsof: no pwd entry for UID {uid}\n")),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(listed.lines().count() > 1, "{listed}");
+
+        let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .args(["-p", &pid])
+            .stdout(Stdio::piped())
+            .stderr(dev_full())
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            listed,
+            "the whole listing"
+        );
+
+        let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .args(["-p", &pid])
+            .stdout(Stdio::piped())
+            .stderr(a_closed_pipe())
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(141));
+    });
 }

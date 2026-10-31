@@ -24,8 +24,10 @@ pub use fflags::FileFlags;
 pub use table::TableOpts;
 
 /// How many decimal digits an offset may have before it is printed in hex —
-/// the C's `OFFDECDIG` (`lib/common.h`), which `-o <digits>` overrides.
-pub const DEFAULT_OFFSET_DIGITS: usize = 8;
+/// the C's `OFFDECDIG` (`lib/common.h`), which `-o <digits>` overrides. An
+/// `i32` because the C's `OffDecDig` is an `int`, and how it wraps is what
+/// [`offset_text`] reproduces.
+pub const DEFAULT_OFFSET_DIGITS: i32 = 8;
 
 /// An offset as lsof writes it: `0t<decimal>`, or `0x<hex>` once the decimal
 /// form has more than `digits` digits (`print.c`: `if (OffDecDig && len >
@@ -33,13 +35,26 @@ pub const DEFAULT_OFFSET_DIGITS: usize = 8;
 /// the C reads as "no limit" because the test is `OffDecDig &&`.
 ///
 /// Measured on an fd seeked to 123456789: `0x75bcd15` by default, `0t123456789`
-/// under `-o 9` or `-o 0`. Zero never reaches the hex branch (`0t0` is three
-/// characters, and a limit of 0 is no limit), so the C's `%#x` printing a bare
-/// `0` for zero needs no mirror here.
-pub fn offset_text(offset: u64, digits: usize) -> String {
+/// under `-o 9` or `-o 0`.
+///
+/// `digits` is the C's `int`, and so is the sum: `OffDecDig + 2` wraps past
+/// `INT_MAX`, so a limit of 2147483646 or 2147483647 (or one the parser
+/// wrapped negative, see `-o` in `args.rs`) prints EVERY offset in hex, zero
+/// included — and the C's `%#llx` writes zero as a bare `0`, with no `0x`
+/// (DIVERGENCES 117, measured: `-o 2147483646 -o` prints `0`, `0xc`, `0x63`
+/// for offsets 0, 12 and 99, where `-o 2147483645 -o` prints `0t0`, `0t12`,
+/// `0t99`). Below that, zero never reaches the hex branch: `0t0` is three
+/// characters, and a limit of 0 is no limit.
+pub fn offset_text(offset: u64, digits: i32) -> String {
     let dec = format!("0t{offset}");
-    if digits != 0 && dec.len() > digits.saturating_add(2) {
-        format!("{offset:#x}")
+    // At most 22 bytes (`0t` and twenty digits), so the conversion holds.
+    let len = i32::try_from(dec.len()).unwrap_or(i32::MAX);
+    if digits != 0 && len > digits.wrapping_add(2) {
+        if offset == 0 {
+            "0".to_string()
+        } else {
+            format!("{offset:#x}")
+        }
     } else {
         dec
     }

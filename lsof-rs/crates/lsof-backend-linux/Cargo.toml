@@ -1,6 +1,6 @@
 [package]
 name = "lsof-backend-linux"
-description = "Linux data-acquisition backend for lsof-rs: enumerates processes and their open files from /proc. Implements lsof-core's Backend trait. Dependency-free — everything it needs is in std."
+description = "Linux data-acquisition backend for lsof-rs: enumerates processes and their open files from /proc. Implements lsof-core's Backend trait. Everything it needs is in std but getxattr(2), which it makes through rustix."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,19 @@ publish = false
 [dependencies]
 lsof-core = { path = "../lsof-core" }
 
-# No platform bindings: /proc is a filesystem, and `std::os::unix::fs::MetadataExt`
-# exposes every stat field this backend needs (mode, ino, dev, rdev, size, nlink). That
-# keeps the dependency surface — and so the `cargo-deny` supply-chain gate —
-# exactly as small as `lsof-core`'s.
+# One platform binding, for one call: `getxattr(2)`, which std has no API for and
+# which names a socket no /proc/net table lists, as the C names it
+# (`system.sockprotoname`, DIVERGENCES 22; the maintainer's decision, 2026-10-30,
+# was a dependency rather than FFI of the crate's own, so it keeps
+# `#![forbid(unsafe_code)]`). Everything else is still std: /proc is a filesystem,
+# and `std::os::unix::fs::MetadataExt` exposes every stat field this backend needs.
+# Pinned exactly, at a release more than two weeks old when it was added, with no
+# default features and only `fs`. On x86_64, aarch64, arm, riscv64 and x86 Linux it
+# makes the syscall itself and pulls in `bitflags` and `linux-raw-sys` alone (all
+# three MIT OR Apache-2.0 at least; see deny.toml and THREAT-MODEL.md). Linux only:
+# off Linux this crate is an empty shell and links nothing.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.5", default-features = false, features = ["fs"] }
 
 [features]
 # Exposes the pure text parsers (`/proc/net/*`, `/proc/<pid>/status`, fdinfo,

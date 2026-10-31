@@ -1336,3 +1336,27 @@ fn dash_f_dash_e_of_a_mount_is_accepted() {
         "lsof: \"-e /nonexistent-mount\" is not a mounted file system.\nTry 'lsof -h' for usage.\n"
     );
 }
+
+/// `-h` and `-?` write the help to stderr and exit 0, as the C's `usage()`
+/// does (DIVERGENCES 114): a script reading `lsof -h 2>/dev/null` gets nothing
+/// from either. With another option the help still wins, and an error the C
+/// finds once every option is read still beats it (item 115).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's streams"
+)]
+fn the_help_goes_to_stderr() {
+    for args in [&["-h"][..], &["-?"], &["-h", "-p", "1"], &["-p", "1", "-h"]] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: help on stdout");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("USAGE:"), "{args:?}: {err}");
+    }
+    // `-hx` is `-x`'s error, not the help.
+    let out = lsof(&["-hx"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("USAGE:"));
+}

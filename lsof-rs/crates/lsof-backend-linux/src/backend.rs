@@ -143,7 +143,7 @@ impl Backend for LinuxBackend {
         // Built empty and filled only if a socket turns up that this
         // namespace's tables cannot explain — nothing is read on a host with
         // one network namespace.
-        let nstab = crate::net::NetnsTables::new(sel.skip_inet_tables);
+        let nstab = crate::net::SockProtoNames::new(sel.skip_inet_tables);
         // When nothing but a socket can reach the output, collect nothing but
         // sockets. The big one is the mapped-file walk: under `-i` the C opens
         // no `/proc/<pid>/maps` at all, and this port was opening one per
@@ -164,6 +164,7 @@ impl Backend for LinuxBackend {
             bound_paths: sel.has_path_filter(),
             mnt_ns: std::fs::metadata("/proc/self/ns/mnt").ok().map(|m| m.ino()),
             helpers: &helpers,
+            mqueue_device: sel.mqueue_device,
         };
 
         for p in procs.iter_mut() {

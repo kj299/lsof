@@ -15,14 +15,24 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lsof_cli::args::{parse_with, read_mount_table, Action};
+use lsof_cli::args::{parse_with_host, read_mount_table, Action, HostChecks};
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
+use lsof_core::safefs::{to_stderr, write_stderr};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
     errno_text, Backend, DirArg, FileId, FilesystemArgs, Located, MountKind, MountRequest,
-    MountTable, PathItem, SafeFs, Selection, TaskMode, UidSel, UserLookup,
+    MountTable, PathItem, SafeFs, Selection, TaskMode,
 };
+
+/// `eprintln!`, without its panic: one line on stderr through
+/// [`to_stderr`], which ignores a failed write as the C's `fprintf(stderr)`
+/// does and ends the run with 141 only when stderr's reader has gone.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        to_stderr(&format!($($arg)*))
+    };
+}
 
 #[cfg(target_os = "linux")]
 use lsof_backend_linux::LinuxBackend;
@@ -202,8 +212,8 @@ MISCELLANEOUS:
                   non-ASCII name prints as it is
     --ascii       accepted; changes nothing
 
-    -h, -?, --help    show this help
-    -v, --version     show version
+    -h, -?        show this help
+    -v            show version
 
 Without elevation, lsof-rs shows the processes you can access; run as
 Administrator (Windows) or root (Linux) for a system-wide view. On Windows,
@@ -211,6 +221,55 @@ privileges are enabled only for the operations that need them.
 ",
         ver = env!("CARGO_PKG_VERSION")
     )
+}
+
+/// The owners the C's `printuid()` warns about as it prints `procs`, one per
+/// call, in the order it makes them: `lsof: no pwd entry for UID N` for an
+/// owner no password entry names, each time it is looked up — the C caches a
+/// name it found and nothing it did not (DIVERGENCES 36, measured with UID
+/// 65000). It looks one up wherever it prints a login:
+///
+/// * the table, twice per row: once as it sizes the USER column and once as
+///   it prints it (`print.c:937-941`), every sizing call before any printing
+///   one; `-t` prints no USER;
+/// * `-F`, once per process set, when `L` is selected (`print.c:2224`);
+/// * `-J`, once per process, and `-j`, once per file, when `login` is
+///   (`print.c:2088`).
+///
+/// None under `-l`, which prints numbers and looks nothing up (`Futol`), and
+/// none under `-w` or `-t` (`Fwarn`, which `+w` clears again: `omit_unreadable`
+/// is that flag). An owner with a name, or with no uid at all (Windows), is
+/// never one.
+fn pwd_warnings(procs: &[lsof_core::Process], format: &Format, sel: &Selection) -> Vec<u32> {
+    if sel.omit_unreadable || sel.numeric_ids {
+        return Vec::new();
+    }
+    let nameless = |p: &lsof_core::Process| if p.user.is_none() { p.uid } else { None };
+    let wants_login = |only: Option<&[char]>| {
+        only.map_or_else(|| fields::field_is_default('L'), |s| s.contains(&'L'))
+    };
+    match format {
+        Format::Table if sel.terse => Vec::new(),
+        Format::Table => {
+            // One per row, a process with no file left being one blank row.
+            let rows: Vec<u32> = procs
+                .iter()
+                .flat_map(|p| std::iter::repeat_n(nameless(p), p.files.len().max(1)))
+                .flatten()
+                .collect();
+            rows.iter().chain(&rows).copied().collect()
+        }
+        Format::Fields { only, .. } if wants_login(only.as_deref()) => {
+            procs.iter().filter_map(nameless).collect()
+        }
+        Format::Json(j) if wants_login(j.only.as_deref()) => procs
+            .iter()
+            .filter(|p| !p.files.is_empty())
+            .flat_map(|p| std::iter::repeat_n(nameless(p), if j.lines { p.files.len() } else { 1 }))
+            .flatten()
+            .collect(),
+        Format::Fields { .. } | Format::Json(_) => Vec::new(),
+    }
 }
 
 /// Resolve a user-typed path selector (`+D` directory, bare path) to its
@@ -678,52 +737,6 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     miss
 }
 
-/// `-u`, resolved the way the platform names users ([`Backend::lookup_user`]):
-/// on Linux each value becomes a numeric ID, and a name the password file
-/// does not have is an error, as it is to the C (`can't get UID for X`, then
-/// the usage message, exit 1). The C enters each UID once and refuses one
-/// that is both selected and excluded — `UID 0 has been included and
-/// excluded.` — so `-u root,^0` is an error, not an empty listing.
-fn resolve_users(sel: &mut Selection, backend: &dyn Backend) -> Result<(), Vec<String>> {
-    let esc = Escaper::for_host();
-    let mut errors = Vec::new();
-    let mut by_name = Vec::new();
-    for v in std::mem::take(&mut sel.users) {
-        match backend.lookup_user(&v) {
-            UserLookup::Uid(uid) => {
-                if !sel.uids.iter().any(|s| s.uid == uid) {
-                    let login = (!v.bytes().all(|b| b.is_ascii_digit())).then(|| v.clone());
-                    sel.uids.push(UidSel { uid, login });
-                }
-            }
-            UserLookup::Unknown => errors.push(format!("can't get UID for {}", esc.text(&v))),
-            UserLookup::ByName => by_name.push(v),
-        }
-    }
-    sel.users = by_name;
-    let mut by_name = Vec::new();
-    for v in std::mem::take(&mut sel.user_excludes) {
-        match backend.lookup_user(&v) {
-            UserLookup::Uid(uid) => {
-                if !sel.uid_excludes.contains(&uid) {
-                    sel.uid_excludes.push(uid);
-                }
-            }
-            UserLookup::Unknown => errors.push(format!("can't get UID for {}", esc.text(&v))),
-            UserLookup::ByName => by_name.push(v),
-        }
-    }
-    sel.user_excludes = by_name;
-    if let Some(s) = sel.uids.iter().find(|s| sel.uid_excludes.contains(&s.uid)) {
-        errors.push(format!("UID {} has been included and excluded.", s.uid));
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
-    }
-}
-
 /// What a failed write to stdout means (LESSONS #063).
 ///
 /// **A closed pipe is not an error for lsof.** `lsof | head -1` is ordinary
@@ -741,7 +754,7 @@ fn exit_on_write_error(r: std::io::Result<()>) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             std::process::exit(141);
         }
-        eprintln!("lsof: write error: {e}");
+        say!("lsof: write error: {e}");
         std::process::exit(1);
     }
 }
@@ -770,7 +783,7 @@ fn main() {
     {
         Ok(argv) => argv,
         Err(bad) => {
-            eprintln!(
+            say!(
                 "lsof: an argument is not valid UTF-8, which lsof-rs cannot take: {}",
                 Escaper::for_host().text(&bad.to_string_lossy())
             );
@@ -801,14 +814,35 @@ fn main() {
 
     // The backend, made where it is first needed: by the parser, if it reads
     // the mount table where the C does (at the first `+d`/`+D`, or for the
-    // `-e` check), else once the options are read. So `-h`, `-v` and a usage
-    // error make none (on Windows, no token is asked whether it is elevated).
+    // `-e` check), looks a `-u` login up or asks whether SELinux is enabled
+    // for `-Z` (as the C does while it parses, so their errors come before
+    // `-h` is acted on: DIVERGENCES 114), else once the options are read. So
+    // `-h`, `-v` and a usage error make none unless one of those asked (on
+    // Windows, no token is asked whether it is elevated).
     let env_cell: std::cell::OnceCell<Env> = std::cell::OnceCell::new();
     let parsed = {
         let read_table = |req: &MountRequest, fs: &SafeFs| {
             env_cell.get_or_init(make_env).backend.mount_table(req, fs)
         };
-        parse_with(argv, &fs, &read_table)
+        let lookup_user = |v: &str| env_cell.get_or_init(make_env).backend.lookup_user(v);
+        // `is_selinux_enabled()`, a check for a mounted selinuxfs, not for
+        // the `/sys/fs/selinux` directory: on a host where the directory
+        // exists unmounted (this port's own test box) a presence check
+        // answers "enabled" where the C answers "disabled", so the mount
+        // table is what decides — the types it lists, read as text, with no
+        // mount examined (the C asks libselinux, which reads `/proc/mounts`
+        // the same way, and `readmnt()` has no part in it).
+        let selinux_enabled = || {
+            env_cell
+                .get_or_init(make_env)
+                .backend
+                .has_mount_type("selinuxfs")
+        };
+        let host = HostChecks {
+            lookup_user: &lookup_user,
+            selinux_enabled: &selinux_enabled,
+        };
+        parse_with_host(argv, &fs, &read_table, &host)
     };
     let action = match parsed {
         Ok(a) => a,
@@ -818,21 +852,23 @@ fn main() {
             // makes in silence under `-w` or `-t` comes back empty: the run
             // still ends, with the usage hint alone.
             if !e.is_empty() {
-                eprintln!("lsof: {e}");
+                say!("lsof: {e}");
             }
-            eprintln!("Try 'lsof -h' for usage.");
+            say!("Try 'lsof -h' for usage.");
             std::process::exit(1);
         }
     };
 
     let (selection, format, repeat, columns, mounts) = match action {
+        // To stderr, as the C's `usage()` writes it, and exit 0 (DIVERGENCES
+        // 114): `lsof -h 2>/dev/null` prints nothing in either.
         Action::Help => {
-            print!("{}", usage());
+            write_stderr(&usage());
             return;
         }
         // To stderr, as the C writes it, and exit 0.
         Action::FieldHelp => {
-            eprint!("{}", fields::field_help());
+            write_stderr(&fields::field_help());
             return;
         }
         Action::Version => {
@@ -848,17 +884,6 @@ fn main() {
         } => (selection, format, repeat, columns, mounts),
     };
     let env = env_cell.into_inner().unwrap_or_else(make_env);
-    let selection = {
-        let mut sel = selection;
-        if let Err(errors) = resolve_users(&mut sel, env.backend.as_ref()) {
-            for e in errors {
-                eprintln!("lsof: {e}");
-            }
-            eprintln!("Try 'lsof -h' for usage.");
-            std::process::exit(1);
-        }
-        sel
-    };
     // The path arguments, as the C's `ck_file_arg()` enters them once its
     // options are parsed (`arg.c`), and then the `+d`/`+D` directories the
     // parser checked, expanded now that a backend exists to identify what is
@@ -875,21 +900,9 @@ fn main() {
     let selection = {
         let mut sel = selection;
         sel.paths_identified = env.backend.identifies_paths();
-        // `-Z` is gated on whether SELinux is ENABLED, which the C asks with
-        // `is_selinux_enabled()` — a check for a mounted selinuxfs, not for
-        // the `/sys/fs/selinux` directory. On a host where the directory
-        // exists unmounted (this port's own test box) a presence check answers
-        // "enabled" where the C answers "disabled", so the mount table is what
-        // decides: the types it lists, read as text, with no mount examined
-        // (the C asks libselinux, which reads `/proc/mounts` the same way, and
-        // `readmnt()` has no part in it).
+        // `-Z` reaches here only where SELinux is enabled: the parse refused
+        // it, in the C's words and order, where it is not ([`HostChecks`]).
         if sel.selinux.is_some() {
-            let enabled = env.backend.has_mount_type("selinuxfs");
-            if !enabled {
-                // The C's exact line, and its status.
-                eprintln!("lsof: -Z limited to SELinux");
-                std::process::exit(1);
-            }
             // SELinux IS enabled, and this port does not implement the column.
             // Deliberately NOT written blind: `print.c:902` puts CONTEXT in the
             // PROCESS columns with a width that grows to the longest value, and
@@ -897,7 +910,7 @@ fn main() {
             // USER and FD. Guessing produces silently misaligned output on
             // exactly the hosts that use the option. A loud refusal is the
             // honest failure; DIVERGENCES records it.
-            eprintln!("lsof: -Z (SELinux context) is not implemented");
+            say!("lsof: -Z (SELinux context) is not implemented");
             std::process::exit(1);
         }
         // The mount table, which lsof reads once and only on a run that needs
@@ -935,7 +948,7 @@ fn main() {
                 Err(e) => {
                     // A warning: `-w` mutes it, `-Q` does not.
                     if !sel.omit_unreadable {
-                        eprintln!("lsof: {}", e.message(&esc.text(&typed)));
+                        say!("lsof: {}", e.message(&esc.text(&typed)));
                     }
                     dropped_an_argument = true;
                     continue;
@@ -978,7 +991,7 @@ fn main() {
                 // typed, escaped, since a script may pass along a file name
                 // it did not choose.
                 if !sel.quiet {
-                    eprintln!("lsof: not a file system: {}", esc.text(&typed));
+                    say!("lsof: not a file system: {}", esc.text(&typed));
                 }
                 dropped_an_argument = true;
                 continue;
@@ -1037,7 +1050,7 @@ fn main() {
                     // /nonexistent/f`, and a `/proc/PID/fd/N` pipe is `status
                     // error on /proc/PID/fd/pipe:[N]`. `-w` does not mute it.
                     if !sel.quiet {
-                        eprintln!(
+                        say!(
                             "lsof: status error on {}: {}",
                             esc.bytes(path.as_encoded_bytes()),
                             errno_text(&e)
@@ -1066,6 +1079,9 @@ fn main() {
         // such a mount is recorded, and that the file's path start with the
         // mount's directory (`dnode.c:735-744`); that path test is not made
         // here (DIVERGENCES 124; source only: this kernel has no NFS).
+        // A POSIX message queue is a regular file on the `mqueue` file
+        // system the table recorded (`dnode.c:815-819`, DIVERGENCES 128).
+        sel.mqueue_device = table.as_ref().and_then(|t| t.mqueue_device);
         if sel.nfs_only {
             for m in table.iter().flat_map(|t| &t.entries) {
                 if let (MountKind::Nfs, Some(dev)) = (m.kind, m.device) {
@@ -1083,12 +1099,12 @@ fn main() {
 
     let _ = env.elevated; // read on all platforms; used for the hint on Windows.
     if let Some(note) = &env.note {
-        eprintln!("lsof: {note}");
+        say!("lsof: {note}");
     }
 
     #[cfg(windows)]
     if wants_privilege_hint(env.elevated, &selection, &format) {
-        eprintln!(
+        say!(
             "lsof: showing your accessible processes; re-run as Administrator for a system-wide view"
         );
     }
@@ -1109,7 +1125,7 @@ fn main() {
         let gathered = match env.backend.gather(&selection) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("lsof: {e}");
+                say!("lsof: {e}");
                 std::process::exit(1);
             }
         };
@@ -1131,6 +1147,12 @@ fn main() {
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
         // host (DIVERGENCES 30). JSON is written a process at a time; `-F` still builds its text first.
+        // The C writes these as it prints, unbuffered, while its listing
+        // waits in stdout's buffer; here they come first, before any of it
+        // (DIVERGENCES 36).
+        for uid in pwd_warnings(&procs, &format, &selection) {
+            say!("lsof: no pwd entry for UID {uid}");
+        }
         let stdout = std::io::stdout();
         let mut sink = std::io::BufWriter::new(stdout.lock());
         let written = match &format {
@@ -1240,6 +1262,80 @@ mod tests {
     use lsof_cli::args::{parse, Action};
     use lsof_core::render::Format;
     use lsof_core::Selection;
+
+    /// Processes owned by `uid`, named `user` or by no password entry, with
+    /// `files` files each — what [`super::pwd_warnings`] counts over.
+    fn owned(uid: u32, user: Option<&str>, files: usize) -> lsof_core::Process {
+        use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
+        let file = |n| OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(n),
+            access: AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "/x".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+            name_addition: None,
+        };
+        Process {
+            tid: None,
+            task_command: None,
+            uid: Some(uid),
+            pgid: None,
+            pid: uid,
+            ppid: None,
+            command: "c".into(),
+            user: user.map(Into::into),
+            endpoint_peer: false,
+            unlisted: false,
+            files: (0..files as u64).map(file).collect(),
+        }
+    }
+
+    /// `lsof: no pwd entry for UID N`, as often as the C's `printuid()` is
+    /// asked about an owner it has no name for (DIVERGENCES 36, measured with
+    /// UID 65000 on two and three rows): twice per table row, every sizing
+    /// call first; once per `-F` process set and `-J` process when `L` is
+    /// selected, once per `-j` line; never under `-l`, `-w` or `-t` (unless
+    /// `+w` follows), nor for an owner with a name.
+    #[test]
+    fn a_nameless_owner_is_warned_about_per_lookup() {
+        let procs = [
+            owned(65000, None, 2),
+            owned(0, Some("root"), 1),
+            owned(65001, None, 1),
+        ];
+        let warned = |argv: &[&str]| {
+            let (sel, format) = parsed(argv);
+            super::pwd_warnings(&procs, &format, &sel)
+        };
+        let table = [65000, 65000, 65001];
+        assert_eq!(warned(&["-n"]), [table, table].concat());
+        assert_eq!(warned(&["-F"]), [65000, 65001]);
+        assert_eq!(warned(&["-FL"]), [65000, 65001]);
+        assert!(warned(&["-Fn"]).is_empty(), "no L, no lookup");
+        assert_eq!(warned(&["-J"]), [65000, 65001]);
+        assert_eq!(warned(&["-j"]), [65000, 65000, 65001]);
+        assert!(warned(&["-J", "-Fn"]).is_empty());
+        for quiet in [&["-l"][..], &["-w"], &["-t"], &["-t", "+w"], &["+w", "-w"]] {
+            assert!(warned(quiet).is_empty(), "{quiet:?}");
+        }
+        assert_eq!(warned(&["-w", "+w"]).len(), 6, "+w after -w warns again");
+        // A process with no file left is one blank row in the table, and
+        // nothing in -J.
+        let empty = [owned(65000, None, 0)];
+        let (sel, format) = parsed(&["-n"]);
+        assert_eq!(super::pwd_warnings(&empty, &format, &sel), [65000, 65000]);
+        let (sel, format) = parsed(&["-J"]);
+        assert!(super::pwd_warnings(&empty, &format, &sel).is_empty());
+    }
 
     /// Parse argv exactly as `main` does and hand back the hint inputs.
     fn parsed(argv: &[&str]) -> (Selection, Format) {

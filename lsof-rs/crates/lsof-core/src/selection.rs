@@ -896,6 +896,14 @@ pub struct Selection {
     /// each mount the C types `N_NFS`. A file whose [`OpenFile::fs_device`]
     /// is in here is an NFS file.
     pub nfs_devices: std::collections::HashSet<u64>,
+    /// The device of the POSIX message queue file system, filled by the CLI
+    /// from [`MountTable::mqueue_device`](crate::backend::MountTable): the
+    /// C's `MqueueDev`, the last `mqueue` mount its table recorded. A
+    /// regular file on it is typed `PSXMQ` (DIVERGENCES 128). `None` on a
+    /// run that read no table (`-i` alone), under `-b`, which `stat`s no
+    /// mount, and where the mqueue mount was `-e`'s: in each the C types it
+    /// `REG`.
+    pub mqueue_device: Option<u64>,
     /// `-e <fs>` / `+e <fs>`: mount points whose files must **not** be
     /// `stat(2)`ed. The C's reason is a hung NFS server; the consequence is a
     /// row built from the link target and fdinfo alone.

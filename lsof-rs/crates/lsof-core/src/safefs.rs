@@ -429,8 +429,31 @@ impl FsCalls for InProcess {
 }
 
 /// Where a warning goes: stderr, as the C prints them, where it stands.
+/// One line, `line` and its newline, in one write ([`write_stderr`]).
 pub fn to_stderr(line: &str) {
-    eprintln!("{line}");
+    let mut text = String::with_capacity(line.len().saturating_add(1));
+    text.push_str(line);
+    text.push('\n');
+    write_stderr(&text);
+}
+
+/// `text` on stderr, written as the C's unchecked `fprintf(stderr, …)`
+/// writes it: a failure is no reason to stop listing. `eprint!` PANICS on
+/// one, so `lsof 2>/dev/full` on a host with an owner the password file
+/// lacks died (exit 101) before its first row, where the C lists everything
+/// and exits 0. A stderr whose reader has gone is the one failure that
+/// ends the run, as the C dies of `SIGPIPE` there: exit 141, the status the
+/// shell shows for that, as lsof-rs's stdout does (`exit_on_write_error` in
+/// the binary). Anything else is ignored. Every warning and the help go
+/// through here.
+pub fn write_stderr(text: &str) {
+    use std::io::Write as _;
+    let written = std::io::stderr().lock().write_all(text.as_bytes());
+    if let Err(e) = written {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(141);
+        }
+    }
 }
 
 /// The calls lsof-rs makes on a path it was given, under the `-b`, `-O` and

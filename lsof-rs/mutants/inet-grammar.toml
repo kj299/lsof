@@ -17,6 +17,16 @@
 # for an Internet file (raw-socket-is-not-selected-by-dash-i), and
 # /proc/net/udplite unread or read under -X (udplite-socket-*), which no
 # unit test reads from the host.
+#
+# 2026-10-30 (Batch A, DIVERGENCES 22): `udplite-kernel-name` and
+# `raw-kernel-name-icmp` are gone with the code they mutated. A socket of
+# another network namespace is named by the kernel's `system.sockprotoname`
+# now, as the C names it, not from a table of names lsof-rs kept
+# (`kernel_proto`), so there is no port-side name left to get wrong; the
+# xattr's own rules are `mutants/batch-a.toml`'s. `udplite-read-under-dash-X`
+# was re-anchored on `/proc/net/raw`'s load alone, the netlink table's now
+# following it, and run again as root: killed by the differential. 35
+# mutants.
 
 [run]
 dir = ".."
@@ -272,11 +282,9 @@ old = '''            t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, 
 new = ''''''
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/net.rs"
-old = '''        t.load_raw("/proc/net/raw", false);
-        t.load_packet("/proc/net/packet");'''
+old = '''        t.load_raw("/proc/net/raw", false);'''
 new = '''        t.load_raw("/proc/net/raw", false);
-        t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);
-        t.load_packet("/proc/net/packet");'''
+        t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);'''
 
 [[mutant]]
 name = "udplite-not-read"
@@ -284,15 +292,6 @@ rule = "/proc/net/udplite is read (112)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/net.rs"
 old = '''            t.load_inet("/proc/net/udplite", Protocol::UdpLite, false, want_queues);
-'''
-new = ''''''
-
-[[mutant]]
-name = "udplite-kernel-name"
-rule = "a foreign UDP-Lite socket is protocol: UDP-Lite (112)"
-[[mutant.edit]]
-file = "crates/lsof-backend-linux/src/net.rs"
-old = '''        (Protocol::UdpLite, false) => "UDP-Lite",
 '''
 new = ''''''
 
@@ -312,14 +311,6 @@ file = "crates/lsof-core/src/model.rs"
 old = '''        self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6)'''
 new = '''        (self.socket.is_some() && matches!(self.file_type, FileType::Ipv4 | FileType::Ipv6))
             || self.file_type == FileType::Socket("raw")'''
-
-[[mutant]]
-name = "raw-kernel-name-icmp"
-rule = "a foreign raw ICMP socket is protocol: RAW (108)"
-[[mutant.edit]]
-file = "crates/lsof-backend-linux/src/net.rs"
-old = '''                    kernel_proto: if v6 { "RAWv6" } else { "RAW" },'''
-new = '''                    kernel_proto: if v6 { "ICMPV6" } else { "ICMP" },'''
 
 [[mutant]]
 name = "raw-name-without-state"
@@ -366,7 +357,7 @@ name = "u-long-name-utf8-raw"
 rule = "the -u long-name echo prints a non-ASCII byte as \\xNN, safestrprtn()'s (133)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                        if c.is_ascii() {
-                            echo.push(c);'''
-new = '''                        if true {
-                            echo.push(c);'''
+old = '''                if c.is_ascii() {
+                    echo.push(c);'''
+new = '''                if true {
+                    echo.push(c);'''

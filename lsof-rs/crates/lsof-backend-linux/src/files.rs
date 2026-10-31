@@ -415,7 +415,7 @@ pub(crate) fn unkn_suffix(fd: &FdType) -> &'static str {
 pub struct GatherCtx<'a> {
     pub socks: &'a SocketTable,
     pub locks: &'a crate::locks::LockTable,
-    pub ns: &'a net::NetnsTables,
+    pub ns: &'a net::SockProtoNames,
     pub exempt: &'a [ExemptFs],
     /// `Selection::socket_rows_only`: nothing but a socket can reach the
     /// output, so nothing but a socket is collected — and the rows that say
@@ -435,6 +435,23 @@ pub struct GatherCtx<'a> {
     /// lsof-rs's helpers among the processes, whose descriptors opened for a
     /// call are neither `stat`ed nor listed ([`crate::safefs::HelperFds`]).
     pub helpers: &'a crate::safefs::HelperFds,
+    /// `Selection::mqueue_device`: a regular file on this device is a POSIX
+    /// message queue, `PSXMQ`.
+    pub mqueue_device: Option<u64>,
+}
+
+/// `ty`, or `PSXMQ` for a regular file on the device of the `mqueue` file
+/// system the mount table recorded: a POSIX message queue, as the C's
+/// `process_proc_node()` types it (`dnode.c:815-819`, DIVERGENCES 128;
+/// measured with a queue `mq_open`ed on fd 3, `REG` before `mqueue` is
+/// mounted and under `-b`, `PSXMQ` after). Only TYPE changes: its size (the
+/// queue's `QSIZE` text), device, inode and link count are the `stat`'s.
+fn psxmq(ty: FileType, dev: u64, mqueue: Option<u64>) -> FileType {
+    if ty == FileType::Regular && mqueue == Some(dev) {
+        FileType::Other("PSXMQ".into())
+    } else {
+        ty
+    }
 }
 
 /// The lock `pid` holds on the file a row was built from, as the C's
@@ -459,25 +476,32 @@ fn is_socket_link(target: &Path) -> bool {
 }
 
 /// The row for socket `inode` held in slot `fd`, as the tables name it: this
-/// namespace's `/proc/net`, or, failing that, the protocol from the owning
-/// process's own namespace (`sock … protocol: TCP`) — or, under `-X`, the
-/// fixed string that replaces the lookup. `None` when neither knows the
-/// socket, and the caller keeps the row its `stat` gives. An fd's row and a
-/// mapped socket's (a packet ring in another mount namespace) are built
-/// alike; the mapping's caller then blanks the offset, which it has none of.
+/// namespace's `/proc/net`, or, failing that, the kernel's own name for it,
+/// read through `link`, the fd's magic link, as the C reads it (`sock …
+/// protocol: TCP`, or `can't identify protocol`; DIVERGENCES 22) — or, under
+/// `-X`, the fixed string that replaces the lookup. `None` when no table
+/// lists it and there is no `link` to ask (a mapping), or its `stat` is no
+/// socket's (the C would not have taken it for one), and the caller keeps
+/// the row its `stat` gives. An fd's row and a mapped socket's (a packet ring
+/// in another mount namespace) are built alike; the mapping's caller then
+/// blanks the offset, which it has none of.
 pub(crate) fn socket_row(
     inode: u64,
     fd: &FdType,
     info: &FdInfo,
     meta: Option<&std::fs::Metadata>,
-    pid: u32,
+    link: Option<&Path>,
     ctx: &GatherCtx<'_>,
 ) -> Option<OpenFile> {
     let (socks, ns) = (ctx.socks, ctx.ns);
     if socks.get(inode).is_none() {
-        // Not in this namespace's tables. Before falling back to the bare
-        // `socket:[inode]` row, ask for the name the C would print here.
-        let name = ns.unresolved_name(pid, inode)?;
+        // Not in this namespace's tables: the C's last branch of
+        // `process_proc_sock()`, reached only for what `stat`s as a socket.
+        let link = link?;
+        if meta?.mode() & S_IFMT != S_IFSOCK {
+            return None;
+        }
+        let name = ns.unlisted_name(link, inode);
         return Some(OpenFile {
             rdev: None,
             fs_device: meta.map(MetadataExt::dev),
@@ -568,7 +592,6 @@ fn row(
     target: std::path::PathBuf,
     fd: FdType,
     info: &FdInfo,
-    pid: u32,
     ctx: &GatherCtx<'_>,
 ) -> Option<OpenFile> {
     let (exempt, sockets_only) = (ctx.exempt, ctx.sockets_only);
@@ -645,7 +668,7 @@ fn row(
     // exactly as it was, which is the honest result for a socket in another
     // network namespace.
     if let Some(inode) = net::socket_inode(&name) {
-        if let Some(f) = socket_row(inode, &fd, info, meta.as_ref(), pid, ctx) {
+        if let Some(f) = socket_row(inode, &fd, info, meta.as_ref(), Some(link), ctx) {
             return Some(f);
         }
     }
@@ -660,7 +683,7 @@ fn row(
             let ty = if name.starts_with("anon_inode:") {
                 FileType::Other("a_inode".into())
             } else {
-                type_from_mode(m.mode())
+                psxmq(type_from_mode(m.mode()), m.dev(), ctx.mqueue_device)
             };
             // DEVICE means two different things depending on the row, and lsof
             // follows the distinction: for a device node it is that device's
@@ -844,14 +867,8 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
         let p = format!("{base}/{name}");
         match std::fs::read_link(&p) {
             Ok(target) => {
-                if let Some(mut f) = row(
-                    Path::new(&p),
-                    target,
-                    fd.clone(),
-                    &FdInfo::default(),
-                    pid,
-                    ctx,
-                ) {
+                if let Some(mut f) = row(Path::new(&p), target, fd.clone(), &FdInfo::default(), ctx)
+                {
                     f.lock = lock_of(ctx.locks, pid, &f);
                     out.push(f);
                 }
@@ -931,7 +948,7 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
                 continue;
             }
         };
-        if let Some(mut f) = row(Path::new(&p), target, FdType::Handle(num), &info, pid, ctx) {
+        if let Some(mut f) = row(Path::new(&p), target, FdType::Handle(num), &info, ctx) {
             // The lock character lsof appends to the FD cell (`8uW`).
             f.lock = lock_of(ctx.locks, pid, &f);
             out.push(f);
@@ -992,9 +1009,8 @@ mod tests {
         link: &Path,
         fd: FdType,
         info: &FdInfo,
-        pid: u32,
         socks: &SocketTable,
-        ns: &net::NetnsTables,
+        ns: &net::SockProtoNames,
         exempt: &[ExemptFs],
     ) -> Option<OpenFile> {
         let locks = crate::locks::LockTable::default();
@@ -1005,7 +1021,6 @@ mod tests {
             target,
             fd,
             info,
-            pid,
             &GatherCtx {
                 socks,
                 locks: &locks,
@@ -1016,6 +1031,7 @@ mod tests {
                 bound_paths: false,
                 mnt_ns: None,
                 helpers: &crate::safefs::HelperFds::default(),
+                mqueue_device: None,
             },
         )
     }
@@ -1103,9 +1119,8 @@ mod tests {
                 access: Some(AccessMode::Read),
                 ..FdInfo::default()
             },
-            0,
             &SocketTable::default(),
-            &net::NetnsTables::default(),
+            &net::SockProtoNames::new(false),
             &[],
         )
         .expect("/dev/null is stat-able");
@@ -1129,13 +1144,14 @@ mod tests {
             &GatherCtx {
                 socks: &SocketTable::load(false, false),
                 locks: &crate::locks::load(),
-                ns: &net::NetnsTables::new(false),
+                ns: &net::SockProtoNames::new(false),
                 exempt: &[],
                 sockets_only: false,
                 omit_unreadable: false,
                 bound_paths: false,
                 mnt_ns: None,
                 helpers: &crate::safefs::HelperFds::default(),
+                mqueue_device: None,
             },
         );
         assert!(
@@ -1306,9 +1322,8 @@ mod tests {
             Path::new(&link),
             FdType::Handle(raw as u64),
             &info,
-            self_pid(),
             &SocketTable::default(),
-            &net::NetnsTables::default(),
+            &net::SockProtoNames::new(false),
             &[],
         )
         .expect("pipe fd is stat-able");
@@ -1449,13 +1464,14 @@ mod tests {
             &GatherCtx {
                 socks: &SocketTable::default(),
                 locks: &locks,
-                ns: &net::NetnsTables::default(),
+                ns: &net::SockProtoNames::new(false),
                 exempt: &[],
                 sockets_only,
                 omit_unreadable,
                 bound_paths: false,
                 mnt_ns: None,
                 helpers: &crate::safefs::HelperFds::default(),
+                mqueue_device: None,
             },
         )
     }
@@ -1663,19 +1679,20 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "miri supports only AF_INET and AF_INET6 sockets")]
-    fn a_socket_only_its_namespace_names_is_found_by_no_path() {
-        // DIVERGENCES 101. A socket this namespace's tables do not know is a
-        // `sock` row named by the owner's namespace (`protocol: TCP`, fixture
-        // J) or, under `-X`, not named at all. It keeps sockfs's device and
+    fn a_socket_no_table_lists_is_found_by_no_path() {
+        // DIVERGENCES 101. A socket this namespace's tables do not list is a
+        // `sock` row named by the kernel (`protocol: TCP`, fixture J; item
+        // 22) or, under `-X`, not named at all. It keeps sockfs's device and
         // its inode for `-F D` and `-F i`, which the C never compares: `-x l
-        // +d /proc/PID/fd` does not find it (measured). An empty table and
-        // `-X`, which asks no namespace, stand in for the other namespace.
+        // +d /proc/PID/fd` does not find it (measured). An empty table stands
+        // in for the other namespace.
         use std::os::fd::AsRawFd;
         let s = std::os::unix::net::UnixDatagram::unbound().unwrap();
-        let md = std::fs::metadata(format!("/proc/self/fd/{}", s.as_raw_fd())).unwrap();
+        let link = std::path::PathBuf::from(format!("/proc/self/fd/{}", s.as_raw_fd()));
+        let md = std::fs::metadata(&link).unwrap();
         let socks = SocketTable::default();
         let locks = crate::locks::LockTable::default();
-        let ns = net::NetnsTables::new(true);
+        let ns = net::SockProtoNames::new(true);
         let ctx = GatherCtx {
             socks: &socks,
             locks: &locks,
@@ -1686,20 +1703,96 @@ mod tests {
             bound_paths: false,
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
+            mqueue_device: None,
         };
         let f = socket_row(
             md.ino(),
             &FdType::Handle(3),
             &FdInfo::default(),
             Some(&md),
-            self_pid(),
+            Some(&link),
             &ctx,
         )
         .expect("`-X` names it");
         assert_eq!(f.file_type.code(), "sock");
+        assert_eq!(f.name, "can't identify protocol (-X specified)");
         assert_eq!(f.fs_device, Some(md.dev()), "`-F D` prints its device");
         assert!(f.is_socket(), "{f:?}");
         assert_eq!((f.file_id(), f.searched_fs_device()), (None, None), "{f:?}");
+        // Without `-X` the kernel names it, as the C's `getxattr()` does.
+        let ns = net::SockProtoNames::new(false);
+        let ctx = GatherCtx { ns: &ns, ..ctx };
+        let named = |link| {
+            socket_row(
+                md.ino(),
+                &FdType::Handle(3),
+                &FdInfo::default(),
+                Some(&md),
+                link,
+                &ctx,
+            )
+        };
+        let f = named(Some(&link)).expect("named");
+        assert_eq!((f.name.as_str(), f.offset), ("protocol: UNIX", Some(0)));
+        // A mapping has no link to ask, and leaves its row to its caller.
+        assert!(named(None).is_none());
+    }
+
+    /// A regular file on the `mqueue` file system the mount table recorded is
+    /// a POSIX message queue, `PSXMQ` (DIVERGENCES 128); anything else there,
+    /// and a regular file anywhere else, keeps its type, and with no such
+    /// mount recorded (no table read, `-b`, an `-e` mount) nothing is one.
+    #[test]
+    fn a_regular_file_on_the_mqueue_device_is_a_posix_queue() {
+        let mq = Some(0x2a);
+        assert_eq!(psxmq(FileType::Regular, 0x2a, mq).code(), "PSXMQ");
+        assert_eq!(psxmq(FileType::Regular, 0x2b, mq), FileType::Regular);
+        assert_eq!(psxmq(FileType::Dir, 0x2a, mq), FileType::Dir);
+        assert_eq!(psxmq(FileType::Regular, 0x2a, None), FileType::Regular);
+        // Through a row: a file on the device the table recorded.
+        let dir = fake_proc("psxmq");
+        let file = dir.join("queue");
+        std::fs::write(&file, b"QSIZE:0").unwrap();
+        let dev = std::fs::metadata(&file).unwrap().dev();
+        let socks = SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = net::SockProtoNames::new(false);
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+            helpers: &crate::safefs::HelperFds::default(),
+            mqueue_device: Some(dev),
+        };
+        let f = super::row(
+            &file,
+            file.clone(),
+            FdType::Handle(3),
+            &FdInfo::default(),
+            &ctx,
+        )
+        .expect("a row");
+        assert_eq!(f.file_type.code(), "PSXMQ");
+        assert_eq!(f.size, Some(7), "its size is the stat's");
+        let ctx = GatherCtx {
+            mqueue_device: None,
+            ..ctx
+        };
+        let f = super::row(
+            &file,
+            file.clone(),
+            FdType::Handle(3),
+            &FdInfo::default(),
+            &ctx,
+        )
+        .expect("a row");
+        assert_eq!(f.file_type, FileType::Regular);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1869,13 +1962,14 @@ mod tests {
         let ctx = GatherCtx {
             socks: &socks,
             locks: &locks,
-            ns: &net::NetnsTables::default(),
+            ns: &net::SockProtoNames::new(false),
             exempt: &[],
             sockets_only: false,
             omit_unreadable: false,
             bound_paths: true,
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
+            mqueue_device: None,
         };
         let id = |f: OpenFile| f.socket.and_then(|s| s.bound).and_then(|b| b.id);
         let first = row(
@@ -1883,20 +1977,12 @@ mod tests {
             target.clone(),
             FdType::Handle(3),
             &FdInfo::default(),
-            0,
             &ctx,
         );
         let md = std::fs::metadata(&path).unwrap();
         assert_eq!(first.and_then(id), Some(file_id(&md)));
         std::fs::remove_file(&path).unwrap();
-        let second = row(
-            &link,
-            target,
-            FdType::Handle(4),
-            &FdInfo::default(),
-            0,
-            &ctx,
-        );
+        let second = row(&link, target, FdType::Handle(4), &FdInfo::default(), &ctx);
         assert_eq!(second.and_then(id), Some(file_id(&md)));
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);

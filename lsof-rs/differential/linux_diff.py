@@ -816,7 +816,8 @@ def state_holder(work: str) -> Fixture:
     and `-sTCP:LISTEN` drops both UDP sockets, while the unix socket and the
     file are never touched. A TCP socket that is bound but neither listening
     nor connected is deliberately absent: `/proc/net/tcp` does not list it,
-    and naming it is DIVERGENCES 22's open decision.
+    so neither binary tests it (both name it from `system.sockprotoname`,
+    DIVERGENCES 22; fixtures SF and NLK hold one).
 
     It runs a second thread, idle, so `-K -a` with `-i` or `-U` has a task
     that holds sockets: the C then builds a task's socket rows and nothing
@@ -1166,17 +1167,36 @@ def mt_wrap(work: str, base: str) -> str:
     mapping on a mount. The daemon, in a session of its own, outlives a
     case that timed out (whose wrapper alone is killed) by 120 s at most,
     as fixture FH's server does: then it answers whatever waits on the
-    mount and goes, and the namespace with it."""
+    mount and goes, and the namespace with it.
+
+    Two more modes use the same namespace for a file system or a file of
+    the run's own: `mqueue` mounts the POSIX message queue file system at
+    `base/mq` (DIVERGENCES 128: fixture MQ's queues are then `PSXMQ`), and
+    `passwd` binds a password file over `/etc/passwd`, the host's with
+    fixture W's WJ and WA added ([`PASSWD_EXTRA`]; DIVERGENCES 71)."""
     path = os.path.join(work, "mt-wrap.sh")
     b = shlex.quote(base)
+    passwd = os.path.join(work, "passwd-mt")
+    with open("/etc/passwd", "rb") as src, open(passwd, "wb") as dst:
+        dst.write(src.read() + PASSWD_EXTRA.encode("utf-8"))
+    os.chmod(passwd, 0o644)
     with open(path, "w") as f:
         f.write(
             "#!/bin/sh\n"
             "mode=$1; shift\n"
             f"B={b}\n"
             "cd /\n"
+            'if [ "$mode" = passwd ]; then\n'
+            f"    mount --bind {shlex.quote(passwd)} /etc/passwd || "
+            '{ echo "linux_diff: no MT passwd ($$)"; exit 2; }\n'
+            '    "$@"\n'
+            "    exit $?\n"
+            "fi\n"
             'mount -t tmpfs lsof-rs-mt "$B" || { echo "linux_diff: no MT table ($$)"; exit 2; }\n'
-            'if [ "$mode" = autofs ]; then\n'
+            'if [ "$mode" = mqueue ]; then\n'
+            '    mkdir "$B/mq"\n'
+            '    mount -t mqueue lsof-rs-mq "$B/mq" || { echo "linux_diff: no mqueue ($$)"; exit 2; }\n'
+            'elif [ "$mode" = autofs ]; then\n'
             '    mkdir "$B/auto"\n'
             f"    setsid {shlex.quote(sys.executable)} -I {shlex.quote(AUTOFS_HOLD)} "
             '"$B/auto" "$B/auto.ready" "$B/auto.state" --lifetime 120 </dev/null >/dev/null 2>&1 &\n'
@@ -1320,8 +1340,9 @@ def netns_listener(work: str) -> Fixture:
     process sees them, which is the whole point: an inode the main table misses
     is the one case where lsof has to go looking in the owning process's
     namespace. The C answers it from the `system.sockprotoname` xattr and shows
-    `sock … protocol: TCP` -- protocol, no address -- and this port reads the
-    namespace's own table to reach the same answer.
+    `sock … protocol: TCP` -- protocol, no address -- and so does this port
+    since 2026-10-30 (DIVERGENCES 22); it had read the namespace's own table
+    to reach the same answer.
 
     `unshare --net` needs CAP_SYS_ADMIN. Where that is not available the
     fixture reports itself unsupported rather than failing: a runner without it
@@ -1386,8 +1407,8 @@ def userns_socket_holder(work: str) -> Fixture:
     namespace, so this needs no privilege on the host -- which is the point:
     unlike fixture K it runs on an ordinary CI runner. `--net` then puts the
     sockets somewhere `/proc/net/*` cannot see them, so both binaries must fall
-    back: the C to the `system.sockprotoname` xattr, this port to the owning
-    process's own tables.
+    back, both to the `system.sockprotoname` xattr (this port, until
+    2026-10-30, to the owning process's own tables; DIVERGENCES 22).
 
     That fallback is the only path on which the KERNEL's name for a socket is
     visible, and for these three it is not the name either program uses
@@ -1464,7 +1485,7 @@ def udplite_holder(work: str) -> Fixture:
     has no `(ESTABLISHED)`), its number kept for `-s TCP:`, queues for `-T q`,
     and `-i udplite` selects it where `-i udp` does not. fd 3 is bound to
     127.0.0.1 and publishes its port ({UDPLPORT}); fd 4 is connected to it;
-    fd 5 is never bound, so it is in no table and the C names it from
+    fd 5 is never bound, so it is in no table and both name it from
     `system.sockprotoname`, `sock … protocol: UDP-Lite` (DIVERGENCES 22).
 
     Needs no privilege, but a kernel with UDP-Lite (`IPPROTO_UDPLITE`, 136):
@@ -1500,8 +1521,9 @@ def userns_raw_holder(work: str) -> Fixture:
     `system.sockprotoname`, the kernel's `struct proto` name -- `RAW` for the
     raw ICMP socket (lsof-rs had said `ICMP`) and `UDP-Lite` (measured). The
     UDP-Lite socket is bound (to 0.0.0.0: the namespace's loopback is down),
-    since an unbound one is in no table, and lsof-rs then names it from none
-    (DIVERGENCES 22).
+    since an unbound one is in no table (in either namespace; fixture UDPL
+    holds one, and since DIVERGENCES 22 was closed both binaries name it
+    from the xattr too).
     """
     ndir = os.path.join(work, "nsraw")
     os.makedirs(ndir)
@@ -1517,6 +1539,141 @@ def userns_raw_holder(work: str) -> Fixture:
         ["unshare", "--user", "--map-root-user", "--net", sys.executable, "-c", py],
         cwd=ndir,
         expect_fds=5,  # 0,1,2 + raw ICMP, UDP-Lite
+        optional=True,
+    )
+
+
+def unlisted_socket_holder(work: str) -> Fixture:
+    """Netlink sockets, and sockets no `/proc/net` table lists yet.
+
+    fd 3 is a netlink `NETLINK_ROUTE` socket bound, 4 one never bound, 5 a
+    `NETLINK_GENERIC` and 6 a `NETLINK_KOBJECT_UEVENT` one bound: the bound
+    ones are in `/proc/net/netlink`, which the C reads and types `netlink`,
+    named by protocol, `ROUTE` (DIVERGENCES 109); the unbound one is in no
+    table. So are fd 7, a UDP socket never bound, and fd 8, a TCP one never
+    bound: the C names each from `system.sockprotoname`, `sock … protocol:
+    NETLINK` / `UDP` / `TCP`, which lsof-rs now reads too (DIVERGENCES 22).
+    Needs no privilege; optional only because a sandbox may refuse
+    AF_NETLINK."""
+    ndir = os.path.join(work, "unlisted")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "NL=socket.AF_NETLINK\n"
+        "r=socket.socket(NL,socket.SOCK_RAW,0); r.bind((0,0))\n"
+        "u=socket.socket(NL,socket.SOCK_RAW,0)\n"
+        "g=socket.socket(NL,socket.SOCK_RAW,16); g.bind((0,0))\n"
+        "k=socket.socket(NL,socket.SOCK_DGRAM,15); k.bind((0,0))\n"
+        "d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+        "t=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ndir
+    )
+    return Fixture(
+        "NLK(netlink and unlisted sockets)",
+        [sys.executable, "-c", py],
+        cwd=ndir,
+        expect_fds=9,  # 0,1,2 + four netlink, UDP, TCP
+        optional=True,
+    )
+
+
+def userns_unlisted_holder(work: str) -> Fixture:
+    """Sockets in a foreign user and network namespace no table of this one
+    lists: fd 3 a ping socket (an ICMP datagram socket, which the namespace's
+    own `ping_group_range` allows its root), 4 a netlink socket bound, 5 one
+    never bound, 6 a UDP socket never bound. The C reads only its own
+    namespace's `/proc/net`, so it names every one from
+    `system.sockprotoname`: `protocol: PING`, `NETLINK` (bound or not:
+    another namespace's `/proc/net/netlink` is not the C's), `UDP`
+    (DIVERGENCES 22, measured)."""
+    ndir = os.path.join(work, "nsunlisted")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "open('/proc/sys/net/ipv4/ping_group_range','w').write('0 0')\n"
+        "p=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,socket.IPPROTO_ICMP)\n"
+        "b=socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,0); b.bind((0,0))\n"
+        "n=socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,0)\n"
+        "d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % ndir
+    )
+    return Fixture(
+        "NSX(userns unlisted sockets)",
+        ["unshare", "--user", "--map-root-user", "--net", sys.executable, "-c", py],
+        cwd=ndir,
+        expect_fds=7,  # 0,1,2 + ping, two netlink, UDP
+        optional=True,
+    )
+
+
+# Fixture NLC's command and its thread's: a newline in each, and a
+# backslash, which the C keeps (DIVERGENCES 58).
+NEWLINE_COMM = b"nl\nc\\x"
+NEWLINE_TASK = b"t\nn"
+
+
+def newline_comm_holder(work: str) -> Fixture:
+    """A process whose command holds a newline, with a thread whose name does
+    too. The C reads both from `stat` and replaces each newline with `?`
+    (`read_id_stat()`), so COMMAND, TASKCMD, `-F c`, `-F M`, JSON and `-c`
+    see `nl?c\\x` and `t?n`; lsof-rs read `status`, undid the kernel's
+    `\\n` and printed `\\n` (DIVERGENCES 58). fd 3 is a file, so a case can
+    list one row."""
+    cdir = os.path.join(work, "nlcomm")
+    os.makedirs(cdir)
+    py = (
+        "import ctypes,os,threading,time\n"
+        "libc=ctypes.CDLL(None)\n"
+        "h=open(os.path.join(%r,'held.txt'),'w')\n"
+        "up=threading.Event()\n"
+        "def w():\n"
+        "    libc.prctl(15, %r, 0, 0, 0)\n"
+        "    up.set()\n"
+        "    time.sleep(600)\n"
+        "threading.Thread(target=w, daemon=True).start()\n"
+        "up.wait()\n"
+        "libc.prctl(15, %r, 0, 0, 0)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (cdir, NEWLINE_TASK, NEWLINE_COMM, cdir)
+    )
+    return Fixture("NLC(newline comm)", [sys.executable, "-c", py], cwd=cdir, expect_fds=4)
+
+
+def mqueue_holder(work: str) -> Fixture:
+    """Two POSIX message queues, `mq_open`ed read/write on fd 3 and read-only
+    on fd 4, then unlinked, so nothing is left behind. Each is a regular file
+    on the `mqueue` file system of this IPC namespace, which the C types
+    `PSXMQ` once its mount table records that file system (`dnode.c:815`,
+    DIVERGENCES 128): its cases run beside an `mqueue` mount of their own
+    (`LSOF_DIFF_MT=mqueue`), and `REG` under `-b`. Unavailable where the
+    kernel has no POSIX message queues."""
+    qdir = os.path.join(work, "mqueue")
+    os.makedirs(qdir)
+    py = (
+        "import ctypes,ctypes.util,os,sys,time\n"
+        "lib=None\n"
+        "for n in (None, ctypes.util.find_library('rt')):\n"
+        "    try:\n"
+        "        c=ctypes.CDLL(n, use_errno=True); c.mq_open; lib=c; break\n"
+        "    except (OSError, AttributeError): pass\n"
+        "if lib is None: sys.exit(3)\n"
+        "lib.mq_open.restype=ctypes.c_int\n"
+        "lib.mq_open.argtypes=[ctypes.c_char_p,ctypes.c_int,ctypes.c_uint,ctypes.c_void_p]\n"
+        "names=[('/lsof-rs-diff-%%d-%%d' %% (os.getpid(), i)).encode() for i in (1, 2)]\n"
+        "a=lib.mq_open(names[0], os.O_CREAT|os.O_RDWR, 0o600, None)\n"
+        "b=lib.mq_open(names[1], os.O_CREAT|os.O_RDONLY, 0o600, None)\n"
+        "for n in names: lib.mq_unlink(n)\n"
+        "if (a, b) != (3, 4): sys.exit(4)\n"
+        "open(os.path.join(%r,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % qdir
+    )
+    return Fixture(
+        "MQ(POSIX message queues)",
+        [sys.executable, "-c", py],
+        cwd=qdir,
+        expect_fds=5,  # 0,1,2 + two queues
         optional=True,
     )
 
@@ -1753,8 +1910,8 @@ def socket_file_holder(work: str) -> Fixture:
     and an inode all the same, which `-F D` and `-F i` print:
 
     fd 3 is a TCP socket bound and never listening, so in no `/proc/net`
-    table (`sock … protocol: TCP` in the C, `SOCK socket:[N]` in lsof-rs:
-    item 22), on sockfs. `+d /proc/SF/fd` under `-x l` follows the link of
+    table (`sock … protocol: TCP` in both since item 22 was closed; lsof-rs
+    had printed `SOCK socket:[N]`), on sockfs. `+d /proc/SF/fd` under `-x l` follows the link of
     its entry to it.
 
     fd 5 is an `O_PATH` descriptor on `s.sock`, where fd 4 listens: its link
@@ -2310,7 +2467,23 @@ def path_spelling_holder(work: str) -> Fixture:
 # 0, so that W, its parent, may signal it: with a real uid of 3000000000 too,
 # the death signal W's exit sends was refused for want of permission, and WB
 # outlived the run (measured).
-OWNER_SHAPES = {"W": (0, 65534), "WR": (65534, 0), "WB": (0, 3000000000)}
+# WJ and WA are owned by 65010 and 65011, which have no account on the host;
+# the cases that name them run beside a password file of their own
+# (`LSOF_DIFF_MT=passwd`, see `mt_wrap`) in which 65010 is `jöhn` and 65011
+# `ab`, a login of more bytes than characters beside a plain one: the C pads
+# USER by bytes (DIVERGENCES 71). Their real uid stays 0, as WB's does, so
+# that W's death signal reaches them.
+OWNER_SHAPES = {
+    "W": (0, 65534),
+    "WR": (65534, 0),
+    "WB": (0, 3000000000),
+    "WJ": (0, 65010),
+    "WA": (0, 65011),
+}
+
+# The password file `LSOF_DIFF_MT=passwd` binds over /etc/passwd: the host's,
+# and WJ's and WA's accounts after it.
+PASSWD_EXTRA = "j\u00f6hn:x:65010:65010::/:/bin/false\nab:x:65011:65011::/:/bin/false\n"
 
 
 def unlock(top: str) -> None:
@@ -2350,13 +2523,15 @@ def owner_holder(work: str) -> Fixture:
     one whose uid is past 2^31.
 
     {W} runs with real uid 0 and effective 65534, {WR} the other way round,
-    and {WB} with real uid 0 and effective 3000000000, which no account has.
+    and {WB} with real uid 0 and effective 3000000000, which no account has;
+    {WJ} and {WA} with effective 65010 and 65011, which have one only in the
+    password file `LSOF_DIFF_MT=passwd` binds over the host's.
     Only root can make any, so the fixture starts through `sudo -n` when the
     runner is not root, and is unavailable when it cannot. Each writes its
     pid before it changes its credentials -- after, it could no longer write
     here -- and dies with its parent (`PR_SET_PDEATHSIG`, set after the change,
-    which clears it): {WR} and {WB} with {W}, and {W} with the harness, so
-    stopping the fixture stops all three."""
+    which clears it): the others with {W}, and {W} with the harness, so
+    stopping the fixture stops all five."""
     wdir = os.path.join(work, "owner")
     os.makedirs(wdir)
     prefix = root_prefix()
@@ -2375,8 +2550,13 @@ def owner_holder(work: str) -> Fixture:
         "me=os.getpid()\n"
         "if os.fork()==0: hold('WR', %d, %d, me)\n"
         "if os.fork()==0: hold('WB', %d, %d, me)\n"
+        "if os.fork()==0: hold('WJ', %d, %d, me)\n"
+        "if os.fork()==0: hold('WA', %d, %d, me)\n"
         "hold('W', %d, %d, os.getppid())\n"
-        % (*OWNER_SHAPES["WR"], *OWNER_SHAPES["WB"], *OWNER_SHAPES["W"])
+        % (
+            *OWNER_SHAPES["WR"], *OWNER_SHAPES["WB"], *OWNER_SHAPES["WJ"],
+            *OWNER_SHAPES["WA"], *OWNER_SHAPES["W"],
+        )
     )
     return Fixture(
         "W(owner)",
@@ -2539,6 +2719,10 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     raw = raw_holder(work)
     udpl = udplite_holder(work)
     nsraw = userns_raw_holder(work)
+    nlk = unlisted_socket_holder(work)
+    nsx = userns_unlisted_holder(work)
+    nlc = newline_comm_holder(work)
+    mq = mqueue_holder(work)
     o = offset_holder(work)
     x = non_utf8_holder(work)
     z = zombie_holder(work)
@@ -2573,6 +2757,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
         em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw, cr,
+        nlk, nsx, nlc, mq,
     )
 
 
@@ -2720,7 +2905,7 @@ def run(args) -> int:
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
             sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
-            crcomm,
+            crcomm, unlisted, nsunlisted, nlcomm, mqueues,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -2736,6 +2921,9 @@ def run(args) -> int:
             "UDPL": (udplite, "no UDP-Lite in this kernel"),
             "UDPLPORT": (udplite, "no UDP-Lite in this kernel"),
             "NSRAW": (nsraw, "no unprivileged user namespaces, or no UDP-Lite in this kernel"),
+            "NLK": (unlisted, "no AF_NETLINK here"),
+            "NSX": (nsunlisted, "no unprivileged user namespaces, or no ping sockets in one"),
+            "MQ": (mqueues, "no POSIX message queues in this kernel"),
             "U": (unreadable, "no user here that cannot read a non-dumpable process"),
             # M's paths name a plain directory here whether or not M came up; a
             # case naming one without M would MATCH on nothing, so they go with it.
@@ -2781,6 +2969,8 @@ def run(args) -> int:
             "W": (owner, "not root, and no passwordless sudo"),
             "WR": (owner, "not root, and no passwordless sudo"),
             "WB": (owner, "not root, and no passwordless sudo"),
+            "WJ": (owner, "not root, and no passwordless sudo"),
+            "WA": (owner, "not root, and no passwordless sudo"),
             # A case that spells /dev/shm differently asks whether the spelling
             # still names the file system; where /dev/shm is no mount point, both
             # binaries would answer "a directory" and MATCH on nothing.
@@ -2834,6 +3024,7 @@ def run(args) -> int:
         (
             netns, packet, userns, unreadable, mntns, owner, mntsock, exmaps, pathnotes,
             relnames, userzero, ptyhost, ptyguest, devnode, rawsocks, udplite, nsraw,
+            unlisted, nsunlisted, mqueues,
         ) = (
             started_optional["J"],
             started_optional["K"],
@@ -2852,6 +3043,9 @@ def run(args) -> int:
             started_optional["RAW"],
             started_optional["UDPL"],
             started_optional["NSRAW"],
+            started_optional["NLK"],
+            started_optional["NSX"],
+            started_optional["MQ"],
         )
         # FH is usable once its probe has mounted and stat()ed the server.
         if started_optional["FUSE"] is not None:
@@ -2897,7 +3091,7 @@ def run(args) -> int:
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
                 ptyhost, ptyguest, devnode, optional["WRACE"][0], rawsocks, udplite,
-                nsraw,
+                nsraw, unlisted, nsunlisted, nlcomm, mqueues,
             )
             if f is not None
         ]:
@@ -2925,9 +3119,8 @@ def run(args) -> int:
                 owners = owners_ready(owner)
             except FixtureUnavailable as unavailable:
                 print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
-                optional["W"] = (None, optional["W"][1])
-                optional["WR"] = (None, optional["WR"][1])
-                optional["WB"] = (None, optional["WB"][1])
+                for key in OWNER_SHAPES:
+                    optional[key] = (None, optional[key][1])
         # U is only worth comparing if the user its cases run as really cannot
         # read it -- a runner with CAP_SYS_PTRACE could, and both binaries
         # would then MATCH on a readable process, a green that measured
@@ -3023,6 +3216,9 @@ def run(args) -> int:
                 "SHMSRC": mount_source(SHM),
                 "ERELINK": os.path.join(e.cwd, "relink"),
                 "T": str(tabname.pid),
+                "NLC": str(nlcomm.pid),
+                # MQ's cases run beside an mqueue mount of their own, here.
+                "MTMQ": os.path.join(work, "mt", "mq"),
                 "RNPLANT": os.path.join(relnames.cwd if relnames else work, "plant"),
                 "EMFS": SHM,
                 "EMFSSLASH": SHM + "/",
@@ -3090,7 +3286,14 @@ def run(args) -> int:
             if key == "WRACE":
                 dropped += [c["name"] for c in cases if needs_race(c) and c["name"] not in dropped]
             if key == "MT":
-                dropped += [c["name"] for c in cases if needs_mt(c, "table") and c["name"] not in dropped]
+                # The `passwd` and `mqueue` modes need what the table's probe
+                # proved: root, and a mount namespace to make them in.
+                dropped += [
+                    c["name"]
+                    for c in cases
+                    if any(needs_mt(c, mode) for mode in ("table", "passwd", "mqueue"))
+                    and c["name"] not in dropped
+                ]
             if key == "MTAUTO":
                 dropped += [c["name"] for c in cases if needs_mt(c, "autofs") and c["name"] not in dropped]
             cases = [c for c in cases if c["name"] not in dropped]
@@ -3112,7 +3315,7 @@ def run(args) -> int:
         race = optional["WRACE"][0] is not None and any(needs_race(c) for c in cases)
         mt = (
             os.path.join(work, "mt-wrap.sh")
-            if any(needs_mt(c, "table") or needs_mt(c, "autofs") for c in cases)
+            if any("LSOF_DIFF_MT" in c.get("env", {}) for c in cases)
             else None
         )
         if prefix or fuse or nofile or race or mt:
@@ -3318,10 +3521,20 @@ def self_test() -> int:
         wrap = mt_wrap(td, os.path.join(td, "mt"))
         with open(wrap) as f:
             text = f.read()
+        # The `passwd` mode runs its binary first, in a branch of its own;
+        # every other mode runs it at the last `"$@"`.
         check("the MT script mounts before the binary and unmounts after it",
-              text.index("mount -t tmpfs lsof-rs-mt") < text.index('"$@"') < text.rindex('umount -l "$B"'))
+              text.index("mount -t tmpfs lsof-rs-mt") < text.rindex('"$@"') < text.rindex('umount -l "$B"'))
         check("the MT script fails a run that triggered the automount",
-              "rc=3" in text and text.index('"$@"') < text.index("auto.state\" 2>/dev/null"))
+              "rc=3" in text and text.rindex('"$@"') < text.index("auto.state\" 2>/dev/null"))
+        check("the MT passwd mode binds its password file before its binary",
+              text.index("/etc/passwd") < text.index('"$@"') < text.index("mount -t tmpfs lsof-rs-mt"))
+        check("...which holds the host's accounts and WJ's and WA's",
+              open(os.path.join(td, "passwd-mt"), encoding="utf-8").read().endswith(PASSWD_EXTRA)
+              and "\nroot:" in "\n" + open(os.path.join(td, "passwd-mt"), encoding="utf-8").read())
+        check("the MT mqueue mode mounts the queues under the table's base",
+              text.index("mount -t tmpfs lsof-rs-mt") < text.index("mount -t mqueue")
+              < text.rindex('"$@"'))
         check("the AUTOFS daemon is given a lifetime of its own",
               "--lifetime" in text.split("autofs_hold.py", 1)[-1].split("\n", 1)[0])
         # ...which ends it, says so, and answers what waits on the mount, so

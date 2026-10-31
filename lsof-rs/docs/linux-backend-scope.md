@@ -189,7 +189,9 @@ immediately after L0**, per the note above.
 3. **Dependencies.** The Windows backend uses `windows-sys`. A Linux backend can
    plausibly be **dependency-free** (pure `/proc` text parsing + `std`), except
    `fstat`/`readlink` details — worth trying `libc`-free first to preserve the
-   project's very small dependency surface for `cargo-deny`.
+   project's very small dependency surface for `cargo-deny`. [2026-10-30: it
+   was, until `getxattr(2)`, which std lacks: the backend now depends on
+   `rustix`, pinned, `fs` only, for that one call (DIVERGENCES 22).]
 4. **MSRV / CI matrix.** Adds a Linux job that builds *and runs* the native
    backend (today Linux CI only runs the portable core).
 

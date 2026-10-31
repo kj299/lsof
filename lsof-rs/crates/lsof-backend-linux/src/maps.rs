@@ -380,7 +380,7 @@ fn path_note(md: &std::fs::Metadata, m: &Mapping) -> Option<String> {
 /// row. Always `mem`.
 fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> OpenFile {
     if md.file_type().is_socket() {
-        return socket_mapping(md, pid, ctx);
+        return socket_mapping(md, ctx);
     }
     let ty = files::type_from_mode(md.mode());
     let (device, rdev, size) = match ty {
@@ -420,10 +420,10 @@ fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>
 /// system's device, no lock and no link count (measured, a packet ring in
 /// another network namespace). An fd's link is a path, so the same socket's
 /// fd row does get its protocol (`protocol: PACKET`).
-fn socket_mapping(md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> OpenFile {
+fn socket_mapping(md: &std::fs::Metadata, ctx: &GatherCtx<'_>) -> OpenFile {
     if ctx.socks.get(md.ino()).is_some() {
         let info = files::FdInfo::default();
-        if let Some(mut f) = files::socket_row(md.ino(), &FdType::Mem, &info, Some(md), pid, ctx) {
+        if let Some(mut f) = files::socket_row(md.ino(), &FdType::Mem, &info, Some(md), None, ctx) {
             f.offset = None;
             return f;
         }
@@ -624,7 +624,7 @@ mod tests {
         let md = std::fs::metadata(format!("/proc/self/fd/{}", s.as_raw_fd())).unwrap();
         let socks = crate::net::SocketTable::default();
         let locks = crate::locks::LockTable::default();
-        let ns = crate::net::NetnsTables::new(false);
+        let ns = crate::net::SockProtoNames::new(false);
         let ctx = GatherCtx {
             socks: &socks,
             locks: &locks,
@@ -635,8 +635,9 @@ mod tests {
             bound_paths: false,
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
+            mqueue_device: None,
         };
-        let f = socket_mapping(&md, std::process::id(), &ctx);
+        let f = socket_mapping(&md, &ctx);
         assert_eq!(f.fd, FdType::Mem);
         assert_eq!(f.file_type.code(), "sock");
         assert_eq!(
@@ -653,10 +654,10 @@ mod tests {
             (None, None, None, None)
         );
         // Under `-X` the C does not look, and says so.
-        let ns = crate::net::NetnsTables::new(true);
+        let ns = crate::net::SockProtoNames::new(true);
         let ctx = GatherCtx { ns: &ns, ..ctx };
         assert_eq!(
-            socket_mapping(&md, std::process::id(), &ctx).name,
+            socket_mapping(&md, &ctx).name,
             "can't identify protocol (-X specified)"
         );
     }
@@ -672,7 +673,7 @@ mod tests {
         // node names. A deleted one keeps them too.
         let socks = crate::net::SocketTable::default();
         let locks = crate::locks::LockTable::default();
-        let ns = crate::net::NetnsTables::new(false);
+        let ns = crate::net::SockProtoNames::new(false);
         let ctx = GatherCtx {
             socks: &socks,
             locks: &locks,
@@ -683,6 +684,7 @@ mod tests {
             bound_paths: false,
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
+            mqueue_device: None,
         };
         let maps = parse_maps(
             "0-1 r--p 0 00:06 4 /nonexistent-lsof-rs/zero\n\

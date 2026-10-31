@@ -369,11 +369,19 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
     assert_eq!(offset_text(123_456_789, 0), "0t123456789", "0 is no limit");
     assert_eq!(offset_text(0, 1), "0t0");
     assert_eq!(offset_text(10, 1), "0xa");
+    // The C's `OffDecDig + 2` is an `int` sum: a limit past INT_MAX - 2
+    // wraps it, and then every offset is hex, zero as a bare `0` (`%#llx`),
+    // as are the limits the C's digit sum wrapped negative (DIVERGENCES 117).
     assert_eq!(
-        offset_text(u64::MAX, usize::MAX),
-        format!("0t{}", u64::MAX),
-        "no overflow"
+        offset_text(u64::MAX, i32::MAX - 2),
+        format!("0t{}", u64::MAX)
     );
+    assert_eq!(offset_text(0, i32::MAX - 2), "0t0");
+    for limit in [i32::MAX - 1, i32::MAX, i32::MIN, -2, -1] {
+        assert_eq!(offset_text(0, limit), "0", "{limit}");
+        assert_eq!(offset_text(12, limit), "0xc", "{limit}");
+        assert_eq!(offset_text(u64::MAX, limit), "0xffffffffffffffff");
+    }
 
     use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
     let p = Process {
@@ -2802,4 +2810,23 @@ fn json_keys_follow_the_dash_f_letters() {
             assert!(j.contains("\"tcp_info\":{"), "{ff:?} {j:?}");
         }
     }
+}
+
+/// USER is padded by bytes, as the C's `printf(" %*s")` pads it (DIVERGENCES
+/// 71, measured with a login `jöhn` beside one `ab`): the column is as wide as
+/// the longest name in bytes, five here, and `jöhn` fills it, so its row and
+/// `ab`'s line up byte for byte with the header — where padding by characters
+/// put a space before `jöhn` that the C does not print.
+#[test]
+fn user_is_padded_by_bytes() {
+    let procs = [
+        named("sleep", "j\u{f6}hn", "/x"),
+        named("sleep", "ab", "/y"),
+    ];
+    let out = table::render(&procs, TableOpts::new(Escaper::UNIX));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(lines[0].starts_with("COMMAND PID  USER FD"), "{out}");
+    assert!(lines[1].starts_with("sleep     7 j\u{f6}hn 4r"), "{out}");
+    assert!(lines[2].starts_with("sleep     7    ab 4r"), "{out}");
 }

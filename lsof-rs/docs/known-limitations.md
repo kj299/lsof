@@ -240,22 +240,24 @@ meet. Each number is a row there, with the measurement behind it.
   `lstat`, and one more for a link `-x l` follows: about 0.08 ms an entry, 1.6
   times the C's (`+D /usr/lib`, 17,742 entries, 1.39 s against 0.86 s; `-O`
   0.13 s; 94, 111).
-- **Linux:** `-E`/`+E` are accepted and ignored (56); AF_VSOCK, ping and
-  unbound netlink sockets, and a TCP socket that is bound but not listening,
-  show as `SOCK` `socket:[N]` (22, waiting on a decision), and an `O_PATH`
-  descriptor on a socket file as `SOCK` and its path, where the C says `sock`
-  and `can't identify protocol` (126); a bound netlink socket is `SOCK`,
-  where the C reads its table (109); a
+- **Linux:** `-E`/`+E` are accepted and ignored (56); an `O_PATH`
+  descriptor on a socket file shows as `SOCK` and its path, where the C says
+  `sock` and `can't identify protocol` (126) [2026-10-30: AF_VSOCK, ping and
+  unbound sockets are named as the C names them, from
+  `system.sockprotoname` (22), and a bound netlink socket from its table
+  (109)]; a
   login name is read from `/etc/passwd` only, so an LDAP or SSSD account can
   be named by its UID alone (39).
 - **Output shape:** `-J`/`-j` print the C's schema since 2.0.0 (91), but an
   Internet row keeps a `name` (134) and DEL, C1 and U+2028/2029 are escaped
   (135), both C-DEFECT; a byte that is not UTF-8 prints as U+FFFD, where the
-  C prints `\xff` (93); `-h` writes
-  its help to stdout, where the C writes the usage to stderr (114).
+  C prints `\xff` (93); the `lsof: no pwd entry for UID N` warnings
+  (Linux) are written before the listing, so on a merged stream (`2>&1`)
+  whose listing passes 4 KiB they sit where the C's do not (the C writes the
+  printing pass's where its stdout buffer flushes, mid-line), though each
+  stream alone is byte-identical (36, not emulated).
 - **Deliberate:** options after the first file name are still options (12); a
   `+d`/`+D` walk stops at 200,000 entries or 16 MiB of names, and says so (81).
-- **Rarer:** the padding of a multibyte login name (71).
   The rest, including the stderr-only differences, are in the ledger.
 
 ## Where these limitations are tracked
