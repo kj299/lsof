@@ -125,6 +125,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   file of the run's own names, one with a multibyte login); the mount-table
   wrapper's `passwd` and `mqueue` modes; and cases for each item above.
 
+### Fixed
+- **Windows: an unelevated full `lsof` on a host with many sockets and slow
+  PTR spent most of its time in serial reverse DNS.** Each socket endpoint
+  made its own lookup, waiting up to 2 s, one after another and with nothing
+  remembered: measured on a Windows 11 host, 83 s of a plain `lsof` with 145
+  endpoints, and 66 s of `lsof -N -V`, which can print no socket at all. Now
+  each distinct address is looked up once, on a pool that dispatches at most
+  8 lookups at a time and waits at most 2 s on each, and every row is named
+  from those answers; and a run that can show no socket NAME (`-t`, a path
+  argument, `-N` alone or under `-a`), or that gave `-n`, looks nothing up. A
+  lookup abandoned at 2 s may keep its OS query running in the background
+  until the resolver gives up, so more than 8 queries can be outstanding;
+  the phase's threads stay bounded by the distinct addresses plus the 8
+  workers. The output is unchanged, except that every row of one
+  address now shows the same answer: before, a lookup that timed out could be
+  answered on a later row from the OS resolver's cache. `LSOF_RS_TRACE`
+  prints the phase's start and end with its distinct-address count.
+  `mutants/host-names.toml`.
+
 ## [2.0.0] — 2026-10-17
 
 ### Changed — BREAKING (2.0.0)

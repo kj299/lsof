@@ -11,7 +11,8 @@ use lsof_core::selection::{EndpointMode, SelKinds, Selection};
 
 use crate::util::trace;
 use crate::{
-    etw, handles, mapped, modules, peb, privilege, process, restart, sockets, tcpinfo, threads,
+    etw, handles, hostnames, mapped, modules, peb, privilege, process, resolve, restart, sockets,
+    tcpinfo, threads,
 };
 
 /// Wall-clock ceiling for the whole per-process extras phase (`cwd`, `txt`/`mem`
@@ -319,26 +320,41 @@ impl Backend for WindowsBackend {
                 socks.len()
             ));
             // Resolve names (reverse DNS / service lookup) only for the sockets
-            // we keep, and only when they can actually be displayed. A path/dir
-            // filter (`+D`/`+d`/bare path) never matches a socket (no filesystem
-            // path), so resolving them would be pure waste — and it's the slow,
-            // reverse-DNS path. So skip resolution for those queries.
-            let resolve_sockets = !sel.has_path_filter();
+            // we keep. `hostnames::socket_host_names` makes the whole decision
+            // (portable, unit-tested on Linux): `None` when no socket NAME can
+            // print (a path filter, `-t`, a `-N` no socket can meet), so the
+            // rows keep their collected name; else the answers to format every
+            // row from: none under `-n`, otherwise each distinct host looked up
+            // once on a small pool, each lookup still bounded by
+            // `resolve::host_name`'s own timeout. Serially and uncached, a host
+            // with a slow PTR resolver spent 2 s per endpoint here: 83 s for
+            // 145 endpoints, measured.
+            let socks: Vec<(u32, OpenFile)> =
+                socks.into_iter().filter(|(pid, _)| wanted(*pid)).collect();
+            let hosts = hostnames::socket_host_names(
+                sel,
+                socks.iter().map(|(_, f)| f),
+                resolve::host_name,
+                trace,
+            );
             for (pid, mut file) in socks {
-                if wanted(pid) {
-                    if resolve_sockets {
-                        sockets::resolve_name(&mut file, sel.no_host_resolve, sel.no_port_resolve);
-                    }
-                    // `-T q/w`: attach extended TCP stats (window / queue) to
-                    // the row via per-connection EStats. Needs elevation. The
-                    // resolved flags, so a bare `-T` (which selects nothing)
-                    // does not pay for the round-trips.
-                    let tcp_show = sel.tcp_info();
-                    if tcp_show.queue || tcp_show.window {
-                        tcpinfo::annotate(&mut file, &tcp_show, self.elevated);
-                    }
-                    attach(&mut procs, &mut idx, pid, file);
+                if let Some(hosts) = &hosts {
+                    sockets::resolve_name(
+                        &mut file,
+                        sel.no_host_resolve,
+                        sel.no_port_resolve,
+                        hosts,
+                    );
                 }
+                // `-T q/w`: attach extended TCP stats (window / queue) to
+                // the row via per-connection EStats. Needs elevation. The
+                // resolved flags, so a bare `-T` (which selects nothing)
+                // does not pay for the round-trips.
+                let tcp_show = sel.tcp_info();
+                if tcp_show.queue || tcp_show.window {
+                    tcpinfo::annotate(&mut file, &tcp_show, self.elevated);
+                }
+                attach(&mut procs, &mut idx, pid, file);
             }
         }
 

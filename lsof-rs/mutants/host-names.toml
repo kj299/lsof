@@ -1,0 +1,305 @@
+# Mutants for "Windows: each distinct socket host looked up once, a few at a
+# time, and not at all where no socket can print" (crates/lsof-backend-windows/
+# src/hostnames.rs, its call site in backend.rs, and sockets.rs): one per rule,
+# each a plausible way to get that rule wrong. The kill table is this file, run
+# (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py mutants/host-names.toml
+#
+# It needs neither the C oracle nor root. The rules live in `hostnames`, which
+# is portable so its unit tests run on Linux with a stand-in lookup: the whole
+# call-site decision is `hostnames::socket_host_names` (whether to format the
+# rows, whether to look anything up, the pool size and per-lookup bound), so
+# the -n guard and the never-resolve call site are killable here. What stays
+# in the Windows-only files (backend.rs, sockets.rs, resolve.rs) cannot run
+# here (no Windows, and no MinGW linker for the test binary); what holds it on
+# Linux is the Windows clippy (`-D warnings`): a call site that stops using a
+# `hostnames` function leaves it dead code there. The WINDOWS-ONLY mutants at
+# the end are the ones nothing on Linux can see; they are kept for a Windows
+# host to run, and expected to survive here. CI runs only --apply-only, which
+# checks that each mutant still fits the code.
+#
+# Run 2026-10-31 on Linux: 27 of the 27 that can run here killed (26 by the
+# unit tests, 19 alone; 8 by the Windows clippy, 1 alone:
+# call-site-never-resolves); the 3 WINDOWS-ONLY ones survived, as expected:
+# per-call-lookup and lookup-unbounded change only timing and DNS traffic in
+# Windows-only code; call-site-always-formats reformats, with no lookup, the
+# NAME of rows that cannot print under -t or -N, and under a path filter the
+# NAME the Windows name-prefix fallback matches the path against (service
+# names instead of port numbers), which a Windows test with a path argument
+# shaped like a socket name would have to catch.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "-p", "lsof-backend-windows"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-windows"]
+timeout = 600
+
+[[run.gate]]
+name = "clippy-windows"
+cmd = ["cargo", "clippy", "-p", "lsof-backend-windows", "--all-targets", "--target", "x86_64-pc-windows-gnu", "--", "-D", "warnings"]
+
+# ------------------------------------------------- which runs resolve at all --
+
+[[mutant]]
+name = "terse-still-resolves"
+rule = "-t prints PIDs alone, so no socket name is looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if sel.has_path_filter() || sel.terse {'''
+new = '''    if sel.has_path_filter() {'''
+
+[[mutant]]
+name = "path-filter-resolves-again"
+rule = "a path argument never matches a socket, so its names are not looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if sel.has_path_filter() || sel.terse {'''
+new = '''    if sel.terse {'''
+
+[[mutant]]
+name = "nfs-and-still-resolves"
+rule = "-a -N: no socket meets the NFS kind, so none prints"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if sel.nfs_only && (sel.and_mode || sel.specified() == SelKinds::NFS) {'''
+new = '''    if sel.nfs_only && sel.specified() == SelKinds::NFS {'''
+
+[[mutant]]
+name = "nfs-alone-still-resolves"
+rule = "-N alone: no socket meets the only kind specified"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if sel.nfs_only && (sel.and_mode || sel.specified() == SelKinds::NFS) {'''
+new = '''    if sel.nfs_only && sel.and_mode {'''
+
+[[mutant]]
+name = "nfs-skips-under-the-or"
+rule = "-N -p P (the OR) lists P's sockets, so their names are looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if sel.nfs_only && (sel.and_mode || sel.specified() == SelKinds::NFS) {'''
+new = '''    if sel.nfs_only {'''
+
+[[mutant]]
+name = "dash-n-still-resolves"
+rule = "-n keeps every host numeric, so nothing is looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if !socket_names_printable(sel) || sel.no_host_resolve {'''
+new = '''    if !socket_names_printable(sel) {'''
+
+[[mutant]]
+name = "hosts-to-resolve-ignores-printable"
+rule = "where no socket NAME can print, no host is looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if !socket_names_printable(sel) || sel.no_host_resolve {'''
+new = '''    if sel.no_host_resolve {'''
+
+[[mutant]]
+name = "rows-reformatted-where-none-prints"
+rule = "where no socket NAME can print, the rows keep their collected name"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if !socket_names_printable(sel) {
+        return None;
+    }'''
+new = ''''''
+
+[[mutant]]
+name = "empty-phase-still-run"
+rule = "with nothing to look up (-n, or no host) there is no lookup phase"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    if addrs.is_empty() {
+        return Some(HostNames::new());
+    }'''
+new = ''''''
+
+[[mutant]]
+name = "call-site-never-resolves"
+rule = "the backend formats its socket rows from socket_host_names"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/backend.rs"
+old = '''            let hosts = hostnames::socket_host_names(
+                sel,
+                socks.iter().map(|(_, f)| f),
+                resolve::host_name,
+                trace,
+            );'''
+new = '''            let hosts = Some(hostnames::HostNames::new());'''
+
+[[mutant]]
+name = "call-site-serial"
+rule = "the call site runs the lookups on WORKERS threads"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    let hosts = resolve_all(addrs, WORKERS, LOOKUP_TIMEOUT, lookup);'''
+new = '''    let hosts = resolve_all(addrs, 1, LOOKUP_TIMEOUT, lookup);'''
+
+[[mutant]]
+name = "workers-constant-serial"
+rule = "the pool has several workers, so slow lookups cost rounds, not addresses"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''pub const WORKERS: usize = 8;'''
+new = '''pub const WORKERS: usize = 1;'''
+
+[[mutant]]
+name = "lookup-timeout-raised"
+rule = "each lookup is still waited on for 2 s, as before the pool"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);'''
+new = '''pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(20);'''
+
+# ------------------------------------------------------- once per address --
+
+[[mutant]]
+name = "addresses-not-deduplicated"
+rule = "each distinct address is looked up once"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''        .filter(|ip| !ip.is_unspecified() && seen.insert(*ip))'''
+new = '''        .filter(|ip| !ip.is_unspecified() && (seen.insert(*ip) || true))'''
+
+[[mutant]]
+name = "unspecified-looked-up"
+rule = "the unspecified address is shown as * and never looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''        .filter(|ip| !ip.is_unspecified() && seen.insert(*ip))'''
+new = '''        .filter(|ip| seen.insert(*ip))'''
+
+[[mutant]]
+name = "remote-host-not-collected"
+rule = "a row shows its remote host too, so it is looked up"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''            .flat_map(|s| [s.local, s.remote])'''
+new = '''            .flat_map(|s| [s.local, None])'''
+
+[[mutant]]
+name = "no-name-answer-dropped"
+rule = "a cached answer is used: a name found is shown"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    hosts.get(&ip).cloned().flatten()'''
+new = '''    hosts.get(&ip).cloned().flatten().filter(|_| false)'''
+
+# ------------------------------------------------------------- the pool --
+
+[[mutant]]
+name = "pool-unbounded"
+rule = "at most WORKERS lookups run at once"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    for _ in 0..workers.clamp(1, want) {'''
+new = '''    for _ in 0..want {'''
+
+[[mutant]]
+name = "pool-serial"
+rule = "the lookups run concurrently, so slow ones cost rounds, not addresses"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    for _ in 0..workers.clamp(1, want) {'''
+new = '''    for _ in 0..1 {'''
+
+[[mutant]]
+name = "pool-capped-at-four"
+rule = "the pool starts all the workers asked for (up to one per address)"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    for _ in 0..workers.clamp(1, want) {'''
+new = '''    for _ in 0..workers.clamp(1, want).min(4) {'''
+
+[[mutant]]
+name = "channel-left-open"
+rule = "the wait ends once every worker has stopped, a panicked one included"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    drop(tx);
+'''
+new = ''''''
+
+[[mutant]]
+name = "abandoned-worker-keeps-looking-up"
+rule = "a worker abandoned at the backstop stops at its next send"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''                if tx.send((ip, lookup(ip))).is_err() {
+                    break; // the phase is over; nobody reads this answer
+                }'''
+new = '''                let _ = tx.send((ip, lookup(ip)));'''
+
+[[mutant]]
+name = "backstop-from-requested-workers"
+rule = "the backstop is rounds of the workers that started, not of those asked for"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''phase_budget(want, started, per_lookup)'''
+new = '''phase_budget(want, workers, per_lookup)'''
+
+[[mutant]]
+name = "refused-spawn-counted"
+rule = "a worker the OS refuses to start is not counted as started"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''        if spawn(job) {'''
+new = '''        if spawn(job) || true {'''
+
+[[mutant]]
+name = "budget-not-enforced"
+rule = "a wedged lookup is abandoned at the phase budget"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''                rx.recv_timeout(left).ok()'''
+new = '''                rx.recv().ok()'''
+
+[[mutant]]
+name = "budget-rounds-floored"
+rule = "the budget covers every round of lookups, the last partial one too"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''    let rounds = distinct.div_ceil(workers.max(1));'''
+new = '''    let rounds = distinct / workers.max(1);'''
+
+[[mutant]]
+name = "budget-without-slack"
+rule = "the budget has slack over the rounds, so no bounded lookup is cut off"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/hostnames.rs"
+old = '''        .and_then(|d| d.checked_add(PHASE_SLACK))'''
+new = '''        .and_then(|d| d.checked_add(Duration::ZERO))'''
+
+# ------------------------------------- Windows-only: expected to survive here --
+
+[[mutant]]
+name = "WINDOWS-ONLY-per-call-lookup"
+rule = "endpoint() reads the run's cache, not a fresh reverse-DNS call per endpoint"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/sockets.rs"
+old = '''        hostnames::cached_name(hosts, addr.ip()).unwrap_or_else(|| host_numeric(addr.ip()))'''
+new = '''        hostnames::cached_name(hosts, addr.ip())
+            .or_else(|| crate::resolve::host_name(addr.ip()))
+            .unwrap_or_else(|| host_numeric(addr.ip()))'''
+
+[[mutant]]
+name = "WINDOWS-ONLY-lookup-unbounded"
+rule = "each lookup is still bounded by LOOKUP_TIMEOUT"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/resolve.rs"
+old = '''    rx.recv_timeout(crate::hostnames::LOOKUP_TIMEOUT)'''
+new = '''    rx.recv_timeout(crate::hostnames::LOOKUP_TIMEOUT * 30)'''
+
+[[mutant]]
+name = "WINDOWS-ONLY-call-site-always-formats"
+rule = "where socket_host_names says None, the rows keep their collected name"
+[[mutant.edit]]
+file = "crates/lsof-backend-windows/src/backend.rs"
+old = '''                if let Some(hosts) = &hosts {'''
+new = '''                if let Some(hosts) = &Some(hosts.clone().unwrap_or_default()) {'''

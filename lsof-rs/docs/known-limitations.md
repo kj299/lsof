@@ -36,6 +36,29 @@ TCP state are all accurate.
 ([`research-roadmap.md`](research-roadmap.md) §5) found no event that carries
 the handle value; mapping an AFD endpoint to a handle needs a kernel driver.
 
+### On Windows, socket host names cost up to 2 s per distinct address
+
+Like the C, lsof-rs on Windows names each socket's hosts by reverse DNS by
+default (`GetNameInfoW`, which sends a PTR query); `-n` turns it off. Each
+lookup is waited on for at most **2 s**, after which the address is shown
+numerically. Each distinct address of the run is looked up **once** (a host's
+sockets repeat a handful: `127.0.0.1`, `::1`, its own, a few peers), on a pool
+that dispatches at most **8 lookups at a time**, so a resolver that never
+answers costs about `ceil(distinct / 8) x 2 s`, not 2 s per endpoint. The 8
+bounds the lookups waited on, not the PTR queries in flight: a lookup abandoned
+at 2 s returns, but its `GetNameInfoW` call may run on in the background until
+the OS resolver gives up, which can take longer, so a silent resolver can have
+more than 8 outstanding. The threads stay bounded by the distinct addresses
+plus the 8 workers, and none of them delays exit. Before this was fixed it was
+2 s per endpoint, serially: measured on a Windows 11 host, an unelevated `lsof`
+with 145 socket endpoints spent 83 s here, and `lsof -N -V` 66 s.
+
+A run whose output can show no socket NAME looks nothing up: `-t`, a path or
+`+d`/`+D` argument, and `-N` alone or under `-a` (no socket is on an NFS file
+system); nor does `-n`. `LSOF_RS_TRACE=1` prints `resolve hosts start (N
+distinct)` and `done (answered, named)` around the phase. Where even that is
+too slow, `-n` skips it.
+
 ### On Windows, `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX are ETW-sourced
 
 There is no public IP Helper table for raw sockets (`SOCK_RAW`), ICMP, or
@@ -206,7 +229,9 @@ concern. The C resolves by default, so `192.0.2.2:43378->160.79.104.10:443` here
 is `192.0.2.2:43378->api.anthropic.com:https` there. Resolution costs DNS
 traffic from a diagnostic tool, which is a poor default for the environments
 this runs in. **On Windows** lsof-rs resolves both by default (reverse DNS
-through `GetNameInfoW`, bounded at 2 s), and `-n` and `-P` turn that off. On
+through `GetNameInfoW`, bounded at 2 s, each distinct address once: see
+[Sockets](#on-windows-socket-host-names-cost-up-to-2-s-per-distinct-address)),
+and `-n` and `-P` turn that off. On
 both, an `-i` address or port must be numeric: `-i@localhost` and `-i:http` are
 refused (DIVERGENCES 38).
 
