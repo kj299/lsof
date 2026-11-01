@@ -11,6 +11,37 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — output and exit status a script may notice
+- **`-v` writes its version line to stderr**, and exits 0, as the C writes
+  its version report (DIVERGENCES 150): `lsof -v 2>/dev/null` prints
+  nothing, and a script that read the version from stdout reads it from
+  stderr now (`lsof -v 2>&1`). The line is lsof-rs's own, as before
+  (`lsof-rs <version> (memory-safe lsof)`). Every platform; the Windows
+  smoke tests read it there.
+- **`-h`, `-F ?` and `-v` are acted on together** (150), in the C's order
+  whatever order they are given in: the help, the field letters, the
+  version, so `lsof -v -h` prints the help and then the version, where
+  lsof-rs had printed the first it acted on alone. Given with an option
+  error, the help (in place of the usage hint) or the field letters are
+  printed after the error, the version after them, and the run exits 1:
+  `lsof -hx` is `-x must accompany +d or +D` and then the help. `-v` with an
+  error alone prints the error and the usage hint, as before.
+- **A letter that is no option is `illegal option character: X`** (149), the
+  C's words, without the prefix (`lsof -W` and `lsof +W` both), where
+  lsof-rs had said `unsupported option: -W`; a colon is `colon is an illegal
+  option character.` And the parse reads on, as the C's does: the rest of
+  the word and the words after are read, every error found is printed in the
+  C's order, and the run exits 1 (`lsof -Wz` prints two lines, `lsof -o -s
+  -W` the `W` line and then `-o and -s are mutually exclusive`). `-D` and
+  `-m`, which lsof-rs does not implement, read on the same way, each taking
+  its value word as the C's does, and `-m` says `-m not supported`, the C's
+  words on Linux. `+n`, `+P`, `+r` and `+m`, `+` spellings of options the C
+  has and lsof-rs does not, still end the parse with `unsupported option`,
+  the rest of the word unread. A `--` after `-D` or `-m` ends the options,
+  as the C's does, rather than being taken as their value. The lines are
+  kept a byte a letter until printed, so a long argument list of unknown
+  letters costs about its own size.
+
 ## [2.0.0] — 2026-11-01
 
 ### Added

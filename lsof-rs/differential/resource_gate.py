@@ -134,6 +134,18 @@ ALLOC_PY = (
     "    b[i] = 1\n"
 )
 
+# illegal letters (DIVERGENCES 149). The parse reads on past a letter that
+# is no option, as the C's does, and prints a line for each: seven words of
+# 131000 `W`s, 0.9 MB of arguments, are 917000 lines. The C prints each where
+# it meets it; lsof-rs keeps them, one byte a letter, until the parse ends.
+# Measured at 400 processes: 6.92 MB against the C's 3.12 MB, 2.22x RSS, and
+# 1.39-1.72x wall. Kept as one `String` a line, as first written, they read
+# 119.87 MB here, 38.55x (and 237 MB for 1.8 MB of arguments, where the C
+# peaks at 7 MB). 3.50x is the measurement plus a runner's headroom and an
+# order of magnitude under the regression.
+ILLEGAL_LETTERS, ILLEGAL_WORDS = 131000, 7
+ILLEGAL_WALL, ILLEGAL_RSS = 4.00, 3.50
+
 # Ratio ceilings, rust/C medians. Each is a measurement plus headroom, and the
 # comment IS the measurement, so a later reader can tell a number that was taken
 # from one that was hoped for.
@@ -162,8 +174,10 @@ ALLOC_PY = (
 CEILINGS = {
     "-i": {"wall": 1.60, "rss": 2.00},
     "whole-host": {"wall": 1.40, "rss": 1.30},
+    "illegal-letters": {"wall": ILLEGAL_WALL, "rss": ILLEGAL_RSS},
 }
-CASES = {"-i": ["-i"], "whole-host": []}
+CASES = {"-i": ["-i"], "whole-host": [],
+         "illegal-letters": ["-" + "W" * ILLEGAL_LETTERS] * ILLEGAL_WORDS}
 
 MIN_TRUE_MB, MAX_TRUE_MB = 0.2, 3.0      # /bin/true: a real floor, not a guess
 MIN_ALLOC_MB, MAX_ALLOC_MB = 190.0, 260.0  # a known 200 MB allocation
@@ -476,9 +490,11 @@ def _self_test():
         # `--warn` with a longer name. Driven through `run` with stand-in
         # binaries so the exit code itself is what is asserted.
         wall_over = {"-i": {"wall": 0.01, "rss": 99.0},
-                     "whole-host": {"wall": 99.0, "rss": 99.0}}
+                     "whole-host": {"wall": 99.0, "rss": 99.0},
+                     "illegal-letters": {"wall": 99.0, "rss": 99.0}}
         rss_over = {"-i": {"wall": 99.0, "rss": 0.01},
-                    "whole-host": {"wall": 99.0, "rss": 99.0}}
+                    "whole-host": {"wall": 99.0, "rss": 99.0},
+                    "illegal-letters": {"wall": 99.0, "rss": 99.0}}
         rc_wall = run("/bin/true", "/bin/true", 2, 2, 1, False, False,
                       ceilings=wall_over, report=quiet, warn_wall=True)
         rc_rss = run("/bin/true", "/bin/true", 2, 2, 1, False, False,

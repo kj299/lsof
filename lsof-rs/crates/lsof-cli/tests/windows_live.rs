@@ -58,10 +58,20 @@ fn lsof(args: &[&str]) -> String {
 
 #[test]
 fn version_and_help() {
-    assert!(lsof(&["-v"]).contains("lsof-rs"), "version banner missing");
-    // The help is on stderr, as the C writes it (DIVERGENCES 114), and
-    // `lsof()` reads stdout only. `-h` reads no handle and cannot hang, so
-    // it needs no deadline.
+    // The version and the help are on stderr, as the C writes them
+    // (DIVERGENCES 150, 114), and `lsof()` reads stdout only. Neither reads
+    // a handle or can hang, so neither needs a deadline.
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .arg("-v")
+        .output()
+        .expect("failed to run lsof.exe -v");
+    assert_eq!(out.status.code(), Some(0), "-v exit status");
+    assert!(out.stdout.is_empty(), "version written to stdout");
+    let version = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        version.contains("lsof-rs"),
+        "version banner missing:\n{version}"
+    );
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
         .arg("-h")
         .output()

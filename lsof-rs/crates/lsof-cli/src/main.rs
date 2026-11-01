@@ -15,7 +15,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lsof_cli::args::{parse_with_host, read_mount_table, Action, HostChecks};
+use lsof_cli::args::{parse_reporting, read_mount_table, Action, HostChecks, Reports};
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::safefs::{to_stderr, write_stderr};
@@ -774,6 +774,26 @@ fn exit_on_write_error(r: std::io::Result<()>) {
     }
 }
 
+/// What `-h`, `-F ?` and `-v` ask for, on stderr, in the C's order whatever
+/// order they were given in: the help, the field letters, the version
+/// (`usage.c`; measured, `-v -h` prints the help and then the version). The
+/// version is lsof-rs's own, in one line, where the C's is a report of its
+/// build (DIVERGENCES 150).
+fn report(reports: Reports) {
+    if reports.help {
+        write_stderr(&usage());
+    }
+    if reports.field_help {
+        write_stderr(&fields::field_help());
+    }
+    if reports.version {
+        write_stderr(&format!(
+            "lsof-rs {} (memory-safe lsof)\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+}
+
 fn main() {
     // The bounded layer's helper is this binary, re-executed with an argument
     // no user types (`lsof_backend_linux::safefs`). It is served before
@@ -857,37 +877,38 @@ fn main() {
             lookup_user: &lookup_user,
             selinux_enabled: &selinux_enabled,
         };
-        parse_with_host(argv, &fs, &read_table, &host)
+        parse_reporting(argv, &fs, &read_table, &host)
     };
     let action = match parsed {
-        Ok(a) => a,
-        Err(e) => {
+        (Ok(a), _) => a,
+        (Err(e), reports) => {
             // An argument is escaped where the message quotes it, as the C
             // escapes it with `safestrprt()` where it does. An error the C
             // makes in silence under `-w` or `-t` comes back empty: the run
             // still ends, with the usage hint alone.
-            if !e.is_empty() {
-                say!("lsof: {e}");
+            e.each_line(|line| say!("lsof: {line}"));
+            // The C's `usage()` after an error: its usage line, then the
+            // help if `-h` was given, else a pointer to it, then the field
+            // letters and the version if they were asked for and `-h` or
+            // `-F ?` was, and exit 1 (`usage.c`; `-W -h -v`, `-x -F ?`,
+            // measured). lsof-rs's help stands for the C's usage line and
+            // help, the hint for its usage line and pointer.
+            if !reports.help {
+                say!("Try 'lsof -h' for usage.");
             }
-            say!("Try 'lsof -h' for usage.");
+            if reports.help || reports.field_help {
+                report(reports);
+            }
             std::process::exit(1);
         }
     };
 
     let (selection, format, repeat, columns, mounts) = match action {
-        // To stderr, as the C's `usage()` writes it, and exit 0 (DIVERGENCES
-        // 114): `lsof -h 2>/dev/null` prints nothing in either.
-        Action::Help => {
-            write_stderr(&usage());
-            return;
-        }
-        // To stderr, as the C writes it, and exit 0.
-        Action::FieldHelp => {
-            write_stderr(&fields::field_help());
-            return;
-        }
-        Action::Version => {
-            println!("lsof-rs {} (memory-safe lsof)", env!("CARGO_PKG_VERSION"));
+        // To stderr, as the C's `usage()` writes them, and exit 0
+        // (DIVERGENCES 114, 150): `lsof -h 2>/dev/null` and `lsof -v
+        // 2>/dev/null` print nothing in either.
+        Action::Report(reports) => {
+            report(reports);
             return;
         }
         Action::Run {
