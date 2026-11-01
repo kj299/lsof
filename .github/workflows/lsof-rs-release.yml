@@ -183,11 +183,9 @@ jobs:
           lsof -h                  # full option list
           \`\`\`
 
-          The binary is **unsigned by design** (a privacy-conscious choice: a
-          publicly-trusted signing certificate would put the maintainer's validated
-          legal name and location permanently on every binary, and would buy only
-          reduced download-friction, not the integrity the SHA-256 below already
-          gives). Windows SmartScreen may therefore warn on first run.
+          The Windows binary is not code-signed; Windows SmartScreen may warn on
+          first run. Verify the download against the SHA-256 checksums published
+          with this release.
 
           **Antivirus / Defender note.** lsof-rs does what an open-files lister
           must - enumerate every process's handles, enable \`SeDebugPrivilege\`, and

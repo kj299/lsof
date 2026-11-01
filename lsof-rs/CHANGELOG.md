@@ -11,6 +11,8 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-11-01
+
 ### Added
 - **A FreeBSD backend, `lsof-backend-freebsd` (phase F0).** It reads the
   `sysctl(3)` records the C's FreeBSD dialect reads: `kern.proc.proc`,
@@ -143,8 +145,6 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   answered on a later row from the OS resolver's cache. `LSOF_RS_TRACE`
   prints the phase's start and end with its distinct-address count.
   `mutants/host-names.toml`.
-
-## [2.0.0] — 2026-10-17
 
 ### Changed — BREAKING (2.0.0)
 - **`-J` and `-j` print the C's JSON schema** (DIVERGENCES 91, 61, 90; 68
