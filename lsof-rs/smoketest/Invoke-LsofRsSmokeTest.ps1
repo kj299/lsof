@@ -477,13 +477,15 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
         # The state is not part of NAME: the C keeps it in Lf->lts and prints it
         # from print_tcptpi(), so `n` carries the endpoints alone and the state
         # arrives as its own TST= token. Reporting it in both is the bug this
-        # guards.
+        # guards. It is proved on the fixture's ESTABLISHED pair, a state every
+        # host reports, not on the listener, which some hosts do not report as
+        # Listen (see Skip-UnlessListen).
         $r = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)", '-FnT') 'F-state'
-        Assert-Contains $r.Out 'TST=LISTEN'
-        Assert-NotContains $r.Out '(LISTEN)' 'the state must not also be in the n field'
+        Assert-Contains $r.Out 'TST=ESTABLISHED'
+        Assert-NotContains $r.Out '(ESTABLISHED)' 'the state must not also be in the n field'
         # ...while the table still shows it, appended by the renderer.
         $t = Invoke-Lsof @('-nP', "-iTCP:$($fx.Port4)") 'F-state-table'
-        Assert-Contains $t.Out '(LISTEN)'
+        Assert-Contains $t.Out '(ESTABLISHED)'
     }
     Test-Case 'field-output-nul-F0' 'render/-F0' {
         # Every field is NUL-terminated and each set gets a NL *appended* after
