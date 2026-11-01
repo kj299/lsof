@@ -6303,16 +6303,17 @@ mod tests {
         assert!(parse_on_host(&["-s", "tcp:LISTEN,"], false).is_ok());
         // A refused `+d` takes the rest of its word as its value, which is
         // not read again as letters (`+d/nonexist` is one line, measured).
-        // Unix only: the stat's words are the host's.
+        // Unix only: the stat's words are the host's. Under miri, whose
+        // strerror adds `(os error 2)` itself, those words come first.
         if cfg!(unix) {
             let got = error_lines(parse_on_host(&["+d/nonexist", "-W"], false));
-            assert_eq!(
-                got,
-                [
-                    "WARNING: can't stat(/nonexist): No such file or directory",
-                    ill
-                ]
+            let want = "WARNING: can't stat(/nonexist): No such file or directory";
+            assert_eq!(got.len(), 2, "{got:?}");
+            assert!(
+                got[0] == want || (cfg!(miri) && got[0].starts_with(want)),
+                "{got:?}"
             );
+            assert_eq!(got[1], ill, "{got:?}");
         }
     }
 
