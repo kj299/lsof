@@ -5419,7 +5419,10 @@ mod tests {
     /// comes back as it went in, in order.
     #[test]
     fn read_on_errors_are_kept_compactly() {
-        let n = 200_000;
+        // Under miri the same path runs on 2 000 letters: the interpreter
+        // spent CI's whole 25-minute miri budget on 200 000, and the size
+        // bound is what the full count pins natively.
+        let n = if cfg!(miri) { 2_000 } else { 200_000 };
         let word = format!("-{}", "W".repeat(n));
         let mut early = Early::default();
         let mut reports = Reports::default();
