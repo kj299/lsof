@@ -15,14 +15,14 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lsof_cli::args::{parse_reporting, read_mount_table, Action, HostChecks, Reports};
+use lsof_cli::args::{parse_reporting, read_mount_table, walk_dir, Action, HostChecks, Reports};
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::safefs::{to_stderr, write_stderr};
 use lsof_core::selection::filesystems_named;
 use lsof_core::{
     errno_text, Backend, DirArg, FileId, FilesystemArgs, Located, MountKind, MountRequest,
-    MountTable, PathItem, SafeFs, Selection, TaskMode,
+    MountTable, PathItem, SafeFs, Selection, TaskMode, WalkedEntry,
 };
 
 /// `eprintln!`, without its panic: one line on stderr through
@@ -366,41 +366,6 @@ fn spell_names_as_reported(sel: &mut Selection) {
     }
 }
 
-/// How many entries a `+d`/`+D` walk takes, and how many bytes of their
-/// names. The C walks on: a tree of 200,000 entries and more is taken whole,
-/// and two links to `.` under `-x l` make 2^40 paths it never finishes. lsof-rs
-/// stops, and says so (DIVERGENCES 81). Names count as well as entries: under
-/// `-x l` a link to `.` makes every name longer than the last, and 200,000
-/// of them reached a gigabyte.
-const WALK_ENTRIES: usize = 200_000;
-const WALK_NAME_BYTES: usize = 16 << 20;
-
-/// What a walk has left of [`WALK_ENTRIES`] and [`WALK_NAME_BYTES`].
-struct WalkBudget {
-    entries: usize,
-    bytes: usize,
-}
-
-impl WalkBudget {
-    fn new() -> Self {
-        WalkBudget {
-            entries: WALK_ENTRIES,
-            bytes: WALK_NAME_BYTES,
-        }
-    }
-
-    /// Take one entry with a name of `len` bytes, or `false` if that would
-    /// exceed either limit.
-    fn take(&mut self, len: usize) -> bool {
-        if self.entries == 0 || self.bytes < len {
-            return false;
-        }
-        self.entries -= 1;
-        self.bytes -= len;
-        true
-    }
-}
-
 /// One `+d`/`+D` directory and what is in it, entered as the C's
 /// `enter_dir()` enters them (`arg.c`): the directory under the name
 /// `Readlink()` gave it when the option was checked, then each entry as that
@@ -409,19 +374,11 @@ impl WalkBudget {
 /// `rel/y` (DIVERGENCES 63), and an entry whose name is not UTF-8 is found by
 /// it, where a lossy name had found nothing (DIVERGENCES 65).
 ///
-/// Each entry is described by ONE `lstat`, as the C's (`arg.c:1014`): it
-/// decides the `-x f` test, whether the entry is a link, whether it is
-/// descended into, and what it is (DIVERGENCES 111). Only a link under `-x
-/// l` gets one more call, the `stat` that follows it, and that result then
-/// stands for the entry. The directory itself is what the option's one
-/// `stat` said ([`DirArg::stat`]); the walk only lists it. Every call it
-/// makes — each listing, each `lstat`, each follow — goes through the
-/// bounded layer under the `-b`, `-O` and `-S` given before the option
-/// (DIVERGENCES 94): an entry on a file system that does not answer is a
-/// `can't lstat(P): Connection timed out` and the walk goes on, as the C's
-/// (its first timeout, DIVERGENCES 118). Its warnings go where the layer's
-/// do, stderr, so that a test can hold them.
-fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Escaper, fs: &SafeFs) {
+/// The walk is [`walk_dir`]'s, made where the option stood when the parse
+/// could make it there ([`DirArg::walked`], DIVERGENCES 82), and here
+/// otherwise; each entry is entered under the identity of the one call made
+/// of it.
+fn expand_dir(sel: &mut Selection, dir: &mut DirArg, backend: &dyn Backend, fs: &SafeFs) {
     fn enter(sel: &mut Selection, path: &Path, id: Option<FileId>, spelled: Option<OsString>) {
         if let Some(id) = id {
             sel.path_ids.insert(id);
@@ -445,17 +402,14 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
         PathBuf::from(p)
     };
     // The directory is the option's one `stat` (`arg.c:876`): its device and
-    // inode are its search item's (`arg.c:915`), and its `st_dev` is `ddev`,
-    // the file system every entry is held to unless `-x f` (`arg.c:905`),
-    // through a followed link too. Nothing at walk time asks again, so a
-    // directory gone since is still the item the C enters, before it tries
-    // to open it (`arg.c:915,930`), and is reported unlocated. Where names
-    // are matched there is no identity, and `ddev` is `None`, which switches
-    // the `-x f` rule off rather than guessing.
-    let (top, ddev) = if identified {
-        (backend.identify_stat(&dir.stat), Some(dir.stat.dev))
+    // inode are its search item's (`arg.c:915`). Nothing at walk time asks
+    // again, so a directory gone since is still the item the C enters,
+    // before it tries to open it (`arg.c:915,930`), and is reported
+    // unlocated. Where names are matched there is no identity.
+    let top = if identified {
+        backend.identify_stat(&dir.stat)
     } else {
-        (None, None)
+        None
     };
     // The directory's own item is `ck_file_arg()`'s, which drops the
     // slashes that end it from the name a row it locates is given, and only
@@ -467,115 +421,20 @@ fn expand_dir(sel: &mut Selection, dir: &DirArg, backend: &dyn Backend, esc: Esc
         None
     };
     enter(sel, &base, top, spelled);
-    let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
-    let mut budget = WalkBudget::new();
-    let mut stack = vec![base.clone()];
-    while let Some(dn) = stack.pop() {
-        let names = match fs.read_dir(&dn) {
-            Ok(names) => names,
-            Err(e) => {
-                if dir.warn && e.kind() != std::io::ErrorKind::NotFound {
-                    fs.tell(&format!(
-                        "lsof: WARNING: can't opendir({}): {}",
-                        shown(&dn),
-                        errno_text(&e)
-                    ));
-                }
-                continue;
-            }
+    // The walk, made where the option stood if the parse could make it
+    // there (DIVERGENCES 82), else now; then each entry is entered under the
+    // identity of the one call made of it.
+    let walked = match dir.walked.take() {
+        Some(walked) => walked,
+        None => walk_dir(dir, &base, identified, &fs),
+    };
+    for WalkedEntry { path, stat } in walked {
+        let id = if identified {
+            stat.and_then(|st| backend.identify_stat(&st))
+        } else {
+            None
         };
-        for name in names {
-            // `dn`, a `/` unless it ends in one, and the entry's name: the C's
-            // spelling, and `DirEntry::path()`'s.
-            let path = dn.join(&name);
-            if !budget.take(path.as_os_str().len()) {
-                if dir.warn {
-                    fs.tell(&format!(
-                        "lsof: WARNING: stopped walking {} after {} entries",
-                        shown(&base),
-                        WALK_ENTRIES - budget.entries
-                    ));
-                }
-                return;
-            }
-            // The entry is `lstat`ed, once; then the two cross-over rules, in
-            // the C's order (`arg.c:1029-1061`):
-            //
-            //   unless -x / -x f, skip an entry whose st_dev is not the
-            //         directory's — do not leave this file system;
-            //   unless -x / -x l, skip a symbolic link outright. With it, the
-            //         link is followed: the TARGET is what is searched for,
-            //         and for `+D` what is descended into, as the C stacks a
-            //         directory by the `stat` that followed the link
-            //         (DIVERGENCES 78).
-            //
-            // `-x` is the one in force when the option was checked
-            // (DIVERGENCES 75). The type is the `lstat`'s, never the listing's
-            // `d_type`, as the C's is (`arg.c:1038,1067`).
-            let st = match fs.lstat(&path) {
-                Ok(st) => Some(st),
-                // `lstat` failed: gone, not ours to see, or timed out. The
-                // C's words, with that call's own error.
-                Err(err) if identified => {
-                    if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
-                        fs.tell(&format!(
-                            "lsof: WARNING: can't lstat({}): {}",
-                            shown(&path),
-                            errno_text(&err)
-                        ));
-                    }
-                    continue;
-                }
-                // Where names are matched, the name is still an item.
-                Err(_) => None,
-            };
-            // The link's own device, before it is followed: a link here to a
-            // file elsewhere is entered under `-x l` alone (`arg.c:1035`).
-            if !dir.cross_filesystems {
-                if let (Some(d), Some(st)) = (ddev, st) {
-                    if d != st.dev {
-                        continue;
-                    }
-                }
-            }
-            // Under `-x l` a link is followed by one `stat`, whose result
-            // replaces the `lstat` (`arg.c:1047`): it is what the entry is,
-            // and whether it is descended into. The name stays the link's.
-            let st = match st {
-                Some(st) if st.is_symlink() => {
-                    if !dir.cross_symlinks {
-                        continue;
-                    }
-                    match fs.stat(&path) {
-                        Ok(st) => Some(st),
-                        Err(err) => {
-                            // The C's words, its spelling included.
-                            if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
-                                fs.tell(&format!(
-                                    "lsof: WARNING: can't stat({}) symbolc link: {}",
-                                    shown(&path),
-                                    errno_text(&err)
-                                ));
-                            }
-                            continue;
-                        }
-                    }
-                }
-                st => st,
-            };
-            // The identity of the call just made, never of another: a second
-            // `stat` would describe whatever the name led to by then. The C
-            // hands `ck_file_arg()` this one (`arg.c:1077`).
-            let id = if identified {
-                st.and_then(|st| backend.identify_stat(&st))
-            } else {
-                None
-            };
-            if dir.recursive && st.is_some_and(|st| st.is_dir()) {
-                stack.push(path.clone());
-            }
-            enter(sel, &path, id, None);
-        }
+        enter(sel, &path, id, None);
     }
 }
 
@@ -873,9 +732,11 @@ fn main() {
                 .backend
                 .has_mount_type("selinuxfs")
         };
+        let identifies_paths = || env_cell.get_or_init(make_env).backend.identifies_paths();
         let host = HostChecks {
             lookup_user: &lookup_user,
             selinux_enabled: &selinux_enabled,
+            identifies_paths: &identifies_paths,
         };
         parse_reporting(argv, &fs, &read_table, &host)
     };
@@ -887,6 +748,11 @@ fn main() {
             // makes in silence under `-w` or `-t` comes back empty: the run
             // still ends, with the usage hint alone.
             e.each_line(|line| say!("lsof: {line}"));
+            // An error the C's `Error()` ends the run at, at once: no usage,
+            // whatever `-h` asked for (`-d foo -h`, measured).
+            if e.is_fatal() {
+                std::process::exit(1);
+            }
             // The C's `usage()` after an error: its usage line, then the
             // help if `-h` was given, else a pointer to it, then the field
             // letters and the version if they were asked for and `-h` or
@@ -970,9 +836,11 @@ fn main() {
         // warnings come before a bare path's status error, and they come even
         // when every bare path is then dropped. The order matters to `-V`,
         // which reports the items last-entered first (DIVERGENCES 52).
-        for dir in sel.dir_args.clone() {
-            expand_dir(&mut sel, &dir, env.backend.as_ref(), esc, &fs);
+        let mut dirs = std::mem::take(&mut sel.dir_args);
+        for dir in &mut dirs {
+            expand_dir(&mut sel, dir, env.backend.as_ref(), &fs);
         }
+        sel.dir_args = dirs;
         let identified = sel.paths_identified;
         // A bare path is examined under the options as they ended, as the C
         // examines it once they are all read (`ck_file_arg()`).
@@ -1522,27 +1390,6 @@ mod tests {
         }
     }
 
-    /// A walk stops at whichever limit it meets first, entries or the bytes
-    /// of their names, and never goes below either.
-    #[test]
-    fn a_walk_budget_counts_entries_and_name_bytes() {
-        use super::{WalkBudget, WALK_ENTRIES, WALK_NAME_BYTES};
-        let mut b = WalkBudget::new();
-        let mut taken = 0;
-        while b.take(1) {
-            taken += 1;
-        }
-        assert_eq!(taken, WALK_ENTRIES);
-        let mut b = WalkBudget::new();
-        assert!(b.take(WALK_NAME_BYTES - 1));
-        assert!(b.take(1));
-        assert!(!b.take(1), "no bytes left");
-        assert_eq!(b.entries, WALK_ENTRIES - 2);
-        let mut b = WalkBudget::new();
-        assert!(!b.take(WALK_NAME_BYTES + 1), "one name past the limit");
-        assert_eq!((b.entries, b.bytes), (WALK_ENTRIES, WALK_NAME_BYTES));
-    }
-
     #[test]
     fn strip_verbatim_matches_backend_spelling() {
         // Must mirror the backend's normalize_final so both sides of the
@@ -1667,7 +1514,7 @@ mod tests {
     #[test]
     fn a_walk_makes_every_call_through_the_layer_and_goes_on_past_a_timeout() {
         use lsof_core::safefs::{timed_out, Blocking, FileStat, FsCalls};
-        use lsof_core::{Backend, DirArg, Escaper, SafeFs, Selection};
+        use lsof_core::{Backend, DirArg, SafeFs, Selection};
         use std::cell::RefCell;
         use std::ffi::OsString;
         use std::io;
@@ -1753,12 +1600,13 @@ mod tests {
             },
             // What the option's `stat` of `/w` said.
             stat: Tree::node("/w", true).unwrap(),
+            walked: None,
         };
         let mut sel = Selection {
             paths_identified: true,
             ..Selection::default()
         };
-        super::expand_dir(&mut sel, &dir, &Ids, Escaper::for_host(), &fs);
+        super::expand_dir(&mut sel, &mut dir.clone(), &Ids, &fs);
         let made = tree.0.take();
         for (c, p, limit) in &made {
             assert_eq!(*limit, 7, "{c} {p}: the limit where +D stood");
@@ -1828,7 +1676,7 @@ mod tests {
             paths_identified: true,
             ..Selection::default()
         };
-        super::expand_dir(&mut sel, &quiet, &Ids, Escaper::for_host(), &fs);
+        super::expand_dir(&mut sel, &mut quiet.clone(), &Ids, &fs);
         assert!(said.borrow().is_empty(), "{:?}", said.borrow());
         assert_eq!(sel.path_items.len(), 4);
     }
@@ -1841,7 +1689,7 @@ mod tests {
     /// the host's separator, which the log reads as `/`.
     mod walk {
         use lsof_core::safefs::{FileStat, FsCalls};
-        use lsof_core::{errno_text, Backend, DirArg, Escaper, SafeFs, Selection};
+        use lsof_core::{errno_text, Backend, DirArg, SafeFs, Selection};
         use std::cell::RefCell;
         use std::ffi::OsString;
         use std::io;
@@ -2006,12 +1854,13 @@ mod tests {
                 warn,
                 blocking: lsof_core::Blocking::default(),
                 stat: top(),
+                walked: None,
             };
             let mut sel = Selection {
                 paths_identified: identified,
                 ..Selection::default()
             };
-            super::super::expand_dir(&mut sel, &arg, &Ids, Escaper::for_host(), &fs);
+            super::super::expand_dir(&mut sel, &mut arg.clone(), &Ids, &fs);
             let items = sel
                 .path_items
                 .iter()

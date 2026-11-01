@@ -13,6 +13,14 @@
 # skip without root. CI runs only --apply-only, which checks that each mutant
 # still fits the code.
 #
+# 2026-11-01 (Batch B, DIVERGENCES 82): the walk moved from main.rs's
+# `expand_dir` into `args::walk_dir`, which the parse calls where a `+d`/`+D`
+# stands and `expand_dir` calls for what the parse did not walk; the mutants
+# of the walk follow it there, `top-restated-at-walk-time` staying in main.rs,
+# and `entry-identified-by-a-second-stat` now replaces the one result the walk
+# keeps for the entry. The unit gate's walk tests reach `walk_dir` through
+# `expand_dir`, so they see each where they saw it.
+#
 # Run 2026-10-10, as root, after item 111's review added cases: 8 of 8
 # KILLED, all by the unit gate, six by the differential as well. The unit
 # tests that fail, measured one mutant at a time, and the walk cases that
@@ -77,16 +85,16 @@ timeout = 1500
 name = "entry-identified-by-a-second-stat"
 rule = "an entry is identified by its one lstat, never by a stat made after it (111)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''                st.and_then(|st| backend.identify_stat(&st))'''
-new = '''                st.and_then(|_| fs.stat(&path).ok())
-                    .and_then(|st| backend.identify_stat(&st))'''
+file = "crates/lsof-cli/src/args.rs"
+old = '''            walked.push(WalkedEntry { path, stat: st });'''
+new = '''            let st = st.and_then(|_| fs.stat(&path).ok());
+            walked.push(WalkedEntry { path, stat: st });'''
 
 [[mutant]]
 name = "followed-link-keeps-the-lstat"
 rule = "under -x l the one follow replaces the lstat, for the identity and the descent (111, 78)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''                    match fs.stat(&path) {
                         Ok(st) => Some(st),'''
 new = '''                    match fs.stat(&path) {
@@ -96,7 +104,7 @@ new = '''                    match fs.stat(&path) {
 name = "link-followed-twice"
 rule = "under -x l a link is followed by exactly one stat (111)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''                    match fs.stat(&path) {'''
 new = '''                    match fs.stat(&path).and_then(|_| fs.stat(&path)) {'''
 
@@ -104,7 +112,7 @@ new = '''                    match fs.stat(&path).and_then(|_| fs.stat(&path)) {
 name = "x-f-judged-after-the-follow"
 rule = "-x f is judged on the lstat's device, the link's own, before it is followed (111)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''            if !dir.cross_filesystems {
                 if let (Some(d), Some(st)) = (ddev, st) {
                     if d != st.dev {
@@ -115,8 +123,8 @@ old = '''            if !dir.cross_filesystems {
 '''
 new = ''
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''            // The identity of the call just made, never of another: a second'''
+file = "crates/lsof-cli/src/args.rs"
+old = '''            // The result of the call just made, never of another: a second'''
 new = '''            if !dir.cross_filesystems {
                 if let (Some(d), Some(st)) = (ddev, st) {
                     if d != st.dev {
@@ -124,13 +132,13 @@ new = '''            if !dir.cross_filesystems {
                     }
                 }
             }
-            // The identity of the call just made, never of another: a second'''
+            // The result of the call just made, never of another: a second'''
 
 [[mutant]]
 name = "symbolc-warning-dropped"
 rule = "a link -x l cannot follow says can't stat(P) symbolc link: E, unless ENOENT or -w (111)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''                            if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
                                 fs.tell(&format!(
                                     "lsof: WARNING: can't stat({}) symbolc link: {}",'''
@@ -142,7 +150,7 @@ new = '''                            if false && dir.warn && err.kind() != std::
 name = "lstat-failure-entered"
 rule = "an entry whose lstat fails is no search item where files are identified (111)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''                            errno_text(&err)
                         ));
                     }
@@ -163,19 +171,20 @@ name = "top-restated-at-walk-time"
 rule = "the directory is the option's one stat, and the walk does not stat it again (111)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        (backend.identify_stat(&dir.stat), Some(dir.stat.dev))'''
-new = '''        (
-            fs.stat(&base).ok().and_then(|st| backend.identify_stat(&st)),
-            Some(dir.stat.dev),
-        )'''
+old = '''        backend.identify_stat(&dir.stat)
+    } else {'''
+new = '''        fs.stat(&base).ok().and_then(|st| backend.identify_stat(&st))
+    } else {'''
 
 [[mutant]]
 name = "ddev-from-a-walk-time-lstat"
 rule = "ddev is the st_dev of the option's one stat of the directory, for the whole walk (111)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''        (backend.identify_stat(&dir.stat), Some(dir.stat.dev))'''
-new = '''        (
-            backend.identify_stat(&dir.stat),
-            fs.lstat(&base).ok().map(|st| st.dev),
-        )'''
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let ddev = identified.then_some(dir.stat.dev);'''
+new = '''    let ddev = if identified {
+        fs.lstat(base).ok().map(|st| st.dev)
+    } else {
+        None
+    };'''
+

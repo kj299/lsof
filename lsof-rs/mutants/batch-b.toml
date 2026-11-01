@@ -1,0 +1,416 @@
+# Mutants for Batch B (2026-11-01): DIVERGENCES 83 (every error the C's
+# option loop finds is printed and the parse reads on after it; the two the
+# C's `Error()` ends the run at are fatal, with no usage) and 82 (a `+d`/`+D`
+# is walked where its option stands, its warnings among the parse's lines).
+# One per rule, each a plausible way to get it wrong. The kill table is this
+# file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/batch-b.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo, for the differential's fixtures (fixture MT's `{MTWL}`
+# for the walk's cases). CI runs only --apply-only.
+#
+# Rules with no mutant here:
+# * Row 85 (the mount table's first row per directory): resolved by item 110,
+#   whose mutants are mounts.toml's.
+# * `-T`'s and `-f`'s letters each named: the same `early.letter` arm as
+#   `-x`'s, which `cross-over-first-letter-only` breaks; the unit test names
+#   each of `-f qz` and `-x qz`.
+# * A `-s` list that ends in a comma: no plausible one-line way back to the
+#   old `split(',')` reading; pinned by `every_error_the_c_reads_past_is_read_past`
+#   and the differential's `dash-s-list-ending-in-a-comma`.
+#
+# Run 2026-11-01, as root, --first-kill: 22 of 23 KILLED (20 by the unit gate,
+# `fatal-prints-the-usage` and `walked-entries-dropped` by the differential).
+# The survivor, `walk-at-the-parse-ignores-dash-w` as first written (the
+# parse's walk viewed through `fs.with(dir.blocking, true)`), was equivalent:
+# the walk asks `dir.warn` itself before each warning, and under `-b`, the one
+# case where the layer's own flag speaks, `enter_dir()` refuses the directory
+# before any walk. It was replaced by the mutant below, which breaks the
+# `-w` the walk is given, and rerun alone: KILLED.
+#
+# Run again in full 2026-11-01, after the reviews' fixes (the section at the
+# end), as root, --first-kill: 34 of 34 KILLED, 32 by the unit gate and
+# `fatal-prints-the-usage` and `walked-entries-dropped` by the differential.
+# Not here: a mutant on the Windows `-g` message, which a Linux gate cannot
+# reach; the unit case expects `illegal -g ppid:` under cfg!(windows).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# -------------------------------------------------------------------- 83
+
+[[mutant]]
+name = "plus-d-refusal-ends-the-parse"
+rule = "a +d/+D the C refuses is an error the parse reads on after (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        Err(e) => {
+                            early.fail(&e);
+                            j = chars.len();
+                            continue;
+                        }'''
+new = '''                        Err(e) => return Err(e),'''
+
+[[mutant]]
+name = "plus-c-value-not-given-back"
+rule = "+c gives a value with no width back, to be read again (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            if attached {
+                                j += 1;
+                            } else {
+                                i = i.saturating_sub(1);
+                                j = chars.len();
+                            }'''
+new = '''                            let _ = attached;
+                            j = chars.len();'''
+
+[[mutant]]
+name = "dash-l-count-ends-the-parse"
+rule = "-L with a count is an error the parse reads on after (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        early.line("no number may follow -L");
+                        continue;'''
+new = '''                        return Err("no number may follow -L".to_string());'''
+
+[[mutant]]
+name = "cross-over-first-letter-only"
+rule = "-x names each letter it does not know, and reads on (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                                    other => early.letter(Early::CROSS_OVER, other),'''
+new = '''                                    other => {
+                                        early.letter(Early::CROSS_OVER, other);
+                                        break;
+                                    }'''
+
+[[mutant]]
+name = "unknown-field-ends-the-parse"
+rule = "-F names each letter its table lacks, and reads on, -F still given (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            for bad in list.chars().filter(|f| !field_known(*f)) {
+                                early.letter(Early::FIELD, bad);
+                            }'''
+new = '''                            if let Some(bad) = list.chars().find(|f| !field_known(*f)) {
+                                return Err(quoting("unknown field: ", &bad.to_string()));
+                            }'''
+
+[[mutant]]
+name = "fd-list-stops-at-a-mixture"
+rule = "each -d item's error is read on after, to the next item (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                if exclude { "^" } else { "" }
+            ));
+            continue;'''
+new = '''                if exclude { "^" } else { "" }
+            ));
+            return Ok(());'''
+
+[[mutant]]
+name = "invalid-fd-type-not-fatal"
+rule = "a -d name that is no kind of descriptor ends the run at once, with no usage (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                Err(FdNameError::Kind(e)) => {
+                    early.fatal = true;'''
+new = '''                Err(FdNameError::Kind(e)) => {'''
+
+[[mutant]]
+name = "uid-conflict-not-fatal"
+rule = "a UID both selected and excluded ends the run at once, with no usage (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                if other_side {
+                    // The C's `Error()`: at once, with no usage.
+                    early.fatal = true;'''
+new = '''                if other_side {'''
+
+[[mutant]]
+name = "fatal-prints-the-usage"
+rule = "lsof prints no usage hint and no help after a fatal error (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            if e.is_fatal() {
+                std::process::exit(1);
+            }'''
+new = ''
+
+[[mutant]]
+name = "pid-conflict-not-found-at-the-option"
+rule = "an ID on both sides is refused where it is entered, and the list goes on (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if other.contains(&id) {
+            early.line(&format!("{word} {id} has been included and excluded."));'''
+new = '''        if false && other.contains(&id) {
+            early.line(&format!("{word} {id} has been included and excluded."));'''
+
+[[mutant]]
+name = "id-list-all-or-nothing"
+rule = "the items before an illegal -p item are entered, as enter_id() enters them (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            return (ids, Some(quoting(&format!("illegal {what}: "), value)));'''
+new = '''            return (Vec::new(), Some(quoting(&format!("illegal {what}: "), value)));'''
+
+[[mutant]]
+name = "missing-value-in-lsof-rs-words"
+rule = "a missing -p value is the C's `no process ID specified` (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            'p' => "no process ID specified",'''
+new = '''                            'p' => "option -p requires a value",'''
+
+[[mutant]]
+name = "dash-dash-taken-as-a-value"
+rule = "-- is no value to +d, -d, -p, -u, -c or -e, and ends the options (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let next = args.get(*i + 1).filter(|w| *w != "--")?;'''
+new = '''    let next = args.get(*i + 1)?;'''
+
+[[mutant]]
+name = "state-list-stops-at-an-unknown-name"
+rule = "each -s state name's error is read on after, to the next name (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            early.line(&quoting("unknown TCP state name: ", name));
+            continue;'''
+new = '''            early.line(&quoting("unknown TCP state name: ", name));
+            return;'''
+
+[[mutant]]
+name = "e-value-given-back"
+rule = "-e takes its value word whatever it opens with (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    // options after.
+                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();'''
+new = '''                    // options after.
+                    let value = optional_value(&chars, j, &args, &mut i).unwrap_or_default();'''
+
+[[mutant]]
+name = "long-login-ends-the-list"
+rule = "a -u login too long is said and the list read on (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            early.line(&format!("-u login name > {LOGINML} characters: {echo}"));
+            rest = tail;
+            continue;'''
+new = '''            early.line(&format!("-u login name > {LOGINML} characters: {echo}"));
+            return Ok(());'''
+
+[[mutant]]
+name = "silent-error-does-not-end-the-run"
+rule = "an error said in silence under -w still ends the run (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if early.told || early.failed || !errors.is_empty() || !early.is_empty() {'''
+new = '''    if early.told || !errors.is_empty() || !early.is_empty() {'''
+
+[[mutant]]
+name = "read-on-lines-never-spilled"
+rule = "what is held of the read-on errors is printed, in order, past its bound (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if self.held() > Self::SPILL {'''
+new = '''        if false && self.held() > Self::SPILL {'''
+
+# -------------------------------------------------------------------- 82
+
+[[mutant]]
+name = "walk-after-the-parse"
+rule = "a +d/+D is walked where its option stands, where the run identifies files (82)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if (host.identifies_paths)() {'''
+new = '''                    if false && (host.identifies_paths)() {'''
+
+[[mutant]]
+name = "walk-at-the-parse-ignores-dash-w"
+rule = "the parse's walk is under the -w that stood at the option (82)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            warn: at.warn,'''
+new = '''            warn: true,'''
+
+[[mutant]]
+name = "walked-twice"
+rule = "the run enters what the parse walked, and does not walk it again (82)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Some(walked) => walked,'''
+new = '''        Some(_) => walk_dir(dir, &base, identified, &fs),'''
+
+[[mutant]]
+name = "walked-entries-dropped"
+rule = "every entry the parse walked is a search item (82)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Some(walked) => walked,'''
+new = '''        Some(_) => Vec::new(),'''
+
+[[mutant]]
+name = "deferred-walks-at-the-parse"
+rule = "parse() and parse_with() walk nothing at the parse (82)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''fn walk_deferred() -> bool {
+    false'''
+new = '''fn walk_deferred() -> bool {
+    true'''
+
+# ------------------------------------------------- the reviews' findings (83)
+# Added 2026-11-01 for the safety and fidelity reviews: the bound inside one
+# word, a spill that empties the store, constant-time ID entry, four read-on
+# decisions no test had pinned, the ByName UID conflict's fatality, and the
+# `-s UDP:` term loop.
+
+[[mutant]]
+name = "text-line-not-spilled"
+rule = "what is held is bounded as each line is stored, inside one word too (83, memory)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        self.texts.push_str(text);
+        self.spill();'''
+new = '''        self.texts.push_str(text);'''
+
+[[mutant]]
+name = "spill-does-not-end-run"
+rule = "a spill that leaves nothing held still ends the run in usage() (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        self.told |= told;'''
+new = '''        let _ = told;'''
+
+[[mutant]]
+name = "id-repeat-entered-twice"
+rule = "-p/-g enter each ID once, looked up in what they entered (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        } else if this.insert(id) {
+            list.push(id);'''
+new = '''        } else {
+            this.insert(id);
+            list.push(id);'''
+
+[[mutant]]
+name = "id-other-side-not-looked-up"
+rule = "an ID on the other side is refused where -p/-g meet it (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if other.contains(&id) {
+            early.line(&format!("{word} {id} has been included and excluded."));'''
+new = '''        if other.contains(&id) && false {
+            early.line(&format!("{word} {id} has been included and excluded."));'''
+
+[[mutant]]
+name = "fd-range-error-ends-list"
+rule = "a -d range error is read on after, to the next item (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            Some(Err(e)) => {
+                early.line(&e);
+                continue;
+            }'''
+new = '''            Some(Err(e)) => {
+                early.line(&e);
+                return Ok(());
+            }'''
+
+[[mutant]]
+name = "fd-number-error-ends-list"
+rule = "a -d number past INT_MAX is read on after, to the next item (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                Err(FdNameError::Number(e)) => {
+                    early.line(&e);
+                    continue;
+                }'''
+new = '''                Err(FdNameError::Number(e)) => {
+                    early.line(&e);
+                    return Ok(());
+                }'''
+
+[[mutant]]
+name = "dup-state-ends-list"
+rule = "a -s state named twice is read on after, to the next name (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            early.line(&quoting(&format!("duplicate TCP {which}: "), name));
+            continue;'''
+new = '''            early.line(&quoting(&format!("duplicate TCP {which}: "), name));
+            return;'''
+
+[[mutant]]
+name = "plus-d-attached-rest-reread"
+rule = "a refused +d takes the rest of its word, which is not read again as letters (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        Err(e) => {
+                            early.fail(&e);
+                            j = chars.len();
+                            continue;
+                        }'''
+new = '''                        Err(e) => {
+                            early.fail(&e);
+                            j += 1;
+                            continue;
+                        }'''
+
+[[mutant]]
+name = "byname-uid-conflict-not-fatal"
+rule = "a UID on both sides is fatal where users are selected by name too (83)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        // The C's `Error()`: at once, with no usage.
+        early.fatal = true;
+        return Err(format!("UID {both} has been included and excluded."));'''
+new = '''        return Err(format!("UID {both} has been included and excluded."));'''
+
+[[mutant]]
+name = "udp-empty-name-is-the-stand-in"
+rule = "an empty -s UDP: name is the C's NULL UDP line, read on after (83, 32)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let names = value.get(4..).unwrap_or("");
+    if names.is_empty() {
+        return early.line(&quoting(&format!("no {proto} state names in: "), value));
+    }'''
+new = '''    let names = value.get(4..).unwrap_or("");
+    if names.is_empty() {
+        return early.line(&quoting(&format!("no {proto} state names in: "), value));
+    }
+    if proto == "UDP" {
+        return early.line(&quoting("no UDP state names available: ", value));
+    }'''
+
+[[mutant]]
+name = "udp-name-read-on-after"
+rule = "the first UDP name that is not empty ends the -s list, where the C crashes (32)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if proto == "UDP" {
+            return early.line(&quoting("no UDP state names available: ", value));
+        }'''
+new = '''        if proto == "UDP" {
+            early.line(&quoting("no UDP state names available: ", value));
+            continue;
+        }'''

@@ -35,5 +35,5 @@ pub use safefs::{Blocking, FileStat, FsCalls, InProcess, SafeFs};
 pub use selection::{
     CommandMatch, CommandWidth, DirArg, EndpointMode, ExemptFs, FdFilter, FdKind, FdSpec,
     FilesystemArgs, InetFilter, InetSpec, Located, PathItem, Selection, StateFilter, TaskMode,
-    TcpInfoFlags, UidSel, DEFAULT_COMMAND_WIDTH,
+    TcpInfoFlags, UidSel, WalkedEntry, DEFAULT_COMMAND_WIDTH,
 };

@@ -15,6 +15,9 @@
 #   past: the arm is `cfg!(target_os = "freebsd")`, so no Linux gate can see
 #   it; `args.rs` `an_illegal_option_character_is_read_past` pins both sides,
 #   and the FreeBSD cross-check builds it.
+#
+# Re-anchored 2026-11-01 (Batch B's review fixes): illegal-letter-kept-as-a-
+# line, as each way of storing a line now ends in `Early::spill`.
 
 [run]
 dir = ".."
@@ -199,6 +202,7 @@ old = '''    fn illegal(&mut self, c: char) {
             self.codes.push(Self::ESC);
         }
         self.codes.push(c);
+        self.spill();
     }'''
 new = '''    fn illegal(&mut self, c: char) {
         self.line(&quoting("illegal option character: ", &c.to_string()));

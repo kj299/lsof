@@ -42,6 +42,10 @@
 #   check, which xattr-identity-by-fstat and xattr-inode-unchecked pin, is
 #   what keeps a FUSE daemon from being asked at all: a non-socket descriptor
 #   is refused before any attribute is read.
+#
+# Re-anchored 2026-11-01 (Batch B's review fixes): read-on-errors-reach-
+# later-checks and read-on-error-after-the-s-warning, as `tell_early` and
+# the parse's `told` became `Early::tell` and `early.told`.
 
 [run]
 dir = ".."
@@ -88,8 +92,8 @@ name = "plus-T-empty-is-plus-T"
 rule = "+T '' selects no letters, not the default (116)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''parse_tcp_info(letters.as_deref(), plus)'''
-new = '''parse_tcp_info(letters.as_deref().filter(|l| !l.is_empty()), plus)'''
+old = '''parse_tcp_info(letters.as_deref(), plus, early)'''
+new = '''parse_tcp_info(letters.as_deref().filter(|l| !l.is_empty()), plus, early)'''
 
 # ------------------------------------------------------------------- 117
 
@@ -375,8 +379,8 @@ name = "read-on-errors-reach-later-checks"
 rule = "an error the C reads on after ends the run in usage(), before -X -i and -a are checked (114)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''    if told || !errors.is_empty() || !early.is_empty() {'''
-new = '''    if told || !errors.is_empty() {'''
+old = '''    if early.told || early.failed || !errors.is_empty() || !early.is_empty() {'''
+new = '''    if early.told || early.failed || !errors.is_empty() {'''
 
 [[mutant]]
 name = "dash-in-a-word-ends-the-parse"
@@ -400,5 +404,5 @@ rule = "an error the parse read on after is printed before the -S warning that f
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
 old = '''                            if n < TMLIMMIN {
-                                tell_early(fs, early, &mut told);'''
+                                early.tell();'''
 new = '''                            if n < TMLIMMIN {'''

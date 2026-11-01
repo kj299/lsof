@@ -179,9 +179,15 @@ fn an_inet_name_error_escapes_the_name_too() {
 )]
 fn plus_c_quotes_nothing() {
     // lsof-rs had said `invalid +c width: ` and the value, raw.
-    for args in [&["+c", "\x1b[2J"][..], &["+c"][..], &["+cx"][..]] {
+    for args in [&["+c", "\x1b[2J"][..], &["+c"][..]] {
         refused_with(&lsof(args), "+c not followed by width number");
     }
+    // An attached value is given back and read as letters, as the C reads
+    // it (DIVERGENCES 83): `+cx` is `-x` as well (measured).
+    refused_with(
+        &lsof(&["+cx"]),
+        "+c not followed by width number\nlsof: -x must accompany +d or +D",
+    );
 }
 
 #[test]
@@ -346,7 +352,15 @@ fn a_plus_d_the_c_cannot_use_ends_the_run_as_it_parses() {
     );
     refused(&["+d", "dangle", "x"], &cannot_stat);
     refused(&["-Q", "+D", "dangle", "x"], &cannot_stat);
-    refused(&["+d", "dangle", "-h"], &cannot_stat);
+    // The C reads on after the error, so a later `-h` is read too, and
+    // its help printed after it, exit 1 (DIVERGENCES 83, measured).
+    let out = lsof_in(&dir.0, &os(&["+d", "dangle", "-h"]));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = stderr_of(&out);
+    assert!(err.starts_with(&cannot_stat), "{err}");
+    assert!(err[cannot_stat.len()..].starts_with("lsof-rs "), "{err}");
+    assert!(!err.contains(usage), "{err}");
     refused(&["+d", "dangle", "-w"], &cannot_stat);
     refused(&["-w", "+d", "dangle"], "");
     refused(&["-t", "+d", "dangle"], "");

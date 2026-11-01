@@ -174,8 +174,8 @@ name = "empty-spec-read-as-bare"
 rule = "`-i ''` is a spec, not the bare form (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                    parse_inet(&mut sel, spec.as_deref())?;'''
-new = '''                    parse_inet(&mut sel, spec.as_deref().filter(|s| !s.is_empty()))?;'''
+old = '''                    if let Err(e) = parse_inet(&mut sel, spec.as_deref()) {'''
+new = '''                    if let Err(e) = parse_inet(&mut sel, spec.as_deref().filter(|s| !s.is_empty())) {'''
 
 [[mutant]]
 name = "leading-zero-octet-refused"
@@ -198,10 +198,10 @@ name = "plus-c-quotes-the-value"
 rule = "+c not followed by width number quotes nothing (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                        return Err("+c not followed by width number".to_string());'''
-new = '''                        return Err(format!(
+old = '''                        early.line("+c not followed by width number");'''
+new = '''                        early.line(&format!(
                             "+c not followed by width number: {}",
-                            value.unwrap_or_default()
+                            value.clone().unwrap_or_default()
                         ));'''
 
 [[mutant]]
@@ -217,8 +217,8 @@ name = "c-length-not-flags-2"
 rule = "the -c length message is safestrprt(..., 2): a space is \\x20 (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                        Escaper::for_host().text_spaced(name),'''
-new = '''                        shown(name),'''
+old = '''                Escaper::for_host().text_spaced(name),'''
+new = '''                shown(name),'''
 
 [[mutant]]
 name = "d-mixture-raw"
@@ -233,8 +233,8 @@ name = "s-protocol-raw"
 rule = "the -s messages escape the value, where the C prints it raw (122)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''        _ => return Err(format!("unknown -s protocol: \"{}\"", shown(value))),'''
-new = '''        _ => return Err(format!("unknown -s protocol: \"{}\"", value)),'''
+old = '''        _ => return early.line(&format!("unknown -s protocol: \"{}\"", shown(value))),'''
+new = '''        _ => return early.line(&format!("unknown -s protocol: \"{}\"", value)),'''
 
 [[mutant]]
 name = "text-spaced-keeps-the-space"
