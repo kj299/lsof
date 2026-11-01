@@ -4549,6 +4549,164 @@ args = ["-h", "--help"]
 name = "double-dash-h-is-refused"
 args = ["--h"]
 
+# ------------------------- -v on stderr; illegal option characters (149, 150)
+# The C's usage() writes -v's report to stderr, like -h's help and -F ?'s
+# letters, and acts on all three at once, in that order, exit 0; given with
+# an error, it prints the help and the letters after it, the version after
+# them, and exits 1, and with neither the version is not printed. lsof-rs
+# had written its version line to stdout and printed one of the three. A
+# letter that is no option is `illegal option character: X`, and the C reads
+# on, through the rest of the word, printing every error it then finds; -D
+# and -m (which the C knows, and refuses on Linux) take their value word and
+# read on too. lsof-rs had said `unsupported option: -X` and stopped. The
+# version and help texts are lsof-rs's own, so these compare stdout and the
+# exit status; the lines are pinned by tests/arguments.rs
+# (the_version_goes_to_stderr, an_illegal_option_character_reads_on,
+# dash_m_is_not_supported_in_the_cs_words) and args.rs
+# (an_illegal_option_character_is_read_past,
+# help_field_help_and_version_are_reported_together).
+
+[[case]]
+name = "version-is-on-stderr"
+args = ["-v"]
+
+[[case]]
+name = "version-with-a-selection-is-on-stderr"
+args = ["-v", "-p", "{A}"]
+
+[[case]]
+name = "version-after-a-selection-is-on-stderr"
+args = ["-p", "{A}", "-v"]
+
+[[case]]
+name = "version-with-plus-is-on-stderr"
+args = ["+v"]
+
+[[case]]
+name = "version-with-help-both-on-stderr"
+args = ["-v", "-h"]
+
+[[case]]
+name = "version-with-field-help-both-on-stderr"
+args = ["-F", "?", "-v"]
+
+[[case]]
+name = "version-with-help-and-field-help-all-on-stderr"
+args = ["-h", "-v", "-F", "?"]
+
+[[case]]
+name = "version-with-an-s-warning-is-on-stderr"
+args = ["-v", "-S", "0"]
+
+[[case]]
+name = "version-with-dash-x-alone-is-the-error"
+args = ["-v", "-x"]
+
+[[case]]
+name = "version-with-an-illegal-letter-is-the-error"
+args = ["-W", "-v"]
+
+[[case]]
+name = "version-help-and-an-illegal-letter-is-the-error"
+args = ["-W", "-h", "-v"]
+
+[[case]]
+name = "version-field-help-and-an-illegal-letter-is-the-error"
+args = ["-W", "-F", "?", "-v"]
+
+[[case]]
+name = "illegal-option-character"
+args = ["-W"]
+
+[[case]]
+name = "illegal-option-character-under-plus"
+args = ["+W"]
+
+[[case]]
+name = "illegal-option-characters-in-one-word"
+args = ["-Wz"]
+
+[[case]]
+name = "illegal-option-character-then-o-and-s"
+args = ["-W", "-o", "-s"]
+
+[[case]]
+name = "o-and-s-then-illegal-option-character"
+args = ["-o", "-s", "-W"]
+
+[[case]]
+name = "illegal-option-character-with-a-selection"
+args = ["-W", "-p", "{A}"]
+
+[[case]]
+name = "illegal-option-character-after-a-selection"
+args = ["-p", "{A}", "-W"]
+
+[[case]]
+name = "illegal-option-character-ends-the-run-before-dash-x-dash-i"
+args = ["-W", "-X", "-i"]
+
+[[case]]
+name = "illegal-option-character-ends-the-run-before-dash-a"
+args = ["-W", "-a"]
+
+[[case]]
+name = "illegal-option-character-ends-the-run-before-a-path"
+args = ["-W", "/nonexistent"]
+
+[[case]]
+name = "illegal-option-character-with-help"
+args = ["-W", "-h"]
+
+[[case]]
+name = "illegal-option-character-then-an-unknown-login"
+args = ["-W", "-u", "lsofrs-no-such-login"]
+
+[[case]]
+name = "illegal-option-character-colon"
+args = ["-a:"]
+
+[[case]]
+name = "illegal-option-character-plus-letter"
+args = ["-+"]
+
+[[case]]
+name = "illegal-option-character-digit-after-dash-s-upper"
+args = ["-S", "-1", "-p", "{A}"]
+
+[[case]]
+name = "dash-d-upper-takes-its-value-and-reads-on"
+args = ["-D", "-p", "{A}"]
+
+[[case]]
+name = "dash-m-takes-its-value-and-reads-on"
+args = ["-m", "-W", "-p", "{A}"]
+
+# `--` is no value to `-D` or `-m` (GetOpt's `"D:"`, `"m:"`, as `-Z`'s): it
+# ends the options, and what follows is a name, never looked at (row 149).
+[[case]]
+name = "dash-d-upper-does-not-take-dash-dash"
+args = ["-D", "--", "-W"]
+
+[[case]]
+name = "dash-m-does-not-take-dash-dash"
+args = ["-m", "--", "-W"]
+
+[[case]]
+name = "illegal-option-character-then-dash-d-upper-and-dash-dash"
+args = ["-W", "-D", "--", "-Y"]
+
+# `+m` is the C's mount supplement, which lsof-rs refuses (row 149): with an
+# error beside it both end in usage, exit 1, and the rest of a `+m` word is
+# never read as letters.
+[[case]]
+name = "illegal-option-character-then-plus-m"
+args = ["-W", "+m"]
+
+[[case]]
+name = "plus-m-with-a-value-then-an-illegal-letter"
+args = ["+mfoo", "-W"]
+
 # ------------------------------------------- an empty optional value (116)
 # The C offers an option's optional value the next word whenever it does not
 # open with `-` or `+`, an empty one too, and the options below take it as a

@@ -88,7 +88,8 @@ $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
 
 try {
     $r = Invoke-Bin @('-v')
-    Test-That 'version banner'        ($r.Out -match 'lsof-rs') "exit=$($r.Exit)"
+    # On stderr, as the C writes it (DIVERGENCES 150); stdout stays empty.
+    Test-That 'version banner'        (($r.Err -match 'lsof-rs') -and [string]::IsNullOrEmpty($r.Out)) "exit=$($r.Exit)"
 
     $r = Invoke-Bin @('-h')
     # On stderr, as the C writes it (DIVERGENCES 114); stdout stays empty.

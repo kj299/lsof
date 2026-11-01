@@ -28,10 +28,9 @@ use lsof_core::{
 // variants and `Run` is irrelevant here, and boxing would only add an alloc.
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
-    Help,
-    /// `-F ?`: the field letters, and nothing else.
-    FieldHelp,
-    Version,
+    /// `-h`, `-F ?` and `-v`, whichever were given: each is printed, on
+    /// stderr, and nothing is listed ([`Reports`]).
+    Report(Reports),
     Run {
         selection: Selection,
         format: Format,
@@ -42,6 +41,50 @@ pub enum Action {
         /// `None` is a table not read yet.
         mounts: Option<MountTable>,
     },
+}
+
+/// What `-h` (or `-?`), `-F ?` and `-v` ask for. The C's `usage()` acts on
+/// all three at once, in this order whatever order they were given in: the
+/// help, then the field letters, then the version (`usage.c`; measured, `-v
+/// -h` and `-h -v -F ?` print each, exit 0). Given with an option error, the
+/// help and the field letters are still printed after the error, and the
+/// version after them, and the run exits 1; with neither, the error ends the
+/// run with the usage hint alone, the version unprinted (`-W -h -v` prints the
+/// error, the help and the version; `-W -v` the error; measured).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reports {
+    /// `-h` or `-?`.
+    pub help: bool,
+    /// `-F ?`.
+    pub field_help: bool,
+    /// `-v`.
+    pub version: bool,
+}
+
+impl Reports {
+    /// `-h` alone.
+    pub const HELP: Reports = Reports {
+        help: true,
+        field_help: false,
+        version: false,
+    };
+    /// `-F ?` alone.
+    pub const FIELD_HELP: Reports = Reports {
+        help: false,
+        field_help: true,
+        version: false,
+    };
+    /// `-v` alone.
+    pub const VERSION: Reports = Reports {
+        help: false,
+        field_help: false,
+        version: true,
+    };
+
+    /// Whether any was asked for.
+    pub fn any(&self) -> bool {
+        self.help || self.field_help || self.version
+    }
 }
 
 /// What reads the mount table for the parser, under the options in force
@@ -327,21 +370,212 @@ pub fn parse_with_host(
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
 ) -> Result<Action, String> {
+    parse_reporting(args, fs, mounts, host)
+        .0
+        .map_err(|e| e.to_string())
+}
+
+/// [`parse_with_host`], and the [`Reports`] the options read asked for,
+/// which `lsof` still acts on when the parse ends in an error, as the C's
+/// `usage()` does: `-W -h` prints the error and then the help, exit 1. They
+/// are the ones read before the parse ended: an error that ends it at once
+/// (DIVERGENCES 83) leaves a later `-h` unread.
+pub fn parse_reporting(
+    args: Vec<String>,
+    fs: &SafeFs,
+    mounts: MountReader<'_>,
+    host: &HostChecks<'_>,
+) -> (Result<Action, ParseError>, Reports) {
+    let mut reports = Reports::default();
+    let parsed = parse_errors(args, fs, mounts, host, &mut reports);
+    (parsed, reports)
+}
+
+/// [`parse_with_host`], with what `-h`, `-F ?` and `-v` ask for left in
+/// `reports`.
+fn parse_errors(
+    args: Vec<String>,
+    fs: &SafeFs,
+    mounts: MountReader<'_>,
+    host: &HostChecks<'_>,
+    reports: &mut Reports,
+) -> Result<Action, ParseError> {
     // What the C reports while it reads the options and reads on after
     // (`+J is not supported`), before whatever ends the parse: measured,
     // `-o -s +J` prints the `+J` line first.
-    let mut early = Vec::new();
-    let parsed = parse_options(args, fs, mounts, host, &mut early);
-    let rest = match parsed {
-        Ok(_) if early.is_empty() => return parsed,
-        Ok(_) => None,
-        Err(e) => Some(e),
+    let mut early = Early::default();
+    let parsed = parse_options(args, fs, mounts, host, &mut early, reports);
+    let last = match parsed {
+        Ok(action) if early.is_empty() => return Ok(action),
+        Ok(_) => String::new(),
+        Err(e) => e,
     };
-    Err(early
-        .into_iter()
-        .chain(rest.filter(|e| !e.is_empty()))
-        .collect::<Vec<_>>()
-        .join("\nlsof: "))
+    Err(ParseError { early, last })
+}
+
+/// A parse that ended in an error: the lines the C printed as it read on
+/// (DIVERGENCES 149), then the error that ended the parse, if it was not
+/// made in silence. Each is printed after `lsof: `; [`ParseError::each_line`]
+/// formats them one at a time, so that a long argument list of letters that
+/// are no options costs its own size and not a line of text per letter, as
+/// the C, which prints each where it meets it, does not hold them at all.
+/// Its `Display` is every line joined with `\nlsof: `.
+#[derive(Debug)]
+pub struct ParseError {
+    early: Early,
+    last: String,
+}
+
+impl ParseError {
+    /// Hand `line` each line in order, without its `lsof: `. The error that
+    /// ended the parse is one line here even when it holds several
+    /// (`errors.join("\nlsof: ")`); one made in silence under `-w` or `-t` is
+    /// none.
+    pub fn each_line(&self, mut line: impl FnMut(&str)) {
+        self.early.each_line(&mut line);
+        if !self.last.is_empty() {
+            line(&self.last);
+        }
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        let mut out = Ok(());
+        self.each_line(|l| {
+            if out.is_ok() {
+                out = if first {
+                    f.write_str(l)
+                } else {
+                    write!(f, "\nlsof: {l}")
+                };
+                first = false;
+            }
+        });
+        out
+    }
+}
+
+/// The errors the C reports and reads on after, kept no larger than the
+/// arguments that made them and formatted only when printed. A letter that is
+/// no option, the common case and the one an argument list can hold millions
+/// of (`-WWWW…`), is the letter itself in `codes`; every other line is
+/// [`Early::ESC`] and a code there, its text, if it has one, in `texts`,
+/// each preceded by its length and a `:`. One `String` per line had cost
+/// about 130 times the argument list's size (237 MB for 1.8 MB of `-W…`,
+/// where the C peaks at 7 MB).
+#[derive(Debug, Default)]
+struct Early {
+    codes: String,
+    texts: String,
+}
+
+impl Early {
+    /// Opens a code in `codes`; a NUL letter is `ESC ESC`.
+    const ESC: char = '\0';
+
+    fn is_empty(&self) -> bool {
+        self.codes.is_empty()
+    }
+
+    /// `illegal option character: X`, `X` escaped (DIVERGENCES 122).
+    fn illegal(&mut self, c: char) {
+        if c == Self::ESC {
+            self.codes.push(Self::ESC);
+        }
+        self.codes.push(c);
+    }
+
+    /// `colon is an illegal option character.`
+    fn colon(&mut self) {
+        self.codes.push(Self::ESC);
+        self.codes.push(':');
+    }
+
+    /// `+J is not supported`, `+j` the same.
+    fn plus_json(&mut self, c: char) {
+        self.codes.push(Self::ESC);
+        self.codes.push(if c == 'j' { 'j' } else { 'J' });
+    }
+
+    /// `can't get UID for NAME`, `name` as shown.
+    fn no_uid(&mut self, name: &str) {
+        self.codes.push(Self::ESC);
+        self.codes.push('U');
+        self.text(name);
+    }
+
+    /// Any other line, as given.
+    fn line(&mut self, line: &str) {
+        self.codes.push(Self::ESC);
+        self.codes.push('T');
+        self.text(line);
+    }
+
+    fn text(&mut self, text: &str) {
+        self.texts.push_str(&text.len().to_string());
+        self.texts.push(':');
+        self.texts.push_str(text);
+    }
+
+    /// Hand `line` each line in order, formatted in one buffer reused.
+    fn each_line(&self, line: &mut impl FnMut(&str)) {
+        let mut buf = String::new();
+        let mut texts = self.texts.as_str();
+        let mut next_text = || {
+            let (len, rest) = texts.split_once(':').unwrap_or(("0", ""));
+            let len = len.parse::<usize>().unwrap_or(0).min(rest.len());
+            let (text, rest) = rest.split_at_checked(len).unwrap_or((rest, ""));
+            texts = rest;
+            text
+        };
+        let mut codes = self.codes.chars();
+        while let Some(c) = codes.next() {
+            buf.clear();
+            // The letter of an `illegal option character` line, or `None`
+            // when `buf` holds another kind of line.
+            let letter = match (c == Self::ESC).then(|| codes.next()) {
+                None => Some(c),
+                Some(None) => break,
+                Some(Some(':')) => {
+                    buf.push_str("colon is an illegal option character.");
+                    None
+                }
+                Some(Some(j @ ('J' | 'j'))) => {
+                    buf.push('+');
+                    buf.push(j);
+                    buf.push_str(" is not supported");
+                    None
+                }
+                Some(Some('U')) => {
+                    buf.push_str("can't get UID for ");
+                    buf.push_str(next_text());
+                    None
+                }
+                Some(Some('T')) => {
+                    buf.push_str(next_text());
+                    None
+                }
+                // `ESC ESC`: a NUL letter.
+                Some(Some(other)) => Some(other),
+            };
+            if let Some(letter) = letter {
+                buf.push_str(&quoting(
+                    "illegal option character: ",
+                    letter.encode_utf8(&mut [0; 4]),
+                ));
+            }
+            line(&buf);
+        }
+    }
+
+    /// Hand each line to `line`, and forget them.
+    fn drain(&mut self, mut line: impl FnMut(&str)) {
+        self.each_line(&mut line);
+        self.codes.clear();
+        self.texts.clear();
+    }
 }
 
 /// [`parse_with`], with the errors the C reports and reads on after left in
@@ -351,7 +585,8 @@ fn parse_options(
     fs: &SafeFs,
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
-    early: &mut Vec<String>,
+    early: &mut Early,
+    reports: &mut Reports,
 ) -> Result<Action, String> {
     let mut sel = Selection::default();
     // Whether errors were printed already, ahead of a line the parse printed
@@ -367,8 +602,6 @@ fn parse_options(
     let mut fields_given = false;
     let mut json_doc = false;
     let mut json_lines = false;
-    let mut want_help = false;
-    let mut want_version = false;
     let mut repeat: Option<u64> = None;
     let mut columns = Columns::default();
     // Every `-s TCP:` state, across all the `-s` options: the C's tables are
@@ -380,7 +613,6 @@ fn parse_options(
     // without that side effect.
     let mut fields_offset = false;
     let mut fields = FieldChoice::default();
-    let mut field_help = false;
     // The C's `Fsv & FSV_FG` and `FsvFlagX`, which `-F` and the letters of
     // `-f`/`+f` set in argument order: whether the flags are shown, and
     // whether in hex. Folded into `columns.file_flags` once every option is
@@ -459,7 +691,7 @@ fn parse_options(
                 // open), so the `+` spelling is refused rather than read as
                 // the `-` one.
                 // `+J`/`+j`: the C says so and reads on (`main.c:567-584`).
-                'J' | 'j' if plus => early.push(format!("+{c} is not supported")),
+                'J' | 'j' if plus => early.plus_json(c),
                 // A `-` inside a word is no option letter to the C's
                 // `GetOpt`: it says so and reads on through the word, so
                 // `--help` is that error, then `-h`, then `-e lp` (`-e not
@@ -467,8 +699,12 @@ fn parse_options(
                 // `--version` the same with `-v` and `-e rsion` (measured).
                 // lsof-rs had taken both as GNU-style long options and exited
                 // 0 (DIVERGENCES 114).
-                '-' => early.push("illegal option character: -".to_string()),
-                'n' | 'P' | 'r' if plus => {
+                '-' => early.illegal('-'),
+                // `+m` is the C's mount supplement (`[+m [m]]`, exit 0 on
+                // Linux, measured), which lsof-rs does not write: refused
+                // here, before `-m`'s arm below could read the rest of the
+                // word as letters (`+mfoo` as `-f -o -o`).
+                'n' | 'P' | 'r' | 'm' if plus => {
                     return Err(quoting("unsupported option: +", &c.to_string()))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
@@ -595,9 +831,9 @@ fn parse_options(
                     }
                     continue;
                 }
-                'v' => want_version = true,
+                'v' => reports.version = true,
                 'V' => sel.verbose = true,
-                'h' | '?' => want_help = true,
+                'h' | '?' => reports.help = true,
                 'l' => sel.numeric_ids = true,
                 'L' => {
                     // `-L` / `+L [n]` (`main.c`, DIVERGENCES 41). The prefix
@@ -648,7 +884,7 @@ fn parse_options(
                         // `--` aside, and only the enabled branch gives a word
                         // back: `-Z -h` and `-Z -u nosuch` print this line
                         // alone, `-h -Z` prints it and no help (measured).
-                        early.push("-Z limited to SELinux".to_string());
+                        early.line("-Z limited to SELinux");
                         if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
                             i += 1;
                         }
@@ -861,7 +1097,7 @@ fn parse_options(
                     let value = optional_value(&chars, j, &args, &mut i);
                     let this_defaults = match value.as_deref() {
                         Some("?") => {
-                            field_help = true;
+                            reports.field_help = true;
                             j = chars.len();
                             continue;
                         }
@@ -986,12 +1222,53 @@ fn parse_options(
                     j = chars.len();
                     continue;
                 }
-                other => {
-                    return Err(quoting(
-                        &format!("unsupported option: {prefix}"),
-                        &other.to_string(),
-                    ))
+                // Letters the C knows and lsof-rs does not implement, each
+                // a value option to the C's `GetOpt` (`"D:"`, `"m:"`, and
+                // `"k:"` on FreeBSD): the C says so, takes the rest of the
+                // word or else the next word, whatever it is, as the value,
+                // and reads on (`err = 1`). Measured on Linux: `-D -W -Y` and
+                // `-m -W -Y` say their line and `illegal option character:
+                // Y`, the `-W` taken as the value; `-Dfoo -W` and `-mfoo -W`
+                // say both. `-D`'s words are the C's own on Linux, which keeps
+                // no device cache; `-m`'s are `-m not supported` there, the
+                // C's too, and on FreeBSD all three keep lsof-rs's
+                // `unsupported option` (DIVERGENCES 148).
+                // `--` is no value to `GetOpt` here either, as for `-Z`:
+                // `-D -- -W` is `-D`'s line alone, `-W` a name (measured).
+                'D' | 'm' if !plus => {
+                    if c == 'm' && !cfg!(target_os = "freebsd") {
+                        early.line("-m not supported");
+                    } else {
+                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                        i += 1;
+                    }
+                    j = chars.len();
+                    continue;
                 }
+                'k' if cfg!(target_os = "freebsd") => {
+                    early.line(&format!("unsupported option: {prefix}k"));
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                        i += 1;
+                    }
+                    j = chars.len();
+                    continue;
+                }
+                // A letter that is no option: the C's `GetOpt` says so in
+                // these words, without the prefix, and reads on, through
+                // the rest of the word too (`err = 2`, `main.c:1924-1932`).
+                // Every error it then finds is printed, and the run ends in
+                // `usage()`, exit 1: measured, `-Wz` is two lines, `-Wp` the
+                // `W` line and then `-p`'s missing value, `-o -s -W` the `W`
+                // line and then `-o and -s are mutually exclusive`, `+W` the
+                // same as `-W`, and a colon is its own sentence. lsof-rs had
+                // said `unsupported option: -W` and stopped (DIVERGENCES
+                // 149). The letter is escaped where the C prints it raw
+                // (DIVERGENCES 122), and is a character, where the C prints
+                // each byte of one on a line of its own (`-é` is two lines).
+                ':' => early.colon(),
+                other => early.illegal(other),
             }
             j += 1;
         }
@@ -1109,21 +1386,16 @@ fn parse_options(
         }
     }
     // An error the C reported and read on after (`err = 1`: `+J`, a `-`
-    // in a word, `-Z` without SELinux, an unknown `-u` login) ends the run
+    // in a word or any letter that is no option, `-D`, `-m`, `-Z` without
+    // SELinux, an unknown `-u` login) ends the run
     // here too, in `usage()`, before the checks below are made: `+J -a` and
     // `-u nosuch -X -i` print their first line alone (measured). Main prints
     // what `early` holds.
     if told || !errors.is_empty() || !early.is_empty() {
         return Err(errors.join("\nlsof: "));
     }
-    if want_help {
-        return Ok(Action::Help);
-    }
-    if field_help {
-        return Ok(Action::FieldHelp);
-    }
-    if want_version {
-        return Ok(Action::Version);
+    if reports.any() {
+        return Ok(Action::Report(*reports));
     }
     // `-X` stops the inet tables being read, so `-i` has nothing left to
     // select on. The C refuses the pair outright rather than silently
@@ -1488,11 +1760,11 @@ fn dedup_ids(ids: &mut Vec<u32>, excludes: &[u32], what: &str) -> Result<(), Str
 /// mount table's lines — since the C prints each where it meets it:
 /// measured, `-Zx -S 0` says `-Z limited to SELinux` before `-S time (0)
 /// changed to 2`, and `-S 0 -Z` after. `told` records that the run is to end.
-fn tell_early(fs: &SafeFs, early: &mut Vec<String>, told: &mut bool) {
-    for e in early.drain(..) {
+fn tell_early(fs: &SafeFs, early: &mut Early, told: &mut bool) {
+    early.drain(|e| {
         fs.tell(&format!("lsof: {e}"));
         *told = true;
-    }
+    });
 }
 
 /// `-u`'s list, entered as the C's `enter_uid()` enters it: item by item,
@@ -1515,7 +1787,7 @@ fn enter_users(
     sel: &mut Selection,
     value: &str,
     host: &HostChecks<'_>,
-    early: &mut Vec<String>,
+    early: &mut Early,
 ) -> Result<(), String> {
     let mut rest = value;
     while !rest.is_empty() {
@@ -1562,7 +1834,7 @@ fn enter_users(
                     sel.uids.push(UidSel { uid, login });
                 }
             }
-            UserLookup::Unknown => early.push(format!("can't get UID for {}", shown(name))),
+            UserLookup::Unknown => early.no_uid(&shown(name)),
             UserLookup::ByName => {
                 if excl {
                     sel.user_excludes.push(name.to_string());
@@ -2492,7 +2764,7 @@ mod tests {
         }
         assert!(matches!(
             parse(vec!["-u".into(), "0,^root".into(), "-h".into()]),
-            Ok(Action::Help)
+            Ok(Action::Report(Reports::HELP))
         ));
     }
 
@@ -2605,7 +2877,7 @@ mod tests {
         // Help comes first, as in the C.
         assert!(matches!(
             parse(vec!["-a".into(), "-h".into()]),
-            Ok(Action::Help)
+            Ok(Action::Report(Reports::HELP))
         ));
     }
 
@@ -3403,7 +3675,7 @@ mod tests {
         assert_eq!(refused(&["+J", "-h"]), "+J is not supported");
         assert_eq!(
             refused(&["+J", "-q"]),
-            joined(&["+J is not supported", "unsupported option: -q"])
+            joined(&["+J is not supported", "illegal option character: q"])
         );
         // Repeating one is not a conflict.
         assert!(!json(&["-J", "-J"]).lines);
@@ -3491,8 +3763,14 @@ mod tests {
 
     #[test]
     fn help_and_version() {
-        assert!(matches!(parse(vec!["-h".into()]).unwrap(), Action::Help));
-        assert!(matches!(parse(vec!["-v".into()]).unwrap(), Action::Version));
+        assert!(matches!(
+            parse(vec!["-h".into()]).unwrap(),
+            Action::Report(Reports::HELP)
+        ));
+        assert!(matches!(
+            parse(vec!["-v".into()]).unwrap(),
+            Action::Report(Reports::VERSION)
+        ));
     }
 
     fn repeat(argv: &[&str]) -> Option<u64> {
@@ -3629,7 +3907,7 @@ mod tests {
         // `illegal option character: 1`).
         assert_eq!(
             parse_saying(&["-S", "-1"]).0.err().as_deref(),
-            Some("unsupported option: -1")
+            Some("illegal option character: 1")
         );
     }
 
@@ -3873,7 +4151,10 @@ mod tests {
         let (sel, _) = run(&["-V"]);
         assert!(sel.verbose);
         // -v is version, distinct from -V (verbose).
-        assert!(matches!(parse(vec!["-v".into()]).unwrap(), Action::Version));
+        assert!(matches!(
+            parse(vec!["-v".into()]).unwrap(),
+            Action::Report(Reports::VERSION)
+        ));
     }
 
     #[test]
@@ -4128,13 +4409,17 @@ mod tests {
             ("+n", "unsupported option: +n"),
             ("+P", "unsupported option: +P"),
             ("+r", "unsupported option: +r"),
+            // `+m`'s value, if any, is never read as letters (`+mfoo` is not
+            // `-f -o -o`); the refusal ends the parse (DIVERGENCES 149).
+            ("+m", "unsupported option: +m"),
+            ("+mfoo", "unsupported option: +m"),
             ("+J", "+J is not supported"),
-            ("+aq", "unsupported option: +q"),
+            ("+aq", "illegal option character: q"),
             ("+", "unsupported option: +"),
         ] {
             assert_eq!(columns(&[o]).unwrap_err(), want, "{o}");
         }
-        assert_eq!(columns(&["-q"]).unwrap_err(), "unsupported option: -q");
+        assert_eq!(columns(&["-q"]).unwrap_err(), "illegal option character: q");
     }
 
     /// `-F [f]` (DIVERGENCES 43): the list may be the next word, only the C's
@@ -4180,7 +4465,7 @@ mod tests {
             assert!(
                 matches!(
                     parse(argv.iter().map(|s| s.to_string()).collect()),
-                    Ok(Action::FieldHelp)
+                    Ok(Action::Report(Reports::FIELD_HELP))
                 ),
                 "{argv:?}"
             );
@@ -4666,7 +4951,7 @@ mod tests {
         );
         assert!(matches!(
             parse_over(&["-h", "-e", "/m"], &mounted, &[]).0,
-            Ok(Action::Help)
+            Ok(Action::Report(Reports::HELP))
         ));
         // A mounted path, and `-f` changes nothing about it (DIVERGENCES 113).
         assert!(parse_over(&["-f", "-e", "/m", "-e", "/n/"], &mounted, &[])
@@ -4849,11 +5134,11 @@ mod tests {
         // help is the help.
         assert!(matches!(
             parse_on_host(&["-Z", "-h"], true),
-            Ok(Action::Help)
+            Ok(Action::Report(Reports::HELP))
         ));
         assert!(matches!(
             parse_on_host(&["-h", "-Z"], true),
-            Ok(Action::Help)
+            Ok(Action::Report(Reports::HELP))
         ));
         match parse_on_host(&["-Z", "ctx"], true) {
             Ok(Action::Run { selection, .. }) => {
@@ -4864,11 +5149,11 @@ mod tests {
         // A known login is no error, and `-h` is acted on.
         assert!(matches!(
             parse_on_host(&["-u", "alice", "-h"], false),
-            Ok(Action::Help)
+            Ok(Action::Report(Reports::HELP))
         ));
         assert!(matches!(
             parse_on_host(&["-u", "0", "-v"], false),
-            Ok(Action::Version)
+            Ok(Action::Report(Reports::VERSION))
         ));
     }
 
@@ -4991,5 +5276,268 @@ mod tests {
             Ok(Action::Run { selection, .. }) => assert_eq!(selection.paths, ["-h"]),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// DIVERGENCES 149: a letter that is no option is the C's `illegal option
+    /// character: X`, without the prefix, and the parse reads on, through the
+    /// rest of the word and the words after; `-D` and `-m`, which the C knows
+    /// and lsof-rs does not implement, say so, take their value word as the
+    /// C's `GetOpt` does, and read on too (all measured).
+    #[test]
+    fn an_illegal_option_character_is_read_past() {
+        let ill = |c: &str| format!("illegal option character: {c}");
+        let m = if cfg!(target_os = "freebsd") {
+            "unsupported option: -m".to_string()
+        } else {
+            "-m not supported".to_string()
+        };
+        let cases: Vec<(&[&str], Vec<String>)> = vec![
+            (&["-W"], vec![ill("W")]),
+            (&["+W"], vec![ill("W")]),
+            (&["-Wz"], vec![ill("W"), ill("z")]),
+            (&["-W", "-W"], vec![ill("W"), ill("W")]),
+            (
+                &["-Wp"],
+                vec![ill("W"), "option -p requires a value".into()],
+            ),
+            (&["-a-W"], vec![ill("-"), ill("W")]),
+            (&["-+"], vec![ill("+")]),
+            (&["+,"], vec![ill(",")]),
+            (&["-1"], vec![ill("1")]),
+            (&["-\u{1}"], vec![ill("^A")]),
+            (
+                &["-:"],
+                vec!["colon is an illegal option character.".into()],
+            ),
+            (
+                &["-W:"],
+                vec![ill("W"), "colon is an illegal option character.".into()],
+            ),
+            (
+                &["-o", "-s", "-W"],
+                vec![ill("W"), "-o and -s are mutually exclusive".into()],
+            ),
+            (
+                &["-W", "-o", "-s"],
+                vec![ill("W"), "-o and -s are mutually exclusive".into()],
+            ),
+            (
+                &["-W", "-x"],
+                vec![ill("W"), "-x must accompany +d or +D".into()],
+            ),
+            (&["-W", "+J"], vec![ill("W"), "+J is not supported".into()]),
+            // Ends in `usage()` before `-X -i` and `-a` are checked, and
+            // before a path is looked at.
+            (&["-W", "-X", "-i"], vec![ill("W")]),
+            (&["-W", "-a"], vec![ill("W")]),
+            (&["-W", "/nonexistent"], vec![ill("W")]),
+            (&["-W", "--", "-p"], vec![ill("W")]),
+            (&["-D"], vec!["unsupported option: -D".into()]),
+            (
+                &["-D", "-W", "-Y"],
+                vec!["unsupported option: -D".into(), ill("Y")],
+            ),
+            (
+                &["-Dfoo", "-W"],
+                vec!["unsupported option: -D".into(), ill("W")],
+            ),
+            (&["-aD"], vec!["unsupported option: -D".into()]),
+            (&["-Da"], vec!["unsupported option: -D".into()]),
+            (&["-m"], vec![m.clone()]),
+            (&["-m", "-W", "-Y"], vec![m.clone(), ill("Y")]),
+            (&["-mfoo", "-W"], vec![m.clone(), ill("W")]),
+            (&["-W", "-m"], vec![ill("W"), m.clone()]),
+            // `--` is no value to `-D` or `-m`, as to `-Z`: it ends the
+            // options, and `-W` after it is a name (measured).
+            (&["-D", "--", "-W"], vec!["unsupported option: -D".into()]),
+            (&["-m", "--", "-W"], vec![m.clone()]),
+            (
+                &["-W", "-D", "--", "-Y"],
+                vec![ill("W"), "unsupported option: -D".into()],
+            ),
+            (&["-D", "--"], vec!["unsupported option: -D".into()]),
+            // `+m` is refused and ends the parse, never read on through:
+            // the C's mount supplement, which lsof-rs does not write.
+            (&["+m"], vec!["unsupported option: +m".into()]),
+            (&["+mfoo"], vec!["unsupported option: +m".into()]),
+            (&["+m", "-h"], vec!["unsupported option: +m".into()]),
+            (
+                &["-W", "+m", "-Y"],
+                vec![ill("W"), "unsupported option: +m".into()],
+            ),
+            // A backslash is escaped as row 122 escapes it, where the C
+            // prints it raw; a NUL letter is shown and does not end the list.
+            (
+                &["-\\"],
+                vec![ill(if cfg!(windows) { "\\" } else { "\\\\" })],
+            ),
+            (&["-\u{0}W"], vec![ill("^@"), ill("W")]),
+        ];
+        for (argv, want) in cases {
+            assert_eq!(error_lines(parse_on_host(argv, false)), want, "{argv:?}");
+        }
+        // An unknown login and an illegal letter, in option order.
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", "nosuch", "-W"], false)),
+            ["can't get UID for nosuch".to_string(), ill("W")]
+        );
+        assert_eq!(
+            error_lines(parse_on_host(&["-W", "-u", "nosuch"], false)),
+            [ill("W"), "can't get UID for nosuch".to_string()]
+        );
+        // A refusal printed before what the parse prints after it.
+        let (got, said) = parse_saying(&["-W", "-S", "0"]);
+        assert_eq!(
+            said,
+            [
+                "lsof: illegal option character: W",
+                "lsof: WARNING: -S time (0) changed to 2"
+            ]
+        );
+        assert_eq!(got.unwrap_err(), "");
+        // `-k` names a kernel file on FreeBSD; elsewhere it is no option.
+        let k = error_lines(parse_on_host(&["-k", "/x"], false));
+        if cfg!(target_os = "freebsd") {
+            assert_eq!(k, ["unsupported option: -k"]);
+        } else {
+            assert_eq!(k, [ill("k")]);
+        }
+        // Nor is `--` a value to FreeBSD's `-k`.
+        let k = error_lines(parse_on_host(&["-k", "--", "-W"], false));
+        if cfg!(target_os = "freebsd") {
+            assert_eq!(k, ["unsupported option: -k"]);
+        } else {
+            assert_eq!(k, [ill("k")]);
+        }
+    }
+
+    /// The read-on errors cost what the arguments that made them cost, not a
+    /// line of text each (DIVERGENCES 149): 200 000 letters that are no
+    /// option are 200 000 bytes of codes and no text, and come back as
+    /// 200 000 lines, formatted one at a time. Every other kind of line,
+    /// texts holding digits, colons and multibyte characters among them,
+    /// comes back as it went in, in order.
+    #[test]
+    fn read_on_errors_are_kept_compactly() {
+        // Under miri the same path runs on 2 000 letters: the interpreter
+        // spent CI's whole 25-minute miri budget on 200 000, and the size
+        // bound is what the full count pins natively.
+        let n = if cfg!(miri) { 2_000 } else { 200_000 };
+        let word = format!("-{}", "W".repeat(n));
+        let mut early = Early::default();
+        let mut reports = Reports::default();
+        let got = parse_options(
+            vec![word],
+            &SafeFs::in_process(),
+            &no_mounts,
+            &HostChecks::DEFERRED,
+            &mut early,
+            &mut reports,
+        );
+        assert_eq!(got.unwrap_err(), "");
+        assert_eq!(early.codes.len(), n);
+        assert!(
+            early.codes.capacity() <= 2 * n,
+            "{}",
+            early.codes.capacity()
+        );
+        assert!(early.texts.is_empty());
+        let mut lines = 0usize;
+        early.each_line(&mut |l: &str| {
+            assert_eq!(l, "illegal option character: W");
+            lines += 1;
+        });
+        assert_eq!(lines, n);
+
+        let mut early = Early::default();
+        early.illegal('\0');
+        early.no_uid("12:ab");
+        early.line("3:x é:");
+        early.colon();
+        early.plus_json('j');
+        early.line("");
+        early.illegal('é');
+        early.plus_json('J');
+        let mut got = Vec::new();
+        early.each_line(&mut |l: &str| got.push(l.to_string()));
+        assert_eq!(
+            got,
+            [
+                "illegal option character: ^@",
+                "can't get UID for 12:ab",
+                "3:x é:",
+                "colon is an illegal option character.",
+                "+j is not supported",
+                "",
+                "illegal option character: é",
+                "+J is not supported",
+            ]
+        );
+        let err = ParseError {
+            early,
+            last: "end".into(),
+        };
+        assert_eq!(err.to_string(), got.join("\nlsof: ") + "\nlsof: end");
+        let mut drained = Vec::new();
+        let mut err = err;
+        err.early.drain(|l| drained.push(l.to_string()));
+        assert_eq!(drained, got);
+        assert!(err.early.is_empty() && err.early.texts.is_empty());
+        assert_eq!(err.to_string(), "end");
+    }
+
+    /// What `-h`, `-F ?` and `-v` ask for is kept with an error too, so `lsof`
+    /// can print it after the error as the C's `usage()` does; without one,
+    /// all three are one [`Action::Report`] (DIVERGENCES 150).
+    #[test]
+    fn help_field_help_and_version_are_reported_together() {
+        let reported = |argv: &[&str]| {
+            parse_reporting(
+                argv.iter().map(|s| s.to_string()).collect(),
+                &SafeFs::in_process(),
+                &no_mounts,
+                &HostChecks::DEFERRED,
+            )
+        };
+        let all = Reports {
+            help: true,
+            field_help: true,
+            version: true,
+        };
+        for argv in [
+            &["-h", "-v", "-F", "?"][..],
+            &["-F?", "-vh"],
+            &["-v", "-?", "-F", "?"],
+        ] {
+            let (got, reports) = reported(argv);
+            assert!(matches!(got, Ok(Action::Report(r)) if r == all), "{argv:?}");
+            assert_eq!(reports, all, "{argv:?}");
+        }
+        let (got, reports) = reported(&["-v", "-h"]);
+        let help_and_version = Reports {
+            help: true,
+            field_help: false,
+            version: true,
+        };
+        assert!(matches!(got, Ok(Action::Report(r)) if r == help_and_version));
+        assert_eq!(reports, help_and_version);
+        // With an error, each is still recorded, and the parse is the error.
+        let (got, reports) = reported(&["-W", "-F", "?", "-v"]);
+        assert_eq!(got.unwrap_err().to_string(), "illegal option character: W");
+        assert_eq!(
+            reports,
+            Reports {
+                help: false,
+                field_help: true,
+                version: true,
+            }
+        );
+        let (got, reports) = reported(&["-x", "-h"]);
+        assert_eq!(got.unwrap_err().to_string(), "-x must accompany +d or +D");
+        assert_eq!(reports, Reports::HELP);
+        let (got, reports) = reported(&["-p", "1"]);
+        assert!(matches!(got, Ok(Action::Run { .. })));
+        assert!(!reports.any());
+        assert!(Reports::HELP.any() && Reports::FIELD_HELP.any() && Reports::VERSION.any());
     }
 }

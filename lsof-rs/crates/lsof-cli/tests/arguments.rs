@@ -1340,7 +1340,8 @@ fn dash_f_dash_e_of_a_mount_is_accepted() {
 /// `-h` and `-?` write the help to stderr and exit 0, as the C's `usage()`
 /// does (DIVERGENCES 114): a script reading `lsof -h 2>/dev/null` gets nothing
 /// from either. With another option the help still wins, and an error the C
-/// finds once every option is read still beats it (item 115).
+/// finds once every option is read still beats it (item 115): the error, then
+/// the help, exit 1, as the C's `usage()` prints them (DIVERGENCES 150).
 #[test]
 #[cfg_attr(
     miri,
@@ -1354,9 +1355,236 @@ fn the_help_goes_to_stderr() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("USAGE:"), "{args:?}: {err}");
     }
-    // `-hx` is `-x`'s error, not the help.
+    // `-hx` is `-x`'s error, then the help in place of the usage hint.
     let out = lsof(&["-hx"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
-    assert!(!String::from_utf8_lossy(&out.stderr).contains("USAGE:"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("lsof: -x must accompany +d or +D\nlsof-rs "),
+        "{err}"
+    );
+    assert!(
+        err.contains("USAGE:") && !err.contains("Try 'lsof -h'"),
+        "{err}"
+    );
+}
+
+/// `-v` writes lsof-rs's version line to stderr and exits 0, as the C's
+/// `usage()` writes its version report (DIVERGENCES 150): stdout is empty.
+/// With `-h` or `-F ?` it comes after them, whatever the order given; with an
+/// error alone it is not printed; with an error and `-h` or `-F ?` it is,
+/// last, and the run exits 1 (all measured on the C).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's streams"
+)]
+fn the_version_goes_to_stderr() {
+    let version = format!("lsof-rs {} (memory-safe lsof)\n", env!("CARGO_PKG_VERSION"));
+    for args in [
+        &["-v"][..],
+        &["-v", "-p", "1"],
+        &["-p", "1", "-v"],
+        &["+v"],
+        &["-v", "-v"],
+    ] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: version on stdout");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), version, "{args:?}");
+    }
+    // The help, the field letters, the version: in that order, exit 0.
+    for args in [&["-v", "-h"][..], &["-h", "-v"], &["-vh"]] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.starts_with("lsof-rs ") && err.contains("USAGE:"),
+            "{args:?}"
+        );
+        assert!(err.ends_with(&version), "{args:?}: {err}");
+    }
+    for args in [&["-v", "-F", "?"][..], &["-F", "?", "-v"]] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.starts_with("lsof:\tID    field description\n"),
+            "{args:?}"
+        );
+        assert!(err.ends_with(&version), "{args:?}: {err}");
+    }
+    let out = lsof(&["-h", "-v", "-F", "?"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let (help, field, ver) = (
+        err.find("USAGE:").unwrap(),
+        err.find("ID    field description").unwrap(),
+        err.find(&version).unwrap(),
+    );
+    assert!(help < field && field < ver, "{err}");
+    // An error with `-h` and `-F ?`: the error, the help, the letters, and
+    // no usage hint, which the help stands in for (measured: the C prints
+    // its usage line once, then the help).
+    for args in [&["-W", "-h", "-F", "?"][..], &["-F", "?", "-h", "-x"]] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.starts_with("lsof: ") && err.contains("\nlsof-rs "),
+            "{args:?}: {err}"
+        );
+        assert!(!err.contains("Try 'lsof -h'"), "{args:?}: {err}");
+        assert!(err.contains("ID    field description"), "{args:?}: {err}");
+    }
+    let out = lsof(&["-W", "-h", "-F", "?"]);
+    assert!(String::from_utf8_lossy(&out.stderr)
+        .starts_with("lsof: illegal option character: W\nlsof-rs "));
+    // An error and `-v`: the error and the hint, no version.
+    let out = lsof(&["-v", "-x"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "lsof: -x must accompany +d or +D\nTry 'lsof -h' for usage.\n"
+    );
+    // An error, `-F ?` and `-v`: the error, the hint, the letters, the
+    // version, exit 1.
+    let out = lsof(&["-W", "-F", "?", "-v"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with(
+            "lsof: illegal option character: W\nTry 'lsof -h' for usage.\nlsof:\tID    field description\n"
+        ),
+        "{err}"
+    );
+    assert!(err.ends_with(&version), "{err}");
+    // An error, `-h` and `-v`: the error, the help, the version.
+    let out = lsof(&["-W", "-h", "-v"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("lsof: illegal option character: W\nlsof-rs "),
+        "{err}"
+    );
+    assert!(err.contains("USAGE:") && err.ends_with(&version), "{err}");
+}
+
+/// A letter that is no option is the C's `illegal option character: X`, and
+/// the parse reads on, through the rest of the word and the words after:
+/// every error it then finds is printed, and the run exits 1 (DIVERGENCES
+/// 149, measured on the C).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's streams"
+)]
+fn an_illegal_option_character_reads_on() {
+    let hint = "Try 'lsof -h' for usage.";
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["-W"], &["lsof: illegal option character: W"]),
+        (&["+W"], &["lsof: illegal option character: W"]),
+        (
+            &["-Wz"],
+            &[
+                "lsof: illegal option character: W",
+                "lsof: illegal option character: z",
+            ],
+        ),
+        (
+            &["-W", "-Y"],
+            &[
+                "lsof: illegal option character: W",
+                "lsof: illegal option character: Y",
+            ],
+        ),
+        (
+            &["-o", "-s", "-W"],
+            &[
+                "lsof: illegal option character: W",
+                "lsof: -o and -s are mutually exclusive",
+            ],
+        ),
+        (
+            &["-u", "lsofrs-no-such-login", "-W"],
+            &[
+                "lsof: can't get UID for lsofrs-no-such-login",
+                "lsof: illegal option character: W",
+            ],
+        ),
+        (&["-W", "-X", "-i"], &["lsof: illegal option character: W"]),
+        (&["-W", "-a"], &["lsof: illegal option character: W"]),
+        (
+            &["-W", "/nonexistent"],
+            &["lsof: illegal option character: W"],
+        ),
+        (&["-:"], &["lsof: colon is an illegal option character."]),
+        (
+            &["-W:"],
+            &[
+                "lsof: illegal option character: W",
+                "lsof: colon is an illegal option character.",
+            ],
+        ),
+        (&["-+"], &["lsof: illegal option character: +"]),
+        (&["-\u{1b}"], &["lsof: illegal option character: ^["]),
+        (
+            &["-D", "-W", "-Y"],
+            &[
+                "lsof: unsupported option: -D",
+                "lsof: illegal option character: Y",
+            ],
+        ),
+        (
+            &["-Dfoo", "-W"],
+            &[
+                "lsof: unsupported option: -D",
+                "lsof: illegal option character: W",
+            ],
+        ),
+    ];
+    for (args, want) in cases {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let mut lines: Vec<&str> = want.to_vec();
+        lines.push(hint);
+        assert_eq!(stderr_of(&out), lines.join("\n") + "\n", "{args:?}");
+    }
+}
+
+/// `-m` is the C's `-m not supported` on Linux, which reads no kernel memory
+/// file, and takes its value word as the C's `GetOpt` does (measured).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's streams"
+)]
+fn dash_m_is_not_supported_in_the_cs_words() {
+    for (args, want) in [
+        (&["-m"][..], &["lsof: -m not supported"][..]),
+        (
+            &["-m", "-W", "-Y"],
+            &[
+                "lsof: -m not supported",
+                "lsof: illegal option character: Y",
+            ],
+        ),
+        (
+            &["-mfoo", "-W"],
+            &[
+                "lsof: -m not supported",
+                "lsof: illegal option character: W",
+            ],
+        ),
+    ] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let mut lines = want.to_vec();
+        lines.push("Try 'lsof -h' for usage.");
+        assert_eq!(stderr_of(&out), lines.join("\n") + "\n", "{args:?}");
+    }
 }

@@ -318,15 +318,17 @@ public static extern bool SetFilePointerEx(System.IntPtr hFile, long liDistanceT
     Write-Host "Running cases...`n" -ForegroundColor Cyan
 
     # ===================== CLI / parsing =====================
-    Test-Case 'version' 'cli' { $r = Invoke-Lsof @('-v') 'version'; Assert-Contains $r.Out 'lsof-rs'; "exit=$($r.Exit)" }
+    # The version is on stderr too, as the C writes it (DIVERGENCES 150).
+    Test-Case 'version' 'cli' { $r = Invoke-Lsof @('-v') 'version'; Assert-Contains $r.Err 'lsof-rs' 'stderr'; Assert ([string]::IsNullOrEmpty($r.Out)) 'version on stdout'; "exit=$($r.Exit)" }
     # The help is on stderr, as the C writes it (DIVERGENCES 114).
     Test-Case 'help-usage' 'cli' { $r = Invoke-Lsof @('-h') 'help'; Assert-Contains $r.Err 'USAGE' 'stderr'; Assert-Contains $r.Err '-i' 'stderr'; Assert ([string]::IsNullOrEmpty($r.Out)) 'help on stdout' }
     # A rejection test pinned to a letter expires the day the letter is
     # implemented: this case named `-Z` and went red on the first Windows run
     # after P4 gave -Z its gate (the unit test of the same name had expired the
     # same way). `-y` is an `illegal option character` to the C on this dialect
-    # too, so it is a stable marker for "not an option at all".
-    Test-Case 'unknown-option-errors' 'cli' { $r = Invoke-Lsof @('-y') 'badopt'; Assert ($r.Exit -ne 0) 'expected nonzero exit'; Assert-Contains $r.Err 'unsupported' }
+    # too, so it is a stable marker for "not an option at all", and lsof-rs
+    # says so in the C's words (DIVERGENCES 149).
+    Test-Case 'unknown-option-errors' 'cli' { $r = Invoke-Lsof @('-y') 'badopt'; Assert ($r.Exit -ne 0) 'expected nonzero exit'; Assert-Contains $r.Err 'illegal option character: y' 'stderr' }
 
     # ===================== P4 options on Windows: the blast radius =====================
     # -X -x -e -N -Z are Linux-semantics options with no backend behind them here.

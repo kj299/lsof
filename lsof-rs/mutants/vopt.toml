@@ -1,0 +1,236 @@
+# Mutants for the -v and illegal-option follow-up (2026-11-01): DIVERGENCES
+# 149 (a letter that is no option is the C's `illegal option character: X`,
+# and the parse reads on; -D and -m take their value word and read on) and
+# 150 (-v on stderr; -h, -F ? and -v acted on together, in the C's order, and
+# after an error). The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/vopt.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo, for the differential's fixtures. CI runs only
+# --apply-only.
+#
+# Rules with no mutant here:
+# * FreeBSD's `-k`, which lsof-rs refuses there in its own words and reads
+#   past: the arm is `cfg!(target_os = "freebsd")`, so no Linux gate can see
+#   it; `args.rs` `an_illegal_option_character_is_read_past` pins both sides,
+#   and the FreeBSD cross-check builds it.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# ------------------------------------------------------------------- 150
+
+[[mutant]]
+name = "version-on-stdout"
+rule = "-v writes its version line to stderr (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        write_stderr(&format!(
+            "lsof-rs {} (memory-safe lsof)\n",'''
+new = '''        print!("{}", format!(
+            "lsof-rs {} (memory-safe lsof)\n",'''
+
+[[mutant]]
+name = "version-only-alone"
+rule = "-h, -F ? and -v are each acted on, not only the first (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    if reports.version {'''
+new = '''    if reports.version && !reports.help && !reports.field_help {'''
+
+[[mutant]]
+name = "version-before-help"
+rule = "the help, the field letters, then the version, whatever the order given (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    if reports.version {
+        write_stderr(&format!('''
+new = '''    if false {
+        write_stderr(&format!('''
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''fn report(reports: Reports) {
+    if reports.help {'''
+new = '''fn report(reports: Reports) {
+    if reports.version {
+        write_stderr(&format!("lsof-rs {} (memory-safe lsof)\n", env!("CARGO_PKG_VERSION")));
+    }
+    if reports.help {'''
+
+[[mutant]]
+name = "error-drops-the-help"
+rule = "after an error, -h and -F ? are still printed, and -v after them (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                report(reports);'''
+new = '''                let _ = reports;'''
+
+[[mutant]]
+name = "error-prints-the-version-alone"
+rule = "after an error, -v alone is not printed (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            if reports.help || reports.field_help {'''
+new = '''            if reports.any() {'''
+
+[[mutant]]
+name = "error-with-help-keeps-the-hint"
+rule = "after an error, the help stands in place of the usage hint (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            if !reports.help {
+                say!("Try 'lsof -h' for usage.");'''
+new = '''            if true {
+                say!("Try 'lsof -h' for usage.");'''
+
+[[mutant]]
+name = "reports-forgotten-on-error"
+rule = "what -h, -F ? and -v ask for survives an error (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let parsed = parse_errors(args, fs, mounts, host, &mut reports);'''
+new = '''    let parsed = parse_errors(args, fs, mounts, host, &mut reports);
+    reports = Reports::default();'''
+
+# ------------------------------------------------------------------- 149
+
+[[mutant]]
+name = "illegal-letter-stops"
+rule = "the parse reads on past a letter that is no option (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                other => early.illegal(other),'''
+new = '''                other => return Err(quoting("illegal option character: ", &other.to_string())),'''
+
+[[mutant]]
+name = "illegal-letter-in-lsof-rs-words"
+rule = "a letter that is no option is the C's `illegal option character: X` (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                other => early.illegal(other),'''
+new = '''                other => early.line(&quoting(&format!("unsupported option: {prefix}"), &other.to_string())),'''
+
+[[mutant]]
+name = "colon-is-a-letter"
+rule = "a colon is the C's `colon is an illegal option character.` (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                ':' => early.colon(),'''
+new = ''''''
+
+[[mutant]]
+name = "d-and-m-take-no-value"
+rule = "-D and -m take the next word as their value, as the C's GetOpt does (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {'''
+new = '''                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if false {'''
+
+[[mutant]]
+name = "d-and-m-stop"
+rule = "-D and -m are refused and the parse reads on (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if c == 'm' && !cfg!(target_os = "freebsd") {
+                        early.line("-m not supported");
+                    } else {
+                        early.line(&format!("unsupported option: -{c}"));
+                    }'''
+new = '''                    return Err(if c == 'm' && !cfg!(target_os = "freebsd") {
+                        "-m not supported".to_string()
+                    } else {
+                        format!("unsupported option: -{c}")
+                    });'''
+
+[[mutant]]
+name = "dash-m-in-lsof-rs-words"
+rule = "-m is the C's `-m not supported` on Linux (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        early.line("-m not supported");'''
+new = '''                        early.line(&format!("unsupported option: -{c}"));'''
+
+# ------------------------------------------------- the review's findings
+
+[[mutant]]
+name = "plus-m-read-on-as-letters"
+rule = "+m is refused and ends the parse; the rest of its word is never read as letters (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                'n' | 'P' | 'r' | 'm' if plus => {'''
+new = '''                'n' | 'P' | 'r' if plus => {'''
+
+[[mutant]]
+name = "d-and-m-take-dash-dash"
+rule = "-D and -m do not take `--` as their value, as -Z does not (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {'''
+new = '''                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if j + 1 == chars.len() && i + 1 < args.len() {'''
+
+[[mutant]]
+name = "illegal-letter-kept-as-a-line"
+rule = "a letter that is no option is kept as itself, not as a line of text (149, memory)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    fn illegal(&mut self, c: char) {
+        if c == Self::ESC {
+            self.codes.push(Self::ESC);
+        }
+        self.codes.push(c);
+    }'''
+new = '''    fn illegal(&mut self, c: char) {
+        self.line(&quoting("illegal option character: ", &c.to_string()));
+    }'''
+
+[[mutant]]
+name = "illegal-letter-unescaped"
+rule = "the letter is escaped as row 122 escapes it (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                buf.push_str(&quoting(
+                    "illegal option character: ",
+                    letter.encode_utf8(&mut [0; 4]),
+                ));'''
+new = '''                buf.push_str("illegal option character: ");
+                buf.push(letter);'''
+
+[[mutant]]
+name = "nul-letter-ends-the-list"
+rule = "a NUL letter is a line like any other, and the lines after it are kept (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                // `ESC ESC`: a NUL letter.
+                Some(Some(other)) => Some(other),'''
+new = '''                Some(Some(_)) => break,'''
+
+[[mutant]]
+name = "error-with-help-and-field-help-keeps-the-hint"
+rule = "after an error, -h stands in for the usage hint with -F ? too (150)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            if !reports.help {
+                say!("Try 'lsof -h' for usage.");'''
+new = '''            if !reports.help || reports.field_help {
+                say!("Try 'lsof -h' for usage.");'''

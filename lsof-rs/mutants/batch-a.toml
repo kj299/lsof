@@ -20,7 +20,11 @@
 # and added xattr-identity-by-fstat (killed only by net.rs's FUSE test, which
 # needs root and /dev/fuse), xattr-buffer-shrunk, the stderr writer's two,
 # the parse's six for -u, -Z, `--help` and the order of what it prints, and
-# users-resolved-after-help in main.rs. Run again in full, 2026-10-31, as root
+# users-resolved-after-help in main.rs. The -v follow-up (2026-11-01,
+# mutants/vopt.toml) moved both of main.rs's anchors: the help is written by
+# `report()`, and the parse is `parse_reporting`. Both rerun 2026-11-01 as
+# root with --first-kill: killed by the unit gate, users-resolved-after-help
+# now by tests/arguments.rs's `-u lsofrs-no-such-login -W`. Run again in full, 2026-10-31, as root
 # with --first-kill: 38 of 38 killed, 34 by the unit gate and 4 by the
 # differential alone (psxmq-device-not-handed-on, netlink-table-unread,
 # netlink-table-gated-by-dash-X, and users-resolved-after-help, which mutates
@@ -61,8 +65,8 @@ name = "help-on-stdout"
 rule = "-h writes the help to stderr (114)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''            write_stderr(&usage());'''
-new = '''            print!("{}", usage());'''
+old = '''        write_stderr(&usage());'''
+new = '''        print!("{}", usage());'''
 
 # ------------------------------------------------------------------- 116
 
@@ -338,16 +342,16 @@ name = "users-resolved-after-help"
 rule = "lsof parses over the host: -u logins are looked up, and -Z checked, while it parses (114, 73)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        parse_with_host(argv, &fs, &read_table, &host)'''
+old = '''        parse_reporting(argv, &fs, &read_table, &host)'''
 new = '''        let _ = host;
-        parse_with_host(argv, &fs, &read_table, &HostChecks::DEFERRED)'''
+        parse_reporting(argv, &fs, &read_table, &HostChecks::DEFERRED)'''
 
 [[mutant]]
 name = "unknown-login-no-error"
 rule = "a -u login the host does not know is can't get UID for X, an error (114, 73)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''            UserLookup::Unknown => early.push(format!("can't get UID for {}", shown(name))),'''
+old = '''            UserLookup::Unknown => early.no_uid(&shown(name)),'''
 new = '''            UserLookup::Unknown => {}'''
 
 [[mutant]]
@@ -379,8 +383,8 @@ name = "dash-in-a-word-ends-the-parse"
 rule = "a - in an option word is illegal option character: -, and the word is read on (--help, --version; 114)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                '-' => early.push("illegal option character: -".to_string()),'''
-new = ''''''
+old = '''                '-' => early.illegal('-'),'''
+new = '''                '-' => return Err("illegal option character: -".to_string()),'''
 
 [[mutant]]
 name = "xattr-nul-kept"

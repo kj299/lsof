@@ -39,7 +39,7 @@ cases (§8) in a PowerShell started with "Run as administrator".
 
 | # | Command | Expected |
 |---|---|---|
-| T1 | `& $lsof -v` | `lsof-rs <current version> (memory-safe lsof)` (`(memory-safe lsof for Windows)` up to v1.0.1) |
+| T1 | `& $lsof -v` | `lsof-rs <current version> (memory-safe lsof)` (`(memory-safe lsof for Windows)` up to v1.0.1), on **stderr** after v2.0.0 (as the C writes it; `& $lsof -v 2>$null` shows nothing) |
 | T2 | `& $lsof -h` | usage text listing `-p -u -c -i -a -n -P -t -F -J -j -r` and `+D`, on **stderr** (as the C writes it; stdout is empty, so `& $lsof -h 2>$null` shows nothing) |
 
 ---

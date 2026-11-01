@@ -154,9 +154,14 @@ Switches that need new Windows API work, or significant data-model expansion:
 
 ## Out of scope (Unix-only — accept-and-no-op or reject)
 
-`-A`, `-C`, `-D`, `-k`, `-m/+m`, `+M`, `-z`. Each is refused,
-`lsof: unsupported option: -A`, rather than silently ignored; that's better than
-appearing to accept and surprising the user. (This list once also held `-e`,
+`-A`, `-C`, `-D`, `-k`, `-m/+m`, `+M`, `-z`. Each is refused rather than
+silently ignored; that's better than appearing to accept and surprising the
+user. Since DIVERGENCES 149 the refusal is in the C's words: a letter the
+port has no case for (`-A`, `-C`, `-k`, `+M`, `-z`) is `lsof: illegal option
+character: A`, and the parse reads on to report every such letter; `-D` is
+`lsof: unsupported option: -D` and `-m` is `lsof: -m not supported`, each
+taking its value word as the C does; `+m` is `lsof: unsupported option: +m`
+and ends the parse. The run exits 1 in every case. (This list once also held `-e`,
 `-f/+f`, `-H`, `-N`, `-x`, `-X` and `-Z`; see the note at the top; and `-b`
 and `-S`, until 2026-10-09.)
 
@@ -183,4 +188,6 @@ and `-S`, until 2026-10-09.)
 - **No surprise CLI-behavior changes**: existing scripts that use the v0.1.0
   surface keep working exactly. Phase 5 is *additive*.
 - **No silent acceptance of irrelevant Unix switches**: they error out with a
-  clear `unsupported option` message rather than getting ignored.
+  clear message, the C's own words since DIVERGENCES 149 (`illegal option
+  character: X`, `unsupported option: -D`, `-m not supported`), rather than
+  getting ignored.
