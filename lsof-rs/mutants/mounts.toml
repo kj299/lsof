@@ -26,6 +26,10 @@
 # z-reads-the-stated-table, as SELinux is asked while the parse meets -Z
 # (DIVERGENCES 114), and errors-after-the-table, as the errors the parse read
 # on after now go out through `tell_early`; each killed again.
+#
+# Re-anchored 2026-11-01 (Batch B's review fixes): errors-after-the-table
+# and help-before-the-end-of-parse-errors, as `tell_early` and the parse's
+# `told` became `Early::tell` and `early.told`.
 
 [run]
 dir = ".."
@@ -383,10 +387,10 @@ name = "errors-after-the-table"
 rule = "an end-of-parse error found before the -e check is printed before the table it reads (m9)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''            tell_early(fs, early, &mut told);
+old = '''            early.tell();
             for e in errors.drain(..) {
                 fs.tell(&format!("lsof: {e}"));
-                told = true;
+                early.told = true;
             }'''
 new = ''''''
 
@@ -395,8 +399,8 @@ name = "help-before-the-end-of-parse-errors"
 rule = "-h with an end-of-parse error is the error, exit 1 (115)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''    if told || !errors.is_empty() || !early.is_empty() {'''
-new = '''    if !want_help && (told || !errors.is_empty() || !early.is_empty()) {'''
+old = '''    if early.told || early.failed || !errors.is_empty() || !early.is_empty() {'''
+new = '''    if !reports.help && (early.told || early.failed || !errors.is_empty() || !early.is_empty()) {'''
 
 [[mutant]]
 name = "tcp-state-conflict-first-only"

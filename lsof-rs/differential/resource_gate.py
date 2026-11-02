@@ -146,6 +146,39 @@ ALLOC_PY = (
 ILLEGAL_LETTERS, ILLEGAL_WORDS = 131000, 7
 ILLEGAL_WALL, ILLEGAL_RSS = 4.00, 3.50
 
+# cross-over letters (DIVERGENCES 83). -x names each letter of its value it
+# does not know, and the parse reads on: seven `-x` words of 131000 `q`s,
+# 0.9 MB of arguments, are 917000 lines, as for the illegal letters. lsof-rs
+# holds each in three bytes and, past 1 MiB at a word's end, prints what it
+# holds as it goes, so what it holds stays bounded however many words follow.
+# Measured at 400 processes: 8.16 MB against the C's 3.21 MB, 2.54x RSS,
+# and 2.60x wall. Held as a line of text each, as every error but an illegal
+# letter was first held, they would cost some 30 bytes a letter, 27 MB here
+# (computed, not measured: no such build was kept). 3.50x is the illegal
+# letters' ceiling, which this measurement sits under.
+CROSS_LETTERS, CROSS_WORDS = 131000, 7
+CROSS_WALL, CROSS_RSS = 4.00, 3.50
+
+# empty state names (DIVERGENCES 83). Each empty name of one `-s tcp:,,,…`
+# word is `NULL TCP state name in: V`, a line quoting the whole word, and the
+# parse reads on to the next: one word of 130000 commas is 130000 lines of
+# 130 KB, 16.9 GB of stderr, which the C streams. lsof-rs had checked its
+# bound at a word's end only, so it held them all: 1.57 GB at 40000 commas,
+# and past a 4 GB address-space cap at 130000 (some 17 GB unbounded). Now it
+# checks as each line is stored, and quotes the word once. Measured: 4.20-4.58
+# MB against the C's 2.39-2.57 MB, 1.6-1.8x RSS, and 2.9 s against the C's
+# 19.4 s. The C's wall makes this the gate's slowest case.
+STATE_COMMAS = 130000
+STATE_WALL, STATE_RSS = 4.00, 3.50
+
+# -d list items (DIVERGENCES 83). Each item of `-d ^1,2,2,…` after the first
+# is `include in an exclude -d list: 2`, fifteen times its two bytes: seven
+# words of 65000 items. Measured: 7.58 MB against the C's 3.41 MB, 2.2x RSS,
+# and 2.3x wall; checked at a word's end only, 8.81 MB (2.6x). 3.50x is the
+# illegal letters' ceiling.
+FD_ITEMS, FD_WORDS = 65000, 7
+FD_WALL, FD_RSS = 4.00, 3.50
+
 # Ratio ceilings, rust/C medians. Each is a measurement plus headroom, and the
 # comment IS the measurement, so a later reader can tell a number that was taken
 # from one that was hoped for.
@@ -175,9 +208,15 @@ CEILINGS = {
     "-i": {"wall": 1.60, "rss": 2.00},
     "whole-host": {"wall": 1.40, "rss": 1.30},
     "illegal-letters": {"wall": ILLEGAL_WALL, "rss": ILLEGAL_RSS},
+    "cross-over-letters": {"wall": CROSS_WALL, "rss": CROSS_RSS},
+    "state-empty-names": {"wall": STATE_WALL, "rss": STATE_RSS},
+    "fd-list-items": {"wall": FD_WALL, "rss": FD_RSS},
 }
 CASES = {"-i": ["-i"], "whole-host": [],
-         "illegal-letters": ["-" + "W" * ILLEGAL_LETTERS] * ILLEGAL_WORDS}
+         "illegal-letters": ["-" + "W" * ILLEGAL_LETTERS] * ILLEGAL_WORDS,
+         "cross-over-letters": ["-x", "q" * CROSS_LETTERS] * CROSS_WORDS,
+         "state-empty-names": ["-s", "tcp:" + "," * STATE_COMMAS],
+         "fd-list-items": ["-d", "^1" + ",2" * FD_ITEMS] * FD_WORDS}
 
 MIN_TRUE_MB, MAX_TRUE_MB = 0.2, 3.0      # /bin/true: a real floor, not a guess
 MIN_ALLOC_MB, MAX_ALLOC_MB = 190.0, 260.0  # a known 200 MB allocation
@@ -491,10 +530,16 @@ def _self_test():
         # binaries so the exit code itself is what is asserted.
         wall_over = {"-i": {"wall": 0.01, "rss": 99.0},
                      "whole-host": {"wall": 99.0, "rss": 99.0},
-                     "illegal-letters": {"wall": 99.0, "rss": 99.0}}
+                     "illegal-letters": {"wall": 99.0, "rss": 99.0},
+                     "cross-over-letters": {"wall": 99.0, "rss": 99.0},
+                     "state-empty-names": {"wall": 99.0, "rss": 99.0},
+                     "fd-list-items": {"wall": 99.0, "rss": 99.0}}
         rss_over = {"-i": {"wall": 99.0, "rss": 0.01},
                     "whole-host": {"wall": 99.0, "rss": 99.0},
-                    "illegal-letters": {"wall": 99.0, "rss": 99.0}}
+                    "illegal-letters": {"wall": 99.0, "rss": 99.0},
+                    "cross-over-letters": {"wall": 99.0, "rss": 99.0},
+                    "state-empty-names": {"wall": 99.0, "rss": 99.0},
+                    "fd-list-items": {"wall": 99.0, "rss": 99.0}}
         rc_wall = run("/bin/true", "/bin/true", 2, 2, 1, False, False,
                       ceilings=wall_over, report=quiet, warn_wall=True)
         rc_rss = run("/bin/true", "/bin/true", 2, 2, 1, False, False,

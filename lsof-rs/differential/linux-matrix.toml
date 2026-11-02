@@ -4707,6 +4707,146 @@ args = ["-W", "+m"]
 name = "plus-m-with-a-value-then-an-illegal-letter"
 args = ["+mfoo", "-W"]
 
+# ------------------------- every error before the usage (83); the walk (82)
+# The C prints every error it finds in its option loop and reads on after it
+# (`err = 1`), so a later error is printed too and a later -h read; lsof-rs
+# had stopped at the first. Two the C's Error() ends the run at, at once,
+# with no usage and no help: a -d name that is no kind of descriptor, and a
+# UID both selected and excluded. Those print no usage in either, so their
+# stderr is compared; the rest end in the C's usage, so these compare stdout
+# and the exit status, and the lines are pinned by args.rs
+# (every_error_the_c_reads_past_is_read_past, the_cs_error_exits_are_fatal).
+
+[[case]]
+name = "invalid-fd-type-ends-the-run-at-once"
+args = ["-d", "foo", "-W", "-h"]
+with_stderr = true
+
+[[case]]
+name = "invalid-fd-type-after-an-illegal-letter-ends-the-run-at-once"
+args = ["-W", "-d", "1,foo", "-h"]
+with_stderr = true
+
+[[case]]
+name = "uid-included-and-excluded-ends-the-run-at-once"
+args = ["-h", "-u", "0,^0", "-W"]
+with_stderr = true
+
+[[case]]
+name = "dash-x-with-a-plus-d-the-c-refuses"
+args = ["-x", "+d", "/nonexistent/lsof-rs", "-p", "{A}"]
+
+[[case]]
+name = "plus-d-the-c-refuses-then-help"
+args = ["+d", "/nonexistent/lsof-rs", "-h"]
+
+[[case]]
+name = "unknown-cross-over-letters-then-help"
+args = ["-x", "qz", "-h"]
+
+[[case]]
+name = "no-number-may-follow-dash-l-and-the-rest-is-read-again"
+args = ["-L", "3x", "-p", "{A}"]
+
+[[case]]
+name = "plus-c-gives-its-value-back"
+args = ["+cx", "-p", "{A}"]
+
+[[case]]
+name = "dash-s-list-ending-in-a-comma"
+args = ["-n", "-P", "-a", "-s", "tcp:LISTEN,", "-i", "TCP:{PORT}"]
+
+[[case]]
+name = "pid-included-and-excluded-reads-on"
+args = ["-p", "1,^1", "-W"]
+
+# Each item of a list is read on after, to the next: ended by the fatal
+# `-d foo`, which prints no usage in either, so stderr is compared whole.
+
+[[case]]
+name = "fd-range-errors-each-read-on"
+args = ["-d", "1-0,3-2", "-d", "foo"]
+with_stderr = true
+
+[[case]]
+name = "duplicate-state-read-on-to-the-next-name"
+args = ["-s", "tcp:LISTEN,LISTEN,FOO", "-d", "foo"]
+with_stderr = true
+
+[[case]]
+name = "plus-d-attached-refusal-takes-its-word"
+args = ["+d/nonexistent/lsof-rs", "-d", "foo"]
+with_stderr = true
+
+[[case]]
+name = "uid-on-both-sides-across-options-is-fatal"
+args = ["-u", "0", "-u", "^0", "-h"]
+with_stderr = true
+
+# `-s UDP:` runs the same term loop as `TCP:`: an empty name is the C's
+# `NULL UDP state name in:`, read on after. (A name that is not empty
+# segfaults the C: `states-udp-names-crash-the-c`.)
+
+[[case]]
+name = "udp-empty-state-name-reads-on"
+args = ["-s", "UDP:,", "-d", "foo"]
+with_stderr = true
+
+[[case]]
+name = "udp-empty-state-names-each-said"
+args = ["-s", "UDP:,,", "-d", "foo"]
+with_stderr = true
+
+[[case]]
+name = "udp-empty-excluded-state-name-reads-on"
+args = ["-s", "udp:^,", "-d", "foo"]
+with_stderr = true
+
+[[case]]
+name = "udp-empty-state-names-mixed"
+args = ["-s", "UDP:,^,,", "-d", "foo"]
+with_stderr = true
+
+# What a +d/+D walk says, the C says where the option stands, among what the
+# parse says (82): before a later -S warning, before a later error, and under
+# a -w after it. MTWL holds a link to itself, which -x l follows.
+
+[[case]]
+name = "mt-walk-warns-before-a-later-s-warning"
+args = ["-x", "l", "+d", "{MTWL}", "-S", "0", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-walk-warns-after-an-earlier-s-warning"
+args = ["-S", "0", "-x", "l", "+D", "{MTWL}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-walk-warns-before-an-error-that-ends-the-run"
+args = ["-x", "l", "+d", "{MTWL}", "-d", "foo"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-walk-warns-under-a-later-w"
+args = ["-x", "l", "+d", "{MTWL}", "-w", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-walk-is-muted-by-an-earlier-w"
+args = ["-w", "-x", "l", "+d", "{MTWL}", "-n", "-P", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
+[[case]]
+name = "mt-walk-warns-before-a-later-bare-path"
+args = ["-x", "l", "+d", "{MTWL}", "-n", "-P", "/nonexistent/lsof-rs"]
+env = { LSOF_DIFF_MT = "table" }
+with_stderr = true
+
 # ------------------------------------------- an empty optional value (116)
 # The C offers an option's optional value the next word whenever it does not
 # open with `-` or `+`, an empty one too, and the options below take it as a

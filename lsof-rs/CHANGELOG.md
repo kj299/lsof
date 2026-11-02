@@ -41,6 +41,33 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   as the C's does, rather than being taken as their value. The lines are
   kept a byte a letter until printed, so a long argument list of unknown
   letters costs about its own size.
+- **Every option error is printed, and the parse reads on after it** (83),
+  as the C's does, where lsof-rs had stopped at the first error found while
+  reading the options: `lsof -x +d /nonexist` prints the `stat` warning and
+  then `-x must accompany +d or +D`, `lsof -x qz` names both letters, `lsof
+  -p abc -S 0` keeps its `-S` warning, and a later `-h` is read, so `lsof +d
+  /nonexist -h` prints the help after the error, exit 1. An option the C
+  gives its value back to reads it again (`lsof +cx` is `-x` as well, `lsof
+  -L 3x` too). A missing value is the C's own words (`no process ID
+  specified`, `no file descriptor specified`, `no UIDs specified`, `missing
+  -c option value`, in place of `option -p requires a value`), and `--` is
+  never taken as a value. `-s tcp:LISTEN,`, a list ending in a comma, is no
+  longer refused. Two errors end the run at once, with no usage hint and no
+  help, as the C's `Error()` ends it: `invalid fd type given in -d option`
+  and `UID N has been included and excluded.` What is held of these lines
+  is bounded: past 1 MiB they are printed as the parse goes, in order,
+  checked as each line is stored, so one word of `-s tcp:,,,…` (a line
+  quoting the word for each comma) stays a few megabytes. `-s UDP:,` is the
+  C's `NULL UDP state name in: UDP:,`, read on after; a UDP state name is
+  still refused (the C crashes on one). A long `-p`/`-g` list is entered in
+  linear time.
+- **A `+d`/`+D` walk's warnings come where the C prints them** (82), among
+  the parse's own lines, because the directory is walked where its option
+  stands: `lsof -x l +d D -S 0` prints D's `can't stat(D/loop) symbolc link`
+  before the `-S` warning, and a run that then ends in an option error
+  prints them too, where lsof-rs had walked once the parse was over and
+  printed nothing of a run that ended there. Linux and FreeBSD; on Windows,
+  which matches names, the walk still comes after the parse.
 
 ## [2.0.0] — 2026-11-01
 

@@ -140,8 +140,10 @@ ledger — those are the kit's, on purpose.
              whose link names the plain one (`src_hidden`), an over-mounted
              mount no one can `stat` ({MTGONE}), a mount behind a link loop, one
              ({MTLOOPSRC}) whose source is a link loop ({MTL1}), an automounter's
-             `server:(pid1234)` ({MTPIDSRC}), one named with ESC and LF, and a
-             directory {MTD} for `+d`: what the C's `readmnt()` skips, reads,
+             `server:(pid1234)` ({MTPIDSRC}), one named with ESC and LF, a
+             directory {MTD} for `+d`, and one {MTWL} holding a link to itself
+             and a file, whose `-x l` walk warns (DIVERGENCES 82): what the
+             C's `readmnt()` skips, reads,
              `stat`s and warns of (DIVERGENCES 87, 110). Its cases set
              LSOF_DIFF_MT to `table`; root (or passwordless sudo) and
              `unshare`. Nothing keeps a cwd, descriptor or mapping on it: its
@@ -1208,8 +1210,9 @@ def mt_wrap(work: str, base: str) -> str:
             "    done\n"
             "else\n"
             '    cd "$B" || exit 2\n'
-            "    mkdir plain dup hp hp/m gone gone/m x x/m loopsrc pidsrc d g\n"
+            "    mkdir plain dup hp hp/m gone gone/m x x/m loopsrc pidsrc d g wl\n"
             "    ln -s l2 l1; ln -s l1 l2\n"
+            "    ln -s self wl/self; : > wl/f\n"
             "    mount -t tmpfs src_plain plain\n"
             "    mount -t tmpfs src_dup_bottom dup\n"
             "    mount -t tmpfs src_dup_top dup\n"
@@ -2956,6 +2959,7 @@ def run(args) -> int:
             "MTPLAIN": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
             "MTGONE": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
             "MTD": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
+            "MTWL": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
             "MTPIDSRC": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
             "MTL1": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
             "MTLOOPSRC": (mtprobe, mtprobe.unavailable or "its mounts could not be made"),
@@ -3056,8 +3060,8 @@ def run(args) -> int:
                 optional["FUSE"] = (None, optional["FUSE"][1])
         # MT and AUTOFS, once their probes have mounted and taken it down.
         for probe_key, keys in (
-            ("MT", ("MT", "MTPLAIN", "MTGONE", "MTD", "MTPIDSRC", "MTL1", "MTLOOPSRC",
-                    "LINK_TO_MTPLAIN")),
+            ("MT", ("MT", "MTPLAIN", "MTGONE", "MTD", "MTWL", "MTPIDSRC", "MTL1",
+                    "MTLOOPSRC", "LINK_TO_MTPLAIN")),
             ("MTAUTO", ("MTAUTO",)),
         ):
             if started_optional[probe_key] is not None:
@@ -3242,6 +3246,7 @@ def run(args) -> int:
                 "MTPLAIN": os.path.join(work, "mt", "plain"),
                 "MTGONE": os.path.join(work, "mt", "gone", "m"),
                 "MTD": os.path.join(work, "mt", "d"),
+                "MTWL": os.path.join(work, "mt", "wl"),
                 "MTPIDSRC": os.path.join(work, "mt", "pidsrc"),
                 "MTL1": os.path.join(work, "mt", "l1"),
                 "MTLOOPSRC": os.path.join(work, "mt", "loopsrc"),

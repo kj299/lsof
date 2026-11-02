@@ -20,6 +20,9 @@
 # gate. Batch A's review re-anchored S-warning-muted-by-w (2026-10-31), as
 # the errors the parse read on after now go out ahead of the warning; run
 # again as root, killed again.
+#
+# Re-anchored 2026-11-01 (Batch B's review fixes): S-warning-muted-by-w, as
+# `tell_early` became `Early::tell`.
 
 [run]
 dir = ".."
@@ -362,11 +365,11 @@ name = "S-warning-muted-by-w"
 rule = "-S's warning prints whatever -w and -t say (94)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                                tell_early(fs, early, &mut told);
+old = '''                                early.tell();
                                 fs.tell(&format!(
                                     "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
                                 ));'''
-new = '''                                tell_early(fs, early, &mut told);
+new = '''                                early.tell();
                                 if !sel.omit_unreadable {
                                     fs.tell(&format!(
                                         "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
@@ -466,7 +469,7 @@ new = '''            let is_block = exempt.is_none()
 name = "walk-entry-lstat-unbounded"
 rule = "a walk's lstat of each entry goes through the bounded layer, with the -S where +D stood (94)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''            let st = match fs.lstat(&path) {'''
 new = '''            let st = match fs.with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns()).lstat(&path) {'''
 
@@ -474,7 +477,7 @@ new = '''            let st = match fs.with(lsof_core::Blocking { in_process: tr
 name = "walk-stops-at-a-failed-lstat"
 rule = "a walk entry whose lstat fails is warned of and the walk goes on (94, 118)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''                            errno_text(&err)
                         ));
                     }
@@ -492,7 +495,7 @@ new = '''                            errno_text(&err)
 name = "walk-lstat-warning-dropped"
 rule = "a walk entry whose lstat fails says can't lstat(P) in the C's words, unless -w (94)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
+file = "crates/lsof-cli/src/args.rs"
 old = '''                    if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
                         fs.tell(&format!(
                             "lsof: WARNING: can't lstat({}): {}",'''
@@ -508,8 +511,8 @@ file = "crates/lsof-cli/src/args.rs"
 old = '''                    if table.is_none() {
                         table = Some(read_table(&sel));
                     }
-                    sel.dir_args.push(dir);'''
-new = '''                    sel.dir_args.push(dir);'''
+'''
+new = ''
 
 [[mutant]]
 name = "e-checked-against-an-empty-table"

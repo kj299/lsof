@@ -241,10 +241,11 @@ Two exposures remain, both the C's as well, since both walk by name:
   between, at the option: the C's `ck_file_arg()` reads and `stat`s it before
   `OpenDir()` (`arg.c:184,915`; 117 calls between the two here, 30 `stat`s and
   86 `readlink`s, measured with strace), lsof-rs right after the option's
-  `stat` too (110). lsof-rs still lists the directory once every option is
-  parsed and the users are resolved, after the walks before it, since it
-  walks after parsing (DIVERGENCES 82); for a later one the C has the table
-  already and opens the directory straight after its `stat`. A directory
+  `stat` too (110). Since 2026-11-01 lsof-rs lists the directory there as
+  well, walking it where its option stands, as the C does (DIVERGENCES 82),
+  on every platform but Windows, where the walk waits for the run; for a
+  later one both have the table already and open the directory straight
+  after its `stat`. A directory
   renamed in that window is listed as whatever is then at the name, under the
   identity the `stat` saw (measured: `walk-race-top-to-link`, the same in
   both).
@@ -299,6 +300,17 @@ million sockets, a process with 65,530 mappings of long names, an epoll fd
 watching a million fds, or a JVM with a thousand threads makes these costs
 visible; the resource gate's 400 synthetic processes cannot. DIVERGENCES 30
 and 81 hold what was measured.
+
+**The parse's error lines are bounded whatever the argument list repeats**
+(DIVERGENCES 83). The argument list is the invoker's own, but a script may
+build it from data (`-p $(pgrep …)`), and the C prints each error where it
+meets it, holding nothing. lsof-rs holds the lines it reads on after until
+1 MiB, then prints them in order, checked as each is stored: checked at a
+word's end only, one 128 KiB word of `-s tcp:,,,…` (a line quoting the whole
+word for each comma) had held some 17 GB. `-p`/`-g` look up what they have
+entered in constant time (308 450 PIDs: 0.08 s, where a linear search took
+31 s). The resource gate's `state-empty-names` and `fd-list-items` cases pin
+the memory bound.
 
 **A socket no table lists is named by one system call, made on a descriptor
 lsof-rs pinned first** (DIVERGENCES 22). The C names such a socket — an

@@ -685,7 +685,9 @@ pub struct ExemptFs {
 /// DIR -x` follows no link in DIR), and a directory that cannot be used ends
 /// the run before anything is listed (DIVERGENCES 74, 75). The CLI checks it
 /// at the option and keeps this; the expansion itself needs the backend and
-/// comes later.
+/// comes later, except that its listing and its entries' `lstat`s and
+/// `stat`s are made where the option stands too, when the CLI can tell there
+/// that the run identifies files ([`DirArg::walked`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DirArg {
     /// `+D`, the whole tree; else `+d`, the directory and its entries.
@@ -711,6 +713,23 @@ pub struct DirArg {
     /// item (`arg.c:915`); the walk makes no other call on the directory
     /// but its listing (DIVERGENCES 111).
     pub stat: crate::safefs::FileStat,
+    /// The walk, made where the option stood as the C's `enter_dir()` makes
+    /// it, so that its warnings come where the C's do, among the parse's own
+    /// lines (DIVERGENCES 82): every entry in the order it was met, and what
+    /// its one call said. `None` is a walk not made yet, made when the
+    /// backend can identify what it meets.
+    pub walked: Option<Vec<WalkedEntry>>,
+}
+
+/// One entry a `+d`/`+D` walk met: its name, the directory's and its own,
+/// and what the walk's one call on it said ([`DirArg::walked`]): the
+/// `lstat`, or the `stat` that followed a link under `-x l`. `None` is an
+/// entry whose `lstat` failed where names are matched rather than files
+/// identified, which is still a search item there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalkedEntry {
+    pub path: std::path::PathBuf,
+    pub stat: Option<crate::safefs::FileStat>,
 }
 
 /// The full set of user-specified filters for one run.

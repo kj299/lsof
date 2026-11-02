@@ -9,6 +9,7 @@
 
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::Path;
 
 use lsof_core::model::tcp_state_table;
 use lsof_core::readlink::ReadlinkError;
@@ -19,7 +20,7 @@ use lsof_core::selection::StateFilter;
 use lsof_core::{
     errno_text, CommandMatch, CommandWidth, DirArg, EndpointMode, ExemptFs, FdFilter, FdKind,
     FdSpec, FilesystemArgs, MountRequest, MountTable, Protocol, SafeFs, Selection, TaskMode,
-    TcpInfoFlags, UidSel, UserLookup,
+    TcpInfoFlags, UidSel, UserLookup, WalkedEntry,
 };
 
 /// What the CLI should do after parsing.
@@ -118,21 +119,34 @@ pub struct HostChecks<'a> {
     pub lookup_user: &'a dyn Fn(&str) -> UserLookup,
     /// Whether SELinux is enabled: the C's `CntxStatus`.
     pub selinux_enabled: &'a dyn Fn() -> bool,
+    /// Whether the run identifies files ([`lsof_core::Backend::identifies_paths`]):
+    /// if so, a `+d`/`+D` is walked where it stands, as the C's `enter_dir()`
+    /// walks it, its warnings among the parse's own lines (DIVERGENCES 82);
+    /// if not, the walk waits for the run.
+    pub identifies_paths: &'a dyn Fn() -> bool,
 }
 
 impl HostChecks<'static> {
     /// Nothing asked of any host: each `-u` value is kept as typed
     /// ([`UserLookup::ByName`]) and SELinux is taken to be enabled, so `-Z`
-    /// is read for its value alone. What [`parse`] and [`parse_with`] use.
+    /// is read for its value alone; a `+d`/`+D` is examined but not walked,
+    /// so that a fuzz input's `+D /` walks nothing. What [`parse`] and
+    /// [`parse_with`] use.
     pub const DEFERRED: HostChecks<'static> = HostChecks {
         lookup_user: &kept_as_typed,
         selinux_enabled: &selinux_assumed,
+        identifies_paths: &walk_deferred,
     };
 }
 
 /// [`HostChecks::DEFERRED`]'s user lookup.
 fn kept_as_typed(_: &str) -> UserLookup {
     UserLookup::ByName
+}
+
+/// [`HostChecks::DEFERRED`]'s walk: none at the parse.
+fn walk_deferred() -> bool {
+    false
 }
 
 /// [`HostChecks::DEFERRED`]'s SELinux answer.
@@ -410,7 +424,10 @@ fn parse_errors(
         Ok(_) => String::new(),
         Err(e) => e,
     };
-    Err(ParseError { early, last })
+    Err(ParseError {
+        early: early.detach(),
+        last,
+    })
 }
 
 /// A parse that ended in an error: the lines the C printed as it read on
@@ -422,11 +439,23 @@ fn parse_errors(
 /// Its `Display` is every line joined with `\nlsof: `.
 #[derive(Debug)]
 pub struct ParseError {
-    early: Early,
+    early: Early<'static>,
     last: String,
 }
 
 impl ParseError {
+    /// Whether the parse ended where the C's `Error()` ends it, at once and
+    /// with no usage: `-d` naming no kind of descriptor (`invalid fd type
+    /// given in -d option`, `arg.c:805-808`) and a UID both selected and
+    /// excluded (`arg.c:2057-2066`). `lsof` then prints the lines and exits
+    /// 1, with no usage hint and no help, whatever `-h` asked for (measured:
+    /// `-d foo -h` and `-h -u 0,^0` print their line alone). Every other
+    /// error ends the run in `usage()`, once every option is read
+    /// (DIVERGENCES 83).
+    pub fn is_fatal(&self) -> bool {
+        self.early.fatal
+    }
+
     /// Hand `line` each line in order, without its `lsof: `. The error that
     /// ended the parse is one line here even when it holds several
     /// (`errors.join("\nlsof: ")`); one made in silence under `-w` or `-t` is
@@ -465,18 +494,116 @@ impl std::fmt::Display for ParseError {
 /// each preceded by its length and a `:`. One `String` per line had cost
 /// about 130 times the argument list's size (237 MB for 1.8 MB of `-W…`,
 /// where the C peaks at 7 MB).
+///
+/// An error that holds a letter of an option's value (`unknown cross-over
+/// option: q`, the C's `-x`, `-f`, `-F` and `-T` say one per letter) is
+/// [`Early::ESC`], a kind and the letter, three characters and no text. And
+/// what is held is printed through the parse's sink, where the C has printed
+/// it already, once it passes [`Early::SPILL`] bytes ([`Early::spill`]), as
+/// each line is stored: so that no argument list, however many errors it
+/// holds, makes the parse hold more than that and one line. Checked at a
+/// word's end only, one word of `-s tcp:,,,…` had held a line quoting the
+/// whole word for each comma, some 17 GB for the 128 KiB Linux allows.
 #[derive(Debug, Default)]
-struct Early {
+struct Early<'s> {
     codes: String,
     texts: String,
+    /// An error made in silence (`-w` or `-t` muting it) was found: the run
+    /// still ends in `usage()`, with nothing printed for it.
+    failed: bool,
+    /// The parse ended where the C's `Error()` ends it ([`ParseError::is_fatal`]).
+    fatal: bool,
+    /// Where what is held is printed past [`Early::SPILL`], and ahead of a
+    /// line the parse prints itself ([`Early::tell`]): the parse's own view
+    /// ([`parse_options`] sets it). With none, everything is held.
+    sink: Option<&'s SafeFs<'s>>,
+    /// Lines were printed through `sink` already: the run is to end in
+    /// `usage()` though nothing may be held any more.
+    told: bool,
 }
 
-impl Early {
+impl Early<'_> {
     /// Opens a code in `codes`; a NUL letter is `ESC ESC`.
     const ESC: char = '\0';
 
+    /// What may be held before it is printed through the sink. Under miri,
+    /// which interprets what takes milliseconds natively in minutes, 4 KiB,
+    /// so that the tests that pass it stay inside CI's miri budget.
+    const SPILL: usize = if cfg!(miri) { 1 << 12 } else { 1 << 20 };
+
+    /// Kinds of [`Early::letter`]: `-x`'s, `-f`'s, `-F`'s and `-T`'s.
+    const CROSS_OVER: char = 'X';
+    const FILE_STRUCT: char = 'S';
+    const FIELD: char = 'L';
+    const TCP_TPI: char = 'P';
+
     fn is_empty(&self) -> bool {
         self.codes.is_empty()
+    }
+
+    /// What is held, with no sink: what a [`ParseError`] keeps.
+    fn detach(self) -> Early<'static> {
+        Early {
+            codes: self.codes,
+            texts: self.texts,
+            failed: self.failed,
+            fatal: self.fatal,
+            sink: None,
+            told: self.told,
+        }
+    }
+
+    /// Print what is held through the sink, if there is one, and forget it:
+    /// the lines the C has printed by this point, in their order. The parse
+    /// calls it ahead of a line it prints itself — the `-S` warning, what a
+    /// `+d`/`+D` or an `-e` says as it is examined, the mount table's lines
+    /// — since the C prints each where it meets it: measured, `-Zx -S 0`
+    /// says `-Z limited to SELinux` before `-S time (0) changed to 2`, and
+    /// `-S 0 -Z` after. `told` records that the run is to end.
+    fn tell(&mut self) {
+        let Some(sink) = self.sink else { return };
+        let mut told = false;
+        let mut out = String::new();
+        self.drain(|e| {
+            out.clear();
+            out.push_str("lsof: ");
+            out.push_str(e);
+            sink.tell(&out);
+            told = true;
+        });
+        self.told |= told;
+    }
+
+    /// [`Early::tell`], once more than [`Early::SPILL`] bytes are held. Each
+    /// way of storing a line ends here, so that what is held stays bounded
+    /// inside one word as across many (DIVERGENCES 83).
+    fn spill(&mut self) {
+        if self.held() > Self::SPILL {
+            self.tell();
+        }
+    }
+
+    /// How much is held.
+    fn held(&self) -> usize {
+        self.codes.len().saturating_add(self.texts.len())
+    }
+
+    /// An error the C prints and reads on after, or, said in silence (an
+    /// empty `message`), one it makes and prints nothing for.
+    fn fail(&mut self, message: &str) {
+        if message.is_empty() {
+            self.failed = true;
+        } else {
+            self.line(message);
+        }
+    }
+
+    /// The error of a `kind` naming `c`, one letter of an option's value.
+    fn letter(&mut self, kind: char, c: char) {
+        self.codes.push(Self::ESC);
+        self.codes.push(kind);
+        self.codes.push(c);
+        self.spill();
     }
 
     /// `illegal option character: X`, `X` escaped (DIVERGENCES 122).
@@ -485,18 +612,21 @@ impl Early {
             self.codes.push(Self::ESC);
         }
         self.codes.push(c);
+        self.spill();
     }
 
     /// `colon is an illegal option character.`
     fn colon(&mut self) {
         self.codes.push(Self::ESC);
         self.codes.push(':');
+        self.spill();
     }
 
     /// `+J is not supported`, `+j` the same.
     fn plus_json(&mut self, c: char) {
         self.codes.push(Self::ESC);
         self.codes.push(if c == 'j' { 'j' } else { 'J' });
+        self.spill();
     }
 
     /// `can't get UID for NAME`, `name` as shown.
@@ -513,10 +643,12 @@ impl Early {
         self.text(line);
     }
 
+    /// A line's text; it ends each line that has one, so it spills.
     fn text(&mut self, text: &str) {
         self.texts.push_str(&text.len().to_string());
         self.texts.push(':');
         self.texts.push_str(text);
+        self.spill();
     }
 
     /// Hand `line` each line in order, formatted in one buffer reused.
@@ -553,8 +685,23 @@ impl Early {
                     buf.push_str(next_text());
                     None
                 }
+                // Handed on as it is held, not copied: such a line may be
+                // as long as a word.
                 Some(Some('T')) => {
-                    buf.push_str(next_text());
+                    line(next_text());
+                    continue;
+                }
+                Some(Some(
+                    kind @ (Self::CROSS_OVER | Self::FILE_STRUCT | Self::FIELD | Self::TCP_TPI),
+                )) => {
+                    let Some(c) = codes.next() else { break };
+                    let message = match kind {
+                        Self::CROSS_OVER => "unknown cross-over option: ",
+                        Self::FILE_STRUCT => "unknown file struct option: ",
+                        Self::FIELD => "unknown field: ",
+                        _ => "unsupported TCP/TPI info selection: ",
+                    };
+                    buf.push_str(&quoting(message, c.encode_utf8(&mut [0; 4])));
                     None
                 }
                 // `ESC ESC`: a NUL letter.
@@ -580,18 +727,20 @@ impl Early {
 
 /// [`parse_with`], with the errors the C reports and reads on after left in
 /// `early`.
-fn parse_options(
+fn parse_options<'s>(
     mut args: Vec<String>,
-    fs: &SafeFs,
+    fs: &'s SafeFs<'s>,
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
-    early: &mut Early,
+    early: &mut Early<'s>,
     reports: &mut Reports,
 ) -> Result<Action, String> {
     let mut sel = Selection::default();
-    // Whether errors were printed already, ahead of a line the parse printed
-    // itself ([`tell_early`]).
-    let mut told = false;
+    // What is held is printed through the parse's own view, ahead of a line
+    // the parse prints itself and past [`Early::SPILL`]; `early.told` says
+    // whether it has been.
+    early.sink = Some(fs);
+    let mut entered = EnteredIds::default();
     // The C's `readmnt()` reads once, where it is first needed (`dmnt.c`:
     // `if (Lmi || Lmist) return (Lmi)`).
     let mut table: Option<MountTable> = None;
@@ -712,23 +861,42 @@ fn parse_options(
                 // are checked here, at the option, as the C's `enter_dir()`
                 // runs where it meets them (see [`enter_dir`]).
                 'd' | 'D' if plus => {
-                    let rest: String = chars[j + 1..].iter().collect();
                     // With no word left the C's `enter_dir()` gets no path,
-                    // and says so in its own words, muted by `-w`.
-                    let value = if !rest.is_empty() {
-                        rest
-                    } else {
-                        i += 1;
-                        args.get(i).cloned().unwrap_or_default()
+                    // and says so in its own words, muted by `-w`; `--` is
+                    // no path to `GetOpt` either, and ends the options after.
+                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();
+                    early.tell();
+                    // A directory the C refuses is an error it reads on
+                    // after (`enter_dir()` returns 1, `err = 1`): no search
+                    // item, and no `+d` for `-x` to accompany, so `-x +d
+                    // /nonexist` says both (DIVERGENCES 83, measured).
+                    let dir = match enter_dir(&value, c == 'D', &sel, fs) {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            early.fail(&e);
+                            j = chars.len();
+                            continue;
+                        }
                     };
-                    tell_early(fs, early, &mut told);
-                    let dir = enter_dir(&value, c == 'D', &sel, fs)?;
                     // The C reads its mount table here, at the first `+d`/`+D`
                     // whose directory checked out (`ck_file_arg()` from
                     // `enter_dir()`, `arg.c:915`), under the `-b`, `-O`,
                     // `-S`, `-w` and `-e`/`+e` given so far.
                     if table.is_none() {
                         table = Some(read_table(&sel));
+                    }
+                    // Then the C walks it (`arg.c:930-1080`), there, so that
+                    // what the walk says comes before what a later option
+                    // says: `+d D -S 0` prints D's `can't stat(D/loop)
+                    // symbolc link` before `-S time (0) changed to 2`, and
+                    // `+d D -u nosuch` it and then the `-u` error (measured).
+                    // lsof-rs had walked once the parse was over, and printed
+                    // nothing of it when the parse ended in an error
+                    // (DIVERGENCES 82).
+                    let mut dir = dir;
+                    if (host.identifies_paths)() {
+                        let at = fs.with(dir.blocking, dir.warn);
+                        dir.walked = Some(walk_dir(&dir, Path::new(&dir.dir), true, &at));
                     }
                     sel.dir_args.push(dir);
                     if c == 'd' {
@@ -749,26 +917,39 @@ fn parse_options(
                 // is `+c 1` (measured), the digits saturating where `atoi()`
                 // wraps (DIVERGENCES 121).
                 'c' if plus => {
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        Some(rest)
-                    } else {
-                        i += 1;
-                        args.get(i).cloned()
-                    };
+                    let attached = j + 1 < chars.len();
+                    let value = required_value(&chars, j, &args, &mut i);
                     let digits = value.as_deref().map_or("", |v| {
                         &v[..v.bytes().take_while(u8::is_ascii_digit).count()]
                     });
                     if digits.is_empty() {
-                        return Err("+c not followed by width number".to_string());
+                        // The C says so, reads on, and gives the value back
+                        // (`GOx1 = GObk[0]`, `main.c:321-325`): attached, its
+                        // letters are options again, so `+cW` is this and
+                        // `illegal option character: W`; the next word is
+                        // read again where it stands (measured).
+                        early.line("+c not followed by width number");
+                        if value.is_some() {
+                            if attached {
+                                j += 1;
+                            } else {
+                                i = i.saturating_sub(1);
+                                j = chars.len();
+                            }
+                        } else {
+                            j = chars.len();
+                        }
+                        continue;
                     }
                     let n = digits_value(digits);
                     // The C refuses a width wider than the longest command name
                     // the system can report, rather than accepting a number it
-                    // could never fill.
+                    // could never fill, and reads on.
                     if let Some(max) = MAX_COMMAND_WIDTH {
                         if n > max {
-                            return Err(format!("+c {n} > what system provides ({max})"));
+                            early.line(&format!("+c {n} > what system provides ({max})"));
+                            j = chars.len();
+                            continue;
                         }
                     }
                     sel.command_width = if n == 0 {
@@ -842,13 +1023,16 @@ fn parse_options(
                     // `+L n` also selects files with fewer than n links. lsof-rs
                     // had read `-L` as "show" and refused a bare `+L`.
                     columns.nlink = plus;
-                    if !plus
-                        && value_word(&chars, j, &args, i)
-                            .is_some_and(|(word, _)| word.starts_with(|d: char| d.is_ascii_digit()))
-                    {
-                        return Err("no number may follow -L".to_string());
+                    // `-L` with a count is the C's error, and it reads on, the
+                    // letters after the digits read again as options, as for
+                    // `+L` (`main.c:652-666`): `-L 3x` says this and then `-x
+                    // must accompany +d or +D` (measured).
+                    let digits = take_digits(&chars, &mut j, &mut args, &mut i, prefix);
+                    if !plus && digits.is_some() {
+                        early.line("no number may follow -L");
+                        continue;
                     }
-                    match take_digits(&chars, &mut j, &mut args, &mut i, prefix) {
+                    match digits {
                         Some(digits) => sel.max_links = Some(digits_value(&digits) as u64),
                         // With no count the C sets `Nlink = 0` and leaves the
                         // selection flag an earlier `+L n` raised, so `+L1 -L`
@@ -900,27 +1084,26 @@ fn parse_options(
                     // With no word at all the C quotes a null pointer,
                     // `"(null)"` (undefined behaviour, a C-DEFECT): here
                     // `""`.
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        rest
-                    } else {
-                        match args.get(i + 1) {
-                            Some(next) if !next.starts_with(['-', '+']) => {
-                                i += 1;
-                                next.clone()
-                            }
-                            other => other.cloned().unwrap_or_default(),
-                        }
-                    };
-                    tell_early(fs, early, &mut told);
-                    enter_exempt(&mut sel, &value, plus, fs)?;
+                    // The word is taken whatever it opens with, as `GetOpt`
+                    // hands it over (`"e:"`), and the parse reads on after
+                    // the error: `-e -W` is `-e`'s error alone, the `-W`
+                    // its value (measured). `--` is no value, and ends the
+                    // options after.
+                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();
+                    early.tell();
+                    if let Err(e) = enter_exempt(&mut sel, &value, plus, fs) {
+                        early.fail(&e);
+                    }
                     j = chars.len();
                     continue;
                 }
                 'x' => {
                     // `-x [fl]`: bare is both (`main.c`'s XO_ALL), otherwise
-                    // each letter adds one. An unknown letter is fatal, and
-                    // the C names it — `lsof: unknown cross-over option: q`.
+                    // each letter adds one. An unknown letter is an error the
+                    // C names, each, and reads on after — `lsof: unknown
+                    // cross-over option: q` — the letters it knows still
+                    // set, so `-x qf` adds `-x must accompany +d or +D` and
+                    // `-x q` does not (measured).
                     // The letters may be the next word (`-x f`), and a word
                     // that opens an option is not one, so `-x /tmp` is that
                     // error rather than a bare `-x` and a file name.
@@ -934,12 +1117,7 @@ fn parse_options(
                                 match c {
                                     'f' => sel.cross_filesystems = true,
                                     'l' => sel.cross_symlinks = true,
-                                    other => {
-                                        return Err(quoting(
-                                            "unknown cross-over option: ",
-                                            &other.to_string(),
-                                        ))
-                                    }
+                                    other => early.letter(Early::CROSS_OVER, other),
                                 }
                             }
                         }
@@ -995,12 +1173,8 @@ fn parse_options(
                                         flags_shown = plus;
                                         flags_hex = c == 'G';
                                     }
-                                    other => {
-                                        return Err(quoting(
-                                            "unknown file struct option: ",
-                                            &other.to_string(),
-                                        ))
-                                    }
+                                    // Each one the C's error, and it reads on.
+                                    other => early.letter(Early::FILE_STRUCT, other),
                                 }
                             }
                         }
@@ -1035,7 +1209,7 @@ fn parse_options(
                         Some(d) => {
                             let n = digits_value(&d).min(i32::MAX as usize) as u32;
                             if n < TMLIMMIN {
-                                tell_early(fs, early, &mut told);
+                                early.tell();
                                 fs.tell(&format!(
                                     "lsof: WARNING: -S time ({n}) changed to {TMLIMMIN}"
                                 ));
@@ -1054,7 +1228,7 @@ fn parse_options(
                     // A value, even an empty one (`+T ''`), is letters: none
                     // selects nothing, whatever the prefix (DIVERGENCES 116).
                     let letters = optional_value(&chars, j, &args, &mut i);
-                    sel.tcp_info_opt = Some(parse_tcp_info(letters.as_deref(), plus)?);
+                    sel.tcp_info_opt = Some(parse_tcp_info(letters.as_deref(), plus, early));
                     j = chars.len();
                     continue;
                 }
@@ -1077,8 +1251,9 @@ fn parse_options(
                         None => sel.tasks = TaskMode::Always,
                         // `strcasecmp`, so `-K I` is `-K i`.
                         Some(v) if v.eq_ignore_ascii_case("i") => sel.tasks = TaskMode::Never,
+                        // The C's error, and it reads on.
                         Some(v) => {
-                            return Err(format!("-K not followed by i (but by {})", shown(&v)))
+                            early.line(&format!("-K not followed by i (but by {})", shown(&v)))
                         }
                     }
                     j = chars.len();
@@ -1103,14 +1278,24 @@ fn parse_options(
                         }
                         // Bare, or `0` alone: the C's default set.
                         None | Some("0") => true,
+                        // Each letter the C's table lacks is its error, and it
+                        // reads on, the letters it knows still chosen and
+                        // `-F` still given: `-F q -t` adds `-F and -t are
+                        // mutually exclusive` (measured).
                         Some(list) => {
-                            if let Some(bad) = list.chars().find(|f| !field_known(*f)) {
-                                return Err(quoting("unknown field: ", &bad.to_string()));
+                            for bad in list.chars().filter(|f| !field_known(*f)) {
+                                early.letter(Early::FIELD, bad);
                             }
                             false
                         }
                     };
-                    let letters = value.as_deref().unwrap_or("");
+                    let known: String = value
+                        .as_deref()
+                        .unwrap_or("")
+                        .chars()
+                        .filter(|f| field_known(*f))
+                        .collect();
+                    let letters = known.as_str();
                     fields.nul |= letters.contains('0');
                     // `-F` shows the flags, in hex, when it selects `G`: the
                     // default set does, and so does the letter (`main.c`:
@@ -1154,43 +1339,44 @@ fn parse_options(
                     // bare `-i` and a file called `:80`. No spec is the bare
                     // form; an empty one (`-i ''`) is a spec, and incomplete.
                     let spec = optional_value(&chars, j, &args, &mut i);
-                    parse_inet(&mut sel, spec.as_deref())?;
+                    if let Err(e) = parse_inet(&mut sel, spec.as_deref()) {
+                        early.fail(&e);
+                    }
                     j = chars.len();
                     continue;
                 }
+                // `-d`, `-p`, `-u` and `-c` take the rest of the word or else
+                // the next word, whatever it is, but `--` (`GetOpt`). Without
+                // one each is the C's own words, and the parse reads on
+                // (`main.c:356-366,756-758,938-940,316-347`): `-x -p` says
+                // `no process ID specified` and then `-x must accompany +d
+                // or +D` (measured), where lsof-rs had said `option -p
+                // requires a value` and stopped.
                 'd' => {
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        rest
-                    } else {
-                        i += 1;
-                        if i >= args.len() {
-                            return Err("option -d requires a value".to_string());
-                        }
-                        args[i].clone()
-                    };
                     // Each `-d` extends the one list, as the C's `Fdl` grows:
                     // lsof-rs kept only the last (DIVERGENCES 51).
+                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();
                     let quiet = sel.omit_unreadable;
-                    enter_fd_list(&mut sel.fd_filter, &value, quiet)?;
+                    enter_fd_list(&mut sel.fd_filter, &value, quiet, early)?;
                     j = chars.len();
                     continue;
                 }
                 'p' | 'u' | 'c' => {
-                    let rest: String = chars[j + 1..].iter().collect();
-                    let value = if !rest.is_empty() {
-                        rest
-                    } else {
-                        i += 1;
-                        if i >= args.len() {
-                            return Err(format!("option -{c} requires a value"));
+                    match required_value(&chars, j, &args, &mut i) {
+                        None => early.line(match c {
+                            'p' => "no process ID specified",
+                            'u' => "no UIDs specified",
+                            _ => "missing -c option value",
+                        }),
+                        Some(value) if c == 'u' => enter_users(&mut sel, &value, host, early)?,
+                        Some(value) if c == 'p' => {
+                            enter_ids(&mut sel, &mut entered, &value, false, early)
                         }
-                        args[i].clone()
-                    };
-                    if c == 'u' {
-                        enter_users(&mut sel, &value, host, early)?;
-                    } else {
-                        apply_value(&mut sel, c, &value)?;
+                        Some(value) => {
+                            if let Err(e) = enter_command(&mut sel, &value) {
+                                early.line(&e);
+                            }
+                        }
                     }
                     j = chars.len();
                     continue;
@@ -1201,7 +1387,13 @@ fn parse_options(
                     // (`main.c`). With or without it, `-g` adds the PGID
                     // column; with it, it also selects by process group.
                     let value = optional_value(&chars, j, &args, &mut i);
-                    apply_g(&mut sel, &mut columns, value.as_deref())?;
+                    apply_g(
+                        &mut sel,
+                        &mut entered,
+                        &mut columns,
+                        value.as_deref(),
+                        early,
+                    );
                     j = chars.len();
                     continue;
                 }
@@ -1216,7 +1408,7 @@ fn parse_options(
                     // a file called `1`, and `lsof -s -o` silently filtered
                     // every socket out by a state named `-o`.
                     match optional_value(&chars, j, &args, &mut i) {
-                        Some(v) => parse_state_spec(&mut states, &v)?,
+                        Some(v) => parse_state_spec(&mut states, &v, early),
                         None => columns.size = true,
                     }
                     j = chars.len();
@@ -1275,11 +1467,6 @@ fn parse_options(
         i += 1;
     }
 
-    // The C refuses a PID or PGID that is both selected and excluded
-    // (`lib/lsof.c`), and enters each only once — `-p 5,5` is one search
-    // item, reported once if it is not found.
-    dedup_ids(&mut sel.pids, &sel.pid_excludes, "PID")?;
-    dedup_ids(&mut sel.pgids, &sel.pgid_excludes, "PGID")?;
     // A UID both selected and excluded, found as the C finds it: while it
     // parses, so before `-h` or `-v` is acted on. A login name waits for the
     // backend to resolve it (DIVERGENCES 73).
@@ -1294,6 +1481,8 @@ fn parse_options(
         .filter_map(uid)
         .find(|u| sel.user_excludes.iter().filter_map(uid).any(|x| x == *u))
     {
+        // The C's `Error()`: at once, with no usage.
+        early.fatal = true;
         return Err(format!("UID {both} has been included and excluded."));
     }
     // What the C finds wrong once every option is read, it reports all of,
@@ -1367,10 +1556,10 @@ fn parse_options(
             // far come before what the table says as it is read: measured,
             // `-e /nosuch -x f` prints `-x must accompany +d or +D`, then a
             // mount's `can't stat()` warning, then the `-e` error.
-            tell_early(fs, early, &mut told);
+            early.tell();
             for e in errors.drain(..) {
                 fs.tell(&format!("lsof: {e}"));
-                told = true;
+                early.told = true;
             }
         }
         let table = table.get_or_insert_with(|| read_table(&sel));
@@ -1391,7 +1580,7 @@ fn parse_options(
     // here too, in `usage()`, before the checks below are made: `+J -a` and
     // `-u nosuch -X -i` print their first line alone (measured). Main prints
     // what `early` holds.
-    if told || !errors.is_empty() || !early.is_empty() {
+    if early.told || early.failed || !errors.is_empty() || !early.is_empty() {
         return Err(errors.join("\nlsof: "));
     }
     if reports.any() {
@@ -1426,6 +1615,179 @@ fn parse_options(
         columns,
         mounts: table,
     })
+}
+
+/// How many entries a `+d`/`+D` walk takes, and how many bytes of their
+/// names. The C walks on: a tree of 200,000 entries and more is taken whole,
+/// and two links to `.` under `-x l` make 2^40 paths it never finishes. lsof-rs
+/// stops, and says so (DIVERGENCES 81). Names count as well as entries: under
+/// `-x l` a link to `.` makes every name longer than the last, and 200,000
+/// of them reached a gigabyte.
+pub const WALK_ENTRIES: usize = 200_000;
+pub const WALK_NAME_BYTES: usize = 16 << 20;
+
+/// What a walk has left of [`WALK_ENTRIES`] and [`WALK_NAME_BYTES`].
+struct WalkBudget {
+    entries: usize,
+    bytes: usize,
+}
+
+impl WalkBudget {
+    fn new() -> Self {
+        WalkBudget {
+            entries: WALK_ENTRIES,
+            bytes: WALK_NAME_BYTES,
+        }
+    }
+
+    /// Take one entry with a name of `len` bytes, or `false` if that would
+    /// exceed either limit.
+    fn take(&mut self, len: usize) -> bool {
+        if self.entries == 0 || self.bytes < len {
+            return false;
+        }
+        self.entries -= 1;
+        self.bytes -= len;
+        true
+    }
+}
+
+/// A `+d`/`+D` walk, as the C's `enter_dir()` makes it (`arg.c:930-1080`):
+/// from `base`, the directory as it is to be named, every entry listed,
+/// `lstat`ed once and, if it is a link the walk follows, `stat`ed once more,
+/// each warning printed through `fs` as it is met. `fs` is the bounded layer
+/// under the `-b`, `-O`, `-S` and `-w` that stood where the option did.
+///
+/// Each entry is described by ONE `lstat`, as the C's (`arg.c:1014`): it
+/// decides the `-x f` test, whether the entry is a link, whether it is
+/// descended into, and what it is (DIVERGENCES 111). Only a link under `-x
+/// l` gets one more call, the `stat` that follows it, and that result then
+/// stands for the entry. The directory itself is what the option's one
+/// `stat` said ([`DirArg::stat`]); the walk only lists it. Every call it
+/// makes — each listing, each `lstat`, each follow — goes through the
+/// bounded layer (DIVERGENCES 94): an entry on a file system that does not
+/// answer is a `can't lstat(P): Connection timed out` and the walk goes on,
+/// as the C's (its first timeout, DIVERGENCES 118).
+///
+/// `identified` says whether the run identifies files (every platform but
+/// Windows): where it does not, an entry whose `lstat` fails is still an
+/// item, and the `-x f` rule, which needs the directory's device, is off.
+/// The walk stops, and says so, past [`WALK_ENTRIES`] entries or
+/// [`WALK_NAME_BYTES`] bytes of names (DIVERGENCES 81).
+pub fn walk_dir(dir: &DirArg, base: &Path, identified: bool, fs: &SafeFs) -> Vec<WalkedEntry> {
+    let esc = Escaper::for_host();
+    // The directory's `st_dev` is `ddev`, the file system every entry is held
+    // to unless `-x f` (`arg.c:905`), through a followed link too. Where
+    // names are matched there is no identity, and `ddev` is `None`, which
+    // switches the `-x f` rule off rather than guessing.
+    let ddev = identified.then_some(dir.stat.dev);
+    let shown = |p: &Path| esc.bytes(p.as_os_str().as_encoded_bytes()).into_owned();
+    let mut budget = WalkBudget::new();
+    let mut walked = Vec::new();
+    let mut stack = vec![base.to_path_buf()];
+    while let Some(dn) = stack.pop() {
+        let names = match fs.read_dir(&dn) {
+            Ok(names) => names,
+            Err(e) => {
+                if dir.warn && e.kind() != std::io::ErrorKind::NotFound {
+                    fs.tell(&format!(
+                        "lsof: WARNING: can't opendir({}): {}",
+                        shown(&dn),
+                        errno_text(&e)
+                    ));
+                }
+                continue;
+            }
+        };
+        for name in names {
+            // `dn`, a `/` unless it ends in one, and the entry's name: the C's
+            // spelling, and `DirEntry::path()`'s.
+            let path = dn.join(&name);
+            if !budget.take(path.as_os_str().len()) {
+                if dir.warn {
+                    fs.tell(&format!(
+                        "lsof: WARNING: stopped walking {} after {} entries",
+                        shown(base),
+                        WALK_ENTRIES - budget.entries
+                    ));
+                }
+                return walked;
+            }
+            // The entry is `lstat`ed, once; then the two cross-over rules, in
+            // the C's order (`arg.c:1029-1061`):
+            //
+            //   unless -x / -x f, skip an entry whose st_dev is not the
+            //         directory's — do not leave this file system;
+            //   unless -x / -x l, skip a symbolic link outright. With it, the
+            //         link is followed: the TARGET is what is searched for,
+            //         and for `+D` what is descended into, as the C stacks a
+            //         directory by the `stat` that followed the link
+            //         (DIVERGENCES 78).
+            //
+            // `-x` is the one in force when the option was checked
+            // (DIVERGENCES 75). The type is the `lstat`'s, never the listing's
+            // `d_type`, as the C's is (`arg.c:1038,1067`).
+            let st = match fs.lstat(&path) {
+                Ok(st) => Some(st),
+                // `lstat` failed: gone, not ours to see, or timed out. The
+                // C's words, with that call's own error.
+                Err(err) if identified => {
+                    if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                        fs.tell(&format!(
+                            "lsof: WARNING: can't lstat({}): {}",
+                            shown(&path),
+                            errno_text(&err)
+                        ));
+                    }
+                    continue;
+                }
+                // Where names are matched, the name is still an item.
+                Err(_) => None,
+            };
+            // The link's own device, before it is followed: a link here to a
+            // file elsewhere is entered under `-x l` alone (`arg.c:1035`).
+            if !dir.cross_filesystems {
+                if let (Some(d), Some(st)) = (ddev, st) {
+                    if d != st.dev {
+                        continue;
+                    }
+                }
+            }
+            // Under `-x l` a link is followed by one `stat`, whose result
+            // replaces the `lstat` (`arg.c:1047`): it is what the entry is,
+            // and whether it is descended into. The name stays the link's.
+            let st = match st {
+                Some(st) if st.is_symlink() => {
+                    if !dir.cross_symlinks {
+                        continue;
+                    }
+                    match fs.stat(&path) {
+                        Ok(st) => Some(st),
+                        Err(err) => {
+                            // The C's words, its spelling included.
+                            if dir.warn && err.kind() != std::io::ErrorKind::NotFound {
+                                fs.tell(&format!(
+                                    "lsof: WARNING: can't stat({}) symbolc link: {}",
+                                    shown(&path),
+                                    errno_text(&err)
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                st => st,
+            };
+            // The result of the call just made, never of another: a second
+            // `stat` would describe whatever the name led to by then. The C
+            // hands `ck_file_arg()` this one (`arg.c:1077`).
+            if dir.recursive && st.is_some_and(|st| st.is_dir()) {
+                stack.push(path.clone());
+            }
+            walked.push(WalkedEntry { path, stat: st });
+        }
+    }
+    walked
 }
 
 /// One `-e`/`+e`, entered as the C's `enter_efsys()` enters it (`arg.c:576-629`)
@@ -1524,6 +1886,7 @@ fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Resu
             warn: at.warn,
             blocking: sel.blocking,
             stat: st,
+            walked: None,
         }),
     }
 }
@@ -1583,10 +1946,22 @@ fn resolve_dir(value: &str, _fs: &SafeFs) -> Result<OsString, ReadlinkError> {
 /// inclusions or all exclusions: an item of the other kind, in this option or
 /// an earlier one, is refused (`exclude in an include -d list: ^4`). Under
 /// `-w` or `-t` (the C's `Fwarn`) the refusal says nothing, and still ends the
-/// run, so the error comes back empty.
-fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Result<(), String> {
+/// run.
+///
+/// Each item's error is one the C reads on after, to the next item and the
+/// next option (`enter_fd()`: `err = 1`, `arg.c:670-690`), so `-d ^2,1,foo`
+/// says `1` and `foo` are inclusions (measured). The one exception is a name
+/// that is no kind of descriptor, which the C's `Error()` ends the run at,
+/// with no usage (`arg.c:805-808`): that comes back as the error, fatal.
+fn enter_fd_list(
+    filter: &mut Option<FdFilter>,
+    value: &str,
+    quiet: bool,
+    early: &mut Early,
+) -> Result<(), String> {
     if value.is_empty() {
-        return Err("no file descriptor specified".to_string());
+        early.line("no file descriptor specified");
+        return Ok(());
     }
     for item in value.split(',') {
         let (exclude, body) = match item.strip_prefix('^') {
@@ -1598,8 +1973,12 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
         }
         // A range is checked first (`ckfd_range()`), then the list's kind,
         // then a name (`enter_fd_lst()`): the C's order, and so its message.
-        let range = match body.rfind('-') {
-            Some(dash) => Some(fd_range(body, dash)?),
+        let range = match body.rfind('-').map(|dash| fd_range(body, dash)) {
+            Some(Ok(range)) => Some(range),
+            Some(Err(e)) => {
+                early.line(&e);
+                continue;
+            }
             None => None,
         };
         let f = filter.get_or_insert_with(FdFilter::default);
@@ -1612,7 +1991,8 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
         };
         if let Some(was) = excluding.filter(|was| *was != exclude) {
             if quiet {
-                return Err(String::new());
+                early.failed = true;
+                continue;
             }
             let kind = |x: bool| if x { "exclude" } else { "include" };
             // The item escaped, where the C prints it raw (`arg.c`,
@@ -1622,16 +2002,28 @@ fn enter_fd_list(filter: &mut Option<FdFilter>, value: &str, quiet: bool) -> Res
                 Some((lo, hi)) => format!("{lo}-{hi}"),
                 None => shown(body).into_owned(),
             };
-            return Err(format!(
+            early.line(&format!(
                 "{} in an {} -d list: {}{item}",
                 kind(exclude),
                 kind(was),
                 if exclude { "^" } else { "" }
             ));
+            continue;
         }
         let spec = match range {
             Some((lo, hi)) => FdSpec::Range(lo, hi),
-            None => fd_named(body)?,
+            None => match fd_named(body) {
+                Ok(spec) => spec,
+                Err(FdNameError::Number(e)) => {
+                    early.line(&e);
+                    continue;
+                }
+                // The C's `Error()`: at once, with no usage.
+                Err(FdNameError::Kind(e)) => {
+                    early.fatal = true;
+                    return Err(e);
+                }
+            },
         };
         // A repeat is kept, not looked for: matching takes the first hit, and
         // a search per item made a long list quadratic to enter.
@@ -1686,11 +2078,21 @@ const OTHER_DIALECTS_FD_NAMES: [&str; 10] = [
     "err", "pd", "ltx", "fp", "twd", "ctty", "jd.", "v86", "m86", "mmap",
 ];
 
+/// Why an `-d` item is refused: a number past `INT_MAX`, an error the parse
+/// reads on after, or a name the C's table lacks, which ends it.
+#[derive(Debug)]
+enum FdNameError {
+    Number(String),
+    Kind(String),
+}
+
 /// An `-d` item that is not a range: a number, or a name from the C's table.
 /// `fd` is every numbered descriptor, 0 to `INT_MAX`.
-fn fd_named(name: &str) -> Result<FdSpec, String> {
+fn fd_named(name: &str) -> Result<FdSpec, FdNameError> {
     if name.bytes().all(|b| b.is_ascii_digit()) {
-        return Ok(FdSpec::Num(fd_number(name, name)?));
+        return fd_number(name, name)
+            .map(FdSpec::Num)
+            .map_err(FdNameError::Number);
     }
     Ok(match name {
         "cwd" => FdSpec::Named(FdKind::Cwd),
@@ -1705,7 +2107,11 @@ fn fd_named(name: &str) -> Result<FdSpec, String> {
         "fd" => FdSpec::Range(0, i32::MAX as u64),
         _ => match OTHER_DIALECTS_FD_NAMES.iter().find(|n| **n == name) {
             Some(n) => FdSpec::Named(FdKind::OtherDialect(n)),
-            None => return Err("invalid fd type given in -d option".to_string()),
+            None => {
+                return Err(FdNameError::Kind(
+                    "invalid fd type given in -d option".to_string(),
+                ))
+            }
         },
     })
 }
@@ -1716,7 +2122,10 @@ fn fd_named(name: &str) -> Result<FdSpec, String> {
 /// trailing comma ends the list (DIVERGENCES 49). Anything else, a space
 /// included, makes the whole argument illegal: `illegal process ID: 1 2`. An
 /// ID too large for 32 bits is too, where the C's `int` wraps it.
-fn parse_id_list(value: &str, what: &str) -> Result<Vec<(bool, u32)>, String> {
+///
+/// The items before an illegal one come back with its error, which ends the
+/// list, as `enter_id()` enters each as it reads it.
+fn parse_id_list(value: &str, what: &str) -> (Vec<(bool, u32)>, Option<String>) {
     let mut ids = Vec::new();
     let mut rest = value;
     while !rest.is_empty() {
@@ -1734,37 +2143,12 @@ fn parse_id_list(value: &str, what: &str) -> Result<Vec<(bool, u32)>, String> {
         };
         let Some(id) = id else {
             // `safestrprt(p, …)`: the whole argument, escaped.
-            return Err(quoting(&format!("illegal {what}: "), value));
+            return (ids, Some(quoting(&format!("illegal {what}: "), value)));
         };
         ids.push((excl, id));
         rest = tail;
     }
-    Ok(ids)
-}
-
-/// Order-preserving de-duplication of an inclusion list, and the C's refusal
-/// of an ID that is also excluded: `lsof: PID 1 has been included and
-/// excluded.`, measured.
-fn dedup_ids(ids: &mut Vec<u32>, excludes: &[u32], what: &str) -> Result<(), String> {
-    let mut seen = std::collections::HashSet::new();
-    ids.retain(|id| seen.insert(*id));
-    match ids.iter().find(|id| excludes.contains(id)) {
-        Some(id) => Err(format!("{what} {id} has been included and excluded.")),
-        None => Ok(()),
-    }
-}
-
-/// The errors the parse has found and read on after, printed now through
-/// `fs`'s sink, ahead of a line the parse is about to print itself — the
-/// `-S` warning, what a `+d`/`+D` or an `-e` says as it is examined, the
-/// mount table's lines — since the C prints each where it meets it:
-/// measured, `-Zx -S 0` says `-Z limited to SELinux` before `-S time (0)
-/// changed to 2`, and `-S 0 -Z` after. `told` records that the run is to end.
-fn tell_early(fs: &SafeFs, early: &mut Early, told: &mut bool) {
-    early.drain(|e| {
-        fs.tell(&format!("lsof: {e}"));
-        *told = true;
-    });
+    (ids, None)
 }
 
 /// `-u`'s list, entered as the C's `enter_uid()` enters it: item by item,
@@ -1811,7 +2195,12 @@ fn enter_users(
                     }
                 }
             }
-            return Err(format!("-u login name > {LOGINML} characters: {echo}"));
+            // An error the C reads on after, to the next item
+            // (`arg.c:1994-2004`: `err = j = 1`, then `continue`): `-u
+            // LONG,nosuch` says both (measured).
+            early.line(&format!("-u login name > {LOGINML} characters: {echo}"));
+            rest = tail;
+            continue;
         }
         let name = if name.is_empty() { "0" } else { name };
         match (host.lookup_user)(name) {
@@ -1822,6 +2211,8 @@ fn enter_users(
                     sel.uid_excludes.contains(&uid)
                 };
                 if other_side {
+                    // The C's `Error()`: at once, with no usage.
+                    early.fatal = true;
                     return Err(format!("UID {uid} has been included and excluded."));
                 }
                 if excl {
@@ -1848,68 +2239,123 @@ fn enter_users(
     Ok(())
 }
 
-fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String> {
-    match opt {
-        'p' => {
-            for (excl, pid) in parse_id_list(value, "process ID")? {
-                if excl {
-                    sel.pid_excludes.push(pid);
-                } else {
-                    sel.pids.push(pid);
-                }
-            }
-        }
-        'c' => {
-            // `enter_cmd()`: a value that opens an option is a missing value,
-            // and one that opens with `/` is a regular expression
-            // (`main.c`: `if (GOv && (*GOv == '/'))`). lsof-rs has no regex
-            // engine, and reading `/re/` as a literal command name matched
-            // nothing, silently — so it is refused, loudly, instead.
-            if value.starts_with(['-', '+']) {
-                return Err("missing -c option value".to_string());
-            }
-            if value.starts_with('/') {
-                return Err(format!(
-                    "-c {}: regular expressions (-c /RE/) are not implemented",
-                    shown(value)
-                ));
-            }
-            let (excl, name) = match value.strip_prefix('^') {
-                Some("") => return Err("option -c^ requires a name".to_string()),
-                Some(name) => (true, name),
-                None => (false, value),
-            };
-            // A name longer than the kernel keeps can never match, and the C
-            // says so rather than accepting it (`lsof_select_process()`),
-            // quoting the name with `safestrprt(…, 2)`: a space is `\x20`
-            // there, as in COMMAND (`lib/lsof.c:178-182`, measured).
-            if let Some(max) = MAX_COMMAND_WIDTH {
-                if name.len() > max {
-                    return Err(format!(
-                        "\"-c {}\" length ({}) > what system provides ({max})",
-                        Escaper::for_host().text_spaced(name),
-                        name.len()
-                    ));
-                }
-            }
-            let (this, other) = if excl {
-                (&mut sel.command_excludes, &sel.commands)
+/// The IDs [`enter_ids`] has entered in each of [`Selection`]'s four lists,
+/// the lists themselves keeping their order.
+#[derive(Default)]
+struct EnteredIds {
+    pids: std::collections::HashSet<u32>,
+    pid_excludes: std::collections::HashSet<u32>,
+    pgids: std::collections::HashSet<u32>,
+    pgid_excludes: std::collections::HashSet<u32>,
+}
+
+/// One `-p` list, or `-g`'s, entered as `enter_id()` enters it (`arg.c`):
+/// item by item, so the items before one that is illegal are entered, and
+/// that one ends the list (`illegal process ID: LIST`), the parse reading on.
+/// An ID already entered on the other side is the C's `lsof_select_pid()`
+/// refusing it where it meets it (`PID 1 has been included and excluded.`,
+/// `lib/lsof.c:1080-1090`), and the list goes on; one already entered on the
+/// same side is entered once. lsof-rs had found the conflict once every
+/// option was read, after the errors that followed it (DIVERGENCES 83).
+///
+/// `entered` holds what each of the four lists holds, so that each item is
+/// looked up in constant time: the C searches its tables linearly, and
+/// lsof-rs searching its `Vec`s had made 290 000 PIDs in 16 words take 25 s
+/// where entering them once had taken 0.03 s.
+fn enter_ids(
+    sel: &mut Selection,
+    entered: &mut EnteredIds,
+    value: &str,
+    group: bool,
+    early: &mut Early,
+) {
+    let (what, word) = if group {
+        ("process group ID", "PGID")
+    } else {
+        ("process ID", "PID")
+    };
+    let (ids, bad) = parse_id_list(value, what);
+    for (excl, id) in ids {
+        let (list, this, other) = if group {
+            if excl {
+                (
+                    &mut sel.pgid_excludes,
+                    &mut entered.pgid_excludes,
+                    &entered.pgids,
+                )
             } else {
-                (&mut sel.commands, &sel.command_excludes)
-            };
-            // Found here, at the option, as the C finds it: its
-            // `lsof_select_process()` refuses the second name as it is
-            // entered (`lib/lsof.c:155-165`), so `main.c:1042`'s check once
-            // every option is read never finds one. The C then reads on, as
-            // after any error in its loop; lsof-rs stops (DIVERGENCES 83).
-            if other.iter().any(|o| o == name) {
-                let name = shown(name);
-                return Err(format!("-c^{name} and -c{name} conflict."));
+                (&mut sel.pgids, &mut entered.pgids, &entered.pgid_excludes)
             }
-            this.push(name.to_string());
+        } else if excl {
+            (
+                &mut sel.pid_excludes,
+                &mut entered.pid_excludes,
+                &entered.pids,
+            )
+        } else {
+            (&mut sel.pids, &mut entered.pids, &entered.pid_excludes)
+        };
+        if other.contains(&id) {
+            early.line(&format!("{word} {id} has been included and excluded."));
+        } else if this.insert(id) {
+            list.push(id);
         }
-        _ => unreachable!(),
     }
+    if let Some(bad) = bad {
+        early.line(&bad);
+    }
+}
+
+/// One `-c` value, entered as `enter_cmd()` and `lsof_select_process()`
+/// enter it; its error, if any, is one the C reads on after.
+fn enter_command(sel: &mut Selection, value: &str) -> Result<(), String> {
+    // `enter_cmd()`: a value that opens an option is a missing value, and one
+    // that opens with `/` is a regular expression (`main.c`: `if (GOv &&
+    // (*GOv == '/'))`). lsof-rs has no regex engine, and reading `/re/` as a
+    // literal command name matched nothing, silently — so it is refused,
+    // loudly, instead.
+    if value.starts_with(['-', '+']) {
+        return Err("missing -c option value".to_string());
+    }
+    if value.starts_with('/') {
+        return Err(format!(
+            "-c {}: regular expressions (-c /RE/) are not implemented",
+            shown(value)
+        ));
+    }
+    let (excl, name) = match value.strip_prefix('^') {
+        Some("") => return Err("option -c^ requires a name".to_string()),
+        Some(name) => (true, name),
+        None => (false, value),
+    };
+    // A name longer than the kernel keeps can never match, and the C says so
+    // rather than accepting it (`lsof_select_process()`), quoting the name
+    // with `safestrprt(…, 2)`: a space is `\x20` there, as in COMMAND
+    // (`lib/lsof.c:178-182`, measured).
+    if let Some(max) = MAX_COMMAND_WIDTH {
+        if name.len() > max {
+            return Err(format!(
+                "\"-c {}\" length ({}) > what system provides ({max})",
+                Escaper::for_host().text_spaced(name),
+                name.len()
+            ));
+        }
+    }
+    let (this, other) = if excl {
+        (&mut sel.command_excludes, &sel.commands)
+    } else {
+        (&mut sel.commands, &sel.command_excludes)
+    };
+    // Found here, at the option, as the C finds it: its
+    // `lsof_select_process()` refuses the second name as it is entered
+    // (`lib/lsof.c:155-165`), so `main.c:1042`'s check once every option is
+    // read never finds one. The C then reads on, as after any error in its
+    // loop, and so does lsof-rs (DIVERGENCES 83).
+    if other.iter().any(|o| o == name) {
+        let name = shown(name);
+        return Err(format!("-c^{name} and -c{name} conflict."));
+    }
+    this.push(name.to_string());
     Ok(())
 }
 
@@ -1922,28 +2368,39 @@ fn apply_value(sel: &mut Selection, opt: char, value: &str) -> Result<(), String
 /// so on Linux `-g <pgid>` selected the wrong processes, `-g ^N` was an error,
 /// and a bare `-g` was refused. Windows has no process groups and keeps the
 /// PPID reading, which is its own extension (`docs/feature-parity-plan.md`).
-fn apply_g(sel: &mut Selection, columns: &mut Columns, value: Option<&str>) -> Result<(), String> {
+/// Each error is one the parse reads on after, as the C's `enter_id()`'s.
+fn apply_g(
+    sel: &mut Selection,
+    entered: &mut EnteredIds,
+    columns: &mut Columns,
+    value: Option<&str>,
+    early: &mut Early,
+) {
     if cfg!(windows) {
         let Some(value) = value else {
-            return Err("option -g requires a value".to_string());
+            early.line("option -g requires a value");
+            return;
         };
-        for (excl, ppid) in parse_id_list(value, "-g ppid")? {
-            if excl {
-                return Err(format!("invalid -g ppid: ^{ppid}"));
+        let (ppids, bad) = parse_id_list(value, "-g ppid");
+        if bad.is_none() {
+            for (excl, ppid) in ppids {
+                if excl {
+                    early.line(&format!("invalid -g ppid: ^{ppid}"));
+                    return;
+                }
+                sel.ppid_filter.push(ppid);
             }
-            sel.ppid_filter.push(ppid);
         }
-        return Ok(());
+        if let Some(bad) = bad {
+            early.line(&bad);
+        }
+        return;
     }
     columns.pgid = true;
-    for (excl, pgid) in parse_id_list(value.unwrap_or(""), "process group ID")? {
-        if excl {
-            sel.pgid_excludes.push(pgid);
-        } else {
-            sel.pgids.push(pgid);
-        }
+    // A bare `-g` enters nothing (`main.c:550-558`: no `GOv`, no `enter_id()`).
+    if let Some(value) = value {
+        enter_ids(sel, entered, value, true, early);
     }
-    Ok(())
 }
 
 /// The longest login name the C takes from `-u`, `LOGINML` (`common.h`).
@@ -2003,6 +2460,21 @@ fn value_word(chars: &[char], j: usize, args: &[String], i: usize) -> Option<(St
     args.get(i + 1)
         .filter(|next| !next.starts_with(['-', '+']))
         .map(|next| (next.clone(), true))
+}
+
+/// The value of an option whose rule letter carries a `:` and which takes
+/// whatever `GetOpt` hands it (`+c`, `+d`/`+D`, `-d`, `-e`, `-p`, `-u`,
+/// `-c`): the rest of this word, or else the next word, whatever it opens
+/// with, consumed. `--` is no value (`GetOpt`: `if (strcmp(GOv, "--") == 0)
+/// GOv = NULL`), and is left to end the options; with no word left there is
+/// none.
+fn required_value(chars: &[char], j: usize, args: &[String], i: &mut usize) -> Option<String> {
+    if j + 1 < chars.len() {
+        return Some(chars[j + 1..].iter().collect());
+    }
+    let next = args.get(*i + 1).filter(|w| *w != "--")?;
+    *i += 1;
+    Some(next.clone())
 }
 
 /// [`value_word`], taken: the next word is consumed when it is the value.
@@ -2072,13 +2544,16 @@ fn take_digits(
 /// default. An empty value is a value with no letters (`main.c` tests `GOv`
 /// for NULL, not for empty): `+T ''` selects nothing, like `-T`, and a unix
 /// socket loses its `(CONNECTED)` (DIVERGENCES 116, measured).
-fn parse_tcp_info(letters: Option<&str>, plus: bool) -> Result<TcpInfoFlags, String> {
+///
+/// A letter it does not know is the C's error, each, and the parse reads on
+/// after (`main.c:928-935`), the letters it knows still selected.
+fn parse_tcp_info(letters: Option<&str>, plus: bool, early: &mut Early) -> TcpInfoFlags {
     let Some(letters) = letters else {
-        return Ok(if plus {
+        return if plus {
             TcpInfoFlags::DEFAULT
         } else {
             TcpInfoFlags::default()
-        });
+        };
     };
     let mut flags = TcpInfoFlags::default();
     for ch in letters.chars() {
@@ -2087,15 +2562,10 @@ fn parse_tcp_info(letters: Option<&str>, plus: bool) -> Result<TcpInfoFlags, Str
             'q' => flags.queue = true,
             's' => flags.state = true,
             'w' if HAS_TCP_WINDOW => flags.window = true,
-            other => {
-                return Err(quoting(
-                    "unsupported TCP/TPI info selection: ",
-                    &other.to_string(),
-                ));
-            }
+            other => early.letter(Early::TCP_TPI, other),
         }
     }
-    Ok(flags)
+    flags
 }
 
 /// Add one `-s <protocol>:<states>` value to `filter`, as the C's
@@ -2106,39 +2576,54 @@ fn parse_tcp_info(letters: Option<&str>, plus: bool) -> Result<TcpInfoFlags, Str
 /// * A state is a name from [`tcp_state_table`] in any case, `^` excluding
 ///   it. An unknown name, an empty one (`TCP:A,,B`) and the same name twice
 ///   in one list — across `-s` options too, since the C's tables are global
-///   — are each fatal.
-/// * `UDP:` with names is refused with the message the man page promises for
-///   a protocol whose states are unavailable. The C on Linux has a UDP table
-///   whose first slot is empty and `strcasecmp`s it: every `-s UDP:<state>`
-///   is a segfault, measured (DIVERGENCES 32). Windows has no UDP states.
-fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String> {
+///   — are each an error the C reads on after, to the next name and the
+///   next option (`arg.c`: `err = 1; continue`), the names it knows still
+///   entered: `-s tcp:FOO,BAR,,^` says four lines (measured). A comma that
+///   ends the list ends it, and is no empty name (`-s tcp:LISTEN,`).
+/// * `UDP:` names go through the same loop. An empty one is the C's `NULL
+///   UDP state name in: V`, read on after (`-s UDP:,,` says it twice,
+///   measured). The first that is not empty is refused with the message the
+///   man page promises for a protocol whose states are unavailable, and ends
+///   the list: the C on Linux has a UDP table whose first slot is empty and
+///   `strcasecmp`s it, so every `-s UDP:<state>` is a segfault, measured
+///   (DIVERGENCES 32). Windows has no UDP states.
+fn parse_state_spec(filter: &mut StateFilter, value: &str, early: &mut Early) {
     let lower = value.get(..4).map(str::to_ascii_lowercase);
     let proto = match lower.as_deref() {
         Some("tcp:") => "TCP",
         Some("udp:") => "UDP",
-        _ => return Err(format!("unknown -s protocol: \"{}\"", shown(value))),
+        _ => return early.line(&format!("unknown -s protocol: \"{}\"", shown(value))),
     };
-    let names = &value[4..];
+    let names = value.get(4..).unwrap_or("");
     if names.is_empty() {
-        return Err(quoting(&format!("no {proto} state names in: "), value));
+        return early.line(&quoting(&format!("no {proto} state names in: "), value));
     }
-    if proto == "UDP" {
-        return Err(quoting("no UDP state names available: ", value));
-    }
-    for term in names.split(',') {
-        let (exclude, name) = match term.strip_prefix('^') {
-            Some(rest) => (true, rest),
-            None => (false, term),
+    // What an empty name says quotes the whole value: made once.
+    let mut null_line: Option<String> = None;
+    let mut rest = names;
+    while !rest.is_empty() {
+        let (exclude, term) = match rest.strip_prefix('^') {
+            Some(term) => (true, term),
+            None => (false, rest),
         };
+        let (name, tail) = term.split_once(',').unwrap_or((term, ""));
+        rest = tail;
         if name.is_empty() {
-            return Err(quoting("NULL TCP state name in: ", value));
+            let line = null_line
+                .get_or_insert_with(|| quoting(&format!("NULL {proto} state name in: "), value));
+            early.line(line);
+            continue;
+        }
+        if proto == "UDP" {
+            return early.line(&quoting("no UDP state names available: ", value));
         }
         let Some(state) = tcp_state_table()
             .iter()
             .copied()
             .find(|st| st.as_str().eq_ignore_ascii_case(name))
         else {
-            return Err(quoting("unknown TCP state name: ", name));
+            early.line(&quoting("unknown TCP state name: ", name));
+            continue;
         };
         let list = if exclude {
             &mut filter.exclude
@@ -2147,11 +2632,11 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str) -> Result<(), String>
         };
         if list.contains(&state) {
             let which = if exclude { "exclusion" } else { "inclusion" };
-            return Err(quoting(&format!("duplicate TCP {which}: "), name));
+            early.line(&quoting(&format!("duplicate TCP {which}: "), name));
+            continue;
         }
         list.push(state);
     }
-    Ok(())
 }
 
 /// The most address specifications the C takes, across every `-i`:
@@ -2932,21 +3417,35 @@ mod tests {
         assert!(err(&["-c", "sle", "-c", "^sleep"]).is_none());
         // Found at the option, where the C finds it, not once every option
         // is read: the first line is the C's either way round, and a name
-        // excluded twice is one conflict (measured). Its later errors are
-        // lost, as after every error found in the loop: `-c^x -cx -x` says
-        // nothing of `-x`, where the C adds `-x must accompany +d or +D`
-        // (DIVERGENCES 83).
-        for (argv, first) in [
-            (&["-c^x", "-cx", "-x", "q"][..], "-c^x and -cx conflict."),
+        // excluded twice is one conflict (measured). The parse reads on
+        // after it, as after every error found in the loop, so the errors
+        // after it are printed too: `-c^x -cx -x` adds `-x must accompany +d
+        // or +D`, as the C does (DIVERGENCES 83, measured).
+        let conflict = "-c^x and -cx conflict.";
+        for (argv, want) in [
+            (
+                &["-c^x", "-cx", "-x", "q"][..],
+                vec![conflict, "unknown cross-over option: q"],
+            ),
             (
                 &["-x", "q", "-c^x", "-cx"][..],
-                "unknown cross-over option: q",
+                vec!["unknown cross-over option: q", conflict],
             ),
-            (&["-c^x", "-c^x", "-cx"][..], "-c^x and -cx conflict."),
-            (&["-c^x", "-cx", "-x"][..], "-c^x and -cx conflict."),
-            (&["-c^x", "-cx", "-o", "-s"][..], "-c^x and -cx conflict."),
+            (&["-c^x", "-c^x", "-cx"][..], vec![conflict]),
+            (
+                &["-c^x", "-cx", "-x"][..],
+                vec![conflict, "-x must accompany +d or +D"],
+            ),
+            (
+                &["-c^x", "-cx", "-o", "-s"][..],
+                vec![conflict, "-o and -s are mutually exclusive"],
+            ),
+            (
+                &["-c^a", "-c^b", "-ca", "-cb"][..],
+                vec!["-c^a and -ca conflict.", "-c^b and -cb conflict."],
+            ),
         ] {
-            assert_eq!(err(argv).as_deref(), Some(first), "{argv:?}");
+            assert_eq!(err(argv), Some(want.join("\nlsof: ")), "{argv:?}");
         }
         if cfg!(target_os = "linux") {
             // `comm` holds 15 bytes; the C refuses 16 with this text, for an
@@ -3432,7 +3931,6 @@ mod tests {
             &["+c"][..],
             &["+c", ""][..],
             &["+c", "x"][..],
-            &["+cx"][..],
             &["+c", "-p", "1"][..],
             &["+c", "\x1b[2J"][..],
             &["+c", " 1"][..],
@@ -3443,6 +3941,21 @@ mod tests {
                 "{argv:?}"
             );
         }
+        // The value is given back, and read again (`main.c:321-325`): an
+        // attached one as option letters, so `+cx` is `-x` alone too, and
+        // `+cW` an illegal letter (measured).
+        assert_eq!(
+            err(&["+cx"]).as_deref(),
+            Some("+c not followed by width number\nlsof: -x must accompany +d or +D")
+        );
+        assert_eq!(
+            err(&["+cW"]).as_deref(),
+            Some("+c not followed by width number\nlsof: illegal option character: W")
+        );
+        assert_eq!(
+            err(&["+c", "-W"]).as_deref(),
+            Some("+c not followed by width number\nlsof: illegal option character: W")
+        );
         let width = |argv: &[&str]| run(argv).0.command_width;
         assert_eq!(width(&["+c", "1x"]), CommandWidth::Chars(1));
         assert_eq!(width(&["+c1\x1b[2J"]), CommandWidth::Chars(1));
@@ -4097,6 +4610,128 @@ mod tests {
         }
     }
 
+    /// A walk stops at whichever limit it meets first, entries or the bytes
+    /// of their names, and never goes below either.
+    #[test]
+    fn a_walk_budget_counts_entries_and_name_bytes() {
+        let mut b = WalkBudget::new();
+        let mut taken = 0;
+        while b.take(1) {
+            taken += 1;
+        }
+        assert_eq!(taken, WALK_ENTRIES);
+        let mut b = WalkBudget::new();
+        assert!(b.take(WALK_NAME_BYTES - 1));
+        assert!(b.take(1));
+        assert!(!b.take(1), "no bytes left");
+        assert_eq!(b.entries, WALK_ENTRIES - 2);
+        let mut b = WalkBudget::new();
+        assert!(!b.take(WALK_NAME_BYTES + 1), "one name past the limit");
+        assert_eq!((b.entries, b.bytes), (WALK_ENTRIES, WALK_NAME_BYTES));
+    }
+
+    /// DIVERGENCES 82: where the run identifies files, a `+d`/`+D` is walked
+    /// where it stands, as the C's `enter_dir()` walks it, so that what the
+    /// walk says comes in the C's order among the parse's own lines and its
+    /// errors, and is said even when the parse then ends in an error (all
+    /// measured against the C, a link to itself in the directory under `-x
+    /// l`). Under [`HostChecks::DEFERRED`] nothing is walked at the parse.
+    #[cfg(unix)]
+    #[test]
+    fn a_plus_d_is_walked_where_it_stands() {
+        let dir =
+            std::env::temp_dir().join(format!("lsof-rs-walk-at-parse-{}", std::process::id()));
+        // Removed however the test ends, a failed assertion included.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let _gone = Gone(dir.clone());
+        std::os::unix::fs::symlink("self", dir.join("self")).unwrap();
+        std::fs::write(dir.join("f"), "").unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let walking = |argv: &[&str]| {
+            let said = std::cell::RefCell::new(Vec::new());
+            let say = |l: &str| said.borrow_mut().push(l.to_string());
+            let fs = SafeFs::new(&lsof_core::InProcess, &say);
+            let identifies = || true;
+            let host = HostChecks {
+                identifies_paths: &identifies,
+                ..HostChecks::DEFERRED
+            };
+            let got = parse_reporting(
+                argv.iter().map(|s| s.to_string()).collect(),
+                &fs,
+                &no_mounts,
+                &host,
+            )
+            .0;
+            (got, said.into_inner())
+        };
+        let looped = format!(
+            "lsof: WARNING: can't stat({}) symbolc link: ",
+            dir.join("self").display()
+        );
+        let is_loop = |l: &str| l.starts_with(&looped);
+        // Before the `-S` warning after it, after the one before it.
+        let (got, said) = walking(&["-x", "l", "+d", &d, "-S", "0"]);
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(is_loop(&said[0]), "{said:?}");
+        assert_eq!(said[1], "lsof: WARNING: -S time (0) changed to 2");
+        let walked = match got {
+            Ok(Action::Run { selection, .. }) => selection.dir_args[0].walked.clone(),
+            other => panic!("{other:?}"),
+        };
+        // The link's `stat` failed, so it is no item; the file is one.
+        let walked = walked.expect("walked at the parse");
+        assert_eq!(walked.len(), 1, "{walked:?}");
+        assert_eq!(walked[0].path, dir.join("f"));
+        assert!(walked[0].stat.is_some());
+        let (_, said) = walking(&["-S", "0", "-x", "l", "+d", &d]);
+        assert_eq!(said[0], "lsof: WARNING: -S time (0) changed to 2");
+        assert!(is_loop(&said[1]), "{said:?}");
+        // Said before an error the parse then ends in, which follows it.
+        for (after, want) in [
+            (&["-W"][..], "illegal option character: W"),
+            (&["-p", "abc"], "illegal process ID: abc"),
+            (
+                &["+d", "/nonexistent-lsof-rs"],
+                "WARNING: can't stat(/nonexistent-lsof-rs): No such file or directory",
+            ),
+        ] {
+            let argv: Vec<&str> = ["-x", "l", "+D", d.as_str()]
+                .into_iter()
+                .chain(after.iter().copied())
+                .collect();
+            let (got, said) = walking(&argv);
+            assert!(said.len() == 1 && is_loop(&said[0]), "{argv:?} {said:?}");
+            let mut lines = Vec::new();
+            match got {
+                Err(e) => e.each_line(|l| lines.push(l.to_string())),
+                Ok(a) => panic!("{a:?}"),
+            }
+            // Under miri, whose strerror adds `(os error N)`, those words first.
+            assert_eq!(lines.len(), 1, "{argv:?} {lines:?}");
+            assert!(lines[0].starts_with(want), "{argv:?} {lines:?}");
+        }
+        // A `-w` before it mutes the walk; one after it does not.
+        let (_, said) = walking(&["-w", "-x", "l", "+d", &d]);
+        assert!(said.is_empty(), "{said:?}");
+        let (_, said) = walking(&["-x", "l", "+d", &d, "-w"]);
+        assert!(said.len() == 1 && is_loop(&said[0]), "{said:?}");
+        // Deferred, nothing is walked, and nothing said.
+        let (got, said) = parse_saying(&["-x", "l", "+d", &d]);
+        assert!(said.is_empty(), "{said:?}");
+        match got {
+            Ok(Action::Run { selection, .. }) => assert!(selection.dir_args[0].walked.is_none()),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn plus_d_is_one_level_and_plus_d_upper_is_the_tree() {
         // lsof distinguishes them: `+d` reports the directory and its
@@ -4259,15 +4894,21 @@ mod tests {
             parse(vec!["-x".into(), "-p".into(), "1".into()]).unwrap_err(),
             "-x must accompany +d or +D"
         );
-        assert_eq!(
-            parse(vec!["-xq".into(), "+d".into(), a_dir()]).unwrap_err(),
-            "unknown cross-over option: q"
-        );
+        // The error is printed where it is found, before the `+d` is
+        // examined, and the run still ends (DIVERGENCES 83).
+        let d = a_dir();
+        let (got, said) = parse_saying(&["-xq", "+d", &d]);
+        assert_eq!(got.unwrap_err(), "");
+        assert_eq!(said, ["lsof: unknown cross-over option: q"]);
         // A known letter alongside an unknown one still fails, and names the
-        // unknown one — the C loops over the value rather than testing it whole.
+        // unknown one — the C loops over the value rather than testing it
+        // whole, and names each: `-x qz` is two lines.
+        let (got, said) = parse_saying(&["-xfz", "+d", &d]);
+        assert_eq!(got.unwrap_err(), "");
+        assert_eq!(said, ["lsof: unknown cross-over option: z"]);
         assert_eq!(
-            parse(vec!["-xfz".into(), "+d".into(), a_dir()]).unwrap_err(),
-            "unknown cross-over option: z"
+            parse(vec!["-x".into(), "qz".into()]).unwrap_err(),
+            "unknown cross-over option: q\nlsof: unknown cross-over option: z"
         );
         // `+D` satisfies it too, and the check is order-independent.
         assert!(parse(vec!["+D".into(), a_dir(), "-x".into()]).is_ok());
@@ -4470,12 +5111,24 @@ mod tests {
                 "{argv:?}"
             );
         }
-        // A letter the C's table lacks is fatal and named, first one first.
+        // Each letter the C's table lacks is its error, named in order, and
+        // the parse reads on (DIVERGENCES 83, measured).
         for (argv, want) in [
             (&["-Fpx"][..], "unknown field: x"),
             (&["-F", "/tmp"][..], "unknown field: /"),
-            (&["-F", "p677"][..], "unknown field: 6"),
+            (
+                &["-F", "p677"][..],
+                "unknown field: 6\nlsof: unknown field: 7\nlsof: unknown field: 7",
+            ),
             (&["-Fp?"][..], "unknown field: ?"),
+            (
+                &["-F", "q", "-t"][..],
+                "unknown field: q\nlsof: -F and -t are mutually exclusive",
+            ),
+            (
+                &["-F", "oq", "-s"][..],
+                "unknown field: q\nlsof: -o and -s are mutually exclusive",
+            ),
         ] {
             assert_eq!(
                 parse(argv.iter().map(|s| s.to_string()).collect()).unwrap_err(),
@@ -4561,17 +5214,25 @@ mod tests {
         assert_eq!(xover(&["+d", &d, "-x", "f"]), (true, false));
         assert_eq!(xover(&["+d", &d, "-x", "l"]), (false, true));
         assert_eq!(xover(&["-x", "+d", &d]), (true, true));
+        // Each letter of the value its error, as the C names each (measured).
+        let each = |kind: &str, letters: &str| {
+            letters
+                .chars()
+                .map(|c| format!("{kind}{c}"))
+                .collect::<Vec<_>>()
+                .join("\nlsof: ")
+        };
         assert_eq!(
             columns(&["+d", &d, "-x", "/tmp"]).unwrap_err(),
-            "unknown cross-over option: /"
+            each("unknown cross-over option: ", "/tmp")
         );
         assert_eq!(
             columns(&["-f", "/dev/null"]).unwrap_err(),
-            "unknown file struct option: /"
+            each("unknown file struct option: ", "/dev/null")
         );
         assert_eq!(
             columns(&["+f", "/dev/null"]).unwrap_err(),
-            "unknown file struct option: /"
+            each("unknown file struct option: ", "/dev/null")
         );
         // `g` is the C's file-flags letter (DIVERGENCES 46): `-f g` hides the
         // flags, which is the default, and leaves the path arguments alone.
@@ -5048,6 +5709,7 @@ mod tests {
         let host = HostChecks {
             lookup_user: &lookup,
             selinux_enabled: &enabled,
+            identifies_paths: &walk_deferred,
         };
         parse_with_host(
             argv.iter().map(|s| s.to_string()).collect(),
@@ -5296,10 +5958,7 @@ mod tests {
             (&["+W"], vec![ill("W")]),
             (&["-Wz"], vec![ill("W"), ill("z")]),
             (&["-W", "-W"], vec![ill("W"), ill("W")]),
-            (
-                &["-Wp"],
-                vec![ill("W"), "option -p requires a value".into()],
-            ),
+            (&["-Wp"], vec![ill("W"), "no process ID specified".into()]),
             (&["-a-W"], vec![ill("-"), ill("W")]),
             (&["-+"], vec![ill("+")]),
             (&["+,"], vec![ill(",")]),
@@ -5411,6 +6070,521 @@ mod tests {
         }
     }
 
+    /// DIVERGENCES 83: every error the C finds inside its option loop it
+    /// prints and reads on after (`err = 1`), so each of these says its own
+    /// line and then what the options after it say, in option order, before
+    /// the usage; and an option it gives its value back to reads that value
+    /// again. Every case measured against the C (`-x qz -W`, `-L 3x`, …).
+    #[test]
+    fn every_error_the_c_reads_past_is_read_past() {
+        let ill = "illegal option character: W";
+        let x = "-x must accompany +d or +D";
+        let cases: Vec<(&[&str], Vec<&str>)> = vec![
+            (&["+c", "-W"], vec!["+c not followed by width number", ill]),
+            (&["+cW"], vec!["+c not followed by width number", ill]),
+            (&["-L", "3", "-W"], vec!["no number may follow -L", ill]),
+            (&["-L", "3x"], vec!["no number may follow -L", x]),
+            (&["-L3x"], vec!["no number may follow -L", x]),
+            (
+                &["-x", "qz", "-W"],
+                vec![
+                    "unknown cross-over option: q",
+                    "unknown cross-over option: z",
+                    ill,
+                ],
+            ),
+            (&["-x", "q"], vec!["unknown cross-over option: q"]),
+            (&["-x", "qf"], vec!["unknown cross-over option: q", x]),
+            (
+                &["-f", "qz", "-W"],
+                vec![
+                    "unknown file struct option: q",
+                    "unknown file struct option: z",
+                    ill,
+                ],
+            ),
+            (
+                &["-K", "x", "-W"],
+                vec!["-K not followed by i (but by x)", ill],
+            ),
+            (&["-F", "zq", "-W"], vec!["unknown field: q", ill]),
+            (
+                &["-i", "foo:bar", "-W"],
+                vec!["unknown protocol name (foo) in: -i foo:bar", ill],
+            ),
+            (
+                &["-d", "^1,2", "-W"],
+                vec!["include in an exclude -d list: 2", ill],
+            ),
+            (
+                &["-d", "^2,1,foo", "-W"],
+                vec![
+                    "include in an exclude -d list: 1",
+                    "include in an exclude -d list: foo",
+                    ill,
+                ],
+            ),
+            (
+                &["-d", "1-0", "-W"],
+                vec!["-d FD range's low >= its high: 1-0", ill],
+            ),
+            (
+                &["-d", "1-0x", "-W"],
+                vec!["non-digit in -d FD range: 1-0x", ill],
+            ),
+            (&["-w", "-d", "1,^2", "-W"], vec![ill]),
+            (&["-d", "-W"], vec!["illegal FD range for -d: -W"]),
+            (&["-p", "abc", "-W"], vec!["illegal process ID: abc", ill]),
+            (
+                &["-p", "1,abc", "-p", "^1"],
+                vec![
+                    "illegal process ID: 1,abc",
+                    "PID 1 has been included and excluded.",
+                ],
+            ),
+            (
+                &["-p", "1,^1", "-W"],
+                vec!["PID 1 has been included and excluded.", ill],
+            ),
+            (&["-p", "1", "-p", "1"], vec![]),
+            // Windows reads `-g` as a parent PID, and says so.
+            (
+                &["-g", "abc", "-W"],
+                vec![
+                    if cfg!(windows) {
+                        "illegal -g ppid: abc"
+                    } else {
+                        "illegal process group ID: abc"
+                    },
+                    ill,
+                ],
+            ),
+            // Each item of a list is read on after, to the next.
+            (
+                &["-d", "1-0,3-2", "-W"],
+                vec![
+                    "-d FD range's low >= its high: 1-0",
+                    "-d FD range's low >= its high: 3-2",
+                    ill,
+                ],
+            ),
+            (
+                &["-d", "9999999999,8888888888", "-W"],
+                vec![
+                    "-d FD number exceeds INT_MAX: 9999999999",
+                    "-d FD number exceeds INT_MAX: 8888888888",
+                    ill,
+                ],
+            ),
+            (
+                &["-s", "tcp:LISTEN,LISTEN,FOO", "-W"],
+                vec![
+                    "duplicate TCP inclusion: LISTEN",
+                    "unknown TCP state name: FOO",
+                    ill,
+                ],
+            ),
+            // `UDP:` runs the same loop: an empty name is the C's own line,
+            // read on after; the first that is not ends the list with
+            // lsof-rs's refusal, where the C segfaults (DIVERGENCES 32).
+            (
+                &["-s", "UDP:,", "-W"],
+                vec!["NULL UDP state name in: UDP:,", ill],
+            ),
+            (
+                &["-s", "udp:,^,,", "-W"],
+                vec![
+                    "NULL UDP state name in: udp:,^,,",
+                    "NULL UDP state name in: udp:,^,,",
+                    "NULL UDP state name in: udp:,^,,",
+                    ill,
+                ],
+            ),
+            (
+                &["-s", "UDP:^", "-W"],
+                vec!["NULL UDP state name in: UDP:^", ill],
+            ),
+            (
+                &["-s", "UDP:,Idle,,x", "-W"],
+                vec![
+                    "NULL UDP state name in: UDP:,Idle,,x",
+                    "no UDP state names available: UDP:,Idle,,x",
+                    ill,
+                ],
+            ),
+            (
+                &["-s", "tcp:FOO,BAR,,^", "-W"],
+                vec![
+                    "unknown TCP state name: FOO",
+                    "unknown TCP state name: BAR",
+                    "NULL TCP state name in: tcp:FOO,BAR,,^",
+                    "NULL TCP state name in: tcp:FOO,BAR,,^",
+                    ill,
+                ],
+            ),
+            (
+                &["-s", "tcp:LISTEN,FOO", "-s", "tcp:^LISTEN"],
+                vec![
+                    "unknown TCP state name: FOO",
+                    "can't include and exclude TCP state: LISTEN",
+                ],
+            ),
+            (
+                &["-s", "foo", "-W"],
+                vec!["unknown -s protocol: \"foo\"", ill],
+            ),
+            (
+                &["-e", "rel", "-x"],
+                vec!["-e not followed by a file system path: \"rel\"", x],
+            ),
+            (
+                &["-e", "-W"],
+                vec!["-e not followed by a file system path: \"-W\""],
+            ),
+            (
+                &["-e", "--", "-W"],
+                vec!["-e not followed by a file system path: \"\""],
+            ),
+            (&["-x", "-p"], vec!["no process ID specified", x]),
+            (&["-x", "-d"], vec!["no file descriptor specified", x]),
+            (&["-x", "-u"], vec!["no UIDs specified", x]),
+            (&["-x", "-c"], vec!["missing -c option value", x]),
+            (&["-p", "--"], vec!["no process ID specified"]),
+            (
+                &["-c", "aaaaaaaaaaaaaaaaaaaa", "-W"],
+                if cfg!(target_os = "linux") {
+                    vec![
+                        "\"-c aaaaaaaaaaaaaaaaaaaa\" length (20) > what system provides (15)",
+                        ill,
+                    ]
+                } else if cfg!(target_os = "freebsd") {
+                    vec![
+                        "\"-c aaaaaaaaaaaaaaaaaaaa\" length (20) > what system provides (19)",
+                        ill,
+                    ]
+                } else {
+                    vec![ill]
+                },
+            ),
+        ];
+        for (argv, want) in cases {
+            let got = parse_on_host(argv, false);
+            if want.is_empty() {
+                assert!(got.is_ok(), "{argv:?}");
+                continue;
+            }
+            // `-T z` is no letter on Linux and FreeBSD only, `+c 99` too
+            // wide only where the system says how wide.
+            assert_eq!(error_lines(got), want, "{argv:?}");
+        }
+        assert_eq!(
+            error_lines(parse_on_host(&["-T", "zq", "-W"], false)),
+            ["unsupported TCP/TPI info selection: z", ill]
+        );
+        if cfg!(target_os = "linux") {
+            for argv in [&["+c", "99", "-W"][..], &["+c", "99x", "-W"]] {
+                assert_eq!(
+                    error_lines(parse_on_host(argv, false)),
+                    ["+c 99 > what system provides (15)", ill],
+                    "{argv:?}"
+                );
+            }
+        }
+        // A login too long is said, and the list read on (`arg.c:1994-2004`).
+        let long = "a".repeat(LOGINML + 1);
+        assert_eq!(
+            error_lines(parse_on_host(&["-u", &format!("{long},nosuch")], false)),
+            [
+                format!("-u login name > {LOGINML} characters: {long}"),
+                "can't get UID for nosuch".to_string()
+            ]
+        );
+        // A `-s` list that ends in a comma is no error (measured).
+        assert!(parse_on_host(&["-s", "tcp:LISTEN,"], false).is_ok());
+        // A refused `+d` takes the rest of its word as its value, which is
+        // not read again as letters (`+d/nonexist` is one line, measured).
+        // Unix only: the stat's words are the host's. Under miri, whose
+        // strerror adds `(os error 2)` itself, those words come first.
+        if cfg!(unix) {
+            let got = error_lines(parse_on_host(&["+d/nonexist", "-W"], false));
+            let want = "WARNING: can't stat(/nonexist): No such file or directory";
+            assert_eq!(got.len(), 2, "{got:?}");
+            assert!(
+                got[0] == want || (cfg!(miri) && got[0].starts_with(want)),
+                "{got:?}"
+            );
+            assert_eq!(got[1], ill, "{got:?}");
+        }
+    }
+
+    /// The two errors the C's `Error()` ends the run at, at once, before
+    /// `usage()` and so before any help (DIVERGENCES 83, measured): they are
+    /// fatal, the others are not, and a later option is never read.
+    #[test]
+    fn the_cs_error_exits_are_fatal() {
+        let ended = |argv: &[&str]| {
+            let lookup = |v: &str| match v.parse() {
+                Ok(uid) => UserLookup::Uid(uid),
+                Err(_) => UserLookup::Unknown,
+            };
+            let host = HostChecks {
+                lookup_user: &lookup,
+                ..HostChecks::DEFERRED
+            };
+            let (got, reports) = parse_reporting(
+                argv.iter().map(|s| s.to_string()).collect(),
+                &SafeFs::in_process(),
+                &no_mounts,
+                &host,
+            );
+            let e = got.expect_err("an error");
+            (e.is_fatal(), e.to_string(), reports.help)
+        };
+        assert_eq!(
+            ended(&["-d", "foo", "-W", "-h"]),
+            (
+                true,
+                "invalid fd type given in -d option".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            ended(&["-W", "-d", "1,foo"]),
+            (
+                true,
+                "illegal option character: W\nlsof: invalid fd type given in -d option".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            ended(&["-h", "-u", "0,^0", "-W"]),
+            (
+                true,
+                "UID 0 has been included and excluded.".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            ended(&["-W", "-h"]),
+            (false, "illegal option character: W".to_string(), true)
+        );
+        // Under `-w` a mixture is said in silence, and still ends the run.
+        assert_eq!(ended(&["-w", "-d", "1,^2"]), (false, String::new(), false));
+        // Where users are selected by name ([`UserLookup::ByName`], Windows'
+        // and `parse()`'s), the same UID on both sides is found once every
+        // option is read, and is as fatal.
+        let (got, _) = parse_reporting(
+            ["-u", "0", "-u", "^0", "-h"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            &SafeFs::in_process(),
+            &no_mounts,
+            &HostChecks::DEFERRED,
+        );
+        let e = got.expect_err("an error");
+        assert!(e.is_fatal());
+        assert_eq!(e.to_string(), "UID 0 has been included and excluded.");
+    }
+
+    /// What the parse holds of the errors it reads on after is printed
+    /// through its sink, in order, once it passes [`Early::SPILL`] at a
+    /// word's end, so that it stays bounded whatever the arguments repeat
+    /// (DIVERGENCES 83): every line is still said, once, in order.
+    #[test]
+    fn read_on_errors_spill_through_the_sink_in_order() {
+        // Each word is a few thousand letters `-x` refuses, each three bytes
+        // held: enough words to pass the limit, and under miri, which takes
+        // minutes over what takes milliseconds here, a few hundred letters.
+        let (letters, words) = if cfg!(miri) { (500, 4) } else { (4_000, 120) };
+        let mut argv = Vec::new();
+        for k in 0..words {
+            argv.push("-x".to_string());
+            argv.push(if k % 2 == 0 { "q" } else { "z" }.repeat(letters));
+        }
+        argv.push("-W".to_string());
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &say);
+        let mut early = Early::default();
+        let mut reports = Reports::default();
+        let got = parse_options(
+            argv,
+            &fs,
+            &no_mounts,
+            &HostChecks::DEFERRED,
+            &mut early,
+            &mut reports,
+        );
+        assert_eq!(got.unwrap_err(), "");
+        assert!(
+            early.held() <= Early::SPILL + 3 * letters + 64,
+            "{}",
+            early.held()
+        );
+        let mut lines = std::mem::take(&mut *said.borrow_mut());
+        let spilled = lines.len();
+        if !cfg!(miri) {
+            assert!(spilled > 0, "nothing spilled");
+        }
+        early.each_line(&mut |l: &str| lines.push(format!("lsof: {l}")));
+        assert_eq!(lines.len(), words * letters + 1);
+        for (n, l) in lines.iter().enumerate() {
+            let want = if n == words * letters {
+                "lsof: illegal option character: W"
+            } else if (n / letters) % 2 == 0 {
+                "lsof: unknown cross-over option: q"
+            } else {
+                "lsof: unknown cross-over option: z"
+            };
+            assert_eq!(l, want, "line {n}");
+        }
+    }
+
+    /// What is held is bounded inside one word too, as each line is stored
+    /// (DIVERGENCES 83): one word of `-s tcp:,,,…` is a line quoting the
+    /// whole word for each comma, a `-d ^1,2,2,…` and a `-p 1,^1,^1,…` a line
+    /// some fifteen times their item for each item. Checked at the word's
+    /// end only, the first held some 17 GB for the 128 KiB a Linux word may
+    /// be. Every line is still said, once, in order.
+    #[test]
+    fn read_on_errors_spill_inside_one_word() {
+        let said = std::cell::RefCell::new(Vec::<String>::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &say);
+        let collect = |early: &Early| {
+            let mut lines = std::mem::take(&mut *said.borrow_mut());
+            early.each_line(&mut |l: &str| lines.push(format!("lsof: {l}")));
+            lines
+        };
+        // Enough items for their lines to pass the limit several times over;
+        // under miri, whose limit is 4 KiB, a few hundred.
+        let (commas, items) = if cfg!(miri) {
+            (200, 400)
+        } else {
+            (3_000, 120_000)
+        };
+
+        let value = format!("tcp:{}", ",".repeat(commas));
+        let mut early = Early {
+            sink: Some(&fs),
+            ..Early::default()
+        };
+        parse_state_spec(&mut StateFilter::default(), &value, &mut early);
+        let line = format!("lsof: NULL TCP state name in: {value}");
+        assert!(
+            early.held() <= Early::SPILL + line.len() + 16,
+            "{}",
+            early.held()
+        );
+        assert!(early.told);
+        let lines = collect(&early);
+        assert_eq!(lines.len(), commas);
+        assert!(lines.iter().all(|l| *l == line));
+
+        let value = format!("^1{}", ",2".repeat(items));
+        let mut early = Early {
+            sink: Some(&fs),
+            ..Early::default()
+        };
+        enter_fd_list(&mut None, &value, false, &mut early).unwrap();
+        assert!(early.held() <= Early::SPILL + 64, "{}", early.held());
+        assert!(early.told);
+        let lines = collect(&early);
+        assert_eq!(lines.len(), items);
+        assert!(lines
+            .iter()
+            .all(|l| l == "lsof: include in an exclude -d list: 2"));
+
+        let value = format!("1{}", ",^1".repeat(items));
+        let mut early = Early {
+            sink: Some(&fs),
+            ..Early::default()
+        };
+        let mut sel = Selection::default();
+        enter_ids(
+            &mut sel,
+            &mut EnteredIds::default(),
+            &value,
+            false,
+            &mut early,
+        );
+        assert!(early.held() <= Early::SPILL + 64, "{}", early.held());
+        assert!(early.told);
+        let lines = collect(&early);
+        assert_eq!(lines.len(), items);
+        assert!(lines
+            .iter()
+            .all(|l| l == "lsof: PID 1 has been included and excluded."));
+        assert_eq!((sel.pids, sel.pid_excludes), (vec![1], vec![]));
+    }
+
+    /// A spill that leaves nothing held still ends the run in `usage()`: the
+    /// lines were printed, so the parse is an error with none of its own.
+    /// The last letter of the last word is the one that passes the limit.
+    #[test]
+    fn a_spill_that_empties_the_store_still_ends_the_run() {
+        // Three bytes a letter: the first count past the limit.
+        let total = Early::SPILL / 3 + 1;
+        let mut argv = Vec::new();
+        let mut left = total;
+        while left > 0 {
+            let n = left.min(100_000);
+            argv.push("-x".to_string());
+            argv.push("q".repeat(n));
+            left -= n;
+        }
+        let said = std::cell::Cell::new(0usize);
+        let say = |l: &str| {
+            assert_eq!(l, "lsof: unknown cross-over option: q");
+            said.set(said.get() + 1);
+        };
+        let fs = SafeFs::new(&lsof_core::InProcess, &say);
+        let (got, _) = parse_reporting(argv, &fs, &no_mounts, &HostChecks::DEFERRED);
+        let e = got.expect_err("the run ends in usage()");
+        assert!(!e.is_fatal());
+        assert_eq!(said.get(), total);
+        let mut held = 0;
+        e.each_line(|_| held += 1);
+        assert_eq!(held, 0, "the spill came at the last letter");
+    }
+
+    /// `-p` and `-g` enter each ID once, in the order first given, and
+    /// refuse one on the other side where they meet it, whatever the lists'
+    /// length: what they have entered is looked up in constant time.
+    #[test]
+    fn ids_are_entered_once_in_order() {
+        let n: u32 = if cfg!(miri) { 300 } else { 200_000 };
+        let list = |from: u32| {
+            (from..n)
+                .chain(from..n)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut sel = Selection::default();
+        let mut entered = EnteredIds::default();
+        let mut early = Early::default();
+        enter_ids(&mut sel, &mut entered, &list(1), false, &mut early);
+        enter_ids(
+            &mut sel,
+            &mut entered,
+            &format!("^0,^{}", n - 1),
+            false,
+            &mut early,
+        );
+        enter_ids(&mut sel, &mut entered, &list(1), true, &mut early);
+        assert_eq!(sel.pids, (1..n).collect::<Vec<_>>());
+        assert_eq!(sel.pid_excludes, [0]);
+        assert_eq!(sel.pgids, (1..n).collect::<Vec<_>>());
+        let mut lines = Vec::new();
+        early.each_line(&mut |l: &str| lines.push(l.to_string()));
+        assert_eq!(
+            lines,
+            [format!("PID {} has been included and excluded.", n - 1)]
+        );
+    }
+
     /// The read-on errors cost what the arguments that made them cost, not a
     /// line of text each (DIVERGENCES 149): 200 000 letters that are no
     /// option are 200 000 bytes of codes and no text, and come back as
@@ -5424,11 +6598,12 @@ mod tests {
         // bound is what the full count pins natively.
         let n = if cfg!(miri) { 2_000 } else { 200_000 };
         let word = format!("-{}", "W".repeat(n));
+        let fs = SafeFs::in_process();
         let mut early = Early::default();
         let mut reports = Reports::default();
         let got = parse_options(
             vec![word],
-            &SafeFs::in_process(),
+            &fs,
             &no_mounts,
             &HostChecks::DEFERRED,
             &mut early,
