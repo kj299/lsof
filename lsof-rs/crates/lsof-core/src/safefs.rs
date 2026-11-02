@@ -402,6 +402,15 @@ pub trait FsCalls {
     fn helper_pids(&self) -> Vec<u32> {
         Vec::new()
     }
+
+    /// A warning these calls have to give once, taken by the first failed
+    /// call to ask after it arose: a platform's helper says here that it has
+    /// stopped making calls (too many of its helpers wait, killed, on file
+    /// systems that do not answer). [`SafeFs`] prints it where its own
+    /// warnings go, unless `-w`. None for calls made in this process.
+    fn note(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The calls made in this process, with no time limit: `-O`, and the whole
@@ -530,6 +539,19 @@ impl<'a> SafeFs<'a> {
         }
     }
 
+    /// `result`, after printing what the calls have to say once a call
+    /// failed ([`FsCalls::note`]), unless warnings are off.
+    fn told<T>(&self, result: io::Result<T>) -> io::Result<T> {
+        if result.is_err() {
+            if let Some(line) = self.calls.note() {
+                if self.warn {
+                    (self.say)(&line);
+                }
+            }
+        }
+        result
+    }
+
     fn shown(path: &Path) -> &[u8] {
         path.as_os_str().as_encoded_bytes()
     }
@@ -543,7 +565,7 @@ impl<'a> SafeFs<'a> {
             }
             _ if Self::shown(path).contains(&0) => Err(invalid_path()),
             Mode::InProcess => IN_PROCESS.stat(path, 0),
-            Mode::Bounded(limit) => self.calls.stat(path, limit),
+            Mode::Bounded(limit) => self.told(self.calls.stat(path, limit)),
         }
     }
 
@@ -557,7 +579,7 @@ impl<'a> SafeFs<'a> {
             }
             _ if Self::shown(path).contains(&0) => Err(invalid_path()),
             Mode::InProcess => IN_PROCESS.lstat(path, 0),
-            Mode::Bounded(limit) => self.calls.lstat(path, limit),
+            Mode::Bounded(limit) => self.told(self.calls.lstat(path, limit)),
         }
     }
 
@@ -573,7 +595,7 @@ impl<'a> SafeFs<'a> {
             }
             _ if Self::shown(path).contains(&0) => Err(invalid_path()),
             Mode::InProcess => IN_PROCESS.readlink(path, 0),
-            Mode::Bounded(limit) => self.calls.readlink(path, limit),
+            Mode::Bounded(limit) => self.told(self.calls.readlink(path, limit)),
         }
     }
 
@@ -588,7 +610,7 @@ impl<'a> SafeFs<'a> {
             Mode::Avoid => Err(would_block()),
             _ if Self::shown(path).contains(&0) => Err(invalid_path()),
             Mode::InProcess => IN_PROCESS.read_dir(path, 0),
-            Mode::Bounded(limit) => self.calls.read_dir(path, limit),
+            Mode::Bounded(limit) => self.told(self.calls.read_dir(path, limit)),
         }
     }
 }
@@ -820,5 +842,63 @@ mod tests {
     fn a_listing_holds_more_than_a_walk_takes() {
         const _: () = assert!(READ_DIR_MAX_NAMES > 200_000);
         const _: () = assert!(READ_DIR_MAX_BYTES > 16 << 20);
+    }
+
+    /// Calls that fail, with a note to give once: what a helper that has
+    /// stopped making calls says ([`FsCalls::note`]).
+    struct Full(RefCell<Option<String>>);
+
+    impl FsCalls for Full {
+        fn stat(&self, _: &Path, _: u32) -> io::Result<FileStat> {
+            Err(would_block())
+        }
+        fn lstat(&self, _: &Path, _: u32) -> io::Result<FileStat> {
+            Err(would_block())
+        }
+        fn readlink(&self, _: &Path, _: u32) -> io::Result<OsString> {
+            Err(would_block())
+        }
+        fn read_dir(&self, _: &Path, _: u32) -> io::Result<Vec<OsString>> {
+            Err(would_block())
+        }
+        fn note(&self) -> Option<String> {
+            self.0.borrow_mut().take()
+        }
+    }
+
+    /// The note is printed once, by the first failed bounded call after it
+    /// arose, where the layer's warnings go; `-w` mutes it; a call `-b`
+    /// avoided or `-O` made never asks for it.
+    #[test]
+    fn a_note_from_the_calls_is_said_once_unless_dash_w() {
+        let said = RefCell::new(Vec::<String>::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let p = Path::new("/");
+        let full = Full(RefCell::new(Some("lsof: WARNING: full".into())));
+        let fs = SafeFs::new(&full, &say);
+        let b = Blocking {
+            avoid: true,
+            ..Blocking::default()
+        };
+        let o = Blocking {
+            in_process: true,
+            ..Blocking::default()
+        };
+        fs.with(b, true).stat(p).unwrap_err();
+        fs.with(o, true).stat(p).unwrap();
+        assert!(said.borrow().iter().all(|l| !l.contains("full")));
+        assert!(full.0.borrow().is_some(), "not asked for");
+        fs.lstat(p).unwrap_err();
+        fs.stat(p).unwrap_err();
+        fs.readlink(p).unwrap_err();
+        fs.read_dir(p).unwrap_err();
+        let notes = said.borrow().iter().filter(|l| l.contains("full")).count();
+        assert_eq!(notes, 1, "{:?}", said.borrow());
+        let full = Full(RefCell::new(Some("lsof: WARNING: full".into())));
+        let quiet = SafeFs::new(&full, &say).with(Blocking::default(), false);
+        quiet.read_dir(p).unwrap_err();
+        assert!(full.0.borrow().is_none(), "taken, and not said");
+        let notes = said.borrow().iter().filter(|l| l.contains("full")).count();
+        assert_eq!(notes, 1, "-w mutes it");
     }
 }

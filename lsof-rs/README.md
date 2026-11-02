@@ -205,7 +205,14 @@ lsof-rs bounds every call ([`DIVERGENCES.md`](DIVERGENCES.md) #94, #118). A
 helper killed on a timeout waits in the kernel until the file system answers,
 holding the descriptor its call opened there: lsof-rs never `stat`s it, but
 another tool that does — the C's lsof listing the host — waits as well
-(#123).
+(#123). When the mount table lists an NFS mount, a process's own files go
+through the helper too, as the C sends them through `statsafely()`: each
+`cwd`, `rtd`, `txt`, fd and mapped file, so a hung NFS server costs `-S`
+seconds per file on it and never stops lsof, except under `-O`, which makes
+every call in lsof with no limit; under `-b` each is avoided and its row
+says so, as the C's does (#124). At most 16 killed helpers may wait on such
+a server at once; past that each further call fails at once with
+`Resource temporarily unavailable`, and lsof says so once (#118).
 
 Both phases were diffed by hand against the real C `lsof` 4.95.0 on the same
 host, and that diff is the reason to trust them: **`-i`, `-iTCP:443`,

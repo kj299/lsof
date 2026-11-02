@@ -34,10 +34,12 @@
 use std::ffi::OsStr;
 use std::num::NonZeroU32;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 use lsof_core::errno_text;
 use lsof_core::model::{AccessMode, FdType, FileType, OpenFile};
+use lsof_core::{FileStat, SafeFs};
 
 use crate::files::{self, GatherCtx};
 
@@ -294,11 +296,26 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
         f.add_name_addition(&files::exempt_note(e));
         return f;
     }
-    let stat = stat_mapping(bytes, m.range, pid, foreign);
+    let stat = stat_mapping(bytes, m.range, pid, foreign, ctx.fs.as_ref());
+    let maps_nfs = files::nfs_suffix(ctx.nfs_mounts, &FileType::Regular, Some(m.dev), bytes);
+    let stat_nfs = stat.as_ref().ok().and_then(|md| {
+        files::nfs_suffix(
+            ctx.nfs_mounts,
+            &files::type_from_mode(md.mode),
+            Some(md.dev),
+            bytes,
+        )
+    });
     // What the maps line alone says, with the reason the `stat` could not
     // say more — none for a deleted mapping, whose path is expected to fail.
+    // A file on an NFS mount the table recorded is named with its source,
+    // before that reason (`dnode.c:858-861`; DIVERGENCES 124).
     let from_maps = |m: Mapping, why: Option<String>| {
         let why = why.filter(|_| !m.deleted && !ctx.omit_unreadable);
+        let mut name = m.path;
+        if let Some(nfs) = &maps_nfs {
+            name.push_str(nfs);
+        }
         let mut f = OpenFile {
             rdev: None,
             fs_device: Some(m.dev),
@@ -307,7 +324,7 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
             fd: gone.clone(),
             access: AccessMode::Unknown,
             file_type: FileType::Regular,
-            name: m.path,
+            name,
             device: Some(m.device),
             size: None,
             offset: None,
@@ -326,7 +343,13 @@ fn mapping_row(m: Mapping, pid: u32, foreign: bool, ctx: &GatherCtx<'_>) -> Open
         Err(e) => from_maps(m, Some(format!("(stat: {})", errno_text(&e)))),
         Ok(md) => match path_note(&md, &m) {
             Some(note) if !foreign => from_maps(m, Some(note)),
-            _ => from_stat(m.path, &md, pid, ctx),
+            _ => {
+                let mut name = m.path;
+                if let Some(nfs) = &stat_nfs {
+                    name.push_str(nfs);
+                }
+                from_stat(name, &md, pid, ctx)
+            }
         },
     }
 }
@@ -344,27 +367,40 @@ const ENOENT: i32 = 2;
 /// run. The directory lsof runs in is often everyone's (`/tmp`). lsof-rs
 /// does not look, and says what the C says when nothing is there: `No such
 /// file or directory` (DIVERGENCES 102).
+///
+/// When the mount table lists an NFS mount, the `stat` goes through `fs`,
+/// the bounded layer, as the C's `statsafely()` (`dproc.c:1542-1551`), and
+/// under `-b` is avoided, and said to be: a name that is no path too, which
+/// the C would `stat` and here no call is made for either way.
 fn stat_mapping(
     bytes: &[u8],
     range: Option<(u64, u64)>,
     pid: u32,
     foreign: bool,
-) -> std::io::Result<std::fs::Metadata> {
+    fs: Option<&SafeFs>,
+) -> std::io::Result<FileStat> {
+    let stat = |p: &Path| match fs {
+        Some(fs) => fs.stat(p),
+        None => std::fs::metadata(p).map(|md| FileStat::from(&md)),
+    };
     match (foreign, range) {
-        (true, Some((start, end))) => {
-            std::fs::metadata(format!("/proc/{pid}/map_files/{start:x}-{end:x}"))
-        }
-        _ if !bytes.starts_with(b"/") => Err(std::io::Error::from_raw_os_error(ENOENT)),
-        _ => std::fs::metadata(OsStr::from_bytes(bytes)),
+        (true, Some((start, end))) => stat(Path::new(&format!(
+            "/proc/{pid}/map_files/{start:x}-{end:x}"
+        ))),
+        _ if !bytes.starts_with(b"/") => match fs {
+            Some(fs) if fs.blocking().avoid => fs.stat(Path::new(OsStr::from_bytes(bytes))),
+            _ => Err(std::io::Error::from_raw_os_error(ENOENT)),
+        },
+        _ => stat(Path::new(OsStr::from_bytes(bytes))),
     }
 }
 
 /// `(path dev=0,42, inode=2)`, `(path dev=0,42)` or `(path inode=2)`: the
 /// file the path leads to now, where the maps line names another — the C's
 /// two `add_nma()`s, joined by its space. `None` when it is the same file.
-fn path_note(md: &std::fs::Metadata, m: &Mapping) -> Option<String> {
-    let dev = (md.dev() != m.dev).then(|| files::dev_string(md.dev()));
-    let ino = (md.ino() != m.inode).then(|| md.ino());
+fn path_note(md: &FileStat, m: &Mapping) -> Option<String> {
+    let dev = (md.dev != m.dev).then(|| files::dev_string(md.dev));
+    let ino = (md.ino != m.inode).then_some(md.ino);
     Some(match (dev, ino) {
         (Some(dev), Some(ino)) => format!("(path dev={dev}, inode={ino})"),
         (Some(dev), None) => format!("(path dev={dev})"),
@@ -378,25 +414,25 @@ fn path_note(md: &std::fs::Metadata, m: &Mapping) -> Option<String> {
 /// (the C's `process_proc_node()` keeps one for neither a device nor a FIFO,
 /// and a mapping has no offset to show instead), and a socket is the socket's
 /// row. Always `mem`.
-fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>) -> OpenFile {
-    if md.file_type().is_socket() {
+fn from_stat(name: String, md: &FileStat, pid: u32, ctx: &GatherCtx<'_>) -> OpenFile {
+    if md.mode & S_IFMT == S_IFSOCK {
         return socket_mapping(md, ctx);
     }
-    let ty = files::type_from_mode(md.mode());
+    let ty = files::type_from_mode(md.mode);
     let (device, rdev, size) = match ty {
         FileType::Chr | FileType::Block => (
-            files::dev_string(md.rdev()),
-            u32::try_from(md.rdev()).ok().and_then(NonZeroU32::new),
+            files::dev_string(md.rdev),
+            u32::try_from(md.rdev).ok().and_then(NonZeroU32::new),
             None,
         ),
-        FileType::Fifo => (files::dev_string(md.dev()), None, None),
-        _ => (files::dev_string(md.dev()), None, Some(md.size())),
+        FileType::Fifo => (files::dev_string(md.dev), None, None),
+        _ => (files::dev_string(md.dev), None, Some(md.size)),
     };
     OpenFile {
         rdev,
-        fs_device: Some(md.dev()),
+        fs_device: Some(md.dev),
         file_flags: None,
-        lock: ctx.locks.get(&(pid, md.dev(), md.ino())).copied(),
+        lock: ctx.locks.get(&(pid, md.dev, md.ino)).copied(),
         fd: FdType::Mem,
         access: AccessMode::Unknown,
         file_type: ty,
@@ -404,12 +440,16 @@ fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>
         device: Some(device),
         size,
         offset: None,
-        node: Some(md.ino().to_string()),
-        links: u32::try_from(md.nlink()).ok(),
+        node: Some(md.ino.to_string()),
+        links: u32::try_from(md.nlink).ok(),
         socket: None,
         name_addition: None,
     }
 }
+
+/// `st_mode`'s type mask and the socket type, as in `files`.
+const S_IFMT: u32 = 0o170_000;
+const S_IFSOCK: u32 = 0o140_000;
 
 /// A mapped socket's row (a packet ring, reached through `map_files`), as
 /// the C's `process_proc_sock()` makes it with the mapping's name for a path.
@@ -420,27 +460,27 @@ fn from_stat(name: String, md: &std::fs::Metadata, pid: u32, ctx: &GatherCtx<'_>
 /// system's device, no lock and no link count (measured, a packet ring in
 /// another network namespace). An fd's link is a path, so the same socket's
 /// fd row does get its protocol (`protocol: PACKET`).
-fn socket_mapping(md: &std::fs::Metadata, ctx: &GatherCtx<'_>) -> OpenFile {
-    if ctx.socks.get(md.ino()).is_some() {
+fn socket_mapping(md: &FileStat, ctx: &GatherCtx<'_>) -> OpenFile {
+    if ctx.socks.get(md.ino).is_some() {
         let info = files::FdInfo::default();
-        if let Some(mut f) = files::socket_row(md.ino(), &FdType::Mem, &info, Some(md), None, ctx) {
+        if let Some(mut f) = files::socket_row(md.ino, &FdType::Mem, &info, Some(md), None, ctx) {
             f.offset = None;
             return f;
         }
     }
     OpenFile {
         rdev: None,
-        fs_device: Some(md.dev()),
+        fs_device: Some(md.dev),
         file_flags: None,
         lock: None,
         fd: FdType::Mem,
         access: AccessMode::Unknown,
         file_type: FileType::Socket("sock"),
         name: ctx.ns.unidentified().to_string(),
-        device: Some(files::dev_string(md.dev())),
+        device: Some(files::dev_string(md.dev)),
         size: None,
         offset: None,
-        node: Some(md.ino().to_string()),
+        node: Some(md.ino.to_string()),
         links: None,
         socket: None,
         name_addition: None,
@@ -636,7 +676,10 @@ mod tests {
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
             mqueue_device: None,
+            fs: None,
+            nfs_mounts: &[],
         };
+        let md = FileStat::from(&md);
         let f = socket_mapping(&md, &ctx);
         assert_eq!(f.fd, FdType::Mem);
         assert_eq!(f.file_type.code(), "sock");
@@ -644,7 +687,7 @@ mod tests {
             f.name, "can't identify protocol",
             "getxattr() of `socket:[N]` fails"
         );
-        assert_eq!(f.fs_device, Some(md.dev()), "`-F` gives its device as `D`");
+        assert_eq!(f.fs_device, Some(md.dev), "`-F` gives its device as `D`");
         // But no path finds it by that device and its inode, nor by its file
         // system: the C hands a socket to `process_proc_sock()`, which never
         // compares them (DIVERGENCES 101).
@@ -685,6 +728,8 @@ mod tests {
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
             mqueue_device: None,
+            fs: None,
+            nfs_mounts: &[],
         };
         let maps = parse_maps(
             "0-1 r--p 0 00:06 4 /nonexistent-lsof-rs/zero\n\
@@ -709,13 +754,13 @@ mod tests {
         // file: the C would describe it, in place of whatever the kernel
         // named so. lsof-rs does not look (DIVERGENCES 102).
         assert!(std::path::Path::new("Cargo.toml").is_file());
-        let e = stat_mapping(b"Cargo.toml", None, 0, false).unwrap_err();
+        let e = stat_mapping(b"Cargo.toml", None, 0, false, None).unwrap_err();
         // `ENOENT`, which NAME gives as `No such file or directory`, the C's
         // words where nothing is planted (the differential compares them;
         // under miri the host's message already carries `(os error 2)`).
         assert_eq!(e.raw_os_error(), Some(ENOENT));
         assert!(
-            stat_mapping(b"/", None, 0, false).is_ok(),
+            stat_mapping(b"/", None, 0, false, None).is_ok(),
             "a path is stat'ed"
         );
     }
@@ -735,23 +780,156 @@ mod tests {
             raw_path: None,
             range: None,
         };
-        assert_eq!(path_note(&md, &mapping(md.dev(), md.ino())), None);
+        let st = FileStat::from(&md);
+        assert_eq!(path_note(&st, &mapping(md.dev(), md.ino())), None);
         assert_eq!(
-            path_note(&md, &mapping(md.dev(), md.ino() + 1)),
+            path_note(&st, &mapping(md.dev(), md.ino() + 1)),
             Some(format!("(path inode={})", md.ino()))
         );
         let other = md.dev() ^ 1;
         assert_eq!(
-            path_note(&md, &mapping(other, md.ino())),
+            path_note(&st, &mapping(other, md.ino())),
             Some(format!("(path dev={})", files::dev_string(md.dev())))
         );
         assert_eq!(
-            path_note(&md, &mapping(other, md.ino() + 1)),
+            path_note(&st, &mapping(other, md.ino() + 1)),
             Some(format!(
                 "(path dev={}, inode={})",
                 files::dev_string(md.dev()),
                 md.ino()
             ))
         );
+    }
+
+    /// What the layer was asked, by call and path; every `stat` answers a
+    /// regular file on device 0,6.
+    #[derive(Default)]
+    struct Asked(std::cell::RefCell<Vec<String>>);
+
+    impl lsof_core::FsCalls for Asked {
+        fn stat(&self, p: &Path, _: u32) -> std::io::Result<FileStat> {
+            self.0.borrow_mut().push(format!("stat {}", p.display()));
+            Ok(FileStat {
+                dev: files::makedev(0, 6),
+                ino: 4,
+                mode: 0o100_644,
+                nlink: 1,
+                ..FileStat::default()
+            })
+        }
+        fn lstat(&self, p: &Path, _: u32) -> std::io::Result<FileStat> {
+            self.0.borrow_mut().push(format!("lstat {}", p.display()));
+            Err(std::io::Error::from_raw_os_error(ENOENT))
+        }
+        fn readlink(&self, p: &Path, _: u32) -> std::io::Result<std::ffi::OsString> {
+            self.0
+                .borrow_mut()
+                .push(format!("readlink {}", p.display()));
+            Err(std::io::Error::from_raw_os_error(ENOENT))
+        }
+        fn read_dir(&self, _: &Path, _: u32) -> std::io::Result<Vec<std::ffi::OsString>> {
+            unreachable!("a mapping lists no directory")
+        }
+    }
+
+    /// Under NFS, bounded and not avoided, a mapped file's `stat` — by its
+    /// path, or another mount namespace's through `map_files` — is asked of
+    /// the layer, never made here; a name that is no path is asked nothing.
+    #[test]
+    fn under_nfs_a_mapping_is_asked_of_the_layer_and_not_made_here() {
+        let quiet = |_: &str| {};
+        let asked = Asked::default();
+        let fs = SafeFs::new(&asked, &quiet);
+        let st = stat_mapping(b"/nonexistent-lsof-rs/lib", None, 0, false, Some(&fs)).unwrap();
+        assert_eq!(st.ino, 4, "the layer's answer, not this process's ENOENT");
+        let st = stat_mapping(b"/x", Some((0x10, 0x20)), 7, true, Some(&fs)).unwrap();
+        assert_eq!(st.ino, 4);
+        let e = stat_mapping(b"[heap]", None, 0, false, Some(&fs)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(ENOENT));
+        assert_eq!(
+            *asked.0.borrow(),
+            [
+                "stat /nonexistent-lsof-rs/lib",
+                "stat /proc/7/map_files/10-20"
+            ]
+        );
+        // Without the layer the call is made here.
+        let e = stat_mapping(b"/nonexistent-lsof-rs/lib", None, 0, false, None).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(ENOENT));
+    }
+
+    /// With an NFS mount listed a mapping's `stat` goes through the bounded
+    /// layer: under `-b` it is avoided and said to be, a name that is no
+    /// path too (the C `stat`s that name, and says so), and the row keeps
+    /// its type and device from the maps line, its SIZE/OFF blank, and says
+    /// why (measured: `mem REG 254,0 210808 /usr/lib/…/libc.so.6 (stat:
+    /// Resource temporarily unavailable)`). A file on a recorded NFS mount
+    /// is named with its source, before that reason.
+    #[test]
+    fn under_nfs_a_mapping_is_stated_through_the_layer() {
+        let said = std::cell::RefCell::new(Vec::new());
+        let sink = |l: &str| said.borrow_mut().push(l.to_string());
+        let avoid = lsof_core::Blocking {
+            avoid: true,
+            ..lsof_core::Blocking::default()
+        };
+        let fs = SafeFs::new(&lsof_core::InProcess, &sink).with(avoid, true);
+        let e = stat_mapping(b"/usr/lib/libc.so.6", None, 0, false, Some(&fs)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(11));
+        let e = stat_mapping(b"Cargo.toml", None, 0, false, Some(&fs)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(11));
+        let e = stat_mapping(b"/x", Some((0x10, 0x20)), 7, true, Some(&fs)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(11));
+        assert_eq!(
+            *said.borrow(),
+            [
+                "lsof: avoiding stat(/usr/lib/libc.so.6): -b was specified.",
+                "lsof: avoiding stat(Cargo.toml): -b was specified.",
+                "lsof: avoiding stat(/proc/7/map_files/10-20): -b was specified.",
+            ]
+        );
+        // Bounded, a name that is no path is still not looked up.
+        let quiet = |_: &str| {};
+        let fs = SafeFs::new(&lsof_core::InProcess, &quiet);
+        let e = stat_mapping(b"Cargo.toml", None, 0, false, Some(&fs)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(ENOENT));
+        // The row, on an NFS mount the table recorded on the maps line's
+        // device.
+        let socks = crate::net::SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = crate::net::SockProtoNames::new(false);
+        let mounts = [lsof_core::MountEntry {
+            dir: "/nonexistent-lsof-rs".into(),
+            device: Some(files::makedev(0, 6)),
+            source_resolved: None,
+            source_is_block: false,
+            fsname: "srv:/x".into(),
+            kind: lsof_core::MountKind::Nfs,
+        }];
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+            helpers: &crate::safefs::HelperFds::default(),
+            mqueue_device: None,
+            fs: Some(fs),
+            nfs_mounts: &mounts,
+        };
+        let m = parse_maps("0-1 r--p 0 00:06 4 /nonexistent-lsof-rs/lib\n").remove(0);
+        let f = mapping_row(m, 1, false, &ctx);
+        assert_eq!((&f.fd, &f.file_type), (&FdType::Mem, &FileType::Regular));
+        assert_eq!((f.device.as_deref(), f.size), (Some("0,6"), None));
+        assert!(
+            f.name
+                .starts_with("/nonexistent-lsof-rs/lib (srv:/x) (stat: "),
+            "{}",
+            f.name
+        );
+        assert_eq!(f.base_name(), Some("/nonexistent-lsof-rs/lib (srv:/x)"));
     }
 }

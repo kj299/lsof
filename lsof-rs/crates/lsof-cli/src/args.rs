@@ -4043,6 +4043,7 @@ mod tests {
                     device: Some(1),
                     source_resolved: None,
                     source_is_block: false,
+                    fsname: "src".into(),
                     kind: lsof_core::MountKind::Regular,
                 }],
                 ..MountTable::default()
@@ -5355,6 +5356,7 @@ mod tests {
                         device: Some(1),
                         source_resolved: Some("src".into()),
                         source_is_block: false,
+                        fsname: "src".into(),
                         kind: lsof_core::MountKind::Regular,
                     })
                     .collect(),

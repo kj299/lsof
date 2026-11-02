@@ -1,0 +1,502 @@
+# Mutants for DIVERGENCES 124 (2026-11-02): with an NFS mount listed, every
+# per-file call goes through the bounded layer, as the C's statsafely(), and
+# the rows are the C's shapes under -b; with one recorded, a file on it is
+# named by its source and is what -N selects. One per rule. The kill table
+# is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/row124.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo: the differential's LSOF_DIFF_MT=nfs mode binds a table
+# over /proc/mounts in a mount namespace of each run's own. CI runs only
+# --apply-only.
+#
+# Run 2026-11-02 as root with --first-kill: 25 of 25 killed, 21 by the unit
+# gate and 4 by the differential alone (table-read-from-self-mounts,
+# has-nfs-not-handed-on, nfs-mounts-not-handed-on, socket-joined-without-a-
+# stat, which mutate what only a run with a listed NFS mount reaches).
+#
+# Fix round, run 2026-11-02 as root with --first-kill, all 46 (the 25 above
+# and 21 new): 46 of 46 killed, 42 by the unit gate (table-read-from-self-
+# mounts now by `a_table_that_cannot_be_opened_is_the_cs_error`) and 4 by
+# the differential alone: nfs-mounts-not-handed-on, socket-joined-without-
+# a-stat, excluded-process-read-in-the-walk and gather-process-sockets-per-
+# run (the last two by the nfs-listed-dash-b-* cases that compare stderr). maps-inproc was first written without
+# its in-process arm and did not build; corrected and rerun alone: killed
+# by the unit gate (`under_nfs_a_mapping_is_asked_of_the_layer_and_not_made_here`).
+#
+# Rules with no mutant here, each pinned elsewhere or equivalent in what a
+# run can show:
+# * A process's tasks are read before it (`backend.rs`): the order alone of
+#   the -b lines, pinned by the differential's
+#   nfs-listed-dash-b-K-tasks-first; no edit reorders it in one string.
+# * The NFS mounts are handed on newest first (`main.rs`, `.rev()`): no
+#   table here records two NFS mounts on one device that both prefix one
+#   path; `Selection::nfs_mount_of`'s order is pinned by
+#   `nfs_files_are_found_by_their_mount`.
+# * A socket-only run keeps only what a `stat` said is a socket
+#   (`files.rs`, `row`): a row kept otherwise is no socket, which `-U` and
+#   `-i` then drop at selection, so the listing and the exit status are the
+#   same (mutated 2026-11-02 to keep the failed rows: survived the full
+#   differential, `nfs-listed-dash-b-U` included). Kept for the C's shape,
+#   which builds none.
+#
+# The helper cap (`MAX_WAITING`, fix round) is reached only through helpers
+# killed in state D: the unit gate's
+# `many_files_on_a_mount_that_never_answers_cost_at_most_the_cap`
+# (bounded_calls.rs, root and FUSE) holds 40 descriptors on a mount that
+# never answers under `ulimit -n 30`, and the safefs unit test reaches the
+# cap with processes not yet dead standing in for them.
+#
+# The mount_stat_audit gate (fix round): its per-file part is the only
+# check that sees a call made in lsof's own process, by strace; a mutant
+# that makes a mapping's stat() in lsof (maps-inproc) answers the same and
+# lists the same, so neither the unit tests' answers nor the differential
+# can tell, and the unit test with a recording layer pins it besides.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "mount-audit"
+cmd = ["python3", "differential/mount_stat_audit.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 900
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# ------------------------------------------------------- the table and HasNFS
+
+[[mutant]]
+name = "table-read-from-self-mounts"
+rule = "the table is /proc/mounts, the name the C opens (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''const PROC_MOUNTS: &str = "/proc/mounts";'''
+new = '''const PROC_MOUNTS: &str = "/proc/self/mounts";'''
+
+[[mutant]]
+name = "has-nfs-not-handed-on"
+rule = "the CLI hands HasNFS to the gather (124)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        sel.has_nfs = table.as_ref().map_or(0, |t| t.has_nfs);'''
+new = '''        sel.has_nfs = 0;'''
+
+[[mutant]]
+name = "nfs-mounts-not-handed-on"
+rule = "the CLI hands the recorded NFS mounts to the gather and -N (124)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                sel.nfs_mounts = nfs_mounts.cloned().collect();'''
+new = '''                sel.nfs_mounts = nfs_mounts.take(0).cloned().collect();'''
+
+[[mutant]]
+name = "fsname-is-the-readlink"
+rule = "a file is named by its mount's source as listed (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            fsname: line.source.clone(),'''
+new = '''            fsname: line.dir.clone(),'''
+
+# ------------------------------------------------------------ the routing
+
+[[mutant]]
+name = "gather-not-through-the-layer"
+rule = "with NFS listed the gather's per-file calls go through the layer (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            fs: (sel.has_nfs != 0).then(|| fs.with(sel.blocking, !sel.omit_unreadable)),'''
+new = '''            fs: (sel.has_nfs == 99).then(|| fs.with(sel.blocking, !sel.omit_unreadable)),'''
+
+[[mutant]]
+name = "lstat-not-made"
+rule = "an fd is lstat()ed as well as stat()ed (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            matches!(fd, FdType::Handle(_)).then(|| look(fs, link, source, false)),'''
+new = '''            None,'''
+
+[[mutant]]
+name = "lstat-of-a-special"
+rule = "cwd, rtd and txt are stat()ed alone (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            matches!(fd, FdType::Handle(_)).then(|| look(fs, link, source, false)),'''
+new = '''            Some(look(fs, link, source, false)),'''
+
+[[mutant]]
+name = "socket-only-skips-the-calls"
+rule = "under NFS a socket-only run makes every fd's calls (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if sockets_only && ctx.fs.is_none() && !is_socket_link(&target) {'''
+new = '''    if sockets_only && !is_socket_link(&target) {'''
+
+[[mutant]]
+name = "maps-not-through-the-layer"
+rule = "a mapping is stat()ed through the layer under NFS (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        Some(fs) => fs.stat(p),'''
+new = '''        Some(_) => std::fs::metadata(p).map(|md| FileStat::from(&md)),'''
+
+[[mutant]]
+name = "maps-name-no-path-silent-under-b"
+rule = "under -b a mapping's name that is no path is avoided, and said to be (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''            Some(fs) if fs.blocking().avoid => fs.stat(Path::new(OsStr::from_bytes(bytes))),'''
+new = '''            Some(fs) if fs.blocking().avoid && false => fs.stat(Path::new(OsStr::from_bytes(bytes))),'''
+
+# ------------------------------------------------------------ statEx()
+
+[[mutant]]
+name = "stat-ex-walks-to-the-root"
+rule = "statEx() stops short of / (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        if slash == 0 {
+            break;
+        }
+        cut = &cut[..slash];'''
+new = '''        cut = if slash == 0 { &cut[..1] } else { &cut[..slash] };'''
+
+[[mutant]]
+name = "stat-ex-walks-on-any-error"
+rule = "statEx() walks on only past EACCES and EPERM (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                if !again {
+                    break;
+                }'''
+new = '''                let _ = again;'''
+
+[[mutant]]
+name = "stat-ex-looks-up-a-relative-path"
+rule = "statEx() does not look up a relative path (124, as 102)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        let got = if cut.starts_with(b"/") || fs.blocking().avoid {'''
+new = '''        let got = if cut.starts_with(b"/") || fs.blocking().avoid || true {'''
+
+[[mutant]]
+name = "stat-ex-never-gives-a-device"
+rule = "a parent statEx() reaches gives the row its device (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            Ok(st) => return Looked::Partial(st.dev),'''
+new = '''            Ok(_) => return Looked::Failed(std::io::Error::from_raw_os_error(ENOENT)),'''
+
+# ------------------------------------------------------------ the rows
+
+[[mutant]]
+name = "link-source-uncut"
+rule = "a link's source is cut at its first colon unless a path (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if target.starts_with(b"/") {
+        return target;
+    }
+    target
+        .iter()'''
+new = '''    if !target.is_empty() {
+        return target;
+    }
+    target
+        .iter()'''
+
+[[mutant]]
+name = "access-kept-without-the-lstat"
+rule = "a row whose lstat failed has no access letter (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        Some(_) => AccessMode::Unknown,'''
+new = '''        Some(_) => info.access(),'''
+
+[[mutant]]
+name = "lstat-reason-dropped"
+rule = "a failed lstat says so in NAME, before the stat's (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        for (call, got) in [("lstat", lstat.as_ref()), ("stat", Some(&stat))] {'''
+new = '''        for (call, got) in [("stat", Some(&stat)), ("lstat", lstat.as_ref())] {'''
+
+[[mutant]]
+name = "socket-joined-without-a-stat"
+rule = "under NFS only what a stat said is a socket is a socket's row (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if ctx.fs.is_none() || meta.is_some_and(|m| m.mode & S_IFMT == S_IFSOCK) {'''
+new = '''    if ctx.fs.is_none() || meta.is_none() || meta.is_some_and(|m| m.mode & S_IFMT == S_IFSOCK) {'''
+
+[[mutant]]
+name = "failed-row-named-by-its-target"
+rule = "a row the C could not stat is named by the link's source (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let mut name = if ctx.fs.is_some() && meta.is_none() {'''
+new = '''    let mut name = if ctx.fs.is_some() && meta.is_none() && false {'''
+
+# ------------------------------------------------------------ N_NFS
+
+[[mutant]]
+name = "nfs-suffix-never"
+rule = "an fd's file on a recorded NFS mount is named with its source (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if let Some(nfs) = nfs_suffix(ctx.nfs_mounts, &file_type, fs_device, source) {'''
+new = '''    if let Some(nfs) = nfs_suffix(&[], &file_type, fs_device, source) {'''
+
+[[mutant]]
+name = "nfs-suffix-on-any-type"
+rule = "only the C's N_REGLR types are N_NFS (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let dev = dev?;
+    if !reglr {
+        return None;
+    }'''
+new = '''    let dev = dev?;
+    let _ = reglr;'''
+
+[[mutant]]
+name = "mapping-nfs-suffix-never"
+rule = "a mapping on a recorded NFS mount is named with its source (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''        if let Some(nfs) = &maps_nfs {'''
+new = '''        if let Some(nfs) = maps_nfs.as_ref().filter(|_| false) {'''
+
+[[mutant]]
+name = "dash-n-by-device"
+rule = "-N selects by mount where the mounts are known, not by device (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if self.nfs_mounts.is_empty() {'''
+new = '''        if self.nfs_mounts.is_empty() || self.nfs_only {'''
+
+# ------------------------------------------------------------ the walk
+
+[[mutant]]
+name = "walk-not-widened-under-b"
+rule = "a walk that warns under -b walks every process the C walks (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        let walk_warns = self.has_nfs != 0 && self.blocking.avoid && !self.omit_unreadable;'''
+new = '''        let walk_warns = false;'''
+
+[[mutant]]
+name = "taskless-process-read-under-k-a"
+rule = "-K -a reads no process with no other task (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''|| (tasks_only && !has_tasks)'''
+new = '''|| (tasks_only && !has_tasks && false)'''
+
+# ------------------------------------- the fix round (2026-11-02, reviews)
+
+[[mutant]]
+name = "sockpath-inproc"
+rule = "under NFS a bound socket's path is stat()ed through the layer (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        stat_via(fs, std::ffi::OsStr::from_bytes(bytes)).ok()?'''
+new = '''        stat_via(None, std::ffi::OsStr::from_bytes(bytes)).ok()?'''
+
+[[mutant]]
+name = "outside-inproc"
+rule = "under NFS the -e walk to a socket's path lstat()s through the layer (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                let md = lstat_via(fs, os(&next)).ok()?;'''
+new = '''                let md = lstat_via(None, os(&next)).ok()?;'''
+
+[[mutant]]
+name = "maps-inproc"
+rule = "under NFS a mapping's stat() is the layer's unless -b avoids it (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/maps.rs"
+old = '''    let stat = |p: &Path| match fs {
+        Some(fs) => fs.stat(p),'''
+new = '''    let stat = |p: &Path| match fs {
+        Some(fs) if fs.blocking().avoid => fs.stat(p),
+        Some(_) => std::fs::metadata(p).map(|md| FileStat::from(&md)),'''
+
+[[mutant]]
+name = "waiting-helpers-uncapped"
+rule = "past MAX_WAITING killed helpers no helper is started; the call fails at once (118, 124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        if state.live.is_none() && state.killed.len() >= self.cap {'''
+new = '''        if state.live.is_none() && state.killed.len() >= self.cap && false {'''
+
+[[mutant]]
+name = "waiting-helpers-cap-told-each-time"
+rule = "the cap's warning is given once a run (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''        state.untold = false;
+        Some(format!('''
+new = '''        Some(format!('''
+
+[[mutant]]
+name = "waiting-helpers-cap-is-a-timeout"
+rule = "a call the cap refuses fails with EAGAIN, at once, not as a timeout (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''                state.untold = true;
+            }
+            return Err(would_block());'''
+new = '''                state.untold = true;
+            }
+            return Err(timed_out());'''
+
+[[mutant]]
+name = "note-never-said"
+rule = "the layer prints what its calls have to say once (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''            if let Some(line) = self.calls.note() {
+                if self.warn {'''
+new = '''            if let Some(line) = self.calls.note() {
+                if self.warn && line.is_empty() {'''
+
+[[mutant]]
+name = "note-past-dash-w"
+rule = "-w mutes the calls' note, as every warning of the layer (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''            if let Some(line) = self.calls.note() {
+                if self.warn {'''
+new = '''            if let Some(line) = self.calls.note() {
+                if self.warn || !self.warn {'''
+
+[[mutant]]
+name = "readlink-reads-on-past-a-refusal"
+rule = "a component the full helper refused ends the reading, as a timeout does (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/readlink.rs"
+old = '''|| e.kind() == std::io::ErrorKind::WouldBlock;'''
+new = '''|| e.kind() == std::io::ErrorKind::Interrupted;'''
+
+[[mutant]]
+name = "lookalike-exe-stated-first"
+rule = "another run's helper: its exe is stat()ed only after its links read as lsof's (THREAT-MODEL)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''                && looks.link(pid, "exe") == mine.exe
+                && looks.link(pid, "ns/mnt") == mine.mnt
+                && looks.exe_file(pid) == mine.file'''
+new = '''                && looks.exe_file(pid) == mine.file
+                && looks.link(pid, "exe") == mine.exe
+                && looks.link(pid, "ns/mnt") == mine.mnt'''
+
+[[mutant]]
+name = "lookalike-other-namespace-stated"
+rule = "another run's helper is in lsof's mount namespace (THREAT-MODEL)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''                && looks.link(pid, "ns/mnt") == mine.mnt
+'''
+new = '''                && looks.link(pid, "ns/mnt").is_some()
+'''
+
+[[mutant]]
+name = "unopenable-table-read-as-empty"
+rule = "a /proc/mounts that cannot be opened is the C's error and exit 1 (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        &parse_mounts(&read_capped(path, cap)?),'''
+new = '''        &parse_mounts(&read_capped(path, cap).unwrap_or_default()),'''
+
+[[mutant]]
+name = "excluded-process-read"
+rule = "a process an exclusion names is not read (is_proc_excl, 124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        self.endpoints.is_some() || !self.excludes_process(p)'''
+new = '''        self.endpoints.is_some() || !self.excludes_process(p) || true'''
+
+[[mutant]]
+name = "excluded-process-skipped-under-endpoints"
+rule = "under -E/+E an excluded process is still read, as the C reads it (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        self.endpoints.is_some() || !self.excludes_process(p)'''
+new = '''        !self.excludes_process(p)'''
+
+[[mutant]]
+name = "excluded-process-read-in-the-walk"
+rule = "the gather skips a process the C does not read (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            if !sel.reads_process(p) {
+                continue;
+            }'''
+new = '''            if !sel.reads_process(p) && p.pid == 0 {
+                continue;
+            }'''
+
+[[mutant]]
+name = "sockets-only-per-run"
+rule = "Ckscko is decided per process: an unselected one is read for sockets alone (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        conditional && !self.proc_kinds(p).intersects(by_process)'''
+new = '''        conditional && false'''
+
+[[mutant]]
+name = "sockets-only-for-a-selected-process"
+rule = "a process the process selecters select is read whole (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        conditional && !self.proc_kinds(p).intersects(by_process)'''
+new = '''        conditional'''
+
+[[mutant]]
+name = "sockets-only-ignores-file-selecters"
+rule = "with a file selecter ORed in, every process is read whole (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            && !spec.intersects(files)
+'''
+new = '''
+'''
+
+[[mutant]]
+name = "sockets-only-under-endpoints"
+rule = "under -E/+E the C keeps the run's rule (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            && spec.intersects(by_process)
+            && self.endpoints.is_none();'''
+new = '''            && spec.intersects(by_process);'''
+
+[[mutant]]
+name = "sockets-only-task-not-whole"
+rule = "under -K a task is a process selecter's match, read whole (124)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        let by_process = SelKinds::PROC.union(SelKinds::TASK);'''
+new = '''        let by_process = SelKinds::PROC;'''
+
+[[mutant]]
+name = "gather-process-sockets-per-run"
+rule = "the gather reads each process under its own Ckscko (124)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            let ctx = files::GatherCtx {
+                sockets_only: sel.sockets_only_for(p),'''
+new = '''            let ctx = files::GatherCtx {
+                sockets_only: sel.socket_rows_only(),'''

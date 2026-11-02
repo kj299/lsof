@@ -87,6 +87,10 @@ pub struct MountEntry {
     /// nothing — unless `+f` widens it to any source. Never for an
     /// `-e`/`+e` mount, whose source is not `stat`ed.
     pub source_is_block: bool,
+    /// The source as the kernel lists it, its escapes undone and nothing
+    /// else: the C's `mp->fsname`, which it appends to the NAME of a file
+    /// on an NFS mount (`/mnt/f (srv:/export)`, `dnode.c:858-861`).
+    pub fsname: OsString,
     /// The C's type for it: what `-N` selects on. The type's name itself is
     /// read by nothing: `-Z` asks the host's table for one by name
     /// ([`Backend::has_mount_type`]), and a warning names the row's own.
@@ -98,13 +102,14 @@ pub struct MountEntry {
 /// way.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MountTable {
-    /// Every mount recorded: one per directory, `/proc/self/mounts` order.
+    /// Every mount recorded: one per directory, `/proc/mounts` order.
     pub entries: Vec<MountEntry>,
     /// The C's `HasNFS`: 0, none; 1, an NFS mount was listed (one dropped
-    /// as a duplicate counts); 2, one was recorded. Recorded as the C
-    /// records it, and read by nothing yet: the C makes every per-file
-    /// `stat` through its child once it is not 0, and lsof-rs does not
-    /// (DIVERGENCES 124, OPEN), whose step this is kept for.
+    /// as a duplicate counts); 2, one was recorded. Once it is not 0 the C
+    /// makes every per-file `stat` through `statsafely()`, and so does the
+    /// Linux backend ([`Selection::has_nfs`](crate::Selection::has_nfs));
+    /// at 2 a file on a recorded NFS mount is named with its source
+    /// (DIVERGENCES 124).
     pub has_nfs: u8,
     /// The device of the last `mqueue` mount recorded (the C's
     /// `MqueueDev`), what a POSIX message queue's descriptor is on. `None`
@@ -258,6 +263,21 @@ pub trait Backend {
     /// engine applies the authoritative filtering afterwards, so a backend may
     /// also return a superset.
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError>;
+
+    /// [`Backend::gather`], with `fs`, the bounded layer under the run's
+    /// `-b`, `-O`, `-S` and `-w`, for the calls the C makes through
+    /// `statsafely()` while it gathers: on Linux, every per-file `stat` once
+    /// the mount table lists an NFS mount ([`Selection::has_nfs`];
+    /// DIVERGENCES 124). A backend that makes none gathers as it does
+    /// without it.
+    fn gather_with(
+        &self,
+        sel: &Selection,
+        fs: &crate::safefs::SafeFs,
+    ) -> Result<Vec<Process>, BackendError> {
+        let _ = fs;
+        self.gather(sel)
+    }
 }
 
 #[cfg(test)]

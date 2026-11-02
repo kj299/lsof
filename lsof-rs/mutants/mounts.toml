@@ -31,6 +31,14 @@
 # and help-before-the-end-of-parse-errors, as `tell_early` and the parse's
 # `told` became `Early::tell` and `early.told`.
 
+# DIVERGENCES 124 re-anchored table-read-under-i-alone, table-not-read-
+# before-listing and dash-n-on-every-mount (2026-11-02: main.rs hands the
+# NFS mounts on, not their devices, on Linux); each run again as root with
+# --first-kill, killed (two by the unit gate, one by the differential).
+# Row 124's fix round re-anchored load-reads-unbounded and types-reads-
+# unbounded (2026-11-02: the table's read returns the C's error when it
+# cannot be opened); run again as root with --first-kill, both killed by
+# the unit gate.
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -99,8 +107,8 @@ name = "load-reads-unbounded"
 rule = "the table's mounts are read through the cap, not around it (129; the item's review)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
-old = '''    resolve_table(&parse_mounts(&read_capped(path, cap)), req, fs)'''
-new = '''    resolve_table(&parse_mounts(&std::fs::read(path).unwrap_or_default()), req, fs)'''
+old = '''        &parse_mounts(&read_capped(path, cap)?),'''
+new = '''        &parse_mounts(&std::fs::read(path).unwrap_or_default()),'''
 
 [[mutant]]
 name = "types-reads-unbounded"
@@ -108,6 +116,7 @@ rule = "-Z's types are read through the cap, not around it (129; the item's revi
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
 old = '''    read_capped(path, cap)
+        .unwrap_or_default()
         .split(|&b| b == b'\n')'''
 new = '''    std::fs::read(path)
         .unwrap_or_default()
@@ -303,11 +312,11 @@ file = "crates/lsof-cli/src/main.rs"
 old = '''        if table.is_none() && needs_table {
             table = Some(read_table(&sel));
         }
-        // `-N` selects'''
+        // A POSIX message queue'''
 new = '''        if table.is_none() {
             table = Some(read_table(&sel));
         }
-        // `-N` selects'''
+        // A POSIX message queue'''
 
 [[mutant]]
 name = "table-not-read-before-listing"
@@ -317,8 +326,8 @@ file = "crates/lsof-cli/src/main.rs"
 old = '''        if table.is_none() && needs_table {
             table = Some(read_table(&sel));
         }
-        // `-N` selects'''
-new = '''        // `-N` selects'''
+        // A POSIX message queue'''
+new = '''        // A POSIX message queue'''
 
 [[mutant]]
 name = "table-not-read-for-a-path"
@@ -437,5 +446,6 @@ name = "dash-n-on-every-mount"
 rule = "-N selects the files of NFS mounts alone (110)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''                if let (MountKind::Nfs, Some(dev)) = (m.kind, m.device) {'''
-new = '''                if let (MountKind::Regular, Some(dev)) = (m.kind, m.device) {'''
+old = '''            .filter(|m| m.kind == MountKind::Nfs && m.device.is_some());'''
+new = '''            .filter(|m| m.kind == MountKind::Regular && m.device.is_some());'''
+

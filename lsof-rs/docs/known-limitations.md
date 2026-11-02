@@ -260,8 +260,14 @@ meet. Each number is a row there, with the measurement behind it.
   is in lsof's own listing (123). lsof-rs never `stat`s that descriptor; the
   C's lsof listing the host, or any other tool that `stat`s
   `/proc/PID/fd/N`, waits on it. A process's own files are `stat`ed in lsof
-  with no limit, as the C does without an NFS mount (124), and `-O` makes
-  every call that way. A `+D` walk makes one helper round trip per entry, its
+  with no limit, as the C does without an NFS mount; with one listed they go
+  through the helper too, and under `-b` are avoided, as the C's are (124);
+  `-O` makes every call in lsof. Each call that meets a hung server leaves
+  a killed helper waiting, with a pipe and a thread of lsof's, until the
+  server answers; past 16 of them every further call fails at once,
+  `Resource temporarily unavailable`, with one warning (118). A file-system argument naming an NFS mount
+  matches every file on its device, where the C asks an NFS file's mount
+  directory as well (151). A `+D` walk makes one helper round trip per entry, its
   `lstat`, and one more for a link `-x l` follows: about 0.08 ms an entry, 1.6
   times the C's (`+D /usr/lib`, 17,742 entries, 1.39 s against 0.86 s; `-O`
   0.13 s; 94, 111).

@@ -17,7 +17,11 @@
 # mount-source-stat-unbounded, mount-table-under-the-final-options (now the
 # parser's read at the first +d) and e-checked-against-an-empty-table (now
 # the parser's -e check); each run again as root, each killed by the unit
-# gate. Batch A's review re-anchored S-warning-muted-by-w (2026-10-31), as
+# gate. Row 124's fix round re-anchored read-dir-ignores-S (the layer now
+# passes a failed call's note on) and readlink-reads-past-a-timeout (a
+# refused call ends the reading too), 2026-11-02; run again as root with
+# --first-kill, both killed by the unit gate. Batch A's review re-anchored
+# S-warning-muted-by-w (2026-10-31), as
 # the errors the parse read on after now go out ahead of the warning; run
 # again as root, killed again.
 #
@@ -339,16 +343,16 @@ name = "read-dir-ignores-S"
 rule = "a listing gets the -S in force, like every call (94)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/safefs.rs"
-old = '''            Mode::Bounded(limit) => self.calls.read_dir(path, limit),'''
-new = '''            Mode::Bounded(_) => self.calls.read_dir(path, TMLIMIT),'''
+old = '''            Mode::Bounded(limit) => self.told(self.calls.read_dir(path, limit)),'''
+new = '''            Mode::Bounded(_) => self.told(self.calls.read_dir(path, TMLIMIT)),'''
 
 [[mutant]]
 name = "readlink-reads-past-a-timeout"
 rule = "one Readlink() reads no more of the path after a component times out (120)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/readlink.rs"
-old = '''                gave_up = crate::safefs::is_timed_out(&e);'''
-new = '''                gave_up = false && crate::safefs::is_timed_out(&e);'''
+old = '''crate::safefs::is_timed_out(&e) || e.kind() == std::io::ErrorKind::WouldBlock;'''
+new = '''false && crate::safefs::is_timed_out(&e) || e.kind() == std::io::ErrorKind::WouldBlock;'''
 
 # ------------------------------------------------------------- the options --
 

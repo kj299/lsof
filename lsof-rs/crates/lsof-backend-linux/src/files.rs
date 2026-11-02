@@ -2,12 +2,11 @@
 
 use std::num::NonZeroU32;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use lsof_core::errno_text;
 use lsof_core::model::{AccessMode, FdType, FileType, LockKind, OpenFile};
-use lsof_core::ExemptFs;
+use lsof_core::{ExemptFs, FileStat, MountEntry, SafeFs};
 
 use crate::net::{self, SocketTable};
 
@@ -27,10 +26,10 @@ const S_IFIFO: u32 = 0o010000;
 /// else (the filesystem the file lives on). What is shown, and only that: a
 /// path argument finds a row by its `st_dev` and inode, a device node's too
 /// (`OpenFile::file_id`; DIVERGENCES 101).
-pub(crate) fn dev_cell(md: &std::fs::Metadata) -> String {
-    match type_from_mode(md.mode()) {
-        FileType::Chr | FileType::Block => dev_string(md.rdev()),
-        _ => dev_string(md.dev()),
+pub(crate) fn dev_cell(md: &FileStat) -> String {
+    match type_from_mode(md.mode) {
+        FileType::Chr | FileType::Block => dev_string(md.rdev),
+        _ => dev_string(md.dev),
     }
 }
 
@@ -283,7 +282,7 @@ fn under_mount(path: &[u8], e: &ExemptFs) -> bool {
 /// nothing: `//`, `/./`, `..` or a symlink can lead into an exempt mount past
 /// any test on the text. The walk keeps a path with no symlink or `.` in it,
 /// which the plain prefix test is right for, and asks before each step.
-fn metadata_outside(path: &[u8], exempt: &[ExemptFs]) -> Option<std::fs::Metadata> {
+fn metadata_outside(path: &[u8], exempt: &[ExemptFs], fs: Option<&SafeFs>) -> Option<FileStat> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     // The kernel's own limit on symlinks in one lookup (`MAXSYMLINKS`).
     const MAX_LINKS: usize = 40;
@@ -296,7 +295,7 @@ fn metadata_outside(path: &[u8], exempt: &[ExemptFs]) -> Option<std::fs::Metadat
         .collect();
     // Where the walk is, as a path with no symlink in it; empty is `/`.
     let mut at: Vec<u8> = Vec::new();
-    let mut at_md: Option<std::fs::Metadata> = None;
+    let mut at_md: Option<FileStat> = None;
     let mut at_is_dir = true;
     let mut links = 0;
     while let Some(c) = todo.pop() {
@@ -319,13 +318,10 @@ fn metadata_outside(path: &[u8], exempt: &[ExemptFs]) -> Option<std::fs::Metadat
                 if exempt.iter().any(|e| under_mount(&next, e)) {
                     return None;
                 }
-                let md = std::fs::symlink_metadata(os(&next)).ok()?;
-                if md.file_type().is_symlink() {
+                let md = lstat_via(fs, os(&next)).ok()?;
+                if md.is_symlink() {
                     links += 1;
-                    let target = std::fs::read_link(os(&next))
-                        .ok()?
-                        .into_os_string()
-                        .into_vec();
+                    let target = readlink_via(fs, os(&next)).ok()?.into_vec();
                     if links > MAX_LINKS || target.is_empty() {
                         return None;
                     }
@@ -350,7 +346,7 @@ fn metadata_outside(path: &[u8], exempt: &[ExemptFs]) -> Option<std::fs::Metadat
             if exempt.iter().any(|e| under_mount(dir, e)) {
                 return None;
             }
-            std::fs::metadata(os(dir)).ok()
+            stat_via(fs, os(dir)).ok()
         }
     }
 }
@@ -375,21 +371,165 @@ fn socket_file_id(
     path: &str,
     raw: Option<&[u8]>,
     exempt: &[ExemptFs],
+    fs: Option<&SafeFs>,
 ) -> Option<lsof_core::FileId> {
-    use std::os::unix::fs::FileTypeExt;
     if !path.starts_with('/') {
         return None;
     }
     let bytes = raw.unwrap_or(path.as_bytes());
     let md = if exempt.is_empty() {
-        std::fs::metadata(std::ffi::OsStr::from_bytes(bytes)).ok()?
+        stat_via(fs, std::ffi::OsStr::from_bytes(bytes)).ok()?
     } else {
-        metadata_outside(bytes, exempt)?
+        metadata_outside(bytes, exempt, fs)?
     };
-    md.file_type().is_socket().then(|| lsof_core::FileId {
-        dev: md.dev(),
-        ino: md.ino(),
+    (md.mode & S_IFMT == S_IFSOCK).then_some(lsof_core::FileId {
+        dev: md.dev,
+        ino: md.ino,
     })
+}
+
+/// `stat(2)` of `p`: through `fs`, the bounded layer, when the mount table
+/// lists an NFS mount (the C's `statsafely()` under `HasNFS`), and made here
+/// otherwise, as the C makes it (DIVERGENCES 124).
+fn stat_via(fs: Option<&SafeFs>, p: &std::ffi::OsStr) -> std::io::Result<FileStat> {
+    match fs {
+        Some(fs) => fs.stat(Path::new(p)),
+        None => std::fs::metadata(p).map(|md| FileStat::from(&md)),
+    }
+}
+
+/// `lstat(2)` of `p`, as [`stat_via`] makes a `stat`.
+fn lstat_via(fs: Option<&SafeFs>, p: &std::ffi::OsStr) -> std::io::Result<FileStat> {
+    match fs {
+        Some(fs) => fs.lstat(Path::new(p)),
+        None => std::fs::symlink_metadata(p).map(|md| FileStat::from(&md)),
+    }
+}
+
+/// `readlink(2)` of `p`, as [`stat_via`] makes a `stat`.
+fn readlink_via(fs: Option<&SafeFs>, p: &std::ffi::OsStr) -> std::io::Result<std::ffi::OsString> {
+    match fs {
+        Some(fs) => fs.readlink(Path::new(p)),
+        None => std::fs::read_link(p).map(std::path::PathBuf::into_os_string),
+    }
+}
+
+/// `ENOENT`, `EACCES` and `EPERM`, fixed by the ABI as `S_IFMT` is.
+const ENOENT: i32 = 2;
+const EACCES: i32 = 13;
+const EPERM: i32 = 1;
+
+/// What the C's `statsafely()` of a `/proc` link, and after it fails its
+/// `statEx()` of what the link names, leave a row (`dproc.c:1786-1847`)
+/// when the mount table lists an NFS mount.
+#[derive(Debug)]
+pub(crate) enum Looked {
+    /// The call answered: everything a `stat` says (`SB_ALL`).
+    Full(FileStat),
+    /// It did not, and a `stat` of a directory above what the link names
+    /// did: that directory's device alone (`SB_DEV | SB_RDEV`), the row's
+    /// DEVICE, with no type, size or inode.
+    Partial(u64),
+    /// Neither did: the error `statEx()` leaves in `errno`, which NAME says.
+    Failed(std::io::Error),
+}
+
+/// The C's `statEx()` of `path`, the link's source as `getlinksrc()` cut it:
+/// trim its last component and `stat` what is left, through `fs`, and on
+/// `EACCES` or `EPERM` trim another and try again, stopping short of `/`
+/// itself. The first `stat` that answers gives the row its device; one that
+/// fails otherwise ends the walk with its error, and a path with no `/` past
+/// its first byte (`/`, `/tmp`, `pipe`, `socket`) is `ENOENT` with no call:
+/// so the C's `rtd` row under `-b` is `/ (stat: No such file or
+/// directory)`, its `cwd` row in `/tmp` `(stat: Resource temporarily
+/// unavailable)` after `avoiding stat(/tmp)`, measured. A relative path
+/// with a `/` in it is one the C `stat`s in its working directory; it is not
+/// looked up here (as DIVERGENCES 102 does not look up a mapping's), and is
+/// `ENOENT`, what the C finds where nothing is there, except under `-b`,
+/// which makes no call and says what it avoided, as the C says it.
+fn stat_ex(fs: &SafeFs, path: &[u8]) -> Looked {
+    let mut err = std::io::Error::from_raw_os_error(ENOENT);
+    let mut cut = path;
+    while let Some(slash) = cut.iter().rposition(|&b| b == b'/') {
+        if slash == 0 {
+            break;
+        }
+        cut = &cut[..slash];
+        let p = Path::new(std::ffi::OsStr::from_bytes(cut));
+        let got = if cut.starts_with(b"/") || fs.blocking().avoid {
+            fs.stat(p)
+        } else {
+            Err(std::io::Error::from_raw_os_error(ENOENT))
+        };
+        match got {
+            Ok(st) => return Looked::Partial(st.dev),
+            Err(e) => {
+                let again = matches!(e.raw_os_error(), Some(EACCES | EPERM));
+                err = e;
+                if !again {
+                    break;
+                }
+            }
+        }
+    }
+    Looked::Failed(err)
+}
+
+/// `statsafely()` (or, with `follow` false, `lstatsafely()`) of `link`,
+/// then `statEx()` of `source` when it fails: one of the C's per-file looks
+/// under `HasNFS` (`dproc.c:963-976`, `1178-1196`).
+fn look(fs: &SafeFs, link: &Path, source: &[u8], follow: bool) -> Looked {
+    let got = if follow {
+        fs.stat(link)
+    } else {
+        fs.lstat(link)
+    };
+    match got {
+        Ok(st) => Looked::Full(st),
+        Err(_) => stat_ex(fs, source),
+    }
+}
+
+/// The source of a `/proc` link as the C's `getlinksrc()` keeps it: a path
+/// whole, anything else up to its first `:` (`pipe`, `socket`,
+/// `anon_inode`). What `statEx()` is asked of, and what a row it could not
+/// `stat` is named (`4 unknown 0t0 pipe (lstat: No such file or directory)
+/// …`, measured).
+fn link_source(target: &[u8]) -> &[u8] {
+    if target.starts_with(b"/") {
+        return target;
+    }
+    target
+        .iter()
+        .position(|&b| b == b':')
+        .map_or(target, |colon| &target[..colon])
+}
+
+/// ` (SOURCE)`, the NFS mount's source, for a file the C types `N_NFS`: one
+/// on device `dev` at `path` on an NFS mount the table recorded
+/// (`dnode.c:735-744,858-861`, `HasNFS` at 2). Asked only of the rows the C
+/// types `N_REGLR`; `None` for every other, and wherever no NFS mount was
+/// recorded. Measured: `/tmp/d (srv:/export)`, `/tmp/d/f.txt
+/// (srv:/export)`, `/tmp/d/gone.txt (deleted) (srv:/export)`, and the
+/// same in `-F n` and JSON's `name`, where it is part of the name.
+pub(crate) fn nfs_suffix(
+    mounts: &[MountEntry],
+    ty: &FileType,
+    dev: Option<u64>,
+    path: &[u8],
+) -> Option<String> {
+    let reglr = !matches!(
+        ty,
+        FileType::Chr | FileType::Block | FileType::Fifo | FileType::Socket(_)
+    ) && *ty != FileType::Other("a_inode".into());
+    let dev = dev?;
+    if !reglr {
+        return None;
+    }
+    let m = mounts
+        .iter()
+        .find(|m| m.device == Some(dev) && path.starts_with(m.dir.as_bytes()))?;
+    Some(format!(" ({})", m.fsname.to_string_lossy()))
 }
 
 /// The C's `UNKN*` TYPE code for an fd kind — `UNKNfd`, `UNKNcwd`, `UNKNrtd`,
@@ -438,6 +578,16 @@ pub struct GatherCtx<'a> {
     /// `Selection::mqueue_device`: a regular file on this device is a POSIX
     /// message queue, `PSXMQ`.
     pub mqueue_device: Option<u64>,
+    /// The bounded layer, under the run's `-b`, `-O`, `-S` and `-w`, when the
+    /// mount table lists an NFS mount (`Selection::has_nfs`): then every
+    /// per-file call is made through it, as the C makes it through
+    /// `statsafely()`, and a failed one is followed by its `statEx()`
+    /// ([`Looked`]). `None` otherwise, and each is made here, as the C makes
+    /// it (DIVERGENCES 124).
+    pub fs: Option<SafeFs<'a>>,
+    /// `Selection::nfs_mounts`: the NFS mounts a file is named by
+    /// ([`nfs_suffix`]), newest first; empty unless one was recorded.
+    pub nfs_mounts: &'a [MountEntry],
 }
 
 /// `ty`, or `PSXMQ` for a regular file on the device of the `mqueue` file
@@ -489,7 +639,7 @@ pub(crate) fn socket_row(
     inode: u64,
     fd: &FdType,
     info: &FdInfo,
-    meta: Option<&std::fs::Metadata>,
+    meta: Option<&FileStat>,
     link: Option<&Path>,
     ctx: &GatherCtx<'_>,
 ) -> Option<OpenFile> {
@@ -498,13 +648,13 @@ pub(crate) fn socket_row(
         // Not in this namespace's tables: the C's last branch of
         // `process_proc_sock()`, reached only for what `stat`s as a socket.
         let link = link?;
-        if meta?.mode() & S_IFMT != S_IFSOCK {
+        if meta?.mode & S_IFMT != S_IFSOCK {
             return None;
         }
         let name = ns.unlisted_name(link, inode);
         return Some(OpenFile {
             rdev: None,
-            fs_device: meta.map(MetadataExt::dev),
+            fs_device: meta.map(|m| m.dev),
             file_flags: info.flags,
             lock: None,
             fd: fd.clone(),
@@ -547,7 +697,9 @@ pub(crate) fn socket_row(
                 let raw = socks.raw_path(inode);
                 Box::new(lsof_core::BoundPath {
                     path: raw.is_none().then(|| path.clone()),
-                    id: socks.bound_id(inode, || socket_file_id(path, raw, ctx.exempt)),
+                    id: socks.bound_id(inode, || {
+                        socket_file_id(path, raw, ctx.exempt, ctx.fs.as_ref())
+                    }),
                 })
             });
         }
@@ -595,17 +747,19 @@ fn row(
     ctx: &GatherCtx<'_>,
 ) -> Option<OpenFile> {
     let (exempt, sockets_only) = (ctx.exempt, ctx.sockets_only);
-    let access = info.access();
     let offset = info.pos;
-    let target = Some(target);
     // `sockets_only`: this run can print nothing but sockets
     // (`Selection::socket_rows_only`), so a row that is not one is built only
     // to be dropped. The kernel names every socket fd `socket:[<inode>]` —
-    // AF_INET and AF_UNIX alike, which is why one test covers `-i` and `-U` —
-    // so the link text decides it, before the `stat` that is the expensive
+    // AF_INET and AF_UNIX alike, which is why one test covers `-i` and `-U`
+    // — so the link text decides it, before the `stat` that is the expensive
     // half. The `-e` exemption below cannot resurrect such a row: it matches
-    // an absolute path prefix and `socket:[…]` is not a path.
-    if sockets_only && !target.as_deref().is_some_and(is_socket_link) {
+    // an absolute path prefix and `socket:[…]` is not a path. Not when the
+    // table lists an NFS mount: the C then makes both of an fd's calls
+    // through `statsafely()` whatever the link says, and keeps the row only
+    // when the `stat` says socket (`dproc.c:1178-1215`), so that under `-b`
+    // each is avoided, and said to be, and no row is kept.
+    if sockets_only && ctx.fs.is_none() && !is_socket_link(&target) {
         return None;
     }
     // `-e <fs>`: never `stat(2)` a file on an exempted file system — that is
@@ -617,63 +771,102 @@ fn row(
     // `stat` would have supplied — the access letter goes blank, TYPE becomes
     // `UNKN<fd kind>`, DEVICE the literal `UNKNOWN`, and size, inode and link
     // count are absent. NAME gains ` (-e <fs>)`.
-    if let Some(t) = target.as_ref() {
-        if let Some(e) = exempt_match(t.as_os_str().as_bytes(), exempt) {
-            let kind = unkn_suffix(&fd);
-            let mut f = OpenFile {
-                rdev: None,
-                fs_device: None,
-                file_flags: info.flags,
-                lock: None,
-                fd,
-                access: AccessMode::Unknown,
-                file_type: FileType::Exempt(kind),
-                name: t.to_string_lossy().into_owned(),
-                device: Some("UNKNOWN".to_string()),
-                size: None,
-                // Pass the fdinfo position through rather than defaulting it:
-                // a numeric fd has one (`o0t0`), and cwd/rtd/txt have none, so
-                // the C leaves their SIZE/OFF cell empty. `unwrap_or(0)` here
-                // printed `0t0` on all three.
-                offset,
-                node: None,
-                links: None,
-                socket: None,
-                name_addition: None,
-            };
-            f.add_name_addition(&exempt_note(e));
-            return Some(f);
+    if let Some(e) = exempt_match(target.as_os_str().as_bytes(), exempt) {
+        if sockets_only {
+            return None;
         }
+        let kind = unkn_suffix(&fd);
+        let mut f = OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: info.flags,
+            lock: None,
+            fd,
+            access: AccessMode::Unknown,
+            file_type: FileType::Exempt(kind),
+            name: target.to_string_lossy().into_owned(),
+            device: Some("UNKNOWN".to_string()),
+            size: None,
+            // Pass the fdinfo position through rather than defaulting it:
+            // a numeric fd has one (`o0t0`), and cwd/rtd/txt have none, so
+            // the C leaves their SIZE/OFF cell empty. `unwrap_or(0)` here
+            // printed `0t0` on all three.
+            offset,
+            node: None,
+            links: None,
+            socket: None,
+            name_addition: None,
+        };
+        f.add_name_addition(&exempt_note(e));
+        return Some(f);
     }
-    let meta = std::fs::metadata(link);
     // What `stat` could not say is said in NAME, as the C says it: the link
     // is named but the file behind it cannot be examined — a dead FUSE mount
     // (`Transport endpoint is not connected`), a file gone between the two
-    // calls. The C `lstat`s an fd's link as well and can add `(lstat: …)`;
-    // that call fails only in the same race, and costs a syscall per fd on
-    // every run, so lsof-rs makes the one call.
-    let stat_failure = match &meta {
-        Err(e) if !ctx.omit_unreadable => Some(format!("(stat: {})", errno_text(e))),
+    // calls. Without NFS the C `lstat`s an fd's link as well and can add
+    // `(lstat: …)`; that call fails only in the same race, and costs a
+    // syscall per fd on every run, so lsof-rs makes the one call there.
+    // With NFS listed it makes both, as the C does, each through the bounded
+    // layer and each followed by `statEx()` when it fails ([`look`]): what
+    // `-b` makes of every row.
+    let source = link_source(target.as_os_str().as_bytes());
+    let (lstat, stat) = match ctx.fs.as_ref() {
+        Some(fs) => (
+            matches!(fd, FdType::Handle(_)).then(|| look(fs, link, source, false)),
+            look(fs, link, source, true),
+        ),
+        None => (
+            None,
+            match std::fs::metadata(link) {
+                Ok(md) => Looked::Full(FileStat::from(&md)),
+                Err(e) => Looked::Failed(e),
+            },
+        ),
+    };
+    if sockets_only && !matches!(&stat, Looked::Full(st) if st.mode & S_IFMT == S_IFSOCK) {
+        return None;
+    }
+    // The access letter is the `lstat`'s of the link (`dnode.c:676-684`),
+    // the same answer fdinfo's flags give; with no answer it is blank.
+    let access = match &lstat {
+        None | Some(Looked::Full(_)) => info.access(),
+        Some(_) => AccessMode::Unknown,
+    };
+    // The C's `Lf->nma`, which JSON leaves out: `(lstat: …)`, then `(stat:
+    // …)`, for each call that left nothing, unless `-w`.
+    let mut why = Vec::new();
+    if !ctx.omit_unreadable {
+        for (call, got) in [("lstat", lstat.as_ref()), ("stat", Some(&stat))] {
+            if let Some(Looked::Failed(e)) = got {
+                why.push(format!("({call}: {})", errno_text(e)));
+            }
+        }
+    }
+    let meta = match &stat {
+        Looked::Full(st) => Some(*st),
         _ => None,
     };
-    let meta = meta.ok();
 
-    let name = target
-        .map(|t| t.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = target.to_string_lossy().into_owned();
 
     // A socket fd's link target carries only `socket:[inode]`; the inode is the
     // join key into /proc/net. A hit replaces the L0 row wholesale — real TYPE
     // (IPv4/IPv6/unix), protocol, addresses and state. A miss keeps the L0 row
     // exactly as it was, which is the honest result for a socket in another
-    // network namespace.
-    if let Some(inode) = net::socket_inode(&name) {
-        if let Some(f) = socket_row(inode, &fd, info, meta.as_ref(), Some(link), ctx) {
-            return Some(f);
+    // network namespace. Under NFS, only what a `stat` said is a socket.
+    if ctx.fs.is_none() || meta.is_some_and(|m| m.mode & S_IFMT == S_IFSOCK) {
+        if let Some(inode) = net::socket_inode(&name) {
+            if let Some(f) = socket_row(inode, &fd, info, meta.as_ref(), Some(link), ctx) {
+                return Some(f);
+            }
         }
     }
 
-    let fs_device = meta.as_ref().map(|m| m.dev());
+    let fs_device = match &stat {
+        Looked::Full(m) => Some(m.dev),
+        Looked::Partial(dev) => Some(*dev),
+        Looked::Failed(_) => None,
+    };
     let (file_type, device, size, node, links, rdev) = match &meta {
         Some(m) => {
             // An anonymous inode stats as a regular file, but lsof types it
@@ -683,22 +876,22 @@ fn row(
             let ty = if name.starts_with("anon_inode:") {
                 FileType::Other("a_inode".into())
             } else {
-                psxmq(type_from_mode(m.mode()), m.dev(), ctx.mqueue_device)
+                psxmq(type_from_mode(m.mode), m.dev, ctx.mqueue_device)
             };
             // DEVICE means two different things depending on the row, and lsof
             // follows the distinction: for a device node it is that device's
             // own number (`st_rdev` — /dev/null is `1,3`), for everything else
             // it is the filesystem the file lives on (`st_dev`).
             let dev = match ty {
-                FileType::Chr | FileType::Block => m.rdev(),
-                _ => m.dev(),
+                FileType::Chr | FileType::Block => m.rdev,
+                _ => m.dev,
             };
             // ...and `-F r` prints that raw number, on a device node and
             // nowhere else (`dnode.c` records `rdev` for N_CHR and N_BLK):
             // `r0x103` for /dev/null (DIVERGENCES 47).
             let rdev = match ty {
                 FileType::Chr | FileType::Block => {
-                    u32::try_from(m.rdev()).ok().and_then(NonZeroU32::new)
+                    u32::try_from(m.rdev).ok().and_then(NonZeroU32::new)
                 }
                 _ => None,
             };
@@ -710,31 +903,51 @@ fn row(
             // without a platform branch in `lsof-core`.
             let size = match ty {
                 FileType::Chr | FileType::Block | FileType::Fifo => None,
-                _ => Some(m.size()),
+                _ => Some(m.size),
             };
             // No link count for a socket: the C hands a socket inode to
             // `process_proc_sock()` before `process_proc_node()` records one,
             // so `+L` never selects it and NLINK stays blank (DIVERGENCES 42).
             // This is the socket no table named; the rows the tables do name
             // carry none either.
-            let links = if m.mode() & S_IFMT == S_IFSOCK {
+            let links = if m.mode & S_IFMT == S_IFSOCK {
                 None
             } else {
-                u32::try_from(m.nlink()).ok()
+                u32::try_from(m.nlink).ok()
             };
             (
                 ty,
                 Some(dev_string(dev)),
                 size,
-                Some(m.ino().to_string()),
+                Some(m.ino.to_string()),
                 links,
                 rdev,
             )
         }
-        None => (FileType::Unknown, None, None, None, None, None),
+        // Only the device of a directory above it (`statEx()`), shown as
+        // the C shows its `Lf->dev`, with no type.
+        None => (
+            FileType::Unknown,
+            fs_device.map(dev_string),
+            None,
+            None,
+            None,
+            None,
+        ),
     };
 
-    let name = name_for_target(&name, info);
+    // A row the C could not `stat` under NFS is named by the link's source,
+    // as `getlinksrc()` cut it (`pipe`, `socket`, `anon_inode`): fdinfo's
+    // names need the type the `stat` gives (measured: `9 unknown 0t0
+    // anon_inode (lstat: …) (stat: …)` for an eventfd under `-b`).
+    let mut name = if ctx.fs.is_some() && meta.is_none() {
+        String::from_utf8_lossy(source).into_owned()
+    } else {
+        name_for_target(&name, info)
+    };
+    if let Some(nfs) = nfs_suffix(ctx.nfs_mounts, &file_type, fs_device, source) {
+        name.push_str(&nfs);
+    }
     let mut f = OpenFile {
         rdev,
         fs_device,
@@ -752,8 +965,7 @@ fn row(
         socket: None,
         name_addition: None,
     };
-    // The C's `Lf->nma`, which JSON leaves out.
-    if let Some(why) = stat_failure {
+    for why in why {
         f.add_name_addition(&why);
     }
     Some(f)
@@ -992,6 +1204,7 @@ pub fn has_readable_file(base: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
     /// `-e` of each of `paths`, as the CLI keeps them.
     fn minus(paths: &[&str]) -> Vec<ExemptFs> {
         paths
@@ -1032,6 +1245,8 @@ mod tests {
                 mnt_ns: None,
                 helpers: &crate::safefs::HelperFds::default(),
                 mqueue_device: None,
+                fs: None,
+                nfs_mounts: &[],
             },
         )
     }
@@ -1152,6 +1367,8 @@ mod tests {
                 mnt_ns: None,
                 helpers: &crate::safefs::HelperFds::default(),
                 mqueue_device: None,
+                fs: None,
+                nfs_mounts: &[],
             },
         );
         assert!(
@@ -1472,6 +1689,8 @@ mod tests {
                 mnt_ns: None,
                 helpers: &crate::safefs::HelperFds::default(),
                 mqueue_device: None,
+                fs: None,
+                nfs_mounts: &[],
             },
         )
     }
@@ -1704,12 +1923,14 @@ mod tests {
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
             mqueue_device: None,
+            fs: None,
+            nfs_mounts: &[],
         };
         let f = socket_row(
             md.ino(),
             &FdType::Handle(3),
             &FdInfo::default(),
-            Some(&md),
+            Some(&FileStat::from(&md)),
             Some(&link),
             &ctx,
         )
@@ -1727,7 +1948,7 @@ mod tests {
                 md.ino(),
                 &FdType::Handle(3),
                 &FdInfo::default(),
-                Some(&md),
+                Some(&FileStat::from(&md)),
                 link,
                 &ctx,
             )
@@ -1768,6 +1989,8 @@ mod tests {
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
             mqueue_device: Some(dev),
+            fs: None,
+            nfs_mounts: &[],
         };
         let f = super::row(
             &file,
@@ -1832,11 +2055,14 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let path = sock.to_str().unwrap();
         let md = std::fs::metadata(&sock).unwrap();
-        assert_eq!(socket_file_id(path, None, &[]), Some(file_id(&md)));
+        assert_eq!(socket_file_id(path, None, &[], None), Some(file_id(&md)));
         // A regular file in its place identifies nothing.
         let plain = dir.join("plain");
         std::fs::write(&plain, b"x").unwrap();
-        assert_eq!(socket_file_id(plain.to_str().unwrap(), None, &[]), None);
+        assert_eq!(
+            socket_file_id(plain.to_str().unwrap(), None, &[], None),
+            None
+        );
         // Nor does a relative path, even one that reaches that very socket
         // from here: it is relative to the cwd of whoever bound it, not this
         // one's, so the C never stats it.
@@ -1847,7 +2073,7 @@ mod tests {
             std::fs::metadata(&relative).is_ok(),
             "{relative} reaches it"
         );
-        assert_eq!(socket_file_id(&relative, None, &[]), None);
+        assert_eq!(socket_file_id(&relative, None, &[], None), None);
         // A path that is not UTF-8 is stat'ed by its own bytes: the U+FFFD
         // it is shown with names no file.
         {
@@ -1857,8 +2083,11 @@ mod tests {
                 std::os::unix::net::UnixListener::bind(std::ffi::OsStr::from_bytes(&raw)).unwrap();
             let shown = String::from_utf8_lossy(&raw).into_owned();
             let md = std::fs::metadata(std::ffi::OsStr::from_bytes(&raw)).unwrap();
-            assert_eq!(socket_file_id(&shown, Some(&raw), &[]), Some(file_id(&md)));
-            assert_eq!(socket_file_id(&shown, None, &[]), None);
+            assert_eq!(
+                socket_file_id(&shown, Some(&raw), &[], None),
+                Some(file_id(&md))
+            );
+            assert_eq!(socket_file_id(&shown, None, &[], None), None);
         }
         // Under a `-e` elsewhere the socket is still found, through a symlink
         // too; under one that covers it, by no spelling, since each would
@@ -1877,8 +2106,8 @@ mod tests {
         let elsewhere = minus(&["/nonexistent-fs"]);
         let exempt = minus(&[d]);
         for s in &spellings {
-            assert_eq!(socket_file_id(s, None, &elsewhere), id, "{s}");
-            assert_eq!(socket_file_id(s, None, &exempt), None, "{s} under -e");
+            assert_eq!(socket_file_id(s, None, &elsewhere, None), id, "{s}");
+            assert_eq!(socket_file_id(s, None, &exempt, None), None, "{s} under -e");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1899,7 +2128,7 @@ mod tests {
         std::fs::create_dir(dir.join("ex")).unwrap();
         std::os::unix::fs::symlink("ex", dir.join("to-ex")).unwrap();
         let none = minus(&["/nonexistent-fs"]);
-        let ino = |p: &str| metadata_outside(p.as_bytes(), &none).map(|m| m.ino());
+        let ino = |p: &str| metadata_outside(p.as_bytes(), &none, None).map(|m| m.ino);
         let want = std::fs::metadata(dir.join("a/b/f")).unwrap().ino();
         let b = std::fs::metadata(dir.join("a/b")).unwrap().ino();
         for (p, expect) in [
@@ -1928,16 +2157,16 @@ mod tests {
             );
         }
         let ex = minus(&[&format!("{d}/ex")]);
-        assert!(metadata_outside(format!("{d}/a/b/f").as_bytes(), &ex).is_some());
+        assert!(metadata_outside(format!("{d}/a/b/f").as_bytes(), &ex, None).is_some());
         for p in [
             format!("{d}/ex"),
             format!("{d}/to-ex"),
             format!("{d}/to-ex/x"),
             format!("{d}/a/../ex"),
         ] {
-            assert!(metadata_outside(p.as_bytes(), &ex).is_none(), "{p}");
+            assert!(metadata_outside(p.as_bytes(), &ex, None).is_none(), "{p}");
         }
-        assert!(metadata_outside(b"/", &minus(&["/"])).is_none());
+        assert!(metadata_outside(b"/", &minus(&["/"]), None).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1970,6 +2199,8 @@ mod tests {
             mnt_ns: None,
             helpers: &crate::safefs::HelperFds::default(),
             mqueue_device: None,
+            fs: None,
+            nfs_mounts: &[],
         };
         let id = |f: OpenFile| f.socket.and_then(|s| s.bound).and_then(|b| b.id);
         let first = row(
@@ -2043,5 +2274,488 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         // And a live process that can be read, itself.
         assert!(has_readable_file(&format!("/proc/{}", self_pid())));
+    }
+
+    /// A file system answering from a table, by path: `stat` and `lstat`
+    /// alike give device 7 unless the table holds an errno for the path, and
+    /// every call is recorded, with its kind.
+    #[derive(Default)]
+    struct Answers {
+        errno: std::collections::HashMap<&'static str, i32>,
+        socket: Vec<&'static str>,
+        dirs: Vec<&'static str>,
+        asked: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Answers {
+        fn answer(&self, call: &str, p: &Path) -> std::io::Result<FileStat> {
+            let p = p.to_str().unwrap();
+            self.asked.borrow_mut().push(format!("{call} {p}"));
+            match self.errno.get(p) {
+                Some(&e) => Err(std::io::Error::from_raw_os_error(e)),
+                None => Ok(FileStat {
+                    dev: 7,
+                    ino: 9,
+                    mode: if self.socket.contains(&p) {
+                        S_IFSOCK
+                    } else if self.dirs.contains(&p) {
+                        0o040_000
+                    } else {
+                        S_IFREG
+                    } | 0o644,
+                    nlink: 1,
+                    ..FileStat::default()
+                }),
+            }
+        }
+        fn asked(&self) -> Vec<String> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    impl lsof_core::FsCalls for Answers {
+        fn stat(&self, p: &Path, _: u32) -> std::io::Result<FileStat> {
+            self.answer("stat", p)
+        }
+        fn lstat(&self, p: &Path, _: u32) -> std::io::Result<FileStat> {
+            self.answer("lstat", p)
+        }
+        fn readlink(&self, p: &Path, _: u32) -> std::io::Result<std::ffi::OsString> {
+            self.asked
+                .borrow_mut()
+                .push(format!("readlink {}", p.display()));
+            Err(std::io::Error::from_raw_os_error(22))
+        }
+        fn read_dir(&self, _: &Path, _: u32) -> std::io::Result<Vec<std::ffi::OsString>> {
+            unreachable!("no row lists a directory")
+        }
+    }
+
+    const EAGAIN: i32 = 11;
+
+    fn avoided() -> lsof_core::Blocking {
+        lsof_core::Blocking {
+            avoid: true,
+            ..lsof_core::Blocking::default()
+        }
+    }
+
+    fn failed_with(l: &Looked) -> Option<i32> {
+        match l {
+            Looked::Failed(e) => e.raw_os_error(),
+            _ => None,
+        }
+    }
+
+    /// `statEx()`: the parent of what failed, and on `EACCES` or `EPERM`
+    /// its parent in turn, never `/` itself; the first that answers gives
+    /// the device, and the last error is the row's. A path with no `/`
+    /// past its first byte is `ENOENT`, with no call (`rtd … / (stat: No
+    /// such file or directory)`, measured), and so is a relative one, which
+    /// the C would look up in its working directory and this does not.
+    #[test]
+    fn stat_ex_walks_up_as_the_c_does() {
+        let quiet = |_: &str| {};
+        let ask = |answers: &Answers, path: &str| {
+            let fs = SafeFs::new(answers, &quiet);
+            stat_ex(&fs, path.as_bytes())
+        };
+        for p in ["/", "/tmp", "pipe", "socket", "x/y", "x/y/z"] {
+            let a = Answers::default();
+            assert_eq!(failed_with(&ask(&a, p)), Some(ENOENT), "{p}");
+            assert!(a.asked().is_empty(), "{p}: {:?}", a.asked());
+        }
+        let a = Answers::default();
+        assert!(matches!(ask(&a, "/a/b/c"), Looked::Partial(7)));
+        assert_eq!(a.asked(), ["stat /a/b"], "the first that answers ends it");
+        let a = Answers {
+            errno: [("/a/b", EACCES), ("/a", 0)]
+                .into_iter()
+                .filter(|e| e.1 != 0)
+                .collect(),
+            ..Answers::default()
+        };
+        assert!(matches!(ask(&a, "/a/b/c"), Looked::Partial(7)));
+        assert_eq!(a.asked(), ["stat /a/b", "stat /a"], "EACCES walks on");
+        let a = Answers {
+            errno: [("/a/b", EPERM), ("/a", EACCES)].into_iter().collect(),
+            ..Answers::default()
+        };
+        assert_eq!(failed_with(&ask(&a, "/a/b/c")), Some(EACCES));
+        assert_eq!(a.asked(), ["stat /a/b", "stat /a"], "never `/`");
+        let a = Answers {
+            errno: [("/a/b", EAGAIN), ("/a", EACCES)].into_iter().collect(),
+            ..Answers::default()
+        };
+        assert_eq!(failed_with(&ask(&a, "/a/b/c")), Some(EAGAIN));
+        assert_eq!(a.asked(), ["stat /a/b"], "any other error ends it");
+        // Under `-b` no call is made, and each is said to be avoided: a
+        // relative one too, as the C says it.
+        let said = std::cell::RefCell::new(Vec::new());
+        let sink = |l: &str| said.borrow_mut().push(l.to_string());
+        let a = Answers::default();
+        let fs = SafeFs::new(&a, &sink).with(avoided(), true);
+        assert_eq!(failed_with(&stat_ex(&fs, b"/usr/bin/sleep")), Some(EAGAIN));
+        assert_eq!(failed_with(&stat_ex(&fs, b"x/y")), Some(EAGAIN));
+        assert_eq!(failed_with(&stat_ex(&fs, b"/tmp")), Some(ENOENT));
+        assert!(a.asked().is_empty());
+        assert_eq!(
+            *said.borrow(),
+            [
+                "lsof: avoiding stat(/usr/bin): -b was specified.",
+                "lsof: avoiding stat(x): -b was specified.",
+            ]
+        );
+    }
+
+    /// Under NFS a bound socket's path is `stat`ed through the layer, and so
+    /// is every step of the `-e` walk to it (`lstat`, and `readlink` of a
+    /// link): none is made in lsof, where a socket file on a mount that does
+    /// not answer would hold the run. Without the layer the call is made
+    /// here, and the fake is asked nothing.
+    #[test]
+    fn a_socket_path_is_stated_through_the_layer_under_nfs() {
+        let quiet = |_: &str| {};
+        let a = Answers {
+            socket: vec!["/srv/s.sock"],
+            ..Answers::default()
+        };
+        let fs = SafeFs::new(&a, &quiet);
+        let id = socket_file_id("/srv/s.sock", None, &[], Some(&fs));
+        assert_eq!(id, Some(lsof_core::FileId { dev: 7, ino: 9 }));
+        assert_eq!(a.asked(), ["stat /srv/s.sock"]);
+        let exempt = [ExemptFs {
+            path: "/other".into(),
+            plus: false,
+        }];
+        let a = Answers {
+            socket: vec!["/srv/s.sock"],
+            dirs: vec!["/srv"],
+            ..Answers::default()
+        };
+        let fs = SafeFs::new(&a, &quiet);
+        let id = socket_file_id("/srv/s.sock", None, &exempt, Some(&fs));
+        assert_eq!(id, Some(lsof_core::FileId { dev: 7, ino: 9 }));
+        assert_eq!(a.asked(), ["lstat /srv", "lstat /srv/s.sock"]);
+        // A walk under the exempt mount asks nothing at all.
+        let a = Answers::default();
+        let fs = SafeFs::new(&a, &quiet);
+        assert_eq!(socket_file_id("/other/s", None, &exempt, Some(&fs)), None);
+        assert!(a.asked().is_empty());
+        // No layer: in this process, of a path that is not there.
+        assert_eq!(
+            socket_file_id("/nonexistent-lsof-rs/s", None, &[], None),
+            None
+        );
+        assert_eq!(
+            metadata_outside(b"/nonexistent-lsof-rs/s", &exempt, None),
+            None
+        );
+    }
+
+    /// `getlinksrc()`: a path whole, anything else up to its first `:`.
+    #[test]
+    fn a_link_source_is_cut_at_its_first_colon_unless_a_path() {
+        assert_eq!(link_source(b"pipe:[123]"), b"pipe");
+        assert_eq!(link_source(b"socket:[9]"), b"socket");
+        assert_eq!(link_source(b"anon_inode:[eventfd]"), b"anon_inode");
+        assert_eq!(link_source(b"anon_inode:a:b"), b"anon_inode");
+        assert_eq!(link_source(b"/a:b (deleted)"), b"/a:b (deleted)");
+        assert_eq!(link_source(b"nocolon"), b"nocolon");
+        assert_eq!(link_source(b""), b"");
+    }
+
+    fn nfs_mount(dir: &str, dev: u64, src: &str) -> MountEntry {
+        MountEntry {
+            dir: dir.into(),
+            device: Some(dev),
+            source_resolved: Some(src.into()),
+            source_is_block: false,
+            fsname: src.into(),
+            kind: lsof_core::MountKind::Nfs,
+        }
+    }
+
+    /// `N_NFS` by mount: a file of the C's `N_REGLR` types on the mount's
+    /// device whose path the mount's directory starts, as `strncmp()`
+    /// tests it, the newest mount first.
+    #[test]
+    fn a_file_on_a_recorded_nfs_mount_is_named_with_its_source() {
+        let mounts = [nfs_mount("/m/b", 5, "new:/b"), nfs_mount("/m", 5, "old:/m")];
+        let suffix =
+            |ty: FileType, dev: Option<u64>, p: &str| nfs_suffix(&mounts, &ty, dev, p.as_bytes());
+        let reg = FileType::Regular;
+        assert_eq!(
+            suffix(reg.clone(), Some(5), "/m/f").as_deref(),
+            Some(" (old:/m)")
+        );
+        assert_eq!(
+            suffix(reg.clone(), Some(5), "/m/b/f").as_deref(),
+            Some(" (new:/b)")
+        );
+        assert_eq!(
+            suffix(FileType::Dir, Some(5), "/m").as_deref(),
+            Some(" (old:/m)")
+        );
+        assert_eq!(
+            suffix(FileType::Unknown, Some(5), "/mx").as_deref(),
+            Some(" (old:/m)"),
+            "a plain prefix, no component boundary"
+        );
+        assert_eq!(suffix(reg.clone(), Some(6), "/m/f"), None, "another device");
+        assert_eq!(suffix(reg.clone(), None, "/m/f"), None, "no device");
+        assert_eq!(suffix(reg, Some(5), "/n/f"), None, "another path");
+        for ty in [
+            FileType::Chr,
+            FileType::Block,
+            FileType::Fifo,
+            FileType::Socket("sock"),
+            FileType::Other("a_inode".into()),
+        ] {
+            assert_eq!(suffix(ty.clone(), Some(5), "/m/f"), None, "{ty:?}");
+        }
+        assert_eq!(nfs_suffix(&[], &FileType::Regular, Some(5), b"/m/f"), None);
+    }
+
+    fn nfs_ctx<'a>(
+        socks: &'a SocketTable,
+        locks: &'a crate::locks::LockTable,
+        ns: &'a net::SockProtoNames,
+        helpers: &'a crate::safefs::HelperFds,
+        fs: SafeFs<'a>,
+        nfs_mounts: &'a [MountEntry],
+    ) -> GatherCtx<'a> {
+        GatherCtx {
+            socks,
+            locks,
+            ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+            helpers,
+            mqueue_device: None,
+            fs: Some(fs),
+            nfs_mounts,
+        }
+    }
+
+    /// With an NFS mount listed, under `-b`: every row loses what a `stat`
+    /// gives, its type, device, size, inode and access letter, and keeps
+    /// fdinfo's flags and offset; it is named by its link's source and says
+    /// why, `(lstat: …)` then `(stat: …)`, unless `-w`; and each call and
+    /// each `statEx()` parent is said to be avoided, in the C's order
+    /// (measured, DIVERGENCES 124).
+    #[test]
+    #[cfg_attr(miri, ignore = "miri has no /proc/self/fd links to read")]
+    fn under_nfs_and_b_each_row_is_what_the_c_makes_of_it() {
+        let dir = fake_proc("nfs-b");
+        let file = dir.join("f.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+        let held = std::fs::File::open(&file).unwrap();
+        let (r, _w) = std::os::unix::net::UnixStream::pair().unwrap();
+        use std::os::fd::AsRawFd;
+        let me = self_pid();
+        let link = |fd: i32| std::path::PathBuf::from(format!("/proc/{me}/fd/{fd}"));
+        let socks = SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = net::SockProtoNames::new(false);
+        let helpers = crate::safefs::HelperFds::default();
+        let said = std::cell::RefCell::new(Vec::new());
+        let sink = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &sink).with(avoided(), true);
+        let ctx = nfs_ctx(&socks, &locks, &ns, &helpers, fs, &[]);
+        let info = FdInfo {
+            access: Some(AccessMode::Read),
+            pos: Some(0),
+            flags: Some(0o100000),
+            ..FdInfo::default()
+        };
+        let one = |fd: i32, kind: FdType, ctx: &GatherCtx<'_>| {
+            let l = link(fd);
+            let target = std::fs::read_link(&l).unwrap();
+            row(&l, target, kind, &info, ctx).expect("a row")
+        };
+        let f = one(held.as_raw_fd(), FdType::Handle(3), &ctx);
+        let d = dir.to_str().unwrap();
+        assert_eq!(f.file_type, FileType::Unknown);
+        assert_eq!(
+            (f.access, f.offset, f.file_flags),
+            (AccessMode::Unknown, Some(0), info.flags)
+        );
+        assert_eq!(
+            (&f.device, f.fs_device, f.size, &f.node),
+            (&None, None, None, &None)
+        );
+        assert_eq!(
+            f.name,
+            format!(
+                "{d}/f.txt (lstat: Resource temporarily unavailable) \
+                 (stat: Resource temporarily unavailable)"
+            )
+        );
+        assert_eq!(
+            f.base_name(),
+            Some(format!("{d}/f.txt").as_str()),
+            "JSON's name"
+        );
+        let fd = held.as_raw_fd();
+        assert_eq!(
+            *said.borrow(),
+            [
+                format!("lsof: avoiding stat(/proc/{me}/fd/{fd}): -b was specified."),
+                format!("lsof: avoiding stat({d}): -b was specified."),
+                format!("lsof: avoiding stat(/proc/{me}/fd/{fd}): -b was specified."),
+                format!("lsof: avoiding stat({d}): -b was specified."),
+            ]
+        );
+        said.borrow_mut().clear();
+        let p = one(r.as_raw_fd(), FdType::Handle(4), &ctx);
+        assert_eq!(
+            p.name,
+            "socket (lstat: No such file or directory) (stat: No such file or directory)"
+        );
+        assert_eq!(
+            p.file_type,
+            FileType::Unknown,
+            "a socket no stat said is one"
+        );
+        assert_eq!(
+            said.borrow().len(),
+            2,
+            "the link's two calls alone: {:?}",
+            said.borrow()
+        );
+        // A special is `stat`ed alone.
+        said.borrow_mut().clear();
+        let l = std::path::PathBuf::from(format!("/proc/{me}/fd/{fd}"));
+        let c = row(&l, file.clone(), FdType::Cwd, &FdInfo::default(), &ctx).unwrap();
+        assert_eq!(
+            c.name,
+            format!("{d}/f.txt (stat: Resource temporarily unavailable)")
+        );
+        assert_eq!((c.access, c.offset), (AccessMode::Unknown, None));
+        assert_eq!(said.borrow().len(), 2, "{:?}", said.borrow());
+        // `-w`: no reason in NAME, and nothing said.
+        said.borrow_mut().clear();
+        let quiet = GatherCtx {
+            omit_unreadable: true,
+            fs: Some(fs.with(avoided(), false)),
+            ..nfs_ctx(&socks, &locks, &ns, &helpers, fs, &[])
+        };
+        assert_eq!(
+            one(fd, FdType::Handle(3), &quiet).name,
+            format!("{d}/f.txt")
+        );
+        assert!(said.borrow().is_empty());
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With an NFS mount listed and every call answering, a row is the row
+    /// the calls made here give, but for the name of a file on a recorded
+    /// NFS mount, which carries the mount's source as part of its name; and
+    /// both of an fd's calls are made, through the layer.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri has no /proc/self/fd links to read")]
+    fn under_nfs_a_row_is_made_through_the_layer_and_named_by_its_mount() {
+        use std::os::fd::AsRawFd;
+        let dir = fake_proc("nfs-ok");
+        let file = dir.join("f.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+        let held = std::fs::File::open(&file).unwrap();
+        let l = std::path::PathBuf::from(format!("/proc/{}/fd/{}", self_pid(), held.as_raw_fd()));
+        let socks = SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = net::SockProtoNames::new(false);
+        let helpers = crate::safefs::HelperFds::default();
+        let info = FdInfo::default();
+        let plain = row_all(&l, FdType::Handle(3), &info, &socks, &ns, &[]).unwrap();
+        let quiet = |_: &str| {};
+        let fs = SafeFs::new(&lsof_core::InProcess, &quiet);
+        let ctx = nfs_ctx(&socks, &locks, &ns, &helpers, fs, &[]);
+        let target = std::fs::read_link(&l).unwrap();
+        assert_eq!(
+            row(&l, target.clone(), FdType::Handle(3), &info, &ctx),
+            Some(plain.clone())
+        );
+        let dev = std::fs::metadata(&file).unwrap().dev();
+        let mounts = [nfs_mount(dir.to_str().unwrap(), dev, "srv:/export")];
+        let named = nfs_ctx(&socks, &locks, &ns, &helpers, fs, &mounts);
+        let f = row(&l, target.clone(), FdType::Handle(3), &info, &named).unwrap();
+        assert_eq!(f.name, format!("{} (srv:/export)", plain.name));
+        assert_eq!(
+            f.base_name(),
+            Some(f.name.as_str()),
+            "part of the name, not an addition"
+        );
+        // Both calls, through the layer, and the row's own `stat`'s.
+        let a = Answers::default();
+        let fs = SafeFs::new(&a, &quiet);
+        let ctx = nfs_ctx(&socks, &locks, &ns, &helpers, fs, &[]);
+        let f = row(&l, target, FdType::Handle(3), &info, &ctx).unwrap();
+        let shown = l.to_str().unwrap();
+        assert_eq!(
+            a.asked(),
+            [format!("lstat {shown}"), format!("stat {shown}")]
+        );
+        assert_eq!((f.fs_device, f.node.as_deref()), (Some(7), Some("9")));
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `-U`/`-i` with an NFS mount listed: every fd's two calls are made,
+    /// as the C makes them before it asks whether the `stat` said socket,
+    /// and only a socket is kept; an `-e` file is neither.
+    #[test]
+    fn under_nfs_a_socket_only_run_stats_every_fd_and_keeps_sockets() {
+        let socks = SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = net::SockProtoNames::new(true);
+        let helpers = crate::safefs::HelperFds::default();
+        let quiet = |_: &str| {};
+        let a = Answers {
+            socket: vec!["/proc/1/fd/4"],
+            ..Answers::default()
+        };
+        let fs = SafeFs::new(&a, &quiet);
+        let exempt = minus(&["/ex"]);
+        let ctx = GatherCtx {
+            sockets_only: true,
+            exempt: &exempt,
+            ..nfs_ctx(&socks, &locks, &ns, &helpers, fs, &[])
+        };
+        let info = FdInfo::default();
+        let file = row(
+            Path::new("/proc/1/fd/3"),
+            "/a/f".into(),
+            FdType::Handle(3),
+            &info,
+            &ctx,
+        );
+        assert!(file.is_none(), "a file is no socket");
+        assert_eq!(a.asked(), ["lstat /proc/1/fd/3", "stat /proc/1/fd/3"]);
+        let sock = row(
+            Path::new("/proc/1/fd/4"),
+            "socket:[9]".into(),
+            FdType::Handle(4),
+            &info,
+            &ctx,
+        )
+        .expect("a socket is kept");
+        assert!(sock.is_socket(), "{sock:?}");
+        a.asked.borrow_mut().clear();
+        let ex = row(
+            Path::new("/proc/1/fd/5"),
+            "/ex/f".into(),
+            FdType::Handle(5),
+            &info,
+            &ctx,
+        );
+        assert!(
+            ex.is_none() && a.asked().is_empty(),
+            "an -e file is not stat()ed"
+        );
     }
 }

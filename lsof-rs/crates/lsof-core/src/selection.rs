@@ -918,6 +918,19 @@ pub struct Selection {
     /// each mount the C types `N_NFS`. A file whose [`OpenFile::fs_device`]
     /// is in here is an NFS file.
     pub nfs_devices: std::collections::HashSet<u64>,
+    /// The C's `HasNFS`, from [`MountTable::has_nfs`](crate::backend::MountTable):
+    /// 0 when the table lists no NFS mount (or none was read), 1 when one is
+    /// listed, 2 when one was recorded. Once it is not 0 the Linux backend
+    /// makes every per-file `stat` through the bounded layer, as the C makes
+    /// them through `statsafely()` (DIVERGENCES 124).
+    pub has_nfs: u8,
+    /// The NFS mounts the table recorded with a device, newest first, as the
+    /// C walks its list: filled by the CLI where the C types a file `N_NFS`
+    /// by its mount (Linux, `dnode.c:735-744`), when [`Selection::has_nfs`]
+    /// is 2. A file on one is named with its source and is what `-N`
+    /// selects ([`Selection::nfs_mount_of`]); where this is empty, `-N` asks
+    /// [`Selection::nfs_devices`].
+    pub nfs_mounts: Vec<MountEntry>,
     /// The device of the POSIX message queue file system, filled by the CLI
     /// from [`MountTable::mqueue_device`](crate::backend::MountTable): the
     /// C's `MqueueDev`, the last `mqueue` mount its table recorded. A
@@ -1111,10 +1124,7 @@ impl Selection {
         if self.unix_only && f.file_type == FileType::Unix {
             k.insert(SelKinds::UNX);
         }
-        if self.nfs_only
-            && !f.is_exempt()
-            && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d))
-        {
+        if self.nfs_only && self.is_nfs_file(f) {
             k.insert(SelKinds::NFS);
         }
         if self.inet.all_matches(f) {
@@ -1388,9 +1398,7 @@ impl Selection {
                     *hit = *hit || spec.matches(f);
                 }
                 found.inet_all |= self.inet.all_matches(f);
-                found.nfs |= self.nfs_only
-                    && !f.is_exempt()
-                    && f.fs_device.is_some_and(|d| self.nfs_devices.contains(&d));
+                found.nfs |= self.nfs_only && self.is_nfs_file(f);
                 // `Ftask = 2` in `link_lfile()`: a file is linked when it
                 // matched anything, and a task's files all inherit the task
                 // kind, so any row of a task locates the item — printed or not,
@@ -1479,6 +1487,46 @@ impl Selection {
         !given.is_empty() && given.without(SelKinds::NET.union(SelKinds::NA)).is_empty()
     }
 
+    /// The NFS mount a file on device `dev` at `path` is on, as the C's
+    /// `process_proc_node()` finds it (`dnode.c:735-744`): with `HasNFS` at
+    /// 2, the newest recorded NFS mount on that device whose directory is a
+    /// plain prefix of the path, bytes against bytes, as `strncmp()` tests
+    /// it (no component boundary: measured, a mount listed at `/tmp/d`
+    /// names `/tmp/d/f` and the directory itself). The caller asks it only
+    /// of what the C types `N_REGLR`: no device node, FIFO, socket or
+    /// anonymous inode.
+    pub fn nfs_mount_of(&self, dev: u64, path: &[u8]) -> Option<&MountEntry> {
+        if self.has_nfs != 2 {
+            return None;
+        }
+        self.nfs_mounts
+            .iter()
+            .find(|m| m.device == Some(dev) && path.starts_with(m.dir.as_encoded_bytes()))
+    }
+
+    /// Whether `f` is a file `-N` selects: one the C types `N_NFS`. By its
+    /// mount where the CLI recorded the mounts ([`Selection::nfs_mount_of`],
+    /// of the name the row was built from), and by its device alone where it
+    /// recorded only devices. Never an `-e` row, which was never `stat`ed.
+    fn is_nfs_file(&self, f: &OpenFile) -> bool {
+        let Some(dev) = f.fs_device.filter(|_| !f.is_exempt()) else {
+            return false;
+        };
+        if self.nfs_mounts.is_empty() {
+            return self.nfs_devices.contains(&dev);
+        }
+        let reglr = !f.is_socket()
+            && !matches!(
+                f.file_type,
+                FileType::Chr | FileType::Block | FileType::Fifo
+            )
+            && f.file_type != FileType::Other("a_inode".into());
+        reglr
+            && self
+                .nfs_mount_of(dev, f.base_name().unwrap_or_default().as_bytes())
+                .is_some()
+    }
+
     /// Whether the C reads its mount table on this run: always but under
     /// `-i` alone ([`Selection::inet_only`]), and then too when an `-e` or
     /// `+e` was given, which its check needs (`dproc.c:670-671`,
@@ -1511,7 +1559,11 @@ impl Selection {
     /// by a socket in ANY process it read. Measured: `lsof -p P -u X
     /// -sTCP:LISTEN` exits 0 on a host with a listener elsewhere, where
     /// `-p P` or `-u X` alone exits 1. Nothing else a walk locates can differ
-    /// there, so the wider walk is taken only when `-s` names a state.
+    /// there, so the wider walk is taken only when `-s` names a state — or
+    /// when the walk itself says something: with an NFS mount listed every
+    /// per-file `stat` of every process walked is avoided under `-b`, and
+    /// says so unless `-w` (measured: `lsof -b -K -p P` warns of each kernel
+    /// thread's `cwd` and `root`; DIVERGENCES 124).
     pub fn selects_process(&self, p: &Process) -> bool {
         if self.excludes_process(p) {
             return false;
@@ -1530,7 +1582,8 @@ impl Selection {
         // `-K` is one of `is_proc_excl`'s kinds too: `-K -p P` reads every
         // process in the C, not P and the other processes' threads.
         let walked_kinds = specified.intersection(SelKinds::PROC.union(SelKinds::TASK));
-        if locates_states && !self.and_mode && walked_kinds.count() > 1 {
+        let walk_warns = self.has_nfs != 0 && self.blocking.avoid && !self.omit_unreadable;
+        if (locates_states || walk_warns) && !self.and_mode && walked_kinds.count() > 1 {
             return true;
         }
         self.proc_selected(self.proc_kinds(p))
@@ -1594,6 +1647,48 @@ impl Selection {
         spec.intersects(net)
             && (self.and_mode || spec.without(net).is_empty())
             && self.endpoints.is_none()
+    }
+
+    /// Whether, for `p`, nothing but its sockets can reach the output: the
+    /// run's [`Selection::socket_rows_only`], or the C's per-process
+    /// `Ckscko` (`dproc.c:263-286, 909-916`). When the run ORs a network
+    /// selecter (`-i`, `-U`) with process selecters only — no `-a`, no
+    /// `-d`, path, `+L` or `-N`, no `-E`/`+E` — the C sets `Cckreg`, and for
+    /// each process it reads, `Ckscko` is set unless the process matched one
+    /// of the process selecters (`sf & SelProc`, `-K` among them for a
+    /// task): such a process has its fds read for sockets, and no cwd, rtd,
+    /// txt or mapping at all. Nothing else of it could be listed, so the
+    /// listing is the same; what differs is what the walk says and costs.
+    /// Measured with an NFS mount listed: `lsof -b -U -p P` warns of P's
+    /// calls and of every other process's fds, and of no other process's
+    /// cwd, root, executable or mapping (DIVERGENCES 124). Under `-E`/`+E`
+    /// the C keeps the run's own (row 56), as this does.
+    pub fn sockets_only_for(&self, p: &Process) -> bool {
+        if self.socket_rows_only() {
+            return true;
+        }
+        let spec = self.specified();
+        let net = SelKinds::NET.union(SelKinds::NA).union(SelKinds::UNX);
+        let by_process = SelKinds::PROC.union(SelKinds::TASK);
+        let files = SelKinds::FILE.without(net);
+        let conditional = spec.intersects(net)
+            && !self.and_mode
+            && !spec.intersects(files)
+            && spec.intersects(by_process)
+            && self.endpoints.is_none();
+        conditional && !self.proc_kinds(p).intersects(by_process)
+    }
+
+    /// Whether the C reads `p` at all: not when a `-p ^`, `-u ^`, `-c ^` or
+    /// `-g ^` exclusion names it. `is_proc_excl()` and `is_cmd_excl()` drop
+    /// such a process before any of its files is read (`dproc.c:895-907`),
+    /// whatever else is selected, except under `-E`/`+E`, where the C reads
+    /// it anyway for its endpoints (`if (!FeptE) return (1)`; DIVERGENCES
+    /// 56). Measured with an NFS mount listed: `lsof -b -u ^root` warns of
+    /// no root process's calls, and `lsof -S 2 -p ^P` costs nothing for a
+    /// P whose descriptor is on a mount that answers slowly.
+    pub fn reads_process(&self, p: &Process) -> bool {
+        self.endpoints.is_some() || !self.excludes_process(p)
     }
 
     /// Whether `-t` can be answered from the process table alone, skipping
@@ -2646,6 +2741,7 @@ mod tests {
             device: Some(device),
             source_resolved: Some(source.into()),
             source_is_block: block,
+            fsname: source.into(),
             kind: crate::backend::MountKind::Regular,
         };
         let table = vec![
@@ -3852,6 +3948,134 @@ mod tests {
         }
     }
 
+    /// `-N` on Linux, as the C's `N_NFS` decides it (`dnode.c:735-744`):
+    /// a file of the `N_REGLR` types on a recorded NFS mount's device whose
+    /// path that mount's directory starts, the newest mount first, and only
+    /// with `HasNFS` at 2. Without the mounts, the device alone decides.
+    #[test]
+    fn nfs_files_are_found_by_their_mount() {
+        let nfs = |dir: &str, dev: u64| MountEntry {
+            dir: dir.into(),
+            device: Some(dev),
+            source_resolved: None,
+            source_is_block: false,
+            fsname: "srv:/x".into(),
+            kind: crate::backend::MountKind::Nfs,
+        };
+        let row = |name: &str, dev: u64, file_type: FileType| OpenFile {
+            rdev: None,
+            fs_device: Some(dev),
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: crate::model::AccessMode::Read,
+            file_type,
+            name: name.into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: None,
+            name_addition: None,
+        };
+        let sel = Selection {
+            nfs_only: true,
+            has_nfs: 2,
+            nfs_mounts: vec![nfs("/m/b", 5), nfs("/m", 5)],
+            ..Default::default()
+        };
+        assert_eq!(
+            sel.nfs_mount_of(5, b"/m/b/f").map(|m| m.dir.as_os_str()),
+            Some(OsStr::new("/m/b"))
+        );
+        assert_eq!(
+            sel.nfs_mount_of(5, b"/mx").map(|m| m.dir.as_os_str()),
+            Some(OsStr::new("/m"))
+        );
+        assert!(sel.nfs_mount_of(6, b"/m/f").is_none());
+        assert!(Selection {
+            has_nfs: 1,
+            ..sel.clone()
+        }
+        .nfs_mount_of(5, b"/m/f")
+        .is_none());
+        assert!(sel.is_nfs_file(&row("/m/f (srv:/x)", 5, FileType::Regular)));
+        assert!(sel.is_nfs_file(&row("/m", 5, FileType::Dir)));
+        assert!(
+            !sel.is_nfs_file(&row("/n/f", 5, FileType::Regular)),
+            "not under it"
+        );
+        assert!(
+            !sel.is_nfs_file(&row("/m/f", 6, FileType::Regular)),
+            "another device"
+        );
+        for ty in [
+            FileType::Chr,
+            FileType::Fifo,
+            FileType::Other("a_inode".into()),
+            FileType::Exempt("fd"),
+        ] {
+            assert!(!sel.is_nfs_file(&row("/m/f", 5, ty.clone())), "{ty:?}");
+        }
+        let by_dev = Selection {
+            nfs_only: true,
+            nfs_devices: [5].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(
+            by_dev.is_nfs_file(&row("/n/f", 5, FileType::Chr)),
+            "the device alone"
+        );
+    }
+
+    /// With an NFS mount listed, a `-b` walk says what it avoids, so it
+    /// walks what the C walks: every process, under two or more process
+    /// selecters (`-K -p P`) and no `-a`; under `-w` it says nothing, and
+    /// the narrower walk stands.
+    #[test]
+    fn a_walk_that_warns_walks_what_the_c_walks() {
+        let other = who(20, "other", 5, 20);
+        let sel = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        assert!(!sel.selects_process(&other), "the control");
+        let b = Selection {
+            has_nfs: 1,
+            blocking: crate::safefs::Blocking {
+                avoid: true,
+                ..crate::safefs::Blocking::default()
+            },
+            ..sel.clone()
+        };
+        assert!(b.selects_process(&other));
+        assert!(!Selection {
+            omit_unreadable: true,
+            ..b.clone()
+        }
+        .selects_process(&other));
+        assert!(!Selection {
+            and_mode: true,
+            ..b.clone()
+        }
+        .selects_process(&other));
+        assert!(!Selection {
+            has_nfs: 0,
+            ..b.clone()
+        }
+        .selects_process(&other));
+        assert!(
+            !Selection {
+                tasks: TaskMode::WhenUnselected,
+                ..b
+            }
+            .selects_process(&other),
+            "one selecter"
+        );
+    }
+
     /// A process with the identity fields `locate` and the `^` exclusions read.
     fn who(pid: u32, command: &str, uid: u32, pgid: u32) -> Process {
         Process {
@@ -3867,6 +4091,163 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
         }
+    }
+
+    /// The C's per-process `Ckscko` (`dproc.c:263-286, 909-916`): a network
+    /// selecter ORed with process selecters alone makes a process they do
+    /// not select sockets-only; one they select (a task, under `-K`) is read
+    /// whole. Each clause on its own line (LESSONS #050).
+    #[test]
+    fn sockets_only_is_decided_per_process_as_the_c_does() {
+        let p = who(10, "sleep", 0, 10);
+        let other = who(11, "bash", 0, 11);
+        let task = Process {
+            tid: Some(12),
+            ..who(11, "bash", 0, 11)
+        };
+        let unx = Selection {
+            unix_only: true,
+            pids: vec![10],
+            ..Default::default()
+        };
+        assert!(!unx.socket_rows_only(), "the run as a whole is not");
+        assert!(
+            !unx.sockets_only_for(&p),
+            "the process -p selects is read whole"
+        );
+        assert!(unx.sockets_only_for(&other), "another, for its sockets");
+        let inet = Selection {
+            inet: InetFilter {
+                enabled: true,
+                ..Default::default()
+            },
+            unix_only: false,
+            ..unx.clone()
+        };
+        assert!(!inet.sockets_only_for(&p));
+        assert!(inet.sockets_only_for(&other), "-i as -U");
+        let cmd = Selection {
+            pids: vec![],
+            commands: vec!["nomatch".into()],
+            ..unx.clone()
+        };
+        assert!(cmd.sockets_only_for(&p), "-c that matches nothing");
+        let cmd = Selection {
+            commands: vec!["sle".into()],
+            ..cmd
+        };
+        assert!(!cmd.sockets_only_for(&p), "-c that matches");
+        let k = Selection {
+            pids: vec![],
+            tasks: TaskMode::Always,
+            ..unx.clone()
+        };
+        assert!(k.sockets_only_for(&other), "-K: a process entry is no task");
+        assert!(!k.sockets_only_for(&task), "-K: a task is read whole");
+        // Anything else and it is the run's rule again.
+        let and = Selection {
+            and_mode: true,
+            ..unx.clone()
+        };
+        assert!(and.socket_rows_only());
+        assert!(
+            and.sockets_only_for(&p),
+            "-a: the run's rule, sockets alone"
+        );
+        for (what, sel) in [
+            (
+                "-d",
+                Selection {
+                    fd_filter: Some(FdFilter {
+                        include: vec![FdSpec::Named(FdKind::Cwd)],
+                        exclude: vec![],
+                    }),
+                    ..unx.clone()
+                },
+            ),
+            (
+                "a path",
+                Selection {
+                    paths: vec!["/etc".into()],
+                    ..unx.clone()
+                },
+            ),
+            (
+                "+L",
+                Selection {
+                    max_links: Some(1),
+                    ..unx.clone()
+                },
+            ),
+            (
+                "-N",
+                Selection {
+                    nfs_only: true,
+                    ..unx.clone()
+                },
+            ),
+            (
+                "-E",
+                Selection {
+                    endpoints: Some(EndpointMode::Files),
+                    ..unx.clone()
+                },
+            ),
+            (
+                "no network selecter",
+                Selection {
+                    unix_only: false,
+                    ..unx.clone()
+                },
+            ),
+        ] {
+            assert!(!sel.sockets_only_for(&other), "{what}: every process whole");
+        }
+        let alone = Selection {
+            unix_only: true,
+            ..Default::default()
+        };
+        assert!(alone.sockets_only_for(&p), "-U alone: the run's own rule");
+    }
+
+    /// A process an exclusion names is not read, unless `-E`/`+E` (row 56).
+    #[test]
+    fn an_excluded_process_is_not_read_but_for_endpoints() {
+        let p = who(10, "sleep", 0, 10);
+        let other = who(11, "bash", 5, 11);
+        for sel in [
+            Selection {
+                pid_excludes: vec![10],
+                ..Default::default()
+            },
+            Selection {
+                uid_excludes: vec![0],
+                ..Default::default()
+            },
+            Selection {
+                user_excludes: vec!["u0".into()],
+                ..Default::default()
+            },
+            Selection {
+                command_excludes: vec!["sle".into()],
+                ..Default::default()
+            },
+            Selection {
+                pgid_excludes: vec![10],
+                ..Default::default()
+            },
+        ] {
+            assert!(!sel.reads_process(&p), "{sel:?}");
+            assert!(sel.reads_process(&other), "{sel:?}");
+            for mode in [EndpointMode::Info, EndpointMode::Files] {
+                let e = Selection {
+                    endpoints: Some(mode),
+                    ..sel.clone()
+                };
+                assert!(e.reads_process(&p), "{mode:?}");
+            }
+        }
+        assert!(Selection::default().reads_process(&p));
     }
 
     #[test]

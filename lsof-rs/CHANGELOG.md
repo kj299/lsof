@@ -12,6 +12,43 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **With an NFS mount listed, every per-file call is bounded** (Linux;
+  DIVERGENCES 124), as the C makes it through `statsafely()`: a process's
+  `cwd`, `rtd` and `txt`, each fd's `lstat` and `stat`, each mapped file,
+  and a bound socket's path go through the helper, under `-S` (15 s), `-O`
+  and `-b`, so a hung NFS server no longer stops lsof itself, except under
+  `-O`, which makes every call in lsof with no limit. Under `-b`
+  each is avoided and said to be (`lsof: avoiding stat(/proc/P/fd/3): -b was
+  specified.`, unless `-w`), and the rows are the C's: `unknown`, no device,
+  size, inode or access letter, named by the link's source (`pipe`,
+  `socket`), with `(lstat: Resource temporarily unavailable) (stat: …)` in
+  NAME, the errno of the C's walk to the parent directory (`rtd … / (stat: No
+  such file or directory)`); a mapping keeps its type and device. A file on
+  a recorded NFS mount is named ` (SOURCE)` (`/mnt/f (srv:/export)`, in the
+  table, `-F n` and JSON), and `-N` selects the files on its device whose
+  path the mount's directory starts (a plain prefix, as the C's
+  `strncmp()`: `/mnt` names `/mntx/f` too), no longer every file on its
+  device. With no NFS mount listed nothing changes. The mount table is read
+  from `/proc/mounts`, the C's name for it. At most 16 helpers killed on a
+  hung server may wait at once (each holds a pipe and a thread of lsof's);
+  past that each further call fails at once, `(stat: Resource temporarily
+  unavailable)`, with one warning (`lsof: WARNING: 16 killed helpers still
+  wait on file systems that do not answer; …`), so a dead server under a
+  thousand open files costs 16 limits and ends the run listed, where it had
+  run out of descriptors and exited 1 with nothing listed.
+- **A `/proc/mounts` that cannot be opened ends the run** (Linux; 124), as
+  the C's `readmnt()` ends it: `lsof: can't fopen(/proc/mounts, "r"): No
+  such file or directory` and exit 1, where the table is first read (not
+  under `-i` alone, which reads none), where lsof-rs had read an empty table
+  in silence and listed. Only a procfs mounted `subset=pid` lacks it.
+- **A process an exclusion names is not read at all** (Linux; 124): `-p ^`,
+  `-u ^`, `-c ^` and `-g ^` drop it before any of its files is looked at,
+  as the C's `is_proc_excl()` does (not under `-E`/`+E`, row 56), and a
+  network selecter ORed with process selecters reads, of a process they do
+  not select, its fds alone for sockets (the C's per-process `Ckscko`). The
+  listing is the same; with an NFS mount listed a `-b` run warns of what
+  the C walks (`lsof -b -u ^root`: 236 lines, as the C, where lsof-rs had
+  printed 1873), and an excluded process on a hung mount costs nothing.
 - **`-v` writes its version line to stderr**, and exits 0, as the C writes
   its version report (DIVERGENCES 150): `lsof -v 2>/dev/null` prints
   nothing, and a script that read the version from stdout reads it from

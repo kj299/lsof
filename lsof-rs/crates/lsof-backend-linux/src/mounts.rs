@@ -1,4 +1,4 @@
-//! The mount table, from `/proc/self/mounts`, read as the C's `readmnt()`
+//! The mount table, from `/proc/mounts`, read as the C's `readmnt()`
 //! reads it (`lib/dialects/linux/dmnt.c`).
 //!
 //! lsof reads a path argument as a **file system name** when it matches a
@@ -21,7 +21,7 @@ use std::path::Path;
 use lsof_core::render::Escaper;
 use lsof_core::{MountEntry, MountKind, MountRequest, MountTable, SafeFs};
 
-/// At most this many bytes of `/proc/self/mounts` are read. The table is the
+/// At most this many bytes of `/proc/mounts` are read. The table is the
 /// kernel's, but a local user who may mount (a FUSE file system through
 /// `fusermount`) chooses its paths, each up to 4,095 bytes and four times
 /// that escaped, and `fs.mount-max` allows 100,000 mounts. 64 MiB is two
@@ -35,21 +35,27 @@ pub const MOUNTS_MAX_BYTES: u64 = 64 << 20;
 /// a warning that the listing may lack something.
 const INCOMPLETE: &str = "      Output information may be incomplete.";
 
-/// `/proc/self/mounts`, at most `cap` bytes of it: a table longer than that
+/// `/proc/mounts`, at most `cap` bytes of it: a table longer than that
 /// is cut after the last whole line within it, so no mount is read in part.
-/// Empty when it cannot be read.
-fn read_capped(path: &Path, cap: u64) -> Vec<u8> {
+/// The C's words when it cannot be opened (`can't fopen(/proc/mounts, "r"):
+/// ...`, see [`load`]); empty when a read fails once it is open, where the
+/// C's `fgets()` loop ends.
+fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     let mut text = Vec::new();
-    let Ok(file) = std::fs::File::open(path) else {
-        return text;
-    };
+    let file = std::fs::File::open(path).map_err(|e| {
+        format!(
+            "lsof: can't fopen({}, \"r\"): {}",
+            Escaper::for_host().bytes(path.as_os_str().as_encoded_bytes()),
+            lsof_core::errno_text(&e)
+        )
+    })?;
     // One byte past the cap tells a table that ends there from a longer one.
     if file
         .take(cap.saturating_add(1))
         .read_to_end(&mut text)
         .is_err()
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     if text.len() as u64 > cap {
         let within = &text[..text.len() - 1];
@@ -59,24 +65,51 @@ fn read_capped(path: &Path, cap: u64) -> Vec<u8> {
             .map_or(0, |nl| nl + 1);
         text.truncate(keep);
     }
-    text
+    Ok(text)
 }
 
-/// Where the kernel lists this process's mounts.
-const PROC_MOUNTS: &str = "/proc/self/mounts";
+/// Where the kernel lists this process's mounts: `/proc/mounts`, the name
+/// the C opens (`dmnt.c:391`, `PROCFS "/mounts"`). It is a link to
+/// `self/mounts`, so the two read the same table, except where a file is
+/// bound over the link itself, which a process's own `/proc/self` does not
+/// see (measured: how the differential lists an NFS mount on a host that has
+/// none, DIVERGENCES 124).
+const PROC_MOUNTS: &str = "/proc/mounts";
 
 /// Read the host's mount table and examine it as the C does
 /// ([`resolve_table`]), through `fs`, the bounded layer, under the options in
 /// force where the C reads it.
+///
+/// A table that cannot be opened ends the run as the C's `readmnt()` ends
+/// it: `lsof: can't fopen(/proc/mounts, "r"): No such file or directory`
+/// and exit 1 (measured, with a `proc` mounted `subset=pid`, which has no
+/// `/proc/mounts`; and `Permission denied` for a file bound over it that
+/// cannot be read). It had been read as an empty table, in silence: no NFS
+/// mount listed, so every per-file `stat` was made in lsof itself, unbounded,
+/// on a host whose own `/proc/self/mounts` lists one; and `-e`, `-N`, a file
+/// system argument and the mount warnings had nothing to go on. Falling back
+/// to `/proc/self/mounts` would keep those, but then lsof-rs would read a
+/// table the C does not, and list where the C refuses to. The C is no less
+/// safe here: it stops before any file is looked at.
 pub fn load(req: &MountRequest, fs: &SafeFs) -> MountTable {
-    load_from(Path::new(PROC_MOUNTS), MOUNTS_MAX_BYTES, req, fs)
+    match load_from(Path::new(PROC_MOUNTS), MOUNTS_MAX_BYTES, req, fs) {
+        Ok(table) => table,
+        Err(line) => {
+            lsof_core::safefs::to_stderr(&line);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// [`load`] of the table at `path`, at most `cap` bytes of it: the one place
 /// the table is read for its mounts, so a test reads it under a cap it can
-/// pass (DIVERGENCES 129).
-fn load_from(path: &Path, cap: u64, req: &MountRequest, fs: &SafeFs) -> MountTable {
-    resolve_table(&parse_mounts(&read_capped(path, cap)), req, fs)
+/// pass (DIVERGENCES 129), and the C's words where it cannot be opened.
+fn load_from(path: &Path, cap: u64, req: &MountRequest, fs: &SafeFs) -> Result<MountTable, String> {
+    Ok(resolve_table(
+        &parse_mounts(&read_capped(path, cap)?),
+        req,
+        fs,
+    ))
 }
 
 /// Whether a mount of type `fstype` is listed, its third field compared
@@ -87,9 +120,12 @@ pub fn has_type(fstype: &str) -> bool {
 }
 
 /// [`has_type`] of the table at `path`, at most `cap` bytes of it, as
-/// [`load_from`] reads it.
+/// [`load_from`] reads it. A table that cannot be opened lists nothing, and
+/// says nothing: `-Z`'s question is libselinux's in the C, which reads the
+/// table the same way and is silent (measured: `-Z limited to SELinux`).
 fn has_type_in(path: &Path, cap: u64, fstype: &str) -> bool {
     read_capped(path, cap)
+        .unwrap_or_default()
         .split(|&b| b == b'\n')
         .any(|line| line.split(|&b| b == b' ').nth(2) == Some(fstype.as_bytes()))
 }
@@ -235,6 +271,7 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
             device,
             source_resolved,
             source_is_block,
+            fsname: line.source.clone(),
             kind,
         };
         match duplicate {
@@ -289,7 +326,7 @@ fn source(
     }
 }
 
-/// One raw `/proc/self/mounts` line: what is mounted, and where.
+/// One raw `/proc/mounts` line: what is mounted, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountLine {
     pub source: OsString,
@@ -460,14 +497,31 @@ mod tests {
     fn a_table_past_the_cap_is_cut_after_a_whole_line() {
         let tmp = std::env::temp_dir().join(format!("lsof-rs-mounts-cap-{}", std::process::id()));
         std::fs::write(&tmp, b"a /a t 0 0\nb /b t 0 0\nc /c t 0 0\n").unwrap();
-        assert_eq!(read_capped(&tmp, 1 << 20).len(), 33);
-        assert_eq!(read_capped(&tmp, 33).len(), 33, "exactly the cap is whole");
-        assert_eq!(read_capped(&tmp, 32), b"a /a t 0 0\nb /b t 0 0\n");
-        assert_eq!(read_capped(&tmp, 22), b"a /a t 0 0\nb /b t 0 0\n");
-        assert_eq!(read_capped(&tmp, 21), b"a /a t 0 0\n");
-        assert_eq!(read_capped(&tmp, 5), b"");
+        let read = |cap| read_capped(&tmp, cap).unwrap();
+        assert_eq!(read(1 << 20).len(), 33);
+        assert_eq!(read(33).len(), 33, "exactly the cap is whole");
+        assert_eq!(read(32), b"a /a t 0 0\nb /b t 0 0\n");
+        assert_eq!(read(22), b"a /a t 0 0\nb /b t 0 0\n");
+        assert_eq!(read(21), b"a /a t 0 0\n");
+        assert_eq!(read(5), b"");
         std::fs::remove_file(&tmp).ok();
-        assert!(read_capped(Path::new("/nonexistent/mounts"), 10).is_empty());
+    }
+
+    /// A table that cannot be opened is the C's error, in its words, not
+    /// an empty table read in silence (which turned NFS routing off); `-Z`'s
+    /// types are read from nothing, quietly, as libselinux's are.
+    #[test]
+    fn a_table_that_cannot_be_opened_is_the_cs_error() {
+        let quiet = |_: &str| {};
+        let fs = SafeFs::new(&lsof_core::InProcess, &quiet);
+        let gone = Path::new("/nonexistent-lsof-rs/mounts");
+        let e = load_from(gone, 10, &MountRequest::default(), &fs).unwrap_err();
+        let want =
+            "lsof: can't fopen(/nonexistent-lsof-rs/mounts, \"r\"): No such file or directory";
+        // Miri's strerror() adds `(os error 2)` itself.
+        assert!(e == want || (cfg!(miri) && e.starts_with(want)), "{e}");
+        assert!(!has_type_in(gone, 10, "proc"));
+        assert_eq!(PROC_MOUNTS, "/proc/mounts", "the name the C opens");
     }
 
     /// Both reads of the table, the mounts and `-Z`'s types, stop at the
@@ -482,7 +536,7 @@ mod tests {
         let host = Host::default();
         let quiet = |_: &str| {};
         let fs = SafeFs::new(&host, &quiet);
-        let t = load_from(&tmp, 22, &MountRequest::default(), &fs);
+        let t = load_from(&tmp, 22, &MountRequest::default(), &fs).unwrap();
         assert_eq!(dirs(&t), ["/a", "/b"]);
         assert!(host.calls_of("/c").is_empty(), "past the cap, asked");
         assert!(has_type_in(&tmp, 22, "t"));
@@ -793,6 +847,20 @@ mod tests {
         assert_eq!(
             t.entries[0].source_resolved.as_deref(),
             Some(OsStr::new("a:/"))
+        );
+        // The source as listed, its escapes undone: what a file on the mount
+        // is named with (`mp->fsname`), a path one not spelt by `Readlink()`.
+        let (t, _) = resolve(&host, "s\\040v:/e\\134x /m nfs rw 0 0\n", vec![]);
+        assert_eq!(t.entries[0].fsname, "s v:/e\\x");
+        let mut linked = Host::default();
+        linked.links.insert("/dev/a", "b");
+        let (t, _) = resolve(&linked, "/dev/a /m nfs rw 0 0\n", vec![]);
+        assert_eq!(
+            (
+                t.entries[0].fsname.as_os_str(),
+                t.entries[0].source_resolved.as_deref()
+            ),
+            (OsStr::new("/dev/a"), Some(OsStr::new("/dev/b")))
         );
         // A directory but `/` is never replaced, NFS or not.
         let (t, _) = resolve(&host, "x /m ext4 rw 0 0\ns:/ /m nfs rw 0 0\n", vec![]);

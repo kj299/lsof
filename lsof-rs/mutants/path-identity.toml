@@ -16,6 +16,9 @@
 # three socket mutants fail 6, 5 and 1 cases on fixtures SF and J (J's
 # needs `unshare --net`), and a unit test each on every runner.
 
+# DIVERGENCES 124 re-anchored socket-file-by-its-rdev (2026-11-02: the
+# socket file's `stat` is a `FileStat`, through the bounded layer under
+# NFS); run again as root with --first-kill, killed by the unit gate.
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -135,7 +138,7 @@ name = "socket-file-by-its-rdev"
 rule = "a socket file at a bound path is its st_dev and inode, like any file (101, 60)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''    md.file_type().is_socket().then(|| lsof_core::FileId {
-        dev: md.dev(),'''
-new = '''    md.file_type().is_socket().then(|| lsof_core::FileId {
-        dev: md.rdev(),'''
+old = '''    (md.mode & S_IFMT == S_IFSOCK).then_some(lsof_core::FileId {
+        dev: md.dev,'''
+new = '''    (md.mode & S_IFMT == S_IFSOCK).then_some(lsof_core::FileId {
+        dev: md.rdev,'''

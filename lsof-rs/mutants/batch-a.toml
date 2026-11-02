@@ -47,6 +47,8 @@
 # later-checks and read-on-error-after-the-s-warning, as `tell_early` and
 # the parse's `told` became `Early::tell` and `early.told`.
 
+# DIVERGENCES 124 re-anchored psxmq-never (2026-11-02: a row's `stat` is a
+# `FileStat`); run again as root with --first-kill, killed by the unit gate.
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -201,8 +203,8 @@ name = "psxmq-never"
 rule = "a regular file on the mqueue device is PSXMQ (128)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''                psxmq(type_from_mode(m.mode()), m.dev(), ctx.mqueue_device)'''
-new = '''                type_from_mode(m.mode())'''
+old = '''                psxmq(type_from_mode(m.mode), m.dev, ctx.mqueue_device)'''
+new = '''                type_from_mode(m.mode)'''
 
 [[mutant]]
 name = "psxmq-device-not-handed-on"

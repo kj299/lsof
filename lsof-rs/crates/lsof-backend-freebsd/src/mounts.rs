@@ -94,6 +94,9 @@ pub fn resolve(list: &[StatFs], req: &MountRequest, fs: &SafeFs) -> MountTable {
             device,
             source_resolved,
             source_is_block,
+            fsname: <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(
+                m.mntfrom.clone(),
+            ),
             kind,
         });
     }
