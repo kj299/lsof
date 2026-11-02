@@ -323,10 +323,11 @@ The parsers of text from outside the process have cargo-fuzz targets under
 `/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
 `/etc/passwd` readers; the Windows backend's name parsers and PEB walk; the
 escaper that every one of them feeds; and the JSON renderer (`render_json`),
-which must print one valid line per file and decode back to what it was given. Four have none, and
+which must print one valid line per file and decode back to what it was given. Three have none, and
 [`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the ETW payload parsers, the
-path speller (`readlink::resolve_with`), the `/etc/passwd` name lookup behind
-`-u NAME`, and the bounded helper's frame decoders. The contract is
+path speller (`readlink::resolve_with`), and the bounded helper's frame
+decoders (the `/etc/passwd` name lookup behind `-u NAME` now shares the
+`passwd` target's line parser). The contract is
 *no panic on any input*; CI smoke-runs all of them on every PR and soaks them
 nightly. The `proc_net` target found a real panic in the IPv6 decoder in its
 first seconds.

@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backend;
+mod endpoints;
 pub mod mock;
 pub mod model;
 pub mod readlink;
@@ -27,8 +28,8 @@ pub use backend::{
     UserLookup,
 };
 pub use model::{
-    AccessMode, BoundPath, FdType, FileId, FileType, OpenFile, Process, Protocol, SockState,
-    SocketInfo, TcpState, UnixState,
+    AccessMode, BoundPath, FdType, FileId, FileType, NameAddition, OpenFile, Process, Protocol,
+    RawNames, SockState, SocketInfo, TcpState, UnixState,
 };
 pub use render::Escaper;
 pub use safefs::{Blocking, FileStat, FsCalls, InProcess, SafeFs};

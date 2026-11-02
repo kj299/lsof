@@ -53,6 +53,7 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
             user: owner_user(pid, numeric_ids),
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: Vec::new(),
         });
         // SAFETY: same invariants as Process32FirstW.

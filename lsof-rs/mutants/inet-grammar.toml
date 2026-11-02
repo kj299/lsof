@@ -217,8 +217,8 @@ name = "c-length-not-flags-2"
 rule = "the -c length message is safestrprt(..., 2): a space is \\x20 (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                Escaper::for_host().text_spaced(name),'''
-new = '''                shown(name),'''
+old = '''                quoted.push_str(&Escaper::for_host().text_spaced(chunk.valid()));'''
+new = '''                quoted.push_str(&shown(chunk.valid()));'''
 
 [[mutant]]
 name = "d-mixture-raw"
@@ -357,7 +357,5 @@ name = "u-long-name-utf8-raw"
 rule = "the -u long-name echo prints a non-ASCII byte as \\xNN, safestrprtn()'s (133)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                if c.is_ascii() {
-                    echo.push(c);'''
-new = '''                if true {
-                    echo.push(c);'''
+old = '''                if b.is_ascii() {'''
+new = '''                if true {'''

@@ -433,7 +433,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
 
     // Pass one over the COMMAND column: the width every cell is then cut to.
     let cmd_cut = procs.iter().fold("COMMAND".len(), |w, p| {
-        let len = esc.command(&p.command).len();
+        let len = esc.command_bytes(p.command_bytes()).len();
         w.max(command_width.map_or(len, |n| len.min(n)))
     });
     // TASKCMD gets its OWN width by the same algorithm — `print.c` seeds
@@ -494,7 +494,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         // whitespace-free, pure ASCII, and a cut that never leaves half an
         // escape at the end of the cell. `cmd_cut` is the column width from
         // pass one, not the `+c` number.
-        let cmd = esc.command_truncated(&p.command, cmd_cut);
+        let cmd = esc.command_bytes_truncated(p.command_bytes(), cmd_cut);
         let mut r = vec![cmd, p.pid.to_string()];
         if show_tasks {
             // The process's own row leaves both cells blank; only a task fills
@@ -514,8 +514,8 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         }
         // A name, escaped; or, where there is none, the number the way the
         // C's `printuid()` writes it (DIVERGENCES 68).
-        r.push(match (&p.user, p.uid) {
-            (Some(u), _) => esc.text(u).into_owned(),
+        r.push(match (p.login_bytes(), p.uid) {
+            (Some(u), _) => esc.bytes(u).into_owned(),
             (None, Some(uid)) => numeric_user(uid),
             (None, None) => String::new(),
         });
@@ -538,7 +538,7 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
         // `-T q/w` extended TCP info renders as a NAME suffix in the table
         // only; machine formats carry it structured (`-F` T tokens, JSON keys).
         // The suffix is generated here, so only the name itself is escaped.
-        let mut name = esc.text(&f.name).into_owned();
+        let mut name = f.printed_name(&esc).into_owned();
         // The `-T` annotation is a *table* decoration: `-F` reports the same
         // facts as `TST=`/`TQR=`/`TQS=` tokens and JSON as its `tcp_info` object, so it
         // is appended here rather than stored in the name.

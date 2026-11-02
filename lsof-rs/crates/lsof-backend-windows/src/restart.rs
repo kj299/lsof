@@ -88,15 +88,21 @@ fn get_list(session: u32) -> Vec<u32> {
 
 /// Resolve all `paths` to the processes holding them, decorated with the
 /// command/user from the process snapshot in `by_pid`.
-pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> {
+pub fn lookup(paths: &[std::ffi::OsString], by_pid: &HashMap<u32, Process>) -> Vec<Process> {
     let mut out: HashMap<u32, Process> = HashMap::new();
     for path in paths {
+        // A name Windows cannot spell as text names no file it holds: it
+        // is asked about no file, rather than about its lossy spelling's.
+        let Some(path) = lsof_core::selection::matched_name(path) else {
+            continue;
+        };
+        let path = path.to_string();
         let device = if path.len() >= 2 && path.as_bytes()[1] == b':' {
             Some(path[..2].to_string())
         } else {
             None
         };
-        for pid in processes_using(path) {
+        for pid in processes_using(&path) {
             let entry = out.entry(pid).or_insert_with(|| {
                 let base = by_pid.get(&pid);
                 Process {
@@ -112,6 +118,7 @@ pub fn lookup(paths: &[String], by_pid: &HashMap<u32, Process>) -> Vec<Process> 
                     user: base.and_then(|p| p.user.clone()),
                     endpoint_peer: false,
                     unlisted: false,
+                    raw_names: None,
                     files: Vec::new(),
                 }
             });

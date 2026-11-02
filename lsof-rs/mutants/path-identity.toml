@@ -102,8 +102,8 @@ name = "an-unresolved-socket-is-a-file"
 rule = "a socket another namespace names is a socket, on sockfs or not (101, 16)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            file_type: FileType::Socket("sock"),'''
-new = '''            file_type: FileType::Other("sock".into()),'''
+old = '''        file_type: FileType::Socket("sock"),'''
+new = '''        file_type: FileType::Other("sock".into()),'''
 
 [[mutant]]
 name = "maps-row-without-its-device"

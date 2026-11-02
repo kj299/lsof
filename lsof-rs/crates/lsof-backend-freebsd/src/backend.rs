@@ -336,6 +336,7 @@ impl Backend for FreeBsdBackend {
                     files: Vec::new(),
                     endpoint_peer: false,
                     unlisted: false,
+                    raw_names: None,
                 })
             })
             .collect();

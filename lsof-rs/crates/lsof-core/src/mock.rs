@@ -32,6 +32,7 @@ pub fn sample_processes() -> Vec<Process> {
             user: Some("EXAMPLE\\alice".into()),
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![
                 OpenFile {
                     rdev: None,
@@ -80,6 +81,7 @@ pub fn sample_processes() -> Vec<Process> {
             user: Some("EXAMPLE\\alice".into()),
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![
                 OpenFile {
                     rdev: None,

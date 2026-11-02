@@ -1,0 +1,728 @@
+# Mutants for the smaller Linux rows (2026-11-02): DIVERGENCES 56 (-E/+E
+# name a pipe's and a local connection's other ends, and the C reads every
+# process under them), 70 (login names by glibc's `files` rules, 32 bytes,
+# re-read under -r), 72 (a zombie leader's tasks locate -p/-g/-u under -K
+# -a), 92 (a path argument that is not UTF-8 is a path) and 126 (an O_PATH
+# descriptor on a socket file is `sock`, `0t0`, `can't identify protocol`).
+# One per rule. The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/small-rows.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo: fixture W and the differential's LSOF_DIFF_MT=passwd
+# mode bind a password file over /etc/passwd in a mount namespace of each
+# run's own. CI runs only --apply-only.
+#
+# Run 2026-11-02 as root with --first-kill, after the reviews' fixes, in
+# three batches (--only; one run of all 72 outlived the session's 2-hour
+# limit): 71 of 71 killed, 66 by the unit gate and 5 by the differential
+# alone (zombie-leader-tasks-not-entered, endpoints-not-left-to-the-core,
+# gather-scoped-under-E, raw-comm-dropped, fields-before-login-dropped).
+# One mutant, zombie-tasks-listed, was found EQUIVALENT and is recorded
+# below instead. Mutants of other files re-anchored on the code this batch
+# changed (batch-a unknown-login-no-error; batch-b e-value-given-back and
+# long-login-ends-the-list; inet-grammar c-length-not-flags-2 and
+# u-long-name-utf8-raw; json-schema base-name-keeps-the-joining-space;
+# row124 sockets-only-per-run, sockets-only-for-a-selected-process and
+# sockets-only-under-endpoints; and, before the reviews, batch-b
+# e-value-given-back, mapped-rows exempt-relative-accepted and
+# unidentified-socket-device-as-d, path-identity
+# an-unresolved-socket-is-a-file, safefs path-argument-readlink-unbounded)
+# were rerun alone: all killed. vopt.toml, whose letters this batch reads
+# as bytes now, was rerun whole: 19 of 19 killed.
+#
+# Rules with no mutant here, each pinned elsewhere:
+# * The `can't stat(/etc/passwd)` of a -r cycle (main.rs, 70): pinned since
+#   the review by `repeat-ends-where-passwd-cannot-be-stated*` (the
+#   differential's `LSOF_DIFF_MT=noetc`) and the unit tests below.
+# * The -r re-read itself (users.rs `new_cycle`): pinned by the unit test
+#   `a_new_cycle_forgets_the_snapshot_and_keeps_found_names` (mutant
+#   new-cycle-keeps-names below) and measured by hand against the C.
+# * The O_PATH socket row's access letter from `info.access()` rather than
+#   the `lstat`'s, and its `(lstat: …)` addition (files.rs, 126): EQUIVALENT
+#   outside a race. The row is made only where the `stat` succeeded, and the
+#   `lstat` is made only with an NFS mount listed; an `lstat` that fails
+#   where the `stat` of the same link then succeeds is a file replaced in
+#   between, under NFS. No gate can hold that instant, so no mutant here.
+# * A zombie leader's tasks entered with `unlisted = false` (backend.rs,
+#   72; the safety review's B3): EQUIVALENT. That branch is reached only
+#   for a leader the process selecters leave out (`restrict`), and its tasks
+#   carry the leader's PID, owner, group and command, so they fail
+#   `proc_selected` as it did (the task kind is no `SelKinds::PROC`): a task
+#   with no row is never a bare line either way. What `unlisted` adds is
+#   that the gather reads no fd table for them, which the unit test
+#   `dash_k_and_a_reads_only_the_selected_tasks` asserts whenever the host
+#   has such a zombie (it is not a mutant gate: no host is sure to have one).
+# * The `-r` runs that never end (`-t`, `-l`, `-J` with no row, under a
+#   missing /etc/passwd): the differential runs each case to its end, so
+#   they are pinned by the unit test `a_login_is_looked_up_where_one_is_printed`
+#   (mutants logins-looked-up-under-t and logins-looked-up-for-empty-json),
+#   and the ones that end by `repeat-ends-where-passwd-cannot-be-stated*`.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# ------------------------------------------------- 126: a socket file by path
+
+[[mutant]]
+name = "socket-file-by-path-typed-by-stat"
+rule = "an O_PATH descriptor on a socket file is the row the C cannot name (126)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if let Some(m) = meta.as_ref().filter(|m| m.mode & S_IFMT == S_IFSOCK) {'''
+new = '''    if let Some(m) = meta.as_ref().filter(|m| m.mode & S_IFMT == S_IFSOCK && m.nlink == 99) {'''
+
+[[mutant]]
+name = "unidentified-socket-has-no-offset"
+rule = "an unidentified socket's SIZE/OFF is its offset, 0t0 (126)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        offset: Some(info.pos.unwrap_or(0)),'''
+new = '''        offset: info.pos,'''
+
+# ------------------------------------------------- 92: paths as bytes
+
+[[mutant]]
+name = "bare-path-read-as-text"
+rule = "a bare path argument is its bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                // A bare argument is a path/name to look up, as typed.
+                sel.paths.push(raw[i].clone());'''
+new = '''                // A bare argument is a path/name to look up, as typed.
+                sel.paths.push(args[i].clone().into());'''
+
+[[mutant]]
+name = "attached-path-value-misplaced"
+rule = "an attached +d/-e value is the word's bytes after the letter (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    1 + chars
+        .iter()
+        .take(j + 1)'''
+new = '''    chars
+        .iter()
+        .take(j + 1)'''
+
+[[mutant]]
+name = "letter-past-the-text-read"
+rule = "an option letter that is not text is refused (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if j >= text_letters {'''
+new = '''            if j >= text_letters && j > usize::MAX - 1 {'''
+
+[[mutant]]
+name = "value-past-the-text-read"
+rule = "an option value that is not text is refused (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if !took_bytes {'''
+new = '''        if !took_bytes && i == usize::MAX {'''
+
+[[mutant]]
+name = "refused-value-keeps-its-lines"
+rule = "what an option said of a value it may not take is forgotten (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                early.rollback(mark);'''
+new = '''                let _ = mark;'''
+
+[[mutant]]
+name = "split-word-bytes-not-kept"
+rule = "-o's leftover letters keep the word's bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            *word = os_from_bytes(bytes);'''
+new = '''            let _ = bytes;'''
+
+# ------------------------------------------------- 70: login names
+
+[[mutant]]
+name = "passwd-blanks-not-skipped"
+rule = "blanks before a password line are skipped (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    let start = line.iter().position(|&b| !is_space(b))?;'''
+new = '''    let start = line.iter().position(|_| true)?;'''
+
+[[mutant]]
+name = "passwd-comment-read"
+rule = "a line opening with # is a comment (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    if line.first() == Some(&b'#') {'''
+new = '''    if line.first() == Some(&b'!') {'''
+
+[[mutant]]
+name = "passwd-nis-entry-named"
+rule = "a + or - entry names no one in the files lookups (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    if matches!(name.first(), Some(b'+' | b'-')) {'''
+new = '''    if matches!(name.first(), Some(b'!')) {'''
+
+[[mutant]]
+name = "passwd-gid-optional"
+rule = "a line needs its gid (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    let _gid = int_field(&mut at)?;'''
+new = '''    let _gid = int_field(&mut at);'''
+
+[[mutant]]
+name = "passwd-uid-wraps"
+rule = "a uid past UINT32_MAX refuses the line (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        u32::try_from(value).ok()'''
+new = '''        Some(value as u32)'''
+
+[[mutant]]
+name = "login-name-not-cut"
+rule = "a login name is kept to LOGINML bytes (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    name.get(..LOGINML).unwrap_or(name).into()'''
+new = '''    name.into()'''
+
+[[mutant]]
+name = "new-cycle-keeps-names"
+rule = "under -r a changed password file drops the names kept (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            c.found.clear();'''
+new = '''            c.found.shrink_to_fit();'''
+
+# ------------------------------------------------- 72: a zombie leader
+
+[[mutant]]
+name = "zombie-leader-tasks-not-entered"
+rule = "a zombie leader's tasks locate -p/-g/-u under -K -a (72)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            } else if sel.lists_tasks() && zombies.contains(&p.pid) {'''
+new = '''            } else if sel.lists_tasks() && zombies.contains(&p.pid) && p.pid == 0 {'''
+
+# ------------------------------------------------- 56: -E and +E
+
+[[mutant]]
+name = "endpoints-not-left-to-the-core"
+rule = "on Linux -E/+E are the core's (56)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        sel.endpoints_in_core = env.backend.leaves_endpoints_to_core();'''
+new = '''        sel.endpoints_in_core = false;'''
+
+[[mutant]]
+name = "endpoints-apply-not-hooked"
+rule = "apply names the ends (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if let (Some(mode), true) = (self.endpoints, self.endpoints_in_core) {'''
+new = '''        if let (Some(mode), true) = (self.endpoints, self.endpoints_in_core && self.terse) {'''
+
+[[mutant]]
+name = "pipe-names-itself"
+rule = "a pipe's row names every other row on it, not itself (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                .filter(|h| h.pid != p.pid || h.fd != f.fd)'''
+new = '''                .filter(|h| h.pid != p.pid || h.fd == f.fd || true)'''
+
+[[mutant]]
+name = "inet-holders-first-first"
+rule = "a connection's peer's rows are named last met first (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                .flat_map(|l| l.iter().rev())'''
+new = '''                .flat_map(|l| l.iter())'''
+
+[[mutant]]
+name = "plus-c-0-prints-the-command"
+rule = "+c 0 prints none of an end's command (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        CommandWidth::Unlimited => 0,'''
+new = '''        CommandWidth::Unlimited => usize::MAX,'''
+
+[[mutant]]
+name = "unknown-access-is-a-dash"
+rule = "an end's unknown access is a blank (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        AccessMode::Unknown => ' ','''
+new = '''        AccessMode::Unknown => '-','''
+
+[[mutant]]
+name = "plus-e-adds-no-end"
+rule = "+E lists each end not printed yet (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''    if forced.is_empty() {'''
+new = '''    if forced.is_empty() || candidates.entries.len() < usize::MAX {'''
+
+[[mutant]]
+name = "excluded-process-locates-nothing"
+rule = "under -E every process's rows locate search items (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        let every = self.reads_every_process();
+        for p in gathered {'''
+new = '''        let every = self.reads_every_process() && self.terse;
+        for p in gathered {'''
+
+[[mutant]]
+name = "gather-scoped-under-E"
+rule = "under -E the gather reads every process (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            if sel.has_process_selector() && !sel.reads_every_process() {'''
+new = '''            if sel.has_process_selector() {'''
+
+# ------------------------------- the review's fixes and pins (2026-11-02)
+
+[[mutant]]
+name = "endpoint-key-not-only-established"
+rule = "only an established TCP or UDP socket is an end (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            let established = s.state == Some(SockState::Tcp(TcpState::Established));'''
+new = '''            let established = s.state.is_some();'''
+
+[[mutant]]
+name = "endpoint-key-any-protocol"
+rule = "only a TCP or UDP socket is an end (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            let tcp_udp = matches!(s.protocol, Protocol::Tcp | Protocol::Udp);'''
+new = '''            let tcp_udp = true;'''
+
+[[mutant]]
+name = "endpoint-peer-any-protocol"
+rule = "a socket's peer has its protocol (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                .get(&(v6, proto, r, l))'''
+new = '''                .get(&(v6, proto, r, l))
+                .or_else(|| by_addr.get(&(v6, Protocol::Udp, r, l)))'''
+
+[[mutant]]
+name = "endpoint-peer-may-be-taken"
+rule = "a socket's peer is the first not yet paired (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                .and_then(|c| c.iter().copied().find(|c| !index.peer.contains_key(c)));'''
+new = '''                .and_then(|c| c.first().copied());'''
+
+[[mutant]]
+name = "plus-e-row-first-when-none-higher"
+rule = "+E puts a forced row after the lower-numbered ones (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                        .unwrap_or(files.len());
+                    files.insert(at, f);'''
+new = '''                        .unwrap_or(0);
+                    files.insert(at, f);'''
+
+[[mutant]]
+name = "endpoint-command-lossy"
+rule = "-E's command is cut by bytes and the partial byte printed \\xNN (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''    Escaper::for_host().bytes(kept).into_owned()'''
+new = '''    Escaper::for_host().text(&String::from_utf8_lossy(kept)).into_owned()'''
+
+[[mutant]]
+name = "endpoint-command-from-lossy-text"
+rule = "-E names a command by its bytes, as COMMAND prints them (56, 92)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''let cmd = cmd.get_or_insert_with(|| cut_command(p.command_bytes(), width));'''
+new = '''let cmd = cmd.get_or_insert_with(|| cut_command(p.command.as_bytes(), width));'''
+
+[[mutant]]
+name = "endpoint-text-escaped-twice"
+rule = "-E's text is stored printed, not escaped again (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                f.add_printed_addition(&h.text);
+            }
+        }
+    }
+    let Some(candidates)'''
+new = '''                f.add_name_addition(&h.text);
+            }
+        }
+    }
+    let Some(candidates)'''
+
+[[mutant]]
+name = "printed-tail-escaped-again"
+rule = "a printed addition is printed as it stands (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''        let mut out = esc.text(text).into_owned();
+        out.push_str(tail);'''
+new = '''        let mut out = esc.text(text).into_owned();
+        out.push_str(&esc.text(tail));'''
+
+[[mutant]]
+name = "printed-tail-trusted"
+rule = "a printed addition holding a control is escaped after all (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            .any(crate::render::escape::is_unprintable_unicode)
+        {
+            return esc.text(&self.name);'''
+new = '''            .any(|_| false)
+        {
+            return esc.text(&self.name);'''
+
+[[mutant]]
+name = "addition-base-moves"
+rule = "the base is where the first addition began, whatever follows (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            Some(a) if (a.base() as usize) <= self.name.len() => a.base() as usize,'''
+new = '''            Some(_) => self.name.len(),'''
+
+[[mutant]]
+name = "plain-addition-after-printed-raw"
+rule = "an addition after printed text is escaped into it (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            let printed = crate::render::escape::Escaper::for_host()
+                .text(text)
+                .into_owned();'''
+new = '''            let printed = text.to_string();'''
+
+[[mutant]]
+name = "c-exclusion-kept-under-E"
+rule = "under -E a -c ^ is ignored (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        (!self.reads_every_process()
+            && self'''
+new = '''        (true
+            && self'''
+
+[[mutant]]
+name = "excluded-process-listed-under-allproc"
+rule = "under -E an excluded process with no item at all is not listed (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            if excluded && (!every || specified.is_empty()) {'''
+new = '''            if excluded && !every {'''
+
+[[mutant]]
+name = "excluded-process-keeps-its-kinds"
+rule = "under -E an excluded process's rows inherit no kind (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            let inherited = if excluded {
+                SelKinds::NONE'''
+new = '''            let inherited = if false {
+                SelKinds::NONE'''
+
+[[mutant]]
+name = "excluded-process-not-listed-under-E"
+rule = "under -E an excluded process's rows a file item selects are listed (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            if excluded && (!every || specified.is_empty()) {'''
+new = '''            if excluded {'''
+
+[[mutant]]
+name = "excluded-process-marks-its-items"
+rule = "under -E an excluded process locates no process-level item (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            if !excluded {
+                self.mark_process_items(p, &mut found);'''
+new = '''            if true {
+                self.mark_process_items(p, &mut found);'''
+
+[[mutant]]
+name = "excluded-process-passes"
+rule = "under -E an excluded process does not pass to mark -c (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            let passes = !excluded && (!self.and_mode || kinds.contains(and_kinds));'''
+new = '''            let passes = !self.and_mode || kinds.contains(and_kinds);'''
+
+[[mutant]]
+name = "excluded-locate-kinds-kept"
+rule = "under -E an excluded process's rows carry no task kind (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            let kinds = if excluded {
+                SelKinds::NONE'''
+new = '''            let kinds = if false {
+                SelKinds::NONE'''
+
+[[mutant]]
+name = "c-matches-lossy-text"
+rule = "-c compares the command's bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            CommandMatch::Prefix => p.command_bytes().starts_with(needle.as_encoded_bytes()),'''
+new = '''            CommandMatch::Prefix => p.command.as_bytes().starts_with(needle.as_encoded_bytes()),'''
+
+[[mutant]]
+name = "name-match-lossy"
+rule = "a path argument that is not text names nothing where names are matched (92)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''pub fn matched_name(path: &OsStr) -> Option<&str> {
+    path.to_str()'''
+new = '''pub fn matched_name(path: &OsStr) -> Option<&str> {
+    Some(Box::leak(path.to_string_lossy().into_owned().into_boxed_str()))'''
+
+[[mutant]]
+name = "command-column-from-lossy-text"
+rule = "COMMAND prints a command's bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        let cmd = esc.command_bytes_truncated(p.command_bytes(), cmd_cut);'''
+new = '''        let cmd = esc.command_bytes_truncated(p.command.as_bytes(), cmd_cut);'''
+
+[[mutant]]
+name = "user-column-from-lossy-text"
+rule = "USER prints a login's bytes (70)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        r.push(match (p.login_bytes(), p.uid) {'''
+new = '''        r.push(match (p.user.as_deref().map(str::as_bytes), p.uid) {'''
+
+[[mutant]]
+name = "fields-c-from-lossy-text"
+rule = "-F c prints a command's bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''            push!('c', &esc.bytes(p.command_bytes()));'''
+new = '''            push!('c', &esc.text(&p.command));'''
+
+[[mutant]]
+name = "fields-l-from-lossy-text"
+rule = "-F L prints a login's bytes (70)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''            if let Some(user) = p.login_bytes() {'''
+new = '''            if let Some(user) = p.user.as_deref().map(str::as_bytes) {'''
+
+[[mutant]]
+name = "command-bytes-cut-midescape"
+rule = "a byte escape is cut whole or not at all (92)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''                if used + 4 > width {
+                    return out;
+                }
+                used += 4;'''
+new = '''                if used + 1 > width {
+                    return out;
+                }
+                used += 4;'''
+
+[[mutant]]
+name = "raw-comm-dropped"
+rule = "a comm that is not UTF-8 is kept as bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/process.rs"
+old = '''    let raw_command = std::str::from_utf8(&bytes)
+        .is_err()'''
+new = '''    let raw_command = std::str::from_utf8(&bytes)
+        .is_ok()'''
+
+[[mutant]]
+name = "raw-comm-newline-kept"
+rule = "a comm's escaped newline is ? in its bytes too (58, 92)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/process.rs"
+old = '''            (b'\\', Some(b'n')) => {
+                out.push(b'?');'''
+new = '''            (b'\\', Some(b'n')) => {
+                out.push(b'\n');'''
+
+[[mutant]]
+name = "login-bytes-dropped"
+rule = "a login that is not UTF-8 is kept as bytes (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/process.rs"
+old = '''    let raw_login = login.filter(|l| std::str::from_utf8(l).is_err());'''
+new = '''    let raw_login: Option<Box<[u8]>> = login.filter(|_| false);'''
+
+[[mutant]]
+name = "uid-cr-not-blank"
+rule = "strtoul skips a carriage return before the uid (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')'''
+new = '''    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c)'''
+
+[[mutant]]
+name = "passwd-stamp-ignores-ctime"
+rule = "-r drops the names kept when /etc/passwd's ctime changed (70)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    let stamp = (md.mtime(), md.ctime());'''
+new = '''    let stamp = (md.mtime(), 0);'''
+
+[[mutant]]
+name = "logins-looked-up-under-t"
+rule = "-t looks up no login (70)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Format::Table => !sel.terse,'''
+new = '''        Format::Table => true,'''
+
+[[mutant]]
+name = "logins-looked-up-for-empty-json"
+rule = "-J looks up a login only for a process with a row (70)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            wants_login(j.only.as_deref()) && procs.iter().any(|p| !p.files.is_empty())'''
+new = '''            wants_login(j.only.as_deref())'''
+
+[[mutant]]
+name = "fields-before-login-dropped"
+rule = "-F writes the fields before L before the passwd stat error (70)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                    let _ = out.write_all(head.as_bytes());'''
+new = '''                    let _ = out.write_all(b"");'''
+
+[[mutant]]
+name = "rollback-drops-told-lines"
+rule = "a rollback keeps what was printed (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if self.told == told && self.codes.len() >= codes && self.texts.len() >= texts {'''
+new = '''        if self.codes.len() >= codes && self.texts.len() >= texts {'''
+
+[[mutant]]
+name = "disabled-z-reads-its-word"
+rule = "a disabled -Z drops its next word unread (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                            i += 1;
+                            took_bytes = true;
+                        }
+                    }
+                    j = chars.len();'''
+new = '''                        if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                            i += 1;
+                        }
+                    }
+                    j = chars.len();'''
+
+[[mutant]]
+name = "dropped-m-word-read"
+rule = "-D and -m drop their next word unread (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                        i += 1;
+                        took_bytes = true;'''
+new = '''                        early.line(&format!("unsupported option: -{c}"));
+                    }
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                        i += 1;'''
+
+[[mutant]]
+name = "option-byte-refused"
+rule = "a byte that is no character in a letter's place is illegal and read on (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if let Some(b) = byte_letter(c).filter(|_| letters_ok) {'''
+new = '''            if let Some(b) = byte_letter(c).filter(|_| false) {'''
+
+[[mutant]]
+name = "option-0xff-counted"
+rule = "0xff is GetOpt's EOF, said and not counted (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    early.tell();
+                    fs.tell(&format!(
+                        "lsof: illegal option character: {}",'''
+new = '''                    early.line("illegal option character: \\xff");
+                    fs.tell(&format!(
+                        "lsof: illegal option character: {}",'''
+
+[[mutant]]
+name = "option-0xff-names-from-next-word"
+rule = "after 0xff with letters following, its own word is the first name (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    ended = Some(if j + 1 < chars.len() { word } else { word + 1 });'''
+new = '''                    ended = Some(word + 1);'''
+
+[[mutant]]
+name = "option-0xff-reads-on"
+rule = "0xff ends the options (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if let Some(start) = ended {
+            sel.paths.extend(raw.iter().skip(start).cloned());
+            break;'''
+new = '''        if let Some(start) = ended {
+            sel.paths.extend(raw.iter().skip(start).take(0).cloned());'''
+
+[[mutant]]
+name = "multibyte-letter-one-line"
+rule = "a character of several bytes is a line a byte (149)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    for b in other.encode_utf8(&mut [0; 4]).bytes() {
+                        early.line('''
+new = '''                    for b in other.encode_utf8(&mut [0; 4]).bytes().take(1) {
+                        early.line('''
+
+[[mutant]]
+name = "c-value-read-as-text"
+rule = "-c reads its value as bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    let value = if c != 'p' && cfg!(unix) {'''
+new = '''                    let value = if c == 'u' && cfg!(unix) {'''
+
+[[mutant]]
+name = "u-value-read-as-text"
+rule = "-u reads its value as bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    let value = if c != 'p' && cfg!(unix) {'''
+new = '''                    let value = if c == 'c' && cfg!(unix) {'''
+
+[[mutant]]
+name = "u-lookup-lossy"
+rule = "-u looks a login up by its bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        match (host.lookup_user)(name) {'''
+new = '''        match (host.lookup_user)(String::from_utf8_lossy(name).as_bytes()) {'''
+
+[[mutant]]
+name = "wtf8-surrogate-lossy"
+rule = "a Windows argument's lone surrogate is kept (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            Ok(unit) => out.push(unit),'''
+new = '''            Ok(unit) if (0xd800..0xe000).contains(&unit) => out.push(0xfffd),
+            Ok(unit) => out.push(unit),'''

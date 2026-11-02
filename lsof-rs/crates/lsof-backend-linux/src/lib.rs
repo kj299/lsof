@@ -122,6 +122,9 @@ mod users;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
+/// The C's `-r` check of the password file, at each cycle (DIVERGENCES 70).
+#[cfg(target_os = "linux")]
+pub use users::new_cycle as passwd_new_cycle;
 
 /// The pure text parsers, exposed for the cargo-fuzz targets in `../../fuzz`.
 ///

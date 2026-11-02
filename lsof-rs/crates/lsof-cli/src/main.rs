@@ -287,6 +287,54 @@ fn pwd_warnings(procs: &[lsof_core::Process], format: &Format, sel: &Selection) 
     }
 }
 
+/// Whether printing `procs` calls the C's `printuid()` at all: where
+/// [`pwd_warnings`] says it does, for any owner. Not under `-l`, which looks
+/// nothing up (`Futol`).
+#[cfg(target_os = "linux")]
+fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selection) -> bool {
+    if sel.numeric_ids || procs.is_empty() {
+        return false;
+    }
+    let wants_login = |only: Option<&[char]>| {
+        only.map_or_else(|| fields::field_is_default('L'), |s| s.contains(&'L'))
+    };
+    match format {
+        Format::Table => !sel.terse,
+        Format::Fields { only, .. } => wants_login(only.as_deref()),
+        Format::Json(j) => {
+            wants_login(j.only.as_deref()) && procs.iter().any(|p| !p.files.is_empty())
+        }
+    }
+}
+
+/// What `-F` writes of process `p` before it looks its login up: the
+/// selected fields that come before `L` (`p`, `K`, `M`, `g`, `R`, `c`, `u`),
+/// each terminated, and no end to the set, which the C never reaches.
+#[cfg(target_os = "linux")]
+fn before_login(p: &lsof_core::Process, nul: bool, only: Option<&[char]>) -> String {
+    let wanted =
+        |c: char| c == 'p' || only.map_or_else(|| fields::field_is_default(c), |s| s.contains(&c));
+    let letters: Vec<char> = ['p', 'K', 'M', 'g', 'R', 'c', 'u']
+        .into_iter()
+        .filter(|&c| wanted(c))
+        .collect();
+    let head = lsof_core::Process {
+        files: Vec::new(),
+        ..p.clone()
+    };
+    let mut text = fields::render(
+        std::slice::from_ref(&head),
+        nul,
+        Some(&letters),
+        lsof_core::TcpInfoFlags::default(),
+        Escaper::for_host(),
+    );
+    if nul && text.ends_with("\0\n") {
+        text.pop();
+    }
+    text
+}
+
 /// Resolve a user-typed path selector (`+D` directory, bare path) to its
 /// canonical long form so the literal prefix/equality match in the selection
 /// engine sees the same spelling the backend reports — on a backend that
@@ -301,7 +349,10 @@ fn canonicalize_selector(p: &mut String) {
     let Ok(resolved) = std::fs::canonicalize(&*p) else {
         return;
     };
-    *p = strip_verbatim(&resolved.to_string_lossy());
+    // Resolved to a name that is not text: left as typed, never lossy.
+    if let Some(text) = resolved.to_str() {
+        *p = strip_verbatim(text);
+    }
 }
 
 /// `path` without the slashes that end it, keeping one: the C's rule for a
@@ -339,16 +390,20 @@ fn trimmed(_: &std::ffi::OsStr) -> Option<OsString> {
 /// used `canonicalize()`, which made `lsof mnt` a file system and followed
 /// such a link to the file behind it. Where names are matched instead
 /// (Windows), the argument as [`spell_names_as_reported`] left it.
-fn spell_path(typed: &str, identified: bool, fs: &SafeFs) -> Result<OsString, ReadlinkError> {
+fn spell_path(
+    typed: &std::ffi::OsStr,
+    identified: bool,
+    fs: &SafeFs,
+) -> Result<OsString, ReadlinkError> {
     #[cfg(unix)]
     if identified {
         use std::os::unix::ffi::OsStringExt;
-        let mut path = lsof_core::readlink::resolve(typed.as_ref(), fs)?.into_vec();
+        let mut path = lsof_core::readlink::resolve(typed, fs)?.into_vec();
         path.truncate(without_trailing_slashes(&path).len());
         return Ok(OsString::from_vec(path));
     }
     let _ = (identified, fs);
-    Ok(typed.into())
+    Ok(typed.to_os_string())
 }
 
 /// On a backend that matches names (Windows), the path arguments and the `+D`
@@ -361,7 +416,17 @@ fn spell_names_as_reported(sel: &mut Selection) {
     if sel.paths_identified {
         return;
     }
-    for p in sel.paths.iter_mut().chain(sel.dir_trees.iter_mut()) {
+    // An argument that is not text is left as it is: it names nothing
+    // where names are matched ([`lsof_core::selection::matched_name`]).
+    for p in sel.paths.iter_mut() {
+        let Some(text) = lsof_core::selection::matched_name(p) else {
+            continue;
+        };
+        let mut text = text.to_string();
+        canonicalize_selector(&mut text);
+        *p = text.into();
+    }
+    for p in sel.dir_trees.iter_mut() {
         canonicalize_selector(p);
     }
 }
@@ -477,7 +542,10 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     // reports them last-given first.
     for (c, hit) in sel.commands.iter().zip(&located.commands).rev() {
         if !hit {
-            miss.push(format!("lsof: command not located: {}", esc.text(c)));
+            miss.push(format!(
+                "lsof: command not located: {}",
+                esc.bytes(c.as_encoded_bytes())
+            ));
         }
     }
     // Every path argument must be located or the run exits 1, and for
@@ -596,7 +664,7 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
                 Some(login) => format!(
                     "lsof: login name (UID {}) not located: {}",
                     u.uid,
-                    esc.text(login)
+                    esc.bytes(login.as_encoded_bytes())
                 ),
                 None => format!("lsof: user ID not located: {}", u.uid),
             });
@@ -667,23 +735,10 @@ fn main() {
 
     // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
     // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —
-    // `lsof /tmp/$'\xff'` exited 101 with a panic message. lsof-rs keeps
-    // arguments as `String`s, so such an argument cannot be looked up yet;
-    // it is refused, in one line, rather than crashing on (DIVERGENCES).
-    let argv: Vec<String> = match std::env::args_os()
-        .skip(1)
-        .map(std::ffi::OsString::into_string)
-        .collect::<Result<_, _>>()
-    {
-        Ok(argv) => argv,
-        Err(bad) => {
-            say!(
-                "lsof: an argument is not valid UTF-8, which lsof-rs cannot take: {}",
-                Escaper::for_host().text(&bad.to_string_lossy())
-            );
-            std::process::exit(1);
-        }
-    };
+    // `lsof /tmp/$'\xff'` exited 101 with a panic message. A path is read
+    // as the bytes it is, and lists the file (DIVERGENCES 92); an option
+    // that reads text refuses what is not.
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     // Default output is ASCII (safe on PowerShell 5.1 / cmd.exe whose console
     // is Windows-1252). Users on modern terminals can pass `--unicode` to
@@ -718,7 +773,7 @@ fn main() {
         let read_table = |req: &MountRequest, fs: &SafeFs| {
             env_cell.get_or_init(make_env).backend.mount_table(req, fs)
         };
-        let lookup_user = |v: &str| env_cell.get_or_init(make_env).backend.lookup_user(v);
+        let lookup_user = |v: &[u8]| env_cell.get_or_init(make_env).backend.lookup_user_bytes(v);
         // `is_selinux_enabled()`, a check for a mounted selinuxfs, not for
         // the `/sys/fs/selinux` directory: on a host where the directory
         // exists unmounted (this port's own test box) a presence check
@@ -802,6 +857,7 @@ fn main() {
     let selection = {
         let mut sel = selection;
         sel.paths_identified = env.backend.identifies_paths();
+        sel.endpoints_in_core = env.backend.leaves_endpoints_to_core();
         // `-Z` reaches here only where SELinux is enabled: the parse refused
         // it, in the C's words and order, where it is not ([`HostChecks`]).
         if sel.selinux.is_some() {
@@ -852,7 +908,7 @@ fn main() {
                 Err(e) => {
                     // A warning: `-w` mutes it, `-Q` does not.
                     if !sel.omit_unreadable {
-                        say!("lsof: {}", e.message(&esc.text(&typed)));
+                        say!("lsof: {}", e.message(&esc.bytes(typed.as_encoded_bytes())));
                     }
                     dropped_an_argument = true;
                     continue;
@@ -861,7 +917,7 @@ fn main() {
             // Where files have identities, the argument is reported, and
             // compared with a socket's bound path, as typed: the C's `aname`.
             let name: OsString = if identified {
-                typed.as_str().into()
+                typed.clone()
             } else {
                 path.clone()
             };
@@ -875,7 +931,7 @@ fn main() {
             let mounted = &table.get_or_insert_with(|| read_table(&sel)).entries;
             let devs = filesystems_named(mounted, &path, sel.filesystem_args);
             if !devs.is_empty() {
-                sel.path_names.insert(typed.as_str().into());
+                sel.path_names.insert(typed.clone());
                 for dev in devs {
                     sel.path_fs_devices.insert(dev);
                     sel.path_items.push(PathItem {
@@ -895,7 +951,10 @@ fn main() {
                 // typed, escaped, since a script may pass along a file name
                 // it did not choose.
                 if !sel.quiet {
-                    say!("lsof: not a file system: {}", esc.text(&typed));
+                    say!(
+                        "lsof: not a file system: {}",
+                        esc.bytes(typed.as_encoded_bytes())
+                    );
                 }
                 dropped_an_argument = true;
                 continue;
@@ -922,7 +981,7 @@ fn main() {
             {
                 Ok(Some(id)) => {
                     sel.path_ids.insert(id);
-                    sel.path_names.insert(typed.as_str().into());
+                    sel.path_names.insert(typed.clone());
                     // A row it locates is named by its `Readlink()`, less
                     // its trailing slashes (`s->name`), where `-V` reports it
                     // as typed (`s->aname`): `lnk/reg.txt/` names the row
@@ -1031,6 +1090,13 @@ fn main() {
     let repeating = repeat.is_some();
 
     let run_cycle = move || -> usize {
+        // Under `-r` the C `stat`s `/etc/passwd` at each cycle's first login
+        // and forgets the names it keeps when the file changed (DIVERGENCES
+        // 70); here before the gather that names the owners.
+        #[cfg(target_os = "linux")]
+        let passwd = (repeating && !selection.numeric_ids)
+            .then(lsof_backend_linux::passwd_new_cycle)
+            .and_then(Result::err);
         let gathered = match env.backend.gather_with(&selection, &fs) {
             Ok(p) => p,
             Err(e) => {
@@ -1043,6 +1109,27 @@ fn main() {
         // drops is still located; see `Selection::locate`.
         let located = selection.locate(&gathered);
         let procs = selection.apply(gathered);
+        // A `stat` that failed is the C's `Error()` where it looks a login
+        // up, before this cycle prints anything (`print.c:1726-1731`).
+        #[cfg(target_os = "linux")]
+        if let Some(e) = passwd {
+            if looks_up_logins(&procs, &format, &selection) {
+                // `-F` has written the first process's fields before its
+                // `L` when the C looks the login up (measured: `-r1 -F pL`
+                // prints `p<pid>` first); the table has printed nothing,
+                // sizing its columns first. JSON's half-written document,
+                // `…,"uid":0` and no more, is not valid JSON and is not
+                // written (DIVERGENCES 70).
+                if let (Format::Fields { nul, only }, Some(first)) = (&format, procs.first()) {
+                    let head = before_login(first, *nul, only.as_deref());
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(head.as_bytes());
+                    let _ = out.flush();
+                }
+                say!("lsof: can't stat(/etc/passwd): {}", errno_text(&e));
+                std::process::exit(1);
+            }
+        }
         // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
         // platform rule is whether `\` is (Unix) or is the path separator
         // (Windows). See lsof_core::render::escape.
@@ -1204,6 +1291,7 @@ mod tests {
             user: user.map(Into::into),
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: (0..files as u64).map(file).collect(),
         }
     }
@@ -1244,6 +1332,56 @@ mod tests {
         assert_eq!(super::pwd_warnings(&empty, &format, &sel), [65000, 65000]);
         let (sel, format) = parsed(&["-J"]);
         assert!(super::pwd_warnings(&empty, &format, &sel).is_empty());
+    }
+
+    /// Whether a run calls the C's `printuid()` at all, which decides
+    /// whether a `-r` cycle's failed `stat` of `/etc/passwd` ends it: under
+    /// the table but not `-t`, under `-F` and `-J` with `L`, `-J` only with
+    /// a row to print, never under `-l`, never for no process (DIVERGENCES
+    /// 70; measured by hand with a tmpfs over /etc).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_login_is_looked_up_where_one_is_printed() {
+        let procs = [owned(0, Some("root"), 1)];
+        let looks = |argv: &[&str], procs: &[lsof_core::Process]| {
+            let (sel, format) = parsed(argv);
+            super::looks_up_logins(procs, &format, &sel)
+        };
+        assert!(looks(&["-n"], &procs));
+        assert!(!looks(&["-t"], &procs), "-t prints no login");
+        assert!(!looks(&["-l"], &procs));
+        assert!(looks(&["-F"], &procs));
+        assert!(looks(&["-FL"], &procs));
+        assert!(!looks(&["-Fp"], &procs));
+        assert!(looks(&["-J"], &procs));
+        assert!(!looks(&["-J", "-Fn"], &procs));
+        assert!(!looks(&["-n"], &[]), "no process, no lookup");
+        let bare = [owned(0, Some("root"), 0)];
+        assert!(!looks(&["-J"], &bare), "-J prints no process without a row");
+        assert!(looks(&["-n"], &bare), "the table prints its blank row");
+    }
+
+    /// `-F` under `-r` with `/etc/passwd` gone: the first process's fields
+    /// before `L`, the set left open, as the C writes them (measured).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_fields_before_a_login_are_written_first() {
+        let mut p = owned(0, Some("root"), 1);
+        p.pgid = Some(7);
+        p.ppid = Some(1);
+        p.command = "sleep".into();
+        assert_eq!(
+            super::before_login(&p, false, Some(&['p', 'L'])),
+            format!("p{}\n", p.pid)
+        );
+        assert_eq!(
+            super::before_login(&p, false, None),
+            format!("p{}\ng7\nR1\ncsleep\nu0\n", p.pid)
+        );
+        assert_eq!(
+            super::before_login(&p, true, Some(&['c', 'L', 'f'])),
+            format!("p{}\0csleep\0", p.pid)
+        );
     }
 
     /// Parse argv exactly as `main` does and hand back the hint inputs.
@@ -1351,7 +1489,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let typed = dir.join(".").to_string_lossy().into_owned();
         let selection = |identified: bool| Selection {
-            paths: vec![typed.clone(), missing.clone()],
+            paths: vec![typed.clone().into(), missing.clone().into()],
             dir_trees: vec![typed.clone()],
             dirs_one_level: vec![typed.clone()],
             paths_identified: identified,
@@ -1368,12 +1506,12 @@ mod tests {
             long, typed,
             "the test needs a spelling canonicalize changes"
         );
-        assert_eq!(sel.paths, [long.clone(), missing.clone()]);
+        assert_eq!(sel.paths, [long.as_str(), missing.as_str()]);
         assert_eq!(sel.dir_trees, [long]);
         assert_eq!(sel.dirs_one_level, std::slice::from_ref(&typed));
         let mut sel = selection(true);
         spell_names_as_reported(&mut sel);
-        assert_eq!(sel.paths, [typed.clone(), missing]);
+        assert_eq!(sel.paths, [typed.as_str(), missing.as_str()]);
         assert_eq!(sel.dir_trees, [typed]);
     }
 

@@ -370,7 +370,7 @@ pub fn render_with_offset_digits(
             }
         }
         if want('c') {
-            push!('c', &esc.text(&p.command));
+            push!('c', &esc.bytes(p.command_bytes()));
         }
         if want('u') {
             if let Some(uid) = p.uid {
@@ -378,8 +378,8 @@ pub fn render_with_offset_digits(
             }
         }
         if want('L') {
-            if let Some(user) = &p.user {
-                push!('L', &esc.text(user));
+            if let Some(user) = p.login_bytes() {
+                push!('L', &esc.bytes(user));
             }
         }
         end_set!();
@@ -478,7 +478,7 @@ pub fn render_with_offset_digits(
             // `task` rows) have no name; a bare `n` field code with an empty
             // value is just noise.
             if want('n') && !f.name.is_empty() {
-                push!('n', &esc.text(&f.name));
+                push!('n', &f.printed_name(&esc));
             }
             // The TCP/TPI tokens come last, *after* the name: `print.c` calls
             // `print_tcptpi()` once `printname()` has run.
@@ -530,6 +530,37 @@ pub(crate) fn uid_as_the_c_prints_it(uid: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command or login that is not UTF-8 is printed from its bytes, each
+    /// byte that is no character `\xNN`, as `safestrprt()` prints it; JSON
+    /// keeps the lossy text (DIVERGENCES 92, 93). The table's COMMAND and
+    /// USER the same.
+    #[test]
+    fn a_command_and_login_of_bytes_print_their_bytes() {
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.clear();
+        p.command = "x\u{fffd}".into();
+        p.user = Some("ab\u{fffd}cd".into());
+        p.raw_names = Some(Box::new(crate::model::RawNames {
+            command: Some(b"x\xff"[..].into()),
+            login: Some(b"ab\xffcd"[..].into()),
+        }));
+        let out = render(
+            std::slice::from_ref(&p),
+            false,
+            Some(&['c', 'L']),
+            TcpInfoFlags::default(),
+            Escaper::UNIX,
+        );
+        assert_eq!(out, format!("p{}\ncx\\xff\nLab\\xffcd\n", p.pid));
+        let table = crate::render::table::render(
+            std::slice::from_ref(&p),
+            crate::render::table::TableOpts::new(Escaper::UNIX),
+        );
+        let row = table.lines().nth(1).unwrap_or_default();
+        assert!(row.starts_with("x\\xff "), "{table}");
+        assert!(row.contains(" ab\\xffcd"), "{table}");
+    }
 
     /// `-F ?` is the C's text to the byte, as `lsof -F ?` wrote it to stderr
     /// on the Linux test host (no SELinux): the table's letters less the five

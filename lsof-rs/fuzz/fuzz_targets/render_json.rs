@@ -80,7 +80,7 @@ fuzz_target!(|data: &[u8]| {
         rdev: None,
         file_flags: Some(0),
         socket: None,
-        name_addition: std::num::NonZeroU16::new(u16::from_le_bytes(*head)),
+        name_addition: lsof_core::model::NameAddition::new(u32::from(u16::from_le_bytes(*head))),
     };
     let p = Process {
         pid: 1,
@@ -93,6 +93,7 @@ fuzz_target!(|data: &[u8]| {
         pgid: Some(1),
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![file.clone(), file.clone()],
     };
     let o = JsonOpts {

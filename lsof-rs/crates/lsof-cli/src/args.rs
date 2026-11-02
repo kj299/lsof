@@ -114,9 +114,9 @@ pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -
 /// `lsof -Z -h` exit 1 with the error and no help, measured.
 #[derive(Clone, Copy)]
 pub struct HostChecks<'a> {
-    /// `-u`'s values, each looked up as it is read
-    /// ([`lsof_core::Backend::lookup_user`]).
-    pub lookup_user: &'a dyn Fn(&str) -> UserLookup,
+    /// `-u`'s values, each looked up as it is read, as bytes
+    /// ([`lsof_core::Backend::lookup_user_bytes`]).
+    pub lookup_user: &'a dyn Fn(&[u8]) -> UserLookup,
     /// Whether SELinux is enabled: the C's `CntxStatus`.
     pub selinux_enabled: &'a dyn Fn() -> bool,
     /// Whether the run identifies files ([`lsof_core::Backend::identifies_paths`]):
@@ -140,7 +140,7 @@ impl HostChecks<'static> {
 }
 
 /// [`HostChecks::DEFERRED`]'s user lookup.
-fn kept_as_typed(_: &str) -> UserLookup {
+fn kept_as_typed(_: &[u8]) -> UserLookup {
     UserLookup::ByName
 }
 
@@ -347,7 +347,7 @@ fn quoting(message: &str, arg: &str) -> String {
 /// directory in this process and warning on stderr, and reading no mount
 /// table: what the tests and the fuzz target use. `lsof` itself parses with
 /// [`parse_with`], over its bounded layer and the host's table.
-pub fn parse(args: Vec<String>) -> Result<Action, String> {
+pub fn parse<A: Into<OsString>>(args: Vec<A>) -> Result<Action, String> {
     parse_with(args, &SafeFs::in_process(), &no_mounts)
 }
 
@@ -365,8 +365,8 @@ pub fn parse(args: Vec<String>) -> Result<Action, String> {
 /// prints them before the `-S` warning, `-S 0 +d D` after, `+d D -w` prints
 /// them and `-w +d D` does not (measured). The table goes back with the run
 /// ([`Action::Run`]); a run that needs it and read none here reads it later.
-pub fn parse_with(
-    args: Vec<String>,
+pub fn parse_with<A: Into<OsString>>(
+    args: Vec<A>,
     fs: &SafeFs,
     mounts: MountReader<'_>,
 ) -> Result<Action, String> {
@@ -378,8 +378,8 @@ pub fn parse_with(
 /// SELinux, their errors reported in option order with the parse's others,
 /// before `-h`, `-v` or `-F ?` is acted on ([`HostChecks`]). What `lsof`
 /// itself parses with.
-pub fn parse_with_host(
-    args: Vec<String>,
+pub fn parse_with_host<A: Into<OsString>>(
+    args: Vec<A>,
     fs: &SafeFs,
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
@@ -394,13 +394,14 @@ pub fn parse_with_host(
 /// `usage()` does: `-W -h` prints the error and then the help, exit 1. They
 /// are the ones read before the parse ended: an error that ends it at once
 /// (DIVERGENCES 83) leaves a later `-h` unread.
-pub fn parse_reporting(
-    args: Vec<String>,
+pub fn parse_reporting<A: Into<OsString>>(
+    args: Vec<A>,
     fs: &SafeFs,
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
 ) -> (Result<Action, ParseError>, Reports) {
     let mut reports = Reports::default();
+    let args = args.into_iter().map(Into::into).collect();
     let parsed = parse_errors(args, fs, mounts, host, &mut reports);
     (parsed, reports)
 }
@@ -408,7 +409,7 @@ pub fn parse_reporting(
 /// [`parse_with_host`], with what `-h`, `-F ?` and `-v` ask for left in
 /// `reports`.
 fn parse_errors(
-    args: Vec<String>,
+    args: Vec<OsString>,
     fs: &SafeFs,
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
@@ -717,6 +718,21 @@ impl Early<'_> {
         }
     }
 
+    /// Where what is held ends now, for [`Early::rollback`].
+    fn mark(&self) -> (usize, usize, bool) {
+        (self.codes.len(), self.texts.len(), self.told)
+    }
+
+    /// Forget what was held after `mark`, unless some of it was printed
+    /// already: the lines an option made of a value it then may not take
+    /// ([`not_text`]).
+    fn rollback(&mut self, (codes, texts, told): (usize, usize, bool)) {
+        if self.told == told && self.codes.len() >= codes && self.texts.len() >= texts {
+            self.codes.truncate(codes);
+            self.texts.truncate(texts);
+        }
+    }
+
     /// Hand each line to `line`, and forget them.
     fn drain(&mut self, mut line: impl FnMut(&str)) {
         self.each_line(&mut line);
@@ -728,7 +744,7 @@ impl Early<'_> {
 /// [`parse_with`], with the errors the C reports and reads on after left in
 /// `early`.
 fn parse_options<'s>(
-    mut args: Vec<String>,
+    mut raw: Vec<OsString>,
     fs: &'s SafeFs<'s>,
     mounts: MountReader<'_>,
     host: &HostChecks<'_>,
@@ -775,6 +791,15 @@ fn parse_options<'s>(
         sel.command_match = CommandMatch::Forgiving;
     }
 
+    // Every argument as text, for the options to read, and as bytes in
+    // `raw`, for what names a path: a bare argument, `+d`/`+D` and `-e`/`+e`
+    // (DIVERGENCES 92). A file name need not be UTF-8, and the C takes one
+    // as bytes like any other; what no option can read as text is refused
+    // where an option reads it ([`not_text`]).
+    let mut args: Vec<String> = raw
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let mut i = 0;
     while i < args.len() {
         let tok = &args[i];
@@ -797,8 +822,8 @@ fn parse_options<'s>(
         // `--` ends option parsing; remaining tokens are paths.
         if tok == "--" {
             i += 1;
-            while i < args.len() {
-                sel.paths.push(args[i].clone());
+            while i < raw.len() {
+                sel.paths.push(raw[i].clone());
                 i += 1;
             }
             break;
@@ -815,8 +840,8 @@ fn parse_options<'s>(
             (Some(body), _) => (true, body),
             (None, Some(body)) => (false, body),
             (None, None) => {
-                // A bare argument is a path/name to look up.
-                sel.paths.push(tok.clone());
+                // A bare argument is a path/name to look up, as typed.
+                sel.paths.push(raw[i].clone());
                 i += 1;
                 continue;
             }
@@ -830,10 +855,58 @@ fn parse_options<'s>(
         }
         let prefix = if plus { '+' } else { '-' };
 
-        let chars: Vec<char> = body.chars().collect();
+        // The letters, each byte that is no character standing as one of its
+        // own ([`option_letters`]): the C's `GetOpt` reads a byte at a time,
+        // and one that is no option is its `illegal option character`, after
+        // which it reads on (DIVERGENCES 92). Where the word holds a
+        // character those stand-ins could be taken for, the letters stop at
+        // its first such byte as they did before: the letters before it are
+        // read as ever, a path option may take the rest as bytes, and
+        // anything else that reads it is refused ([`not_text`]). And
+        // whether an option took what is not text as bytes, attached or the
+        // next word, or dropped the next word unread.
+        let (chars, letters_ok) = option_letters(&raw[i]);
+        let text_letters = if letters_ok {
+            usize::MAX
+        } else {
+            text_letters(&raw[i])
+        };
+        let not_chars = chars.iter().filter(|&&c| byte_letter(c).is_some()).count();
+        let mut illegal_bytes = 0usize;
+        // `-\xff`: the word the C's options end at, whose names begin there.
+        let mut ended: Option<usize> = None;
+        let word = i;
+        let mut took_bytes = false;
+        let mut mark = early.mark();
         let mut j = 0;
         while j < chars.len() {
+            if j >= text_letters {
+                early.fatal = true;
+                return Err(not_text(&raw[word]));
+            }
+            mark = early.mark();
             let c = chars[j];
+            if let Some(b) = byte_letter(c).filter(|_| letters_ok) {
+                if b == 0xff {
+                    // 0xff is `(char)-1`, EOF, to `GetOpt`: it says the
+                    // byte is illegal, counts no error, and ends the options
+                    // there, so the next word, or this one when letters
+                    // follow, is the first name (`main.c:1925-1945`,
+                    // measured: `-p 1 -\xff` lists PID 1 and exits 0,
+                    // `-\xff -a` reports `-a` as a file).
+                    early.tell();
+                    fs.tell(&format!(
+                        "lsof: illegal option character: {}",
+                        shown_bytes(&[b])
+                    ));
+                    ended = Some(if j + 1 < chars.len() { word } else { word + 1 });
+                    break;
+                }
+                early.line(&format!("illegal option character: {}", shown_bytes(&[b])));
+                illegal_bytes += 1;
+                j += 1;
+                continue;
+            }
             match c {
                 // The C gives these a `+` meaning lsof-rs does not implement
                 // (`+n`/`+P` resolve names, `+r` repeats until nothing is
@@ -864,7 +937,8 @@ fn parse_options<'s>(
                     // With no word left the C's `enter_dir()` gets no path,
                     // and says so in its own words, muted by `-w`; `--` is
                     // no path to `GetOpt` either, and ends the options after.
-                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();
+                    let value = path_value(&chars, j, letters_ok, &raw, &mut i).unwrap_or_default();
+                    took_bytes = true;
                     early.tell();
                     // A directory the C refuses is an error it reads on
                     // after (`enter_dir()` returns 1, `err = 1`): no search
@@ -899,6 +973,7 @@ fn parse_options<'s>(
                         dir.walked = Some(walk_dir(&dir, Path::new(&dir.dir), true, &at));
                     }
                     sel.dir_args.push(dir);
+                    let value = value.to_string_lossy().into_owned();
                     if c == 'd' {
                         sel.dirs_one_level.push(value);
                     } else {
@@ -991,7 +1066,7 @@ fn parse_options<'s>(
                             ));
                         }
                     }
-                    let delay = take_digits(&chars, &mut j, &mut args, &mut i, prefix);
+                    let delay = take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix);
                     repeat = Some(delay.map_or(15, |d| digits_value(&d) as u64));
                     continue;
                 }
@@ -1006,7 +1081,7 @@ fn parse_options<'s>(
                     // is `-o -t`, `-o3t` is `-o3 -t`, and `-o /file` is `-o`
                     // and a file name. Note that a limit does NOT switch the
                     // offset column on: `-o 5` keeps SIZE/OFF.
-                    match take_digits(&chars, &mut j, &mut args, &mut i, prefix) {
+                    match take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix) {
                         Some(digits) => columns.offset_digits = offset_digits_value(&digits),
                         None => columns.offset = true,
                     }
@@ -1027,7 +1102,7 @@ fn parse_options<'s>(
                     // letters after the digits read again as options, as for
                     // `+L` (`main.c:652-666`): `-L 3x` says this and then `-x
                     // must accompany +d or +D` (measured).
-                    let digits = take_digits(&chars, &mut j, &mut args, &mut i, prefix);
+                    let digits = take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix);
                     if !plus && digits.is_some() {
                         early.line("no number may follow -L");
                         continue;
@@ -1071,6 +1146,7 @@ fn parse_options<'s>(
                         early.line("-Z limited to SELinux");
                         if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
                             i += 1;
+                            took_bytes = true;
                         }
                     }
                     j = chars.len();
@@ -1089,7 +1165,8 @@ fn parse_options<'s>(
                     // the error: `-e -W` is `-e`'s error alone, the `-W`
                     // its value (measured). `--` is no value, and ends the
                     // options after.
-                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();
+                    let value = path_value(&chars, j, letters_ok, &raw, &mut i).unwrap_or_default();
+                    took_bytes = true;
                     early.tell();
                     if let Err(e) = enter_exempt(&mut sel, &value, plus, fs) {
                         early.fail(&e);
@@ -1203,7 +1280,7 @@ fn parse_options<'s>(
                     // not reproduced (DIVERGENCES 121), and a limit that
                     // large waits as long as the system does (no deadline is
                     // computed that could overflow).
-                    let digits = take_digits(&chars, &mut j, &mut args, &mut i, prefix);
+                    let digits = take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix);
                     sel.blocking.limit = match digits {
                         None => TMLIMIT,
                         Some(d) => {
@@ -1362,16 +1439,31 @@ fn parse_options<'s>(
                     continue;
                 }
                 'p' | 'u' | 'c' => {
-                    match required_value(&chars, j, &args, &mut i) {
+                    // `-u` and `-c` read their value as bytes, as the C
+                    // compares a login and a command (DIVERGENCES 92);
+                    // where names are text (Windows) it must be text.
+                    let value = if c != 'p' && cfg!(unix) {
+                        took_bytes = true;
+                        raw_value(&chars, j, letters_ok, &raw, &mut i)
+                    } else {
+                        required_value(&chars, j, &args, &mut i).map(OsString::from)
+                    };
+                    match value {
                         None => early.line(match c {
                             'p' => "no process ID specified",
                             'u' => "no UIDs specified",
                             _ => "missing -c option value",
                         }),
-                        Some(value) if c == 'u' => enter_users(&mut sel, &value, host, early)?,
-                        Some(value) if c == 'p' => {
-                            enter_ids(&mut sel, &mut entered, &value, false, early)
+                        Some(value) if c == 'u' => {
+                            enter_users(&mut sel, value.as_encoded_bytes(), host, early)?
                         }
+                        Some(value) if c == 'p' => enter_ids(
+                            &mut sel,
+                            &mut entered,
+                            &value.to_string_lossy(),
+                            false,
+                            early,
+                        ),
                         Some(value) => {
                             if let Err(e) = enter_command(&mut sel, &value) {
                                 early.line(&e);
@@ -1435,6 +1527,7 @@ fn parse_options<'s>(
                     }
                     if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
                         i += 1;
+                        took_bytes = true;
                     }
                     j = chars.len();
                     continue;
@@ -1443,6 +1536,7 @@ fn parse_options<'s>(
                     early.line(&format!("unsupported option: {prefix}k"));
                     if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
                         i += 1;
+                        took_bytes = true;
                     }
                     j = chars.len();
                     continue;
@@ -1457,12 +1551,37 @@ fn parse_options<'s>(
                 // same as `-W`, and a colon is its own sentence. lsof-rs had
                 // said `unsupported option: -W` and stopped (DIVERGENCES
                 // 149). The letter is escaped where the C prints it raw
-                // (DIVERGENCES 122), and is a character, where the C prints
-                // each byte of one on a line of its own (`-é` is two lines).
+                // (DIVERGENCES 122).
                 ':' => early.colon(),
+                // A character of more than one byte is as many letters to
+                // `GetOpt`, each its own line (`-é` is two; DIVERGENCES
+                // 149), the byte escaped where the C prints it raw.
+                other if !other.is_ascii() => {
+                    for b in other.encode_utf8(&mut [0; 4]).bytes() {
+                        early.line(&format!("illegal option character: {}", shown_bytes(&[b])));
+                    }
+                }
                 other => early.illegal(other),
             }
             j += 1;
+        }
+        if let Some(start) = ended {
+            sel.paths.extend(raw.iter().skip(start).cloned());
+            break;
+        }
+        // The rest of a word that is not text, or a next word that is not,
+        // read by an option as its value; not this word when every byte of
+        // it that is no character was a letter, said to be illegal.
+        // What that option made of it is forgotten: it may not take it.
+        let letters_only = letters_ok && illegal_bytes == not_chars;
+        if !took_bytes {
+            if let Some(k) = (word..=i).find(|&k| {
+                k < raw.len() && raw[k].to_str().is_none() && !(k == word && letters_only)
+            }) {
+                early.rollback(mark);
+                early.fatal = true;
+                return Err(not_text(&raw[k]));
+            }
         }
         i += 1;
     }
@@ -1802,16 +1921,21 @@ pub fn walk_dir(dir: &DirArg, base: &Path, identified: bool, fs: &SafeFs) -> Vec
 /// measured). Then the trailing slashes go (`/` stays `/`), and a path entered
 /// already is not entered again: the first keeps its sign (`+e X -e X` is
 /// `+e`'s). On Windows the value is kept as typed, as `+d`'s is.
-fn enter_exempt(sel: &mut Selection, value: &str, plus: bool, fs: &SafeFs) -> Result<(), String> {
+fn enter_exempt(
+    sel: &mut Selection,
+    value: &std::ffi::OsStr,
+    plus: bool,
+    fs: &SafeFs,
+) -> Result<(), String> {
     let at = AtOption::new(sel, fs);
-    if !value.starts_with('/') {
+    if !value.as_encoded_bytes().starts_with(b"/") {
         return Err(at.said(format!(
             "-e not followed by a file system path: \"{}\"",
-            shown(value)
+            shown_bytes(value.as_encoded_bytes())
         )));
     }
     let path = if plus {
-        OsString::from(value)
+        value.to_os_string()
     } else {
         at.readlink(value)?
     };
@@ -1861,10 +1985,16 @@ fn without_trailing_slashes(path: OsString) -> OsString {
 /// by a `-w` or `-t` given before the option, the C's `Fwarn` as it stands
 /// then, and the run still ends; and the `-x` given so far is the one its
 /// walk obeys (DIVERGENCES 75), as are the `-b`, `-O` and `-S`.
-fn enter_dir(value: &str, recursive: bool, sel: &Selection, fs: &SafeFs) -> Result<DirArg, String> {
+fn enter_dir(
+    value: &std::ffi::OsStr,
+    recursive: bool,
+    sel: &Selection,
+    fs: &SafeFs,
+) -> Result<DirArg, String> {
     let at = AtOption::new(sel, fs);
     // The C's own words, for `+D` too.
-    if value.is_empty() || value.starts_with('+') || value.starts_with('-') {
+    let bytes = value.as_encoded_bytes();
+    if bytes.is_empty() || bytes.starts_with(b"+") || bytes.starts_with(b"-") {
         return Err(at.said("+d not followed by a directory path".to_string()));
     }
     let dir = at.readlink(value)?;
@@ -1923,21 +2053,22 @@ impl<'a> AtOption<'a> {
 
     /// `value` as `Readlink()` spells it, or the C's message for why it
     /// gave up, naming `value` escaped.
-    fn readlink(&self, value: &str) -> Result<OsString, String> {
-        resolve_dir(value, &self.fs).map_err(|e| self.said(e.message(&self.esc.text(value))))
+    fn readlink(&self, value: &std::ffi::OsStr) -> Result<OsString, String> {
+        resolve_dir(value, &self.fs)
+            .map_err(|e| self.said(e.message(&self.esc.bytes(value.as_encoded_bytes()))))
     }
 }
 
 /// A `+d`/`+D` directory as the C spells it: its `Readlink()`. Windows has no
 /// such reading, and keeps it as typed.
 #[cfg(unix)]
-fn resolve_dir(value: &str, fs: &SafeFs) -> Result<OsString, ReadlinkError> {
-    lsof_core::readlink::resolve(value.as_ref(), fs)
+fn resolve_dir(value: &std::ffi::OsStr, fs: &SafeFs) -> Result<OsString, ReadlinkError> {
+    lsof_core::readlink::resolve(value, fs)
 }
 
 #[cfg(not(unix))]
-fn resolve_dir(value: &str, _fs: &SafeFs) -> Result<OsString, ReadlinkError> {
-    Ok(value.into())
+fn resolve_dir(value: &std::ffi::OsStr, _fs: &SafeFs) -> Result<OsString, ReadlinkError> {
+    Ok(value.to_os_string())
 }
 
 /// One `-d` option's list, entered as `enter_fd()` enters it (`arg.c`), into
@@ -2169,14 +2300,20 @@ fn parse_id_list(value: &str, what: &str) -> (Vec<(bool, u32)>, Option<String>) 
 /// ([`UserLookup::ByName`]) keeps the item as typed.
 fn enter_users(
     sel: &mut Selection,
-    value: &str,
+    value: &[u8],
     host: &HostChecks<'_>,
     early: &mut Early,
 ) -> Result<(), String> {
+    // Bytes, as the C's `getpwnam()` compares a login: one need not be
+    // UTF-8 (DIVERGENCES 92).
     let mut rest = value;
     while !rest.is_empty() {
-        let (item, tail) = rest.split_once(',').unwrap_or((rest, ""));
-        let (excl, name) = match item.strip_prefix('^') {
+        let (item, tail) = match rest.iter().position(|&b| b == b',') {
+            Some(at) => (&rest[..at], &rest[at + 1..]),
+            None => (rest, &rest[rest.len()..]),
+        };
+        rest = tail;
+        let (excl, name) = match item.strip_prefix(b"^") {
             Some(name) => (true, name),
             None => (false, item),
         };
@@ -2186,23 +2323,20 @@ fn enter_users(
             // (measured), where `shown()` keeps it. Its cut at the item's
             // length is not reproduced (DIVERGENCES 133).
             let mut echo = String::new();
-            for c in shown(item).chars() {
-                if c.is_ascii() {
-                    echo.push(c);
+            for &b in item {
+                if b.is_ascii() {
+                    echo.push_str(&shown(char::from(b).encode_utf8(&mut [0; 4])));
                 } else {
-                    for b in c.to_string().bytes() {
-                        echo.push_str(&format!("\\x{b:02x}"));
-                    }
+                    echo.push_str(&format!("\\x{b:02x}"));
                 }
             }
             // An error the C reads on after, to the next item
             // (`arg.c:1994-2004`: `err = j = 1`, then `continue`): `-u
             // LONG,nosuch` says both (measured).
             early.line(&format!("-u login name > {LOGINML} characters: {echo}"));
-            rest = tail;
             continue;
         }
-        let name = if name.is_empty() { "0" } else { name };
+        let name: &[u8] = if name.is_empty() { b"0" } else { name };
         match (host.lookup_user)(name) {
             UserLookup::Uid(uid) => {
                 let other_side = if excl {
@@ -2220,21 +2354,21 @@ fn enter_users(
                         sel.uid_excludes.push(uid);
                     }
                 } else if !sel.uids.iter().any(|s| s.uid == uid) {
-                    let login =
-                        (!name.bytes().all(|b| b.is_ascii_digit())).then(|| name.to_string());
+                    let login = (!name.iter().all(u8::is_ascii_digit))
+                        .then(|| os_from_bytes(name.to_vec()));
                     sel.uids.push(UidSel { uid, login });
                 }
             }
-            UserLookup::Unknown => early.no_uid(&shown(name)),
+            UserLookup::Unknown => early.no_uid(&shown_bytes(name)),
             UserLookup::ByName => {
+                let name = String::from_utf8_lossy(name).into_owned();
                 if excl {
-                    sel.user_excludes.push(name.to_string());
+                    sel.user_excludes.push(name);
                 } else {
-                    sel.users.push(name.to_string());
+                    sel.users.push(name);
                 }
             }
         }
-        rest = tail;
     }
     Ok(())
 }
@@ -2308,35 +2442,45 @@ fn enter_ids(
 
 /// One `-c` value, entered as `enter_cmd()` and `lsof_select_process()`
 /// enter it; its error, if any, is one the C reads on after.
-fn enter_command(sel: &mut Selection, value: &str) -> Result<(), String> {
+fn enter_command(sel: &mut Selection, value: &std::ffi::OsStr) -> Result<(), String> {
+    // Bytes, as the C compares a command (`strncmp()`): a name need not be
+    // UTF-8 (DIVERGENCES 92).
+    let bytes = value.as_encoded_bytes();
     // `enter_cmd()`: a value that opens an option is a missing value, and one
     // that opens with `/` is a regular expression (`main.c`: `if (GOv &&
     // (*GOv == '/'))`). lsof-rs has no regex engine, and reading `/re/` as a
     // literal command name matched nothing, silently — so it is refused,
     // loudly, instead.
-    if value.starts_with(['-', '+']) {
+    if bytes.starts_with(b"-") || bytes.starts_with(b"+") {
         return Err("missing -c option value".to_string());
     }
-    if value.starts_with('/') {
+    if bytes.starts_with(b"/") {
         return Err(format!(
             "-c {}: regular expressions (-c /RE/) are not implemented",
-            shown(value)
+            shown_bytes(bytes)
         ));
     }
-    let (excl, name) = match value.strip_prefix('^') {
-        Some("") => return Err("option -c^ requires a name".to_string()),
+    let (excl, name) = match bytes.strip_prefix(b"^") {
+        Some(b"") => return Err("option -c^ requires a name".to_string()),
         Some(name) => (true, name),
-        None => (false, value),
+        None => (false, bytes),
     };
     // A name longer than the kernel keeps can never match, and the C says so
     // rather than accepting it (`lsof_select_process()`), quoting the name
     // with `safestrprt(…, 2)`: a space is `\x20` there, as in COMMAND
-    // (`lib/lsof.c:178-182`, measured).
+    // (`lib/lsof.c:178-182`, measured), and a byte that is no character
+    // `\xNN`.
     if let Some(max) = MAX_COMMAND_WIDTH {
         if name.len() > max {
+            let mut quoted = String::new();
+            for chunk in name.utf8_chunks() {
+                quoted.push_str(&Escaper::for_host().text_spaced(chunk.valid()));
+                for b in chunk.invalid() {
+                    quoted.push_str(&format!("\\x{b:02x}"));
+                }
+            }
             return Err(format!(
-                "\"-c {}\" length ({}) > what system provides ({max})",
-                Escaper::for_host().text_spaced(name),
+                "\"-c {quoted}\" length ({}) > what system provides ({max})",
                 name.len()
             ));
         }
@@ -2351,11 +2495,11 @@ fn enter_command(sel: &mut Selection, value: &str) -> Result<(), String> {
     // (`lib/lsof.c:155-165`), so `main.c:1042`'s check once every option is
     // read never finds one. The C then reads on, as after any error in its
     // loop, and so does lsof-rs (DIVERGENCES 83).
-    if other.iter().any(|o| o == name) {
-        let name = shown(name);
+    if other.iter().any(|o| o.as_encoded_bytes() == name) {
+        let name = shown_bytes(name);
         return Err(format!("-c^{name} and -c{name} conflict."));
     }
-    this.push(name.to_string());
+    this.push(os_from_bytes(name.to_vec()));
     Ok(())
 }
 
@@ -2505,7 +2649,7 @@ fn optional_value(chars: &[char], j: usize, args: &[String], i: &mut usize) -> O
 fn take_digits(
     chars: &[char],
     j: &mut usize,
-    args: &mut [String],
+    (args, raw): (&mut [String], &mut [OsString]),
     i: &mut usize,
     prefix: char,
 ) -> Option<String> {
@@ -2532,8 +2676,196 @@ fn take_digits(
         *i += 1;
     } else {
         args[*i + 1] = format!("{prefix}{leftover}");
+        // The digits are ASCII, one byte each, in the bytes as in the text.
+        if let Some(word) = raw.get_mut(*i + 1) {
+            let mut bytes = vec![prefix as u8];
+            bytes.extend_from_slice(
+                word.as_encoded_bytes()
+                    .get(digits.len()..)
+                    .unwrap_or_default(),
+            );
+            *word = os_from_bytes(bytes);
+        }
     }
     Some(digits)
+}
+
+/// [`required_value`] for an option whose value is a path (`+d`/`+D`,
+/// `-e`/`+e`): the same word, as bytes. Attached, the rest of the word
+/// after letter `j`, which is text up to there ([`text_letters`]).
+fn path_value(
+    chars: &[char],
+    j: usize,
+    stand_ins: bool,
+    raw: &[OsString],
+    i: &mut usize,
+) -> Option<OsString> {
+    if j + 1 < chars.len() {
+        // The prefix, then the letters through `j`.
+        let bytes = raw
+            .get(*i)?
+            .as_encoded_bytes()
+            .get(letter_offset(chars, j, stand_ins)..)?;
+        return Some(os_from_bytes(bytes.to_vec()));
+    }
+    let next = raw.get(*i + 1).filter(|w| *w != "--")?;
+    *i += 1;
+    Some(next.clone())
+}
+
+/// How many letters of option word `word`, after its prefix, are text: all
+/// of them (`usize::MAX`) when it is UTF-8, else those before its first byte
+/// that is not.
+fn text_letters(word: &std::ffi::OsStr) -> usize {
+    let bytes = word.as_encoded_bytes();
+    match std::str::from_utf8(bytes) {
+        Ok(_) => usize::MAX,
+        Err(e) => std::str::from_utf8(bytes.get(1..e.valid_up_to()).unwrap_or_default())
+            .map_or(0, |t| t.chars().count()),
+    }
+}
+
+/// What stands for byte `b` of an option word that is no character, in
+/// [`option_letters`]: a character of the last private-use plane's last
+/// block, U+10FF00 + `b`.
+fn letter_for_byte(b: u8) -> char {
+    char::from_u32(0x10_FF00 + u32::from(b)).unwrap_or(char::REPLACEMENT_CHARACTER)
+}
+
+/// The byte a [`letter_for_byte`] stands for.
+fn byte_letter(c: char) -> Option<u8> {
+    u32::from(c)
+        .checked_sub(0x10_FF00)
+        .and_then(|b| u8::try_from(b).ok())
+}
+
+/// The letters of option word `word`, after its prefix: its characters, and
+/// each byte that is no character as [`letter_for_byte`]; and whether those
+/// stand-ins are told apart from its characters, which they are unless the
+/// word is not UTF-8 and holds one of U+10FF00..=U+10FFFF as text too.
+fn option_letters(word: &std::ffi::OsStr) -> (Vec<char>, bool) {
+    let bytes = word.as_encoded_bytes().get(1..).unwrap_or_default();
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return (text.chars().collect(), true);
+    }
+    let mut letters = Vec::with_capacity(bytes.len());
+    let mut ok = true;
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            ok &= byte_letter(c).is_none();
+            letters.push(c);
+        }
+        letters.extend(chunk.invalid().iter().map(|&b| letter_for_byte(b)));
+    }
+    (letters, ok)
+}
+
+/// Where in option word `word`'s bytes letter `j + 1` begins: its prefix,
+/// then each letter's bytes, one for a stand-in for a byte where there are
+/// stand-ins ([`option_letters`]).
+fn letter_offset(chars: &[char], j: usize, stand_ins: bool) -> usize {
+    1 + chars
+        .iter()
+        .take(j + 1)
+        .map(|&c| match byte_letter(c) {
+            Some(_) if stand_ins => 1,
+            _ => c.len_utf8(),
+        })
+        .sum::<usize>()
+}
+
+/// [`required_value`] as bytes, for `-c` and `-u`, which compare bytes: the
+/// rest of the word after letter `j` as the bytes it is, or the next word
+/// as it stands, `--` no value.
+fn raw_value(
+    chars: &[char],
+    j: usize,
+    stand_ins: bool,
+    raw: &[OsString],
+    i: &mut usize,
+) -> Option<OsString> {
+    if j + 1 < chars.len() {
+        let bytes = raw
+            .get(*i)?
+            .as_encoded_bytes()
+            .get(letter_offset(chars, j, stand_ins)..)?;
+        return Some(os_from_bytes(bytes.to_vec()));
+    }
+    let next = raw.get(*i + 1).filter(|w| *w != "--")?;
+    *i += 1;
+    Some(next.clone())
+}
+
+/// The error for an argument an option would read as text that is not
+/// UTF-8: lsof-rs reads only a path as bytes (DIVERGENCES 92). Fatal, as
+/// the refusal of the whole command line was.
+fn not_text(arg: &std::ffi::OsStr) -> String {
+    format!(
+        "an argument is not valid UTF-8, which lsof-rs cannot take: {}",
+        shown_bytes(arg.as_encoded_bytes())
+    )
+}
+
+/// Bytes taken from an `OsString`'s encoded bytes, back as one.
+#[cfg(unix)]
+fn os_from_bytes(bytes: Vec<u8>) -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(bytes)
+}
+
+/// Bytes taken from an `OsString`'s encoded bytes, back as one: on
+/// Windows, where they are WTF-8 cut at an ASCII byte, decoded to the UTF-16
+/// they encode, a lone surrogate kept. A lossy decode had made one U+FFFD of
+/// it, which then named a different file ([`lsof_core::selection::matched_name`]).
+#[cfg(windows)]
+fn os_from_bytes(bytes: Vec<u8>) -> OsString {
+    use std::os::windows::ffi::OsStringExt;
+    OsString::from_wide(&wtf8_to_wide(&bytes))
+}
+
+/// Bytes taken from an `OsString`'s encoded bytes, back as one, on a target
+/// that is neither Unix nor Windows: as text.
+#[cfg(not(any(unix, windows)))]
+fn os_from_bytes(bytes: Vec<u8>) -> OsString {
+    String::from_utf8_lossy(&bytes).into_owned().into()
+}
+
+/// WTF-8 (UTF-8 that may encode a lone surrogate, as `OsStr` holds UTF-16
+/// on Windows) back to its UTF-16 units. A byte that starts no sequence, or a
+/// sequence cut short, is U+FFFD: never made by cutting an `OsStr`'s bytes
+/// at an ASCII byte, which is all this is given.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wtf8_to_wide(bytes: &[u8]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        let (len, init) = match b {
+            0x00..=0x7f => (1, u32::from(b)),
+            0xc2..=0xdf => (2, u32::from(b & 0x1f)),
+            0xe0..=0xef => (3, u32::from(b & 0x0f)),
+            0xf0..=0xf4 => (4, u32::from(b & 0x07)),
+            _ => (0, 0),
+        };
+        let tail = bytes.get(i + 1..i + len.max(1)).unwrap_or_default();
+        if len == 0 || tail.len() + 1 != len || tail.iter().any(|&t| t & 0xc0 != 0x80) {
+            out.push(0xfffd);
+            i += 1;
+            continue;
+        }
+        let cp = tail
+            .iter()
+            .fold(init, |cp, &t| (cp << 6) | u32::from(t & 0x3f));
+        match u16::try_from(cp) {
+            Ok(unit) => out.push(unit),
+            Err(_) => {
+                let v = cp - 0x1_0000;
+                out.push(0xd800 | ((v >> 10) & 0x3ff) as u16);
+                out.push(0xdc00 | (v & 0x3ff) as u16);
+            }
+        }
+        i += len;
+    }
+    out
 }
 
 /// Parse the letters of a `-T` / `+T` option.
@@ -3248,7 +3580,7 @@ mod tests {
             assert_eq!(got, both, "{argv:?}");
         }
         assert!(matches!(
-            parse(vec!["-u".into(), "0,^root".into(), "-h".into()]),
+            parse::<String>(vec!["-u".into(), "0,^root".into(), "-h".into()]),
             Ok(Action::Report(Reports::HELP))
         ));
     }
@@ -3361,7 +3693,7 @@ mod tests {
         }
         // Help comes first, as in the C.
         assert!(matches!(
-            parse(vec!["-a".into(), "-h".into()]),
+            parse::<String>(vec!["-a".into(), "-h".into()]),
             Ok(Action::Report(Reports::HELP))
         ));
     }
@@ -3470,7 +3802,7 @@ mod tests {
         let (sel, _) = run(&["-p", "^1,2", "-p", "2,3"]);
         assert_eq!(sel.pid_excludes, [1]);
         assert_eq!(sel.pids, [2, 3], "the repeat is dropped, order kept");
-        let err = parse(vec!["-p".into(), "1".into(), "-p".into(), "^1".into()]).err();
+        let err = parse::<String>(vec!["-p".into(), "1".into(), "-p".into(), "^1".into()]).err();
         assert_eq!(
             err.as_deref(),
             Some("PID 1 has been included and excluded.")
@@ -3492,7 +3824,7 @@ mod tests {
         assert!(sel.ppid_filter.is_empty(), "not the Windows PPID extension");
         let (_, sel) = columns(&["-g7"]).unwrap();
         assert_eq!(sel.pgids, [7]);
-        let err = parse(vec!["-g".into(), "1,^1".into()]).err();
+        let err = parse::<String>(vec!["-g".into(), "1,^1".into()]).err();
         assert_eq!(
             err.as_deref(),
             Some("PGID 1 has been included and excluded.")
@@ -3513,7 +3845,7 @@ mod tests {
         let (sel, fmt) = run(&["-a", "-n", "-P", "-p", "123,456", "-c", "ssh"]);
         assert!(sel.and_mode && sel.no_host_resolve && sel.no_port_resolve);
         assert_eq!(sel.pids, vec![123, 456]);
-        assert_eq!(sel.commands, vec!["ssh".to_string()]);
+        assert_eq!(sel.commands, vec![OsString::from("ssh")]);
         assert_eq!(fmt, Format::Table);
     }
 
@@ -3605,7 +3937,7 @@ mod tests {
         // No spec is the bare form; an empty one is a spec, and incomplete.
         assert!(run(&["-i"]).0.inet.all);
         assert_eq!(
-            parse(vec!["-i".into(), String::new()]).unwrap_err(),
+            parse::<String>(vec!["-i".into(), String::new()]).unwrap_err(),
             "incomplete Internet address specification: -i "
         );
     }
@@ -3844,7 +4176,7 @@ mod tests {
         );
         let l101 = format!(":{}", list(101));
         assert_eq!(
-            parse(vec!["-i".into(), l101.clone()]).unwrap_err(),
+            parse::<String>(vec!["-i".into(), l101.clone()]).unwrap_err(),
             format!("{limit}{l101}")
         );
         let singles: Vec<String> = (1..=101).map(|p| format!("-i:{p}")).collect();
@@ -3870,12 +4202,12 @@ mod tests {
         // The entry's own error comes first; the limit, before a later one's.
         let l100x = format!(":{},1x", list(100));
         assert_eq!(
-            parse(vec!["-i".into(), l100x.clone()]).unwrap_err(),
+            parse::<String>(vec!["-i".into(), l100x.clone()]).unwrap_err(),
             format!("unacceptable port specification in: -i {l100x}")
         );
         let l101x = format!(":{},1x", list(101));
         assert_eq!(
-            parse(vec!["-i".into(), l101x.clone()]).unwrap_err(),
+            parse::<String>(vec!["-i".into(), l101x.clone()]).unwrap_err(),
             format!("{limit}{l101x}")
         );
     }
@@ -3889,7 +4221,7 @@ mod tests {
         for p in ["icmp", "ICMP", "raw", "6icmp", "RAW:1"] {
             let token = p.trim_start_matches('6').split(':').next().unwrap();
             assert_eq!(
-                parse(vec!["-i".into(), p.into()]).unwrap_err(),
+                parse::<String>(vec!["-i".into(), p.into()]).unwrap_err(),
                 format!("unknown protocol name ({token}) in: -i {p}")
             );
         }
@@ -3973,7 +4305,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_c_length_message_is_safestrprt_flags_2() {
-        let err = |v: &str| parse(vec!["-c".into(), v.into()]).unwrap_err();
+        let err = |v: &str| parse::<String>(vec!["-c".into(), v.into()]).unwrap_err();
         assert_eq!(
             err("aaaaaaaaaaaaaa\x1b[2J"),
             "\"-c aaaaaaaaaaaaaa^[[2J\" length (18) > what system provides (15)"
@@ -4278,11 +4610,11 @@ mod tests {
     #[test]
     fn help_and_version() {
         assert!(matches!(
-            parse(vec!["-h".into()]).unwrap(),
+            parse::<String>(vec!["-h".into()]).unwrap(),
             Action::Report(Reports::HELP)
         ));
         assert!(matches!(
-            parse(vec!["-v".into()]).unwrap(),
+            parse::<String>(vec!["-v".into()]).unwrap(),
             Action::Report(Reports::VERSION)
         ));
     }
@@ -4299,7 +4631,7 @@ mod tests {
         assert_eq!(repeat(&["-r"]), Some(15));
         assert_eq!(repeat(&["-r5"]), Some(5));
         assert_eq!(repeat(&[]), None);
-        assert!(parse(vec!["-rx".into()]).is_err());
+        assert!(parse::<String>(vec!["-rx".into()]).is_err());
     }
 
     /// The C accumulates `-r`'s digits in an `int` (main.c:779-783) and wraps:
@@ -4320,7 +4652,7 @@ mod tests {
         assert_eq!(repeat(&["-r4294967297"]), saturated);
     }
 
-    fn paths(argv: &[&str]) -> Vec<String> {
+    fn paths(argv: &[&str]) -> Vec<OsString> {
         match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
             Action::Run { selection, .. } => selection.paths,
             other => panic!("expected Run, got {other:?}"),
@@ -4336,7 +4668,7 @@ mod tests {
 
     #[test]
     fn bare_path_vs_plus_d() {
-        assert_eq!(paths(&["C:\\f.txt"]), vec!["C:\\f.txt".to_string()]);
+        assert_eq!(paths(&["C:\\f.txt"]), ["C:\\f.txt"]);
         assert!(dirs(&["C:\\f.txt"]).is_empty());
         let d = a_dir();
         assert_eq!(dirs(&["+D", &d]), vec![d.clone()]);
@@ -4755,7 +5087,10 @@ mod tests {
                 "+d not followed by a directory path"
             );
         }
-        assert_eq!(parse(vec!["-w".into(), "+D".into()]).unwrap_err(), "");
+        assert_eq!(
+            parse::<String>(vec!["-w".into(), "+D".into()]).unwrap_err(),
+            ""
+        );
     }
 
     #[test]
@@ -4774,12 +5109,12 @@ mod tests {
         let (sel, _) = run(&["-d", "^5,^cwd"]);
         let f = sel.fd_filter.expect("fd filter");
         assert_eq!(f.exclude, vec![FdSpec::Num(5), FdSpec::Named(FdKind::Cwd)]);
-        assert!(parse(vec!["-d".into(), "bogus".into()]).is_err());
+        assert!(parse::<String>(vec!["-d".into(), "bogus".into()]).is_err());
     }
 
     #[test]
     fn ppid_and_verbose() {
-        let show_ppid = match parse(vec!["-R".into()]).unwrap() {
+        let show_ppid = match parse::<String>(vec!["-R".into()]).unwrap() {
             Action::Run { columns, .. } => columns.ppid,
             other => panic!("expected Run, got {other:?}"),
         };
@@ -4788,7 +5123,7 @@ mod tests {
         assert!(sel.verbose);
         // -v is version, distinct from -V (verbose).
         assert!(matches!(
-            parse(vec!["-v".into()]).unwrap(),
+            parse::<String>(vec!["-v".into()]).unwrap(),
             Action::Report(Reports::VERSION)
         ));
     }
@@ -4801,11 +5136,14 @@ mod tests {
         // implemented its gate — a rejection test pinned to a letter is a
         // rejection test that expires the day the letter is implemented.
         for o in ["-y", "-Y", "-M"] {
-            assert!(parse(vec![o.into()]).is_err(), "{o} should be rejected");
+            assert!(
+                parse::<String>(vec![o.into()]).is_err(),
+                "{o} should be rejected"
+            );
         }
         // And the letters P4 added are NOT rejected any more.
         for o in ["-X", "-N", "-Z"] {
-            assert!(parse(vec![o.into()]).is_ok(), "{o} should parse");
+            assert!(parse::<String>(vec![o.into()]).is_ok(), "{o} should parse");
         }
     }
 
@@ -4879,7 +5217,7 @@ mod tests {
     fn dash_x_alone_is_accepted_and_selects_nothing() {
         // The flag suppresses a lookup; it is not a selector, so it must not
         // turn a whole-host run into a filtered one.
-        match parse(vec!["-X".to_string()]).unwrap() {
+        match parse::<String>(vec!["-X".to_string()]).unwrap() {
             Action::Run { selection, .. } => {
                 assert!(selection.skip_inet_tables);
                 assert!(!selection.inet.enabled, "-X must not imply -i");
@@ -4892,7 +5230,7 @@ mod tests {
     fn dash_x_needs_a_directory_argument_and_known_letters() {
         // Both contracts measured against the C, message for message.
         assert_eq!(
-            parse(vec!["-x".into(), "-p".into(), "1".into()]).unwrap_err(),
+            parse::<String>(vec!["-x".into(), "-p".into(), "1".into()]).unwrap_err(),
             "-x must accompany +d or +D"
         );
         // The error is printed where it is found, before the `+d` is
@@ -4908,11 +5246,11 @@ mod tests {
         assert_eq!(got.unwrap_err(), "");
         assert_eq!(said, ["lsof: unknown cross-over option: z"]);
         assert_eq!(
-            parse(vec!["-x".into(), "qz".into()]).unwrap_err(),
+            parse::<String>(vec!["-x".into(), "qz".into()]).unwrap_err(),
             "unknown cross-over option: q\nlsof: unknown cross-over option: z"
         );
         // `+D` satisfies it too, and the check is order-independent.
-        assert!(parse(vec!["+D".into(), a_dir(), "-x".into()]).is_ok());
+        assert!(parse::<String>(vec!["+D".into(), a_dir(), "-x".into()]).is_ok());
     }
 
     #[test]
@@ -5158,7 +5496,7 @@ mod tests {
         );
         // Every letter the C accepts is accepted, including the ones that
         // print nothing here.
-        assert!(parse(vec!["-F0CDFGKLMNPRSTZacdfgiklmnoprstuz".into()]).is_ok());
+        assert!(parse::<String>(vec!["-F0CDFGKLMNPRSTZacdfgiklmnoprstuz".into()]).is_ok());
         // `T`'s side effect belongs to the `-F` that names it: a later `-Fn`
         // must not widen a `-T q` back to the state as well.
         let tcp = |argv: &[&str]| {
@@ -5436,7 +5774,7 @@ mod tests {
         }
         // `-i -x f` is no table case: a usage error in both.
         assert_eq!(
-            parse(vec!["-i".into(), "-x".into(), "f".into()]).unwrap_err(),
+            parse::<String>(vec!["-i".into(), "-x".into(), "f".into()]).unwrap_err(),
             "-x must accompany +d or +D"
         );
     }
@@ -5609,7 +5947,7 @@ mod tests {
         );
         // `-hx` is `-x`'s error, not the help.
         assert_eq!(
-            parse(vec!["-hx".into()]).unwrap_err(),
+            parse::<String>(vec!["-hx".into()]).unwrap_err(),
             "-x must accompany +d or +D"
         );
         assert!(matches!(
@@ -5699,7 +6037,7 @@ mod tests {
     /// `root` (0), every number being its own UID, and whose SELinux is
     /// `selinux`, as `lsof` parses ([`parse_with_host`]).
     fn parse_on_host(argv: &[&str], selinux: bool) -> Result<Action, String> {
-        let lookup = |v: &str| match v {
+        let lookup = |v: &[u8]| match std::str::from_utf8(v).unwrap_or("\u{fffd}") {
             "alice" => UserLookup::Uid(1000),
             "root" => UserLookup::Uid(0),
             v if v.bytes().all(|b| b.is_ascii_digit()) => {
@@ -5871,7 +6209,7 @@ mod tests {
             ["can't get UID for a^[b"]
         );
         // A platform that selects by name keeps each item as typed.
-        match parse(vec!["-u".into(), "alice,^bob".into()]) {
+        match parse::<String>(vec!["-u".into(), "alice,^bob".into()]) {
             Ok(Action::Run { selection, .. }) => {
                 assert_eq!(selection.users, ["alice"]);
                 assert_eq!(selection.user_excludes, ["bob"]);
@@ -5936,7 +6274,7 @@ mod tests {
             assert_eq!(lines, *want, "{argv:?}");
         }
         // `--` alone still ends the options.
-        match parse(vec!["--".into(), "-h".into()]) {
+        match parse::<String>(vec!["--".into(), "-h".into()]) {
             Ok(Action::Run { selection, .. }) => assert_eq!(selection.paths, ["-h"]),
             other => panic!("{other:?}"),
         }
@@ -6325,7 +6663,7 @@ mod tests {
     #[test]
     fn the_cs_error_exits_are_fatal() {
         let ended = |argv: &[&str]| {
-            let lookup = |v: &str| match v.parse() {
+            let lookup = |v: &[u8]| match String::from_utf8_lossy(v).parse() {
                 Ok(uid) => UserLookup::Uid(uid),
                 Err(_) => UserLookup::Unknown,
             };
@@ -6411,7 +6749,7 @@ mod tests {
         let mut early = Early::default();
         let mut reports = Reports::default();
         let got = parse_options(
-            argv,
+            argv.into_iter().map(Into::into).collect(),
             &fs,
             &no_mounts,
             &HostChecks::DEFERRED,
@@ -6604,7 +6942,7 @@ mod tests {
         let mut early = Early::default();
         let mut reports = Reports::default();
         let got = parse_options(
-            vec![word],
+            vec![word.into()],
             &fs,
             &no_mounts,
             &HostChecks::DEFERRED,
@@ -6716,5 +7054,316 @@ mod tests {
         assert!(matches!(got, Ok(Action::Run { .. })));
         assert!(!reports.any());
         assert!(Reports::HELP.any() && Reports::FIELD_HELP.any() && Reports::VERSION.any());
+    }
+
+    /// A `-u` login is looked up by its bytes (the C's `getpwnam()`), and a
+    /// UID named once each way is the C's error whatever the spelling.
+    #[test]
+    #[cfg(unix)]
+    fn a_login_is_looked_up_by_its_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        let lookup = |v: &[u8]| match v {
+            b"\xff\xfeuser" => UserLookup::Uid(7033),
+            b"ab\xffcd" => UserLookup::Uid(7032),
+            v if !v.is_empty() && v.iter().all(u8::is_ascii_digit) => String::from_utf8_lossy(v)
+                .parse()
+                .map_or(UserLookup::Unknown, UserLookup::Uid),
+            _ => UserLookup::Unknown,
+        };
+        let host = HostChecks {
+            lookup_user: &lookup,
+            ..HostChecks::DEFERRED
+        };
+        let run =
+            |argv: Vec<OsString>| parse_reporting(argv, &SafeFs::in_process(), &no_mounts, &host).0;
+        let Ok(Action::Run { selection, .. }) =
+            run(vec![os(b"-u"), os(b"ab\xffcd,\xff\xfeuser,7")])
+        else {
+            panic!("expected a run");
+        };
+        let uids: Vec<u32> = selection.uids.iter().map(|u| u.uid).collect();
+        assert_eq!(uids, [7032, 7033, 7]);
+        assert_eq!(selection.uids[0].login, Some(os(b"ab\xffcd")));
+        assert_eq!(selection.uids[2].login, None);
+        let e = run(vec![os(b"-u"), os(b"^\xff\xfeuser"), os(b"-u7033")]).unwrap_err();
+        assert_eq!(e.to_string(), "UID 7033 has been included and excluded.");
+        let e = run(vec![os(b"-u"), os(b"\xff\xfeuse")]).unwrap_err();
+        assert_eq!(e.to_string(), "can't get UID for \\xff\\xfeuse");
+        // `-u a,` is one item, `-u ,` one empty one (UID 0), as before.
+        let Ok(Action::Run { selection, .. }) = run(vec![os(b"-u"), os(b"7,")]) else {
+            panic!("expected a run");
+        };
+        assert_eq!(selection.uids.len(), 1);
+        // Too long: each byte that is not ASCII as `\xNN`.
+        let mut long = b"L".repeat(31);
+        long.extend_from_slice("é".as_bytes());
+        let e = run(vec![os(b"-u"), os(&long)]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "-u login name > 32 characters: {}\\xc3\\xa9",
+                "L".repeat(31)
+            )
+        );
+    }
+
+    /// An option that drops its next word unread (`-D`, `-m`, a disabled
+    /// `-Z`) does not read it as text, so a word that is not UTF-8 there is
+    /// no refusal: the option's own line alone.
+    #[test]
+    #[cfg(unix)]
+    fn a_dropped_word_is_not_read_as_text() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        let disabled = || false;
+        let host = HostChecks {
+            selinux_enabled: &disabled,
+            ..HostChecks::DEFERRED
+        };
+        for (letter, line) in [
+            (&b"-Z"[..], "-Z limited to SELinux"),
+            (b"-m", "-m not supported"),
+            (b"-D", "unsupported option: -D"),
+        ] {
+            let (got, _) = parse_reporting(
+                vec![os(letter), os(b"\xff")],
+                &SafeFs::in_process(),
+                &no_mounts,
+                &host,
+            );
+            let e = got.unwrap_err();
+            assert!(!e.is_fatal(), "{letter:?}");
+            assert_eq!(e.to_string(), line, "{letter:?}");
+        }
+    }
+
+    /// What an option said before it is refused its value is forgotten,
+    /// unless it was printed already: then it stays, and the run still ends.
+    #[test]
+    fn a_rollback_keeps_what_was_printed() {
+        let mut e = Early::default();
+        let mark = e.mark();
+        e.line("one");
+        e.rollback(mark);
+        assert!(e.is_empty(), "held, so forgotten");
+        let mark = e.mark();
+        e.line("two");
+        e.told = true;
+        e.rollback(mark);
+        assert!(!e.is_empty(), "told since the mark: kept");
+        let mut f = Early::default();
+        f.line("kept");
+        let mark = f.mark();
+        f.line("gone");
+        f.rollback(mark);
+        let mut lines = Vec::new();
+        f.each_line(&mut |l| lines.push(l.to_string()));
+        assert_eq!(lines, ["kept"]);
+    }
+
+    /// WTF-8 back to UTF-16, a lone surrogate kept: what a Windows argument
+    /// cut at an ASCII byte is put back together from.
+    #[test]
+    fn wtf8_decodes_to_the_units_it_encodes() {
+        let text = "aé😀\u{7f}";
+        assert_eq!(
+            wtf8_to_wide(text.as_bytes()),
+            text.encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(wtf8_to_wide(b"x\xed\xa0\x80y"), [0x78, 0xd800, 0x79]);
+        assert_eq!(wtf8_to_wide(b"\xed\xb0\x80"), [0xdc00]);
+        // Nothing an `OsStr` holds, and no panic.
+        assert_eq!(wtf8_to_wide(b"\xff\xc3"), [0xfffd, 0xfffd]);
+        assert_eq!(wtf8_to_wide(b"\xe2\x82"), [0xfffd, 0xfffd]);
+        assert!(wtf8_to_wide(b"").is_empty());
+    }
+
+    /// On Windows a path argument holding a lone surrogate is kept as it is,
+    /// attached to an option or not, and names no file: never its lossy
+    /// spelling's.
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_argument_that_is_not_text_is_kept_and_matches_nothing() {
+        use std::os::windows::ffi::OsStringExt;
+        let lone = OsString::from_wide(&[0xd800]);
+        let Ok(Action::Run { selection, .. }) = parse(vec![lone.clone()]) else {
+            panic!("expected a run");
+        };
+        assert_eq!(selection.paths, std::slice::from_ref(&lone));
+        assert_eq!(
+            lsof_core::selection::matched_name(&selection.paths[0]),
+            None
+        );
+        let mut attached: Vec<u16> = "+e".encode_utf16().collect();
+        attached.push(0xd800);
+        assert_eq!(
+            os_from_bytes(OsString::from_wide(&attached).as_encoded_bytes()[2..].to_vec()),
+            lone
+        );
+    }
+
+    /// DIVERGENCES 92: a path that is not UTF-8 is a path, read as its bytes
+    /// — a bare argument, after `--`, and `+d`/`+D` and `-e`/`+e`, attached
+    /// or the next word — and an option that reads text refuses it, at once,
+    /// with nothing it said of it kept.
+    #[test]
+    #[cfg(unix)]
+    fn a_path_that_is_not_utf8_is_read_as_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        // A table with `/m\xff` mounted, for `+e` to name.
+        let reader = |_: &MountRequest, _: &SafeFs| MountTable {
+            entries: vec![lsof_core::MountEntry {
+                dir: os(b"/m\xff"),
+                device: Some(1),
+                source_resolved: Some("src".into()),
+                source_is_block: false,
+                fsname: "src".into(),
+                kind: lsof_core::MountKind::Regular,
+            }],
+            ..MountTable::default()
+        };
+        let sel =
+            |argv: Vec<OsString>| match parse_with(argv.clone(), &SafeFs::in_process(), &reader) {
+                Ok(Action::Run { selection, .. }) => selection,
+                other => panic!("{argv:?}: expected Run, got {other:?}"),
+            };
+        let bad = os(b"bad\xffname");
+        assert_eq!(sel(vec![bad.clone()]).paths, std::slice::from_ref(&bad));
+        assert_eq!(
+            sel(vec![os(b"-n"), os(b"--"), os(b"-x\xfe"), bad.clone()]).paths,
+            [os(b"-x\xfe"), bad.clone()]
+        );
+        // `+e` keeps its value as typed, attached or not; `-e` would read
+        // its link, which no such path has.
+        for argv in [
+            vec![os(b"+e"), os(b"/m\xff/"), bad.clone()],
+            vec![os(b"+e/m\xff/"), bad.clone()],
+            vec![os(b"+Ue/m\xff/"), bad.clone()],
+        ] {
+            let s = sel(argv.clone());
+            assert_eq!(s.exempt_fs.len(), 1, "{argv:?}");
+            assert_eq!(s.exempt_fs[0].path.as_bytes(), b"/m\xff", "{argv:?}");
+            assert!(s.exempt_fs[0].plus);
+        }
+        // `+d`: the directory, under its own bytes.
+        let dir = std::env::temp_dir().join(format!("lsof-rs-92-{}", std::process::id()));
+        let named = dir.join(std::ffi::OsStr::from_bytes(b"d\xfe"));
+        std::fs::create_dir_all(&named).unwrap();
+        for argv in [
+            vec![os(b"+d"), named.clone().into_os_string()],
+            vec![{
+                let mut w = b"+D".to_vec();
+                w.extend_from_slice(named.as_os_str().as_bytes());
+                OsString::from_vec(w)
+            }],
+        ] {
+            let s = sel(argv.clone());
+            assert_eq!(s.dir_args.len(), 1, "{argv:?}");
+            assert_eq!(s.dir_args[0].dir, named.as_os_str(), "{argv:?}");
+        }
+        // A missing one is named by its bytes, escaped.
+        let err = parse(vec![os(b"+d"), os(b"/nonexist/\xff")]).unwrap_err();
+        assert!(err.contains("/nonexist/\\xff"), "{err}");
+        let err = parse(vec![os(b"-e"), os(b"\xff")]).unwrap_err();
+        assert!(err.contains("\"\\xff\""), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        // An option that reads text: refused, fatal, alone.
+        let refused = |argv: Vec<OsString>, shown: &str| {
+            let (got, _) = parse_reporting(
+                argv.clone(),
+                &SafeFs::in_process(),
+                &no_mounts,
+                &HostChecks::DEFERRED,
+            );
+            let e = got.unwrap_err();
+            assert!(e.is_fatal(), "{argv:?}");
+            assert_eq!(
+                e.to_string(),
+                format!("an argument is not valid UTF-8, which lsof-rs cannot take: {shown}"),
+                "{argv:?}"
+            );
+        };
+        refused(vec![os(b"-p\xff")], "-p\\xff");
+        refused(vec![os(b"-p"), os(b"1\xfe")], "1\\xfe");
+        refused(vec![os(b"-s"), os(b"\xff")], "\\xff");
+        // `-c` and `-u` read bytes, as the C compares them.
+        assert_eq!(
+            sel(vec![os(b"-a"), os(b"-c"), os(b"x\xff")]).commands,
+            [os(b"x\xff")]
+        );
+        assert_eq!(
+            sel(vec![os(b"-c^\xffx"), os(b"-cz\xc3")]).command_excludes,
+            [os(b"\xffx")]
+        );
+        assert_eq!(sel(vec![os(b"-cz\xc3")]).commands, [os(b"z\xc3")]);
+        let err = parse(vec![os(b"-c"), os(&[0xff; 16])]).unwrap_err();
+        assert!(
+            err.contains(&format!("\"-c {}\" length (16)", "\\xff".repeat(16))),
+            "{err}"
+        );
+        // A byte that is no character, where a letter stands, is the C's
+        // `illegal option character`, each, and the parse reads on.
+        let err = parse(vec![os(b"-p"), os(b"1"), os(b"-\xfea")]).unwrap_err();
+        assert_eq!(err, "illegal option character: \\xfe");
+        let err = parse(vec![os(b"-\xc3\xa9")]).unwrap_err();
+        assert_eq!(
+            err,
+            "illegal option character: \\xc3\nlsof: illegal option character: \\xa9"
+        );
+        // 0xff is `GetOpt`'s EOF: said, not counted, and the options end
+        // there, the next word or this one the first name.
+        let s = sel(vec![os(b"-p"), os(b"1"), os(b"-a\xff")]);
+        assert!(s.and_mode && s.paths.is_empty() && s.pids == [1]);
+        assert_eq!(sel(vec![os(b"-\xff"), os(b"-a")]).paths, [os(b"-a")]);
+        let s = sel(vec![os(b"-\xffa"), os(b"-p")]);
+        assert_eq!(s.paths, [os(b"-\xffa"), os(b"-p")]);
+        assert!(!s.and_mode);
+        assert!(sel(vec![os(b"-o3\xff")]).paths.is_empty());
+        assert!(sel(vec![os(b"-o"), os(b"3\xff")]).paths.is_empty());
+        assert!(sel(vec![os(b"+\xff"), os(b"x")]).paths == [os(b"x")]);
+        // `-o 34\xfe`: the letters after `-o`'s digits are the word's own
+        // bytes under the prefix, not its digits.
+        let err = parse(vec![os(b"-o"), os(b"34\xfe")]).unwrap_err();
+        assert_eq!(err, "illegal option character: \\xfe");
+        // A word that holds a stand-in's character as text has no stand-ins:
+        // its letters stop at its first byte that is no character, as
+        // before, and what its letters said stays.
+        let mut w = b"-".to_vec();
+        w.extend_from_slice("\u{10ff41}".as_bytes());
+        w.extend_from_slice(b"\xfe\xfd");
+        let (got, _) = parse_reporting(
+            vec![OsString::from_vec(w.clone())],
+            &SafeFs::in_process(),
+            &no_mounts,
+            &HostChecks::DEFERRED,
+        );
+        let e = got.unwrap_err();
+        assert!(e.is_fatal());
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "illegal option character: \\xf4\nlsof: illegal option character: \\x8f\n\
+                 lsof: illegal option character: \\xbd\nlsof: illegal option character: \\x81\n\
+                 lsof: an argument is not valid UTF-8, which lsof-rs cannot take: {}",
+                shown_bytes(&w)
+            )
+        );
+        // What was said before it stays: `-W` is its own line.
+        let (got, _) = parse_reporting(
+            vec![os(b"-W"), os(b"-s"), os(b"\xff")],
+            &SafeFs::in_process(),
+            &no_mounts,
+            &HostChecks::DEFERRED,
+        );
+        assert_eq!(
+            got.unwrap_err().to_string(),
+            "illegal option character: W\nlsof: an argument is not valid UTF-8, which lsof-rs cannot take: \\xff"
+        );
+        // An option that drops its next word unread does not read it.
+        assert!(parse(vec![os(b"-D"), os(b"\xff")]).is_err_and(|e| !e.contains("UTF-8")));
+        // `-o` takes no word without digits: the word is a path.
+        assert_eq!(sel(vec![os(b"-o"), bad.clone()]).paths, [bad]);
     }
 }

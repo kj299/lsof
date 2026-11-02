@@ -291,7 +291,7 @@ name = "exempt-relative-accepted"
 rule = "-e that is no path is an error (105)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''    if !value.starts_with('/') {'''
+old = '''    if !value.as_encoded_bytes().starts_with(b"/") {'''
 new = '''    if false {'''
 
 [[mutant]]
@@ -307,8 +307,8 @@ name = "unidentified-socket-device-as-d"
 rule = "-F D of an unidentified socket is D0x9 (106)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            fs_device: meta.map(|m| m.dev),'''
-new = '''            fs_device: None,'''
+old = '''        fs_device: Some(meta.dev),'''
+new = '''        fs_device: None,'''
 
 [[mutant]]
 name = "exempt-path-keeps-its-slash"

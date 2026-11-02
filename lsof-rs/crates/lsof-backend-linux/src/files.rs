@@ -648,34 +648,12 @@ pub(crate) fn socket_row(
         // Not in this namespace's tables: the C's last branch of
         // `process_proc_sock()`, reached only for what `stat`s as a socket.
         let link = link?;
-        if meta?.mode & S_IFMT != S_IFSOCK {
+        let meta = meta?;
+        if meta.mode & S_IFMT != S_IFSOCK {
             return None;
         }
         let name = ns.unlisted_name(link, inode);
-        return Some(OpenFile {
-            rdev: None,
-            fs_device: meta.map(|m| m.dev),
-            file_flags: info.flags,
-            lock: None,
-            fd: fd.clone(),
-            access: info.access(),
-            // Lowercase `sock`, the C's LSOF_FILE_SOCKET, and the OFFSET
-            // rather than a size: an unidentified socket has no size worth
-            // printing and the C shows `0t0`. Its device is the socket's
-            // file system's, which the C records (`Lf->dev`), so `-F` gives
-            // it as `D0x9`, not as the `d` string a socket from a table
-            // gets (measured). Typed a socket, whose device and inode no path
-            // finds it by (DIVERGENCES 101).
-            file_type: FileType::Socket("sock"),
-            name,
-            device: meta.map(dev_cell),
-            size: None,
-            offset: Some(info.pos.unwrap_or(0)),
-            node: Some(inode.to_string()),
-            links: None,
-            socket: None,
-            name_addition: None,
-        });
+        return Some(unidentified_socket(fd, info, meta, name));
     }
     let e = socks.get(inode)?;
     // NAME for AF_UNIX is the bound path plus lsof's `type=` tail; an
@@ -727,6 +705,34 @@ pub(crate) fn socket_row(
         socket: sock,
         name_addition: None,
     })
+}
+
+/// The row of a socket the C cannot name (`process_proc_sock()`'s last
+/// branch, `dsock.c:4145-4166`): `sock`, the socket inode's own device and
+/// inode, `0t0`, and `name`. Lowercase `sock`, the C's LSOF_FILE_SOCKET, and
+/// the OFFSET rather than a size: an unidentified socket has no size worth
+/// printing and the C shows `0t0`. Its device is the socket's file system's,
+/// which the C records (`Lf->dev`), so `-F` gives it as `D0x9`, not as the
+/// `d` string a socket from a table gets (measured). Typed a socket, whose
+/// device and inode no path finds it by (DIVERGENCES 101).
+fn unidentified_socket(fd: &FdType, info: &FdInfo, meta: &FileStat, name: String) -> OpenFile {
+    OpenFile {
+        rdev: None,
+        fs_device: Some(meta.dev),
+        file_flags: info.flags,
+        lock: None,
+        fd: fd.clone(),
+        access: info.access(),
+        file_type: FileType::Socket("sock"),
+        name,
+        device: Some(dev_cell(meta)),
+        size: None,
+        offset: Some(info.pos.unwrap_or(0)),
+        node: Some(meta.ino.to_string()),
+        links: None,
+        socket: None,
+        name_addition: None,
+    }
 }
 
 /// One row from a path under `/proc` that is a magic symlink (an fd, or
@@ -859,6 +865,24 @@ fn row(
             if let Some(f) = socket_row(inode, &fd, info, meta.as_ref(), Some(link), ctx) {
                 return Some(f);
             }
+        }
+    }
+
+    // A link that is a path but a `stat` that is a socket's: an `O_PATH`
+    // descriptor on a socket file. The C hands it to `process_proc_sock()`
+    // as it would `socket:[N]`; no table lists the socket file's inode (a
+    // coincidence of numbers on two file systems aside, not reproduced), and
+    // the file's inode carries no `system.sockprotoname`, so it is the row
+    // the C cannot name: `sock`, `0t0`, `can't identify protocol`
+    // (DIVERGENCES 126). Not under NFS without a `stat` that said so.
+    if let Some(m) = meta.as_ref().filter(|m| m.mode & S_IFMT == S_IFSOCK) {
+        if net::socket_inode(&name).is_none() {
+            let mut f = unidentified_socket(&fd, info, m, ctx.ns.unidentified().to_string());
+            f.access = access;
+            for why in why {
+                f.add_name_addition(&why);
+            }
+            return Some(f);
         }
     }
 
@@ -1855,7 +1879,11 @@ mod tests {
             .iter()
             .find(|f| f.fd == FdType::Handle(3))
             .expect("a row for fd 3");
-        assert_eq!(s.file_type, FileType::Socket("SOCK"), "{s:?}");
+        // The socket file reached by its path is the row the C cannot name
+        // (DIVERGENCES 126): `sock`, `0t0`, `can't identify protocol`.
+        assert_eq!(s.file_type, FileType::Socket("sock"), "{s:?}");
+        assert_eq!(s.name, "can't identify protocol", "{s:?}");
+        assert_eq!((s.size, s.offset), (None, Some(0)), "{s:?}");
         assert_eq!(s.links, None, "a socket has no link count: {s:?}");
         let cwd = rows
             .iter()
