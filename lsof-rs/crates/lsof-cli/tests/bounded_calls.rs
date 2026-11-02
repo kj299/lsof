@@ -611,3 +611,159 @@ echo "held=$(grep -c 'READLINK.*HELD' "$LOG")"
     );
     assert_eq!(get(&got, "held"), "4", "two calls each: {got:?}");
 }
+
+/// Bind a mount table that lists an NFS mount on `$BASE/nfs` over the
+/// `/proc/mounts` link of this namespace, as the differential's `nfs` mode
+/// does (DIVERGENCES 124): `mount(TABLE, "/proc/self/fd/N", MS_BIND)` of an
+/// `O_PATH|O_NOFOLLOW` descriptor on the link. Then every per-file call
+/// lsof-rs makes goes through its helper.
+const LIST_NFS: &str = r#"mkdir -p "$BASE/nfs"
+cat /proc/self/mounts > "$BASE/mounts"
+echo "srv:/export $BASE/nfs nfs4 rw,relatime 0 0" >> "$BASE/mounts"
+python3 -I -c "import ctypes,os,sys
+libc=ctypes.CDLL(None,use_errno=True)
+fd=os.open('/proc/mounts',os.O_PATH|os.O_NOFOLLOW)
+sys.exit(0 if libc.mount(sys.argv[1].encode(),('/proc/self/fd/%d'%fd).encode(),None,4096,None)==0 else 1)" "$BASE/mounts" || echo nfs=unbound
+"#;
+
+/// With an NFS mount listed every per-file call is bounded, and a process
+/// holding many descriptors on a mount that never answers costs one killed
+/// helper per call that timed out — each with a pipe descriptor and a reader
+/// thread of lsof's until the file system answers. Before the cap, 40 such
+/// descriptors under `ulimit -n 30` ended the run `can't open pipes: Too many
+/// open files`, exit 1, with nothing listed (measured: 23 helpers left in
+/// `D`). Now at most `MAX_WAITING` (16) wait — the table's mount `stat` and
+/// 15 descriptors' — and every later call fails at once with `EAGAIN`: the
+/// run lists all 40 rows, says so once, and exits 0, in 16 limits.
+#[test]
+#[cfg_attr(miri, ignore = "miri cannot spawn a process")]
+fn many_files_on_a_mount_that_never_answers_cost_at_most_the_cap() {
+    if let Some(why) = unavailable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let dir = Scratch::new("fuse-many");
+    let Some(got) = in_namespace(
+        &dir,
+        "--mode hold --hang-when \"$BASE/hang\"",
+        &format!(
+            r#"python3 -I -c 'import os,sys,time
+fds=[os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY) for _ in range(40)]
+open(sys.argv[2],"w").write(str(os.getpid()))
+time.sleep(100)' "$FUSE" "$BASE/hpid" &
+h=$!
+i=0; while [ ! -s "$BASE/hpid" ] && [ $i -lt 200 ]; do i=$((i+1)); sleep 0.05; done
+{LIST_NFS}
+touch "$BASE/hang"
+t0=$(now)
+(ulimit -n 30; "$LSOF" -S 2 -n -P -a -d 3-99 -p $h >'{out}' 2>'{err}')
+echo "rc=$?"
+t1=$(now)
+echo "ms=$(( (t1 - t0) / 1000000 ))"
+echo "rows=$(grep -c "^python3 *$h .* $FUSE" '{out}')"
+echo "refused=$(grep -c 'Resource temporarily unavailable)$' '{out}')"
+echo "warned=$(grep -c '^lsof: WARNING: 16 killed helpers still wait' '{err}')"
+echo "helpers=$(helpers)"
+kill $h; wait $h
+"#,
+            out = dir.0.join("out").display(),
+            err = dir.0.join("err").display(),
+        ),
+    ) else {
+        return;
+    };
+    assert!(!got.iter().any(|(k, _)| k == "nfs"), "{got:?}");
+    assert_eq!(get(&got, "rc"), "0", "{got:?}");
+    let ms: u64 = get(&got, "ms").parse().unwrap();
+    assert!((32_000..40_000).contains(&ms), "16 limits: {got:?}");
+    assert_eq!(
+        get(&got, "rows"),
+        "40",
+        "every descriptor is listed: {got:?}"
+    );
+    let refused: u32 = get(&got, "refused").parse().unwrap();
+    assert!(refused >= 25, "the calls past the cap: {got:?}");
+    assert_eq!(get(&got, "warned"), "1", "said once: {got:?}");
+    assert_eq!(get(&got, "helpers"), "D".repeat(16), "{got:?}");
+    assert_eq!(get(&got, "after_teardown"), "", "the abort frees them");
+}
+
+/// Anyone may start a process with lsof's command name and a helper's
+/// argument from a file on a FUSE mount of their own, then stop answering.
+/// lsof-rs knows another run's helper by its executable, and had `stat`ed
+/// `/proc/PID/exe` in its own process to tell: unbounded, so every run that
+/// saw such a process — any `-p`, NFS listed or not — waited in the kernel
+/// until the daemon answered (measured: a minute, until the fixture's
+/// lifetime ended it). Now only a process whose `/proc/PID/exe` reads as
+/// lsof's own path, in lsof's mount namespace, is `stat`ed: this one is not,
+/// and the run takes no time. With an NFS mount listed its executable's
+/// `stat` and its mapping's go through the helper, bounded by `-S`.
+#[test]
+#[cfg_attr(miri, ignore = "miri cannot spawn a process")]
+fn a_look_alike_helper_on_a_mount_that_never_answers_stalls_no_run() {
+    if let Some(why) = unavailable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let dir = Scratch::new("fuse-lookalike");
+    let Some(got) = in_namespace(
+        &dir,
+        "--mode hold --file lsof=\"$LSOF\" --hang-op file --hang-when \"$BASE/hang\"",
+        &format!(
+            r#"python3 -I -c 'import subprocess,sys,time
+open("/proc/self/comm","w").write("lsof")
+p=subprocess.Popen(["x","{helper_arg}"],executable=sys.argv[1],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+open(sys.argv[2],"w").write(str(p.pid))
+time.sleep(100)' "$FUSE/lsof" "$BASE/hpid" &
+par=$!
+i=0; while [ ! -s "$BASE/hpid" ] && [ $i -lt 200 ]; do i=$((i+1)); sleep 0.05; done
+H=$(cat "$BASE/hpid")
+sleep 0.2
+echo "comm=$(cat /proc/$H/comm)"
+echo "exe=$(readlink /proc/$H/exe)"
+touch "$BASE/hang"
+# In the background, so that a run that waits in the kernel is seen.
+run() {{
+    rm -f "$BASE/rc"
+    t0=$(now)
+    ( "$LSOF" "$@" >/dev/null 2>'{err}'; echo $? > "$BASE/rc" ) &
+    i=0; while [ ! -s "$BASE/rc" ] && [ $i -lt 300 ]; do i=$((i+1)); sleep 0.05; done
+    t1=$(now)
+    echo "$name.rc=$(cat "$BASE/rc" 2>/dev/null || echo waiting)"
+    echo "$name.ms=$(( (t1 - t0) / 1000000 ))"
+}}
+name=plain run -n -P -p $$
+{LIST_NFS}
+name=nfs run -S 2 -n -P -p $$
+name=nfs_it run -S 2 -n -P -p $H
+echo "held=$(grep -c 'node=3 .*HELD' "$LOG")"
+kill $par; wait $par
+"#,
+            helper_arg = "--lsof-rs-bounded-fs-helper",
+            err = dir.0.join("err").display(),
+        ),
+    ) else {
+        return;
+    };
+    assert_eq!(get(&got, "comm"), "lsof", "{got:?}");
+    assert_eq!(
+        get(&got, "exe"),
+        dir.0.join("fuse/lsof").display().to_string(),
+        "{got:?}"
+    );
+    assert!(!got.iter().any(|(k, _)| k == "nfs"), "{got:?}");
+    let ms = |name: &str| -> u64 { get(&got, &format!("{name}.ms")).parse().unwrap() };
+    for name in ["plain", "nfs"] {
+        assert_eq!(get(&got, &format!("{name}.rc")), "0", "{name}: {got:?}");
+        assert!(ms(name) < 2000, "{name}: {got:?}");
+    }
+    // Its executable and its mapping, each a limit in a helper.
+    assert_eq!(get(&got, "nfs_it.rc"), "0", "{got:?}");
+    assert!((2000..12_000).contains(&ms("nfs_it")), "{got:?}");
+    assert_ne!(
+        get(&got, "held"),
+        "0",
+        "the mount did stop answering: {got:?}"
+    );
+    assert_eq!(get(&got, "after_teardown"), "", "the abort frees them");
+}

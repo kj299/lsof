@@ -28,6 +28,14 @@
 # identity and no file system (OpenFile::file_id, searched_fs_device), and
 # mark() asks the name rule only of a row path_matches() selected, which an
 # -e row never is; the guard stays as the statement of the C's rule.
+# DIVERGENCES 124 re-anchored ten (2026-11-02: a mapping's `stat` is a
+# `FileStat` now, made through the bounded layer under NFS); each run again
+# as root with --first-kill, nine killed (four by the unit gate, five by the
+# differential). mapped-socket-named-from-its-netns SURVIVES, an equivalent
+# mutant since Batch A's item 22: `files::socket_row` itself gives no row
+# for a socket no table lists when there is no link to ask, and a mapping
+# has none, so the guard only saves that call (the code before the
+# re-anchoring has the same `let link = link?;`).
 
 [run]
 dir = ".."
@@ -77,9 +85,8 @@ name = "names-that-are-no-path-stated"
 rule = "a name that is no path is never stat()ed (102, C-DEFECT)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''        _ if !bytes.starts_with(b"/") => Err(std::io::Error::from_raw_os_error(ENOENT)),
-'''
-new = ''''''
+old = '''        _ if !bytes.starts_with(b"/") => match fs {'''
+new = '''        _ if !bytes.starts_with(b"/") && false => match fs {'''
 
 [[mutant]]
 name = "mappings-not-exempted"
@@ -94,8 +101,8 @@ name = "no-map-files"
 rule = "another mount namespace is stat()ed through /proc/PID/map_files (95)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''        (true, Some((start, end))) => {'''
-new = '''        (false, Some((start, end))) => {'''
+old = '''        (true, Some((start, end))) => stat('''
+new = '''        (false, Some((start, end))) => stat('''
 
 [[mutant]]
 name = "no-stat-reason"
@@ -126,9 +133,11 @@ name = "deleted-always-DEL"
 rule = "a deleted file the path names again is mem (95)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''            _ => from_stat(m.path, &md, pid, ctx),'''
+old = '''            _ => {
+                let mut name = m.path;'''
 new = '''            _ if m.deleted => from_maps(m, None),
-            _ => from_stat(m.path, &md, pid, ctx),'''
+            _ => {
+                let mut name = m.path;'''
 
 [[mutant]]
 name = "path-note-format"
@@ -143,7 +152,7 @@ name = "devices-typed-REG"
 rule = "a mapped device is CHR/BLK (48)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''    let ty = files::type_from_mode(md.mode());'''
+old = '''    let ty = files::type_from_mode(md.mode);'''
 new = '''    let ty = FileType::Regular;'''
 
 [[mutant]]
@@ -151,10 +160,10 @@ name = "devices-have-a-size"
 rule = "a mapped device has no size (48)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''            u32::try_from(md.rdev()).ok().and_then(NonZeroU32::new),
+old = '''            u32::try_from(md.rdev).ok().and_then(NonZeroU32::new),
             None,'''
-new = '''            u32::try_from(md.rdev()).ok().and_then(NonZeroU32::new),
-            Some(md.size()),'''
+new = '''            u32::try_from(md.rdev).ok().and_then(NonZeroU32::new),
+            Some(md.size),'''
 
 [[mutant]]
 name = "no-lock-on-maps-rows"
@@ -169,7 +178,7 @@ name = "no-lock-on-stat-rows"
 rule = "a stat()ed mapping shows its lock (96)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''        lock: ctx.locks.get(&(pid, md.dev(), md.ino())).copied(),'''
+old = '''        lock: ctx.locks.get(&(pid, md.dev, md.ino)).copied(),'''
 new = '''        lock: None,'''
 
 [[mutant]]
@@ -290,7 +299,7 @@ name = "mapped-socket-named-from-its-netns"
 rule = "a mapped socket no table here knows is `can't identify protocol` (95)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/maps.rs"
-old = '''    if ctx.socks.get(md.ino()).is_some() {'''
+old = '''    if ctx.socks.get(md.ino).is_some() {'''
 new = '''    if true {'''
 
 [[mutant]]
@@ -298,7 +307,7 @@ name = "unidentified-socket-device-as-d"
 rule = "-F D of an unidentified socket is D0x9 (106)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            fs_device: meta.map(MetadataExt::dev),'''
+old = '''            fs_device: meta.map(|m| m.dev),'''
 new = '''            fs_device: None,'''
 
 [[mutant]]

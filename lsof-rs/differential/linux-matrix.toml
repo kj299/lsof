@@ -5105,3 +5105,232 @@ args = ["-n", "-P", "-a", "-d", "3-6", "-p", "{NSX}"]
 [[case]]
 name = "userns-unlisted-sockets-fields"
 args = ["-n", "-P", "-a", "-d", "3-6", "-Ftn", "-p", "{NSX}"]
+
+# ------------------------------------- an NFS mount listed: statsafely() (124)
+# Fixture NFS's files lie in the directory `LSOF_DIFF_MT=nfs` lists as an
+# NFS mount, `srv:/export`: a file holding the run's table and that line is
+# bound over the `/proc/mounts` link. With the line listed the C makes
+# every per-file `stat` through `statsafely()` and, when one fails,
+# `statEx()` of the parent directories; with it recorded (a plain directory,
+# which a `stat` answers), a file there is `N_NFS`, named `(srv:/export)`
+# and what `-N` selects. Under `-b` every per-file call is avoided and said
+# to be, and each row loses what a `stat` gives: `unknown`, no device, size,
+# inode or access letter, the link's source for a name (`pipe`, `socket`,
+# `anon_inode`) and `(lstat: …) (stat: …)` with `statEx()`'s errno (`rtd …
+# / (stat: No such file or directory)`); a mapping keeps its type and
+# device from its maps line. fd 7, a TCP listener, is left out of the JSON
+# cases (DIVERGENCES 134).
+
+[[case]]
+name = "nfs-listed-table"
+args = ["-n", "-P", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-fields"
+args = ["-n", "-P", "-F", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-json"
+args = ["-n", "-P", "-j", "-a", "-d", "^7", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b"
+args = ["-n", "-P", "-b", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-fields"
+args = ["-n", "-P", "-b", "-F", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-json"
+args = ["-n", "-P", "-b", "-j", "-a", "-d", "^7", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `-w` mutes the `avoiding stat()` lines and every `(stat: …)` in NAME.
+name = "nfs-listed-dash-b-w"
+args = ["-n", "-P", "-b", "-w", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-w-fields"
+args = ["-n", "-P", "-b", "-w", "-F", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# Bounded by `-S 2`, and made in-process by `-O`: every call answers, and
+# the listing is the one without `-b`.
+name = "nfs-listed-dash-S"
+args = ["-n", "-P", "-S", "2", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-O"
+args = ["-n", "-P", "-O", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `-N`: the files under the mount's directory on its device, and nothing
+# else on that device (the host's root file system).
+name = "nfs-listed-dash-N-and"
+args = ["-n", "-P", "-N", "-a", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-N-alone"
+args = ["-n", "-P", "-N"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `-U` under `-b`: both of every fd's calls are avoided, said, and no row
+# says socket, so nothing is listed and `-U` is not located.
+name = "nfs-listed-dash-b-U"
+args = ["-n", "-P", "-b", "-U", "-a", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-U"
+args = ["-n", "-P", "-U", "-a", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `-K -a`: a process with no other task is not read, and says nothing.
+name = "nfs-listed-dash-b-K-and"
+args = ["-n", "-P", "-b", "-K", "-a", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# An `-e` of the mount: its files are `UNKN`, never `stat`ed, and none is
+# named by it, as it has no device.
+name = "nfs-listed-exempt"
+args = ["-n", "-P", "-e", "{NFSDIR}", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# A path argument names the row as it was given, without the mount's source.
+name = "nfs-listed-path-argument"
+args = ["-n", "-P", "{NFSDIR}/f.txt"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-path-argument"
+args = ["-n", "-P", "-b", "{NFSDIR}/f.txt"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-plus-d"
+args = ["-n", "-P", "+d", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-terse-dash-b"
+args = ["-t", "-b", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# Fixture I's threads under `-K`: each task is read before its process, as
+# the C reads them, so their `avoiding stat()` lines come in that order.
+name = "nfs-listed-dash-b-K-tasks-first"
+args = ["-n", "-P", "-b", "-K", "-a", "-p", "{I}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+# What a `-b` walk says is what the C walks. `-u ^0` keeps lsof's own
+# process (and anything else of root's) out of the walk, so stderr can be
+# compared: what is left is fixture W's processes of other owners, and the
+# host's. An exclusion drops a process before anything of it is read
+# (`is_proc_excl()`): no `avoiding stat()` line names one. A network
+# selecter ORed with process selecters reads, of a process they do not
+# select, its fds alone for sockets (`Ckscko`): no cwd, rtd, txt or mapping.
+
+[[case]]
+name = "nfs-listed-dash-b-excluded-owner-not-walked"
+args = ["-n", "-P", "-b", "-u", "^0"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-excluded-pid-not-walked"
+args = ["-n", "-P", "-b", "-p", "^{WJ}", "-u", "^0"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-U-or-process-sockets-only-elsewhere"
+args = ["-n", "-P", "-b", "-U", "-p", "{WJ}", "-u", "^0"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-inet-or-process-sockets-only-elsewhere"
+args = ["-n", "-P", "-b", "-i", "-p", "{WJ}", "-u", "^0"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "nfs-listed-dash-b-U-or-command-sockets-only-elsewhere"
+args = ["-n", "-P", "-b", "-U", "-c", "nomatch", "-u", "^0"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+# ------------------------------ a mount table that cannot be opened (124)
+# `LSOF_DIFF_MT=nomounts` mounts a procfs with `subset=pid` over `/proc`,
+# which has no `/proc/mounts`: the C's `readmnt()` says `can't
+# fopen(/proc/mounts, "r"): No such file or directory` and exits 1 where it
+# first reads the table, and so does lsof-rs (it had read an empty table in
+# silence). `-i` alone reads no table.
+
+[[case]]
+name = "mount-table-unopenable-is-fatal"
+args = ["-n", "-P", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "nomounts" }
+with_stderr = true
+
+[[case]]
+name = "mount-table-unopenable-is-fatal-under-dash-b-w"
+args = ["-n", "-P", "-b", "-w", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "nomounts" }
+with_stderr = true
+
+[[case]]
+name = "mount-table-unopenable-is-fatal-for-a-path"
+args = ["-n", "-P", "{ADIR}"]
+env = { LSOF_DIFF_MT = "nomounts" }
+with_stderr = true
+
+[[case]]
+name = "mount-table-unopenable-is-fatal-at-dash-e"
+args = ["-n", "-P", "-e", "/tmp", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "nomounts" }
+with_stderr = true
+
+[[case]]
+name = "mount-table-unopenable-terse"
+args = ["-t", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "nomounts" }
+with_stderr = true

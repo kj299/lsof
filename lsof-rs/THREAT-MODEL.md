@@ -140,10 +140,31 @@ place, and a link planted there into a hung file system stops the run;
 lsof-rs never `stat`s such a name. And the C ends a mapping's name at a TAB,
 so a library its owner named `libssl.so`, a TAB and more passes for the real
 `libssl.so`; lsof-rs keeps the whole name. A `stat` of a real path can still
-block on a hung file system, as an fd's can: a process's own files are
-`stat`ed in lsof with no limit, as the C `stat`s them when its mount table
-lists no NFS mount (DIVERGENCES 124), and `-b` guards in both only the paths a
-user names and the mount table, not these. `-e` exempts by a plain prefix of
+block on a hung file system, as an fd's can: when the mount table lists no
+NFS mount a process's own files are `stat`ed in lsof with no limit, as the C
+`stat`s them then, and `-b` guards in both only the paths a user names and
+the mount table, not these. When it lists one (DIVERGENCES 124, resolved
+2026-11-02), every such call (the `cwd`, `rtd` and `txt`, each fd's `lstat`
+and `stat`, each mapping, and the parent directories the C's `statEx()`
+tries after one fails) goes through the bounded helper, under `-S`, `-O` and
+`-b`, as the C makes them through `statsafely()`: none is made in lsof
+itself, except under `-O`, which makes every call in lsof with no limit (the
+C's segfaults there, 119), and a hung NFS server costs `-S` seconds per call
+that meets it. Each such call leaves a killed helper waiting in state D,
+holding a pipe descriptor and a reader thread of lsof's, until the server
+answers; at most 16 (`MAX_WAITING`) may wait at once. Past that no helper is
+started and each further call fails at once with `EAGAIN` (`Resource
+temporarily unavailable`, the row's `(stat: …)`), with one warning, so a
+dead server under many open files costs 16 limits and a bounded number of
+descriptors, threads and processes; before the cap, 40 such files under
+`ulimit -n 30` ended the run `can't open pipes`, exit 1, nothing listed
+(118). A table that cannot be opened ends the run as the C's does (`can't
+fopen(/proc/mounts, "r")`, exit 1): read as empty, it had listed no NFS
+mount and turned this routing off in silence. And a process an exclusion
+names is not read at all, as the C's `is_proc_excl()` skips it (not under
+`-E`/`+E`, 56), so its files on a hung mount cost nothing. A
+relative name the C would look up in its working directory there is not
+looked up (as 102). `-e` exempts by a plain prefix of
 the path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
 
 **A mount directory is `stat`ed only when the run needs the table, through a
@@ -168,12 +189,15 @@ one of lsof's threads reading its pipe until lsof exits. `lsof -i :22` and
 (measured). `-b` makes no such call. The `stat` opens the path `O_PATH`,
 which, like `stat(2)`, mounts no automount point, where std's `statx` did, so
 a path argument naming one does not mount it either (fixture AUTOFS). The
-table is read whole up to 64 MiB of `/proc/self/mounts`, which a user who may
-mount can lengthen; past it, mounts are left out (129). What stays open:
+table is read whole up to 64 MiB of `/proc/mounts` (the C's name for it, a
+link to `self/mounts`), which a user who may mount can lengthen; past it,
+mounts are left out (129). What stays open:
 the C's mount warnings and `Readlink()` messages quote names a mounter chose,
 which lsof-rs escapes (`^[`), as the C does but in its raw `avoiding stat(P)`
 and `-e` messages (122). A bound AF_UNIX socket's path, like a process's
-files, is `stat`ed in lsof with no limit (124).
+files, is `stat`ed in lsof with no limit unless the table lists an NFS mount,
+and then in the helper (124), and only when a path argument may find the
+socket by it; the C's `get_unix()` `stat`s every path `/proc/net/unix` lists.
 
 **The bounded calls run in a second process** (DIVERGENCES 94, 123). lsof
 re-executes its own image, `/proc/self/exe` — never the binary's path, which
@@ -204,7 +228,18 @@ neither `stat`s nor lists a helper's close-on-exec descriptors — exactly the
 ones it opened; its pipes, `/dev/null` and what it inherited are not — for
 this run's helpers by pid and another run's when it runs the same file
 (`/proc/PID/exe`) with the helper's argument; a program that only names
-itself so is not skipped. Another tool, the C's lsof, or an lsof-rs that is
+itself so is not skipped. **Telling another run's helper never blocks**
+(found by row 124's review, fixed 2026-11-02): that test had `stat`ed
+`/proc/PID/exe` in lsof's own process, unbounded, for any process with
+lsof's command name and the helper's argument, which anyone may start from
+a file on a FUSE mount of their own whose daemon then stops answering; every
+run that saw the process, root's included and NFS listed or not, waited in
+the kernel (measured: a minute, until the fixture's lifetime aborted it).
+Now `/proc/PID/exe` and `/proc/PID/ns/mnt` are read as links first, procfs's
+answers that reach no file system, and only a process whose executable
+reads as lsof's own path in lsof's mount namespace is `stat`ed, a file lsof
+itself was loaded from (`HelperFds::among_by`; bounded_calls.rs
+`a_look_alike_helper_on_a_mount_that_never_answers_stalls_no_run`). Another tool, the C's lsof, or an lsof-rs that is
 not the same file, waits on it until the file system answers; so does any of
 them on an lsof `-O` waiting in its own `stat`, which holds the same
 descriptor (119).

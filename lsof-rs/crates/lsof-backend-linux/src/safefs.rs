@@ -69,7 +69,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lsof_core::safefs::{
-    lost_child, name_too_long, stat_now, timed_out, FileStat, FsCalls, MAX_NAME,
+    lost_child, name_too_long, stat_now, timed_out, would_block, FileStat, FsCalls, MAX_NAME,
     READ_DIR_MAX_BYTES, READ_DIR_MAX_NAMES,
 };
 
@@ -83,6 +83,19 @@ pub const MAGIC: &[u8; 8] = b"lsofrsFS";
 
 /// The protocol's version, in the greeting: a change to any frame changes it.
 pub const PROTOCOL: u32 = 1;
+
+/// At most this many killed helpers may still be waiting, unreaped, on file
+/// systems that do not answer before lsof starts no more: each holds a pipe
+/// descriptor and a reader thread of lsof's until its call ends (in state
+/// `D` that is when the file system answers or goes), and a helper killed in
+/// `D` cannot be reaped. With an NFS mount listed every per-file call is
+/// bounded, so a dead server under a thousand open files had cost a
+/// thousand of each, and at `ulimit -n` the run ended `can't open pipes`
+/// with nothing listed. Past the cap each call fails at once with `EAGAIN`
+/// (`Resource temporarily unavailable`, as a call `-b` avoided reads), and
+/// one warning says why ([`Helper::note`]); once one of them is reaped,
+/// calls are made again.
+pub const MAX_WAITING: usize = 16;
 
 /// The largest frame either side sends or accepts: a request's path, a
 /// reply's payload. A path longer than this is refused before it is sent
@@ -645,29 +658,86 @@ pub fn helper_args(started: &[Vec<u8>], given: &[Vec<u8>]) -> Vec<Vec<u8>> {
     args
 }
 
-/// The file this program was loaded from, as `(st_dev, st_ino)`, and the
-/// command name a process running it has: `/proc/self/exe`'s and
-/// `/proc/self/comm`'s, or, run through the loader, the program's — the file
-/// at the path the loader was given, and that path's last component, cut to
-/// the kernel's 15 bytes — since the loader is then this process's.
-fn this_program() -> (Option<(u64, u64)>, Vec<u8>) {
+/// What another process must show to be running this program: see
+/// [`HelperFds::among`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Program {
+    /// The command name a process running it has.
+    pub name: Vec<u8>,
+    /// Where it is, as `/proc/PID/exe` reads for a process running it.
+    pub exe: Option<Vec<u8>>,
+    /// This process's mount namespace, as `/proc/PID/ns/mnt` reads.
+    pub mnt: Option<Vec<u8>>,
+    /// The file, as `(st_dev, st_ino)`.
+    pub file: Option<(u64, u64)>,
+}
+
+/// This program ([`Program`]): `/proc/self/exe`'s file and target and
+/// `/proc/self/comm`'s name, or, run through the loader, the program's — the
+/// file at the path the loader was given, that path made absolute, and its
+/// last component, cut to the kernel's 15 bytes — since the loader is then
+/// this process's. Only this process's own files are looked at.
+fn this_program() -> Program {
     let (started, given) = words();
-    let (file, name) = match loader_options(&started, &given) {
+    let link = |p: &str| {
+        std::fs::read_link(p)
+            .ok()
+            .map(|t| t.into_os_string().into_vec())
+    };
+    let (file, exe, name) = match loader_options(&started, &given) {
         Some(_) => {
             let path = &given[0];
             let base = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
-            (
-                Path::new(OsStr::from_bytes(path)).to_path_buf(),
-                base[..base.len().min(15)].to_vec(),
-            )
+            let file = Path::new(OsStr::from_bytes(path)).to_path_buf();
+            let exe = std::fs::canonicalize(&file)
+                .ok()
+                .map(|p| p.into_os_string().into_vec());
+            (file, exe, base[..base.len().min(15)].to_vec())
         }
         None => {
             let comm = std::fs::read("/proc/self/comm").unwrap_or_default();
             let comm = comm.strip_suffix(b"\n").unwrap_or(&comm).to_vec();
-            (Path::new("/proc/self/exe").to_path_buf(), comm)
+            (
+                Path::new("/proc/self/exe").to_path_buf(),
+                link("/proc/self/exe"),
+                comm,
+            )
         }
     };
-    (identity(&file), name)
+    Program {
+        name,
+        exe,
+        mnt: link("/proc/self/ns/mnt"),
+        file: identity(&file),
+    }
+}
+
+/// Another process's view, as [`HelperFds::among`] asks for it: its
+/// command line, and what `/proc/PID/exe` and `/proc/PID/ns/mnt` read as —
+/// procfs's own answers, none of which reaches the file system the
+/// executable is on — and last, only for a process that has passed the rest,
+/// its executable's `(st_dev, st_ino)`.
+pub trait Looks {
+    fn cmdline(&self, pid: u32) -> Option<Vec<u8>>;
+    fn link(&self, pid: u32, name: &str) -> Option<Vec<u8>>;
+    fn exe_file(&self, pid: u32) -> Option<(u64, u64)>;
+}
+
+/// [`Looks`] through `/proc`.
+struct Procfs;
+
+impl Looks for Procfs {
+    fn cmdline(&self, pid: u32) -> Option<Vec<u8>> {
+        std::fs::read(format!("/proc/{pid}/cmdline")).ok()
+    }
+    fn link(&self, pid: u32, name: &str) -> Option<Vec<u8>> {
+        std::fs::read_link(format!("/proc/{pid}/{name}"))
+            .ok()
+            .map(|t| t.into_os_string().into_vec())
+    }
+    fn exe_file(&self, pid: u32) -> Option<(u64, u64)> {
+        identity(Path::new(&format!("/proc/{pid}/exe")))
+    }
 }
 
 /// A file's `(st_dev, st_ino)`, following links: whether two names are the
@@ -707,21 +777,47 @@ impl HelperFds {
     /// it must be this file. (A helper another run started through the
     /// loader has the loader's words too, and is not known by them.)
     pub fn among<'a>(own: &[u32], procs: impl IntoIterator<Item = (u32, &'a str)>) -> Self {
+        Self::among_by(own, procs, &this_program(), &Procfs)
+    }
+
+    /// [`among`](Self::among), against `mine` and through `looks`.
+    ///
+    /// Whether the executable is this file is asked last, and only of a
+    /// process whose `/proc/PID/exe` reads as this program's path and whose
+    /// mount namespace is this one's: a `stat` of `/proc/PID/exe` is made in
+    /// lsof's own process, unbounded, and follows the link to wherever the
+    /// executable is. Anyone may start a process with this command name and
+    /// these arguments, from a file on a FUSE mount of their own whose
+    /// daemon then stops answering; that `stat` had hung every run that
+    /// walked the process, root's included, NFS listed or not. The two links
+    /// are procfs's answers alone, and a process that passes them runs the
+    /// file at this program's own path, in this namespace, where lsof itself
+    /// was loaded from.
+    pub fn among_by<'a>(
+        own: &[u32],
+        procs: impl IntoIterator<Item = (u32, &'a str)>,
+        mine: &Program,
+        looks: &dyn Looks,
+    ) -> Self {
         let mut pids: HashSet<u32> = own.iter().copied().collect();
-        let (mine, name) = this_program();
+        let name = &mine.name;
         for (pid, command) in procs {
-            if name.is_empty() || command.as_bytes() != name || pids.contains(&pid) {
+            if name.is_empty() || command.as_bytes() != name.as_slice() || pids.contains(&pid) {
                 continue;
             }
-            let Ok(argv) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            let Some(argv) = looks.cmdline(pid) else {
                 continue;
             };
             let argv: Vec<&[u8]> = argv.split(|&b| b == 0).collect();
             if argv.len() == 3
                 && argv[1] == HELPER_ARG.as_bytes()
                 && argv[2].is_empty()
-                && mine.is_some()
-                && identity(Path::new(&format!("/proc/{pid}/exe"))) == mine
+                && mine.file.is_some()
+                && mine.exe.is_some()
+                && mine.mnt.is_some()
+                && looks.link(pid, "exe") == mine.exe
+                && looks.link(pid, "ns/mnt") == mine.mnt
+                && looks.exe_file(pid) == mine.file
             {
                 pids.insert(pid);
             }
@@ -752,14 +848,21 @@ pub struct Helper {
     state: Mutex<State>,
     launch: Launcher,
     on_failure: OnFailure,
+    /// [`MAX_WAITING`], or a test's own.
+    cap: usize,
 }
 
 #[derive(Default)]
 struct State {
     live: Option<Live>,
     /// Helpers killed and not yet reaped: each is waited for, without
-    /// blocking, at the next call, so a long `-r` run collects them.
+    /// blocking, at the next call, so a long `-r` run collects them. Never
+    /// more than the cap and the one a call has just killed.
     killed: Vec<Child>,
+    /// Whether the cap has refused a call yet, and whether the warning that
+    /// says so is still to be given ([`FsCalls::note`]): once a run.
+    full: bool,
+    untold: bool,
 }
 
 impl State {
@@ -819,7 +922,14 @@ impl Helper {
             state: Mutex::new(State::default()),
             launch,
             on_failure,
+            cap: MAX_WAITING,
         }
+    }
+
+    /// The same helper with another cap on killed helpers still waiting
+    /// ([`MAX_WAITING`]): what the tests use to reach it.
+    pub fn with_cap(self, cap: usize) -> Self {
+        Helper { cap, ..self }
     }
 
     /// End the run's helper: close its stdin, which it takes as the end,
@@ -908,6 +1018,15 @@ impl Helper {
         let wait = Duration::from_secs(u64::from(limit));
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.reap();
+        if state.live.is_none() && state.killed.len() >= self.cap {
+            // No new helper, and so no descriptor or thread more: the call
+            // fails at once, and the run is told once.
+            if !state.full {
+                state.full = true;
+                state.untold = true;
+            }
+            return Err(would_block());
+        }
         if state.live.is_none() {
             if let Err(e) = self.start(&mut state, wait) {
                 (self.on_failure)(&e);
@@ -977,6 +1096,21 @@ impl FsCalls for Helper {
 
     fn helper_pids(&self) -> Vec<u32> {
         self.pids()
+    }
+
+    /// Once the cap has refused a call ([`MAX_WAITING`]): the one warning.
+    fn note(&self) -> Option<String> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.untold {
+            return None;
+        }
+        state.untold = false;
+        Some(format!(
+            "lsof: WARNING: {} killed helpers still wait on file systems that do not \
+             answer; no call is made while they do.\n      \
+             Output information may be incomplete.",
+            self.cap
+        ))
     }
 
     fn read_dir(&self, path: &Path, limit: u32) -> io::Result<Vec<OsString>> {
@@ -1406,6 +1540,90 @@ mod tests {
         assert_eq!(found.pids, [7].into_iter().collect());
     }
 
+    /// A process as [`Table`] gives it: its command line, its `exe` and
+    /// `ns/mnt` links, its executable's identity.
+    type Shown = (Vec<u8>, &'static str, &'static str, (u64, u64));
+
+    /// Processes as a table gives them, every executable `stat` recorded.
+    struct Table {
+        procs: std::collections::HashMap<u32, Shown>,
+        stated: std::cell::RefCell<Vec<u32>>,
+    }
+
+    impl Looks for Table {
+        fn cmdline(&self, pid: u32) -> Option<Vec<u8>> {
+            self.procs.get(&pid).map(|p| p.0.clone())
+        }
+        fn link(&self, pid: u32, name: &str) -> Option<Vec<u8>> {
+            let p = self.procs.get(&pid)?;
+            Some(match name {
+                "exe" => p.1.as_bytes().to_vec(),
+                "ns/mnt" => p.2.as_bytes().to_vec(),
+                _ => unreachable!("{name}"),
+            })
+        }
+        fn exe_file(&self, pid: u32) -> Option<(u64, u64)> {
+            self.stated.borrow_mut().push(pid);
+            self.procs.get(&pid).map(|p| p.3)
+        }
+    }
+
+    /// Another run's helper is known by its name, its arguments, its two
+    /// procfs links and, last, its executable's identity; the `stat` behind
+    /// that is made only for a process whose links already read as this
+    /// program's — never for one whose executable lies elsewhere (a file on
+    /// a FUSE mount whose daemon does not answer would hang it), nor for one
+    /// in another mount namespace.
+    #[test]
+    fn a_process_that_only_looks_like_a_helper_is_never_stated() {
+        let argv = [b"x".as_slice(), HELPER_ARG.as_bytes(), b""].join(&0u8);
+        let mine = Program {
+            name: b"lsof".to_vec(),
+            exe: Some(b"/usr/bin/lsof".to_vec()),
+            mnt: Some(b"mnt:[1]".to_vec()),
+            file: Some((5, 6)),
+        };
+        let procs = [
+            (10, (argv.clone(), "/fuse/lsof", "mnt:[1]", (5, 6))),
+            (11, (argv.clone(), "/usr/bin/lsof", "mnt:[2]", (5, 6))),
+            (12, (argv.clone(), "/usr/bin/lsof", "mnt:[1]", (5, 6))),
+            (13, (argv.clone(), "/usr/bin/lsof", "mnt:[1]", (5, 7))),
+            (
+                14,
+                (b"x\0-p\0".to_vec(), "/usr/bin/lsof", "mnt:[1]", (5, 6)),
+            ),
+            (15, (argv.clone(), "/usr/bin/lsof", "mnt:[1]", (5, 6))),
+        ];
+        let table = Table {
+            procs: procs.into_iter().collect(),
+            stated: Default::default(),
+        };
+        let named = [10, 11, 12, 13, 14, 15].map(|p| (p, if p == 15 { "sleep" } else { "lsof" }));
+        let found = HelperFds::among_by(&[3], named, &mine, &table);
+        assert_eq!(found.pids, [3, 12].into_iter().collect());
+        assert_eq!(*table.stated.borrow(), [12, 13], "only these are stated");
+        // Without this program's own links, nothing is asked at all.
+        for mine in [
+            Program {
+                exe: None,
+                ..mine.clone()
+            },
+            Program {
+                mnt: None,
+                ..mine.clone()
+            },
+            Program {
+                file: None,
+                ..mine.clone()
+            },
+        ] {
+            table.stated.borrow_mut().clear();
+            let found = HelperFds::among_by(&[], named, &mine, &table);
+            assert!(found.pids.is_empty());
+            assert!(table.stated.borrow().is_empty());
+        }
+    }
+
     #[test]
     fn frames_are_checked_before_anything_is_allocated() {
         let mut huge = vec![R_STAT];
@@ -1549,6 +1767,68 @@ mod tests {
         // ...and reaps the one killed before it.
         assert_eq!(state(first), None, "the killed helper was never reaped");
         assert!(dead(second), "the second timed-out helper was left running");
+        helper.finish();
+    }
+
+    /// Past [`MAX_WAITING`] killed helpers still waiting, a call starts no
+    /// helper — no pipe, no reader thread — and fails at once with `EAGAIN`;
+    /// the warning is given once ([`FsCalls::note`]); once one is reaped,
+    /// calls are made again. A helper killed in `D` cannot be reaped, and no
+    /// unit test can put one there: processes that are simply not dead yet
+    /// stand in for them (the FUSE case is `bounded_calls.rs`'s).
+    #[test]
+    #[cfg_attr(miri, ignore = "miri cannot spawn a process")]
+    fn past_the_cap_of_waiting_helpers_a_call_fails_at_once_and_says_so_once() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let helper = fake(format!("printf '{}'; exec sleep 100", greeting()), &starts).with_cap(2);
+        assert!(helper.note().is_none(), "nothing to say yet");
+        let stand_ins: Vec<Child> = (0..2)
+            .map(|_| Command::new("sleep").arg("100").spawn().expect("a sleeper"))
+            .collect();
+        let pids: Vec<u32> = stand_ins.iter().map(Child::id).collect();
+        helper.state.lock().unwrap().killed.extend(stand_ins);
+        let began = Instant::now();
+        for _ in 0..3 {
+            let e = helper.stat(Path::new("/"), 5).unwrap_err();
+            assert_eq!(e.raw_os_error(), Some(11), "{e}");
+            assert_eq!(
+                lsof_core::errno_text(&e),
+                "Resource temporarily unavailable"
+            );
+        }
+        let e = helper.read_dir(Path::new("/"), 5).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(11));
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 0, "no helper was started");
+        let note = helper.note().expect("the cap is said");
+        assert!(
+            note.starts_with("lsof: WARNING: 2 killed helpers"),
+            "{note}"
+        );
+        assert!(note.ends_with("\n      Output information may be incomplete."));
+        assert!(helper.note().is_none(), "once");
+        let mut waiting = helper.pids();
+        waiting.sort_unstable();
+        let mut want = pids.clone();
+        want.sort_unstable();
+        assert_eq!(waiting, want, "the waiting ones stay known to a scan");
+        // One goes: the next call is made, by a fresh helper, and times out.
+        let _ = helper.state.lock().unwrap().killed[0].kill();
+        assert!(dead(pids[0]));
+        let e = helper.lstat(Path::new("/"), 1).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(110), "{e}");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        // Whatever comes next, the warning is not given twice.
+        let _ = helper.stat(Path::new("/"), 1);
+        assert!(helper.note().is_none(), "once a run");
+        for c in helper.state.lock().unwrap().killed.iter_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
         helper.finish();
     }
 

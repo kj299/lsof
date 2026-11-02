@@ -200,7 +200,11 @@ pub fn resolve(
         match fs.readlink(std::path::Path::new(std::ffi::OsStr::from_bytes(prefix))) {
             Ok(target) => Some(target.into_vec()),
             Err(e) => {
-                gave_up = crate::safefs::is_timed_out(&e);
+                // A call that ran out of time, or one a helper that has
+                // stopped making calls refused at once (`EAGAIN`; under `-b`
+                // no call reaches here): the rest would fare no better.
+                gave_up =
+                    crate::safefs::is_timed_out(&e) || e.kind() == std::io::ErrorKind::WouldBlock;
                 None
             }
         }
@@ -493,6 +497,8 @@ mod tests {
                 self.0.borrow_mut().push((p.clone(), limit));
                 if p == b"/m/lnk" {
                     Err(crate::safefs::timed_out())
+                } else if p == b"/full" {
+                    Err(crate::safefs::would_block())
                 } else if p == b"/m/rel" {
                     Ok("lnk".into())
                 } else {
@@ -528,6 +534,11 @@ mod tests {
             *slow.0.borrow(),
             [(b"/x".to_vec(), 3), (b"/x/y".to_vec(), 3)]
         );
+        slow.0.borrow_mut().clear();
+        // A call a helper that has stopped making calls refused at once
+        // (`EAGAIN`) ends the reading as a timeout does.
+        assert_eq!(resolve("/full/x".as_ref(), &fs).unwrap(), "/full/x");
+        assert_eq!(*slow.0.borrow(), [(b"/full".to_vec(), 3)]);
         slow.0.borrow_mut().clear();
         assert_eq!(resolve("/m/rel".as_ref(), &fs).unwrap(), "/m/lnk");
         // `-b`: nothing read, the argument as it is, and one message for it.

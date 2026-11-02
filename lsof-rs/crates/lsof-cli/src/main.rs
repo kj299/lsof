@@ -976,22 +976,27 @@ fn main() {
         if table.is_none() && needs_table {
             table = Some(read_table(&sel));
         }
-        // `-N` selects on file-system TYPE, so the mount table is what turns
-        // the flag into a set of devices a row can be compared against: each
-        // mount the C typed `N_NFS` (`nfs`, `nfs3`, `nfs4`, in any case), one
-        // it `stat`ed. The C also asks that `HasNFS` be 2, which it is once
-        // such a mount is recorded, and that the file's path start with the
-        // mount's directory (`dnode.c:735-744`); that path test is not made
-        // here (DIVERGENCES 124; source only: this kernel has no NFS).
         // A POSIX message queue is a regular file on the `mqueue` file
         // system the table recorded (`dnode.c:815-819`, DIVERGENCES 128).
         sel.mqueue_device = table.as_ref().and_then(|t| t.mqueue_device);
-        if sel.nfs_only {
-            for m in table.iter().flat_map(|t| &t.entries) {
-                if let (MountKind::Nfs, Some(dev)) = (m.kind, m.device) {
-                    sel.nfs_devices.insert(dev);
-                }
+        // The C's `HasNFS`: once the table lists an NFS mount the Linux
+        // backend makes every per-file `stat` through the bounded layer, as
+        // the C makes it through `statsafely()`; once one is recorded, a file
+        // on it is the C's `N_NFS`, named with its source, and what `-N`
+        // selects: on Linux by its mount, the newest recorded on its device
+        // whose directory starts its path (`dnode.c:735-744`), and elsewhere
+        // by its device (DIVERGENCES 124).
+        sel.has_nfs = table.as_ref().map_or(0, |t| t.has_nfs);
+        let nfs_mounts = table
+            .iter()
+            .flat_map(|t| t.entries.iter().rev())
+            .filter(|m| m.kind == MountKind::Nfs && m.device.is_some());
+        if cfg!(target_os = "linux") {
+            if sel.has_nfs == 2 {
+                sel.nfs_mounts = nfs_mounts.cloned().collect();
             }
+        } else if sel.nfs_only {
+            sel.nfs_devices = nfs_mounts.filter_map(|m| m.device).collect();
         }
         // Every bounded call this run makes is made by now. A helper killed
         // while one outlived its limit still holds what it opened for it, on
@@ -1026,7 +1031,7 @@ fn main() {
     let repeating = repeat.is_some();
 
     let run_cycle = move || -> usize {
-        let gathered = match env.backend.gather(&selection) {
+        let gathered = match env.backend.gather_with(&selection, &fs) {
             Ok(p) => p,
             Err(e) => {
                 say!("lsof: {e}");

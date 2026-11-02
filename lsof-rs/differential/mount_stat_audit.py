@@ -32,6 +32,23 @@ both binaries run under `strace -ff`, and it asserts:
     `rel/../blkdev`, lsof-rs 4, 3 and 2. Neither changes what is printed,
     and each of lsof-rs's calls is bounded by `-S`.
 
+A second part audits the per-file calls (DIVERGENCES 124). With an NFS
+mount listed, the C makes every per-file `stat` -- a process's `cwd`,
+`root` and `exe`, each fd's `lstat` and `stat`, each mapped file -- through
+`statsafely()`, in its child, and lsof-rs through its helper; without one,
+both make them in themselves. For each argument list in `NFS_CASES`, run in
+a mount namespace of its own with a table that lists `srv:/export` on a
+directory here bound over the `/proc/mounts` link (as the differential's
+`LSOF_DIFF_MT=nfs` does), it asserts that the C's child and lsof-rs's helper
+make the same per-file calls on the sleeper's `/proc/PID/` links and mapped
+files, each as many times, that neither binary makes one in itself, and,
+without the line, that lsof-rs's helper makes none (and that `-b` makes
+none at all). Needs root and `unshare`, else that part is skipped, saying
+so. Not compared: the C's `get_unix()` `stat`s the path of every bound
+AF_UNIX socket `/proc/net/unix` lists, through its child, where lsof-rs
+`stat`s a socket's path only when a path argument may find it by it, and
+then through its helper; the sleeper holds no socket.
+
 A call is counted as walk111's `a_walk_entry_is_stated_once` counts it: an
 `O_PATH` `openat` is one `stat` (an `lstat` with `O_NOFOLLOW`), whether it
 succeeds or not, matched by its exact path. The counts are of the processes
@@ -54,11 +71,13 @@ import collections
 import glob
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 # The argument lists, `{P}` a sleeper this script starts in `/`. Every one
 # carries `-n -P`, so the C asks the name service nothing (glibc's NSS
@@ -91,6 +110,27 @@ CASES: list[tuple[list[str], bool]] = [
     (["+f", "--", "/dev"], True),
     (["-Z", "-a", "-d", "cwd", "-p", "{P}"], False),
 ]
+
+# The per-file part's argument lists, run with an NFS mount listed and
+# without; `{P}` is the sleeper, which holds `/etc/hostname` on fd 0 and a
+# file in the listed directory on fd 3.
+NFS_CASES: list[list[str]] = [
+    ["-p", "{P}"],
+    ["-a", "-d", "cwd,3", "-p", "{P}"],
+    ["-b", "-p", "{P}"],
+    ["-U", "-a", "-p", "{P}"],
+    ["-F", "-p", "{P}"],
+]
+
+# What binds a table over the `/proc/mounts` link (the differential's
+# `NFS_BIND`): an `O_PATH|O_NOFOLLOW` descriptor's `/proc/self/fd/N`.
+NFS_BIND = (
+    "import ctypes,os,sys\n"
+    "libc=ctypes.CDLL(None,use_errno=True)\n"
+    "fd=os.open('/proc/mounts',os.O_PATH|os.O_NOFOLLOW)\n"
+    "r=libc.mount(sys.argv[1].encode(),('/proc/self/fd/%d'%fd).encode(),None,4096,None)\n"
+    "sys.exit(0 if r==0 else 1)\n"
+)
 
 TRACE = "trace=execve,stat,lstat,newfstatat,statx,openat,readlink,readlinkat"
 
@@ -154,7 +194,7 @@ def calls(line: str) -> tuple[str, str, bool] | None:
 
 
 def trace(
-    binary: str, argv: list[str], work: str, tag: str
+    binary: str, argv: list[str], work: str, tag: str, wrap: list[str] | None = None
 ) -> list[tuple[str, str, bool, bool]]:
     """Every call of interest the run made, as `calls()` gives it, and
     whether lsof made it in its own process: the one whose first `execve`
@@ -163,7 +203,8 @@ def trace(
     for old in glob.glob(prefix + ".*"):
         os.unlink(old)
     subprocess.run(
-        ["timeout", "120", "strace", "-ff", "-qq", "-e", TRACE, "-o", prefix, binary, *argv],
+        [*(wrap or []), "timeout", "120", "strace", "-ff", "-qq", "-e", TRACE, "-o", prefix,
+         binary, *argv],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -215,6 +256,84 @@ def counted(reads_table: bool, c: collections.Counter, rs: collections.Counter) 
     return problems
 
 
+def per_file(pid: int, mapped: set[str], seen, own: bool) -> collections.Counter:
+    """The per-file calls among `seen`, as `trace()` gives them, made in
+    lsof's own process (`own`) or in the one it starts for its calls: a
+    `stat` or `lstat` of one of the sleeper's `/proc/PID/` links (not the
+    directory, nor `ns/mnt`, which both read in themselves to compare mount
+    namespaces) or of a file it maps."""
+    base = f"/proc/{pid}/"
+    return collections.Counter(
+        (k, p) for k, p, _, o in seen
+        if k in ("stat", "lstat") and o == own
+        and ((p.startswith(base) and p not in (base, base + "ns/mnt")) or p in mapped)
+    )
+
+
+def nfs_audit(oracle: str, rust: str, held: "Held") -> tuple[int, int]:
+    """The per-file part (see the docstring): how many cases ran, and how
+    many failed. Nothing when this host cannot make the namespace."""
+    if os.geteuid() != 0 or shutil.which("unshare") is None:
+        print("skip  per-file calls with an NFS mount listed (needs root and unshare)")
+        return 0, 0
+    work = held.work
+    ndir = os.path.join(work, "nfs")
+    os.makedirs(ndir, exist_ok=True)
+    held_file = os.path.join(ndir, "f.txt")
+    with open(held_file, "w") as f:
+        f.write("x\n")
+    pid = held.nfs_sleeper_pid(held_file)
+    with open(f"/proc/{pid}/maps", encoding="utf-8", errors="surrogateescape") as f:
+        mapped = {l.split(None, 5)[5].strip() for l in f if len(l.split(None, 5)) == 6}
+    table = os.path.join(work, "nfs-mounts")
+    with open("/proc/self/mounts", "rb") as src, open(table, "wb") as dst:
+        dst.write(src.read() + f"srv:/export {ndir} nfs4 rw,relatime 0 0\n".encode())
+    script = os.path.join(work, "nfs-wrap.sh")
+    with open(script, "w") as f:
+        f.write(
+            "#!/bin/sh\n"
+            f"{shlex_quote(sys.executable)} -I -c {shlex_quote(NFS_BIND)} {shlex_quote(table)} || exit 9\n"
+            'exec "$@"\n'
+        )
+    listed = ["unshare", "-m", "--propagation", "private", "sh", script]
+    plain = ["unshare", "-m", "--propagation", "private"]
+    run = failed = 0
+    for args in NFS_CASES:
+        argv = ["-n", "-P", "-w", *[a.replace("{P}", str(pid)) for a in args]]
+        label = "NFS " + " ".join(argv)
+        run += 1
+        problems = []
+        got = {side: trace(b, argv, work, "nfs-" + side, listed)
+               for side, b in (("c", oracle), ("rs", rust))}
+        c_child, rs_helper = (per_file(pid, mapped, got[s], False) for s in ("c", "rs"))
+        for side in ("c", "rs"):
+            mine = per_file(pid, mapped, got[side], True)
+            if mine:
+                problems.append(f"{side} made per-file calls in itself: {sorted(mine)[:4]}")
+        if c_child != rs_helper:
+            problems.append("per-file calls differ: C only " + repr(sorted(c_child - rs_helper)[:4])
+                            + ", lsof-rs only " + repr(sorted(rs_helper - c_child)[:4]))
+        if "-b" in args and (c_child or rs_helper):
+            problems.append("-b made a per-file call")
+        if "-b" not in args and not rs_helper:
+            problems.append("no per-file call was made: the line was not listed")
+        unlisted = per_file(pid, mapped, trace(rust, argv, work, "nfs-plain", plain), False)
+        if unlisted:
+            problems.append(f"without the line lsof-rs's helper made per-file calls: {sorted(unlisted)[:4]}")
+        if problems:
+            failed += 1
+            print(f"FAIL  {label}")
+            for p in problems:
+                print(f"      {p}")
+        else:
+            print(f"ok    {label}  ({sum(rs_helper.values())} per-file calls in each's child)")
+    return run, failed
+
+
+def shlex_quote(s: str) -> str:
+    return shlex.quote(s)
+
+
 def ended(signum, _frame):
     """SIGTERM or SIGHUP: end as an exception would, so what an audit holds
     is let go (`Held`); left to their default, they ended the script where
@@ -234,7 +353,29 @@ class Held:
             signal.signal(sig, ended)
         self.work = tempfile.mkdtemp(prefix="lsof-rs-mount-audit-")
         self.sleeper: subprocess.Popen | None = None
+        self.nfs_sleeper: subprocess.Popen | None = None
         return self
+
+    def nfs_sleeper_pid(self, held: str) -> int:
+        """A sleeper in `/` with `/etc/hostname` on fd 0 and `held` on fd 3,
+        for the per-file part."""
+        if self.nfs_sleeper is None:
+            with open("/etc/hostname", "rb") as zero:
+                self.nfs_sleeper = subprocess.Popen(
+                    ["sh", "-c", 'exec sleep 120 3<"$1"', "sh", held],
+                    cwd="/", stdin=zero, stdout=subprocess.DEVNULL,
+                )
+            # Read once it has exec'd: the shell's own maps are not its.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    if os.readlink(f"/proc/{self.nfs_sleeper.pid}/fd/3") == held and \
+                            os.readlink(f"/proc/{self.nfs_sleeper.pid}/exe").endswith("/sleep"):
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.02)
+        return self.nfs_sleeper.pid
 
     def sleeper_pid(self) -> int:
         if self.sleeper is None:
@@ -242,9 +383,10 @@ class Held:
         return self.sleeper.pid
 
     def __exit__(self, *_exc) -> bool:
-        if self.sleeper is not None:
-            self.sleeper.kill()
-            self.sleeper.wait()
+        for sleeper in (self.sleeper, self.nfs_sleeper):
+            if sleeper is not None:
+                sleeper.kill()
+                sleeper.wait()
         shutil.rmtree(self.work, ignore_errors=True)
         return False
 
@@ -301,6 +443,8 @@ def audit(oracle: str, rust: str) -> int:
                     print(f"      {p}")
             else:
                 print(f"ok    {label}  ({sum(rs.values())} mount stat()s)")
+        nrun, nfailed = nfs_audit(oracle, rust, held)
+        run, failed = run + nrun, failed + nfailed
         print(f"mount_stat_audit: {run - failed}/{run} held")
         return 1 if failed else 0
 
@@ -352,6 +496,27 @@ def self_test() -> int:
     check("...and so is less often", counted(True, twice, once) != [])
     check("a run the C reads no table on stat()s none", counted(False, collections.Counter(), once) != [])
     check("a run that reads the table stat()s some", counted(True, once, collections.Counter()) != [])
+    seen = [
+        ("stat", "/proc/7/cwd", False, False),
+        ("lstat", "/proc/7/fd/3", False, False),
+        ("stat", "/proc/7/fd/3", False, True),
+        ("stat", "/proc/7/", True, True),
+        ("stat", "/proc/7/ns/mnt", True, True),
+        ("stat", "/usr/lib/libc.so.6", False, False),
+        ("stat", "/usr/lib/other.so", False, False),
+        ("readlink", "/proc/7/fd/3", True, True),
+        ("stat", "/proc/77/cwd", False, False),
+    ]
+    check("the per-file calls are the sleeper's links and mapped files, by who made them",
+          per_file(7, {"/usr/lib/libc.so.6"}, seen, False)
+          == collections.Counter({("stat", "/proc/7/cwd"): 1, ("lstat", "/proc/7/fd/3"): 1,
+                                  ("stat", "/usr/lib/libc.so.6"): 1}))
+    check("...and lsof's own, not its directory nor its mount namespace, nor a readlink",
+          per_file(7, set(), seen, True) == collections.Counter({("stat", "/proc/7/fd/3"): 1}))
+    check("the NFS cases hold one -b case, which makes no call",
+          sum("-b" in a for a in NFS_CASES) == 1 and all("{P}" in a for a in NFS_CASES))
+    check("the table is bound over the /proc/mounts link itself",
+          "O_NOFOLLOW" in NFS_BIND and "'/proc/mounts'" in NFS_BIND)
     # An audit ended by SIGTERM lets go of what it holds, as one that
     # finishes does.
     code = (

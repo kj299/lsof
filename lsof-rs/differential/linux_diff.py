@@ -152,6 +152,14 @@ ledger — those are the kit's, on purpose.
              (`autofs_hold.py`), in the same way (LSOF_DIFF_MT `autofs`): the
              C never `stat`s an autofs mount, and nothing may trigger it; the
              wrapper fails a run that did. Root and an autofs kernel
+  fixture NFS files in a directory {NFSDIR} that the LSOF_DIFF_MT `nfs`
+             mode lists as an NFS mount, `srv:/export`, in a table bound over
+             the `/proc/mounts` link in each run's mount namespace: its cwd,
+             a file, a pipe, a unix listener bound there, a TCP listener,
+             /dev/null, an eventfd, the directory and an unlinked file, on
+             fds 3-11. With the line listed the C makes every per-file
+             `stat` through `statsafely()` (DIVERGENCES 124). Root and
+             `unshare`, as MT
   fixture WRACE a holder of a directory and a file in it, beside the
              directory {WRACEDIR} a `+d`/`+D` walks, and of a file on
              /dev/shm: for a walk whose entry is renamed while strace holds
@@ -1156,7 +1164,21 @@ AUTOFS_HOLD = os.path.join(HERE, "autofs_hold.py")
 EXEC_ENVS = ("LSOF_DIFF_FUSE", "LSOF_DIFF_RACE", "LSOF_DIFF_MT")
 
 
-def mt_wrap(work: str, base: str) -> str:
+# What `mt-wrap.sh`'s `nfs` mode binds a table with: `mount(TABLE,
+# "/proc/self/fd/N", NULL, MS_BIND)` of an `O_PATH|O_NOFOLLOW` descriptor on
+# the `/proc/mounts` link, so that the link itself is covered and
+# `/proc/self/mounts` is not (a bind over `/proc/PID/mounts` is not seen by
+# that process's own `/proc/self`, measured).
+NFS_BIND = (
+    "import ctypes,os,sys\n"
+    "libc=ctypes.CDLL(None,use_errno=True)\n"
+    "fd=os.open('/proc/mounts',os.O_PATH|os.O_NOFOLLOW)\n"
+    "r=libc.mount(sys.argv[1].encode(),('/proc/self/fd/%d'%fd).encode(),None,4096,None)\n"
+    "sys.exit(0 if r==0 else 1)\n"
+)
+
+
+def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     """The script fixture MT's and AUTOFS's cases run in, already in a mount
     namespace of their own: mount a tmpfs at `base` and, in `table` mode,
     the mounts fixture MT lists on it, or in `autofs` mode an autofs direct
@@ -1175,7 +1197,17 @@ def mt_wrap(work: str, base: str) -> str:
     the run's own: `mqueue` mounts the POSIX message queue file system at
     `base/mq` (DIVERGENCES 128: fixture MQ's queues are then `PSXMQ`), and
     `passwd` binds a password file over `/etc/passwd`, the host's with
-    fixture W's WJ and WA added ([`PASSWD_EXTRA`]; DIVERGENCES 71)."""
+    fixture W's WJ and WA added ([`PASSWD_EXTRA`]; DIVERGENCES 71). And
+    `nfs` lists an NFS mount on a host that has none (DIVERGENCES 124): a
+    file holding this namespace's table and one more line, `srv:/export
+    NFS_DIR nfs4 rw,relatime 0 0` (`nfs_dir`, fixture NFS's directory, a
+    plain directory, so the C records the mount), is bound over the
+    `/proc/mounts` link itself, through an `O_PATH|O_NOFOLLOW` descriptor,
+    so that both binaries, which read `/proc/mounts`, read it, and no other
+    process's `/proc/self/mounts` changes. And `nomounts` mounts a procfs
+    of the namespace's own over `/proc` with `subset=pid`, which has no
+    `/proc/mounts` at all: both binaries end where they first read the
+    table, `can't fopen(/proc/mounts, "r")`."""
     path = os.path.join(work, "mt-wrap.sh")
     b = shlex.quote(base)
     passwd = os.path.join(work, "passwd-mt")
@@ -1191,6 +1223,22 @@ def mt_wrap(work: str, base: str) -> str:
             'if [ "$mode" = passwd ]; then\n'
             f"    mount --bind {shlex.quote(passwd)} /etc/passwd || "
             '{ echo "linux_diff: no MT passwd ($$)"; exit 2; }\n'
+            '    "$@"\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "$mode" = nomounts ]; then\n'
+            '    mount -t proc -o subset=pid lsof-rs-proc /proc || '
+            '{ echo "linux_diff: no MT nomounts ($$)"; exit 2; }\n'
+            '    "$@"\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "$mode" = nfs ]; then\n'
+            f"    T={shlex.quote(os.path.join(work, 'nfs-mounts'))}.$$\n"
+            '    cat /proc/self/mounts > "$T" || exit 2\n'
+            f"    echo {shlex.quote('srv:/export ' + (nfs_dir or '/nonexistent') + ' nfs4 rw,relatime 0 0')} >> \"$T\"\n"
+            f"    {shlex.quote(sys.executable)} -I -c {shlex.quote(NFS_BIND)} \"$T\" || "
+            '{ rm -f "$T"; echo "linux_diff: no MT nfs ($$)"; exit 2; }\n'
+            '    rm -f "$T"\n'
             '    "$@"\n'
             "    exit $?\n"
             "fi\n"
@@ -1679,6 +1727,37 @@ def mqueue_holder(work: str) -> Fixture:
         expect_fds=5,  # 0,1,2 + two queues
         optional=True,
     )
+
+
+def nfs_holder(work: str) -> Fixture:
+    """A process whose files lie on the NFS mount `LSOF_DIFF_MT=nfs` lists
+    (DIVERGENCES 124): its working directory `nfs` is the directory the
+    faked table names `srv:/export`, and it holds f.txt there on fd 3, a
+    pipe on 4 and 5, a unix listener bound there on 6, a TCP listener on 7,
+    `/dev/null` on 8, an eventfd on 9, the directory on 10, and an unlinked
+    file there on 11. With the line listed the C makes every per-file
+    `stat` through `statsafely()`, so `-b` empties each row of what a
+    `stat` gives; with it recorded, a file there is the C's `N_NFS`, named
+    `(srv:/export)` and what `-N` selects."""
+    ndir = os.path.join(work, "nfs")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "os.chdir(%r)\n"
+        "open('f.txt','w').write('hello\\n')\n"
+        "f=open('f.txt')\n"
+        "r,w=os.pipe()\n"
+        "u=socket.socket(socket.AF_UNIX); u.bind(os.path.join(%r,'u.sock')); u.listen(1)\n"
+        "t=socket.socket(); t.bind(('127.0.0.1',0)); t.listen(1)\n"
+        "n=os.open('/dev/null',os.O_RDWR)\n"
+        "e=os.eventfd(0)\n"
+        "d=os.open('.',os.O_RDONLY)\n"
+        "g=open('gone.txt','w'); os.unlink('gone.txt')\n"
+        "if g.fileno()!=11: raise SystemExit(4)\n"
+        "open('ready','w').close()\n"
+        "time.sleep(600)\n" % (ndir, ndir)
+    )
+    return Fixture("NFS(files on a listed NFS mount)", [sys.executable, "-c", py], cwd=ndir, expect_fds=12)
 
 
 def socket_path_holder(work: str) -> Fixture:
@@ -2726,6 +2805,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     nsx = userns_unlisted_holder(work)
     nlc = newline_comm_holder(work)
     mq = mqueue_holder(work)
+    nfs = nfs_holder(work)
     o = offset_holder(work)
     x = non_utf8_holder(work)
     z = zombie_holder(work)
@@ -2754,13 +2834,13 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     # MT's and AUTOFS's base: a directory here, mounted over in each run's
     # namespace, where the cases' paths ({MTPLAIN}...) lead.
     os.makedirs(os.path.join(work, "mt"))
-    mtwrap = mt_wrap(work, os.path.join(work, "mt"))
+    mtwrap = mt_wrap(work, os.path.join(work, "mt"), nfs.cwd)
     mt = mt_probe(work, mtwrap, "table")
     af = mt_probe(work, mtwrap, "autofs")
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
         em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw, cr,
-        nlk, nsx, nlc, mq,
+        nlk, nsx, nlc, mq, nfs,
     )
 
 
@@ -2908,7 +2988,7 @@ def run(args) -> int:
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
             sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
-            crcomm, unlisted, nsunlisted, nlcomm, mqueues,
+            crcomm, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -3095,7 +3175,7 @@ def run(args) -> int:
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
                 ptyhost, ptyguest, devnode, optional["WRACE"][0], rawsocks, udplite,
-                nsraw, unlisted, nsunlisted, nlcomm, mqueues,
+                nsraw, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles,
             )
             if f is not None
         ]:
@@ -3177,6 +3257,8 @@ def run(args) -> int:
                     for key, (fx, _) in optional.items()
                 },
                 "A": str(a.pid),
+                "NFS": str(nfsfiles.pid),
+                "NFSDIR": nfsfiles.cwd,
                 "B": str(b.pid),
                 "C": str(c.pid),
                 "D": str(d.pid),
@@ -3291,12 +3373,15 @@ def run(args) -> int:
             if key == "WRACE":
                 dropped += [c["name"] for c in cases if needs_race(c) and c["name"] not in dropped]
             if key == "MT":
-                # The `passwd` and `mqueue` modes need what the table's probe
+                # The `passwd`, `mqueue` and `nfs` modes need what the table's probe
                 # proved: root, and a mount namespace to make them in.
                 dropped += [
                     c["name"]
                     for c in cases
-                    if any(needs_mt(c, mode) for mode in ("table", "passwd", "mqueue"))
+                    if any(
+                        needs_mt(c, mode)
+                        for mode in ("table", "passwd", "mqueue", "nfs", "nomounts")
+                    )
                     and c["name"] not in dropped
                 ]
             if key == "MTAUTO":
@@ -3537,6 +3622,22 @@ def self_test() -> int:
         check("...which holds the host's accounts and WJ's and WA's",
               open(os.path.join(td, "passwd-mt"), encoding="utf-8").read().endswith(PASSWD_EXTRA)
               and "\nroot:" in "\n" + open(os.path.join(td, "passwd-mt"), encoding="utf-8").read())
+        nfs_text = open(mt_wrap(td, os.path.join(td, "mt"), "/x/nfs")).read()
+        nfs_branch = nfs_text.split('if [ "$mode" = nfs ]', 1)[-1].split("\nfi\n", 1)[0]
+        check("the MT nfs mode lists the NFS mount on fixture NFS's directory",
+              "srv:/export /x/nfs nfs4 rw,relatime 0 0" in nfs_branch
+              and "cat /proc/self/mounts" in nfs_branch)
+        check("...binds it over the /proc/mounts link itself, before its binary, and mounts no table",
+              nfs_branch.index("O_NOFOLLOW") < nfs_branch.index('"$@"')
+              and "mount -t tmpfs" not in nfs_branch and "O_PATH" in NFS_BIND
+              and "'/proc/mounts'" in NFS_BIND)
+        check("...and a table that cannot be bound is no result",
+              "no MT nfs ($$)" in nfs_branch)
+        nomounts = nfs_text.split('if [ "$mode" = nomounts ]', 1)[-1].split("\nfi\n", 1)[0]
+        check("the MT nomounts mode mounts a procfs with no /proc/mounts before its binary",
+              nomounts.index("subset=pid") < nomounts.index('"$@"')
+              and "no MT nomounts ($$)" in nomounts
+              and "mount -t tmpfs" not in nomounts)
         check("the MT mqueue mode mounts the queues under the table's base",
               text.index("mount -t tmpfs lsof-rs-mt") < text.index("mount -t mqueue")
               < text.rindex('"$@"'))

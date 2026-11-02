@@ -17,7 +17,8 @@ USAGE (root, and ONLY inside a private mount namespace):
     fuse_hang.py MOUNTPOINT [--mode hold|stall|delay|serve] [--delay SECS]
                  [--answer-first N] [--ready FILE] [--log FILE]
                  [--lifetime SECS] [--subtype NAME]
-                 [--symlink NAME=TARGET] [--hang-op getattr|readlink]
+                 [--symlink NAME=TARGET] [--file NAME=SOURCE]
+                 [--hang-op getattr|readlink|file] [--hang-when PATH]
 
 MODES (what happens to a GETATTR -- a stat(2) -- of the root):
 
@@ -39,9 +40,19 @@ MODES (what happens to a GETATTR -- a stat(2) -- of the root):
                      (not in stall mode, which stops reading after INIT).
   --symlink NAME=TARGET   the root holds one entry, a symbolic link NAME -> TARGET
                      (LOOKUP of NAME answers it; every other name is ENOENT).
+  --file NAME=SOURCE the root holds an entry NAME, a regular file (mode 0755)
+                     whose bytes are SOURCE's, read when the server starts:
+                     it can be opened, read, mapped and executed (OPEN, READ,
+                     FLUSH, RELEASE are answered).
   --hang-op OP       which request the mode applies to: getattr (default; a
-                     stat(2) of the root) or readlink (READLINK of the
-                     --symlink entry; GETATTRs are then answered at once).
+                     stat(2) of the root), readlink (READLINK of the
+                     --symlink entry; GETATTRs are then answered at once) or
+                     file (GETATTR of the --file entry; the root's are then
+                     answered at once).
+  --hang-when PATH   the hang op is answered at once while PATH does not
+                     exist, and the mode applies once it does: a fixture can
+                     open, or exec, what it needs before the mount stops
+                     answering.
   --lifetime SECS    the server exits on its own after SECS (default 900):
                      a safety net, so a forgotten fixture cannot hang the
                      namespace forever.
@@ -76,6 +87,7 @@ import time
 
 FUSE_LOOKUP, FUSE_FORGET, FUSE_GETATTR = 1, 2, 3
 FUSE_READLINK = 5
+FUSE_OPEN, FUSE_READ, FUSE_RELEASE, FUSE_FLUSH = 14, 15, 18, 25
 FUSE_STATFS = 17
 FUSE_GETXATTR = 22
 FUSE_INIT = 26
@@ -87,7 +99,8 @@ FUSE_BATCH_FORGET = 42
 FUSE_READDIRPLUS = 44
 FUSE_STATX = 52
 
-NAMES = {1: "LOOKUP", 2: "FORGET", 3: "GETATTR", 5: "READLINK", 17: "STATFS", 22: "GETXATTR",
+NAMES = {1: "LOOKUP", 2: "FORGET", 3: "GETATTR", 5: "READLINK", 14: "OPEN", 15: "READ",
+         17: "STATFS", 18: "RELEASE", 22: "GETXATTR", 25: "FLUSH",
          26: "INIT", 27: "OPENDIR", 28: "READDIR", 29: "RELEASEDIR",
          34: "ACCESS", 36: "INTERRUPT", 38: "DESTROY", 42: "BATCH_FORGET",
          44: "READDIRPLUS", 52: "STATX"}
@@ -101,6 +114,8 @@ ATTR = struct.Struct("<QQQQQQIIIIIIIIII")  # fuse_attr, 88 bytes
 ATTR_OUT_HEAD = struct.Struct("<QII")      # attr_valid, nsec, dummy
 ENTRY_OUT_HEAD = struct.Struct("<QQQQII")  # nodeid, generation, entry/attr valid
 OPEN_OUT = struct.Struct("<QIi")           # fuse_open_out, 16 bytes
+READ_IN = struct.Struct("<QQI")            # fh, offset, size (fuse_read_in's head)
+FILE_NODE = 3                              # the --file entry's node
 STATFS_OUT = struct.Struct("<QQQQQIIII6I")  # fuse_kstatfs, 80 bytes
 
 MS_NOSUID, MS_NODEV = 2, 4
@@ -122,18 +137,21 @@ def reply(fd, unique, err=0, payload=b""):
         log("reply unique=%d failed: %s" % (unique, e))
 
 
-def attr_of(node, target=b""):
+def attr_of(node, target=b"", size=0):
     now = int(time.time())
     if node == 1:
         return ATTR.pack(1, 0, 0, now, now, now, 0, 0, 0,
                          0o40755, 2, 0, 0, 0, 4096, 0)
+    if node == FILE_NODE:
+        return ATTR.pack(node, size, (size + 511) // 512, now, now, now, 0, 0, 0,
+                         0o100755, 1, 0, 0, 0, 4096, 0)
     return ATTR.pack(node, len(target), 0, now, now, now, 0, 0, 0,
                      0o120777, 1, 0, 0, 0, 4096, 0)
 
 
-def root_attr(node=1, target=b""):
+def root_attr(node=1, target=b"", size=0):
     # attr_valid 0: never cached, so every stat(2) asks again
-    return ATTR_OUT_HEAD.pack(0, 0, 0) + attr_of(node, target)
+    return ATTR_OUT_HEAD.pack(0, 0, 0) + attr_of(node, target, size)
 
 
 def main():
@@ -149,7 +167,9 @@ def main():
     ap.add_argument("--lifetime", type=float, default=900.0)
     ap.add_argument("--subtype", default="hang")
     ap.add_argument("--symlink")
-    ap.add_argument("--hang-op", choices=("getattr", "readlink"), default="getattr")
+    ap.add_argument("--file")
+    ap.add_argument("--hang-op", choices=("getattr", "readlink", "file"), default="getattr")
+    ap.add_argument("--hang-when")
     a = ap.parse_args()
     if a.log:
         LOG = open(a.log, "a", buffering=1)
@@ -159,6 +179,13 @@ def main():
     if a.symlink:
         n, _, t = a.symlink.partition("=")
         link_name, link_target = n.encode(), t.encode()
+    file_name, file_bytes = None, b""
+    if a.file:
+        n, _, src = a.file.partition("=")
+        with open(src, "rb") as f:
+            file_name, file_bytes = n.encode(), f.read()
+    # The node whose GETATTR is the hang op, for --hang-op getattr or file.
+    hang_node = FILE_NODE if a.hang_op == "file" else 1
     fd = os.open("/dev/fuse", os.O_RDWR | os.O_CLOEXEC)
     libc = ctypes.CDLL(None, use_errno=True)
     opts = "fd=%d,rootmode=40000,user_id=0,group_id=0,allow_other" % fd
@@ -223,17 +250,22 @@ def main():
             if op == FUSE_STATX:              # not negotiated; 7.31 has none
                 reply(fd, unique, -errno.ENOSYS)
                 continue
-            if op == FUSE_GETATTR and (a.hang_op != "getattr" or nodeid != 1):
+            if op == FUSE_GETATTR and (a.hang_op == "readlink" or nodeid != hang_node):
                 log("GETATTR unique=%d node=%d pid=%d answered (not the hang op)" % (unique, nodeid, pid))
-                reply(fd, unique, 0, root_attr(nodeid, link_target))
+                reply(fd, unique, 0, root_attr(nodeid, link_target, len(file_bytes)))
                 continue
             if op == FUSE_READLINK and a.hang_op != "readlink":
                 log("READLINK unique=%d node=%d pid=%d answered" % (unique, nodeid, pid))
                 reply(fd, unique, 0, link_target)
                 continue
             if op == FUSE_GETATTR or op == FUSE_READLINK:
+                answer = (root_attr(nodeid, link_target, len(file_bytes))
+                          if op == FUSE_GETATTR else link_target)
+                if a.hang_when and not os.path.exists(a.hang_when):
+                    log("%s unique=%d node=%d pid=%d answered (not yet)" % (name, unique, nodeid, pid))
+                    reply(fd, unique, 0, answer)
+                    continue
                 getattrs += 1
-                answer = root_attr() if op == FUSE_GETATTR else link_target
                 if a.mode == "serve" or getattrs <= a.answer_first:
                     log("%s unique=%d node=%d pid=%d answered" % (name, unique, nodeid, pid))
                     reply(fd, unique, 0, answer)
@@ -253,12 +285,20 @@ def main():
             if op == FUSE_LOOKUP:
                 if link_name is not None and nodeid == 1 and body.rstrip(b"\0") == link_name:
                     reply(fd, unique, 0, ENTRY_OUT_HEAD.pack(2, 0, 0, 0, 0, 0) + attr_of(2, link_target))
+                elif file_name is not None and nodeid == 1 and body.rstrip(b"\0") == file_name:
+                    reply(fd, unique, 0, ENTRY_OUT_HEAD.pack(FILE_NODE, 0, 0, 0, 0, 0)
+                          + attr_of(FILE_NODE, size=len(file_bytes)))
                 else:
                     reply(fd, unique, -errno.ENOENT)
             elif op == FUSE_STATFS:
                 reply(fd, unique, 0, STATFS_OUT.pack(0, 0, 0, 0, 0, 4096, 255, 4096, 0, *([0] * 6)))
-            elif op == FUSE_OPENDIR:
+            elif op == FUSE_OPENDIR or (op == FUSE_OPEN and nodeid == FILE_NODE):
                 reply(fd, unique, 0, OPEN_OUT.pack(1, 0, 0))
+            elif op == FUSE_READ and nodeid == FILE_NODE:
+                _, offset, size = READ_IN.unpack_from(body)
+                reply(fd, unique, 0, file_bytes[offset:offset + size])
+            elif op in (FUSE_FLUSH, FUSE_RELEASE):
+                reply(fd, unique, 0)
             elif op in (FUSE_READDIR, FUSE_READDIRPLUS):
                 reply(fd, unique, 0, b"")
             elif op in (FUSE_RELEASEDIR, FUSE_ACCESS, FUSE_DESTROY):

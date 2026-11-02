@@ -82,6 +82,18 @@ impl Backend for LinuxBackend {
     }
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
+        self.gather_with(sel, &lsof_core::SafeFs::in_process())
+    }
+
+    /// The gather, with `fs` for the calls the C makes through
+    /// `statsafely()` once its table lists an NFS mount: every per-file
+    /// `stat` and `lstat`, under the run's `-b`, `-O`, `-S` and `-w`
+    /// (DIVERGENCES 124). With no NFS mount listed none goes through it.
+    fn gather_with(
+        &self,
+        sel: &Selection,
+        fs: &lsof_core::SafeFs,
+    ) -> Result<Vec<Process>, BackendError> {
         let process::Enumerated { mut procs, zombies } = process::enumerate(sel.numeric_ids);
 
         // `-t` prints PIDs only, and the renderer emits a process's PID whether
@@ -165,10 +177,66 @@ impl Backend for LinuxBackend {
             mnt_ns: std::fs::metadata("/proc/self/ns/mnt").ok().map(|m| m.ino()),
             helpers: &helpers,
             mqueue_device: sel.mqueue_device,
+            fs: (sel.has_nfs != 0).then(|| fs.with(sel.blocking, !sel.omit_unreadable)),
+            nfs_mounts: if sel.has_nfs == 2 {
+                &sel.nfs_mounts
+            } else {
+                &[]
+            },
         };
 
+        // `-K`: every other thread becomes its own entry, repeating the whole
+        // file set from its own `/proc/<pid>/task/<tid>` — which is what makes
+        // `lsof -K` on a 3-thread process print three times the rows, mapped
+        // files included. The main thread is not among them: it IS the process,
+        // and shows blank TID/TASKCMD cells.
+        //
+        // An explicit `-K` makes tasks a selector of their own, so EVERY
+        // process's tasks are candidates — `lsof -K -p N` lists N's rows
+        // and every other process's task rows, because the two selectors
+        // are ORed. Under `-a` they are not: a task has its process's PID,
+        // UID, group and command, so it passes the process selecters
+        // exactly when its process does, and the tasks of a process
+        // `restrict` left out cannot be listed. Reading their fd tables
+        // anyway had made `lsof -K -a -p N` walk every task on the host.
+        // Without `-K` the listing is the unselected default, where
+        // `restrict` is `None` anyway, so this costs nothing extra.
+        let task_scope = match sel.tasks {
+            lsof_core::TaskMode::Always if !sel.and_mode => None,
+            _ => restrict.as_ref(),
+        };
+        // `-K -a`: a process is listed only as a task, and the C reads one
+        // with no other task not at all (`dproc.c:415-421`: it is entered as
+        // a task only when it has some, `ht`), which shows where its walk
+        // says something (an NFS host's `-b` warnings).
+        let tasks_only = sel.and_mode && sel.tasks == lsof_core::TaskMode::Always;
+        let mut tasks = Vec::new();
         for p in procs.iter_mut() {
-            if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
+            // A process an exclusion names is not read at all, nor its tasks
+            // (`is_proc_excl()`): there is nothing of it to list, and what its
+            // walk would say and cost the C never does (DIVERGENCES 124).
+            if !sel.reads_process(p) {
+                continue;
+            }
+            // A process's tasks are read before the process itself, as the C
+            // reads them (`dproc.c:349-406`): what a walk says, the `-b`
+            // warnings of an NFS host's run, comes in the C's order.
+            let mut has_tasks = false;
+            if sel.lists_tasks() && !task_scope.is_some_and(|s| !s.contains(&p.pid)) {
+                for mut t in process::tasks_of(p) {
+                    let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
+                    let ctx = files::GatherCtx {
+                        sockets_only: sel.sockets_only_for(&t),
+                        ..ctx
+                    };
+                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
+                    t.unlisted = t.files.is_empty();
+                    tasks.push(t);
+                    has_tasks = true;
+                }
+            }
+            if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) || (tasks_only && !has_tasks)
+            {
                 continue;
             }
             // A zombie holds nothing — its fd table and `mm` are gone — and it
@@ -180,42 +248,16 @@ impl Backend for LinuxBackend {
             // — comes back with the rows that say what could not be read, as
             // the C's do; under `-w` or `-t`, with none, and then it has no
             // line at all (it is still found: `-p` naming it is located).
+            // Sockets alone, for a process the run ORs a network selecter
+            // with process selecters that it does not match (`Ckscko`).
+            let ctx = files::GatherCtx {
+                sockets_only: sel.sockets_only_for(p),
+                ..ctx
+            };
             p.files = files::for_pid(p.pid, p.uid, &ctx);
             p.unlisted = p.files.is_empty();
         }
-
-        // `-K`: every other thread becomes its own entry, repeating the whole
-        // file set from its own `/proc/<pid>/task/<tid>` — which is what makes
-        // `lsof -K` on a 3-thread process print three times the rows, mapped
-        // files included. The main thread is not among them: it IS the process,
-        // and shows blank TID/TASKCMD cells.
         if sel.lists_tasks() {
-            let mut tasks = Vec::new();
-            // An explicit `-K` makes tasks a selector of their own, so EVERY
-            // process's tasks are candidates — `lsof -K -p N` lists N's rows
-            // and every other process's task rows, because the two selectors
-            // are ORed. Under `-a` they are not: a task has its process's PID,
-            // UID, group and command, so it passes the process selecters
-            // exactly when its process does, and the tasks of a process
-            // `restrict` left out cannot be listed. Reading their fd tables
-            // anyway had made `lsof -K -a -p N` walk every task on the host.
-            // Without `-K` the listing is the unselected default, where
-            // `restrict` is `None` anyway, so this costs nothing extra.
-            let task_scope = match sel.tasks {
-                lsof_core::TaskMode::Always if !sel.and_mode => None,
-                _ => restrict.as_ref(),
-            };
-            for p in procs.iter() {
-                if task_scope.is_some_and(|s| !s.contains(&p.pid)) {
-                    continue;
-                }
-                for mut t in process::tasks_of(p) {
-                    let base = format!("/proc/{}/task/{}", p.pid, t.tid.unwrap_or(p.pid));
-                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
-                    t.unlisted = t.files.is_empty();
-                    tasks.push(t);
-                }
-            }
             procs.extend(tasks);
             // The C emits each process followed by its tasks in tid order; a
             // stable sort on (pid, tid) reproduces that, with `None` — the
@@ -659,5 +701,112 @@ mod tests {
             and.iter().all(|&p| p == me),
             "-K -a -p {me} read the tasks of {and:?}"
         );
+    }
+
+    /// With an NFS mount listed (`has_nfs`), the gather makes its per-file
+    /// calls through the layer it is given, under the run's `-b` and `-w`:
+    /// each avoided and said to be, and every row the C's shape for it. With
+    /// none listed the same `-b` changes nothing: the C `stat`s in itself
+    /// there, `-b` or not (DIVERGENCES 124).
+    #[test]
+    #[cfg_attr(miri, ignore = "miri has no /proc/self/fd links to read")]
+    fn under_nfs_the_gather_goes_through_the_layer() {
+        use lsof_core::model::{FdType, FileType};
+        let me: u32 = std::fs::read_to_string("/proc/self/stat")
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let said = std::cell::RefCell::new(Vec::new());
+        let sink = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = lsof_core::SafeFs::new(&lsof_core::InProcess, &sink);
+        let sel = Selection {
+            pids: vec![me],
+            blocking: lsof_core::Blocking {
+                avoid: true,
+                ..lsof_core::Blocking::default()
+            },
+            ..Default::default()
+        };
+        let cwd = |procs: &[Process]| {
+            procs
+                .iter()
+                .find(|p| p.pid == me)
+                .and_then(|p| p.files.iter().find(|f| f.fd == FdType::Cwd).cloned())
+                .expect("a cwd row")
+        };
+        let plain = LinuxBackend::new().gather_with(&sel, &fs).unwrap();
+        assert_eq!(
+            cwd(&plain).file_type,
+            FileType::Dir,
+            "no NFS: -b changes nothing"
+        );
+        assert!(said.borrow().is_empty(), "{:?}", said.borrow());
+        let nfs = Selection {
+            has_nfs: 1,
+            ..sel.clone()
+        };
+        let got = LinuxBackend::new().gather_with(&nfs, &fs).unwrap();
+        let c = cwd(&got);
+        assert_eq!(c.file_type, FileType::Unknown);
+        assert!(
+            c.name
+                .ends_with(" (stat: Resource temporarily unavailable)")
+                || c.name.ends_with(" (stat: No such file or directory)"),
+            "{}",
+            c.name
+        );
+        assert_eq!(
+            said.borrow().first().map(String::as_str),
+            Some(format!("lsof: avoiding stat(/proc/{me}/cwd): -b was specified.").as_str())
+        );
+        // `-w`: the same rows, with nothing said and no reason in NAME.
+        said.borrow_mut().clear();
+        let quiet = Selection {
+            omit_unreadable: true,
+            ..nfs
+        };
+        let c = cwd(&LinuxBackend::new().gather_with(&quiet, &fs).unwrap());
+        assert_eq!((c.file_type, c.name_addition), (FileType::Unknown, None));
+        assert!(said.borrow().is_empty(), "{:?}", said.borrow());
+    }
+
+    /// `-K -a`: a process with no task but itself is not read at all, as
+    /// the C enters it as a task only when it has others; with them, or
+    /// without `-a`, it is.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+    )]
+    fn dash_k_and_a_reads_no_process_without_tasks() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let read = |and_mode| {
+            let sel = Selection {
+                pids: vec![pid],
+                tasks: lsof_core::TaskMode::Always,
+                and_mode,
+                ..Default::default()
+            };
+            let procs = LinuxBackend::new().gather(&sel).unwrap();
+            procs
+                .iter()
+                .find(|p| p.pid == pid && p.tid.is_none())
+                .map(|p| p.files.len())
+        };
+        let (or, and) = (read(false), read(true));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            or.is_some_and(|n| n > 0),
+            "the control: -K -p reads it: {or:?}"
+        );
+        assert_eq!(and, Some(0), "-K -a -p reads nothing of it");
     }
 }
