@@ -677,7 +677,10 @@ mod tests {
             "abcdé\\xff"
         );
         assert_eq!(cut_command(b"ab", w9), "ab");
-        assert_eq!(cut_command(b"a b\\\x1b", w9), "a b\\\\^[");
+        // Windows paths keep `\` bare (`Escaper::WINDOWS`); elsewhere the
+        // C doubles it.
+        let bs = if cfg!(windows) { "\\" } else { "\\\\" };
+        assert_eq!(cut_command(b"a b\\\x1b", w9), format!("a b{bs}^["));
         assert_eq!(cut_command(b"abc", CommandWidth::Unlimited), "");
     }
 
