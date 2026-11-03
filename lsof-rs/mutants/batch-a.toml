@@ -357,7 +357,7 @@ name = "unknown-login-no-error"
 rule = "a -u login the host does not know is can't get UID for X, an error (114, 73)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''            UserLookup::Unknown => early.no_uid(&shown(name)),'''
+old = '''            UserLookup::Unknown => early.no_uid(&shown_bytes(name)),'''
 new = '''            UserLookup::Unknown => {}'''
 
 [[mutant]]

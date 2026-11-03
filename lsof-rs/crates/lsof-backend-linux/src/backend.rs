@@ -77,7 +77,17 @@ impl Backend for LinuxBackend {
         true
     }
 
+    /// The C's `-E`/`+E` tables are built from every process's rows, which
+    /// the core has once the gather is over (DIVERGENCES 56).
+    fn leaves_endpoints_to_core(&self) -> bool {
+        true
+    }
+
     fn lookup_user(&self, value: &str) -> lsof_core::UserLookup {
+        crate::users::lookup(value.as_bytes())
+    }
+
+    fn lookup_user_bytes(&self, value: &[u8]) -> lsof_core::UserLookup {
         crate::users::lookup(value)
     }
 
@@ -133,17 +143,20 @@ impl Backend for LinuxBackend {
         // Scope the fd walk to processes a process-level selector can still
         // match, so `lsof -p/-c/-u …` doesn't read every process's fd table.
         // `None` means no such selector was given — inspect everything.
-        let restrict: Option<HashSet<u32>> = if sel.has_process_selector() {
-            Some(
-                procs
-                    .iter()
-                    .filter(|p| sel.selects_process(p))
-                    .map(|p| p.pid)
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        // Not under `-E`/`+E`, where the C reads every process for its ends
+        // (DIVERGENCES 56).
+        let restrict: Option<HashSet<u32>> =
+            if sel.has_process_selector() && !sel.reads_every_process() {
+                Some(
+                    procs
+                        .iter()
+                        .filter(|p| sel.selects_process(p))
+                        .map(|p| p.pid)
+                        .collect(),
+                )
+            } else {
+                None
+            };
 
         // /proc/net is system-wide, so it is read once for the whole gather
         // rather than per process. `-T q` is the only reason to pay for queue
@@ -202,14 +215,16 @@ impl Backend for LinuxBackend {
         // Without `-K` the listing is the unselected default, where
         // `restrict` is `None` anyway, so this costs nothing extra.
         let task_scope = match sel.tasks {
-            lsof_core::TaskMode::Always if !sel.and_mode => None,
+            lsof_core::TaskMode::Always if !sel.and_mode || sel.reads_every_process() => None,
             _ => restrict.as_ref(),
         };
         // `-K -a`: a process is listed only as a task, and the C reads one
         // with no other task not at all (`dproc.c:415-421`: it is entered as
         // a task only when it has some, `ht`), which shows where its walk
         // says something (an NFS host's `-b` warnings).
-        let tasks_only = sel.and_mode && sel.tasks == lsof_core::TaskMode::Always;
+        // Under `-E`/`+E` it reads that one too.
+        let tasks_only =
+            sel.and_mode && sel.tasks == lsof_core::TaskMode::Always && !sel.reads_every_process();
         let mut tasks = Vec::new();
         for p in procs.iter_mut() {
             // A process an exclusion names is not read at all, nor its tasks
@@ -233,6 +248,19 @@ impl Backend for LinuxBackend {
                     t.unlisted = t.files.is_empty();
                     tasks.push(t);
                     has_tasks = true;
+                }
+            } else if sel.lists_tasks() && zombies.contains(&p.pid) {
+                // A zombie leader has no entry of its own to be found by,
+                // and the C still reads its live tasks, each with the
+                // leader's owner (`dproc.c:349-406`), whose `is_proc_excl()`
+                // locates a `-p`, `-g` or `-u` that names them though they
+                // then fail the AND (DIVERGENCES 72): `lsof -V -K -a -u U -c
+                // nomatch` does not say `user ID not located`. Entered with
+                // no file read, for the search items alone: no task here
+                // can be listed, as it fails the AND as its leader did.
+                for mut t in process::tasks_of(p) {
+                    t.unlisted = true;
+                    tasks.push(t);
                 }
             }
             if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) || (tasks_only && !has_tasks)
@@ -684,9 +712,16 @@ mod tests {
                 ..Default::default()
             };
             let procs = LinuxBackend::new().gather(&sel).unwrap();
+            // A zombie leader's tasks are entered under `-K` whatever the
+            // AND says, for search items alone: `unlisted`, no fd table
+            // read (row 72). Any host may have one, so they are not what
+            // this asks about; that they hold no file is asked here.
+            for p in procs.iter().filter(|p| p.unlisted && p.tid.is_some()) {
+                assert!(p.files.is_empty(), "a zombie's task {p:?} read files");
+            }
             procs
                 .iter()
-                .filter(|p| p.tid.is_some())
+                .filter(|p| p.tid.is_some() && !p.unlisted)
                 .map(|p| p.pid)
                 .collect()
         };

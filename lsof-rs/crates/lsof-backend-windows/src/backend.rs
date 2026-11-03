@@ -201,6 +201,7 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![file],
         });
         idx.insert(pid, i);

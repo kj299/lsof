@@ -195,6 +195,7 @@ fn table_offset_with_dash_o() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -268,6 +269,7 @@ fn the_size_off_column_has_three_modes() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![
             file(FdType::Handle(3), FileType::Regular, Some(100), Some(42)),
             file(FdType::Cwd, FileType::Dir, Some(4096), None),
@@ -395,6 +397,7 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -456,6 +459,7 @@ fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -585,6 +589,7 @@ fn a_task_row_is_distinguishable_from_a_thread_handle() {
         user: Some("runneradmin".into()),
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![file(FdType::Task), file(FdType::Handle(180))],
     };
     let out = table::render(&[p], TableOpts::new(Escaper::WINDOWS));
@@ -620,6 +625,7 @@ fn table_command_width_caps() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -681,6 +687,7 @@ fn fields_skips_empty_name() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -819,6 +826,7 @@ fn windows_object_types_render() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![
             mk(0x1a4, FileType::Key, "\\REGISTRY\\MACHINE\\SOFTWARE"),
             mk(
@@ -947,6 +955,7 @@ fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
         user: Some(user.into()),
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -1191,6 +1200,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         }],
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
     }]
 }
 
@@ -1455,6 +1465,7 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
         user: None,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -1819,6 +1830,7 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
         user: Some("root".into()),
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -1923,6 +1935,7 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
         user: Some("root".into()),
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -2007,6 +2020,7 @@ fn python3(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
         files,
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
     }
 }
 
@@ -2340,6 +2354,7 @@ fn jproc(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
         user: Some("root".into()),
         endpoint_peer: false,
         unlisted: false,
+        raw_names: None,
         files,
     }
 }

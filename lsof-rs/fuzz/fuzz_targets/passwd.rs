@@ -11,9 +11,10 @@ use libfuzzer_sys::fuzz_target;
 use lsof_backend_linux::fuzz_api::parse_passwd;
 
 fuzz_target!(|data: &[u8]| {
-    let text = String::from_utf8_lossy(data);
-    let map = parse_passwd(&text);
-    // Every entry came from a line whose third field parsed as u32 and whose
-    // first field existed; the map can never hold more entries than lines.
-    assert!(map.len() <= text.lines().count());
+    // Bytes, as glibc reads the file (DIVERGENCES 70).
+    let map = parse_passwd(data);
+    // Every entry came from a line glibc's rules accept; the map can never
+    // hold more entries than lines, nor a name past LOGINML (32) bytes.
+    assert!(map.len() <= data.split(|&b| b == b'\n').count());
+    assert!(map.values().all(|n| n.len() <= 32));
 });

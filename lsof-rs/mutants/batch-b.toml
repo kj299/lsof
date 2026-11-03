@@ -202,9 +202,9 @@ rule = "-e takes its value word whatever it opens with (83)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
 old = '''                    // options after.
-                    let value = required_value(&chars, j, &args, &mut i).unwrap_or_default();'''
+                    let value = path_value(&chars, j, letters_ok, &raw, &mut i).unwrap_or_default();'''
 new = '''                    // options after.
-                    let value = optional_value(&chars, j, &args, &mut i).unwrap_or_default();'''
+                    let value = optional_value(&chars, j, &args, &mut i).map(OsString::from).unwrap_or_default();'''
 
 [[mutant]]
 name = "long-login-ends-the-list"
@@ -212,7 +212,6 @@ rule = "a -u login too long is said and the list read on (83)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
 old = '''            early.line(&format!("-u login name > {LOGINML} characters: {echo}"));
-            rest = tail;
             continue;'''
 new = '''            early.line(&format!("-u login name > {LOGINML} characters: {echo}"));
             return Ok(());'''

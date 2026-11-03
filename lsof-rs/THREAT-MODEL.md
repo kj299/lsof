@@ -71,7 +71,7 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.filedesc.PID`: packed `kinfo_file` records, each with its own length, and `kf_path`, a name any local user's process chose | kernel, and **any local user's process** for the path | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it (DIVERGENCES 143) |
-| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`); none for `parse_passwd_names`, behind `-u NAME` |
+| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares) |
 | the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
 | Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
@@ -119,8 +119,35 @@ run: no cargo-fuzz target drives `resolve_with`, although it is pure and could
 be. `etw.rs` parses AFD event payloads (`parse_afd_create`, `parse_afd_address`,
 `parse_sockaddr`) that any process's socket activity shapes; the parsing checks
 its bounds, but it is Windows-only code and no fuzzer reaches it.
-`users::parse_passwd_names`, behind `-u NAME`, follows `parse_passwd`'s rules for
-a malformed line, but only `parse_passwd` has a target. The bounded helper's
+`users::parse_passwd` and the `-u NAME` lookup read each line by one parser,
+`parse_line`, glibc's `files` rules as the C's `getpwuid()` gets them
+(DIVERGENCES 70): bytes, any line length, checked arithmetic for the uid and
+gid; a name is kept as its first 32 bytes and printed escaped, a byte that
+is no character as `\xNN` (the C prints it raw).
+The `passwd` target drives it.
+
+**The command line is bytes** (DIVERGENCES 92): `args_os()`, so no argument
+can panic the parse. A path (a bare argument, after `--`, `+d`/`+D`, `-e`/`+e`)
+is kept as its bytes end to end and quoted escaped, and so are `-c`'s and
+`-u`'s values; a byte that is no character where an option letter stands is
+an illegal letter (0xff, the C's EOF, ends the options), stood in for while
+the letters are read by a private-use character, which a word that holds
+one as text does not get (its letters then stop at the byte, as before);
+every other option reads text and refuses what is not UTF-8. A command or
+login that is not UTF-8 is kept as bytes beside its lossy text and printed
+escaped. Where names are matched (Windows) a path argument that is not text
+names nothing, never what its lossy spelling names. The `parse_args` target
+feeds it raw bytes.
+
+**Under `-E`/`+E` every process is read** (DIVERGENCES 56), as the C reads
+it: the gather is not scoped to the processes selected, so a run naming one
+PID reads the whole host's descriptors, as a whole-host run does, and its
+names of other processes' ends (`PID,cmd,FDmode`) are escaped as NAME is
+when they are made, and stored in that printed form; before it prints them
+the renderer checks them again and escapes the whole NAME if they hold
+anything a terminal would act on. Their length is unbounded (it grows with
+the processes sharing a pipe, as the C's does), and the base before them is
+recorded by its length, so JSON's `name` never takes them in. The bounded helper's
 frame decoders (`read_frame`, `decode_stat`, `decode_error`, `decode_names`)
 check every length before they allocate and are unit-tested with malformed,
 short, oversized and foreign frames (DIVERGENCES 94), but no fuzzer drives

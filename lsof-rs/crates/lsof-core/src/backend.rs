@@ -248,6 +248,14 @@ pub trait Backend {
         false
     }
 
+    /// Whether `-E`/`+E` are left to the core, which names a pipe's and a
+    /// local connection's other ends from the rows gathered
+    /// ([`Selection::endpoints_in_core`](crate::Selection)), rather than
+    /// named by the backend as it gathers (Windows' pipes).
+    fn leaves_endpoints_to_core(&self) -> bool {
+        false
+    }
+
     /// Resolve a `-u` value the way the platform names users.
     ///
     /// The C does it with `getpwnam(3)` while it parses its options: a number
@@ -256,6 +264,16 @@ pub trait Backend {
     /// name, which is the default here.
     fn lookup_user(&self, _value: &str) -> UserLookup {
         UserLookup::ByName
+    }
+
+    /// [`Backend::lookup_user`] for a value as bytes, as the C's
+    /// `getpwnam()` compares a login: one that is not UTF-8 names no account
+    /// here unless the backend reads its accounts as bytes too.
+    fn lookup_user_bytes(&self, value: &[u8]) -> UserLookup {
+        match std::str::from_utf8(value) {
+            Ok(text) => self.lookup_user(text),
+            Err(_) => UserLookup::Unknown,
+        }
     }
 
     /// Gather processes and their open files, already narrowed by `sel` where

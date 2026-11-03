@@ -51,6 +51,9 @@ ledger — those are the kit's, on purpose.
              (123456789 and 12)
   fixture X  a process whose name, unix socket path and mapped file are not
              UTF-8 -- each had hidden something from lsof-rs
+  fixture EP two processes, {EP} and {EPC}, at the two ends of a pipe, a
+             named FIFO, a loopback TCP connection and a connected UDP pair,
+             and {EP}'s socketpair: what `-E`/`+E` name (DIVERGENCES 56)
   fixture Z  a main thread that has exited while another runs on, and a
              child never reaped: the two kinds of zombie ({Z}, {ZC})
   fixture U  a process that made itself unreadable (`PR_SET_DUMPABLE` 0):
@@ -693,6 +696,65 @@ def non_utf8_holder(work: str) -> Fixture:
     )
 
 
+def endpoint_holder(work: str) -> Fixture:
+    """{EP} and its child {EPC}, at the ends of what `-E`/`+E` name on Linux
+    (DIVERGENCES 56): {EP} writes a pipe {EPC} reads, writes a named FIFO
+    {EPC} reads, holds the server end of a loopback TCP connection {EPC}
+    made (and the listener), and one of a connected UDP pair whose other
+    end {EPC} holds; and one end of a UNIX socketpair whose other end {EPC}
+    holds, whose peer lsof-rs does not name yet. {EP} also holds a UDP
+    socket on its TCP connection's tuple reversed, three UDP sockets on one
+    tuple, and two pipes at fds 30-33, for the pairing's rules and `+E`'s
+    placement of a row. {EPC} names itself
+    `ep-child-long-name`, which an end shows cut to the `+c` width. {EP}
+    writes {EPC}'s pid, then `ready`, once every end is in place; {EPC}
+    dies with it (`PR_SET_PDEATHSIG`)."""
+    edir = os.path.join(work, "endpoints")
+    os.makedirs(edir)
+    os.mkfifo(os.path.join(edir, "ff"))
+    py = (
+        "import ctypes,os,socket,time\n"
+        "d=%r\n"
+        "libc=ctypes.CDLL(None)\n"
+        "r,w=os.pipe()\n"
+        "srv=socket.socket(); srv.bind(('127.0.0.1',0)); srv.listen(1)\n"
+        "u1=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); u1.bind(('127.0.0.1',0))\n"
+        "u2=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); u2.bind(('127.0.0.1',0))\n"
+        "u1.connect(u2.getsockname()); u2.connect(u1.getsockname())\n"
+        "a,b=socket.socketpair()\n"
+        "me=os.getpid()\n"
+        "pid=os.fork()\n"
+        "if pid==0:\n"
+        "    libc.prctl(15,b'ep-child-long-name',0,0,0)\n"
+        "    libc.prctl(1,9,0,0,0)\n"
+        "    if os.getppid()!=me: os._exit(0)\n"
+        "    os.close(w); a.close(); u1.close()\n"
+        "    f=os.open(os.path.join(d,'ff'),os.O_RDONLY|os.O_NONBLOCK)\n"
+        "    c=socket.create_connection(srv.getsockname()); srv.close()\n"
+        "    open(os.path.join(d,'child'),'w').close()\n"
+        "    time.sleep(600); os._exit(0)\n"
+        "os.close(r); b.close(); u2.close()\n"
+        "conn,_=srv.accept()\n"
+        # A UDP socket on the TCP connection's tuple reversed, which is no
+        # peer of it (another protocol), and three UDP sockets on one tuple,
+        # of which the third finds its peer taken (DIVERGENCES 56).
+        "x=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); x.bind(conn.getpeername()); x.connect(conn.getsockname())\n"
+        "q1=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); q1.bind(('127.0.0.1',0))\n"
+        "q2=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); q2.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); q2.bind(('127.0.0.1',0))\n"
+        "q3=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); q3.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); q3.bind(q2.getsockname())\n"
+        "q1.connect(q2.getsockname()); q2.connect(q1.getsockname()); q3.connect(q1.getsockname())\n"
+        # Two pipes at 30-33, whose ends `+E` puts among the rows by number.
+        "for fd,(a0,a1) in ((30,os.pipe()),(32,os.pipe())):\n"
+        "    os.dup2(a0,fd); os.dup2(a1,fd+1); os.close(a0); os.close(a1)\n"
+        "while not os.path.exists(os.path.join(d,'child')): time.sleep(0.01)\n"
+        "f=os.open(os.path.join(d,'ff'),os.O_WRONLY|os.O_NONBLOCK)\n"
+        "open(os.path.join(d,'epc.pid'),'w').write(str(pid))\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(600)\n" % (edir,)
+    )
+    return Fixture("EP(endpoints)", [sys.executable, "-c", py], cwd=edir, expect_fds=3)
+
+
 def tab_name_holder(work: str) -> Fixture:
     """A process that maps one file, whose name holds a TAB: `tab<TAB>here`.
     The C's `get_fields()` ends a maps path at a TAB, so it reads this one as
@@ -1207,12 +1269,15 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     process's `/proc/self/mounts` changes. And `nomounts` mounts a procfs
     of the namespace's own over `/proc` with `subset=pid`, which has no
     `/proc/mounts` at all: both binaries end where they first read the
-    table, `can't fopen(/proc/mounts, "r")`."""
+    table, `can't fopen(/proc/mounts, "r")`. And `noetc` mounts an empty
+    tmpfs over `/etc`, so that `/etc/passwd` cannot be `stat`ed: a `-r` run
+    that prints a login ends at its first cycle, `can't stat(/etc/passwd)`
+    (DIVERGENCES 70), the one way such a run ends by itself."""
     path = os.path.join(work, "mt-wrap.sh")
     b = shlex.quote(base)
     passwd = os.path.join(work, "passwd-mt")
     with open("/etc/passwd", "rb") as src, open(passwd, "wb") as dst:
-        dst.write(src.read() + PASSWD_EXTRA.encode("utf-8"))
+        dst.write(src.read() + PASSWD_EXTRA.encode("utf-8", "surrogateescape"))
     os.chmod(passwd, 0o644)
     with open(path, "w") as f:
         f.write(
@@ -1223,6 +1288,12 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             'if [ "$mode" = passwd ]; then\n'
             f"    mount --bind {shlex.quote(passwd)} /etc/passwd || "
             '{ echo "linux_diff: no MT passwd ($$)"; exit 2; }\n'
+            '    "$@"\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "$mode" = noetc ]; then\n'
+            '    mount -t tmpfs lsof-rs-etc /etc || '
+            '{ echo "linux_diff: no MT noetc ($$)"; exit 2; }\n'
             '    "$@"\n'
             "    exit $?\n"
             "fi\n"
@@ -2561,11 +2632,34 @@ OWNER_SHAPES = {
     "WB": (0, 3000000000),
     "WJ": (0, 65010),
     "WA": (0, 65011),
+    # DIVERGENCES 70: owners whose lines glibc's `files` rules read apart.
+    "WL": (0, 65012),
+    "WC": (0, 65013),
+    "WP": (0, 65014),
+    "WN": (0, 65015),
+    "WG": (0, 65016),
+    # DIVERGENCES 70 and 92: a login cut to 32 bytes inside a character, and
+    # one that is not UTF-8.
+    "WU": (0, 65017),
+    "WX": (0, 65018),
 }
 
 # The password file `LSOF_DIFF_MT=passwd` binds over /etc/passwd: the host's,
-# and WJ's and WA's accounts after it.
-PASSWD_EXTRA = "j\u00f6hn:x:65010:65010::/:/bin/false\nab:x:65011:65011::/:/bin/false\n"
+# and WJ's and WA's accounts after it; then the lines of DIVERGENCES 70,
+# each read as glibc's `files` service reads it: WL's name after blanks
+# (`lead`), WC's commented out and WP's a NIS `+` entry (no name for either),
+# WN's 40 bytes long (cut to 32), and WG's first line refused for its gid
+# and its second taken (`good`).
+PASSWD_EXTRA = (
+    "j\u00f6hn:x:65010:65010::/:/bin/false\nab:x:65011:65011::/:/bin/false\n"
+    "  lead:x:65012:65012::/:/bin/false\n"
+    "#com:x:65013:65013::/:/bin/false\n"
+    "+plus:x:65014:65014::/:/bin/false\n"
+    + "n" * 40 + ":x:65015:65015::/:/bin/false\n"
+    "bad:x:65016:\ngood:x: 65016:+65016::/:/bin/false\n"
+    + "L" * 31 + "\u00e9:x:65017:65017::/:/bin/false\n"
+    "ab\udcffcd:x:65018:65018::/:/bin/false\n"
+)
 
 
 def unlock(top: str) -> None:
@@ -2607,13 +2701,15 @@ def owner_holder(work: str) -> Fixture:
     {W} runs with real uid 0 and effective 65534, {WR} the other way round,
     and {WB} with real uid 0 and effective 3000000000, which no account has;
     {WJ} and {WA} with effective 65010 and 65011, which have one only in the
-    password file `LSOF_DIFF_MT=passwd` binds over the host's.
+    password file `LSOF_DIFF_MT=passwd` binds over the host's, and {WL},
+    {WC}, {WP}, {WN} and {WG}, 65012 to 65016, whose lines there glibc's
+    `files` rules read apart (DIVERGENCES 70).
     Only root can make any, so the fixture starts through `sudo -n` when the
     runner is not root, and is unavailable when it cannot. Each writes its
     pid before it changes its credentials -- after, it could no longer write
     here -- and dies with its parent (`PR_SET_PDEATHSIG`, set after the change,
     which clears it): the others with {W}, and {W} with the harness, so
-    stopping the fixture stops all five."""
+    stopping the fixture stops them all."""
     wdir = os.path.join(work, "owner")
     os.makedirs(wdir)
     prefix = root_prefix()
@@ -2630,14 +2726,12 @@ def owner_holder(work: str) -> Fixture:
         "    time.sleep(600)\n"
         "    os._exit(0)\n"
         "me=os.getpid()\n"
-        "if os.fork()==0: hold('WR', %d, %d, me)\n"
-        "if os.fork()==0: hold('WB', %d, %d, me)\n"
-        "if os.fork()==0: hold('WJ', %d, %d, me)\n"
-        "if os.fork()==0: hold('WA', %d, %d, me)\n"
+        "for key, (real, eff) in %r:\n"
+        "    if os.fork()==0: hold(key, real, eff, me)\n"
         "hold('W', %d, %d, os.getppid())\n"
         % (
-            *OWNER_SHAPES["WR"], *OWNER_SHAPES["WB"], *OWNER_SHAPES["WJ"],
-            *OWNER_SHAPES["WA"], *OWNER_SHAPES["W"],
+            [(k, v) for k, v in OWNER_SHAPES.items() if k != "W"],
+            *OWNER_SHAPES["W"],
         )
     )
     return Fixture(
@@ -2823,6 +2917,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     pn = path_note_holder(work)
     rn = relative_name_holder(work)
     t = tab_name_holder(work)
+    ep = endpoint_holder(work)
     fh = fuse_probe(work)
     mz = userns_device_mapping_holder(work)
     # PTH before PTG: PTG reads the index PTH got.
@@ -2840,7 +2935,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
         em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw, cr,
-        nlk, nsx, nlc, mq, nfs,
+        nlk, nsx, nlc, mq, nfs, ep,
     )
 
 
@@ -2988,7 +3083,7 @@ def run(args) -> int:
             flagfds, sockpaths, mntns, owner, mntsock, spellings, exmaps, pathnotes,
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
             sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
-            crcomm, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles,
+            crcomm, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles, endpoints,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -3055,6 +3150,13 @@ def run(args) -> int:
             "WB": (owner, "not root, and no passwordless sudo"),
             "WJ": (owner, "not root, and no passwordless sudo"),
             "WA": (owner, "not root, and no passwordless sudo"),
+            "WL": (owner, "not root, and no passwordless sudo"),
+            "WC": (owner, "not root, and no passwordless sudo"),
+            "WP": (owner, "not root, and no passwordless sudo"),
+            "WN": (owner, "not root, and no passwordless sudo"),
+            "WG": (owner, "not root, and no passwordless sudo"),
+            "WU": (owner, "not root, and no passwordless sudo"),
+            "WX": (owner, "not root, and no passwordless sudo"),
             # A case that spells /dev/shm differently asks whether the spelling
             # still names the file system; where /dev/shm is no mount point, both
             # binaries would answer "a directory" and MATCH on nothing.
@@ -3175,7 +3277,7 @@ def run(args) -> int:
                 unreadable, states, unlinked, devices, flagfds, sockpaths, mntns,
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
                 ptyhost, ptyguest, devnode, optional["WRACE"][0], rawsocks, udplite,
-                nsraw, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles,
+                nsraw, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles, endpoints,
             )
             if f is not None
         ]:
@@ -3284,6 +3386,21 @@ def run(args) -> int:
                 "YGONE": os.path.join(sockpaths.cwd, "gone.sock"),
                 "YGONELINK": os.path.join(sockpaths.cwd, "link-gone"),
                 "XSOCKLINK": os.path.join(nonutf8.cwd, "sock-link"),
+                # A path and a `+d` entry that are not UTF-8: the bytes, as
+                # the surrogates `os.fsencode()` turns back into them
+                # (DIVERGENCES 92).
+                "XMAP": os.fsdecode(os.path.join(nonutf8.cwd.encode(), b"map\xfe")),
+                "XNOPE": os.fsdecode(os.path.join(nonutf8.cwd.encode(), b"nope\xff")),
+                "XDIR": nonutf8.cwd,
+                "EP": str(endpoints.pid),
+                "EPC": open(os.path.join(endpoints.cwd, "epc.pid")).read().strip(),
+                "EPFIFO": os.path.join(endpoints.cwd, "ff"),
+                # Single bytes that are not UTF-8, as the surrogates
+                # `os.fsencode()` turns back into them (DIVERGENCES 92).
+                "BYTEFE": "\udcfe",
+                "BYTEFF": "\udcff",
+                # WU's login cut to 32 bytes inside its `é` (DIVERGENCES 70).
+                "WUCUT": "L" * 31 + "\udcc3",
                 "XSOCKREPL": os.path.join(nonutf8.cwd, "sock\ufffd"),
                 "YCOLON": os.path.join(sockpaths.cwd, "odd", "c:lon.sock"),
                 "YCOLONCUT": os.path.join(sockpaths.cwd, "odd", "c"),
@@ -3380,7 +3497,7 @@ def run(args) -> int:
                     for c in cases
                     if any(
                         needs_mt(c, mode)
-                        for mode in ("table", "passwd", "mqueue", "nfs", "nomounts")
+                        for mode in ("table", "passwd", "mqueue", "nfs", "nomounts", "noetc")
                     )
                     and c["name"] not in dropped
                 ]
@@ -3619,9 +3736,9 @@ def self_test() -> int:
               "rc=3" in text and text.rindex('"$@"') < text.index("auto.state\" 2>/dev/null"))
         check("the MT passwd mode binds its password file before its binary",
               text.index("/etc/passwd") < text.index('"$@"') < text.index("mount -t tmpfs lsof-rs-mt"))
-        check("...which holds the host's accounts and WJ's and WA's",
-              open(os.path.join(td, "passwd-mt"), encoding="utf-8").read().endswith(PASSWD_EXTRA)
-              and "\nroot:" in "\n" + open(os.path.join(td, "passwd-mt"), encoding="utf-8").read())
+        check("...which holds the host's accounts and fixture W's",
+              open(os.path.join(td, "passwd-mt"), encoding="utf-8", errors="surrogateescape").read().endswith(PASSWD_EXTRA)
+              and "\nroot:" in "\n" + open(os.path.join(td, "passwd-mt"), encoding="utf-8", errors="surrogateescape").read())
         nfs_text = open(mt_wrap(td, os.path.join(td, "mt"), "/x/nfs")).read()
         nfs_branch = nfs_text.split('if [ "$mode" = nfs ]', 1)[-1].split("\nfi\n", 1)[0]
         check("the MT nfs mode lists the NFS mount on fixture NFS's directory",

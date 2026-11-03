@@ -452,9 +452,9 @@ name = "path-argument-readlink-unbounded"
 rule = "a path argument's Readlink() goes through the bounded layer (94)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        let mut path = lsof_core::readlink::resolve(typed.as_ref(), fs)?.into_vec();'''
+old = '''        let mut path = lsof_core::readlink::resolve(typed, fs)?.into_vec();'''
 new = '''        let fs = fs.with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns());
-        let mut path = lsof_core::readlink::resolve(typed.as_ref(), &fs)?.into_vec();'''
+        let mut path = lsof_core::readlink::resolve(typed, &fs)?.into_vec();'''
 
 [[mutant]]
 name = "mount-source-stat-unbounded"

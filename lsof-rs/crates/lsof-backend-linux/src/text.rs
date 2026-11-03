@@ -33,13 +33,17 @@ use std::path::Path;
 /// same meaning `read_to_string(..).ok()` had, minus the one it should never
 /// have had.
 pub fn read_lossy(path: impl AsRef<Path>) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(match String::from_utf8(bytes) {
+    std::fs::read(path).ok().map(lossy)
+}
+
+/// `bytes` as text, as [`read_lossy`] decodes a file.
+pub fn lossy(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
         Ok(s) => s,
         // The common case costs nothing extra: only a table that really holds
         // a stray byte is copied.
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-    })
+    }
 }
 
 #[cfg(test)]

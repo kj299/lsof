@@ -127,6 +127,53 @@ impl Escaper {
     }
 }
 
+impl Escaper {
+    /// [`Escaper::command`] for a command that need not be UTF-8: each byte
+    /// that is no character is `\xNN`, as `safestrprtn()` prints it.
+    pub fn command_bytes<'a>(&self, b: &'a [u8]) -> Cow<'a, str> {
+        if let Ok(s) = std::str::from_utf8(b) {
+            return self.command(s);
+        }
+        let mut out = String::with_capacity(b.len() + 8);
+        for chunk in b.utf8_chunks() {
+            out.push_str(&self.command(chunk.valid()));
+            for &byte in chunk.invalid() {
+                push_hex(&mut out, byte);
+            }
+        }
+        Cow::Owned(out)
+    }
+
+    /// [`Escaper::command_truncated`] for a command that need not be UTF-8:
+    /// a byte that is no character is a four-byte escape, cut whole or not
+    /// at all, as an escaped character is.
+    pub fn command_bytes_truncated(&self, b: &[u8], width: usize) -> String {
+        if let Ok(s) = std::str::from_utf8(b) {
+            return self.command_truncated(s, width);
+        }
+        let mut out = String::with_capacity(width.min(b.len() * 4));
+        let mut used = 0usize;
+        for chunk in b.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                let w = escaped_width(c, Mode::Command, self.backslash);
+                if used + w > width {
+                    return out;
+                }
+                used += w;
+                push(&mut out, c, Mode::Command, self.backslash);
+            }
+            for &byte in chunk.invalid() {
+                if used + 4 > width {
+                    return out;
+                }
+                used += 4;
+                push_hex(&mut out, byte);
+            }
+        }
+        out
+    }
+}
+
 /// Which of the C's two printers is being mirrored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -253,6 +300,20 @@ mod tests {
         assert_eq!(U.text("\x7f"), "\\x7f");
         // The ANSI clear-screen the fuzz target's finding pointed at.
         assert_eq!(U.text("h\x1b[2Jz"), "h^[[2Jz");
+    }
+
+    #[test]
+    fn a_command_of_bytes_escapes_each_byte_that_is_no_character() {
+        assert_eq!(U.command_bytes(b"abc"), "abc");
+        assert_eq!(U.command_bytes(b"a\xffb c"), "a\\xffb\\x20c");
+        assert_eq!(U.command_bytes("é".as_bytes()), "\\xc3\\xa9");
+        assert_eq!(U.command_bytes(b"\xc3\xa9\xff"), "\\xc3\\xa9\\xff");
+        // Cut whole: `\xff` needs four.
+        assert_eq!(U.command_bytes_truncated(b"ab\xffcd", 5), "ab");
+        assert_eq!(U.command_bytes_truncated(b"ab\xffcd", 6), "ab\\xff");
+        assert_eq!(U.command_bytes_truncated(b"ab\xffcd", 9), "ab\\xffcd");
+        assert_eq!(U.command_bytes_truncated(b"a b\xff", 9), "a\\x20b");
+        assert_eq!(U.command_bytes_truncated(b"sleep", 3), "sle");
     }
 
     #[test]

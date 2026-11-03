@@ -12,6 +12,45 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **`-E` and `+E` name endpoints on Linux** (DIVERGENCES 56), as the C:
+  a pipe's or a named FIFO's other descriptors and a local TCP or UDP
+  connection's other end are appended to NAME as `PID,cmd,FDmode` (the
+  command cut to the `+c` width; the table puts them before a socket's
+  state, `-F n` carries them, JSON does not), and `+E` lists those ends too,
+  with their own. Under either, every process is read, so one the `-a`
+  leaves out still locates `-i`, `-K` or a path through its rows (`lsof -V
+  -E -K -a -p P` no longer says `no tasks located`). A UNIX socket's peer,
+  a pty's, a POSIX message queue's and an eventfd's ends are not named yet.
+  As the C, a process a `-p ^`, `-u ^` or `-g ^` excludes is then listed for
+  the rows a file item (a name, `-i`, `-U`, `-d`) selects when the AND holds
+  for the row, a `-c ^` is ignored, and `-E -p P -i` reads P's sockets
+  alone. An end's command is cut by bytes, a partial character printed
+  `\xc3`; a row's endpoint text of any length is left out of JSON's `name`.
+- **Login names are read by glibc's `files` rules** (Linux; 70): blanks
+  before a line, comments, NIS `+`/`-` entries, the uid and gid fields
+  `strtoul()` reads, and the first line for a uid, as `getpwuid()` reads
+  `/etc/passwd`; a name is kept to 32 bytes; under `-r` the names are read
+  again once the file's mtime or ctime changes, and a `stat` of it that
+  fails ends the run (`lsof: can't stat(/etc/passwd): …`, exit 1; `-F`
+  first writes the process's fields before `L`). Control bytes in a name
+  stay escaped (the C prints them raw), and so does a byte that is no
+  character, the cut's partial character among them (`\xc3`).
+- **A path argument that is not UTF-8 is a path** (92): `lsof $'bad\xffname'`
+  lists the file, and so do `+d`, `+D`, `-e` and `+e` with such a value,
+  where lsof-rs had refused the whole command line. `-c` and `-u` read
+  their values as bytes too (a command, a login), and COMMAND, `-F c`, USER
+  and `-F L` print one that is not UTF-8 as its bytes (`\xff`). A byte that
+  is no character where an option letter stands is `illegal option
+  character: \xNN` and the parse reads on, one line a byte (`-é` is two);
+  0xff ends the options, as the C's `GetOpt` takes it for EOF (`-p 1 -\xff`
+  lists PID 1). Any other option that reads text still refuses one, alone
+  (`an argument is not valid UTF-8`, exit 1). On Windows a path argument
+  that is not text names no file, never its lossy spelling's.
+- **An `O_PATH` descriptor on a socket file is `sock`, `0t0`, `can't
+  identify protocol`** (Linux; 126), the row the C cannot name, where it
+  had been `SOCK` with its path.
+- **A zombie leader's live tasks locate `-p`, `-g` and `-u` under `-K -a`**
+  (Linux; 72), though the AND drops them: no `process ID not located`.
 - **With an NFS mount listed, every per-file call is bounded** (Linux;
   DIVERGENCES 124), as the C makes it through `statsafely()`: a process's
   `cwd`, `rtd` and `txt`, each fd's `lstat` and `stat`, each mapped file,

@@ -9,7 +9,7 @@
 use std::net::SocketAddr;
 
 /// What kind of slot an [`OpenFile`] occupies — lsof's "FD" column.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FdType {
     /// A concrete handle with a numeric value (the Windows `HANDLE` value).
     Handle(u64),
@@ -229,7 +229,7 @@ impl FileType {
 /// upper-case protocol name (e.g. "ICMP", "ICMPV6", "RAW", "AF_UNIX") for
 /// non-TCP/UDP sockets surfaced from sources beyond IP Helper (currently the
 /// ETW backend, when `--etw` is on).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Protocol {
     Tcp,
     Udp,
@@ -665,9 +665,64 @@ pub struct OpenFile {
     /// a backend appends, with the one space that joins it. The table and
     /// `-F n` print the whole; JSON prints only [`OpenFile::base_name`], as
     /// the C's `json_print_file()` prints `Lf->nm` alone (`print.c:1991`).
-    /// Set only through [`OpenFile::add_name_addition`]. Two bytes, in the
-    /// padding the row already had: it stays 192 (measured).
-    pub name_addition: Option<std::num::NonZeroU16>,
+    /// Set only through [`OpenFile::add_name_addition`] (and, for text
+    /// already in printed form, the core's `-E` naming). Eight bytes, in the
+    /// padding the row already had: it stays 192 (`a_row_stays_small`).
+    pub name_addition: Option<NameAddition>,
+}
+
+/// [`OpenFile::name_addition`]: where NAME's base ends and its addition
+/// begins, and whether that addition is already in printed form.
+///
+/// The base's length is recorded, not the addition's: a base is a path or an
+/// object's name, bounded by `PATH_MAX` (a path argument longer than that
+/// names no file), so 15 bits hold it (32,766 bytes), where an
+/// addition is not. `-E` names every other holder of a pipe in one row, and
+/// 4,000 processes sharing one make an addition of 131,000 bytes, which a
+/// `u16` addition length had dropped, leaking all but the last holder into
+/// JSON's `name` (DIVERGENCES 56).
+///
+/// Printed form is for `-E`'s `PID,cmd,FDmode`, whose command the C cuts to
+/// `+c` *bytes* and prints through `safestrprt()`, so a cut inside a
+/// character prints the bytes it kept as `\xNN` (`\xc3`). A `String` cannot
+/// hold such a byte, so that text is stored as it is printed, and the
+/// renderer does not escape it again ([`OpenFile::printed_name`]). Two
+/// bytes, with the `Option` in its niche, in the padding the row already
+/// had: it stays 192 (`a_row_stays_small`, which three bytes fail).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NameAddition(std::num::NonZeroU16);
+
+impl NameAddition {
+    const PRINTED: u16 = 0x8000;
+
+    /// NAME's first `base` bytes are its base, the rest an addition in plain
+    /// text; `None` for a base too long to record (32,766 bytes).
+    pub fn new(base: u32) -> Option<NameAddition> {
+        Self::with(base, false)
+    }
+
+    fn with(base: u32, printed: bool) -> Option<NameAddition> {
+        let stored = u16::try_from(base)
+            .ok()?
+            .checked_add(1)
+            .filter(|&v| v < Self::PRINTED)?;
+        let flag = if printed { Self::PRINTED } else { 0 };
+        std::num::NonZeroU16::new(stored | flag).map(NameAddition)
+    }
+
+    fn at(base: usize, printed: bool) -> Option<NameAddition> {
+        Self::with(u32::try_from(base).ok()?, printed)
+    }
+
+    /// How many bytes of NAME are its base.
+    pub fn base(self) -> u32 {
+        u32::from((self.0.get() & !Self::PRINTED).saturating_sub(1))
+    }
+
+    /// Whether the addition is printed text ([`OpenFile::printed_name`]).
+    pub fn printed(self) -> bool {
+        self.0.get() & Self::PRINTED != 0
+    }
 }
 
 impl OpenFile {
@@ -677,33 +732,84 @@ impl OpenFile {
     /// that would split a character, is no addition at all: the whole name,
     /// never a panic.
     pub fn base_name(&self) -> Option<&str> {
-        let extra = self.name_addition.map_or(0, |n| usize::from(n.get()));
         let base = self
-            .name
-            .len()
-            .checked_sub(extra)
-            .and_then(|end| self.name.get(..end))
+            .name_addition
+            .and_then(|a| self.name.get(..a.base() as usize))
             .unwrap_or(&self.name);
         (!base.is_empty()).then_some(base)
     }
 
+    /// NAME as the table and `-F n` print it: escaped by `esc`, except an
+    /// addition that is already printed text ([`NameAddition::printed`]).
+    /// That is checked rather than trusted: one holding anything a terminal
+    /// would act on, or a length that does not fall on a character
+    /// boundary, is escaped like the rest.
+    pub fn printed_name(&self, esc: &crate::render::escape::Escaper) -> std::borrow::Cow<'_, str> {
+        let split = self
+            .name_addition
+            .filter(|a| a.printed())
+            .map(|a| a.base() as usize)
+            .filter(|&at| self.name.is_char_boundary(at));
+        let Some(at) = split else {
+            return esc.text(&self.name);
+        };
+        let (text, tail) = self.name.split_at(at);
+        if tail
+            .chars()
+            .any(crate::render::escape::is_unprintable_unicode)
+        {
+            return esc.text(&self.name);
+        }
+        let mut out = esc.text(text).into_owned();
+        out.push_str(tail);
+        std::borrow::Cow::Owned(out)
+    }
+
     /// Append `text` to NAME as an addition (the C's `Lf->nma`), after one
-    /// space, or alone on an empty NAME. The length is recorded so JSON can
-    /// leave it out ([`OpenFile::base_name`]); one too long to record (over
-    /// 65,535 bytes) leaves none recorded rather than a wrong one.
+    /// space, or alone on an empty NAME. Where the base ends is recorded so
+    /// JSON can leave the addition out ([`OpenFile::base_name`]); a base too
+    /// long to record (32,766 bytes) leaves none recorded. After printed text,
+    /// `text` is escaped into it, so the addition stays one piece.
     pub fn add_name_addition(&mut self, text: &str) {
-        let before = self.name.len();
+        if self.name_addition.is_some_and(NameAddition::printed) {
+            let printed = crate::render::escape::Escaper::for_host()
+                .text(text)
+                .into_owned();
+            self.push_addition(&printed, true);
+        } else {
+            self.push_addition(text, false);
+        }
+    }
+
+    /// [`OpenFile::add_name_addition`] for `printed`, text already in the
+    /// form the table and `-F n` print it in. An addition in plain text
+    /// before it is escaped now, as the renderer would have, so that the
+    /// whole addition is printed text ([`NameAddition::printed`]).
+    pub(crate) fn add_printed_addition(&mut self, printed: &str) {
+        if let Some(a) = self.name_addition.filter(|a| !a.printed()) {
+            let at = a.base() as usize;
+            if let Some(plain) = self.name.get(at..) {
+                let escaped = crate::render::escape::Escaper::for_host()
+                    .text(plain)
+                    .into_owned();
+                self.name.truncate(at);
+                self.name.push_str(&escaped);
+                self.name_addition = NameAddition::at(at, true);
+            }
+        }
+        self.push_addition(printed, true);
+    }
+
+    fn push_addition(&mut self, text: &str, printed: bool) {
+        let base = match self.name_addition {
+            Some(a) if (a.base() as usize) <= self.name.len() => a.base() as usize,
+            _ => self.name.len(),
+        };
         if !self.name.is_empty() {
             self.name.push(' ');
         }
         self.name.push_str(text);
-        let base = before.saturating_sub(self.name_addition.map_or(0, |n| usize::from(n.get())));
-        self.name_addition = self
-            .name
-            .len()
-            .checked_sub(base)
-            .and_then(|n| u16::try_from(n).ok())
-            .and_then(std::num::NonZeroU16::new);
+        self.name_addition = NameAddition::at(base, printed);
     }
 
     /// Replace NAME's base, the C's `Lf->nm`, with `base`, keeping its
@@ -713,22 +819,20 @@ impl OpenFile {
     /// as [`OpenFile::add_name_addition`] would have joined it.
     pub fn set_base_name(&mut self, base: &str) {
         let old = self.base_name().map_or(0, str::len);
-        // `base_name` gives the whole name back for a length it cannot use,
-        // so the tail is then empty and nothing is recorded as an addition.
+        // `base_name` gives the whole name back for a base it cannot use, so
+        // the tail is then empty and nothing is recorded as an addition.
         let tail = self.name.get(old..).unwrap_or_default().to_string();
+        let printed = self.name_addition.is_some_and(NameAddition::printed);
         self.name.clear();
         self.name.push_str(base);
         self.name_addition = None;
         if !tail.is_empty() {
             if old == 0 {
                 // The addition alone: no joining space was recorded.
-                self.add_name_addition(&tail);
+                self.push_addition(&tail, printed);
             } else {
-                let joined = tail.len();
                 self.name.push_str(&tail);
-                self.name_addition = u16::try_from(joined)
-                    .ok()
-                    .and_then(std::num::NonZeroU16::new);
+                self.name_addition = NameAddition::at(base.len(), printed);
             }
         }
     }
@@ -832,6 +936,42 @@ pub struct Process {
     /// for a file it cannot read then (DIVERGENCES 37). Windows never sets it,
     /// and keeps the bare line for a process whose handles it could not read.
     pub unlisted: bool,
+    /// The process's names as bytes, where a [`String`] could not hold them
+    /// ([`RawNames`]); `None`, the common case, where both are UTF-8 (or the
+    /// platform's names are text).
+    pub raw_names: Option<Box<RawNames>>,
+}
+
+/// A command or login name that is not UTF-8, kept as the bytes it is, for
+/// what the C does with bytes: `-c` compares the command's bytes, COMMAND and
+/// `-F c` print each byte that is not text as `\xNN`, and USER and `-F L`
+/// the login's (DIVERGENCES 92, 70). [`Process::command`] and
+/// [`Process::user`] still hold them decoded lossily, for JSON, which must be
+/// UTF-8, and for whatever reads them as text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawNames {
+    /// The command's bytes, where they are not UTF-8.
+    pub command: Option<Box<[u8]>>,
+    /// The login's bytes (cut to the C's 32), where they are not UTF-8.
+    pub login: Option<Box<[u8]>>,
+}
+
+impl Process {
+    /// The command as bytes: [`RawNames::command`], or [`Process::command`].
+    pub fn command_bytes(&self) -> &[u8] {
+        self.raw_names
+            .as_deref()
+            .and_then(|r| r.command.as_deref())
+            .unwrap_or(self.command.as_bytes())
+    }
+
+    /// The login as bytes: [`RawNames::login`], or [`Process::user`].
+    pub fn login_bytes(&self) -> Option<&[u8]> {
+        self.raw_names
+            .as_deref()
+            .and_then(|r| r.login.as_deref())
+            .or(self.user.as_deref().map(str::as_bytes))
+    }
 }
 
 #[cfg(test)]
@@ -929,24 +1069,71 @@ mod name_addition_tests {
         assert_eq!(h.name, "y (stat: x)");
         assert_eq!(h.base_name(), Some("y"));
         let mut i = row("/a");
-        i.name_addition = std::num::NonZeroU16::new(9);
+        i.name_addition = super::NameAddition::new(9);
         i.set_base_name("b");
         assert_eq!((i.name.as_str(), i.name_addition), ("b", None));
     }
 
-    /// One too long to record is recorded as none, never wrong and never a
-    /// panic; a recorded length past the name or inside a character gives
-    /// the whole name back.
+    /// A recorded length past the name or inside a character gives the whole
+    /// name back, never a panic.
     #[test]
     fn a_length_that_does_not_fit_is_no_addition() {
-        let mut f = row("/a");
-        f.add_name_addition(&"x".repeat(70_000));
-        assert_eq!(f.name_addition, None);
-        assert_eq!(f.base_name(), Some(f.name.as_str()));
         let mut g = row("é");
-        g.name_addition = std::num::NonZeroU16::new(1);
+        g.name_addition = super::NameAddition::new(1);
         assert_eq!(g.base_name(), Some("é"));
-        g.name_addition = std::num::NonZeroU16::new(9);
+        g.name_addition = super::NameAddition::new(9);
         assert_eq!(g.base_name(), Some("é"));
+    }
+
+    /// `-E` names every other holder of a pipe, one addition each: past
+    /// 65,535 bytes of them (a `u16` had dropped the length there and the
+    /// next one had taken the whole NAME for its base), the base is still
+    /// the C's `Lf->nm`, which is all JSON prints.
+    #[test]
+    fn additions_past_65535_bytes_keep_the_base() {
+        let mut f = row("pipe");
+        let n = if cfg!(miri) { 40 } else { 8_000 };
+        for i in 0..n {
+            f.add_name_addition(&format!("{},python3,{}r", 100_000 + i, 3 + i % 2));
+        }
+        assert!(cfg!(miri) || f.name.len() > 65_535);
+        assert_eq!(f.base_name(), Some("pipe"));
+        let mut g = row("pipe");
+        g.add_name_addition(&"x".repeat(if cfg!(miri) { 70 } else { 70_000 }));
+        g.add_name_addition("1,a,3r");
+        assert_eq!(g.base_name(), Some("pipe"));
+    }
+
+    /// Printed text at NAME's end is not escaped again; the rest is, and an
+    /// addition after it is escaped into it. A tail that would reach a
+    /// terminal raw is escaped after all.
+    #[test]
+    fn a_printed_tail_is_printed_as_it_stands() {
+        use crate::render::escape::Escaper;
+        let esc = Escaper::UNIX;
+        let mut f = row("a\\b");
+        f.add_printed_addition("1,aaaaaaaa\\xc3,3r");
+        assert_eq!(f.printed_name(&esc), "a\\\\b 1,aaaaaaaa\\xc3,3r");
+        assert_eq!(f.base_name(), Some("a\\b"));
+        f.add_name_addition("(x\u{1b})");
+        assert_eq!(f.printed_name(&esc), "a\\\\b 1,aaaaaaaa\\xc3,3r (x^[)");
+        assert_eq!(f.base_name(), Some("a\\b"));
+        // A new base keeps the printed tail.
+        f.set_base_name("n\\m");
+        assert_eq!(f.printed_name(&esc), "n\\\\m 1,aaaaaaaa\\xc3,3r (x^[)");
+        // Forged: an ESC in the tail is escaped with the rest.
+        let mut g = row("p");
+        g.add_printed_addition("\u{1b}]0;x\u{7}");
+        assert_eq!(g.printed_name(&esc), "p ^[]0;x^G");
+        // Plain text is escaped as ever.
+        let mut h = row("p");
+        h.add_name_addition("a\\b");
+        assert_eq!(h.printed_name(&esc), "p a\\\\b");
+        assert_eq!(row("").printed_name(&esc), "");
+        // An addition alone on an empty name keeps its printed part.
+        let mut k = row("");
+        k.add_printed_addition("1,c\\xc3,3r");
+        k.set_base_name("b");
+        assert_eq!(k.printed_name(&esc), "b 1,c\\xc3,3r");
     }
 }

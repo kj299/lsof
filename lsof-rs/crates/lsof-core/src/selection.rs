@@ -592,8 +592,9 @@ pub struct UidSel {
     pub uid: u32,
     /// The login name it was given as, if it was given as one — `-V` reports
     /// the two differently: `login name (UID 1000) not located: alice`
-    /// against `user ID not located: 1000`.
-    pub login: Option<String>,
+    /// against `user ID not located: 1000`. Bytes, as typed: a login need
+    /// not be UTF-8 (DIVERGENCES 92).
+    pub login: Option<OsString>,
 }
 
 /// Which process-level search items some process located — each vector
@@ -760,7 +761,11 @@ pub struct Selection {
     pub uids: Vec<UidSel>,
     /// `-u ^value`, resolved the same way.
     pub uid_excludes: Vec<u32>,
-    pub commands: Vec<String>,
+    /// `-c name`: a command whose bytes begin with `name`'s selects its
+    /// process. Bytes, as the C compares them (`strncmp()`): a name need not
+    /// be UTF-8, and one that is not matches a command that is not either
+    /// ([`Process::command_bytes`]; DIVERGENCES 92).
+    pub commands: Vec<OsString>,
     /// How [`Selection::commands`] and [`Selection::command_excludes`]
     /// compare — the C's case-sensitive prefix unless the CLI says otherwise.
     pub command_match: CommandMatch,
@@ -776,7 +781,7 @@ pub struct Selection {
     /// absolute exclusion as [`Selection::user_excludes`] (Lsof.8 `-c`: "then
     /// the following characters specify a command name whose processes are to
     /// be ignored").
-    pub command_excludes: Vec<String>,
+    pub command_excludes: Vec<OsString>,
     pub inet: InetFilter,
     /// `-a`: AND together the specified process selectors.
     pub and_mode: bool,
@@ -789,8 +794,10 @@ pub struct Selection {
     /// `-V`: verbose — report inaccessible processes and unmatched search items.
     pub verbose: bool,
     /// Bare path arguments: report files whose name equals one of these
-    /// (resolved efficiently via Restart Manager when possible).
-    pub paths: Vec<String>,
+    /// (resolved efficiently via Restart Manager when possible). Bytes as
+    /// typed, not text: a file name need not be UTF-8, and `lsof
+    /// $'bad\xffname'` lists the file (DIVERGENCES 92).
+    pub paths: Vec<OsString>,
     /// `+D` / `+d` directory arguments: report files whose name is under one of
     /// these directory prefixes (requires full enumeration).
     pub dir_trees: Vec<String>,
@@ -1015,6 +1022,13 @@ pub struct Selection {
     /// pipe rows; `Files` additionally shows the peer processes' pipe rows
     /// (see [`Process::endpoint_peer`]).
     pub endpoints: Option<EndpointMode>,
+    /// The backend names no endpoint itself and leaves `-E`/`+E` to
+    /// [`Selection::apply`], which finds a pipe's or a local connection's
+    /// other ends among the rows gathered, as the C's tables do, and to
+    /// [`Selection::locate`], which then counts every process's rows, as the
+    /// C reads every process under them (Linux; DIVERGENCES 56). Windows
+    /// names its pipes' ends while it gathers.
+    pub endpoints_in_core: bool,
     /// `+L <count>`: select files whose link count is **less than** `count`
     /// — `+L 1` is the "unlinked but still open" case. A file selecter, so it
     /// ORs with the others unless `-a`.
@@ -1091,11 +1105,7 @@ impl Selection {
         if self.users_match(p) {
             k.insert(SelKinds::UID);
         }
-        if self
-            .commands
-            .iter()
-            .any(|c| self.command_matches(c, &p.command))
-        {
+        if self.commands.iter().any(|c| self.command_matches(c, p)) {
             k.insert(SelKinds::CMD);
         }
         if p.pgid.is_some_and(|g| self.pgids.contains(&g)) {
@@ -1225,7 +1235,7 @@ impl Selection {
         // second rule: the C has no name-prefix matching for a bare path
         // argument at all.
         let name = f.name.to_ascii_lowercase();
-        let exact = self.paths.iter().any(|p| {
+        let exact = self.paths.iter().filter_map(|p| matched_name(p)).any(|p| {
             let p = p.to_ascii_lowercase();
             name == p || name.starts_with(&p)
         });
@@ -1256,10 +1266,21 @@ impl Selection {
     /// Verified against the C: `lsof -c ^sleep -p <a sleep's pid>` prints
     /// nothing, with or without `-a`, even though `-p` names that very
     /// process.
+    ///
+    /// Under `-E`/`+E` on Linux ([`Selection::reads_every_process`]) a `-c
+    /// ^` exclusion is no exclusion at all: the C asks `is_cmd_excl()` after
+    /// `is_proc_excl()` has given the process its marks, and `if (!FeptE)
+    /// return (1)` ignores its answer, so the process keeps them and is
+    /// listed as if no `-c ^` had been given (measured: `lsof -E -c
+    /// ^python3` lists every python3, and `-E -c ^kid -a -p B -d 3` B's fd
+    /// 3). The other three stay exclusions there, of a process that is
+    /// still read ([`Selection::apply`]).
     pub fn excludes_process(&self, p: &Process) -> bool {
-        self.command_excludes
-            .iter()
-            .any(|c| self.command_matches(c, &p.command))
+        (!self.reads_every_process()
+            && self
+                .command_excludes
+                .iter()
+                .any(|c| self.command_matches(c, p)))
             || self
                 .user_excludes
                 .iter()
@@ -1278,12 +1299,12 @@ impl Selection {
     }
 
     /// `-c`'s comparison, under this run's [`CommandMatch`].
-    fn command_matches(&self, needle: &str, command: &str) -> bool {
+    fn command_matches(&self, needle: &OsStr, p: &Process) -> bool {
         match self.command_match {
-            CommandMatch::Prefix => command.starts_with(needle),
+            CommandMatch::Prefix => p.command_bytes().starts_with(needle.as_encoded_bytes()),
             CommandMatch::Forgiving => {
-                let c = command.to_ascii_lowercase();
-                let n = needle.to_ascii_lowercase();
+                let c = p.command.to_ascii_lowercase();
+                let n = needle.to_string_lossy().to_ascii_lowercase();
                 c.starts_with(&n) || c.contains(&n)
             }
         }
@@ -1352,75 +1373,106 @@ impl Selection {
         let with_tasks = pids_with_tasks(gathered);
         let sockets_only = self.socket_rows_only();
         let path_index = PathIndex::new(&self.path_items, self.paths_identified);
+        let every = self.reads_every_process();
         for p in gathered {
-            if self.excludes_process(p) {
+            let excluded = self.excludes_process(p);
+            if excluded && !every {
                 continue;
             }
-            for (hit, &pid) in found.pids.iter_mut().zip(&self.pids) {
-                *hit |= p.pid == pid;
+            // Under `-E`/`+E` an excluded process is read for its rows
+            // alone: `is_proc_excl()` has said no before it marks an item,
+            // and before its rows inherit a kind, the task's among them
+            // (measured: `-E -K -u ^root -i UDP`, every task root's, says
+            // `no tasks located`).
+            let kinds = if excluded {
+                SelKinds::NONE
+            } else {
+                self.entry_kinds(p, &with_tasks)
+            };
+            let passes = !excluded && (!self.and_mode || kinds.contains(and_kinds));
+            if !excluded {
+                self.mark_process_items(p, &mut found);
             }
-            for (hit, &g) in found.pgids.iter_mut().zip(&self.pgids) {
-                *hit |= p.pgid == Some(g);
-            }
-            for (hit, s) in found.uids.iter_mut().zip(&self.uids) {
-                *hit |= p.uid == Some(s.uid);
-            }
-            for (hit, u) in found.users.iter_mut().zip(&self.users) {
-                *hit |= user_matches(u, p.user.as_deref());
-            }
-            let kinds = self.entry_kinds(p, &with_tasks);
-            if self.and_mode && !kinds.contains(and_kinds) {
-                continue;
-            }
-            for (hit, c) in found.commands.iter_mut().zip(&self.commands) {
-                *hit |= self.command_matches(c, &p.command);
+            if passes {
+                for (hit, c) in found.commands.iter_mut().zip(&self.commands) {
+                    *hit |= self.command_matches(c, p);
+                }
             }
             // Its files are examined only if the process passed the command
-            // test as well.
-            if self.and_mode && !self.proc_selected(kinds) {
+            // test as well — or when the C reads every process.
+            if !every && (!passes || (self.and_mode && !self.proc_selected(kinds))) {
                 continue;
             }
-            // A state is located by a socket in it, whatever else happens to
-            // the row: the C marks `TcpStI` while it reads the socket, before
-            // `-d`, `-i` or `-a` have had a say — measured, `lsof -a -p P -d
-            // 10 -sTCP:LISTEN` exits 0 on a P whose listener is fd 4.
-            if let Some(filter) = &self.state_filter {
-                for f in &p.files {
-                    if let Some(state) = f.socket.as_ref().and_then(|s| s.filter_state()) {
-                        for (hit, want) in found.states.iter_mut().zip(&filter.include) {
-                            *hit |= state == *want;
-                        }
+            self.mark_file_items(p, kinds, &path_index, sockets_only, &mut found);
+        }
+        found
+    }
+
+    /// The process-level items `p` locates: `is_proc_excl()`'s marks.
+    fn mark_process_items(&self, p: &Process, found: &mut Located) {
+        for (hit, &pid) in found.pids.iter_mut().zip(&self.pids) {
+            *hit |= p.pid == pid;
+        }
+        for (hit, &g) in found.pgids.iter_mut().zip(&self.pgids) {
+            *hit |= p.pgid == Some(g);
+        }
+        for (hit, s) in found.uids.iter_mut().zip(&self.uids) {
+            *hit |= p.uid == Some(s.uid);
+        }
+        for (hit, u) in found.users.iter_mut().zip(&self.users) {
+            *hit |= user_matches(u, p.user.as_deref());
+        }
+    }
+
+    /// The items `p`'s rows locate, as the C's rows locate them while it
+    /// builds them; `kinds` is what the entry itself matched.
+    fn mark_file_items(
+        &self,
+        p: &Process,
+        kinds: SelKinds,
+        path_index: &PathIndex<'_>,
+        sockets_only: bool,
+        found: &mut Located,
+    ) {
+        // A state is located by a socket in it, whatever else happens to
+        // the row: the C marks `TcpStI` while it reads the socket, before
+        // `-d`, `-i` or `-a` have had a say — measured, `lsof -a -p P -d
+        // 10 -sTCP:LISTEN` exits 0 on a P whose listener is fd 4.
+        if let Some(filter) = &self.state_filter {
+            for f in &p.files {
+                if let Some(state) = f.socket.as_ref().and_then(|s| s.filter_state()) {
+                    for (hit, want) in found.states.iter_mut().zip(&filter.include) {
+                        *hit |= state == *want;
                     }
                 }
             }
-            for f in p.files.iter().filter(|f| self.state_matches(f)) {
-                for (hit, spec) in found.inet.iter_mut().zip(&self.inet.specs) {
-                    *hit = *hit || spec.matches(f);
-                }
-                found.inet_all |= self.inet.all_matches(f);
-                found.nfs |= self.nfs_only && self.is_nfs_file(f);
-                // `Ftask = 2` in `link_lfile()`: a file is linked when it
-                // matched anything, and a task's files all inherit the task
-                // kind, so any row of a task locates the item — printed or not,
-                // as `-a -d 999` on a multi-threaded process exits 0, measured.
-                // Any row the C builds, that is: under `-a` with `-i` or `-U`
-                // it builds a task's sockets alone. The Linux backend builds
-                // the same (`socket_rows_only`); Windows builds only sockets
-                // under `-i`/`-U` too, but adds its thread rows, which give
-                // the process's sockets the task kind and are not sockets
-                // themselves.
-                found.tasks |= self.tasks == TaskMode::Always
-                    && !(sockets_only && f.fd == FdType::Task)
-                    && kinds.union(self.file_kinds(f)).contains(SelKinds::TASK);
-                // A path is marked as the file is examined, too: the C sets
-                // `Sfile[].f` in `is_file_named()` while it builds the file,
-                // before `-a` is applied. So `lsof -a -p P -d 0 FILE`, P
-                // holding FILE on fd 3, lists nothing and exits 0; lsof-rs had
-                // asked the rows it printed, and exited 1.
-                path_index.mark(f, &mut found.paths, || self.path_matches(f));
-            }
         }
-        found
+        for f in p.files.iter().filter(|f| self.state_matches(f)) {
+            for (hit, spec) in found.inet.iter_mut().zip(&self.inet.specs) {
+                *hit = *hit || spec.matches(f);
+            }
+            found.inet_all |= self.inet.all_matches(f);
+            found.nfs |= self.nfs_only && self.is_nfs_file(f);
+            // `Ftask = 2` in `link_lfile()`: a file is linked when it
+            // matched anything, and a task's files all inherit the task
+            // kind, so any row of a task locates the item — printed or not,
+            // as `-a -d 999` on a multi-threaded process exits 0, measured.
+            // Any row the C builds, that is: under `-a` with `-i` or `-U`
+            // it builds a task's sockets alone. The Linux backend builds
+            // the same (`socket_rows_only`); Windows builds only sockets
+            // under `-i`/`-U` too, but adds its thread rows, which give
+            // the process's sockets the task kind and are not sockets
+            // themselves.
+            found.tasks |= self.tasks == TaskMode::Always
+                && !(sockets_only && f.fd == FdType::Task)
+                && kinds.union(self.file_kinds(f)).contains(SelKinds::TASK);
+            // A path is marked as the file is examined, too: the C sets
+            // `Sfile[].f` in `is_file_named()` while it builds the file,
+            // before `-a` is applied. So `lsof -a -p P -d 0 FILE`, P
+            // holding FILE on fd 3, lists nothing and exits 0; lsof-rs had
+            // asked the rows it printed, and exited 1.
+            path_index.mark(f, &mut found.paths, || self.path_matches(f));
+        }
     }
 
     /// The set of selector kinds this run specified — the C's `Selflags`
@@ -1646,7 +1698,7 @@ impl Selection {
         let net = SelKinds::NET.union(SelKinds::NA).union(SelKinds::UNX);
         spec.intersects(net)
             && (self.and_mode || spec.without(net).is_empty())
-            && self.endpoints.is_none()
+            && (self.endpoints.is_none() || self.endpoints_in_core)
     }
 
     /// Whether, for `p`, nothing but its sockets can reach the output: the
@@ -1662,7 +1714,10 @@ impl Selection {
     /// Measured with an NFS mount listed: `lsof -b -U -p P` warns of P's
     /// calls and of every other process's fds, and of no other process's
     /// cwd, root, executable or mapping (DIVERGENCES 124). Under `-E`/`+E`
-    /// the C keeps the run's own (row 56), as this does.
+    /// on Linux the C sets no per-process `Ckscko` (`if (Cckreg && !FeptE)`),
+    /// so the run's own, set, holds for every process, a process the
+    /// selecters name included: measured, `lsof -E -p P -i UDP` lists P's
+    /// sockets alone, where without `-E` it lists all of P's files (row 56).
     pub fn sockets_only_for(&self, p: &Process) -> bool {
         if self.socket_rows_only() {
             return true;
@@ -1675,8 +1730,25 @@ impl Selection {
             && !self.and_mode
             && !spec.intersects(files)
             && spec.intersects(by_process)
-            && self.endpoints.is_none();
-        conditional && !self.proc_kinds(p).intersects(by_process)
+            && (self.endpoints.is_none() || self.endpoints_in_core);
+        conditional && (self.reads_every_process() || !self.proc_kinds(p).intersects(by_process))
+    }
+
+    /// Whether the C reads every process, as it does under `-E`/`+E`
+    /// (`process_id()`: `if (!FeptE) return (1)`), where the backend leaves
+    /// them to the core ([`Selection::endpoints_in_core`]): then a process
+    /// that fails the AND, or that a `^` excludes, is read, and its rows
+    /// locate a search item as any process's do, though it locates no
+    /// process-level item it fails and is not printed for it (DIVERGENCES
+    /// 56). A process a `-p ^`, `-u ^` or `-g ^` excludes is read with none
+    /// of its process-level marks (`is_proc_excl()` returns before it sets
+    /// one), so a row of it that a file-level item selects (a name, `-i`,
+    /// `-U`, `-d`, …) is listed when the AND holds for that row alone, as
+    /// `is_file_sel()` decides; a `-c ^` is ignored
+    /// ([`Selection::excludes_process`]). Measured: `lsof -V -E -K -a -p P`, P single-threaded, prints
+    /// nothing and exits 0, the task some other process has locating `-K`.
+    pub fn reads_every_process(&self) -> bool {
+        self.endpoints.is_some() && self.endpoints_in_core
     }
 
     /// Whether the C reads `p` at all: not when a `-p ^`, `-u ^`, `-c ^` or
@@ -1704,7 +1776,10 @@ impl Selection {
     /// entries at all, so `lsof -t -K -p P` printed P alone where the C
     /// prints every process with a task (DIVERGENCES 33).
     pub fn terse_skips_files(&self) -> bool {
+        // `+E` prints the PID of a process holding an end, which only its
+        // rows can tell (DIVERGENCES 56).
         self.terse
+            && !(self.reads_every_process() && self.endpoints == Some(EndpointMode::Files))
             && !self.specified().intersects(SelKinds::FILE)
             && self.state_filter.is_none()
             && self.tasks != TaskMode::Always
@@ -1756,6 +1831,19 @@ impl Selection {
     /// of selecters each file matched, then test that set against the
     /// specified set — non-empty for the OR, complete for `-a`.
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
+        if let (Some(mode), true) = (self.endpoints, self.endpoints_in_core) {
+            let index = crate::endpoints::Index::build(&procs, self.command_width);
+            let candidates =
+                (mode == EndpointMode::Files).then(|| crate::endpoints::Candidates::of(&procs));
+            let mut out = self.apply_rows(procs);
+            crate::endpoints::annotate(&index, &mut out, candidates, mode);
+            return out;
+        }
+        self.apply_rows(procs)
+    }
+
+    /// [`Selection::apply`] but for the ends `-E`/`+E` name.
+    fn apply_rows(&self, procs: Vec<Process>) -> Vec<Process> {
         let specified = self.specified();
         let with_tasks = pids_with_tasks(&procs);
         // Where a path names a row, the row is named by it (see
@@ -1764,15 +1852,26 @@ impl Selection {
         let naming = (self.paths_identified && !self.path_items.is_empty())
             .then(|| PathIndex::new(&self.path_items, true));
         let mut out = Vec::new();
+        let every = self.reads_every_process();
         for mut p in procs {
-            if self.excludes_process(&p) {
-                continue; // any `^` negation: before all other selection
+            // Any `^` negation: before all other selection. Under `-E`/`+E`
+            // the process is read all the same, with no process-level mark,
+            // and a row a file-level item selects is listed (see
+            // [`Selection::reads_every_process`]); with no item at all
+            // (`AllProc`) none is selected, so it is not listed.
+            let excluded = self.excludes_process(&p);
+            if excluded && (!every || specified.is_empty()) {
+                continue;
             }
             // The kinds this process matched. A file inherits them only if the
             // process matched something, the C's `PS_PRI` gate on
             // `Lf->sf = Lp->sf` (`lib/proc.c:178`).
-            let inherited = self.entry_kinds(&p, &with_tasks);
-            let peer_only = p.endpoint_peer && inherited.is_empty();
+            let inherited = if excluded {
+                SelKinds::NONE
+            } else {
+                self.entry_kinds(&p, &with_tasks)
+            };
+            let peer_only = !excluded && p.endpoint_peer && inherited.is_empty();
             p.files.retain_mut(|f| {
                 // `-s` is not a list option: it can only veto. Its exclusion
                 // form is the C's `SELEXCLF`, which outranks even the OR
@@ -1826,7 +1925,8 @@ impl Selection {
                 // And a process its backend read and found nothing to show
                 // in is not a bare line either: where the C lists a process
                 // only through its files, it has no line at all.
-                if p.unlisted
+                if excluded
+                    || p.unlisted
                     || !self.proc_selected(inherited)
                     || specified.intersects(SelKinds::FILE)
                     || peer_only
@@ -1980,8 +2080,9 @@ impl<'a> PathIndex<'a> {
                         .insert(dev_ino_bucket(id.dev, id.ino, ID_MASK), i);
                 }
                 (None, None) if !identified => {
-                    ix.by_prefix
-                        .push((i, item.name.to_string_lossy().to_ascii_lowercase()));
+                    if let Some(name) = matched_name(&item.name) {
+                        ix.by_prefix.push((i, name.to_ascii_lowercase()));
+                    }
                 }
                 (None, None) => {}
             }
@@ -2088,6 +2189,15 @@ fn under_dir(name: &str, dir: &str) -> bool {
     name.starts_with(dir) && name.as_bytes().get(dir.len()) == Some(&b'\\')
 }
 
+/// A path argument's text where a backend matches names rather than
+/// identifying files (Windows): `None` for one that is not valid text, which
+/// then names no file. Never its lossy spelling: a lone surrogate's U+FFFD
+/// would name, and prefix-match, a file whose name holds U+FFFD at that
+/// place, and Restart Manager would be asked about that other file.
+pub fn matched_name(path: &OsStr) -> Option<&str> {
+    path.to_str()
+}
+
 /// `-u` match: case-insensitive, against either the full `DOMAIN\user` string
 /// or just the account name after the backslash.
 fn user_matches(needle: &str, user: Option<&str>) -> bool {
@@ -2104,6 +2214,90 @@ fn user_matches(needle: &str, user: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use crate::mock;
+
+    /// `-c` compares bytes: a needle that is not UTF-8 matches a command
+    /// whose bytes begin with it, the raw bytes where the command is not
+    /// UTF-8, and a needle cut inside a character a command that is.
+    #[test]
+    fn dash_c_compares_bytes() {
+        #[cfg(unix)]
+        let os = |b: &[u8]| {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b.to_vec())
+        };
+        #[cfg(not(unix))]
+        let os = |b: &[u8]| OsString::from(String::from_utf8_lossy(b).into_owned());
+        let mut raw = who(10, "x\u{fffd}name", 0, 10);
+        raw.raw_names = Some(Box::new(crate::model::RawNames {
+            command: Some(b"x\xffname"[..].into()),
+            login: None,
+        }));
+        let text = who(20, "aaaaaaaaézz", 0, 20);
+        let sel = |needle: &[u8]| Selection {
+            commands: vec![os(needle)],
+            ..Default::default()
+        };
+        let pids = |s: Selection| -> Vec<u32> {
+            s.apply(vec![raw.clone(), text.clone()])
+                .iter()
+                .map(|p| p.pid)
+                .collect()
+        };
+        if cfg!(unix) {
+            assert_eq!(pids(sel(b"x\xff")), [10]);
+            assert_eq!(pids(sel("aaaaaaaaé".as_bytes())), [20]);
+            assert_eq!(pids(sel(b"aaaaaaaa\xc3")), [20]);
+            assert!(
+                pids(sel("x\u{fffd}".as_bytes())).is_empty(),
+                "not the lossy text"
+            );
+        }
+    }
+
+    /// Where names are matched (Windows), a path argument that is not text
+    /// names no row, though a row's name holds its lossy spelling.
+    #[test]
+    fn a_path_argument_that_is_not_text_matches_no_name() {
+        #[cfg(unix)]
+        let arg = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b"/tmp/a\xff".to_vec())
+        };
+        #[cfg(windows)]
+        let arg = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut w: Vec<u16> = "/tmp/a".encode_utf16().collect();
+            w.push(0xd800);
+            OsString::from_wide(&w)
+        };
+        #[cfg(not(any(unix, windows)))]
+        let arg = OsString::from("/tmp/a\u{fffd}");
+        assert_eq!(matched_name(&arg), None.or(arg.to_str()));
+        let mut procs = mock::sample_processes();
+        procs[0].files[0].name = "/tmp/a\u{fffd}-other".into();
+        let sel = Selection {
+            paths: vec![arg.clone()],
+            paths_identified: false,
+            path_items: vec![PathItem {
+                name: arg,
+                ..PathItem::default()
+            }],
+            ..Default::default()
+        };
+        if cfg!(any(unix, windows)) {
+            assert!(!sel.path_matches(&procs[0].files[0]));
+            assert!(sel.apply(procs).is_empty());
+        }
+        // Text still matches by name.
+        let mut procs = mock::sample_processes();
+        procs[0].files[0].name = "/tmp/abc".into();
+        let sel = Selection {
+            paths: vec!["/tmp/a".into()],
+            paths_identified: false,
+            ..Default::default()
+        };
+        assert!(sel.path_matches(&procs[0].files[0]));
+    }
 
     #[test]
     fn no_selectors_lists_all() {
@@ -2861,6 +3055,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![
                 row("/usr/bin/python3", 65024), // on the named filesystem
                 row("/dev/null", 6),            // NOT on it — a different mount
@@ -2916,6 +3111,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![
                 // The file itself, open under a DIFFERENT name (a hard link).
                 row("C:\\other\\name.txt", "C:", "42"),
@@ -2970,6 +3166,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files,
         }
     }
@@ -3244,7 +3441,7 @@ mod tests {
             ino: 11,
         });
         for p in &sel.paths {
-            sel.path_names.insert(p.into());
+            sel.path_names.insert(p.clone());
         }
         let bound = |path: &str, id: Option<(u64, u64)>| BoundPath {
             path: Some(path.into()),
@@ -3261,6 +3458,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![
                 // The same path, another file: a tmpfs over /d/mnt elsewhere.
                 row("/d/mnt", "1", None),
@@ -3340,6 +3538,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files,
         };
         let item = |id: Option<(u64, u64)>, fs: Option<u64>, name: &str| PathItem {
@@ -3686,6 +3885,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![file(name)],
         };
         assert_eq!(sel.locate(&[p("c:\\dir\\a.txt")]).paths, [true, false]);
@@ -3867,6 +4067,7 @@ mod tests {
             user: None,
             endpoint_peer: true,
             unlisted: false,
+            raw_names: None,
             files: vec![pipe.clone(), reg.clone()],
         };
         // 8888 matches no selector and is no peer: dropped as usual.
@@ -3881,6 +4082,7 @@ mod tests {
             user: None,
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
             files: vec![pipe, reg],
         };
         let sel = Selection {
@@ -4090,6 +4292,7 @@ mod tests {
             files: Vec::new(),
             endpoint_peer: false,
             unlisted: false,
+            raw_names: None,
         }
     }
 
@@ -4913,5 +5116,270 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(plain.apply(vec![app]).len(), 1);
+    }
+
+    /// DIVERGENCES 56: where the backend leaves `-E`/`+E` to the core, the C
+    /// reads every process, so one `-a` leaves out still locates `-i` and
+    /// `-K` through its rows, and one a `^` excludes does too; neither
+    /// locates a process-level item it fails. `+E` needs the rows of `-t`.
+    #[test]
+    fn under_endpoints_every_process_locates_by_its_rows() {
+        let mut inet = k_row(FdType::Handle(3), FileType::Ipv4);
+        inet.socket = Some(Box::new(crate::model::SocketInfo {
+            protocol: crate::model::Protocol::Tcp,
+            local: Some("127.0.0.1:80".parse().unwrap()),
+            remote: None,
+            state: None,
+            tcp: None,
+            bound: None,
+        }));
+        let mut other = who(2, "other", 0, 2);
+        other.files = vec![inet];
+        let mut task = who(2, "other", 0, 2);
+        task.tid = Some(5);
+        task.files = vec![k_row(FdType::Cwd, FileType::Dir)];
+        let mine = who(1, "mine", 0, 1);
+        let gathered = vec![mine, other, task];
+        let mut sel = Selection {
+            pids: vec![1, 2],
+            and_mode: true,
+            inet: InetFilter {
+                enabled: true,
+                ..Default::default()
+            },
+            uids: Vec::new(),
+            commands: vec!["mine".into()],
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        sel.pids = vec![1];
+        let quiet = sel.locate(&gathered);
+        assert!(!quiet.inet_all && !quiet.tasks, "without -E: {quiet:?}");
+        sel.endpoints = Some(EndpointMode::Info);
+        assert!(!sel.reads_every_process(), "the backend names its own");
+        sel.endpoints_in_core = true;
+        assert!(sel.reads_every_process());
+        let got = sel.locate(&gathered);
+        assert!(got.inet_all && got.tasks, "{got:?}");
+        assert_eq!(got.pids, [true]);
+        // `-c` is compared only past `-K -a`, which no entry but a task is.
+        assert_eq!(got.commands, [false]);
+        // Excluded: read for its rows, locating nothing of its own: not
+        // `-p 2` or `-u 0`, which it names, not `-c other`, and not `-K`
+        // through its task, whose rows inherit no kind from it.
+        let excluding = Selection {
+            pid_excludes: vec![2],
+            pids: vec![1, 2],
+            uids: vec![UidSel {
+                uid: 0,
+                login: None,
+            }],
+            commands: vec!["other".into()],
+            and_mode: false,
+            ..sel.clone()
+        };
+        let mut mine_away = gathered.clone();
+        mine_away[0].uid = Some(9);
+        let got = excluding.locate(&mine_away);
+        assert!(got.inet_all, "{got:?}");
+        assert_eq!(got.pids, [true, false], "{got:?}");
+        assert_eq!(got.uids, [false], "{got:?}");
+        assert_eq!(got.commands, [false], "{got:?}");
+        assert!(!got.tasks, "{got:?}");
+        // A `-c ^` is no exclusion under `-E`: the process locates as ever.
+        let by_command = Selection {
+            command_excludes: vec!["oth".into()],
+            pids: vec![2],
+            commands: Vec::new(),
+            and_mode: false,
+            ..sel.clone()
+        };
+        let got = by_command.locate(&gathered);
+        assert_eq!(got.pids, [true], "{got:?}");
+        assert!(got.tasks, "{got:?}");
+        // `-t` under `+E` reads the rows that name the ends.
+        let terse = Selection {
+            terse: true,
+            and_mode: false,
+            pids: vec![1],
+            commands: Vec::new(),
+            inet: InetFilter::default(),
+            tasks: TaskMode::default(),
+            endpoints: Some(EndpointMode::Files),
+            ..sel.clone()
+        };
+        assert!(!terse.terse_skips_files());
+        let info = Selection {
+            endpoints: Some(EndpointMode::Info),
+            ..terse
+        };
+        assert!(info.terse_skips_files());
+    }
+
+    /// Under `-E`/`+E` (Linux) a process a `-p ^`, `-u ^` or `-g ^`
+    /// excludes is still read, with no process-level mark: a row of it that a
+    /// file-level item selects is listed when the AND holds for the row
+    /// alone (`is_file_sel()`), and nothing of it otherwise; a `-c ^` is
+    /// ignored. Measured against the C (DIVERGENCES 56).
+    #[test]
+    fn under_endpoints_an_excluded_process_lists_the_rows_a_file_item_selects() {
+        let row = |fd: u64| {
+            let mut f = k_row(FdType::Handle(fd), FileType::Regular);
+            f.name = format!("/f{fd}");
+            f
+        };
+        let mut a = who(10, "python3", 0, 10);
+        a.files = vec![row(3), row(4)];
+        let mut b = who(20, "kidb", 0, 10);
+        b.files = vec![row(3)];
+        let gathered = vec![a, b];
+        let base = Selection {
+            endpoints: Some(EndpointMode::Info),
+            endpoints_in_core: true,
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(3)],
+                exclude: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let pids = |sel: &Selection| -> Vec<(u32, Vec<String>)> {
+            sel.apply(gathered.clone())
+                .iter()
+                .map(|p| (p.pid, p.files.iter().map(|f| f.fd.code()).collect()))
+                .collect()
+        };
+        // `-E -p ^10 -d 3`: 10's fd 3 is listed.
+        let sel = Selection {
+            pid_excludes: vec![10],
+            ..base.clone()
+        };
+        assert_eq!(pids(&sel), [(10, vec!["3".into()]), (20, vec!["3".into()])]);
+        // Without `-E` it is not read at all.
+        let plain = Selection {
+            endpoints: None,
+            ..sel.clone()
+        };
+        assert_eq!(pids(&plain), [(20, vec!["3".into()])]);
+        // `-u ^0 -a -p 10 -d 3`: the row lacks the PID kind its process
+        // would have given it, so the AND fails.
+        let sel = Selection {
+            uid_excludes: vec![0],
+            pids: vec![10],
+            and_mode: true,
+            ..base.clone()
+        };
+        assert!(pids(&sel).is_empty());
+        // `-g ^10` the same as `-p ^`.
+        let sel = Selection {
+            pgid_excludes: vec![10],
+            ..base.clone()
+        };
+        assert_eq!(pids(&sel).len(), 2);
+        // No item at all (`AllProc`): nothing of an excluded process.
+        let sel = Selection {
+            pid_excludes: vec![10],
+            fd_filter: None,
+            ..base.clone()
+        };
+        assert_eq!(pids(&sel), [(20, vec!["3".into()])]);
+        // `-c ^python3`, alone or with `-a -p 10 -d 3`: ignored.
+        let sel = Selection {
+            command_excludes: vec!["python3".into()],
+            fd_filter: None,
+            ..base.clone()
+        };
+        assert_eq!(pids(&sel).len(), 2);
+        assert!(!sel.excludes_process(&gathered[0]));
+        let sel = Selection {
+            command_excludes: vec!["python3".into()],
+            pids: vec![10],
+            and_mode: true,
+            ..base.clone()
+        };
+        assert_eq!(pids(&sel), [(10, vec!["3".into()])]);
+        assert!(Selection {
+            endpoints: None,
+            ..sel
+        }
+        .excludes_process(&gathered[0]));
+    }
+
+    /// Under `-E`/`+E` on Linux the C sets no per-process `Ckscko`, so the
+    /// run's own holds for every process: `-E -p P -i` reads P's sockets
+    /// alone, and `-E -a -i` stays sockets-only.
+    #[test]
+    fn under_endpoints_the_runs_socket_only_reading_holds_for_every_process() {
+        let me = who(10, "python3", 0, 10);
+        let sel = Selection {
+            pids: vec![10],
+            inet: InetFilter {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!sel.sockets_only_for(&me), "without -E it is read whole");
+        let e = Selection {
+            endpoints: Some(EndpointMode::Info),
+            endpoints_in_core: true,
+            ..sel.clone()
+        };
+        assert!(e.sockets_only_for(&me));
+        assert!(!e.socket_rows_only());
+        let windows = Selection {
+            endpoints_in_core: false,
+            ..e.clone()
+        };
+        assert!(!windows.sockets_only_for(&me));
+        let anded = Selection {
+            and_mode: true,
+            ..e.clone()
+        };
+        assert!(anded.socket_rows_only());
+        assert!(!Selection {
+            endpoints_in_core: false,
+            ..anded
+        }
+        .socket_rows_only());
+    }
+
+    /// [`Selection::apply`] names a pipe's other ends where the backend
+    /// leaves them to it, and under `+E` lists them (DIVERGENCES 56).
+    #[test]
+    fn apply_names_the_ends_where_the_backend_leaves_them() {
+        let pipe = |fd: u64, access| {
+            let mut f = k_row(FdType::Handle(fd), FileType::Fifo);
+            f.name = "pipe".into();
+            f.node = Some("77".into());
+            f.access = access;
+            f
+        };
+        let mut w = who(10, "w", 0, 10);
+        w.files = vec![pipe(4, crate::model::AccessMode::Write)];
+        let mut r = who(20, "r", 0, 20);
+        r.files = vec![pipe(3, crate::model::AccessMode::Read)];
+        let gathered = vec![w, r];
+        let mut sel = Selection {
+            pids: vec![10],
+            endpoints: Some(EndpointMode::Info),
+            ..Default::default()
+        };
+        let names = |sel: &Selection| -> Vec<(u32, String)> {
+            sel.apply(gathered.clone())
+                .iter()
+                .flat_map(|p| p.files.iter().map(move |f| (p.pid, f.name.clone())))
+                .collect()
+        };
+        assert_eq!(names(&sel), [(10, "pipe".to_string())]);
+        sel.endpoints_in_core = true;
+        assert_eq!(names(&sel), [(10, "pipe 20,r,3r".to_string())]);
+        sel.endpoints = Some(EndpointMode::Files);
+        assert_eq!(
+            names(&sel),
+            [
+                (10, "pipe 20,r,3r".to_string()),
+                (20, "pipe 10,w,4w".to_string())
+            ]
+        );
     }
 }

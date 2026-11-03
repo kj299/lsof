@@ -812,12 +812,21 @@ name = "sock-file-held-by-path-is-no-plus-d-entry"
 args = ["-n", "-P", "-Fft", "-a", "-p", "{SF}", "-d", "4,5", "-x", "l", "+d", "/proc/{SF}/fd"]
 
 [[case]]
-# LEDGERED (DIVERGENCES 126, OPEN). The row itself: the C's
-# `process_proc_sock()` names no protocol for a socket file reached by its
-# path, `tsock`, `o0t0`, `ncan't identify protocol`; lsof-rs types it by
-# its `stat`, `tSOCK`, `s0`, and its path for NAME.
+# DIVERGENCES 126. The row itself: the C's `process_proc_sock()` names no
+# protocol for a socket file reached by its path, `tsock`, `o0t0`,
+# `ncan't identify protocol`; lsof-rs had typed it by its `stat`, `tSOCK`,
+# `s0`, and its path for NAME.
 name = "sock-file-held-by-path-row-in-the-c"
 args = ["-n", "-P", "-FftDsoin", "-a", "-p", "{SF}", "-d", "5"]
+
+[[case]]
+# Under -X the C does not look, and says so; the table's columns too.
+name = "sock-file-held-by-path-row-under-X"
+args = ["-n", "-P", "-X", "-a", "-p", "{SF}", "-d", "5"]
+
+[[case]]
+name = "sock-file-held-by-path-row-json"
+args = ["-n", "-P", "-J", "-a", "-p", "{SF}", "-d", "5"]
 
 # A file-system argument finds a socket bound at exactly the path typed
 # (DIVERGENCES 60, from the review). Fixture MS binds one at `/dev/shm`, free
@@ -5334,3 +5343,261 @@ name = "mount-table-unopenable-terse"
 args = ["-t", "-p", "{A}"]
 env = { LSOF_DIFF_MT = "nomounts" }
 with_stderr = true
+
+# ------------------------------------------- paths that are not UTF-8 (92)
+# Fixture X holds `map\xfe` open and mapped; a path, a `+d` entry and a
+# missing path that are not UTF-8 are paths like any other, as bytes. lsof-rs
+# had refused the whole command line: `an argument is not valid UTF-8`.
+# `-F pf`: which rows, not how a byte is shown (the C `\xfe`, lsof-rs U+FFFD
+# in a NAME read from the kernel).
+
+[[case]]
+name = "nonutf8-path-argument-is-a-path"
+args = ["-F", "pf", "-a", "-p", "{X}", "{XMAP}"]
+
+[[case]]
+name = "nonutf8-path-argument-dash-V"
+args = ["-V", "-F", "pf", "-a", "-p", "{X}", "{XMAP}", "{XNOPE}"]
+with_stderr = true
+
+[[case]]
+name = "nonutf8-plus-d-finds-its-entries"
+args = ["-F", "pf", "-a", "-p", "{X}", "+d", "{XDIR}"]
+
+[[case]]
+name = "nonutf8-path-argument-after-dash-dash"
+args = ["-F", "pf", "-a", "-p", "{X}", "--", "{XMAP}"]
+
+# --------------------------------- login names by glibc's file rules (70)
+# Fixture W's WL, WC, WP, WN and WG beside the password file
+# `LSOF_DIFF_MT=passwd` binds: glibc's `files` service skips blanks before a
+# name (`lead`), a comment and a NIS `+` entry (the number, and the C's `no
+# pwd entry` on stderr), cuts nothing, but the C keeps 32 bytes of a name
+# (`LOGINML`), and refuses a line whose gid is missing for a later one
+# (`good`). lsof-rs had read the file by rules of its own.
+
+[[case]]
+name = "user-login-by-glibc-files-rules"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{WL},{WC},{WP},{WN},{WG}"]
+env = { LSOF_DIFF_MT = "passwd" }
+with_stderr = true
+
+[[case]]
+name = "user-login-by-glibc-files-rules-fields"
+args = ["-F", "pLu", "-a", "-d", "cwd", "-p", "{WL},{WC},{WP},{WN},{WG}"]
+env = { LSOF_DIFF_MT = "passwd" }
+with_stderr = true
+
+[[case]]
+name = "user-login-after-blanks-selected-by-name"
+args = ["-t", "-a", "-u", "lead", "-p", "{WL},{WC}"]
+env = { LSOF_DIFF_MT = "passwd" }
+
+[[case]]
+# A commented-out line names no one: `can't get UID`, exit 1 in both.
+name = "user-commented-login-names-no-one"
+args = ["-t", "-a", "-u", "com", "-p", "{WL},{WC}"]
+env = { LSOF_DIFF_MT = "passwd" }
+
+# ---------------------------------- a zombie leader's tasks under -K -a (72)
+# Fixture Z's leader has exited and its `zombie-live` thread runs on. The C
+# reads that task with the leader's PID and owner, which locates `-p` though
+# the task then fails `-c`: no `process ID not located` line. lsof-rs had
+# read no task of a process the AND left out, and said it.
+
+[[case]]
+name = "zombie-leader-task-locates-p-though-it-fails-the-and"
+args = ["-V", "-n", "-P", "-K", "-a", "-p", "{Z}", "-c", "nomatch"]
+with_stderr = true
+
+# ------------------------------------------- -E and +E endpoints (56)
+# Fixture EP: {EP} and {EPC} at the ends of a pipe, a named FIFO, a loopback
+# TCP connection and a connected UDP pair. Under -E the C names each other
+# end in NAME (`PID,cmd,FDmode`, the command cut to the `+c` width, after a
+# socket's addresses and before its state), and under +E lists that end too,
+# with its own; -F carries it in `n`, JSON not at all. lsof-rs had accepted
+# both and printed neither. The UNIX socketpair is left out (`-d ^7`): the
+# C names its peer from NETLINK_SOCK_DIAG, which lsof-rs does not read yet.
+
+[[case]]
+name = "endpoints-E-names-the-other-ends"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+name = "endpoints-plus-E-lists-the-other-ends"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+name = "endpoints-plus-E-from-the-child"
+args = ["-n", "-P", "+E", "-a", "-p", "{EPC}", "-d", "3-6"]
+
+[[case]]
+name = "endpoints-E-fields"
+args = ["-n", "-P", "-E", "-F", "pcfatn", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+name = "endpoints-plus-E-fields"
+args = ["-n", "-P", "+E", "-F", "pcfatnT", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+# The pipe alone: an Internet row's JSON `name` is lsof-rs's (item 134).
+name = "endpoints-E-json-leaves-them-out"
+args = ["-n", "-P", "-E", "-J", "-a", "-p", "{EP}", "-d", "4"]
+
+[[case]]
+name = "endpoints-plus-E-terse"
+args = ["+E", "-t", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+# `%.*s` with CmdLim: `+c 0` prints none of the command.
+name = "endpoints-plus-c-0-prints-no-command"
+args = ["-n", "-P", "+E", "+c", "0", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+name = "endpoints-plus-c-15"
+args = ["-n", "-P", "-E", "+c", "15", "-a", "-p", "{EP}", "-d", "3-6"]
+
+[[case]]
+# -i alone: the TCP and UDP rows, and under +E their other ends.
+name = "endpoints-plus-E-with-i"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-i"]
+
+[[case]]
+# The C reads every process under -E, so a process -a leaves out still
+# locates -i through its sockets: no `no Internet files located` line.
+name = "endpoints-E-reads-every-process-for-search-items"
+args = ["-V", "-n", "-P", "-E", "-a", "-p", "{A}", "-i", "-d", "999"]
+with_stderr = true
+
+[[case]]
+# LEDGERED (DIVERGENCES 56, OPEN): a UNIX socket's peer, named by the C
+# from NETLINK_SOCK_DIAG (`type=STREAM ->INO=N PID,cmd,FDmode`).
+name = "endpoints-E-unix-socket-peer-in-the-c"
+args = ["-n", "-P", "-E", "-F", "fn", "-a", "-p", "{EP}", "-U"]
+
+# ------------- -E/+E: excluded processes, socket-only reading, pairing (56)
+# The C reads every process under -E/+E. One a `-p ^`, `-u ^` or `-g ^`
+# excludes is read with none of its process-level marks, so a row a file
+# item selects is listed when the AND holds for the row alone; a `-c ^` is
+# ignored (it is asked after the marks are given). And a run that ORs `-i`
+# or `-U` with process selecters alone reads every process for its sockets
+# alone (the C sets no per-process `Ckscko` under -E).
+
+[[case]]
+name = "endpoints-E-excluded-pid-rows-a-name-selects"
+args = ["-n", "-P", "-E", "-p", "^{EP}", "{EPFIFO}"]
+
+[[case]]
+name = "endpoints-plus-E-excluded-pids-rows-a-name-selects"
+args = ["-n", "-P", "+E", "-p", "^{EP},^{EPC}", "{EPFIFO}"]
+
+[[case]]
+# The excluded process's rows lack the PID kind the AND asks for. EPC's
+# UNIX socket (fd 9) is left out: its peer is the ledgered unix case's.
+name = "endpoints-E-excluded-pid-fails-an-and-of-pids"
+args = ["-n", "-P", "-E", "-p", "^{EP}", "-a", "-p", "{EPC}", "-d", "0-8"]
+
+[[case]]
+# File items alone: the AND holds for the excluded process's FIFO rows.
+name = "endpoints-E-excluded-pid-and-of-file-items"
+args = ["-n", "-P", "-E", "-p", "^{EP}", "-a", "-d", "0-99", "{EPFIFO}"]
+
+[[case]]
+# LEDGERED (DIVERGENCES 13, C-DEFECT): the rows match; the C exits 1, as it
+# does for every `-c ^`, which it reports as a search item never located.
+name = "endpoints-E-ignores-a-c-exclusion"
+args = ["-n", "-P", "-E", "-c", "^ep-child", "-a", "-p", "{EPC}", "-d", "3-6"]
+
+[[case]]
+# `-p EP` ORed with `-i`: EP's sockets alone under -E, all its files without.
+name = "endpoints-E-p-or-i-reads-sockets-alone"
+args = ["-F", "pf", "-E", "-p", "{EP}", "-i", "TCP:1"]
+
+[[case]]
+name = "endpoints-p-or-i-without-E-reads-every-file"
+args = ["-F", "pf", "-p", "{EP}", "-i", "TCP:1"]
+
+[[case]]
+# A UDP socket on a TCP connection's tuple reversed is no peer of it, and
+# of three UDP sockets on one tuple the third finds its peer taken.
+name = "endpoints-E-with-i-pairs-by-protocol-once"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-i"]
+
+[[case]]
+# +E puts an end's row among a printed process's rows by number: fd 30
+# before 31, fd 33 after 32.
+name = "endpoints-plus-E-places-forced-rows-by-fd"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "31,32"]
+
+[[case]]
+name = "endpoints-plus-E-forced-rows-fields"
+args = ["-F", "pfan", "+E", "-a", "-p", "{EP}", "-d", "31,32"]
+
+# ------------------------------------------ -r and /etc/passwd (70)
+# Under -r the C stats /etc/passwd at the first login of each cycle and
+# ends the run when it cannot: `can't stat(/etc/passwd)`, exit 1. With an
+# empty tmpfs over /etc that is the first cycle, the one -r run that ends.
+[[case]]
+name = "repeat-ends-where-passwd-cannot-be-stated"
+args = ["-r1", "-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "noetc" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+name = "repeat-ends-where-passwd-cannot-be-stated-fields"
+args = ["-r1", "-F", "pL", "-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "noetc" }
+with_stderr = true
+timeout = 30
+
+# ------------------------- logins cut inside a character, or not UTF-8 (70, 92)
+# WU's login is 31 `L`s and `é`, cut to 32 bytes inside the `é`; WX's is
+# `ab\xffcd`. The C prints both raw (a C-DEFECT: an account's name reaches
+# the terminal raw); lsof-rs prints the bytes it kept, escaped, so the
+# table is compared through -F with the login left out, and `-u` by bytes.
+[[case]]
+name = "user-login-cut-and-not-utf8-selected-by-uid"
+args = ["-F", "pu", "-a", "-d", "cwd", "-u", "65017,65018"]
+env = { LSOF_DIFF_MT = "passwd" }
+with_stderr = true
+
+[[case]]
+name = "user-login-not-utf8-selected-by-its-bytes"
+args = ["-F", "pu", "-a", "-d", "cwd", "-u", "ab{BYTEFF}cd"]
+env = { LSOF_DIFF_MT = "passwd" }
+with_stderr = true
+
+[[case]]
+# A cut login is no login: `-u` compares the whole name, which no account
+# has, and says so.
+name = "user-login-cut-is-not-a-login"
+args = ["-F", "pu", "-a", "-d", "cwd", "-u", "{WUCUT}"]
+env = { LSOF_DIFF_MT = "passwd" }
+
+# ----------------------------------- option bytes that are not UTF-8 (92)
+# GetOpt reads a byte at a time: one that is no option is its `illegal
+# option character`, and it reads on; 0xff is `(char)-1`, EOF, so it says
+# so, counts no error, and ends the options there, the next word (or this
+# one, when letters follow) the first name. The C prints the byte raw and
+# lsof-rs escaped (DIVERGENCES 122), so stderr is not compared here.
+[[case]]
+name = "nonutf8-option-byte-is-illegal-and-read-on"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-{BYTEFE}"]
+
+[[case]]
+name = "nonutf8-option-0xff-ends-the-options"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-option-0xff-makes-the-next-word-a-name"
+args = ["-p", "{A}", "-{BYTEFF}", "-a", "{FILE}"]
+
+[[case]]
+name = "nonutf8-option-0xff-with-letters-makes-its-word-a-name"
+args = ["-a", "-p", "{A}", "-{BYTEFF}a", "-d", "cwd"]
+
+[[case]]
+# `-c` compares bytes: fixture X's command is `x\xff\xfename`.
+name = "nonutf8-dash-c-matches-command-bytes"
+args = ["-F", "pc", "-a", "-d", "cwd", "-c", "x{BYTEFF}"]

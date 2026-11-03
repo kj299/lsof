@@ -453,16 +453,16 @@ name = "sockets-only-per-run"
 rule = "Ckscko is decided per process: an unselected one is read for sockets alone (124)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        conditional && !self.proc_kinds(p).intersects(by_process)'''
-new = '''        conditional && false'''
+old = '''        conditional && (self.reads_every_process() || !self.proc_kinds(p).intersects(by_process))'''
+new = '''        conditional && (self.reads_every_process() || false)'''
 
 [[mutant]]
 name = "sockets-only-for-a-selected-process"
 rule = "a process the process selecters select is read whole (124)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        conditional && !self.proc_kinds(p).intersects(by_process)'''
-new = '''        conditional'''
+old = '''        conditional && (self.reads_every_process() || !self.proc_kinds(p).intersects(by_process))'''
+new = '''        conditional && (self.reads_every_process() || true)'''
 
 [[mutant]]
 name = "sockets-only-ignores-file-selecters"
@@ -479,9 +479,10 @@ name = "sockets-only-under-endpoints"
 rule = "under -E/+E the C keeps the run's rule (56)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''            && spec.intersects(by_process)
-            && self.endpoints.is_none();'''
-new = '''            && spec.intersects(by_process);'''
+old = '''            && (self.endpoints.is_none() || self.endpoints_in_core);
+        conditional'''
+new = '''            && self.endpoints.is_none();
+        conditional'''
 
 [[mutant]]
 name = "sockets-only-task-not-whole"

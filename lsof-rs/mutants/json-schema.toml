@@ -169,8 +169,8 @@ name = "base-name-keeps-the-joining-space"
 rule = "name is the base without the space that joins its addition"
 [[mutant.edit]]
 file = "crates/lsof-core/src/model.rs"
-old = '''            .checked_sub(extra)'''
-new = '''            .checked_sub(extra.saturating_sub(1))'''
+old = '''            .and_then(|a| self.name.get(..a.base() as usize))'''
+new = '''            .and_then(|a| self.name.get(..(a.base() as usize).saturating_add(1)))'''
 
 [[mutant]]
 name = "json-with-t-accepted"
