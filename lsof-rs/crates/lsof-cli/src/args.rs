@@ -7350,21 +7350,33 @@ mod tests {
     #[test]
     fn an_attached_value_opening_an_option_is_read_as_letters() {
         let said = |argv: &[&str]| parse(argv.to_vec()).unwrap_err();
-        assert_eq!(said(&["-g-a"]), "illegal option character: -");
-        assert_eq!(said(&["-s+a"]), "illegal option character: +");
-        assert_eq!(
-            said(&["-F-W"]),
-            "illegal option character: -\nlsof: illegal option character: W"
+        // Windows says its own words for some of these options first (a
+        // bare `-g` is refused there: its `-g` is the PPID extension); the
+        // value is given back and read as letters all the same.
+        let check = |w: &str, want: &str| {
+            let got = said(&[w]);
+            if cfg!(windows) {
+                let c = &want[..want.find('\n').unwrap_or(want.len())];
+                assert!(got.contains(c), "{w}: {got}");
+            } else {
+                assert_eq!(got, want, "{w}");
+            }
+        };
+        check("-g-a", "illegal option character: -");
+        check("-s+a", "illegal option character: +");
+        check(
+            "-F-W",
+            "illegal option character: -\nlsof: illegal option character: W",
         );
-        assert_eq!(
-            said(&["-x-a"]),
-            "illegal option character: -\nlsof: -x must accompany +d or +D"
+        check(
+            "-x-a",
+            "illegal option character: -\nlsof: -x must accompany +d or +D",
         );
         for w in ["-T-a", "-K-a", "-f-a", "-i-a", "+f-a", "+K-a"] {
-            assert_eq!(said(&[w]), "illegal option character: -", "{w}");
+            check(w, "illegal option character: -");
         }
         // The letters after it are options again: `-g-h` asks for help too.
-        assert!(matches!(parse(vec!["-g-h"]), Err(e) if e == "illegal option character: -"));
+        check("-g-h", "illegal option character: -");
     }
 
     /// On Windows, where `-c` reads text, a value holding a lone surrogate
