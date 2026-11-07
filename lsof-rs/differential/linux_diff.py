@@ -1335,6 +1335,14 @@ NFS_BIND = (
     "sys.exit(0 if r==0 else 1)\n"
 )
 
+# `mt-wrap.sh`'s `nfsws` mode's NFS line, a `printf` format of fixture NFS's
+# directory: `nfs`'s mount, led by a space and a tab, its fields parted by
+# tabs and runs of spaces. The kernel writes single spaces, but the C's
+# `get_fields()` skips leading blanks and takes a run of them for one
+# separator, so to it this is the mount; lsof-rs had split on single
+# spaces and dropped it (DIVERGENCES 151's review, `parse_mounts`).
+NFS_WS_LINE = " \tsrv:/export\t%s\t\t nfs4  rw,relatime 0 0\\n"
+
 
 def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     """The script fixture MT's and AUTOFS's cases run in, already in a mount
@@ -1366,7 +1374,10 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     (DIVERGENCES 151): `srv:/sub` at `NFS_DIR/sub`, `srv:/two` at
     `NFS_DIR2` and `srv:/zz` at `NFS_DIR2/zz`, all on the one device, so
     that two NFS mounts share it, one's directory starts another's, and
-    one has no file open on it. And `nomounts` mounts a procfs
+    one has no file open on it. `nfsws` lists the one NFS mount of `nfs`
+    on a line the kernel never writes ([`NFS_WS_LINE`]): led by a space and
+    a tab, its fields parted by tabs and runs of spaces, which the C's
+    `get_fields()` reads as one separator each. And `nomounts` mounts a procfs
     of the namespace's own over `/proc` with `subset=pid`, which has no
     `/proc/mounts` at all: both binaries end where they first read the
     table, `can't fopen(/proc/mounts, "r")`. And `noetc` mounts an empty
@@ -1403,10 +1414,14 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             '    "$@"\n'
             "    exit $?\n"
             "fi\n"
-            'if [ "$mode" = nfs ] || [ "$mode" = nfs3 ]; then\n'
+            'if [ "$mode" = nfs ] || [ "$mode" = nfs3 ] || [ "$mode" = nfsws ]; then\n'
             f"    T={shlex.quote(os.path.join(work, 'nfs-mounts'))}.$$\n"
             '    cat /proc/self/mounts > "$T" || exit 2\n'
-            f"    echo {shlex.quote('srv:/export ' + (nfs_dir or '/nonexistent') + ' nfs4 rw,relatime 0 0')} >> \"$T\"\n"
+            '    if [ "$mode" = nfsws ]; then\n'
+            f"        printf {shlex.quote(NFS_WS_LINE)} {shlex.quote(nfs_dir or '/nonexistent')} >> \"$T\"\n"
+            "    else\n"
+            f"        echo {shlex.quote('srv:/export ' + (nfs_dir or '/nonexistent') + ' nfs4 rw,relatime 0 0')} >> \"$T\"\n"
+            "    fi\n"
             '    if [ "$mode" = nfs3 ]; then\n'
             f"        echo {shlex.quote('srv:/sub ' + (nfs_dir or '/nonexistent') + '/sub nfs4 rw,relatime 0 0')} >> \"$T\"\n"
             f"        echo {shlex.quote('srv:/two ' + (nfs_dir or '/nonexistent') + '2 nfs4 rw,relatime 0 0')} >> \"$T\"\n"
@@ -3617,7 +3632,7 @@ def run(args) -> int:
                     for c in cases
                     if any(
                         needs_mt(c, mode)
-                        for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nomounts", "noetc")
+                        for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc")
                     )
                     and c["name"] not in dropped
                 ]
@@ -3877,6 +3892,12 @@ def self_test() -> int:
               and "srv:/zz /x/nfs2/zz nfs4" in nfs3
               and nfs_branch.index("srv:/export") < nfs_branch.index("srv:/sub")
               and nfs_branch.index("srv:/zz") < nfs_branch.index('"$@"'))
+        ws = nfs_branch.split('if [ "$mode" = nfsws ]', 1)[-1].split("\n    else\n", 1)[0]
+        check("the MT nfsws mode lists the NFS mount with tabs, runs of spaces and leading whitespace",
+              '[ "$mode" = nfsws ]; then' in nfs_text and "printf" in ws and "/x/nfs" in ws
+              and NFS_WS_LINE.startswith(" \t") and "\t\t" in NFS_WS_LINE and "  " in NFS_WS_LINE
+              and NFS_WS_LINE.endswith("\\n") and "%s" in NFS_WS_LINE
+              and nfs_branch.index("nfsws") < nfs_branch.index('"$@"'))
         nomounts = nfs_text.split('if [ "$mode" = nomounts ]', 1)[-1].split("\nfi\n", 1)[0]
         check("the MT nomounts mode mounts a procfs with no /proc/mounts before its binary",
               nomounts.index("subset=pid") < nomounts.index('"$@"')

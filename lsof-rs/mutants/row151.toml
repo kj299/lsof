@@ -12,10 +12,15 @@
 # bind a faked table over the `/proc/mounts` link in a mount namespace of
 # each run's own. CI runs only --apply-only.
 #
-# Run 2026-11-07 as root with --first-kill: 14 of 14 killed, 10 by the unit
-# gate and 4 by the differential alone (no-mount-kept-on-linux,
-# item-never-nfs, item-dir-is-the-argument, item-mounts-not-handed-on:
-# the CLI's half, which no unit test reaches). The `N_NFS` typing itself
+# Run 2026-11-07 as root with --first-kill, after the review fixes: 20
+# of 20 killed, 16 by the unit gate and 4 by the differential alone
+# (no-mount-kept-on-linux, item-never-nfs, item-dir-is-the-argument,
+# item-mounts-not-handed-on: the CLI's half, which no unit test reaches).
+# The review's equivalent mutant (`rename_located` asking with no NFS
+# mount) is moot: it now asks with none, since a file-system item names
+# nothing there. The three `mounts-*` mutants pin the `/proc/mounts` field
+# split, the C's `get_fields()`, found in the same review. The `N_NFS`
+# typing itself
 # (`row_nfs_mount`, the newest NFS mount of the device whose directory
 # starts the path, of what the C types `N_REGLR`) is row 124's, pinned by
 # mutants/row124.toml and the unit test `nfs_files_are_found_by_their_mount`.
@@ -73,30 +78,34 @@ name = "path-matches-by-device-alone"
 rule = "the path filter asks the items' mounts, not the device alone (151)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''                if self.path_fs_devices.contains(&dev) && self.fs_items_name(dev, f) {'''
-new = '''                if self.path_fs_devices.contains(&dev) {'''
-
-[[mutant]]
-name = "items-of-another-device-asked"
-rule = "a file is asked only of the file-system items of its own device (151)"
-[[mutant.edit]]
-file = "crates/lsof-core/src/selection.rs"
-old = '''            .any(|(d, m)| *d == dev && m.names(row))'''
-new = '''            .any(|(_, m)| m.names(row))'''
+old = '''        let Some(of_dev) = self.path_fs_items.get(&dev) else {'''
+new = '''        let Some(of_dev) = None::<&Vec<usize>> else {'''
 
 [[mutant]]
 name = "no-mounts-names-nothing"
 rule = "where no mounts were recorded (every backend but Linux) the device decides (151)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        if self.path_fs_mounts.is_empty() {
-            return true;
-        }
-        let row = self.row_nfs_dir(f);'''
-new = '''        if self.path_fs_mounts.is_empty() {
-            return false;
-        }
-        let row = self.row_nfs_dir(f);'''
+old = '''            |&i| match self.path_items.get(i).and_then(|it| it.fs_mount.as_ref()) {
+                None => true,'''
+new = '''            |&i| match self.path_items.get(i).and_then(|it| it.fs_mount.as_ref()) {
+                None => false,'''
+
+[[mutant]]
+name = "unindexed-device-names-nothing"
+rule = "a named device with no item indexed is matched by the device alone (151)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            return self.path_fs_devices.contains(&dev);'''
+new = '''            return false;'''
+
+[[mutant]]
+name = "fs-item-not-indexed-by-device"
+rule = "each file-system item is indexed by its own device (151)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        self.path_fs_items.entry(dev).or_default().push(i);'''
+new = '''        self.path_fs_items.entry(0).or_default().push(i);'''
 
 [[mutant]]
 name = "row-never-nfs"
@@ -113,6 +122,22 @@ rule = "a row locates the first item of its device's chain that names it (151)"
 file = "crates/lsof-core/src/selection.rs"
 old = '''            .find(|i| names(i))'''
 new = '''            .find(|_| true)'''
+
+[[mutant]]
+name = "bound-head-of-another-device"
+rule = "the bucket's head is met first only where it is an item of the row's device: the C's chain skips another device's (84, 151)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            .filter(|&h| self.items.get(h).and_then(|it| it.fs_device) == Some(dev));'''
+new = '''            .filter(|_| true);'''
+
+[[mutant]]
+name = "nfs-mount-with-no-dir"
+rule = "an NFS mount whose directory is empty types nothing N_NFS, the C's mp->dirl test (124, 151)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            m.device == Some(dev) && !dir.is_empty() && path.starts_with(dir)'''
+new = '''            m.device == Some(dev) && path.starts_with(dir)'''
 
 [[mutant]]
 name = "bound-ignores-the-bucket-head"
@@ -153,5 +178,29 @@ name = "item-mounts-not-handed-on"
 rule = "the CLI hands each item's mount to the path filter (151)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''                        sel.path_fs_mounts.push((dev, fm.clone()));'''
-new = '''                        let _ = fm;'''
+old = '''                    sel.add_fs_item(dev, name.clone(), fs_mount);'''
+new = '''                    sel.add_fs_item(dev, name.clone(), fs_mount.and(None));'''
+
+[[mutant]]
+name = "mounts-split-on-single-spaces"
+rule = "a mounts line's fields are parted by runs of spaces and tabs, as get_fields() parts them (151 review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            .split(|&b| b == b' ' || b == b'\t')'''
+new = '''            .split(|&b| b == b' ')'''
+
+[[mutant]]
+name = "mounts-empty-fields-kept"
+rule = "a run of separators is one, and leading blanks are skipped (151 review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            .filter(|field| !field.is_empty());'''
+new = '''            .filter(|_| true);'''
+
+[[mutant]]
+name = "mounts-nul-does-not-end-the-line"
+rule = "a NUL ends a mounts line, as it ends the C's string (151 review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let line = line.split(|&b| b == 0).next().unwrap_or_default();'''
+new = '''        let line = &line[..];'''

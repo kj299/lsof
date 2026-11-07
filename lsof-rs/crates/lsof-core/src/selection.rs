@@ -940,11 +940,15 @@ pub struct Selection {
     /// `-e` row's) is in here matches the `SELNM` kind, which is how naming a
     /// mount point selects everything open on it.
     pub path_fs_devices: std::collections::HashSet<u64>,
-    /// On Linux, each file-system item's device and mount, in the order
-    /// entered: a file on one of [`Selection::path_fs_devices`] matches only
-    /// where one of the items of its device names it ([`FsItemMount::names`],
-    /// DIVERGENCES 151). Empty elsewhere, where the device alone decides.
-    pub path_fs_mounts: Vec<(u64, FsItemMount)>,
+    /// Each file-system item of a device, as its index in
+    /// [`Selection::path_items`], in the order entered: a file on one of
+    /// [`Selection::path_fs_devices`] matches only where one of the items of
+    /// its device names it ([`FsItemMount::names`], DIVERGENCES 151). The
+    /// mount itself is held once, in the item's [`PathItem::fs_mount`]; this
+    /// is the index by device, so a file is asked only of its device's
+    /// items. [`Selection::add_fs_item`] keeps the three in step. A device
+    /// listed with no entry here is matched by the device alone.
+    pub path_fs_items: HashMap<u64, Vec<usize>>,
     /// `+c <n>`: how much of the command name the COMMAND column shows.
     /// Defaults to [`CommandWidth::Standard`] — a plain `lsof` run caps it.
     pub command_width: CommandWidth,
@@ -1246,11 +1250,11 @@ impl Selection {
         // On Linux the item's mount decides too: an `N_NFS` file is named only
         // by a file system its own NFS mount's directory starts, and any
         // other file only by one that is not NFS (`FsItemMount::names`,
-        // DIVERGENCES 151). The few file-system items are asked only of a
-        // file on one of their devices, from what is already held: no call.
+        // DIVERGENCES 151). Only a file on one of their devices is asked, and
+        // only of that device's items, from what is already held: no call.
         if !self.path_fs_devices.is_empty() {
             if let Some(dev) = f.searched_fs_device() {
-                if self.path_fs_devices.contains(&dev) && self.fs_items_name(dev, f) {
+                if self.fs_items_name(dev, f) {
                     return true;
                 }
             }
@@ -1534,9 +1538,12 @@ impl Selection {
             // before `-a` is applied. So `lsof -a -p P -d 0 FILE`, P
             // holding FILE on fd 3, lists nothing and exits 0; lsof-rs had
             // asked the rows it printed, and exited 1.
-            path_index.mark(f, self.row_nfs_dir(f), &mut found.paths, || {
-                self.path_matches(f)
-            });
+            path_index.mark(
+                f,
+                || self.row_nfs_dir(f),
+                &mut found.paths,
+                || self.path_matches(f),
+            );
         }
     }
 
@@ -1611,14 +1618,17 @@ impl Selection {
     /// it (no component boundary: measured, a mount listed at `/tmp/d`
     /// names `/tmp/d/f` and the directory itself). The caller asks it only
     /// of what the C types `N_REGLR`: no device node, FIFO, socket or
-    /// anonymous inode.
+    /// anonymous inode. A mount whose directory is empty is skipped, as the
+    /// C's `mp->dirl` test skips it: only a faked table can list one, and it
+    /// would otherwise make every file on its device `N_NFS`.
     pub fn nfs_mount_of(&self, dev: u64, path: &[u8]) -> Option<&MountEntry> {
         if self.has_nfs != 2 {
             return None;
         }
-        self.nfs_mounts
-            .iter()
-            .find(|m| m.device == Some(dev) && path.starts_with(m.dir.as_encoded_bytes()))
+        self.nfs_mounts.iter().find(|m| {
+            let dir = m.dir.as_encoded_bytes();
+            m.device == Some(dev) && !dir.is_empty() && path.starts_with(dir)
+        })
     }
 
     /// Whether `f` is a file `-N` selects: one the C types `N_NFS`. By its
@@ -1647,7 +1657,7 @@ impl Selection {
                 f.file_type,
                 FileType::Chr | FileType::Block | FileType::Fifo
             )
-            && f.file_type != FileType::Other("a_inode".into());
+            && !matches!(&f.file_type, FileType::Other(s) if s == "a_inode");
         if !reglr {
             return None;
         }
@@ -1664,17 +1674,42 @@ impl Selection {
     }
 
     /// Whether one of the file-system items of device `dev` names `f`, a
-    /// file on it: any, where no mounts were recorded with them (every
-    /// backend but Linux, the C's `isfn.c`); else one whose mount
-    /// [`FsItemMount::names`] it.
+    /// file on it: any item that recorded no mount (every backend but
+    /// Linux, the C's `isfn.c`), else one whose mount [`FsItemMount::names`]
+    /// it; a device of [`Selection::path_fs_devices`] with no item indexed
+    /// is named by the device alone. Only `dev`'s items are asked, by
+    /// [`Selection::path_fs_items`] (one lookup, which also stands for the
+    /// device test), and the row's own NFS mount is looked up only when one
+    /// of them has a mount to ask: no cost to a file on no named file
+    /// system.
     fn fs_items_name(&self, dev: u64, f: &OpenFile) -> bool {
-        if self.path_fs_mounts.is_empty() {
-            return true;
-        }
-        let row = self.row_nfs_dir(f);
-        self.path_fs_mounts
-            .iter()
-            .any(|(d, m)| *d == dev && m.names(row))
+        let Some(of_dev) = self.path_fs_items.get(&dev) else {
+            return self.path_fs_devices.contains(&dev);
+        };
+        let mut row = None;
+        of_dev.iter().any(
+            |&i| match self.path_items.get(i).and_then(|it| it.fs_mount.as_ref()) {
+                None => true,
+                Some(m) => m.names(*row.get_or_insert_with(|| self.row_nfs_dir(f))),
+            },
+        )
+    }
+
+    /// Enter a file-system item: one of the mounts a path argument named,
+    /// of device `dev`, with the mount it keeps on Linux (`fs_mount`, `None`
+    /// elsewhere). It is appended to [`Selection::path_items`], so the C's
+    /// order of entry is kept, and indexed by its device.
+    pub fn add_fs_item(&mut self, dev: u64, name: OsString, fs_mount: Option<FsItemMount>) {
+        let i = self.path_items.len();
+        self.path_fs_devices.insert(dev);
+        self.path_fs_items.entry(dev).or_default().push(i);
+        self.path_items.push(PathItem {
+            id: None,
+            fs_device: Some(dev),
+            name,
+            spelled: None,
+            fs_mount,
+        });
     }
 
     /// Whether the C reads its mount table on this run: always but under
@@ -1916,8 +1951,11 @@ impl Selection {
         if f.is_socket() {
             return;
         }
+        // No NFS mount is asked for: the item a file system locates is a
+        // file-system item, which names nothing (`row_name`), whichever
+        // of a device's it is.
         let Some(name) = ix
-            .bound(f, self.row_nfs_dir(f))
+            .bound(f, || None)
             .and_then(|i| self.path_items.get(i))
             .and_then(PathItem::row_name)
         else {
@@ -2231,8 +2269,13 @@ impl<'a> PathIndex<'a> {
     /// the row ([`FsItemMount::names`], asked with `row_nfs_dir`, the
     /// directory of the row's own NFS mount where it is `N_NFS`): the
     /// bucket's head where it is one of them, then the rest in the order
-    /// entered, as `hashSfile()` chains them.
-    fn bound(&self, f: &OpenFile, row_nfs_dir: Option<&OsStr>) -> Option<usize> {
+    /// entered, as `hashSfile()` chains them. `row_nfs_dir` is called once,
+    /// and only for a row on a device that has file-system items.
+    fn bound<'r>(
+        &self,
+        f: &OpenFile,
+        row_nfs_dir: impl FnOnce() -> Option<&'r OsStr>,
+    ) -> Option<usize> {
         if f.is_exempt() {
             return None;
         }
@@ -2254,11 +2297,15 @@ impl<'a> PathIndex<'a> {
         }
         let dev = f.searched_fs_device()?;
         let of_dev = self.by_fs.get(&dev)?;
+        // The bucket's head, where it is an item of this device: another
+        // device may hash to the bucket (`8:1` and `0:17` both do), and the
+        // C's chain skips its items (`s->dev != Lf->dev`).
         let head = self
             .fs_heads
             .get(&dev_ino_bucket(dev, 0, FS_MASK))
             .copied()
-            .filter(|h| of_dev.contains(h));
+            .filter(|&h| self.items.get(h).and_then(|it| it.fs_device) == Some(dev));
+        let row_nfs_dir = row_nfs_dir();
         let names = |i: &usize| {
             self.items
                 .get(*i)
@@ -2276,10 +2323,10 @@ impl<'a> PathIndex<'a> {
     /// Only such a name can start with an item's, and a `+D` makes an item of
     /// every entry, so asking every file on the host would cost files x
     /// entries.
-    fn mark(
+    fn mark<'r>(
         &self,
         f: &OpenFile,
-        row_nfs_dir: Option<&OsStr>,
+        row_nfs_dir: impl FnOnce() -> Option<&'r OsStr>,
         hits: &mut [bool],
         selected: impl FnOnce() -> bool,
     ) {
@@ -4434,36 +4481,19 @@ mod tests {
             ..who(9, "x", 0, 9)
         };
         let listed = |args: &[(&str, bool)]| {
-            let items: Vec<(u64, FsItemMount)> = args
-                .iter()
-                .map(|&(dir, nfs)| {
-                    (
-                        5,
-                        FsItemMount {
-                            nfs,
-                            dir: dir.into(),
-                        },
-                    )
-                })
-                .collect();
-            let sel = Selection {
+            let mut sel = Selection {
                 has_nfs: 2,
                 nfs_mounts: nfs_mounts.clone(),
                 paths_identified: true,
-                path_fs_devices: [5].into_iter().collect(),
-                path_items: items
-                    .iter()
-                    .map(|(dev, m)| PathItem {
-                        id: None,
-                        fs_device: Some(*dev),
-                        name: m.dir.clone(),
-                        spelled: None,
-                        fs_mount: Some(m.clone()),
-                    })
-                    .collect(),
-                path_fs_mounts: items,
                 ..Default::default()
             };
+            for &(dir, nfs) in args {
+                let m = FsItemMount {
+                    nfs,
+                    dir: dir.into(),
+                };
+                sel.add_fs_item(5, dir.into(), Some(m));
+            }
             let fds: Vec<u64> = sel
                 .apply(vec![p.clone()])
                 .iter()
@@ -4497,7 +4527,6 @@ mod tests {
             has_nfs: 2,
             nfs_mounts: nfs_mounts.clone(),
             paths_identified: true,
-            path_fs_devices: [5, 6].into_iter().collect(),
             ..Default::default()
         };
         for (dev, nfs, dir) in [(5, true, "/D/nfs"), (6, false, "/other")] {
@@ -4505,14 +4534,7 @@ mod tests {
                 nfs,
                 dir: dir.into(),
             };
-            two.path_fs_mounts.push((dev, m.clone()));
-            two.path_items.push(PathItem {
-                id: None,
-                fs_device: Some(dev),
-                name: dir.into(),
-                spelled: None,
-                fs_mount: Some(m),
-            });
+            two.add_fs_item(dev, dir.into(), Some(m));
         }
         assert_eq!(two.apply(vec![p.clone()])[0].files.len(), 2);
         assert_eq!(two.locate(std::slice::from_ref(&p)).paths, [true, false]);
@@ -4543,6 +4565,99 @@ mod tests {
         assert!(!m.names(Some(OsStr::new("/D/"))));
         assert!(!m.names(None));
         assert!(FsItemMount { nfs: false, ..m }.names(None));
+        // An NFS mount listed with no directory types nothing `N_NFS`, as
+        // the C's `mp->dirl` test has it: the root file system names the
+        // files then, and an NFS item none.
+        let empty = mount("");
+        let none_dir = |dir: &str, nfs: bool| {
+            let mut sel = Selection {
+                has_nfs: 2,
+                nfs_mounts: vec![empty.clone()],
+                paths_identified: true,
+                ..Default::default()
+            };
+            sel.add_fs_item(
+                5,
+                dir.into(),
+                Some(FsItemMount {
+                    nfs,
+                    dir: dir.into(),
+                }),
+            );
+            sel.apply(vec![p.clone()])
+                .iter()
+                .map(|p| p.files.len())
+                .sum::<usize>()
+        };
+        assert_eq!(none_dir("/", false), 6);
+        assert_eq!(none_dir("/D", true), 0);
+        assert!(Selection {
+            has_nfs: 2,
+            nfs_mounts: vec![empty],
+            ..Default::default()
+        }
+        .nfs_mount_of(5, b"/D/nfs/a")
+        .is_none());
+    }
+
+    /// Two file-system arguments whose devices share a bucket of the C's
+    /// `SFFSHASH` chain, `8:1` and `0:17`: a file on the one locates its
+    /// own device's item even where the other's is the bucket's head (the
+    /// one entered last), as the C's chain walk skips an item of another
+    /// device (`s->dev != Lf->dev`). Locating the wrong one would make `-V`
+    /// report it and flip the exit status.
+    #[test]
+    fn a_file_system_item_of_another_device_in_the_bucket_is_not_bound() {
+        assert_eq!(
+            dev_ino_bucket(0x801, 0, FS_MASK),
+            dev_ino_bucket(17, 0, FS_MASK)
+        );
+        let f = OpenFile {
+            rdev: None,
+            fs_device: Some(0x801),
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(3),
+            access: crate::model::AccessMode::Read,
+            file_type: FileType::Regular,
+            name: "/a".into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some("5".into()),
+            links: None,
+            socket: None,
+            name_addition: None,
+        };
+        let p = Process {
+            pid: 9,
+            files: vec![f],
+            ..who(9, "x", 0, 9)
+        };
+        for linux in [true, false] {
+            let mut sel = Selection {
+                paths_identified: true,
+                ..Default::default()
+            };
+            for (dev, dir) in [(0x801, "/"), (17, "/t")] {
+                let m = linux.then(|| FsItemMount {
+                    nfs: false,
+                    dir: dir.into(),
+                });
+                sel.add_fs_item(dev, dir.into(), m);
+            }
+            assert_eq!(sel.locate(std::slice::from_ref(&p)).paths, [true, false]);
+            // And the path filter takes the file: by the item's mount on
+            // Linux, by its device alone where the item has none.
+            let listed: usize = sel
+                .apply(vec![p.clone()])
+                .iter()
+                .map(|p| p.files.len())
+                .sum();
+            assert_eq!(listed, 1, "linux {linux}");
+            assert_eq!(sel.path_fs_items[&0x801], [0]);
+            assert_eq!(sel.path_fs_items[&17], [1]);
+        }
     }
 
     /// With an NFS mount listed, a `-b` walk says what it avoids, so it

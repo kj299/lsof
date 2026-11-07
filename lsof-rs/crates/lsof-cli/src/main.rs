@@ -940,21 +940,12 @@ fn main() {
                     // named only by a file system its NFS mount's directory
                     // starts, and any other file only by one that is not
                     // NFS (`dfile.c:242-276`, DIVERGENCES 151).
+                    // One copy of the mount's directory per item.
                     let fs_mount = cfg!(target_os = "linux").then(|| FsItemMount {
                         nfs: m.kind == MountKind::Nfs,
                         dir: m.dir.clone(),
                     });
-                    sel.path_fs_devices.insert(dev);
-                    if let Some(fm) = &fs_mount {
-                        sel.path_fs_mounts.push((dev, fm.clone()));
-                    }
-                    sel.path_items.push(PathItem {
-                        id: None,
-                        fs_device: Some(dev),
-                        name: name.clone(),
-                        spelled: None,
-                        fs_mount,
-                    });
+                    sel.add_fs_item(dev, name.clone(), fs_mount);
                 }
                 survived += 1;
                 continue;

@@ -5450,6 +5450,30 @@ args = ["-n", "-P", "-a", "-p", "{NFS}", "+D", "{NFSDIR}2", "{NFSDIR}"]
 env = { LSOF_DIFF_MT = "nfs3" }
 with_stderr = true
 
+[[case]]
+# `nfsws`: `nfs`'s one NFS mount on a line led by a space and a tab, its
+# fields parted by tabs and runs of spaces. The C's `get_fields()` skips the
+# leading blanks and takes each run for one separator, so this is the mount
+# to it: `{NFSDIR}` names the mount's files with `(srv:/export)`, `-N`
+# selects them, and `/` no longer names them. lsof-rs had split on single
+# spaces and dropped the line, so `{NFSDIR}` was a plain directory.
+name = "fs-nfsws-mount-point"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfsws" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfsws-N"
+args = ["-n", "-P", "-N", "-a", "-p", "{NFS}"]
+env = { LSOF_DIFF_MT = "nfsws" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfsws-root"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "/"]
+env = { LSOF_DIFF_MT = "nfsws" }
+with_stderr = true
+
 # What a `-b` walk says is what the C walks. `-u ^0` keeps lsof's own
 # process (and anything else of root's) out of the walk, so stderr can be
 # compared: what is left is fixture W's processes of other owners, and the
