@@ -15,6 +15,7 @@
 
 pub mod backend;
 mod endpoints;
+pub use endpoints::{EndpointTables, UnixEnds};
 pub mod mock;
 pub mod model;
 pub mod readlink;

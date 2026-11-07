@@ -1023,8 +1023,10 @@ pub struct Selection {
     /// (see [`Process::endpoint_peer`]).
     pub endpoints: Option<EndpointMode>,
     /// The backend names no endpoint itself and leaves `-E`/`+E` to
-    /// [`Selection::apply`], which finds a pipe's or a local connection's
-    /// other ends among the rows gathered, as the C's tables do, and to
+    /// [`Selection::apply_with`], which finds a pipe's, a UNIX socket's, a
+    /// pseudoterminal's, an eventfd's, a message queue's or a local
+    /// connection's other ends among the rows gathered and the tables the
+    /// backend read beside them, as the C's tables do, and to
     /// [`Selection::locate`], which then counts every process's rows, as the
     /// C reads every process under them (Linux; DIVERGENCES 56). Windows
     /// names its pipes' ends while it gathers.
@@ -1777,9 +1779,13 @@ impl Selection {
     /// prints every process with a task (DIVERGENCES 33).
     pub fn terse_skips_files(&self) -> bool {
         // `+E` prints the PID of a process holding an end, which only its
-        // rows can tell (DIVERGENCES 56).
+        // rows can tell; and where the core names the ends (Linux), under
+        // either the C reads every socket, which asks the kernel for the UNIX
+        // sockets' ends, and what that asking says, or the run's end where
+        // it fails, is the C's (DIVERGENCES 56).
         self.terse
             && !(self.reads_every_process() && self.endpoints == Some(EndpointMode::Files))
+            && !(self.endpoints_in_core && self.endpoints.is_some())
             && !self.specified().intersects(SelKinds::FILE)
             && self.state_filter.is_none()
             && self.tasks != TaskMode::Always
@@ -1831,10 +1837,27 @@ impl Selection {
     /// of selecters each file matched, then test that set against the
     /// specified set — non-empty for the OR, complete for `-a`.
     pub fn apply(&self, procs: Vec<Process>) -> Vec<Process> {
+        self.apply_with(procs, crate::endpoints::EndpointTables::default())
+    }
+
+    /// [`Selection::apply`], with what the backend found beside the rows for
+    /// `-E`/`+E` ([`Backend::take_endpoint_tables`](crate::Backend::take_endpoint_tables)):
+    /// a UNIX socket's peer and a pseudoterminal master's index, which no row
+    /// carries.
+    pub fn apply_with(
+        &self,
+        procs: Vec<Process>,
+        tables: crate::endpoints::EndpointTables,
+    ) -> Vec<Process> {
         if let (Some(mode), true) = (self.endpoints, self.endpoints_in_core) {
-            let index = crate::endpoints::Index::build(&procs, self.command_width);
-            let candidates =
-                (mode == EndpointMode::Files).then(|| crate::endpoints::Candidates::of(&procs));
+            let index = crate::endpoints::Index::build_with(
+                &procs,
+                self.command_width,
+                tables,
+                self.mqueue_device,
+            );
+            let candidates = (mode == EndpointMode::Files)
+                .then(|| crate::endpoints::Candidates::of(&procs, &index));
             let mut out = self.apply_rows(procs);
             crate::endpoints::annotate(&index, &mut out, candidates, mode);
             return out;
@@ -5211,9 +5234,22 @@ mod tests {
         assert!(!terse.terse_skips_files());
         let info = Selection {
             endpoints: Some(EndpointMode::Info),
+            endpoints_in_core: false,
             ..terse
         };
         assert!(info.terse_skips_files());
+        // Where the core names the ends, `-t -E` reads the sockets, whose
+        // reading asks the kernel, as the C's does.
+        let linux = Selection {
+            endpoints_in_core: true,
+            ..info.clone()
+        };
+        assert!(!linux.terse_skips_files());
+        assert!(Selection {
+            endpoints: None,
+            ..linux
+        }
+        .terse_skips_files());
     }
 
     /// Under `-E`/`+E` (Linux) a process a `-p ^`, `-u ^` or `-g ^`

@@ -15,13 +15,26 @@ use crate::{files, mounts, process};
 /// lsof-rs's native Linux data source.
 pub struct LinuxBackend {
     root: bool,
+    /// What the last gather found for `-E`/`+E` beside the rows, until the
+    /// core takes it ([`Backend::take_endpoint_tables`]).
+    ends: std::sync::Mutex<lsof_core::EndpointTables>,
 }
 
 impl LinuxBackend {
     pub fn new() -> Self {
         Self {
             root: process::is_root(),
+            ends: std::sync::Mutex::new(lsof_core::EndpointTables::default()),
         }
+    }
+
+    /// Keep `tables` for the core to take.
+    fn keep_ends(&self, tables: lsof_core::EndpointTables) {
+        let mut held = self
+            .ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = tables;
     }
 
     /// Whether this process is running as root. The CLI uses it the way the
@@ -83,6 +96,14 @@ impl Backend for LinuxBackend {
         true
     }
 
+    fn take_endpoint_tables(&self) -> lsof_core::EndpointTables {
+        let mut held = self
+            .ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *held)
+    }
+
     fn lookup_user(&self, value: &str) -> lsof_core::UserLookup {
         crate::users::lookup(value.as_bytes())
     }
@@ -105,6 +126,8 @@ impl Backend for LinuxBackend {
         fs: &lsof_core::SafeFs,
     ) -> Result<Vec<Process>, BackendError> {
         let process::Enumerated { mut procs, zombies } = process::enumerate(sel.numeric_ids);
+        // Nothing of an earlier cycle's (`-r`) is left for this one.
+        self.keep_ends(lsof_core::EndpointTables::default());
 
         // `-t` prints PIDs only, and the renderer emits a process's PID whether
         // or not it has files. When no file-level filter needs per-file data,
@@ -162,6 +185,35 @@ impl Backend for LinuxBackend {
         // rather than per process. `-T q` is the only reason to pay for queue
         // depths; see SocketTable::load.
         let socks = SocketTable::load(sel.tcp_info().queue, sel.skip_inet_tables);
+        // `-E`/`+E`: each UNIX socket's peer and pending connection, asked
+        // of the kernel once a gather (each `-r` cycle), where the C asks,
+        // at the first socket that brings it to `/proc/net/unix`
+        // (`get_unix()`, `dsock.c:3234-3240`), and only then (DIVERGENCES
+        // 56; [`files::UnixStage`]).
+        let mut ends = lsof_core::EndpointTables::default();
+        let say = |line: &str| fs.tell(line);
+        let stage = files::UnixStage::new(&socks, &say);
+        // The C's `Error()` at a netlink socket that could not be made: what
+        // it said is said, and the run ends with exit 1, nothing listed.
+        let failed = || Err(BackendError::Reported);
+        // And each pseudoterminal master's slave, from its fdinfo's
+        // `tty-index:`, which the C reads as it reads the descriptor
+        // (`dproc.c:1313-1317`).
+        let mut pty_masters =
+            |base: &str, pid: u32, tid: Option<u32>, rows: &[lsof_core::OpenFile]| {
+                if sel.endpoints.is_none() {
+                    return;
+                }
+                for f in rows {
+                    if let (lsof_core::FileType::Chr, Some(0x502), lsof_core::FdType::Handle(n)) =
+                        (&f.file_type, f.rdev.map(std::num::NonZeroU32::get), &f.fd)
+                    {
+                        if let Some(index) = files::tty_index(base, *n) {
+                            ends.pty_index.insert((pid, tid, *n), index);
+                        }
+                    }
+                }
+            };
         // /proc/locks is one table for the whole system, with a pid column, so
         // it is read once here rather than per process.
         let locks = crate::locks::load();
@@ -196,6 +248,7 @@ impl Backend for LinuxBackend {
             } else {
                 &[]
             },
+            unix_stage: sel.endpoints.is_some().then_some(&stage),
         };
 
         // `-K`: every other thread becomes its own entry, repeating the whole
@@ -245,6 +298,10 @@ impl Backend for LinuxBackend {
                         ..ctx
                     };
                     t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
+                    if ctx.stopped() {
+                        return failed();
+                    }
+                    pty_masters(&base, t.pid, t.tid, &t.files);
                     t.unlisted = t.files.is_empty();
                     tasks.push(t);
                     has_tasks = true;
@@ -283,6 +340,10 @@ impl Backend for LinuxBackend {
                 ..ctx
             };
             p.files = files::for_pid(p.pid, p.uid, &ctx);
+            if ctx.stopped() {
+                return failed();
+            }
+            pty_masters(&format!("/proc/{}", p.pid), p.pid, p.tid, &p.files);
             p.unlisted = p.files.is_empty();
         }
         if sel.lists_tasks() {
@@ -303,6 +364,8 @@ impl Backend for LinuxBackend {
         if !zombies.is_empty() {
             procs.retain(|p| p.tid.is_some() || !zombies.contains(&p.pid));
         }
+        ends.unix = stage.into_ends();
+        self.keep_ends(ends);
 
         Ok(procs)
     }

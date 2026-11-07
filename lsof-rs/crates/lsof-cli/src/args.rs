@@ -329,7 +329,63 @@ fn offset_digits_value(digits: &str) -> i32 {
 /// Every message that quotes an argument goes through this or [`quoting`],
 /// and `no_option_error_holds_a_control_character` holds every option to it.
 fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
+    if STAND_INS.with(std::cell::Cell::get) && arg.chars().any(|c| byte_letter(c).is_some()) {
+        return std::borrow::Cow::Owned(
+            Escaper::for_host().bytes(&stand_in_bytes(arg)).into_owned(),
+        );
+    }
     Escaper::for_host().text(arg)
+}
+
+thread_local! {
+    /// Whether this thread's last parse read the words that are not UTF-8
+    /// with each byte that is no character standing as a letter of its own
+    /// ([`letter_for_byte`]), so that an option reading such a word as text
+    /// says the C's own words about it, the byte shown `\xNN` ([`shown`];
+    /// DIVERGENCES 92). Set at each parse's start ([`stand_ins_usable`]);
+    /// read where its errors are formatted, which may be after it ends, on
+    /// the same thread.
+    static STAND_INS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether `args` can be read with stand-ins for their bytes: some word is
+/// not UTF-8, and no word holds one of the stand-ins' own characters,
+/// U+10FF00..=U+10FFFF, as text, which a stand-in could then be taken for.
+fn stand_ins_usable(args: &[OsString]) -> bool {
+    let mut any = false;
+    for a in args {
+        for chunk in a.as_encoded_bytes().utf8_chunks() {
+            if chunk.valid().chars().any(|c| byte_letter(c).is_some()) {
+                return false;
+            }
+            any |= !chunk.invalid().is_empty();
+        }
+    }
+    any
+}
+
+/// `word` as text, each byte that is no character its stand-in
+/// ([`letter_for_byte`]).
+fn with_stand_ins(word: &std::ffi::OsStr) -> String {
+    let mut out = String::with_capacity(word.len());
+    for chunk in word.as_encoded_bytes().utf8_chunks() {
+        out.push_str(chunk.valid());
+        out.extend(chunk.invalid().iter().map(|&b| letter_for_byte(b)));
+    }
+    out
+}
+
+/// The bytes text read with stand-ins was read from: each stand-in its
+/// byte, every other character its own.
+fn stand_in_bytes(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for c in text.chars() {
+        match byte_letter(c) {
+            Some(b) => out.push(b),
+            None => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
+    }
+    out
 }
 
 /// [`shown`] for an argument kept as bytes (a path `Readlink()` spelt).
@@ -419,6 +475,7 @@ fn parse_errors(
     // (`+J is not supported`), before whatever ends the parse: measured,
     // `-o -s +J` prints the `+J` line first.
     let mut early = Early::default();
+    STAND_INS.with(|on| on.set(stand_ins_usable(&args)));
     let parsed = parse_options(args, fs, mounts, host, &mut early, reports);
     let last = match parsed {
         Ok(action) if early.is_empty() => return Ok(action),
@@ -796,9 +853,21 @@ fn parse_options<'s>(
     // (DIVERGENCES 92). A file name need not be UTF-8, and the C takes one
     // as bytes like any other; what no option can read as text is refused
     // where an option reads it ([`not_text`]).
+    // A word that is not UTF-8 is read as text with each byte that is no
+    // character standing as a letter of its own, where that can be told
+    // apart ([`stand_ins_usable`]): an option that reads it as text then
+    // finds it no value of its own and says so in the C's words
+    // (`illegal process ID: \xff`, DIVERGENCES 92).
+    let stand_ins = STAND_INS.with(std::cell::Cell::get);
     let mut args: Vec<String> = raw
         .iter()
-        .map(|a| a.to_string_lossy().into_owned())
+        .map(|a| {
+            if stand_ins {
+                with_stand_ins(a)
+            } else {
+                a.to_string_lossy().into_owned()
+            }
+        })
         .collect();
     let mut i = 0;
     while i < args.len() {
@@ -877,9 +946,17 @@ fn parse_options<'s>(
         let mut ended: Option<usize> = None;
         let word = i;
         let mut took_bytes = false;
+        // The words an option that says the C's own words about a value
+        // that is not UTF-8 read, as text with stand-ins ([`shown`]): from
+        // where its letter was met to where the scan stood after it.
+        let mut as_text: Vec<(usize, usize)> = Vec::new();
+        let mut text_from: Option<usize> = None;
         let mut mark = early.mark();
         let mut j = 0;
         while j < chars.len() {
+            if let Some(from) = text_from.take() {
+                as_text.push((from, i));
+            }
             if j >= text_letters {
                 early.fatal = true;
                 return Err(not_text(&raw[word]));
@@ -906,6 +983,14 @@ fn parse_options<'s>(
                 illegal_bytes += 1;
                 j += 1;
                 continue;
+            }
+            // An option that reads its value as the C does, bytes and all,
+            // where a byte that is no character is none of its grammar: it
+            // says so in the C's words, the byte escaped (DIVERGENCES 92,
+            // 122) ([`reads_value_as_text`]).
+            let text_option = reads_value_as_text(plus, c);
+            if stand_ins && text_option {
+                text_from = Some(i);
             }
             match c {
                 // The C gives these a `+` meaning lsof-rs does not implement
@@ -1136,6 +1221,8 @@ fn parse_options<'s>(
                         let context = optional_value(&chars, j, &args, &mut i);
                         let list = sel.selinux.get_or_insert_with(Vec::new);
                         list.extend(context);
+                        j = past_value(&chars, j);
+                        continue;
                     } else {
                         // Refused where it stands, and the parse reads on
                         // (`err = 1`). `GetOpt` hands `-Z` its value, attached
@@ -1199,7 +1286,7 @@ fn parse_options<'s>(
                             }
                         }
                     }
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 'U' => sel.unix_only = true,
@@ -1256,7 +1343,7 @@ fn parse_options<'s>(
                             }
                         }
                     }
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 // `-b`/`+b`: make no call that can block (`main.c`: the
@@ -1306,7 +1393,7 @@ fn parse_options<'s>(
                     // selects nothing, whatever the prefix (DIVERGENCES 116).
                     let letters = optional_value(&chars, j, &args, &mut i);
                     sel.tcp_info_opt = Some(parse_tcp_info(letters.as_deref(), plus, early));
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 'K' => {
@@ -1333,7 +1420,7 @@ fn parse_options<'s>(
                             early.line(&format!("-K not followed by i (but by {})", shown(&v)))
                         }
                     }
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 'F' => {
@@ -1406,7 +1493,7 @@ fn parse_options<'s>(
                         t.queue = true;
                     }
                     fields_given = true;
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 'i' => {
@@ -1419,7 +1506,7 @@ fn parse_options<'s>(
                     if let Err(e) = parse_inet(&mut sel, spec.as_deref()) {
                         early.fail(&e);
                     }
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 // `-d`, `-p`, `-u` and `-c` take the rest of the word or else
@@ -1486,7 +1573,7 @@ fn parse_options<'s>(
                         value.as_deref(),
                         early,
                     );
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 's' => {
@@ -1503,7 +1590,7 @@ fn parse_options<'s>(
                         Some(v) => parse_state_spec(&mut states, &v, early),
                         None => columns.size = true,
                     }
-                    j = chars.len();
+                    j = past_value(&chars, j);
                     continue;
                 }
                 // Letters the C knows and lsof-rs does not implement, each
@@ -1573,10 +1660,16 @@ fn parse_options<'s>(
         // read by an option as its value; not this word when every byte of
         // it that is no character was a letter, said to be illegal.
         // What that option made of it is forgotten: it may not take it.
+        if let Some(from) = text_from.take() {
+            as_text.push((from, i));
+        }
         let letters_only = letters_ok && illegal_bytes == not_chars;
         if !took_bytes {
             if let Some(k) = (word..=i).find(|&k| {
-                k < raw.len() && raw[k].to_str().is_none() && !(k == word && letters_only)
+                k < raw.len()
+                    && raw[k].to_str().is_none()
+                    && !(k == word && letters_only)
+                    && !as_text.iter().any(|&(lo, hi)| (lo..=hi).contains(&k))
             }) {
                 early.rollback(mark);
                 early.fatal = true;
@@ -2597,7 +2690,16 @@ const HAS_FILE_FLAGS: bool = false;
 /// That is the whole rule: `lsof -T q` takes `q`, `lsof -T /some/path` takes
 /// the path and then rejects `/` as a letter, and `lsof -T -i` is a bare `-T`
 /// followed by `-i`. `--` opens an option too, and ends the options after.
+///
+/// An attached value that opens with `-` or `+` is given back the same way
+/// (`GOx1 = GObk[0]; GOx2 = GObk[1]`), and the rest of the word is read again
+/// as letters: `-g-a` is a bare `-g`, the C's `illegal option character: -`
+/// and `-a` (measured, as `-s-a`, `-F-a`, `-f-a`, `-x-a`, `-T-a`, `-K-a`,
+/// `-i-a` and `-g-\xff`); the option's arm resumes there ([`past_value`]).
 fn value_word(chars: &[char], j: usize, args: &[String], i: usize) -> Option<(String, bool)> {
+    if gives_back(chars, j) {
+        return None;
+    }
     if j + 1 < chars.len() {
         return Some((chars[j + 1..].iter().collect(), false));
     }
@@ -2619,6 +2721,23 @@ fn required_value(chars: &[char], j: usize, args: &[String], i: &mut usize) -> O
     let next = args.get(*i + 1).filter(|w| *w != "--")?;
     *i += 1;
     Some(next.clone())
+}
+
+/// Whether the value attached to the option at letter `j` opens with `-` or
+/// `+`, which every option with an optional value gives back ([`value_word`]).
+fn gives_back(chars: &[char], j: usize) -> bool {
+    chars.get(j + 1).is_some_and(|c| matches!(c, '-' | '+'))
+}
+
+/// Where the scan of an option word resumes after an option with an optional
+/// value at letter `j`: at the attached text it gave back ([`gives_back`]),
+/// else past the word.
+fn past_value(chars: &[char], j: usize) -> usize {
+    if gives_back(chars, j) {
+        j + 1
+    } else {
+        chars.len()
+    }
 }
 
 /// [`value_word`], taken: the next word is consumed when it is the value.
@@ -2794,6 +2913,27 @@ fn raw_value(
     let next = raw.get(*i + 1).filter(|w| *w != "--")?;
     *i += 1;
     Some(next.clone())
+}
+
+/// Whether option `c` under prefix `+` (`plus`) or `-` reads its value as
+/// text the C's way when it is not UTF-8, saying the C's own words about it
+/// (`illegal process ID: \xff`, DIVERGENCES 92): `p`, `g`, `s`, `i`, `T`,
+/// `F`, `x`, `K`, `Z` and `f` under either prefix, the `+` form sharing the
+/// `-` form's grammar (measured: `+p \xff` is `illegal process ID: \xff`,
+/// `+f\xff` is `unknown file struct option: \xff`, `+Z\xff` is `-Z limited
+/// to SELinux`); `-d`, whose FD range reads text (`non-digit in -d FD
+/// range: 1-\xff`, `illegal FD range for -d: -\xff`); `-D` and `-m`, whose
+/// attached value the C takes and drops; and `+c`, which reads its leading
+/// digits alone, as `atoi()` does. Any other option that would read such a
+/// value as text refuses it ([`not_text`]); `-c`, `-u`, `+d`/`+D` and
+/// `-e`/`+e` read theirs as bytes.
+fn reads_value_as_text(plus: bool, c: char) -> bool {
+    matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z' | 'f')
+        || if plus {
+            c == 'c'
+        } else {
+            matches!(c, 'd' | 'D' | 'm')
+        }
 }
 
 /// The error for an argument an option would read as text that is not
@@ -7179,6 +7319,78 @@ mod tests {
         assert!(wtf8_to_wide(b"").is_empty());
     }
 
+    /// Which options read a value that is not UTF-8 as text, saying the C's
+    /// own words about it (DIVERGENCES 92): both prefixes of the ones the
+    /// `+` form shares the grammar of, `-d`/`-D`/`-m` and `+c`; not `-c`,
+    /// `-u`, `+d`/`+D` or `-e`/`+e`, which read bytes, nor the options that
+    /// read digits.
+    #[test]
+    fn the_options_that_read_a_value_not_utf8_as_text() {
+        for c in ['p', 'g', 's', 'i', 'T', 'F', 'x', 'K', 'Z', 'f'] {
+            assert!(reads_value_as_text(false, c), "-{c}");
+            assert!(reads_value_as_text(true, c), "+{c}");
+        }
+        for c in ['d', 'D', 'm'] {
+            assert!(reads_value_as_text(false, c), "-{c}");
+            assert!(!reads_value_as_text(true, c), "+{c}");
+        }
+        assert!(reads_value_as_text(true, 'c'));
+        for c in ['c', 'u', 'e', 'o', 'r', 'S', 'L', 'A', 'k', 'a', 'E', 'w'] {
+            assert!(!reads_value_as_text(false, c), "-{c}");
+        }
+        for c in ['u', 'e', 'o', 'r', 'S', 'L', 'n', 'P'] {
+            assert!(!reads_value_as_text(true, c), "+{c}");
+        }
+    }
+
+    /// An attached value that opens with `-` or `+` is given back, and the
+    /// rest of the word read as letters, by every option whose value is
+    /// optional (measured: `-g-a` is a bare `-g`, `illegal option
+    /// character: -` and `-a`; `-x-a` adds `-x must accompany +d or +D`).
+    #[test]
+    fn an_attached_value_opening_an_option_is_read_as_letters() {
+        let said = |argv: &[&str]| parse(argv.to_vec()).unwrap_err();
+        // Windows says its own words for some of these options first (a
+        // bare `-g` is refused there: its `-g` is the PPID extension); the
+        // value is given back and read as letters all the same.
+        let check = |w: &str, want: &str| {
+            let got = said(&[w]);
+            if cfg!(windows) {
+                let c = &want[..want.find('\n').unwrap_or(want.len())];
+                assert!(got.contains(c), "{w}: {got}");
+            } else {
+                assert_eq!(got, want, "{w}");
+            }
+        };
+        check("-g-a", "illegal option character: -");
+        check("-s+a", "illegal option character: +");
+        check(
+            "-F-W",
+            "illegal option character: -\nlsof: illegal option character: W",
+        );
+        check(
+            "-x-a",
+            "illegal option character: -\nlsof: -x must accompany +d or +D",
+        );
+        for w in ["-T-a", "-K-a", "-f-a", "-i-a", "+f-a", "+K-a"] {
+            check(w, "illegal option character: -");
+        }
+        // The letters after it are options again: `-g-h` asks for help too.
+        check("-g-h", "illegal option character: -");
+    }
+
+    /// On Windows, where `-c` reads text, a value holding a lone surrogate
+    /// is still refused: `-c` is no option that reads such a value as text
+    /// ([`reads_value_as_text`]), and its stand-ins could match no image.
+    #[test]
+    #[cfg(windows)]
+    fn an_option_outside_the_text_options_still_refuses_a_value_not_utf8() {
+        use std::os::windows::ffi::OsStringExt;
+        let lone = OsString::from_wide(&[0x61, 0xd800]);
+        let err = parse(vec![OsString::from("-c"), lone]).unwrap_err();
+        assert!(err.starts_with("an argument is not valid UTF-8"), "{err}");
+    }
+
     /// On Windows a path argument holding a lone surrogate is kept as it is,
     /// attached to an option or not, and names no file: never its lossy
     /// spelling's.
@@ -7269,8 +7481,10 @@ mod tests {
         let err = parse(vec![os(b"-e"), os(b"\xff")]).unwrap_err();
         assert!(err.contains("\"\\xff\""), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
-        // An option that reads text: refused, fatal, alone.
-        let refused = |argv: Vec<OsString>, shown: &str| {
+        // An option that reads text says the C's own words about a byte
+        // that is no character of its grammar, the byte escaped where the C
+        // prints it raw (DIVERGENCES 92, 122), and the parse reads on.
+        let says = |argv: Vec<OsString>, said: &str| {
             let (got, _) = parse_reporting(
                 argv.clone(),
                 &SafeFs::in_process(),
@@ -7278,16 +7492,118 @@ mod tests {
                 &HostChecks::DEFERRED,
             );
             let e = got.unwrap_err();
-            assert!(e.is_fatal(), "{argv:?}");
-            assert_eq!(
-                e.to_string(),
-                format!("an argument is not valid UTF-8, which lsof-rs cannot take: {shown}"),
-                "{argv:?}"
-            );
+            assert!(!e.is_fatal(), "{argv:?}");
+            assert_eq!(e.to_string(), said, "{argv:?}");
         };
-        refused(vec![os(b"-p\xff")], "-p\\xff");
-        refused(vec![os(b"-p"), os(b"1\xfe")], "1\\xfe");
-        refused(vec![os(b"-s"), os(b"\xff")], "\\xff");
+        says(vec![os(b"-p\xff")], "illegal process ID: \\xff");
+        says(vec![os(b"-p"), os(b"1\xfe")], "illegal process ID: 1\\xfe");
+        says(
+            vec![os(b"-p"), os(b"1,\xff")],
+            "illegal process ID: 1,\\xff",
+        );
+        says(vec![os(b"-g\xc3")], "illegal process group ID: \\xc3");
+        says(
+            vec![os(b"-s"), os(b"\xff")],
+            "unknown -s protocol: \"\\xff\"",
+        );
+        says(
+            vec![os(b"-s"), os(b"TCP:LISTEN,\xff")],
+            "unknown TCP state name: \\xff",
+        );
+        says(
+            vec![os(b"-i\xff")],
+            "unknown protocol name (\\xff) in: -i \\xff",
+        );
+        says(
+            vec![os(b"-i"), os(b"4\xff")],
+            "unknown protocol name (\\xff) in: -i 4\\xff",
+        );
+        says(
+            vec![os(b"-T"), os(b"s\xff")],
+            "unsupported TCP/TPI info selection: \\xff",
+        );
+        says(vec![os(b"-Fp\xc3")], "unknown field: \\xc3");
+        says(
+            vec![os(b"-x"), os(b"f\xff")],
+            "unknown cross-over option: \\xff\nlsof: -x must accompany +d or +D",
+        );
+        says(
+            vec![os(b"-K"), os(b"\xff")],
+            "-K not followed by i (but by \\xff)",
+        );
+        // `-d`'s FD range, the item without its `^`, and a range with no
+        // start; `-f`/`+f`, a cluster ending in it included; the `+` forms
+        // of the options whose `-` grammar they share; `+Z`, and `-m`/`-D`
+        // with their value attached (all measured: the C's words, exit 1).
+        for (argv, said) in [
+            (
+                vec![os(b"-d"), os(b"1-\xff")],
+                "non-digit in -d FD range: 1-\\xff",
+            ),
+            (vec![os(b"-d\xff-1")], "non-digit in -d FD range: \\xff-1"),
+            (
+                vec![os(b"-d"), os(b"mem,^1-\xff")],
+                "non-digit in -d FD range: 1-\\xff",
+            ),
+            (
+                vec![os(b"-d"), os(b"-\xff")],
+                "illegal FD range for -d: -\\xff",
+            ),
+            (vec![os(b"-d-\xff")], "illegal FD range for -d: -\\xff"),
+            (
+                vec![os(b"-f"), os(b"\xff")],
+                "unknown file struct option: \\xff",
+            ),
+            (vec![os(b"+f\xff")], "unknown file struct option: \\xff"),
+            (vec![os(b"-af\xff")], "unknown file struct option: \\xff"),
+            (
+                vec![os(b"-fc\xff")],
+                "unknown file struct option: c\nlsof: unknown file struct option: \\xff",
+            ),
+            (vec![os(b"+p"), os(b"\xff")], "illegal process ID: \\xff"),
+            (vec![os(b"+g\xff")], "illegal process group ID: \\xff"),
+            (vec![os(b"+s\xff")], "unknown -s protocol: \"\\xff\""),
+            (
+                vec![os(b"+i\xff")],
+                "unknown protocol name (\\xff) in: -i \\xff",
+            ),
+            (
+                vec![os(b"+x"), os(b"\xff")],
+                "unknown cross-over option: \\xff",
+            ),
+            (vec![os(b"+F\xff")], "unknown field: \\xff"),
+            (vec![os(b"+K\xff")], "-K not followed by i (but by \\xff)"),
+            (
+                vec![os(b"+T"), os(b"\xff")],
+                "unsupported TCP/TPI info selection: \\xff",
+            ),
+            (vec![os(b"+Z\xff")], "-Z limited to SELinux"),
+            (vec![os(b"-m\xff")], "-m not supported"),
+            (vec![os(b"-D\xff")], "unsupported option: -D"),
+        ] {
+            let (got, _) = parse_reporting(
+                argv.clone(),
+                &SafeFs::in_process(),
+                &no_mounts,
+                &HostChecks {
+                    selinux_enabled: &|| false,
+                    ..HostChecks::DEFERRED
+                },
+            );
+            let e = got.unwrap_err();
+            assert!(!e.is_fatal(), "{argv:?}");
+            assert_eq!(e.to_string(), said, "{argv:?}");
+        }
+        // And reads on, as the C does: `-d 1-\xff -s foo` is both lines.
+        says(
+            vec![os(b"-d"), os(b"1-\xff"), os(b"-s"), os(b"foo")],
+            "non-digit in -d FD range: 1-\\xff\nlsof: unknown -s protocol: \"foo\"",
+        );
+        // `+c` reads its leading digits, as `atoi()` does.
+        assert_eq!(
+            sel(vec![os(b"+c"), os(b"1\xff")]).command_width,
+            lsof_core::selection::CommandWidth::Chars(1)
+        );
         // `-c` and `-u` read bytes, as the C compares them.
         assert_eq!(
             sel(vec![os(b"-a"), os(b"-c"), os(b"x\xff")]).commands,
@@ -7350,9 +7666,16 @@ mod tests {
                 shown_bytes(&w)
             )
         );
-        // What was said before it stays: `-W` is its own line.
+        // So does an option's value that is not UTF-8, in a command line
+        // that holds such a character anywhere, and what was said before it
+        // stays: `-W` is its own line.
         let (got, _) = parse_reporting(
-            vec![os(b"-W"), os(b"-s"), os(b"\xff")],
+            vec![
+                os(b"-W"),
+                os(b"-s"),
+                os(b"\xff"),
+                os("\u{10ff41}".as_bytes()),
+            ],
             &SafeFs::in_process(),
             &no_mounts,
             &HostChecks::DEFERRED,

@@ -1,6 +1,6 @@
 [package]
 name = "lsof-backend-linux"
-description = "Linux data-acquisition backend for lsof-rs: enumerates processes and their open files from /proc. Implements lsof-core's Backend trait. Everything it needs is in std but getxattr(2), which it makes through rustix."
+description = "Linux data-acquisition backend for lsof-rs: enumerates processes and their open files from /proc. Implements lsof-core's Backend trait. Everything it needs is in std but getxattr(2) and a NETLINK_SOCK_DIAG query, which it makes through rustix."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,19 +11,24 @@ publish = false
 [dependencies]
 lsof-core = { path = "../lsof-core" }
 
-# One platform binding, for one call: `getxattr(2)`, which std has no API for and
-# which names a socket no /proc/net table lists, as the C names it
+# One platform binding, for two things std has no API for: `getxattr(2)`, which
+# names a socket no /proc/net table lists, as the C names it
 # (`system.sockprotoname`, DIVERGENCES 22; the maintainer's decision, 2026-10-30,
 # was a dependency rather than FFI of the crate's own, so it keeps
-# `#![forbid(unsafe_code)]`). Everything else is still std: /proc is a filesystem,
-# and `std::os::unix::fs::MetadataExt` exposes every stat field this backend needs.
+# `#![forbid(unsafe_code)]`), and the `NETLINK_SOCK_DIAG` socket `-E`/`+E` ask a
+# UNIX socket's peer of (`net`, the maintainer's decision of 2026-11-06,
+# DIVERGENCES 56; `diag.rs` builds the request and reads the replies as bytes).
+# Everything else is still std: /proc is a filesystem, and
+# `std::os::unix::fs::MetadataExt` exposes every stat field this backend needs.
 # Pinned exactly, at a release more than two weeks old when it was added, with no
-# default features and only `fs`. On x86_64, aarch64, arm, riscv64 and x86 Linux it
-# makes the syscall itself and pulls in `bitflags` and `linux-raw-sys` alone (all
-# three MIT OR Apache-2.0 at least; see deny.toml and THREAT-MODEL.md). Linux only:
-# off Linux this crate is an empty shell and links nothing.
+# default features and only `fs` and `net`. On x86_64, aarch64, arm, riscv64 and
+# x86 Linux it makes the syscalls itself and pulls in `bitflags` and
+# `linux-raw-sys` alone (all three MIT OR Apache-2.0 at least; `net` turns on
+# linux-raw-sys's `net`, `netlink`, `if_ether` and `xdp` modules, constants and
+# layouts, no new crate; see deny.toml and THREAT-MODEL.md). Linux only: off
+# Linux this crate is an empty shell and links nothing.
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.5", default-features = false, features = ["fs"] }
+rustix = { version = "=1.1.5", default-features = false, features = ["fs", "net"] }
 
 [features]
 # Exposes the pure text parsers (`/proc/net/*`, `/proc/<pid>/status`, fdinfo,

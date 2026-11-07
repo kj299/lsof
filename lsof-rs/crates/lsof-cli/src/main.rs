@@ -177,10 +177,11 @@ OUTPUT:
     -H            human-readable sizes in the SIZE column (2.0M); -F, -J
                   and -j keep bytes
     -t            terse: PIDs only
-    -E            (Windows) pipe endpoint info: append peer server/client
-                  PID+command to pipe NAMEs (GetNamedPipe*ProcessId)
-    +E            same, and also list the peer processes' own pipe rows.
-                  Linux accepts -E and +E and ignores them
+    -E            endpoint info: append each end's PID,cmd,FDmode to NAME
+                  (Linux: pipes, FIFOs, UNIX sockets, local TCP/UDP, ptys,
+                  eventfds, POSIX message queues; Windows: a pipe's peer
+                  server/client PID+command, GetNamedPipe*ProcessId)
+    +E            same, and also list those ends' own rows
     -l            numeric USER: the UID on Linux, the SID string on Windows
     +L [count]    an NLINK (link count) column; with a count, also select the
                   files with fewer links (`+L 1` = unlinked but still open).
@@ -1099,6 +1100,8 @@ fn main() {
             .and_then(Result::err);
         let gathered = match env.backend.gather_with(&selection, &fs) {
             Ok(p) => p,
+            // Said already, in the C's words.
+            Err(lsof_core::BackendError::Reported) => std::process::exit(1),
             Err(e) => {
                 say!("lsof: {e}");
                 std::process::exit(1);
@@ -1108,7 +1111,7 @@ fn main() {
         // gathered BEFORE any file is selected, so a PID whose files `-a`
         // drops is still located; see `Selection::locate`.
         let located = selection.locate(&gathered);
-        let procs = selection.apply(gathered);
+        let procs = selection.apply_with(gathered, env.backend.take_endpoint_tables());
         // A `stat` that failed is the C's `Error()` where it looks a login
         // up, before this cycle prints anything (`print.c:1726-1731`).
         #[cfg(target_os = "linux")]

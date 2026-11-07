@@ -140,6 +140,10 @@ pub enum BackendError {
     Unsupported(String),
     /// An underlying OS call failed.
     Os(String),
+    /// The gather ended where the C's `Error()` ends a run, after the backend
+    /// said why in the C's own words: the run exits 1 and says no more (a
+    /// netlink socket `-E` could not make, `netlink socket error: …`).
+    Reported,
 }
 
 impl std::fmt::Display for BackendError {
@@ -147,6 +151,7 @@ impl std::fmt::Display for BackendError {
         match self {
             BackendError::Unsupported(m) => write!(f, "unsupported: {m}"),
             BackendError::Os(m) => write!(f, "OS error: {m}"),
+            BackendError::Reported => write!(f, "the run ended where the C's Error() ends it"),
         }
     }
 }
@@ -254,6 +259,15 @@ pub trait Backend {
     /// named by the backend as it gathers (Windows' pipes).
     fn leaves_endpoints_to_core(&self) -> bool {
         false
+    }
+
+    /// What the last [`Backend::gather`] found beside the rows for
+    /// `-E`/`+E`, handed over once: each UNIX socket's peer and pending
+    /// connection, and each pseudoterminal master's index, which
+    /// [`Selection::apply_with`](crate::Selection::apply_with) names the
+    /// ends by. Empty where the backend reads none (DIVERGENCES 56).
+    fn take_endpoint_tables(&self) -> crate::EndpointTables {
+        crate::EndpointTables::default()
     }
 
     /// Resolve a `-u` value the way the platform names users.

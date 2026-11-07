@@ -5416,8 +5416,7 @@ with_stderr = true
 # end in NAME (`PID,cmd,FDmode`, the command cut to the `+c` width, after a
 # socket's addresses and before its state), and under +E lists that end too,
 # with its own; -F carries it in `n`, JSON not at all. lsof-rs had accepted
-# both and printed neither. The UNIX socketpair is left out (`-d ^7`): the
-# C names its peer from NETLINK_SOCK_DIAG, which lsof-rs does not read yet.
+# both and printed neither.
 
 [[case]]
 name = "endpoints-E-names-the-other-ends"
@@ -5470,10 +5469,146 @@ args = ["-V", "-n", "-P", "-E", "-a", "-p", "{A}", "-i", "-d", "999"]
 with_stderr = true
 
 [[case]]
-# LEDGERED (DIVERGENCES 56, OPEN): a UNIX socket's peer, named by the C
-# from NETLINK_SOCK_DIAG (`type=STREAM ->INO=N PID,cmd,FDmode`).
+# A UNIX socket's peer, from NETLINK_SOCK_DIAG (`type=STREAM ->INO=N
+# PID,cmd,FDmode`). It had been ledgered (OPEN) until lsof-rs read it too.
 name = "endpoints-E-unix-socket-peer-in-the-c"
 args = ["-n", "-P", "-E", "-F", "fn", "-a", "-p", "{EP}", "-U"]
+
+# ---------------------- -E/+E: UNIX sockets, ptys, eventfds, mqueues (56)
+# Fixture EP's fds 40-60. A UNIX socket names `->INO=N` and the rows on its
+# peer, last met first, the process itself among them: an abstract
+# listener's connection and its accepted end, a socketpair across the two
+# processes, a datagram socket and the one connected to it (the C fills
+# the peer both ways), and a peer in flight that no process holds
+# (`->INO=N` alone); a listener at a path names its first pending
+# connection. The pty master names `->/dev/pts/N` and the slave's rows, a
+# slave the master's; an eventfd and a message queue name every other row
+# on them, in the order met -- the queue only once the mount table records
+# the `mqueue` file system (MT's `mqueue` mode), and not under -b. lsof-rs
+# had named none of them.
+
+[[case]]
+name = "endpoints-E-unix-sockets"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "40-53"]
+
+[[case]]
+name = "endpoints-plus-E-unix-sockets"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "40-53"]
+
+[[case]]
+name = "endpoints-plus-E-unix-sockets-from-the-child"
+args = ["-n", "-P", "+E", "-a", "-p", "{EPC}", "-U"]
+
+[[case]]
+name = "endpoints-E-unix-sockets-fields"
+args = ["-n", "-P", "-E", "-F", "pcfatnT", "-a", "-p", "{EP}", "-d", "40-53"]
+
+[[case]]
+name = "endpoints-plus-E-unix-sockets-fields"
+args = ["-n", "-P", "+E", "-F", "pfn", "-a", "-p", "{EP}", "-U"]
+
+[[case]]
+name = "endpoints-E-unix-sockets-json-leaves-them-out"
+args = ["-n", "-P", "-E", "-J", "-a", "-p", "{EP}", "-d", "40-53"]
+
+[[case]]
+name = "endpoints-E-unix-sockets-plus-c-0"
+args = ["-n", "-P", "+E", "+c", "0", "-a", "-p", "{EP}", "-d", "41,46"]
+
+[[case]]
+# A path argument selects the listener; +E lists its pending connection.
+name = "endpoints-plus-E-listener-by-its-path"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "{EPDIR}/l.sock"]
+
+[[case]]
+# A listener whose first pending connection's client closed: the kernel
+# names it inode 0, the first the listener knows, so a live one after it is
+# not reached, and it is not printed (`if (p->inode)`, measured); a listener
+# with that one alone is `(LISTEN)` alone. lsof-rs had printed `->INO=0`.
+name = "endpoints-E-pending-client-closed"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "61-63"]
+
+[[case]]
+name = "endpoints-plus-E-pending-client-closed"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "61-63"]
+
+[[case]]
+name = "endpoints-plus-E-pending-client-closed-fields"
+args = ["-n", "-P", "+E", "-F", "pfn", "-a", "-p", "{EP}", "-d", "61-63"]
+
+[[case]]
+# A row +E adds of a process whose command is not UTF-8 prints its bytes, as
+# the process's own rows do (93): `ep\xff^[raw`. lsof-rs had shown U+FFFD.
+name = "endpoints-plus-E-adds-a-command-not-utf8"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "64"]
+
+[[case]]
+name = "endpoints-plus-E-adds-a-command-not-utf8-fields"
+args = ["-n", "-P", "+E", "-F", "pcn", "-a", "-p", "{EP}", "-d", "64"]
+
+[[case]]
+# A descriptor of 10000 or more is `*%03d` in the FD column and in an end's
+# `PID,cmd,FD` (`fd_to_string()`): `*000u`, `*345w`; `-F f` and JSON print
+# the number whole. lsof-rs had printed `10000u`.
+name = "fd-10000-and-up-column"
+args = ["-n", "-P", "-a", "-p", "{EP}", "-d", "10000-12345"]
+
+[[case]]
+name = "fd-10000-and-up-fields-and-json-whole"
+args = ["-n", "-P", "-F", "pfn", "-a", "-p", "{EP}", "-d", "10000-12345"]
+
+[[case]]
+name = "fd-10000-and-up-json"
+args = ["-n", "-P", "-J", "-a", "-p", "{EP}", "-d", "10000-12345"]
+
+[[case]]
+name = "endpoints-E-fd-10000-and-up"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "10000-12345,46"]
+
+[[case]]
+name = "endpoints-plus-E-fd-10000-and-up"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "10000-12345"]
+
+[[case]]
+name = "endpoints-E-pty"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "54"]
+
+[[case]]
+name = "endpoints-plus-E-pty"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "54"]
+
+[[case]]
+name = "endpoints-plus-E-pty-from-the-slave"
+args = ["-n", "-P", "+E", "-F", "pfan", "-a", "-p", "{EPC}", "-d", "55,56"]
+
+[[case]]
+name = "endpoints-E-eventfd"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "57,58"]
+
+[[case]]
+name = "endpoints-plus-E-eventfd"
+args = ["-n", "-P", "+E", "-a", "-p", "{EP}", "-d", "57"]
+
+[[case]]
+name = "endpoints-E-mqueue"
+args = ["-n", "-P", "-E", "-a", "-p", "{EP}", "-d", "59,60"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "endpoints-plus-E-mqueue"
+args = ["-n", "-P", "+E", "-F", "pfatn", "-a", "-p", "{EP}", "-d", "59"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+name = "endpoints-E-mqueue-dash-b-records-no-mount"
+args = ["-n", "-P", "-w", "-b", "-E", "-a", "-p", "{EP}", "-d", "59,60"]
+env = { LSOF_DIFF_MT = "mqueue" }
+
+[[case]]
+# Every end of the two processes at once, under +E.
+name = "endpoints-plus-E-every-end-of-the-child"
+args = ["-n", "-P", "+E", "-a", "-p", "{EPC}", "-d", "40-60"]
+env = { LSOF_DIFF_MT = "mqueue" }
 
 # ------------- -E/+E: excluded processes, socket-only reading, pairing (56)
 # The C reads every process under -E/+E. One a `-p ^`, `-u ^` or `-g ^`
@@ -5574,6 +5709,136 @@ with_stderr = true
 name = "user-login-cut-is-not-a-login"
 args = ["-F", "pu", "-a", "-d", "cwd", "-u", "{WUCUT}"]
 env = { LSOF_DIFF_MT = "passwd" }
+
+# -------------------- option values that are not UTF-8: the C's words (92)
+# -p, -g, -s, -i, -T, -F, -x, -K and -Z read their values as bytes, and a
+# byte that is no character of their grammar is their own error, then the
+# usage, exit 1: `illegal process ID: \xff`, `unknown -s protocol:
+# "\xff"`, ... (stderr is not compared: the C prints some raw, 122, and
+# its usage text is lsof-rs's own). lsof-rs had refused each with `an
+# argument is not valid UTF-8`. `+c` reads its leading digits.
+[[case]]
+name = "nonutf8-value-p"
+args = ["-p", "1{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-g"
+args = ["-g{BYTEFE}"]
+
+[[case]]
+name = "nonutf8-value-s-protocol"
+args = ["-s", "{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-s-state"
+args = ["-i", "-s", "TCP:LISTEN,{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-i"
+args = ["-i", "4{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-T"
+args = ["-T", "s{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-F"
+args = ["-Fp{BYTEFE}"]
+
+[[case]]
+name = "nonutf8-value-x"
+args = ["-x", "f{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-K"
+args = ["-K", "{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-Z"
+args = ["-Z{BYTEFF}"]
+
+[[case]]
+# -d's FD range reads text: `non-digit in -d FD range: 1-\xff`, the item
+# without its `^`; `illegal FD range for -d: -\xff` for a range with no
+# start; and the parse reads on (`-s foo` is its own error too).
+name = "nonutf8-value-d-range"
+args = ["-d", "^1-{BYTEFF}", "-a", "-p", "{A}"]
+
+[[case]]
+name = "nonutf8-value-d-range-no-start"
+args = ["-d-{BYTEFF}", "-a", "-p", "{A}"]
+
+[[case]]
+name = "nonutf8-value-d-reads-on"
+args = ["-d", "1-{BYTEFF}", "-s", "foo"]
+
+[[case]]
+# -f/+f's letters, a cluster ending in f included: `unknown file struct
+# option: \xff`, each letter.
+name = "nonutf8-value-f"
+args = ["-f", "{BYTEFF}", "-a", "-p", "{A}"]
+
+[[case]]
+name = "nonutf8-value-plus-f-attached"
+args = ["+f{BYTEFF}", "-a", "-p", "{A}"]
+
+[[case]]
+name = "nonutf8-value-cluster-ending-in-f"
+args = ["-afc{BYTEFF}", "-p", "{A}"]
+
+[[case]]
+# The `+` forms share the `-` forms' grammar and words.
+name = "nonutf8-value-plus-p"
+args = ["+p", "{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-plus-s"
+args = ["+s{BYTEFF}"]
+
+[[case]]
+name = "nonutf8-value-plus-K"
+args = ["+K{BYTEFE}"]
+
+[[case]]
+name = "nonutf8-value-plus-Z"
+args = ["+Z{BYTEFF}"]
+
+[[case]]
+# -m and -D take their attached value and drop it.
+name = "nonutf8-value-m-attached"
+args = ["-m{BYTEFF}", "-a", "-p", "{A}"]
+
+[[case]]
+name = "nonutf8-value-D-attached"
+args = ["-D{BYTEFF}", "-a", "-p", "{A}"]
+
+[[case]]
+# An attached value that opens with `-` or `+` is given back to be read as
+# letters, by every option whose value is optional: `-g-\xff` is `-g`, then
+# `illegal option character: -` and the byte, which as 0xff ends the
+# options; `-g-a` is `-g`, the `-` line, and `-a`.
+name = "nonutf8-value-attached-dash-given-back"
+args = ["-a", "-p", "{A}", "-g-{BYTEFF}"]
+
+[[case]]
+name = "attached-dash-value-given-back-g"
+args = ["-p", "{A}", "-g-a", "-d", "cwd"]
+
+[[case]]
+name = "attached-dash-value-given-back-s"
+args = ["-p", "{A}", "-s-a", "-d", "cwd"]
+
+[[case]]
+name = "attached-dash-value-given-back-F"
+args = ["-p", "{A}", "-F-a", "-d", "cwd"]
+
+[[case]]
+name = "attached-dash-value-given-back-x-T-K-f-i"
+args = ["-p", "{A}", "-x-a", "-T+a", "-K-a", "-f-a", "-i-4", "-d", "cwd"]
+
+[[case]]
+name = "nonutf8-value-plus-c-reads-its-digits"
+args = ["-F", "pc", "+c", "2{BYTEFF}", "-a", "-p", "{A}", "-d", "cwd"]
 
 # ----------------------------------- option bytes that are not UTF-8 (92)
 # GetOpt reads a byte at a time: one that is no option is its `illegal

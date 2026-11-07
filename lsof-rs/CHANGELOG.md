@@ -19,8 +19,22 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   state, `-F n` carries them, JSON does not), and `+E` lists those ends too,
   with their own. Under either, every process is read, so one the `-a`
   leaves out still locates `-i`, `-K` or a path through its rows (`lsof -V
-  -E -K -a -p P` no longer says `no tasks located`). A UNIX socket's peer,
-  a pty's, a POSIX message queue's and an eventfd's ends are not named yet.
+  -E -K -a -p P` no longer says `no tasks located`). A UNIX socket names
+  its peer, `->INO=N` and the rows on it, last met first, from the kernel's
+  `NETLINK_SOCK_DIAG` dump (read once a run, and each `-r` cycle, only
+  under `-E`/`+E`), and a listener its first pending connection; a pty
+  master names `->/dev/pts/N` and the slave's rows, a slave the master's;
+  an eventfd and a POSIX message queue (once the `mqueue` file system is
+  mounted) name every other row on them. A pending connection whose client
+  closed (inode 0) is not printed, as the C prints none. Where no netlink
+  socket can be made, lsof-rs says `netlink socket error: …` and exits 1
+  having listed nothing, as the C does, asking where the C asks: at the
+  first socket not in its raw, netlink or packet tables. Only the kernel's
+  answer is read (the socket connected to it, the sender and a sequence
+  number checked), within 5 s for the whole dump. A row `+E` adds prints
+  its command's own bytes, and an fd of 10000 or more is `*%03d` in the FD
+  column and in an end's `PID,cmd,FD` (`*000u`), as the C's
+  `fd_to_string()` prints it; `-F f` and JSON print the number whole.
   As the C, a process a `-p ^`, `-u ^` or `-g ^` excludes is then listed for
   the rows a file item (a name, `-i`, `-U`, `-d`) selects when the AND holds
   for the row, a `-c ^` is ignored, and `-E -p P -i` reads P's sockets
@@ -43,8 +57,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   is no character where an option letter stands is `illegal option
   character: \xNN` and the parse reads on, one line a byte (`-é` is two);
   0xff ends the options, as the C's `GetOpt` takes it for EOF (`-p 1 -\xff`
-  lists PID 1). Any other option that reads text still refuses one, alone
-  (`an argument is not valid UTF-8`, exit 1). On Windows a path argument
+  lists PID 1). `-p`, `-g`, `-s`, `-i`, `-T`, `-F`, `-x`, `-K` and `-Z`
+  say the C's own words about such a value (`illegal process ID: \xff`,
+  `unknown -s protocol: "\xff"`, `unknown field: \xc3`, …), the byte
+  escaped, then the usage, exit 1, where they had refused it with `an
+  argument is not valid UTF-8`; so do `-d`'s FD range (`non-digit in -d
+  FD range: 1-\xff`), `-f`/`+f`, the `+` forms of those options, `+Z`, and
+  `-m`/`-D` with the value attached, reading on after each as the C does;
+  `+c` reads its leading digits. An attached value that opens with `-` or
+  `+` is given back to be read as letters by every option whose value is
+  optional, as the C's `GetOpt` gives it back: `-g-a` is `-g`, `illegal
+  option character: -` and `-a`. On Windows a path argument
   that is not text names no file, never its lossy spelling's.
 - **An `O_PATH` descriptor on a socket file is `sock`, `0t0`, `can't
   identify protocol`** (Linux; 126), the row the C cannot name, where it
@@ -144,6 +167,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   prints them too, where lsof-rs had walked once the parse was over and
   printed nothing of a run that ended there. Linux and FreeBSD; on Windows,
   which matches names, the walk still comes after the parse.
+
+### Added
+- **The Linux backend asks the kernel's `NETLINK_SOCK_DIAG`** for a UNIX
+  socket's peer under `-E`/`+E` (56), through `rustix`'s `net` feature
+  beside `fs` (still =1.1.5; `net` turns on linux-raw-sys's netlink
+  constants, no new crate; the maintainer's decision of 2026-11-06). The
+  backend keeps `#![forbid(unsafe_code)]`: the request is built and each
+  reply read as bytes, every length checked, the receive buffer 32 KiB, the
+  dump read for at most 64 MiB and 5 s in all, only the kernel's answer read
+  (connected to port 0, the sender and a sequence number checked), and only
+  the sockets the run's own `/proc/net/unix` lists are kept. A fuzz target,
+  `netlink_diag`, drives the reply reader; CI's fuzz runs pass
+  `-timeout=10`.
+- Differential fixture EP's fds 40-65 and 10000-12345: UNIX sockets of every
+  shape (listeners whose first pending client closed among them), a pty, an
+  eventfd, a POSIX message queue, a second child whose command is not UTF-8,
+  and descriptors of 10000 and up, with `-E`/`+E` cases for each; and a case
+  for each option value that is not UTF-8. The resource gate measures
+  the whole host under `-E` (`whole-host-E`).
 
 ## [2.0.0] — 2026-11-01
 

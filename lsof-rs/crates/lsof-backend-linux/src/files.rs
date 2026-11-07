@@ -129,6 +129,10 @@ pub struct FdInfo {
     pub tfds: Vec<i64>,
     /// There were more than [`EPOLL_MAX_TFDS`] of them, so the list is cut.
     pub tfds_truncated: bool,
+    /// `tty-index:` on a pseudoterminal master, `/dev/ptmx`: the index of
+    /// its slave, `/dev/pts/N`, which `-E` names (DIVERGENCES 56). `None`
+    /// past the C's `int` (`dproc.c:536-541`).
+    pub tty_index: Option<u32>,
 }
 
 impl FdInfo {
@@ -159,6 +163,12 @@ fn access_from_flags(flags: u32) -> AccessMode {
     }
 }
 
+/// The `tty-index:` of descriptor `fd` of `base` (`/proc/PID` or a task's
+/// directory), where it is a pseudoterminal master (DIVERGENCES 56).
+pub fn tty_index(base: &str, fd: u64) -> Option<u32> {
+    fdinfo_for(base, &fd.to_string()).tty_index
+}
+
 /// The parsing half of [`fdinfo_for`], over the file's text. Pure, so the fuzz
 /// target can drive it with arbitrary bytes; must never panic.
 pub fn parse_fdinfo(info: &str) -> FdInfo {
@@ -173,6 +183,12 @@ pub fn parse_fdinfo(info: &str) -> FdInfo {
             out.pos = v.trim().parse::<u64>().ok();
         } else if let Some(v) = line.strip_prefix("eventfd-id:") {
             out.eventfd_id = v.trim().parse::<i64>().ok();
+        } else if let Some(v) = line.strip_prefix("tty-index:") {
+            out.tty_index = v
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| i32::try_from(n).is_ok());
         } else if let Some(v) = line.strip_prefix("Pid:") {
             out.pidfd_pid = v.trim().parse::<i64>().ok();
         } else if let Some(v) = line.strip_prefix("tfd:") {
@@ -588,6 +604,95 @@ pub struct GatherCtx<'a> {
     /// `Selection::nfs_mounts`: the NFS mounts a file is named by
     /// ([`nfs_suffix`]), newest first; empty unless one was recorded.
     pub nfs_mounts: &'a [MountEntry],
+    /// `-E`/`+E`: the question to the kernel for the UNIX sockets' ends,
+    /// asked at the first socket that needs it ([`UnixStage`]); `None`
+    /// otherwise.
+    pub unix_stage: Option<&'a UnixStage<'a>>,
+}
+
+impl GatherCtx<'_> {
+    /// Whether the walk ends here: the C's `Error()` at a netlink socket that
+    /// could not be made ([`UnixStage`]), after which it reads, and says,
+    /// nothing more.
+    pub fn stopped(&self) -> bool {
+        self.unix_stage.is_some_and(UnixStage::failed)
+    }
+
+    /// A socket the C takes past the tables it reads before
+    /// `/proc/net/unix`: the question is asked, if it has not been.
+    fn reach_unix(&self, inode: u64) {
+        if let Some(stage) = self.unix_stage {
+            stage.reach(inode);
+        }
+    }
+}
+
+/// `-E`/`+E`'s question to the kernel for every UNIX socket's ends
+/// ([`crate::diag::unix_ends`]), asked where the C asks it: at the first
+/// socket its `process_proc_sock()` does not find in the tables it reads
+/// before `/proc/net/unix` (AX.25, IPX, IPv4 raw, netlink, packet), when
+/// `get_unix()` reads that table and then `get_uxpeeri()` (`dsock.c:3234-
+/// 3240, 3653-3657`), once a gather. So a run that meets no other socket
+/// asks nothing, and says nothing of it (measured: `-E` in a PID namespace
+/// whose processes hold no socket makes no netlink socket); and one whose
+/// netlink socket cannot be made ends there, as the C's `Error()` ends it,
+/// before anything more is read or said (exit 1, nothing listed).
+pub struct UnixStage<'a> {
+    socks: &'a SocketTable,
+    say: &'a dyn Fn(&str),
+    got: std::cell::RefCell<Asked>,
+}
+
+/// What the question came to, so far.
+enum Asked {
+    NotYet,
+    Ends(std::collections::HashMap<u64, lsof_core::UnixEnds>),
+    Failed,
+}
+
+impl<'a> UnixStage<'a> {
+    pub fn new(socks: &'a SocketTable, say: &'a dyn Fn(&str)) -> UnixStage<'a> {
+        UnixStage {
+            socks,
+            say,
+            got: std::cell::RefCell::new(Asked::NotYet),
+        }
+    }
+
+    /// Socket `inode` was met: ask, if it is none the C finds before
+    /// `/proc/net/unix` and nothing was asked yet.
+    fn reach(&self, inode: u64) {
+        if self.socks.read_before_unix(inode) {
+            return;
+        }
+        let mut got = self.got.borrow_mut();
+        if matches!(*got, Asked::NotYet) {
+            let socks = self.socks;
+            *got = match crate::diag::unix_ends(&|i| socks.is_unix(i), self.say) {
+                Some(ends) => Asked::Ends(ends),
+                None => Asked::Failed,
+            };
+        }
+    }
+
+    /// Whether the question was asked, answered or not.
+    #[cfg(test)]
+    fn asked(&self) -> bool {
+        !matches!(*self.got.borrow(), Asked::NotYet)
+    }
+
+    /// Whether no netlink socket could be made: the C's `Error()`.
+    pub fn failed(&self) -> bool {
+        matches!(*self.got.borrow(), Asked::Failed)
+    }
+
+    /// The ends found, if the question was asked and answered.
+    pub fn into_ends(self) -> std::collections::HashMap<u64, lsof_core::UnixEnds> {
+        match self.got.into_inner() {
+            Asked::Ends(ends) => ends,
+            Asked::NotYet | Asked::Failed => std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// `ty`, or `PSXMQ` for a regular file on the device of the `mqueue` file
@@ -644,6 +749,10 @@ pub(crate) fn socket_row(
     ctx: &GatherCtx<'_>,
 ) -> Option<OpenFile> {
     let (socks, ns) = (ctx.socks, ctx.ns);
+    // What `stat`s as a socket is the C's `process_proc_sock()`'s.
+    if meta.is_some_and(|m| m.mode & S_IFMT == S_IFSOCK) {
+        ctx.reach_unix(inode);
+    }
     if socks.get(inode).is_none() {
         // Not in this namespace's tables: the C's last branch of
         // `process_proc_sock()`, reached only for what `stat`s as a socket.
@@ -877,6 +986,7 @@ fn row(
     // (DIVERGENCES 126). Not under NFS without a `stat` that said so.
     if let Some(m) = meta.as_ref().filter(|m| m.mode & S_IFMT == S_IFSOCK) {
         if net::socket_inode(&name).is_none() {
+            ctx.reach_unix(m.ino);
             let mut f = unidentified_socket(&fd, info, m, ctx.ns.unidentified().to_string());
             f.access = access;
             for why in why {
@@ -1130,6 +1240,9 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
             .find(|f| f.fd == FdType::Txt)
             .and_then(|f| Some((f.fs_device?, f.node.as_deref()?.parse::<u64>().ok()?)));
         out.extend(crate::maps::rows_for(base, pid, exe, ctx));
+        if ctx.stopped() {
+            return out;
+        }
     }
 
     let dir = match std::fs::read_dir(format!("{base}/fd")) {
@@ -1188,6 +1301,9 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
             // The lock character lsof appends to the FD cell (`8uW`).
             f.lock = lock_of(ctx.locks, pid, &f);
             out.push(f);
+        }
+        if ctx.stopped() {
+            break;
         }
     }
     // Every process's rows are held until the whole host has been walked and
@@ -1271,6 +1387,7 @@ mod tests {
                 mqueue_device: None,
                 fs: None,
                 nfs_mounts: &[],
+                unix_stage: None,
             },
         )
     }
@@ -1393,6 +1510,7 @@ mod tests {
                 mqueue_device: None,
                 fs: None,
                 nfs_mounts: &[],
+                unix_stage: None,
             },
         );
         assert!(
@@ -1493,6 +1611,15 @@ mod tests {
             "anon_inode:3"
         );
         assert_eq!(name_for_target("anon_inode:[timerfd]", &none), "[timerfd]");
+        // A pseudoterminal master's slave index (DIVERGENCES 56), as the C's
+        // `int`: past it, none.
+        let tty = |s: &str| parse_fdinfo(s).tty_index;
+        assert_eq!(tty("pos:\t0\nflags:\t0102002\ntty-index:\t3\n"), Some(3));
+        assert_eq!(tty("tty-index:\t2147483647\n"), Some(i32::MAX as u32));
+        assert_eq!(tty("tty-index:\t2147483648\n"), None);
+        assert_eq!(tty("tty-index:\t-1\n"), None);
+        assert_eq!(tty("tty-index:\tx\n"), None);
+        assert_eq!(tty("pos:\t0\n"), None);
         // eventfd: the *id*, not the counter and not the fd number.
         let ev = parse_fdinfo("pos:\t0\neventfd-count:\t7\neventfd-id: 6\n");
         assert_eq!(name_for_target("anon_inode:[eventfd]", &ev), "[eventfd:6]");
@@ -1715,6 +1842,7 @@ mod tests {
                 mqueue_device: None,
                 fs: None,
                 nfs_mounts: &[],
+                unix_stage: None,
             },
         )
     }
@@ -1953,6 +2081,7 @@ mod tests {
             mqueue_device: None,
             fs: None,
             nfs_mounts: &[],
+            unix_stage: None,
         };
         let f = socket_row(
             md.ino(),
@@ -1987,6 +2116,37 @@ mod tests {
         assert!(named(None).is_none());
     }
 
+    /// `-E`'s question is asked at the first socket the C takes past the
+    /// tables it reads before `/proc/net/unix`, and once: a raw socket asks
+    /// nothing, any other socket asks (DIVERGENCES 56).
+    #[cfg(not(miri))]
+    #[test]
+    fn the_unix_question_is_asked_at_the_first_socket_past_the_early_tables() {
+        let mut socks = SocketTable::default();
+        socks.parse_raw(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+  85: 00000000:0001 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 71 2 00000000400092a3 0\n",
+            false,
+        );
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let stage = UnixStage::new(&socks, &say);
+        stage.reach(71);
+        assert!(!stage.asked(), "a raw socket is found before");
+        stage.reach(72);
+        assert!(stage.asked(), "any other socket asks");
+        let first = said.borrow().len();
+        stage.reach(73);
+        assert_eq!(said.borrow().len(), first, "asked once");
+        // Asked, it failed only where no netlink socket could be made.
+        assert_eq!(
+            stage.failed(),
+            said.borrow()
+                .iter()
+                .any(|l| l.contains("netlink socket error"))
+        );
+    }
+
     /// A regular file on the `mqueue` file system the mount table recorded is
     /// a POSIX message queue, `PSXMQ` (DIVERGENCES 128); anything else there,
     /// and a regular file anywhere else, keeps its type, and with no such
@@ -2019,6 +2179,7 @@ mod tests {
             mqueue_device: Some(dev),
             fs: None,
             nfs_mounts: &[],
+            unix_stage: None,
         };
         let f = super::row(
             &file,
@@ -2229,6 +2390,7 @@ mod tests {
             mqueue_device: None,
             fs: None,
             nfs_mounts: &[],
+            unix_stage: None,
         };
         let id = |f: OpenFile| f.socket.and_then(|s| s.bound).and_then(|b| b.id);
         let first = row(
@@ -2566,6 +2728,7 @@ mod tests {
             mqueue_device: None,
             fs: Some(fs),
             nfs_mounts,
+            unix_stage: None,
         }
     }
 

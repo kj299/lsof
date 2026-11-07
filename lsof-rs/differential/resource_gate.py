@@ -204,15 +204,21 @@ FD_WALL, FD_RSS = 4.00, 3.50
 # unit tests instead of by this ceiling. Before DIVERGENCES 30 closed, this
 # ceiling was 3.50x and pinned a cost that grew with the host; the cost is now
 # proportional (0.84x, 0.85x, 0.87x of the C at 76, 575 and 1075 processes).
+# whole host under -E (DIVERGENCES 56): every process read, each end of a
+# pipe, socket, pty, eventfd and queue entered, and the kernel's AF_UNIX
+# dump read once. Measured at 400 processes (2026-11-06): 1.11x wall
+# (130.5 ms against 117.7 ms), 0.94x RSS (5.67 MB against 6.03 MB), the
+# whole host's own ratios (1.14x, 0.93x), so its ceilings.
 CEILINGS = {
     "-i": {"wall": 1.60, "rss": 2.00},
     "whole-host": {"wall": 1.40, "rss": 1.30},
+    "whole-host-E": {"wall": 1.40, "rss": 1.30},
     "illegal-letters": {"wall": ILLEGAL_WALL, "rss": ILLEGAL_RSS},
     "cross-over-letters": {"wall": CROSS_WALL, "rss": CROSS_RSS},
     "state-empty-names": {"wall": STATE_WALL, "rss": STATE_RSS},
     "fd-list-items": {"wall": FD_WALL, "rss": FD_RSS},
 }
-CASES = {"-i": ["-i"], "whole-host": [],
+CASES = {"-i": ["-i"], "whole-host": [], "whole-host-E": ["-E"],
          "illegal-letters": ["-" + "W" * ILLEGAL_LETTERS] * ILLEGAL_WORDS,
          "cross-over-letters": ["-x", "q" * CROSS_LETTERS] * CROSS_WORDS,
          "state-empty-names": ["-s", "tcp:" + "," * STATE_COMMAS],
@@ -530,12 +536,14 @@ def _self_test():
         # binaries so the exit code itself is what is asserted.
         wall_over = {"-i": {"wall": 0.01, "rss": 99.0},
                      "whole-host": {"wall": 99.0, "rss": 99.0},
+                     "whole-host-E": {"wall": 99.0, "rss": 99.0},
                      "illegal-letters": {"wall": 99.0, "rss": 99.0},
                      "cross-over-letters": {"wall": 99.0, "rss": 99.0},
                      "state-empty-names": {"wall": 99.0, "rss": 99.0},
                      "fd-list-items": {"wall": 99.0, "rss": 99.0}}
         rss_over = {"-i": {"wall": 99.0, "rss": 0.01},
                     "whole-host": {"wall": 99.0, "rss": 99.0},
+                    "whole-host-E": {"wall": 99.0, "rss": 99.0},
                     "illegal-letters": {"wall": 99.0, "rss": 99.0},
                     "cross-over-letters": {"wall": 99.0, "rss": 99.0},
                     "state-empty-names": {"wall": 99.0, "rss": 99.0},

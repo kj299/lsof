@@ -241,8 +241,8 @@ The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
 - **Refused, where the C works:** `-c /regex/`, and host or service names in
-  `-i` (38); a value that is not UTF-8 for an option other than a path,
-  `-c` and `-u` (92); `-Z`, where SELinux is
+  `-i` (38); a value that is not UTF-8, in a command line that also holds
+  one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
 - **Linux, and worth knowing before running it on a busy host:** a run that
   needs the mount table — every run but `-i` alone, and that too with `-e` —
@@ -272,18 +272,17 @@ meet. Each number is a row there, with the measurement behind it.
   `lstat`, and one more for a link `-x l` follows: about 0.08 ms an entry, 1.6
   times the C's (`+D /usr/lib`, 17,742 entries, 1.39 s against 0.86 s; `-O`
   0.13 s; 94, 111).
-- **Linux:** `-E`/`+E` name a pipe's, a named FIFO's and a local TCP or
-  UDP connection's ends as the C does, but not a UNIX socket's peer (the C
-  asks `NETLINK_SOCK_DIAG`, which lsof-rs does not read), a pty's, a POSIX
-  message queue's or an eventfd's (56) [2026-11-02; an `O_PATH` descriptor on
+- **Linux:** `-E`/`+E` name every end the C names (56), and where no
+  netlink socket can be made (a sandbox without `AF_NETLINK`) end the run
+  as the C does, exit 1, nothing listed; their output grows with the square
+  of an object's holders, as the C's does (2,000 processes on one pipe
+  print 276 MB; THREAT-MODEL §2) [2026-11-07; an `O_PATH` descriptor on
   a socket file is the C's `sock` row (126); 2026-10-30: AF_VSOCK, ping and
   unbound sockets are named as the C names them, from
   `system.sockprotoname` (22), and a bound netlink socket from its table
   (109)]; a login name is read from `/etc/passwd` only, by glibc's `files`
   rules, so an LDAP or SSSD account can be named by its UID alone (39, 70),
-  and a control byte in one is escaped where the C prints it raw (70). An
-  option other than a path, `-c` or `-u` that is given a value that is not
-  UTF-8 is refused, where the C reads the bytes and says its own words (92).
+  and a control byte in one is escaped where the C prints it raw (70).
 - **Output shape:** `-J`/`-j` print the C's schema since 2.0.0 (91), but an
   Internet row keeps a `name` (134) and DEL, C1 and U+2028/2029 are escaped
   (135), both C-DEFECT; a byte that is not UTF-8 prints as U+FFFD in NAME,

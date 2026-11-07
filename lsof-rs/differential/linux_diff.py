@@ -53,7 +53,9 @@ ledger — those are the kit's, on purpose.
              UTF-8 -- each had hidden something from lsof-rs
   fixture EP two processes, {EP} and {EPC}, at the two ends of a pipe, a
              named FIFO, a loopback TCP connection and a connected UDP pair,
-             and {EP}'s socketpair: what `-E`/`+E` name (DIVERGENCES 56)
+             {EP}'s socketpair, and at fds 40-60 UNIX sockets of every shape,
+             a pty, an eventfd and a POSIX message queue: what `-E`/`+E`
+             name (DIVERGENCES 56)
   fixture Z  a main thread that has exited while another runs on, and a
              child never reaped: the two kinds of zombie ({Z}, {ZC})
   fixture U  a process that made itself unreadable (`PR_SET_DUMPABLE` 0):
@@ -702,7 +704,14 @@ def endpoint_holder(work: str) -> Fixture:
     {EPC} reads, holds the server end of a loopback TCP connection {EPC}
     made (and the listener), and one of a connected UDP pair whose other
     end {EPC} holds; and one end of a UNIX socketpair whose other end {EPC}
-    holds, whose peer lsof-rs does not name yet. {EP} also holds a UDP
+    holds. At fds 40-60 are the rest of the ends `-E` names: UNIX sockets of
+    every shape (an abstract listener, a connection to it and its accepted
+    end, a listener at a path with two connections pending, a socketpair
+    across the two processes, a datagram socket another connected to, and
+    one whose peer is in flight, held by no process), a pseudoterminal {EP}
+    is the master of and {EPC} holds the slave of twice, an eventfd both
+    hold, and a POSIX message queue both hold, where the kernel has
+    pseudoterminals and message queues. {EP} also holds a UDP
     socket on its TCP connection's tuple reversed, three UDP sockets on one
     tuple, and two pipes at fds 30-33, for the pairing's rules and `+E`'s
     placement of a row. {EPC} names itself
@@ -722,18 +731,102 @@ def endpoint_holder(work: str) -> Fixture:
         "u2=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); u2.bind(('127.0.0.1',0))\n"
         "u1.connect(u2.getsockname()); u2.connect(u1.getsockname())\n"
         "a,b=socket.socketpair()\n"
+        # The rest of the ends, at fds 40-60 (DIVERGENCES 56): UNIX sockets
+        # (an abstract listener, a connection to it and its accepted end; a
+        # listener at a path with two connections pending; a socketpair
+        # across the two processes; a datagram socket two others connected
+        # to; one whose peer is in flight, held by no process), a
+        # pseudoterminal, an eventfd, and a POSIX message queue where the
+        # kernel has them.
+        "def at(fd,n):\n"
+        "    os.dup2(fd,n); os.close(fd)\n"
+        "def sock(s,n): at(s.detach(),n)\n"
+        "U=socket.AF_UNIX\n"
+        "ab=socket.socket(U); ab.bind(('\\0lsof-rs-ep-%%d'%%os.getpid()).encode()); ab.listen(4)\n"
+        "cl=socket.socket(U); cl.connect(ab.getsockname()); ac,_=ab.accept()\n"
+        "sock(ab,40); sock(cl,41); sock(ac,42)\n"
+        "pl=socket.socket(U); pl.bind(os.path.join(d,'l.sock')); pl.listen(4)\n"
+        "p1=socket.socket(U); p1.connect(os.path.join(d,'l.sock'))\n"
+        "p2=socket.socket(U); p2.connect(os.path.join(d,'l.sock'))\n"
+        "sock(pl,43); sock(p1,44); sock(p2,45)\n"
+        "s1,s2=socket.socketpair(); sock(s1,46); sock(s2,47)\n"
+        "dg=socket.socket(U,socket.SOCK_DGRAM); dg.bind(os.path.join(d,'d.sock'))\n"
+        "dc=socket.socket(U,socket.SOCK_DGRAM); dc.connect(os.path.join(d,'d.sock'))\n"
+        "sock(dg,48); sock(dc,49)\n"
+        "fl,gone=socket.socketpair(); c1,c2=socket.socketpair()\n"
+        "socket.send_fds(c1,[b'x'],[gone.fileno()]); gone.close()\n"
+        "sock(fl,51); sock(c1,52); sock(c2,53)\n"
+        "try:\n"
+        "    m,sl=os.openpty(); at(m,54); at(sl,55)\n"
+        "except OSError: pass\n"
+        "ev=os.eventfd(0); at(ev,57); os.dup2(57,58)\n"
+        "try:\n"
+        "    import ctypes.util\n"
+        "    rt=ctypes.CDLL(ctypes.util.find_library('rt') or None)\n"
+        "    rt.mq_open.restype=ctypes.c_int\n"
+        "    rt.mq_open.argtypes=[ctypes.c_char_p,ctypes.c_int,ctypes.c_uint,ctypes.c_void_p]\n"
+        "    qn=('/lsof-rs-ep-%%d'%%os.getpid()).encode()\n"
+        "    q1=rt.mq_open(qn,os.O_CREAT|os.O_RDWR,0o600,None); q2=rt.mq_open(qn,os.O_RDONLY,0,None); rt.mq_unlink(qn)\n"
+        "    if q1>=0 and q2>=0: at(q1,59); at(q2,60)\n"
+        "except (OSError, AttributeError): pass\n"
+        # Listeners whose first pending connection's client closed, which the
+        # kernel names inode 0: one with a live connection pending after it
+        # (61, the client 62), one with none (63) (DIVERGENCES 56).
+        "def lis(n,closed):\n"
+        "    p=os.path.join(d,n); L=socket.socket(U); L.bind(p); L.listen(4)\n"
+        "    for _ in range(closed):\n"
+        "        z=socket.socket(U); z.connect(p); z.close()\n"
+        "    return L\n"
+        "sock(lis('c.sock',1),61); lv=socket.socket(U); lv.connect(os.path.join(d,'c.sock')); sock(lv,62)\n"
+        "sock(lis('c1.sock',1),63)\n"
+        # A socketpair whose other end a second child holds, whose command
+        # is not UTF-8 (64; DIVERGENCES 93), and descriptors of 10000 and up,
+        # which the C prints `*%%03d` (a socketpair end and a pipe end;
+        # `fd_to_string()`), where the limit can be raised.
+        "g1,g2=socket.socketpair(); sock(g1,64); sock(g2,65)\n"
+        "try:\n"
+        "    import resource\n"
+        "    h=resource.getrlimit(resource.RLIMIT_NOFILE)[1]\n"
+        "    if h==resource.RLIM_INFINITY or h>=12400: resource.setrlimit(resource.RLIMIT_NOFILE,(12400,h))\n"
+        "    os.dup2(46,10000)\n"
+        "    hr,hw=os.pipe(); os.dup2(hr,10001); os.dup2(hw,12345); os.close(hr); os.close(hw)\n"
+        "except (OSError, ValueError, ImportError): pass\n"
         "me=os.getpid()\n"
+        "pid2=os.fork()\n"
+        "if pid2==0:\n"
+        "    libc.prctl(15,b'ep\\xff\\x1braw',0,0,0)\n"
+        "    libc.prctl(1,9,0,0,0)\n"
+        "    if os.getppid()!=me: os._exit(0)\n"
+        "    for n in range(3,12346):\n"
+        "        if n!=65:\n"
+        "            try: os.close(n)\n"
+        "            except OSError: pass\n"
+        "    open(os.path.join(d,'child2'),'w').close()\n"
+        "    time.sleep(600); os._exit(0)\n"
+        "os.close(65)\n"
+        "while not os.path.exists(os.path.join(d,'child2')): time.sleep(0.01)\n"
         "pid=os.fork()\n"
         "if pid==0:\n"
         "    libc.prctl(15,b'ep-child-long-name',0,0,0)\n"
         "    libc.prctl(1,9,0,0,0)\n"
         "    if os.getppid()!=me: os._exit(0)\n"
         "    os.close(w); a.close(); u1.close()\n"
+        "    for n in (42,45,46,48,60):\n"
+        "        os.close(n)\n"
+        "    for n in (61,62,63,64,10000,10001,12345):\n"
+        "        try: os.close(n)\n"
+        "        except OSError: pass\n"
+        "    try:\n"
+        "        os.close(54); os.dup2(55,56)\n"
+        "    except OSError: pass\n"
         "    f=os.open(os.path.join(d,'ff'),os.O_RDONLY|os.O_NONBLOCK)\n"
         "    c=socket.create_connection(srv.getsockname()); srv.close()\n"
         "    open(os.path.join(d,'child'),'w').close()\n"
         "    time.sleep(600); os._exit(0)\n"
         "os.close(r); b.close(); u2.close()\n"
+        "for n in (47,49,55):\n"
+        "    try: os.close(n)\n"
+        "    except OSError: pass\n"
         "conn,_=srv.accept()\n"
         # A UDP socket on the TCP connection's tuple reversed, which is no
         # peer of it (another protocol), and three UDP sockets on one tuple,
@@ -3395,6 +3488,7 @@ def run(args) -> int:
                 "EP": str(endpoints.pid),
                 "EPC": open(os.path.join(endpoints.cwd, "epc.pid")).read().strip(),
                 "EPFIFO": os.path.join(endpoints.cwd, "ff"),
+                "EPDIR": endpoints.cwd,
                 # Single bytes that are not UTF-8, as the surrogates
                 # `os.fsencode()` turns back into them (DIVERGENCES 92).
                 "BYTEFE": "\udcfe",

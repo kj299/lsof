@@ -71,13 +71,6 @@ disagreeing, and it names the C code so anyone can check the triage.
   and, under `-E`, ignores its answer (`if (!FeptE) return (1)`), and
   lsof-rs does the same (56). Only the exit differs: the C exits 1 for every
   `-c ^` value, which it enters as a search item and never marks.
-- [x] endpoints-E-unix-socket-peer-in-the-c: DEBT (item 56, OPEN) —
-  fixture EP's UNIX socketpair under `-E -U`. The C asks the kernel for
-  every UNIX socket's peer (`NETLINK_SOCK_DIAG`, `get_uxpeeri()`) and
-  names it in NAME, `ntype=STREAM ->INO=N PID,cmd,FDmode`; lsof-rs reads no
-  sock_diag (its one binding, rustix, is taken with `fs` alone) and prints
-  `ntype=STREAM`. Pipes, named FIFOs and local TCP and UDP connections are
-  named as the C names them. Not pinned: the diff holds pids and inodes.
 - [x] hostile-comm-utf8-table: C-DEFECT, not reproduced — the C sizes the
   COMMAND column with `safestrlen()` (`lib/misc.c`), which compares each
   `char` with `0x20`; `char` is signed on x86-64, so every byte ≥ 0x80 is
@@ -256,6 +249,135 @@ disagreeing, and it names the C code so anyone can check the triage.
   output is not valid UTF-8 and so no JSON; lsof-rs writes U+FFFD and stays
   valid. Not pinned: X's pid and inodes.
 
+## Fixed by the rest of `-E`: UNIX socket peers, pseudoterminals, eventfds, message queues, and option values that are not UTF-8 (2026-11-06)
+
+Items 56 and 92, as the owner decided on 2026-11-06 ("Turn on rustix net
+feature. Also add in the most logical rows to the PR"; "just like the C",
+never at the cost of safety), each measured against the C first:
+
+* **A UNIX socket's peer** (56). The C asks the kernel once a run (each
+  `-r` cycle), only under `-E`/`+E`, for every AF_UNIX socket's peer and
+  pending connections: one `SOCK_DIAG_BY_FAMILY` request (40 bytes,
+  `UDIAG_SHOW_PEER | UDIAG_SHOW_ICONS`, measured with strace), then
+  `NLMSG_DONE`. lsof-rs makes the same request through rustix's `net`
+  feature (no new crate: it turns on linux-raw-sys's netlink constants;
+  `Cargo.lock` is unchanged and `cargo deny` clean) and reads the replies
+  as bytes in `diag.rs`, safe Rust, every length checked, a 32 KiB buffer,
+  at most 64 MiB and 5 s for the whole dump (THREAT-MODEL §2). As the C
+  asks, it asks at the first socket that brings the C's
+  `process_proc_sock()` past the tables it reads before `/proc/net/unix`
+  (IPv4 raw, netlink, packet): a run that meets no other socket asks
+  nothing (measured: `-E` in a PID namespace whose only processes hold no
+  socket, or a bound netlink, a packet or a raw socket alone, makes no
+  `NETLINK_SOCK_DIAG` socket in either). Beyond the C, and changing nothing
+  it prints, only the kernel's answer is read: the socket is connected to
+  port 0, a datagram from another sender is dropped, and a record not
+  carrying the request's own sequence number (never 0; the C's is 0) is
+  skipped. As `fill_uxpino()`,
+  a peer is filled both ways and the first one named is kept, so a
+  datagram socket nothing connected to names its first client's; as
+  `fill_uxicino()`, a listener keeps its first pending connection; as
+  `check_unix()`, only a socket the run's own `/proc/net/unix` lists is
+  given or named, so a pending connection's peer, the embryo (inode 0), is
+  none; and as `process_uxsinfo()`'s `if (p->inode)`, a pending connection
+  of inode 0, a client that connected and closed before the listener
+  accepted it, is not printed, and the walk ends there: the C lists the
+  embryo in `/proc/net/unix` with inode 0, so it is the listener's first
+  pending connection, and a live one after it is never reached (measured:
+  `/tmp/l1 type=STREAM (LISTEN)` in both, where lsof-rs had printed
+  `->INO=0`). Measured on a fixture of every shape: `type=STREAM ->INO=2650
+  495,python3,5u 493,python3,5u (CONNECTED)` (the peer's holders last met
+  first, the row's own process among them), a listener at a path
+  `->INO=2652 495,python3,7u 493,python3,7u (LISTEN)` (its first pending
+  connection; the pending client itself names nothing), a peer in flight,
+  held by no process, `->INO=18921` alone, and a socketpair, an abstract
+  socket and a datagram pair; `-F n` carries it, JSON's `name` is the
+  base, and under `+E` the peer's rows are listed, each naming its peer (a
+  listener added so names its pending connection only for want of a peer,
+  `process_uxsinfo(…, 1)`'s `else if`). Whole host, `-E`'s 29 `->INO=` rows
+  match the C's but for the two lsof processes' own pids.
+* **What fails is the C's** (56). Measured with strace's fault injection on
+  both: a request that cannot be sent is `lsof: netlink peer request error:
+  Operation not permitted` and the files are listed without peers, exit 0;
+  a `recv()` that fails (`ENOBUFS`) says nothing and lists them the same;
+  an `NLMSG_ERROR` reply is `netlink UNIX socket msg peer info error`
+  (unit-tested; no gate can make the kernel refuse). A netlink socket that
+  cannot be made (`EAFNOSUPPORT`, a sandbox without `AF_NETLINK`) is the
+  C's `Error()` (`dsock.c:991-995`), and lsof-rs's too: `lsof: netlink
+  socket error: Address family not supported by protocol`, exit 1, nothing
+  listed, and nothing more said, under `-E`, `+E`, `-t`, `-F`, `-J` and
+  `-K` alike, and under `-r` after the cycles already printed (measured
+  with `-e inject=socket:error=EAFNOSUPPORT`, `when=2+` for `-r`;
+  stdout and stderr byte-identical). It ends the gather where the C exits,
+  at the first socket that asks, so no later warning is said; `-t -E` no
+  longer takes the fast path that read no socket, as the C reads them.
+* **A pseudoterminal** (56). The C enters a master (`/dev/ptmx`, 5,2) by the
+  `tty-index:` of its fdinfo and a slave (majors 136-143) by its minor, in
+  one table, in the order met; a master names `->/dev/pts/N` and the first
+  slave row, then the other slave rows; a slave names each master row.
+  Measured: `/dev/ptmx ->/dev/pts/1 7713,ep-child-,55u 7713,ep-child-,56u`
+  and `/dev/pts/1 7711,python3,54u`. lsof-rs reads the master's
+  `tty-index` again from its fdinfo under `-E` alone.
+* **An eventfd and a POSIX message queue** (56), as a pipe: every other row
+  on it, in the order met, by `eventfd-id` (`[eventfd:7] 7711,python3,58u
+  7713,ep-child-,57u 7713,ep-child-,58u`) and by inode on the `mqueue` file
+  system the mount table recorded (`/lsofrs-mq 684,python3,4r
+  686,python3,3u 686,python3,4r`), any row there, a cwd too (measured: two
+  processes with their cwd in `/dev/mqueue` name each other, `14553,sh,cwd
+  `, the access a blank); no queue is an end where no `mqueue` is mounted,
+  or under `-b`.
+* **Option values that are not UTF-8** (92). Measured, each with `\xff` (and
+  `\xc3`, `\xfe`) attached and as the next word: `-p` is `illegal process
+  ID: \xff`, `-g` `illegal process group ID: \xc3`, `-s` `unknown -s
+  protocol: "\xff"` or `unknown TCP state name: \xff`, `-i` `unknown
+  protocol name (\xff) in: -i 4\xff`, `-T` `unsupported TCP/TPI info
+  selection: \xff`, `-F` `unknown field: \xc3`, `-x` `unknown cross-over
+  option: \xff` (and `-x must accompany +d or +D`), `-K` `-K not followed
+  by i (but by \xff)`, `-Z` `-Z limited to SELinux`, each then the usage,
+  exit 1; `+c 1\xff` is `+c 1`. lsof-rs now reads such a word with each
+  byte that is no character standing as a character of its own
+  (U+10FF00 + the byte, as option letters already were), so each option
+  finds it none of its grammar and says the C's words; a message shows the
+  stand-in as the byte, escaped (`\xff`, where the C writes some raw, 122).
+  Where a command line holds one of those characters as text the bytes are
+  not stood in for, and such a value is still refused. Amended 2026-11-07
+  by the reviews, each measured: `-d`'s FD range (`non-digit in -d FD
+  range: 1-\xff`, the item without its `^`; `illegal FD range for -d:
+  -\xff`), `-f`/`+f` and a cluster ending in it (`unknown file struct
+  option: \xff`, each letter), the `+` forms of `-p -g -s -i -T -F -x -K`
+  (`+p \xff` is `illegal process ID: \xff`), `+Z` (`-Z limited to
+  SELinux`), and `-m`/`-D` with their value attached (`-m not supported`,
+  `unsupported option: -D`) say the C's words too, and the parse reads on
+  after each as the C does (`-d 1-\xff -s foo` is both lines); an
+  attached value that opens with `-` or `+` is given back by every option
+  whose value is optional and the rest of the word read as letters
+  (`GOx1 = GObk[0]`), which held for UTF-8 too: `-g-a` is a bare `-g`,
+  `illegal option character: -` and `-a`, and `-g-\xff` the `-` line and
+  the byte's, where lsof-rs had said `illegal process group ID: -a`. A
+  grid of every option letter under both prefixes with seven values, 1,400
+  command lines, matches the C in stdout, exit and stderr (the byte
+  escaped, the usage normalised) but for `+m`, `+n`, `+P` and `+r`, which
+  lsof-rs refuses, and `-i TCP:\xff`, a service name (38).
+* **An fd of 10000 or more** (2026-11-07, the review). The C's
+  `fd_to_string()` (`lib/proc.c:1322-1331`) prints it `*` and its last three
+  digits, `*%03d`, in the FD column and in each end's `PID,cmd,FD` (`pipe`,
+  `PSXMQ`, eventfd, pty, UNIX and Internet holders alike), and the number
+  whole under `-F f` and in JSON; so does lsof-rs now (measured: fd 10000
+  is `*000u` in the column and `17049,python3,*000u` in its peer's NAME,
+  `f10000` under `-F`). Not on Windows, which has no C and whose handle
+  values pass 10000 as a matter of course.
+* **A row `+E` adds keeps its command's bytes** (2026-11-07, the review):
+  `cx?y\xff,z^[[1mlongn` under `-F c` and `x?y\xff,z` in COMMAND, as the
+  C prints them, where lsof-rs had shown U+FFFD for the process `+E` added
+  (93; pipes too since they were named).
+* **Gates**: fixture EP's fds 40-65 (UNIX sockets of every shape, two
+  listeners whose first pending client closed, a socketpair with a second
+  child whose command is not UTF-8, a pty, an eventfd, a message queue) and
+  fds 10000, 10001 and 12345, with 27 `endpoints-*` and `fd-10000-*`
+  cases, and 28 `nonutf8-value-*` and `attached-dash-*` cases; the resource gate's `whole-host-E` (1.11x wall,
+  0.94x RSS at 400 processes); the fuzz target `netlink_diag`; and
+  `mutants/endpoints-rest.toml`.
+
 ## Fixed by the smaller Linux rows: endpoints, login names, a zombie leader's tasks, paths as bytes, a socket file by its path (2026-11-02)
 
 Items 56, 70, 72, 92 and 126, as the owner decided on 2026-11-02 ("then do
@@ -333,12 +455,10 @@ each measured against the C first:
   on the row's own kinds), a `-c ^` is ignored, and a run that ORs `-i` or
   `-U` with process selecters alone reads every process for its sockets
   alone (no per-process `Ckscko` under `-E`). Whole host, `-E` takes what the C takes (0.08 s against 0.05 s
-  here). **Left**: a UNIX socket's peer (`->INO=N PID,cmd,FDmode`, from
-  `NETLINK_SOCK_DIAG`, and a listener's first pending connection), which
-  needs a netlink binding the dependency policy has not taken (rustix with
-  `net` beside `fs`); a pseudoterminal's ends (`ptyept`), a POSIX message
-  queue's and an eventfd's. Recorded in 56, ledgered as
-  `endpoints-E-unix-socket-peer-in-the-c`.
+  here). **Left** then, and resolved 2026-11-06 (above): a UNIX socket's
+  peer (`->INO=N PID,cmd,FDmode`, from `NETLINK_SOCK_DIAG`, and a
+  listener's first pending connection), a pseudoterminal's ends, a POSIX
+  message queue's and an eventfd's.
 
 ### What the gate gained
 
@@ -521,8 +641,9 @@ and keeps the run's `Ckscko`, which a `-b` run's warnings show (56).
 
 Items 114, 116, 117, 58, 71, 36, 128, 109 and 22, each measured against the
 C first; the rows below hold what was measured. Item 22 was the owner's
-decision of 2026-10-30: a dependency, `rustix` (=1.1.5, `fs` only), for the
-one `getxattr(2)` std lacks, so the Linux backend keeps
+decision of 2026-10-30: a dependency, `rustix` (=1.1.5, `fs` only then;
+`net` beside it since 2026-11-06, item 56), for the one `getxattr(2)` std
+lacks, so the Linux backend keeps
 `#![forbid(unsafe_code)]` (THREAT-MODEL §2, `deny.toml`). With it the
 namespace fallback of item 16, which read another namespace's tables, is
 gone: the C reads no such table, and names every socket its own tables miss
@@ -4513,7 +4634,7 @@ C-DEFECT not reproduced.
 | 19 | a path argument that cannot be `stat()`ed is reported and **dropped**, and if NO argument survived the run exits before listing anything; `-Q` mutes both the message and the status | ~~reported exit 1 but still printed what the other selectors matched, and `-Q` muted only the message~~ **resolved 2026-09-12** | see "Fixed by making the search-item contract the C's" above. This entry was also imprecise: it said the failure is fatal full stop. It is fatal only when EVERY path argument fails — `lsof /a/real/file /nope` prints the first file's rows and exits 1, and lsof-rs already matched there. |
 | 20 | a bare path argument alongside `+d`/`+D` makes the C **silently lose the expansion's entries**, keeping only the directory itself | both are listed | `lsof +d DIR` prints `DIR` and its open entries; `lsof ANY_PATH +d DIR` prints `DIR` alone. Measured 2026-09-12 on a directory with one open entry (1 row vs 0) and again on fixture A (4 entry rows lost), with an existing, readable bare path — so it is not about the stat failure that found it. A correct result is dropped because of an unrelated argument. ~~**C-DEFECT**, not reproduced~~ **re-diagnosed 2026-10-04: item 12, not a defect.** The C ends its options at the first name, so in `lsof ANY_PATH +d DIR` the words `+d` and `DIR` are two more path arguments: `+d` a status error, `DIR` a plain directory, whose entries are no search items. With `+d` first the C expands DIR. See "Fixed by spelling paths as the C's `Readlink()` does" above. |
 | 21 | `-c`, `-u` and `-g` are **search items**: a value that matches nothing exits 1, and `-V` says `command not located:` / `no user use located:` etc. | ~~they select, but never counted as unlocated, so the run exits 0~~ **resolved 2026-09-25** | every one of the C's ten `not located` messages audited; `-c`, `-u`, `-g`, `-p ^`, each `-i` specification and the order of the lines fixed, `-s` and `-K` recorded as items 32 and 33. See "Fixed by making every search item one" above. |
-| 22 | a socket family with **no `/proc/net` table at all** is still named: `protocol: AF_VSOCK` (and, measured 2026-10-04, a ping socket `protocol: PING` and an unbound netlink socket `protocol: NETLINK`, each TYPE `sock` with SIZE/OFF `0t0`) | ~~`SOCK` / `socket:[3467]`, SIZE/OFF `0`~~ **resolved 2026-10-30** | the C's `system.sockprotoname` xattr names any socket, table or no table; item 16's namespace fallback could only name families that have one. **Wider than one family, measured 2026-09-25:** a TCP socket that is bound but neither listening nor connected is in no `/proc/net` table either, so the C names it `sock … protocol: TCP`. **Measured 2026-10-17:** an unbound UDP or UDP-Lite socket is in no table either (`protocol: UDP` / `protocol: UDP-Lite`, `-F t` `tsock`), own namespace and foreign. **Resolved 2026-10-30 (Batch A), on the maintainer's decision that day to take a dependency rather than `unsafe` FFI:** the Linux backend makes `getxattr(2)` through `rustix` (=1.1.5, `fs` only) and keeps `#![forbid(unsafe_code)]`. Measured with strace: the C calls `getxattr("/proc/PID/fd/N", "system.sockprotoname", buf, 4086)` from its own process, for every socket fd whose inode no table of its own namespace lists, unless `-X` (`dsock.c:4145-4166`); it reads no other namespace's tables, so every socket of another network namespace is named this way too, and `can't identify protocol` is what a failed call prints. lsof-rs now does the same and no longer reads the owner's `/proc/PID/net` (item 16's fallback, which gave the same names for the families it could, is gone with its `kernel_proto` table). One difference, deliberate and invisible in output: the link is first opened `O_PATH` and the attribute read through `/proc/self/fd/K` only if that pinned descriptor's own link reads `socket:[inode]`, the socket the link named; the kernel spells that link from the dentry and asks no file system, so a descriptor its owner swapped meanwhile for a file on a FUSE file system that does not answer is never asked (THREAT-MODEL); the C asks the link itself. **Corrected 2026-10-30 (Batch A's review):** the check had been an `fstat` of the pinned descriptor, which FUSE answers: measured with `fuse_hang.py --mode hold`, a pinned descriptor on its root held that `fstat` (`GETATTR … HELD`); the `readlink` returns at once and the server is asked nothing (`net.rs` `a_swapped_in_fuse_file_is_never_asked`, root only; mutant `xattr-identity-by-fstat`). Residual: the `O_PATH` open follows the link, and a file system that revalidates a dentry on open (NFS's `d_weak_revalidate`) may be asked there; the unbounded `stat` of every fd link both binaries make before this asks every file system anyway. Measured on this host in both, own namespace and a foreign user+network one: `protocol: NETLINK`, `UDP`, `UDP-Lite`, `TCP` (bound and unbound), `AF_VSOCK`, `PING`, `UNIX-STREAM`, `PACKET`, and `-X`'s string; fixtures NLK and NSX, and UDPL's `udplite-socket-unbound`, whose ledger entry is gone. |
+| 22 | a socket family with **no `/proc/net` table at all** is still named: `protocol: AF_VSOCK` (and, measured 2026-10-04, a ping socket `protocol: PING` and an unbound netlink socket `protocol: NETLINK`, each TYPE `sock` with SIZE/OFF `0t0`) | ~~`SOCK` / `socket:[3467]`, SIZE/OFF `0`~~ **resolved 2026-10-30** | the C's `system.sockprotoname` xattr names any socket, table or no table; item 16's namespace fallback could only name families that have one. **Wider than one family, measured 2026-09-25:** a TCP socket that is bound but neither listening nor connected is in no `/proc/net` table either, so the C names it `sock … protocol: TCP`. **Measured 2026-10-17:** an unbound UDP or UDP-Lite socket is in no table either (`protocol: UDP` / `protocol: UDP-Lite`, `-F t` `tsock`), own namespace and foreign. **Resolved 2026-10-30 (Batch A), on the maintainer's decision that day to take a dependency rather than `unsafe` FFI:** the Linux backend makes `getxattr(2)` through `rustix` (=1.1.5, `fs`; since 2026-11-06 also `net`, for item 56's `NETLINK_SOCK_DIAG`) and keeps `#![forbid(unsafe_code)]`. Measured with strace: the C calls `getxattr("/proc/PID/fd/N", "system.sockprotoname", buf, 4086)` from its own process, for every socket fd whose inode no table of its own namespace lists, unless `-X` (`dsock.c:4145-4166`); it reads no other namespace's tables, so every socket of another network namespace is named this way too, and `can't identify protocol` is what a failed call prints. lsof-rs now does the same and no longer reads the owner's `/proc/PID/net` (item 16's fallback, which gave the same names for the families it could, is gone with its `kernel_proto` table). One difference, deliberate and invisible in output: the link is first opened `O_PATH` and the attribute read through `/proc/self/fd/K` only if that pinned descriptor's own link reads `socket:[inode]`, the socket the link named; the kernel spells that link from the dentry and asks no file system, so a descriptor its owner swapped meanwhile for a file on a FUSE file system that does not answer is never asked (THREAT-MODEL); the C asks the link itself. **Corrected 2026-10-30 (Batch A's review):** the check had been an `fstat` of the pinned descriptor, which FUSE answers: measured with `fuse_hang.py --mode hold`, a pinned descriptor on its root held that `fstat` (`GETATTR … HELD`); the `readlink` returns at once and the server is asked nothing (`net.rs` `a_swapped_in_fuse_file_is_never_asked`, root only; mutant `xattr-identity-by-fstat`). Residual: the `O_PATH` open follows the link, and a file system that revalidates a dentry on open (NFS's `d_weak_revalidate`) may be asked there; the unbounded `stat` of every fd link both binaries make before this asks every file system anyway. Measured on this host in both, own namespace and a foreign user+network one: `protocol: NETLINK`, `UDP`, `UDP-Lite`, `TCP` (bound and unbound), `AF_VSOCK`, `PING`, `UNIX-STREAM`, `PACKET`, and `-X`'s string; fixtures NLK and NSX, and UDPL's `udplite-socket-unbound`, whose ledger entry is gone. |
 | 23 | an **AF_PACKET** socket is a `pack` row: the inode in DEVICE, the ethernet protocol in NODE, `type=SOCK_RAW` as the whole NAME | ~~`SOCK` / `socket:[11426]`, with a size~~ **resolved 2026-09-20** | see "Fixed by reading /proc/net/packet" above |
 | 24 | a socket named through the **`system.sockprotoname` xattr** reports the KERNEL's name for it, which is not the family: `UNIX-STREAM`, `UNIX`, `PACKET` | ~~`unix`, `unix`, `packet`~~ **resolved 2026-09-20** | a latent defect in item 16's fix, which answered with the port's own `info.protocol`. That is right for TCP and UDP, where the two strings coincide, and wrong for the two families where they do not — and the netns fixture held only a TCP listener, so nothing measured it. Found while adding the packet fixture, because the same code path names a packet socket in a foreign namespace. |
 | 25 | `-X` does **not** skip TCP and UDP files — it degrades them to `sock … can't identify protocol (-X specified)` | ~~option unsupported~~ **resolved 2026-09-20** | see "Fixed by measuring the five small options" above |
@@ -4547,7 +4668,7 @@ C-DEFECT not reproduced.
 | 53 | `-V` **under `-Q`** still prints every `not located` line: `-Q` clears `FsearchErr`, which changes only the exit status (`lsof -V -Q -p 3999999` prints the line and exits 0) | ~~prints nothing (`verbose && !quiet`)~~ **resolved 2026-10-04** | see "Fixed by reporting what was not located as the C reports it" above. Item 19's "`-Q` mutes the message" is the `stat` error on stderr, not these. |
 | 54 | under `-r` the `not located` report comes **once, after the repeat loop** — so never under `-r`, which ends only on a signal | ~~after every cycle: `lsof -V -r 1 -p 3999999` prints the line before each `=======`~~ **resolved 2026-10-04** | see "Fixed by reporting what was not located as the C reports it" above. |
 | 55 | a process's **owner** (USER, `-u`, `-F u`) is the owner of `/proc/<pid>` (`dproc.c`: `uid = sb.st_uid` after `stat()`), which the kernel sets to the **effective** uid, dumpable or not | ~~the **real** uid, the first field of `Uid:` in `status`~~ **resolved 2026-10-03** | see "Fixed by taking the owner from the effective uid, and finding a file by what it is" above. This row's "of a dumpable process" was too narrow: `task_dump_owner()` gives a world-readable directory the effective uid either way. |
-| 56 | on Linux `-E`/`+E` **name endpoints** (a pipe's `PID,cmd,FDmode`, a unix socket's, a TCP connection to the same host's), and under `-a` they keep reading the processes `-a` excluded (`process_id()`: `if (!FeptE) return (1);`), so those processes' files still locate search items: `-i`, a file name, and `-K` through any task on the host. `lsof -V -E -K -a -p P`, P single-threaded, prints nothing and exits 0 | ~~accepted and ignored on Linux: no endpoint names, and an excluded process locates nothing~~ names a pipe's, a named FIFO's and a local TCP or UDP connection's ends as the C does, lists them under `+E`, and reads every process; **not** a UNIX socket's peer, a pseudoterminal's, a POSIX message queue's or an eventfd's ends | **partly resolved 2026-11-02, like the C** — see "Fixed by the smaller Linux rows" above: pipes, named FIFOs, TCP and UDP, `+E`, `-t`, `+c`, `-F`/JSON, and the reading of every process (`lsof -V -E -K -a -p P` prints nothing and exits 0 in both), each measured. **OPEN for the rest**, measured 2026-11-02: a UNIX socket's row gets `->INO=PEER PID,cmd,FDmode…` (the peer's holders last met first, every one, the process itself included) before its state, from `NETLINK_SOCK_DIAG` (`get_uxpeeri()`: `UNIX_DIAG_PEER`, and a listener's first pending connection, `UNIX_DIAG_ICONS`, named `->INO=N` alone); it needs a netlink binding (rustix's `net` feature beside `fs`, no new crate), a dependency decision, and a peer field on the socket row. A pty (`->/dev/ptsN PID,cmd,FDmode` on the master), a POSIX mqueue and an eventfd (both as a pipe) are not measured here. Ledgered as `endpoints-E-unix-socket-peer-in-the-c`. Found 2026-10-03 by the item 33 review sweep. **Amended 2026-11-02 by the review, like the C**: a process a `-p ^`, `-u ^` or `-g ^` excludes is listed for the rows a file-level item selects, the AND applied to the row's own kinds; a `-c ^` is ignored (its exit 1 stays item 13's C-DEFECT); the run's `Ckscko` holds for every process (`dproc.c:909`); `-E`'s command is cut by bytes, a partial character `\xc3`; and an addition of any length leaves JSON's `name` the base. |
+| 56 | on Linux `-E`/`+E` **name endpoints** (a pipe's `PID,cmd,FDmode`, a unix socket's, a TCP connection to the same host's), and under `-a` they keep reading the processes `-a` excluded (`process_id()`: `if (!FeptE) return (1);`), so those processes' files still locate search items: `-i`, a file name, and `-K` through any task on the host. `lsof -V -E -K -a -p P`, P single-threaded, prints nothing and exits 0 | ~~accepted and ignored on Linux: no endpoint names, and an excluded process locates nothing~~ names a pipe's, a named FIFO's, a UNIX socket's, a pseudoterminal's, an eventfd's, a POSIX message queue's and a local TCP or UDP connection's ends as the C does, lists them under `+E`, and reads every process | **resolved 2026-11-06, like the C** (pipes, FIFOs, TCP and UDP since 2026-11-02) — see "Fixed by the smaller Linux rows" above: pipes, named FIFOs, TCP and UDP, `+E`, `-t`, `+c`, `-F`/JSON, and the reading of every process (`lsof -V -E -K -a -p P` prints nothing and exits 0 in both), each measured. **Resolved for the rest 2026-11-06** (the owner's decision that day: "Turn on rustix net feature") — see "Fixed by the rest of `-E`" above, each measured: a UNIX socket's row gets `->INO=PEER` and the peer's holders, last met first, every one, the process itself included, before its state, from `NETLINK_SOCK_DIAG` (`get_uxpeeri()`), a peer no process holds `->INO=N` alone, and a listener its first pending connection (`UNIX_DIAG_ICONS`) the same way; a pty master `->/dev/pts/N` and the slave's rows, a slave the master's; an eventfd (by `eventfd-id`) and any row on the `mqueue` file system the mount table recorded (a cwd too) every other row on them, in the order met. A netlink socket that cannot be made is the C's `Error()` in both (`netlink socket error: …`, exit 1, nothing listed; measured with an injected `EAFNOSUPPORT`), asked where the C asks, at the first socket past its raw, netlink and packet tables. **Amended 2026-11-07 by the reviews, like the C**: a pending connection of inode 0 (a client that closed before `accept()`) is not printed (`if (p->inode)`); a row `+E` adds keeps its command's bytes; an fd of 10000 or more is `*%03d` in the column and the holder text (`fd_to_string()`); and, beyond the C, changing no output, only the kernel's answer is read (connected to port 0, the sender checked, a nonzero sequence number checked) within 5 s for the whole dump. The ledger entry `endpoints-E-unix-socket-peer-in-the-c` is gone: the case MATCHes. Found 2026-10-03 by the item 33 review sweep. **Amended 2026-11-02 by the review, like the C**: a process a `-p ^`, `-u ^` or `-g ^` excludes is listed for the rows a file-level item selects, the AND applied to the row's own kinds; a `-c ^` is ignored (its exit 1 stays item 13's C-DEFECT); the run's `Ckscko` holds for every process (`dproc.c:909`); `-E`'s command is cut by bytes, a partial character `\xc3`; and an addition of any length leaves JSON's `name` the base. |
 | 57 | under `-t` a process whose own entry has **no selected row** hides its tasks' PID: `print_proc()` sets `LastPid` before it looks for one, so `-K -t -a -p P DIR`, with DIR the cwd of one of P's threads alone, prints nothing and exits 0 | prints P, the PID whose row the same run without `-t` lists | **C-DEFECT, not reproduced — found 2026-10-03** by the item 33 review sweep, after `-K -t` stopped taking the fast path (which matched the C here only by never reading a task). Ledgered as `tasks-dash-K-terse-a-row-only-a-task-holds-in-lsof-rs`. The same happens run as a user who can read a thread but not its process. |
 | 58 | a **newline in a command name** (COMMAND, TASKCMD, `-F c`, `-F M`) is `?`: the C reads the name from `stat` and replaces each `\n` (`read_id_stat()`) | ~~reads `Name:` from `status`, un-escapes the kernel's `\n`, and the renderer prints `\n`~~ **resolved 2026-10-30** | found 2026-10-03 by the item 33 review sweep. The C replaces the newline and nothing else (a backslash, TAB, CR and the rest are left to the printer's escaping, as before); measured with a command `a\nb\n\\c\td` and a thread `th\nre\\ad`: `a?b?\\c\t`, `-F c` `ca?b?\\c\td`, `-F M` `Mth?re\ad` (raw: item 59), JSON `"a?b?\\c\td"`, and `-c a?` selects it. lsof-rs now makes each decoded newline a `?` where it reads `Name:` (`parse_status`), so every view and `-c` see it; the `proc_status` fuzz target's contract is now that no newline survives. Fixture NLC. |
 | 59 | `-F M`, the task command, is printed **raw** (`print.c`: `printf("%c%s%c", LSOF_FID_TCMD, Lp->tcmd, Terminator)`), while `c` and the TASKCMD column are escaped | escaped as `c` is | **C-DEFECT, not reproduced — found 2026-10-03** by the item 33 review sweep. Any process can name a thread, so the C's `-F M` lets it write an escape sequence to the terminal of whoever runs lsof. No case pins it: fixture I's thread names are plain. |
@@ -4583,7 +4704,7 @@ C-DEFECT not reproduced.
 | 89 | `/proc/self/...` is read by a child the C forks to read links (`doinchild()`), so `self` is that child: `lsof /proc/self/fd/0 </dev/null` is a status error on the child's pipe | `self` is lsof: the same run lists every user of `/dev/null` | **C-DEFECT, not reproduced — found 2026-10-04** by the item 62 review. Since item 94 lsof-rs reads links in a helper process too, and the helper names lsof's `/proc/PID` for its own wherever a path leads through `/proc/self` or `/proc/thread-self`, however it is spelt — `/proc//self`, `//proc/./self`, `/proc/self/../self`, `self/fd/0` from `/proc`, a link to either (`/dev/fd/N`, `/dev//fd/N`, `/dev/stdin`, `/proc/net`) — and reads those two links as lsof's: a path that starts in `/proc` or `/dev` (the working directory's start, for a relative one), or holds `self`, `thread-self` or `..`, is read there as `Readlink()` reads it, a link replaced only where its target goes through one of the two (`lsof-backend-linux/src/safefs.rs`, `as_lsof_names_it`). The pids are procfs's (`/proc/self`, and `/proc/self/stat`'s ppid), so a pid namespace that shares the host's `/proc` names lsof too. The first cut matched only the literal `/proc/self` and `/proc/thread-self` and reproduced the defect for every other spelling (found by item 94's review; `tests/arguments.rs`, `a_path_through_proc_self_is_lsof_however_it_is_spelt`, pins eleven). A link made by a user elsewhere into `/proc/self` is followed by the helper's kernel, as the C's child follows it. The helper reaches lsof's entry with lsof's own credentials and capabilities (the same file, executed); measured working from a binary its user may execute but not read and from one with file capabilities, the second not dumpable. Ledgered as `path-proc-self-is-lsof-in-lsof-rs` and `path-dev-stdin-is-lsof-in-lsof-rs`. |
 | 90 | `-F`, `-J` or `-j` with `-t` is refused: `-F and -t are mutually exclusive`, and for `-J`/`-j` also `-J/-j and -t are mutually exclusive`, exit 1 | ~~accepted, exit 0~~ **resolved 2026-10-17** for `-F`, `-J` and `-j` | see "Fixed by adopting the C's JSON schema" above; cases `json-option-error-*`. |
 | 91 | `-J`/`-j` print the C's schema: `lsof_version` at the top; a process's `pid`, `pgid`, `ppid`, `command`, `uid` and `login`; a file's `fd`, `access`, `type`, `device`, `offset`, `inode`, `flags`, `name` and `tcp_info` | ~~its own: no `lsof_version` or `pgid`, `user` for `uid` and `login`, `node` for `inode`, `protocol` and `state` on a socket, and no `offset`, `flags` or `tcp_info` (measured with `-J -a -p P -d 0` on a unix socket)~~ **resolved 2026-10-17: the C's schema, in lsof-rs 2.0.0** | see "Fixed by adopting the C's JSON schema" above. Decided 2026-10-09 by the maintainer, as a breaking change; recorded 2026-10-04 by the drift audit. What lsof-rs still prints differently is rows 134 and 135 (C-DEFECT), 93 and 29; 68 is the C's since 2026-10-18. |
-| 92 | a path argument that is not UTF-8 is a path like any other: `lsof $'bad\xffname'` lists the file | ~~refused: `an argument is not valid UTF-8, which lsof-rs cannot take`, exit 1~~ a path, as bytes; an option that reads text refuses a value that is not UTF-8, at once | **resolved 2026-11-02 for paths, like the C** — see "Fixed by the smaller Linux rows" above: a bare argument, after `--`, `+d`/`+D` and `-e`/`+e` (`nonutf8-path-*`). **Amended 2026-11-02 by the review, like the C**: `-c` and `-u` read their values as bytes (`-c $'\xff'` lists a process so named, exit 0; `-u $'ab\xffcd'` looks that login up); a byte that is no character in a letter's place is `illegal option character: \xNN` and the parse reads on; 0xff, `GetOpt`'s EOF, is said, counted as no error, and ends the options, the next word (or its own, when letters follow) the first name (`-p 1 -\xff` lists PID 1, exit 0). **Left**, measured: `-p`, `-g`, `-s`, `-i`, `-T`, `-F`, `-x`, `-K` and `-S`'s values are refused (`an argument is not valid UTF-8, which lsof-rs cannot take`) where the C says its own words (`illegal process ID: \xff`, `unknown -s protocol: "\xff"`, …), exit 1 in both; `-c /re/` is refused, as every regular expression (no engine); the byte in a message is escaped where the C writes it raw (122). Recorded 2026-10-04 by the drift audit. |
+| 92 | a path argument that is not UTF-8 is a path like any other: `lsof $'bad\xffname'` lists the file | ~~refused: `an argument is not valid UTF-8, which lsof-rs cannot take`, exit 1~~ a path, as bytes; an option that reads text refuses a value that is not UTF-8, at once | **resolved 2026-11-02 for paths, like the C** — see "Fixed by the smaller Linux rows" above: a bare argument, after `--`, `+d`/`+D` and `-e`/`+e` (`nonutf8-path-*`). **Amended 2026-11-02 by the review, like the C**: `-c` and `-u` read their values as bytes (`-c $'\xff'` lists a process so named, exit 0; `-u $'ab\xffcd'` looks that login up); a byte that is no character in a letter's place is `illegal option character: \xNN` and the parse reads on; 0xff, `GetOpt`'s EOF, is said, counted as no error, and ends the options, the next word (or its own, when letters follow) the first name (`-p 1 -\xff` lists PID 1, exit 0). **Resolved 2026-11-06 for the rest, like the C** — see "Fixed by the rest of `-E`" above: `-p`, `-g`, `-s`, `-i`, `-T`, `-F`, `-x`, `-K` and `-Z` read such a value as the C does and say its own words (`illegal process ID: \xff`, `illegal process group ID: \xc3`, `unknown -s protocol: "\xff"`, `unknown TCP state name: \xff`, `unknown protocol name (\xff) in: -i 4\xff`, `unsupported TCP/TPI info selection: \xff`, `unknown field: \xc3`, `unknown cross-over option: \xff` and then `-x must accompany +d or +D`, `-K not followed by i (but by \xff)`, `-Z limited to SELinux`), exit 1, each measured; `+c` reads its leading digits (`+c 1\xff` is `+c 1`, exit 0); `-S`'s value was already the C's (a path when it is no number). **Amended 2026-11-07 by the reviews, like the C** — see "Fixed by the rest of `-E`" above: `-d`'s FD range (`non-digit in -d FD range: 1-\xff`, `illegal FD range for -d: -\xff`), `-f`/`+f` and a cluster ending in `f` (`unknown file struct option: \xff`), the `+` forms of `-p -g -s -i -T -F -x -K` (their `-` forms' words), `+Z` (`-Z limited to SELinux`) and `-m`/`-D` with the value attached (`-m not supported`, `unsupported option: -D`), each measured, the parse reading on after each (`nonutf8-value-d-*`, `-f`, `-plus-*`, `-m-attached`, `-D-attached`); the gate is `args.rs` `reads_value_as_text`, pinned by `the_options_that_read_a_value_not_utf8_as_text` (on Linux no other option reads a value as text: `-c`, `-u`, `+d`/`+D` and `-e`/`+e` read bytes, `-o`, `-r`, `-S` and `-L` digits; on Windows `-c` reads text and still refuses one, `an_option_outside_the_text_options_still_refuses_a_value_not_utf8`); and an attached value opening with `-` or `+` is given back to be read as letters by every option whose value is optional (`-g-\xff` is `illegal option character: -` and the byte's line; `-g-a` the `-` line and `-a`, for UTF-8 too; `attached-dash-*`). A grid of every letter under both prefixes with seven values (1,400 command lines) matches the C but for `+m`, `+n`, `+P`, `+r` (refused, as with any value) and `-i TCP:\xff` (38). **Left**: the byte is escaped where the C writes it raw (122, C-DEFECT); a host or service name in `-i` is lsof-rs's `host names are not resolved` (38), as for every name; the usage after the error is lsof-rs's `Try 'lsof -h' for usage.`, as after every option error; `-c /re/` is refused, as every regular expression (no engine); and a command line that holds one of U+10FF00..U+10FFFF as text beside a byte that is not UTF-8 still has such a value refused (`an argument is not valid UTF-8`), as stand-ins for the bytes could not be told from it. Recorded 2026-10-04 by the drift audit. |
 | 93 | a byte that is not UTF-8 prints as `\xff` | prints U+FFFD | **DECISION** — see "Fixed by reading bytes: one byte had blinded a whole table" above. Given a row 2026-10-04 by the drift audit; it had lived only in that section's prose. **Amended 2026-10-17 (item 91):** in JSON the C writes the raw byte too (`json_puts_escaped()` passes it, commit 40e4c7d), so its document is not valid UTF-8 and so no JSON; lsof-rs's U+FFFD keeps it valid (case `json-non-utf8`). **Amended 2026-11-02 (the smaller rows' review), like the C for these**: a command or login that is not UTF-8 is kept as its bytes (`RawNames`), so COMMAND, `-F c`, `-E`'s ends, USER and `-F L` print each byte that is no character as `\xNN`, and `-c` compares the bytes; NAME, TASKCMD and JSON still print U+FFFD. |
 | 94 | `-b` and `-S [t]` are accepted: avoid the kernel functions that might block, and time out `stat`/`readlink` | ~~refused: `unsupported option: -b`~~ **resolved 2026-10-09**: `-b`, `+b`, `-S [t]`, `+S [t]`, and `-O`/`+O` in place of the no-op it was, each as the C reads it | see "Fixed by bounding the calls that can block, and taking -b, -S and -O" above. The maintainer decided (2026-10-09) to implement the C's documented timeout, every call bounded (Lsof.8, "BLOCKS AND TIMEOUTS"), not its measured one (118-120). |
 | 95 | a mapping it cannot `stat`, or whose `stat` disagrees with the maps line, is a `mem` row with a `(stat: ...)` or `(path inode=...)` name addition | ~~omits the row (`maps.rs`)~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Recorded 2026-10-04 by the drift audit, from the L2 maps work's own note; measuring it found the larger half, a process in another mount namespace, whose mappings the C `stat`s through `/proc/<pid>/map_files/`. |
