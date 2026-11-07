@@ -266,9 +266,14 @@ meet. Each number is a row there, with the measurement behind it.
   `-O` makes every call in lsof. Each call that meets a hung server leaves
   a killed helper waiting, with a pipe and a thread of lsof's, until the
   server answers; past 16 of them every further call fails at once,
-  `Resource temporarily unavailable`, with one warning (118). A file-system argument naming an NFS mount
-  matches every file on its device, where the C asks an NFS file's mount
-  directory as well (151). A `+D` walk makes one helper round trip per entry, its
+  `Resource temporarily unavailable`, with one warning (118). A file-system argument
+  names a file on its device as the C's Linux hack does: an NFS file only
+  where its own NFS mount's directory starts the argument's, a plain prefix
+  with no regard to a path component (so, with an NFS mount at `/mnt/a`,
+  the files under a directory `/mnt/ax` on the same device, which is no
+  mount, are `/mnt/a`'s NFS files, and an argument naming a mount at
+  `/mnt/ax` on that device names `/mnt/a`'s files as well as its own),
+  and any other file only through a file system that is not NFS (151). A `+D` walk makes one helper round trip per entry, its
   `lstat`, and one more for a link `-x l` follows: about 0.08 ms an entry, 1.6
   times the C's (`+D /usr/lib`, 17,742 entries, 1.39 s against 0.86 s; `-O`
   0.13 s; 94, 111).

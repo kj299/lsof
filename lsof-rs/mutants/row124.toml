@@ -283,8 +283,10 @@ name = "dash-n-by-device"
 rule = "-N selects by mount where the mounts are known, not by device (124)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        if self.nfs_mounts.is_empty() {'''
-new = '''        if self.nfs_mounts.is_empty() || self.nfs_only {'''
+old = '''        if self.nfs_mounts.is_empty() {
+            return f'''
+new = '''        if self.nfs_mounts.is_empty() || self.nfs_only {
+            return f'''
 
 # ------------------------------------------------------------ the walk
 

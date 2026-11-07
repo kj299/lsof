@@ -348,16 +348,25 @@ pub struct MountLine {
 /// without decoding those escapes would silently mis-key it. A line with
 /// fewer than three fields is no mount, as it is none to the C's `readmnt()`
 /// (`get_fields(…) < 3`): it had been kept with an empty type.
+///
+/// Fields are split as the C's `get_fields()` splits them (`dnode.c:429`,
+/// no separator list): leading spaces and tabs are skipped, a run of spaces
+/// or tabs is one separator, and a NUL ends the line, as it ends the C's
+/// string. Only a faked or bind-mounted table can hold such a line (the
+/// kernel writes single spaces and escapes the rest), but there it is a
+/// mount to the C; measured against it with tabs, runs of spaces, leading
+/// whitespace and a NUL after the type, all four had been dropped or
+/// misread here.
 pub fn parse_mounts(text: &[u8]) -> Vec<MountLine> {
     let mut out = Vec::new();
     for line in text.split(|&b| b == b'\n') {
-        let mut f = line.split(|&b| b == b' ');
+        let line = line.split(|&b| b == 0).next().unwrap_or_default();
+        let mut f = line
+            .split(|&b| b == b' ' || b == b'\t')
+            .filter(|field| !field.is_empty());
         let (Some(source), Some(dir), Some(fstype)) = (f.next(), f.next(), f.next()) else {
             continue;
         };
-        if source.is_empty() || dir.is_empty() || fstype.is_empty() {
-            continue;
-        }
         out.push(MountLine {
             source: unescape_octal(source),
             dir: unescape_octal(dir),
@@ -473,6 +482,39 @@ mod tests {
         assert_eq!(parse_mounts(b"/dev/sda1 / \n"), vec![]);
         // A line with more fields than expected still yields the first three.
         assert_eq!(parse_mounts(b"a b c d e f g\n")[0].dir, "b");
+        // Whitespace only, or two fields and a tab, is no mount either.
+        assert_eq!(parse_mounts(b"   \t \n"), vec![]);
+        assert_eq!(parse_mounts(b"src /d\t\n"), vec![]);
+        // A NUL ends the line, as it ends the C's string: two fields left.
+        assert_eq!(parse_mounts(b"src /d\0x nfs4 rw 0 0\n"), vec![]);
+    }
+
+    /// Fields split as the C's `get_fields()` splits them: leading spaces
+    /// and tabs skipped, a run of either one separator, a NUL the end.
+    /// Measured against the C with a faked table, each of these lines is
+    /// an NFS mount at `/m` to it.
+    #[test]
+    fn fields_split_as_the_cs_get_fields() {
+        let want = MountLine {
+            source: "srv:/x".into(),
+            dir: "/m".into(),
+            fstype: "nfs4".into(),
+        };
+        for line in [
+            &b"srv:/x\t/m\tnfs4\trw\t0\t0\n"[..],
+            b"srv:/x   /m  nfs4 rw 0 0\n",
+            b" srv:/x /m nfs4 rw 0 0\n",
+            b"\tsrv:/x /m nfs4 rw 0 0\n",
+            b" \t srv:/x \t /m\t\t nfs4 \trw 0 0\n",
+            b"srv:/x /m nfs4 \t \n",
+            b"srv:/x /m nfs4",
+            b"srv:/x /m nfs4\0 rw 0 0\n",
+        ] {
+            assert_eq!(parse_mounts(line), vec![want.clone()], "{line:?}");
+        }
+        // Neither a carriage return nor a vertical tab separates.
+        assert_eq!(parse_mounts(b"srv:/x /m nfs4\r\n")[0].fstype, "nfs4\r");
+        assert_eq!(parse_mounts(b"srv:/x\x0b/m nfs4 rw\n")[0].dir, "nfs4");
     }
 
     #[test]

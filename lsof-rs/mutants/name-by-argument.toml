@@ -192,8 +192,8 @@ name = "one-item-per-device"
 rule = "an argument naming two mounts of one device is two items (84)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        .filter(|&found| seen.insert(found))'''
-new = '''        .filter(|&(_, dev)| seen.insert(dev))'''
+old = '''        .filter(|m| seen.insert((m.dir.as_os_str(), m.device.unwrap_or(0))))'''
+new = '''        .filter(|m| seen.insert((OsStr::new(""), m.device.unwrap_or(0))))'''
 
 [[mutant]]
 name = "mounts-in-table-order"
