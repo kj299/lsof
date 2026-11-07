@@ -12,6 +12,28 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **A file-system argument names an NFS mount's files as the C does**
+  (Linux; DIVERGENCES 151). Where the table lists an NFS mount, a file on
+  it (the C's `N_NFS`: on the newest NFS mount of its device whose
+  directory starts its path) is named by a file-system argument only where
+  that mount's directory starts the argument's mount directory, a plain
+  `strncmp()` prefix, and any other file only by a file system that is not
+  NFS. So, the two on one device, `lsof /` no longer lists the NFS mount's
+  files, `lsof /mnt/nfs` no longer lists the root file system's, an NFS
+  mount at `/mnt/nfs/sub` is named by `lsof /mnt/nfs/sub` and not by `lsof
+  /mnt/nfs` while `/mnt/nfs`'s files are named by both, and an argument
+  that names nothing this way exits 1 (with `-V`, `no file system use
+  located: ARG`). lsof-rs had listed every file on the device. No call is
+  added, and a file on no named file system pays nothing: only a file on
+  the device of a file-system argument looks up its own NFS mount, in the
+  mounts already read, and is asked of that device's items alone, the
+  first of which names it unless it is an NFS file.
+- **A `/proc/mounts` line's fields are split as the C splits them**
+  (Linux): leading spaces and tabs are skipped, a run of spaces or tabs is
+  one separator, and a NUL ends the line, as in the C's `get_fields()`. The
+  kernel writes single spaces, so only a faked or bind-mounted table
+  differs, but there a line with tabs, extra spaces or leading whitespace
+  is a mount to the C and had been dropped or misread here.
 - **`-E` and `+E` name endpoints on Linux** (DIVERGENCES 56), as the C:
   a pipe's or a named FIFO's other descriptors and a local TCP or UDP
   connection's other end are appended to NAME as `PID,cmd,FDmode` (the
