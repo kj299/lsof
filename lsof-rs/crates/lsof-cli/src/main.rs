@@ -19,7 +19,7 @@ use lsof_cli::args::{parse_reporting, read_mount_table, walk_dir, Action, HostCh
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::{fields, json, table, Escaper, Format, TableOpts};
 use lsof_core::safefs::{to_stderr, write_stderr};
-use lsof_core::selection::filesystems_named;
+use lsof_core::selection::{filesystem_mounts_named, FsItemMount};
 use lsof_core::{
     errno_text, Backend, DirArg, FileId, FilesystemArgs, Located, MountKind, MountRequest,
     MountTable, PathItem, SafeFs, Selection, TaskMode, WalkedEntry,
@@ -455,6 +455,7 @@ fn expand_dir(sel: &mut Selection, dir: &mut DirArg, backend: &dyn Backend, fs: 
             fs_device: None,
             name: path.as_os_str().to_os_string(),
             spelled,
+            fs_mount: None,
         });
     }
     let fs = fs.with(dir.blocking, dir.warn);
@@ -930,16 +931,29 @@ fn main() {
             // source. A run that names a path always reads the table
             // (`needs_mount_table`), here if not before.
             let mounted = &table.get_or_insert_with(|| read_table(&sel)).entries;
-            let devs = filesystems_named(mounted, &path, sel.filesystem_args);
-            if !devs.is_empty() {
+            let named = filesystem_mounts_named(mounted, &path, sel.filesystem_args);
+            if !named.is_empty() {
                 sel.path_names.insert(typed.clone());
-                for dev in devs {
+                for m in named {
+                    let dev = m.device.unwrap_or(0);
+                    // On Linux the item keeps its mount: an `N_NFS` file is
+                    // named only by a file system its NFS mount's directory
+                    // starts, and any other file only by one that is not
+                    // NFS (`dfile.c:242-276`, DIVERGENCES 151).
+                    let fs_mount = cfg!(target_os = "linux").then(|| FsItemMount {
+                        nfs: m.kind == MountKind::Nfs,
+                        dir: m.dir.clone(),
+                    });
                     sel.path_fs_devices.insert(dev);
+                    if let Some(fm) = &fs_mount {
+                        sel.path_fs_mounts.push((dev, fm.clone()));
+                    }
                     sel.path_items.push(PathItem {
                         id: None,
                         fs_device: Some(dev),
                         name: name.clone(),
                         spelled: None,
+                        fs_mount,
                     });
                 }
                 survived += 1;
@@ -967,6 +981,7 @@ fn main() {
                     fs_device: None,
                     name,
                     spelled: None,
+                    fs_mount: None,
                 });
                 survived += 1;
                 continue;
@@ -993,6 +1008,7 @@ fn main() {
                         fs_device: None,
                         name,
                         spelled,
+                        fs_mount: None,
                     });
                     survived += 1;
                 }
@@ -1005,6 +1021,7 @@ fn main() {
                         fs_device: None,
                         name,
                         spelled: None,
+                        fs_mount: None,
                     });
                     survived += 1;
                 }
@@ -1620,12 +1637,14 @@ mod tests {
                     fs_device: None,
                     name: "./x".into(),
                     spelled: Some("/w/x".into()),
+                    fs_mount: None,
                 },
                 PathItem {
                     id: None,
                     fs_device: Some(42),
                     name: "mnt".into(),
                     spelled: None,
+                    fs_mount: None,
                 },
             ],
             ..Default::default()

@@ -12,6 +12,20 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **A file-system argument names an NFS mount's files as the C does**
+  (Linux; DIVERGENCES 151). Where the table lists an NFS mount, a file on
+  it (the C's `N_NFS`: on the newest NFS mount of its device whose
+  directory starts its path) is named by a file-system argument only where
+  that mount's directory starts the argument's mount directory, a plain
+  `strncmp()` prefix, and any other file only by a file system that is not
+  NFS. So, the two on one device, `lsof /` no longer lists the NFS mount's
+  files, `lsof /mnt/nfs` no longer lists the root file system's, an NFS
+  mount at `/mnt/nfs/sub` is named by `lsof /mnt/nfs/sub` and not by `lsof
+  /mnt/nfs` while `/mnt/nfs`'s files are named by both, and an argument
+  that names nothing this way exits 1 (with `-V`, `no file system use
+  located: ARG`). lsof-rs had listed every file on the device. No call is added: the
+  few file-system items are asked of a file on their device from the mounts
+  already read.
 - **`-E` and `+E` name endpoints on Linux** (DIVERGENCES 56), as the C:
   a pipe's or a named FIFO's other descriptors and a local TCP or UDP
   connection's other end are appended to NAME as `PID,cmd,FDmode` (the

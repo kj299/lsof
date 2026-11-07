@@ -5269,6 +5269,187 @@ args = ["-n", "-P", "-b", "-K", "-a", "-p", "{I}"]
 env = { LSOF_DIFF_MT = "nfs" }
 with_stderr = true
 
+# A file-system argument naming an NFS mount (DIVERGENCES 151): on Linux
+# the C names an `N_NFS` file by it only where the file's own NFS mount's
+# directory starts the argument's, a plain `strncmp()` prefix, and any
+# other file only by a file system that is not NFS (`is_file_named()`,
+# `dfile.c:242-276`). Fixture NFS's fds 12-15 are on `{NFSDIR}/sub`,
+# `{NFSDIR}x`, `{NFSDIR}2` and a plain directory, all on the device of the
+# directory the faked table lists.
+[[case]]
+# The mount point names the files of its NFS mount and of `{NFSDIR}x` and
+# `{NFSDIR}2`, which `strncmp()` puts on it too (fds 13, 14), and not
+# `plain/d` (15) or the rtd, txt and mappings, on the same device but on
+# no NFS mount (DIVERGENCES 151).
+name = "fs-nfs-mount-point"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-trailing-slash"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "{NFSDIR}/"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# The root file system names the files on its device that are not `N_NFS`.
+name = "fs-nfs-root-fs"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "/"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# A directory on the mount that is not its mount point is a file, held by
+# nothing: `no file use located`, exit 1.
+name = "fs-nfs-plain-dir"
+args = ["-n", "-P", "-V", "-a", "-p", "{NFS}", "{NFSDIR}/sub"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-alone"
+args = ["-n", "-P", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-terse"
+args = ["-t", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-N-and"
+args = ["-n", "-P", "-N", "-a", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `-N` and the root file system: nothing is both, and both are located
+# all the same, by different files, as the C marks each before `-a`.
+name = "fs-nfs-N-and-root-fs"
+args = ["-n", "-P", "-N", "-a", "-p", "{NFS}", "/"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-fields"
+args = ["-n", "-P", "-F", "-a", "-p", "{NFS}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-json"
+args = ["-n", "-P", "-J", "-a", "-d", "^7", "-p", "{NFS}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-V-root-fs-and-mount"
+args = ["-n", "-P", "-V", "-a", "-p", "{NFS}", "/", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-d-and"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "-d", "3-15", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `+d` names the files directly in the directory by their identity, and
+# so by its spelling, without the source; the mount names the rest.
+name = "fs-nfs-plus-d"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "+d", "{NFSDIR}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-source"
+args = ["-n", "-P", "-V", "-a", "-p", "{NFS}", "+f", "--", "srv:/export"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-file-and-mount"
+args = ["-n", "-P", "-V", "-a", "-p", "{NFS}", "{NFSDIR}/f.txt", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs-dash-b"
+args = ["-n", "-P", "-b", "-a", "-p", "{NFS}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs" }
+with_stderr = true
+
+[[case]]
+# `nfs3`: NFS mounts at `{NFSDIR}`, `{NFSDIR}/sub`, `{NFSDIR}2` and
+# `{NFSDIR}2/zz`, one device. A file is on the newest whose directory starts
+# its path, and a mount argument names it only where that mount's
+# directory starts the argument's: `{NFSDIR}` names neither `sub/e` nor
+# `{NFSDIR}2/c`, and `{NFSDIR}/sub` and `{NFSDIR}2` name `{NFSDIR}`'s files
+# as well as their own (DIVERGENCES 151).
+name = "fs-nfs3-mount-point"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-sub"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "{NFSDIR}/sub"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-two"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "{NFSDIR}2"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-root-fs"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "/"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+# `{NFSDIR}2/zz` has nothing open on it: `no file system use located`.
+name = "fs-nfs3-V-every-mount"
+args = ["-n", "-P", "-V", "-a", "-p", "{NFS}", "{NFSDIR}", "{NFSDIR}/sub", "{NFSDIR}2", "{NFSDIR}2/zz", "/"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-unused-mount"
+args = ["-n", "-P", "{NFSDIR}2/zz"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-fields"
+args = ["-n", "-P", "-F", "pfn", "-a", "-p", "{NFS}", "{NFSDIR}/sub"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-json"
+args = ["-n", "-P", "-J", "-a", "-d", "^7", "-p", "{NFS}", "{NFSDIR}2"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-N-and"
+args = ["-n", "-P", "-N", "-a", "{NFSDIR}2"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
+[[case]]
+name = "fs-nfs3-plus-D"
+args = ["-n", "-P", "-a", "-p", "{NFS}", "+D", "{NFSDIR}2", "{NFSDIR}"]
+env = { LSOF_DIFF_MT = "nfs3" }
+with_stderr = true
+
 # What a `-b` walk says is what the C walks. `-u ^0` keeps lsof's own
 # process (and anything else of root's) out of the walk, so stderr can be
 # compared: what is left is fixture W's processes of other owners, and the

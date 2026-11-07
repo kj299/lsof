@@ -401,6 +401,19 @@ pub enum FilesystemArgs {
 /// device and inode another match had (`arg.c:196-206`); here, whose
 /// directory and device, the inode being the directory's.
 pub fn filesystems_named(mounts: &[MountEntry], path: &OsStr, mode: FilesystemArgs) -> Vec<u64> {
+    filesystem_mounts_named(mounts, path, mode)
+        .into_iter()
+        .map(|m| m.device.unwrap_or(0))
+        .collect()
+}
+
+/// [`filesystems_named`]'s mounts themselves, one per item, in its order:
+/// what an item keeps of its mount on Linux ([`FsItemMount`]).
+pub fn filesystem_mounts_named<'m>(
+    mounts: &'m [MountEntry],
+    path: &OsStr,
+    mode: FilesystemArgs,
+) -> Vec<&'m MountEntry> {
     if mode == FilesystemArgs::NeverFilesystem {
         return Vec::new();
     }
@@ -420,9 +433,7 @@ pub fn filesystems_named(mounts: &[MountEntry], path: &OsStr, mode: FilesystemAr
         // nothing and `-V` says `no file system use located` of it: measured,
         // `lsof -V -a -p P -e /dev/shm /dev/shm`, P's cwd on /dev/shm, exits 1
         // with that line.
-        .map(|m| (m.dir.as_os_str(), m.device.unwrap_or(0)))
-        .filter(|&found| seen.insert(found))
-        .map(|(_, dev)| dev)
+        .filter(|m| seen.insert((m.dir.as_os_str(), m.device.unwrap_or(0))))
         .collect()
 }
 
@@ -643,6 +654,45 @@ pub struct PathItem {
     /// where it is `name`, as it is for every `+d`/`+D` entry, so a walk's
     /// names are held once. See [`PathItem::row_name`].
     pub spelled: Option<OsString>,
+    /// For a file-system item on Linux, the mount it named: the C's `s->mp`
+    /// and `s->name` (`arg.c:325-342`), which `is_file_named()` asks of a
+    /// file on its device (`dfile.c:242-276`, see [`FsItemMount::names`]).
+    /// `None` elsewhere, where any file on the device locates the item, as
+    /// the C's `isfn.c` has it.
+    pub fs_mount: Option<FsItemMount>,
+}
+
+/// The mount a file-system item named, as the C's Linux `is_file_named()`
+/// asks it of a file on its device (DIVERGENCES 151).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FsItemMount {
+    /// Whether the C typed the mount `N_NFS` (`smp->ty`).
+    pub nfs: bool,
+    /// The mounted-on directory, the item's `s->name`: never the argument as
+    /// typed, nor its source, but `mp->dir`.
+    pub dir: OsString,
+}
+
+impl FsItemMount {
+    /// Whether a file on this item's device is named by it. `row_nfs_dir` is
+    /// the directory of the file's own NFS mount where the C typed the file
+    /// `N_NFS`, and `None` where it did not. A file that is not `N_NFS` is
+    /// named by a file system that is not NFS; an `N_NFS` file only when its
+    /// own mount's directory starts this item's, a plain `strncmp()` prefix
+    /// with no regard to a component boundary (`!strncmp(nfs_mount->dir,
+    /// s->name, nfs_mount->dirl)`), NFS item or not. Measured: with NFS
+    /// mounts at `D/nfs` and `D/nfs/sub` on one device, `lsof D/nfs/sub`
+    /// lists the files of `D/nfs` too, and `lsof D/nfs` not those of
+    /// `D/nfs/sub`.
+    pub fn names(&self, row_nfs_dir: Option<&OsStr>) -> bool {
+        match row_nfs_dir {
+            Some(d) => {
+                let d = d.as_encoded_bytes();
+                !d.is_empty() && self.dir.as_encoded_bytes().starts_with(d)
+            }
+            None => !self.nfs,
+        }
+    }
 }
 
 impl PathItem {
@@ -890,6 +940,11 @@ pub struct Selection {
     /// `-e` row's) is in here matches the `SELNM` kind, which is how naming a
     /// mount point selects everything open on it.
     pub path_fs_devices: std::collections::HashSet<u64>,
+    /// On Linux, each file-system item's device and mount, in the order
+    /// entered: a file on one of [`Selection::path_fs_devices`] matches only
+    /// where one of the items of its device names it ([`FsItemMount::names`],
+    /// DIVERGENCES 151). Empty elsewhere, where the device alone decides.
+    pub path_fs_mounts: Vec<(u64, FsItemMount)>,
     /// `+c <n>`: how much of the command name the COMMAND column shows.
     /// Defaults to [`CommandWidth::Standard`] — a plain `lsof` run caps it.
     pub command_width: CommandWidth,
@@ -1187,9 +1242,15 @@ impl Selection {
         // the rule waited for `OpenFile::fs_device` to exist. Not a socket's,
         // which the C never compares: an `O_PATH` descriptor on a socket file
         // was listed under that file's file system (DIVERGENCES 101).
+        //
+        // On Linux the item's mount decides too: an `N_NFS` file is named only
+        // by a file system its own NFS mount's directory starts, and any
+        // other file only by one that is not NFS (`FsItemMount::names`,
+        // DIVERGENCES 151). The few file-system items are asked only of a
+        // file on one of their devices, from what is already held: no call.
         if !self.path_fs_devices.is_empty() {
             if let Some(dev) = f.searched_fs_device() {
-                if self.path_fs_devices.contains(&dev) {
+                if self.path_fs_devices.contains(&dev) && self.fs_items_name(dev, f) {
                     return true;
                 }
             }
@@ -1473,7 +1534,9 @@ impl Selection {
             // before `-a` is applied. So `lsof -a -p P -d 0 FILE`, P
             // holding FILE on fd 3, lists nothing and exits 0; lsof-rs had
             // asked the rows it printed, and exited 1.
-            path_index.mark(f, &mut found.paths, || self.path_matches(f));
+            path_index.mark(f, self.row_nfs_dir(f), &mut found.paths, || {
+                self.path_matches(f)
+            });
         }
     }
 
@@ -1559,26 +1622,59 @@ impl Selection {
     }
 
     /// Whether `f` is a file `-N` selects: one the C types `N_NFS`. By its
-    /// mount where the CLI recorded the mounts ([`Selection::nfs_mount_of`],
-    /// of the name the row was built from), and by its device alone where it
-    /// recorded only devices. Never an `-e` row, which was never `stat`ed.
+    /// mount where the CLI recorded the mounts ([`Selection::row_nfs_mount`]),
+    /// and by its device alone where it recorded only devices. Never an `-e`
+    /// row, which was never `stat`ed.
     fn is_nfs_file(&self, f: &OpenFile) -> bool {
-        let Some(dev) = f.fs_device.filter(|_| !f.is_exempt()) else {
-            return false;
-        };
         if self.nfs_mounts.is_empty() {
-            return self.nfs_devices.contains(&dev);
+            return f
+                .fs_device
+                .filter(|_| !f.is_exempt())
+                .is_some_and(|dev| self.nfs_devices.contains(&dev));
         }
+        self.row_nfs_mount(f).is_some()
+    }
+
+    /// The NFS mount the C found `f` on, where it typed it `N_NFS` (Linux,
+    /// `dnode.c:735-744`): of what it types `N_REGLR` — no device node, FIFO,
+    /// socket or anonymous inode — the mount [`Selection::nfs_mount_of`]
+    /// finds for its device and the name the row was built from. `None` for
+    /// an `-e` row, never `stat`ed, and wherever the CLI recorded no mounts.
+    fn row_nfs_mount(&self, f: &OpenFile) -> Option<&MountEntry> {
+        let dev = f.fs_device.filter(|_| !f.is_exempt())?;
         let reglr = !f.is_socket()
             && !matches!(
                 f.file_type,
                 FileType::Chr | FileType::Block | FileType::Fifo
             )
             && f.file_type != FileType::Other("a_inode".into());
-        reglr
-            && self
-                .nfs_mount_of(dev, f.base_name().unwrap_or_default().as_bytes())
-                .is_some()
+        if !reglr {
+            return None;
+        }
+        self.nfs_mount_of(dev, f.base_name().unwrap_or_default().as_bytes())
+    }
+
+    /// The directory of `f`'s own NFS mount, which a file-system item is
+    /// asked about ([`FsItemMount::names`]).
+    fn row_nfs_dir(&self, f: &OpenFile) -> Option<&OsStr> {
+        if self.nfs_mounts.is_empty() {
+            return None;
+        }
+        self.row_nfs_mount(f).map(|m| m.dir.as_os_str())
+    }
+
+    /// Whether one of the file-system items of device `dev` names `f`, a
+    /// file on it: any, where no mounts were recorded with them (every
+    /// backend but Linux, the C's `isfn.c`); else one whose mount
+    /// [`FsItemMount::names`] it.
+    fn fs_items_name(&self, dev: u64, f: &OpenFile) -> bool {
+        if self.path_fs_mounts.is_empty() {
+            return true;
+        }
+        let row = self.row_nfs_dir(f);
+        self.path_fs_mounts
+            .iter()
+            .any(|(d, m)| *d == dev && m.names(row))
     }
 
     /// Whether the C reads its mount table on this run: always but under
@@ -1821,7 +1917,7 @@ impl Selection {
             return;
         }
         let Some(name) = ix
-            .bound(f)
+            .bound(f, self.row_nfs_dir(f))
             .and_then(|i| self.path_items.get(i))
             .and_then(PathItem::row_name)
         else {
@@ -1985,8 +2081,13 @@ impl Selection {
 /// fx/hard.txt` binds `hard.txt`, and adding a third argument, a file whose
 /// inode falls in the same bucket, binds `reg.txt`.
 struct PathIndex<'a> {
+    items: &'a [PathItem],
     by_id: HashMap<crate::model::FileId, Span>,
-    by_fs: HashMap<u64, Span>,
+    /// Every file-system item of a device, in the order entered: on Linux
+    /// the first the chain meets may not name a file of that device, and
+    /// the next is asked (`FsItemMount::names`), so a span is not enough.
+    /// There is one item per mount a file-system argument names, a few.
+    by_fs: HashMap<u64, Vec<usize>>,
     /// Every item by its name as typed, for a socket's bound path: the C
     /// compares that with every argument, a file system's included.
     by_name: HashMap<&'a OsStr, Span>,
@@ -2077,6 +2178,7 @@ impl<'a> PathIndex<'a> {
     /// with identities, nothing is matched by name (DIVERGENCES 60).
     fn new(items: &'a [PathItem], identified: bool) -> Self {
         let mut ix = PathIndex {
+            items,
             by_id: HashMap::new(),
             by_fs: HashMap::new(),
             by_name: HashMap::new(),
@@ -2092,8 +2194,7 @@ impl<'a> PathIndex<'a> {
             ix.name_heads.insert(name_bucket(name), i);
             match (&item.id, item.fs_device) {
                 (_, Some(dev)) => {
-                    let span = ix.by_fs.get(&dev).copied();
-                    ix.by_fs.insert(dev, Span::enter(span, i));
+                    ix.by_fs.entry(dev).or_default().push(i);
                     ix.fs_heads.insert(dev_ino_bucket(dev, 0, FS_MASK), i);
                 }
                 (Some(id), None) => {
@@ -2125,7 +2226,13 @@ impl<'a> PathIndex<'a> {
     /// its bound path, which only a file item can name, and failing that by
     /// that path as typed (`dsock.c:3716-3758`). Never a row `-e` exempted:
     /// never `stat`ed, it names nothing (see `path_matches`).
-    fn bound(&self, f: &OpenFile) -> Option<usize> {
+    ///
+    /// Of a device's file-system items, the first in the chain that names
+    /// the row ([`FsItemMount::names`], asked with `row_nfs_dir`, the
+    /// directory of the row's own NFS mount where it is `N_NFS`): the
+    /// bucket's head where it is one of them, then the rest in the order
+    /// entered, as `hashSfile()` chains them.
+    fn bound(&self, f: &OpenFile, row_nfs_dir: Option<&OsStr>) -> Option<usize> {
         if f.is_exempt() {
             return None;
         }
@@ -2146,8 +2253,21 @@ impl<'a> PathIndex<'a> {
             return Some(i);
         }
         let dev = f.searched_fs_device()?;
-        let head = self.fs_heads.get(&dev_ino_bucket(dev, 0, FS_MASK));
-        Span::first_met(self.by_fs.get(&dev), head)
+        let of_dev = self.by_fs.get(&dev)?;
+        let head = self
+            .fs_heads
+            .get(&dev_ino_bucket(dev, 0, FS_MASK))
+            .copied()
+            .filter(|h| of_dev.contains(h));
+        let names = |i: &usize| {
+            self.items
+                .get(*i)
+                .is_some_and(|item| item.fs_mount.as_ref().is_none_or(|m| m.names(row_nfs_dir)))
+        };
+        head.iter()
+            .chain(of_dev.iter().filter(|&&i| Some(i) != head))
+            .find(|i| names(i))
+            .copied()
     }
 
     /// Mark the item `f` locates ([`PathIndex::bound`]). With no identity to
@@ -2156,8 +2276,14 @@ impl<'a> PathIndex<'a> {
     /// Only such a name can start with an item's, and a `+D` makes an item of
     /// every entry, so asking every file on the host would cost files x
     /// entries.
-    fn mark(&self, f: &OpenFile, hits: &mut [bool], selected: impl FnOnce() -> bool) {
-        if let Some(i) = self.bound(f) {
+    fn mark(
+        &self,
+        f: &OpenFile,
+        row_nfs_dir: Option<&OsStr>,
+        hits: &mut [bool],
+        selected: impl FnOnce() -> bool,
+    ) {
+        if let Some(i) = self.bound(f, row_nfs_dir) {
             hits[i] = true;
         }
         if !self.by_prefix.is_empty() && !f.is_exempt() && selected() {
@@ -3205,6 +3331,7 @@ mod tests {
                 fs_device: None,
                 name: "/dev/zero".into(),
                 spelled: None,
+                fs_mount: None,
             }],
             ..Default::default()
         };
@@ -3325,6 +3452,7 @@ mod tests {
                 fs_device: None,
                 name: "/dev/zero".into(),
                 spelled: None,
+                fs_mount: None,
             }],
             ..Default::default()
         };
@@ -3396,6 +3524,7 @@ mod tests {
                 fs_device: Some(0x29),
                 name: "/mnt".into(),
                 spelled: None,
+                fs_mount: None,
             }],
             ..Default::default()
         };
@@ -3569,6 +3698,7 @@ mod tests {
             fs_device: fs,
             name: name.into(),
             spelled: None,
+            fs_mount: None,
         };
         // `-a -p 7 -d 0`: process 7 is examined and every row of it is
         // dropped at print; process 8 fails `-p` and is never examined.
@@ -3686,6 +3816,7 @@ mod tests {
                     fs_device: fs,
                     name: name.into(),
                     spelled: spelled.map(Into::into),
+                    fs_mount: None,
                 })
                 .collect(),
             ..Default::default()
@@ -4252,6 +4383,166 @@ mod tests {
             by_dev.is_nfs_file(&row("/n/f", 5, FileType::Chr)),
             "the device alone"
         );
+    }
+
+    /// A file-system argument on Linux names a file on its device by the
+    /// C's NFS hack (`dfile.c:242-276`, DIVERGENCES 151): an `N_NFS` file
+    /// only where its own NFS mount's directory starts the item's
+    /// directory, a plain prefix, and any other file only where the item's
+    /// mount is not NFS. Measured with NFS mounts at `D/nfs`, `D/nfs/sub`
+    /// and `D/nfs2` on the root file system's device.
+    #[test]
+    fn file_system_items_name_nfs_files_by_their_mount() {
+        let mount = |dir: &str| MountEntry {
+            dir: dir.into(),
+            device: Some(5),
+            source_resolved: None,
+            source_is_block: false,
+            fsname: "srv:/x".into(),
+            kind: crate::backend::MountKind::Nfs,
+        };
+        let row = |fd: u64, name: &str, ty: FileType| OpenFile {
+            rdev: None,
+            fs_device: Some(5),
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(fd),
+            access: crate::model::AccessMode::Read,
+            file_type: ty,
+            name: name.into(),
+            device: None,
+            size: None,
+            offset: None,
+            node: Some((100 + fd).to_string()),
+            links: None,
+            socket: None,
+            name_addition: None,
+        };
+        // Newest first, as the CLI records them: `D/nfs2`, `D/nfs/sub`, `D/nfs`.
+        let nfs_mounts = vec![mount("/D/nfs2"), mount("/D/nfs/sub"), mount("/D/nfs")];
+        let files = vec![
+            row(3, "/D/nfs/a", FileType::Regular),
+            row(4, "/D/nfs/sub/e", FileType::Regular),
+            row(5, "/D/nfsx/b", FileType::Regular),
+            row(6, "/D/nfs2/c", FileType::Regular),
+            row(7, "/D/plain/d", FileType::Regular),
+            row(8, "/D/nfs/fifo", FileType::Fifo),
+        ];
+        let p = Process {
+            pid: 9,
+            files,
+            ..who(9, "x", 0, 9)
+        };
+        let listed = |args: &[(&str, bool)]| {
+            let items: Vec<(u64, FsItemMount)> = args
+                .iter()
+                .map(|&(dir, nfs)| {
+                    (
+                        5,
+                        FsItemMount {
+                            nfs,
+                            dir: dir.into(),
+                        },
+                    )
+                })
+                .collect();
+            let sel = Selection {
+                has_nfs: 2,
+                nfs_mounts: nfs_mounts.clone(),
+                paths_identified: true,
+                path_fs_devices: [5].into_iter().collect(),
+                path_items: items
+                    .iter()
+                    .map(|(dev, m)| PathItem {
+                        id: None,
+                        fs_device: Some(*dev),
+                        name: m.dir.clone(),
+                        spelled: None,
+                        fs_mount: Some(m.clone()),
+                    })
+                    .collect(),
+                path_fs_mounts: items,
+                ..Default::default()
+            };
+            let fds: Vec<u64> = sel
+                .apply(vec![p.clone()])
+                .iter()
+                .flat_map(|p| p.files.iter())
+                .filter_map(|f| match f.fd {
+                    FdType::Handle(n) => Some(n),
+                    _ => None,
+                })
+                .collect();
+            (fds, sel.locate(std::slice::from_ref(&p)).paths)
+        };
+        // `D/nfs`: its own files and `D/nfsx`'s, which its prefix makes
+        // `N_NFS`; not `D/nfs/sub`'s or `D/nfs2`'s, whose mounts are longer.
+        assert_eq!(listed(&[("/D/nfs", true)]).0, vec![3, 5]);
+        // `D/nfs/sub`: `D/nfs`'s files too, whose mount's directory starts it.
+        assert_eq!(listed(&[("/D/nfs/sub", true)]).0, vec![3, 4, 5]);
+        assert_eq!(listed(&[("/D/nfs2", true)]).0, vec![3, 5, 6]);
+        // The root file system: the files on no NFS mount, the FIFO among
+        // them, which the C never types `N_NFS`.
+        assert_eq!(listed(&[("/", false)]).0, vec![7, 8]);
+        // A non-NFS item whose directory an NFS mount starts names its files.
+        assert_eq!(listed(&[("/D/nfs/z", false)]).0, vec![3, 5, 7, 8]);
+        // Two items on one device: each file locates the first in the chain
+        // that names it, so both are located; with none naming any file on
+        // it, an item is not.
+        assert_eq!(listed(&[("/", false), ("/D/nfs", true)]).1, [true, true]);
+        assert_eq!(listed(&[("/D/zz", true)]), (Vec::<u64>::new(), vec![false]));
+        // An item of another device names none of them: a file on the
+        // NFS item's device is asked only of the items of that device.
+        let mut two = Selection {
+            has_nfs: 2,
+            nfs_mounts: nfs_mounts.clone(),
+            paths_identified: true,
+            path_fs_devices: [5, 6].into_iter().collect(),
+            ..Default::default()
+        };
+        for (dev, nfs, dir) in [(5, true, "/D/nfs"), (6, false, "/other")] {
+            let m = FsItemMount {
+                nfs,
+                dir: dir.into(),
+            };
+            two.path_fs_mounts.push((dev, m.clone()));
+            two.path_items.push(PathItem {
+                id: None,
+                fs_device: Some(dev),
+                name: dir.into(),
+                spelled: None,
+                fs_mount: Some(m),
+            });
+        }
+        assert_eq!(two.apply(vec![p.clone()])[0].files.len(), 2);
+        assert_eq!(two.locate(std::slice::from_ref(&p)).paths, [true, false]);
+        // Without the hack's mounts (any other backend), the device decides.
+        let mut plain = Selection {
+            paths_identified: true,
+            path_fs_devices: [5].into_iter().collect(),
+            path_items: vec![PathItem {
+                id: None,
+                fs_device: Some(5),
+                name: "/D/nfs".into(),
+                spelled: None,
+                fs_mount: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(plain.apply(vec![p.clone()])[0].files.len(), 6);
+        plain.has_nfs = 2;
+        plain.nfs_mounts = nfs_mounts.clone();
+        assert_eq!(plain.locate(std::slice::from_ref(&p)).paths, [true]);
+        // `names` itself: an empty mount directory names nothing (`dirl`).
+        let m = FsItemMount {
+            nfs: true,
+            dir: "/D".into(),
+        };
+        assert!(!m.names(Some(OsStr::new(""))));
+        assert!(m.names(Some(OsStr::new("/D"))));
+        assert!(!m.names(Some(OsStr::new("/D/"))));
+        assert!(!m.names(None));
+        assert!(FsItemMount { nfs: false, ..m }.names(None));
     }
 
     /// With an NFS mount listed, a `-b` walk says what it avoids, so it
