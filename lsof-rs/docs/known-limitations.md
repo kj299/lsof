@@ -272,10 +272,11 @@ meet. Each number is a row there, with the measurement behind it.
   `lstat`, and one more for a link `-x l` follows: about 0.08 ms an entry, 1.6
   times the C's (`+D /usr/lib`, 17,742 entries, 1.39 s against 0.86 s; `-O`
   0.13 s; 94, 111).
-- **Linux:** `-E`/`+E` name every end the C names (56), but where no
-  netlink socket can be made (a sandbox without `AF_NETLINK`) lsof-rs lists
-  the files with no UNIX socket's peer named, where the C ends the run,
-  exit 1 (C-DEFECT) [2026-11-06; an `O_PATH` descriptor on
+- **Linux:** `-E`/`+E` name every end the C names (56), and where no
+  netlink socket can be made (a sandbox without `AF_NETLINK`) end the run
+  as the C does, exit 1, nothing listed; their output grows with the square
+  of an object's holders, as the C's does (2,000 processes on one pipe
+  print 276 MB; THREAT-MODEL §2) [2026-11-07; an `O_PATH` descriptor on
   a socket file is the C's `sock` row (126); 2026-10-30: AF_VSOCK, ping and
   unbound sockets are named as the C names them, from
   `system.sockprotoname` (22), and a bound netlink socket from its table

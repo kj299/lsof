@@ -252,7 +252,13 @@ impl Index {
                     tid: p.tid,
                     fd: f.fd.clone(),
                     side,
-                    text: format!("{},{},{}{}", p.pid, cmd, f.fd.code(), access_char(f.access)),
+                    text: format!(
+                        "{},{},{}{}",
+                        p.pid,
+                        cmd,
+                        f.fd.column_code(),
+                        access_char(f.access)
+                    ),
                 };
                 match k {
                     Key::Inet(ino) => {
@@ -393,21 +399,29 @@ impl Index {
     fn unix_ends(&self, ino: u64, forced: bool) -> Vec<Piece<'_>> {
         let mut out = Vec::new();
         let ends = self.tables.unix.get(&ino).copied().unwrap_or_default();
-        if let Some(peer) = ends.peer {
+        // `if (p && p->inode)`: a socket of inode 0 is named by no one.
+        if let Some(peer) = ends.peer.filter(|&p| p != 0) {
             self.unix_socket(peer, &mut out);
             if forced {
                 return out;
             }
         }
-        // `p = tp->icons; while (p && p != tp) { …; p = p->icons; }`: one
-        // pending connection's own pending connection, and so on, each once.
+        // `p = tp->icons; while (p && p != tp) { if (p->inode) …; p =
+        // p->icons; }`: one pending connection's own pending connection, and
+        // so on, each once. A pending connection whose client has closed is
+        // the kernel's inode 0 (`/proc/net/unix` lists the embryo so): it is
+        // the listener's first, so a live one after it is never reached, and
+        // it is not printed, as the C prints none (measured: a listener
+        // whose first pending client closed shows `(LISTEN)` alone).
         let mut walked = HashSet::new();
         let mut next = ends.incoming;
         while let Some(n) = next {
             if n == ino || !walked.insert(n) {
                 break;
             }
-            self.unix_socket(n, &mut out);
+            if n != 0 {
+                self.unix_socket(n, &mut out);
+            }
             next = self.tables.unix.get(&n).and_then(|e| e.incoming);
         }
         out
@@ -531,7 +545,9 @@ fn header(p: &Process) -> Process {
         files: Vec::new(),
         endpoint_peer: p.endpoint_peer,
         unlisted: p.unlisted,
-        raw_names: None,
+        // The command's own bytes, where it is not UTF-8: a row `+E` adds
+        // prints them as the process's own rows do (DIVERGENCES 93).
+        raw_names: p.raw_names.clone(),
     }
 }
 
@@ -1034,6 +1050,137 @@ mod tests {
         let mut out = vec![procs[0].clone()];
         annotate(&index, &mut out, None, EndpointMode::Info);
         assert_eq!(named(&out, 10, 4), "type=STREAM ->INO=2 30,b,5u 10,a,5u");
+    }
+
+    /// A listener's first pending connection whose client closed is inode 0
+    /// (`/proc/net/unix` lists the embryo so): `if (p->inode)`, it is not
+    /// printed, and the walk goes on from it, which names nothing more;
+    /// measured, `/tmp/l1 type=STREAM (LISTEN)`, where lsof-rs had printed
+    /// `->INO=0`. A peer of inode 0 is named by no one either, and a forced
+    /// row then names its pending connection, as for no peer.
+    #[test]
+    fn a_pending_connection_or_peer_of_inode_0_is_not_named() {
+        let procs = vec![proc_(10, "srv", vec![unix(3, "100"), unix(4, "300")])];
+        let t = tables(&[
+            (100, None, Some(0)),
+            (0, None, Some(200)),
+            (300, Some(0), Some(400)),
+        ]);
+        let index = Index::build_with(&procs, CommandWidth::Standard, t, None);
+        let mut out = procs.clone();
+        annotate(&index, &mut out, None, EndpointMode::Info);
+        assert_eq!(named(&out, 10, 3), "type=STREAM ->INO=200");
+        assert_eq!(named(&out, 10, 4), "type=STREAM ->INO=400");
+        // With no entry for 0, the walk ends at it.
+        let t = tables(&[(100, None, Some(0))]);
+        let index = Index::build_with(&procs, CommandWidth::Standard, t, None);
+        let mut out = procs.clone();
+        annotate(&index, &mut out, None, EndpointMode::Info);
+        assert_eq!(named(&out, 10, 3), "type=STREAM");
+        assert!(index.unix_ends(300, true).is_empty());
+        let t = tables(&[(300, Some(0), Some(400))]);
+        let index = Index::build_with(&procs, CommandWidth::Standard, t, None);
+        let forced: Vec<String> = index
+            .unix_ends(300, true)
+            .into_iter()
+            .map(|p| p.text.into_owned())
+            .collect();
+        assert_eq!(forced, ["->INO=400"], "no peer: its pending connection");
+    }
+
+    /// The pending connections are walked each once: a dump whose listeners
+    /// name each other, which no sane kernel sends, and one that names
+    /// itself, end the walk where the C's `p != tp` and a visit ends it,
+    /// rather than looping without end.
+    #[test]
+    fn the_pending_walk_ends_at_a_cycle_or_the_listener_itself() {
+        let procs = vec![proc_(10, "srv", vec![unix(3, "1"), unix(4, "5")])];
+        let t = tables(&[
+            (1, None, Some(2)),
+            (2, None, Some(3)),
+            (3, None, Some(2)),
+            (5, None, Some(5)),
+        ]);
+        let index = Index::build_with(&procs, CommandWidth::Standard, t, None);
+        let mut out = procs.clone();
+        annotate(&index, &mut out, None, EndpointMode::Info);
+        assert_eq!(named(&out, 10, 3), "type=STREAM ->INO=2 ->INO=3");
+        assert_eq!(named(&out, 10, 4), "type=STREAM", "its own is not named");
+        // Two listeners that name each other: each names the other, once.
+        let t = tables(&[(1, None, Some(5)), (5, None, Some(1))]);
+        let index = Index::build_with(&procs, CommandWidth::Standard, t, None);
+        let mut out = procs.clone();
+        annotate(&index, &mut out, None, EndpointMode::Info);
+        assert_eq!(named(&out, 10, 3), "type=STREAM ->INO=5 10,srv,4u");
+        assert_eq!(named(&out, 10, 4), "type=STREAM ->INO=1 10,srv,3u");
+    }
+
+    /// A row `+E` adds keeps its process's command bytes (DIVERGENCES 93):
+    /// `p<child>` `cx?y\xff,z…` as the C prints it, not U+FFFD.
+    #[test]
+    fn a_row_plus_e_adds_keeps_its_commands_bytes() {
+        let mut child = proc_(20, "x\u{fffd}", vec![unix(4, "2")]);
+        child.raw_names = Some(Box::new(crate::model::RawNames {
+            command: Some(b"x\xff".to_vec().into()),
+            login: None,
+        }));
+        let procs = vec![proc_(10, "a", vec![unix(3, "1")]), child];
+        let t = tables(&[(1, Some(2), None), (2, Some(1), None)]);
+        let index = Index::build_with(&procs, CommandWidth::Standard, t, None);
+        let mut out = vec![procs[0].clone()];
+        let c = Candidates::of(&procs, &index);
+        annotate(&index, &mut out, Some(c), EndpointMode::Files);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].command_bytes(), b"x\xff");
+        assert_eq!(named(&out, 10, 3), "type=STREAM ->INO=2 20,x\\xff,4u");
+    }
+
+    /// A descriptor of 10000 or more is `*%03d` in a holder's text, as the
+    /// C's `fd_to_string()` prints it (measured: `PID,python3,*000u` for fd
+    /// 10000); not on Windows, which has no C.
+    #[test]
+    fn a_holder_of_fd_10000_or_more_is_star_and_three_digits() {
+        let procs = vec![
+            proc_(
+                10,
+                "a",
+                vec![row(9999, FileType::Fifo, "7", AccessMode::Write)],
+            ),
+            proc_(
+                20,
+                "b",
+                vec![
+                    row(10_000, FileType::Fifo, "7", AccessMode::Read),
+                    row(12_345, FileType::Fifo, "7", AccessMode::Read),
+                ],
+            ),
+        ];
+        let index = Index::build(&procs, CommandWidth::Standard);
+        let mut out = vec![procs[0].clone()];
+        annotate(&index, &mut out, None, EndpointMode::Info);
+        let want = if cfg!(windows) {
+            "pipe 20,b,10000r 20,b,12345r"
+        } else {
+            "pipe 20,b,*000r 20,b,*345r"
+        };
+        assert_eq!(named(&out, 10, 9999), want);
+        let mut out = vec![procs[1].clone()];
+        annotate(&index, &mut out, None, EndpointMode::Info);
+        assert!(named(&out, 20, 10_000).starts_with("pipe 10,a,9999w"));
+        // The column the same; `-F f` and JSON print [`FdType::code`], the
+        // number whole (measured: `f10000`).
+        let col = |n| FdType::Handle(n).column_code();
+        if cfg!(windows) {
+            assert_eq!(col(10_000), "10000");
+        } else {
+            assert_eq!(
+                (col(9999), col(10_000), col(10_999)),
+                ("9999".into(), "*000".into(), "*999".into())
+            );
+            assert_eq!(col(1_234_567), "*567");
+        }
+        assert_eq!(FdType::Handle(10_000).code(), "10000");
+        assert_eq!(FdType::Cwd.column_code(), "cwd");
     }
 
     /// `+E`: the peer's rows are listed, each naming its own peer; a forced

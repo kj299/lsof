@@ -11,9 +11,15 @@ use libfuzzer_sys::fuzz_target;
 use lsof_backend_linux::fuzz_api::{parse_reply, Ends};
 
 fuzz_target!(|data: &[u8]| {
+    // The request's number: the first record's, so that what follows it is
+    // read as an answer; a record numbered otherwise is skipped.
+    let seq = data
+        .get(8..12)
+        .and_then(|b| b.try_into().ok())
+        .map_or(1, u32::from_ne_bytes);
     // The table: inodes below 1000, or every inode.
     let some = |i: u64| i < 1000;
-    let mut ends = Ends::new(&some);
+    let mut ends = Ends::new(&some, seq);
     let _ = parse_reply(data, &mut ends);
     for (inode, e) in ends.into_map() {
         assert!(inode < 1000, "a socket the table does not list was kept");
@@ -21,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(e.incoming.is_none_or(|p| p < 1000), "a pending connection the table does not list");
     }
     let all = |_: u64| true;
-    let mut ends = Ends::new(&all);
+    let mut ends = Ends::new(&all, seq);
     // The dump read as it arrives: in pieces, each its own buffer.
     for piece in data.chunks(97) {
         let _ = parse_reply(piece, &mut ends);

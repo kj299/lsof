@@ -61,6 +61,21 @@ impl FdType {
             FdType::Unknown => "unk".to_string(),
         }
     }
+
+    /// The FD as the table's column and the `-E` holder text print it, the
+    /// C's `fd_to_string()` (`lib/proc.c:1322-1331`): a descriptor of 10000
+    /// or more is `*` and its last three digits, `*%03d` of `fd % 1000`, to
+    /// keep the column to the width of `TYPE`; `-F f` and JSON print the
+    /// number whole, as the C's do (measured: fd 10000 is `*000u` in the
+    /// column and `PID,cmd,*000u` in a peer's NAME, `f10000` under `-F`).
+    /// Not on Windows, which has no C to follow and whose handle values run
+    /// past 10000 as a matter of course: there it is [`FdType::code`].
+    pub fn column_code(&self) -> String {
+        match self {
+            FdType::Handle(n) if *n >= 10_000 && !cfg!(windows) => format!("*{:03}", n % 1000),
+            _ => self.code(),
+        }
+    }
 }
 
 /// Access mode of an open file (lsof appends this to the FD column: `3u`).

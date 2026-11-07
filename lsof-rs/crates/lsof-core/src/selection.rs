@@ -1779,9 +1779,13 @@ impl Selection {
     /// prints every process with a task (DIVERGENCES 33).
     pub fn terse_skips_files(&self) -> bool {
         // `+E` prints the PID of a process holding an end, which only its
-        // rows can tell (DIVERGENCES 56).
+        // rows can tell; and where the core names the ends (Linux), under
+        // either the C reads every socket, which asks the kernel for the UNIX
+        // sockets' ends, and what that asking says, or the run's end where
+        // it fails, is the C's (DIVERGENCES 56).
         self.terse
             && !(self.reads_every_process() && self.endpoints == Some(EndpointMode::Files))
+            && !(self.endpoints_in_core && self.endpoints.is_some())
             && !self.specified().intersects(SelKinds::FILE)
             && self.state_filter.is_none()
             && self.tasks != TaskMode::Always
@@ -5230,9 +5234,22 @@ mod tests {
         assert!(!terse.terse_skips_files());
         let info = Selection {
             endpoints: Some(EndpointMode::Info),
+            endpoints_in_core: false,
             ..terse
         };
         assert!(info.terse_skips_files());
+        // Where the core names the ends, `-t -E` reads the sockets, whose
+        // reading asks the kernel, as the C's does.
+        let linux = Selection {
+            endpoints_in_core: true,
+            ..info.clone()
+        };
+        assert!(!linux.terse_skips_files());
+        assert!(Selection {
+            endpoints: None,
+            ..linux
+        }
+        .terse_skips_files());
     }
 
     /// Under `-E`/`+E` (Linux) a process a `-p ^`, `-u ^` or `-g ^`

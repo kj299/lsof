@@ -130,6 +130,20 @@ impl SocketTable {
             .is_some_and(|e| e.file_type == FileType::Unix)
     }
 
+    /// Whether socket `inode` is in a table the C's `process_proc_sock()`
+    /// reads before `/proc/net/unix`: IPv4 raw, netlink or packet (`dsock.c:
+    /// 3530, 3590, 3617`; lsof-rs reads no AX.25 or IPX table). Such a socket
+    /// never brings the C to `get_unix()`.
+    pub fn read_before_unix(&self, inode: u64) -> bool {
+        self.by_inode
+            .get(&inode)
+            .is_some_and(|e| match &e.file_type {
+                FileType::Socket(t) => matches!(*t, "raw" | "netlink"),
+                FileType::Other(t) => t == "pack",
+                _ => false,
+            })
+    }
+
     /// The bytes of `inode`'s bound path, when they are not UTF-8.
     pub fn raw_path(&self, inode: u64) -> Option<&[u8]> {
         self.raw_paths.get(&inode).map(|b| &**b)
@@ -1108,6 +1122,30 @@ mod tests {
         );
         assert_eq!(conn.filter_state(), Some(TcpState::Established));
         assert_eq!(conn.shown_state(), None, "no (ESTABLISHED), measured");
+    }
+
+    /// The tables the C's `process_proc_sock()` reads before
+    /// `/proc/net/unix`: a socket found in one never brings it to
+    /// `get_unix()`, nor to `-E`'s question to the kernel; any other does,
+    /// whatever names it (DIVERGENCES 56).
+    #[test]
+    fn only_raw_netlink_and_packet_sockets_are_read_before_unix() {
+        let raw = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+  85: 00000000:0001 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 71 2 00000000400092a3 0\n";
+        let mut t = SocketTable::default();
+        t.parse_raw(raw, false);
+        t.parse_netlink(
+            "sk               Eth Pid        Groups   Rmem     Wmem     Dump  Locks    Drops    Inode\n\
+000000000a2cfcbb 0   7884       00000000 0        0        0     2        0        72\n",
+        );
+        t.parse_packet(PACKET_TABLE);
+        assert!(t.read_before_unix(71), "raw");
+        assert!(t.read_before_unix(72), "netlink");
+        assert!(t.read_before_unix(1399), "packet");
+        let mut t6 = SocketTable::default();
+        t6.parse_raw(raw, true);
+        assert!(!t6.read_before_unix(71), "raw6 is read after");
+        assert!(!t.read_before_unix(99), "in no table");
     }
 
     /// `/proc/net/raw` as the kernel wrote it for a raw ICMP and a raw

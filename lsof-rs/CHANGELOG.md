@@ -25,9 +25,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   under `-E`/`+E`), and a listener its first pending connection; a pty
   master names `->/dev/pts/N` and the slave's rows, a slave the master's;
   an eventfd and a POSIX message queue (once the `mqueue` file system is
-  mounted) name every other row on them. Where no netlink socket can be
-  made, lsof-rs says `netlink socket error: …` as the C does and lists the
-  files with no UNIX peer named, where the C exits 1 having listed nothing.
+  mounted) name every other row on them. A pending connection whose client
+  closed (inode 0) is not printed, as the C prints none. Where no netlink
+  socket can be made, lsof-rs says `netlink socket error: …` and exits 1
+  having listed nothing, as the C does, asking where the C asks: at the
+  first socket not in its raw, netlink or packet tables. Only the kernel's
+  answer is read (the socket connected to it, the sender and a sequence
+  number checked), within 5 s for the whole dump. A row `+E` adds prints
+  its command's own bytes, and an fd of 10000 or more is `*%03d` in the FD
+  column and in an end's `PID,cmd,FD` (`*000u`), as the C's
+  `fd_to_string()` prints it; `-F f` and JSON print the number whole.
   As the C, a process a `-p ^`, `-u ^` or `-g ^` excludes is then listed for
   the rows a file item (a name, `-i`, `-U`, `-d`) selects when the AND holds
   for the row, a `-c ^` is ignored, and `-E -p P -i` reads P's sockets
@@ -54,7 +61,13 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   say the C's own words about such a value (`illegal process ID: \xff`,
   `unknown -s protocol: "\xff"`, `unknown field: \xc3`, …), the byte
   escaped, then the usage, exit 1, where they had refused it with `an
-  argument is not valid UTF-8`; `+c` reads its leading digits. On Windows a path argument
+  argument is not valid UTF-8`; so do `-d`'s FD range (`non-digit in -d
+  FD range: 1-\xff`), `-f`/`+f`, the `+` forms of those options, `+Z`, and
+  `-m`/`-D` with the value attached, reading on after each as the C does;
+  `+c` reads its leading digits. An attached value that opens with `-` or
+  `+` is given back to be read as letters by every option whose value is
+  optional, as the C's `GetOpt` gives it back: `-g-a` is `-g`, `illegal
+  option character: -` and `-a`. On Windows a path argument
   that is not text names no file, never its lossy spelling's.
 - **An `O_PATH` descriptor on a socket file is `sock`, `0t0`, `can't
   identify protocol`** (Linux; 126), the row the C cannot name, where it
@@ -162,12 +175,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   constants, no new crate; the maintainer's decision of 2026-11-06). The
   backend keeps `#![forbid(unsafe_code)]`: the request is built and each
   reply read as bytes, every length checked, the receive buffer 32 KiB, the
-  dump read for at most 64 MiB and 5 s a `recv()`, and only the sockets the
-  run's own `/proc/net/unix` lists are kept. A fuzz target, `netlink_diag`,
-  drives the reply reader.
-- Differential fixture EP's fds 40-60: UNIX sockets of every shape, a pty,
-  an eventfd and a POSIX message queue, with `-E`/`+E` cases for each; and
-  a case for each option value that is not UTF-8. The resource gate measures
+  dump read for at most 64 MiB and 5 s in all, only the kernel's answer read
+  (connected to port 0, the sender and a sequence number checked), and only
+  the sockets the run's own `/proc/net/unix` lists are kept. A fuzz target,
+  `netlink_diag`, drives the reply reader; CI's fuzz runs pass
+  `-timeout=10`.
+- Differential fixture EP's fds 40-65 and 10000-12345: UNIX sockets of every
+  shape (listeners whose first pending client closed among them), a pty, an
+  eventfd, a POSIX message queue, a second child whose command is not UTF-8,
+  and descriptors of 10000 and up, with `-E`/`+E` cases for each; and a case
+  for each option value that is not UTF-8. The resource gate measures
   the whole host under `-E` (`whole-host-E`).
 
 ## [2.0.0] — 2026-11-01

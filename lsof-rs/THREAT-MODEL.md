@@ -404,10 +404,19 @@ as it always was (above).
 **Under `-E`/`+E`, the kernel's `NETLINK_SOCK_DIAG` dump of AF_UNIX
 sockets is read** (DIVERGENCES 56), to name a UNIX socket's peer as the C's
 `get_uxpeeri()` does. The socket is lsof-rs's own (`AF_NETLINK`,
-`SOCK_DGRAM`, close-on-exec), unbound, and sends one 40-byte request it
-built itself; the replies come from the kernel alone (an unbound netlink
-socket receives only unicast replies to itself), but every length in them
-is treated as hostile all the same, since a parser that trusts a length is
+`SOCK_DGRAM`, close-on-exec) and sends one 40-byte request it built
+itself. An unconnected netlink socket is bound (autobound) to a port when
+it first sends, and any process with `CAP_NET_ADMIN` in the run's network
+namespace can unicast to that port (measured: root reached another
+process's `NETLINK_SOCK_DIAG` port, `nobody` could not), so the C's
+socket, which checks neither the sender nor its own sequence number (0),
+can be fed a forged dump, cut short with a forged `NLMSG_DONE`, or held
+with a trickle of datagrams. lsof-rs, changing nothing it prints, reads
+only the kernel's answer: the socket is `connect()`ed to the kernel (port
+0), so the kernel delivers it nothing from another port; a datagram whose
+sender is not port 0 is dropped all the same; and a record that does not
+carry the request's own sequence number, random and never 0, is skipped.
+Every length in what is left is treated as hostile all the same, since a parser that trusts a length is
 one kernel bug or one changed layout from reading out of bounds. `diag.rs`
 reads them as bytes in safe Rust: each `nlmsghdr` and each attribute's
 length is checked against what is left of the buffer before it is used, a
@@ -417,14 +426,29 @@ and `RTA_OK()` end the C's), and a peer or pending connection is a whole
 Memory is bounded twice: the receive buffer is 32 KiB, reused; and only a
 socket the run's own `/proc/net/unix` lists is given an end, and only one it
 lists is named (the C's `check_unix()`), so a dump of any size keeps at most
-one entry of some 40 bytes per socket of a table already in memory. The bytes read are
-capped at 64 MiB and each `recv()` at 5 s (`SO_RCVTIMEO`), past which the
+one entry of some 40 bytes per socket of a table already in memory. The
+C's buffer is `SOCKET_BUFFER_SIZE`, `min(getpagesize(), 8192)`
+(`dsock.c:47`): 4 KiB with 4 KiB pages, 8 KiB with larger ones. The bytes
+read are capped at 64 MiB and the whole dump at 5 s, every `recv()`
+together (`SO_RCVTIMEO` set to what is left before each), past which the
 dump is read no further, as when the C's `recv()` fails; the C would wait on
-the kernel indefinitely. Nothing is asked unless `-E`/`+E` is given (the
-resource gate's `whole-host-E` case measures the cost). A netlink socket
-that cannot be made (a seccomp filter, a sandbox without `AF_NETLINK`) is
-said, in the C's words, and the files are listed without UNIX peers, where
-the C's `Error()` ends the run. The reply reader is fuzzed (`netlink_diag`).
+the kernel indefinitely. Nothing is asked unless `-E`/`+E` is given, and then
+only at the first socket past the C's raw, netlink and packet tables, as the
+C asks (the resource gate's `whole-host-E` case measures the cost). A
+netlink socket that cannot be made (a seccomp filter, a sandbox without
+`AF_NETLINK`) is the C's `Error()` in both: said in the C's words, exit 1,
+nothing listed. The reply reader is fuzzed (`netlink_diag`), with
+`-timeout=10` in CI, so that a length that stopped the reader moving on
+would be a reported hang rather than a stalled job; each record and
+attribute is left by at least its header's length, whatever it claims.
+
+**`-E`/`+E` output grows with the square of an object's holders, as the
+C's does.** Each row on a pipe, socket, pty, eventfd or queue names every
+other holder, so N processes sharing one object print N rows of N
+holders: 2,000 forked processes on one pipe (a `make -j` jobserver's
+shape) printed 276 MB, the C in 281 MB of memory and 16.1 s, lsof-rs in
+296 MB and 3.5 s (measured). Each holder's text is bounded; the number of
+holders is the host's.
 The same run reads each pseudoterminal master's `tty-index` from its fdinfo
 again, by the same bounded text reader as every fdinfo.
 
@@ -445,8 +469,9 @@ those. All five are MIT OR Apache-2.0 (rustix and linux-raw-sys also Apache
 with the LLVM exception), allowed by `deny.toml`, from crates.io only, and
 the lock pins each by checksum (`libc` held at 0.2.190, more than two weeks
 old). What lsof-rs *asks* of the crate is `getxattr` on a path it
-formatted itself, and under `-E` `socket`, `setsockopt(SO_RCVTIMEO)`,
-`sendto` and `recv` on its own netlink socket, but that bounds nothing a
+formatted itself, and under `-E` `socket`, `connect`,
+`setsockopt(SO_RCVTIMEO)`, `sendto` and `recvfrom` on its own netlink
+socket, but that bounds nothing a
 compromised release could do.
 `rustix` ships a build script (`build.rs`, 281 lines in 1.1.5) that cargo
 compiles and runs at build time, on every developer's and CI's machine, with

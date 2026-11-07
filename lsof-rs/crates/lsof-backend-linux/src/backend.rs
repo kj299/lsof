@@ -186,14 +186,16 @@ impl Backend for LinuxBackend {
         // depths; see SocketTable::load.
         let socks = SocketTable::load(sel.tcp_info().queue, sel.skip_inet_tables);
         // `-E`/`+E`: each UNIX socket's peer and pending connection, asked
-        // of the kernel once a run (each `-r` cycle), as the C asks once it
-        // has read `/proc/net/unix` (`get_unix()`, `dsock.c:3234-3240`), and
-        // only then (DIVERGENCES 56).
+        // of the kernel once a gather (each `-r` cycle), where the C asks,
+        // at the first socket that brings it to `/proc/net/unix`
+        // (`get_unix()`, `dsock.c:3234-3240`), and only then (DIVERGENCES
+        // 56; [`files::UnixStage`]).
         let mut ends = lsof_core::EndpointTables::default();
-        if sel.endpoints.is_some() {
-            let known = |inode: u64| socks.is_unix(inode);
-            ends.unix = crate::diag::unix_ends(&known, &mut |line| fs.tell(line));
-        }
+        let say = |line: &str| fs.tell(line);
+        let stage = files::UnixStage::new(&socks, &say);
+        // The C's `Error()` at a netlink socket that could not be made: what
+        // it said is said, and the run ends with exit 1, nothing listed.
+        let failed = || Err(BackendError::Reported);
         // And each pseudoterminal master's slave, from its fdinfo's
         // `tty-index:`, which the C reads as it reads the descriptor
         // (`dproc.c:1313-1317`).
@@ -246,6 +248,7 @@ impl Backend for LinuxBackend {
             } else {
                 &[]
             },
+            unix_stage: sel.endpoints.is_some().then_some(&stage),
         };
 
         // `-K`: every other thread becomes its own entry, repeating the whole
@@ -295,6 +298,9 @@ impl Backend for LinuxBackend {
                         ..ctx
                     };
                     t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
+                    if ctx.stopped() {
+                        return failed();
+                    }
                     pty_masters(&base, t.pid, t.tid, &t.files);
                     t.unlisted = t.files.is_empty();
                     tasks.push(t);
@@ -334,6 +340,9 @@ impl Backend for LinuxBackend {
                 ..ctx
             };
             p.files = files::for_pid(p.pid, p.uid, &ctx);
+            if ctx.stopped() {
+                return failed();
+            }
             pty_masters(&format!("/proc/{}", p.pid), p.pid, p.tid, &p.files);
             p.unlisted = p.files.is_empty();
         }
@@ -355,6 +364,7 @@ impl Backend for LinuxBackend {
         if !zombies.is_empty() {
             procs.retain(|p| p.tid.is_some() || !zombies.contains(&p.pid));
         }
+        ends.unix = stage.into_ends();
         self.keep_ends(ends);
 
         Ok(procs)

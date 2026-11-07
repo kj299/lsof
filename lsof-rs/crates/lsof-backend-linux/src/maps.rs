@@ -678,6 +678,7 @@ mod tests {
             mqueue_device: None,
             fs: None,
             nfs_mounts: &[],
+            unix_stage: None,
         };
         let md = FileStat::from(&md);
         let f = socket_mapping(&md, &ctx);
@@ -730,6 +731,7 @@ mod tests {
             mqueue_device: None,
             fs: None,
             nfs_mounts: &[],
+            unix_stage: None,
         };
         let maps = parse_maps(
             "0-1 r--p 0 00:06 4 /nonexistent-lsof-rs/zero\n\
@@ -919,6 +921,7 @@ mod tests {
             mqueue_device: None,
             fs: Some(fs),
             nfs_mounts: &mounts,
+            unix_stage: None,
         };
         let m = parse_maps("0-1 r--p 0 00:06 4 /nonexistent-lsof-rs/lib\n").remove(0);
         let f = mapping_row(m, 1, false, &ctx);

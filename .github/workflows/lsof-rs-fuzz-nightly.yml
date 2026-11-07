@@ -60,7 +60,7 @@ jobs:
           echo "$n targets, ${per}s each"
           for t in $targets; do
             echo "=== deep fuzz: $t (${per}s) ==="
-            cargo fuzz run "$t" -- -max_total_time="$per" -rss_limit_mb=2048
+            cargo fuzz run "$t" -- -max_total_time="$per" -rss_limit_mb=2048 -timeout=10
           done
       - name: upload crash artifacts
         # Only exists on a finding; libFuzzer writes the reproducer input here.

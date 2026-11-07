@@ -1100,6 +1100,8 @@ fn main() {
             .and_then(Result::err);
         let gathered = match env.backend.gather_with(&selection, &fs) {
             Ok(p) => p,
+            // Said already, in the C's words.
+            Err(lsof_core::BackendError::Reported) => std::process::exit(1),
             Err(e) => {
                 say!("lsof: {e}");
                 std::process::exit(1);

@@ -140,6 +140,10 @@ pub enum BackendError {
     Unsupported(String),
     /// An underlying OS call failed.
     Os(String),
+    /// The gather ended where the C's `Error()` ends a run, after the backend
+    /// said why in the C's own words: the run exits 1 and says no more (a
+    /// netlink socket `-E` could not make, `netlink socket error: …`).
+    Reported,
 }
 
 impl std::fmt::Display for BackendError {
@@ -147,6 +151,7 @@ impl std::fmt::Display for BackendError {
         match self {
             BackendError::Unsupported(m) => write!(f, "unsupported: {m}"),
             BackendError::Os(m) => write!(f, "OS error: {m}"),
+            BackendError::Reported => write!(f, "the run ended where the C's Error() ends it"),
         }
     }
 }

@@ -20,21 +20,54 @@
 # endpoint-text-escaped-twice) were rerun alone: 3 of 3 killed by the unit
 # gate.
 #
+# Run 2026-11-07 as root with --first-kill (the reviews' fixes): the 24 new
+# mutants and the 5 whose anchors moved (unix-dump-not-asked,
+# diag-attributes-unaligned, text-option-K-refuses, diag-done-read-on,
+# unix-pending-connection-not-named): 29 of 29 killed, 26 by the unit gate
+# and 3 by the differential alone (unix-dump-not-asked,
+# fd-10000-column-printed-whole, unix-question-not-asked-at-a-socket).
+#
 # Rules with no mutant here, each pinned elsewhere or equivalent:
 # * The C's words when the request cannot be sent or the kernel answers
 #   NLMSG_ERROR (`diag.rs` `unix_ends`): no gate can make the kernel refuse
 #   one request of one process; measured by hand with strace's fault
 #   injection (`-e inject=sendto:error=EPERM`, and the C's `sendmsg`), and
 #   the parser's `Step::Error` is pinned by `an_error_reply_ends_the_dump`.
-# * A netlink socket that cannot be made (`netlink socket error: …`, the
-#   files listed without peers, the C-DEFECT kept): measured with
-#   `-e inject=socket:error=EAFNOSUPPORT`; no gate can refuse the socket.
+# * A netlink socket that cannot be made (`netlink socket error: …`, then
+#   the C's `Error()`: exit 1, nothing listed, nothing more said; `files.rs`
+#   `GatherCtx::stopped`, `backend.rs` `BackendError::Reported`): measured
+#   with `-e inject=socket:error=EAFNOSUPPORT` (and `when=2+` under -r),
+#   byte-identical to the C; no gate can refuse the socket.
 # * The dump asked only under -E/+E (`backend.rs`): no output shows it, so
-#   no gate. Measured with strace (no `socket(AF_NETLINK…)` without -E);
-#   the resource gate's whole-host and whole-host-E cases measure the cost.
+#   no gate. Measured with strace (no `socket(AF_NETLINK…)` without -E, nor
+#   under -E in a PID namespace holding no socket, or only a bound netlink,
+#   a packet or a raw socket); the resource gate's whole-host and
+#   whole-host-E cases measure the cost. Where it is asked is pinned:
+#   unix-question-* below.
+# * Only the kernel's answer read (`diag.rs` `unix_ends`: `connect()` to
+#   port 0, the sender's port checked, the whole-dump deadline): no output
+#   shows any of them and no gate can forge a sender; measured with a root
+#   process's unicast to the port (THREAT-MODEL §2). The sequence number
+#   is pinned (diag-other-sequence-read, diag-sequence-0).
+# * The backstop that leaves a record or attribute by at least its header's
+#   length (`len.max(NLMSG_HDRLEN)`, `len.max(RTA_HDRLEN)`): EQUIVALENT
+#   while the minimum-length checks hold, which
+#   diag-*-shorter-than-its-header-read pin; with either check gone it is
+#   what keeps the reader moving, so those mutants end in the unit gate's
+#   assertion, not a hang.
+# * The row-92 gate's call site (`if stand_ins && text_option`): EQUIVALENT
+#   on Linux, where no option outside `reads_value_as_text` reads a value as
+#   text (`-c`, `-u`, `+d`/`+D`, `-e`/`+e` read bytes; `-o`, `-r`, `-S`, `-L`
+#   digits; measured over every letter, both prefixes); pinned on Windows,
+#   where `-c` reads text, by
+#   `an_option_outside_the_text_options_still_refuses_a_value_not_utf8`, and
+#   the list itself by text-option-* and
+#   `the_options_that_read_a_value_not_utf8_as_text`.
 # * The checks of a record's and an attribute's length against what is left
-#   (`len > rest.len()`, `len > attrs.len()` in `diag.rs`): EQUIVALENT by
-#   construction, defence in depth. Every slice after them is taken with
+#   (`len > rest.len()`, `len > attrs.len()` in `diag.rs`): EQUIVALENT for
+#   any kernel output, defence in depth (a truncated record typed DONE or
+#   ERROR would, without the record check, end the dump rather than the
+#   buffer; the kernel never sends one). Every slice after them is taken with
 #   `get()`, which answers `None` past the end, so without the check the
 #   record or attribute is read as empty and the loop ends the same way;
 #   the fuzz target `netlink_diag` holds the no-panic contract.
@@ -115,10 +148,8 @@ name = "unix-dump-not-asked"
 rule = "-E/+E ask the kernel's NETLINK_SOCK_DIAG for each UNIX socket's peer (56)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/backend.rs"
-old = '''        if sel.endpoints.is_some() {
-            let known'''
-new = '''        if sel.endpoints.is_some() && sel.endpoints.is_none() {
-            let known'''
+old = '''            unix_stage: sel.endpoints.is_some().then_some(&stage),'''
+new = '''            unix_stage: sel.endpoints.is_some().then_some(&stage).filter(|_| false),'''
 
 [[mutant]]
 name = "diag-peer-filled-one-way"
@@ -165,10 +196,8 @@ name = "diag-attributes-unaligned"
 rule = "each attribute starts at its predecessor's aligned end (RTA_NEXT, 56)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/diag.rs"
-old = '''        let Some(next) = align4(len) else { break };
-        let Some(after) = attrs.get(next..) else {'''
-new = '''        let Some(next) = Some(len) else { break };
-        let Some(after) = attrs.get(next..) else {'''
+old = '''        let Some(next) = align4(len.max(RTA_HDRLEN)) else {'''
+new = '''        let Some(next) = Some(len.max(RTA_HDRLEN)) else {'''
 
 # ------------------------------------------------- 56: pseudoterminals
 
@@ -282,8 +311,8 @@ name = "text-option-K-refuses"
 rule = "-K says the C's words about a value that is not UTF-8 (92)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z')'''
-new = '''                matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'Z')'''
+old = '''    matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z' | 'f')'''
+new = '''    matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'Z' | 'f')'''
 
 [[mutant]]
 name = "stand-in-shown-as-a-character"
@@ -292,3 +321,219 @@ rule = "a stand-in is shown as the byte it stands for, `\\xNN` (92, 122)"
 file = "crates/lsof-cli/src/args.rs"
 old = '''    if STAND_INS.with(std::cell::Cell::get) && arg.chars().any(|c| byte_letter(c).is_some()) {'''
 new = '''    if STAND_INS.with(std::cell::Cell::get) && arg.chars().any(|c| byte_letter(c).is_some()) && arg.is_empty() {'''
+
+# ---------------------- 2026-11-07: the reviews' findings (fix-endpoints)
+
+[[mutant]]
+name = "diag-record-shorter-than-its-header-read"
+rule = "a record shorter than its header ends the buffer's reading (NLMSG_OK, 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        if len < NLMSG_HDRLEN || len > rest.len() {'''
+new = '''        if len > rest.len() {'''
+
+[[mutant]]
+name = "diag-attribute-shorter-than-its-header-read"
+rule = "an attribute shorter than its header ends its record's attributes (RTA_OK, 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        if len < RTA_HDRLEN || len > attrs.len() {'''
+new = '''        if len > attrs.len() {'''
+
+[[mutant]]
+name = "diag-records-unaligned"
+rule = "each record starts at its predecessor's aligned end (NLMSG_NEXT, 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        let Some(next) = align4(len.max(NLMSG_HDRLEN)) else {'''
+new = '''        let Some(next) = Some(len.max(NLMSG_HDRLEN)) else {'''
+
+[[mutant]]
+name = "diag-other-family-read"
+rule = "a record of another family names nothing (parse_diag's udiag_family, 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''    if body.len() <= UNIX_DIAG_MSG_LEN || body.first() != Some(&AF_UNIX) {'''
+new = '''    if body.len() <= UNIX_DIAG_MSG_LEN {'''
+
+[[mutant]]
+name = "diag-inode-0-read"
+rule = "a record of inode 0 names nothing (parse_diag's !(inop = dm->udiag_ino), 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''    let Some(ino) = u32_at(body, 4).filter(|&i| i != 0) else {'''
+new = '''    let Some(ino) = u32_at(body, 4) else {'''
+
+[[mutant]]
+name = "diag-other-sequence-read"
+rule = "a record that does not carry the request's sequence number is skipped (56, THREAT-MODEL)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        if u32_at(rest, 8) == Some(ends.seq) {'''
+new = '''        if u32_at(rest, 8) == Some(ends.seq) || !rest.is_empty() {'''
+
+[[mutant]]
+name = "diag-sequence-0"
+rule = "the request's sequence number is never 0 (56, THREAT-MODEL)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''    u32::try_from(seq & 0xffff_ffff).unwrap_or(1).max(1)'''
+new = '''    u32::try_from(seq & 0xffff_ffff).unwrap_or(1).min(0)'''
+
+[[mutant]]
+name = "unix-pending-inode-0-named"
+rule = "a pending connection of inode 0 is not printed (if (p->inode), 56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            if n != 0 {
+                self.unix_socket(n, &mut out);'''
+new = '''            if n != u64::MAX {
+                self.unix_socket(n, &mut out);'''
+
+[[mutant]]
+name = "unix-peer-inode-0-named"
+rule = "a peer of inode 0 is not printed, and a forced row then names its pending connection (p && p->inode, 56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        if let Some(peer) = ends.peer.filter(|&p| p != 0) {'''
+new = '''        if let Some(peer) = ends.peer {'''
+
+[[mutant]]
+# Bounded, so that the mutant cannot run the host out of memory: the walk
+# goes on for a hundred visits more past a cycle.
+name = "unix-pending-walk-cycle-not-ended"
+rule = "the pending connections are walked each once (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            if n == ino || !walked.insert(n) {'''
+new = '''            if n == ino || (!walked.insert(n) && out.len() > 100) {'''
+
+[[mutant]]
+name = "unix-pending-walk-self-named"
+rule = "the walk ends at the listener itself (p != tp, 56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            if n == ino || !walked.insert(n) {'''
+new = '''            if n == u64::MAX || !walked.insert(n) {'''
+
+[[mutant]]
+name = "plus-e-row-loses-its-command-bytes"
+rule = "a row +E adds keeps its command's bytes (93)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        raw_names: p.raw_names.clone(),'''
+new = '''        raw_names: None,'''
+
+[[mutant]]
+name = "fd-10000-printed-whole"
+rule = "an fd of 10000 or more is *%03d in the column and holder text (fd_to_string())"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''            FdType::Handle(n) if *n >= 10_000 && !cfg!(windows) => format!("*{:03}", n % 1000),'''
+new = '''            FdType::Handle(n) if *n >= 10_000 && cfg!(windows) => format!("*{:03}", n % 1000),'''
+
+[[mutant]]
+name = "fd-10000-holder-printed-whole"
+rule = "an end's PID,cmd,FD prints fd_to_string()'s FD (*%03d)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                        f.fd.column_code(),'''
+new = '''                        f.fd.code(),'''
+
+[[mutant]]
+name = "fd-10000-column-printed-whole"
+rule = "the FD column prints fd_to_string()'s FD (*%03d)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''    f.fd.column_code()
+}'''
+new = '''    f.fd.code()
+}'''
+
+[[mutant]]
+name = "unix-question-not-asked-at-a-socket"
+rule = "a socket the C takes past its early tables asks the kernel for the UNIX ends (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if meta.is_some_and(|m| m.mode & S_IFMT == S_IFSOCK) {
+        ctx.reach_unix(inode);
+    }'''
+new = '''    if meta.is_some_and(|m| m.mode & S_IFMT == S_IFSOCK) && inode == 0 {
+        ctx.reach_unix(inode);
+    }'''
+
+[[mutant]]
+name = "unix-question-asked-at-a-raw-socket"
+rule = "a raw, netlink or packet socket asks nothing (the C finds it before get_unix(), 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        if self.socks.read_before_unix(inode) {
+            return;'''
+new = '''        if self.socks.read_before_unix(inode) && inode == 0 {
+            return;'''
+
+[[mutant]]
+name = "unix-question-asked-at-a-netlink-socket"
+rule = "a netlink socket is found before /proc/net/unix (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            FileType::Socket(t) => matches!(*t, "raw" | "netlink"),'''
+new = '''            FileType::Socket(t) => matches!(*t, "raw"),'''
+
+[[mutant]]
+name = "terse-E-skips-the-sockets"
+rule = "-t -E reads the sockets, as the C does, where the core names the ends (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            && !(self.endpoints_in_core && self.endpoints.is_some())'''
+new = '''            && !(self.endpoints_in_core && self.endpoints.is_none())'''
+
+[[mutant]]
+name = "text-option-d-refuses"
+rule = "-d says the C's words about a range that is not UTF-8 (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            matches!(c, 'd' | 'D' | 'm')'''
+new = '''            matches!(c, 'D' | 'm')'''
+
+[[mutant]]
+name = "text-option-f-refuses"
+rule = "-f/+f say the C's words about letters that are not UTF-8 (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z' | 'f')'''
+new = '''    matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z')'''
+
+[[mutant]]
+name = "text-option-plus-forms-refuse"
+rule = "the + forms say their - forms' words about a value that is not UTF-8 (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z' | 'f')
+        ||'''
+new = '''    (!plus && matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z' | 'f'))
+        ||'''
+
+[[mutant]]
+name = "attached-dash-value-taken"
+rule = "an attached value opening with - or + is given back to be read as letters (GOx1 = GObk[0], 92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if gives_back(chars, j) {
+        return None;
+    }'''
+new = '''    if gives_back(chars, j) && j == usize::MAX {
+        return None;
+    }'''
+
+[[mutant]]
+name = "attached-dash-value-dropped"
+rule = "the letters an option gave back are read again (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if gives_back(chars, j) {
+        j + 1
+    } else {'''
+new = '''    if gives_back(chars, j) {
+        chars.len()
+    } else {'''

@@ -86,10 +86,7 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
 
 /// The FD cell's name part: `cwd`, `txt`, `NOFD`, or the descriptor number.
 fn fd_name(f: &OpenFile) -> String {
-    match f.fd {
-        FdType::Handle(n) => n.to_string(),
-        _ => f.fd.code(),
-    }
+    f.fd.column_code()
 }
 
 /// The FD cell's two trailing characters, always both present: the access
