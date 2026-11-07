@@ -19,8 +19,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   state, `-F n` carries them, JSON does not), and `+E` lists those ends too,
   with their own. Under either, every process is read, so one the `-a`
   leaves out still locates `-i`, `-K` or a path through its rows (`lsof -V
-  -E -K -a -p P` no longer says `no tasks located`). A UNIX socket's peer,
-  a pty's, a POSIX message queue's and an eventfd's ends are not named yet.
+  -E -K -a -p P` no longer says `no tasks located`). A UNIX socket names
+  its peer, `->INO=N` and the rows on it, last met first, from the kernel's
+  `NETLINK_SOCK_DIAG` dump (read once a run, and each `-r` cycle, only
+  under `-E`/`+E`), and a listener its first pending connection; a pty
+  master names `->/dev/pts/N` and the slave's rows, a slave the master's;
+  an eventfd and a POSIX message queue (once the `mqueue` file system is
+  mounted) name every other row on them. Where no netlink socket can be
+  made, lsof-rs says `netlink socket error: …` as the C does and lists the
+  files with no UNIX peer named, where the C exits 1 having listed nothing.
   As the C, a process a `-p ^`, `-u ^` or `-g ^` excludes is then listed for
   the rows a file item (a name, `-i`, `-U`, `-d`) selects when the AND holds
   for the row, a `-c ^` is ignored, and `-E -p P -i` reads P's sockets
@@ -43,8 +50,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   is no character where an option letter stands is `illegal option
   character: \xNN` and the parse reads on, one line a byte (`-é` is two);
   0xff ends the options, as the C's `GetOpt` takes it for EOF (`-p 1 -\xff`
-  lists PID 1). Any other option that reads text still refuses one, alone
-  (`an argument is not valid UTF-8`, exit 1). On Windows a path argument
+  lists PID 1). `-p`, `-g`, `-s`, `-i`, `-T`, `-F`, `-x`, `-K` and `-Z`
+  say the C's own words about such a value (`illegal process ID: \xff`,
+  `unknown -s protocol: "\xff"`, `unknown field: \xc3`, …), the byte
+  escaped, then the usage, exit 1, where they had refused it with `an
+  argument is not valid UTF-8`; `+c` reads its leading digits. On Windows a path argument
   that is not text names no file, never its lossy spelling's.
 - **An `O_PATH` descriptor on a socket file is `sock`, `0t0`, `can't
   identify protocol`** (Linux; 126), the row the C cannot name, where it
@@ -144,6 +154,21 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   prints them too, where lsof-rs had walked once the parse was over and
   printed nothing of a run that ended there. Linux and FreeBSD; on Windows,
   which matches names, the walk still comes after the parse.
+
+### Added
+- **The Linux backend asks the kernel's `NETLINK_SOCK_DIAG`** for a UNIX
+  socket's peer under `-E`/`+E` (56), through `rustix`'s `net` feature
+  beside `fs` (still =1.1.5; `net` turns on linux-raw-sys's netlink
+  constants, no new crate; the maintainer's decision of 2026-11-06). The
+  backend keeps `#![forbid(unsafe_code)]`: the request is built and each
+  reply read as bytes, every length checked, the receive buffer 32 KiB, the
+  dump read for at most 64 MiB and 5 s a `recv()`, and only the sockets the
+  run's own `/proc/net/unix` lists are kept. A fuzz target, `netlink_diag`,
+  drives the reply reader.
+- Differential fixture EP's fds 40-60: UNIX sockets of every shape, a pty,
+  an eventfd and a POSIX message queue, with `-E`/`+E` cases for each; and
+  a case for each option value that is not UTF-8. The resource gate measures
+  the whole host under `-E` (`whole-host-E`).
 
 ## [2.0.0] — 2026-11-01
 

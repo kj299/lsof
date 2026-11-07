@@ -401,12 +401,42 @@ dentry on open (NFS, `d_weak_revalidate`) may be asked there; and the `stat`
 of each fd's link that both binaries make before any of this is unbounded,
 as it always was (above).
 
-**One third-party crate reaches the Linux binary, for that one call.**
+**Under `-E`/`+E`, the kernel's `NETLINK_SOCK_DIAG` dump of AF_UNIX
+sockets is read** (DIVERGENCES 56), to name a UNIX socket's peer as the C's
+`get_uxpeeri()` does. The socket is lsof-rs's own (`AF_NETLINK`,
+`SOCK_DGRAM`, close-on-exec), unbound, and sends one 40-byte request it
+built itself; the replies come from the kernel alone (an unbound netlink
+socket receives only unicast replies to itself), but every length in them
+is treated as hostile all the same, since a parser that trusts a length is
+one kernel bug or one changed layout from reading out of bounds. `diag.rs`
+reads them as bytes in safe Rust: each `nlmsghdr` and each attribute's
+length is checked against what is left of the buffer before it is used, a
+length that claims more ends the reading of that buffer (as `NLMSG_OK()`
+and `RTA_OK()` end the C's), and a peer or pending connection is a whole
+`u32` or nothing (the C reads four bytes whatever the attribute's length).
+Memory is bounded twice: the receive buffer is 32 KiB, reused; and only a
+socket the run's own `/proc/net/unix` lists is given an end, and only one it
+lists is named (the C's `check_unix()`), so a dump of any size keeps at most
+one entry of some 40 bytes per socket of a table already in memory. The bytes read are
+capped at 64 MiB and each `recv()` at 5 s (`SO_RCVTIMEO`), past which the
+dump is read no further, as when the C's `recv()` fails; the C would wait on
+the kernel indefinitely. Nothing is asked unless `-E`/`+E` is given (the
+resource gate's `whole-host-E` case measures the cost). A netlink socket
+that cannot be made (a seccomp filter, a sandbox without `AF_NETLINK`) is
+said, in the C's words, and the files are listed without UNIX peers, where
+the C's `Error()` ends the run. The reply reader is fuzzed (`netlink_diag`).
+The same run reads each pseudoterminal master's `tty-index` from its fdinfo
+again, by the same bounded text reader as every fdinfo.
+
+**One third-party crate reaches the Linux binary, for those calls.**
 `getxattr(2)` has no std API; the maintainer chose (2026-10-30) a dependency
 over FFI of the crate's own, so `lsof-backend-linux` keeps
 `#![forbid(unsafe_code)]` and the port's `unsafe` stays in the native
 backends that cannot avoid it: Windows, and since 2026-10-31 FreeBSD (below). The crate is `rustix`, pinned exactly (`=1.1.5`, a release more than
-two weeks old when it was taken), with no default features and only `fs`.
+two weeks old when it was taken), with no default features and only `fs`
+and, since 2026-11-06 (the maintainer's decision, for `-E`), `net`, which
+turns on `linux-raw-sys`'s `net`, `netlink`, `if_ether` and `xdp` modules
+(constants and struct layouts) and adds no crate.
 On x86_64, aarch64, arm, riscv64 and x86 Linux it issues the system call
 itself (its `linux_raw` backend, inline assembly in `rustix`, not here) and
 compiles in `bitflags` and `linux-raw-sys` alone; `libc` and `errno` are in
@@ -414,8 +444,10 @@ the lock file for its other targets and under miri, and are not built on
 those. All five are MIT OR Apache-2.0 (rustix and linux-raw-sys also Apache
 with the LLVM exception), allowed by `deny.toml`, from crates.io only, and
 the lock pins each by checksum (`libc` held at 0.2.190, more than two weeks
-old). What lsof-rs *asks* of the crate is one call, `getxattr` on a path it
-formatted itself, but that bounds nothing a compromised release could do.
+old). What lsof-rs *asks* of the crate is `getxattr` on a path it
+formatted itself, and under `-E` `socket`, `setsockopt(SO_RCVTIMEO)`,
+`sendto` and `recv` on its own netlink socket, but that bounds nothing a
+compromised release could do.
 `rustix` ships a build script (`build.rs`, 281 lines in 1.1.5) that cargo
 compiles and runs at build time, on every developer's and CI's machine, with
 their privileges; it runs `$RUSTC` (or `$RUSTC_WRAPPER`) to probe the

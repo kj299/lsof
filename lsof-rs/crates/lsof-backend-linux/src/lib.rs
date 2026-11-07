@@ -102,6 +102,8 @@
 #[cfg(target_os = "linux")]
 mod backend;
 #[cfg(target_os = "linux")]
+mod diag;
+#[cfg(target_os = "linux")]
 mod files;
 #[cfg(target_os = "linux")]
 mod locks;
@@ -142,6 +144,7 @@ pub use users::new_cycle as passwd_new_cycle;
 #[cfg(all(target_os = "linux", feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzz_api {
+    pub use crate::diag::{parse_reply, Ends, Step};
     pub use crate::files::{name_for_target, parse_fdinfo, FdInfo};
     pub use crate::locks::parse_locks;
     pub use crate::maps::{parse_maps, parse_maps_bytes, Mapping};

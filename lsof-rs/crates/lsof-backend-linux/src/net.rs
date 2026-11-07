@@ -121,6 +121,15 @@ impl SocketTable {
         self.by_inode.get(&inode)
     }
 
+    /// Whether `/proc/net/unix` listed socket `inode`: the C's
+    /// `check_unix()`, which a UNIX socket's end must pass to be named
+    /// (`-E`, [`crate::diag`]).
+    pub fn is_unix(&self, inode: u64) -> bool {
+        self.by_inode
+            .get(&inode)
+            .is_some_and(|e| e.file_type == FileType::Unix)
+    }
+
     /// The bytes of `inode`'s bound path, when they are not UTF-8.
     pub fn raw_path(&self, inode: u64) -> Option<&[u8]> {
         self.raw_paths.get(&inode).map(|b| &**b)

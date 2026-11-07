@@ -48,10 +48,14 @@ name = "inet-spec-not-escaped"
 rule = "every -i message quotes the spec escaped, as safestrprt() (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
-    Escaper::for_host().text(arg)'''
-new = '''fn shown(arg: &str) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(arg)'''
+old = '''        );
+    }
+    Escaper::for_host().text(arg)
+}'''
+new = '''        );
+    }
+    std::borrow::Cow::Borrowed(arg)
+}'''
 
 [[mutant]]
 name = "protocol-in-parentheses-raw"

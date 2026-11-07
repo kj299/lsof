@@ -321,7 +321,8 @@ keep the parsing honest against a real kernel.
 The parsers of text from outside the process have cargo-fuzz targets under
 [`fuzz/`](fuzz/) — the argv parser; the Linux backend's `/proc/net`,
 `/proc/<pid>/status`, fdinfo, maps, `/proc/locks`, mount-table and
-`/etc/passwd` readers; the Windows backend's name parsers and PEB walk; the
+`/etc/passwd` readers, and its reader of the kernel's `NETLINK_SOCK_DIAG`
+replies; the Windows backend's name parsers and PEB walk; the
 escaper that every one of them feeds; and the JSON renderer (`render_json`),
 which must print one valid line per file and decode back to what it was given. Three have none, and
 [`THREAT-MODEL.md`](THREAT-MODEL.md) §2 names them: the ETW payload parsers, the

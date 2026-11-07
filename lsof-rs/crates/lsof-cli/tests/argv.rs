@@ -44,7 +44,7 @@ fn a_path_that_is_not_utf8_is_looked_up_and_named_escaped() {
     miri,
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
-fn an_option_that_reads_text_refuses_what_is_not() {
+fn an_option_that_reads_text_says_the_cs_words_about_what_is_not() {
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
         .arg("-p")
         .arg(OsStr::from_bytes(b"x\xff\x1b[2J"))
@@ -53,9 +53,11 @@ fn an_option_that_reads_text_refuses_what_is_not() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(!out.stderr.contains(&0x1b), "{err:?}");
+    // The C's `illegal process ID: x\xff^[[2J` (measured), escaped as the
+    // C's `safestrprt()` escapes it, then the usage (DIVERGENCES 92).
     assert_eq!(
-        err,
-        "lsof: an argument is not valid UTF-8, which lsof-rs cannot take: x\\xff^[[2J\n"
+        err.lines().next(),
+        Some("lsof: illegal process ID: x\\xff^[[2J")
     );
     // `-u` reads bytes, as the C's `getpwnam()`: a login no account has
     // is its error, the bytes escaped (DIVERGENCES 92).

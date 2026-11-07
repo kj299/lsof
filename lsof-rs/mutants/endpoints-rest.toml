@@ -1,0 +1,294 @@
+# Mutants for the rest of -E/+E on Linux and the rest of row 92
+# (2026-11-06): DIVERGENCES 56 (a UNIX socket's peer and a listener's
+# pending connection, from NETLINK_SOCK_DIAG; a pseudoterminal's other side;
+# an eventfd's and a POSIX message queue's other rows) and 92 (an option
+# value that is not UTF-8 says the C's own words). One per rule. The kill
+# table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/endpoints-rest.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root: the
+# differential's LSOF_DIFF_MT=mqueue mode mounts the mqueue file system in
+# a mount namespace of each run's own. CI runs only --apply-only.
+#
+# Run 2026-11-07 as root with --first-kill, in two batches (--only): 26 of
+# 26 killed, 22 by the unit gate and 4 by the differential alone
+# (unix-tables-not-handed-to-the-core, unix-dump-not-asked,
+# pty-index-not-read, mqueue-device-not-handed-to-the-core). Mutants of
+# other files re-anchored on the code this batch changed (inet-grammar
+# inet-spec-not-escaped; small-rows inet-holders-first-first and
+# endpoint-text-escaped-twice) were rerun alone: 3 of 3 killed by the unit
+# gate.
+#
+# Rules with no mutant here, each pinned elsewhere or equivalent:
+# * The C's words when the request cannot be sent or the kernel answers
+#   NLMSG_ERROR (`diag.rs` `unix_ends`): no gate can make the kernel refuse
+#   one request of one process; measured by hand with strace's fault
+#   injection (`-e inject=sendto:error=EPERM`, and the C's `sendmsg`), and
+#   the parser's `Step::Error` is pinned by `an_error_reply_ends_the_dump`.
+# * A netlink socket that cannot be made (`netlink socket error: …`, the
+#   files listed without peers, the C-DEFECT kept): measured with
+#   `-e inject=socket:error=EAFNOSUPPORT`; no gate can refuse the socket.
+# * The dump asked only under -E/+E (`backend.rs`): no output shows it, so
+#   no gate. Measured with strace (no `socket(AF_NETLINK…)` without -E);
+#   the resource gate's whole-host and whole-host-E cases measure the cost.
+# * The checks of a record's and an attribute's length against what is left
+#   (`len > rest.len()`, `len > attrs.len()` in `diag.rs`): EQUIVALENT by
+#   construction, defence in depth. Every slice after them is taken with
+#   `get()`, which answers `None` past the end, so without the check the
+#   record or attribute is read as empty and the loop ends the same way;
+#   the fuzz target `netlink_diag` holds the no-panic contract.
+# * The 64 MiB and 5 s bounds of one dump: no host's table is near either.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# ------------------------------------------------- 56: UNIX sockets
+
+[[mutant]]
+name = "unix-peer-holders-first-first"
+rule = "a UNIX socket's peer's rows are named last met first (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                .get(&Key::Unix(n))
+                .into_iter()
+                .flat_map(|l| l.iter().rev())'''
+new = '''                .get(&Key::Unix(n))
+                .into_iter()
+                .flat_map(|l| l.iter())'''
+
+[[mutant]]
+name = "unix-peer-inode-not-named"
+rule = "a UNIX socket's peer is named `->INO=N` before its rows, alone where none holds it (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            text: Cow::Owned(format!("->INO={n}")),'''
+new = '''            text: Cow::Owned(format!("INO={n}")),'''
+
+[[mutant]]
+name = "unix-pending-connection-not-named"
+rule = "a listener names its first pending connection (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        let mut next = ends.incoming;'''
+new = '''        let mut next = ends.incoming.filter(|_| false);'''
+
+[[mutant]]
+name = "unix-forced-row-names-both"
+rule = "a row +E added names its pending connection only for want of a peer (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''            if forced {
+                return out;
+            }'''
+new = '''            if forced && ino == u64::MAX {
+                return out;
+            }'''
+
+[[mutant]]
+name = "unix-tables-not-handed-to-the-core"
+rule = "the core names a UNIX socket's ends from the tables the backend read (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''                tables,
+                self.mqueue_device,'''
+new = '''                {
+                    let _ = tables;
+                    crate::endpoints::EndpointTables::default()
+                },
+                self.mqueue_device,'''
+
+[[mutant]]
+name = "unix-dump-not-asked"
+rule = "-E/+E ask the kernel's NETLINK_SOCK_DIAG for each UNIX socket's peer (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''        if sel.endpoints.is_some() {
+            let known'''
+new = '''        if sel.endpoints.is_some() && sel.endpoints.is_none() {
+            let known'''
+
+[[mutant]]
+name = "diag-peer-filled-one-way"
+rule = "a peer is filled both ways, as fill_uxpino() is called both ways (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''                    ends.peer(u64::from(peer), ino);'''
+new = '''                    let _ = ino;'''
+
+[[mutant]]
+name = "diag-peer-last-wins"
+rule = "a socket keeps the first peer named (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        if e.peer.is_none() {'''
+new = '''        if e.peer.is_none() || pi != 0 {'''
+
+[[mutant]]
+name = "diag-unlisted-peer-kept"
+rule = "only a peer /proc/net/unix lists is kept (check_unix(), 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        if !(self.known)(si) || !(self.known)(pi) {'''
+new = '''        if !(self.known)(si) {'''
+
+[[mutant]]
+name = "diag-unlisted-pending-connection-kept"
+rule = "a listener keeps its first pending connection /proc/net/unix lists (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        if (self.known)(ic) {'''
+new = '''        if (self.known)(ic) || ic != 0 {'''
+
+[[mutant]]
+name = "diag-done-read-on"
+rule = "NLMSG_DONE ends the dump (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''            Some(NLMSG_DONE) => return Step::Done,'''
+new = '''            Some(NLMSG_DONE) => {}'''
+
+[[mutant]]
+name = "diag-attributes-unaligned"
+rule = "each attribute starts at its predecessor's aligned end (RTA_NEXT, 56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/diag.rs"
+old = '''        let Some(next) = align4(len) else { break };
+        let Some(after) = attrs.get(next..) else {'''
+new = '''        let Some(next) = Some(len) else { break };
+        let Some(after) = attrs.get(next..) else {'''
+
+# ------------------------------------------------- 56: pseudoterminals
+
+[[mutant]]
+name = "pty-master-names-no-device"
+rule = "the master names `->/dev/pts/N` before the slave's first row (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                        first.text = Cow::Owned(format!("->/dev/pts/{n} {}", first.text));'''
+new = '''                        first.text = Cow::Owned(format!("{}", first.text));'''
+
+[[mutant]]
+name = "pty-side-not-told-apart"
+rule = "a master names the slave's rows and a slave the master's, never its own side (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                    .filter(|h| h.side == Some(want))'''
+new = '''                    .filter(|h| h.side.is_some() || want == Side::Slave)'''
+
+[[mutant]]
+name = "pty-master-keyed-by-its-minor"
+rule = "a master is keyed by its fdinfo's tty-index (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''                    return Some((Key::Pty(*index), Some(Side::Master)));'''
+new = '''                    let _ = index;
+                    return Some((Key::Pty(2), Some(Side::Master)));'''
+
+[[mutant]]
+name = "pty-one-slave-major"
+rule = "every Unix98 slave major, 136 to 143, is a slave (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''    (136..144).contains(&major)'''
+new = '''    (136..137).contains(&major)'''
+
+[[mutant]]
+name = "pty-index-not-read"
+rule = "the backend reads each master's tty-index for the core (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''                            ends.pty_index.insert((pid, tid, *n), index);'''
+new = '''                            let _ = (pid, tid, index);'''
+
+[[mutant]]
+name = "tty-index-past-int"
+rule = "a tty-index past the C's int is none (56)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                .filter(|&n| i32::try_from(n).is_ok());'''
+new = '''                .filter(|&n| n != u32::MAX);'''
+
+# ------------------------------------------------- 56: eventfds, mqueues
+
+[[mutant]]
+name = "eventfd-not-an-end"
+rule = "an eventfd names its other rows by its id (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        eventfd_id(f).map(|id| (Key::EventFd(id), None))'''
+new = '''        eventfd_id(f).and(None::<u32>).map(|id| (Key::EventFd(id), None))'''
+
+[[mutant]]
+name = "eventfd-id-past-int"
+rule = "an eventfd id past the C's int is none (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''    digits.parse::<u32>().ok().filter(|&n| n <= i32::MAX as u32)'''
+new = '''    digits.parse::<u32>().ok()'''
+
+[[mutant]]
+name = "mqueue-not-an-end"
+rule = "a row on the mqueue file system names its other rows (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/endpoints.rs"
+old = '''        if self.mqueue_device.is_some() && f.fs_device == self.mqueue_device {'''
+new = '''        if self.mqueue_device.is_some() && f.fs_device == self.mqueue_device && f.size == Some(1) {'''
+
+[[mutant]]
+name = "mqueue-device-not-handed-to-the-core"
+rule = "the core knows the mqueue file system the mount table recorded (56)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''                tables,
+                self.mqueue_device,'''
+new = '''                tables,
+                self.mqueue_device.filter(|_| false),'''
+
+# ------------------------------------------------- 92: the C's own words
+
+[[mutant]]
+name = "stand-ins-never-used"
+rule = "an option value that is not UTF-8 is read with stand-ins for its bytes (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    STAND_INS.with(|on| on.set(stand_ins_usable(&args)));'''
+new = '''    STAND_INS.with(|on| on.set(stand_ins_usable(&args) && args.is_empty()));'''
+
+[[mutant]]
+name = "stand-ins-beside-their-own-characters"
+rule = "no stand-ins where a word holds one of their characters as text (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if chunk.valid().chars().any(|c| byte_letter(c).is_some()) {
+                return false;'''
+new = '''            if chunk.valid().chars().any(|c| byte_letter(c).is_some()) && args.is_empty() {
+                return false;'''
+
+[[mutant]]
+name = "text-option-K-refuses"
+rule = "-K says the C's words about a value that is not UTF-8 (92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'K' | 'Z')'''
+new = '''                matches!(c, 'p' | 'g' | 's' | 'i' | 'T' | 'F' | 'x' | 'Z')'''
+
+[[mutant]]
+name = "stand-in-shown-as-a-character"
+rule = "a stand-in is shown as the byte it stands for, `\\xNN` (92, 122)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if STAND_INS.with(std::cell::Cell::get) && arg.chars().any(|c| byte_letter(c).is_some()) {'''
+new = '''    if STAND_INS.with(std::cell::Cell::get) && arg.chars().any(|c| byte_letter(c).is_some()) && arg.is_empty() {'''

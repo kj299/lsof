@@ -247,8 +247,12 @@ name = "inet-holders-first-first"
 rule = "a connection's peer's rows are named last met first (56)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/endpoints.rs"
-old = '''                .flat_map(|l| l.iter().rev())'''
-new = '''                .flat_map(|l| l.iter())'''
+old = '''                .and_then(|peer| self.sockets.get(&Key::Inet(*peer)))
+                .into_iter()
+                .flat_map(|l| l.iter().rev())'''
+new = '''                .and_then(|peer| self.sockets.get(&Key::Inet(*peer)))
+                .into_iter()
+                .flat_map(|l| l.iter())'''
 
 [[mutant]]
 name = "plus-c-0-prints-the-command"
@@ -358,12 +362,12 @@ name = "endpoint-text-escaped-twice"
 rule = "-E's text is stored printed, not escaped again (56)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/endpoints.rs"
-old = '''                f.add_printed_addition(&h.text);
+old = '''                f.add_printed_addition(&piece.text);
             }
         }
     }
     let Some(candidates)'''
-new = '''                f.add_name_addition(&h.text);
+new = '''                f.add_name_addition(&piece.text);
             }
         }
     }

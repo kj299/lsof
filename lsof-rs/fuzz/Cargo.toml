@@ -135,3 +135,10 @@ path = "fuzz_targets/freebsd_kinfo.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "netlink_diag"
+path = "fuzz_targets/netlink_diag.rs"
+test = false
+doc = false
+bench = false

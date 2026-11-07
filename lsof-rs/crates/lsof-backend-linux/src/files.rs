@@ -129,6 +129,10 @@ pub struct FdInfo {
     pub tfds: Vec<i64>,
     /// There were more than [`EPOLL_MAX_TFDS`] of them, so the list is cut.
     pub tfds_truncated: bool,
+    /// `tty-index:` on a pseudoterminal master, `/dev/ptmx`: the index of
+    /// its slave, `/dev/pts/N`, which `-E` names (DIVERGENCES 56). `None`
+    /// past the C's `int` (`dproc.c:536-541`).
+    pub tty_index: Option<u32>,
 }
 
 impl FdInfo {
@@ -159,6 +163,12 @@ fn access_from_flags(flags: u32) -> AccessMode {
     }
 }
 
+/// The `tty-index:` of descriptor `fd` of `base` (`/proc/PID` or a task's
+/// directory), where it is a pseudoterminal master (DIVERGENCES 56).
+pub fn tty_index(base: &str, fd: u64) -> Option<u32> {
+    fdinfo_for(base, &fd.to_string()).tty_index
+}
+
 /// The parsing half of [`fdinfo_for`], over the file's text. Pure, so the fuzz
 /// target can drive it with arbitrary bytes; must never panic.
 pub fn parse_fdinfo(info: &str) -> FdInfo {
@@ -173,6 +183,12 @@ pub fn parse_fdinfo(info: &str) -> FdInfo {
             out.pos = v.trim().parse::<u64>().ok();
         } else if let Some(v) = line.strip_prefix("eventfd-id:") {
             out.eventfd_id = v.trim().parse::<i64>().ok();
+        } else if let Some(v) = line.strip_prefix("tty-index:") {
+            out.tty_index = v
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| i32::try_from(n).is_ok());
         } else if let Some(v) = line.strip_prefix("Pid:") {
             out.pidfd_pid = v.trim().parse::<i64>().ok();
         } else if let Some(v) = line.strip_prefix("tfd:") {
@@ -1493,6 +1509,15 @@ mod tests {
             "anon_inode:3"
         );
         assert_eq!(name_for_target("anon_inode:[timerfd]", &none), "[timerfd]");
+        // A pseudoterminal master's slave index (DIVERGENCES 56), as the C's
+        // `int`: past it, none.
+        let tty = |s: &str| parse_fdinfo(s).tty_index;
+        assert_eq!(tty("pos:\t0\nflags:\t0102002\ntty-index:\t3\n"), Some(3));
+        assert_eq!(tty("tty-index:\t2147483647\n"), Some(i32::MAX as u32));
+        assert_eq!(tty("tty-index:\t2147483648\n"), None);
+        assert_eq!(tty("tty-index:\t-1\n"), None);
+        assert_eq!(tty("tty-index:\tx\n"), None);
+        assert_eq!(tty("pos:\t0\n"), None);
         // eventfd: the *id*, not the counter and not the fd number.
         let ev = parse_fdinfo("pos:\t0\neventfd-count:\t7\neventfd-id: 6\n");
         assert_eq!(name_for_target("anon_inode:[eventfd]", &ev), "[eventfd:6]");

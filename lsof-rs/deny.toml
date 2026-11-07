@@ -4,8 +4,9 @@
 #
 # The whole third-party dependency tree is the `windows-sys` family
 # (windows-sys -> windows-targets -> the per-arch import-lib shims), all
-# MIT OR Apache-2.0, and, for the Linux backend's one `getxattr(2)`
-# (DIVERGENCES 22, 2026-10-30), `rustix` pinned at =1.1.5 with `bitflags`
+# MIT OR Apache-2.0, and, for the Linux backend's `getxattr(2)`
+# (DIVERGENCES 22, 2026-10-30) and its `NETLINK_SOCK_DIAG` query for `-E`
+# (`net`, DIVERGENCES 56, 2026-11-06), `rustix` pinned at =1.1.5 with `bitflags`
 # and `linux-raw-sys` (and, for rustix's other targets only, `libc` and
 # `errno`), each MIT OR Apache-2.0 at least: rustix and linux-raw-sys are
 # `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`, which the allow

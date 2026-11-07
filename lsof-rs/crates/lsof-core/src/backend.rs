@@ -256,6 +256,15 @@ pub trait Backend {
         false
     }
 
+    /// What the last [`Backend::gather`] found beside the rows for
+    /// `-E`/`+E`, handed over once: each UNIX socket's peer and pending
+    /// connection, and each pseudoterminal master's index, which
+    /// [`Selection::apply_with`](crate::Selection::apply_with) names the
+    /// ends by. Empty where the backend reads none (DIVERGENCES 56).
+    fn take_endpoint_tables(&self) -> crate::EndpointTables {
+        crate::EndpointTables::default()
+    }
+
     /// Resolve a `-u` value the way the platform names users.
     ///
     /// The C does it with `getpwnam(3)` while it parses its options: a number
