@@ -290,6 +290,21 @@ pub trait Backend {
         }
     }
 
+    /// A host name's addresses of one IP version, `v6` or IPv4, for `-i
+    /// @name`: what the C's `gethostbyname2(3)` gives it, in its order
+    /// (DIVERGENCES 38). None for a name that names nothing, which is the
+    /// default: a backend with no resolver knows no host.
+    fn lookup_host(&self, _name: &[u8], _v6: bool) -> Vec<std::net::IpAddr> {
+        Vec::new()
+    }
+
+    /// A service name's port for a protocol (`tcp`, `udp`, `udplite`), for
+    /// `-i :name`: the C's `getservbyname(3)`. None for a name that names
+    /// nothing, the default.
+    fn lookup_service(&self, _name: &[u8], _protocol: &str) -> Option<u16> {
+        None
+    }
+
     /// Gather processes and their open files, already narrowed by `sel` where
     /// the backend can do so cheaply. The portable [`selection`](crate::selection)
     /// engine applies the authoritative filtering afterwards, so a backend may

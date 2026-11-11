@@ -124,6 +124,13 @@ pub struct HostChecks<'a> {
     /// walks it, its warnings among the parse's own lines (DIVERGENCES 82);
     /// if not, the walk waits for the run.
     pub identifies_paths: &'a dyn Fn() -> bool,
+    /// An `-i @name`'s addresses of one IP version, IPv6 (`true`) or IPv4,
+    /// looked up where it is read, as the C's `lkup_hostnm()` looks it up
+    /// ([`lsof_core::Backend::lookup_host`]); none for a name unknown.
+    pub lookup_host: &'a dyn Fn(&[u8], bool) -> Vec<IpAddr>,
+    /// An `-i :name`'s port for a protocol, the C's `getservbyname()`
+    /// ([`lsof_core::Backend::lookup_service`]).
+    pub lookup_service: &'a dyn Fn(&[u8], &str) -> Option<u16>,
 }
 
 impl HostChecks<'static> {
@@ -136,7 +143,20 @@ impl HostChecks<'static> {
         lookup_user: &kept_as_typed,
         selinux_enabled: &selinux_assumed,
         identifies_paths: &walk_deferred,
+        lookup_host: &no_host,
+        lookup_service: &no_service,
     };
+}
+
+/// [`HostChecks::DEFERRED`]'s host lookup: no name is known, and no
+/// resolver asked.
+fn no_host(_: &[u8], _: bool) -> Vec<IpAddr> {
+    Vec::new()
+}
+
+/// [`HostChecks::DEFERRED`]'s service lookup: no name is known.
+fn no_service(_: &[u8], _: &str) -> Option<u16> {
+    None
 }
 
 /// [`HostChecks::DEFERRED`]'s user lookup.
@@ -1503,7 +1523,7 @@ fn parse_options<'s>(
                     // bare `-i` and a file called `:80`. No spec is the bare
                     // form; an empty one (`-i ''`) is a spec, and incomplete.
                     let spec = optional_value(&chars, j, &args, &mut i);
-                    if let Err(e) = parse_inet(&mut sel, spec.as_deref()) {
+                    if let Err(e) = parse_inet(&mut sel, spec.as_deref(), host) {
                         early.fail(&e);
                     }
                     j = past_value(&chars, j);
@@ -1552,7 +1572,13 @@ fn parse_options<'s>(
                             early,
                         ),
                         Some(value) => {
-                            if let Err(e) = enter_command(&mut sel, &value) {
+                            // `main.c`: `if (GOv && (*GOv == '/'))` it is a
+                            // regular expression, and else a name.
+                            if value.as_encoded_bytes().starts_with(b"/") {
+                                for e in enter_command_regex(&mut sel, value.as_encoded_bytes()) {
+                                    early.line(&e);
+                                }
+                            } else if let Err(e) = enter_command(&mut sel, &value) {
                                 early.line(&e);
                             }
                         }
@@ -2539,19 +2565,11 @@ fn enter_command(sel: &mut Selection, value: &std::ffi::OsStr) -> Result<(), Str
     // Bytes, as the C compares a command (`strncmp()`): a name need not be
     // UTF-8 (DIVERGENCES 92).
     let bytes = value.as_encoded_bytes();
-    // `enter_cmd()`: a value that opens an option is a missing value, and one
-    // that opens with `/` is a regular expression (`main.c`: `if (GOv &&
-    // (*GOv == '/'))`). lsof-rs has no regex engine, and reading `/re/` as a
-    // literal command name matched nothing, silently — so it is refused,
-    // loudly, instead.
+    // `enter_cmd()`: a value that opens an option is a missing value. One
+    // that opens with `/` is a regular expression, which the caller hands
+    // to [`enter_command_regex`].
     if bytes.starts_with(b"-") || bytes.starts_with(b"+") {
         return Err("missing -c option value".to_string());
-    }
-    if bytes.starts_with(b"/") {
-        return Err(format!(
-            "-c {}: regular expressions (-c /RE/) are not implemented",
-            shown_bytes(bytes)
-        ));
     }
     let (excl, name) = match bytes.strip_prefix(b"^") {
         Some(b"") => return Err("option -c^ requires a name".to_string()),
@@ -2594,6 +2612,84 @@ fn enter_command(sel: &mut Selection, value: &std::ffi::OsStr) -> Result<(), Str
     }
     this.push(os_from_bytes(name.to_vec()));
     Ok(())
+}
+
+/// One `-c /regex/[bix]` value, as the C's `lsof_select_process_regex()`
+/// reads it (`lib/lsof.c:890-1063`): the expression runs to the next `/`,
+/// and what follows it is modifiers, `b` for a basic expression, `x` for an
+/// extended one (which it is with neither) and `i` to ignore case. The
+/// lines of every error it finds, the C's, each of which the parse reads on
+/// after; none when the expression was entered.
+///
+/// A modifier given twice is said once, as is `b` with `x`; every other
+/// letter is said each time, escaped where the C prints it raw (DIVERGENCES
+/// 122). An expression `regcomp()` refuses is refused with `regerror()`'s
+/// words for it ([`lsof_core::posix_regex`]; DIVERGENCES 38).
+fn enter_command_regex(sel: &mut Selection, value: &[u8]) -> Vec<String> {
+    let arg = shown_bytes(value);
+    let rest = value.get(1..).unwrap_or_default();
+    let Some(end) = rest.iter().position(|&b| b == b'/') else {
+        return vec![format!("regexp doesn't end with '/': {arg}")];
+    };
+    let (expression, modifiers) = rest.split_at(end);
+    let (mut bmod, mut imod, mut xmod, mut bxmod) = (0u32, 0u32, 0u32, 0u32);
+    let (mut extended, mut icase) = (true, false);
+    let mut errors = Vec::new();
+    let conflict = |bxmod: &mut u32, errors: &mut Vec<String>| {
+        *bxmod = bxmod.saturating_add(1);
+        if *bxmod == 1 {
+            errors.push(format!("b and x regexp modifiers conflict: {arg}"));
+        }
+    };
+    let again = |count: u32, letter: char, errors: &mut Vec<String>| {
+        if count == 2 {
+            errors.push(format!("{letter} regexp modifier already used: {arg}"));
+        }
+    };
+    for &m in modifiers.get(1..).unwrap_or_default() {
+        match m {
+            b'b' => {
+                bmod = bmod.saturating_add(1);
+                if bmod > 1 {
+                    again(bmod, 'b', &mut errors);
+                } else if xmod > 0 {
+                    conflict(&mut bxmod, &mut errors);
+                } else {
+                    extended = false;
+                }
+            }
+            b'i' => {
+                imod = imod.saturating_add(1);
+                if imod > 1 {
+                    again(imod, 'i', &mut errors);
+                } else {
+                    icase = true;
+                }
+            }
+            b'x' => {
+                xmod = xmod.saturating_add(1);
+                if xmod > 1 {
+                    again(xmod, 'x', &mut errors);
+                } else if bmod > 0 {
+                    conflict(&mut bxmod, &mut errors);
+                } else {
+                    extended = true;
+                }
+            }
+            other => errors.push(format!(
+                "invalid regexp modifier: {}",
+                shown_bytes(&[other])
+            )),
+        }
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
+    match lsof_core::posix_regex::CommandRegex::new(expression, extended, icase) {
+        Ok(regex) => sel.command_regexes.push(regex),
+        Err(e) => errors.push(format!("regexp error: {arg}: {}", e.text())),
+    }
+    errors
 }
 
 /// `-g`, with or without its value.
@@ -3151,7 +3247,11 @@ const MAXNWAD: usize = 100;
 /// Each message is the C's, quoting the spec as the C does, escaped
 /// ([`quoting`]), and the token in parentheses too, which the C prints raw
 /// (DIVERGENCES 112, 122).
-fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
+fn parse_inet(
+    sel: &mut Selection,
+    spec: Option<&str>,
+    checks: &HostChecks<'_>,
+) -> Result<(), String> {
     // `main.c:586-593`: no value, or one that opens an option, is `Fnet = 1;
     // FnetTy = 0`.
     let Some(spec) = spec else {
@@ -3162,8 +3262,11 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
     let unacceptable_port = || quoting("unacceptable port specification in: -i ", spec);
     let mut s = spec;
     let mut family = None;
+    // The C's `ft`: the version the spec itself gives.
+    let mut ft = None;
     if let Some(rest) = s.strip_prefix(['4', '6']) {
         family = Some(if s.starts_with('4') { 4 } else { 6 });
+        ft = family;
         if rest.is_empty() {
             sel.inet.add_all(family);
             return Ok(());
@@ -3171,9 +3274,12 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
         s = rest;
     } else if sel.inet.all {
         family = sel.inet.all_family;
+        ft = family;
     }
 
     let mut proto = None;
+    // The protocol as `getservbyname()` is given it: in lower case.
+    let mut proto_name = None;
     if !s.is_empty() && !s.starts_with(['@', ':']) {
         let end = s.find(['@', ':']).unwrap_or(s.len());
         let token = &s[..end];
@@ -3184,10 +3290,14 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
                 shown(spec)
             )
         })?);
+        proto_name = Some(token.to_ascii_lowercase());
         s = &s[end..];
     }
 
+    // The address the spec names: none, the one it writes, or a host name's
+    // (`n.af` and `n.a`, and the `hostent` they came from).
     let mut host = None;
+    let mut named: Option<NamedHost> = None;
     if let Some(after) = s.strip_prefix('@') {
         if after.is_empty() || after.starts_with(':') {
             return Err(unacceptable_address());
@@ -3219,7 +3329,36 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
             });
             s = &inner[close + 1..];
         } else {
-            return Err(quoting("host names are not resolved: -i ", spec) + " (give the address)");
+            // A host name, to the `:` or the end, looked up as the C looks
+            // it up (`arg.c:1403-1437`): with no version given, as an IPv6
+            // name first and, if that names nothing, as an IPv4 one; with a
+            // version, in it alone.
+            let end = after.find(':').unwrap_or(after.len());
+            let name = typed_bytes(&after[..end]);
+            let lookup = |v6: bool| (checks.lookup_host)(&name, v6);
+            let (v6, addresses) = match ft {
+                Some(4) => (false, lookup(false)),
+                Some(_) => (true, lookup(true)),
+                None => match lookup(true) {
+                    found if found.is_empty() => (false, lookup(false)),
+                    found => (true, found),
+                },
+            };
+            if addresses.is_empty() {
+                return Err(format!(
+                    "unknown host name ({}) in: -i {}",
+                    shown(&after[..end]),
+                    shown(spec)
+                ));
+            }
+            named = Some(NamedHost {
+                name,
+                v6,
+                // `lkup_hostnm()` copies the first address to `n.a`.
+                bytes: address_bytes(addresses.first()),
+                addresses,
+            });
+            s = &after[end..];
         }
     }
     // An all-zero address is no constraint at all to the C (`is_nw_addr()`
@@ -3229,8 +3368,12 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
 
     // What every earlier `-i` entered, in `enter_nwad()`'s units.
     let mut entries: usize = sel.inet.specs.iter().map(|s| s.ports.len().max(1)).sum();
-    let mut enter = |ports: &mut Vec<(u32, u32)>, range: Option<(u32, u32)>| {
-        if range.is_none() && proto.is_none() && host.is_none() {
+    // What this spec enters: an address (and the version it is held to),
+    // with the port entries entered for it. One for a spec with no host
+    // name; for one with a name, one for each address a port entry met.
+    let mut groups: Vec<InetGroup> = Vec::new();
+    let mut enter = |at: (Option<u8>, Option<IpAddr>), range: Option<(u32, u32)>| {
+        if range.is_none() && proto.is_none() && at.1.is_none() {
             return Err(quoting(
                 "incomplete Internet address specification: -i ",
                 spec,
@@ -3243,17 +3386,60 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
             ));
         }
         entries += 1;
-        ports.extend(range);
+        let i = match groups.iter().position(|g| g.at == at) {
+            Some(i) => i,
+            None => {
+                groups.push(InetGroup {
+                    at,
+                    ports: Vec::new(),
+                });
+                groups.len().saturating_sub(1)
+            }
+        };
+        if let Some(group) = groups.get_mut(i) {
+            group.ports.extend(range);
+        }
         Ok(())
     };
-    let mut ports = Vec::new();
+    // `nwad_enter` (`arg.c:1578-1600`): one port entry, or the spec with
+    // none, entered for the address or for each of the name's.
+    let mut enter_entry = |named: &mut Option<NamedHost>, range: Option<(u32, u32)>| {
+        let Some(named) = named.as_mut() else {
+            return enter((family, host), range);
+        };
+        loop {
+            // `enter_nwad()`: `n.a`, then the rest of the `hostent`'s.
+            enter(named.at(named.bytes), range)?;
+            for ip in named.addresses.iter().skip(1) {
+                enter(named.at(address_bytes(Some(ip))), range)?;
+            }
+            // A name that was looked up as an IPv6 name is then looked up
+            // as an IPv4 one, unless the spec is held to IPv6, and entered
+            // again if it is one. The spec stays an IPv4 one from there
+            // (`n.af = AF_INET`), with the IPv4 addresses for every later
+            // port entry; and with the IPv6 address's first four bytes for
+            // an IPv4 address when the name has none, since nothing writes
+            // `n.a` then. Both as the C has it, measured (DIVERGENCES 38).
+            if named.v6 && ft != Some(6) {
+                named.v6 = false;
+                named.addresses = (checks.lookup_host)(&named.name, false);
+                if let Some(first) = named.addresses.first() {
+                    named.bytes = address_bytes(Some(first));
+                    continue;
+                }
+            }
+            return Ok(());
+        }
+    };
     if s.is_empty() {
-        enter(&mut ports, None)?;
+        enter_entry(&mut named, None)?;
     } else {
         let list = match s.strip_prefix(':') {
-            Some(list) if !list.is_empty() => list.as_bytes(),
+            Some(list) if !list.is_empty() => list,
             _ => return Err(unacceptable_port()),
         };
+        let text = list;
+        let list = list.as_bytes();
         // `arg.c:1461-1580`, one entry a pass. A port's digits saturate
         // where the C's `int` wraps (DIVERGENCES 121).
         let mut at = 0;
@@ -3262,13 +3448,27 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
             // The entry's start, and after a `-` the range's end.
             while let Some(&c) = list.get(at) {
                 if !c.is_ascii_digit() {
-                    // A service name runs to the next `,` and may hold a `-`:
-                    // none at all is the C's `invalid service name`.
-                    if c == b',' {
+                    // A service name runs to the next `,` and may hold a `-`,
+                    // so it cannot open a range, but it can end one
+                    // (`:1-http`); none at all is the C's `invalid service
+                    // name`.
+                    let name_end = list
+                        .get(at..)
+                        .and_then(|l| l.iter().position(|&b| b == b','))
+                        .map_or(list.len(), |i| at.saturating_add(i));
+                    if name_end == at {
                         return Err(quoting("invalid service name: -i ", spec));
                     }
-                    return Err(quoting("service names are not resolved: -i ", spec)
-                        + " (give the port number)");
+                    // A `,` is one byte, so this splits between characters.
+                    let name = text.get(at..name_end).unwrap_or_default();
+                    let port = service_port(checks, name, proto_name.as_deref(), spec)?;
+                    if range {
+                        end = port;
+                    } else {
+                        start = port;
+                    }
+                    at = name_end;
+                    break;
                 }
                 while let Some(&c) = list.get(at) {
                     match c {
@@ -3298,21 +3498,120 @@ fn parse_inet(sel: &mut Selection, spec: Option<&str>) -> Result<(), String> {
             if end < start {
                 return Err(unacceptable_port());
             }
-            enter(&mut ports, Some((start, end)))?;
+            enter_entry(&mut named, Some((start, end)))?;
             // Past the `,` that ended the entry: a trailing one ends the list.
             at += 1;
         }
     }
 
     sel.inet.enabled = true;
-    sel.inet.specs.push(lsof_core::InetSpec {
-        text: spec.to_string(),
-        proto,
-        family,
-        ports,
-        host,
-    });
+    for group in groups {
+        sel.inet.specs.push(lsof_core::InetSpec {
+            text: spec.to_string(),
+            proto,
+            family: group.at.0,
+            ports: group.ports,
+            host: group.at.1,
+        });
+    }
     Ok(())
+}
+
+/// What one `-i` spec enters for one address: the IP version it is held
+/// to and the address, if any, and its port entries.
+struct InetGroup {
+    at: (Option<u8>, Option<IpAddr>),
+    ports: Vec<(u32, u32)>,
+}
+
+/// An `-i @name` as the C holds it between its port entries: the name, the
+/// family it stands in (`n.af`), the address bytes in `n.a`, and the
+/// addresses of the `hostent` it last looked up.
+struct NamedHost {
+    name: Vec<u8>,
+    v6: bool,
+    bytes: [u8; 16],
+    addresses: Vec<IpAddr>,
+}
+
+impl NamedHost {
+    /// `bytes` as the address the C compares in this family, which holds
+    /// the entry to its IP version (`if (af && n->af && af != n->af)`): all
+    /// sixteen for IPv6, the first four for IPv4; none when they are all
+    /// zero, which compares with nothing.
+    fn at(&self, bytes: [u8; 16]) -> (Option<u8>, Option<IpAddr>) {
+        if self.v6 {
+            let ip = Ipv6Addr::from(bytes);
+            (Some(6), (!ip.is_unspecified()).then_some(IpAddr::V6(ip)))
+        } else {
+            let [a, b, c, d, ..] = bytes;
+            let ip = Ipv4Addr::new(a, b, c, d);
+            (Some(4), (!ip.is_unspecified()).then_some(IpAddr::V4(ip)))
+        }
+    }
+}
+
+/// An address as the C's `n.a` holds it: its bytes, and zeros after an
+/// IPv4 address's four.
+fn address_bytes(ip: Option<&IpAddr>) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    match ip {
+        Some(IpAddr::V4(v4)) => {
+            for (to, from) in bytes.iter_mut().zip(v4.octets()) {
+                *to = from;
+            }
+        }
+        Some(IpAddr::V6(v6)) => bytes = v6.octets(),
+        None => {}
+    }
+    bytes
+}
+
+/// A service name's port, as `enter_network_address()` asks for it
+/// (`arg.c:1494-1537`): for the spec's protocol if it names one, and else
+/// for TCP and for UDP, which must agree where both know the name. The
+/// errors are the C's, the names escaped where it prints them raw
+/// (DIVERGENCES 122).
+fn service_port(
+    checks: &HostChecks<'_>,
+    name: &str,
+    protocol: Option<&str>,
+    spec: &str,
+) -> Result<u32, String> {
+    let bytes = typed_bytes(name);
+    let lookup = |protocol: &str| (checks.lookup_service)(&bytes, protocol);
+    if let Some(protocol) = protocol {
+        return lookup(protocol).map(u32::from).ok_or_else(|| {
+            format!(
+                "unknown service {} for {protocol} in: -i {}",
+                shown(name),
+                shown(spec)
+            )
+        });
+    }
+    match (lookup("tcp"), lookup("udp")) {
+        (None, None) => Err(format!(
+            "unknown service {} in: -i {}",
+            shown(name),
+            shown(spec)
+        )),
+        (Some(tcp), Some(udp)) if tcp != udp => Err(format!(
+            "TCP={tcp} and UDP={udp} {name} ports conflict;\n      specify \"tcp:{name}\" or \"udp:{name}\": -i {}",
+            shown(spec),
+            name = shown(name),
+        )),
+        (Some(port), _) | (None, Some(port)) => Ok(u32::from(port)),
+    }
+}
+
+/// The bytes an argument read as text was typed as: where the parse read
+/// the words that are not UTF-8 with stand-ins, each stand-in its byte.
+fn typed_bytes(text: &str) -> Vec<u8> {
+    if STAND_INS.with(std::cell::Cell::get) {
+        stand_in_bytes(text)
+    } else {
+        text.as_bytes().to_vec()
+    }
 }
 
 /// An `-i` protocol, as the C compares it: the whole word, in any case
@@ -3866,9 +4165,10 @@ mod tests {
     }
 
     /// `-c`'s argument rules, each measured against the C: a value that opens
-    /// an option is missing, one that opens with `/` is a regex (refused, not
-    /// read literally), a name the kernel could never hold is refused, and the
-    /// same name selected and excluded is a conflict.
+    /// an option is missing, one that opens with `/` is a regular expression
+    /// ([`dash_c_reads_a_regular_expression_as_the_c_reads_it`]), a name the
+    /// kernel could never hold is refused, and the same name selected and
+    /// excluded is a conflict.
     #[test]
     fn dash_c_refuses_what_could_never_match() {
         let err = |argv: &[&str]| parse(argv.iter().map(|s| s.to_string()).collect()).err();
@@ -3876,7 +4176,7 @@ mod tests {
             err(&["-c", "-p"]).as_deref(),
             Some("missing -c option value")
         );
-        assert!(err(&["-c", "/pyt/"]).is_some_and(|e| e.contains("not implemented")));
+        assert_eq!(err(&["-c", "/pyt/"]), None);
         assert_eq!(
             err(&["-c", "sleep", "-c", "^sleep"]).as_deref(),
             Some("-c^sleep and -csleep conflict.")
@@ -4098,39 +4398,485 @@ mod tests {
         }
     }
 
-    /// What the C resolves and lsof-rs does not is refused rather than
-    /// matched wrongly: `-i:http` had listed every Internet file. A host name
-    /// is any address that is not the C's own IPv4 or bracketed IPv6 form,
-    /// numeric shorthand glibc reads without DNS included (DIVERGENCES 38).
+    /// What [`dash_c_reads_a_regular_expression_as_the_c_reads_it`] asks of
+    /// each expression it enters.
+    fn dash_c_regular_expressions_match(matches: &dyn Fn(&[&str], &str) -> bool) {
+        // Extended by default and under `x`; basic under `b`.
+        assert!(matches(&["-c", "/x+y/"], "xxy"));
+        assert!(!matches(&["-c", "/x+y/"], "x+y"));
+        assert!(matches(&["-c", "/x+y/x"], "xxy"));
+        assert!(matches(&["-c", "/x+y/b"], "x+y"));
+        assert!(!matches(&["-c", "/x+y/b"], "xxy"));
+        assert!(matches(&["-c", r"/a\(b\)/"], "a(b)"));
+        assert!(matches(&["-c", r"/a\(b\)/b"], "ab"));
+        // `i` ignores case, alone or with either.
+        assert!(!matches(&["-c", "/abc/"], "ABC"));
+        assert!(matches(&["-c", "/abc/i"], "ABC"));
+        assert!(matches(&["-c", "/abc/ib"], "ABC"));
+        assert!(matches(&["-c", "/abc/xi"], "ABC"));
+        // Anywhere in the command, unless anchored; the empty expression
+        // matches every command.
+        assert!(matches(&["-c", "/ytho/"], "python3"));
+        assert!(!matches(&["-c", "/^ytho/"], "python3"));
+        assert!(matches(&["-c", "//"], "anything"));
+        assert!(matches(&["-c", "//b"], ""));
+    }
+
+    /// `-c /regex/[bix]` (DIVERGENCES 38), each measured against the C: the
+    /// expression runs to the next `/`, extended unless `b` follows it, and
+    /// every error is the C's, the parse reading on after each.
     #[test]
-    fn names_the_c_would_resolve_are_refused() {
+    fn dash_c_reads_a_regular_expression_as_the_c_reads_it() {
+        let regexes = |argv: &[&str]| run(argv).0.command_regexes;
+        let matches = |argv: &[&str], command: &str| {
+            regexes(argv).iter().any(|r| r.is_match(command.as_bytes()))
+        };
+        assert_eq!(regexes(&["-c", "/a.c/"]).len(), 1);
+        assert_eq!(regexes(&["-c", "/a.c/"])[0].expression(), b"a.c");
+        assert_eq!(regexes(&["-c/a/", "-c", "/b/i", "-c", "//"]).len(), 3);
+        // A regular expression is no name, and a name no expression.
+        assert!(run(&["-c", "/a.c/"]).0.commands.is_empty());
+        assert!(run(&["-c", "a.c"]).0.command_regexes.is_empty());
+        // Under miri, which interprets the engine's compiler, the table of
+        // matches is `lsof-core`'s sample to run.
+        if !cfg!(miri) {
+            dash_c_regular_expressions_match(&matches);
+        }
+
+        let err = |argv: &[&str]| {
+            parse(argv.iter().map(|s| s.to_string()).collect())
+                .err()
+                .unwrap_or_default()
+        };
+        for (value, want) in [
+            ("/abc", "regexp doesn't end with '/': /abc"),
+            ("/", "regexp doesn't end with '/': /"),
+            ("/abc/q", "invalid regexp modifier: q"),
+            ("/abc/b/", "invalid regexp modifier: /"),
+            (
+                "/a/ibq1",
+                "invalid regexp modifier: q\nlsof: invalid regexp modifier: 1",
+            ),
+            // Said once, however often it is given.
+            ("/a/bb", "b regexp modifier already used: /a/bb"),
+            ("/a/bbb", "b regexp modifier already used: /a/bbb"),
+            ("/a/ii", "i regexp modifier already used: /a/ii"),
+            ("/a/xx", "x regexp modifier already used: /a/xx"),
+            ("/a/xb", "b and x regexp modifiers conflict: /a/xb"),
+            ("/a/bx", "b and x regexp modifiers conflict: /a/bx"),
+            (
+                "/a/bxbx",
+                "b and x regexp modifiers conflict: /a/bxbx\n\
+                 lsof: b regexp modifier already used: /a/bxbx\n\
+                 lsof: x regexp modifier already used: /a/bxbx",
+            ),
+            (
+                "/a/xxbb",
+                "x regexp modifier already used: /a/xxbb\n\
+                 lsof: b and x regexp modifiers conflict: /a/xxbb\n\
+                 lsof: b regexp modifier already used: /a/xxbb",
+            ),
+            // A modifier's error comes before the expression is compiled.
+            ("/a[/q", "invalid regexp modifier: q"),
+            // `regerror()`'s words, after the argument as typed.
+            ("/a[/", "regexp error: /a[/: Invalid regular expression"),
+            ("/[a/", "regexp error: /[a/: Unmatched [, [^, [:, [., or [="),
+            ("/a(/", r"regexp error: /a(/: Unmatched ( or \("),
+            (
+                "/*a/",
+                "regexp error: /*a/: Invalid preceding regular expression",
+            ),
+            ("/a{1/", r"regexp error: /a{1/: Unmatched \{"),
+            (
+                "/a{2,1}/",
+                r"regexp error: /a{2,1}/: Invalid content of \{\}",
+            ),
+            (
+                "/a{99999}/",
+                "regexp error: /a{99999}/: Regular expression too big",
+            ),
+            (
+                "/[[:foo:]]/",
+                "regexp error: /[[:foo:]]/: Invalid character class name",
+            ),
+            ("/[b-a]/", "regexp error: /[b-a]/: Invalid range end"),
+            (
+                "/[[.ab.]]/",
+                "regexp error: /[[.ab.]]/: Invalid collation character",
+            ),
+            // The argument is escaped, as `safestrprt()` escapes it; a
+            // modifier too, which the C prints raw (DIVERGENCES 122).
+            (
+                "/\x1b[2J[/",
+                "regexp error: /^[[2J[/: Unmatched [, [^, [:, [., or [=",
+            ),
+            ("/a/\x1b", "invalid regexp modifier: ^["),
+            (
+                "/a/\u{e9}",
+                "invalid regexp modifier: \\xc3\nlsof: invalid regexp modifier: \\xa9",
+            ),
+        ] {
+            assert_eq!(err(&["-c", value]), want, "{value}");
+        }
+        // An argument that holds a backslash, which the host's escaping
+        // doubles where a backslash is no path separator (`safestrprt()`).
+        let shown = |value: &str| Escaper::for_host().text(value).into_owned();
+        assert_eq!(shown(r"a\b"), if cfg!(windows) { r"a\b" } else { r"a\\b" });
+        for (value, want) in [
+            (r"/a\(/b", r"Unmatched ( or \("),
+            (r"/a\)/b", r"Unmatched ( or \("),
+            (r"/a\{1/b", r"Unmatched \{"),
+            (r"/\1/", "Invalid back reference"),
+            (r"/a\/", "Trailing backslash"),
+            // What glibc takes and the engine cannot: lsof-rs's own words.
+            (r"/(a)\1/", "back references are not supported"),
+            (r"/\(a\)\1/b", "back references are not supported"),
+        ] {
+            assert_eq!(
+                err(&["-c", value]),
+                format!("regexp error: {}: {want}", shown(value)),
+                "{value}"
+            );
+        }
+        // The parse reads on after each, as after every `-c` error, and
+        // what was entered before it stays.
+        assert_eq!(
+            err(&["-c", "/a/", "-c", "/[/", "-c", "/b/q", "-x", "q"]),
+            "regexp error: /[/: Invalid regular expression\n\
+             lsof: invalid regexp modifier: q\n\
+             lsof: unknown cross-over option: q"
+        );
+    }
+
+    /// `-c /regex/` as bytes: an expression need not be UTF-8, and a byte of
+    /// it that is no character is shown `\xNN` (measured).
+    #[cfg(unix)]
+    #[test]
+    fn dash_c_reads_a_regular_expression_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        let (sel, _) = match parse(vec![os(b"-c"), os(b"/bad\xffbyte/")]).unwrap() {
+            Action::Run {
+                selection, format, ..
+            } => (selection, format),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(sel.command_regexes[0].expression(), b"bad\xffbyte");
+        assert!(sel.command_regexes[0].is_match(b"bad\xffbyte"));
+        assert!(!sel.command_regexes[0].is_match(b"bad-byte"));
+        assert_eq!(
+            parse(vec![os(b"-c"), os(b"/\xffa[/")]).unwrap_err(),
+            "regexp error: /\\xffa[/: Invalid regular expression"
+        );
+        assert_eq!(
+            parse(vec![os(b"-c"), os(b"/a/\xff")]).unwrap_err(),
+            "invalid regexp modifier: \\xff"
+        );
+    }
+
+    /// A name no host knows is unknown, in the C's words (DIVERGENCES 38):
+    /// the parse with no host asked knows none, as the C on a host whose
+    /// files and name servers hold none (each measured there). The names
+    /// are escaped, where the C prints them raw (122).
+    #[test]
+    fn names_no_host_knows_are_unknown_in_the_cs_words() {
         let err = |a: &str| parse(vec![a.to_string()]).err().unwrap_or_default();
-        for spec in [
-            ":http", "TCP:http", ":1-http", ":-1", ":1--2", ":x-y", ":80,http",
+        for (spec, name) in [
+            (":http", "http"),
+            (":1-http", "http"),
+            // A `-` is part of a name, so a name opens no range.
+            (":-1", "-1"),
+            (":1--2", "-2"),
+            (":x-y", "x-y"),
+            (":http-90", "http-90"),
+            (":80,http", "http"),
+            (":a\x1b[2J", "a^[[2J"),
         ] {
             assert_eq!(
                 err(&format!("-i{spec}")),
-                format!("service names are not resolved: -i {spec} (give the port number)")
+                format!(
+                    "unknown service {name} in: -i {}",
+                    spec.replace('\x1b', "^[")
+                ),
             );
         }
-        for spec in [
-            "@localhost",
-            "@127.1",
-            "@1.2.3",
-            "@1.2.3.4x",
-            "@1.2.3.256",
-            "@0x7f.0.0.1",
+        assert_eq!(
+            err("-iTCP:http"),
+            "unknown service http for tcp in: -i TCP:http"
+        );
+        assert_eq!(
+            err("-iudplite:http,1"),
+            "unknown service http for udplite in: -i udplite:http,1"
+        );
+        for (spec, name) in [
+            ("@localhost", "localhost"),
+            ("@localhost:80", "localhost"),
+            ("4@localhost", "localhost"),
+            ("6tcp@localhost", "localhost"),
+            ("@1.2.3.4x", "1.2.3.4x"),
+            ("@1.2.3.256", "1.2.3.256"),
+            ("@0x7f.0.0.1", "0x7f.0.0.1"),
+            ("@h\x1b[2J.invalid", "h^[[2J.invalid"),
         ] {
             assert_eq!(
                 err(&format!("-i{spec}")),
-                format!("host names are not resolved: -i {spec} (give the address)")
+                format!(
+                    "unknown host name ({name}) in: -i {}",
+                    spec.replace('\x1b', "^[")
+                )
             );
         }
+        // The host is looked up before the ports are read, and the entries
+        // of a port list from left to right.
+        assert_eq!(
+            err("-i@nosuch:1x"),
+            "unknown host name (nosuch) in: -i @nosuch:1x"
+        );
+        assert_eq!(
+            err("-i:1x,nosuch"),
+            "unacceptable port specification in: -i :1x,nosuch"
+        );
+        assert_eq!(
+            err("-i:nosuch,1x"),
+            "unknown service nosuch in: -i :nosuch,1x"
+        );
         // Accepted now, as the C accepts it: a port is the C's `int`.
         assert!(err("-i:70000").is_empty());
         assert_eq!(err("-i:9-1"), "unacceptable port specification in: -i :9-1");
         assert_eq!(err("-iSCTP"), "unknown protocol name (SCTP) in: -i SCTP");
         assert_eq!(err("-i@[::1"), "unacceptable Internet address in: -i @[::1");
+    }
+
+    /// `-i @name` on a host that knows the name (DIVERGENCES 38), as the
+    /// C's `enter_network_address()` enters it, each measured there through
+    /// its address limit and the sockets it lists: looked up as an IPv6 name
+    /// and, with no version given, as an IPv4 one too; every address the
+    /// lookup gives is an entry; and from the second port entry on, the
+    /// IPv4 addresses alone.
+    #[test]
+    fn dash_i_enters_a_host_names_addresses_as_the_c_enters_them() {
+        /// A spec's version, address and port entries.
+        type Entered = (Option<u8>, Option<String>, Vec<(u32, u32)>);
+        let specs = |argv: &[&str]| -> Vec<Entered> {
+            match parse_on_host(argv, false).unwrap() {
+                Action::Run { selection, .. } => selection
+                    .inet
+                    .specs
+                    .into_iter()
+                    .map(|s| {
+                        assert_eq!(s.text, argv[1]);
+                        (s.family, s.host.map(|h| h.to_string()), s.ports)
+                    })
+                    .collect(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let at = |family: u8, host: &str, ports: &[(u32, u32)]| {
+            (
+                Some(family),
+                (!host.is_empty()).then(|| host.to_string()),
+                ports.to_vec(),
+            )
+        };
+        assert_eq!(specs(&["-i", "@two"]), [at(4, "127.0.0.2", &[])]);
+        assert_eq!(
+            specs(&["-i", "tcp@two:80"]),
+            [at(4, "127.0.0.2", &[(80, 80)])]
+        );
+        assert_eq!(
+            specs(&["-i", "@dual"]),
+            [
+                at(6, "::1", &[]),
+                at(4, "127.0.0.2", &[]),
+                at(4, "127.0.0.1", &[])
+            ]
+        );
+        assert_eq!(
+            specs(&["-i", "4@dual"]),
+            [at(4, "127.0.0.2", &[]), at(4, "127.0.0.1", &[])]
+        );
+        assert_eq!(specs(&["-i", "6@dual"]), [at(6, "::1", &[])]);
+        // The IPv6 address for the first port entry alone.
+        assert_eq!(
+            specs(&["-i", "@dual:1,2-3,4"]),
+            [
+                at(6, "::1", &[(1, 1)]),
+                at(4, "127.0.0.2", &[(1, 1), (2, 3), (4, 4)]),
+                at(4, "127.0.0.1", &[(1, 1), (2, 3), (4, 4)])
+            ]
+        );
+        // Held to IPv6, it stays an IPv6 name for every entry.
+        assert_eq!(
+            specs(&["-i", "6@dual:1,2"]),
+            [at(6, "::1", &[(1, 1), (2, 2)])]
+        );
+        // A name with no IPv4 address is, from the second port entry on,
+        // an IPv4 one all the same, of the IPv6 address's first four bytes:
+        // `fe80::1` is 254.128.0.0, and `::5` no address at all, so any
+        // IPv4 one (measured: `-i @sixz:1,18080` lists 127.0.0.1:18080).
+        assert_eq!(specs(&["-i", "@six3"]), [at(6, "fe80::1", &[])]);
+        assert_eq!(
+            specs(&["-i", "@six3:1,2,3"]),
+            [
+                at(6, "fe80::1", &[(1, 1)]),
+                at(4, "254.128.0.0", &[(2, 2), (3, 3)])
+            ]
+        );
+        assert_eq!(
+            specs(&["-i", "@sixz:1,2"]),
+            [at(6, "::5", &[(1, 1)]), at(4, "", &[(2, 2)])]
+        );
+        assert_eq!(
+            specs(&["-i", "@sixj:1,2"]),
+            [at(6, "7f00:2::", &[(1, 1)]), at(4, "127.0.0.2", &[(2, 2)])]
+        );
+        // The address that is none is no address, but holds the entry to
+        // its version; with nothing else it is no specification.
+        assert_eq!(specs(&["-i", "tcp@zero"]), [at(4, "", &[])]);
+        assert_eq!(specs(&["-i", "@zero:9"]), [at(4, "", &[(9, 9)])]);
+        let err = |argv: &[&str]| parse_on_host(argv, false).err().unwrap_or_default();
+        assert_eq!(
+            err(&["-i", "@zero"]),
+            "incomplete Internet address specification: -i @zero"
+        );
+        // A name of the other version alone is unknown.
+        assert_eq!(
+            err(&["-i", "6@two"]),
+            "unknown host name (two) in: -i 6@two"
+        );
+        assert_eq!(
+            err(&["-i", "4@six3"]),
+            "unknown host name (six3) in: -i 4@six3"
+        );
+        // The version a bare form lends holds a name too.
+        assert_eq!(
+            err(&["-i6", "-i", "@two"]),
+            "unknown host name (two) in: -i @two"
+        );
+        // Each address of each port entry is one of the hundred the C
+        // allows: `@dual:1,2` is five, so the twentieth is the 100th, and
+        // the twenty-first's first is refused.
+        let mut argv = Vec::new();
+        for _ in 0..20 {
+            argv.extend(["-i", "@dual:1,2"]);
+        }
+        assert!(parse_on_host(&argv, false).is_ok());
+        argv.extend(["-i", "@two"]);
+        assert_eq!(err(&argv), "network address limit (100) exceeded: -i @two");
+        argv.truncate(40);
+        argv.extend(["-i", "@dual"]);
+        assert_eq!(err(&argv), "network address limit (100) exceeded: -i @dual");
+    }
+
+    /// `-i :name` on a host that knows the name, as the C's
+    /// `getservbyname()` calls resolve it (measured over a services file
+    /// bound over `/etc/services`).
+    #[test]
+    fn dash_i_resolves_a_service_name_as_the_c_resolves_it() {
+        let ports = |argv: &[&str]| match parse_on_host(argv, false).unwrap() {
+            Action::Run { selection, .. } => selection
+                .inet
+                .specs
+                .into_iter()
+                .flat_map(|s| s.ports)
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        let err = |argv: &[&str]| parse_on_host(argv, false).err().unwrap_or_default();
+        assert_eq!(ports(&["-i", ":http"]), [(80, 80)]);
+        assert_eq!(ports(&["-i", "TCP:http"]), [(80, 80)]);
+        assert_eq!(ports(&["-i", "udp:http"]), [(80, 80)]);
+        // For the spec's protocol alone, if it names one.
+        assert_eq!(ports(&["-i", "tcp:both"]), [(81, 81)]);
+        assert_eq!(ports(&["-i", "UDP:both"]), [(82, 82)]);
+        assert_eq!(ports(&["-i", "udplite:lite"]), [(86, 86)]);
+        assert_eq!(
+            err(&["-i", "tcp:uonly"]),
+            "unknown service uonly for tcp in: -i tcp:uonly"
+        );
+        assert_eq!(
+            err(&["-i", "UDPLITE:http"]),
+            "unknown service http for udplite in: -i UDPLITE:http"
+        );
+        // With none, for TCP and for UDP, which must agree where both know
+        // it; either alone will do.
+        assert_eq!(ports(&["-i", ":tonly"]), [(83, 83)]);
+        assert_eq!(ports(&["-i", ":uonly"]), [(84, 84)]);
+        assert_eq!(
+            err(&["-i", ":both"]),
+            "TCP=81 and UDP=82 both ports conflict;\n      specify \"tcp:both\" or \"udp:both\": -i :both"
+        );
+        assert_eq!(err(&["-i", ":lite"]), "unknown service lite in: -i :lite");
+        // Compared exactly.
+        assert_eq!(err(&["-i", ":HTTP"]), "unknown service HTTP in: -i :HTTP");
+        // A name runs to the `,`, its `-` included: it can end a range
+        // and cannot open one.
+        assert_eq!(ports(&["-i", ":da-sh"]), [(85, 85)]);
+        assert_eq!(ports(&["-i", ":1-da-sh"]), [(1, 85)]);
+        assert_eq!(ports(&["-i", ":80-http"]), [(80, 80)]);
+        assert_eq!(
+            err(&["-i", ":da-sh-90"]),
+            "unknown service da-sh-90 in: -i :da-sh-90"
+        );
+        assert_eq!(
+            err(&["-i", ":81-http"]),
+            "unacceptable port specification in: -i :81-http"
+        );
+        // In a list, with numbers, entry by entry.
+        assert_eq!(
+            ports(&["-i", ":http,tonly,9,1-da-sh,"]),
+            [(80, 80), (83, 83), (9, 9), (1, 85)]
+        );
+        assert_eq!(
+            err(&["-i", ":http,,tonly"]),
+            "invalid service name: -i :http,,tonly"
+        );
+        assert_eq!(
+            err(&["-i", ":http,nosuch"]),
+            "unknown service nosuch in: -i :http,nosuch"
+        );
+        // With a host name beside it.
+        assert_eq!(ports(&["-i", "@two:http"]), [(80, 80)]);
+    }
+
+    /// A host or service name that is not UTF-8 is looked up as the bytes
+    /// typed, and shown `\xNN` where the C prints it raw (DIVERGENCES 92,
+    /// 38: `unknown service \xff for tcp in: -i TCP:\xff`, measured).
+    #[cfg(unix)]
+    #[test]
+    fn dash_i_looks_a_name_that_is_not_utf8_up_as_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        let on_host = |argv: Vec<OsString>| {
+            let host = HostChecks {
+                lookup_host: &named_hosts,
+                lookup_service: &named_services,
+                ..HostChecks::DEFERRED
+            };
+            parse_with_host(argv, &SafeFs::in_process(), &no_mounts, &host)
+        };
+        let spec = |argv: Vec<OsString>| match on_host(argv).unwrap() {
+            Action::Run { selection, .. } => selection.inet.specs.into_iter().next().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        let s = spec(vec![os(b"-i"), os(b"@bad\xffhost")]);
+        assert_eq!(s.host, Some("127.0.0.9".parse().unwrap()));
+        let s = spec(vec![os(b"-i"), os(b"tcp:s\xffvc")]);
+        assert_eq!(s.ports, [(87, 87)]);
+        for (argv, want) in [
+            (
+                &b"TCP:\xff"[..],
+                "unknown service \\xff for tcp in: -i TCP:\\xff",
+            ),
+            (b":\xff", "unknown service \\xff in: -i :\\xff"),
+            (b"@\xff", "unknown host name (\\xff) in: -i @\\xff"),
+            (
+                b"@caf\xc3\xa9\xff:1",
+                "unknown host name (caf\u{e9}\\xff) in: -i @caf\u{e9}\\xff:1",
+            ),
+        ] {
+            assert_eq!(on_host(vec![os(b"-i"), os(argv)]).unwrap_err(), want);
+        }
     }
 
     /// Every `-i` refusal in the C's words, each measured against the C 4.99.6
@@ -4199,11 +4945,11 @@ mod tests {
             // host name (DIVERGENCES 121).
             (
                 "@4294967297.0.0.1",
-                "host names are not resolved: -i @4294967297.0.0.1 (give the address)".into(),
+                "unknown host name (4294967297.0.0.1) in: -i @4294967297.0.0.1".into(),
             ),
             (
                 "@99999999999.0.0.1",
-                "host names are not resolved: -i @99999999999.0.0.1 (give the address)".into(),
+                "unknown host name (99999999999.0.0.1) in: -i @99999999999.0.0.1".into(),
             ),
             (":1-,5", "invalid service name: -i :1-,5".into()),
             ("", "incomplete Internet address specification: -i ".into()),
@@ -4231,13 +4977,10 @@ mod tests {
                 "a\x1b[2J",
                 "unknown protocol name (a^[[2J) in: -i a^[[2J".into(),
             ),
-            (
-                ":a\x1b[2J",
-                "service names are not resolved: -i :a^[[2J (give the port number)".into(),
-            ),
+            (":a\x1b[2J", "unknown service a^[[2J in: -i :a^[[2J".into()),
             (
                 "@h\x1b[2J.invalid",
-                "host names are not resolved: -i @h^[[2J.invalid (give the address)".into(),
+                "unknown host name (h^[[2J.invalid) in: -i @h^[[2J.invalid".into(),
             ),
         ] {
             assert_eq!(err(&["-i", spec]), want, "{spec:?}");
@@ -6173,6 +6916,41 @@ mod tests {
         }
     }
 
+    /// The host names [`parse_on_host`]'s host knows, as a hosts file under
+    /// `multi on` gives them to the C (each measured there, DIVERGENCES 38):
+    /// `two` IPv4 alone, `dual` both and two of IPv4, `six3` and `sixz` IPv6
+    /// alone, `zero` the address that is none.
+    fn named_hosts(name: &[u8], v6: bool) -> Vec<IpAddr> {
+        let ips = |all: &[&str]| all.iter().map(|ip| ip.parse().unwrap()).collect();
+        match (name, v6) {
+            (b"two", false) => ips(&["127.0.0.2"]),
+            (b"dual", true) => ips(&["::1"]),
+            (b"dual", false) => ips(&["127.0.0.2", "127.0.0.1"]),
+            (b"six3", true) => ips(&["fe80::1"]),
+            (b"sixz", true) => ips(&["::5"]),
+            (b"sixj", true) => ips(&["7f00:2::"]),
+            (b"zero", false) => ips(&["0.0.0.0"]),
+            (b"bad\xffhost", false) => ips(&["127.0.0.9"]),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The services it knows: `http` for both protocols, `both` on two
+    /// ports, one for each protocol alone, and one with a `-` in its name.
+    fn named_services(name: &[u8], protocol: &str) -> Option<u16> {
+        match (name, protocol) {
+            (b"http", "tcp" | "udp") => Some(80),
+            (b"both", "tcp") => Some(81),
+            (b"both", "udp") => Some(82),
+            (b"tonly", "tcp") => Some(83),
+            (b"uonly", "udp") => Some(84),
+            (b"da-sh", "tcp") => Some(85),
+            (b"lite", "udplite") => Some(86),
+            (b"s\xffvc", "tcp") => Some(87),
+            _ => None,
+        }
+    }
+
     /// Parse over a host whose password file knows `alice` (1000) and
     /// `root` (0), every number being its own UID, and whose SELinux is
     /// `selinux`, as `lsof` parses ([`parse_with_host`]).
@@ -6190,6 +6968,8 @@ mod tests {
             lookup_user: &lookup,
             selinux_enabled: &enabled,
             identifies_paths: &walk_deferred,
+            lookup_host: &named_hosts,
+            lookup_service: &named_services,
         };
         parse_with_host(
             argv.iter().map(|s| s.to_string()).collect(),

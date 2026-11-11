@@ -142,3 +142,22 @@ path = "fuzz_targets/netlink_diag.rs"
 test = false
 doc = false
 bench = false
+
+# `-c /regex/[bix]` (lsof-core, `posix_regex`): a POSIX regular expression
+# read by glibc's grammar, written for the `regex` crate, compiled under a
+# size limit and run over a command name (DIVERGENCES 38).
+[[bin]]
+name = "posix_regex"
+path = "fuzz_targets/posix_regex.rs"
+test = false
+doc = false
+bench = false
+
+# The files `-i` resolves a host or service name from (lsof-core,
+# `netnames`): hosts, services, host.conf, nsswitch.conf.
+[[bin]]
+name = "netnames"
+path = "fuzz_targets/netnames.rs"
+test = false
+doc = false
+bench = false

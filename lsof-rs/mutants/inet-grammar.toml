@@ -28,6 +28,13 @@
 # following it, and run again as root: killed by the differential. 35
 # mutants.
 
+# 2026-11-11 (DIVERGENCES 38): `-i` resolves host and service names now, so
+# `parse_inet` takes the host's lookups and enters an address for each a
+# name has. Four mutants were re-anchored on the code as it reads since
+# (`inherited-family-ignored`, `empty-port-entry-skipped`,
+# `incomplete-check-dropped`, `empty-spec-read-as-bare`) and run again as
+# root with --first-kill: 4 of 4 killed, by the unit gate.
+
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -111,6 +118,7 @@ rule = "a spec with no version takes the bare form's (FnetTy, 112)"
 file = "crates/lsof-cli/src/args.rs"
 old = '''    } else if sel.inet.all {
         family = sel.inet.all_family;
+        ft = family;
     }'''
 new = '''    }'''
 
@@ -119,10 +127,10 @@ name = "empty-port-entry-skipped"
 rule = "an empty port entry is `invalid service name` (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                    if c == b',' {
+old = '''                    if name_end == at {
                         return Err(quoting("invalid service name: -i ", spec));
                     }'''
-new = '''                    if c == b',' {
+new = '''                    if name_end == at {
                         at += 1;
                         continue;
                     }'''
@@ -170,16 +178,16 @@ name = "incomplete-check-dropped"
 rule = "no protocol, address or port is incomplete (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''        if range.is_none() && proto.is_none() && host.is_none() {'''
-new = '''        if range.is_none() && proto.is_none() && host.is_none() && spec.len() > 9999 {'''
+old = '''        if range.is_none() && proto.is_none() && at.1.is_none() {'''
+new = '''        if range.is_none() && proto.is_none() && at.1.is_none() && spec.len() > 9999 {'''
 
 [[mutant]]
 name = "empty-spec-read-as-bare"
 rule = "`-i ''` is a spec, not the bare form (112)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                    if let Err(e) = parse_inet(&mut sel, spec.as_deref()) {'''
-new = '''                    if let Err(e) = parse_inet(&mut sel, spec.as_deref().filter(|s| !s.is_empty())) {'''
+old = '''                    if let Err(e) = parse_inet(&mut sel, spec.as_deref(), host) {'''
+new = '''                    if let Err(e) = parse_inet(&mut sel, spec.as_deref().filter(|s| !s.is_empty()), host) {'''
 
 [[mutant]]
 name = "leading-zero-octet-refused"

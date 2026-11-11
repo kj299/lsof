@@ -1344,6 +1344,59 @@ NFS_BIND = (
 NFS_WS_LINE = " \tsrv:/export\t%s\t\t nfs4  rw,relatime 0 0\\n"
 
 
+# What the `names` modes put in /etc (DIVERGENCES 38): a hosts file, a
+# services file, and the files that say how glibc reads them, so that `-i
+# @name` and `-i :name` are resolved from files of the run's own and no case
+# asks a name server anything that answers. Fixture B's sockets are on
+# 127.0.0.1, which `localhost`, `r38one` (and its alias), `r38six` (the
+# IPv6 loopback is 127.0.0.1 to an IPv4 lookup) and `r38multi`'s second line
+# name; `r38other` and `r38multi`'s first line name addresses it has no
+# socket on; `r38sixz` and `r38six3` have an IPv6 address alone, and
+# `r38zero` the address that is none.
+NAMES_HOSTS = (
+    "127.0.0.1 localhost\n"
+    "::1 localhost ip6-localhost\n"
+    "127.0.0.1\tr38one R38-Alias # fixture B's address\n"
+    "127.0.0.2 r38other\n"
+    "::1 r38six\n"
+    "::5 r38sixz\n"
+    "fe80::1 r38six3\n"
+    "0.0.0.0 r38zero\n"
+    "127.0.0.9 r38multi\n"
+    "127.0.0.1 r38multi\n"
+)
+# No name server answers: nothing listens on the loopback address named,
+# so a query is refused at once (and a resolver bound to every address
+# would say NXDOMAIN to these names, `.invalid` among them).
+NAMES_RESOLV = "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"
+NAMES_NSSWITCH = "passwd: files\nhosts: files dns\nservices: files\n"
+
+
+def names_dir(work: str) -> str:
+    return os.path.join(work, "names")
+
+
+def write_names_services(work: str, port: str, uport: str) -> None:
+    """The services file of the `names` modes, once fixture B's ports are
+    known: its TCP listener's port under a name with an alias and a
+    comment, its UDP socket's under another, a name both protocols give on
+    different ports (`r38both`: a conflict with no protocol named), one both
+    give on the listener's, one with a `-` in it, and one written in
+    hexadecimal, as glibc reads a port."""
+    with open(os.path.join(names_dir(work), "services"), "w") as f:
+        f.write(
+            "# lsof-rs differential: fixture B's ports\n"
+            f"r38tcp\t{port}/tcp\tr38alias r38also # the listener\n"
+            f"r38udp {uport}/udp\n"
+            f"r38both {port}/tcp\n"
+            f"r38both {uport}/udp\n"
+            f"r38same {port}/tcp\n"
+            f"r38same {port}/udp\n"
+            f"r38-dash {port}/tcp\n"
+            "r38hex 0x50/tcp\n"
+        )
+
+
 def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     """The script fixture MT's and AUTOFS's cases run in, already in a mount
     namespace of their own: mount a tmpfs at `base` and, in `table` mode,
@@ -1383,13 +1436,44 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     table, `can't fopen(/proc/mounts, "r")`. And `noetc` mounts an empty
     tmpfs over `/etc`, so that `/etc/passwd` cannot be `stat`ed: a `-r` run
     that prints a login ends at its first cycle, `can't stat(/etc/passwd)`
-    (DIVERGENCES 70), the one way such a run ends by itself."""
+    (DIVERGENCES 70), the one way such a run ends by itself. And `names`
+    mounts a tmpfs over `/etc` and puts there the files glibc resolves a
+    host or service name from ([`NAMES_HOSTS`], the services file
+    [`write_names_services`] writes, an nsswitch.conf of `files` then `dns`,
+    a resolv.conf whose name server does not answer, and `multi off` in
+    host.conf), with the host's password file, so that `-i @name` and `-i
+    :name` are resolved alike by both binaries and from no host's own
+    files (DIVERGENCES 38); `namesmulti` is the same with `multi on`,
+    under which glibc gives every address a name has; and `namesnopw` the
+    same with an nsswitch.conf of `passwd: sss` alone, under which glibc
+    reads no password file, so that no account has a name (DIVERGENCES
+    39)."""
     path = os.path.join(work, "mt-wrap.sh")
     b = shlex.quote(base)
     passwd = os.path.join(work, "passwd-mt")
     with open("/etc/passwd", "rb") as src, open(passwd, "wb") as dst:
         dst.write(src.read() + PASSWD_EXTRA.encode("utf-8", "surrogateescape"))
     os.chmod(passwd, 0o644)
+    names = names_dir(work)
+    os.makedirs(names, exist_ok=True)
+    with open("/etc/passwd", "rb") as src, open(os.path.join(names, "passwd"), "wb") as dst:
+        dst.write(src.read())
+    for name, text in (
+        ("hosts", NAMES_HOSTS),
+        ("resolv.conf", NAMES_RESOLV),
+        ("nsswitch.conf", NAMES_NSSWITCH),
+        ("host.conf", "multi off\n"),
+        ("host.conf.multi", "multi on\n"),
+    ):
+        with open(os.path.join(names, name), "w") as f:
+            f.write(text)
+    # Until fixture B's ports are known, no service.
+    if not os.path.exists(os.path.join(names, "services")):
+        with open(os.path.join(names, "services"), "w") as f:
+            f.write("")
+    os.chmod(names, 0o755)
+    for name in os.listdir(names):
+        os.chmod(os.path.join(names, name), 0o644)
     with open(path, "w") as f:
         f.write(
             "#!/bin/sh\n"
@@ -1405,6 +1489,19 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             'if [ "$mode" = noetc ]; then\n'
             '    mount -t tmpfs lsof-rs-etc /etc || '
             '{ echo "linux_diff: no MT noetc ($$)"; exit 2; }\n'
+            '    "$@"\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "$mode" = names ] || [ "$mode" = namesmulti ] || [ "$mode" = namesnopw ]; then\n'
+            f"    N={shlex.quote(names)}\n"
+            '    mount -t tmpfs lsof-rs-names /etc || '
+            '{ echo "linux_diff: no MT names ($$)"; exit 2; }\n'
+            "    for f in passwd hosts services nsswitch.conf resolv.conf; do\n"
+            '        cat "$N/$f" > "/etc/$f" || { echo "linux_diff: no MT names file ($$)"; exit 2; }\n'
+            "    done\n"
+            '    if [ "$mode" = namesmulti ]; then cat "$N/host.conf.multi" > /etc/host.conf; '
+            'else cat "$N/host.conf" > /etc/host.conf; fi || exit 2\n'
+            '    if [ "$mode" = namesnopw ]; then echo "passwd: sss" > /etc/nsswitch.conf || exit 2; fi\n'
             '    "$@"\n'
             "    exit $?\n"
             "fi\n"
@@ -3010,7 +3107,8 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
         "acc,_ = u.accept()\n"
         "an=socket.socket(socket.AF_UNIX)\n"
         "g=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); g.bind(('127.0.0.1',0))\n"
-        "time.sleep(600)\n" % (sdir, sdir, sdir)
+        "open(os.path.join(%r,'uport'),'w').write(str(g.getsockname()[1]))\n"
+        "time.sleep(600)\n" % (sdir, sdir, sdir, sdir)
     )
     # 0,1,2 + TCP listener, unix listener, unix client, unix accepted,
     # unix unconnected, UDP.
@@ -3482,6 +3580,20 @@ def run(args) -> int:
             infra(f"fixture B did not publish its listener port: {e}")
         if not port.isdigit():
             infra(f"fixture B published a non-numeric port: {port!r}")
+        # Its UDP socket's port, written after the listener's.
+        uport_file = os.path.join(b.cwd, "uport")
+        while not os.path.exists(uport_file) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        try:
+            with open(uport_file) as f:
+                uport = f.read().strip()
+        except OSError as e:
+            infra(f"fixture B did not publish its UDP port: {e}")
+        if not uport.isdigit():
+            infra(f"fixture B published a non-numeric UDP port: {uport!r}")
+        # The services file the `names` modes put at /etc/services names
+        # those two ports (DIVERGENCES 38).
+        write_names_services(work, port, uport)
         cases = render_matrix(
             args.matrix,
             {
@@ -3607,6 +3719,8 @@ def run(args) -> int:
                 "WRACEDIR": os.path.join(walkrace.cwd, "V"),
                 "WRACELINKS": os.path.join(walkrace.cwd, "links"),
                 "PORT": port,
+                # B's UDP socket.
+                "UPORT": uport,
                 # UDPL's bound socket, which its connected one names too.
                 "UDPLPORT": udplite_port(udplite),
             },
@@ -3632,7 +3746,7 @@ def run(args) -> int:
                     for c in cases
                     if any(
                         needs_mt(c, mode)
-                        for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc")
+                        for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc", "names", "namesmulti", "namesnopw")
                     )
                     and c["name"] not in dropped
                 ]
@@ -3874,6 +3988,34 @@ def self_test() -> int:
         check("...which holds the host's accounts and fixture W's",
               open(os.path.join(td, "passwd-mt"), encoding="utf-8", errors="surrogateescape").read().endswith(PASSWD_EXTRA)
               and "\nroot:" in "\n" + open(os.path.join(td, "passwd-mt"), encoding="utf-8", errors="surrogateescape").read())
+        names_branch = text.split('if [ "$mode" = names ]', 1)[-1].split("\nfi\n", 1)[0]
+        check("the MT names modes put their files in a tmpfs over /etc before the binary",
+              '|| [ "$mode" = namesmulti ] || [ "$mode" = namesnopw ]; then' in text
+              and names_branch.index("mount -t tmpfs lsof-rs-names /etc")
+              < names_branch.index('cat "$N/$f" > "/etc/$f"') < names_branch.index('"$@"')
+              and all(f in names_branch for f in ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf"))
+              and "no MT names ($$)" in names_branch)
+        check("...multi on in host.conf for namesmulti alone",
+              names_branch.index('"$mode" = namesmulti') < names_branch.index("host.conf.multi")
+              < names_branch.index('else cat "$N/host.conf"')
+              and open(os.path.join(td, "names", "host.conf")).read() == "multi off\n"
+              and open(os.path.join(td, "names", "host.conf.multi")).read() == "multi on\n")
+        check("...a hosts file that names fixture B's address, and no name server that answers",
+              "127.0.0.1 localhost\n" in NAMES_HOSTS and "\n::1 r38six\n" in NAMES_HOSTS
+              and NAMES_HOSTS.index("127.0.0.9 r38multi") < NAMES_HOSTS.index("127.0.0.1 r38multi")
+              and open(os.path.join(td, "names", "hosts")).read() == NAMES_HOSTS
+              and open(os.path.join(td, "names", "resolv.conf")).read().startswith("nameserver 127.0.0.1\n")
+              and "hosts: files dns\n" in open(os.path.join(td, "names", "nsswitch.conf")).read()
+              and "\nroot:" in "\n" + open(os.path.join(td, "names", "passwd")).read())
+        check("...and for namesnopw an nsswitch.conf that names no password file",
+              names_branch.index('cat "$N/$f" > "/etc/$f"')
+              < names_branch.index('"$mode" = namesnopw ]; then echo "passwd: sss" > /etc/nsswitch.conf')
+              < names_branch.index('"$@"'))
+        write_names_services(td, "4001", "4002")
+        services = open(os.path.join(td, "names", "services")).read()
+        check("...and a services file of fixture B's two ports",
+              "r38tcp\t4001/tcp\tr38alias" in services and "r38udp 4002/udp\n" in services
+              and "r38both 4001/tcp\nr38both 4002/udp\n" in services and "r38hex 0x50/tcp\n" in services)
         nfs_text = open(mt_wrap(td, os.path.join(td, "mt"), "/x/nfs")).read()
         nfs_branch = nfs_text.split('if [ "$mode" = nfs ]', 1)[-1].split("\nfi\n", 1)[0]
         check("the MT nfs mode lists the NFS mount on fixture NFS's directory",

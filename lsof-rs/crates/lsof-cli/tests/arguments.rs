@@ -162,13 +162,24 @@ fn an_inet_name_error_escapes_the_name_too() {
         &lsof(&["-i", "a\x1b[2J"]),
         "unknown protocol name (a^[[2J) in: -i a^[[2J",
     );
+    // A service name is looked up in the host's services file, which
+    // holds no such name (DIVERGENCES 38).
     refused_with(
         &lsof(&["-i", ":a\x1b[2J"]),
-        "service names are not resolved: -i :a^[[2J (give the port number)",
+        "unknown service a^[[2J in: -i :a^[[2J",
     );
     refused_with(
-        &lsof(&["-i", "@h\x1b[2J"]),
-        "host names are not resolved: -i @h^[[2J (give the address)",
+        &lsof(&["-i", "tcp:a\x1b[2J"]),
+        "unknown service a^[[2J for tcp in: -i tcp:a^[[2J",
+    );
+    // A host name that is a number and no address is unknown with no
+    // resolver asked, as glibc answers it (no test asks DNS anything; the
+    // escaping of a host name is `args.rs`'s to pin, over a host of its
+    // own). Linux only: the other backends hand every name to the system.
+    #[cfg(target_os = "linux")]
+    refused_with(
+        &lsof(&["-i", "@256.1"]),
+        "unknown host name (256.1) in: -i @256.1",
     );
 }
 

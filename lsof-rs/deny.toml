@@ -11,8 +11,13 @@
 # `errno`), each MIT OR Apache-2.0 at least: rustix and linux-raw-sys are
 # `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`, which the allow
 # list below satisfies through either plain licence, so nothing new is
-# allowed for them. lsof-rs's own crates are `publish = false` with
-# LicenseRef-lsof and are skipped via `private.ignore`.
+# allowed for them. And, for `-c /regex/` (DIVERGENCES 38, 2026-11-11), in
+# `lsof-core` and so on every platform, `regex` pinned at =1.12.3 with no
+# default features, with `regex-automata` and `regex-syntax` (each MIT OR
+# Apache-2.0); `aho-corasick` and `memchr` (Unlicense OR MIT), which only
+# its `perf-*` features build, are in the lock file and not in any binary.
+# lsof-rs's own crates are `publish = false` with LicenseRef-lsof and are
+# skipped via `private.ignore`.
 
 [advisories]
 version = 2

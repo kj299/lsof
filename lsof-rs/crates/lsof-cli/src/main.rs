@@ -130,14 +130,17 @@ SELECTION:
     -p <pids>     select by PID (comma separated; ^pid excludes)
     -u <users>    select by owning user, login name or UID (^ excludes)
     -c <cmd>      select by command name: a prefix (case-insensitive substring
-                  on Windows); ^cmd excludes. -c /regex/ is not supported
+                  on Windows); ^cmd excludes. -c /regex/[bix] selects by a
+                  POSIX regular expression: extended, or basic with b; i
+                  ignores case. Back-references are refused
     -g [pgids]    process groups: the PGID column, and with pgids, selection
                   (^ excludes). On Windows: select children of these PPIDs
     -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD,unk,fd (every number),
                   numbers, a-b ranges; all ^excluded or none. Repeats add up
     -i [spec]     Internet sockets; spec = [46][tcp|udp|icmp|raw][@addr][:ports]
                   ports may be a list and ranges (:22,80,1000-2000); each -i
-                  is its own item, ORed. Host and service names are refused.
+                  is its own item, ORed. addr may be a host name (@localhost)
+                  and a port a service name (:http), looked up as it is read
                   On Windows icmp/raw come from the ETW capture (Administrator)
     -s [p:s]      TCP and UDP sockets by TCP state: TCP:LISTEN,ESTABLISHED
                   lists only those, TCP:^TIME_WAIT excludes one; each listed
@@ -550,6 +553,16 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
             ));
         }
     }
+    // `-c /regex/`, in the order given (`CmdRx[]` is an array), the text
+    // between the slashes.
+    for (r, hit) in sel.command_regexes.iter().zip(&located.command_regexes) {
+        if !hit {
+            miss.push(format!(
+                "lsof: no command found for regex: {}",
+                esc.bytes(r.expression())
+            ));
+        }
+    }
     // Every path argument must be located or the run exits 1, and for
     // `+d`/`+D` each expanded ENTRY is its own item — verified against the C:
     // a directory whose every entry is open exits 0, and adding one unopened
@@ -790,10 +803,22 @@ fn main() {
                 .has_mount_type("selinuxfs")
         };
         let identifies_paths = || env_cell.get_or_init(make_env).backend.identifies_paths();
+        // `-i`'s host and service names, resolved where they are read
+        // (DIVERGENCES 38).
+        let lookup_host =
+            |name: &[u8], v6: bool| env_cell.get_or_init(make_env).backend.lookup_host(name, v6);
+        let lookup_service = |name: &[u8], protocol: &str| {
+            env_cell
+                .get_or_init(make_env)
+                .backend
+                .lookup_service(name, protocol)
+        };
         let host = HostChecks {
             lookup_user: &lookup_user,
             selinux_enabled: &selinux_enabled,
             identifies_paths: &identifies_paths,
+            lookup_host: &lookup_host,
+            lookup_service: &lookup_service,
         };
         parse_reporting(argv, &fs, &read_table, &host)
     };
@@ -1593,6 +1618,55 @@ mod tests {
             lines(&["-p", "1"], false),
             ["lsof: process ID not located: 1"]
         );
+    }
+
+    /// `-c /regex/`'s search items follow the names', in the order given,
+    /// each the text between its slashes, escaped (DIVERGENCES 38; measured:
+    /// `-c /a/ -c abc -V -c /zzz/ -c /yyy/i -c qqq`).
+    #[test]
+    fn no_command_found_for_regex_follows_the_names_in_the_order_given() {
+        use lsof_core::render::Escaper;
+        use lsof_core::Located;
+        let (sel, _) = parsed(&[
+            "-c",
+            "/a/",
+            "-c",
+            "abc",
+            "-c",
+            "/zzz/",
+            "-c",
+            "/y\x1by/i",
+            "-c",
+            "qqq",
+            "-p",
+            "1",
+        ]);
+        let lines = |commands: Vec<bool>, command_regexes: Vec<bool>| {
+            let located = Located {
+                commands,
+                command_regexes,
+                pids: vec![true],
+                ..Default::default()
+            };
+            super::unlocated(&sel, &located, Escaper::UNIX)
+        };
+        assert_eq!(
+            lines(vec![true, false], vec![true, false, false]),
+            [
+                "lsof: command not located: qqq",
+                "lsof: no command found for regex: zzz",
+                "lsof: no command found for regex: y^[y",
+            ]
+        );
+        assert_eq!(
+            lines(vec![false, false], vec![false, true, true]),
+            [
+                "lsof: command not located: qqq",
+                "lsof: command not located: abc",
+                "lsof: no command found for regex: a",
+            ]
+        );
+        assert!(lines(vec![true, true], vec![true, true, true]).is_empty());
     }
 
     /// The C strips trailing slashes from a path argument longer than one

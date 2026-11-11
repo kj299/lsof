@@ -618,6 +618,8 @@ pub struct Located {
     pub uids: Vec<bool>,
     pub users: Vec<bool>,
     pub commands: Vec<bool>,
+    /// Parallel to `sel.command_regexes` (the C's `CmdRx[i].mc`).
+    pub command_regexes: Vec<bool>,
     /// Parallel to `sel.inet.specs`.
     pub inet: Vec<bool>,
     /// The bare `-i`/`-i4`/`-i6` item (the C's `Fnet == 2`).
@@ -816,6 +818,12 @@ pub struct Selection {
     /// be UTF-8, and one that is not matches a command that is not either
     /// ([`Process::command_bytes`]; DIVERGENCES 92).
     pub commands: Vec<OsString>,
+    /// `-c /regex/[bix]`: a command the expression matches selects its
+    /// process, as one a `-c name` names does; the two are one kind
+    /// (`SELCMD`). The C tries the names first and then the expressions,
+    /// and marks the first that matches (`is_cmd_excl()`); every one that
+    /// matches is located here, as every name is (DIVERGENCES 13, 38).
+    pub command_regexes: Vec<crate::posix_regex::CommandRegex>,
     /// How [`Selection::commands`] and [`Selection::command_excludes`]
     /// compare — the C's case-sensitive prefix unless the CLI says otherwise.
     pub command_match: CommandMatch,
@@ -1166,7 +1174,12 @@ impl Selection {
         if self.users_match(p) {
             k.insert(SelKinds::UID);
         }
-        if self.commands.iter().any(|c| self.command_matches(c, p)) {
+        if self.commands.iter().any(|c| self.command_matches(c, p))
+            || self
+                .command_regexes
+                .iter()
+                .any(|r| r.is_match(p.command_bytes()))
+        {
             k.insert(SelKinds::CMD);
         }
         if p.pgid.is_some_and(|g| self.pgids.contains(&g)) {
@@ -1421,6 +1434,7 @@ impl Selection {
             uids: vec![false; self.uids.len()],
             users: vec![false; self.users.len()],
             commands: vec![false; self.commands.len()],
+            command_regexes: vec![false; self.command_regexes.len()],
             inet: vec![false; self.inet.specs.len()],
             inet_all: false,
             nfs: false,
@@ -1463,6 +1477,9 @@ impl Selection {
             if passes {
                 for (hit, c) in found.commands.iter_mut().zip(&self.commands) {
                     *hit |= self.command_matches(c, p);
+                }
+                for (hit, r) in found.command_regexes.iter_mut().zip(&self.command_regexes) {
+                    *hit = *hit || r.is_match(p.command_bytes());
                 }
             }
             // Its files are examined only if the process passed the command
@@ -1558,7 +1575,7 @@ impl Selection {
         if !self.users.is_empty() || !self.uids.is_empty() {
             k.insert(SelKinds::UID);
         }
-        if !self.commands.is_empty() {
+        if !self.commands.is_empty() || !self.command_regexes.is_empty() {
             k.insert(SelKinds::CMD);
         }
         if !self.pgids.is_empty() || !self.ppid_filter.is_empty() {
@@ -4972,6 +4989,69 @@ mod tests {
                 .commands,
             [true]
         );
+    }
+
+    /// `-c /regex/` (DIVERGENCES 38): a command an expression matches is
+    /// selected as one a name names is, the two being one kind; each
+    /// expression is located by a process it matches that got to the
+    /// command test, a name beside it or not (the C marks the first name or
+    /// expression that matches and no other: 13).
+    #[test]
+    fn a_command_regex_selects_and_is_located_as_a_name_is() {
+        use crate::posix_regex::CommandRegex;
+        let rx = |e: &str| CommandRegex::new(e.as_bytes(), true, false).unwrap();
+        let sel = Selection {
+            command_regexes: vec![rx("^py"), rx("zz")],
+            ..Default::default()
+        };
+        assert!(sel.specified().contains(SelKinds::CMD));
+        assert!(sel.selects_process(&who(10, "python3", 0, 1)));
+        assert!(!sel.selects_process(&who(11, "sleep", 0, 1)));
+        let procs = [who(10, "python3", 0, 1), who(11, "sleep", 0, 1)];
+        let found = sel.locate(&procs);
+        assert_eq!(found.command_regexes, [true, false]);
+        assert_eq!(found.commands, Vec::<bool>::new());
+        // With a name beside it: either selects, and each is located.
+        let both = Selection {
+            commands: vec!["sle".into(), "py".into()],
+            ..sel.clone()
+        };
+        assert!(both.selects_process(&who(11, "sleep", 0, 1)));
+        assert!(both.selects_process(&who(10, "python3", 0, 1)));
+        assert!(!both.selects_process(&who(12, "bash", 0, 1)));
+        let found = both.locate(&procs);
+        assert_eq!(found.commands, [true, true]);
+        assert_eq!(found.command_regexes, [true, false]);
+        // Under -a a process that fails the -p part never reaches it.
+        let and = Selection {
+            pids: vec![11],
+            and_mode: true,
+            ..sel.clone()
+        };
+        assert_eq!(and.locate(&procs).command_regexes, [false, false]);
+        assert!(!and.selects_process(&who(10, "python3", 0, 1)));
+        // A `-c ^name` exclusion outranks it, and an excluded process
+        // locates nothing.
+        let excluded = Selection {
+            command_excludes: vec!["python".into()],
+            ..sel.clone()
+        };
+        assert!(excluded.excludes_process(&who(10, "python3", 0, 1)));
+        assert_eq!(excluded.locate(&procs).command_regexes, [false, false]);
+        // The command's bytes are what is matched, where it is not UTF-8.
+        let raw = Process {
+            raw_names: Some(Box::new(crate::RawNames {
+                command: Some(b"py\xff"[..].into()),
+                login: None,
+            })),
+            ..who(13, "py\u{fffd}", 0, 1)
+        };
+        let bytes = Selection {
+            command_regexes: vec![CommandRegex::new(b"^py\xff$", true, false).unwrap()],
+            ..Default::default()
+        };
+        assert!(bytes.selects_process(&raw));
+        assert!(!bytes.selects_process(&who(13, "py\u{fffd}", 0, 1)));
     }
 
     #[test]

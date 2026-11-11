@@ -22,6 +22,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 /// The password file, as the C names it.
 const PASSWD: &str = "/etc/passwd";
 
+/// Where glibc reads which sources name an account.
+const NSSWITCH: &str = "/etc/nsswitch.conf";
+
 /// The C's `LOGINML`, `sizeof(((struct utmpx *)0)->ut_user)`: a login name
 /// is kept to this many bytes (`strncpy(upn->nm, pw->pw_name, LOGINML)`).
 pub const LOGINML: usize = 32;
@@ -67,10 +70,26 @@ fn each_line(path: &str, mut each: impl FnMut(&[u8])) {
     }
 }
 
+/// Whether glibc's `passwd` lookups read the password file at all, as
+/// `/etc/nsswitch.conf` has it (`lsof_core::netnames::nsswitch_reads_passwd_file`;
+/// DIVERGENCES 39): under `passwd: sss`, with no `files`, the C's
+/// `getpwuid()` and `getpwnam()` know no account `/etc/passwd` holds
+/// (measured: USER is the number, and `-u root` is `can't get UID for
+/// root`), and neither does lsof-rs. Read once a run.
+fn passwd_file_is_read() -> bool {
+    static READ: OnceLock<bool> = OnceLock::new();
+    *READ.get_or_init(|| {
+        let text = lsof_core::netnames::small_file(std::path::Path::new(NSSWITCH), 1 << 20);
+        lsof_core::netnames::nsswitch_reads_passwd_file(&text)
+    })
+}
+
 /// uid → name, the file read now.
 fn read_passwd() -> HashMap<u32, Box<[u8]>> {
     let mut m = HashMap::new();
-    each_line(PASSWD, |line| add_uid(&mut m, line));
+    if passwd_file_is_read() {
+        each_line(PASSWD, |line| add_uid(&mut m, line));
+    }
     m
 }
 
@@ -250,7 +269,9 @@ static NAMES: OnceLock<HashMap<Vec<u8>, u32>> = OnceLock::new();
 fn names_map() -> &'static HashMap<Vec<u8>, u32> {
     NAMES.get_or_init(|| {
         let mut m = HashMap::new();
-        each_line(PASSWD, |line| add_name(&mut m, line));
+        if passwd_file_is_read() {
+            each_line(PASSWD, |line| add_name(&mut m, line));
+        }
         m
     })
 }

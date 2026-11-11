@@ -12,6 +12,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **`-i` with a name no longer exits 1 as a refusal**: a name that
+  resolves selects (Added, below), and a lookup may now ask a name server (once
+  a name, under `/etc/resolv.conf`'s timeouts; never for an address, a
+  number, or a name `/etc/hosts` holds).
+- **`-u name` and the USER column follow `/etc/nsswitch.conf`'s `passwd:`**
+  (Linux; DIVERGENCES 39): where it lists neither `files` nor `compat`,
+  glibc reads no password file, so the C knows no login, and neither does
+  lsof-rs now (`-u root` is `can't get UID for root`, USER is the number).
+  It had read `/etc/passwd` regardless. With `files` listed, or no line,
+  nothing changes.
 - **A file-system argument names an NFS mount's files as the C does**
   (Linux; DIVERGENCES 151). Where the table lists an NFS mount, a file on
   it (the C's `N_NFS`: on the newest NFS mount of its device whose
@@ -191,6 +201,52 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   which matches names, the walk still comes after the parse.
 
 ### Added
+- **`-c /regex/[bix]` selects by a POSIX regular expression**, as the C
+  (DIVERGENCES 38): the text between the slashes is an extended expression,
+  or a basic one with `b` after it (`x` says extended), and `i` ignores
+  case. It is read by glibc's own grammar (`\+`, `\?` and `\|` in a basic
+  expression, the GNU operators `\w \s \b \< \>`, `[[:class:]]`, intervals
+  to 32767, `.` and lists by characters, classes and case by the locale's,
+  for which lsof-rs takes UTF-8 everywhere) and matched against the
+  command's bytes; an expression `regcomp()` refuses is refused in
+  `regerror()`'s words (`regexp error: /a[/: Invalid regular expression`),
+  and with `-V` one that matched nothing is `no command found for regex:
+  EXPR`. lsof-rs had refused every regular expression. Not taken: a
+  back-reference (`\(a\)\1`), which the engine cannot match in linear
+  time (`back references are not supported`), and an expression whose
+  program passes 4 MiB or nests 100 deep (`Regular expression too big`).
+  On every platform.
+- **`-i` takes host names and service names**, as the C (DIVERGENCES 38):
+  `-i @localhost`, `-i tcp@db.example:5432`, `-i :http`, `-i :1-http`. On
+  Linux a host name is looked up as glibc's `gethostbyname2()` looks it up
+  in `/etc/hosts` (the first line that names it, every line under `multi
+  on`, `::1` read as 127.0.0.1 for IPv4), a name that is a number is
+  answered as one (`@127.1`), and any other goes to the system's resolver
+  (`getaddrinfo()`: DNS and whatever else `/etc/nsswitch.conf` lists); every
+  address is an entry, IPv6 first, as the C enters them. A service name is
+  read from `/etc/services` for the spec's protocol, or for TCP and UDP,
+  which must agree. A name nothing knows is `unknown host name (NAME) in:
+  -i SPEC` or `unknown service NAME in: -i SPEC`, exit 1. lsof-rs had
+  refused every name (`host names are not resolved`). On FreeBSD and
+  Windows a host goes to the system's resolver and a service to the
+  platform's services file. Where the C aborts on a host name with two
+  addresses (a double free on exit: `-i @localhost` under `multi on`),
+  lsof-rs lists the sockets.
+- **A second third-party crate, `regex`** (`=1.12.3`, no default features:
+  `std`, `unicode-case`, `unicode-bool`, `unicode-gencat`, `unicode-perl`;
+  with it `regex-automata` and `regex-syntax`; all MIT OR Apache-2.0, none
+  with a build script), in `lsof-core` and so in every platform's binary,
+  for `-c /regex/` (the owner's decision of 2026-11-11). The three portable
+  crates keep `#![forbid(unsafe_code)]`. The Linux release binary grows from
+  636 KB to 1.64 MB (the engine some 610 KB, the Unicode tables 400 KB).
+  Fuzz targets `posix_regex` (the expression's reader, the compile and the
+  match) and `netnames` (the hosts, services, host.conf and nsswitch.conf
+  readers).
+- Differential: 56 `-c /regex/` cases over the fixtures' commands, and 42
+  for `-i`'s names and `-u`'s in a mount namespace whose `/etc` holds a
+  hosts file, a services file, an nsswitch.conf and a name server that does
+  not answer (`LSOF_DIFF_MT=names`, `namesmulti`, `namesnopw`), so that no
+  case reads a host's own files or asks DNS.
 - **The Linux backend asks the kernel's `NETLINK_SOCK_DIAG`** for a UNIX
   socket's peer under `-E`/`+E` (56), through `rustix`'s `net` feature
   beside `fs` (still =1.1.5; `net` turns on linux-raw-sys's netlink

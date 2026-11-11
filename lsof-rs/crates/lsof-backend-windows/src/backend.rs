@@ -213,6 +213,25 @@ impl Backend for WindowsBackend {
         "windows"
     }
 
+    /// `-i @name`: the system's resolver, through `std` (`getaddrinfo`),
+    /// its addresses of the version asked for (DIVERGENCES 38).
+    fn lookup_host(&self, name: &[u8], v6: bool) -> Vec<std::net::IpAddr> {
+        lsof_core::netnames::system_host(name, v6)
+    }
+
+    /// `-i :name`: the services file Windows keeps beside its hosts file
+    /// (`%SystemRoot%\System32\drivers\etc\services`), whose lines are
+    /// written as `/etc/services`'s are.
+    fn lookup_service(&self, name: &[u8], protocol: &str) -> Option<u16> {
+        let root = std::env::var_os("SystemRoot")?;
+        let path = std::path::Path::new(&root)
+            .join("System32")
+            .join("drivers")
+            .join("etc")
+            .join("services");
+        lsof_core::netnames::service_in_file(&path, name, protocol.as_bytes())
+    }
+
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         trace("gather: process::enumerate start");
         let mut procs = process::enumerate(sel.numeric_ids);
