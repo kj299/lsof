@@ -241,6 +241,30 @@ disagreeing, and it names the C code so anyone can check the triage.
   twice, and the C aborts as above. This is every host whose `/etc/host.conf`
   says `multi on` (Debian's and Ubuntu's do) and whose hosts file names
   `localhost` on both loopback lines. Not pinned: B's pid and ports.
+- [x] rx-past-the-size-limit: DEBT (item 38) — `-c '/^\w{0,800}/'`. glibc
+  compiles it and the C lists fixture A's process; the program the `regex`
+  crate would compile for it is past lsof-rs's 8 MiB bound
+  (`posix_regex::SIZE_LIMIT`), which is what bounds the time a match takes,
+  and it is refused: `regexp error: …: Regular expression too big`, exit 1.
+  Not pinned: A's pid.
+- [x] rx-past-the-cost-limit: DEBT (item 38) — an expression of 64 `\w*`.
+  glibc compiles it and the C lists fixture A's process; lsof-rs counts what
+  an expression asks of its engine as it reads it, 63 of the locale's large
+  classes at most (`posix_regex::COST_LIMIT`), because the engine builds
+  each as thousands of ranges before any size limit applies, and refuses it
+  with the same words. Not pinned: A's pid.
+- [x] inet-protocol-port-list-frees-twice-in-the-c: C-DEFECT, not reproduced
+  (item 38) — `-i TCP:22,1x`. `enter_network_address()` enters one `struct
+  nwad` for each port entry with the one copy of the protocol's name
+  (`n.proto`), as it does with the argument for a name of two addresses
+  (`names-multi-host-with-two-addresses`), and it is freed once for each:
+  after `unacceptable port specification in: -i TCP:22,1x` and the usage,
+  glibc ends the C with `free(): double free detected in tcache 2` and
+  SIGABRT (exit 134). lsof-rs says the same line and exits 1. The same
+  defect ends the C after a listing it has written (`-i TCP:1,2`, `-i
+  TCP@127.0.0.1:1,2`, `-i UDP:ntp,ssh`: exit 134 where glibc's allocator
+  notices, which depends on what else the run allocated; the listing itself,
+  read unbuffered, is lsof-rs's line for line).
 - [x] json-sockets-inet: C-DEFECT, not reproduced (row 134) — an Internet
   row's JSON object has `"name"`, the `-F n` text (`127.0.0.1:P`, or
   `local->remote`), where the C prints none: `json_print_file()` prints
@@ -339,12 +363,19 @@ the C", never at the cost of safety), each measured against the C first.
   * **`-V`**: `no command found for regex: EXPR`, after the names', in the
     order given; a command an expression matches is selected as one a name
     names (one kind, `SELCMD`), and `-c ^name` excludes it all the same.
-  It is bounded where glibc is not: the compiled program at 4 MiB
-  (`a{32767}` fits, as glibc takes it; `(a{1000}){1000}` is `Regular
-  expression too big`, where glibc expands it until memory runs out), groups,
-  alternations and repetitions 100 deep. The engine matches in time linear in the command
-  and the program, and compiling the worst expression takes milliseconds and
-  under 10 MB (measured).
+  It is bounded where glibc is not (`Regular expression too big` past each
+  bound; the review of this row moved two of them, see "The review's fixes"
+  below): what an expression asks of the engine is counted as it is read and
+  held to 65,536 units (a character is one, each of the locale's large
+  classes 1,024: `posix_regex::COST_LIMIT`), the compiled program to 8 MiB
+  (`a{32767}`, `.{20000}`, `[[:graph:]]{1,255}` and `[[:alpha:]]{300}` fit;
+  `(a{1000}){1000}` does not, where glibc expands it until memory runs
+  out), groups, alternations and repetitions to 100 deep. The engine
+  matches in time linear in the command and the program. Measured over the
+  worst expressions found for each bound: one is compiled in at most 0.1 s
+  and 40 MB, refused past the cost limit in 10 ms and past the size limit
+  in 70 ms, and matched against a 15-byte command in at most 18 ms (once a
+  command name: the answer is kept).
 
 * **`-i @name`** (38). The C looks the name up with `gethostbyname2()`, as
   an IPv6 name and, with no version given, as an IPv4 one too
@@ -355,9 +386,13 @@ the C", never at the cost of safety), each measured against the C first.
   * glibc's `files` service, by its rules (`lsof-core/src/netnames.rs`,
     13,800 lookups over generated files agreeing with `gethostbyname2()`):
     the first line that names it, or every line under `multi on`
-    (`/etc/host.conf`, then `RESOLV_MULTI`); names in any case; an IPv4
-    lookup reads `::1` as 127.0.0.1 (so `-i @ip6-localhost` lists
-    127.0.0.1's sockets) and a v4-mapped address as its IPv4 one;
+    (`/etc/host.conf`, or the file `RESOLV_HOST_CONF` names, then
+    `RESOLV_MULTI`); names in any case; an IPv4 lookup reads `::1` as
+    127.0.0.1 (so `-i @ip6-localhost` lists 127.0.0.1's sockets) and a
+    v4-mapped address as its IPv4 one;
+  * where `/etc/nsswitch.conf` has glibc read that file first: `files` the
+    first source of its `hosts:` line, or no such line, or no file, where
+    this glibc's built-in sources are `files dns` (see "The review's fixes");
   * a name that is a number is answered with no lookup, as
     `__nss_hostname_digits_dots()` answers it: `@127.1`, `@2130706433`,
     `@0177.1` (octal) are 127.0.0.1; `6@127.1` is unknown; `@0x7f.1` is a
@@ -383,7 +418,9 @@ the C", never at the cost of safety), each measured against the C first.
 * **`-i :name`** (38). `getservbyname()`, for the spec's protocol or, with
   none, for TCP and for UDP (`arg.c:1494-1537`): read from `/etc/services`
   by the `files` rules (name or alias, compared exactly; a port in any base C
-  writes one in, kept to 16 bits; `#` comments). `unknown service NAME [for
+  writes one in, kept to 16 bits; `#` comments), where nsswitch.conf's
+  `services:` line has glibc reach `files` (`services: db` with no such
+  module installed: no service is known, measured). `unknown service NAME [for
   PROTO] in: -i SPEC`; `TCP=N and UDP=M NAME ports conflict;` and its second
   line; a name ends a range (`:1-http`) and cannot open one (`:http-90` is
   the name `http-90`). 119 command lines over a services and a hosts file
@@ -391,11 +428,13 @@ the C", never at the cost of safety), each measured against the C first.
   (122) and the C's abort below.
 
 * **`-u name` follows `/etc/nsswitch.conf`'s `passwd:`** (39) as far as the
-  file goes: where it lists neither `files` nor `compat`, glibc reads no
-  password file, the C knows no login and prints every USER as its number
-  (`passwd: sss` on a host with no such service: `can't get UID for root`,
-  measured over nine nsswitch.conf shapes), and so does lsof-rs now, which
-  had read `/etc/passwd` regardless.
+  file goes: where glibc's walk through the line's sources does not reach
+  `files` or `compat` (`passwd: sss` on a host with no such service: `can't
+  get UID for root`), it reads no password file, the C knows no login and
+  prints every USER as its number, and so does lsof-rs now, which had read
+  `/etc/passwd` regardless. The line is read and walked by glibc's rules,
+  its `[STATUS=action]` items included, and `compat` reads the file by its
+  own (see "The review's fixes").
 
 * **What 92 left** is the C's: `-i TCP:\xff` is `unknown service \xff for
   tcp in: -i TCP:\xff`, `-i @\xff` `unknown host name (\xff) in: -i @\xff`
@@ -411,12 +450,144 @@ every host with `multi on` and `localhost` on both loopback lines (Debian's
 and Ubuntu's defaults), and any DNS name with two A records. lsof-rs lists
 the sockets and exits as for any other spec (`names-multi-*`, ledgered).
 
+### The review's fixes (2026-11-11)
+
+Two reviews of the above (fidelity and safety) measured 5,486 command lines
+against the C and broke three of the bounds; what they found, and what was
+then measured again:
+
+* **A run of `$` in a basic expression overflowed the stack** (100,000 of
+  them: SIGABRT), and was read in quadratic time before that: the reader
+  had taken glibc's `peek_token()` whole, which for a `$` reads the next
+  token with itself. It looks at the next two items now and calls nothing.
+  **C-DEFECT, not reproduced**: the C dies there too, from 70,000 (SIGSEGV
+  in `regcomp()`); lsof-rs reads a run of any length in one pass, and one
+  past the cost limit is `Regular expression too big`.
+* **The size limit did not bound the engine's memory or time.** It bounds
+  the compiled program; the engine first builds every class as a set of
+  ranges, folded for case under `i`, so `-c` with 60,000 `\W` and `i` took
+  20 s and 2.5 GB before it was refused. An expression's cost is now
+  counted as it is read (`COST_LIMIT`, 65,536: one for a character, anchor,
+  repetition or list element, two for a `.` or a non-matching list, 1,024
+  for `[:alpha:]`, `[:alnum:]`, `[:upper:]`, `[:lower:]`, `[:punct:]`,
+  `[:graph:]`, `[:print:]`, `\w` and `\W`, 64 for `[:space:]`, `[:blank:]`,
+  `[:cntrl:]`, `\s` and `\S`), and one past it is refused before the engine
+  sees it, after any refusal of glibc's own: that expression in 8 ms and 5
+  MB. So an expression holds at most 63 of the large classes, and 65,536
+  characters. With that the size limit could be raised to 8 MiB, which
+  takes what the first limit of 4 MiB refused and glibc compiles
+  (`.{20000}`, `[[:graph:]]{1,255}`, `[[:alpha:]]{300}`). It is not higher
+  because it is also what bounds a match: the engine looks at every state
+  of the program for every byte of a command at worst, 18 ms for the worst
+  program found under 8 MiB and a 15-byte command (`(.*){1,16000}z`, which
+  the C refuses, `Memory exhausted`, or dies on), and a match's answer is
+  now kept for each command name, so a run pays it once a name and not
+  once a process and option (1.1 s over this host's 79 processes for
+  `(.*.*){8000}z`, 11 s before). **Refused, where glibc compiles them**:
+  `.{32767}`, `\w{0,800}`, `.{0,20000}`, `(.{200}){150}`, an expression of
+  64 large classes, one of more than 65,536 characters, and nesting past
+  100. Ledgered: `rx-past-the-size-limit`, `rx-past-the-cost-limit`.
+* **A hosts, services or password file's line had no bound**, nor had the
+  file: `/dev/zero` in its place was read into memory until the allocation
+  failed (SIGABRT). A line is read to 1 MiB and a longer one passed over,
+  a file to 256 MiB, nsswitch.conf and host.conf to 1 MiB, and at most
+  1,048,576 accounts are kept from a password file. And what is no regular
+  file is not opened at all: a FIFO there holds `open(2)` until something
+  writes to it, which holds the C for good (measured: `/etc/hosts`,
+  `/etc/services`, `/etc/passwd`, `/etc/nsswitch.conf` or `/etc/host.conf`
+  as a FIFO, and the C never returns). lsof-rs reads such a hosts, services,
+  password or host.conf file as no file, such an nsswitch.conf as one glibc
+  cannot read (below), and does not hand a name to `getaddrinfo()` while one
+  of the files glibc reads for it is such a file. Measured with each of the
+  five as `/dev/zero`, a FIFO, a directory and `/dev/urandom`, under
+  `ulimit -v 3000000`: every lsof-rs run ends within 0.1 s with the answer
+  for a file that names nothing; the C takes 0.8 to 4 s over `/dev/zero`
+  (it reads until memory runs out), and does not return from a FIFO,
+  `/dev/urandom` or a `/dev/zero` host.conf.
+* **nsswitch.conf is read as glibc 2.39 reads it** (`nss/nss_database.c`,
+  `nss_action_parse.c`; `netnames::nsswitch_database`, each rule measured
+  through `getent` and the C over 69 shapes of the file). With no file, an
+  empty one, or no line for a database, glibc has built-in sources:
+  **`files dns` for hosts on this glibc** (Debian's and Ubuntu's; the first
+  version had taken upstream's `dns [!UNAVAIL=return] files`, under which a
+  name `/etc/hosts` holds was `unknown host name` on a host with no
+  nsswitch.conf, a minimal container), `files` for services and for passwd.
+  A line is read to its newline or a NUL, and **a last line no newline ends
+  is not read at all**; the database's name ends at a blank or a colon and
+  is matched as written; the last line for a database wins; **there is no
+  comment after the sources** (`passwd: sss # files` has three sources, and
+  the password file is read); a source may be followed by `[STATUS=action
+  …]`, with `!STATUS` for every other status, in any case; and **a line
+  glibc cannot parse makes it refuse the whole file**, for every database:
+  under `services: files [` the C knows no login, no host name and no
+  service name (a number is still an address), and so does lsof-rs. A
+  nsswitch.conf that is a directory is refused the same way.
+* **A lookup walks the sources as glibc walks them** (`netnames::nss_walk`,
+  after `__nss_lookup()`, `__nss_next2()` and `getXXbyYY_r()`): a source
+  that returns ends it where its status's action is `return`, a later
+  source's answer replaces an earlier one's, `[SUCCESS=merge]` fails the
+  lookup (nothing here can be merged), and a source whose module is not
+  there is stepped over only where its `UNAVAIL` action is `continue`. So
+  under `passwd: sss [UNAVAIL=return] files`, with no `sss` installed, the
+  C knows no login, and under `sss [NOTFOUND=return] files` it reads the
+  file; lsof-rs had it the other way round. The same walk answers a
+  service name, and a host name's first step: `hosts: files
+  [SUCCESS=continue] dns` asks DNS for a name the file holds, `files
+  [SUCCESS=merge]` knows none.
+* **`passwd: compat` reads the password file by `nss_compat`'s rules**
+  where the file holds a `+` or `-` line (`users::compat_line`; 31 files
+  measured through `getent` with no NIS): `-name` before the account's own
+  line excludes the name, and the uid keeps it; `+name` leaves the name to
+  NIS, which is not there; after a `+` alone no name is found; after any
+  `+` line (`+`, `+name`, `+@netgroup`) no uid is. Such a line counts only
+  where its parser takes it (`-bob`, `-bob::::`; not `-bob:x`, `-bob:::`,
+  or a uid past 32 bits).
+* **`RESOLV_HOST_CONF` is read**, as glibc's `_res_hconf_init()` reads it,
+  but in secure-execution mode, where glibc's loader takes it out of the
+  environment (measured with a set-user-ID copy of the C: ignored there,
+  `RESOLV_MULTI` honoured); lsof-rs reads `AT_SECURE` from
+  `/proc/self/auxv`, and a vector it cannot read is taken as secure. And
+  host.conf is read 255 bytes of a line at a time, as glibc's `fgets()`
+  reads it (a comment of 255 bytes with `multi on` after it on its line
+  turns `multi` on; measured).
+* **`(a)|\1` is `Invalid back reference`**, as glibc has it: an alternative
+  can refer only to a group closed before the alternation or earlier in
+  itself, and what follows the alternation to the groups of every
+  alternative (`(a)|(b)\2` and `(a|(b))\2` are back-references). 40
+  expressions in each syntax measured through `regcomp()`.
+* **The differential compares the words of a refusal**, not only that there
+  was one: every `rx-*`, `names-*` and `nss-*` case has `with_stderr =
+  true` (124 cases, and the new `inet-` one), the C's nine lines of usage and
+  lsof-rs's one made the same line by five rules (`linux_diff.py`,
+  `USAGE_RULES`; the usage text itself is 114). Checked by breaking four
+  messages in a copy of the binary: 16 cases fail. 27 cases were added for
+  the fixes above (`names-VARIANT` modes, each a shape of nsswitch.conf,
+  the password file or host.conf); the first version of lsof-rs fails 17 of
+  them. And the names modes' name server is the harness's own now
+  (127.238.38.53, every query refused), so that no query reaches a resolver
+  the host runs on port 53.
+* **C-DEFECTs found by the reviews, not reproduced**: the C frees a
+  protocol's name once for each port entry of a list (`-i TCP:1,2`, `-i
+  TCP@127.0.0.1:1,2`, `-i UDP:ntp,ssh`: `free(): double free detected in
+  tcache 2`, SIGABRT, wherever glibc's allocator notices, which it does
+  every time after a refusal: `-i TCP:22,1x`, ledgered as
+  `inet-protocol-port-list-frees-twice-in-the-c`); read unbuffered, what the
+  C lists before it dies is lsof-rs's listing line for line. And with a
+  `passwd:`, `hosts:` or `services:` line that lists no source (or opens
+  with an action) the C dies in glibc on `-u name`, `-i @name` or `-i
+  :name` (SIGSEGV, as `getent` does); lsof-rs knows no such name, and says
+  so.
+
+`mutants/row38.toml` gained 93 mutants for these (169 in all; 9 of the
+first 85 were replaced with the code they changed).
+
 **Left, each measured**:
 
 * **A back-reference** (`\(a\)\1`, `(a)\1`), which glibc takes in both
   syntaxes: the engine has none, and the expression is refused, `regexp
   error: …: back references are not supported` (an invalid one is glibc's
-  `Invalid back reference`). Ledgered: `rx-back-reference`.
+  `Invalid back reference`, one into another alternative too). Ledgered:
+  `rx-back-reference`.
 * **A word operator** (`\b`, `\B`, `\<`, `\>`) takes Unicode's word
   characters, which are glibc's (`iswalnum()` or `_`) and a combining mark,
   a connector other than `_` and the zero-width joiners; and beside a byte
@@ -431,8 +602,12 @@ the sockets and exits as for any other spec (`names-multi-*`, ledgered).
   kelvin and ångström signs), and `ÿ` in a range that ends at `\xff`.
 * **Encodings glibc reads as characters and Rust does not**: a surrogate's
   three bytes and a code past U+10FFFF, to `.` alone.
-* **Bounds** glibc lacks: a program past 4 MiB (`[[:alpha:]]{1000}`) and
-  nesting past 100 are `Regular expression too big`.
+* **Bounds** glibc lacks: a program past 8 MiB (`[[:alpha:]]{1000}`,
+  `.{32767}`, `\w{0,800}`), an expression past the cost limit (64 of the
+  locale's large classes, or more than 65,536 characters) and nesting past
+  100 are `Regular expression too big`. There is no bound on how many `-c
+  /regex/` a command line holds, as the C has none: each is compiled within
+  its own.
 * **Locales.** All of the above is the C under a UTF-8 locale, `C.UTF-8`'s
   collation; under `LC_ALL=C` the C takes every byte for a character, as
   lsof-rs never does (its one reading of text everywhere).
@@ -441,12 +616,35 @@ the sockets and exits as for any other spec (`names-multi-*`, ledgered).
   one family): the C adds a DNS `AAAA` for a name the file gives only an
   IPv4 address (measured). **Where `files` is not the first `hosts:`
   source**, the system's resolver answers alone, in its own way with the
-  file (no `::1`-as-127.0.0.1, every line). `RESOLV_HOST_CONF` is not read.
+  file (no `::1`-as-127.0.0.1, every line; so `-i 6@localhost` is `unknown
+  host name` under `hosts: dns files` when DNS answers an A record for it).
   **nscd**, which the C asks first when it runs, is not asked for hosts
   read from the file, services or logins.
+* **glibc's built-in sources are taken to be this distribution's**: `files
+  dns` for hosts where nsswitch.conf gives none. glibc as its authors ship
+  it has `dns [!UNAVAIL=return] files`, and lsof-rs cannot ask the C
+  library which it was built with.
 * **A service only another NSS source knows** (`services: db`, `sss`) is
   unknown: there is no `getservbyname()` in safe Rust, and no other route.
-  The same for **a login** (39): `/etc/passwd` or nothing.
+  The same for **a login** (39): `/etc/passwd` or nothing. **A source
+  lsof-rs cannot ask is taken as one that is not installed** (`UNAVAIL`,
+  and stepped over or not as the line says), which is exact where it is not
+  (measured with `sss`, and with `dns` and `hesiod`, which have no `passwd`
+  function or no configuration) and a guess where it is installed and
+  would have answered: under `passwd: sss [NOTFOUND=return] files` with a
+  working SSSD, glibc stops at `sss` for an account it does not know, and
+  lsof-rs reads the file.
+* **`compat` with NIS**: `+name`, `+@netgroup` and `+` are read as glibc
+  reads them with no NIS to ask (the lines above); where there is one,
+  the accounts it would have given are unknown here. A line named exactly
+  `-`, `+@` or `-@` is an account of that name to `nss_compat` (uid 0 where
+  it gives none), and no account here.
+* **A hosts, services or password file line past 1 MiB is passed over, and
+  a file is read to 256 MiB**, where glibc reads a line and a file of any
+  length (into memory it grows until there is none left). **What is no
+  regular file is not read**: the C reads a device and waits on a FIFO.
+* **glibc's own warnings about a host.conf it cannot parse**
+  (`/etc/host.conf: line 2: bad command …`, on stderr) are not printed.
 * **glibc 2.39 misreads a hosts or services line that blanks open and no
   newline ends** (its `__nss_readline()` moves the line without its
   terminator: ` 127.0.0.1 host` at a file's end names `hostt`). The line is
@@ -455,7 +653,7 @@ the sockets and exits as for any other spec (`names-multi-*`, ledgered).
   service from their services file by the same rules, not measured against
   the C (Windows has no C lsof).
 
-`mutants/row38.toml` holds one mutant for each rule above, 85 of them, with its kill table; its first run found that the engine counts nesting its own way, which is why the nesting limit is 100 and the engine's is set above it.
+`mutants/row38.toml` holds one mutant for each rule above, 169 of them since the review, with its kill table; its first run found that the engine counts nesting its own way, which is why the nesting limit is 100 and the engine's is set above it.
 
 ## Fixed by the rest of `-E`: UNIX socket peers, pseudoterminals, eventfds, message queues, and option values that are not UTF-8 (2026-11-06)
 
@@ -4858,8 +5056,8 @@ C-DEFECT not reproduced.
 | 35 | every column is **right-aligned** but COMMAND and TASKCMD (`print.c`: `" %*s"`), FD is the descriptor right-aligned plus its access and lock characters, and NAME follows one space unpadded | ~~USER, FD, TYPE, DEVICE and NODE left-aligned~~ **resolved 2026-09-26** | see "Fixed by laying the table out as `print.c` does" above. The item named four of the five columns. Every case now compares whitespace, and that found one more difference, a space after every packet-socket NAME. |
 | 36 | a UID with no password entry, or any UID under `-l`: no `-F L` field, the number eight wide in USER, and `lsof: no pwd entry for UID N` on stderr | ~~prints `L<uid>`, and a bare number~~ **resolved 2026-09-26**; ~~the stderr line~~ **resolved 2026-10-30** | the table and `-F` matched since 2026-09-26 (measured with UID 65000 and with `-l`). The stderr line, measured 2026-10-30 with UID 65000 and fixture W's WB (3000000000): the C's `printuid()` writes it each time it is asked about an owner it has no entry for — it caches the names it finds and nothing else — and it is asked twice per table row (sizing USER, `print.c:937`, then printing it, `:941`, every sizing call before any printing one), once per `-F` process set when `L` is selected (`:2224`), once per `-J` process and once per `-j` line (`:2088`); never under `-l` (`Futol`), `-w` or `-t` (`Fwarn`, which `+w` clears again), and `-t` prints no USER. lsof-rs writes the same lines in the same order (`pwd_warnings` in `main.rs`), all of them before the listing, where the C's interleave with a stdout it buffers: the same bytes and the same count on each stream. **Corrected 2026-10-30 (Batch A's review):** on a merged stream (`lsof >file 2>&1`, `2>&1 | less`) the two differ once stdout passes its stdio buffer, not only on a terminal: the C writes the sizing pass's warnings before line 1, and the printing pass's where glibc flushes its 4096-byte stdout buffer, which cuts a listing line in the middle (measured: `lsof -u 65016,0 >file 2>&1` put 8 at lines 1-8 and 8 at 384-391, mid-line; `-F` at line 3523, `-j` at 371-378), where lsof-rs puts all of them at lines 1-16. A listing under 4 KiB per cycle (`-r1` with a small one) merges identically. Not emulated, by decision: it would mean glibc's full-buffering rules (a buffer of stdout's `st_blksize`, flushed at exact boundaries mid-line, `xsputn`'s rule for long writes, line buffering on a tty) and each warning written at the C's call site. A stderr write that fails no longer ends the listing (exit 101 before the first row, found by the review): it is ignored, as the C's unchecked `fprintf(stderr)`, and a stderr whose reader has gone exits 141, the C's SIGPIPE (`lsof_core::safefs::write_stderr`; `tests/stdout_errors.rs`). Linux only: Windows has no uid. |
 | 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed — yet still located: `lsof -t -p 1` prints nothing on this host, and exits 0 | ~~the blank row, and `-t` prints the pid~~ **resolved 2026-09-25** | see "Fixed by reporting what could not be read" above. The fast path still skips the file walk; it asks whether one link reads. |
-| 38 | `-c /regex/[bix]` is a POSIX regular expression (`regcomp()`, extended unless `b`), and `-i` takes host names (`@localhost`, `gethostbyname2()`) and service names (`:http`, `getservbyname()`) | ~~refused, with an error~~ the same: the expression read by glibc's grammar and run by the `regex` crate, a host name from the hosts file by glibc's `files` rules and then from the system's resolver, a service name from the services file | **resolved 2026-11-11, like the C** but for what is left — see "Fixed by `-c /regex/` and `-i`'s host and service names" above; the owner's decision ("Add regex crate. For `-i` match what the original version did"). Measured: 336,840 expressions exhaustively and 1.1 million at random against glibc's `regcomp()`/`regexec()`, 13,800 hosts and services lookups and 4,354 numeric names against `gethostbyname2()`/`getservbyname()`, 189 command lines against the C. **C-DEFECT, not reproduced**: the C frees an `-i` argument once for each address a host name gave it and aborts (`double free`), on `-i @localhost` wherever `multi on` gives it two. **Left**: a back-reference is refused (no engine has one in linear time); word operators, `^`/`$` beside a newline, six characters' case and encodings Rust does not read are the engine's; a program past 4 MiB or 100 deep is too big; a name the hosts file holds in one family is not asked of DNS for the other; a service, like a login (39), comes from its file or not at all; nscd is not asked. History: recorded 2026-09-25 as a refusal that replaced a silent wrong answer (`-c /re/` was a literal that matched nothing, `-i:http` every Internet file); amended 2026-10-17 (item 112), when `-i` was read in the C's grammar and each name refused in words of lsof-rs's own (`host names are not resolved`, `service names are not resolved`), which are gone. |
-| 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, and only where `/etc/nsswitch.conf` has glibc read it, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. **Amended 2026-11-11, like the C as far as the file goes**: the file is read by glibc's `files` rules (70) and, since this date, only where nsswitch.conf's `passwd:` lists `files` or `compat` (or there is no line, or no file: glibc's default). Measured over nine shapes of the line: under `passwd: sss` (no such service installed), `passwd: FILES`, an empty line, or a line that opens with an action, the C knows no login (`can't get UID for root`) and prints USER as the number with `no pwd entry for UID 0`, and lsof-rs now does the same (`nss-passwd-*`), where it had read the file regardless; under `sss files`, `db files`, `nosuchsource files`, `compat`, and with two lines (the last wins), both read it. **Left, and why**: an account only another source serves (LDAP, SSSD, systemd-homed, NIS) has no name here. `getpwnam()` is libc's; calling it needs `unsafe` or a crate that wraps it, which the three `forbid(unsafe_code)` crates do not take for a name alone, and `std` has no route to it (there is one for hosts, `getaddrinfo()`, which is why 38 could follow NSS for those and this cannot). nsswitch.conf is read once a run, where glibc reads it again when it changes; nscd is not asked. |
+| 38 | `-c /regex/[bix]` is a POSIX regular expression (`regcomp()`, extended unless `b`), and `-i` takes host names (`@localhost`, `gethostbyname2()`) and service names (`:http`, `getservbyname()`) | ~~refused, with an error~~ the same: the expression read by glibc's grammar and run by the `regex` crate, a host name from the hosts file by glibc's `files` rules and then from the system's resolver, a service name from the services file | **resolved 2026-11-11, like the C** but for what is left — see "Fixed by `-c /regex/` and `-i`'s host and service names" above; the owner's decision ("Add regex crate. For `-i` match what the original version did"). Measured: 336,840 expressions exhaustively and 1.1 million at random against glibc's `regcomp()`/`regexec()`, 13,800 hosts and services lookups and 4,354 numeric names against `gethostbyname2()`/`getservbyname()`, 189 command lines against the C. **C-DEFECT, not reproduced**: the C frees an `-i` argument once for each address a host name gave it and aborts (`double free`), on `-i @localhost` wherever `multi on` gives it two. **Reviewed 2026-11-11** ("The review's fixes" there): the reader no longer recurses on a run of `$` (the C dies on 70,000, SIGSEGV); an expression's cost is bounded before the engine sees it (60,000 `\W` under `i` took 20 s and 2.5 GB) and its program at 8 MiB, which takes `.{20000}`, `[[:graph:]]{1,255}` and `[[:alpha:]]{300}`; a hosts or services file is read in bounded lines and only if it is a regular file; nsswitch.conf is read and walked by glibc's rules, with `files dns` where it gives hosts no line, and `services:` followed; `RESOLV_HOST_CONF` is read; `(a)|\1` is glibc's `Invalid back reference`; the C's second double free (`-i TCP:22,1x`) is ledgered. **Left**: a back-reference is refused (no engine has one in linear time); word operators, `^`/`$` beside a newline, six characters' case and encodings Rust does not read are the engine's; a program past 8 MiB, an expression of 64 large classes or 65,536 characters, or 100 deep is too big; a name the hosts file holds in one family is not asked of DNS for the other; a service, like a login (39), comes from its file or not at all; a line past 1 MiB of those files is passed over; nscd is not asked. History: recorded 2026-09-25 as a refusal that replaced a silent wrong answer (`-c /re/` was a literal that matched nothing, `-i:http` every Internet file); amended 2026-10-17 (item 112), when `-i` was read in the C's grammar and each name refused in words of lsof-rs's own (`host names are not resolved`, `service names are not resolved`), which are gone. |
+| 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, and only where `/etc/nsswitch.conf` has glibc read it, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. **Amended 2026-11-11, like the C as far as the file goes**: the file is read by glibc's `files` rules (70) and, since this date, only where glibc's walk through nsswitch.conf's `passwd:` sources reaches `files` or `compat` (or there is no line, or no file: glibc's default, `files`). The line is read by glibc 2.39's own parser and walked by its rules (reviewed the same day, 38's "The review's fixes"): measured over 69 shapes of the file, 1,409 `-u` command lines and listings agree with the C but where the C dies. Under `passwd: sss` (no such service installed), `passwd: FILES`, `sss [UNAVAIL=return] files`, `sss [!SUCCESS=return] files`, `files [SUCCESS=merge]`, or any line glibc cannot parse, for any database (`sss [NOTFOUND] files`, `hosts: files [`), the C knows no login (`can't get UID for root`) and prints USER as the number with `no pwd entry for UID 0`, and lsof-rs does the same (`nss-*`), where it had read the file regardless; under `sss files`, `db files`, `sss # files` (no comment there), `sss [NOTFOUND=return] files`, `compat`, a last line with no newline (not read), and with two lines (the last wins), both read it. **`compat`** reads the file by `nss_compat`'s rules where it holds a `+` or `-` line: `-name` excludes the name (not its uid's name), `+name` and a `+` alone leave names to NIS, and after any `+` line no uid is found (31 files measured). With an empty source list, or one that opens with an action, the C dies in glibc on `-u name` (SIGSEGV, as `getent` does; **C-DEFECT, not reproduced**: lsof-rs says `can't get UID for name`). **Left, and why**: an account only another source serves (LDAP, SSSD, systemd-homed, NIS) has no name here. `getpwnam()` is libc's; calling it needs `unsafe` or a crate that wraps it, which the three `forbid(unsafe_code)` crates do not take for a name alone, and `std` has no route to it (there is one for hosts, `getaddrinfo()`, which is why 38 could follow NSS for those and this cannot). A source lsof-rs cannot ask is taken as not installed (`UNAVAIL`), which is a guess where it is installed and would have answered; `compat`'s `+` lines are read as with no NIS. nsswitch.conf is read once a run, where glibc reads it again when it changes; nscd is not asked. |
 | 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | ~~stats the mapped file and prints `REG`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-09-25, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it; the cwd/rtd/txt/fd half of `-e` had matched since 2026-09-20. |
 | 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | ~~`-L` **shows** the column, and a bare `+L` is refused~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. Windows changed with it: its smoke case now asserts the C's reading. |
 | 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). ~~A socket's inode reports 1~~ A socket never has a count: `process_proc_node()` hands it to `process_proc_sock()` first | ~~a row whose count lsof-rs never read passes the filter~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. The reason this row first gave was wrong, and `+L2` shows it: no socket is selected there either. |
@@ -4942,7 +5140,7 @@ C-DEFECT not reproduced.
 | 119 | `-O` makes the call in lsof under `alarm(TmLimit)`, which cannot end a FUSE or NFS wait; when the call returns after it, `handleint()` `longjmp`s to a `jmp_buf` no `setjmp` filled: `Segmentation fault`, exit 139 | `-O` makes the call in lsof with no limit, as documented, and lists when it returns. While it waits, lsof holds the `O_PATH` descriptor the `stat` opened (decision 3), where the C's `stat(2)` holds none: another lsof that `stat`s lsof's fds meanwhile waits too | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:410,432-440`). Measured: delay 3 s, `-O -S 2 -p P`, exit 139; `-O -p P` (15 > 3) lists. Ledgered as `fh-delay-O-crashes-in-the-c`, unpinned (the listing holds fixture A's pid); lsof-rs's side is pinned by `crates/lsof-cli/tests/bounded_calls.rs`, `an_answer_in_time_is_taken_and_dash_o_has_no_limit` (`-O -S 2` on a 3 s answer lists, exit 0). |
 | 120 | a timed-out `readlink` makes `doinchild()` return 1, not -1, and `Readlink()` reads that as a **one-byte link target from a buffer nothing filled**: the argument becomes another path (undefined behaviour) | a component whose `readlink` fails or times out is kept as it is, as the C keeps one whose `readlink` fails; and after a timeout no more of the path is read (**DECISION**, item 94's review): every later prefix is reached through the one that did not answer, so each would cost the limit again and leave another helper waiting — measured on a mount whose `LOOKUP` never answers, `-S 2 FUSE/x/x/x/x/x` took 12 s and left 8 helpers in D, and a mount source of ten such components made every `lsof PATH` 22 s. The C documents a limit per call and hangs at its second (118); lsof-rs bounds one `Readlink()` by one | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:1072-1086`). Measured: FH's root holds `lnk -> /etc`, its `readlink` answered after 3 s; `-V -S 2 FUSE/lnk` says `no file system use located: FUSE/lnk`, the mount point. Ledgered as `fh-delay-readlink-timeout-in-the-c`, unpinned (the work directory); lsof-rs's side is pinned by `crates/lsof-cli/tests/bounded_calls.rs`, `a_link_that_never_reads_costs_the_limit_per_call`, and the stop by `lsof-core/src/readlink.rs`, `each_component_is_read_through_the_bounded_layer`. |
 | 121 | **user-supplied numbers wrap** in a C `int` or `long` (`main.c`, `arg.c`): `-S 4294967295` is -1 and `-S 4294967297` is 1, each raised to 2 with a warning, and `-S 99999999999` is 1215752191; ~~`-o4294967297` is a hex limit of 1~~ (reproduced since 2026-10-30, item 117); `+L18446744073709551617` is `+L1`; `-r 4294967297` repeats every second; `-i TCP:4295011267` is port 43971, `-i :4294967295` is no port (`incomplete Internet address specification`), `-i :4294967295-1` the same, `-i :1-4294967295` an end below its start (`unacceptable port specification`) and `-i @4294967297.0.0.1` is 1.0.0.1 (measured 2026-10-17); `+c 4294967296` is accepted | **`-S`, `+L` and `-r` saturate** (at `INT_MAX` for `-S`: no warning, no deadline that could overflow; at the largest count for the others; `-o` saturated too until item 117 found what its wrap prints, harmless to follow, and it now wraps as the C's does), and **the `-i` port and `+c` saturate** too (since 2026-10-17, item 112: a port past 65535 is accepted and matches nothing, as the C's unwrapped `int` does, so `:4294967376` matches nothing where the C's is port 80, `:4294967295` and `:1-4294967295` are accepted and match nothing where the C refuses them, `:4294967295-1` is refused as an end below its start, and an IPv4 octet saturates too, so `@4294967297.0.0.1` is a host name, and since 2026-11-11 (38) one glibc answers as a number that is no address: `unknown host name (4294967297.0.0.1)`; `+c` reads its leading digits as `atoi()` does, `+c 1x` being `+c 1`, and a width past 15 is `+c N > what system provides (15)`, N the saturated value, where the C's `atoi()` wraps `4294967296` to 0, no limit, and accepts it). `-p`, `-g`, `-u` and `-d` are the ledger's `*-overflow-*` entries, all refused | **C-DEFECT, not reproduced — 2026-10-09**, one row for the family. Measured: the `-S` values here, and for the others the overflow audit of 2026-10-09 (each command against a fixture with fds at offset 0x123 and 2^63-1). Ledgered for `-S` as `opt-S-wraps-negative-in-the-c` and `opt-S-wraps-to-one-in-the-c`, for `-i` as `inet-port-wraps-to-none-in-the-c`, `inet-port-range-end-wraps-in-the-c` and `inet-octet-wraps-in-the-c`; the others have no case. |
-| 122 | `avoiding stat(P): -b was specified.` prints `P` **raw**, where the same run escapes it in `avoiding readlink(P)` and in the status error: a path named `e<ESC>[2Jx` puts an ESC byte on the terminal | escapes it (`^[`) | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:1011,1519`: `fprintf("%s")`, not `safestrprt()`). Measured with `od -c` on `-b -f -- 'e\033[2Jx'`. No differential case can isolate it while the C names every mount under `-b` (the ledgered `opt-b-*` cases); `crates/lsof-cli/tests/arguments.rs` pins it. Item 112's class, which joins it here. The two `-e` messages are of the class (item 110, measured 2026-10-17 with `-e 'no<ESC>[2Jsuch'` and `-e '/no<ESC>[2Jsuch'`): `enter_efsys()` prints a value that is no path with `"%s"` (`arg.c:586-588`) and `main.c:1154` an unmounted one with `%s`, both raw; lsof-rs escapes both (`"no^[[2Jsuch"`). **Widened 2026-10-17** (item 112): the C prints raw, each measured with an `\e[2J` value and `od -c`, `-i`'s protocol, host name and service name in `unknown protocol name (P)`, `unknown host name (H)`, `unknown service S [for P]` and `TCP=n and UDP=m S ports conflict` (`arg.c:1300-1302, 1430-1432, 1502-1504, 1519-1533`; the spec after `-i ` it escapes); the `%c` option letters (`illegal option character`, `unknown cross-over option`, `unknown file struct option`, `unknown field`, `unsupported TCP/TPI info selection`); `-K not followed by i (but by V)`; `-c^X and -cX conflict.`; every `-s` message; and the `-d` mixture's item (`exclude in an include -d list: ^2<ESC>[2J`), which an item-51 note had kept raw on purpose. lsof-rs escapes each as `safestrprt()` would. |
+| 122 | `avoiding stat(P): -b was specified.` prints `P` **raw**, where the same run escapes it in `avoiding readlink(P)` and in the status error: a path named `e<ESC>[2Jx` puts an ESC byte on the terminal | escapes it (`^[`) | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:1011,1519`: `fprintf("%s")`, not `safestrprt()`). Measured with `od -c` on `-b -f -- 'e\033[2Jx'`. No differential case can isolate it while the C names every mount under `-b` (the ledgered `opt-b-*` cases); `crates/lsof-cli/tests/arguments.rs` pins it. Item 112's class, which joins it here. The two `-e` messages are of the class (item 110, measured 2026-10-17 with `-e 'no<ESC>[2Jsuch'` and `-e '/no<ESC>[2Jsuch'`): `enter_efsys()` prints a value that is no path with `"%s"` (`arg.c:586-588`) and `main.c:1154` an unmounted one with `%s`, both raw; lsof-rs escapes both (`"no^[[2Jsuch"`). **Widened 2026-10-17** (item 112): the C prints raw, each measured with an `\e[2J` value and `od -c`, `-i`'s protocol, host name and service name in `unknown protocol name (P)`, `unknown host name (H)`, `unknown service S [for P]` and `TCP=n and UDP=m S ports conflict` (`arg.c:1300-1302, 1430-1432, 1502-1504, 1519-1533`; the spec after `-i ` it escapes); the `%c` option letters (`illegal option character`, `unknown cross-over option`, `unknown file struct option`, `unknown field`, `unsupported TCP/TPI info selection`); `-K not followed by i (but by V)`; `-c^X and -cX conflict.`; every `-s` message; and the `-d` mixture's item (`exclude in an include -d list: ^2<ESC>[2J`), which an item-51 note had kept raw on purpose. lsof-rs escapes each as `safestrprt()` would. `invalid regexp modifier: X` (38) is of the class, the modifier a `%c` in the C: escaped here by the one rule for a quoted argument, so a backslash is `\\` and a tab `\t` where the C prints the byte (`-c '/a/\'`). |
 | 123 | the child that reads links and `stat`s is a **fork**: in lsof's own listing it has the parent's command name and working directory, fds 0r and 1w on two pipes and nothing else, and the parent holds the other ends (fds 5w and 6r here) | the helper is the binary **re-executed** (`/proc/self/exe`; through the loader when lsof was run by naming it): the same command name (it takes its parent's) and working directory (it inherits lsof's), fds 0r and 1w on two pipes, but it has `/dev/null` on fd 2, and it holds any fd lsof was given without close-on-exec, which std cannot close; lsof holds the other ends at its own numbers. It runs on every run that makes a bounded call (one that reads the mount table, every one but `-f`, or names a path or a `+d`/`+D`), unless `-b` or `-O` is in force. While it waits on a call it holds what the call opened: the `O_PATH` descriptor of a `stat` (decision 3: the one std `stat` that mounts no automount point) or a directory being listed; killed there, it keeps it until the file system answers, and **anything that `stat`s `/proc/HELPER/fd/N` meanwhile waits too** — the C's lsof listing the host, another tool, and an lsof-rs that is not the same file. lsof-rs itself neither `stat`s nor lists a helper's close-on-exec descriptors, which are exactly those (its pipes, `/dev/null` and what it inherited are not close-on-exec): this run's helpers by pid, another run's when it runs this same file (`/proc/PID/exe`) with the helper's argument and lsof's command name. And lsof has a second thread per helper started, which reads its replies (one stays, blocked in a pipe `read`, for each helper killed): `-K` lists them as tasks (TASKCMD `lsof-safe`), so `lsof -K -a -c lsof` lists lsof, where the C, single-threaded, lists nothing | **DECISION — 2026-10-09** (item 94). `/dev/null` because std has no closed stdio; the exec because a thread blocked on FUSE cannot be abandoned (measured); pipes, so that the helper's fds 0 and 1 are FIFOs as the C's child's are, and std gives a pipe read no timeout, hence the thread (a socket would have needed none, and shown as `unix`). The working directory had been `/`, with a relative path sent through `/proc/<lsof>/cwd`; the review found that named another process's directory in a pid namespace sharing the host's `/proc`, so the helper now works where lsof does, as the C's child. The descriptor a waiting helper holds was found the same way: `lsof -S 2` beside a mount that never answered dropped the mount and then hung on its own killed helper's fd 3 (and so did the C's `lsof -b -w -p HELPER`); `crates/lsof-cli/tests/bounded_calls.rs`, `a_killed_helper_holds_nothing_a_scan_waits_on`, pins that two whole-host runs in a row, a `+D` and a path argument each end within their limits. Measured with `lsof -n -P -a -c lsof -d 0-9,cwd` and `-K -a -c lsof -d cwd` for both binaries. Since 2026-10-17 (item 110) the helper starts only on a run that reads the mount table or names a path or a `+d`/`+D`, never under `-i` alone, which reads no table in the C either: `opt-i-alone-under-a-descriptor-limit` lists in both. |
 | 124 | when the mount table lists an NFS mount (`HasNFS`), the C makes every per-file `stat` as well — cwd, rtd, txt, each fd's `lstat` and `stat`, mapped files, unix-socket paths — through `statsafely()`, and after a failure `statEx()` `stat`s the parent directories; a row it could not `stat` is `unknown`, named by the link's source, with `(lstat: …)` and `(stat: …)` in NAME; with an NFS mount recorded (`HasNFS` 2) a file on it is `N_NFS`, its NAME followed by ` (SOURCE)` | ~~per-process `stat`s are made in lsof, unbounded, NFS or not, as the C makes them without NFS~~ **resolved 2026-11-02** | **resolved 2026-11-02, like the C** (the owner's decision of 2026-11-02: "row 124 like the C", its `-b` row shapes and `statEx()`'s errno included): see "Fixed by making the per-file calls through the bounded layer when an NFS mount is listed" above. Measured as recorded here since 2026-11-01 (a table with `srv:/export DIR nfs4 rw 0 0` bound over the `/proc/mounts` link through an `O_PATH|O_NOFOLLOW` descriptor, in a mount namespace of its own); the differential now does the same (`LSOF_DIFF_MT=nfs`, fixture NFS, 26 cases, all MATCH; 5 under `nomounts`), and `mount_stat_audit.py` compares each binary's per-file calls in its child (the same, none in lsof itself). lsof-rs reads `/proc/mounts` now, the name the C opens, and, as the C, ends the run where it cannot open it (`can't fopen(/proc/mounts, "r"): …`, exit 1; measured with a procfs mounted `subset=pid`, which has none, and the differential's `LSOF_DIFF_MT=nomounts`). **Fix round (2026-11-02, the reviews)**: a process an exclusion names is not read (`is_proc_excl()`: `lsof -b -u ^root` 236 lines of warnings, as the C, where lsof-rs had printed 1873); a network selecter ORed with process selecters reads an unselected process's fds alone for sockets, decided per process as the C's `Ckscko` (`lsof -b -U -p P` 381 lines against the C's 387, the rest lsof's own fds, where lsof-rs had printed 577); at most 16 killed helpers wait on a hung server (118); another run's helper is told without a `stat` in lsof of a user's executable (THREAT-MODEL). The `No such file or directory` of an `rtd` row, and of a `cwd` one directly under `/`, is `statEx()`'s initial errno where it has no parent to try; reproduced, as decided. What stays open: the C's `get_unix()` `stat`s every bound AF_UNIX path `/proc/net/unix` lists, where lsof-rs `stat`s a socket's path only when a path argument may find it (through the helper under NFS); and the C's timeout working once per run (118). A file-system argument naming an NFS mount (151) is resolved 2026-11-07, like the C. |
 | 125 | a row locates **one** search item: `is_file_named()` tries the file arguments, then the file-system ones, marks the first that names the row and returns (`dfile.c`), so a file-system argument whose only open file another argument also names is `no file system use located`, exit 1 | ~~marks every item a row matches: exit 0~~ **resolved 2026-10-18: one item per row** | see "Fixed by naming a located row by its search item, as the C binds it, and printing a numeric owner as the C does" above. Found 2026-10-09 measuring item 101: `lsof -V -a -p H T T/f`, `T` a tmpfs whose only open file is H's `T/f`, in either order, and with `-d 99`, which prints no row. The mechanism of items 17 and 84, reproduced with them on the maintainer's decision of 2026-10-18. Pinned by `path-file-and-its-file-system-one-item-per-row` and `path-file-system-and-its-file-one-item-per-row` on fixture DN. |

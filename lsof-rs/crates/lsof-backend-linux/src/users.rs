@@ -4,7 +4,9 @@
 //! by the rules glibc's `files` service reads it with (`nss_files`, its
 //! `LINE_PARSER` for `struct passwd`; [`parse_line`]), which is what
 //! `getpwuid(3)` returns where `/etc/nsswitch.conf` says `passwd: files`
-//! (DIVERGENCES 70). That misses accounts served only by another NSS source
+//! (DIVERGENCES 70); where it says `compat` the file is read by
+//! `nss_compat`'s rules ([`compat_line`]), and where glibc's walk through
+//! the line's sources reaches neither, not at all (DIVERGENCES 39). That misses accounts served only by another NSS source
 //! (LDAP, SSSD, systemd-homed: item 39), which is why an unknown uid falls
 //! back to its number rather than to an error: lsof's USER column showing
 //! `1000` is honest, showing the wrong name would not be.
@@ -16,7 +18,6 @@
 //! [`new_cycle`] do the same.
 
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// The password file, as the C names it.
@@ -38,7 +39,7 @@ struct Cache {
     /// uid not in `found`. The C's `getpwuid()` reads the file at every such
     /// call; here once per cycle ([`new_cycle`] forgets it), which is the
     /// same file unless it is written in the instant between two calls.
-    snapshot: Option<HashMap<u32, Box<[u8]>>>,
+    snapshot: Option<ByUid>,
     /// `/etc/passwd`'s mtime and ctime, in seconds (`time_t`), when the
     /// first `-r` cycle `stat`ed it.
     stamp: Option<(i64, i64)>,
@@ -52,51 +53,198 @@ fn cache() -> MutexGuard<'static, Cache> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Every line of the file at `path`, fed to `each`, as glibc's
-/// `__nss_readline()` reads them: up to each `\n`, any length, as bytes.
-/// Nothing when it cannot be opened: then no account has a name.
-fn each_line(path: &str, mut each: impl FnMut(&[u8])) {
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
+/// The most accounts kept from one reading of the password file, in each
+/// direction: one past that many has no name here. Far more than a system
+/// has (the file is read to `lsof_core::netnames::FILE_LIMIT`, and each
+/// account kept costs memory the C, which keeps none, does not spend).
+const MAX_ACCOUNTS: usize = 1 << 20;
+
+/// `/etc/nsswitch.conf`, read once a run.
+fn nsswitch() -> &'static lsof_core::netnames::Conf {
+    static CONF: OnceLock<lsof_core::netnames::Conf> = OnceLock::new();
+    CONF.get_or_init(|| lsof_core::netnames::nsswitch_conf(std::path::Path::new(NSSWITCH)))
+}
+
+/// One line of a password file as glibc's `compat` service reads it
+/// (`nss_compat/compat-pwd.c`), where it is not an account's.
+#[derive(Debug, PartialEq, Eq)]
+enum Compat<'a> {
+    /// An account: its name and uid ([`parse_line`]).
+    Account(&'a [u8], u32),
+    /// `-name`: the account is excluded.
+    Minus(&'a [u8]),
+    /// `+name`: the account is taken from NIS.
+    Plus(&'a [u8]),
+    /// `+@netgroup`: so are a netgroup's.
+    PlusNetgroup,
+    /// `+` alone: so is every other.
+    PlusAll,
+    /// Anything else: a line no lookup takes.
+    Other,
+}
+
+/// How glibc's `compat` service reads `line`. A `+` or `-` line is one
+/// only where the parser takes it: its name alone (`-bob`, `-bob:`), or
+/// with a password field and then a uid and a gid field that may each be
+/// empty (`-bob::::`, four colons at least; `-bob:x`, `-bob:x:zz:5` and
+/// `-bob:::` are no lines). Measured through `getent` under `passwd:
+/// compat` (DIVERGENCES 39).
+fn compat_line(line: &[u8]) -> Compat<'_> {
+    if let Some((name, uid)) = parse_line(line) {
+        return Compat::Account(name, uid);
+    }
+    let line = line
+        .split(|&b| b == b'\n' || b == 0)
+        .next()
+        .unwrap_or_default();
+    let start = line
+        .iter()
+        .position(|&b| !is_space(b))
+        .unwrap_or(line.len());
+    let line = line.get(start..).unwrap_or_default();
+    let mut fields = line.splitn(2, |&b| b == b':');
+    let name = fields.next().unwrap_or_default();
+    let rest = fields.next().unwrap_or_default();
+    let Some((sign @ (b'+' | b'-'), who)) = name.split_first() else {
+        return Compat::Other;
     };
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => each(&line),
+    if !rest.is_empty() {
+        // The password, then `INT_FIELD_MAYBE_NULL` twice: each needs
+        // something to read, a number or nothing before a `:` or the end.
+        let mut at = rest.splitn(2, |&b| b == b':').nth(1).unwrap_or_default();
+        for _ in 0..2 {
+            if at.is_empty() {
+                return Compat::Other;
+            }
+            // A number past 32 bits is no line, as in an account's.
+            let (value, used) = strtoul(at);
+            if u32::try_from(value).is_err() {
+                return Compat::Other;
+            }
+            at = match at.get(used) {
+                None => &[],
+                Some(b':') => at.get(used.saturating_add(1)..).unwrap_or_default(),
+                Some(_) => return Compat::Other,
+            };
         }
+    }
+    match (sign, who) {
+        (b'+', []) => Compat::PlusAll,
+        // `+@`, `-@` and `-` are names like any other to it, of accounts
+        // nobody has.
+        (_, [] | [b'@']) => Compat::Other,
+        (b'+', [b'@', ..]) => Compat::PlusNetgroup,
+        (_, [b'@', ..]) => Compat::Other,
+        (b'+', who) => Compat::Plus(who),
+        (_, who) => Compat::Minus(who),
     }
 }
 
-/// Whether glibc's `passwd` lookups read the password file at all, as
-/// `/etc/nsswitch.conf` has it (`lsof_core::netnames::nsswitch_reads_passwd_file`;
-/// DIVERGENCES 39): under `passwd: sss`, with no `files`, the C's
-/// `getpwuid()` and `getpwnam()` know no account `/etc/passwd` holds
-/// (measured: USER is the number, and `-u root` is `can't get UID for
-/// root`), and neither does lsof-rs. Read once a run.
-fn passwd_file_is_read() -> bool {
-    static READ: OnceLock<bool> = OnceLock::new();
-    *READ.get_or_init(|| {
-        let text = lsof_core::netnames::small_file(std::path::Path::new(NSSWITCH), 1 << 20);
-        lsof_core::netnames::nsswitch_reads_passwd_file(&text)
+/// The sources `/etc/nsswitch.conf` lists for `passwd`; `None` where
+/// glibc refuses the file (`lsof_core::netnames::nsswitch_database`).
+fn passwd_sources() -> Option<&'static [lsof_core::netnames::NssSource<'static>]> {
+    static SOURCES: OnceLock<Option<Vec<lsof_core::netnames::NssSource<'static>>>> =
+        OnceLock::new();
+    SOURCES
+        .get_or_init(|| {
+            lsof_core::netnames::nsswitch_database(
+                nsswitch(),
+                b"passwd",
+                lsof_core::netnames::FILES_DEFAULT,
+            )
+        })
+        .as_deref()
+}
+
+/// How `sources`, the ones nsswitch.conf lists for `passwd`, answer one
+/// lookup: `files` with what the password file holds by glibc's `files`
+/// rules, `compat` by its `compat` rules, and no other source can be asked
+/// (`lsof_core::netnames::nss_walk`). Nothing where glibc refuses
+/// nsswitch.conf. (With no password file to read glibc's two are
+/// unavailable, not empty; nothing is found either way, so it is not told
+/// apart here.)
+fn walk<T: Clone>(
+    sources: Option<&[lsof_core::netnames::NssSource<'_>]>,
+    files: Option<T>,
+    compat: Option<T>,
+) -> Option<T> {
+    use lsof_core::netnames::NssAnswer;
+    lsof_core::netnames::nss_walk(sources?, |module| {
+        let found = match module {
+            b"files" => files.clone(),
+            b"compat" => compat.clone(),
+            _ => return None,
+        };
+        Some(match found {
+            Some(found) => NssAnswer::Success(found),
+            None => NssAnswer::NotFound,
+        })
     })
 }
 
-/// uid → name, the file read now.
-fn read_passwd() -> HashMap<u32, Box<[u8]>> {
-    let mut m = HashMap::new();
-    if passwd_file_is_read() {
-        each_line(PASSWD, |line| add_uid(&mut m, line));
-    }
-    m
+/// uid → name as each source that reads the password file has it.
+#[derive(Default)]
+struct ByUid {
+    files: HashMap<u32, Box<[u8]>>,
+    compat: HashMap<u32, Box<[u8]>>,
+    /// A `+` line was read: `compat` asks NIS from there on, which lsof-rs
+    /// cannot, and with no NIS glibc finds no uid on a later line
+    /// (measured).
+    compat_ended: bool,
 }
 
-fn add_uid(m: &mut HashMap<u32, Box<[u8]>>, line: &[u8]) {
-    if let Some((name, uid)) = parse_line(line) {
-        m.entry(uid).or_insert_with(|| login_name(name));
+impl ByUid {
+    fn add(&mut self, line: &[u8]) {
+        match compat_line(line) {
+            Compat::Account(name, uid) => {
+                let keep = |m: &mut HashMap<u32, Box<[u8]>>| {
+                    if m.len() < MAX_ACCOUNTS {
+                        m.entry(uid).or_insert_with(|| login_name(name));
+                    }
+                };
+                keep(&mut self.files);
+                if !self.compat_ended {
+                    keep(&mut self.compat);
+                }
+            }
+            Compat::Plus(_) | Compat::PlusNetgroup | Compat::PlusAll => self.compat_ended = true,
+            // An excluded name is still the name of its uid.
+            Compat::Minus(_) | Compat::Other => {}
+        }
     }
+
+    /// The whole of `text`, a password file.
+    #[cfg(any(test, feature = "fuzzing"))]
+    fn of(text: &[u8]) -> Self {
+        let mut by = Self::default();
+        for line in text.split(|&b| b == b'\n') {
+            by.add(line);
+        }
+        by
+    }
+
+    /// `uid`'s name, by `sources`.
+    fn get(
+        &self,
+        sources: Option<&[lsof_core::netnames::NssSource<'_>]>,
+        uid: u32,
+    ) -> Option<Box<[u8]>> {
+        walk(
+            sources,
+            self.files.get(&uid).cloned(),
+            self.compat.get(&uid).cloned(),
+        )
+    }
+}
+
+/// uid → name as each source has it, the file read now.
+fn read_passwd() -> ByUid {
+    let mut by = ByUid::default();
+    lsof_core::netnames::file_lines(std::path::Path::new(PASSWD), |line| {
+        by.add(line);
+        false
+    });
+    by
 }
 
 /// A name as the C keeps it: its first [`LOGINML`] bytes, as bytes, so a
@@ -113,11 +261,7 @@ fn login_name(name: &[u8]) -> Box<[u8]> {
 /// bytes; must never panic. A line [`parse_line`] refuses is skipped.
 #[cfg(any(test, feature = "fuzzing"))]
 pub fn parse_passwd(text: &[u8]) -> HashMap<u32, Box<[u8]>> {
-    let mut m = HashMap::new();
-    for line in text.split(|&b| b == b'\n') {
-        add_uid(&mut m, line);
-    }
-    m
+    ByUid::of(text).files
 }
 
 /// `isspace()` in the C locale.
@@ -254,43 +398,97 @@ pub fn lookup(value: &[u8]) -> lsof_core::UserLookup {
             return UserLookup::Uid(uid);
         }
     }
-    match names_map().get(value) {
-        Some(&uid) => UserLookup::Uid(uid),
+    match names_map().get(passwd_sources(), value) {
+        Some(uid) => UserLookup::Uid(uid),
         None => UserLookup::Unknown,
     }
 }
 
-/// name → uid, read once: the `-u` values are all looked up while the
-/// options are read. Its own map rather than a search of the uid → name one,
-/// which keeps only the first name for each UID and so could not find a
-/// second account sharing one.
-static NAMES: OnceLock<HashMap<Vec<u8>, u32>> = OnceLock::new();
-
-fn names_map() -> &'static HashMap<Vec<u8>, u32> {
-    NAMES.get_or_init(|| {
-        let mut m = HashMap::new();
-        if passwd_file_is_read() {
-            each_line(PASSWD, |line| add_name(&mut m, line));
-        }
-        m
-    })
+/// name → uid as each source that reads the password file has it.
+#[derive(Default)]
+struct ByName {
+    files: HashMap<Vec<u8>, u32>,
+    /// `None` for a name `compat` knows it does not have: one a `-name`
+    /// line excludes, or a `+name` line leaves to NIS, before any line of
+    /// its own.
+    compat: HashMap<Vec<u8>, Option<u32>>,
+    /// A `+` alone was read: every name after it is NIS's.
+    compat_ended: bool,
 }
 
-fn add_name(m: &mut HashMap<Vec<u8>, u32>, line: &[u8]) {
-    if let Some((name, uid)) = parse_line(line) {
-        m.entry(name.to_vec()).or_insert(uid);
+impl ByName {
+    fn add(&mut self, line: &[u8]) {
+        let decide = |m: &mut HashMap<Vec<u8>, Option<u32>>, name: &[u8], uid| {
+            if m.len() < MAX_ACCOUNTS && !m.contains_key(name) {
+                m.insert(name.to_vec(), uid);
+            }
+        };
+        match compat_line(line) {
+            Compat::Account(name, uid) => {
+                if self.files.len() < MAX_ACCOUNTS && !self.files.contains_key(name) {
+                    self.files.insert(name.to_vec(), uid);
+                }
+                if !self.compat_ended {
+                    decide(&mut self.compat, name, Some(uid));
+                }
+            }
+            Compat::Minus(name) | Compat::Plus(name) => {
+                if !self.compat_ended {
+                    decide(&mut self.compat, name, None);
+                }
+            }
+            Compat::PlusAll => self.compat_ended = true,
+            // With no netgroup to ask, nobody is in one.
+            Compat::PlusNetgroup | Compat::Other => {}
+        }
     }
+
+    /// The whole of `text`, a password file.
+    #[cfg(test)]
+    fn of(text: &[u8]) -> Self {
+        let mut by = Self::default();
+        for line in text.split(|&b| b == b'\n') {
+            by.add(line);
+        }
+        by
+    }
+
+    /// `name`'s uid, by `sources`.
+    fn get(
+        &self,
+        sources: Option<&[lsof_core::netnames::NssSource<'_>]>,
+        name: &[u8],
+    ) -> Option<u32> {
+        walk(
+            sources,
+            self.files.get(name).copied(),
+            self.compat.get(name).copied().flatten(),
+        )
+    }
+}
+
+/// name → uid, read once: the `-u` values are all looked up while the
+/// options are read. Its own tables rather than a search of the uid → name
+/// ones, which keep only the first name for each UID and so could not find
+/// a second account sharing one.
+static NAMES: OnceLock<ByName> = OnceLock::new();
+
+fn names_map() -> &'static ByName {
+    NAMES.get_or_init(|| {
+        let mut by = ByName::default();
+        lsof_core::netnames::file_lines(std::path::Path::new(PASSWD), |line| {
+            by.add(line);
+            false
+        });
+        by
+    })
 }
 
 /// name → uid, the first line for each name winning, as `getpwnam()` scans.
 /// Pure; the same line rules as [`parse_line`], and the whole name.
 #[cfg(test)]
 pub fn parse_passwd_names(text: &[u8]) -> HashMap<Vec<u8>, u32> {
-    let mut m = HashMap::new();
-    for line in text.split(|&b| b == b'\n') {
-        add_name(&mut m, line);
-    }
-    m
+    ByName::of(text).files
 }
 
 /// The login name for `uid`, or `None` where the C shows the number instead:
@@ -309,8 +507,7 @@ pub fn name_for(uid: u32, numeric: bool) -> Option<Box<[u8]>> {
     let name = c
         .snapshot
         .get_or_insert_with(read_passwd)
-        .get(&uid)?
-        .clone();
+        .get(passwd_sources(), uid)?;
     c.found.insert(uid, name.clone());
     Some(name)
 }
@@ -352,8 +549,8 @@ mod tests {
         // which the table then prints eight wide and `-F` writes no `L` for.
         assert_eq!(name_for(0, true), None, "-l never looks the name up");
         assert_eq!(name_for(u32::MAX - 1, false), None, "no account has it");
-        if let Some(root) = read_passwd().get(&0) {
-            assert_eq!(name_for(0, false).as_deref(), Some(&**root));
+        if let Some(root) = read_passwd().get(passwd_sources(), 0) {
+            assert_eq!(name_for(0, false), Some(root));
         }
     }
 
@@ -361,21 +558,29 @@ mod tests {
     fn a_new_cycle_forgets_the_snapshot_and_keeps_found_names() {
         // Without the file changing, a found name is kept; the per-cycle
         // read is dropped either way. Under miri the file is not there.
-        let _ = name_for(0, false);
-        if new_cycle().is_ok() {
-            assert!(cache().snapshot.is_none());
-            let before = cache().found.get(&0).cloned();
-            assert!(new_cycle().is_ok());
-            assert_eq!(cache().found.get(&0).cloned(), before);
+        // On a cache of the test's own: the one every lookup shares is
+        // written by whichever test looks a login up meanwhile.
+        let mut c = Cache::default();
+        c.found.insert(0, b"root"[..].into());
+        c.snapshot = Some(ByUid::default());
+        if new_cycle_of(&mut c, PASSWD).is_ok() {
+            assert!(c.snapshot.is_none());
+            assert!(c.stamp.is_some() && c.found.contains_key(&0));
+            c.snapshot = Some(ByUid::default());
+            assert!(new_cycle_of(&mut c, PASSWD).is_ok());
+            assert!(c.snapshot.is_none());
+            assert!(c.found.contains_key(&0));
         }
         // A changed stamp drops them.
-        let mut c = cache();
         c.found.insert(7_777_777, b"x"[..].into());
         c.stamp = Some((-1, -1));
-        drop(c);
-        if new_cycle().is_ok() {
-            assert!(!cache().found.contains_key(&7_777_777));
+        if new_cycle_of(&mut c, PASSWD).is_ok() {
+            assert!(!c.found.contains_key(&7_777_777));
+            assert!(c.found.is_empty());
         }
+        // The shared one, through the calls the backend makes.
+        let _ = name_for(0, false);
+        let _ = new_cycle();
     }
 
     #[test]
@@ -389,6 +594,214 @@ mod tests {
         assert_eq!(m.get(&b"bad"[..]), None);
         assert_eq!(m.get(&b"+nis"[..]), None);
         assert_eq!(m.len(), 3);
+    }
+
+    /// The sources of a `passwd:` line.
+    fn with_sources<T>(
+        line: &str,
+        then: impl FnOnce(Option<&[lsof_core::netnames::NssSource<'_>]>) -> T,
+    ) -> T {
+        let conf = lsof_core::netnames::Conf::Text(format!("{line}\n").into_bytes());
+        let sources = lsof_core::netnames::nsswitch_database(&conf, b"passwd", b"files");
+        then(sources.as_deref())
+    }
+
+    /// A `+` or `-` line as glibc's `compat` service takes it; each shape
+    /// measured through `getent passwd` under `passwd: compat`.
+    #[test]
+    fn compat_lines_are_read_as_nss_compat_reads_them() {
+        for (line, want) in [
+            (&b"bob:x:1002:1::/:"[..], Compat::Account(b"bob", 1002)),
+            (b"-bob", Compat::Minus(b"bob")),
+            (b"-bob:", Compat::Minus(b"bob")),
+            (b"-bob::::::", Compat::Minus(b"bob")),
+            (b"-bob::::", Compat::Minus(b"bob")),
+            (b"  -bob::::\n", Compat::Minus(b"bob")),
+            (b"-bob:x:5:5:::", Compat::Minus(b"bob")),
+            (b"-bob: x:5:5", Compat::Minus(b"bob")),
+            (b"-bob:x: 5: +5", Compat::Minus(b"bob")),
+            (b"-bob:x:5:5\0zz", Compat::Minus(b"bob")),
+            (b"+bob::1009:1::/:", Compat::Plus(b"bob")),
+            (b"+bob", Compat::Plus(b"bob")),
+            (b"+", Compat::PlusAll),
+            (b"+::::::", Compat::PlusAll),
+            (b"+@ng::::::", Compat::PlusNetgroup),
+            (b"+@ng", Compat::PlusNetgroup),
+            // No line: too few fields, or a field that is no number.
+            (b"-bob:x", Compat::Other),
+            (b"-bob::", Compat::Other),
+            (b"-bob:::", Compat::Other),
+            (b"-bob:x:5", Compat::Other),
+            (b"-bob:x:5:", Compat::Other),
+            (b"-bob:x:zz:5:::", Compat::Other),
+            (b"-bob:x:5:5x", Compat::Other),
+            (b"-bob:x:99999999999:5::", Compat::Other),
+            (b"-bob:x:5:99999999999", Compat::Other),
+            (b"+bob:x:zz", Compat::Other),
+            (b"#-bob::::", Compat::Other),
+            // Names of accounts nobody has.
+            (b"-", Compat::Other),
+            (b"-::::::", Compat::Other),
+            (b"+@", Compat::Other),
+            (b"-@", Compat::Other),
+            (b"-@ng::::::", Compat::Other),
+            (b"", Compat::Other),
+            (b"bad line", Compat::Other),
+        ] {
+            assert_eq!(
+                compat_line(line),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(line)
+            );
+        }
+    }
+
+    /// `passwd: compat` over a password file with `+` and `-` lines, as the
+    /// C's `getpwnam()` and `getpwuid()` answered over each (no NIS; the
+    /// accounts alice 1001, bob 1002, dave 1004; DIVERGENCES 39). Under
+    /// `passwd: files` every such line is skipped.
+    #[test]
+    fn compat_reads_the_password_file_by_its_own_rules() {
+        // The file, then who of alice, bob and dave is known by name, and
+        // which of 1001, 1002 and 1004 by uid.
+        for (middle, names, uids) in [
+            ("", "abd", "abd"),
+            ("+@ng::::::\n", "abd", "a"),
+            ("-@ng::::::\n", "abd", "abd"),
+            ("+carol::1009:::/x:\n", "abd", "a"),
+            ("+carol\n", "abd", "a"),
+            ("+::::::\n", "a", "a"),
+            ("+\n", "a", "a"),
+            ("-\n", "abd", "abd"),
+            ("-::::::\n", "abd", "abd"),
+            ("-bob::::::\n", "ad", "abd"),
+            ("-bob\n", "ad", "abd"),
+            ("-alice::::::\n", "abd", "abd"),
+            ("+bob::1009:1::/:\n", "ad", "a"),
+            ("+bob::::::\n", "ad", "a"),
+            ("+dave::::::\n", "ab", "a"),
+            ("-dave::::::\n+dave::::::\n", "ab", "a"),
+            ("-bob::::::\n-dave::::\n", "a", "abd"),
+            ("+@\n", "abd", "abd"),
+            ("-@\n", "abd", "abd"),
+            ("  -bob::::\n", "ad", "abd"),
+            ("#-bob::::\n", "abd", "abd"),
+            ("-bob:x:zz:5:::\n", "abd", "abd"),
+            ("-bob:x\n", "abd", "abd"),
+            ("+bob:x:zz\n", "abd", "abd"),
+            ("bad line\n", "abd", "abd"),
+        ] {
+            let text = format!("alice:x:1001:1::/:\n{middle}bob:x:1002:1::/:\ndave:x:1004:1::/:\n");
+            let (by_name, by_uid) = (ByName::of(text.as_bytes()), ByUid::of(text.as_bytes()));
+            let known = |sources: Option<&[lsof_core::netnames::NssSource<'_>]>| {
+                let names: String = [("alice", 'a'), ("bob", 'b'), ("dave", 'd')]
+                    .into_iter()
+                    .filter(|(name, _)| by_name.get(sources, name.as_bytes()).is_some())
+                    .map(|(_, c)| c)
+                    .collect();
+                let uids: String = [(1001, 'a'), (1002, 'b'), (1004, 'd')]
+                    .into_iter()
+                    .filter(|(uid, _)| by_uid.get(sources, *uid).is_some())
+                    .map(|(_, c)| c)
+                    .collect();
+                (names, uids)
+            };
+            assert_eq!(
+                with_sources("passwd: compat", known),
+                (names.to_string(), uids.to_string()),
+                "compat {middle:?}"
+            );
+            assert_eq!(
+                with_sources("passwd: files", known),
+                ("abd".to_string(), "abd".to_string()),
+                "files {middle:?}"
+            );
+        }
+        // A line after the account's own decides nothing by name, and by
+        // uid only for the accounts after it.
+        let text =
+            b"alice:x:1001:1::/:\nbob:x:1002:1::/:\n-bob::::::\n+bob::::::\ndave:x:1004:1::/:\n";
+        let (by_name, by_uid) = (ByName::of(text), ByUid::of(text));
+        with_sources("passwd: compat", |sources| {
+            assert_eq!(by_name.get(sources, b"bob"), Some(1002));
+            assert_eq!(by_name.get(sources, b"dave"), Some(1004));
+            assert_eq!(by_uid.get(sources, 1002).as_deref(), Some(&b"bob"[..]));
+            assert_eq!(by_uid.get(sources, 1004), None);
+        });
+        // An excluded name is still its uid's name, and a second account
+        // of the uid is not put in its place.
+        let text = b"-dave::::::\nbob:x:1002:1::/:\ndave:x:1002:1::/:\ndave:x:1004:1::/:\n";
+        let (by_name, by_uid) = (ByName::of(text), ByUid::of(text));
+        with_sources("passwd: compat", |sources| {
+            assert_eq!(by_name.get(sources, b"dave"), None);
+            assert_eq!(by_uid.get(sources, 1002).as_deref(), Some(&b"bob"[..]));
+            assert_eq!(by_uid.get(sources, 1004).as_deref(), Some(&b"dave"[..]));
+        });
+    }
+
+    /// Which lines of nsswitch.conf have the password file answer (each
+    /// measured through the C: `-u name`, and USER in a listing).
+    #[test]
+    fn the_password_file_answers_where_nsswitch_has_glibc_reach_it() {
+        let text = b"alice:x:1001:1::/:\n";
+        let (by_name, by_uid) = (ByName::of(text), ByUid::of(text));
+        for (line, want) in [
+            ("passwd: files", true),
+            ("hosts: files", true),
+            ("passwd: files systemd", true),
+            ("passwd: sss files", true),
+            ("passwd: compat", true),
+            ("passwd: sss", false),
+            ("passwd:", false),
+            ("passwd: FILES", false),
+            ("passwd: sss # files", true),
+            ("passwd: sss [NOTFOUND=return]files", true),
+            ("passwd: sss [UNAVAIL=return] files", false),
+            ("passwd: sss [!SUCCESS=return] files", false),
+            ("passwd: sss [UNAVAIL=merge] files", false),
+            ("passwd: [UNAVAIL=return] sss files", false),
+            ("passwd: files [SUCCESS=merge]", false),
+            ("passwd: files [SUCCESS=continue] compat", true),
+            // A line glibc cannot parse: no login is known.
+            ("passwd: sss [NOTFOUND] files", false),
+            ("passwd: files [x=y] sss", false),
+            ("passwd: files\nhosts: files [", false),
+        ] {
+            with_sources(line, |sources| {
+                assert_eq!(by_name.get(sources, b"alice").is_some(), want, "{line}");
+                assert_eq!(by_uid.get(sources, 1001).is_some(), want, "{line}");
+                assert_eq!(by_name.get(sources, b"nobody"), None, "{line}");
+                assert_eq!(by_uid.get(sources, 7), None, "{line}");
+            });
+        }
+        // With no password file nobody is known.
+        let none = ByName::default();
+        with_sources("passwd: files compat", |sources| {
+            assert_eq!(none.get(sources, b"alice"), None);
+        });
+    }
+
+    /// The tables keep a bounded number of accounts whatever the file
+    /// holds: scaled down under miri, which has no time for a million.
+    #[test]
+    fn the_accounts_kept_are_bounded() {
+        assert_eq!(MAX_ACCOUNTS, 1 << 20);
+        let lines: u32 = if cfg!(miri) { 64 } else { (1 << 20) + 5 };
+        let (mut by_name, mut by_uid) = (ByName::default(), ByUid::default());
+        for i in 0..lines {
+            let line = format!("u{i}:x:{i}:1::/:\n");
+            by_name.add(line.as_bytes());
+            by_uid.add(line.as_bytes());
+            by_name.add(format!("-x{i}\n").as_bytes());
+        }
+        let lines = usize::try_from(lines).unwrap();
+        let want = lines.min(MAX_ACCOUNTS);
+        assert_eq!(by_name.files.len(), want);
+        // An excluded name is kept too, as one decided.
+        assert_eq!(by_name.compat.len(), (2 * lines).min(MAX_ACCOUNTS));
+        assert_eq!(by_uid.files.len(), want);
+        assert_eq!(by_uid.compat.len(), want);
     }
 
     #[test]

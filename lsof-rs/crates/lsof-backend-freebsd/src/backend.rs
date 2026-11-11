@@ -327,6 +327,7 @@ impl Backend for FreeBsdBackend {
             name,
             protocol.as_bytes(),
         )
+        .found()
     }
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {

@@ -102,11 +102,45 @@ const ENGINE_NEST_LIMIT: u32 = NEST_LIMIT * 3 + 32;
 
 /// The bound on a compiled program, in bytes; past it the expression is
 /// `Regular expression too big`. glibc has no such bound: it expands
-/// `(a{32767}){32767}` until memory runs out. Under it the largest interval
-/// of one character fits (`a{32767}`, glibc's `RE_DUP_MAX`), and compiling
-/// the worst expression there is takes milliseconds and under 10 MB
-/// (measured).
-pub const SIZE_LIMIT: usize = 1 << 22;
+/// `(a{32767}){32767}` until memory runs out. Under it fit the largest
+/// interval of one character (`a{32767}`, glibc's `RE_DUP_MAX`),
+/// `.{20000}`, `[[:graph:]]{1,255}` and `[[:alpha:]]{300}`; `.{32767}` and
+/// `\w{0,800}` do not.
+///
+/// It bounds two things. The engine stops compiling where the program
+/// passes it, so compiling what [`COST_LIMIT`] let through takes bounded
+/// time and memory. And a match is at worst every state of the program
+/// looked at for every byte of the command, so the program's size is what
+/// bounds a match: the worst there is costs milliseconds a command
+/// ([`CommandRegex::is_match`]; THREAT-MODEL.md has the measurements).
+pub const SIZE_LIMIT: usize = 1 << 23;
+
+/// The bound on what an expression may ask of the engine before it
+/// compiles anything, counted as the expression is read: one for each
+/// character, anchor, repetition and list element, two for a `.` or a
+/// non-matching list, `CLASS_COST` (1,024) for a
+/// class of the locale's that is thousands of ranges of characters
+/// (`[:alpha:]`, `\w`), `SMALL_CLASS_COST` (64) for one that is tens
+/// (`[:space:]`, `\s`). Past it the expression is `Regular expression too
+/// big`, in the time it takes to read it.
+///
+/// [`SIZE_LIMIT`] alone does not bound the engine: it bounds the compiled
+/// program, and the engine first builds each class as a set of ranges,
+/// folded for case under `i`, which for 60,000 `\W` took 20 s and 2.5 GB
+/// before the program was found too big; and what the engine keeps of an
+/// expression as it reads it is some hundreds of bytes a character. Under
+/// this limit an expression holds at most 63 such classes, or 65,536
+/// characters.
+pub const COST_LIMIT: u64 = 1 << 16;
+
+/// What a class of thousands of ranges costs ([`COST_LIMIT`]): `[:alpha:]`,
+/// `[:alnum:]`, `[:upper:]`, `[:lower:]`, `[:punct:]`, `[:graph:]`,
+/// `[:print:]`, `\w` and `\W`.
+const CLASS_COST: u64 = 1 << 10;
+
+/// What a class of tens of ranges costs: `[:space:]`, `[:blank:]`,
+/// `[:cntrl:]`, `\s` and `\S`.
+const SMALL_CLASS_COST: u64 = 1 << 6;
 
 /// One unit of an expression or of a command, as glibc's `re_string` sees a
 /// UTF-8 text: a character, or a byte that is part of none.
@@ -239,6 +273,8 @@ struct Parser {
     completed: u16,
     by_chars: bool,
     back_reference: bool,
+    /// What the expression asks of the engine so far ([`COST_LIMIT`]).
+    cost: u64,
 }
 
 /// Read `expression` as `regcomp()` does, extended or basic, and write it
@@ -257,11 +293,16 @@ pub fn translate(expression: &[u8], extended: bool, icase: bool) -> Result<Trans
         completed: 0,
         by_chars: icase,
         back_reference: false,
+        cost: 0,
     };
     p.fetch(true);
     let tree = p.parse_reg_exp(0)?;
     if p.back_reference {
         return Err(RegexError::BackReference);
+    }
+    // After every refusal of glibc's own, which reading on may yet find.
+    if p.cost > COST_LIMIT {
+        return Err(RegexError::Size);
     }
     // `.` and a non-matching list take a newline (`RE_DOT_NEWLINE`, no
     // `RE_HAT_LISTS_NOT_NEWLINE`), and `^` and `$` are the text's ends (no
@@ -311,6 +352,15 @@ fn atom(s: &str) -> Frag {
 const ALNUM: &str = r"\p{Alphabetic}\p{Nd}";
 const GRAPH: &str = r"[^\p{Cn}\p{Cc}\p{Zl}\p{Zp}\p{Zs}]\x{A0}\x{2007}\x{202F}";
 const SPACE: &str = r"\t\n\x0B\x0C\r\x20\p{Zl}\p{Zp}[\p{Zs}--[\x{A0}\x{2007}\x{202F}]]";
+
+/// What a class costs the engine ([`COST_LIMIT`]).
+fn class_cost(name: &[u8]) -> u64 {
+    match name {
+        b"digit" | b"xdigit" => 1,
+        b"space" | b"blank" | b"cntrl" => SMALL_CLASS_COST,
+        _ => CLASS_COST,
+    }
+}
 
 fn class_set(name: &[u8], icase: bool) -> Option<String> {
     // `build_charclass()`: under `REG_ICASE` a case is every letter.
@@ -401,13 +451,18 @@ impl Parser {
             // alternative opens.
             Some(b'^') if x || caret_here || pos == 0 => Kind::Anchor(r"\A", false),
             Some(b'$') => {
-                // Basic: an anchor only where one of those ends.
+                // Basic: an anchor only where one of those ends, which is
+                // where the next token is `\|` or `\)`. glibc finds that
+                // out by reading the next token with this function, which
+                // for a run of `$` calls itself once for each (its
+                // `peek_token()`: 70,000 of them end the C with SIGSEGV).
+                // The answer only depends on the next two items, so they
+                // are looked at here and nothing is called (DIVERGENCES
+                // 38).
+                let next = |n: usize| self.at(pos.saturating_add(n)).and_then(Item::ascii);
                 let ends = x
                     || pos.saturating_add(1) == self.items.len()
-                    || matches!(
-                        self.peek(pos.saturating_add(1), false).0.kind,
-                        Kind::Alt | Kind::CloseSub
-                    );
+                    || (next(1) == Some(b'\\') && matches!(next(2), Some(b'|' | b')')));
                 if ends {
                     Kind::Anchor(r"\z", false)
                 } else {
@@ -435,6 +490,12 @@ impl Parser {
     /// `parse_reg_exp()`: branches between `|`s. `None` is glibc's null
     /// tree, the empty expression.
     fn parse_reg_exp(&mut self, nest: u32) -> Result<Option<Frag>, RegexError> {
+        // A back-reference in an alternative can name only a group closed
+        // before the alternation or earlier in that alternative: glibc
+        // gives each alternative the groups there were when the first
+        // began (`(a)|\1` is `Invalid back reference`, `(a)|(b)\2` is
+        // not), and what follows the alternation the groups of them all.
+        let initial = self.completed;
         let first = self.parse_branch(nest)?;
         if self.token.kind != Kind::Alt {
             return Ok(first);
@@ -446,7 +507,11 @@ impl Parser {
             self.fetch(true);
             s.push('|');
             if !self.ends_branch(nest) {
-                if let Some(branch) = self.parse_branch(nest)? {
+                let accumulated = self.completed;
+                self.completed = initial;
+                let branch = self.parse_branch(nest)?;
+                self.completed |= accumulated;
+                if let Some(branch) = branch {
                     depth = depth.max(branch.depth);
                     s.push_str(&branch.s);
                 }
@@ -475,10 +540,16 @@ impl Parser {
         Ok(tree)
     }
 
+    /// Count `units` against [`COST_LIMIT`].
+    fn charge(&mut self, units: u64) {
+        self.cost = self.cost.saturating_add(units);
+    }
+
     /// `parse_expression()`: one atom and the repetitions after it.
     fn parse_expression(&mut self, nest: u32) -> Result<Option<Frag>, RegexError> {
         let x = self.extended;
         let lit = self.token.lit;
+        self.charge(1);
         let mut tree = match self.token.kind {
             Kind::Char | Kind::CloseDup => Some(literal(lit)),
             Kind::OpenSub => Some(self.parse_sub_exp(nest.saturating_add(1))?),
@@ -519,13 +590,23 @@ impl Parser {
                 self.fetch(false);
                 return Ok(Some(atom(text)));
             }
-            Kind::Period => Some(atom(".")),
+            Kind::Period => {
+                // Every character: more of a program than one is.
+                self.charge(1);
+                Some(atom("."))
+            }
             Kind::Never => Some(atom(NOTHING)),
             Kind::Word | Kind::NotWord | Kind::Space | Kind::NotSpace => {
                 self.by_chars = true;
                 let set = match self.token.kind {
-                    Kind::Word | Kind::NotWord => format!("{ALNUM}_"),
-                    _ => SPACE.to_string(),
+                    Kind::Word | Kind::NotWord => {
+                        self.charge(CLASS_COST);
+                        format!("{ALNUM}_")
+                    }
+                    _ => {
+                        self.charge(SMALL_CLASS_COST);
+                        SPACE.to_string()
+                    }
                 };
                 let not = matches!(self.token.kind, Kind::NotWord | Kind::NotSpace);
                 Some(atom(&format!("[{}{set}]", if not { "^" } else { "" })))
@@ -652,6 +733,7 @@ impl Parser {
             )
         };
         self.fetch(false);
+        self.charge(1);
         let Some(elem) = elem else {
             return Ok(None);
         };
@@ -731,6 +813,7 @@ impl Parser {
         }
         let non_match = token.kind == BrKind::NonMatch;
         if non_match {
+            self.charge(1);
             complex = true;
             self.pos = self.pos.saturating_add(len);
             (token, len) = self.peek_bracket();
@@ -742,6 +825,7 @@ impl Parser {
         // `parse_bracket_element()` reads the first token as one.
         let mut first_round = true;
         loop {
+            self.charge(1);
             let start = self.parse_bracket_element(token, len, first_round)?;
             first_round = false;
             (token, len) = self.peek_bracket();
@@ -795,6 +879,7 @@ impl Parser {
                     complex = true;
                     let name: Vec<u8> = name.iter().filter_map(|i| i.ascii()).collect();
                     let class = class_set(&name, self.icase).ok_or(RegexError::CharClass)?;
+                    self.charge(class_cost(&name));
                     let _ = write!(set, "[{class}]");
                 }
             }
@@ -941,6 +1026,11 @@ fn nested(s: String, depth: u32) -> Result<Option<Frag>, RegexError> {
     }))
 }
 
+/// How many commands' answers a [`CommandRegex`] keeps, and the longest
+/// command it keeps one for.
+const KEPT_ANSWERS: usize = 1024;
+const KEPT_COMMAND: usize = 256;
+
 /// One `-c /regex/[bix]` expression, compiled.
 #[derive(Clone, Debug)]
 pub struct CommandRegex {
@@ -949,7 +1039,15 @@ pub struct CommandRegex {
     icase: bool,
     regex: regex::bytes::Regex,
     by_chars: bool,
+    /// What it answered for the commands asked so far: a command is
+    /// asked about once for each time it is selected or located, and many
+    /// processes share one, while the worst expression inside
+    /// [`SIZE_LIMIT`] takes milliseconds to answer once. Bounded
+    /// ([`KEPT_ANSWERS`]), and shared with its copies.
+    answers: std::sync::Arc<std::sync::Mutex<Answers>>,
 }
+
+type Answers = std::collections::HashMap<Box<[u8]>, bool>;
 
 /// Two are the same when they were made from the same expression.
 impl PartialEq for CommandRegex {
@@ -983,6 +1081,7 @@ impl CommandRegex {
             icase,
             regex,
             by_chars: translated.by_chars,
+            answers: std::sync::Arc::default(),
         })
     }
 
@@ -991,8 +1090,39 @@ impl CommandRegex {
         &self.expression
     }
 
-    /// Whether `command` matches, as `regexec()` would say.
+    /// Whether `command` matches, as `regexec()` would say. The engine's
+    /// answer, kept for the next time the command is asked about.
     pub fn is_match(&self, command: &[u8]) -> bool {
+        if command.len() > KEPT_COMMAND {
+            return self.search(command);
+        }
+        let mut answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&answer) = answers.get(command) {
+            return answer;
+        }
+        let answer = self.search(command);
+        if answers.len() >= KEPT_ANSWERS {
+            answers.clear();
+        }
+        answers.insert(command.into(), answer);
+        answer
+    }
+
+    /// How many answers are kept.
+    #[cfg(test)]
+    fn kept(&self) -> usize {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// [`Self::is_match`], asked of the engine: time linear in the
+    /// command and in the program.
+    fn search(&self, command: &[u8]) -> bool {
         if !self.by_chars {
             return self.regex.is_match(command);
         }
@@ -1277,6 +1407,286 @@ mod tests {
         );
         // A group still open is not yet one to refer to.
         assert_eq!(pattern("(a\\1)", true, false), Err(RegexError::SubReg));
+        // Nor is one closed in another alternative: each alternative has
+        // the groups there were when the first began, and what follows
+        // them all has theirs (each line glibc's answer, through
+        // `regcomp()`).
+        for (expression, valid) in [
+            ("(a)|\\1", false),
+            ("(a)|b\\1", false),
+            ("((a)|\\1)", false),
+            ("(a|\\1)", false),
+            ("(a)(b|\\1)", true),
+            ("(a)|(b)\\1", false),
+            ("(a)|(b)\\2", true),
+            ("(a)|(b)|\\2", false),
+            ("a|(b)|\\1", false),
+            ("(a)\\1|\\1", false),
+            ("(a)\\1*|c", true),
+            ("((a)|b)\\2", true),
+            ("((a)|b)\\1", true),
+            ("((a)|\\2)", false),
+            ("(a)(|\\1)", true),
+            ("(a)((b)|\\1)", true),
+            ("((a)|(b))\\2|\\3", false),
+            ("(a)(b)\\1|\\2", false),
+            ("(a)|()\\1", false),
+            ("(a|(b))\\2", true),
+            ("(a|(b)\\2)", true),
+            ("((a)|(b))\\3", true),
+            ("(a)|(b)|(c)\\3", true),
+        ] {
+            let want = if valid {
+                RegexError::BackReference
+            } else {
+                RegexError::SubReg
+            };
+            assert_eq!(pattern(expression, true, false), Err(want), "{expression}");
+            let basic = expression
+                .replace('(', "\\(")
+                .replace(')', "\\)")
+                .replace('|', "\\|");
+            assert_eq!(pattern(&basic, false, false), Err(want), "{basic}");
+        }
+    }
+
+    /// In a basic expression a `$` is an anchor only where the expression,
+    /// a group or an alternative ends; found by looking at what follows,
+    /// not by reading it as glibc does (once for every `$` of a run: 70,000
+    /// end the C with SIGSEGV; DIVERGENCES 38).
+    #[test]
+    fn a_dollar_is_an_anchor_where_a_basic_expression_ends() {
+        for (expression, want) in [
+            ("a$", r"(?s)\x{61}\z"),
+            ("a$b", r"(?s)\x{61}\x{24}\x{62}"),
+            ("$a", r"(?s)\x{24}\x{61}"),
+            ("a$$", r"(?s)\x{61}\x{24}\z"),
+            ("$$$", r"(?s)\x{24}\x{24}\z"),
+            ("a$\\|b", r"(?s)(?:\x{61}\z|\x{62})"),
+            ("\\(a$\\)", r"(?s)(?:\x{61}\z)"),
+            ("\\(a$\\)b", r"(?s)(?:\x{61}\z)\x{62}"),
+            ("a$\\(b\\)", r"(?s)\x{61}\x{24}(?:\x{62})"),
+            ("a$|b", r"(?s)\x{61}\x{24}\x{7C}\x{62}"),
+            ("a$)", r"(?s)\x{61}\x{24}\x{29}"),
+            ("a$\\$", r"(?s)\x{61}\x{24}\x{24}"),
+            ("a$\\{2\\}", r"(?s)\x{61}\x{24}{2}"),
+        ] {
+            assert_eq!(
+                pattern(expression, false, false).as_deref(),
+                Ok(want),
+                "{expression}"
+            );
+        }
+        assert_eq!(pattern("a$\\", false, false), Err(RegexError::Escape));
+        // A run of them of any length is read in one pass and no depth:
+        // every one a character but the last.
+        let run = if cfg!(miri) { 2_000 } else { 60_000 };
+        let dollars = "$".repeat(run);
+        let translated = pattern(&dollars, false, false).unwrap();
+        assert_eq!(translated.matches(r"\x{24}").count(), run - 1);
+        assert!(translated.ends_with(r"\z"));
+        // Past the cost limit it is too big, still without depth (miri,
+        // which interprets every step, is spared the million).
+        if !cfg!(miri) {
+            let long = 1_000_000;
+            assert_eq!(
+                pattern(&"$".repeat(long), false, false),
+                Err(RegexError::Size)
+            );
+            assert_eq!(
+                pattern(&format!("{}\\|a", "$".repeat(long)), false, false),
+                Err(RegexError::Size)
+            );
+        }
+    }
+
+    /// What an expression may ask of the engine is bounded before the
+    /// engine sees it ([`COST_LIMIT`]): the classes of thousands of ranges
+    /// above all, which the size limit alone let through at 20 s and 2.5 GB
+    /// (60,000 `\W` under `i`).
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "it reads expressions of 65,536 characters: minutes under miri"
+    )]
+    fn an_expression_past_the_cost_limit_is_too_big_before_it_is_compiled() {
+        assert_eq!(
+            (COST_LIMIT, CLASS_COST, SMALL_CLASS_COST),
+            (1 << 16, 1 << 10, 1 << 6)
+        );
+        let size = Err(RegexError::Size);
+        let ok = |e: &str, x, i| translate(e.as_bytes(), x, i).is_ok();
+        // A character costs one: the limit's worth is taken, one more is
+        // not.
+        let most = usize::try_from(COST_LIMIT).unwrap();
+        assert!(ok(&"a".repeat(most), true, false));
+        assert_eq!(pattern(&"a".repeat(most + 1), true, false), size);
+        assert!(ok(&"a".repeat(most), false, true));
+        assert_eq!(pattern(&"a".repeat(most + 1), false, true), size);
+        // A `.` two, a repetition one more, a list one for each element
+        // and one more where it is a non-matching one.
+        assert!(ok(&".".repeat(most / 2), true, false));
+        assert_eq!(pattern(&".".repeat(most / 2 + 1), true, false), size);
+        assert!(ok(&"a*".repeat(most / 2), true, false));
+        assert_eq!(pattern(&"a*".repeat(most / 2 + 1), true, false), size);
+        assert!(ok(&"a{2,3}".repeat(most / 2), true, false));
+        assert_eq!(pattern(&"a{2,3}".repeat(most / 2 + 1), true, false), size);
+        assert!(ok(&"[abc]".repeat(most / 4), true, false));
+        assert_eq!(pattern(&"[abc]".repeat(most / 4 + 1), true, false), size);
+        assert!(ok(&"[a-c]".repeat(most / 2), true, false));
+        assert_eq!(pattern(&"[a-c]".repeat(most / 2 + 1), true, false), size);
+        assert!(ok(&"[^a]".repeat(most / 3), true, false));
+        assert_eq!(pattern(&"[^a]".repeat(most / 3 + 1), true, false), size);
+        // A class of thousands of ranges 1,024: 63 of them with what
+        // carries them, never 64.
+        for class in [
+            "\\w",
+            "\\W",
+            "[[:alpha:]]",
+            "[[:alnum:]]",
+            "[[:upper:]]",
+            "[[:lower:]]",
+            "[[:punct:]]",
+            "[[:graph:]]",
+            "[[:print:]]",
+            "[^[:alpha:]]",
+        ] {
+            for icase in [false, true] {
+                assert!(ok(&class.repeat(63), true, icase), "{class}");
+                assert_eq!(pattern(&class.repeat(64), true, icase), size, "{class}");
+            }
+        }
+        // Two in one list are two.
+        assert!(ok(&"[[:alpha:][:punct:]]".repeat(31), true, false));
+        assert_eq!(
+            pattern(&"[[:alpha:][:punct:]]".repeat(32), true, false),
+            size
+        );
+        assert_eq!(
+            pattern(&format!("[{}]", "[:alpha:]".repeat(64)), true, false),
+            size
+        );
+        // A class of tens 64, and of digits one.
+        for class in ["\\s", "\\S", "[[:space:]]", "[[:blank:]]", "[[:cntrl:]]"] {
+            assert!(ok(&class.repeat(900), true, true), "{class}");
+            assert_eq!(pattern(&class.repeat(1024), true, true), size, "{class}");
+        }
+        assert!(ok(&"\\s".repeat(1008), true, false));
+        assert_eq!(pattern(&"\\s".repeat(1009), true, false), size);
+        assert!(ok(&"[[:digit:]]".repeat(most / 3), true, false));
+        assert!(ok(&"[[:xdigit:]]".repeat(most / 3), true, false));
+        assert_eq!(
+            pattern(&"[[:digit:]]".repeat(most / 3 + 1), true, false),
+            size
+        );
+        // A repetition does not multiply the cost: the program's size is
+        // the size limit's to refuse.
+        assert!(ok("[[:alpha:]]{32767}", true, false));
+        assert!(ok("(\\w{1,255}){1,255}", true, true));
+        // What glibc refuses for itself is said first, wherever it is.
+        let long = "\\W".repeat(100);
+        assert_eq!(
+            pattern(&format!("{long}("), true, true),
+            Err(RegexError::Paren)
+        );
+        assert_eq!(
+            pattern(&format!("{long}[z-a]"), true, true),
+            Err(RegexError::Range)
+        );
+        // The reviewers' reproducers, and argv's worst: refused at once.
+        if !cfg!(miri) {
+            let started = std::time::Instant::now();
+            for (unit, count, extended, icase) in [
+                ("\\W", 60_000, true, true),
+                ("\\w\\W\\s\\S", 15_000, true, true),
+                ("[^[:punct:]]", 10_000, true, true),
+                ("[[:alpha:]]", 10_000, true, false),
+                ("\\W*", 1_365, true, true),
+                ("\\W", 2_047, true, true),
+                ("$", 100_000, false, false),
+            ] {
+                assert_eq!(
+                    CommandRegex::new(unit.repeat(count).as_bytes(), extended, icase).err(),
+                    Some(RegexError::Size),
+                    "{unit} x {count}"
+                );
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// An answer is kept for the next time the command is asked about,
+    /// the same answer, and the answers kept are bounded.
+    #[test]
+    fn an_answer_is_kept_and_the_answers_kept_are_bounded() {
+        let regex = CommandRegex::new(b"^a.*[0-4]$", true, false).unwrap();
+        assert_eq!(regex.kept(), 0);
+        for _ in 0..3 {
+            assert!(regex.is_match(b"abc3"));
+            assert!(!regex.is_match(b"abc7"));
+            assert!(!regex.is_match(b""));
+        }
+        assert_eq!(regex.kept(), 3);
+        // A copy shares them, and answers alike.
+        let copy = regex.clone();
+        assert!(copy.is_match(b"abc3") && !copy.is_match(b"abc8"));
+        assert_eq!((regex.kept(), copy.kept()), (4, 4));
+        // A command past the length kept is answered and not kept: at the
+        // length it is.
+        let long = |n: usize, last: u8| {
+            let mut command = vec![b'a'; n - 1];
+            command.push(last);
+            command
+        };
+        assert!(regex.is_match(&long(KEPT_COMMAND, b'1')));
+        assert_eq!(regex.kept(), 5);
+        assert!(regex.is_match(&long(KEPT_COMMAND + 1, b'1')));
+        assert!(!regex.is_match(&long(KEPT_COMMAND + 1, b'9')));
+        assert_eq!(regex.kept(), 5);
+        // However many commands are asked about, a bounded number of
+        // answers is kept, and each is still the engine's.
+        assert_eq!((KEPT_ANSWERS, KEPT_COMMAND), (1024, 256));
+        let commands = if cfg!(miri) { 40 } else { 5000 };
+        for round in 0..2 {
+            for i in 0..commands {
+                let command = format!("a{i}");
+                assert_eq!(
+                    regex.is_match(command.as_bytes()),
+                    i % 10 < 5,
+                    "{round} {command}"
+                );
+                assert!(regex.kept() <= KEPT_ANSWERS);
+            }
+        }
+    }
+
+    /// A `[:name:]`, `[.name.]` or `[=name=]` of 32 bytes or more is no
+    /// name (`BRACKET_NAME_BUF_SIZE`): 31 are read, and are then no class
+    /// and no collating symbol (glibc's answers, through `regcomp()`).
+    #[test]
+    fn a_bracket_name_is_at_most_thirty_one_bytes() {
+        for (open, close, short) in [
+            ("[:", ":]", RegexError::CharClass),
+            ("[.", ".]", RegexError::Collate),
+            ("[=", "=]", RegexError::Collate),
+        ] {
+            let named = |n: usize| format!("[{open}{}{close}]", "a".repeat(n));
+            for icase in [false, true] {
+                assert_eq!(pattern(&named(30), true, icase), Err(short));
+                assert_eq!(pattern(&named(31), true, icase), Err(short));
+                assert_eq!(pattern(&named(32), true, icase), Err(RegexError::Bracket));
+                assert_eq!(pattern(&named(33), true, icase), Err(RegexError::Bracket));
+            }
+        }
+        // Bytes are counted, not characters.
+        assert_eq!(
+            pattern(&format!("[[:{}:]]", "é".repeat(15)), true, false),
+            Err(RegexError::CharClass)
+        );
+        assert_eq!(
+            pattern(&format!("[[:{}:]]", "é".repeat(16)), true, false),
+            Err(RegexError::Bracket)
+        );
     }
 
     /// Which expressions glibc searches by characters.
@@ -1323,11 +1733,37 @@ mod tests {
         assert_eq!(pattern(&stars(many), true, false), Err(RegexError::Size));
         // A program past the size limit, each interval one glibc takes.
         if !cfg!(miri) {
-            assert_eq!(
-                CommandRegex::new(b"(a{1000}){1000}", true, false).err(),
-                Some(RegexError::Size)
-            );
-            assert!(CommandRegex::new(b"a{32767}", true, false).is_ok());
+            assert_eq!(SIZE_LIMIT, 1 << 23);
+            for refused in [
+                "(a{1000}){1000}",
+                "[[:alpha:]]{1000}",
+                "(.{200}){150}",
+                ".{32767}",
+                "\\w{0,800}z",
+                ".{0,20000}z",
+                "(.*){1,32767}z",
+            ] {
+                assert_eq!(
+                    CommandRegex::new(refused.as_bytes(), true, false).err(),
+                    Some(RegexError::Size),
+                    "{refused}"
+                );
+            }
+            // Inside it, what an expression for a command name asks.
+            for taken in [
+                "a{32767}",
+                ".{20000}",
+                "[[:graph:]]{1,255}",
+                "[[:alpha:]]{300}",
+                "(.{200}){75}",
+                "\\w{0,400}z",
+                ".{0,10000}z",
+            ] {
+                assert!(
+                    CommandRegex::new(taken.as_bytes(), true, false).is_ok(),
+                    "{taken}"
+                );
+            }
         }
     }
 

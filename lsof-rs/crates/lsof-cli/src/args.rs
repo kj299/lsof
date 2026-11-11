@@ -2632,14 +2632,13 @@ fn enter_command_regex(sel: &mut Selection, value: &[u8]) -> Vec<String> {
         return vec![format!("regexp doesn't end with '/': {arg}")];
     };
     let (expression, modifiers) = rest.split_at(end);
-    let (mut bmod, mut imod, mut xmod, mut bxmod) = (0u32, 0u32, 0u32, 0u32);
+    let (mut bmod, mut imod, mut xmod) = (0u32, 0u32, 0u32);
     let (mut extended, mut icase) = (true, false);
     let mut errors = Vec::new();
-    let conflict = |bxmod: &mut u32, errors: &mut Vec<String>| {
-        *bxmod = bxmod.saturating_add(1);
-        if *bxmod == 1 {
-            errors.push(format!("b and x regexp modifiers conflict: {arg}"));
-        }
+    // It can arise once a value at most: the letter that conflicts has
+    // been seen, and seen again it is `already used`.
+    let conflict = |errors: &mut Vec<String>| {
+        errors.push(format!("b and x regexp modifiers conflict: {arg}"));
     };
     let again = |count: u32, letter: char, errors: &mut Vec<String>| {
         if count == 2 {
@@ -2653,7 +2652,7 @@ fn enter_command_regex(sel: &mut Selection, value: &[u8]) -> Vec<String> {
                 if bmod > 1 {
                     again(bmod, 'b', &mut errors);
                 } else if xmod > 0 {
-                    conflict(&mut bxmod, &mut errors);
+                    conflict(&mut errors);
                 } else {
                     extended = false;
                 }
@@ -2671,7 +2670,7 @@ fn enter_command_regex(sel: &mut Selection, value: &[u8]) -> Vec<String> {
                 if xmod > 1 {
                     again(xmod, 'x', &mut errors);
                 } else if bmod > 0 {
-                    conflict(&mut bxmod, &mut errors);
+                    conflict(&mut errors);
                 } else {
                     extended = true;
                 }

@@ -229,7 +229,7 @@ impl Backend for WindowsBackend {
             .join("drivers")
             .join("etc")
             .join("services");
-        lsof_core::netnames::service_in_file(&path, name, protocol.as_bytes())
+        lsof_core::netnames::service_in_file(&path, name, protocol.as_bytes()).found()
     }
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {

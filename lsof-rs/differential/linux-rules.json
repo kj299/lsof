@@ -28,5 +28,30 @@
     "name": "lsof-version",
     "regex": "\"lsof_version\":\"[^\"]*\"",
     "replacement": "\"lsof_version\":\"<V>\""
+  },
+  {
+    "name": "usage-c-version",
+    "regex": "^lsof \\d+\\.\\d+\\.\\d+$",
+    "replacement": "<USAGE>"
+  },
+  {
+    "name": "usage-c-links",
+    "regex": "^ latest (revision|FAQ|\\(non-formatted\\) man page): https://github\\.com/lsof-org/lsof\\S*$",
+    "replacement": ""
+  },
+  {
+    "name": "usage-c-options",
+    "regex": "^ (usage: \\[-\\?abhHKlnNoOPRtUvVX\\]|\\[-F \\[f\\]\\] \\[-g \\[s\\]\\]|\\[\\+\\|-r \\[t\\]\\] \\[-s \\[p:s\\]\\]) .*\\[.*\\]$",
+    "replacement": ""
+  },
+  {
+    "name": "usage-c-help",
+    "regex": "^Use the ``-h'' option to get more help information\\.$",
+    "replacement": ""
+  },
+  {
+    "name": "usage-rs",
+    "regex": "^Try 'lsof -h' for usage\\.$",
+    "replacement": "<USAGE>"
   }
 ]

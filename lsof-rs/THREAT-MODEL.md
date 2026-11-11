@@ -71,9 +71,9 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.filedesc.PID`: packed `kinfo_file` records, each with its own length, and `kf_path`, a name any local user's process chose | kernel, and **any local user's process** for the path | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it (DIVERGENCES 143) |
-| `/etc/passwd` | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users` | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares) |
-| `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine) | `posix_regex` (expression and command both arbitrary bytes; `-timeout=10`) |
-| `/etc/hosts`, `/etc/services`, `/etc/host.conf`, `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name` | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
+| `/etc/passwd`, and `/etc/nsswitch.conf`, which says whether it is read: **both on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l` reads neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
+| `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has; `-timeout=10`) |
+| `/etc/hosts`, `/etc/services`, `/etc/host.conf` (or the file `RESOLV_HOST_CONF` names), `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name`; `/proc/self/auxv`, read where `RESOLV_HOST_CONF` is set | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
 | the system's resolver's answer to an `-i @name` the hosts file does not hold (`getaddrinfo()` through `std`): addresses only | **a remote name server**, and whoever is on the path to it | **hostile** to availability; the addresses untrusted | `lsof-core::netnames::system_addresses` | not applicable: no bytes of the answer are parsed here (libc parses the reply, `std` hands over addresses); see below |
 | the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
@@ -510,7 +510,7 @@ files, gated by `cargo deny`; none has a build script. `regex-syntax` forbids
 fifty `unsafe` blocks, most in the engines the `perf-*` features would
 build), and, as for `rustix` above, code linked in runs with lsof-rs's
 privileges whatever this repository forbids. The Linux release binary grows
-from 636 KB to 1.64 MB. What bounds the engine:
+from 636 KB to 1.66 MB. What bounds the engine:
 
 * **Nothing typed reaches it as syntax.** `posix_regex::translate` parses
   the expression by glibc's grammar and writes every literal as a code point
@@ -519,24 +519,46 @@ from 636 KB to 1.64 MB. What bounds the engine:
   engine refuses nothing the translator wrote but a program past the size
   limit (a debug assertion in `CommandRegex::new`, which the fuzz build
   keeps).
+* **The reader is one pass, and its depth is bounded.** It recurses only
+  into a group, counted against the nesting limit. (Its first version had
+  glibc's own look-ahead for a `$` in a basic expression, which calls
+  itself once for each `$` of a run: 100,000 of them overflowed the stack,
+  as 70,000 end the C with SIGSEGV. It looks at the next two items now.)
 * **Time is linear.** The crate has no back-references and no look-around,
   and its engines (here the PikeVM alone, the `perf-*` features being off)
   match in time proportional to the command's length times the program's
   size: there is no expression that backtracks. A back-reference, which
   glibc takes, is refused in the reader. A command is at most 15 bytes on
-  Linux.
-* **Memory is bounded.** The compiled program is held to 4 MiB
-  (`size_limit`), nesting to 100 groups, alternations or repetitions (the
-  reader's own count; the engine's limit is set above the deepest that lets
-  it write, 332 of its levels, and its compiler recurses once a level), and
-  an interval's count to 32767,
-  glibc's. Measured: the worst expression inside those limits compiles in
-  under 30 ms and 10 MB, and one past them is refused in as long
-  (`Regular expression too big`), where glibc expands `(a{32767}){32767}`
-  until memory runs out. The expression is the invoking user's, so what an
-  expensive one costs is that user's own run; the command names it runs
-  over are other users' and cannot make a match cost more than the program's
-  size.
+  Linux (64 for a kernel thread).
+* **What the engine is asked is bounded before it is asked.** The compiled
+  program is held to 8 MiB (`size_limit`), but that alone bounds neither
+  the memory nor the time of compiling: the engine first builds each class
+  of the locale's as thousands of ranges, folded for case under `i`, and
+  60,000 `\W` took 20 s and 2.5 GB before the program was found too big.
+  So the reader counts what an expression asks as it reads it
+  (`COST_LIMIT`, 65,536 units: a character one, a large class 1,024, so 63
+  of them at most) and refuses one past that before the engine sees it;
+  nesting is held to 100 groups, alternations or repetitions (the reader's
+  own count; the engine's limit is set above the deepest that lets it
+  write, 332 of its levels, and its compiler recurses once a level), and an
+  interval's count to 32767, glibc's. Measured on the worst expressions
+  found for each bound (release build, this host): an expression past the
+  cost limit is refused in under 10 ms and 7 MB (those 60,000 `\W`: 8 ms,
+  5 MB); one inside it and past the size limit in under 75 ms and 36 MB;
+  the costliest that is taken compiles in 81 ms and 40 MB peak (65,000 `é`
+  under `i`). glibc expands `(a{32767}){32767}` until memory runs out.
+* **A match costs at most the program's size times the command's length**,
+  and the size limit is what bounds it: 18 ms for the worst program found
+  under 8 MiB against a 15-byte command (`(.*){1,16000}z`; about 1.2 ms a
+  byte), where a plain expression takes microseconds. Each expression keeps
+  its answer for a command name (1,024 names of at most 256 bytes), so a
+  run pays for a name once, not once a process: 1.1 s for `(.*.*){8000}z`
+  over this host's 79 processes. The expression is the invoking user's, so
+  what an expensive one costs is that user's own run, and so is how many
+  `-c /regex/` words a command line holds: there is no bound on their
+  number, as the C has none, each within its own bounds (a word of argv per
+  8 MiB of program at worst). The command names it runs over are other
+  users' and cannot make a match cost more than that.
 
 **`-i @name` can make lsof-rs wait on a name server, as it makes the C.**
 A host name is looked up where the option is read, before anything is
@@ -552,9 +574,31 @@ the file system, and is not asked. A run with no `-i @name`, or with an
 address, asks nothing: lsof-rs still resolves nothing it prints on Linux.
 What comes back is a list of addresses, kept to 128 a name; a wrong answer
 selects the wrong sockets of the invoker's own listing, nothing more. A
-service name is read from `/etc/services` alone. The hosts, services,
-host.conf and nsswitch.conf readers take arbitrary bytes (fuzzed,
-`netnames`), read a line at a time, and keep a bounded answer.
+service name is read from `/etc/services` alone, where nsswitch.conf has
+glibc read it.
+
+**The files a name is read from are read in bounded memory and time, and
+only if they are files.** `/etc/hosts`, `/etc/services` and `/etc/passwd`
+are read a line at a time, a line to 1 MiB (a longer one is passed over, as
+one that names nothing; glibc reads a line of any length into memory it
+grows) and a file to 256 MiB; `/etc/nsswitch.conf` and `/etc/host.conf` to
+1 MiB; the addresses kept for a name to 128, the accounts kept from a
+password file to 1,048,576, the resolver's answers kept to 64 names. Each
+is opened only if it is a regular file, looked at before it is opened and
+again after: a FIFO in its place would hold `open(2)` for good, which holds
+the C (measured), and a device has no end. Such a hosts, services, password
+or host.conf file is read as none; such an nsswitch.conf, like a directory
+there, as one glibc cannot read, under which no login, host or service name
+is known. And a name is not handed to `getaddrinfo()`, which reads those
+files itself with no such care, while one of them (or `/etc/resolv.conf`,
+`/etc/gai.conf`) is a FIFO or a device: the name then has no address.
+Measured, each of the five as `/dev/zero`, a FIFO, a directory and
+`/dev/urandom`, under `ulimit -v 3000000`: every run ends within 0.1 s.
+The first version read a line with no bound, and `/dev/zero` as
+`/etc/hosts`, `/etc/services` or `/etc/passwd` ended a run in an allocation
+failure (SIGABRT); for `/etc/passwd` that was every run that prints a
+login, and older than these rows. The readers take arbitrary bytes (fuzzed,
+`netnames`).
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
 structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares
@@ -574,13 +618,20 @@ version by `cfg`, a choice a cast would inherit silently. The parsers and the
 row rules are fuzzed (`freebsd_kinfo`) and run under miri on Linux. The FFI
 itself has run under no sanitizer, and on no FreeBSD host yet (DIVERGENCES 140).
 
-**The environment surface is three variables, and the resolver's own.** The
+**The environment surface is four variables, and the resolver's own.** The
 C `lsof` reads considerably more, including the personal device-cache path;
 lsof-rs reads the two trace switches above and, on Linux for an `-i @name`,
 `RESOLV_MULTI` (`on` or `off`: whether every hosts-file line that names a
 host gives an address, as glibc reads it; it can add or drop addresses of the
-invoker's own selection, nothing else). `RESOLV_HOST_CONF`, which glibc
-takes for another file's path, is not read. Where a name goes to the system's
+invoker's own selection, nothing else) and `RESOLV_HOST_CONF`, which names
+the file read in place of `/etc/host.conf` for that one setting (it is read
+by the bounded reader, as a regular file, for `multi on` or `off` and
+nothing else). glibc's loader takes `RESOLV_HOST_CONF` out of the
+environment of a set-user-ID or set-group-ID program and leaves
+`RESOLV_MULTI` (measured with a set-user-ID copy of the C), and lsof-rs
+does the same of its own accord: it reads `AT_SECURE` from
+`/proc/self/auxv` and ignores the variable where that is set, or cannot be
+read. Where a name goes to the system's
 resolver, libc reads what it reads (`RES_OPTIONS`, `LOCALDOMAIN`,
 `HOSTALIASES`), as under the C. On Windows `SystemRoot` names the services
 file's directory. The device cache is not ported (it is a
@@ -668,11 +719,14 @@ sanitizer gates are pointed at it.
 - **Names its process to make `-c /regex/` expensive, or answers a DNS
   query slowly.** A command name is matched by an engine with no
   backtracking, in time linear in its fifteen bytes and the program's size,
-  which the invoker's expression and a 4 MiB limit set. A name server is
-  asked only for a host name the invoker typed and the hosts file does not
-  hold, once, under the system's own timeouts. Defence: the `posix_regex`
-  fuzz target under `-timeout=10`, the size and nesting limits, and no
-  lookup that the C does not make.
+  which the invoker's expression and an 8 MiB limit set, and once for each
+  name. A name server is asked only for a host name the invoker typed and
+  the hosts file does not hold (or any name, where nsswitch.conf does not
+  put `files` first for hosts), once, under the system's own timeouts.
+  Defence: the `posix_regex` fuzz target under `-timeout=10` (expressions
+  to 64 KB in the local runs; its commands held to 64 bytes, the longest a
+  process has), the cost, size and nesting limits, and no lookup that the C
+  does not make.
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit
   between `readdir` and the read of its entries, and a PID can be recycled.
   Defence: treat every per-process read as fallible and skip, never abort the

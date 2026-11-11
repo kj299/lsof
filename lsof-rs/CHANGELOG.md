@@ -14,12 +14,17 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Changed — output and exit status a script may notice
 - **`-i` with a name no longer exits 1 as a refusal**: a name that
   resolves selects (Added, below), and a lookup may now ask a name server (once
-  a name, under `/etc/resolv.conf`'s timeouts; never for an address, a
-  number, or a name `/etc/hosts` holds).
+  a name, under `/etc/resolv.conf`'s timeouts; never for an address or a
+  number, nor for a name `/etc/hosts` holds where `/etc/nsswitch.conf` puts
+  `files` first for hosts or has no line for them: under `hosts: dns files`
+  the system's resolver is asked for every name).
 - **`-u name` and the USER column follow `/etc/nsswitch.conf`'s `passwd:`**
-  (Linux; DIVERGENCES 39): where it lists neither `files` nor `compat`,
-  glibc reads no password file, so the C knows no login, and neither does
-  lsof-rs now (`-u root` is `can't get UID for root`, USER is the number).
+  (Linux; DIVERGENCES 39): where glibc's walk through its sources does not
+  reach `files` or `compat` (`passwd: sss`, `sss [UNAVAIL=return] files`
+  with no `sss` installed, a line it cannot parse), glibc reads no password
+  file, so the C knows no login, and neither does lsof-rs now (`-u root` is
+  `can't get UID for root`, USER is the number). A service name follows
+  `services:` in the same way.
   It had read `/etc/passwd` regardless. With `files` listed, or no line,
   nothing changes.
 - **A file-system argument names an NFS mount's files as the C does**
@@ -213,19 +218,23 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   and with `-V` one that matched nothing is `no command found for regex:
   EXPR`. lsof-rs had refused every regular expression. Not taken: a
   back-reference (`\(a\)\1`), which the engine cannot match in linear
-  time (`back references are not supported`), and an expression whose
-  program passes 4 MiB or nests 100 deep (`Regular expression too big`).
-  On every platform.
+  time (`back references are not supported`), and an expression past
+  lsof-rs's bounds (`Regular expression too big`): a compiled program of 8
+  MiB (`.{20000}` and `[[:alpha:]]{300}` fit, `.{32767}` does not), 64 of
+  the locale's large classes (`[[:alpha:]]`, `\w`) or 65,536 characters,
+  nesting 100 deep. On every platform.
 - **`-i` takes host names and service names**, as the C (DIVERGENCES 38):
   `-i @localhost`, `-i tcp@db.example:5432`, `-i :http`, `-i :1-http`. On
   Linux a host name is looked up as glibc's `gethostbyname2()` looks it up
   in `/etc/hosts` (the first line that names it, every line under `multi
-  on`, `::1` read as 127.0.0.1 for IPv4), a name that is a number is
-  answered as one (`@127.1`), and any other goes to the system's resolver
-  (`getaddrinfo()`: DNS and whatever else `/etc/nsswitch.conf` lists); every
-  address is an entry, IPv6 first, as the C enters them. A service name is
-  read from `/etc/services` for the spec's protocol, or for TCP and UDP,
-  which must agree. A name nothing knows is `unknown host name (NAME) in:
+  on`, `::1` read as 127.0.0.1 for IPv4) where `/etc/nsswitch.conf` puts
+  `files` first for hosts, or says nothing of them; a name that is a number
+  is answered as one (`@127.1`), and any other goes to the system's
+  resolver (`getaddrinfo()`: DNS and whatever else `/etc/nsswitch.conf`
+  lists); every address is an entry, IPv6 first, as the C enters them. A
+  service name is read from `/etc/services`, where nsswitch.conf's
+  `services:` has glibc read it, for the spec's protocol, or for TCP and
+  UDP, which must agree. A name nothing knows is `unknown host name (NAME) in:
   -i SPEC` or `unknown service NAME in: -i SPEC`, exit 1. lsof-rs had
   refused every name (`host names are not resolved`). On FreeBSD and
   Windows a host goes to the system's resolver and a service to the
@@ -238,15 +247,35 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   with a build script), in `lsof-core` and so in every platform's binary,
   for `-c /regex/` (the owner's decision of 2026-11-11). The three portable
   crates keep `#![forbid(unsafe_code)]`. The Linux release binary grows from
-  636 KB to 1.64 MB (the engine some 610 KB, the Unicode tables 400 KB).
+  636 KB to 1.66 MB (the engine some 610 KB, the Unicode tables 400 KB).
   Fuzz targets `posix_regex` (the expression's reader, the compile and the
   match) and `netnames` (the hosts, services, host.conf and nsswitch.conf
   readers).
-- Differential: 56 `-c /regex/` cases over the fixtures' commands, and 42
+- Differential: 61 `-c /regex/` cases over the fixtures' commands, and 63
   for `-i`'s names and `-u`'s in a mount namespace whose `/etc` holds a
-  hosts file, a services file, an nsswitch.conf and a name server that does
-  not answer (`LSOF_DIFF_MT=names`, `namesmulti`, `namesnopw`), so that no
-  case reads a host's own files or asks DNS.
+  hosts file, a services file, an nsswitch.conf and a name server of the
+  harness's own that refuses every query (`LSOF_DIFF_MT=names`,
+  `namesmulti`, `namesnopw` and ten `names-VARIANT` modes), so that no case
+  reads a host's own files or asks a resolver the host runs. Each compares
+  stderr too: a refusal's words are the C's, its usage made one line on both
+  sides (`USAGE_RULES`).
+- **The readers of `/etc/hosts`, `/etc/services`, `/etc/passwd`,
+  `/etc/nsswitch.conf` and `/etc/host.conf` are bounded** (the review of
+  rows 38 and 39): a line to 1 MiB (a longer one is passed over), a file to
+  256 MiB, the two configuration files to 1 MiB, the accounts kept to
+  1,048,576; and a file that is no regular file is not opened, so a FIFO or
+  `/dev/zero` in its place neither holds the run (it holds the C) nor
+  exhausts memory (`/dev/zero` as `/etc/passwd` had aborted every run, row
+  70's reader included).
+- **`/etc/nsswitch.conf` is read and followed as glibc 2.39 does** for
+  `passwd:`, `hosts:` and `services:` (DIVERGENCES 38, 39): no file or no
+  line is glibc's built-in sources (`files dns` for hosts); a last line
+  with no newline is not read; `[STATUS=action]` items decide whether
+  `files` is reached (`passwd: sss [UNAVAIL=return] files` knows no login
+  where `sss` is not installed); a line glibc cannot parse refuses the file,
+  and with it every login, host and service name; `passwd: compat` reads
+  `-name` and `+name` lines by `nss_compat`'s rules. `RESOLV_HOST_CONF` names
+  host.conf, as for glibc, but in secure-execution mode.
 - **The Linux backend asks the kernel's `NETLINK_SOCK_DIAG`** for a UNIX
   socket's peer under `-E`/`+E` (56), through `rustix`'s `net` feature
   beside `fs` (still =1.1.5; `net` turns on linux-raw-sys's netlink

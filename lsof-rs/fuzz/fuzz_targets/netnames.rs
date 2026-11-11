@@ -9,8 +9,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_core::netnames::{
-    bool_arg, host_conf_multi, hosts_lookup, inet_aton, nsswitch_files_first, numeric_host,
-    services_lookup, MAX_ADDRESSES,
+    bool_arg, host_conf_multi, hosts_lookup, inet_aton, nss_walk, nsswitch_database, numeric_host,
+    read_lines, services_lookup, Conf, NssAnswer, FILES_DEFAULT, HOSTS_DEFAULT, MAX_ADDRESSES,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -43,6 +43,38 @@ fuzz_target!(|data: &[u8]| {
     let _ = inet_aton(name, true);
     let _ = host_conf_multi(data);
     let _ = bool_arg(name);
-    let order = nsswitch_files_first(data, b"hosts");
-    assert!(order.first || !order.only);
+    // nsswitch.conf: the sources of a database it lists, or the built-in
+    // ones, or a file refused whole, and then for every database; a walk
+    // through them asks each source once at most.
+    let conf = Conf::Text(data.to_vec());
+    let hosts = nsswitch_database(&conf, b"hosts", HOSTS_DEFAULT);
+    for database in [&b"passwd"[..], b"services"] {
+        let sources = nsswitch_database(&conf, database, FILES_DEFAULT);
+        assert_eq!(sources.is_some(), hosts.is_some());
+        let Some(sources) = sources else { continue };
+        for found in [true, false] {
+            let mut asked = 0usize;
+            let answer = nss_walk(&sources, |module| {
+                (module == b"files").then(|| {
+                    asked += 1;
+                    if found {
+                        NssAnswer::Success(asked)
+                    } else {
+                        NssAnswer::NotFound
+                    }
+                })
+            });
+            assert!(asked <= sources.len());
+            assert!(answer.is_none_or(|n| found && n == asked));
+        }
+    }
+    // A file is read in lines no longer than the bound, to the file's
+    // bound and no further.
+    let mut read = 0usize;
+    read_lines(data, 64, 4096, |line| {
+        assert!(line.len() <= 65);
+        read += line.len();
+        false
+    });
+    assert!(read <= data.len().min(4096));
 });

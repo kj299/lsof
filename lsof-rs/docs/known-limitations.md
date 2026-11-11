@@ -248,8 +248,10 @@ The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
 - **Refused, where the C works:** a back-reference in `-c /regex/` (38:
-  `\(a\)\1`; every other POSIX expression glibc takes is taken, up to a
-  compiled size of 4 MiB); a value that is not UTF-8, in a command line that
+  `\(a\)\1`), and an expression past lsof-rs's bounds: a compiled size of
+  8 MiB (`.{32767}`, `\w{0,800}`), 64 of the locale's large classes or
+  65,536 characters, groups and repetitions nested 100 deep (every other
+  POSIX expression glibc takes is taken); a value that is not UTF-8, in a command line that
   also holds one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
 - **Names only the files know** (38, 39): a service name is read from
