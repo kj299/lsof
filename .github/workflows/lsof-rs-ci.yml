@@ -513,7 +513,18 @@ jobs:
     # button (LESSONS #043).
     name: miri (UB in the portable crates)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 45, not 25. MEASURED: ten green runs of this job on unchanged code took
+    # 11 to 24 minutes (d0291c8 11, 7af091a 16, 1475ca0 24, 43cd014 12,
+    # deaa7f5 17, b9d4e7b 17, 2e907b8 12, b31dbea 21, c9e97ca 12, 6761a9a 14):
+    # the runner alone moves it better than 2x, and one run was a minute from
+    # the limit. One test is most of it, on any runner:
+    # args::tests::no_option_error_holds_a_control_character, some 9,000
+    # parses, 880 s here on master and 1080 s on the slow runner below. The
+    # `-c /regex/` and `-i` name tests (rows 38/39) add about four minutes,
+    # and c640f8b was cancelled at 25m15s on such a runner, mid lsof-core,
+    # with no finding. The limit bounds a hang; it is not a budget to tune
+    # tests against.
+    timeout-minutes: 45
     # HARD GATE. Landed observe-first (continue-on-error) in the retrospective
     # PR #64 after LESSONS #19 found the playbook's sanitizer gate had never been
     # wired for this port; promoted here, in its own PR, on the kit's promotion
