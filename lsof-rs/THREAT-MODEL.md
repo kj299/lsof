@@ -459,8 +459,10 @@ again, by the same bounded text reader as every fdinfo.
 `getxattr(2)` has no std API; the maintainer chose (2026-10-30) a dependency
 over FFI of the crate's own, so `lsof-backend-linux` keeps
 `#![forbid(unsafe_code)]` and the port's `unsafe` stays in the native
-backends that cannot avoid it: Windows, and since 2026-10-31 FreeBSD (below). The crate is `rustix`, pinned exactly (`=1.1.5`, a release more than
-two weeks old when it was taken), with no default features and only `fs`
+backends that cannot avoid it: Windows, and since 2026-10-31 FreeBSD (below). The crate is `rustix`, pinned exactly (`=1.1.6`, a release more than
+two weeks old when it was taken; moved from 1.1.5 on 2026-11-11 for
+RUSTSEC-2026-0486, an unsound zero-length-buffer path in the xattr
+functions that lsof-rs's one call, with a fixed 32-byte buffer, did not reach), with no default features and only `fs`
 and, since 2026-11-06 (the maintainer's decision, for `-E`), `net`, which
 turns on `linux-raw-sys`'s `net`, `netlink`, `if_ether` and `xdp` modules
 (constants and struct layouts) and adds no crate.
@@ -476,7 +478,7 @@ formatted itself, and under `-E` `socket`, `connect`,
 `setsockopt(SO_RCVTIMEO)`, `sendto` and `recvfrom` on its own netlink
 socket, but that bounds nothing a
 compromised release could do.
-`rustix` ships a build script (`build.rs`, 281 lines in 1.1.5) that cargo
+`rustix` ships a build script (`build.rs`, 281 lines, identical in 1.1.5 and 1.1.6) that cargo
 compiles and runs at build time, on every developer's and CI's machine, with
 their privileges; it runs `$RUSTC` (or `$RUSTC_WRAPPER`) to probe the
 compiler. It is the only crate with a build script in the Linux build
@@ -485,7 +487,7 @@ targets and the miri runs that use it). And any code linked into lsof-rs can
 run before `main` (static constructors, `.init_array`) or wherever its call
 graph reaches, inside lsof-rs, often as root, `forbid(unsafe_code)` in this
 repository notwithstanding. The mitigations are the ones that apply to any
-dependency: the version is exact (`=1.1.5`), so no release is taken without
+dependency: the version is exact (`=1.1.6`), so no release is taken without
 an edit here; `Cargo.lock` (and `fuzz/Cargo.lock`) pin each crate by
 checksum, so a crates.io artifact that changed under the same version fails
 the build; `cargo deny check` gates licences, sources (crates.io only),

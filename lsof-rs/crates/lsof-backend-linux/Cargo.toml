@@ -28,7 +28,7 @@ lsof-core = { path = "../lsof-core" }
 # layouts, no new crate; see deny.toml and THREAT-MODEL.md). Linux only: off
 # Linux this crate is an empty shell and links nothing.
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.5", default-features = false, features = ["fs", "net"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["fs", "net"] }
 
 [features]
 # Exposes the pure text parsers (`/proc/net/*`, `/proc/<pid>/status`, fdinfo,

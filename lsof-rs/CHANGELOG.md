@@ -205,6 +205,13 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   printed nothing of a run that ended there. Linux and FreeBSD; on Windows,
   which matches names, the walk still comes after the parse.
 
+### Security
+
+- `rustix` moves from =1.1.5 to =1.1.6 for RUSTSEC-2026-0486: the xattr
+  functions marked unwritten bytes as initialized when given a zero-length
+  buffer. lsof-rs's one `getxattr` call passes a fixed 32-byte buffer and
+  did not reach that path. No new crate; the build script is unchanged.
+
 ### Added
 - **`-c /regex/[bix]` selects by a POSIX regular expression**, as the C
   (DIVERGENCES 38): the text between the slashes is an extended expression,
