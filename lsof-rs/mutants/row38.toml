@@ -1,0 +1,1648 @@
+# Mutants for DIVERGENCES 38 and 39 (2026-11-11): `-c /regex/[bix]` read as
+# glibc's regcomp() reads it and run by the `regex` crate; `-i @name` and
+# `-i :name` resolved as the C's gethostbyname2() and getservbyname() resolve
+# them from the hosts and services files, and entered as
+# enter_network_address() enters them; and the password file read only where
+# nsswitch.conf has glibc read it. One per rule, each a plausible way to get
+# that rule wrong. The kill table is this file, run (porting-kit LESSONS
+# #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/row38.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo: the differential's LSOF_DIFF_MT=names, namesmulti and
+# namesnopw modes mount a tmpfs over /etc in a mount namespace of each
+# run's own. CI runs only --apply-only.
+#
+# Run 2026-11-11 as root with --first-kill, after the review's fixes: 169 of
+# 169 killed, 118 by lsof-core's unit tests (the gate `unit-core`: the
+# translator's, the glibc table's, the nsswitch.conf reader's and the files
+# readers'), 47 by lsof-cli's and the Linux backend's, and 4 by the
+# differential alone (`names-backend-knows-no-host`,
+# `names-backend-knows-no-service` and
+# `names-backend-service-reads-no-nsswitch`, the backend's wiring, which no
+# unit test reaches, and `names-host-conf-environment-not-read`, which reads
+# the environment).
+#
+# The first run of the first version, of 86, was 83 killed with three
+# survivors. `rx-nest-limit-lifted` survived a
+# test that held the limit only from far away, and looking at it found
+# that the engine counts a concatenation as a nesting level too, so an
+# expression inside the translator's limit could pass the engine's: the
+# limit is 100 now, the engine's is set above the deepest that writes, both
+# are pinned at their edges, and `rx-engine-nest-limit-at-the-translators`
+# holds the second. The other two were equivalent mutants and are gone,
+# one with the code it showed to be dead: `b and x regexp modifiers
+# conflict` can arise once a value at most (the "said once" guard guarded
+# nothing, in the C either, and went with the review), and a `]` that opens
+# a list needs no marking as a character, since `parse_bracket_element()`
+# reads the list's first token as one whatever it is.
+#
+# The safety review of that version then found 13 mutants no gate killed,
+# by hand: bounds (the configuration files' limit, the addresses kept, the
+# resolver's answers kept and asked once), host.conf's and nsswitch.conf's
+# terminators, a services line's junk after its port, the bracket name's
+# length. Each is a mutant below now, or gone with code it showed to be
+# dead: host.conf's keyword need not end at a `#` or a `,`, nor its line at
+# a NUL, for the answer to be glibc's (what follows the keyword must open
+# with `on` or `off` either way). With them are a mutant for each bound and
+# each rule the review's fixes brought: the cost and size limits and what
+# each construct costs, the `$` look-ahead, the alternation's groups, the
+# answers kept, the line and file limits, what is no regular file,
+# nsswitch.conf's parser and the walk through its sources, `compat`'s
+# lines, `AT_SECURE` and RESOLV_HOST_CONF. Nine of the first 85 were
+# replaced with the code they changed (`nsswitch_files_first` and
+# `nsswitch_reads_passwd_file` are `nsswitch_database` and `nss_walk`).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+# lsof-core's tests first, in a gate of their own: most of these rules are
+# its, and cargo would run them last (after lsof-cli's bounded-call tests,
+# over a minute a mutant).
+[[run.gate]]
+name = "unit-core"
+cmd = ["cargo", "test", "-p", "lsof-core"]
+timeout = 600
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1800
+
+[[mutant]]
+name = "rx-option-reads-a-slash-value-as-a-name"
+rule = "a -c value that opens with / is a regular expression, not a name"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''if value.as_encoded_bytes().starts_with(b"/") {'''
+new = '''if value.as_encoded_bytes().starts_with(b"/no") {'''
+
+[[mutant]]
+name = "rx-basic-by-default"
+rule = "extended unless b follows the expression (the C's REG_EXTENDED default)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''let (mut extended, mut icase) = (true, false);'''
+new = '''let (mut extended, mut icase) = (false, false);'''
+
+[[mutant]]
+name = "rx-b-modifier-ignored"
+rule = "b is a basic expression"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                } else {
+                    extended = false;
+                }'''
+new = '''                } else {
+                    extended = true;
+                }'''
+
+[[mutant]]
+name = "rx-i-modifier-ignored"
+rule = "i is REG_ICASE"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                } else {
+                    icase = true;
+                }'''
+new = '''                } else {
+                    icase = false;
+                }'''
+
+[[mutant]]
+name = "rx-expression-ends-at-the-last-slash"
+rule = "the expression runs to the NEXT /, and what follows is modifiers"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''let Some(end) = rest.iter().position(|&b| b == b'/') else {'''
+new = '''let Some(end) = rest.iter().rposition(|&b| b == b'/') else {'''
+
+[[mutant]]
+name = "rx-modifier-twice-said-each-time"
+rule = "a modifier given again is said once"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if count == 2 {'''
+new = '''        if count >= 2 {'''
+
+[[mutant]]
+name = "rx-does-not-select"
+rule = "a command an expression matches is selected (SELCMD)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''                .any(|r| r.is_match(p.command_bytes()))'''
+new = '''                .any(|_| false)'''
+
+[[mutant]]
+name = "rx-is-no-selector-kind"
+rule = "an expression alone makes the run a -c run"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''if !self.commands.is_empty() || !self.command_regexes.is_empty() {'''
+new = '''if !self.commands.is_empty() {'''
+
+[[mutant]]
+name = "rx-never-located"
+rule = "an expression a process matched is located"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''                    *hit = *hit || r.is_match(p.command_bytes());'''
+new = '''                    *hit = *hit || r.expression().is_empty();'''
+
+[[mutant]]
+name = "rx-search-items-last-first"
+rule = "no command found for regex: in the order given"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    for (r, hit) in sel.command_regexes.iter().zip(&located.command_regexes) {'''
+new = '''    for (r, hit) in sel.command_regexes.iter().zip(&located.command_regexes).rev() {'''
+
+[[mutant]]
+name = "rx-search-item-not-escaped"
+rule = "the expression is escaped where -V prints it"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''                esc.bytes(r.expression())'''
+new = '''                String::from_utf8_lossy(r.expression())'''
+
+[[mutant]]
+name = "rx-dot-refuses-a-newline"
+rule = ". and a non-matching list take a newline (no REG_NEWLINE)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''let mut pattern = String::from(if icase { "(?si)" } else { "(?s)" });'''
+new = '''let mut pattern = String::from(if icase { "(?i)" } else { "" });'''
+
+[[mutant]]
+name = "rx-icase-not-written"
+rule = "REG_ICASE is the engine's i flag"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''let mut pattern = String::from(if icase { "(?si)" } else { "(?s)" });'''
+new = '''let mut pattern = String::from(if icase { "(?s)" } else { "(?s)" });'''
+
+[[mutant]]
+name = "rx-basic-backslash-bar-is-a-character"
+rule = "\\| is alternation in a basic expression (glibc)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                Some(b'|') if !x => Kind::Alt,'''
+new = '''                Some(b'|') if !x => Kind::Char,'''
+
+[[mutant]]
+name = "rx-basic-backslash-plus-is-a-character"
+rule = "\\+ repeats in a basic expression (glibc)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                Some(b'+') if !x => Kind::Plus,'''
+new = '''                Some(b'+') if !x => Kind::Char,'''
+
+[[mutant]]
+name = "rx-back-reference-to-no-group-accepted"
+rule = "\\N for a group not yet closed is Invalid back reference"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                if self.completed & (1u16 << n) == 0 {'''
+new = '''                if self.completed & (1u16 << n) == 0 && n > 9 {'''
+
+[[mutant]]
+name = "rx-back-reference-matches-nothing-silently"
+rule = "a back-reference glibc takes is refused, not dropped"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                self.back_reference = true;'''
+new = '''                self.back_reference = false;'''
+
+[[mutant]]
+name = "rx-extended-leading-star-is-a-character"
+rule = "extended: a repetition with nothing before it is REG_BADRPT"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                if x {
+                    return Err(RegexError::BadRepeat);
+                }'''
+new = '''                if x && lit.ascii().is_none() {
+                    return Err(RegexError::BadRepeat);
+                }'''
+
+[[mutant]]
+name = "rx-basic-double-repetition-taken"
+rule = "basic: a repetition of a repetition is REG_BADRPT"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''            if !x && matches!(self.token.kind, Kind::Star | Kind::OpenDup) {'''
+new = '''            if x && matches!(self.token.kind, Kind::Star | Kind::OpenDup) {'''
+
+[[mutant]]
+name = "rx-extended-unmatched-close-refused"
+rule = "extended: a ) that closes nothing is itself; basic: REG_EPAREN"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                if !x {
+                    return Err(RegexError::Paren);
+                }'''
+new = '''                if x {
+                    return Err(RegexError::Paren);
+                }'''
+
+[[mutant]]
+name = "rx-caret-after-an-anchor-is-an-anchor"
+rule = "basic: ^ after an anchor is a character (^^a matches ^a)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                self.fetch(false);
+                return Ok(Some(atom(text)));'''
+new = '''                self.fetch(true);
+                return Ok(Some(atom(text)));'''
+
+[[mutant]]
+name = "rx-basic-caret-anchors-anywhere"
+rule = "basic: ^ is an anchor only where an expression, group or alternative opens"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''            Some(b'^') if x || caret_here || pos == 0 => Kind::Anchor(r"\A", false),'''
+new = '''            Some(b'^') => Kind::Anchor(r"\A", false),'''
+
+[[mutant]]
+name = "rx-basic-dollar-anchors-anywhere"
+rule = "basic: $ is an anchor only where one of those ends"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                if ends {
+                    Kind::Anchor(r"\z", false)'''
+new = '''                if ends || !x {
+                    Kind::Anchor(r"\z", false)'''
+
+[[mutant]]
+name = "rx-interval-open-start-is-one"
+rule = "{,m} is {0,m}"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                    // `{,m}` is `{0,m}`.
+                    start = 0;'''
+new = '''                    // `{,m}` is `{0,m}`.
+                    start = 1;'''
+
+[[mutant]]
+name = "rx-interval-limit-raised"
+rule = "an interval's count ends at RE_DUP_MAX, 32767"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''const RE_DUP_MAX: i64 = 0x7fff;'''
+new = '''const RE_DUP_MAX: i64 = 0xffff;'''
+
+[[mutant]]
+name = "rx-interval-of-none-kept"
+rule = "{0} is nothing at all (glibc's null tree)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        if start == 0 && end == 0 {
+            return Ok(None);
+        }'''
+new = '''        if start == 0 && end == 0 && self.extended != self.extended {
+            return Ok(None);
+        }'''
+
+[[mutant]]
+name = "rx-list-trailing-dash-is-a-range"
+rule = "a - before the ] is a character"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                    if token2.kind == BrKind::Close {
+                        // A `-` that ends the list is a character.'''
+new = '''                    if token2.kind == BrKind::NonMatch {
+                        // A `-` that ends the list is a character.'''
+
+[[mutant]]
+name = "rx-range-backwards-taken"
+rule = "a range whose end is below its start is Invalid range end"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        if lo > hi {
+            return Err(RegexError::Range);
+        }'''
+new = '''        if lo > hi {
+            return Err(RegexError::Collate);
+        }'''
+
+[[mutant]]
+name = "rx-range-end-past-ascii-taken"
+rule = "a range's end past ASCII is Invalid collation character (C.UTF-8)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        let (Some(lo), Some(hi)) = (seq(start), seq(end)) else {
+            return Err(RegexError::Collate);
+        };'''
+new = '''        let (Some(lo), Some(hi)) = (seq(start), seq(end)) else {
+            return Err(RegexError::Range);
+        };'''
+
+[[mutant]]
+name = "rx-collating-name-past-ascii-taken"
+rule = "[.x.] and [=x=] name a single byte alone"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        [item @ Item::Char(c)] if c.is_ascii() => Some(*item),'''
+new = '''        [item @ Item::Char(_)] => Some(*item),'''
+
+[[mutant]]
+name = "rx-icase-keeps-a-class-of-one-case"
+rule = "REG_ICASE: [[:upper:]] and [[:lower:]] are [[:alpha:]]"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        b"upper" | b"lower" if icase => b"alpha",'''
+new = '''        b"upper" | b"lower" if icase && name.is_empty() => b"alpha",'''
+
+[[mutant]]
+name = "rx-icase-list-read-as-typed"
+rule = "REG_ICASE: a list is read in upper case ([Z-a] is [Z-A], refused)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''            Item::Char(c) if self.icase => Item::Char(c.to_ascii_uppercase()),'''
+new = '''            Item::Char(c) if self.icase => Item::Char(c),'''
+
+[[mutant]]
+name = "rx-icase-escaped-letter-matches"
+rule = "REG_ICASE: an escaped small letter matches nothing (glibc's defect, the C's answer)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                Some(b'a'..=b'z') if self.icase => Kind::Never,'''
+new = '''                Some(b'a'..=b'z') if self.icase => Kind::Char,'''
+
+[[mutant]]
+name = "rx-alpha-takes-ascii-digits"
+rule = "[[:alpha:]] takes a digit past ASCII, and no ASCII one"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        b"alpha" => r"\p{Alphabetic}[\p{Nd}--[0-9]]".to_string(),'''
+new = '''        b"alpha" => r"\p{Alphabetic}\p{Nd}".to_string(),'''
+
+[[mutant]]
+name = "rx-lower-without-the-titlecase-digraphs"
+rule = "[[:lower:]] takes the four titlecase digraphs, as glibc's does"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        b"lower" => r"\p{Lowercase}\x{1C5}\x{1C8}\x{1CB}\x{1F2}".to_string(),'''
+new = '''        b"lower" => r"\p{Lowercase}".to_string(),'''
+
+[[mutant]]
+name = "rx-space-takes-a-no-break-space"
+rule = "[[:space:]] takes no no-break space"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''const SPACE: &str = r"\t\n\x0B\x0C\r\x20\p{Zl}\p{Zp}[\p{Zs}--[\x{A0}\x{2007}\x{202F}]]";'''
+new = '''const SPACE: &str = r"\t\n\x0B\x0C\r\x20\p{Zl}\p{Zp}\p{Zs}";'''
+
+[[mutant]]
+name = "rx-punct-without-the-no-break-spaces"
+rule = "[[:punct:]] and [[:graph:]] take a no-break space"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''const GRAPH: &str = r"[^\p{Cn}\p{Cc}\p{Zl}\p{Zp}\p{Zs}]\x{A0}\x{2007}\x{202F}";'''
+new = '''const GRAPH: &str = r"[^\p{Cn}\p{Cc}\p{Zl}\p{Zp}\p{Zs}]";'''
+
+[[mutant]]
+name = "rx-byte-written-as-a-character"
+rule = "a byte that is no character matches that byte, not U+00NN"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''            let _ = write!(s, "(?-u:\\x{b:02X})");'''
+new = '''            push_char(&mut s, char::from(b));'''
+
+[[mutant]]
+name = "rx-byte-in-a-list-is-a-character"
+rule = "a byte that is no character is in no list"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                    if let Some(b) = item.ascii() {
+                        push_char(&mut set, char::from(b));
+                    }'''
+new = '''                    match item {
+                        Item::Char(c) => push_char(&mut set, c),
+                        Item::Byte(b) => push_char(&mut set, char::from(b)),
+                    }'''
+
+[[mutant]]
+name = "rx-searched-by-bytes-always"
+rule = "glibc searches by characters under i, a word operator or a list past ASCII: a match starts at a character"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        if !self.by_chars {
+            return self.regex.is_match(command);
+        }'''
+new = '''        if !self.by_chars || !command.is_empty() {
+            return self.regex.is_match(command);
+        }'''
+
+[[mutant]]
+name = "rx-icase-searched-by-bytes"
+rule = "REG_ICASE is searched by characters"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        by_chars: icase,'''
+new = '''        by_chars: false,'''
+
+[[mutant]]
+name = "rx-nest-limit-lifted"
+rule = "groups, alternations and repetitions nested past 100 are Regular expression too big"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''pub const NEST_LIMIT: u32 = 100;'''
+new = '''pub const NEST_LIMIT: u32 = 101;'''
+
+[[mutant]]
+name = "rx-engine-nest-limit-at-the-translators"
+rule = "the engine's nesting limit is above the deepest the translator writes (it counts a concatenation and a list too)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''const ENGINE_NEST_LIMIT: u32 = NEST_LIMIT * 3 + 32;'''
+new = '''const ENGINE_NEST_LIMIT: u32 = NEST_LIMIT + 32;'''
+
+[[mutant]]
+name = "names-host-v4-first"
+rule = "a name with no version given is looked up as an IPv6 name first"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    found if found.is_empty() => (false, lookup(false)),
+                    found => (true, found),'''
+new = '''                    found if found.is_empty() => (false, lookup(false)),
+                    found => match lookup(false) {
+                        v4 if v4.is_empty() => (true, found),
+                        v4 => (false, v4),
+                    },'''
+
+[[mutant]]
+name = "names-host-no-second-lookup"
+rule = "a name found as an IPv6 name is then looked up as an IPv4 one"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if named.v6 && ft != Some(6) {'''
+new = '''            if named.v6 && ft == Some(4) {'''
+
+[[mutant]]
+name = "names-host-second-lookup-under-6"
+rule = "held to IPv6, a name stays an IPv6 one"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if named.v6 && ft != Some(6) {'''
+new = '''            if named.v6 {'''
+
+[[mutant]]
+name = "names-host-first-address-only"
+rule = "every address of the lookup is an entry"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            for ip in named.addresses.iter().skip(1) {'''
+new = '''            for ip in named.addresses.iter().skip(usize::MAX) {'''
+
+[[mutant]]
+name = "names-host-v6-only-later-port-forgets-its-bytes"
+rule = "a name with no IPv4 address is, from the second port entry, its IPv6 address's first four bytes"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    named.bytes = address_bytes(Some(first));
+                    continue;
+                }
+            }
+            return Ok(());'''
+new = '''                    named.bytes = address_bytes(Some(first));
+                    continue;
+                }
+                named.bytes = [0xffu8; 16];
+            }
+            return Ok(());'''
+
+[[mutant]]
+name = "names-host-unknown-is-taken"
+rule = "a name nothing knows is unknown host name"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            if addresses.is_empty() {'''
+new = '''            if addresses.is_empty() && ft == Some(9) {'''
+
+[[mutant]]
+name = "names-host-not-held-to-its-version"
+rule = "an entry from a name is held to the version it was looked up in"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            (Some(4), (!ip.is_unspecified()).then_some(IpAddr::V4(ip)))'''
+new = '''            (None, (!ip.is_unspecified()).then_some(IpAddr::V4(ip)))'''
+
+[[mutant]]
+name = "names-host-zero-is-an-address"
+rule = "0.0.0.0 from a name is no address"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            (Some(4), (!ip.is_unspecified()).then_some(IpAddr::V4(ip)))'''
+new = '''            (Some(4), Some(IpAddr::V4(ip)))'''
+
+[[mutant]]
+name = "names-host-not-utf8-looked-up-as-stand-ins"
+rule = "a name is looked up as the bytes typed"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if STAND_INS.with(std::cell::Cell::get) {
+        stand_in_bytes(text)
+    } else {'''
+new = '''    if STAND_INS.with(std::cell::Cell::get) {
+        text.as_bytes().to_vec()
+    } else {'''
+
+[[mutant]]
+name = "names-backend-knows-no-host"
+rule = "the Linux backend resolves a host name"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''        crate::netnames::lookup_host(name, v6)'''
+new = '''        let _ = (name, v6);
+        Vec::new()'''
+
+[[mutant]]
+name = "names-backend-knows-no-service"
+rule = "the Linux backend resolves a service name"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''        crate::netnames::lookup_service(name, protocol)'''
+new = '''        let _ = (name, protocol);
+        None'''
+
+[[mutant]]
+name = "names-hosts-v6-loopback-is-no-v4-address"
+rule = "an IPv4 lookup reads ::1 as 127.0.0.1"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            None if v6 == Ipv6Addr::LOCALHOST => IpAddr::V4(Ipv4Addr::LOCALHOST),'''
+new = '''            None if v6 == Ipv6Addr::UNSPECIFIED => IpAddr::V4(Ipv4Addr::LOCALHOST),'''
+
+[[mutant]]
+name = "names-hosts-mapped-is-no-v4-address"
+rule = "an IPv4 lookup reads a v4-mapped address as its IPv4 one"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            Some(v4) => IpAddr::V4(v4),
+            None if v6 =='''
+new = '''            Some(_) => return None,
+            None if v6 =='''
+
+[[mutant]]
+name = "names-hosts-compared-exactly"
+rule = "a host name is compared in any case"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            if words(names).any(|n| n.eq_ignore_ascii_case(self.name)) {'''
+new = '''            if words(names).any(|n| n == self.name) {'''
+
+[[mutant]]
+name = "names-hosts-every-line-without-multi"
+rule = "without multi, the first line that names it alone"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        (!self.multi && !self.found.is_empty()) || self.found.len() >= MAX_ADDRESSES'''
+new = '''        self.found.len() >= MAX_ADDRESSES'''
+
+[[mutant]]
+name = "names-hosts-unbounded"
+rule = "a lookup keeps a bounded number of addresses"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        (!self.multi && !self.found.is_empty()) || self.found.len() >= MAX_ADDRESSES'''
+new = '''        !self.multi && !self.found.is_empty()'''
+
+[[mutant]]
+name = "names-files-comment-read"
+rule = "a # ends a hosts or services line"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    let line = line.split(|&b| b == b'#').next().unwrap_or_default();'''
+new = '''    let line = line.split(|&b| b == 0).next().unwrap_or_default();'''
+
+[[mutant]]
+name = "names-resolv-multi-ignored"
+rule = "RESOLV_MULTI overrides host.conf"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        let multi = multi_env
+            .and_then(bool_arg)
+            .unwrap_or_else('''
+new = '''        let multi = multi_env
+            .and_then(|_| None)
+            .unwrap_or_else('''
+
+[[mutant]]
+name = "names-number-answered-for-v6"
+rule = "a name of digits and dots is no IPv6 name"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    Some(if v6 {
+        None
+    } else {'''
+new = '''    Some(if v6 && name.is_empty() {
+        None
+    } else {'''
+
+[[mutant]]
+name = "names-number-hexadecimal-handed-to-getaddrinfo"
+rule = "a name getaddrinfo alone reads as a number is unknown, as to gethostbyname2"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if inet_aton(name, true).is_some() {
+        return Vec::new();
+    }'''
+new = '''    if inet_aton(name, false).is_some() {
+        return Vec::new();
+    }'''
+
+[[mutant]]
+name = "names-number-last-part-unbounded"
+rule = "inet_aton's last number fills the bytes that are left, no more"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                let max = [0xffff_ffffu32, 0x00ff_ffff, 0xffff, 0xff];'''
+new = '''                let max = [0xffff_ffffu32, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff];'''
+
+[[mutant]]
+name = "names-number-octal-read-as-decimal"
+rule = "inet_aton reads a leading 0 as octal"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        [b'0', b'x' | b'X', d, ..] if hex && is_hex(d) => (16u32, 2usize),
+        [b'0', ..] => (8, 0),'''
+new = '''        [b'0', b'x' | b'X', d, ..] if hex && is_hex(d) => (16u32, 2usize),
+        [b'0', ..] => (10, 0),'''
+
+[[mutant]]
+name = "names-system-answers-of-both-families"
+rule = "the system's addresses of the version asked for are the answer"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    system(text)
+        .into_iter()
+        .filter(|ip| ip.is_ipv6() == v6)'''
+new = '''    system(text)
+        .into_iter()
+        .filter(|ip| ip.is_ipv6() == v6 || ip.is_ipv4())'''
+
+[[mutant]]
+name = "names-service-protocol-not-compared"
+rule = "a service is the line's for its protocol alone"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if proto != protocol {
+        return None;
+    }'''
+new = '''    if proto != protocol && proto.is_empty() {
+        return None;
+    }'''
+
+[[mutant]]
+name = "names-service-alias-not-read"
+rule = "a service is known by its aliases too"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if first != name && !words(aliases).any(|a| a == name) {'''
+new = '''    if first != name {'''
+
+[[mutant]]
+name = "names-service-port-past-32-bits-taken"
+rule = "a port past 32 bits (or negative) is no line"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if value > u64::from(u32::MAX) {
+        return None;
+    }'''
+new = '''    if value > u64::from(u32::MAX) && value < 1 {
+        return None;
+    }'''
+
+[[mutant]]
+name = "names-service-port-not-kept-to-16-bits"
+rule = "a port is kept to 16 bits, as htons() keeps it"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    u16::try_from(value & 0xffff).ok()'''
+new = '''    u16::try_from(value).ok()'''
+
+[[mutant]]
+name = "names-service-for-the-protocol-ignored"
+rule = "with a protocol in the spec, the service is that protocol's"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if let Some(protocol) = protocol {
+        return lookup(protocol)'''
+new = '''    if let Some(protocol) = protocol.filter(|p| p.is_empty()) {
+        return lookup(protocol)'''
+
+[[mutant]]
+name = "names-service-conflict-taken"
+rule = "TCP and UDP must agree on a name's port"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        (Some(tcp), Some(udp)) if tcp != udp => Err(format!('''
+new = '''        (Some(tcp), Some(udp)) if tcp != udp && tcp == 0 => Err(format!('''
+
+[[mutant]]
+name = "names-service-udp-alone-unknown"
+rule = "a name UDP alone knows is its port"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        (Some(port), _) | (None, Some(port)) => Ok(u32::from(port)),'''
+new = '''        (Some(port), _) => Ok(u32::from(port)),
+        (None, Some(_)) => Err(String::new()),'''
+
+[[mutant]]
+name = "names-service-cannot-end-a-range"
+rule = "a name can end a range"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if range {
+                        end = port;
+                    } else {
+                        start = port;
+                    }'''
+new = '''                    start = port;'''
+
+[[mutant]]
+name = "names-service-ends-at-a-dash"
+rule = "a service name runs to the , and may hold a -"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        .and_then(|l| l.iter().position(|&b| b == b','))'''
+new = '''                        .and_then(|l| l.iter().position(|&b| b == b',' || b == b'-'))'''
+
+[[mutant]]
+name = "names-service-empty-is-unknown"
+rule = "an empty port entry is invalid service name"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if name_end == at {
+                        return Err(quoting("invalid service name: -i ", spec));
+                    }'''
+new = '''                    if name_end == at && at > list.len() {
+                        return Err(quoting("invalid service name: -i ", spec));
+                    }'''
+
+# ---- after the review of 2026-11-11 (the fixer's additions; see the header)
+
+[[mutant]]
+name = "rx-size-limit-lifted"
+rule = "a compiled program past 8 MiB is Regular expression too big"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''pub const SIZE_LIMIT: usize = 1 << 23;'''
+new = '''pub const SIZE_LIMIT: usize = 1 << 34;'''
+
+[[mutant]]
+name = "rx-size-limit-lowered"
+rule = "a compiled program of up to 8 MiB is taken: .{20000}, [[:alpha:]]{300}"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''pub const SIZE_LIMIT: usize = 1 << 23;'''
+new = '''pub const SIZE_LIMIT: usize = 1 << 22;'''
+
+[[mutant]]
+name = "rx-cost-limit-lifted"
+rule = "an expression past the cost limit is refused before the engine sees it"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''pub const COST_LIMIT: u64 = 1 << 16;'''
+new = '''pub const COST_LIMIT: u64 = 1 << 40;'''
+
+[[mutant]]
+name = "rx-cost-limit-lowered"
+rule = "an expression of up to 65,536 characters is taken"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''pub const COST_LIMIT: u64 = 1 << 16;'''
+new = '''pub const COST_LIMIT: u64 = 1 << 15;'''
+
+[[mutant]]
+name = "rx-large-class-costs-one"
+rule = "a class of thousands of ranges costs 1,024"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        _ => CLASS_COST,'''
+new = '''        _ => 1,'''
+
+[[mutant]]
+name = "rx-small-class-costs-one"
+rule = "a class of tens of ranges costs 64"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        b"space" | b"blank" | b"cntrl" => SMALL_CLASS_COST,'''
+new = '''        b"space" | b"blank" | b"cntrl" => 1,'''
+
+[[mutant]]
+name = "rx-word-operator-not-charged"
+rule = "\\w and \\W cost what [:alnum:] costs"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                        self.charge(CLASS_COST);
+                        format!("{ALNUM}_")'''
+new = '''                        format!("{ALNUM}_")'''
+
+[[mutant]]
+name = "rx-space-operator-not-charged"
+rule = "\\s and \\S cost what [:space:] costs"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                        self.charge(SMALL_CLASS_COST);
+                        SPACE.to_string()'''
+new = '''                        SPACE.to_string()'''
+
+[[mutant]]
+name = "rx-list-elements-not-charged"
+rule = "each element of a list costs one"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''            self.charge(1);
+            let start = self.parse_bracket_element(token, len, first_round)?;'''
+new = '''            let start = self.parse_bracket_element(token, len, first_round)?;'''
+
+[[mutant]]
+name = "rx-class-in-a-list-not-charged"
+rule = "a class named in a list costs what it costs"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                    self.charge(class_cost(&name));
+'''
+new = ''''''
+
+[[mutant]]
+name = "rx-repetition-not-charged"
+rule = "a repetition costs one"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        self.fetch(false);
+        self.charge(1);
+        let Some(elem) = elem else {'''
+new = '''        self.fetch(false);
+        let Some(elem) = elem else {'''
+
+[[mutant]]
+name = "rx-atom-not-charged"
+rule = "each atom costs one"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        let lit = self.token.lit;
+        self.charge(1);'''
+new = '''        let lit = self.token.lit;'''
+
+[[mutant]]
+name = "rx-dot-costs-one"
+rule = "a . costs two"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                // Every character: more of a program than one is.
+                self.charge(1);'''
+new = '''                // Every character: more of a program than one is.'''
+
+[[mutant]]
+name = "rx-non-matching-list-costs-no-more"
+rule = "a non-matching list costs one more"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        if non_match {
+            self.charge(1);'''
+new = '''        if non_match {'''
+
+[[mutant]]
+name = "rx-cost-refused-before-glibcs-own-errors"
+rule = "what glibc refuses for itself is said before the cost limit"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''    fn charge(&mut self, units: u64) {
+        self.cost = self.cost.saturating_add(units);'''
+new = '''    fn charge(&mut self, units: u64) {
+        if self.cost.saturating_add(units) > COST_LIMIT {
+            self.items.truncate(self.pos);
+        }
+        self.cost = self.cost.saturating_add(units);'''
+
+[[mutant]]
+name = "rx-basic-dollar-next-token-not-looked-at"
+rule = "a basic $ before \\| or \\) is an anchor"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                    || (next(1) == Some(b'\\') && matches!(next(2), Some(b'|' | b')')));'''
+new = '''                    || (next(1) == Some(b'\\') && next(2).is_none());'''
+
+[[mutant]]
+name = "rx-basic-dollar-before-any-escape-anchors"
+rule = "a basic $ before any other escape is a character"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''matches!(next(2), Some(b'|' | b')')));'''
+new = '''next(2).is_some());'''
+
+[[mutant]]
+name = "rx-basic-dollar-before-a-group-end-is-a-character"
+rule = "a basic $ before \\) is an anchor"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''matches!(next(2), Some(b'|' | b')')));'''
+new = '''matches!(next(2), Some(b'|')));'''
+
+[[mutant]]
+name = "rx-alternative-keeps-the-groups-of-those-before"
+rule = "an alternative has the groups there were when the first began: (a)|\\1 is Invalid back reference"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                let accumulated = self.completed;
+                self.completed = initial;'''
+new = '''                let accumulated = self.completed;'''
+
+[[mutant]]
+name = "rx-alternation-forgets-its-last-groups"
+rule = "what follows an alternation has the groups of every alternative: (a|(b))\\2 is a back-reference"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''                self.completed |= accumulated;'''
+new = '''                self.completed = accumulated;'''
+
+[[mutant]]
+name = "rx-bracket-name-of-32-bytes-read"
+rule = "a [:name:] of 32 bytes or more is Unmatched ["
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''const BRACKET_NAME_MAX: usize = 32;'''
+new = '''const BRACKET_NAME_MAX: usize = 33;'''
+
+[[mutant]]
+name = "rx-answers-not-kept"
+rule = "an answer is kept for the next time the command is asked about"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        answers.insert(command.into(), answer);
+'''
+new = ''''''
+
+[[mutant]]
+name = "rx-answers-kept-unbounded"
+rule = "the answers kept are bounded"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        if answers.len() >= KEPT_ANSWERS {
+            answers.clear();
+        }'''
+new = '''        if answers.len() >= usize::MAX {
+            answers.clear();
+        }'''
+
+[[mutant]]
+name = "rx-answers-kept-for-long-commands"
+rule = "a command past the length kept is answered and not kept"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = '''        if command.len() > KEPT_COMMAND {
+            return self.search(command);
+        }'''
+new = '''        if command.len() > usize::MAX - 1 {
+            return self.search(command);
+        }'''
+
+[[mutant]]
+name = "names-hostconf-keyword-exact"
+rule = "host.conf's multi and its value are read in any case"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if keyword.eq_ignore_ascii_case(b"multi") {'''
+new = '''        if keyword == b"multi" {'''
+
+[[mutant]]
+name = "names-hostconf-read-by-whole-lines"
+rule = "glibc reads host.conf 255 bytes of a line at a time"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    const FGETS: usize = 255;'''
+new = '''    const FGETS: usize = 1 << 30;'''
+
+[[mutant]]
+name = "names-hostconf-read-256-at-a-time"
+rule = "fgets(buf, 256) reads 255 bytes"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    const FGETS: usize = 255;'''
+new = '''    const FGETS: usize = 256;'''
+
+[[mutant]]
+name = "names-nsswitch-files-always-first"
+rule = "the hosts file's own rules apply only where files is the first hosts: source"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if first.module == b"files" {'''
+new = '''    if first.module == b"files" || first.module == b"dns" {'''
+
+[[mutant]]
+name = "names-nsswitch-notfound-return-ignored"
+rule = "[NOTFOUND=return] after files ends the search at the file"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            (_, NssAction::Return) => return Vec::new(),'''
+new = '''            (_, NssAction::Return) => {}'''
+
+[[mutant]]
+name = "names-nsswitch-files-alone-asks-the-system"
+rule = "a name the file lacks is asked of nothing where files is the only source"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            _ if !more => return Vec::new(),'''
+new = '''            _ if !more && name.is_empty() => return Vec::new(),'''
+
+[[mutant]]
+name = "names-nsswitch-success-merge-is-an-answer"
+rule = "files [SUCCESS=merge] fails the lookup"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            (NssStatus::Success, NssAction::Merge) => return Vec::new(),'''
+new = '''            (NssStatus::Success, NssAction::Merge) => return found,'''
+
+[[mutant]]
+name = "names-nsswitch-success-continue-ignored"
+rule = "files [SUCCESS=continue] dns: the next source's answer replaces the file's"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            (NssStatus::Success, NssAction::Continue) if more => {}'''
+new = '''            (NssStatus::Success, NssAction::Continue) if more && name.is_empty() => {}'''
+
+[[mutant]]
+name = "names-nsswitch-no-source-asks-the-system"
+rule = "a hosts: line with no source names no host"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    let Some(first) = sources.first() else {
+        return Vec::new();
+    };'''
+new = '''    let first = sources.first().copied().unwrap_or(NssSource::new(b"dns"));'''
+
+[[mutant]]
+name = "names-nsswitch-bad-line-skipped"
+rule = "a line glibc cannot parse refuses the whole file"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        let sources = nss_action_parse(rest.get(skip..).unwrap_or_default(), keep)?;'''
+new = '''        let sources = nss_action_parse(rest.get(skip..).unwrap_or_default(), keep).unwrap_or_default();'''
+
+[[mutant]]
+name = "names-nsswitch-hosts-default-is-upstreams"
+rule = "with no hosts: line this glibc's sources are files dns"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''pub const HOSTS_DEFAULT: &[u8] = b"files dns";'''
+new = '''pub const HOSTS_DEFAULT: &[u8] = b"dns [!UNAVAIL=return] files";'''
+
+[[mutant]]
+name = "names-nsswitch-last-line-without-newline-read"
+rule = "a line no newline ends is not read"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if lines.peek().is_none() {
+            break;
+        }'''
+new = '''        if lines.peek().is_none() && line.is_empty() {
+            break;
+        }'''
+
+[[mutant]]
+name = "names-nsswitch-line-not-cut-at-a-nul"
+rule = "a line of nsswitch.conf ends at a NUL"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        let line = line.split(|&b| b == 0).next().unwrap_or_default();
+        let (name, rest) = nss_word(skip_spaces(line), |b| is_space(b) || b == b':');'''
+new = '''        let (name, rest) = nss_word(skip_spaces(line), |b| is_space(b) || b == b':');'''
+
+[[mutant]]
+name = "names-nsswitch-unknown-database-parsed"
+rule = "a line for a database glibc does not know is not looked at"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if name.is_empty() || rest.is_empty() || !NSS_DATABASES.contains(&name) {'''
+new = '''        if name.is_empty() || rest.is_empty() {'''
+
+[[mutant]]
+name = "names-nsswitch-name-alone-is-a-line"
+rule = "a database's name alone on its line is no line"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if name.is_empty() || rest.is_empty() || !NSS_DATABASES.contains(&name) {'''
+new = '''        if name.is_empty() || !NSS_DATABASES.contains(&name) {'''
+
+[[mutant]]
+name = "names-nsswitch-first-line-wins"
+rule = "the last line for a database is the one kept"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if keep {
+            found = Some(sources);
+        }'''
+new = '''        if keep {
+            found = found.or(Some(sources));
+        }'''
+
+[[mutant]]
+name = "names-nsswitch-unreadable-is-the-default"
+rule = "a nsswitch.conf that cannot be read is refused"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        Conf::Unreadable => return None,'''
+new = '''        Conf::Unreadable => return nss_action_parse(default, true),'''
+
+[[mutant]]
+name = "names-nsswitch-database-name-ends-at-a-blank-only"
+rule = "a database's name ends at a colon too"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''nss_word(skip_spaces(line), |b| is_space(b) || b == b':');'''
+new = '''nss_word(skip_spaces(line), is_space);'''
+
+[[mutant]]
+name = "nss-source-ends-at-a-blank-only"
+rule = "a source's name ends at a [ too"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        let (module, rest) = nss_word(line, |b| is_space(b) || b == b'[');'''
+new = '''        let (module, rest) = nss_word(line, is_space);'''
+
+[[mutant]]
+name = "nss-unavail-read-as-notfound"
+rule = "UNAVAIL and NOTFOUND are different statuses"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                    (b"UNAVAIL", NssStatus::Unavail),'''
+new = '''                    (b"UNAVAIL", NssStatus::NotFound),'''
+
+[[mutant]]
+name = "nss-merge-read-as-continue"
+rule = "merge is an action of its own"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                    (b"MERGE", NssAction::Merge),'''
+new = '''                    (b"MERGE", NssAction::Continue),'''
+
+[[mutant]]
+name = "nss-not-status-sets-that-status"
+rule = "!STATUS sets every other status"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                    let kept = source.on(status);
+                    source.actions = [action; 4];
+                    source.set(status, kept);'''
+new = '''                    source.set(status, action);'''
+
+[[mutant]]
+name = "nss-action-without-an-equals-taken"
+rule = "a status needs = and an action"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                line = skip_spaces(skip_spaces(rest).strip_prefix(b"=")?);'''
+new = '''                line = skip_spaces(skip_spaces(rest).strip_prefix(b"=").unwrap_or(rest));'''
+
+[[mutant]]
+name = "nss-success-default-is-continue"
+rule = "a source's SUCCESS action is return unless the line says otherwise"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if let Some(a) = actions.first_mut() {
+            *a = NssAction::Return;
+        }'''
+new = '''        if let Some(a) = actions.last_mut() {
+            *a = NssAction::Return;
+        }'''
+
+[[mutant]]
+name = "nss-walk-steps-over-every-missing-source"
+rule = "a source that is not there ends the walk unless its UNAVAIL action is continue"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            if source.on(NssStatus::Unavail) != NssAction::Continue {
+                break;
+            }'''
+new = '''            if source.on(NssStatus::Unavail) == NssAction::Return && last {
+                break;
+            }'''
+
+[[mutant]]
+name = "nss-walk-reads-on-past-a-return"
+rule = "a source asked ends the walk where its status's action is return"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if action == NssAction::Return || last {'''
+new = '''        if last {'''
+
+[[mutant]]
+name = "nss-walk-merge-is-an-answer"
+rule = "SUCCESS=merge fails the lookup"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            NssAnswer::Success(_) if action == NssAction::Merge => return None,
+'''
+new = ''''''
+
+[[mutant]]
+name = "nss-walk-keeps-an-earlier-answer"
+rule = "a later source's answer replaces an earlier one's"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            NssAnswer::Success(found) => Some(found),
+            _ => None,
+        };
+        if action'''
+new = '''            NssAnswer::Success(found) => Some(found),
+            _ => result.take(),
+        };
+        if action'''
+
+[[mutant]]
+name = "names-line-limit-lifted"
+rule = "a line past a megabyte is passed over"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''pub const LINE_LIMIT: usize = 1 << 20;'''
+new = '''pub const LINE_LIMIT: usize = 1 << 40;'''
+
+[[mutant]]
+name = "names-file-limit-lifted"
+rule = "nothing past 256 MiB of a file is read"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''pub const FILE_LIMIT: u64 = 1 << 28;'''
+new = '''pub const FILE_LIMIT: u64 = u64::MAX;'''
+
+[[mutant]]
+name = "names-conf-limit-lifted"
+rule = "nothing past a megabyte of nsswitch.conf is read"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''const CONF_LIMIT: u64 = 1 << 20;'''
+new = '''const CONF_LIMIT: u64 = u64::MAX;'''
+
+[[mutant]]
+name = "names-long-line-read-in-pieces"
+rule = "a line past the limit is passed over whole"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if line.len() > line_limit && line.last() != Some(&b'\n') {'''
+new = '''        if line.len() > line_limit && line.is_empty() {'''
+
+[[mutant]]
+name = "names-line-of-the-limit-passed-over"
+rule = "a line of exactly the limit is read"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if line.len() > line_limit && line.last() != Some(&b'\n') {'''
+new = '''        if line.len() > line_limit {'''
+
+[[mutant]]
+name = "names-file-limit-doubled"
+rule = "a file is read to its limit and no further"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''std::io::BufReader::new(source.take(file_limit));'''
+new = '''std::io::BufReader::new(source.take(file_limit.saturating_mul(2)));'''
+
+[[mutant]]
+name = "names-long-line-ends-the-file"
+rule = "the line after one passed over is read"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                reader.consume(used);
+                if ended {
+                    break;
+                }
+            }
+            continue;'''
+new = '''                reader.consume(used);
+                if ended {
+                    break;
+                }
+            }
+            return;'''
+
+[[mutant]]
+name = "names-fifo-opened-for-reading"
+rule = "what is no regular file is not opened: a FIFO would hold open(2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;'''
+new = '''    let file = std::fs::File::open(path).ok()?;'''
+
+[[mutant]]
+name = "names-conf-of-no-regular-file-is-missing"
+rule = "a nsswitch.conf that is no regular file is one glibc cannot read"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        Ok(_) => return Conf::Unreadable,'''
+new = '''        Ok(_) => return Conf::Missing,'''
+
+[[mutant]]
+name = "names-device-holds-no-reader"
+rule = "a FIFO or a device would hold whoever reads it as a file"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''.is_ok_and(|meta| !meta.is_file() && !meta.is_dir())'''
+new = '''.is_ok_and(|meta| !meta.is_file() && meta.is_dir())'''
+
+[[mutant]]
+name = "names-service-junk-after-the-port-taken"
+rule = "a port must be followed by / or the line's end"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        Some(_) => return None,
+        None => rest,'''
+new = '''        Some(_) => rest,
+        None => rest,'''
+
+[[mutant]]
+name = "names-addresses-repeated"
+rule = "the system's addresses are kept once each"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if !found.contains(&ip) {
+            found.push(ip);
+        }'''
+new = '''        found.push(ip);'''
+
+[[mutant]]
+name = "names-addresses-unbounded"
+rule = "the system's addresses are kept to a bounded number"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if found.len() >= MAX_ADDRESSES {
+            break;
+        }
+        if !found.contains'''
+new = '''        if !found.contains'''
+
+[[mutant]]
+name = "names-service-no-file-is-not-found"
+rule = "with no services file the files source is unavailable, not empty"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        Some(port) => NssAnswer::Success(port),
+        None if read => NssAnswer::NotFound,
+        None => NssAnswer::Unavail,'''
+new = '''        Some(port) => NssAnswer::Success(port),
+        None => NssAnswer::NotFound,'''
+
+[[mutant]]
+name = "names-hosts-no-file-is-not-found"
+rule = "with no hosts file the files source is unavailable, not empty"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    } else if read {
+        NssAnswer::NotFound
+    } else {
+        NssAnswer::Unavail
+    }'''
+new = '''    } else {
+        NssAnswer::NotFound
+    }'''
+
+[[mutant]]
+name = "names-service-read-whatever-nsswitch-says"
+rule = "the services file is read only where services: has glibc reach files"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        (module == b"files").then(|| service_in_file(services, name, protocol))'''
+new = '''        (!module.is_empty()).then(|| service_in_file(services, name, protocol))'''
+
+[[mutant]]
+name = "names-service-default-is-no-source"
+rule = "with no services: line glibc reads the services file"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''pub const FILES_DEFAULT: &[u8] = b"files";'''
+new = '''pub const FILES_DEFAULT: &[u8] = b"db";'''
+
+[[mutant]]
+name = "names-resolver-asked-each-time"
+rule = "the resolver is asked once for each name"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''self.kept.iter().find(|(n, _)| n == name) {'''
+new = '''self.kept.iter().find(|(n, _)| n == name && n.is_empty()) {'''
+
+[[mutant]]
+name = "names-resolver-answers-kept-unbounded"
+rule = "the resolver's answers kept are bounded"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        if self.kept.len() >= KEPT {
+            self.kept.remove(0);
+        }'''
+new = '''        if self.kept.len() >= usize::MAX {
+            self.kept.remove(0);
+        }'''
+
+[[mutant]]
+name = "names-at-secure-value-not-read"
+rule = "AT_SECURE not zero is secure-execution mode"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''            return word(value) != Some(0);'''
+new = '''            return false;'''
+
+[[mutant]]
+name = "names-at-secure-any-entry-is-it"
+rule = "the entry of type AT_SECURE says it, not another"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        if word(kind) == Some(AT_SECURE) {'''
+new = '''        if word(kind).is_some() {'''
+
+[[mutant]]
+name = "names-no-auxv-is-not-secure"
+rule = "a vector that does not say is taken as secure"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''            return word(value) != Some(0);
+        }
+    }
+    true'''
+new = '''            return word(value) != Some(0);
+        }
+    }
+    false'''
+
+[[mutant]]
+name = "names-host-conf-environment-read-in-secure-mode"
+rule = "RESOLV_HOST_CONF is not looked at in secure-execution mode"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        Some(path) if !secure => PathBuf::from(path),'''
+new = '''        Some(path) => PathBuf::from(path),'''
+
+[[mutant]]
+name = "names-host-conf-environment-not-read"
+rule = "RESOLV_HOST_CONF names the file multi is read from"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''            host_conf_path(env, at_secure(&auxv))'''
+new = '''            host_conf_path(env.filter(|_| false), at_secure(&auxv))'''
+
+[[mutant]]
+name = "names-resolver-asked-past-a-fifo"
+rule = "glibc is not handed a lookup where a file it reads would hold it"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        .any(|path| lsof_core::netnames::would_hold_a_reader(path))'''
+new = '''        .any(|path| lsof_core::netnames::would_hold_a_reader(path) && path.as_os_str().is_empty())'''
+
+[[mutant]]
+name = "names-backend-service-reads-no-nsswitch"
+rule = "the backend's service lookup follows /etc/nsswitch.conf"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        Path::new(SERVICES),
+        Path::new(NSSWITCH),'''
+new = '''        Path::new(SERVICES),
+        Path::new("/nonexistent/nsswitch.conf"),'''
+
+[[mutant]]
+name = "nss-passwd-any-source-reads-the-file"
+rule = "a source that is neither files nor compat cannot be asked (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            b"compat" => compat.clone(),
+            _ => return None,'''
+new = '''            b"compat" => compat.clone(),
+            _ => files.clone(),'''
+
+[[mutant]]
+name = "nss-passwd-compat-is-no-source"
+rule = "compat reads the password file too (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            b"compat" => compat.clone(),
+            _ => return None,'''
+new = '''            b"compat" => return None,
+            _ => return None,'''
+
+[[mutant]]
+name = "nss-passwd-compat-read-by-the-files-rules"
+rule = "compat reads the password file by its own rules (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            b"compat" => compat.clone(),'''
+new = '''            b"compat" => files.clone(),'''
+
+[[mutant]]
+name = "nss-compat-minus-name-ignored"
+rule = "a -name line excludes the account by name (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        (_, who) => Compat::Minus(who),'''
+new = '''        (_, _) => Compat::Other,'''
+
+[[mutant]]
+name = "nss-compat-plus-name-ignored"
+rule = "a +name line leaves the account to NIS (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        (b'+', who) => Compat::Plus(who),'''
+new = '''        (b'+', _) => Compat::Other,'''
+
+[[mutant]]
+name = "nss-compat-plus-alone-ends-no-names"
+rule = "after a + alone every name is NIS's (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            Compat::PlusAll => self.compat_ended = true,'''
+new = '''            Compat::PlusAll => {}'''
+
+[[mutant]]
+name = "nss-compat-uids-read-past-a-plus-line"
+rule = "after a + line no uid is found (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            Compat::Plus(_) | Compat::PlusNetgroup | Compat::PlusAll => self.compat_ended = true,'''
+new = '''            Compat::Plus(_) | Compat::PlusNetgroup | Compat::PlusAll => {}'''
+
+[[mutant]]
+name = "nss-compat-netgroup-ends-the-names"
+rule = "a +@netgroup line decides no name (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            // With no netgroup to ask, nobody is in one.
+            Compat::PlusNetgroup | Compat::Other => {}'''
+new = '''            // With no netgroup to ask, nobody is in one.
+            Compat::PlusNetgroup => self.compat_ended = true,
+            Compat::Other => {}'''
+
+[[mutant]]
+name = "nss-compat-minus-name-hides-its-uid"
+rule = "an excluded name is still its uid's name (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            // An excluded name is still the name of its uid.
+            Compat::Minus(_) | Compat::Other => {}'''
+new = '''            // An excluded name is still the name of its uid.
+            Compat::Minus(_) => self.compat_ended = true,
+            Compat::Other => {}'''
+
+[[mutant]]
+name = "nss-compat-line-after-the-account-decides"
+rule = "the first line for a name decides it (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            if m.len() < MAX_ACCOUNTS && !m.contains_key(name) {
+                m.insert(name.to_vec(), uid);
+            }'''
+new = '''            if m.len() < MAX_ACCOUNTS {
+                m.insert(name.to_vec(), uid);
+            }'''
+
+[[mutant]]
+name = "nss-compat-short-line-taken"
+rule = "a + or - line needs its fields: -bob::: is no line (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            if at.is_empty() {
+                return Compat::Other;
+            }'''
+new = ''''''
+
+[[mutant]]
+name = "nss-compat-number-past-32-bits-taken"
+rule = "a + or - line with a number past 32 bits is no line (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            if u32::try_from(value).is_err() {
+                return Compat::Other;
+            }'''
+new = ''''''
+
+[[mutant]]
+name = "nss-compat-junk-after-a-number-taken"
+rule = "a + or - line's number ends at a colon or the line's end (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''                Some(_) => return Compat::Other,'''
+new = '''                Some(_) => &[],'''
+
+[[mutant]]
+name = "nss-compat-empty-netgroup-is-one"
+rule = "+@ alone is no netgroup line (39)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        (_, [] | [b'@']) => Compat::Other,'''
+new = '''        (_, []) => Compat::Other,'''
+
+[[mutant]]
+name = "nss-accounts-unbounded"
+rule = "the accounts kept from one reading are bounded"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''const MAX_ACCOUNTS: usize = 1 << 20;'''
+new = '''const MAX_ACCOUNTS: usize = usize::MAX;'''

@@ -6071,3 +6071,836 @@ args = ["-a", "-p", "{A}", "-{BYTEFF}a", "-d", "cwd"]
 # `-c` compares bytes: fixture X's command is `x\xff\xfename`.
 name = "nonutf8-dash-c-matches-command-bytes"
 args = ["-F", "pc", "-a", "-d", "cwd", "-c", "x{BYTEFF}"]
+
+# ------------------------------------------- -c /regex/[bix] (DIVERGENCES 38)
+#
+# A POSIX regular expression, compiled by the C with regcomp() (extended
+# unless `b`, REG_ICASE for `i`) and matched against the command with
+# regexec(); by lsof-rs read in glibc's grammar and run by the `regex` crate
+# (`lsof-core/src/posix_regex.rs`). Each case selects among the fixtures a
+# `-p` list names, ANDed, so that no other process's command is asked: A
+# `sleep`, B `python3`, C and D the hostile commands (`h`, ESC `[2J`, CR,
+# space, backslash, DEL, TAB, and then ^A `z` or `é` U+009B `z`), CR
+# `crcomm` and a CR, H `abcdefghijklmno`, X `x\xff\xfename` and NLC `nl`,
+# a newline, `c`. `-F pc` prints each command whole, escaped as NAME is.
+# The 1,500 expressions of `lsof-core/tests/posix_regex_glibc.txt` are
+# glibc's own answers; these are the C's, through lsof.
+
+[[case]]
+name = "rx-literal-anywhere"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/le/"]
+with_stderr = true
+
+[[case]]
+name = "rx-anchored-both-ends"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^sleep$/"]
+with_stderr = true
+
+[[case]]
+# Nothing matches: exit 1, and with -V the expression is the search item.
+name = "rx-no-match-is-a-search-failure"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^sle$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-empty-matches-every-command"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "//"]
+with_stderr = true
+
+[[case]]
+name = "rx-empty-basic-matches-every-command"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "//b"]
+with_stderr = true
+
+[[case]]
+# Extended is the default: `+` repeats.
+name = "rx-extended-by-default-plus-repeats"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sle+p/"]
+with_stderr = true
+
+[[case]]
+# Basic: `+` is itself, and no command holds one.
+name = "rx-basic-plus-is-a-character"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sle+p/b"]
+with_stderr = true
+
+[[case]]
+name = "rx-basic-backslash-plus-repeats"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sle\\+p/b"]
+with_stderr = true
+
+[[case]]
+name = "rx-x-modifier-is-extended"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^(sleep|python3)$/x"]
+with_stderr = true
+
+[[case]]
+name = "rx-basic-groups-and-alternation"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^\\(sleep\\|python3\\)$/b"]
+with_stderr = true
+
+[[case]]
+# Basic: unescaped parentheses and bar are characters.
+name = "rx-basic-plain-parentheses-are-characters"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^(sleep|python3)$/b"]
+with_stderr = true
+
+[[case]]
+name = "rx-ignore-case"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/SLEEP|PYTHON/i"]
+with_stderr = true
+
+[[case]]
+name = "rx-case-matters-without-i"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/SLEEP/"]
+with_stderr = true
+
+[[case]]
+name = "rx-ignore-case-basic"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^SLE\\{2\\}P$/bi"]
+with_stderr = true
+
+[[case]]
+name = "rx-interval-extended"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^[a-o]{15}$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-interval-open-ended"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^[a-z]{6,}$/"]
+with_stderr = true
+
+[[case]]
+# `{0}` is nothing at all.
+name = "rx-interval-of-none"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^z{0}sleep$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-dot-is-any-character"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^.{5}$/"]
+with_stderr = true
+
+[[case]]
+# `.` takes a newline: no REG_NEWLINE.
+name = "rx-dot-takes-a-newline"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^nl.c$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-non-matching-list-takes-a-newline"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^nl[^a]c$/"]
+with_stderr = true
+
+[[case]]
+# `$` is the command's end, not a line's: `nl` before the newline is not
+# at one.
+name = "rx-dollar-is-the-end-not-a-lines"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/nl$/"]
+with_stderr = true
+
+[[case]]
+# `.` is a character, not a byte: `é` is one, U+009B one, so D is fifteen
+# bytes and thirteen characters.
+name = "rx-dot-is-a-character-not-a-byte"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^.{13}$/"]
+with_stderr = true
+
+[[case]]
+# A byte that is no character is taken by no `.`: X's `\xff\xfe`.
+name = "rx-dot-takes-no-byte-that-is-no-character"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^x..name$/"]
+with_stderr = true
+
+[[case]]
+# ...nor by a non-matching list.
+name = "rx-list-takes-no-byte-that-is-no-character"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^x[^a]/"]
+with_stderr = true
+
+[[case]]
+# ...but the rest of such a command matches as any other's.
+name = "rx-matches-around-bytes-that-are-no-character"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/name$/"]
+with_stderr = true
+
+[[case]]
+# An expression that is not UTF-8 matches the byte it holds.
+name = "rx-expression-not-utf8-matches-its-byte"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^x{BYTEFF}/"]
+with_stderr = true
+
+[[case]]
+name = "rx-class-lower"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^[[:lower:]]+$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-class-digit-at-the-end"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/[[:digit:]]$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-class-cntrl"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/[[:cntrl:]]/"]
+with_stderr = true
+
+[[case]]
+name = "rx-class-space-at-the-end"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/[[:space:]]$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-class-punct-twice"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/[[:punct:]]{2}/"]
+with_stderr = true
+
+[[case]]
+# A class is the locale's: `é` is a letter, and lower case.
+name = "rx-class-alpha-is-the-locales"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/[[:lower:]][[:cntrl:]]z$/"]
+with_stderr = true
+
+[[case]]
+name = "rx-non-ascii-literal"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/é/"]
+with_stderr = true
+
+[[case]]
+# REG_ICASE folds past ASCII: `É` finds `é`.
+name = "rx-ignore-case-folds-past-ascii"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/É/i"]
+with_stderr = true
+
+[[case]]
+name = "rx-escaped-backslash"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/ \\\\/"]
+with_stderr = true
+
+[[case]]
+name = "rx-bracket-with-a-leading-close"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/[][]2J/"]
+with_stderr = true
+
+[[case]]
+name = "rx-range-and-negation"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^[^a-rt-z]/"]
+with_stderr = true
+
+[[case]]
+# GNU's word operators, which glibc reads in a POSIX expression too.
+name = "rx-word-boundaries"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/\\<sleep\\>|\\bpython\\B/"]
+with_stderr = true
+
+[[case]]
+name = "rx-word-and-space-classes"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^\\w+\\s$|\\Wc$/"]
+with_stderr = true
+
+[[case]]
+# Extended: empty alternatives and an empty group are nothing.
+name = "rx-empty-alternatives"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^sl(e|)+()p$/"]
+with_stderr = true
+
+[[case]]
+# Extended: a `)` that closes nothing is itself; no command holds one.
+name = "rx-unmatched-close-is-a-character"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sleep)/"]
+with_stderr = true
+
+[[case]]
+# Basic: a `*` that opens the expression is itself.
+name = "rx-basic-leading-star-is-a-character"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/*sleep/b"]
+with_stderr = true
+
+[[case]]
+# Basic: `^` and `$` inside are characters.
+name = "rx-basic-inner-anchors-are-characters"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/s^leep/b"]
+with_stderr = true
+
+[[case]]
+# Each refusal ends the run as a usage error: exit 1, nothing listed.
+name = "rx-refused-unmatched-bracket"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sle[/"]
+with_stderr = true
+
+[[case]]
+name = "rx-refused-leading-star-extended"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/*sleep/"]
+with_stderr = true
+
+[[case]]
+name = "rx-refused-no-closing-slash"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sleep"]
+with_stderr = true
+
+[[case]]
+name = "rx-refused-unknown-modifier"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sleep/q"]
+with_stderr = true
+
+[[case]]
+name = "rx-refused-b-with-x"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sleep/bx"]
+with_stderr = true
+
+[[case]]
+name = "rx-refused-modifier-twice"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sleep/ii"]
+with_stderr = true
+
+[[case]]
+name = "rx-refused-interval-too-big"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sle{32768}p/"]
+with_stderr = true
+
+[[case]]
+# The largest interval glibc takes is taken.
+name = "rx-largest-interval"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sle{32767}p/"]
+with_stderr = true
+
+[[case]]
+# With names: either selects, and each item that found nothing is said,
+# the names first (the last given first), then the expressions in the
+# order given.
+name = "rx-with-names"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/zzz/", "-c", "/c/", "-c", "nosuch", "-c", "sle", "-c", "/yyy/i", "-c", "nosuch2"]
+with_stderr = true
+
+[[case]]
+# A `-c ^name` excludes whatever an expression matched. (No -V: what the
+# two say of an excluded process's items is DIVERGENCES 13's.)
+name = "rx-with-an-exclusion"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "^crcomm", "-c", "/c/"]
+with_stderr = true
+
+[[case]]
+# In the table too, and under -t.
+name = "rx-terse"
+args = ["-t", "-a", "-p", "{A},{B},{H}", "-c", "/^[a-o]+$/"]
+with_stderr = true
+
+[[case]]
+# A back-reference, which glibc takes and the engine cannot: refused, in
+# lsof-rs's words. Ledgered.
+name = "rx-back-reference"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sl(e)\\1p/"]
+with_stderr = true
+
+[[case]]
+# Every expression that matches is located; the C marks the first alone
+# (DIVERGENCES 13's rule for names, here for expressions). Ledgered.
+name = "rx-every-matching-expression-is-located"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B}", "-c", "/sle/", "-c", "/sleep/"]
+with_stderr = true
+
+# ---------------------------------- -i host and service names (DIVERGENCES 38)
+#
+# In a mount namespace whose /etc holds a hosts file, a services file and
+# the files that say how glibc reads them (`LSOF_DIFF_MT=names`, see
+# `mt_wrap`): no case reads a host's own files or asks a name server that
+# answers. Fixture B holds a TCP listener on 127.0.0.1:{PORT} and a UDP
+# socket on 127.0.0.1:{UPORT}.
+
+[[case]]
+# Looked up as an IPv6 name (::1) and then as an IPv4 one (127.0.0.1).
+name = "names-host-localhost"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@localhost"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# By an alias, in any case.
+name = "names-host-alias-in-any-case"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38-alias"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-host-with-protocol-and-port"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "TCP@r38one:{PORT}"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# A name of another address: nothing of B's, and the spec is the item.
+name = "names-host-of-another-address"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38other"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# The IPv6 loopback is 127.0.0.1 to glibc's IPv4 lookup of the hosts file.
+name = "names-host-v6-loopback-is-v4-loopback"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38six"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-host-held-to-v4"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "4@r38six"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# Held to IPv6, `::1` alone: none of B's.
+name = "names-host-held-to-v6"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "6@r38six"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# A name with no address of the version asked for is unknown: exit 1.
+name = "names-host-unknown-in-that-version"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "6@r38other"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-host-unknown"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38nosuch.invalid"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# Without `multi`, the first line that names it alone: 127.0.0.9.
+name = "names-host-first-line-without-multi"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38multi"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# From the second port entry on a name is an IPv4 one, and one with no
+# IPv4 address is then its IPv6 address's first four bytes: `::5` is no
+# address at all, so any IPv4 one, and B's listener is listed (measured).
+name = "names-host-v6-only-later-port-is-any-v4"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38sixz:1,{PORT}"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# ...and `fe80::1` is 254.128.0.0, which nothing is on.
+name = "names-host-v6-only-later-port-is-its-first-bytes"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38six3:1,{PORT}"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# The first port entry is the IPv6 address's alone.
+name = "names-host-v6-only-first-port"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38sixz:{PORT}"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# The address that is none is no specification by itself...
+name = "names-host-zero-alone-is-incomplete"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38zero"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# ...and no constraint beside a protocol.
+name = "names-host-zero-with-protocol"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "udp@r38zero"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# A number glibc reads as an address with no lookup: 127.1 is 127.0.0.1.
+name = "names-host-inet-aton-short-form"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@127.1"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-host-inet-aton-one-number"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@2130706433"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-host-inet-aton-octal"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@0177.1"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# ...which is no IPv6 address: unknown.
+name = "names-host-inet-aton-is-no-v6-name"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "6@127.1"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# ...and hexadecimal is a name, which nothing knows.
+name = "names-host-hexadecimal-is-a-name"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@0x7f.1"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-tcp"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38tcp"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-by-alias"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38also"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# A name UDP alone knows is its port, for either protocol's sockets.
+name = "names-service-udp-only"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38udp"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# For the protocol the spec names alone: TCP does not know r38udp.
+name = "names-service-unknown-for-the-protocol"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "tcp:r38udp"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# Two ports for one name with no protocol named: a conflict, exit 1.
+name = "names-service-tcp-and-udp-conflict"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38both"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-conflict-settled-by-protocol"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "UDP:r38both"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-same-port-for-both"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38same"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# A `-` is part of a name.
+name = "names-service-with-a-dash"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38-dash"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# ...so a name ends a range, and cannot open one.
+name = "names-service-ends-a-range"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":1-r38-dash"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-cannot-open-a-range"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38tcp-65535"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-in-a-list"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":1,r38udp,r38tcp"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# Compared exactly: another case is another name.
+name = "names-service-case-matters"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":R38TCP"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-service-unknown"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", ":r38nosuch"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# A port glibc reads in hexadecimal: 0x50 is 80, which B has nothing on.
+name = "names-service-port-in-hexadecimal"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", ":r38hex", "-i", ":80"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+name = "names-host-and-service"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@localhost:r38tcp,r38udp"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# Each spec is its own search item, by its text.
+name = "names-search-items"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38other:r38tcp", "-i", "@r38one", "-i", ":r38hex"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+[[case]]
+# Under `multi on` a name on two lines has both addresses, and the C
+# frees one argument string for each address it entered when it ends
+# (`lib/lsof.c`, `lsof_destroy()`): `double free or corruption`, SIGABRT,
+# its listing lost in the pipe. lsof-rs lists B's sockets, by the second
+# address. Ledgered (C-DEFECT).
+name = "names-multi-host-with-two-addresses"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38multi"]
+env = { LSOF_DIFF_MT = "namesmulti" }
+with_stderr = true
+
+[[case]]
+# ...as `localhost` has there: 127.0.0.1 twice, once for its IPv6 line.
+# Ledgered (C-DEFECT).
+name = "names-multi-localhost"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@localhost"]
+env = { LSOF_DIFF_MT = "namesmulti" }
+with_stderr = true
+
+[[case]]
+# A name with one address is entered as without `multi`, and no memory
+# is freed twice.
+name = "names-multi-host-with-one-address"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38one"]
+env = { LSOF_DIFF_MT = "namesmulti" }
+with_stderr = true
+
+# ------------------------------- -u name and nsswitch.conf (DIVERGENCES 39)
+#
+# Under an nsswitch.conf whose `passwd:` names no `files` (`passwd: sss`,
+# `LSOF_DIFF_MT=namesnopw`) glibc reads no password file, so the C's
+# getpwnam() and getpwuid() know no account, whatever /etc/passwd holds;
+# lsof-rs, which reads the file itself, read it regardless.
+
+[[case]]
+# No login is known: `can't get UID for root`, exit 1.
+name = "nss-passwd-without-files-knows-no-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "namesnopw" }
+with_stderr = true
+
+[[case]]
+# ...and USER is the number, with the C's `no pwd entry for UID` warning.
+name = "nss-passwd-without-files-user-is-the-number"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "namesnopw" }
+with_stderr = true
+
+[[case]]
+# With `files` (the `names` modes' `passwd: files`) it is read as ever.
+name = "nss-passwd-with-files-knows-the-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names" }
+with_stderr = true
+
+# ------------------- rows 38 and 39 after their review (2026-11-11)
+#
+# A refusal's words are compared as well as its status: `with_stderr = true`
+# on each case above and below whose point is an error, the C's nine lines
+# of usage and lsof-rs's one made the same line by the rules file
+# (`linux_diff.py`, `USAGE_RULES`).
+
+[[case]]
+# A reference to a group closed in another alternative is invalid to glibc,
+# not a back-reference lsof-rs has no engine for.
+name = "rx-refused-reference-into-another-alternative"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/(s)leep|x\\1/"]
+with_stderr = true
+
+[[case]]
+# In a basic expression a `$` before the end is a character, a run of them
+# too: nothing is called `sle$$$p`.
+name = "rx-basic-dollars-before-the-end-are-characters"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/sle$$$p$/b"]
+with_stderr = true
+
+[[case]]
+# An interval of a class, which the first size limit refused.
+name = "rx-interval-of-a-class"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/^[[:graph:]]{1,255}$/"]
+with_stderr = true
+
+[[case]]
+# Past lsof-rs's own bound on a compiled program, where glibc compiles it:
+# ledgered.
+name = "rx-past-the-size-limit"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/^\\w{0,800}/"]
+with_stderr = true
+
+[[case]]
+# ...and past its bound on what an expression asks before it is compiled:
+# 64 of the locale's large classes. Ledgered.
+name = "rx-past-the-cost-limit"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/^\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*/"]
+with_stderr = true
+
+[[case]]
+# A protocol and a list of ports of which one is refused: the C says so
+# and then frees the protocol's name once for each entry it made (SIGABRT).
+# Ledgered (C-DEFECT).
+name = "inet-protocol-port-list-frees-twice-in-the-c"
+args = ["-n", "-P", "-i", "TCP:22,1x"]
+with_stderr = true
+
+# With no nsswitch.conf (`names-nonss`), or one with no line for a database
+# (`names-nolines`), glibc has its built-in sources: `files dns` for hosts
+# here, so a name the hosts file holds is found there, by its rules.
+
+[[case]]
+name = "names-no-nsswitch-host-in-the-file"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38six"]
+env = { LSOF_DIFF_MT = "names-nonss" }
+with_stderr = true
+
+[[case]]
+# Known in IPv6 too (`::1 localhost`): nothing of B's, and no error.
+name = "names-no-nsswitch-host-held-to-v6"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "6@localhost"]
+env = { LSOF_DIFF_MT = "names-nonss" }
+with_stderr = true
+
+[[case]]
+name = "names-no-nsswitch-host-unknown"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38nosuch.invalid"]
+env = { LSOF_DIFF_MT = "names-nonss" }
+with_stderr = true
+
+[[case]]
+name = "names-no-nsswitch-service"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "TCP:r38tcp"]
+env = { LSOF_DIFF_MT = "names-nonss" }
+with_stderr = true
+
+[[case]]
+name = "names-no-nsswitch-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-nonss" }
+with_stderr = true
+
+[[case]]
+name = "names-no-hosts-line-host-in-the-file"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@r38six"]
+env = { LSOF_DIFF_MT = "names-nolines" }
+with_stderr = true
+
+[[case]]
+name = "names-no-services-line-service"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "UDP:r38udp"]
+env = { LSOF_DIFF_MT = "names-nolines" }
+with_stderr = true
+
+# `services:` in nsswitch.conf decides whether the services file is read.
+
+[[case]]
+# `db` alone, which is not installed: no service is known.
+name = "names-service-db-alone-knows-none"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "TCP:r38tcp"]
+env = { LSOF_DIFF_MT = "names-svcdb" }
+with_stderr = true
+
+[[case]]
+name = "names-service-db-then-files"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "TCP:r38tcp"]
+env = { LSOF_DIFF_MT = "names-svcdbfiles" }
+with_stderr = true
+
+# A line of nsswitch.conf glibc cannot parse, for any database (here
+# `services: files [`), and it refuses the file: no login, no host and no
+# service is known.
+
+[[case]]
+name = "nss-refused-file-knows-no-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-broken" }
+with_stderr = true
+
+[[case]]
+name = "nss-refused-file-user-is-the-number"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-broken" }
+with_stderr = true
+
+[[case]]
+name = "nss-refused-file-knows-no-host"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@localhost"]
+env = { LSOF_DIFF_MT = "names-broken" }
+with_stderr = true
+
+[[case]]
+name = "nss-refused-file-knows-no-service"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "TCP:r38tcp"]
+env = { LSOF_DIFF_MT = "names-broken" }
+with_stderr = true
+
+[[case]]
+# A number is an address all the same.
+name = "nss-refused-file-a-number-is-an-address"
+args = ["-n", "-P", "-a", "-p", "{B}", "-i", "@127.1"]
+env = { LSOF_DIFF_MT = "names-broken" }
+with_stderr = true
+
+# `passwd:` with a source that is not there (`sss`) before `files`: what the
+# line says to do when a source is unavailable decides whether the
+# password file is reached.
+
+[[case]]
+# `sss [UNAVAIL=return] files`: it is not.
+name = "nss-passwd-unavail-return-knows-no-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwunavail" }
+with_stderr = true
+
+[[case]]
+name = "nss-passwd-unavail-return-user-is-the-number"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-pwunavail" }
+with_stderr = true
+
+[[case]]
+# `sss [NOTFOUND=return]files # x`: it is (and a `#` is no comment there).
+name = "nss-passwd-notfound-return-reads-the-file"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwnotfound" }
+with_stderr = true
+
+[[case]]
+# A last line no newline ends (`passwd: sss`) is not read: `files`.
+name = "nss-last-line-without-a-newline-is-not-read"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-nonewline" }
+with_stderr = true
+
+# `passwd: compat`, and a password file that opens with `-root::::::`.
+
+[[case]]
+# The name is excluded: `can't get UID for root`.
+name = "nss-compat-minus-name-excludes-the-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-compat" }
+with_stderr = true
+
+[[case]]
+# ...and is still its uid's name.
+name = "nss-compat-minus-name-is-still-the-uids-name"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-compat" }
+with_stderr = true
+
+[[case]]
+# RESOLV_HOST_CONF names the file `multi` is read from: `multi off` there,
+# `multi on` in /etc/host.conf, so the name's first address alone
+# (127.0.0.9, where B has nothing).
+name = "names-host-conf-is-named-by-the-environment"
+args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38multi"]
+env = { LSOF_DIFF_MT = "names-hostconf", RESOLV_HOST_CONF = "/etc/host.conf.off" }
+with_stderr = true

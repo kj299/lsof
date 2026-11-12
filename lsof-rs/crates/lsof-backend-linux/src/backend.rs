@@ -112,6 +112,14 @@ impl Backend for LinuxBackend {
         crate::users::lookup(value)
     }
 
+    fn lookup_host(&self, name: &[u8], v6: bool) -> Vec<std::net::IpAddr> {
+        crate::netnames::lookup_host(name, v6)
+    }
+
+    fn lookup_service(&self, name: &[u8], protocol: &str) -> Option<u16> {
+        crate::netnames::lookup_service(name, protocol)
+    }
+
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         self.gather_with(sel, &lsof_core::SafeFs::in_process())
     }

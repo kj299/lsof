@@ -8,9 +8,10 @@
 //! ([`model`]), the selection/filter engine ([`selection`]), and the output
 //! renderers ([`render`]).
 //!
-//! It is deliberately dependency-free and `#![forbid(unsafe_code)]`, so it
-//! builds and is fully unit-tested on any host (including this project's Linux
-//! CI), independent of the Windows backend.
+//! It is `#![forbid(unsafe_code)]` and has one dependency, the `regex` crate,
+//! for `-c /regex/` ([`posix_regex`]; DIVERGENCES 38), so it builds and is
+//! fully unit-tested on any host (including this project's Linux CI),
+//! independent of the Windows backend.
 #![forbid(unsafe_code)]
 
 pub mod backend;
@@ -18,6 +19,8 @@ mod endpoints;
 pub use endpoints::{EndpointTables, UnixEnds};
 pub mod mock;
 pub mod model;
+pub mod netnames;
+pub mod posix_regex;
 pub mod readlink;
 pub mod render;
 pub mod safefs;

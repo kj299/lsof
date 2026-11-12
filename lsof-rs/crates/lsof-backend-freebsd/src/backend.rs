@@ -312,6 +312,24 @@ impl Backend for FreeBsdBackend {
         users::lookup(value)
     }
 
+    /// `-i @name`: the system's resolver, through `std` (`getaddrinfo(3)`),
+    /// which reads `/etc/hosts` and DNS as `/etc/nsswitch.conf` orders them.
+    /// Not measured against the C on FreeBSD (DIVERGENCES 38).
+    fn lookup_host(&self, name: &[u8], v6: bool) -> Vec<std::net::IpAddr> {
+        lsof_core::netnames::system_host(name, v6)
+    }
+
+    /// `-i :name`: `/etc/services`, whose lines FreeBSD writes as glibc's
+    /// `files` service reads them.
+    fn lookup_service(&self, name: &[u8], protocol: &str) -> Option<u16> {
+        lsof_core::netnames::service_in_file(
+            std::path::Path::new("/etc/services"),
+            name,
+            protocol.as_bytes(),
+        )
+        .found()
+    }
+
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         let buf = sys::sysctl_mib(&[layout::CTL_KERN, layout::KERN_PROC, layout::KERN_PROC_PROC])
             .map_err(|e| {

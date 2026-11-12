@@ -8,8 +8,26 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
-# The portable core is pure safe Rust with zero external dependencies, so it
-# builds and tests fully offline on any host.
+# The portable core is pure safe Rust (`forbid(unsafe_code)`, below) with
+# one dependency, declared at the end of this file.
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# One dependency, for `-c /regex/[bix]` (DIVERGENCES 38; the owner's decision
+# of 2026-11-11, "Add regex crate"): the C compiles the expression with
+# regcomp(3) and safe Rust has none, so `posix_regex` reads it by glibc's
+# grammar and writes it for this engine, which matches in time linear in the
+# command and the program, under a size limit. Pinned exactly, as rustix is,
+# at a release more than two weeks old when it was added, with no default
+# features: `std`, and the four Unicode tables glibc's reading of an
+# expression under a UTF-8 locale needs: `unicode-case` for REG_ICASE past
+# ASCII (`/É/i` finds `é`), `unicode-bool` and `unicode-gencat` for the
+# locale's classes (`[[:alpha:]]`, `[[:upper:]]`, `[[:punct:]]` take what
+# iswalpha() and the rest take), `unicode-perl` for a word boundary. None of
+# the `perf-*` features: no DFA, no literal searcher, so `aho-corasick` and
+# `memchr` are in the lock file and never built. With it come
+# `regex-automata` and `regex-syntax`, its own; all three MIT OR Apache-2.0,
+# none with a build script (see deny.toml and THREAT-MODEL.md).
+[dependencies]
+regex = { version = "=1.12.3", default-features = false, features = ["std", "unicode-case", "unicode-bool", "unicode-gencat", "unicode-perl"] }

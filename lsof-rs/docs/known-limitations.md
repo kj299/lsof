@@ -231,19 +231,36 @@ traffic from a diagnostic tool, which is a poor default for the environments
 this runs in. **On Windows** lsof-rs resolves both by default (reverse DNS
 through `GetNameInfoW`, bounded at 2 s, each distinct address once: see
 [Sockets](#on-windows-socket-host-names-cost-up-to-2-s-per-distinct-address)),
-and `-n` and `-P` turn that off. On
-both, an `-i` address or port must be numeric: `-i@localhost` and `-i:http` are
-refused (DIVERGENCES 38).
+and `-n` and `-P` turn that off.
+
+What lsof-rs does resolve, on every platform, is a name it is **given**: `-i
+@localhost` and `-i :http` are looked up where the option is read, as the C
+looks them up (DIVERGENCES 38). On Linux a host name comes from `/etc/hosts`
+by glibc's rules, and one the file does not hold from the system's resolver
+(`getaddrinfo()`), so such a name can cost one DNS lookup, under
+`/etc/resolv.conf`'s timeouts; an address, a number (`@127.1`) and a name the
+file holds cost none. A service name comes from `/etc/services`. What the
+listing prints stays numeric.
 
 ## Open differences from the C
 
 The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
-- **Refused, where the C works:** `-c /regex/`, and host or service names in
-  `-i` (38); a value that is not UTF-8, in a command line that also holds
-  one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
+- **Refused, where the C works:** a back-reference in `-c /regex/` (38:
+  `\(a\)\1`), and an expression past lsof-rs's bounds: a compiled size of
+  8 MiB (`.{32767}`, `\w{0,800}`), 64 of the locale's large classes or
+  65,536 characters, groups and repetitions nested 100 deep (every other
+  POSIX expression glibc takes is taken); a value that is not UTF-8, in a command line that
+  also holds one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
+- **Names only the files know** (38, 39): a service name is read from
+  `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
+  has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves
+  is unknown; its port or UID works. A host name does reach DNS and the other
+  NSS sources, through the system's resolver, but one `/etc/hosts` holds for
+  IPv4 alone is not asked of DNS for IPv6, as the C asks it. nscd is not
+  asked.
 - **Linux, and worth knowing before running it on a busy host:** a run that
   needs the mount table — every run but `-i` alone, and that too with `-e` —
   reads it as the C does, and `stat`s each mount point once (again for a

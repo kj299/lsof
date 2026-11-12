@@ -46,7 +46,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-a` | sel | ✅ shipped | AND combinator |
 | `-A A` | sel | ❌ N/A | AFS NWA mode (HP-UX); not portable |
 | `-b` | prec | ✅ shipped 2026-10-09 | Make no call that can block (`stat`, `lstat`, `readlink`) on a path a user names or a mount point, and say so unless `-w`; a path argument is then a status error (DIVERGENCES 94). Windows: accepted; its own handle queries are bounded by its worker model |
-| `-c c` | sel | ✅ shipped | Match by command/image name |
+| `-c c` | sel | ✅ shipped | Match by command/image name; `-c /regex/[bix]` by a POSIX regular expression, read in glibc's grammar and run by the `regex` crate (DIVERGENCES 38, 2026-11-11; a back-reference is refused) |
 | `+c c` | out | ✅ shipped (5A) | Max command-name width in the COMMAND column — small render tweak |
 | `-C` | prec | ❌ N/A | Kernel name cache; Unix-only |
 | `-d d` | sel | ✅ shipped | FD filter (`cwd`/`txt`/`mem`/numbers/ranges/`^excl`) |
@@ -63,7 +63,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-h` | misc | ✅ shipped | Help |
 | `-?` | misc | ✅ shipped (5A) | Alias for `-h` — one-line add |
 | `-H` | out | ✅ shipped 2026-09-19 | Human-readable sizes in the SIZE column, in `lsof-core`, so both platforms. It was never a headers toggle |
-| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|udplite][@addr][:ports]`, read in the C's grammar and words, the argument escaped in every message (DIVERGENCES 112); host and service names are refused (38). On Windows `icmp`/`raw` too, ETW-sourced (they imply the Administrator-only capture); on Linux they are the C's `unknown protocol name`, a raw socket being the C's `raw` row, which no `-i` selects (108) |
+| `-i [i]` | sel | ✅ shipped | Internet sockets `[46][tcp|udp|udplite][@addr][:ports]`, read in the C's grammar and words, the argument escaped in every message (DIVERGENCES 112); host names (`@localhost`) and service names (`:http`) are resolved as the C resolves them, from the hosts and services files and, for a host, the system's resolver (38, 2026-11-11). On Windows `icmp`/`raw` too, ETW-sourced (they imply the Administrator-only capture); on Linux they are the C's `unknown protocol name`, a raw socket being the C's `raw` row, which no `-i` selects (108) |
 | `-J` | out | ✅ shipped | JSON aggregated, the C's schema since 2.0.0 (DIVERGENCES 91; an Internet row's `name` and the extra escapes are C-DEFECT, 134, 135) |
 | `-j` | out | ✅ shipped | JSON Lines, the C's schema since 2.0.0 (DIVERGENCES 91) |
 | `-k k` | misc | ❌ N/A | Kernel symbol file — Unix-only |

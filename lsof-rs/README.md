@@ -54,11 +54,11 @@ independent code and per-OS "dialect" backends:
 
 | Crate | Role |
 |---|---|
-| `lsof-core` | Platform-agnostic: data model (`Process`/`OpenFile` ≈ lsof's `lproc`/`lfile`), the selection/filter engine, the output renderers (table / `-F` / JSON), and the `Backend` trait (the "dialect" seam). **Zero dependencies, `#![forbid(unsafe_code)]`, fully unit-tested on any host.** |
+| `lsof-core` | Platform-agnostic: data model (`Process`/`OpenFile` ≈ lsof's `lproc`/`lfile`), the selection/filter engine, the output renderers (table / `-F` / JSON), and the `Backend` trait (the "dialect" seam). **`#![forbid(unsafe_code)]`, one dependency** (the `regex` crate, pinned exactly with no default features, for `-c /regex/`: the expression is read by glibc's grammar in `posix_regex.rs` and run by an engine that matches in linear time, DIVERGENCES 38), **fully unit-tested on any host.** |
 | `lsof-backend-windows` | The Windows "dialect": implements `Backend` with native Win32 APIs (`windows-sys`). Processes via Toolhelp, sockets via IP Helper and ETW, file handles via the NT handle table — all behind a strict least-privilege model. Compiled only on Windows, but for its pure name parsers, PEB walk and buffer-size checks (`names.rs`, `peb_walk.rs`, `sizes.rs`), which are tested on Linux, and the first two fuzzed there. |
 | `lsof-backend-linux` | The Linux "dialect": implements `Backend` over `/proc`. **`#![forbid(unsafe_code)]`, and one dependency** — `/proc` is a filesystem and `std::os::unix::fs::MetadataExt` supplies every stat field; the one call std lacks, `getxattr(2)` (which names a socket no `/proc/net` table lists, as the C names it), is made through `rustix`, pinned exactly with only its `fs` feature, so no FFI of the crate's own is involved. Compiled only on Linux. |
 | `lsof-backend-freebsd` | The FreeBSD "dialect": implements `Backend` from the `sysctl(3)` records the C's own FreeBSD dialect reads (`kinfo_proc`, `kinfo_file`, `kinfo_lockf`, the pcblists). **No dependencies**; four libc calls declared in `src/sys.rs`, the one module allowed `unsafe` (the crate is `#![deny(unsafe_code)]`), each returning bytes that safe, bounds-checked code parses at offsets measured from FreeBSD 14.5 and 15.1's headers. Compiled only on FreeBSD, but for its parsers and row rules, which are tested, fuzzed and run under miri on Linux. |
-| `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). **No third-party dependency of its own** (the Linux backend it links brings `rustix`) **and `#![forbid(unsafe_code)]`** — on both of its crate roots, since a bin and a lib in one package are two crates and the attribute does not cross between them. |
+| `lsof-cli` | The `lsof` binary: lsof-compatible option parsing and rendering. Picks the native backend per platform, falling back to a mock backend elsewhere (so the pipeline runs/tests anywhere). **No third-party dependency of its own** (`lsof-core` brings `regex`, and the Linux backend it links `rustix`) **and `#![forbid(unsafe_code)]`** — on both of its crate roots, since a bin and a lib in one package are two crates and the attribute does not cross between them. |
 
 ### Mapping Unix concepts to Windows
 
@@ -123,8 +123,8 @@ item is shipped or a documented closed gate — and the release criteria are in
 - ✅ **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,udplite,udplite6,raw,raw6,unix}`
   is read once per gather and indexed by inode; an fd whose target is
   `socket:[N]` resolves by that key into a real TYPE, protocol, addresses and
-  TCP state. **`-i` and `-U` work** in every form the C takes but host and
-  service names (#38), `-i udplite` included, as does `-T q`; a raw socket is the C's `raw` row, which no `-i`
+  TCP state. **`-i` and `-U` work** in every form the C takes, host and
+  service names among them since 2026-11-11 (#38), `-i udplite` included, as does `-T q`; a raw socket is the C's `raw` row, which no `-i`
   selects (#108).
 - ✅ **L2** — `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock
   column (`3uW`) from `/proc/locks`; ✅ named `anon_inode` kinds

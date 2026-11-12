@@ -568,6 +568,57 @@ name = "linux/differential-search-g-selects-a-process-group"
 args = ["-n", "-P", "-a", "-g", "PID", "-d", "0"]
 
 [[case]]
+name = "core/command-regex"
+# `-c /regex/[bix]` (DIVERGENCES 38), on every platform's push:
+# args::tests::dash_c_reads_a_regular_expression_as_the_c_reads_it (the
+# modifiers, each of the C's errors and regerror()'s words), its twin for an
+# expression that is not UTF-8, lsof-core's posix_regex::tests (what is
+# written for the engine, construct by construct, and each refusal),
+# tests/posix_regex.rs (1,500 expressions against 62 commands, each glibc's
+# own answer), selection::tests::a_command_regex_selects_and_is_located_as_a_name_is
+# and main's no_command_found_for_regex_follows_the_names_in_the_order_given.
+args = ["-V", "-c", "/^sle{2}p$/i"]
+
+[[case]]
+name = "core/inet-host-and-service-names"
+# `-i @name` and `-i :name` (DIVERGENCES 38), over a host of the tests' own:
+# args::tests::dash_i_enters_a_host_names_addresses_as_the_c_enters_them,
+# dash_i_resolves_a_service_name_as_the_c_resolves_it,
+# names_no_host_knows_are_unknown_in_the_cs_words and (Unix)
+# dash_i_looks_a_name_that_is_not_utf8_up_as_bytes; lsof-core's
+# netnames::tests, the hosts, services, host.conf and nsswitch.conf readers
+# and the rule for a name that is a number, each line measured against
+# glibc. No test asks a resolver anything.
+args = ["-i", "tcp@localhost:http"]
+
+[[case]]
+name = "linux/differential-rx-ignore-case-folds-past-ascii"
+# One of the 56 `rx-*` cases of ../differential/linux-matrix.toml: the C's
+# regcomp() and regexec() against lsof-rs, over the fixtures' commands.
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "PIDS", "-c", "/É/i"]
+
+[[case]]
+name = "linux/differential-rx-with-names"
+args = ["-V", "-F", "pc", "-a", "-d", "cwd", "-p", "PIDS", "-c", "/zzz/", "-c", "/c/", "-c", "nosuch", "-c", "sle"]
+
+[[case]]
+name = "linux/differential-names-host-localhost"
+# One of the 39 `names-*` cases: a hosts file, a services file and the files
+# that say how glibc reads them, in a mount namespace's /etc
+# (LSOF_DIFF_MT=names), so that the C's gethostbyname2() and getservbyname()
+# and lsof-rs read the same and no name server is asked.
+args = ["-n", "-P", "-a", "-p", "PID", "-i", "@localhost"]
+
+[[case]]
+name = "linux/differential-names-host-and-service"
+args = ["-n", "-P", "-a", "-p", "PID", "-i", "@localhost:r38tcp,r38udp"]
+
+[[case]]
+name = "linux/differential-nss-passwd-without-files-knows-no-login"
+# DIVERGENCES 39: under `passwd: sss` glibc reads no password file.
+args = ["-a", "-p", "PID", "-d", "cwd", "-u", "root"]
+
+[[case]]
 name = "linux/differential-search-u-numeric-uid-selects"
 args = ["-n", "-P", "-a", "-p", "PID", "-u", "UID", "-d", "3"]
 
