@@ -340,7 +340,7 @@ mod tests {
     /// A name service out of tables, counting its calls.
     #[derive(Default)]
     struct Table {
-        hosts: Vec<(IpAddr, &'static str)>,
+        hosts: Vec<(IpAddr, String)>,
         services: Vec<ServiceEntry>,
         host_calls: Vec<IpAddr>,
         port_calls: Vec<(u16, Vec<u8>)>,
@@ -391,8 +391,8 @@ mod tests {
     fn hosts_and_ports_are_named_as_the_c_names_them() {
         let mut t = Table {
             hosts: vec![
-                ("127.0.0.1".parse().unwrap(), "localhost"),
-                ("127.0.0.7".parse().unwrap(), ""),
+                ("127.0.0.1".parse().unwrap(), "localhost".to_string()),
+                ("127.0.0.7".parse().unwrap(), String::new()),
             ],
             services: vec![
                 svc("svcboth", 4001, "tcp"),
@@ -457,6 +457,8 @@ mod tests {
                 svc("x", 7001, "udp"),
                 svc("late", 7011, "tcp"),
                 svc("upper", 7012, "TCP"),
+                svc("first", 7013, "tcp"),
+                svc("second", 7013, "tcp"),
             ],
             ..Table::default()
         };
@@ -479,6 +481,8 @@ mod tests {
         assert_eq!((t.port_calls.len(), t.scans), (10, 1));
         assert_eq!(port(&mut n, &mut t, Protocol::Udp, 7001), "127.0.0.1:x");
         assert_eq!(port(&mut n, &mut t, Protocol::Tcp, 7012), "127.0.0.1:upper");
+        // The scan keeps a port's first entry (`fill_porttab()`).
+        assert_eq!(port(&mut n, &mut t, Protocol::Tcp, 7013), "127.0.0.1:first");
         assert_eq!(port(&mut n, &mut t, Protocol::Tcp, 9999), "127.0.0.1:9999");
         assert_eq!(t.scans, 1);
         // Measured the other way round: UDP first finds it.
@@ -493,8 +497,8 @@ mod tests {
 
     #[test]
     fn a_name_past_the_cs_buffer_is_no_name() {
-        let long = Box::leak("h".repeat(4200).into_boxed_str());
-        let edge = Box::leak("e".repeat(NAME_ROOM - 4).into_boxed_str());
+        let long = "h".repeat(4200);
+        let edge = "e".repeat(NAME_ROOM - 4);
         let mut t = Table {
             hosts: vec![
                 ("127.0.0.250".parse().unwrap(), long),

@@ -106,9 +106,9 @@ args = ["-i", "icmp"]
 [[case]]
 name = "core/repeat-delay-as-the-next-word"
 # args::tests::dash_r_takes_its_delay_as_the_next_word: `-r 2` repeats every two
-# seconds, `-r abc` is `-r` and a file, and the C's `c`/`m` suffixes are
-# refused. Repeat mode never exits, so no differential or smoke case can run
-# this spelling to completion; smoke/repeat runs the attached `-r1`.
+# seconds, and `-r abc` is `-r` and a file. Since 2026-11-14 a count ends the
+# loop (`-r 1c2`), so the differential runs it to completion too
+# (linux/differential-repeat-*, DIVERGENCES 152).
 args = ["-r", "2"]
 
 [[case]]
@@ -952,3 +952,178 @@ args = ["-F", "pcuL", "-p", "PID"]
 [[case]]
 name = "linux/differential-owner-dash-u-name-selects-the-effective-uid"
 args = ["-n", "-P", "-V", "-u", "USER", "-a", "-d", "cwd", "-p", "PID"]
+
+# ------------------------------------------- +n, +P, +r and +m (DIVERGENCES 152-154)
+# The cases of ../differential/linux-matrix.toml from its `host and service
+# names in NAME` section on: the names over fixture NS and the harness's own
+# name server, the repeat loop run to its count or its idle cycle, and the
+# mount supplement printed and read. Each compared with the C, stdout and
+# exit status (and stderr where the case says).
+
+[[case]]
+name = "linux/differential-names-socket-hosts-and-ports-by-default"
+args = ["-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-field-n"
+args = ["-F", "pfn", "-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-dash-n"
+args = ["-n", "-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-dash-p-upper"
+args = ["-P", "-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-plus-n-plus-p-after-dash"
+args = ["-n", "-P", "+n", "+P", "-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-plus-p-after-dash-np"
+args = ["-nP", "+P", "-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-selected-by-number"
+args = ["-a", "-p", "PID", "-i", "@127.53.0.1"]
+
+[[case]]
+name = "linux/differential-names-socket-repeat-asks-once"
+args = ["-r", "1c2mX", "-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-no-attempts"
+args = ["-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-hosts-files-only"
+args = ["-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-dns-first"
+args = ["-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-names-socket-dns-notfound-returns"
+args = ["-a", "-p", "PID", "-i"]
+
+[[case]]
+name = "linux/differential-repeat-count-and-marker"
+args = ["-r", "1c2mX", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-count-is-also-dash-c"
+args = ["-r", "1c2", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-plus-r-count"
+args = ["+r", "1c2", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-plus-r-nothing-listed"
+args = ["+r", "1mX", "-a", "-d", "999", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-plus-r-zero-delay"
+args = ["+r0", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-field-marker"
+args = ["-r", "1c2mabc", "-F", "pf", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-field-marker-nul"
+args = ["-r", "1c2", "-F0pf", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-json-lines"
+args = ["-r", "1c2mX", "-j", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-terse-marker"
+args = ["-r1c2mX", "-t", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-marker-strftime"
+args = ["-r", "1c1m[%Z%%%n%Y]", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-verbose-after-the-loop"
+args = ["-r", "1c2mX", "-V", "-p", "999999", "-p", "PID", "-a", "-d", "cwd"]
+
+[[case]]
+name = "linux/differential-repeat-plus-r-verbose-nothing"
+args = ["+r", "1mX", "-V", "-p", "999999"]
+
+[[case]]
+name = "linux/differential-repeat-marker-empty-is-illegal"
+args = ["-r", "1c1m", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-marker-too-long-is-illegal"
+args = ["-r", "1m%c", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-marker-newline-with-dash-f"
+args = ["-r", "1m%n", "-F", "p", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-repeat-marker-illegal-and-newline-with-dash-f"
+args = ["-F", "-r1m%n%c%c%c", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-prints-the-mounts"
+args = ["+m"]
+
+[[case]]
+name = "linux/differential-plus-m-ends-before-listing"
+args = ["+m", "-p", "PID", "-V"]
+
+[[case]]
+name = "linux/differential-plus-m-exempt-mount-has-no-device"
+args = ["-e", "/proc", "+m"]
+
+[[case]]
+name = "linux/differential-plus-m-after-plus-d-prints-nothing"
+args = ["+d", "DIR", "+m"]
+
+[[case]]
+name = "linux/differential-plus-m-before-plus-d-prints-there"
+args = ["+m", "+d", "DIR"]
+
+[[case]]
+name = "linux/differential-plus-m-then-a-path"
+args = ["+m", "--", "DIR"]
+
+[[case]]
+name = "linux/differential-plus-m-file-under-b"
+args = ["+m", "SUP", "-b", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-under-b-quiet"
+args = ["+m", "SUP", "-b", "-w", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-bad-lines"
+args = ["+m", "SUP", "-b", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-duplicate"
+args = ["+m", "SUP", "-b", "-w", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-missing"
+args = ["+m", "SUP", "-b", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-a-directory"
+args = ["+m", "DIR", "-b", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-a-socket"
+args = ["+m", "PATH", "-b", "-a", "-d", "cwd", "-p", "PID"]
+
+[[case]]
+name = "linux/differential-plus-m-file-empty-crashes-the-c"
+args = ["+m", "SUP", "-b", "-a", "-d", "cwd", "-p", "PID"]

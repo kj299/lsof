@@ -230,7 +230,7 @@ impl ResolvConf {
     ///   a NUL; one that opens with `;` or `#` is a comment;
     /// * a keyword counts only at the line's start and followed by a blank:
     ///   ` nameserver x` is no server (measured);
-    /// * `nameserver`: see [`ResolvConf::nameserver`]; past the third it is
+    /// * `nameserver`: see `ResolvConf::nameserver`; past the third it is
     ///   not read;
     /// * `options`: `timeout:N` (at most 30), `attempts:N` (at most 5),
     ///   `rotate`, `use-vc`, `edns0`, `trust-ad`, each a prefix of its word,
@@ -623,7 +623,10 @@ pub fn udp_verdict(query: &[u8], reply: &[u8]) -> Verdict {
 ///   target unpacked and written as text ([`name_text`]), within
 ///   [`MAX_NAME_TEXT`] (unreadable if it does not fit); anything else is
 ///   passed over;
-/// * no such PTR record: not found.
+/// * no such PTR record: try again (`NSS_STATUS_TRYAGAIN`, measured: a
+///   reply holding an A record alone ends a walk under `[TRYAGAIN=return]`,
+///   where an unreadable one ends it under `[UNAVAIL=return]` and NXDOMAIN
+///   under `[NOTFOUND=return]`).
 ///
 /// Nothing checks that the name is a host name: measured, a target with a
 /// space, an ESC, a `/` or a leading `-` is the host, in its escaped form,
@@ -711,7 +714,7 @@ pub fn answer_name(reply: &[u8]) -> NssAnswer<String> {
             };
         }
     }
-    NssAnswer::NotFound
+    NssAnswer::TryAgain
 }
 
 /// What one datagram read gave.
@@ -1171,6 +1174,16 @@ mod tests {
             NssAnswer::Success("h\\195\\169.x".into())
         );
         assert_eq!(name_of(&one(&[0])), NssAnswer::Success(".".into()));
+        // Each of `"` `;` `(` `)` `@` `$` after a backslash, a tab and DEL
+        // as numbers, the rest of printable ASCII as it is (measured).
+        assert_eq!(
+            name_of(&one(&lab(&[b"a\"b;c(d)e@f$g", b"x"]))),
+            NssAnswer::Success("a\\\"b\\;c\\(d\\)e\\@f\\$g.x".into())
+        );
+        assert_eq!(
+            name_of(&one(&lab(&[b"t\tab\x7fz~!#%&*+,/:<=>?[]^_`{|}", b"x"]))),
+            NssAnswer::Success("t\\009ab\\127z~!#%&*+,/:<=>?[]^_`{|}.x".into())
+        );
         // Case kept; no host-name check (`-lead`, `a/b`, `a*b`).
         assert_eq!(
             name_of(&one(&lab(&[b"-lead", b"Ex"]))),
@@ -1273,7 +1286,8 @@ mod tests {
             2,
             &[rr(PTR_OWNER, 5, &cn, 1), rr(PTR_OWNER, 12, &good, 1)],
         );
-        assert_eq!(name_of(&r), NssAnswer::NotFound);
+        // Records and no PTR at the name: glibc's TRYAGAIN (measured).
+        assert_eq!(name_of(&r), NssAnswer::TryAgain);
         // Another class is passed over, the case of the owner is not.
         let r = reply(
             &q,
@@ -1298,7 +1312,17 @@ mod tests {
                 1,
                 &[rr(&lab(&[b"other", b"arpa"]), 12, &good, 1)]
             )),
-            NssAnswer::NotFound
+            NssAnswer::TryAgain
+        );
+        // An A record alone (measured: `[TRYAGAIN=return]` ends the walk).
+        assert_eq!(
+            name_of(&reply(
+                &q,
+                OK,
+                1,
+                &[rr(PTR_OWNER, 1, b"\x01\x02\x03\x04", 1)]
+            )),
+            NssAnswer::TryAgain
         );
         let r = reply(
             &q,
@@ -1417,6 +1441,12 @@ mod tests {
         cut[2] = 0x81;
         cut[3] = 0x80;
         assert_eq!(udp_verdict(&q, &cut), Verdict::Answer);
+        // Under the header's 12 bytes: the next server, whatever it holds
+        // (measured with 11 bytes of the query; here of an answer).
+        for len in [11, 6, 2, 0] {
+            let short = r(OK, 1);
+            assert_eq!(udp_verdict(&q, &short[..len]), Verdict::NextServer, "{len}");
+        }
     }
 
     /// A transport scripted per server, on a clock that moves only when a
@@ -1426,7 +1456,9 @@ mod tests {
         now: Duration,
         /// Per server: what each datagram sent gets, in order.
         udp: std::collections::HashMap<SocketAddr, VecDeque<Vec<Reply>>>,
-        tcp: std::collections::HashMap<SocketAddr, Vec<u8>>,
+        /// Per server: the messages a TCP exchange reads, in order, the
+        /// last again for as long as it is read.
+        tcp: std::collections::HashMap<SocketAddr, VecDeque<Vec<u8>>>,
         log: Vec<(u64, SocketAddr, &'static str)>,
         pending: VecDeque<Reply>,
     }
@@ -1495,7 +1527,12 @@ mod tests {
             buf: &mut [u8],
             _: Duration,
         ) -> Option<usize> {
-            let r = self.tcp.get(conn)?.clone();
+            let queue = self.tcp.get_mut(conn)?;
+            let r = if queue.len() > 1 {
+                queue.pop_front()?
+            } else {
+                queue.front()?.clone()
+            };
             buf[..r.len()].copy_from_slice(&r);
             Some(r.len())
         }
@@ -1596,7 +1633,7 @@ mod tests {
         s.udp
             .insert(a, VecDeque::from([vec![Reply::After(0, tc_reply)]]));
         let q = ptr_query(0x4242, "127.0.0.7".parse().unwrap(), &ResolvConf::default());
-        s.tcp.insert(b, good_reply(&q));
+        s.tcp.insert(b, VecDeque::from([good_reply(&q)]));
         let got = run(
             "nameserver 127.0.0.53\nnameserver 127.0.0.54\noptions timeout:1 attempts:2\n",
             &mut s,
@@ -1615,12 +1652,21 @@ mod tests {
         let mut s = Script::default();
         let mut other = good_reply(&q);
         other[0] ^= 1;
-        s.tcp.insert(a, other);
+        s.tcp.insert(a, VecDeque::from([other.clone()]));
         let got = run(
             "nameserver 127.0.0.53\noptions timeout:1 attempts:1 use-vc\n",
             &mut s,
         );
         assert_eq!(got, NssAnswer::NotFound);
+        // ...and the query's own after it is taken.
+        let mut s = Script::default();
+        s.tcp
+            .insert(a, VecDeque::from([other.clone(), other, good_reply(&q)]));
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:1 use-vc\n",
+            &mut s,
+        );
+        assert_eq!(got, NssAnswer::Success("good".into()));
     }
 
     #[test]

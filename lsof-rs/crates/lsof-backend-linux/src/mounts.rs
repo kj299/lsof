@@ -277,36 +277,40 @@ enum SupplementState {
     Failed,
 }
 
-/// The file's bytes, or the C's words for why there are none: `access()`
-/// failing (`WARNING: access F: ERR`, which `-w` mutes), a file that cannot
-/// be read through to its end (`error reading F`: a directory, as the C
-/// says; and, where the C would wait or read forever, anything that is no
-/// regular file, or one past [`SUPPLEMENT_MAX_BYTES`]).
+/// The file's bytes, or the C's words for why there are none (each muted
+/// by `-w`): `access()` failing (`WARNING: access F: ERR`), `fopen()`
+/// failing past it (`can't open(F): ERR`: a socket, measured), a file that
+/// cannot be read through to its end (`error reading F`: a directory, as the
+/// C says). Where the C would wait or read for ever, lsof-rs reads nothing
+/// and says `error reading F` too: a FIFO (measured: the C's `fopen()`
+/// waits for a writer), a device, or a file past [`SUPPLEMENT_MAX_BYTES`].
+/// No FIFO or device is opened at all, and the rest are opened without
+/// blocking, so a FIFO put in a regular file's place cannot hold the run.
 fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
     let shown = Escaper::UNIX.bytes(path.as_bytes()).into_owned();
-    let meta = std::fs::metadata(path).map_err(|e| {
+    let access = |e: &std::io::Error| {
         format!(
             "lsof: WARNING: access {shown}: {}",
-            lsof_core::errno_text(&e)
+            lsof_core::errno_text(e)
         )
-    })?;
+    };
     let error = || format!("lsof: error reading {shown}");
-    if !meta.is_file() {
-        // Opened as the C opens it, for its error, but never read.
-        return Err(match std::fs::File::open(path) {
-            Err(e) => format!(
-                "lsof: WARNING: access {shown}: {}",
-                lsof_core::errno_text(&e)
-            ),
-            Ok(_) => error(),
-        });
+    let meta = std::fs::metadata(path).map_err(|e| access(&e))?;
+    let kind = meta.file_type();
+    if kind.is_fifo() || kind.is_char_device() || kind.is_block_device() {
+        return Err(error());
     }
-    let file = std::fs::File::open(path).map_err(|e| {
-        format!(
-            "lsof: WARNING: access {shown}: {}",
-            lsof_core::errno_text(&e)
-        )
-    })?;
+    let nonblocking = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblocking)
+        .open(path)
+        .map_err(|e| match e.kind() {
+            // What `access(R_OK)` would have refused first.
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => access(&e),
+            _ => format!("lsof: can't open({shown}): {}", lsof_core::errno_text(&e)),
+        })?;
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return Err(error());
     }
@@ -1115,6 +1119,73 @@ mod tests {
     /// holds, and that is the last one there where the file has none
     /// (measured: a file of `/proc` and `/dev` alone gives `/sys` `/proc`'s
     /// 0x15 under `-b`).
+    /// What the file is decides what is said of it, and nothing waits on a
+    /// FIFO, which the C's `fopen()` waits on for ever (measured), or reads
+    /// a device; a socket is the C's `can't open` (measured).
+    #[test]
+    #[cfg_attr(miri, ignore = "it makes files")]
+    fn a_supplement_that_is_no_regular_file_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-supk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shown = |p: &Path| p.to_str().unwrap().to_string();
+        let sock = dir.join("sock");
+        let _ = std::fs::remove_file(&sock);
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert_eq!(
+            supplement_bytes(sock.as_os_str()).unwrap_err(),
+            format!(
+                "lsof: can't open({}): No such device or address",
+                shown(&sock)
+            )
+        );
+        let fifo = dir.join("fifo");
+        let _ = std::fs::remove_file(&fifo);
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            std::ffi::CString::new(fifo.as_os_str().as_bytes())
+                .unwrap()
+                .as_c_str(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            supplement_bytes(fifo.as_os_str()).unwrap_err(),
+            format!("lsof: error reading {}", shown(&fifo))
+        );
+        assert_eq!(
+            supplement_bytes(OsStr::new("/dev/null")).unwrap_err(),
+            "lsof: error reading /dev/null"
+        );
+        assert_eq!(
+            supplement_bytes(dir.as_os_str()).unwrap_err(),
+            format!("lsof: error reading {}", shown(&dir))
+        );
+        let gone = dir.join("gone");
+        assert_eq!(
+            supplement_bytes(gone.as_os_str()).unwrap_err(),
+            format!(
+                "lsof: WARNING: access {}: No such file or directory",
+                shown(&gone)
+            )
+        );
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(supplement_bytes(empty.as_os_str()).unwrap(), b"");
+        // The bound: a file of 16 MiB is read, one byte more is not.
+        let big = dir.join("big");
+        let at_most = usize::try_from(SUPPLEMENT_MAX_BYTES).unwrap();
+        std::fs::write(&big, vec![b'/'; at_most]).unwrap();
+        assert_eq!(supplement_bytes(big.as_os_str()).unwrap().len(), at_most);
+        std::fs::write(&big, vec![b'/'; at_most + 1]).unwrap();
+        assert_eq!(
+            supplement_bytes(big.as_os_str()).unwrap_err(),
+            format!("lsof: error reading {}", shown(&big))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     #[cfg_attr(miri, ignore = "it writes a supplement file")]
     fn a_mount_not_stated_takes_the_supplements_device() {
@@ -1174,6 +1245,33 @@ mod tests {
                 format!("lsof: assuming dev=0x15 for /proc from {shown}"),
                 format!("lsof: assuming dev=0x6 for /dev from {shown}"),
                 format!("lsof: assuming dev=0x6 for /x from {shown}"),
+            ]
+        );
+        // Where the file has no line, what the buffer held is said: what a
+        // good `stat` left, kept by a timeout, zeroed by the helper's failure.
+        let mut host = Host::default();
+        host.stats.insert("/sys", dir_on(0x22));
+        host.stats.insert("/t", Err(lsof_core::safefs::timed_out()));
+        host.stats.insert("/a", errno(13));
+        let text4 = "sysfs /sys sysfs rw 0 0
+none /t tmpfs rw 0 0
+none /a tmpfs rw 0 0
+";
+        let (t, said) = resolve_sup(
+            &host,
+            text4,
+            vec![],
+            MountSupplement::File(file.clone().into()),
+            Blocking::default(),
+            false,
+        );
+        let devs: Vec<Option<u64>> = t.entries.iter().map(|m| m.device).collect();
+        assert_eq!(devs, [Some(0x22), None, None]);
+        assert_eq!(
+            said,
+            [
+                format!("lsof: assuming dev=0x22 for /t from {shown}"),
+                format!("lsof: assuming dev=0 for /a from {shown}"),
             ]
         );
         // No file: `access()`'s warning once, every mount kept without a

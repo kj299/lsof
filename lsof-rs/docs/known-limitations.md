@@ -71,8 +71,9 @@ glibc 2.39's resolver in every rule measured against the C (DIVERGENCES 154):
 each server waited for `timeout << n` seconds, divided by the servers'
 count but for the first, one second at least; `RES_OPTIONS` read after the
 file; `rotate`, `use-vc`, `edns0`, `trust-ad`. So a name server that does not
-answer costs each such address what it costs the C: 10 s with glibc's
-defaults and one server, 20 s with two, `attempts:N` times the round. `-n`
+answer costs each such address what it costs the C: by that rule 10 s with
+glibc's defaults and one server, 20 s with two, `attempts:N` times the
+round (measured: 10.04 s for three servers at `timeout:2`). `-n`
 asks nothing; so do `-t`, `-F` without `n`, and JSON, which print no host
 name. A run with no Internet socket row asks nothing.
 
@@ -80,7 +81,8 @@ What is not followed, and why: a source other than `files` and `dns` in
 `hosts:` (`mdns`, `resolve`, `myhostname`, `sss`) cannot be asked without
 the C library and is taken as not installed (`UNAVAIL`), as row 38 takes
 one; nscd is not asked; `/etc/resolv.conf` is read once a run, where glibc
-reads it again when it changes; an `edns0` query whose server answers
+reads it again when it changes; the names found are kept for the whole run,
+as the C keeps them, with no cap on how many; an `edns0` query whose server answers
 `FORMERR` is not asked again without EDNS, as glibc would; an IPv6 name
 server's `%scope` naming an interface is looked up in
 `/sys/class/net/NAME/ifindex`. A TCP exchange after a truncated reply,
@@ -301,9 +303,13 @@ meet. Each number is a row there, with the measurement behind it.
   zone with daylight time and no rule (`EST5EDT`) takes the United States'
   rule (glibc reads `posixrules`, which is that rule where it links to
   `America/New_York`); a zone file past 1 MiB, or one that is no regular file,
-  is no zone. A mount supplement that is no regular file, or past 16 MiB,
-  is `error reading` it, where the C would wait on a FIFO or read
-  `/dev/zero` forever, and its bad lines are quoted escaped.
+  is no zone; the zone is read once a run, where glibc's `localtime()`
+  looks at `/etc/localtime` again at each marker. A mount supplement that is
+  a FIFO or a device, or past 16 MiB, is `error reading` it and is never
+  opened, where the C waits on a FIFO or reads `/dev/zero` forever, and an
+  empty one, which kills the C, names no mount; its bad lines, and what `+m`
+  prints, are quoted escaped, so a directory holding a control byte prints in
+  a form `+m m` cannot read back.
 - **Linux, and worth knowing before running it on a busy host:** a run that
   needs the mount table — every run but `-i` alone, and that too with `-e` —
   reads it as the C does, and `stat`s each mount point once (again for a

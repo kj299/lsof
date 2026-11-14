@@ -109,7 +109,12 @@ fuzz_target!(|data: &[u8]| {
         None,
         &|_| None,
     );
-    let mut t = Replies { data: &framed, at: 0, now: Duration::ZERO, reads: 0 };
+    let mut t = Replies {
+        data: &framed,
+        at: 0,
+        now: Duration::ZERO,
+        reads: 0,
+    };
     check(&query_ptr(&conf, ip, &mut t, &mut Rotation::default()));
     assert!(t.reads <= framed.len() + 8, "{} reads", t.reads);
 });

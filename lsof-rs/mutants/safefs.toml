@@ -27,6 +27,11 @@
 #
 # Re-anchored 2026-11-01 (Batch B's review fixes): S-warning-muted-by-w, as
 # `tell_early` became `Early::tell`.
+#
+# Re-anchored 2026-11-14 (DIVERGENCES 153): mount-source-stat-unbounded, on
+# `source`'s new shape.
+# Run again 2026-11-14 with --first-kill (unit gates split by crate, then
+# the whole differential): each killed by a unit gate.
 
 [run]
 dir = ".."
@@ -462,12 +467,11 @@ rule = "a mount source is stat()ed through the bounded layer (94, 110)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
 old = '''            let is_block = exempt.is_none()
-                && fs
-                    .stat(Path::new(&path))'''
+                && match fs.stat(Path::new(&path)) {'''
 new = '''            let is_block = exempt.is_none()
-                && fs
+                && match fs
                     .with(lsof_core::Blocking { in_process: true, ..fs.blocking() }, fs.warns())
-                    .stat(Path::new(&path))'''
+                    .stat(Path::new(&path)) {'''
 
 [[mutant]]
 name = "walk-entry-lstat-unbounded"

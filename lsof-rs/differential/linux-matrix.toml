@@ -4705,9 +4705,9 @@ args = ["-m", "--", "-W"]
 name = "illegal-option-character-then-dash-d-upper-and-dash-dash"
 args = ["-W", "-D", "--", "-Y"]
 
-# `+m` is the C's mount supplement, which lsof-rs refuses (row 149): with an
-# error beside it both end in usage, exit 1, and the rest of a `+m` word is
-# never read as letters.
+# `+m` is the C's mount supplement (row 153; until 2026-11-14 lsof-rs refused
+# it, row 149): with an error beside it both end in usage, exit 1, before any
+# table is read, and the rest of a `+m` word is its file, never letters.
 [[case]]
 name = "illegal-option-character-then-plus-m"
 args = ["-W", "+m"]
@@ -7078,6 +7078,13 @@ name = "repeat-marker-newline-with-dash-f"
 args = ["-r", "1m%n", "-F", "p", "-a", "-d", "cwd", "-p", "{A}"]
 with_stderr = true
 
+[[case]]
+# A format refused where it is read is still looked at for `%n`, as the
+# C's `fmt` is: both lines, then the usage (measured).
+name = "repeat-marker-illegal-and-newline-with-dash-f"
+args = ["-F", "-r1m%n%c%c%c", "-p", "{A}"]
+with_stderr = true
+
 # ---------------------------------------------- +m, the mount supplement (DIVERGENCES 153)
 
 [[case]]
@@ -7141,3 +7148,15 @@ with_stderr = true
 name = "plus-m-file-a-directory"
 args = ["+m", "{AXDIR}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
 with_stderr = true
+
+[[case]]
+# `access()` passes and `fopen()` fails: `can't open(F): ERR` (measured).
+name = "plus-m-file-a-socket"
+args = ["+m", "{YSOCK}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# An empty file: the C dies at its first lookup (exit 139, measured); lsof-rs
+# reads it as a file that names no mount. Ledgered.
+name = "plus-m-file-empty-crashes-the-c"
+args = ["+m", "{SUPEMPTY}", "-b", "-a", "-d", "cwd", "-p", "{A}"]

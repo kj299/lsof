@@ -664,8 +664,14 @@ format and nine more, so at most 1 MiB for the longest argument Linux
 passes. The mount supplement is read only if it is a regular file, at most
 16 MiB, in the C's 8,191-byte lines, and a line it quotes in a complaint is
 escaped where the C prints it raw (fuzzed, `mount_supplement`, 1,521,540
-runs in 181 s); where the C would wait on a FIFO or read `/dev/zero` until
-it is killed, lsof-rs says `error reading` it.
+runs in 181 s); a FIFO or a device is never opened, and every other file is
+opened without blocking, so neither a FIFO named as the file nor one put in
+a regular file's place after it was looked at can hold the run. Measured,
+the C's `fopen()` waits on a FIFO for a writer (the first version of this
+reader did too, before the inventory's cross-check found it), reads
+`/dev/zero` until it is killed, and dies (exit 139) on an empty file or
+`/dev/null`; lsof-rs says `error reading` the FIFO or device and reads no
+mount from the empty file. The zone file is opened the same way.
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
 structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares

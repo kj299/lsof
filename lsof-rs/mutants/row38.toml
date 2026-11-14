@@ -53,6 +53,13 @@
 # lines, `AT_SECURE` and RESOLV_HOST_CONF. Nine of the first 85 were
 # replaced with the code they changed (`nsswitch_files_first` and
 # `nsswitch_reads_passwd_file` are `nsswitch_database` and `nss_walk`).
+#
+# Re-anchored 2026-11-14 (DIVERGENCES 154): the three names-service-* mutants
+# (junk-after-the-port, port-past-32-bits, port-not-kept-to-16-bits)
+# now mutate `services_fields`, the one parser behind `getservbyname()`'s
+# and `getservbyport()`'s lines, which had been written twice.
+# Run again 2026-11-14 with --first-kill (unit gates split by crate, then
+# the whole differential): each killed by a unit gate.
 
 [run]
 dir = ".."
@@ -727,8 +734,10 @@ name = "names-service-port-not-kept-to-16-bits"
 rule = "a port is kept to 16 bits, as htons() keeps it"
 [[mutant.edit]]
 file = "crates/lsof-core/src/netnames.rs"
-old = '''    u16::try_from(value & 0xffff).ok()'''
-new = '''    u16::try_from(value).ok()'''
+old = '''    let port = u16::try_from(value & 0xffff).ok()?;
+    let (proto, aliases) = string_field(rest);'''
+new = '''    let port = u16::try_from(value).ok()?;
+    let (proto, aliases) = string_field(rest);'''
 
 [[mutant]]
 name = "names-service-for-the-protocol-ignored"

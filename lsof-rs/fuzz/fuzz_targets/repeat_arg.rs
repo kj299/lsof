@@ -27,7 +27,9 @@ fuzz_target!(|data: &[u8]| {
         if let Err(e) = lsof_cli::args::parse(argv) {
             for piece in e.split("\nlsof: ") {
                 assert!(
-                    !piece.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
+                    !piece
+                        .chars()
+                        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}'),
                     "an error holds a control character: {e:?}"
                 );
             }

@@ -965,6 +965,10 @@ fn parse_options<'s>(
     let mut json_doc = false;
     let mut json_lines = false;
     let mut repeat = Repeat::default();
+    // The last `m<fmt>` read, taken or refused: the C's `fmt`, which its
+    // `%n` check reads whether or not `illegal <fmt>` was said of it
+    // (`main.c:812-829`, `1103-1117`), so `-F -r1m%n%c%c%c` says both.
+    let mut last_marker: Option<Vec<u8>> = None;
     let mut columns = Columns::default();
     // Every `-s TCP:` state, across all the `-s` options: the C's tables are
     // global, so two `-s` make one filter (lsof-rs kept the last one).
@@ -1342,6 +1346,7 @@ fn parse_options<'s>(
                             let format =
                                 bytes.and_then(|b| b.get(at..)).unwrap_or_default().to_vec();
                             took_bytes = true;
+                            last_marker = Some(format.clone());
                             if (host.marker_ok)(&format) {
                                 repeat.marker = Some(format);
                             } else {
@@ -1973,7 +1978,7 @@ fn parse_options<'s>(
     // `-F` ends each field's line itself, so a marker may not hold a new
     // line (`main.c:1100-1117`; under `-J` and `-j` too, which set the C's
     // `Ffield` and print no marker at all).
-    if let Some(format) = repeat.marker.as_deref().filter(|_| fields_given || json) {
+    if let Some(format) = last_marker.as_deref().filter(|_| fields_given || json) {
         if lsof_core::timefmt::has_newline_conversion(format) {
             errors.push(format!(
                 "%n illegal in -r m<fmt> when -F has been specified: \"{}\"",
@@ -5819,9 +5824,9 @@ mod tests {
             ["illegal <fmt>: \"%c%c^[\"".to_string()]
         );
         let n = "%n illegal in -r m<fmt> when -F has been specified: \"%n\"".to_string();
-        assert_eq!(err(&["-r1m%n", "-F", "p"]), [n.clone()]);
-        assert_eq!(err(&["-r1m%n", "-J"]), [n.clone()]);
-        assert_eq!(err(&["-r1m%n", "-j"]), [n.clone()]);
+        assert_eq!(err(&["-r1m%n", "-F", "p"]), std::slice::from_ref(&n));
+        assert_eq!(err(&["-r1m%n", "-J"]), std::slice::from_ref(&n));
+        assert_eq!(err(&["-r1m%n", "-j"]), std::slice::from_ref(&n));
         assert!(parse_on_host(&["-r1m%n"], false).is_ok());
         assert!(parse_on_host(&["-r1m%%n", "-F", "p"], false).is_ok());
         assert!(parse_on_host(&["-r1m%_n", "-F", "p"], false).is_ok());
@@ -5830,6 +5835,17 @@ mod tests {
             err(&["-r1m%n", "-t", "-F", "p"]),
             ["-F and -t are mutually exclusive".to_string(), n]
         );
+        // A format refused where it is read is still looked at for `%n`,
+        // as the C's `fmt` is (measured: both lines, then the usage).
+        assert_eq!(
+            err(&["-F", "-r1m%n%c%c%c"]),
+            [
+                "illegal <fmt>: \"%n%c%c%c\"".to_string(),
+                "%n illegal in -r m<fmt> when -F has been specified: \"%n%c%c%c\"".to_string()
+            ]
+        );
+        // The last format read is the one looked at.
+        assert!(parse_on_host(&["-F", "p", "-r1m%n", "-r1mX"], false).is_ok());
     }
 
     /// `+n`/`-n` and `+P`/`-P`, the last of each winning; the default is

@@ -58,6 +58,12 @@
 #   they are pinned by the unit test `a_login_is_looked_up_where_one_is_printed`
 #   (mutants logins-looked-up-under-t and logins-looked-up-for-empty-json),
 #   and the ones that end by `repeat-ends-where-passwd-cannot-be-stated*`.
+#
+# Re-anchored 2026-11-14 (DIVERGENCES 152, 154): logins-looked-up-under-t and
+# split-word-bytes-not-kept, whose `old` the new socket-name pass and `-r`'s
+# re-read made occur twice.
+# Run again 2026-11-14 with --first-kill (unit gates split by crate, then
+# the whole differential): each killed by a unit gate.
 
 [run]
 dir = ".."
@@ -145,8 +151,14 @@ name = "split-word-bytes-not-kept"
 rule = "-o's leftover letters keep the word's bytes (92)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''            *word = os_from_bytes(bytes);'''
-new = '''            let _ = bytes;'''
+old = '''                    .get(digits.len()..)
+                    .unwrap_or_default(),
+            );
+            *word = os_from_bytes(bytes);'''
+new = '''                    .get(digits.len()..)
+                    .unwrap_or_default(),
+            );
+            let _ = bytes;'''
 
 # ------------------------------------------------- 70: login names
 
@@ -590,8 +602,10 @@ name = "logins-looked-up-under-t"
 rule = "-t looks up no login (70)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        Format::Table => !sel.terse,'''
-new = '''        Format::Table => true,'''
+old = '''        Format::Table => !sel.terse,
+        Format::Fields { only, .. } => wants_login(only.as_deref()),'''
+new = '''        Format::Table => true,
+        Format::Fields { only, .. } => wants_login(only.as_deref()),'''
 
 [[mutant]]
 name = "logins-looked-up-for-empty-json"

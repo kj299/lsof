@@ -39,6 +39,13 @@
 # unbounded (2026-11-02: the table's read returns the C's error when it
 # cannot be opened); run again as root with --first-kill, both killed by
 # the unit gate.
+#
+# Re-anchored 2026-11-14 (DIVERGENCES 153, `+m`): exempt-source-stated and
+# stat-warning-not-muted, on `resolve_table`'s and `source`'s new shape
+# (the C's stat buffer is kept for the supplement's message).
+# Run again 2026-11-14 with --first-kill (unit gates split by crate, then
+# the whole differential): each killed by a unit gate.
+
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -154,9 +161,9 @@ rule = "an -e mount's source is read but not stat()ed (88)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
 old = '''            let is_block = exempt.is_none()
-                && fs'''
+                && match fs.stat(Path::new(&path)) {'''
 new = '''            let is_block = true
-                && fs'''
+                && match fs.stat(Path::new(&path)) {'''
 
 [[mutant]]
 name = "plus-e-source-read"
@@ -233,9 +240,9 @@ name = "stat-warning-not-muted"
 rule = "-w and -t mute the can't stat() warning (87)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
-old = '''                Err(_) => {
+old = '''                if let Some(Err(e)) = &failed {
                     if fs.warns() {'''
-new = '''                Err(_) => {
+new = '''                if let Some(Err(e)) = &failed {
                     if true {'''
 
 [[mutant]]

@@ -204,10 +204,11 @@ OUTPUT:
                   times; between cycles print `=======`, or the strftime(3)
                   format fmt (TZ, TZDIR, /etc/localtime); -r0 is one cycle.
                   The rest of the value after t and before m is read again as
-                  options, as the C reads it (-r 1c2 is also -c 2)
+                  options, as the C reads it (-r 1c2 is also -c 2); beside -F,
+                  -J or -j, fmt may not hold %n
     +r [t[c<n>][m<fmt>]]
                   the same, ending at the first cycle that lists nothing;
-                  exit 1 if no cycle listed anything
+                  exit 1 if that was the first (and after +r0's one cycle)
     +c <n>        cap COMMAND column width at <n> characters
 
 MISCELLANEOUS:
@@ -1191,6 +1192,7 @@ fn main() {
     let marking = marking_of(&format);
     // Under `-r` the C re-reads the password file when it changed, and so
     // does lsof-rs (DIVERGENCES 70): a run that repeats at all.
+    #[cfg(target_os = "linux")]
     let repeating = repeat.delay > 0;
     let quiet = selection.quiet;
 
@@ -1342,7 +1344,6 @@ fn main() {
         idle_error: false,
         cycles: 0,
     });
-    drop(host);
     // What no cycle located, once, after the loop, on stdout; `-Q` does not
     // mute the lines, only the status (DIVERGENCES 53, 54).
     let located = located_all.into_inner().unwrap_or_default();

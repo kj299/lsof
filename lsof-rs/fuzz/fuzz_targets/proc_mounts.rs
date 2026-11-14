@@ -58,7 +58,9 @@ fuzz_target!(|data: &[u8]| {
         })
         .into_iter()
         .collect();
-    // `+m`'s print, by the input's length: one line a mount recorded.
+    // `+m`'s print, by the input's length: one line each time a mount is
+    // recorded, so at least one a mount kept (an NFS `/` after another `/`
+    // is recorded twice, as the C prints it twice) and at most one a line.
     let supplement = if data.len() % 3 == 0 {
         MountSupplement::Print
     } else {
@@ -66,8 +68,19 @@ fuzz_target!(|data: &[u8]| {
     };
     let print = supplement == MountSupplement::Print;
     let table = resolve_table(&rows, &MountRequest { exempt, supplement }, &quiet);
-    let printed = table.supplement_out.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
-    assert_eq!(printed, if print { table.entries.len() } else { 0 }, "{table:?}");
+    let printed = table
+        .supplement_out
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    if print {
+        assert!(
+            printed >= table.entries.len() && printed <= rows.len(),
+            "{printed} lines printed: {table:?}"
+        );
+    } else {
+        assert_eq!(printed, 0, "{table:?}");
+    }
     assert!(table.entries.len() <= 1, "{table:?}");
     assert!(table.entries.iter().all(|m| m.device.is_none()), "{table:?}");
     assert!(table.has_nfs <= 2);

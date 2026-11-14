@@ -104,7 +104,7 @@ fn at_secure(auxv: &[u8]) -> bool {
 }
 
 /// Whether this process runs in secure-execution mode, as its auxiliary
-/// vector says ([`at_secure`]; a vector that cannot be read says it does).
+/// vector says (`at_secure`; a vector that cannot be read says it does).
 pub fn secure_execution() -> bool {
     at_secure(&lsof_core::netnames::small_file(Path::new(AUXV), 1 << 16))
 }

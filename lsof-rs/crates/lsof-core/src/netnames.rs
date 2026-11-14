@@ -442,8 +442,13 @@ pub enum NssAnswer<T> {
     Success(T),
     /// `NSS_STATUS_NOTFOUND`.
     NotFound,
-    /// `NSS_STATUS_UNAVAIL`: its file cannot be opened.
+    /// `NSS_STATUS_UNAVAIL`: its file cannot be opened; or, from DNS, an
+    /// answer that cannot be read.
     Unavail,
+    /// `NSS_STATUS_TRYAGAIN`: from DNS, an answer whose records hold no PTR
+    /// at the name asked for (measured: `[TRYAGAIN=return]` ends the walk
+    /// there, `[NOTFOUND=return]` does not).
+    TryAgain,
 }
 
 impl<T> NssAnswer<T> {
@@ -451,7 +456,7 @@ impl<T> NssAnswer<T> {
     pub fn found(self) -> Option<T> {
         match self {
             NssAnswer::Success(found) => Some(found),
-            NssAnswer::NotFound | NssAnswer::Unavail => None,
+            NssAnswer::NotFound | NssAnswer::Unavail | NssAnswer::TryAgain => None,
         }
     }
 }
@@ -490,6 +495,7 @@ pub fn nss_walk<T>(
             NssAnswer::Success(_) => NssStatus::Success,
             NssAnswer::NotFound => NssStatus::NotFound,
             NssAnswer::Unavail => NssStatus::Unavail,
+            NssAnswer::TryAgain => NssStatus::TryAgain,
         };
         let action = source.on(status);
         result = match answer {
@@ -600,6 +606,23 @@ pub fn numeric_host(name: &[u8], v6: bool) -> Option<Option<IpAddr>> {
 /// with anything but a `/` or the line's end after it, is skipped. Each
 /// measured against glibc 2.39's `getservbyname()`.
 fn services_line(line: &[u8], name: &[u8], protocol: &[u8]) -> Option<u16> {
+    let (first, port, proto, aliases) = services_fields(line)?;
+    if proto != protocol {
+        return None;
+    }
+    if first != name && !words(aliases).any(|a| a == name) {
+        return None;
+    }
+    Some(port)
+}
+
+/// A services line as glibc's parser reads it: its name, port, protocol
+/// and the rest (its aliases).
+type ServicesFields<'a> = (&'a [u8], u16, &'a [u8], &'a [u8]);
+
+/// A services line's fields ([`ServicesFields`]), by [`services_line`]'s
+/// rules: `None` for a line glibc's parser skips.
+fn services_fields(line: &[u8]) -> Option<ServicesFields<'_>> {
     let line = files_line(line)?;
     let (first, rest) = string_field(line);
     let (value, used) = strtoul0(rest)?;
@@ -612,19 +635,14 @@ fn services_line(line: &[u8], name: &[u8], protocol: &[u8]) -> Option<u16> {
         Some(_) => return None,
         None => rest,
     };
-    let (proto, aliases) = string_field(rest);
-    if proto != protocol {
-        return None;
-    }
-    if first != name && !words(aliases).any(|a| a == name) {
-        return None;
-    }
     // Past 32 bits the line is refused (`-1` too, which `strtoul()` wraps);
     // within them the port is the low 16, as `htons()` keeps it.
     if value > u64::from(u32::MAX) {
         return None;
     }
-    u16::try_from(value & 0xffff).ok()
+    let port = u16::try_from(value & 0xffff).ok()?;
+    let (proto, aliases) = string_field(rest);
+    Some((first, port, proto, aliases))
 }
 
 /// `strtoul(s, &end, 0)` on a 64-bit `long`: the value and how many bytes
@@ -996,6 +1014,7 @@ pub fn glibc_host(
             NssAnswer::Success(found) => (NssStatus::Success, found),
             NssAnswer::NotFound => (NssStatus::NotFound, Vec::new()),
             NssAnswer::Unavail => (NssStatus::Unavail, Vec::new()),
+            NssAnswer::TryAgain => (NssStatus::TryAgain, Vec::new()),
         };
         match (status, first.on(status)) {
             (NssStatus::Success, NssAction::Merge) => return Vec::new(),
@@ -1062,7 +1081,7 @@ fn hosts_line_name(line: &[u8], ip: IpAddr) -> Option<&[u8]> {
 }
 
 /// `ip`'s name in the hosts file at `path`: the first line that gives it
-/// ([`hosts_line_name`]), at most [`NAME_KEPT`] bytes of it.
+/// (`hosts_line_name`), at most [`NAME_KEPT`] bytes of it.
 pub fn host_by_addr_in_file(path: &std::path::Path, ip: IpAddr) -> NssAnswer<Vec<u8>> {
     let mut found = None;
     let read = file_lines(path, |line| {
@@ -1090,23 +1109,7 @@ pub struct ServiceEntry {
 /// One line of a services file read by glibc's `files` parser, whatever
 /// it names: [`services_line`]'s rules.
 fn services_entry(line: &[u8]) -> Option<(&[u8], u16, &[u8])> {
-    let line = files_line(line)?;
-    let (first, rest) = string_field(line);
-    let (value, used) = strtoul0(rest)?;
-    let rest = rest.get(used..)?;
-    let rest = match rest.first() {
-        Some(b'/') => {
-            let skip = rest.iter().position(|&b| b != b'/').unwrap_or(rest.len());
-            rest.get(skip..)?
-        }
-        Some(_) => return None,
-        None => rest,
-    };
-    if value > u64::from(u32::MAX) {
-        return None;
-    }
-    let port = u16::try_from(value & 0xffff).ok()?;
-    Some((first, port, string_field(rest).0))
+    services_fields(line).map(|(name, port, protocol, _)| (name, port, protocol))
 }
 
 /// `getservbyport(htons(port), protocol)` of the services file at `path`:
@@ -1178,6 +1181,7 @@ pub fn glibc_host_by_addr(
             NssAnswer::Success(name) => NssAnswer::Success(name.into_bytes()),
             NssAnswer::NotFound => NssAnswer::NotFound,
             NssAnswer::Unavail => NssAnswer::Unavail,
+            NssAnswer::TryAgain => NssAnswer::TryAgain,
         }),
         _ => None,
     })
@@ -2294,6 +2298,16 @@ last 19/tcp";
         );
         std::fs::write(&nss, "hosts: dns [NOTFOUND=return] files\n").unwrap();
         assert_eq!(by_addr("127.0.0.2", NssAnswer::NotFound), None);
+        // DNS's TRYAGAIN and UNAVAIL go on to the file there (measured).
+        for answer in [NssAnswer::TryAgain, NssAnswer::Unavail] {
+            assert_eq!(by_addr("127.0.0.2", answer).as_deref(), Some("two"));
+        }
+        std::fs::write(&nss, "hosts: dns [TRYAGAIN=return] files\n").unwrap();
+        assert_eq!(by_addr("127.0.0.2", NssAnswer::TryAgain), None);
+        assert_eq!(
+            by_addr("127.0.0.2", NssAnswer::Unavail).as_deref(),
+            Some("two")
+        );
         std::fs::write(&nss, "hosts: files\n").unwrap();
         asked.borrow_mut().clear();
         assert_eq!(by_addr("127.0.0.3", found()), None);

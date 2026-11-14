@@ -1385,6 +1385,10 @@ NAMES_HOSTS = (
     # Fixture NS's 127.53.0.9, named past what the C's NAME buffer holds
     # (`MAXPATHLEN + 1`): its NAME is none at all (DIVERGENCES 154).
     "127.53.0.9 " + "h" * 4200 + "\n"
+    # Fixture NS's 127.53.0.5 and .6, whose DNS answers are glibc's
+    # TRYAGAIN and UNAVAIL ([`NAMES_PTR`]).
+    "127.53.0.5 files-five\n"
+    "127.53.0.6 files-six\n"
 )
 # No name server answers a name: the one named is this harness's own
 # ([`NamesResolver`]), bound to a loopback address nothing else has a
@@ -1435,12 +1439,17 @@ NAMES_FILES = ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf", "h
 # What the names modes' name server says of fixture NS's remote addresses
 # (DIVERGENCES 154): a PTR record; NXDOMAIN; nothing at all, so that a
 # lookup waits its `timeout:1`; a PTR record whose name holds an ESC, which
-# glibc writes `\027` and both print escaped again; anything else, REFUSED.
+# glibc writes `\027` and both print escaped again; an A record and no PTR,
+# glibc's TRYAGAIN; a CNAME whose data points at the header, which glibc
+# cannot read, its UNAVAIL (the hosts file names both, so the `dnsreturn`
+# walk shows they are no NOTFOUND); anything else, REFUSED.
 NAMES_PTR = {
     "1.0.53.127.in-addr.arpa": b"\x07ns-name\x07example\x00",
     "2.0.53.127.in-addr.arpa": "NXDOMAIN",
     "3.0.53.127.in-addr.arpa": None,
     "4.0.53.127.in-addr.arpa": b"\x08esc\x1b[31m\x07example\x00",
+    "5.0.53.127.in-addr.arpa": ("A", b"\x01\x02\x03\x04"),
+    "6.0.53.127.in-addr.arpa": ("CNAME", b"\xc0\x00"),
 }
 
 
@@ -1502,7 +1511,11 @@ class NamesResolver:
         head = query[:2] + bytes([0x81 | (query[2] & 0x01), 0x80])
         if what == "NXDOMAIN":
             return head[:3] + b"\x83" + query[4:6] + b"\0" * 6 + query[12:end]
-        record = b"\xc0\x0c\0\x0c\0\x01\0\0\0\x3c" + len(what).to_bytes(2, "big") + what
+        rtype = 12
+        if isinstance(what, tuple):
+            rtype = {"A": 1, "CNAME": 5}[what[0]]
+            what = what[1]
+        record = b"\xc0\x0c\0" + bytes([rtype]) + b"\0\x01\0\0\0\x3c" + len(what).to_bytes(2, "big") + what
         return head + query[4:6] + b"\0\x01\0\0\0\0" + query[12:end] + record
 
     def serve(self):
@@ -1892,9 +1905,10 @@ def names_socket_holder(work: str) -> Fixture:
     ports published (the services file names the first for TCP, the second
     for TCP alone), and a UDP socket connected to each address the names
     modes' name server answers its own way ([`NAMES_PTR`]): 127.53.0.1 (a
-    PTR record), .2 (NXDOMAIN), .3 (no reply), .4 (a name with an ESC), .9
-    (which the hosts file names past the C's NAME buffer), and to 127.0.0.2,
-    which it names `r38other`. All on `lo`."""
+    PTR record), .2 (NXDOMAIN), .3 (no reply), .4 (a name with an ESC), .5
+    and .6 (an answer with no PTR, and one glibc cannot read: the hosts file
+    names both), .9 (which the hosts file names past the C's NAME buffer),
+    and to 127.0.0.2, which it names `r38other`. All on `lo`."""
     ndir = os.path.join(work, "names-sockets")
     os.makedirs(ndir)
     py = (
@@ -1902,22 +1916,24 @@ def names_socket_holder(work: str) -> Fixture:
         "t=socket.socket(); t.bind(('127.0.0.1',0)); t.listen(1)\n"
         "u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); u.bind(('127.0.0.1',0))\n"
         "c=[]\n"
-        "for a in ('127.53.0.1','127.53.0.2','127.53.0.3','127.53.0.4','127.0.0.2','127.53.0.9'):\n"
+        "for a in ('127.53.0.1','127.53.0.2','127.53.0.3','127.53.0.4','127.53.0.5','127.53.0.6','127.0.0.2','127.53.0.9'):\n"
         "    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((a,9)); c.append(s)\n"
         "open(os.path.join(%r,'ports.tmp'),'w').write('%%d %%d' %% (t.getsockname()[1],u.getsockname()[1]))\n"
         "os.rename(os.path.join(%r,'ports.tmp'),os.path.join(%r,'ports'))\n"
         "time.sleep(600)\n" % (ndir, ndir, ndir)
     )
-    return Fixture("NS(names)", [sys.executable, "-c", py], cwd=ndir, expect_fds=11)
+    return Fixture("NS(names)", [sys.executable, "-c", py], cwd=ndir, expect_fds=13)
 
 
 # A mount supplement file each, for the `+m m` cases (DIVERGENCES 153): its
 # lines, in the C's format; another with one of each line the C complains
-# of; another that gives one directory two devices.
+# of; another that gives one directory two devices; an empty one, which the
+# C dies on (ledgered).
 SUPPLEMENTS = {
     "sup-part": "/proc 0x15\n/dev 0x6\n",
     "sup-bad": "proc 0x15\n/dev 15\n/x 0x15 \n/y 0xG\n/ok 0x1\n",
     "sup-dup": "/proc 0x15\n/proc 0x16\n/dev 0x6\n",
+    "sup-empty": "",
 }
 
 
@@ -3850,6 +3866,7 @@ def run(args) -> int:
                 "SUPPART": supplements["sup-part"],
                 "SUPBAD": supplements["sup-bad"],
                 "SUPDUP": supplements["sup-dup"],
+                "SUPEMPTY": supplements["sup-empty"],
                 "NFS": str(nfsfiles.pid),
                 "NFSDIR": nfsfiles.cwd,
                 "B": str(b.pid),

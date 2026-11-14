@@ -501,7 +501,11 @@ pub fn read_zone_file(path: &std::path::Path) -> Option<Vec<u8>> {
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, crate::safefs::NONBLOCK);
+    let file = open.open(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
@@ -1204,9 +1208,9 @@ fn format_into(out: &mut Out<'_>, format: &[u8], tm: &Tm, epoch: i64, depth: u8)
     true
 }
 
-/// `-r m<fmt>`'s marker, as `main.c` makes it: a buffer of `(len + 1) * 8
-/// + 1` bytes the format is written into at the option and again at each
-/// cycle, and printed up to its first NUL.
+/// `-r m<fmt>`'s marker, as `main.c` makes it: a buffer of
+/// `(len + 1) * 8 + 1` bytes the format is written into at the option and
+/// again at each cycle, and printed up to its first NUL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Marker {
     format: Vec<u8>,
@@ -1293,27 +1297,16 @@ mod tests {
             .collect()
     }
 
-    /// Every line of the file `LSOF_TZ_VECTORS` names is one call glibc
-    /// answered, made by the helper this module was measured with:
-    /// `TZ`, `TZDIR` (or `-`), the second, the buffer's size, the format
-    /// in hex, then what `strftime` returned, the buffer up to its NUL in
-    /// hex, `tm_gmtoff`, `tm_isdst` and `tm_zone` in hex. With no such
-    /// variable there is nothing to compare, and the fixed vectors below
-    /// are the test.
-    #[test]
-    #[cfg_attr(miri, ignore = "reads the host's zone files")]
-    fn glibc_vectors_from_a_file() {
-        let Some(path) = std::env::var_os("LSOF_TZ_VECTORS") else {
-            return;
-        };
-        let text = std::fs::read_to_string(path).expect("the vectors file");
-        let mut read = |path: &[u8]| {
-            let path = String::from_utf8_lossy(path).into_owned();
-            let meta = std::fs::metadata(&path).ok()?;
-            (meta.is_file() && meta.len() <= TZIF_MAX_BYTES)
-                .then(|| std::fs::read(&path).ok())
-                .flatten()
-        };
+    /// One line a call glibc 2.39 answered, made by the helper this module
+    /// was measured with: `TZ`, `TZDIR` (or `-`), the second, the buffer's
+    /// size, the format in hex, then what `strftime` returned, the buffer up
+    /// to its NUL in hex, `tm_gmtoff`, `tm_isdst` and `tm_zone` in hex.
+    /// Each is asked again here, its zone read through `read`; what
+    /// differs is returned, with how many lines were asked.
+    fn check_vectors(
+        text: &str,
+        read: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+    ) -> (usize, Vec<String>) {
         let mut zones: std::collections::HashMap<(String, String), Zone> = Default::default();
         let mut bad = Vec::new();
         let mut count = 0usize;
@@ -1327,7 +1320,7 @@ mod tests {
                 .or_insert_with(|| {
                     let tz = (tz != "-").then(|| hex(tz));
                     let tzdir = (tzdir != "-").then(|| hex(tzdir));
-                    Zone::from_env(tz.as_deref(), tzdir.as_deref(), false, &mut read)
+                    Zone::from_env(tz.as_deref(), tzdir.as_deref(), false, &mut *read)
                 });
             let epoch: i64 = epoch.parse().unwrap();
             let size: usize = size.parse().unwrap();
@@ -1364,6 +1357,10 @@ mod tests {
                 ));
             }
         }
+        (count, bad)
+    }
+
+    fn assert_none_differ(count: usize, bad: &[String]) {
         assert!(
             bad.is_empty(),
             "{} of {count} differ:\n{}",
@@ -1374,5 +1371,70 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+    }
+
+    /// 754 calls glibc answered, kept with this module
+    /// (`tests/timefmt_glibc.txt`): 694 of the 118,516 it was measured
+    /// with (every conversion with no flag in UTC and formats at random, six
+    /// seconds each of 64 `TZ` rule strings that name no zone file, six each
+    /// of 16 crafted zone files, `tests/tzif/`, named `/craft/NAME`:
+    /// versions 1 to 4, a footer of each shape, leap seconds, counts past the
+    /// file, no file at all), and 60 around February 29 under four `Jn` and
+    /// `n` rules. No file of the host is read, so it runs anywhere, miri too.
+    #[test]
+    fn glibc_vectors_kept_with_the_code() {
+        let mut read = |path: &[u8]| -> Option<Vec<u8>> {
+            let bytes: &[u8] = match path {
+                b"/craft/v1only" => include_bytes!("../tests/tzif/v1only").as_slice(),
+                b"/craft/v1as2" => include_bytes!("../tests/tzif/v1as2").as_slice(),
+                b"/craft/onetype" => include_bytes!("../tests/tzif/onetype").as_slice(),
+                b"/craft/onetype_dst" => include_bytes!("../tests/tzif/onetype_dst").as_slice(),
+                b"/craft/onetype_foot" => include_bytes!("../tests/tzif/onetype_foot").as_slice(),
+                b"/craft/leap" => include_bytes!("../tests/tzif/leap").as_slice(),
+                b"/craft/nonul" => include_bytes!("../tests/tzif/nonul").as_slice(),
+                b"/craft/hugecount" => include_bytes!("../tests/tzif/hugecount").as_slice(),
+                b"/craft/isstdbig" => include_bytes!("../tests/tzif/isstdbig").as_slice(),
+                b"/craft/trunc" => include_bytes!("../tests/tzif/trunc").as_slice(),
+                b"/craft/trunc2" => include_bytes!("../tests/tzif/trunc2").as_slice(),
+                b"/craft/empty" => include_bytes!("../tests/tzif/empty").as_slice(),
+                b"/craft/hdr" => include_bytes!("../tests/tzif/hdr").as_slice(),
+                b"/craft/badmagic" => include_bytes!("../tests/tzif/badmagic").as_slice(),
+                b"/craft/ver4" => include_bytes!("../tests/tzif/ver4").as_slice(),
+                b"/craft/footer_x" => include_bytes!("../tests/tzif/footer_x").as_slice(),
+                _ => return None,
+            };
+            Some(bytes.to_vec())
+        };
+        // Under miri a line in five, 151: each call costs about a fifth of a
+        // second there, and 694 of them took 148 s of the job (measured).
+        let text: String = include_str!("../tests/timefmt_glibc.txt")
+            .lines()
+            .step_by(if cfg!(miri) { 5 } else { 1 })
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let (count, bad) = check_vectors(&text, &mut read);
+        assert_eq!(count, if cfg!(miri) { 151 } else { 754 });
+        assert_none_differ(count, &bad);
+    }
+
+    /// Every line of the file `LSOF_TZ_VECTORS` names ([`check_vectors`]'s
+    /// lines), read with the host's zone files: the whole measurement, where
+    /// the helper's output is at hand.
+    #[test]
+    #[cfg_attr(miri, ignore = "reads the host's zone files")]
+    fn glibc_vectors_from_a_file() {
+        let Some(path) = std::env::var_os("LSOF_TZ_VECTORS") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).expect("the vectors file");
+        let mut read = |path: &[u8]| {
+            let path = String::from_utf8_lossy(path).into_owned();
+            let meta = std::fs::metadata(&path).ok()?;
+            (meta.is_file() && meta.len() <= TZIF_MAX_BYTES)
+                .then(|| std::fs::read(&path).ok())
+                .flatten()
+        };
+        let (count, bad) = check_vectors(&text, &mut read);
+        assert_none_differ(count, &bad);
     }
 }

@@ -72,7 +72,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-L [l]` | out | ✅ shipped (5A) | **No link count column** — the default; `-L` takes no count. Shipped reading `-L` as "show the column", which is `+L`'s meaning; corrected 2026-09-26 (DIVERGENCES 41). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
 | `+L [l]` | sel | ✅ shipped (5A) | **The link count column**, and with `l`, also select files whose link count is known and < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too). A row with no count (a socket, a pipe) is never selected (DIVERGENCES 42). |
 | `-m m` | misc | ❌ N/A | The kernel memory file; the Linux C's `-m not supported`, as lsof-rs's |
-| `+m [m]` | misc | ❌ N/A on Windows; ✅ Linux 2026-11-14 | The C's mount supplement: `+m` prints the table (`DIR 0xDEV`) and exits 0; `+m m` reads such a file for the mounts not `stat`ed (DIVERGENCES 153). Elsewhere `+m not supported`, as the FreeBSD C says |
+| `+m [m]` | misc | ❌ N/A on Windows; ✅ Linux 2026-11-14 | The C's mount supplement: `+m` prints the table (`DIR 0xDEV`) and exits 0; `+m m` reads such a file for the mounts not `stat`ed (DIVERGENCES 153). Elsewhere `+m not supported`, the FreeBSD C's words by its source (`HASMOPT` without `HASMNTSUP`; unmeasured) |
 | `+|-M` | misc | ❌ N/A | Portmapper — Unix RPC |
 | `-n` | out | ✅ shipped | No host name resolution; `+n` turns it back on, the last winning. On Linux since 2026-11-14 hosts are named by default as the C names them, from `/etc/hosts` and DNS (DIVERGENCES 154) |
 | `-N` | sel | ❌ N/A on Windows; ✅ Linux 2026-09-20 | NFS-file listing (DIVERGENCES 28) |
@@ -162,7 +162,7 @@ character: A`, and the parse reads on to report every such letter; `-D` is
 `lsof: unsupported option: -D` and `-m` is `lsof: -m not supported`, each
 taking its value word as the C does; `+m` is the Linux C's mount supplement
 since 2026-11-14 (DIVERGENCES 153), and elsewhere `lsof: +m not supported`,
-as the FreeBSD C says. The run exits 1 in every case. (This list once also held `-e`,
+the FreeBSD C's words by its source (unmeasured). The run exits 1 in every case. (This list once also held `-e`,
 `-f/+f`, `-H`, `-N`, `-x`, `-X` and `-Z`; see the note at the top; and `-b`
 and `-S`, until 2026-10-09.)
 

@@ -13,7 +13,9 @@ fuzz_target!(|data: &[u8]| {
     let first = data.first().map_or(0, |&b| usize::from(b));
     for warn in [true, false] {
         let mut said = Vec::new();
-        let got = parse_supplement(data, b"F\x1b", first, warn, &mut |l: &str| said.push(l.to_string()));
+        let got = parse_supplement(data, b"F\x1b", first, warn, &mut |l: &str| {
+            said.push(l.to_string())
+        });
         for line in &said {
             assert!(!line.chars().any(char::is_control), "{line:?}");
         }

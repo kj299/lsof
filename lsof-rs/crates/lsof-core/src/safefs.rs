@@ -213,6 +213,7 @@ mod sys {
     pub const ENAMETOOLONG: i32 = 36;
     pub const ETIMEDOUT: i32 = 110;
     pub const O_PATH: i32 = 0o10_000_000;
+    pub const O_NONBLOCK: i32 = 0o4000;
     #[cfg(any(
         target_arch = "aarch64",
         target_arch = "arm",
@@ -253,8 +254,16 @@ mod sys {
     #[cfg(unix)]
     pub const O_PATH: i32 = 0;
     #[cfg(unix)]
+    pub const O_NONBLOCK: i32 = 0;
+    #[cfg(unix)]
     pub const O_NOFOLLOW: i32 = 0;
 }
+
+/// `O_NONBLOCK` where its value is known (0 elsewhere): a file opened to be
+/// read whole is opened with it, so that a FIFO put where a regular file
+/// was looked at cannot hold the open, which the read then refuses.
+#[cfg(unix)]
+pub(crate) const NONBLOCK: i32 = sys::O_NONBLOCK;
 
 /// `errno` as an error, so that `strerror()`'s words are the C library's,
 /// byte for byte the C's; where the number was not checked, those words.

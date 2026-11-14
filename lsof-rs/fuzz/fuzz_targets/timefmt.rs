@@ -15,7 +15,11 @@ fuzz_target!(|data: &[u8]| {
     let head = parts.next().unwrap_or_default();
     let rest = parts.next().unwrap_or_default();
     let t = i64::from_le_bytes(
-        head.iter().copied().chain(std::iter::repeat(0)).take(8).collect::<Vec<u8>>()[..8]
+        head.iter()
+            .copied()
+            .chain(std::iter::repeat(0))
+            .take(8)
+            .collect::<Vec<u8>>()[..8]
             .try_into()
             .unwrap_or([0; 8]),
     ) >> 16;
@@ -24,10 +28,14 @@ fuzz_target!(|data: &[u8]| {
         TzFile::parse(rest).map(|f| Zone::File(Box::new(f))),
         Some(Zone::Rules(PosixTz::parse(rest))),
         Some(Zone::Rules(PosixTz::parse(head))),
-        Some(Zone::from_env(Some(rest), Some(head), false, &mut |_| Some(rest.to_vec()))),
+        Some(Zone::from_env(Some(rest), Some(head), false, &mut |_| {
+            Some(rest.to_vec())
+        })),
     ];
     for zone in zones.into_iter().flatten() {
-        let Some(tm) = zone.localtime(t) else { continue };
+        let Some(tm) = zone.localtime(t) else {
+            continue;
+        };
         for size in [0usize, 1, 7, 64, 1024] {
             let mut buf = vec![0xa5u8; size];
             let n = strftime(&mut buf, format, &tm, t);

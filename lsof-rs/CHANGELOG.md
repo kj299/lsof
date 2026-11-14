@@ -20,8 +20,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   a run (across `-r`'s cycles too), in print order, under
   `/etc/resolv.conf`'s and `RES_OPTIONS`' `timeout` and `attempts`, so a
   name server that does not answer costs each such address what it costs
-  the C (with glibc's defaults, 10 s an address for one name server that
-  does not answer, 20 s for two). `-n` keeps
+  the C (by the rule measured, at glibc's defaults 10 s an address for one
+  name server that does not answer and 20 s for two; measured, 10.04 s for
+  three at `timeout:2`). `-n` keeps
   hosts numeric and asks nothing, `-P` keeps ports numeric, and `+n`/`+P`
   turn names back on, the last of each winning; `-n -P` is the old output
   exactly. Nothing is asked for a row that prints no NAME: `-t`, `-F`
@@ -197,9 +198,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   -W` the `W` line and then `-o and -s are mutually exclusive`). `-D` and
   `-m`, which lsof-rs does not implement, read on the same way, each taking
   its value word as the C's does, and `-m` says `-m not supported`, the C's
-  words on Linux. `+n`, `+P`, `+r` and `+m`, `+` spellings of options the C
-  has and lsof-rs does not, still end the parse with `unsupported option`,
-  the rest of the word unread. A `--` after `-D` or `-m` ends the options,
+  words on Linux. (`+n`, `+P`, `+r` and `+m`, which had still ended the
+  parse with `unsupported option`, are options now: Added, below.) A `--`
+  after `-D` or `-m` ends the options,
   as the C's does, rather than being taken as their value. The lines are
   kept a byte a letter until printed, so a long argument list of unknown
   letters costs about its own size.
@@ -246,8 +247,13 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   server; a TCP fallback, which glibc waits on without a limit, has the
   same server's datagram deadline. Fuzzed (`dns_reply`). No new crate.
 - A mount supplement file (`+m m`) is read only if it is a regular file,
-  at most 16 MiB of it, and what it says of a bad line is escaped where the
-  C prints the line raw (`mount_supplement` fuzz target).
+  at most 16 MiB of it, opened without blocking, and a FIFO or a device is
+  never opened (measured: the C's `fopen()` waits on a FIFO for a writer,
+  and an empty file or `/dev/null` kills the C, exit 139, where lsof-rs
+  reads no mount from it); what it says of a bad line is escaped where the
+  C prints the line raw (`mount_supplement` fuzz target). A `TZ` zone file
+  for `-r m<fmt>` is read the same way, a regular file of at most 1 MiB
+  (`timefmt` fuzz target).
 - `rustix` moves from =1.1.5 to =1.1.6 for RUSTSEC-2026-0486: the xattr
   functions marked unwritten bytes as initialized when given a zero-length
   buffer. lsof-rs's one `getxattr` call passes a fixed 32-byte buffer and
@@ -270,7 +276,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
     whole file once, and remember a port none was found for under either
     protocol (measured: a TCP socket on a port the file names for UDP alone
     makes a later UDP socket on it print the number). UDP-Lite's ports, as
-    in the C, are numbers.
+    in the C, are numbers. A DNS reply whose records hold no PTR is glibc's
+    `TRYAGAIN` and one it cannot read its `UNAVAIL`, so `hosts: dns
+    [NOTFOUND=return] files` goes on to the hosts file past either, as
+    glibc's walk does (measured).
   * `+r [t[c<N>][m<fmt>]]` repeats until a cycle lists nothing, and exits 1
     where none listed anything (`+r0` lists once and exits 1, as the C
     does); `-r` and `+r` take `c<N>`, a count, and `m<fmt>`, a marker

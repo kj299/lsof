@@ -2458,6 +2458,55 @@ mod tests {
     use super::*;
     use crate::mock;
 
+    /// A search item one cycle of `-r` located stays located: the C sets
+    /// its `f` and never clears it, and reports once after the loop
+    /// (measured: `+r 1 -p P -V`, P gone after two cycles, says nothing).
+    #[test]
+    fn what_any_cycle_located_stays_located() {
+        let item = |v: bool| vec![v, !v];
+        let cycle = |v: bool| Located {
+            pids: item(v),
+            pgids: item(v),
+            uids: item(v),
+            users: item(v),
+            commands: item(v),
+            command_regexes: item(v),
+            inet: item(v),
+            inet_all: v,
+            nfs: v,
+            states: item(v),
+            tasks: v,
+            paths: item(v),
+        };
+        let every = |l: &Located| {
+            [
+                &l.pids,
+                &l.pgids,
+                &l.uids,
+                &l.users,
+                &l.commands,
+                &l.command_regexes,
+                &l.inet,
+                &l.states,
+                &l.paths,
+            ]
+            .iter()
+            .all(|v| v.as_slice() == [true, true])
+                && l.inet_all
+                && l.nfs
+                && l.tasks
+        };
+        let mut all = cycle(true);
+        all.merge(&cycle(false));
+        assert!(every(&all), "{all:?}");
+        let mut all = cycle(false);
+        all.merge(&cycle(true));
+        assert!(every(&all), "{all:?}");
+        // A later cycle that locates nothing unmarks nothing.
+        all.merge(&Located::default());
+        assert!(every(&all), "{all:?}");
+    }
+
     /// `-c` compares bytes: a needle that is not UTF-8 matches a command
     /// whose bytes begin with it, the raw bytes where the command is not
     /// UTF-8, and a needle cut inside a character a command that is.
