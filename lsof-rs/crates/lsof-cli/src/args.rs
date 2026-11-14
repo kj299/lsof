@@ -35,7 +35,7 @@ pub enum Action {
     Run {
         selection: Selection,
         format: Format,
-        repeat: Option<u64>,
+        repeat: Repeat,
         columns: Columns,
         /// The mount table, when the parse read it: at the first `+d`/`+D`,
         /// or for the `-e` check, where the C reads it ([`parse_with`]).
@@ -131,6 +131,10 @@ pub struct HostChecks<'a> {
     /// An `-i :name`'s port for a protocol, the C's `getservbyname()`
     /// ([`lsof_core::Backend::lookup_service`]).
     pub lookup_service: &'a dyn Fn(&[u8], &str) -> Option<u16>,
+    /// Whether `-r m<fmt>`'s format gives a marker now, in the run's time
+    /// zone: the C tries it with `strftime(3)` where it reads the option
+    /// (`illegal <fmt>`, `main.c:825`).
+    pub marker_ok: &'a dyn Fn(&[u8]) -> bool,
 }
 
 impl HostChecks<'static> {
@@ -145,7 +149,15 @@ impl HostChecks<'static> {
         identifies_paths: &walk_deferred,
         lookup_host: &no_host,
         lookup_service: &no_service,
+        marker_ok: &marker_in_utc,
     };
+}
+
+/// [`HostChecks::DEFERRED`]'s marker check: the format at the epoch, in
+/// UTC, so that it asks no clock and reads no zone file.
+fn marker_in_utc(format: &[u8]) -> bool {
+    use lsof_core::timefmt::{Marker, PosixTz, Zone};
+    Marker::new(format, &Zone::Rules(PosixTz::utc(b"UTC")), 0).is_some()
 }
 
 /// [`HostChecks::DEFERRED`]'s host lookup: no name is known, and no
@@ -324,6 +336,81 @@ fn digits_value(digits: &str) -> usize {
     digits.bytes().fold(0usize, |n, b| {
         n.saturating_mul(10).saturating_add(usize::from(b - b'0'))
     })
+}
+
+/// `-r`'s delay where it gives none: the C's `RPTTM`.
+pub const RPTTM: u64 = 15;
+
+/// `-r` and `+r` as the options left them (the C's `RptTm`, `RptMaxCount`,
+/// `rc` and `fmt`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Repeat {
+    /// Seconds between cycles; 0 is one cycle and no marker (`-r0`, and no
+    /// `-r` at all).
+    pub delay: u64,
+    /// `c<N>`: the cycles after which the run ends; 0 is no such end.
+    pub count: u64,
+    /// `+r`: the run ends at the first cycle that lists nothing, and exits 1
+    /// if none listed anything.
+    pub until_idle: bool,
+    /// `m<fmt>`: the marker's `strftime(3)` format, tried when it was read.
+    pub marker: Option<Vec<u8>>,
+}
+
+/// What follows the delay and the count in `-r`'s value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepeatRest {
+    /// Nothing: the value was the delay's digits, or empty.
+    End,
+    /// `m<fmt>`: the format begins this many bytes into the value.
+    Marker(usize),
+    /// Anything else: the value past this many digits is read again as
+    /// option letters.
+    Letters(usize),
+}
+
+/// `-r`'s value as the C reads it (`main.c:779-805`).
+struct RepeatValue {
+    delay: u64,
+    count: Option<u64>,
+    rest: RepeatRest,
+}
+
+/// The delay's digits, 15 with none; then, past any spaces, `c` and the
+/// count's digits (`c` alone is 0, no count); then `m` and the format, or
+/// whatever else, which is given back from after the delay's digits, count
+/// and all. Both numbers saturate, where the C's `int` wraps
+/// ([`digits_value`]).
+fn repeat_value(value: &str) -> RepeatValue {
+    let bytes = value.as_bytes();
+    let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    let number = |from: usize, len: usize| {
+        value
+            .get(from..from + len)
+            .map_or(0, |d| digits_value(d) as u64)
+    };
+    let delay = if digits > 0 { number(0, digits) } else { RPTTM };
+    if digits == bytes.len() {
+        return RepeatValue {
+            delay,
+            count: None,
+            rest: RepeatRest::End,
+        };
+    }
+    let mut at = digits + bytes[digits..].iter().take_while(|&&b| b == b' ').count();
+    let mut count = None;
+    if bytes.get(at) == Some(&b'c') {
+        at += 1;
+        let len = bytes[at..].iter().take_while(|b| b.is_ascii_digit()).count();
+        count = Some(number(at, len));
+        at += len;
+    }
+    let rest = if bytes.get(at) == Some(&b'm') {
+        RepeatRest::Marker(at + 1)
+    } else {
+        RepeatRest::Letters(digits)
+    };
+    RepeatValue { delay, count, rest }
 }
 
 /// `-o`'s digits as the C's `main.c` sums them: `i = (i * 10) + digit` in an
@@ -844,7 +931,7 @@ fn parse_options<'s>(
     let mut fields_given = false;
     let mut json_doc = false;
     let mut json_lines = false;
-    let mut repeat: Option<u64> = None;
+    let mut repeat = Repeat::default();
     let mut columns = Columns::default();
     // Every `-s TCP:` state, across all the `-s` options: the C's tables are
     // global, so two `-s` make one filter (lsof-rs kept the last one).
@@ -1031,7 +1118,7 @@ fn parse_options<'s>(
                 // Linux, measured), which lsof-rs does not write: refused
                 // here, before `-m`'s arm below could read the rest of the
                 // word as letters (`+mfoo` as `-f -o -o`).
-                'n' | 'P' | 'r' | 'm' if plus => {
+                'n' | 'P' | 'm' if plus => {
                     return Err(quoting("unsupported option: +", &c.to_string()))
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
@@ -1151,28 +1238,77 @@ fn parse_options<'s>(
                     sel.omit_unreadable = true;
                 }
                 'r' => {
-                    // `-r [t]`: the delay is attached or the next word, and a
-                    // word that opens an option is not one (`main.c`) — so
-                    // `lsof -r 2 -p P` repeats every two seconds. lsof-rs had
-                    // taken only an attached delay, and looked for a file
-                    // called `2`. Only the leading digits are the delay; the C
-                    // then reads `c<count>` and `m<format>`, which lsof-rs
-                    // refuses rather than half-reads, and gives anything else
-                    // back as options, the way `-o` does.
-                    if let Some((word, _)) = value_word(&chars, j, &args, i) {
-                        let digits = word.chars().take_while(char::is_ascii_digit).count();
-                        if word[digits..]
-                            .trim_start_matches(' ')
-                            .starts_with(['c', 'm'])
-                        {
-                            return Err(format!(
-                                "-r {}: a repeat count (c) and marker format (m) are not supported",
-                                shown(&word)
-                            ));
+                    // `-r [t[c<N>][m<fmt>]]` and `+r`, read as `main.c:766-837`
+                    // reads them ([`repeat_value`]): the value is attached or
+                    // the next word, and a word that opens an option is not
+                    // one. `+` repeats until a cycle lists nothing (the C's
+                    // `rc`), and stays set whatever `-r` follows.
+                    if plus {
+                        repeat.until_idle = true;
+                    }
+                    let Some((value, next)) = value_word(&chars, j, &args, i) else {
+                        repeat.delay = RPTTM;
+                        j = past_value(&chars, j);
+                        continue;
+                    };
+                    let read = repeat_value(&value);
+                    repeat.delay = read.delay;
+                    if let Some(count) = read.count {
+                        repeat.count = count;
+                    }
+                    match read.rest {
+                        RepeatRest::Marker(at) => {
+                            // The format is bytes, as given: the rest of the
+                            // word, whose letters before it are ASCII.
+                            let bytes = if next {
+                                raw.get(i + 1).map(|w| w.as_encoded_bytes())
+                            } else {
+                                raw.get(i)
+                                    .and_then(|w| w.as_encoded_bytes().get(letter_offset(&chars, j, letters_ok)..))
+                            };
+                            let format = bytes.and_then(|b| b.get(at..)).unwrap_or_default().to_vec();
+                            took_bytes = true;
+                            if (host.marker_ok)(&format) {
+                                repeat.marker = Some(format);
+                            } else {
+                                early.line(&format!(
+                                    "illegal <fmt>: \"{}\"",
+                                    Escaper::for_host().bytes(&format)
+                                ));
+                            }
+                            if next {
+                                i += 1;
+                            }
+                            j = chars.len();
+                        }
+                        RepeatRest::End => {
+                            if next {
+                                i += 1;
+                            }
+                            j = chars.len();
+                        }
+                        // What follows the delay's digits is options again
+                        // (`GOx2 = GObk[1] + n`), the count's `c` with them:
+                        // `-r 1c2` repeats twice and is `-c 2` as well
+                        // (measured: it lists the commands that begin `2`).
+                        RepeatRest::Letters(digits) if !next => j += 1 + digits,
+                        // A next word with no digits is not taken: it is
+                        // the first name (`-r c2` repeats twice and looks
+                        // for a file `c2`, measured).
+                        RepeatRest::Letters(0) => j = chars.len(),
+                        RepeatRest::Letters(digits) => {
+                            let leftover: String = value.chars().skip(digits).collect();
+                            args[i + 1] = format!("{prefix}{leftover}");
+                            if let Some(word) = raw.get_mut(i + 1) {
+                                let mut bytes = vec![prefix as u8];
+                                bytes.extend_from_slice(
+                                    word.as_encoded_bytes().get(digits..).unwrap_or_default(),
+                                );
+                                *word = os_from_bytes(bytes);
+                            }
+                            j = chars.len();
                         }
                     }
-                    let delay = take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix);
-                    repeat = Some(delay.map_or(15, |d| digits_value(&d) as u64));
                     continue;
                 }
                 'J' => json_doc = true,
@@ -1759,6 +1895,17 @@ fn parse_options<'s>(
     let json = json_doc || json_lines;
     if (fields_given || json) && sel.terse {
         errors.push("-F and -t are mutually exclusive".to_string());
+    }
+    // `-F` ends each field's line itself, so a marker may not hold a new
+    // line (`main.c:1100-1117`; under `-J` and `-j` too, which set the C's
+    // `Ffield` and print no marker at all).
+    if let Some(format) = repeat.marker.as_deref().filter(|_| fields_given || json) {
+        if lsof_core::timefmt::has_newline_conversion(format) {
+            errors.push(format!(
+                "%n illegal in -r m<fmt> when -F has been specified: \"{}\"",
+                Escaper::for_host().bytes(format)
+            ));
+        }
     }
     //
     // `-x` only means anything to a `+d`/`+D` expansion, and the C refuses it

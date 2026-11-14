@@ -26,6 +26,7 @@ pub mod render;
 pub mod safefs;
 pub mod selection;
 pub mod service;
+pub mod timefmt;
 
 pub use backend::{
     errno_text, Backend, BackendError, MountEntry, MountKind, MountRequest, MountTable, Privilege,
