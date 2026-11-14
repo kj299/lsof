@@ -1,8 +1,16 @@
-# cargo-deny — supply-chain gate for the lsof-rs workspace.
+# cargo-deny — supply-chain gate for the lsof-rs workspaces.
 #
-#   cargo deny check          (run from lsof-rs/)
+#   cargo deny check                                                (run from lsof-rs/)
+#   cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check
 #
-# The whole third-party dependency tree is the `windows-sys` family
+# This one policy covers BOTH lockfiles. fuzz/ is a workspace of its own, with
+# its own Cargo.lock, so `cargo deny check` here never reads it; CI audits every
+# lockfile `git ls-files` finds under lsof-rs/ against this file. Until
+# 2026-11-14 it audited the root's only, and the fuzz lockfile's crates, four of
+# them build scripts that run in CI, had never been checked by anything
+# (LESSONS #089).
+#
+# The main workspace's whole third-party dependency tree is the `windows-sys` family
 # (windows-sys -> windows-targets -> the per-arch import-lib shims), all
 # MIT OR Apache-2.0, and, for the Linux backend's `getxattr(2)`
 # (DIVERGENCES 22, 2026-10-30) and its `NETLINK_SOCK_DIAG` query for `-E`
@@ -18,6 +26,12 @@
 # its `perf-*` features build, are in the lock file and not in any binary.
 # lsof-rs's own crates are `publish = false` with LicenseRef-lsof and are
 # skipped via `private.ignore`.
+#
+# The fuzz workspace adds `libfuzzer-sys` and `arbitrary`, and the crates
+# libfuzzer-sys's build script compiles libFuzzer with: `cc`, with
+# `find-msvc-tools`, `jobserver`, `libc` and `shlex` (and, for other targets
+# only, `getrandom` and `r-efi` under jobserver). Each is MIT OR Apache-2.0 at
+# least, except libfuzzer-sys itself, which is excepted by name below.
 
 [advisories]
 version = 2
@@ -28,6 +42,14 @@ yanked = "deny"
 [licenses]
 version = 2
 allow = ["MIT", "Apache-2.0"]
+# libfuzzer-sys is `(MIT OR Apache-2.0) AND NCSA`: it vendors and builds LLVM's
+# libFuzzer, whose University of Illinois/NCSA licence is permissive and
+# OSI-approved. Excepted for that one crate rather than added to `allow`, so no
+# other crate may arrive under NCSA unreviewed. Only fuzz/ depends on it; no
+# lsof binary links it (LESSONS #089).
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
 # lsof-rs's workspace crates are unpublished (LicenseRef-lsof); don't judge them.
 private = { ignore = true }
 

@@ -65,5 +65,22 @@ jobs:
       # Its skeleton step builds and tests the skeleton when cargo is on PATH
       # and skips without it; GitHub's ubuntu image has cargo, so here it
       # builds (LESSONS #082: until then nothing automatic ever had).
+      #
+      # cargo-deny, so `run_supply_chain.sh --check` loads deny.template.toml
+      # with the tool that reads it. Without it the check prints a note and
+      # passes on a TOML parse, which is how a key cargo-deny rejects outright
+      # sat in the template, passing, until 2026-11-14 (LESSONS #089). A release
+      # binary checked against the SHA-256 its release publishes: a few seconds,
+      # where `cargo install` is five minutes of building an unpinned version.
+      - name: install cargo-deny (pinned release binary)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfLo deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  deny.tgz" | sha256sum -c -
+          tar xzf deny.tgz
+          mkdir -p "$HOME/.cargo/bin"
+          install -m 0755 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny "$HOME/.cargo/bin/"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: make check-kit
         run: make -C porting-kit check-kit

@@ -4155,3 +4155,91 @@ the same, since the day before this entry.]*
   mention does. lsof's `platforms.toml` names the two lsof-rs lines.
 - **Section amended:** harnesses/platforms/check_platforms.py · _search, run,
   self-test; harnesses/platforms/platforms.toml · platforms.freebsd.
+
+---
+
+## 089. The policy a port is told to copy did not load here either, and the fuzz lockfile had never been audited
+
+- **Date:** 2026-11-14
+- **Codebase:** this kit's supply-chain harness, and lsof-rs's supply-chain CI
+  job, checked against the primary line's entry 065
+- **What happened:** the primary line found that its `deny.template.toml`
+  said `wildcard-dependencies`, a key cargo-deny rejects outright, so the
+  policy its ports are told to copy had never loaded anywhere, and that
+  `run_supply_chain.sh --check` passed it on a TOML parse. This copy had the
+  same key and the same check. With cargo-deny installed, `--check` printed
+  `self-test: OK` over a template cargo-deny refuses (`unexpected-keys`, exit
+  101). lsof-rs never copied the template: its own `deny.toml` was right, and
+  CI ran it. But CI ran `cargo deny check` in `lsof-rs/` only, and `fuzz/` is a
+  workspace of its own with its own lockfile: libfuzzer-sys, and the `cc` build
+  script that compiles libFuzzer, with `jobserver`, `shlex` and
+  `find-msvc-tools`, code that runs in CI. Run over that lockfile, lsof-rs's
+  own policy failed on libfuzzer-sys's licence, `(MIT OR Apache-2.0) AND NCSA`;
+  nothing had ever read it. Its advisories, bans and sources were clean. And
+  CI installed cargo-deny with `cargo install cargo-deny --locked`, whichever
+  version was newest that day, built from source on every run.
+- **The rule.** A config file is validated by the tool that reads it (the
+  primary line's entry 065). "The dependencies are audited" means every
+  lockfile the repository tracks: a nested workspace is a second dependency
+  tree, not a directory of the first. And pin the tool that judges the
+  dependencies the way the dependencies are pinned.
+- **Kit change:** `deny.template.toml` uses `wildcards`, allows wildcard paths
+  to `publish = false` crates, and excepts NCSA for `libfuzzer-sys` by name,
+  where the primary line's copy allows it for every crate.
+  `run_supply_chain.sh --check` loads the template with cargo-deny, where cargo
+  and cargo-deny exist, against a one-crate fixture, and requires a copy with
+  the old key to be refused; on the old template it fails. This repository's
+  check-kit workflow installs cargo-deny, so that check runs in CI rather than
+  noting the tool is absent. In lsof-rs, `deny.toml` excepts NCSA for
+  libfuzzer-sys alone, and CI audits every lockfile `git ls-files` finds under
+  `lsof-rs/` against it, reporting each before it fails, with cargo-deny 0.20.2
+  installed as a release binary checked against its published SHA-256.
+- **Section amended:** harnesses/supply-chain/run_supply_chain.sh · --check;
+  harnesses/supply-chain/deny.template.toml; .github/workflows/porting-kit.yml
+  · check-kit; .github/workflows/lsof-rs-ci.yml · supply-chain;
+  lsof-rs/deny.toml.
+
+---
+
+## 090. A declaration credited an option its case never ran, and another case's coverage hid it
+
+- **Date:** 2026-11-14
+- **Codebase:** this kit's coverage gate and lsof-rs's coverage declaration
+  (`lsof-rs/coverage/coverage-matrix.toml`), checked against the primary
+  line's entry 061
+- **What happened:** the primary line found manifest rows naming a driver mode
+  that no case ran. Asked here: lsof-rs's coverage gate reads a declaration
+  file, one `[[case]]` per real test, kept truthful by hand. Over the Linux
+  differential's own cases, the gate credits every option feature the
+  declarations credit but `optword:r`, which a unit test covers, so the option
+  verdict held. The declarations' names are shorthand: some are a real case's
+  name, some the prefix of several, and five matched no case. Each of the five
+  traced to a real case with the same arguments under another name, and one
+  claimed what that case does not run: `linux/differential-opt-x-symlink-rule`
+  declared `covers = ["opt:x"]` while its args run `+d` with no `-x`. It is
+  `opt-x-plus-d-skips-symlinks-by-default`, the rule without `-x`. Another
+  declaration spells `-x`, so the false claim changed no verdict, which is why
+  nothing could see it; had that one gone, `-x` would have stayed covered by a
+  case that never runs it. The declarations for the backend's unit tests were
+  not traced.
+- **The rule.** Credit an option from the args that run it. A claim the gate
+  can check against the case's own args is checked, not trusted; one it cannot
+  check, the TYPE a fixture creates, stays a declaration.
+- **Kit change:** `coverage_gate.py` refuses an `opt:`/`optword:` id in a
+  case's `covers` that the case's own args do not spell (`unspelled_claims`;
+  UNSPELLED in the report and in the JSON). The claim credits nothing, and the
+  gate fails even when every feature is covered. Ten self-test checks and a
+  gate-mutation row; the decision sweep finds each new decision pinned.
+  lsof-rs's declaration now carries its case's name and claims only what its
+  args run. Reported, not changed: the declarations are tied to the tests they
+  describe by name only, and their TYPE claims are checked against no output,
+  though the Linux differential has the C's TYPE column for every case it
+  runs. And `diff_run.py` passes a case whose two sides print nothing, the
+  question of the primary line's entry 063. lsof-rs's `oracle_diff.py` already
+  refuses an empty capture, but in the Linux differential an empty result is
+  often the point (the C prints nothing for the `+d` case above), so a rule
+  there needs each such case to declare it.
+- **Section amended:** harnesses/coverage/coverage_gate.py · args_coverage,
+  unspelled_claims, matrix_claims, run_gate, self-test;
+  harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
+  lsof-rs/coverage/coverage-matrix.toml.
