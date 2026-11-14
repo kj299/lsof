@@ -187,6 +187,114 @@ pub fn host_conf_multi(text: &[u8]) -> bool {
     multi
 }
 
+/// `TRIMDOMAINS_MAX`: the most domains `trim` lines and the environment
+/// keep, all together; glibc warns of one past it and keeps none of the
+/// rest of its list.
+pub const TRIMDOMAINS_MAX: usize = 4;
+
+/// What one `fgets(buf, 256, fp)` of `/etc/host.conf` reads at most.
+const HOST_CONF_FGETS: usize = 255;
+
+/// The domains `trim` lines of `/etc/host.conf` (`text`) give, as glibc
+/// 2.39's `_res_hconf_init()` reads them (`parse_line()`,
+/// `arg_trimdomain_list()`), each rule measured through the C:
+///
+/// * a line is what one `fgets()` into 256 bytes reads (as for
+///   [`host_conf_multi`]), to its `\n` or a NUL;
+/// * its keyword, after blanks, ends at a blank, a `#` or a `,`, and is
+///   `trim` in any case;
+/// * each domain ends at a blank, a `#` or a `,`; blanks after it, then one
+///   of `,` `;` `:` and blanks, separate it from the next (so `.a;.b` is one
+///   domain, `.a ;.b` two), and a `#` ends the list;
+/// * at most [`TRIMDOMAINS_MAX`] are kept, every line's together.
+pub fn host_conf_trim(text: &[u8]) -> Vec<Vec<u8>> {
+    let mut domains = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let window = rest.get(..HOST_CONF_FGETS).unwrap_or(rest);
+        let (line, len) = match window.iter().position(|&b| b == b'\n') {
+            Some(at) => (window.get(..at).unwrap_or_default(), at.saturating_add(1)),
+            None => (window, window.len()),
+        };
+        rest = rest.get(len..).unwrap_or_default();
+        let line = line.split(|&b| b == 0).next().unwrap_or_default();
+        let line = skip_spaces(line);
+        if line.first().is_none_or(|&b| b == b'#') {
+            continue;
+        }
+        let (keyword, args) = nss_word(line, ends_a_hconf_string);
+        if keyword.eq_ignore_ascii_case(b"trim") {
+            trim_domain_list(&mut domains, skip_spaces(args));
+        }
+    }
+    domains
+}
+
+/// `skip_string()`'s end of a word: a blank, a `#` or a `,`.
+fn ends_a_hconf_string(b: u8) -> bool {
+    is_space(b) || b == b'#' || b == b','
+}
+
+/// `arg_trimdomain_list()`: the domains of `args` added to `domains`,
+/// within [`TRIMDOMAINS_MAX`].
+fn trim_domain_list(domains: &mut Vec<Vec<u8>>, args: &[u8]) {
+    let mut rest = args.split(|&b| b == 0).next().unwrap_or_default();
+    loop {
+        let (domain, after) = nss_word(rest, ends_a_hconf_string);
+        if domains.len() >= TRIMDOMAINS_MAX {
+            return;
+        }
+        domains.push(domain.to_vec());
+        rest = skip_spaces(after);
+        if let Some((b',' | b';' | b':', after)) = rest.split_first() {
+            rest = skip_spaces(after);
+            if rest.first().is_none_or(|&b| b == b'#') {
+                return;
+            }
+        }
+        if rest.first().is_none_or(|&b| b == b'#') {
+            return;
+        }
+    }
+}
+
+/// The trim domains a run uses: `/etc/host.conf`'s (`file`), then
+/// `RESOLV_ADD_TRIM_DOMAINS` (`add`) after them, then
+/// `RESOLV_OVERRIDE_TRIM_DOMAINS` (`replace`) in their place, as glibc's
+/// `_res_hconf_init()` reads them, in that order (measured with both set:
+/// the second's alone). glibc's loader leaves both variables in a
+/// set-user-ID program's environment.
+pub fn trim_domains(file: &[u8], add: Option<&[u8]>, replace: Option<&[u8]>) -> Vec<Vec<u8>> {
+    let mut domains = host_conf_trim(file);
+    if let Some(add) = add {
+        trim_domain_list(&mut domains, add);
+    }
+    if let Some(replace) = replace {
+        domains.clear();
+        trim_domain_list(&mut domains, replace);
+    }
+    domains
+}
+
+/// `_res_hconf_trim_domain()`: `name` cut at the first of `domains` that
+/// ends it, compared in any case, where the name is longer than the
+/// domain; no dot is added or taken (`trim example.com` makes
+/// `a.example.com` `a.`).
+pub fn trim_domain(name: &mut Vec<u8>, domains: &[Vec<u8>]) {
+    for domain in domains {
+        if name.len() > domain.len() {
+            let at = name.len() - domain.len();
+            if name
+                .get(at..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(domain))
+            {
+                name.truncate(at);
+                return;
+            }
+        }
+    }
+}
+
 /// `arg_bool()`: `on` or `off` by its first letters, in any case. Also how
 /// `RESOLV_MULTI` in the environment is read, which overrides the file.
 pub fn bool_arg(value: &[u8]) -> Option<bool> {
@@ -374,7 +482,7 @@ pub enum Conf {
     /// No file, or none that can be opened.
     Missing,
     /// It is there and cannot be read: a directory, or anything else that
-    /// is no regular file.
+    /// is no regular file but the null device (which is an empty file).
     Unreadable,
     /// Its bytes.
     Text(Vec<u8>),
@@ -476,13 +584,24 @@ impl<T> NssAnswer<T> {
 ///
 /// A source that was asked ends the walk where its status's action is
 /// `return`, or it is the last; otherwise the next one's answer replaces
-/// it. `SUCCESS=merge` fails the lookup (no database here can be merged).
-/// No sources at all is no answer, where the C dies in glibc (SIGSEGV).
-pub fn nss_walk<T>(
+/// it. No sources at all is no answer, where the C dies in glibc (SIGSEGV).
+///
+/// `SUCCESS=merge` is glibc's for a database with no merge function, which
+/// is every one read here (hosts, services, passwd: `__copy_einval`): the
+/// answer is kept aside and the status taken as `UNAVAIL`, whose action
+/// says whether the walk goes on. The next source asked that does not
+/// succeed gives the kept answer back as its own `SUCCESS`, whose action
+/// then decides; one that succeeds fails the merge, `UNAVAIL` and no
+/// answer. With no later source asked there is no answer (measured: under
+/// `hosts: files [SUCCESS=merge] dns` the C names an address from the hosts
+/// file where DNS says NXDOMAIN, and none where DNS names it).
+pub fn nss_walk<T: Clone>(
     sources: &[NssSource<'_>],
     mut ask: impl FnMut(&[u8]) -> Option<NssAnswer<T>>,
 ) -> Option<T> {
     let mut result = None;
+    // `do_merge` and `mergegrp`: the answer a `SUCCESS=merge` kept aside.
+    let mut merging: Option<T> = None;
     for (i, source) in sources.iter().enumerate() {
         let last = i.saturating_add(1) == sources.len();
         let Some(answer) = ask(source.module) else {
@@ -491,19 +610,30 @@ pub fn nss_walk<T>(
             }
             continue;
         };
-        let status = match answer {
-            NssAnswer::Success(_) => NssStatus::Success,
-            NssAnswer::NotFound => NssStatus::NotFound,
-            NssAnswer::Unavail => NssStatus::Unavail,
-            NssAnswer::TryAgain => NssStatus::TryAgain,
+        let (mut status, mut found) = match answer {
+            NssAnswer::Success(found) => (NssStatus::Success, Some(found)),
+            NssAnswer::NotFound => (NssStatus::NotFound, None),
+            NssAnswer::Unavail => (NssStatus::Unavail, None),
+            NssAnswer::TryAgain => (NssStatus::TryAgain, None),
         };
-        let action = source.on(status);
-        result = match answer {
-            NssAnswer::Success(_) if action == NssAction::Merge => return None,
-            NssAnswer::Success(found) => Some(found),
-            _ => None,
-        };
-        if action == NssAction::Return || last {
+        if let Some(kept) = merging.as_ref() {
+            if status == NssStatus::Success {
+                // `MERGE_FN` fails: no answer, and nothing kept any more.
+                status = NssStatus::Unavail;
+                found = None;
+                merging = None;
+            } else {
+                // `DEEPCOPY_FN` fails, and the kept answer is the status's.
+                status = NssStatus::Success;
+                found = Some(kept.clone());
+            }
+        }
+        if status == NssStatus::Success && source.on(status) == NssAction::Merge {
+            status = NssStatus::Unavail;
+            merging = found.take();
+        }
+        result = found;
+        if source.on(status) == NssAction::Return || last {
             break;
         }
     }
@@ -762,16 +892,66 @@ pub fn would_hold_a_reader(path: &std::path::Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| !meta.is_file() && !meta.is_dir())
 }
 
+/// Whether `meta` is the null device's (`/dev/null`, a character device
+/// 1:3): glibc reads it as an empty file, which is how it is read here,
+/// with no `open(2)` (measured: nsswitch.conf, resolv.conf, hosts and
+/// host.conf there are each the empty file to the C; DIVERGENCES 38, 154).
+pub fn is_null_device(meta: &std::fs::Metadata) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        meta.file_type().is_char_device() && meta.rdev() == 0x103
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+/// Whether the file at `path` is one glibc's reader would wait on or read
+/// for ever, where the C library reads it with no care: a FIFO (its
+/// `fopen()` waits for a writer) or a device other than the null device
+/// (`/dev/zero` never ends, `/dev/urandom` neither). A directory, a socket
+/// and the null device each give glibc an answer at once, and are not.
+pub fn holds_glibcs_reader(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(path).is_ok_and(|meta| {
+            let kind = meta.file_type();
+            (kind.is_fifo() || kind.is_char_device() || kind.is_block_device())
+                && !is_null_device(&meta)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// The file at `path` opened for reading, if it is a regular file. A FIFO
 /// there would hold `open(2)` until something writes to it (it holds the C,
-/// measured), and a device has no end, so neither is opened: what is no
+/// measured), and a device has no end, so neither is read: what is no
 /// regular file is read as no file. Looked at before it is opened, and
-/// again once it is.
+/// again once it is; opened without blocking, so that a FIFO put in its
+/// place between the two cannot hold the open, and is then refused.
 fn open_regular(path: &std::path::Path) -> Option<std::fs::File> {
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    open_nonblocking_regular(path)
+}
+
+/// The open and the second look of [`open_regular`]: the file at `path`
+/// opened without blocking, if what was opened is a regular file.
+fn open_nonblocking_regular(path: &std::path::Path) -> Option<std::fs::File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, crate::safefs::NONBLOCK);
+    let file = open.open(path).ok()?;
     file.metadata().ok()?.is_file().then_some(file)
 }
 
@@ -824,6 +1004,12 @@ pub fn read_lines(
 /// [`FILE_LIMIT`]. Whether there was a file to read: where there is none
 /// (or none that is a regular file) glibc's `files` service is unavailable.
 pub fn file_lines(path: &std::path::Path, each: impl FnMut(&[u8]) -> bool) -> bool {
+    // The null device is a file with no line, as glibc reads it: `files`
+    // answers NOTFOUND there, not UNAVAIL (measured under
+    // `[NOTFOUND=return]`).
+    if std::fs::metadata(path).is_ok_and(|meta| is_null_device(&meta)) {
+        return true;
+    }
     let Some(file) = open_regular(path) else {
         return false;
     };
@@ -842,9 +1028,11 @@ pub fn conf_file(path: &std::path::Path, limit: u64) -> Conf {
     // What is there and is no regular file cannot be read as one: a
     // directory fails glibc's read, a device has no end to read to (glibc
     // reads `/dev/zero` until it has no memory left, and then refuses the
-    // file), and a FIFO would hold `open(2)`, as it holds the C.
+    // file), and a FIFO would hold `open(2)`, as it holds the C. The null
+    // device is the exception: glibc reads it as the empty file it is.
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() => {}
+        Ok(meta) if is_null_device(&meta) => return Conf::Text(Vec::new()),
         Ok(_) => return Conf::Unreadable,
         Err(_) => return Conf::Missing,
     }
@@ -1095,6 +1283,10 @@ pub fn host_by_addr_in_file(path: &std::path::Path, ip: IpAddr) -> NssAnswer<Vec
     }
 }
 
+/// What a services scan hands each entry to: its name, its port, its
+/// protocol as written ([`services_in_file`]).
+pub type ServiceVisitor<'a> = dyn FnMut(&[u8], u16, &[u8]) + 'a;
+
 /// One entry of a services file: what `getservent()` gives for a line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceEntry {
@@ -1134,33 +1326,23 @@ pub fn service_by_port_in_file(
     }
 }
 
-/// The most of a services file's names [`services_in_file`] keeps, all
-/// together: thousands of times a distribution's `/etc/services`. What a
-/// file holds past it is not kept, where the C keeps every entry.
-pub const SERVICES_KEPT: usize = 16 << 20;
-
 /// Every entry of the services file at `path`, in its order, as a
-/// `getservent()` scan gives them, within [`SERVICES_KEPT`]; `None` where
-/// there is no file to read.
-pub fn services_in_file(path: &std::path::Path) -> Option<Vec<ServiceEntry>> {
-    let mut entries = Vec::new();
-    let mut bytes = 0usize;
-    let read = file_lines(path, |line| {
+/// `getservent()` scan gives them, handed to `each` (its name at most
+/// [`NAME_KEPT`] bytes of it, its port, its protocol as written) as its
+/// line is read, nothing kept; `false` where there is no file to read.
+/// The C's `fill_porttab()` reads `getservent()` the same way, keeping
+/// what it needs as it goes.
+pub fn services_in_file(path: &std::path::Path, each: &mut ServiceVisitor<'_>) -> bool {
+    file_lines(path, |line| {
         if let Some((name, port, protocol)) = services_entry(line) {
-            let size = name.len().saturating_add(protocol.len());
-            if bytes.saturating_add(size) > SERVICES_KEPT {
-                return true;
-            }
-            bytes = bytes.saturating_add(size);
-            entries.push(ServiceEntry {
-                name: kept(name),
+            each(
+                name.get(..name.len().min(NAME_KEPT)).unwrap_or_default(),
                 port,
-                protocol: kept(protocol),
-            });
+                protocol,
+            );
         }
         false
-    });
-    read.then_some(entries)
+    })
 }
 
 /// `gethostbyaddr()`'s answer for `ip` where this module can follow it: the
@@ -1168,23 +1350,46 @@ pub fn services_in_file(path: &std::path::Path) -> Option<Vec<ServiceEntry>> {
 /// ([`nss_walk`]), `files` being the hosts file at `files.hosts`
 /// ([`host_by_addr_in_file`]) and `dns` the resolver, `dns`. Any other
 /// source is taken as not installed (DIVERGENCES 38, 154). `None`: no name.
+///
+/// A hosts file glibc's reader would wait on or read for ever
+/// ([`holds_glibcs_reader`]: a FIFO, `/dev/zero`) ends the lookup where the
+/// walk reaches it, with no name and no later source asked: the C never
+/// gets past it (it waits on a FIFO, and its buffer grows on `/dev/zero`
+/// until `gethostbyaddr()` fails, `ENOMEM`), and asks no name server.
+///
+/// The name found, from any source, is cut by `trim` ([`trim_domain`]), as
+/// glibc's `gethostbyaddr_r()` cuts every answer (`POSTPROCESS`).
 pub fn glibc_host_by_addr(
     ip: IpAddr,
     files: &GlibcFiles<'_>,
+    trim: &[Vec<u8>],
     dns: &mut dyn FnMut(IpAddr) -> NssAnswer<String>,
 ) -> Option<Vec<u8>> {
     let conf = nsswitch_conf(files.nsswitch);
     let sources = nsswitch_database(&conf, b"hosts", HOSTS_DEFAULT)?;
-    nss_walk(&sources, |module| match module {
-        b"files" => Some(host_by_addr_in_file(files.hosts, ip)),
-        b"dns" => Some(match dns(ip) {
-            NssAnswer::Success(name) => NssAnswer::Success(name.into_bytes()),
-            NssAnswer::NotFound => NssAnswer::NotFound,
-            NssAnswer::Unavail => NssAnswer::Unavail,
-            NssAnswer::TryAgain => NssAnswer::TryAgain,
-        }),
-        _ => None,
+    let mut held = false;
+    let mut name = nss_walk(&sources, |module| {
+        if held {
+            return None;
+        }
+        match module {
+            b"files" if holds_glibcs_reader(files.hosts) => {
+                held = true;
+                Some(NssAnswer::Unavail)
+            }
+            b"files" => Some(host_by_addr_in_file(files.hosts, ip)),
+            b"dns" => Some(match dns(ip) {
+                NssAnswer::Success(name) => NssAnswer::Success(name.into_bytes()),
+                NssAnswer::NotFound => NssAnswer::NotFound,
+                NssAnswer::Unavail => NssAnswer::Unavail,
+                NssAnswer::TryAgain => NssAnswer::TryAgain,
+            }),
+            _ => None,
+        }
     })
+    .filter(|_| !held)?;
+    trim_domain(&mut name, trim);
+    Some(name)
 }
 
 /// `getservbyport(htons(port), protocol)` where this module can follow it:
@@ -1203,23 +1408,28 @@ pub fn glibc_service_by_port(
 }
 
 /// A `getservent()` scan where this module can follow it: the services
-/// file's entries where the walk of the `services` sources reaches `files`
-/// (sources before it that cannot be asked passed over where their
+/// file's entries, each handed to `each` as it is read
+/// ([`services_in_file`]), where the walk of the `services` sources reaches
+/// `files` (sources before it that cannot be asked passed over where their
 /// `UNAVAIL` action is `continue`), and none otherwise.
-pub fn glibc_services(services: &std::path::Path, nsswitch: &std::path::Path) -> Vec<ServiceEntry> {
+pub fn glibc_services(
+    services: &std::path::Path,
+    nsswitch: &std::path::Path,
+    each: &mut ServiceVisitor<'_>,
+) {
     let conf = nsswitch_conf(nsswitch);
     let Some(sources) = nsswitch_database(&conf, b"services", FILES_DEFAULT) else {
-        return Vec::new();
+        return;
     };
     for source in &sources {
         if source.module == b"files" {
-            return services_in_file(services).unwrap_or_default();
+            services_in_file(services, each);
+            return;
         }
         if source.on(NssStatus::Unavail) != NssAction::Continue {
-            break;
+            return;
         }
     }
-    Vec::new()
 }
 
 #[cfg(test)]
@@ -2279,7 +2489,7 @@ last 19/tcp";
                 asked.borrow_mut().push(ip);
                 answer.clone()
             };
-            glibc_host_by_addr(ip.parse().unwrap(), &files, &mut dns)
+            glibc_host_by_addr(ip.parse().unwrap(), &files, &[], &mut dns)
                 .map(|n| String::from_utf8_lossy(&n).into_owned())
         };
         let found = || NssAnswer::Success("dns.example".to_string());
@@ -2322,12 +2532,253 @@ last 19/tcp";
         );
         assert_eq!(glibc_service_by_port(4001, b"udp", &svc, &nss), None);
         assert_eq!(glibc_service_by_port(4005, b"tcp", &svc, &nss), None);
-        assert_eq!(glibc_services(&svc, &nss).len(), 3);
+        let scan = |svc: &std::path::Path, nss: &std::path::Path| {
+            let mut n = 0usize;
+            glibc_services(svc, nss, &mut |_, _, _| n += 1);
+            n
+        };
+        assert_eq!(scan(&svc, &nss), 3);
         std::fs::write(&nss, "services: db files\n").unwrap();
-        assert_eq!(glibc_services(&svc, &nss).len(), 3);
+        assert_eq!(scan(&svc, &nss), 3);
         std::fs::write(&nss, "services: db [UNAVAIL=return] files\n").unwrap();
-        assert!(glibc_services(&svc, &nss).is_empty());
+        assert_eq!(scan(&svc, &nss), 0);
         assert_eq!(glibc_service_by_port(4001, b"tcp", &svc, &nss), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `SUCCESS=merge`, for a database with no merge function (every one
+    /// here): the answer kept aside, the walk on by `UNAVAIL`'s action, the
+    /// next source asked giving it back where it does not succeed and
+    /// failing it where it does (glibc 2.39's `getXXbyYY_r()`; measured
+    /// through the C under `hosts: files [SUCCESS=merge] dns`).
+    #[test]
+    fn a_merge_keeps_the_answer_where_the_next_source_fails() {
+        let walk = |line: &str, dns: Option<NssAnswer<u8>>| {
+            let sources = nss_action_parse(line.as_bytes(), true).unwrap();
+            let mut asked = Vec::new();
+            let got = nss_walk(&sources, |module| {
+                asked.push(String::from_utf8_lossy(module).into_owned());
+                match module {
+                    b"files" => Some(NssAnswer::Success(1u8)),
+                    b"dns" => dns,
+                    _ => None,
+                }
+            });
+            (got, asked.join(" "))
+        };
+        let merge = "files [SUCCESS=merge] dns";
+        assert_eq!(
+            walk(merge, Some(NssAnswer::NotFound)),
+            (Some(1), "files dns".into())
+        );
+        assert_eq!(
+            walk(merge, Some(NssAnswer::Unavail)),
+            (Some(1), "files dns".into())
+        );
+        assert_eq!(
+            walk(merge, Some(NssAnswer::TryAgain)),
+            (Some(1), "files dns".into())
+        );
+        assert_eq!(
+            walk(merge, Some(NssAnswer::Success(2))),
+            (None, "files dns".into())
+        );
+        // A later source that cannot be asked is stepped over: nothing
+        // gives the answer back.
+        assert_eq!(
+            walk("files [SUCCESS=merge] sss", None),
+            (None, "files sss".into())
+        );
+        assert_eq!(walk("files [SUCCESS=merge]", None), (None, "files".into()));
+        // `UNAVAIL=return` ends the walk at the merge.
+        assert_eq!(
+            walk(
+                "files [SUCCESS=merge UNAVAIL=return] dns",
+                Some(NssAnswer::NotFound)
+            ),
+            (None, "files".into())
+        );
+        // The answer given back is the next source's SUCCESS, whose action
+        // then decides: `continue` reads on, still merging (glibc leaves
+        // `do_merge` set), so a third source that fails gives it back
+        // again, and one that succeeds fails the merge.
+        assert_eq!(
+            walk(
+                "files [SUCCESS=merge] dns [SUCCESS=continue] dns",
+                Some(NssAnswer::NotFound)
+            ),
+            (Some(1), "files dns dns".into())
+        );
+        assert_eq!(
+            walk(
+                "files [SUCCESS=merge] dns [SUCCESS=continue] files",
+                Some(NssAnswer::NotFound)
+            ),
+            (None, "files dns files".into())
+        );
+    }
+
+    /// host.conf's `trim` as glibc's `_res_hconf_init()` reads it (each
+    /// rule measured through the C, `trim` variants of 2026-11-14).
+    #[test]
+    fn trim_domains_are_read_and_cut_as_glibc_does() {
+        let t = |text: &str| -> Vec<String> {
+            host_conf_trim(text.as_bytes())
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect()
+        };
+        assert_eq!(t("trim .a.com\n"), [".a.com"]);
+        assert_eq!(t("trim .bb;.cc\n"), [".bb;.cc"]);
+        assert_eq!(t("trim .bb ;.cc\n"), [".bb", ".cc"]);
+        assert_eq!(t("trim .bb :.cc\n"), [".bb", ".cc"]);
+        assert_eq!(t("trim .bb,.cc\n"), [".bb", ".cc"]);
+        assert_eq!(t("trim .bb#.cc\n"), [".bb"]);
+        assert_eq!(t("trim .bb, \n"), [".bb"]);
+        assert_eq!(t("TRIM .BB\n"), [".BB"]);
+        assert_eq!(t("  # x\n\ttrim\t.bb\n"), [".bb"]);
+        assert_eq!(t("trim .bb\0 .cc\n"), [".bb"]);
+        assert_eq!(t("trim\ntrim .bb\n"), ["", ".bb"]);
+        assert_eq!(t("multi on\nnospoof off\n"), Vec::<String>::new());
+        // At most four, every line's together.
+        assert_eq!(t("trim .a .b .c .d .e\n"), [".a", ".b", ".c", ".d"]);
+        assert_eq!(t("trim .a .b .c\ntrim .d .e\n"), [".a", ".b", ".c", ".d"]);
+        // A line is what one fgets() into 256 bytes reads.
+        let long = format!("{}trim .bb\ntrim .cc\n", "#".repeat(250));
+        assert_eq!(t(&long), [".cc"]);
+        // The environment: added after the file's, then in their place.
+        let d = |file: &str, add: Option<&str>, replace: Option<&str>| -> Vec<String> {
+            trim_domains(
+                file.as_bytes(),
+                add.map(str::as_bytes),
+                replace.map(str::as_bytes),
+            )
+            .iter()
+            .map(|d| String::from_utf8_lossy(d).into_owned())
+            .collect()
+        };
+        assert_eq!(d("trim .aa\n", Some(".bb"), None), [".aa", ".bb"]);
+        assert_eq!(d("trim .aa\n", Some(".bb"), Some(".cc")), [".cc"]);
+        assert_eq!(
+            d("trim .a .b .c\n", Some(".d .e"), None),
+            [".a", ".b", ".c", ".d"]
+        );
+        // The cut: the first domain that ends a longer name, in any case.
+        let cut = |name: &str, domains: &[&str]| {
+            let mut n = name.as_bytes().to_vec();
+            let domains: Vec<Vec<u8>> = domains.iter().map(|d| d.as_bytes().to_vec()).collect();
+            trim_domain(&mut n, &domains);
+            String::from_utf8(n).unwrap()
+        };
+        assert_eq!(cut("two.EXAMPLE", &[".example"]), "two");
+        assert_eq!(cut("good.example.com", &["example.com"]), "good.");
+        assert_eq!(cut("example", &["example"]), "example");
+        assert_eq!(cut("x.other", &[".example"]), "x.other");
+        assert_eq!(cut("two.bb", &["", ".bb"]), "two.bb");
+        assert_eq!(cut("a.b.c", &[".c", ".b.c"]), "a.b");
+    }
+
+    /// A hosts file glibc would wait on or read for ever ends the lookup
+    /// with no name and no query; one that answers at once (a directory,
+    /// the null device, none) does not, and the name is trimmed.
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "it makes files and a FIFO")]
+    fn a_hosts_file_that_holds_glibc_ends_the_lookup() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nss = dir.join("nsswitch.conf");
+        std::fs::write(&nss, "hosts: files dns\n").unwrap();
+        let lookup = |hosts: &std::path::Path, nss: &std::path::Path| {
+            let files = GlibcFiles {
+                hosts,
+                host_conf: hosts,
+                nsswitch: nss,
+            };
+            let mut calls = 0;
+            let mut dns = |_: IpAddr| {
+                calls += 1;
+                NssAnswer::Success("dns.example".to_string())
+            };
+            let trim = [b".example".to_vec()];
+            let got = glibc_host_by_addr("127.0.0.1".parse().unwrap(), &files, &trim, &mut dns);
+            (got.map(|n| String::from_utf8(n).unwrap()), calls)
+        };
+        let fifo = dir.join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            assert_eq!(lookup(&fifo, &nss), (None, 0), "a FIFO");
+            // DNS first: answered before the hosts file is reached.
+            std::fs::write(dir.join("dnsfirst"), "hosts: dns files\n").unwrap();
+            assert_eq!(
+                lookup(&fifo, &dir.join("dnsfirst")),
+                (Some("dns".into()), 1)
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(lookup(std::path::Path::new("/dev/zero"), &nss), (None, 0));
+            assert_eq!(
+                lookup(std::path::Path::new("/dev/null"), &nss),
+                (Some("dns".into()), 1)
+            );
+            // The null device is a file with no line: NOTFOUND, which
+            // `[NOTFOUND=return]` ends the walk at.
+            std::fs::write(dir.join("nfret"), "hosts: files [NOTFOUND=return] dns\n").unwrap();
+            assert_eq!(
+                lookup(std::path::Path::new("/dev/null"), &dir.join("nfret")),
+                (None, 0)
+            );
+            assert!(file_lines(std::path::Path::new("/dev/null"), |_| false));
+            assert_eq!(
+                conf_file(std::path::Path::new("/dev/null"), 100),
+                Conf::Text(Vec::new())
+            );
+            // glibc's built-in sources for an empty nsswitch.conf.
+            let null = nsswitch_conf(std::path::Path::new("/dev/null"));
+            let hosts = nsswitch_database(&null, b"hosts", HOSTS_DEFAULT).unwrap();
+            let modules: Vec<&[u8]> = hosts.iter().map(|s| s.module).collect();
+            assert_eq!(modules, [&b"files"[..], b"dns"]);
+        }
+        assert_eq!(lookup(&dir, &nss), (Some("dns".into()), 1), "a directory");
+        // A `hosts:` line with no source names nothing and asks nothing,
+        // where the C dies in glibc in some runs (DIVERGENCES 154).
+        std::fs::write(dir.join("nosource"), "hosts:\n").unwrap();
+        assert_eq!(lookup(&dir.join("hosts"), &dir.join("nosource")), (None, 0));
+        assert_eq!(lookup(&dir.join("nosuch"), &nss), (Some("dns".into()), 1));
+        std::fs::write(dir.join("hosts"), "127.0.0.1 local.EXAMPLE\n").unwrap();
+        assert_eq!(lookup(&dir.join("hosts"), &nss), (Some("local".into()), 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A FIFO put where a regular file was looked at cannot hold the open:
+    /// it is opened without blocking and refused.
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "miri cannot make a FIFO")]
+    fn an_open_of_a_fifo_that_raced_in_returns_no_file() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(open_nonblocking_regular(&path).is_none());
+            });
+            let got = rx.recv_timeout(std::time::Duration::from_secs(30));
+            if got.is_err() {
+                // Let the stuck open go before failing.
+                let mut w = std::fs::OpenOptions::new();
+                w.write(true);
+                std::os::unix::fs::OpenOptionsExt::custom_flags(&mut w, crate::safefs::NONBLOCK);
+                let _ = w.open(&fifo);
+            }
+            assert_eq!(got, Ok(true));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

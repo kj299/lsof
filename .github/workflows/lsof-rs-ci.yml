@@ -124,6 +124,15 @@ jobs:
         # calls under strace, and without it skip, saying so: installed here so
         # that they gate.
         run: sudo apt-get update -qq && sudo apt-get install -y strace
+      - name: allow unprivileged user namespaces (the namespaced names test)
+        # `crates/lsof-cli/tests/names.rs` names a socket end to end in a
+        # user, mount and network namespace of its own (DIVERGENCES 154): the
+        # one gate on this runner that Linux naming is on and works. Ubuntu
+        # 24.04 blocks `unshare --user` for an unconfined binary; cleared as
+        # the differential job clears it, non-fatal, the test saying
+        # `skipped` where it still cannot.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1 ||             echo "could not clear it; the namespaced names test will skip, saying so"
       - name: test (core, CLI and the Linux backend)
         run: cargo test --all
       - name: committed mutants still apply
@@ -328,7 +337,11 @@ jobs:
   fuzz:
     name: fuzz smoke (every target)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 targets at about 64 s each (measured: 16 took 17:35 with their
+    # builds and the cargo-fuzz install), so about 22 min; 35 leaves the
+    # ~1.4x headroom the miri job's comment asks for. The step below fails
+    # at once, naming the numbers, when the targets no longer fit it.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
@@ -352,12 +365,23 @@ jobs:
         # files, or one is not registered in fuzz/Cargo.toml and not fuzzed;
         # the fuzz crate is outside the workspace, so nothing else would see
         # it (porting-kit LESSONS #082). 60 s each, the kit's smoke minimum.
+        #
+        # The budget: 65 s a target and 300 s for the install and the first
+        # build must fit this job's own timeout-minutes, read from this file,
+        # so that a target added past it fails here, saying so, instead of
+        # the job being cancelled with the last targets never smoked.
         run: |
           targets=$(cargo fuzz list)
           n=$(echo "$targets" | wc -w)
           files=$(ls fuzz/fuzz_targets/*.rs | wc -l)
           if [ "$n" -eq 0 ] || [ "$n" -ne "$files" ]; then
             echo "::error::cargo fuzz list names $n target(s); fuzz/fuzz_targets holds $files"
+            exit 1
+          fi
+          minutes=$(awk '/^  fuzz:$/ {f=1} f && /timeout-minutes:/ {print $2; exit}' .github/workflows/lsof-rs-ci.yml)
+          budget=$(( n * 65 + 300 ))
+          if [ -z "$minutes" ] || [ "$budget" -gt $(( minutes * 60 )) ]; then
+            echo "::error::$n fuzz targets x 65 s + 300 s = ${budget} s does not fit the job's timeout-minutes (${minutes:-unread})"
             exit 1
           fi
           for t in $targets; do
@@ -605,8 +629,9 @@ jobs:
     # isolated and blocks nothing, which is the whole point of it being a job.
     #
     # What it is NOT free of is wall time. At 20-43 min this is the longest job
-    # in the workflow either way (the fuzz smoke, next longest, is ~12: eleven
-    # targets at 60 s each, and their build), so the check suite stays yellow
+    # in the workflow either way (the fuzz smoke, next longest, is ~22: about
+    # 64 s a target, measured, for the twenty that `cargo fuzz list` names
+    # today), so the check suite stays yellow
     # that long on every push. If that becomes worth
     # fixing, the lever is NARROWING WHAT IT RUNS -- the live-/proc tests are
     # what generate the ~5700 warnings, and the pure parsers are where the UB

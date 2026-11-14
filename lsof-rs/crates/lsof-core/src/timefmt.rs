@@ -136,10 +136,6 @@ pub struct PosixTz {
     rules: [Rule; 2],
 }
 
-/// The longest zone abbreviation kept: glibc keeps any length; a longer one
-/// is cut here, which no zone file and no `TZ` a person writes has.
-pub const ZONE_NAME_MAX: usize = 256;
-
 fn peek(s: &[u8], at: usize) -> u8 {
     s.get(at).copied().unwrap_or(0)
 }
@@ -243,7 +239,9 @@ impl PosixTz {
         };
         let name = rest.get(start..start.saturating_add(len))?;
         *at = at.saturating_add(end);
-        Some(name.get(..name.len().min(ZONE_NAME_MAX))?.to_vec())
+        // Kept whole, as glibc keeps it: its length is the `TZ` value's,
+        // and what `%Z` makes of it is bounded by the marker's buffer.
+        Some(name.to_vec())
     }
 
     /// `parse_offset()`: `[+-]hh[:mm[:ss]]`, west of UTC unless `-`.
@@ -432,12 +430,20 @@ impl PosixTz {
             RuleDay::J0 => t = t.saturating_add(i64::from(rule.d) * SECS_PER_DAY),
             RuleDay::M => {
                 // A month glibc refused is kept as it read it (`M13.1.0`),
-                // and its table is read past the year's end: the change
-                // then falls after the year, in a month of no days.
-                let (before, length) = if (1..=12).contains(&rule.m) {
-                    let m = usize::from(rule.m);
+                // and its table, `__mon_yday[leap][m]`, read past the row:
+                // in a common year M13 is the year's end, a month of no
+                // days, and M14 to M25 the leap year's row that follows it
+                // (M14 is January; measured). Past that (M26 on, or M13 on
+                // in a leap year) glibc reads past the table, which is
+                // undefined; here the change then falls after the year
+                // (DIVERGENCES 152, C-DEFECT not reproduced).
+                let m = usize::from(rule.m);
+                let (before, length) = if (1..=12).contains(&m) {
                     let before = mon_yday(leap, m - 1);
                     (before, mon_yday(leap, m) - before)
+                } else if !leap && (14..=25).contains(&m) {
+                    let before = mon_yday(true, m - 14);
+                    (before, mon_yday(true, m - 13) - before)
                 } else {
                     (mon_yday(leap, 12), 0)
                 };
@@ -667,9 +673,8 @@ impl TzFile {
 
     fn name(&self, idx: u8) -> &[u8] {
         let from = self.names.get(usize::from(idx)..).unwrap_or_default();
-        let name = from.split(|&b| b == 0).next().unwrap_or_default();
-        name.get(..name.len().min(ZONE_NAME_MAX))
-            .unwrap_or_default()
+        // Whole, as glibc keeps it: within the file's own bytes.
+        from.split(|&b| b == 0).next().unwrap_or_default()
     }
 
     /// `__tzfile_compute()`: the offset, whether it is the alternative and
@@ -1413,7 +1418,7 @@ mod tests {
             .map(|line| format!("{line}\n"))
             .collect();
         let (count, bad) = check_vectors(&text, &mut read);
-        assert_eq!(count, if cfg!(miri) { 151 } else { 754 });
+        assert_eq!(count, if cfg!(miri) { 161 } else { 801 });
         assert_none_differ(count, &bad);
     }
 
@@ -1436,5 +1441,126 @@ mod tests {
         };
         let (count, bad) = check_vectors(&text, &mut read);
         assert_none_differ(count, &bad);
+    }
+
+    /// The zone file is read only where it is a regular file of at most
+    /// [`TZIF_MAX_BYTES`], looked at before and after a non-blocking open:
+    /// a FIFO (which would hold the open), a device (`/dev/zero` never
+    /// ends), a directory, a socket, a missing path and a longer file are
+    /// none, at once.
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "it makes files, a FIFO and a socket")]
+    fn a_zone_file_that_is_no_regular_file_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-tzif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let limit = usize::try_from(TZIF_MAX_BYTES).unwrap();
+        std::fs::write(dir.join("exact"), vec![b'x'; limit]).unwrap();
+        std::fs::write(dir.join("over"), vec![b'x'; limit + 1]).unwrap();
+        std::fs::write(dir.join("empty"), b"").unwrap();
+        assert_eq!(
+            read_zone_file(&dir.join("exact")).map(|b| b.len()),
+            Some(limit)
+        );
+        assert_eq!(read_zone_file(&dir.join("over")), None);
+        assert_eq!(read_zone_file(&dir.join("empty")), Some(Vec::new()));
+        assert_eq!(read_zone_file(&dir.join("nosuch")), None);
+        assert_eq!(read_zone_file(&dir), None);
+        let _listener = std::os::unix::net::UnixListener::bind(dir.join("sock")).unwrap();
+        assert_eq!(read_zone_file(&dir.join("sock")), None);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(read_zone_file(std::path::Path::new("/dev/null")), None);
+            assert_eq!(read_zone_file(std::path::Path::new("/dev/zero")), None);
+        }
+        let fifo = dir.join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(read_zone_file(&path).is_none());
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(30)),
+                Ok(true)
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// glibc's `tzset()` in secure-execution mode (a set-user-ID run): `TZ`
+    /// is read as a file only where it is the default or lies under the
+    /// system's directory and holds no `../`, and `TZDIR` is not read.
+    #[test]
+    fn secure_mode_reads_only_the_system_zone_files() {
+        let asked = |tz: &[u8], tzdir: Option<&[u8]>, secure: bool| {
+            let mut asked: Vec<Vec<u8>> = Vec::new();
+            let _ = Zone::from_env(Some(tz), tzdir, secure, &mut |path| {
+                asked.push(path.to_vec());
+                None
+            });
+            asked
+        };
+        let zi: &[u8] = b"/tmp/zi";
+        assert!(asked(b"/tmp/x", None, true).is_empty());
+        assert!(asked(b"a/../b", None, true).is_empty());
+        assert_eq!(
+            asked(b"Europe/Paris", Some(zi), true),
+            [b"/usr/share/zoneinfo/Europe/Paris".to_vec()]
+        );
+        assert_eq!(
+            asked(b"/usr/share/zoneinfo/Asia/Tokyo", None, true),
+            [b"/usr/share/zoneinfo/Asia/Tokyo".to_vec()]
+        );
+        assert_eq!(asked(b"/tmp/x", None, false), [b"/tmp/x".to_vec()]);
+        assert_eq!(
+            asked(b"a/../b", None, false),
+            [b"/usr/share/zoneinfo/a/../b".to_vec()]
+        );
+        assert_eq!(
+            asked(b"Europe/Paris", Some(zi), false),
+            [b"/tmp/zi/Europe/Paris".to_vec()]
+        );
+    }
+
+    /// With no `TZ` and no zone file (Windows, which reads none), the
+    /// marker's zone is UTC; a `TZ` rule string needs no file.
+    #[test]
+    fn with_no_zone_file_the_zone_is_utc_or_tzs_rule() {
+        let utc = Zone::from_env(None, None, false, &mut |_| None)
+            .localtime(0)
+            .unwrap();
+        assert_eq!(
+            (utc.gmtoff, utc.isdst, utc.zone.as_slice()),
+            (0, false, &b"UTC"[..])
+        );
+        let cet = Zone::from_env(
+            Some(b"CET-1CEST,M3.5.0,M10.5.0/3"),
+            None,
+            false,
+            &mut |_| None,
+        )
+        .localtime(0)
+        .unwrap();
+        assert_eq!((cet.gmtoff, cet.zone.as_slice()), (3600, &b"CET"[..]));
+    }
+
+    /// `%s` is the time itself. glibc's is `mktime()` of the broken-down
+    /// time, which in an hour a zone repeats with the same `tm_isdst` is
+    /// the later of the two (measured: Asia/Almaty, 2024-02-29 23:30 +06,
+    /// t=1709227800, prints 1709231400): recorded, not reproduced
+    /// (DIVERGENCES 152, residue).
+    #[test]
+    fn percent_s_is_the_time_itself() {
+        let bytes = include_bytes!("../tests/tzif/almaty");
+        let zone = Zone::File(Box::new(TzFile::parse(bytes).unwrap()));
+        let t = 1_709_227_800;
+        let tm = zone.localtime(t).unwrap();
+        assert_eq!(tm.gmtoff, 21_600);
+        let mut buf = [0u8; 32];
+        let n = strftime(&mut buf, b"%s", &tm, t);
+        assert_eq!(&buf[..n], b"1709227800");
     }
 }

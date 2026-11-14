@@ -62,7 +62,10 @@ too slow, `-n` skips it.
 ### On Linux, a socket's host name may cost a DNS query
 
 As in the C, each address a printed socket row holds is named once a run
-(across `-r`'s cycles too), in print order: from `/etc/hosts`, or from DNS
+(across `-r`'s cycles too), in print order, as its row is written: a reader
+that goes away (`| head`) stops the lookups at the next 4 KiB write, as it
+stops the C's (measured: 85 queries for 300 sockets, the C 84). The name
+comes from `/etc/hosts`, or from DNS
 where `/etc/nsswitch.conf` says so (`files dns` where it says nothing), by
 lsof-rs's own PTR query (`std` has no reverse lookup, and the three
 `forbid(unsafe_code)` crates cannot call `getnameinfo()`). The query follows
@@ -70,7 +73,11 @@ glibc 2.39's resolver in every rule measured against the C (DIVERGENCES 154):
 `/etc/resolv.conf`'s first three name servers in turn, `attempts` rounds,
 each server waited for `timeout << n` seconds, divided by the servers'
 count but for the first, one second at least; `RES_OPTIONS` read after the
-file; `rotate`, `use-vc`, `edns0`, `trust-ad`. So a name server that does not
+file; `rotate`, `use-vc`, `edns0`, `trust-ad`; host.conf's `trim` domains
+cut the name. glibc reads `/etc/resolv.conf` before any host lookup, and so
+does lsof-rs: where glibc cannot load it (a directory, a socket,
+`/dev/zero`), no host is named, by the hosts file either, and nothing is
+asked, as in the C. So a name server that does not
 answer costs each such address what it costs the C: by that rule 10 s with
 glibc's defaults and one server, 20 s with two, `attempts:N` times the
 round (measured: 10.04 s for three servers at `timeout:2`). `-n`
@@ -81,15 +88,24 @@ What is not followed, and why: a source other than `files` and `dns` in
 `hosts:` (`mdns`, `resolve`, `myhostname`, `sss`) cannot be asked without
 the C library and is taken as not installed (`UNAVAIL`), as row 38 takes
 one; nscd is not asked; `/etc/resolv.conf` is read once a run, where glibc
-reads it again when it changes; the names found are kept for the whole run,
-as the C keeps them, with no cap on how many; an `edns0` query whose server answers
-`FORMERR` is not asked again without EDNS, as glibc would; an IPv6 name
-server's `%scope` naming an interface is looked up in
+reads it again when it changes, and one with a line past 1 MiB or past 256
+MiB in all is taken as one glibc cannot load, never read in part; a
+resolv.conf, hosts file or host.conf that is a FIFO or an endless device
+(`/dev/urandom`; for host.conf `/dev/zero` too) names no host and asks
+nothing, where the C waits or reads for ever; glibc's warnings about
+host.conf are not printed; the names found are kept for the whole run, as
+the C keeps them, with no cap on how many; where DNS comes before the hosts
+file, glibc asks DNS again each time the file's scan meets a line longer
+than its buffer (about 1 KiB, doubling), and lsof-rs asks once; an IPv6
+name server's `%scope` naming an interface is looked up in
 `/sys/class/net/NAME/ifindex`. A TCP exchange after a truncated reply,
-which glibc waits on without a limit, has the time the same server's
-datagram attempt had. IPv6 sockets are named by glibc's rules (`ip6.arpa`,
-an IPv4-mapped end as IPv4) but could not be measured: this project's
-test host has no IPv6.
+which glibc waits on without a limit, has as long again as the same
+server's datagram attempt, so one address costs at most `attempts` rounds
+and one more server's wait (490 s at `timeout:30 attempts:5` with three
+servers). An `edns0` query answered `FORMERR` is no name after that one
+query, as in glibc 2.39 (measured). IPv6 sockets are named by glibc's rules
+(`ip6.arpa`, an IPv4-mapped end as IPv4) but could not be measured: this
+project's test host has no IPv6.
 
 ### On Windows, `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX are ETW-sourced
 
@@ -263,8 +279,9 @@ costs the C (see [On Linux, a socket's host name may cost a DNS
 query](#on-linux-a-sockets-host-name-may-cost-a-dns-query)), and `-n` is the
 way to pay nothing. The maintainer can make numbers the default again in one
 line, `LINUX_NAMES_BY_DEFAULT` in `crates/lsof-cli/src/args.rs`. **On
-Windows** lsof-rs names both by default as before (reverse DNS through
-`GetNameInfoW`, bounded at 2 s, each distinct address once: see
+Windows** lsof-rs names both by default as before (hosts by reverse DNS
+through `GetNameInfoW`, ports from a built-in table of common services;
+bounded at 2 s, each distinct address once: see
 [Sockets](#on-windows-socket-host-names-cost-up-to-2-s-per-distinct-address)),
 and `-n`/`-P`/`+n`/`+P` read the same flags. On FreeBSD nothing is named.
 
@@ -304,12 +321,21 @@ meet. Each number is a row there, with the measurement behind it.
   rule (glibc reads `posixrules`, which is that rule where it links to
   `America/New_York`); a zone file past 1 MiB, or one that is no regular file,
   is no zone; the zone is read once a run, where glibc's `localtime()`
-  looks at `/etc/localtime` again at each marker. A mount supplement that is
-  a FIFO or a device, or past 16 MiB, is `error reading` it and is never
-  opened, where the C waits on a FIFO or reads `/dev/zero` forever, and an
-  empty one, which kills the C, names no mount; its bad lines, and what `+m`
-  prints, are quoted escaped, so a directory holding a control byte prints in
-  a form `+m m` cannot read back.
+  looks at `/etc/localtime` again at each marker; `%s` is the time itself,
+  where glibc's `mktime()` takes the later of an hour a zone repeats with
+  the same daylight flag; on Windows the marker's zone is `TZ`'s POSIX rule
+  string (`CET-1CEST,M3.5.0,M10.5.0/3`), else UTC: the Windows time-zone
+  setting is not read; on FreeBSD it follows glibc's rules, unmeasured
+  against FreeBSD's libc. With SIGPIPE ignored and the reader gone, lsof-rs
+  exits 141 at its first failed write, where the C writes on into the dead
+  pipe until its count or `+r` ends the loop. A mount supplement that is a
+  FIFO, a pipe or a device is `error reading` it and is never read, where the
+  C waits on a FIFO with no writer, reads a pipe that has one (`printf … |
+  lsof +m /dev/stdin`) or reads `/dev/zero` forever; one past 16 MiB is read
+  to that bound and refused the same way; an empty one, which kills the C,
+  names no mount; its file name, its bad lines, the directories `assuming
+  dev=` names, and what `+m` prints, are quoted escaped, so a directory
+  holding a control byte prints in a form `+m m` cannot read back.
 - **Linux, and worth knowing before running it on a busy host:** a run that
   needs the mount table — every run but `-i` alone, and that too with `-e` —
   reads it as the C does, and `stat`s each mount point once (again for a

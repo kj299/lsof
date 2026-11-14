@@ -16,7 +16,7 @@ use std::time::Duration;
 use libfuzzer_sys::fuzz_target;
 use lsof_core::dns::{
     answer_name, name_text, ptr_query, query_ptr, udp_verdict, unpack_name, Opened, Received,
-    ResolvConf, Rotation, Transport, MAX_NAME_TEXT,
+    ResolvConf, Rotation, TcpRead, Transport, MAX_NAME_TEXT,
 };
 use lsof_core::netnames::NssAnswer;
 
@@ -72,8 +72,13 @@ impl Transport for Replies<'_> {
     fn tcp_send(&mut self, _: &mut (), _: &[u8], _: Duration) -> bool {
         true
     }
-    fn tcp_recv(&mut self, _: &mut (), buf: &mut [u8], _: Duration) -> Option<usize> {
-        self.next(buf)
+    fn tcp_recv(&mut self, _: &mut (), buf: &mut [u8], _: Duration) -> TcpRead {
+        // An empty message is a reset, so that the reconnection is fuzzed too.
+        match self.next(buf) {
+            Some(0) => TcpRead::Reset,
+            Some(n) => TcpRead::Message(n),
+            None => TcpRead::Failed,
+        }
     }
 }
 

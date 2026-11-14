@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::model::{Protocol, SocketInfo};
-use crate::netnames::ServiceEntry;
 
 /// The C's `Namech` is `MAXPATHLEN + 1` bytes, and `printinaddr()` writes
 /// into all but one of them: a NAME that does not fit is none at all.
@@ -32,8 +31,11 @@ pub trait NameService {
     fn host_by_addr(&mut self, ip: IpAddr) -> Option<Vec<u8>>;
     /// `getservbyport(htons(port), protocol)`, `protocol` `tcp` or `udp`.
     fn service_by_port(&mut self, port: u16, protocol: &[u8]) -> Option<Vec<u8>>;
-    /// A `getservent()` scan, every entry in order.
-    fn services(&mut self) -> Vec<ServiceEntry>;
+    /// A `getservent()` scan, every entry in order, each handed to `each`
+    /// (its name, its port, its protocol as written) and not kept: what
+    /// the scan keeps is `PortNames::fill`'s, one name a port and
+    /// protocol, whatever the database holds.
+    fn for_each_service(&mut self, each: &mut crate::netnames::ServiceVisitor<'_>);
 }
 
 /// A [`NameService`] that knows no name: every host numeric, every port a
@@ -47,9 +49,7 @@ impl NameService for NoNames {
     fn service_by_port(&mut self, _: u16, _: &[u8]) -> Option<Vec<u8>> {
         None
     }
-    fn services(&mut self) -> Vec<ServiceEntry> {
-        Vec::new()
-    }
+    fn for_each_service(&mut self, _: &mut crate::netnames::ServiceVisitor<'_>) {}
 }
 
 /// Text for a name that need not be UTF-8: a byte that is no character is
@@ -207,23 +207,29 @@ impl PortNames {
     /// `fill_porttab()`: every entry of the database whose protocol is TCP
     /// or UDP in any case and whose name is not empty, the first for each
     /// port kept, alongside what was found already.
+    ///
+    /// Each entry is taken as the scan reads it, as the C's `getservent()`
+    /// loop takes it, so what is kept is at most one name a port and
+    /// protocol whatever the file's size (2 x 65,536 names of at most 4,097
+    /// bytes).
     fn fill(&mut self, ns: &mut dyn NameService) {
         self.filled = true;
-        for e in ns.services() {
-            let proto = if e.protocol.eq_ignore_ascii_case(b"tcp") {
+        let named = &mut self.named;
+        ns.for_each_service(&mut |name, port, protocol| {
+            let proto = if protocol.eq_ignore_ascii_case(b"tcp") {
                 0
-            } else if e.protocol.eq_ignore_ascii_case(b"udp") {
+            } else if protocol.eq_ignore_ascii_case(b"udp") {
                 1
             } else {
-                continue;
+                return;
             };
-            if e.name.is_empty() {
-                continue;
+            if name.is_empty() {
+                return;
             }
-            if let Some(m) = self.named.get_mut(proto) {
-                m.entry(e.port).or_insert(e.name);
+            if let Some(m) = named.get_mut(proto) {
+                m.entry(port).or_insert_with(|| name.to_vec());
             }
-        }
+        });
     }
 }
 
@@ -336,6 +342,7 @@ impl SocketNames {
 mod tests {
     use super::*;
     use crate::model::{SockState, TcpState};
+    use crate::netnames::ServiceEntry;
 
     /// A name service out of tables, counting its calls.
     #[derive(Default)]
@@ -362,9 +369,11 @@ mod tests {
                 .find(|e| e.port == port && e.protocol == protocol)
                 .map(|e| e.name.clone())
         }
-        fn services(&mut self) -> Vec<ServiceEntry> {
+        fn for_each_service(&mut self, each: &mut crate::netnames::ServiceVisitor<'_>) {
             self.scans += 1;
-            self.services.clone()
+            for e in &self.services {
+                each(&e.name, e.port, &e.protocol);
+            }
         }
     }
 
@@ -559,5 +568,37 @@ mod tests {
         assert_eq!(t("2001:db8:0:1:1:1:1:1"), "2001:db8:0:1:1:1:1:1");
         assert_eq!(t("fe80::1"), "fe80::1");
         assert_eq!(t("::ffff:0:1.2.3.4"), "::ffff:0:102:304");
+    }
+
+    /// The scan keeps one name a port and protocol as it reads, whatever
+    /// the database holds, as the C's `fill_porttab()` does over
+    /// `getservent()`: a million entries that name nothing kept (an empty
+    /// protocol, which glibc accepts), and one that does.
+    #[test]
+    fn the_scan_keeps_only_what_it_names() {
+        struct Many {
+            entries: usize,
+        }
+        impl NameService for Many {
+            fn host_by_addr(&mut self, _: IpAddr) -> Option<Vec<u8>> {
+                None
+            }
+            fn service_by_port(&mut self, _: u16, _: &[u8]) -> Option<Vec<u8>> {
+                None
+            }
+            fn for_each_service(&mut self, each: &mut crate::netnames::ServiceVisitor<'_>) {
+                for i in 0..self.entries {
+                    each(b"a", (i % 65_536) as u16, b"");
+                }
+                each(b"x", 7, b"TCP");
+                each(b"y", 7, b"tcp");
+            }
+        }
+        let entries = if cfg!(miri) { 1_000 } else { 1_000_000 };
+        let mut ports = PortNames::default();
+        ports.fill(&mut Many { entries });
+        assert_eq!(ports.named[0].len(), 1);
+        assert_eq!(ports.named[0].get(&7).map(Vec::as_slice), Some(&b"x"[..]));
+        assert!(ports.named[1].is_empty());
     }
 }

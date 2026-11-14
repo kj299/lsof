@@ -113,7 +113,7 @@ for genuinely other-dialect features (Solaris zones, BSD kqueue, HP-UX AFS).
    `-Z` or of socket classification. The gate output prints each one, so the list
    cannot rot unseen.
 4. **Not in the dialect** — Linux-scoped waivers for what the C's own Linux build
-   lacks: `-m`, `-M`, and TYPE codes the shared table names but the Linux
+   lacks: `-M`, and TYPE codes the shared table names but the Linux
    dialect never emits. Their `reason` begins `NOT IN THE DIALECT`.
 
 ## Coverage debt: closed (2026-07-25)

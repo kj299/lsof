@@ -357,8 +357,10 @@ fn digits_value(digits: &str) -> usize {
 /// does: `-n` and `-P` turn either off, `+n` and `+P` on again, the last one
 /// winning (DIVERGENCES 154). A run that lists an Internet socket may then
 /// ask DNS for its hosts' names, as the C asks. `false` here makes every
-/// host and port a number unless `+n`/`+P` asks, as lsof-rs printed them on
-/// Linux before 2026-11-14; nothing else changes with it. Windows names its
+/// host and port a number unless `+n`/`+P` asks, in the C's numeric form (an
+/// IPv4-mapped end written as IPv4, an IPv6 host by `inet_ntop()`), so the
+/// bracketed `[::ffff:a.b.c.d]` lsof-rs printed on Linux before 2026-11-14
+/// does not come back. Windows names its
 /// sockets by default whatever this says (its backend resolves them as it
 /// gathers, under the same `-n`/`-P`); on FreeBSD nothing names them.
 pub const LINUX_NAMES_BY_DEFAULT: bool = true;
@@ -1014,26 +1016,32 @@ fn parse_options<'s>(
         })
         .collect();
     let mut i = 0;
+    // The next word holds what an option gave back from after its digits
+    // (`GOx2 = GObk[1] + n`), its prefix put back in front: `GetOpt` reads
+    // on inside it, with no word-start check, so `-r 1-` is `-` as a letter
+    // and not `--`.
+    let mut resumed = false;
     while i < args.len() {
         let tok = &args[i];
-        if tok == "--etw" {
+        let resumed_here = std::mem::take(&mut resumed);
+        if !resumed_here && tok == "--etw" {
             sel.use_etw = true;
             i += 1;
             continue;
         }
-        if tok == "--unicode" {
+        if !resumed_here && tok == "--unicode" {
             sel.unicode_output = true;
             i += 1;
             continue;
         }
-        if tok == "--ascii" {
+        if !resumed_here && tok == "--ascii" {
             // Explicit opt-out; redundant with the default, kept for symmetry.
             sel.unicode_output = false;
             i += 1;
             continue;
         }
         // `--` ends option parsing; remaining tokens are paths.
-        if tok == "--" {
+        if !resumed_here && tok == "--" {
             i += 1;
             while i < raw.len() {
                 sel.paths.push(raw[i].clone());
@@ -1385,6 +1393,7 @@ fn parse_options<'s>(
                                 );
                                 *word = os_from_bytes(bytes);
                             }
+                            resumed = true;
                             j = chars.len();
                         }
                     }
@@ -1401,7 +1410,14 @@ fn parse_options<'s>(
                     // is `-o -t`, `-o3t` is `-o3 -t`, and `-o /file` is `-o`
                     // and a file name. Note that a limit does NOT switch the
                     // offset column on: `-o 5` keeps SIZE/OFF.
-                    match take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix) {
+                    match take_digits(
+                        &chars,
+                        &mut j,
+                        (&mut args, &mut raw),
+                        &mut i,
+                        prefix,
+                        &mut resumed,
+                    ) {
                         Some(digits) => columns.offset_digits = offset_digits_value(&digits),
                         None => columns.offset = true,
                     }
@@ -1422,7 +1438,14 @@ fn parse_options<'s>(
                     // letters after the digits read again as options, as for
                     // `+L` (`main.c:652-666`): `-L 3x` says this and then `-x
                     // must accompany +d or +D` (measured).
-                    let digits = take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix);
+                    let digits = take_digits(
+                        &chars,
+                        &mut j,
+                        (&mut args, &mut raw),
+                        &mut i,
+                        prefix,
+                        &mut resumed,
+                    );
                     if !plus && digits.is_some() {
                         early.line("no number may follow -L");
                         continue;
@@ -1602,7 +1625,14 @@ fn parse_options<'s>(
                     // not reproduced (DIVERGENCES 121), and a limit that
                     // large waits as long as the system does (no deadline is
                     // computed that could overflow).
-                    let digits = take_digits(&chars, &mut j, (&mut args, &mut raw), &mut i, prefix);
+                    let digits = take_digits(
+                        &chars,
+                        &mut j,
+                        (&mut args, &mut raw),
+                        &mut i,
+                        prefix,
+                        &mut resumed,
+                    );
                     sel.blocking.limit = match digits {
                         None => TMLIMIT,
                         Some(d) => {
@@ -2028,6 +2058,14 @@ fn parse_options<'s>(
         }
         let table = table.get_or_insert_with(|| read_table(&sel));
         if !table.entries.is_empty() {
+            for e in sel.exempt_fs.iter_mut() {
+                e.device = table
+                    .entries
+                    .iter()
+                    .find(|m| m.dir == e.path)
+                    .filter(|m| m.supplied)
+                    .and_then(|m| m.device);
+            }
             for e in sel.exempt_fs.iter().rev() {
                 if !table.entries.iter().any(|m| m.dir == e.path) {
                     errors.push(format!(
@@ -2286,7 +2324,11 @@ fn enter_exempt(
     };
     let path = without_trailing_slashes(path);
     if !sel.exempt_fs.iter().any(|e| e.path == path) {
-        sel.exempt_fs.push(ExemptFs { path, plus });
+        sel.exempt_fs.push(ExemptFs {
+            path,
+            plus,
+            device: None,
+        });
     }
     Ok(())
 }
@@ -3092,6 +3134,7 @@ fn take_digits(
     (args, raw): (&mut [String], &mut [OsString]),
     i: &mut usize,
     prefix: char,
+    resumed: &mut bool,
 ) -> Option<String> {
     if *j + 1 < chars.len() {
         let digits: String = chars[*j + 1..]
@@ -3116,6 +3159,7 @@ fn take_digits(
         *i += 1;
     } else {
         args[*i + 1] = format!("{prefix}{leftover}");
+        *resumed = true;
         // The digits are ASCII, one byte each, in the bytes as in the text.
         if let Some(word) = raw.get_mut(*i + 1) {
             let mut bytes = vec![prefix as u8];
@@ -5485,6 +5529,7 @@ mod tests {
                     source_is_block: false,
                     fsname: "src".into(),
                     kind: lsof_core::MountKind::Regular,
+                    supplied: false,
                 }],
                 ..MountTable::default()
             };
@@ -5802,6 +5847,78 @@ mod tests {
             repeat(&["-r", "1c99999999999999999999mX"]).count,
             usize::MAX as u64
         );
+    }
+
+    /// What follows the digits of a value in the next word is read on as
+    /// letters inside that word, under the option word's prefix, as the
+    /// C's `GetOpt` resumes there (`GOx2 = GObk[1] + n`) with no word-start
+    /// check: `-r 1-` is `illegal option character: -`, not `--`, and
+    /// `-r 1-etw` is not `--etw` (each measured against the C).
+    #[test]
+    fn a_next_word_read_on_after_its_digits_is_letters_not_a_word() {
+        // The next word reads as the attached form reads its own rest.
+        let read = |argv: &[&str]| {
+            let (got, said) = parse_saying(argv);
+            (format!("{got:?}"), said)
+        };
+        for opt in ["-r", "+r", "-o", "-S", "-L", "+L"] {
+            for rest in ["-", "--", "-etw", "-unicode", "-ascii", "-p1", "+", "t"] {
+                let value = format!("3{rest}");
+                let attached = format!("{opt}{value}");
+                assert_eq!(
+                    read(&[opt, &value, "x"]),
+                    read(&[&attached, "x"]),
+                    "{opt} {value} x"
+                );
+            }
+        }
+        // The letters' own errors are the Linux C's words; the comparison
+        // above runs everywhere.
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let err = |argv: &[&str]| error_lines(parse_on_host(argv, false));
+        let dash = || "illegal option character: -".to_string();
+        for opt in ["-r", "-o", "-S"] {
+            assert_eq!(err(&[opt, "3-", "x"]), [dash()], "{opt} 3- x");
+            assert_eq!(err(&[opt, "3-", "-p", "1"]), [dash()], "{opt} 3- -p 1");
+            assert_eq!(
+                err(&[opt, "3-", "-p", "abc"]),
+                [dash(), "illegal process ID: abc".to_string()],
+                "{opt} 3- -p abc: the words after are options still"
+            );
+        }
+        assert_eq!(
+            err(&["-L", "1-", "-p", "1"]),
+            ["no number may follow -L".to_string(), dash()]
+        );
+        assert_eq!(err(&["+L", "1-", "-p", "1"]), [dash()]);
+        assert_eq!(err(&["+r", "1-", "-p", "1"]), [dash()]);
+        // `-e` prints what the parse holds before its own line.
+        let (got, said) = parse_saying(&["-r", "1-etw"]);
+        assert_eq!(said, ["lsof: illegal option character: -".to_string()]);
+        assert_eq!(
+            error_lines(got),
+            ["-e not followed by a file system path: \"tw\"".to_string()]
+        );
+        assert_eq!(
+            err(&["-r", "1-ascii"]),
+            [dash(), "unknown -s protocol: \"cii\"".to_string()]
+        );
+        assert_eq!(
+            err(&["-r", "1-unicode"]),
+            [dash(), "can't get UID for nicode".to_string()]
+        );
+        assert_eq!(
+            err(&["-o", "1-unicode"]),
+            [dash(), "can't get UID for nicode".to_string()]
+        );
+        // The attached form, which already read on inside its word.
+        assert_eq!(err(&["-r1-", "x"]), [dash()]);
+        // A word given back whole is still a word: `-r -- x` is the default
+        // delay and `--` ends the options.
+        let (r, sel) = repeat_and_selection(&["-r", "--", "x"]);
+        assert_eq!((r.delay, sel.paths.len()), (15, 1));
     }
 
     /// A marker format that gives no marker now, and `%n` beside `-F`, are
@@ -6959,6 +7076,7 @@ mod tests {
                         source_is_block: false,
                         fsname: "src".into(),
                         kind: lsof_core::MountKind::Regular,
+                        supplied: false,
                     })
                     .collect(),
                 ..MountTable::default()
@@ -6966,6 +7084,54 @@ mod tests {
         };
         let got = parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs, &reader);
         (got, said.into_inner())
+    }
+
+    /// An `-e`/`+e` path's mount, found where the C sets `ep->mp`, gives its
+    /// files the device the supplement gave it (`isefsys()`: `ds` of
+    /// `SB_DEV` alone), and none where the table `stat`ed it, as when it was
+    /// read at a `+d` before the `-e` (row 130) or the file had no line.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exempt_path_takes_the_device_the_supplement_gave_its_mount() {
+        let fs = SafeFs::in_process();
+        let reader = |_: &MountRequest, _: &SafeFs| MountTable {
+            entries: [
+                ("/x", Some(0x4242), true),
+                ("/y", Some(5), false),
+                ("/z", None, false),
+            ]
+            .iter()
+            .map(|&(dir, device, supplied)| lsof_core::MountEntry {
+                dir: dir.into(),
+                device,
+                source_resolved: None,
+                source_is_block: false,
+                fsname: "src".into(),
+                kind: lsof_core::MountKind::Regular,
+                supplied,
+            })
+            .collect(),
+            ..MountTable::default()
+        };
+        let argv = ["-e", "/x", "+e", "/y", "-e", "/z", "-p", "1"];
+        match parse_with(argv.iter().map(|s| s.to_string()).collect(), &fs, &reader) {
+            Ok(Action::Run { selection, .. }) => {
+                let devices: Vec<(String, Option<u64>)> = selection
+                    .exempt_fs
+                    .iter()
+                    .map(|e| (e.path.to_string_lossy().into_owned(), e.device))
+                    .collect();
+                assert_eq!(
+                    devices,
+                    [
+                        ("/x".to_string(), Some(0x4242)),
+                        ("/y".to_string(), None),
+                        ("/z".to_string(), None)
+                    ]
+                );
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
     }
 
     /// The C reads its mount table iff some `-e`/`+e` was given or the run is
@@ -8604,6 +8770,7 @@ mod tests {
                 source_is_block: false,
                 fsname: "src".into(),
                 kind: lsof_core::MountKind::Regular,
+                supplied: false,
             }],
             ..MountTable::default()
         };

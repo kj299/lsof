@@ -281,11 +281,15 @@ enum SupplementState {
 /// by `-w`): `access()` failing (`WARNING: access F: ERR`), `fopen()`
 /// failing past it (`can't open(F): ERR`: a socket, measured), a file that
 /// cannot be read through to its end (`error reading F`: a directory, as the
-/// C says). Where the C would wait or read for ever, lsof-rs reads nothing
-/// and says `error reading F` too: a FIFO (measured: the C's `fopen()`
-/// waits for a writer), a device, or a file past [`SUPPLEMENT_MAX_BYTES`].
-/// No FIFO or device is opened at all, and the rest are opened without
-/// blocking, so a FIFO put in a regular file's place cannot hold the run.
+/// C says). Where the C would wait or read with no bound, lsof-rs reads
+/// nothing and says `error reading F` too: a FIFO or a pipe (measured: the
+/// C's `fopen()` waits for ever on one with no writer, and reads one that
+/// has a writer, `printf … | lsof +m /dev/stdin`, until the writer closes
+/// it, which may be never), a device, or a file past
+/// [`SUPPLEMENT_MAX_BYTES`] (opened, read to that bound and refused). No
+/// FIFO or device named as the file is opened, and the rest are opened
+/// without blocking: one put in a regular file's place after the look may
+/// be opened, cannot hold the open, and is refused unread (DIVERGENCES 153).
 fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
     let shown = Escaper::UNIX.bytes(path.as_bytes()).into_owned();
@@ -296,6 +300,12 @@ fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
         )
     };
     let error = || format!("lsof: error reading {shown}");
+    // A descriptor lsof inherited is one the C has closed by now
+    // (`closefrom_shim(ctx, 3)`, `main.c:173-176`): its name, `/dev/fd/N`
+    // or `/proc/self/fd/N`, is none to the C's `access()` (measured).
+    if names_an_inherited_fd(Path::new(path), inherited_fds()) {
+        return Err(access(&std::io::Error::from_raw_os_error(ENOENT)));
+    }
     let meta = std::fs::metadata(path).map_err(|e| access(&e))?;
     let kind = meta.file_type();
     if kind.is_fifo() || kind.is_char_device() || kind.is_block_device() {
@@ -322,6 +332,124 @@ fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
         return Err(error());
     }
     Ok(text)
+}
+
+/// The descriptors from 3 up this process had when [`note_inherited_fds`]
+/// looked, first thing in `main`: what the C closes at its start.
+static INHERITED: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+
+/// Note the descriptors from 3 up this process holds now, before it opens
+/// any: those it inherited. lsof-rs cannot close them as the C does
+/// (`closefrom_shim()`; a close is `unsafe` in Rust, which this crate
+/// forbids), so it reads a name that leads to one as the C would find it,
+/// gone (DIVERGENCES 153). The listing of `/proc/self/fd` used to look is
+/// itself a descriptor, and is told apart by what it is.
+pub fn note_inherited_fds() {
+    let own = Path::new("/proc/self/fd");
+    let listing = Path::new("/proc")
+        .join(std::process::id().to_string())
+        .join("fd");
+    let fds = std::fs::read_dir(own)
+        .map(|dir| {
+            dir.filter_map(Result::ok)
+                .filter_map(|e| {
+                    let n: u32 = e.file_name().to_str()?.parse().ok()?;
+                    let target = std::fs::read_link(e.path()).ok()?;
+                    // The directory listing's own descriptor names this
+                    // process's fd directory.
+                    (n >= 3 && target != listing).then_some(n)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = INHERITED.set(fds);
+}
+
+/// `ENOENT`, which `access()` says of a closed descriptor's name.
+const ENOENT: i32 = 2;
+
+fn inherited_fds() -> &'static [u32] {
+    INHERITED.get().map_or(&[], Vec::as_slice)
+}
+
+/// Whether `path`, its links followed one by one as the kernel follows
+/// them, leads through `/proc/PID/fd/N` (or a task's) of this process, `N`
+/// one of `inherited`: `/dev/fd/9`, `/proc/self/fd/9`, `<(cmd)`. At most 40
+/// links, as the kernel follows.
+fn names_an_inherited_fd(path: &Path, inherited: &[u32]) -> bool {
+    use std::path::Component;
+    if inherited.is_empty() {
+        return false;
+    }
+    let pid = std::process::id().to_string();
+    let ours = |p: &Path| -> bool {
+        let parts: Vec<&OsStr> = p
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        let fd = match parts.as_slice() {
+            [proc, id, fd, n] if *proc == "proc" && *id == pid.as_str() && *fd == "fd" => n,
+            [proc, id, task, _, fd, n]
+                if *proc == "proc" && *id == pid.as_str() && *task == "task" && *fd == "fd" =>
+            {
+                n
+            }
+            _ => return false,
+        };
+        fd.to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| inherited.contains(&n))
+    };
+    let start = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return false,
+        }
+    };
+    let mut todo: std::collections::VecDeque<std::ffi::OsString> =
+        std::collections::VecDeque::new();
+    let push_front = |todo: &mut std::collections::VecDeque<std::ffi::OsString>, p: &Path| {
+        for c in p.components().rev() {
+            todo.push_front(c.as_os_str().to_os_string());
+        }
+    };
+    push_front(&mut todo, &start);
+    let mut done = std::path::PathBuf::from("/");
+    let mut links = 0u32;
+    while let Some(c) = todo.pop_front() {
+        match c.to_str() {
+            Some("/") => done = std::path::PathBuf::from("/"),
+            Some(".") => {}
+            Some("..") => {
+                done.pop();
+            }
+            _ => {
+                done.push(&c);
+                if ours(&done) {
+                    return true;
+                }
+                let is_link =
+                    std::fs::symlink_metadata(&done).is_ok_and(|m| m.file_type().is_symlink());
+                if is_link {
+                    links = links.saturating_add(1);
+                    if links > 40 {
+                        return false;
+                    }
+                    let Ok(target) = std::fs::read_link(&done) else {
+                        return false;
+                    };
+                    done.pop();
+                    push_front(&mut todo, &target);
+                }
+            }
+        }
+    }
+    false
 }
 
 impl Supplement {
@@ -464,6 +592,7 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
             }
         }
         let stated = (!no_stat).then(|| fs.stat(Path::new(&dir)));
+        let mut supplied = false;
         let device = match stated {
             Some(Ok(st)) => {
                 sb_dev = st.dev;
@@ -494,6 +623,7 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
                         if let Some(dev) = hit {
                             sb_dev = dev;
                         }
+                        supplied = hit.is_some();
                         fs.tell(&format!(
                             "lsof: assuming dev={} for {} from {}",
                             alternate_hex(sb_dev),
@@ -535,6 +665,7 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
             source_is_block,
             fsname: line.source.clone(),
             kind,
+            supplied,
         };
         match duplicate {
             Some(i) => table.entries[i] = entry,
@@ -966,6 +1097,7 @@ mod tests {
         ExemptFs {
             path: path.into(),
             plus,
+            device: None,
         }
     }
 
@@ -1158,6 +1290,28 @@ mod tests {
             supplement_bytes(OsStr::new("/dev/null")).unwrap_err(),
             "lsof: error reading /dev/null"
         );
+        // A pipe whose writer holds it open, the supplement in it: the C
+        // reads it and takes `/proc`'s device (measured, `printf '/proc
+        // 0x15\n' | lsof +m /dev/stdin`); lsof-rs refuses it unread, a read
+        // that waits for as long as the writer keeps it.
+        let mut holder = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut w = holder.stdin.take().unwrap();
+            w.write_all(b"/proc 0x15\n").unwrap();
+            let pipe = format!("/proc/{}/fd/0", holder.id());
+            assert_eq!(
+                supplement_bytes(OsStr::new(&pipe)).unwrap_err(),
+                format!("lsof: error reading {pipe}")
+            );
+            drop(w);
+        }
+        let _ = holder.kill();
+        let _ = holder.wait();
         assert_eq!(
             supplement_bytes(dir.as_os_str()).unwrap_err(),
             format!("lsof: error reading {}", shown(&dir))
@@ -1182,6 +1336,68 @@ mod tests {
         assert_eq!(
             supplement_bytes(big.as_os_str()).unwrap_err(),
             format!("lsof: error reading {}", shown(&big))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A name that leads to a descriptor lsof inherited is gone, as the C
+    /// finds it: `/dev/fd/N`, `/proc/self/fd/N`, `/proc/PID/fd/N`; another
+    /// descriptor's, or the file's own name, is not.
+    #[test]
+    #[cfg_attr(miri, ignore = "it opens a file and reads /proc")]
+    fn a_name_through_an_inherited_descriptor_is_none() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/proc/self/stat").unwrap();
+        let n = u32::try_from(file.as_raw_fd()).unwrap();
+        let held = [n];
+        let pid = std::process::id();
+        for name in [
+            format!("/dev/fd/{n}"),
+            format!("/proc/self/fd/{n}"),
+            format!("/proc/{pid}/fd/{n}"),
+            format!("/proc/thread-self/fd/{n}"),
+            format!("/dev/../dev/fd/{n}"),
+        ] {
+            assert!(names_an_inherited_fd(Path::new(&name), &held), "{name}");
+            assert!(!names_an_inherited_fd(Path::new(&name), &[n + 1]), "{name}");
+        }
+        assert!(!names_an_inherited_fd(Path::new("/proc/self/stat"), &held));
+        assert!(!names_an_inherited_fd(Path::new("/dev/fd/0"), &held));
+        drop(file);
+    }
+
+    /// An empty supplement names no mount: each mount not `stat`ed is
+    /// `assuming dev=0 … from F` and kept, and the run goes on (the C dies
+    /// at its first lookup, exit 139: ledger
+    /// `plus-m-file-empty-crashes-the-c`).
+    #[test]
+    #[cfg_attr(miri, ignore = "it writes a file")]
+    fn an_empty_supplement_names_no_mount() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-supe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("empty");
+        std::fs::write(&file, "").unwrap();
+        let shown = file.to_str().unwrap().to_string();
+        let b = Blocking {
+            avoid: true,
+            ..Blocking::default()
+        };
+        let (t, said) = resolve_sup(
+            &Host::default(),
+            "proc /proc proc rw 0 0\nsysfs /sys sysfs rw 0 0\n",
+            vec![],
+            MountSupplement::File(file.clone().into()),
+            b,
+            false,
+        );
+        assert_eq!(dirs(&t), ["/proc", "/sys"]);
+        assert!(t.entries.iter().all(|m| m.device.is_none() && !m.supplied));
+        assert_eq!(
+            said,
+            [
+                format!("lsof: assuming dev=0 for /proc from {shown}"),
+                format!("lsof: assuming dev=0 for /sys from {shown}"),
+            ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1239,6 +1455,12 @@ mod tests {
         );
         let devs: Vec<Option<u64>> = t.entries.iter().map(|m| m.device).collect();
         assert_eq!(devs, [Some(0x15), Some(0x22), Some(6), None]);
+        // Which device came from the file (the C's `ds` of `SB_DEV` alone,
+        // which `isefsys()` shows for an `-e` mount's files): a hit, for a
+        // failed `stat` or a timeout as for one not made; never a `stat`'s,
+        // nor a miss.
+        let supplied: Vec<bool> = t.entries.iter().map(|m| m.supplied).collect();
+        assert_eq!(supplied, [true, false, true, false]);
         assert_eq!(
             said,
             [

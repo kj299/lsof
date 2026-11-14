@@ -128,6 +128,10 @@ mod users;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
+/// What lsof-rs inherited from 3 up, noted before it opens any (DIVERGENCES
+/// 153: the C closes them at its start).
+#[cfg(target_os = "linux")]
+pub use mounts::note_inherited_fds;
 /// Whether this process runs in secure-execution mode (`AT_SECURE`), where
 /// glibc's loader takes `TZDIR`, `RES_OPTIONS` and the like out of the
 /// environment and `tzset()` reads only the system's zone files.

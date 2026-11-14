@@ -907,6 +907,7 @@ mod tests {
             source_is_block: false,
             fsname: "srv:/x".into(),
             kind: lsof_core::MountKind::Nfs,
+            supplied: false,
         }];
         let ctx = GatherCtx {
             socks: &socks,

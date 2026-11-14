@@ -265,6 +265,13 @@ disagreeing, and it names the C code so anyone can check the triage.
   TCP@127.0.0.1:1,2`, `-i UDP:ntp,ssh`: exit 134 where glibc's allocator
   notices, which depends on what else the run allocated; the listing itself,
   read unbuffered, is lsof-rs's line for line).
+- [x] plus-m-file-a-pipe-with-a-writer: DECISION (row 153) — a mount
+  supplement on a pipe or FIFO that has a writer (`printf '/proc 0x15\n' |
+  lsof -e /proc +m /dev/stdin`): the C's `fopen()`/`fgets()` read it to the
+  writer's close and take `/proc`'s device (`assuming dev=0x15`, measured
+  2026-11-14); lsof-rs refuses every FIFO and pipe unread, `error reading
+  /dev/stdin`, then `assuming dev=0`, because such a read has no bound but
+  the writer's (one with no writer holds the C for ever).
 - [x] plus-m-file-empty-crashes-the-c: C-DEFECT, not reproduced (row 153)
   — a mount supplement that holds no line kills the C at its first lookup,
   exit 139 (measured: an empty file and `/dev/null`, under `-b`, where every
@@ -318,7 +325,16 @@ measurement is what is written here, and the brief's error is named.
   then past any spaces `c` and a count's digits, then `m` and the rest of the
   word as a `strftime(3)` format; anything else after the delay's digits,
   *the count's `c` included*, is read again as option letters under the same
-  prefix (`GOx2 = GObk[1] + n`, `main.c:801-805`). So `-r 1c2` is a count of
+  prefix (`GOx2 = GObk[1] + n`, `main.c:801-805`), unless `m<fmt>` follows
+  the count (`-r 1c2mX` gives nothing back). It is read on *inside the
+  word*, where `GetOpt()` makes no word-start test: a next word `1-` is the
+  letter `-`, `illegal option character: -`, not the `--` that ends the
+  options, and `1-unicode` is `-` then `-u nicode`, not `--unicode`
+  (measured; the same for `-o`, `-S` and `-L`'s digits; lsof-rs had made the
+  word `--` and listed the words after it as names, or repeated until
+  killed, since 854e2c7's `take_digits()`; fixed 2026-11-14 by the review,
+  cases `repeat-next-word-dash-*`, `offset-next-word-dash-*`,
+  `links-next-word-dash-*`). So `-r 1c2` is a count of
   two **and** `-c 2` (measured: it lists the commands that begin `2`, here
   none, and prints two markers), `+r 1c2` a count and `+c 2`, `-r "1  c1 mX"`
   two `illegal option character:  ` lines (the spaces the count's search
@@ -339,9 +355,11 @@ measurement is what is written here, and the brief's error is named.
   report). A plain `-r` ends only on a signal and so reports nothing (54).
   The marker: `=======` or the format, `m` plus the format and the field
   terminator under `-F` (and a newline after `-F0`'s NUL), nothing under
-  `-J`, the formatted text under `-t`; the C tries the format where it reads
-  it, into its buffer of `(len + 1) * 8 + 1` bytes, and refuses one whose
-  text does not fit or is empty, `illegal <fmt>: "F"` (`%c` is 24
+  `-J`, the formatted text under `-t`; it follows every cycle, the last
+  counted one too, before its sleep; the C tries the format where it reads
+  it, into a buffer of `(len + 1) * 8 + 1` bytes of which `strftime()` is
+  given `(len + 1) * 8`, and refuses one whose text is longer than `(len +
+  1) * 8 - 1` characters or is empty, `illegal <fmt>: "F"` (`%c` is 24
   characters, so `-r m%c` is refused and `-r m%cX` taken), and `%n` beside
   `-F`, `-J` or `-j` (`%n illegal in -r m<fmt> when -F has been specified:
   "F"`, after `-F and -t are mutually exclusive`; a format already refused is
@@ -353,16 +371,30 @@ measurement is what is written here, and the brief's error is named.
   `localtime()`: `TZ` read as `tzset()` reads it (unset, `/etc/localtime`;
   empty, `Universal`; a leading `:` dropped; a file under `TZDIR` or the
   system's directory unless it starts with `/`; else a POSIX rule string,
-  each of `__tzset_parse_tz()`'s partial readings kept), and a compiled zone
+  each of `__tzset_parse_tz()`'s partial readings kept: a refused month
+  `M13` falls after the year, and `M14` to `M25` in a common year are read
+  from the leap year's row of `__mon_yday`, `M14` being January, as glibc's
+  read past the row gives (measured; lsof-rs had taken every month past 12
+  as `M13`, fixed by the review; past that, glibc reads past the table, a
+  C-DEFECT not reproduced: lsof-rs takes the change as after the year), a
+  zone name of any length kept whole (measured: a 300-byte name and `%Z` and
+  34 characters do not fit, `illegal <fmt>`; lsof-rs had cut it at 256), and a compiled zone
   file as `__tzfile_read()` reads it, version 1 to 4, its footer, leap
   seconds. Measured: 118,516 calls of glibc's `strftime()`/`localtime()`
   (formats at random and every conversion with every flag, every zone of
   `/usr/share/zoneinfo`, 72 rule strings, 35 crafted zone files, buffer
-  sizes around each result), and 60 more around February 29 under `Jn` and
-  `n` rules, every one the same; 754 of them are kept with the code
+  sizes around each result), 60 more around February 29 under `Jn` and
+  `n` rules, and 47 for the review (months 14-25, the long name), every one
+  the same; 801 of them are kept with the code
   (`lsof-core/tests/timefmt_glibc.txt`) and run as a unit test. A count's digits saturate,
   as the delay's do (121). `+r`/`-r` may be given on every platform; the
-  zone is read only on Unix (`TZ`'s rule string alone on Windows).
+  zone is read only on Unix (`TZ`'s rule string alone on Windows, else
+  UTC). On FreeBSD the marker follows glibc 2.39's `strftime()` and
+  `tzset()` rules, `TZDIR` included, where the FreeBSD C uses FreeBSD
+  libc's (which expands `%+` and `%v`, where glibc copies them):
+  unmeasured, no FreeBSD C here (row 140). The cases
+  `repeat-marker-follows-tz`, `-tz-file` and `-tzdir` pin the zone to `TZ`
+  and `TZDIR` (`+0330+0330`, `JST+0900`, measured).
 * **`+m [m]`** (153). `+m` with no value, or one that opens an option, is the
   print: the C's `readmnt()` prints `DIR 0xDEV` (`DIR 0x0` for no device)
   for each mount *as it records it*, and `main.c` reads the table where it
@@ -383,7 +415,13 @@ measurement is what is written here, and the brief's error is named.
   length is a second entry, and the later is found. Any bad line discards
   the file, every line read first. A file that cannot be read is `WARNING:
   access F: ERR`, one `fopen()` refuses past that `can't open(F): ERR` (a
-  socket, measured), a directory `error reading F`, each muted by `-w`. Then the
+  socket, measured), a directory `error reading F`, each muted by `-w`. A
+  name that leads to a descriptor lsof inherited (`/dev/fd/9`,
+  `/proc/self/fd/9`, `<(cmd)`) is `WARNING: access F: No such file or
+  directory`, as the C finds it, having closed every descriptor from 3 up as
+  it starts (`closefrom_shim()`, measured; lsof-rs cannot close them, a
+  close being `unsafe`, and reads such a name as gone; fixed by the
+  review). Then the
   mount is **kept**, with its device or none, and the C says `assuming
   dev=%#lx for DIR from F` whether or not the file had it, `-w` or not, with
   the device in its `stat` buffer: the file's, or, where the file has none,
@@ -391,12 +429,25 @@ measurement is what is written here, and the brief's error is named.
   zero at first (measured; it is the C's uninitialised stack, zero on every
   run measured), and zero after a `stat` its child made and failed (it
   zeroes the buffer and sends it whatever happened) but not under `-b`,
-  `-O` or a timeout. Measured over 23 files and option sets. `-m` stays the
+  `-O` or a timeout. A file on an `-e`/`+e` mount whose device came from the
+  file (a mount not `stat`ed, the C's `ds` of `SB_DEV` alone) shows that
+  device, in DEVICE, `-F D` and JSON's `device_number`, as the C's
+  `isefsys()` shows it (measured: `/dev 0x4242` gives `66,66`; lsof-rs had
+  printed `UNKNOWN`, fixed by the review, cases
+  `plus-m-file-exempt-row-device*`); one the table `stat`ed stays UNKNOWN
+  (row 130). Measured over 23 files and option sets. `-m` stays the
   Linux C's `-m not supported` (148, 149); elsewhere `+m not supported`,
   the FreeBSD C's words by its source (`HASMOPT` without `HASMNTSUP`;
   unmeasured, no FreeBSD C here).
 * **Host and service names in NAME** (154). The C names a socket's ends at
-  print time (`printinaddr()`), local before remote, host before port, each
+  print time (`printinaddr()`), as it writes each row into stdout's 4096-byte
+  buffer, so a reader that goes away stops the lookups at the next flush;
+  lsof-rs names each row as it writes it, through a buffer of that size
+  (measured, 300 sockets and `| head -1`: the C 84 queries, lsof-rs 85;
+  `-F pfn` 223 and 222; it had named every row before the first byte,
+  301, fixed by the review; resource case `names-reader-gone`), and a `-r`
+  run whose /etc/passwd cannot be stated ends before any row is named (0
+  queries in both), local before remote, host before port, each
   host once a run through `gethostnm()`'s cache, under `-n`'s and `-P`'s
   last word (`+n`/`+P` turn them back on; measured `-n -P +n +P`). A wildcard
   is `*`, a port 0 `*`, an IPv4-mapped end (either one) makes both ends IPv4
@@ -405,7 +456,29 @@ measurement is what is written here, and the brief's error is named.
   sources (`files dns` where it gives none), `files` the first line of
   `/etc/hosts` with the address (`::1` read as 127.0.0.1, as for `-i`; an
   address with no name is an empty host, printed `:4006`), `dns` a PTR query.
-  The service: `getservbyport()` over `/etc/services` (the first line of the
+  Before its walk glibc's `gethostbyaddr()` reads `/etc/host.conf` (or the
+  file `RESOLV_HOST_CONF` names, outside secure-execution mode), whose
+  `trim` domains, and `RESOLV_ADD_TRIM_DOMAINS` after them and
+  `RESOLV_OVERRIDE_TRIM_DOMAINS` in their place, cut the name found, from
+  any source (`.a ;.b`, `.a,.b`, `.a :.b` two domains, `.a;.b` one, four
+  at most, `#` ends the list, any case, only from a longer name, `trim bb`
+  leaving `two.`: 17 forms measured), and the resolver's configuration
+  (`NEED__RES`): where `/etc/resolv.conf` is there and glibc cannot load it
+  (a directory, a socket, `/dev/zero`) no host is named, by the hosts file
+  either, and nothing asked, whatever `hosts:` says; missing, unreadable for
+  want of permission, empty or the null device, glibc's defaults; read to
+  its end whatever its size (measured; lsof-rs had read the first 1 MiB and
+  taken anything else as no file, asking 127.0.0.1; fixed by the review).
+  A hosts file glibc's reader would wait on or read for ever ends the
+  lookup there, no name and no query (`/dev/zero` under a memory limit:
+  the C numeric, nothing asked, measured), and the null device is a file
+  with no line, `NOTFOUND`, wherever a file is read. `SUCCESS=merge`, for
+  these databases, which have no merge function: the answer is kept aside as
+  `UNAVAIL`, the next source asked gives it back where it does not succeed
+  and fails it where it does (measured: `hosts: files [SUCCESS=merge] dns`
+  names an address from the hosts file that DNS says NXDOMAIN of, and none
+  that DNS names, after a query for each; lsof-rs had ended the walk with
+  no answer). The service: `getservbyport()` over `/etc/services` (the first line of the
   port and protocol, the protocol compared exactly), with `lkup_svcnam()`'s
   memory of failures, which is by port alone (measured: a TCP socket on a
   port the file names for UDP alone, listed first, leaves a later UDP socket
@@ -426,7 +499,18 @@ measurement is what is written here, and the brief's error is named.
   `NOERROR` or a datagram under 12 bytes moving on at once, another id or
   question waited past, `QR` and the opcode not looked at; `TC` asks the same
   server over TCP and every later one that way, with no second round
-  (measured: a TCP server on the second only, asked after the first's `TC`).
+  (measured: a TCP server on the second only, asked after the first's `TC`),
+  a TCP reply compared by its id alone, messages with another id read past
+  for as long as the exchange lasts, and a connection reset while a
+  message's length is read met by connecting to the same server again,
+  once an exchange (measured: one reset, two connections and the name;
+  always reset, two to each server; lsof-rs had moved to the next server,
+  fixed by the review). A datagram socket stays open across its server's
+  timeout, so a late reply is read at the next attempt, and every server's
+  is closed by a refusal or a reply that moves on (measured: one server 1.5
+  s late at `timeout:1 attempts:2` names the host; late then a refusal, a
+  number). An `edns0` query answered `FORMERR` is no name after that one
+  query (measured: glibc 2.39 does not ask again without EDNS).
   The answer: another rcode or no record, no name (glibc's `NOTFOUND`, as for a
   server that refuses or never answers); one question,
   uncompressed; a record of another class passed over; a CNAME followed
@@ -440,11 +524,23 @@ measurement is what is written here, and the brief's error is named.
   `-dash.example` is followed to its PTR. Records with no PTR at the name are `TRYAGAIN`, an
   answer glibc cannot read `UNAVAIL` (measured: under `dns [NOTFOUND=return] files` both
   go on to the hosts file, under `[TRYAGAIN=return]` and `[UNAVAIL=return]`
-  each ends the walk). JSON prints the numeric name and looks nothing up, as
+  each ends the walk; the UNAVAIL one measured again with a CNAME whose
+  pointer runs past the message, unreadable whatever the query's id, case
+  `names-socket-dns-unavail-returns`: the fixture's first one, pointing at
+  the header, could be read for about 11% of ids). JSON prints the numeric name and looks nothing up, as
   the C's JSON prints none and looks nothing up (measured); `-t` and `-F`
   without `n` look nothing up. The one-line switch back to numbers is
   `LINUX_NAMES_BY_DEFAULT` (`crates/lsof-cli/src/args.rs`). FreeBSD names
-  nothing, as before (unverified against its C); Windows names as before.
+  nothing, as before (unverified against its C); Windows names hosts by
+  reverse DNS and ports from a built-in table, as before. Under `-n -P` an
+  IPv6 socket's NAME is the C's numeric form too: an IPv4-mapped end makes
+  both ends IPv4, and an IPv4-compatible address is glibc's `inet_ntop()`
+  form (`::1.2.3.4`), where lsof-rs had printed `[::ffff:a.b.c.d]` and
+  `[::102:304]` (unmeasured here, no IPv6; from the C's source, glibc's
+  `inet_ntop()` and a unit test). The services scan keeps one name a port
+  and protocol as it reads, as `fill_porttab()` does (measured with 2
+  million entries: 10.2 MB of RSS, as the C; it had held every entry, 238
+  MB).
 
 ### What stays open
 
@@ -455,18 +551,42 @@ measurement is what is written here, and the brief's error is named.
   the zone is read once a run, where glibc's `localtime()`, `TZ` unset, looks
   at `/etc/localtime` again at each marker and takes a new one (unmeasured).
   The count saturates where the C's wraps (121). With `SIGPIPE` ignored and
-  its reader gone, the C's loop exits 1 and lsof-rs 141, its rule for a
-  closed pipe (row 36; measured).
-* 153: a supplement that is a FIFO or a device, or a file past 16 MiB, is
-  `error reading F`, and no FIFO or device is opened, where the C's
-  `fopen()` waits on a FIFO for a writer (measured), reads a device
-  (`/dev/zero` for ever, printing `no path: ""`) and dies on an empty one
-  (`/dev/null`: exit 139, measured); an empty file the C dies on too, at its
-  first lookup, and lsof-rs reads it as one that names no mount (ledger
+  its reader gone, the C keeps writing into the closed pipe (its stdio
+  errors unchecked) until its count or `+r` ends the loop, then exits with
+  its usual status, and a plain `-r` never ends (measured: `-r1` runs until
+  killed, `+r1c3mX` exits 0); lsof-rs exits 141 at its first failed write,
+  its rule for a closed pipe (row 36), and does not spin on a dead reader.
+  (The record had said the C exits 1: that run was `-r 1c2`, which is also
+  `-c 2`, a search failure.) `%s` is the time itself, where glibc's is
+  `mktime()` of the broken-down time, which in an hour a zone repeats with
+  the same `tm_isdst` is the later occurrence (measured: Asia/Almaty
+  2024-02-29 23:30 +06, t=1709227800, prints 1709231400): not reproduced,
+  `mktime()`'s search and the guess it carries from call to call being
+  glibc's. On FreeBSD the marker is glibc's (above), unmeasured.
+* 153: a supplement that is a FIFO, a pipe or a device is `error reading F`
+  and is never read, where the C's `fopen()` waits on a FIFO with no writer
+  for ever (measured), reads one or a pipe that has a writer through to its
+  close and uses it (`printf … | lsof +m /dev/stdin`, measured: ledger
+  `plus-m-file-a-pipe-with-a-writer`), reads a device (`/dev/zero` for
+  ever, printing `no path: ""`) and dies on an empty one (`/dev/null`: exit
+  139, measured). A FIFO or device named as the file is not opened; one put
+  in a regular file's place after the look may be opened, without
+  blocking, and is refused unread. A regular file is opened without
+  blocking, read to 16 MiB and a byte, and refused as `error reading F` if
+  longer. An empty file the C dies on too, at its first lookup, and lsof-rs
+  reads it as one that names no mount (ledger
   `plus-m-file-empty-crashes-the-c`). The lines and directories `+m` prints
   are escaped where the C prints them raw, so a directory holding a byte the
   escaper changes (a control byte, `\`, one that is no UTF-8) prints in a
-  form `+m m` cannot read back. `+m -X -i -- NAME`: the C reads the table
+  form `+m m` cannot read back; so are the file's messages, as
+  `safestrprt()` would: `F` in `WARNING: access F`, `can't open(F)`,
+  `error reading F`, `F line N: …` and `assuming dev=… from F`, `DIR` in
+  `assuming dev=… for DIR`, and the quoted line in `no path`, `no device`,
+  `illegal device` and `path duplicate` (a TAB, an ESC, a CR, a name with an
+  ESC or 0xff), where the C prints each raw (row 122's class). lsof-rs keeps
+  the descriptors it inherits from 3 up, where the C closes them, so lsof
+  lists them in its own rows; only a supplement named through one is read
+  as the C finds it (above). `+m -X -i -- NAME`: the C reads the table
   for NAME, printing its lines, before `initialize()` refuses `-X` with
   `-i`; lsof-rs refuses the pair in its parse, before any table is read
   (measured; the refusal's place, which `-X -i -- /nonexistent` shows
@@ -475,10 +595,32 @@ measurement is what is written here, and the brief's error is named.
 * 154: an NSS source other than `files` and `dns` for `hosts` (`mdns`,
   `resolve`, `myhostname`, `sss`) is taken as not installed, as 38 takes
   one; nscd is not asked; `/etc/resolv.conf` is read once a run, where glibc
-  reads it again when it changes; an `edns0` query a server answers
-  `FORMERR` is not asked again without EDNS, as glibc asks it; an IPv6
-  server's `%scope` naming an interface is read from `/sys/class/net`; a TCP
-  exchange has the same server's datagram time where glibc has none; a hosts
+  reads it again when it changes; one with a line past 1 MiB or past 256
+  MiB in all, which glibc reads whole, is taken as one glibc cannot load (no
+  host named, nothing asked), never parsed in part; a resolv.conf, hosts
+  file or host.conf that would hold glibc's reader (a FIFO, `/dev/urandom`;
+  host.conf `/dev/zero` too) names no host and asks nothing at once, where
+  the C waits or reads for ever (measured: each a `timeout`); glibc's own
+  warnings about host.conf (`cannot specify more than 4 trim domains`,
+  `bad command`, `list delimiter not followed by domain`) are not printed;
+  an IPv6 server's `%scope` naming an interface is read from
+  `/sys/class/net`; a TCP exchange after `TC` has as long again as the same
+  server's datagram attempt, where glibc's has no limit, so a query's
+  longest is `attempts` rounds of every server's wait and one more wait
+  (490 s at `timeout:30 attempts:5` with three servers; the C's has no
+  bound at all); where DNS comes before the hosts file, glibc's
+  `gethostbyaddr()` asks DNS again with its buffer doubled each time the
+  file's scan meets a line its buffer cannot hold (a line of 975 bytes or
+  more for the first 1,024, 1,999 for 2,048, with one name; less with
+  aliases: measured), once a run, where lsof-rs asks once (fewer queries,
+  the same NAME; the differential compares such runs' queries with each
+  repeat taken as one); a `hosts:` or `services:` line with no source names
+  nothing, where the C dies in glibc in some runs and names nothing in others
+  (measured: one of two differential runs crashed, none of eight in a
+  namespace of its own; the same as for `-u` and `-i`, row 38); `-i @name`
+  under `files [SUCCESS=merge] dns` is still row 38's `getaddrinfo()` path:
+  the C asks DNS and keeps the hosts file's address where DNS fails
+  (measured), lsof-rs says `unknown host name`; a hosts
   file's name that is not UTF-8 prints U+FFFD (93), where the C prints its
   bytes as `\xNN`. The cache of host names grows by an entry for each
   address named over a `-r` run, as the C's does; it is not capped, which
@@ -490,11 +632,32 @@ measurement is what is written here, and the brief's error is named.
 ### What the gate gained
 
 42 cases (`names-socket-*` in the `names` modes over fixture NS and an
-answering name server of the harness's own, `repeat-*`, `plus-m-*`), each
-failing on 854e2c7, and `RES_OPTIONS=attempts:0` in every other case's
-environment and the resource gate's, so that no run of either binary asks a
-name server the harness does not own; a resource case with a name server
-that never answers (`names-silent-resolver`). Mutants: `mutants/plus4.toml`.
+answering name server of the harness's own, `repeat-*`, `plus-m-*`): 41
+fail on 854e2c7; the 42nd, `plus-m-file-empty-crashes-the-c`, is a
+ledgered C crash (exit 139) that no binary can match, unpinned because its
+diff holds the fixture's PID and directory. `RES_OPTIONS=attempts:0` is in
+every other case's environment and the resource gate's (through `sudo`
+too, which drops it: the wrappers pass it on), so that no run of either
+binary asks a name server the harness does not own; a resource case with a
+name server that never answers (`names-silent-resolver`). Mutants:
+`mutants/plus4.toml`.
+
+The review of 2026-11-14 (58 findings) added 27 cases: `names-socket-*`
+for the walk and the files glibc reads first (`-dns-unavail-returns`,
+`-files-merge`, `-host-conf-trim`, `-trim-from-the-environment`,
+`-resolv-conf-a-directory` and its `-P`, `-hosts-file-is-dev-zero`,
+`-nsswitch-is-dev-null`, `-hosts-file-is-dev-null`), `repeat-*` (the
+next-word re-read, `TZ`/`TZDIR`, the long zone name, `-r0`/`+r0` and
+/etc/passwd, `-Q +r`, `+r ''`), `offset-`/`links-next-word-dash-*`,
+`plus-m-*` (the exempt rows' device, the duplicate seen, the piped file,
+`+m ''`); fixture NS's 127.53.0.7 (named differently by DNS and the hosts
+file), a name server on an address of each run's own, and
+`compare_queries`, which reruns a case and compares the queries each
+binary sent, in order (it found glibc's ERANGE retries, above); a resource
+case `names-reader-gone` (queries asked with `| head -1`, and with no
+password file); the namespaced CLI test `crates/lsof-cli/tests/names.rs`,
+which gates naming on the CI runner, where the `names` modes and the
+resource cases skip (no root). Mutants: `mutants/plus4-fix.toml`.
 
 ## Fixed by `-c /regex/` and `-i`'s host and service names, like the C, and `-u name` by nsswitch.conf (2026-11-11)
 
@@ -722,19 +885,27 @@ then measured again:
   glibc cannot parse makes it refuse the whole file**, for every database:
   under `services: files [` the C knows no login, no host name and no
   service name (a number is still an address), and so does lsof-rs. A
-  nsswitch.conf that is a directory is refused the same way.
+  nsswitch.conf that is a directory is refused the same way. The null device
+  is the empty file glibc reads it as (its built-in sources; measured
+  2026-11-14, where lsof-rs had refused it as it refuses `/dev/zero`: every
+  login, host and port then lost its name).
 * **A lookup walks the sources as glibc walks them** (`netnames::nss_walk`,
   after `__nss_lookup()`, `__nss_next2()` and `getXXbyYY_r()`): a source
   that returns ends it where its status's action is `return`, a later
-  source's answer replaces an earlier one's, `[SUCCESS=merge]` fails the
-  lookup (nothing here can be merged), and a source whose module is not
+  source's answer replaces an earlier one's, `[SUCCESS=merge]` keeps the
+  answer aside for the next source asked to give back where it fails
+  (amended 2026-11-14: "fails the lookup" held only where no later source is
+  asked; see "Fixed by `+n`, `+P`, `+r` and `+m`"), and a source whose module is not
   there is stepped over only where its `UNAVAIL` action is `continue`. So
   under `passwd: sss [UNAVAIL=return] files`, with no `sss` installed, the
   C knows no login, and under `sss [NOTFOUND=return] files` it reads the
   file; lsof-rs had it the other way round. The same walk answers a
   service name, and a host name's first step: `hosts: files
   [SUCCESS=continue] dns` asks DNS for a name the file holds, `files
-  [SUCCESS=merge]` knows none.
+  [SUCCESS=merge]` alone knows none. (`-i @name` under `files
+  [SUCCESS=merge] dns` is still `unknown host name` in lsof-rs, where the C
+  asks DNS and keeps the file's address when DNS fails: measured
+  2026-11-14, recorded under 154's open items.)
 * **`passwd: compat` reads the password file by `nss_compat`'s rules**
   where the file holds a `+` or `-` line (`users::compat_line`; 31 files
   measured through `getent` with no NIS): `-name` before the account's own
@@ -765,8 +936,9 @@ then measured again:
   the fixes above (`names-VARIANT` modes, each a shape of nsswitch.conf,
   the password file or host.conf); the first version of lsof-rs fails 17 of
   them. And the names modes' name server is the harness's own now
-  (127.238.38.53, every query refused), so that no query reaches a resolver
-  the host runs on port 53.
+  (127.238.38.53, every query refused; since 2026-11-14 an address of each
+  run's own, 127.238.X.Y, bound without SO_REUSEPORT), so that no query
+  reaches a resolver the host runs on port 53.
 * **C-DEFECTs found by the reviews, not reproduced**: the C frees a
   protocol's name once for each port entry of a list (`-i TCP:1,2`, `-i
   TCP@127.0.0.1:1,2`, `-i UDP:ntp,ssh`: `free(): double free detected in
@@ -963,8 +1135,8 @@ never at the cost of safety), each measured against the C first:
   the byte's, where lsof-rs had said `illegal process group ID: -a`. A
   grid of every option letter under both prefixes with seven values, 1,400
   command lines, matches the C in stdout, exit and stderr (the byte
-  escaped, the usage normalised) but for `+m`, `+n`, `+P` and `+r`, which
-  lsof-rs refuses, and `-i TCP:\xff`, a service name (38).
+  escaped, the usage normalised) but for ~~`+m`, `+n`, `+P` and `+r`, which
+  lsof-rs refuses,~~ (options since 2026-11-14, rows 152-154) and `-i TCP:\xff`, a service name (38).
 * **An fd of 10000 or more** (2026-11-07, the review). The C's
   `fd_to_string()` (`lib/proc.c:1322-1331`) prints it `*` and its last three
   digits, `*%03d`, in the FD column and in each end's `PID,cmd,FD` (`pipe`,
@@ -3499,8 +3671,8 @@ is `+w -a`. lsof-rs read one letter per `+` word and silently dropped the rest,
 so `lsof +wa -p P -d 3` ORed where the C ANDs, 28 rows against one. Every
 letter the C reads the same under either prefix now means the same under `+`.
 One whose `+` meaning lsof-rs does not implement is refused rather than read as
-its `-` meaning: `+n` and `+P` (look names up), `+r` (repeat until nothing is
-open), `+e`, `+J`/`+j` (errors in the C too). An unknown letter's message names
+its `-` meaning: ~~`+n` and `+P` (look names up), `+r` (repeat until nothing is
+open),~~ (options since 2026-11-14, rows 152-154) `+e`, `+J`/`+j` (errors in the C too). An unknown letter's message names
 the prefix it came with.
 
 **`-t` reads the files a file selecter needs.** Both backends skip the file
@@ -3555,7 +3727,9 @@ can show them:
 * letters after a next-word count read under `-` rather than `+`. Only a
   letter with two meanings shows it (`+L 1w`), and no case gives one;
 * `+n`, `+P`, `+r` and `+e` read as their `-` meanings. The C's `+n` and `+P`
-  resolve names, which lsof-rs never does, and `+r` never exits;
+  resolve names, ~~which lsof-rs never does,~~ (lsof-rs too since 2026-11-14,
+  row 154; its `names-socket-plus-n-plus-p-after-dash` case now shows them)
+  and `+r` repeats until a cycle lists nothing;
 * both `-r` mutants: repeat mode never exits;
 * `+E` read as `-E`: no Linux case uses either;
 * `+w`'s warnings, which go to stderr, and the differential does not compare
@@ -5337,7 +5511,7 @@ C-DEFECT not reproduced.
 | 113 | `-e` is accepted **under `-f`**: the C reads the mount table for `-e` whatever `-f` says | ~~refused: under `-f` lsof-rs reads no mount table, so `-f -e /dev/shm -- /nonexistent` says `"-e /dev/shm" is not a mounted file system.`~~ **resolved 2026-10-17** | found 2026-10-04 by the retrospective's audit, measured; see "Fixed by reading the mount table when the C reads it, as it reads it" above. `-f` only stops a path argument from naming a file system: the table is read under it too, for `-e` and at the first path argument, as the C reads it (`arg.c:184`). Pinned by `exempt-under-dash-f-is-still-a-mount` and `tests/arguments.rs`, `dash_f_dash_e_of_a_mount_is_accepted`. |
 | 114 | `-h` writes the usage to **stderr**, and exits 0 | ~~writes its help to **stdout**, exit 0~~ **resolved 2026-10-30** | found 2026-10-04 by the first run of the kit's argv-mode differential fuzzer. Measured: `-h`, `-?`, `-h -p 1`, `-p 1 -h`, `-hp1`, `-V -h` and `-h /nonexistent` all write the usage to stderr and nothing to stdout, exit 0; an error the C finds once every option is read still beats it (`-hx`, item 115). lsof-rs now writes its help to stderr on every platform; the text stays lsof-rs's own (it lists lsof-rs's options, not the C's usage), so the differential compares stdout and the exit status, and `tests/arguments.rs` the stream. The Windows smoke tests (`Test-Lsof.ps1`, `Invoke-LsofRsSmokeTest.ps1`), `tests/windows_live.rs` and `docs/windows-validation.md` read it from stderr. `-F ?` already went to stderr, as the C's does. **Corrected 2026-10-30 (Batch A's review):** this row had said `-h -Z` matched; measured, it did not. The C looks each `-u` login up and refuses `-Z` where SELinux is not enabled *while it parses*, reads on (`err = 1`), and `usage()` then prints the error and exits 1 before `-h`, `-v` or `-F ?` is acted on, and before `-X -i` and `-a` are checked: `-h -u nosuch`, `-u nosuch -h`, `-h -u ^nosuch`, `-h -g 1 -u nosuch`, `-h -w -u nosuch`, `-h -t -u nosuch`, `-h -Z`, `-Z -h`, `-v -u nosuch`, `-v -Z`, `-F ? -u nosuch`, `-F ? -Z` all exit 1 with nothing on stdout, where lsof-rs had printed the help or version and exited 0. A refused `-Z` takes the next word whatever it is (`--` aside: `GetOpt`'s `"Z:"`), so `-Z -u nosuch` and `-Z -x` say `-Z limited to SELinux` alone; `-u nosuch -Z` says both, in that order. lsof-rs now parses over the host (`args::parse_with_host`, `HostChecks`), as the C does, which resolves row 73 too; an error the parse reads on after is printed before any line the parse prints itself later (`-Zx -S 0`: the refusal, then the `-S` warning, measured). **Also 2026-10-30:** `--help` and `--version` had been lsof-rs long options (help on stderr, version on stdout, exit 0). The C has none: `-` in a word is `illegal option character: -`, and the word is read on, so `--help` is that, then `-h`, then `-e lp` (`-e not followed by a file system path: "lp"`), exit 1, and `--version` the same with `-v` and `"rsion"`. lsof-rs now refuses both exactly so (a breaking change, CHANGELOG); `lsof -h` and `lsof -v` are the spellings. Differential: the `help-…-is-the-error`, `version-…`, `field-help-…`, `z-without-selinux-…`, `double-dash-…` and `plus-j-ends-the-run-before-dash-a` cases; unit: `args.rs` `host_errors_found_while_parsing_beat_help_and_version`, `users_are_resolved_item_by_item`, `double_dash_words_are_refused_as_the_c_refuses_them`, `read_on_errors_come_before_what_the_parse_prints_after_them`. |
 | 115 | an option error the C finds after reading every option ends the run **before `-h` is acted on**: `lsof -hx` is `-x must accompany +d or +D`, exit 1 | ~~acts on `-h` first: the help, exit 0~~ **resolved 2026-10-17** | found 2026-10-04 by the argv fuzzer, measured with `-hx` and `+hx`. Item 73's shape, with another error. Since item 110 the errors the C finds once every option is read are found before `-h`, `-v` and `-F ?` are acted on, the `-e` check last, which reads the table for it: `-hx` and `-e /nosuch -h` exit 1 with their errors, `-h -e /dev/shm` reads the table and prints the help (measured). **Corrected 2026-11-01** (row 150): the C prints its help *after* such an error, exit 1, rather than not at all; lsof-rs now prints its own help there too, in place of the usage hint. |
-| 116 | an option that takes an optional value takes the **next word** as that value when it does not start with `-`, **an empty one too**: `+T ''` is `+T` with no letters, so a unix socket loses its `(CONNECTED)` | ~~reads `''` as an operand (an empty path), and keeps the state~~ **resolved 2026-10-30** | found 2026-10-04 by the argv fuzzer. Every optional-value option measured with `''` on 2026-10-30: `+T ''` and `-T ''` select nothing; `-o ''`, `-S ''` (15), `-L ''`, `+L ''` and `-r ''` (15) are the option alone with the word consumed, where lsof-rs had made it a path (`status error on : No such file or directory`, exit 1); `-F ''`, `-g ''`, `-x ''`, `-f ''` and `+f ''` already matched, and `-i ''`, `-K ''`, `-s ''`, `+c ''`, `-e ''` and `+e ''` are errors whose first line already matched (the C then prints its usage, lsof-rs its usage hint, as after every option error). `+m` and `+r` are refused by lsof-rs whatever follows. A word with no digits that is not empty is still given back (`-o /file` is `-o` and a file), as the C resumes at it. |
+| 116 | an option that takes an optional value takes the **next word** as that value when it does not start with `-`, **an empty one too**: `+T ''` is `+T` with no letters, so a unix socket loses its `(CONNECTED)` | ~~reads `''` as an operand (an empty path), and keeps the state~~ **resolved 2026-10-30** | found 2026-10-04 by the argv fuzzer. Every optional-value option measured with `''` on 2026-10-30: `+T ''` and `-T ''` select nothing; `-o ''`, `-S ''` (15), `-L ''`, `+L ''` and `-r ''` (15) are the option alone with the word consumed, where lsof-rs had made it a path (`status error on : No such file or directory`, exit 1); `-F ''`, `-g ''`, `-x ''`, `-f ''` and `+f ''` already matched, and `-i ''`, `-K ''`, `-s ''`, `+c ''`, `-e ''` and `+e ''` are errors whose first line already matched (the C then prints its usage, lsof-rs its usage hint, as after every option error). ~~`+m` and `+r` are refused by lsof-rs whatever follows.~~ Amended 2026-11-14: `+m` and `+r` are taken as in the C (rows 152-153): `+r ''` is `+r` with the default delay, the word consumed, and `+m ''` names the empty path as the supplement (`-b +m ''` warns `access : No such file or directory`, as the C does); cases `repeat-plus-r-empty-value`, `plus-m-file-empty-name`. A word with no digits that is not empty is still given back (`-o /file` is `-o` and a file), as the C resumes at it. |
 | 117 | `-o` with a digit count past about 10^8 (2147483646 measured; 100000000 is not) prints a zero offset as `0` | ~~`0t0`, as for any count~~ **resolved 2026-10-30** | found 2026-10-04 by the argv fuzzer. The mechanism, measured 2026-10-30 against offsets 0, 12 and 99: `main.c` sums the digits in an `int` (`i = i * 10 + d`), which wraps, and `print.c` hexes an offset when `OffDecDig && len > OffDecDig + 2`, an `int` sum that wraps too. So 2147483645 is a limit like any (`0t0 0t12 0t99`); 2147483646 and 2147483647 wrap the `+ 2` negative and every offset is hex (`0 0xc 0x63`: `%#llx` writes zero as a bare `0`); 2147483648 to 4294967295 wrap the count negative, the same; 4294967296 wraps to 0, no limit; 4294967297 to 1 (`0t0 0xc 0x63`); 6442450943 to 2147483647. The `o` field the same. lsof-rs now keeps the count as the C's `int`, summed with explicit wrapping, and compares as the C does; unlike `-S` and `-r`, whose wrap would set a time and stays a C-DEFECT not reproduced (item 121), this one only spells a number. |
 | 118 | its per-call timeout works **once per run**: `handleint()` `longjmp`s out of the `SIGALRM` handler, and glibc's `setjmp` is `_setjmp`, which saves no signal mask, so `SIGALRM` stays blocked from the first timeout on; `childx()`'s `wait()` and every later call are then unbounded. On a file system that does not answer the C hangs (`-p`, `-w -p`, `-S 2 -p`, a path argument, `+D`: no output after 150 s), a later slow `stat` is waited out in full, and `WARNING -- child process N may be hung.` is never printed | every call is bounded by `-S` on its own, in a helper process that is killed and replaced when one times out; nothing waits on a hung child, so nothing warns of one. Each call that times out costs the limit, one after another: a mount that does not answer costs every run that reads the table `-S` (15 s by default), N such mounts N times that, and a path argument on one a second limit after the table's; one `Readlink()` costs at most one limit (120) | **C-DEFECT, not reproduced — 2026-10-09** (item 94; `lib/misc.c:137,279,821-822`, `/usr/include/setjmp.h:47-49`). Measured with `differential/fuse_hang.py`: in hold mode the C parent shows `SigBlk 0x2000` and waits in `do_wait`; in delay mode (3 s) `-w -S 2 FUSE/.` waits out the argument's `stat` and succeeds. Ledgered as `fh-delay-second-stat-unbounded-in-the-c`; the hold cases the C cannot finish are `crates/lsof-cli/tests/bounded_calls.rs`, lsof-rs alone. **What a timeout leaves** (2026-11-02, row 124's review): a helper killed in state D cannot be reaped, and until the file system answers it keeps one pipe descriptor and one reader thread of lsof's. With an NFS mount listed every per-file call is bounded (124), so each file that meets a hung server costs one limit and one such helper. lsof-rs lets at most 16 (`MAX_WAITING`) wait: past that it starts none, and each further call fails at once with `EAGAIN` (`Resource temporarily unavailable`, a row's `(stat: …)`), with one warning (`lsof: WARNING: 16 killed helpers still wait on file systems that do not answer; no call is made while they do.`, unless `-w`); once one is reaped, calls are made again. Measured, a process with 40 descriptors on a mount that never answers, NFS listed, `ulimit -n 30`, `-S 2 -p P`: before, `can't open pipes: Too many open files`, exit 1, nothing listed, after 46 s, 23 helpers in D; now 32.1 s (the table's mount `stat` and 15 descriptors' limits), every descriptor listed, exit 0, 16 helpers in D (`bounded_calls.rs` `many_files_on_a_mount_that_never_answers_cost_at_most_the_cap`). The C hangs at the first. |
 | 119 | `-O` makes the call in lsof under `alarm(TmLimit)`, which cannot end a FUSE or NFS wait; when the call returns after it, `handleint()` `longjmp`s to a `jmp_buf` no `setjmp` filled: `Segmentation fault`, exit 139 | `-O` makes the call in lsof with no limit, as documented, and lists when it returns. While it waits, lsof holds the `O_PATH` descriptor the `stat` opened (decision 3), where the C's `stat(2)` holds none: another lsof that `stat`s lsof's fds meanwhile waits too | **C-DEFECT, not reproduced — 2026-10-09** (`lib/misc.c:410,432-440`). Measured: delay 3 s, `-O -S 2 -p P`, exit 139; `-O -p P` (15 > 3) lists. Ledgered as `fh-delay-O-crashes-in-the-c`, unpinned (the listing holds fixture A's pid); lsof-rs's side is pinned by `crates/lsof-cli/tests/bounded_calls.rs`, `an_answer_in_time_is_taken_and_dash_o_has_no_limit` (`-O -S 2` on a 3 s answer lists, exit 0). |
@@ -5373,9 +5547,9 @@ C-DEFECT not reproduced.
 | 149 | a letter that is no option is `illegal option character: X`, without the prefix (`-W` and `+W` alike; a colon is `colon is an illegal option character.`), and `GetOpt` reads on, through the rest of the word and the words after (`err = 2`, `main.c:1924-1932`): every error then found is printed, in option order with the others the parse reads on after and before those found once every option is read, and `usage()` ends the run, exit 1, before `-X -i`, `-a` or a path is looked at. `-D` and `-m`, which the Linux C knows and refuses (`unsupported option: -D`, `-m not supported`), take the rest of the word or else the next word as their value and read on too | ~~`unsupported option: -W`, and the parse stopped there; `-D` and `-m` the same~~ **resolved 2026-11-01** | found 2026-10-30 by the Batch A fixer. Measured, each identical in stdout, exit status and stderr's error lines: `-W`, `+W`, `-Wz` (two lines), `-W -W`, `-W -Y`, `-W:` (the `W` line, then the colon's), `-a-W`, `-+`, `+,`, `-1`, `-S -1`, `+aq`, `+J -q`, `-o -s -W` and `-W -o -s` (the `W` line, then `-o and -s are mutually exclusive`), `-W -x`, `-W +J`, `-W -u nosuch` and `-u nosuch -W` (option order), `-W -Z`, `-W -e /nosuch`, `-W +d /nosuch` and `-W -S 0` (the `W` line before the parse's own lines), `-W -X -i`, `-W -a`, `-W /nonexistent` and `-W -- x` (the `W` line alone), `-D`, `-aD`, `-Da`, `-D -W -Y` and `-Dfoo -W` (`-D`'s value taken), `-m -W -Y`, `-mfoo -W`, `-W -m`; `-D -- -W`, `-m -- -W` and `-W -D -- -Y` (`--` is no value to `-D` or `-m`, as to `-Z`: the options end there and what follows is a name, never looked at); and every printable ASCII letter under both prefixes against the C, the backslash's escaping aside (below). Still lsof-rs's own: an option letter is escaped (row 122), so `-\` is `illegal option character: \\` where the C prints the backslash raw, and is a character, where the C prints each byte of one raw on a line of its own (`-é` is two lines in both since 2026-11-02, `illegal option character: \xc3` and `\xa9`, the bytes escaped where the C prints them raw); `-Wp` is `option -p requires a value` where the C says `no process ID specified` (its missing value, not this row); on FreeBSD `-k`, `-m` and `-D` say `unsupported option` (row 148) and read on the same way. ~~`+n`, `+P`, `+r` and `+m`, options the C has and lsof-rs does not, still end the parse with `unsupported option: +X`, the rest of the word never read as letters: `+m` is the C's mount supplement, which on Linux lists and exits 0 (`+m`, `+mfoo`, `+m m`, and `+m -h` the help, measured 2026-11-01), and lsof-rs, which writes none, refuses `+m`, `+mfoo` and `+m -h` alike, exit 1~~ (since 2026-11-14 they are options, rows 152-154: `+m` takes the rest of its word, or a next word that opens no option, as its file, so `-W +m` and `+mfoo -W` end in the usage, exit 1, before any table is read, as the C's do); `++`, the C's `--`, is `illegal option character: +` (not measured as a case here). Differential: the `illegal-option-character-…`, `o-and-s-then-illegal-option-character`, `dash-d-upper-…` and `dash-m-…` cases; integration: `tests/arguments.rs` `an_illegal_option_character_reads_on`, `dash_m_is_not_supported_in_the_cs_words`; unit: `args.rs` `an_illegal_option_character_is_read_past`, `read_on_errors_are_kept_compactly` (the lines are kept a byte a letter and formatted as printed, where one `String` each had cost about 130 times the arguments: 237 MB for 1.8 MB of `-W…`, 30 MB now for 5.9 MB, the C 11 MB); resource gate: `differential/resource_gate.py`'s `illegal-letters` case; mutants: `mutants/vopt.toml`. |
 | 150 | `-v` writes its version report to **stderr**, exit 0, stdout empty; `usage()` acts on `-h`, `-F ?` and `-v` together, in that order whatever order they were given in (`-v -h` is the help, then the version); given with an error, the error comes first, then the help if `-h` was given (else the usage line and a pointer to `-h`), the field letters if `-F ?` was, the version if `-v` was and either of the others was, and the run exits 1; with neither, the version is not printed (`usage.c:284-960`) | ~~the version line on **stdout**, exit 0; only the first of `-h`, `-F ?` and `-v` acted on; after an error, the usage hint alone~~ **resolved 2026-11-01** | found 2026-10-30 by the Batch A fixer (row 114's `-h` change, for `-v`). Measured: `-v`, `-v -p 1`, `-p 1 -v`, `+v`, `-v -v`, `-V -v`, `-v -S 0` (the warning, then the version) all on stderr, exit 0; `-v -h`, `-h -v`, `-vh` (the help, then the version), `-v -F ?`, `-F ? -v` (the letters, then the version), `-h -v -F ?` (all three, in that order), exit 0; `-v -x` and `-W -v` (the error and the usage, no version), `-W -h`, `-x -h`, `-hx` and `--help` (the errors, then the help), `-W -F ?` and `-x -F ?` (the errors, the usage, the letters), `-W -h -v` and `-W -F ? -v` (the version last), exit 1. The **version text stays lsof-rs's own**, one line, `lsof-rs <version> (memory-safe lsof)`, where the C prints a report of its build (revision, URLs, compiler, flags, system, features); the help is lsof-rs's own too (row 114), and stands for the C's usage line and help after an error, as the usage hint stands for its usage line and its `Use the ``-h'' option` pointer. Row 115 had said an error found once every option is read ends the run *before* `-h` is acted on; measured, the C prints the help after the error (exit 1), as lsof-rs now does. The differential compares stdout and the exit status (both texts differ); the stream, the order and the lines are pinned by `tests/arguments.rs` `the_version_goes_to_stderr` and `the_help_goes_to_stderr`, and `args.rs` `help_field_help_and_version_are_reported_together`. Every in-repo reader moved to stderr: `smoketest/Invoke-LsofRsSmokeTest.ps1` (`version`), `smoketest/Test-Lsof.ps1`, `tests/windows_live.rs`, `docs/windows-validation.md` T1, the bug report template; `linux_diff.py`'s preflight checks only `-v`'s exit status. Differential: the `version-…` cases. |
 | 151 | a file-system argument that names an NFS mount matches an `N_NFS` file only when that file's own NFS mount directory starts the argument's name, and a file that is not `N_NFS` only through a file system that is not NFS (`is_file_named()`, `dfile.c:242-276`, a hack it names for Linux NFS giving two mounts one device) | ~~a file-system argument matches every file on its device, NFS or not~~ **resolved 2026-11-07** | **resolved 2026-11-07, like the C** (the owner's decision of 2026-11-07: "do row 151 like the C"). Recorded 2026-11-02 in row 124's work. On Linux each file-system item keeps its mount's type and directory (`FsItemMount`, the C's `s->mp->ty` and `s->name`, which is `mp->dir` whether the argument named the directory or, under `+f`, the source), and a file on its device is named by it only where `FsItemMount::names` says so: an `N_NFS` file (the newest recorded NFS mount of its device whose directory starts its path, `Selection::row_nfs_mount`, row 124's rule) where that mount's directory is a plain byte prefix of the item's, `!strncmp(nfs_mount->dir, s->name, nfs_mount->dirl)`, NFS item or not; any other file (a FIFO, device node, socket or anonymous inode among them, which the C never types `N_NFS`) where the item's mount is not NFS. A row locates the first item of its device's chain that names it (`PathIndex::bound`, the bucket's head and then the rest in the order entered), so `-V` and the exit status follow. FreeBSD and Windows keep the device alone (`isfn.c` has no hack): their items carry no mount. Cost: no call is added, and a file on no named file system pays nothing: only a file on the device of a file-system argument looks up its own NFS mount (`row_nfs_mount`, a scan of the recorded NFS mounts, as the C's `readmnt()` loop is for every `N_REGLR` file), and it is asked of that device's items alone (`Selection::path_fs_items`, keyed by device), the first of which names it unless it is `N_NFS`; the bucket head's device is checked in O(1). Each item holds one copy of its mount's directory. **Measured** (2026-11-07, root, each run in a mount namespace of its own with a faked table bound over the `/proc/mounts` link, row 124's technique; the files on the root file system's device): with `srv:/export` at `D/nfs`, `lsof -a -p P D/nfs` and `D/nfs/` list P's cwd and the files in `D/nfs`, `D/nfsx` and `D/nfs2` (the `strncmp()` prefix), each ` (srv:/export)`, and not P's rtd, txt, mappings or `D/plain/d`, where lsof-rs had listed all of them; `lsof -a -p P /` lists those and not the NFS ones (lsof-rs: both); `-V -a -p P / D/nfs` exits 0 with both located (lsof-rs had exited 1); `-N -a -p P /` lists nothing and exits 0; `-F`, `-J`, `-t`, `-b`, `-d 3-15`, `+d D/nfs D/nfs`, `+f -- srv:/export` and `D/nfs/f.txt D/nfs` the same rows. With NFS mounts at `D/nfs`, `D/nfs/sub`, `D/nfs2` and `D/nfs2/zz` listed in that order: `D/nfs` lists `D/nfs`'s and `D/nfsx`'s files and not `D/nfs/sub/e` (` (srv:/sub)`) or `D/nfs2/c` (` (srv:/two)`); `D/nfs/sub` lists `D/nfs`'s, `D/nfsx`'s and its own; `D/nfs2` `D/nfs`'s, `D/nfsx`'s and its own; `/` none of them; `D/nfs2/zz`, which nothing is on, exits 1, and under `-V` says `no file system use located: D/nfs2/zz`. lsof-rs matches every one byte for byte, stdout, stderr and exit (the JSON's `lsof_version` aside). A directory on the mount that is not its mount point is a plain file argument and unchanged. The differential: `LSOF_DIFF_MT=nfs` and a new `nfs3` mode (the three more mounts), fixture NFS's fds 12-15 on `nfs/sub`, `nfsx`, `nfs2` and a plain directory, cases `fs-nfs-*` (16) and `fs-nfs3-*` (10), all MATCH, 23 of them DIVERGE on the binary before; unit test `file_system_items_name_nfs_files_by_their_mount`; `mutants/row151.toml`. **Review fixes (2026-11-07):** the bucket head is met first only where it is an item of the row's own device, as the C's chain skips another device's (`8:1` and `0:17` share a bucket; unit test `a_file_system_item_of_another_device_in_the_bucket_is_not_bound`), checked in O(1); the row's NFS mount is looked up only for a file on a named file system's device, never when no file-system argument is given; `nfs_mount_of` skips an NFS mount with an empty directory, as the C's `mp->dirl` test does (only a faked table could list one, and neither binary's parser yields one); and `/proc/mounts` lines are split as the C's `get_fields()` splits them (leading blanks skipped, a run of spaces or tabs one separator, a NUL the end of the line). Measured against the C with a faked table, 16 line shapes by 3 commands: tabs, runs of spaces, leading spaces or a tab, mixed blanks, and a NUL after the type or in the directory, 20 of 48 had diverged (lsof-rs had dropped or misread the line) and all 48 match now; the differential's `LSOF_DIFF_MT=nfsws` mode and cases `fs-nfsws-*` (3), unit test `fields_split_as_the_cs_get_fields`. |
-| 152 | `-r [t[c<N>][m<fmt>]]` repeats: a delay, a count after which the run ends, a `strftime(3)` marker; `+r` ends the run at the first cycle that lists nothing and exits 1 if none listed; what follows the delay's digits but a marker is read again as options (`-r 1c2` is also `-c 2`) | ~~`-r` took a delay alone: a value with a count or a marker was `-r V: a repeat count (c) and marker format (m) are not supported`, and `+r` `unsupported option: +r`~~ **resolved 2026-11-14** | **resolved 2026-11-14, like the C** (the maintainer's ask: "just like the C"). See "Fixed by `+n`, `+P`, `+r` and `+m`, like the C" above: the grammar, the loop's order, the markers under each format, `-V` after the loop, the status, `TZ` and the zone files. Code: `crates/lsof-cli/src/args.rs` (`Repeat`, `repeat_value`), `crates/lsof-cli/src/repeat.rs` (the loop, its clock and sleep handed in), `crates/lsof-core/src/timefmt.rs` (`strftime()`, `localtime()`). Differential: `repeat-*` (16 cases, and the two `repeat-ends-where-passwd-…` before them); unit: `repeat.rs`, `args.rs` `repeat_reads_a_delay_a_count_and_a_marker_as_the_c_does`, `a_marker_format_is_tried_where_it_is_read`, `timefmt.rs`; fuzz: `timefmt`, `repeat_arg`; mutants: `mutants/plus4.toml`. Residue: the count saturates where the C's wraps (row 121); `TZ` naming daylight time with no rule and no file takes the US rule where glibc reads `posixrules`; a zone file past 1 MiB is no zone. |
-| 153 | `+m` prints each mount as the table records it, `DIR 0xDEV`, and exits 0; `+m m` reads `m` for the device of each mount it does not `stat()` (`-b`, `-e`, a failed `stat`), says `assuming dev=… for DIR from m` and keeps the mount (`getmntdev()`, `dmnt.c:148-345`) | ~~`unsupported option: +m`~~ **resolved 2026-11-14** | **resolved 2026-11-14, like the C** (the maintainer's ask). See "Fixed by `+n`, `+P`, `+r` and `+m`, like the C" above: when the print comes and what it holds, the file's grammar and its messages, the stale device the C says. Code: `crates/lsof-cli/src/args.rs` (`+m [m]`), `crates/lsof-backend-linux/src/mounts.rs` (`parse_supplement`, `Supplement`, `resolve_table`). Differential: `plus-m-*` (14 cases, fixture files `SUPPART`, `SUPBAD`, `SUPDUP`, `SUPEMPTY`, a socket); unit: `mounts.rs` `a_supplement_is_read_as_getmntdev_reads_it`, `a_mount_not_stated_takes_the_supplements_device`, `a_supplement_that_is_no_regular_file_is_not_read`, `plus_m_prints_each_mount_it_records`, `args.rs` `plus_m_reads_its_file_as_the_c_does`; fuzz: `mount_supplement`; mutants: `mutants/plus4.toml`. Linux only, as in the C; FreeBSD says `+m not supported` (row 148). Residue: a FIFO, a device or a file past 16 MiB is `error reading F`, never opened (the C waits on a FIFO, reads `/dev/zero` for ever, dies on `/dev/null`); an empty file, which the C dies on (exit 139), names no mount (ledger `plus-m-file-empty-crashes-the-c`); what `+m` prints is escaped where the C prints it raw; `+m -X -i -- NAME` prints no table before the refusal. |
-| 154 | on Linux a socket's NAME names its hosts (`gethostbyaddr()`: `/etc/hosts`, then a DNS PTR query, as nsswitch.conf says) and its TCP and UDP ports (`/etc/services`) unless `-n` or `-P` says not, `+n` and `+P` turning them back on | ~~hosts and ports as numbers on Linux, `-n` and `-P` accepted and doing nothing; `+n` and `+P` `unsupported option`~~ **resolved 2026-11-14** | **resolved 2026-11-14, like the C** (the maintainer's ask), the default included: **a run that lists an Internet socket on Linux may now send DNS queries**, as the C's does (CHANGELOG, known-limitations). See "Fixed by `+n`, `+P`, `+r` and `+m`, like the C" above: the cache, the services' state machine, the resolver's rules, the answer's reading. Code: `crates/lsof-core/src/sockname.rs` (`printinaddr()`, `lkup_port()`), `crates/lsof-core/src/dns.rs` (glibc's resolver: `resolv.conf`, the query loop, the answer), `crates/lsof-core/src/netnames.rs` (`/etc/hosts` and `/etc/services` by address and port), `crates/lsof-backend-linux/src/dns.rs` (the sockets), `crates/lsof-backend-linux/src/netnames.rs` (`LinuxNames`); the switch, `LINUX_NAMES_BY_DEFAULT` in `crates/lsof-cli/src/args.rs`. JSON keeps the numeric name and asks nothing (the C prints none and asks nothing; ledger `json-sockets-inet`). Differential: `names-socket-*` (12 cases, fixture NS, the harness's own name server); resource gate: `names-silent-resolver`; unit: `dns.rs` (13), `sockname.rs` (5), `netnames.rs`; fuzz: `dns_reply`; mutants: `mutants/plus4.toml`. Residue: see "What stays open" above (NSS sources but `files` and `dns`, nscd, `resolv.conf` read once, `edns0` not retried, IPv6 unmeasured, non-UTF-8 host names, row 93). |
+| 152 | `-r [t[c<N>][m<fmt>]]` repeats: a delay, a count after which the run ends, a `strftime(3)` marker; `+r` ends the run at the first cycle that lists nothing and exits 1 if none listed; unless a marker follows, what follows the delay's digits is read again as options, inside its word (`-r 1c2` is also `-c 2`; `-r 1c2mX` is not; `-r 1-` is the letter `-`) | ~~`-r` took a delay alone: a value with a count or a marker was `-r V: a repeat count (c) and marker format (m) are not supported`, and `+r` `unsupported option: +r`~~ **resolved 2026-11-14** | **resolved 2026-11-14, like the C** (the maintainer's ask: "just like the C"). See "Fixed by `+n`, `+P`, `+r` and `+m`, like the C" above: the grammar, the loop's order, the markers under each format, `-V` after the loop, the status, `TZ` and the zone files. Code: `crates/lsof-cli/src/args.rs` (`Repeat`, `repeat_value`), `crates/lsof-cli/src/repeat.rs` (the loop, its clock and sleep handed in), `crates/lsof-core/src/timefmt.rs` (`strftime()`, `localtime()`). Differential: `repeat-*` (16 cases, 26 since the review, and the two `repeat-ends-where-passwd-…` before them), `offset-`/`links-next-word-dash-*`; unit: `repeat.rs`, `args.rs` `repeat_reads_a_delay_a_count_and_a_marker_as_the_c_does`, `a_marker_format_is_tried_where_it_is_read`, `a_next_word_read_on_after_its_digits_is_letters_not_a_word`, `timefmt.rs`; fuzz: `timefmt`, `repeat_arg`; mutants: `mutants/plus4.toml`, `mutants/plus4-fix.toml`. Residue: see "What stays open" above (the count saturates where the C's wraps, row 121; `TZ` naming daylight time with no rule and no file takes the US rule where glibc reads `posixrules`; a zone file past 1 MiB is no zone; the zone read once a run; `%s` not `mktime()`'s; with SIGPIPE ignored lsof-rs exits 141 where the C writes on; FreeBSD's marker glibc's, unmeasured). |
+| 153 | `+m` prints each mount as the table records it, `DIR 0xDEV`, and exits 0; `+m m` reads `m` for the device of each mount it does not `stat()` (`-b`, `-e`, a failed `stat`), says `assuming dev=… for DIR from m` and keeps the mount (`getmntdev()`, `dmnt.c:148-345`) | ~~`unsupported option: +m`~~ **resolved 2026-11-14** | **resolved 2026-11-14, like the C** (the maintainer's ask). See "Fixed by `+n`, `+P`, `+r` and `+m`, like the C" above: when the print comes and what it holds, the file's grammar and its messages, the stale device the C says. Code: `crates/lsof-cli/src/args.rs` (`+m [m]`), `crates/lsof-backend-linux/src/mounts.rs` (`parse_supplement`, `Supplement`, `resolve_table`). Differential: `plus-m-*` (14 cases, 20 since the review, fixture files `SUPPART`, `SUPBAD`, `SUPDUP`, `SUPEMPTY`, `SUPEX`, a socket, a pipe); unit: `mounts.rs` `a_supplement_is_read_as_getmntdev_reads_it`, `a_mount_not_stated_takes_the_supplements_device`, `a_supplement_that_is_no_regular_file_is_not_read`, `plus_m_prints_each_mount_it_records`, `args.rs` `plus_m_reads_its_file_as_the_c_does`; fuzz: `mount_supplement`; mutants: `mutants/plus4.toml`. Linux only, as in the C; FreeBSD says `+m not supported` (row 148). Residue: a FIFO, a pipe or a device is `error reading F` and never read (the C waits on a FIFO with no writer, reads one or a pipe that has a writer, ledger `plus-m-file-a-pipe-with-a-writer`, reads `/dev/zero` for ever, dies on `/dev/null`), a regular file past 16 MiB is read to that bound and refused the same way; an empty file, which the C dies on (exit 139), names no mount (ledger `plus-m-file-empty-crashes-the-c`); what `+m` prints, and the file's messages, are escaped where the C prints them raw; lsof-rs keeps the descriptors it inherits (a supplement named through one is gone, as in the C); `+m -X -i -- NAME` prints no table before the refusal. |
+| 154 | on Linux a socket's NAME names its hosts (`gethostbyaddr()`: `/etc/hosts`, then a DNS PTR query, as nsswitch.conf says) and its TCP and UDP ports (`/etc/services`) unless `-n` or `-P` says not, `+n` and `+P` turning them back on | ~~hosts and ports as numbers on Linux, `-n` and `-P` accepted and doing nothing; `+n` and `+P` `unsupported option`~~ **resolved 2026-11-14** | **resolved 2026-11-14, like the C** (the maintainer's ask), the default included: **a run that lists an Internet socket on Linux may now send DNS queries**, as the C's does (CHANGELOG, known-limitations). See "Fixed by `+n`, `+P`, `+r` and `+m`, like the C" above: the cache, the services' state machine, the resolver's rules, the answer's reading. Code: `crates/lsof-core/src/sockname.rs` (`printinaddr()`, `lkup_port()`), `crates/lsof-core/src/dns.rs` (glibc's resolver: `resolv.conf`, the query loop, the answer), `crates/lsof-core/src/netnames.rs` (`/etc/hosts` and `/etc/services` by address and port), `crates/lsof-backend-linux/src/dns.rs` (the sockets), `crates/lsof-backend-linux/src/netnames.rs` (`LinuxNames`); the switch, `LINUX_NAMES_BY_DEFAULT` in `crates/lsof-cli/src/args.rs`. JSON keeps the numeric name and asks nothing (the C prints none and asks nothing; ledger `json-sockets-inet`). Differential: `names-socket-*` (12 cases, 21 since the review, fixture NS, the harness's own name server, query sequences compared); resource gate: `names-silent-resolver`, `names-reader-gone`; CLI: `tests/names.rs` (in a user namespace of its own, on the CI runner too); unit: `dns.rs` (18), `sockname.rs` (6), `netnames.rs`, the backend's `netnames.rs` and `dns.rs`; fuzz: `dns_reply`; mutants: `mutants/plus4.toml`, `mutants/plus4-fix.toml`. Names are looked up as each row is written. Residue: see "What stays open" above (NSS sources but `files` and `dns`, nscd, `resolv.conf` read once and within 1 MiB a line and 256 MiB in all, a FIFO or endless device in its place, or the hosts file's or host.conf's, naming nothing at once where the C waits, glibc's host.conf warnings, glibc's ERANGE retries, a TCP exchange bounded, IPv6 unmeasured, non-UTF-8 host names, row 93). The `names` cases and the resource cases need root and skip on the CI runner, where `tests/names.rs` gates naming. |
 
 Items 4–9 were found by the Linux differential in one afternoon, on fixtures of
 a dozen open files. None was visible to the Windows smoke suite or the golden
@@ -5383,12 +5557,17 @@ tests, because a golden test pins what its author believed the C emits.
 
 ## Deliberate, and staying
 
-- **No hostname or service resolution on Linux.** lsof-rs on Linux behaves as
+- ~~**No hostname or service resolution on Linux.** lsof-rs on Linux behaves as
   if `-n -P` were always given; both flags are accepted and change nothing there.
   Resolution costs DNS traffic from a diagnostic tool, which is a poor default
   for where this runs. The differential passes `-n -P` to the C for parity. (On
   Windows lsof-rs resolves both by default, and `-n` and `-P` turn that off, as
-  the C's do. On both, an `-i` address or port must be numeric: item 38.)
+  the C's do. On both, an `-i` address or port must be numeric: item 38.)~~
+  Not staying: fixed 2026-11-14, see "Fixed by `+n`, `+P`, `+r` and `+m`,
+  like the C" and row 154. On Linux hosts and ports are named by default, as
+  in the C, and `-n`/`-P`/`+n`/`+P` work as the C's do; the differential
+  passes `-n -P` where a case is not about names, to keep it off any name
+  server. An `-i` name is looked up since item 38.
 - ~~**Inaccessible files are omitted, not reported with an errno.**~~ Not
   deliberate, and not staying: fixed 2026-09-25 — see "Fixed by reporting
   what could not be read". The obstacle this entry gave was never real.

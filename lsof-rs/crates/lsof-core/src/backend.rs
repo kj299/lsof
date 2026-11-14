@@ -73,7 +73,8 @@ pub struct MountEntry {
     /// file system reports, and of a directory mounted over twice, the top
     /// mount's. `None` for an `-e`/`+e` mount, which is never `stat`ed (the
     /// C records it with no device, `ds = 0`), so a file-system argument
-    /// naming it finds nothing.
+    /// naming it finds nothing, unless the mount supplement (`+m m`) gave it
+    /// one ([`Self::supplied`]).
     pub device: Option<u64>,
     /// The source as the C compares it with a path argument (`fsnmres`):
     /// spelt by `Readlink()` when it is a path, `/dev/vda` or
@@ -95,6 +96,10 @@ pub struct MountEntry {
     /// read by nothing: `-Z` asks the host's table for one by name
     /// ([`Backend::has_mount_type`]), and a warning names the row's own.
     pub kind: MountKind,
+    /// Whether [`Self::device`] came from the mount supplement (`+m m`), not
+    /// a `stat`: the C's `ds` is then `SB_DEV` alone, and `isefsys()` gives a
+    /// file on an `-e`/`+e` mount this device (`dproc.c:758-768`).
+    pub supplied: bool,
 }
 
 /// The host's mount table as the C's `readmnt()` leaves it: the mounts it
@@ -113,7 +118,8 @@ pub struct MountTable {
     pub has_nfs: u8,
     /// The device of the last `mqueue` mount recorded (the C's
     /// `MqueueDev`), what a POSIX message queue's descriptor is on. `None`
-    /// when there is none, or it was `-e`/`+e`'s and so never `stat`ed.
+    /// when there is none, or it was `-e`/`+e`'s and so never `stat`ed and
+    /// given no device by a supplement.
     /// A regular file there is typed `PSXMQ`, as the C types it
     /// (DIVERGENCES 128): the CLI hands it to the backend as
     /// [`Selection::mqueue_device`](crate::Selection::mqueue_device).

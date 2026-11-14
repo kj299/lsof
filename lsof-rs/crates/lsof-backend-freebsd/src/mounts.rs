@@ -98,6 +98,7 @@ pub fn resolve(list: &[StatFs], req: &MountRequest, fs: &SafeFs) -> MountTable {
                 m.mntfrom.clone(),
             ),
             kind,
+            supplied: false,
         });
     }
     table

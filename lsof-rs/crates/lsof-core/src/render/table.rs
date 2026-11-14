@@ -410,6 +410,22 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
 /// (DIVERGENCES 30). Formatting a row twice costs CPU; holding it costs memory
 /// for the rest of the run, and a table grows with the host.
 pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::Result<()> {
+    render_naming(w, procs, opts, &mut |_| None)
+}
+
+/// [`render_to`], each row's file first offered to `rename` as the row is
+/// printed, which may give back the file as it is to be printed (a socket's
+/// hosts and ports named). The C names a socket in `printinaddr()` as it
+/// prints the row into stdout's buffer, in the printing pass alone, NAME
+/// being sized by none (`print.c:1179-1190`); so here, in pass three, once
+/// every row before it is in `w`, and a write error ends it at once
+/// (DIVERGENCES 154).
+pub fn render_naming(
+    w: &mut dyn Write,
+    procs: &[Process],
+    opts: TableOpts,
+    rename: &mut dyn FnMut(&OpenFile) -> Option<OpenFile>,
+) -> io::Result<()> {
     let TableOpts {
         terse,
         show_ppid,
@@ -589,7 +605,13 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
     let titles: Vec<&str> = cols.iter().map(|c| c.title).collect();
     emit_line(w, &titles, &widths, &cols)?;
     for (p, f) in rows_of(procs, &blank) {
-        emit_line(w, &row_for(p, f), &widths, &cols)?;
+        let renamed = rename(f);
+        emit_line(
+            w,
+            &row_for(p, renamed.as_ref().unwrap_or(f)),
+            &widths,
+            &cols,
+        )?;
     }
     Ok(())
 }

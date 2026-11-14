@@ -275,3 +275,31 @@ fn a_listing_on_a_failing_stderr() {
         assert_eq!(out.status.code(), Some(141));
     });
 }
+
+/// `+m`'s print to a reader that has gone: the C dies of SIGPIPE at its
+/// write, 141, and says nothing (DIVERGENCES 153), and so does lsof-rs.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
+fn the_mount_print_into_a_closed_pipe_exits_141() {
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
+        .args(["+m"])
+        .stdout(a_closed_pipe())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run lsof");
+    assert_eq!(
+        out.status.code(),
+        Some(141),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stderr_of(&out.stderr).is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

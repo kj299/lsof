@@ -46,13 +46,15 @@ pub const MAX_MESSAGE: usize = 65_535;
 pub const MAX_NAME_TEXT: usize = 256;
 /// `NS_MAXCDNAME`: the longest name in wire form, its last zero counted.
 pub const MAX_WIRE_NAME: usize = 255;
-/// The most of `/etc/resolv.conf` that is read: far more than any holds.
-pub const RESOLV_CONF_LIMIT: u64 = 1 << 20;
-/// The most TCP messages read in one exchange before the server is given
-/// up on: glibc reads on while the id does not match, which a server that
-/// sends nothing but strangers' replies could make it do until its time is
-/// up; here it is that, or this many, whichever comes first.
-pub const MAX_TCP_MESSAGES: usize = 64;
+/// The longest line of `/etc/resolv.conf` that is read, its `\n` apart.
+/// glibc reads a line of any length; a file with a longer one is taken as
+/// one glibc cannot read, so that no server is asked from a line read in
+/// part ([`resolv_conf_file`], DIVERGENCES 154).
+pub const RESOLV_LINE_LIMIT: usize = 1 << 20;
+/// The most of `/etc/resolv.conf` that is read: glibc reads it to its end
+/// whatever its size, and so does lsof-rs up to here; a longer file is
+/// taken as one glibc cannot read, never parsed in part.
+pub const RESOLV_CONF_LIMIT: u64 = 1 << 28;
 
 const T_PTR: u16 = 12;
 const T_CNAME: u16 = 5;
@@ -243,46 +245,57 @@ impl ResolvConf {
         scope_index: &dyn Fn(&[u8]) -> Option<u32>,
     ) -> ResolvConf {
         let mut conf = ResolvConf::default();
+        for line in file.unwrap_or_default().split(|&b| b == b'\n') {
+            conf.line(line, scope_index);
+        }
+        conf.finish(env)
+    }
+
+    /// One line of the file, its `\n` apart, read into `self` as
+    /// [`ResolvConf::parse`] reads it.
+    fn line(&mut self, line: &[u8], scope_index: &dyn Fn(&[u8]) -> Option<u32>) {
         let keyword = |line: &[u8], word: &[u8]| -> Option<usize> {
             (line.starts_with(word) && matches!(line.get(word.len()), Some(b' ') | Some(b'\t')))
                 .then_some(word.len())
         };
-        for line in file.unwrap_or_default().split(|&b| b == b'\n') {
-            let line = line.split(|&b| b == 0).next().unwrap_or_default();
-            if matches!(line.first(), Some(b';') | Some(b'#')) {
-                continue;
-            }
-            if let Some(at) = keyword(line, b"nameserver") {
-                if conf.servers.len() >= MAXNS {
-                    continue;
-                }
-                let rest = line.get(at..).unwrap_or_default();
-                let skip = rest
-                    .iter()
-                    .take_while(|&&b| b == b' ' || b == b'\t')
-                    .count();
-                let rest = rest.get(skip..).unwrap_or_default();
-                let end = rest
-                    .iter()
-                    .position(|&b| matches!(b, b' ' | b'\t' | b'\n'))
-                    .unwrap_or(rest.len());
-                if let Some(server) =
-                    Self::nameserver(rest.get(..end).unwrap_or_default(), scope_index)
-                {
-                    conf.servers.push(server);
-                }
-            } else if let Some(at) = keyword(line, b"options") {
-                conf.options(line.get(at..).unwrap_or_default());
-            }
+        let line = line.split(|&b| b == 0).next().unwrap_or_default();
+        if matches!(line.first(), Some(b';') | Some(b'#')) {
+            return;
         }
-        if conf.servers.is_empty() {
-            conf.servers
+        if let Some(at) = keyword(line, b"nameserver") {
+            if self.servers.len() >= MAXNS {
+                return;
+            }
+            let rest = line.get(at..).unwrap_or_default();
+            let skip = rest
+                .iter()
+                .take_while(|&&b| b == b' ' || b == b'\t')
+                .count();
+            let rest = rest.get(skip..).unwrap_or_default();
+            let end = rest
+                .iter()
+                .position(|&b| matches!(b, b' ' | b'\t' | b'\n'))
+                .unwrap_or(rest.len());
+            if let Some(server) = Self::nameserver(rest.get(..end).unwrap_or_default(), scope_index)
+            {
+                self.servers.push(server);
+            }
+        } else if let Some(at) = keyword(line, b"options") {
+            self.options(line.get(at..).unwrap_or_default());
+        }
+    }
+
+    /// The file read: 127.0.0.1 where it named no server, then
+    /// `RES_OPTIONS`.
+    fn finish(mut self, env: Option<&[u8]>) -> ResolvConf {
+        if self.servers.is_empty() {
+            self.servers
                 .push(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53)));
         }
         if let Some(env) = env {
-            conf.options(env);
+            self.options(env);
         }
-        conf
+        self
     }
 
     /// How long server `ns` (its index in [`ResolvConf::servers`]) is
@@ -299,17 +312,138 @@ impl ResolvConf {
         Duration::from_secs(u64::try_from(seconds.max(1)).unwrap_or(1))
     }
 
-    /// The longest one query can take: every attempt of every server, each
-    /// waited for its [`ResolvConf::wait`] (and the TCP exchange a truncated
-    /// reply leads to within it). The C's own worst case, which it has no
-    /// bound past: 450 s at `timeout:30 attempts:5` with three servers.
+    /// The longest one query can take here: every attempt of every server,
+    /// each waited for its [`ResolvConf::wait`], and then the one TCP
+    /// exchange a truncated reply at the very end leads to, which has as
+    /// long again as that server's datagram attempt (no round follows it):
+    /// 490 s at `timeout:30 attempts:5` with three servers (450 s of
+    /// datagrams, 40 s of TCP). lsof-rs's own bound: glibc's datagram
+    /// attempts take the same, but its TCP exchange has no limit at all.
     pub fn worst_case(&self) -> Duration {
-        let round: Duration = (0..self.servers.len()).map(|ns| self.wait(ns)).sum();
+        if self.retry <= 0 {
+            return Duration::ZERO;
+        }
+        let waits = || (0..self.servers.len()).map(|ns| self.wait(ns));
+        let round: Duration = waits().sum();
         round
-            .checked_mul(u32::try_from(self.retry.max(0)).unwrap_or(0))
+            .checked_mul(u32::try_from(self.retry).unwrap_or(u32::MAX))
+            .and_then(|all| all.checked_add(waits().max().unwrap_or_default()))
             .unwrap_or(Duration::MAX)
     }
 }
+
+/// `/etc/resolv.conf` at `path`, and `RES_OPTIONS` (`env`), as glibc
+/// 2.39's `__resolv_conf_load()` reads them before any host lookup (its
+/// `gethostbyaddr()` loads them before it walks nsswitch.conf): `None`
+/// where glibc's load fails, and then no host is named at all, by the
+/// hosts file or by DNS, and no server is asked (measured: the C prints
+/// every host as a number, whatever `hosts:` says). Each state measured
+/// through the C:
+///
+/// * a regular file is read to its end, every line in turn, its last with
+///   no `\n` too;
+/// * no file (`ENOENT`, `ENOTDIR`, `ELOOP`), one that cannot be opened for
+///   want of permission (`EACCES`, `EPERM`, which glibc passes by), and the
+///   null device, read as empty: glibc's defaults, 127.0.0.1;
+/// * a directory (glibc's read fails, `EISDIR`), a socket (`ENXIO` at its
+///   open), a read that fails: `None`;
+/// * a FIFO, where glibc's `fopen()` waits for a writer for ever, and any
+///   other device, which glibc reads until it has no memory left
+///   (`/dev/zero`, then `None`) or for ever (`/dev/urandom`): `None`,
+///   without opening it (DIVERGENCES 154);
+/// * a line longer than [`RESOLV_LINE_LIMIT`], or more than
+///   [`RESOLV_CONF_LIMIT`] bytes, which glibc reads whole: `None`, never a
+///   server or an option read from a file read in part.
+pub fn resolv_conf_file(
+    path: &std::path::Path,
+    env: Option<&[u8]>,
+    scope_index: &dyn Fn(&[u8]) -> Option<u32>,
+) -> Option<ResolvConf> {
+    resolv_conf_within(
+        path,
+        env,
+        scope_index,
+        (RESOLV_LINE_LIMIT, RESOLV_CONF_LIMIT),
+    )
+}
+
+/// [`resolv_conf_file`] within a line's and a file's bounds.
+fn resolv_conf_within(
+    path: &std::path::Path,
+    env: Option<&[u8]>,
+    scope_index: &dyn Fn(&[u8]) -> Option<u32>,
+    (line_limit, file_limit): (usize, u64),
+) -> Option<ResolvConf> {
+    use std::io::{BufRead, Read};
+    // What glibc's `fopen()` failing with passes by, keeping its defaults.
+    let passed_by = |e: &std::io::Error| {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        ) || matches!(e.raw_os_error(), Some(n) if n == ENOTDIR || n == ELOOP)
+    };
+    let defaults = || Some(ResolvConf::default().finish(env));
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if passed_by(&e) => return defaults(),
+        Err(_) => return None,
+    };
+    if crate::netnames::is_null_device(&meta) {
+        return defaults();
+    }
+    if !meta.is_file() {
+        return None;
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, crate::safefs::NONBLOCK);
+    let file = match open.open(path) {
+        Ok(file) => file,
+        Err(e) if passed_by(&e) => return defaults(),
+        Err(_) => return None,
+    };
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut reader = std::io::BufReader::new(file.take(file_limit.saturating_add(1)));
+    let most = u64::try_from(line_limit)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut conf = ResolvConf::default();
+    let mut read: u64 = 0;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let n = reader
+            .by_ref()
+            .take(most)
+            .read_until(b'\n', &mut line)
+            .ok()?;
+        if n == 0 {
+            break;
+        }
+        read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        if read > file_limit {
+            return None;
+        }
+        let text = match line.strip_suffix(b"\n") {
+            Some(text) => text,
+            None if line.len() > line_limit => return None,
+            None => &line,
+        };
+        conf.line(text, scope_index);
+    }
+    Some(conf.finish(env))
+}
+
+/// `ENOTDIR` and `ELOOP` (Linux's, and the BSDs'), which `std` names only
+/// in versions later than this workspace's.
+const ENOTDIR: i32 = 20;
+#[cfg(target_os = "linux")]
+const ELOOP: i32 = 40;
+#[cfg(not(target_os = "linux"))]
+const ELOOP: i32 = 62;
 
 /// Where `rotate` starts each query: glibc picks a random server for the
 /// run's first and the next one for each after it (`nameserver_offset()`).
@@ -762,13 +896,20 @@ pub trait Transport {
     /// Send `message` on it, its 16-bit length before it, by `deadline`.
     fn tcp_send(&mut self, conn: &mut Self::Tcp, message: &[u8], deadline: Duration) -> bool;
     /// Read one message (a length, then that many bytes) by `deadline` into
-    /// `buf`: its length, or `None` where the connection failed or ended.
-    fn tcp_recv(
-        &mut self,
-        conn: &mut Self::Tcp,
-        buf: &mut [u8],
-        deadline: Duration,
-    ) -> Option<usize>;
+    /// `buf`.
+    fn tcp_recv(&mut self, conn: &mut Self::Tcp, buf: &mut [u8], deadline: Duration) -> TcpRead;
+}
+
+/// What one read of a TCP message gave ([`Transport::tcp_recv`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcpRead {
+    /// A message of this many bytes, now at the front of the buffer.
+    Message(usize),
+    /// The connection was reset (`ECONNRESET`) while its length was read,
+    /// which glibc's `send_vc()` meets by connecting again, once.
+    Reset,
+    /// It failed or ended any other way, or its time was up.
+    Failed,
 }
 
 /// What one exchange with a server came to.
@@ -842,11 +983,13 @@ fn udp_attempt<T: Transport>(
 }
 
 /// One exchange over TCP with server `ns` (`send_vc()`): connect, send, and
-/// read messages until one has the query's id. glibc waits on each step
-/// without a limit; here the whole exchange has `wait`, the time an attempt
-/// over UDP with this server has, and at most [`MAX_TCP_MESSAGES`] messages.
-/// A connection reset before the first reply is tried once more, as glibc
-/// tries it.
+/// read messages until one has the query's id, comparing the id alone, as
+/// glibc compares it there. glibc waits on each step without a limit; here
+/// the whole exchange has `wait`, as long again as an attempt over UDP with
+/// this server has (DIVERGENCES 154), and ends there however many messages
+/// a server sends. A connection reset while a message's length is read is
+/// met by connecting to the same server again and sending again, once an
+/// exchange, as glibc's `connreset` does; within the same time.
 fn tcp_attempt<T: Transport>(
     t: &mut T,
     server: SocketAddr,
@@ -855,25 +998,33 @@ fn tcp_attempt<T: Transport>(
     buf: &mut [u8],
 ) -> Exchange {
     let deadline = t.now().saturating_add(wait);
-    let Some(mut conn) = t.tcp(server, deadline) else {
-        return Exchange::Next;
-    };
-    if !t.tcp_send(&mut conn, query, deadline) {
-        return Exchange::Next;
-    }
-    for _ in 0..MAX_TCP_MESSAGES {
-        let Some(len) = t.tcp_recv(&mut conn, buf, deadline) else {
+    let mut reset = false;
+    'connect: loop {
+        let Some(mut conn) = t.tcp(server, deadline) else {
             return Exchange::Next;
         };
-        let reply = buf.get(..len.min(buf.len())).unwrap_or_default();
-        if reply.len() < HEADER {
+        if !t.tcp_send(&mut conn, query, deadline) {
             return Exchange::Next;
         }
-        if reply.get(..2) == query.get(..2) {
-            return Exchange::Answer(reply.to_vec());
+        while t.now() < deadline {
+            let len = match t.tcp_recv(&mut conn, buf, deadline) {
+                TcpRead::Message(len) => len,
+                TcpRead::Reset if !reset => {
+                    reset = true;
+                    continue 'connect;
+                }
+                TcpRead::Reset | TcpRead::Failed => return Exchange::Next,
+            };
+            let reply = buf.get(..len.min(buf.len())).unwrap_or_default();
+            if reply.len() < HEADER {
+                return Exchange::Next;
+            }
+            if reply.get(..2) == query.get(..2) {
+                return Exchange::Answer(reply.to_vec());
+            }
         }
+        return Exchange::Next;
     }
-    Exchange::Next
 }
 
 /// `ip`'s PTR name, asked of the servers of `conf` as glibc's
@@ -1067,9 +1218,16 @@ mod tests {
             secs(&conf("nameserver 1.1.1.1\noptions timeout:-3\n")),
             vec![1]
         );
-        // The C's worst case: 5 rounds of 30 + 20 + 40.
+        // lsof-rs's worst case: 5 rounds of 30 + 20 + 40, and then a TCP
+        // exchange as long as the longest wait (the C's has no limit).
         let worst = conf(&format!("{three}options timeout:30 attempts:5\n")).worst_case();
-        assert_eq!(worst.as_secs(), 450);
+        assert_eq!(worst.as_secs(), 490);
+        assert_eq!(
+            conf("nameserver 1.1.1.1\noptions timeout:2 attempts:1\n")
+                .worst_case()
+                .as_secs(),
+            4
+        );
         assert_eq!(conf("options attempts:0\n").worst_case(), Duration::ZERO);
     }
 
@@ -1450,91 +1608,168 @@ mod tests {
     }
 
     /// A transport scripted per server, on a clock that moves only when a
-    /// wait would.
+    /// wait would. Each datagram socket has its own queue of replies due: a
+    /// reply that comes after the deadline stays on the socket, read by the
+    /// next wait on it, and is lost with it when the loop closes the socket
+    /// (a socket opened again is a new one), as on a real one.
     #[derive(Default)]
     struct Script {
         now: Duration,
         /// Per server: what each datagram sent gets, in order.
         udp: std::collections::HashMap<SocketAddr, VecDeque<Vec<Reply>>>,
         /// Per server: the messages a TCP exchange reads, in order, the
-        /// last again for as long as it is read.
+        /// last again for as long as it is read (each a millisecond after
+        /// the one before).
         tcp: std::collections::HashMap<SocketAddr, VecDeque<Vec<u8>>>,
+        /// Per server: how many of its TCP connections are reset at their
+        /// first read.
+        resets: std::collections::HashMap<SocketAddr, usize>,
         log: Vec<(u64, SocketAddr, &'static str)>,
-        pending: VecDeque<Reply>,
+        /// Each open socket's replies, by the token it was opened with.
+        queues: std::collections::HashMap<u64, Vec<(Duration, Reply)>>,
+        tokens: u64,
+        /// Every TCP step's deadline, and the time it was given at.
+        tcp_deadlines: Vec<(Duration, Duration)>,
+        /// The servers TCP connections were made to, in order.
+        connects: Vec<SocketAddr>,
+        /// Each datagram's length.
+        sent: Vec<usize>,
     }
 
     #[derive(Clone)]
     enum Reply {
-        /// A datagram this long after the query, made of it.
+        /// A datagram this many seconds after the query, made of it.
         After(u64, fn(&[u8]) -> Vec<u8>),
+        /// The same, this many milliseconds after it.
+        AfterMs(u64, fn(&[u8]) -> Vec<u8>),
         Refused,
     }
 
     impl Transport for Script {
-        type Udp = SocketAddr;
-        type Tcp = SocketAddr;
+        type Udp = (SocketAddr, u64);
+        type Tcp = (SocketAddr, bool);
         fn now(&mut self) -> Duration {
             self.now
         }
         fn random(&mut self) -> u16 {
             0x4242
         }
-        fn udp(&mut self, server: SocketAddr) -> Opened<SocketAddr> {
-            Opened::Socket(server)
+        fn udp(&mut self, server: SocketAddr) -> Opened<(SocketAddr, u64)> {
+            self.tokens += 1;
+            self.queues.insert(self.tokens, Vec::new());
+            Opened::Socket((server, self.tokens))
         }
-        fn udp_send(&mut self, sock: &mut SocketAddr, message: &[u8]) -> bool {
-            self.log.push((self.now.as_secs(), *sock, "udp"));
+        fn udp_send(&mut self, sock: &mut (SocketAddr, u64), message: &[u8]) -> bool {
+            self.log.push((self.now.as_secs(), sock.0, "udp"));
+            self.sent.push(message.len());
             let replies = self
                 .udp
-                .get_mut(sock)
+                .get_mut(&sock.0)
                 .and_then(VecDeque::pop_front)
                 .unwrap_or_default();
-            self.pending = replies.into();
-            self.pending
-                .iter_mut()
-                .for_each(|r| if let Reply::After(_, _) = r {});
+            let now = self.now;
+            let queue = self.queues.entry(sock.1).or_default();
+            for r in replies {
+                let due = match r {
+                    Reply::After(secs, _) => now + Duration::from_secs(secs),
+                    Reply::AfterMs(ms, _) => now + Duration::from_millis(ms),
+                    Reply::Refused => now,
+                };
+                queue.push((due, r));
+            }
             let _ = message;
             true
         }
-        fn udp_recv(&mut self, _: &mut SocketAddr, buf: &mut [u8], deadline: Duration) -> Received {
-            match self.pending.pop_front() {
-                Some(Reply::After(secs, make))
-                    if self.now + Duration::from_secs(secs) < deadline =>
-                {
-                    self.now += Duration::from_secs(secs);
-                    let q = ptr_query(0x4242, "127.0.0.7".parse().unwrap(), &ResolvConf::default());
-                    let r = make(&q);
-                    buf[..r.len()].copy_from_slice(&r);
-                    Received::Datagram(r.len())
+        fn udp_recv(
+            &mut self,
+            sock: &mut (SocketAddr, u64),
+            buf: &mut [u8],
+            deadline: Duration,
+        ) -> Received {
+            let queue = self.queues.entry(sock.1).or_default();
+            let first = queue
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (due, _))| *due)
+                .map(|(i, (due, _))| (i, *due));
+            match first {
+                Some((i, due)) if due < deadline => {
+                    let (_, reply) = queue.remove(i);
+                    self.now = self.now.max(due);
+                    match reply {
+                        Reply::Refused => Received::Refused,
+                        Reply::After(_, make) | Reply::AfterMs(_, make) => {
+                            let q = ptr_query(
+                                0x4242,
+                                "127.0.0.7".parse().unwrap(),
+                                &ResolvConf::default(),
+                            );
+                            let r = make(&q);
+                            buf[..r.len()].copy_from_slice(&r);
+                            Received::Datagram(r.len())
+                        }
+                    }
                 }
-                Some(Reply::Refused) => Received::Refused,
                 _ => {
                     self.now = deadline;
                     Received::TimedOut
                 }
             }
         }
-        fn tcp(&mut self, server: SocketAddr, _: Duration) -> Option<SocketAddr> {
-            self.tcp.contains_key(&server).then_some(server)
+        fn tcp(&mut self, server: SocketAddr, deadline: Duration) -> Option<(SocketAddr, bool)> {
+            self.tcp_deadlines.push((self.now, deadline));
+            if !self.tcp.contains_key(&server) {
+                return None;
+            }
+            self.connects.push(server);
+            let reset = self.resets.get_mut(&server).is_some_and(|n| {
+                let left = *n > 0;
+                *n = n.saturating_sub(1);
+                left
+            });
+            Some((server, reset))
         }
-        fn tcp_send(&mut self, conn: &mut SocketAddr, _: &[u8], _: Duration) -> bool {
-            self.log.push((self.now.as_secs(), *conn, "tcp"));
+        fn tcp_send(
+            &mut self,
+            conn: &mut (SocketAddr, bool),
+            _: &[u8],
+            deadline: Duration,
+        ) -> bool {
+            self.tcp_deadlines.push((self.now, deadline));
+            self.log.push((self.now.as_secs(), conn.0, "tcp"));
             true
         }
         fn tcp_recv(
             &mut self,
-            conn: &mut SocketAddr,
+            conn: &mut (SocketAddr, bool),
             buf: &mut [u8],
-            _: Duration,
-        ) -> Option<usize> {
-            let queue = self.tcp.get_mut(conn)?;
+            deadline: Duration,
+        ) -> TcpRead {
+            self.tcp_deadlines.push((self.now, deadline));
+            if std::mem::take(&mut conn.1) {
+                return TcpRead::Reset;
+            }
+            self.now += Duration::from_millis(1);
+            if self.now >= deadline {
+                self.now = deadline;
+                return TcpRead::Failed;
+            }
+            let Some(queue) = self.tcp.get_mut(&conn.0) else {
+                return TcpRead::Failed;
+            };
             let r = if queue.len() > 1 {
-                queue.pop_front()?
+                queue.pop_front()
             } else {
-                queue.front()?.clone()
+                queue.front().cloned()
+            };
+            // A server that accepted and sends nothing: silent until the
+            // deadline.
+            let Some(r) = r else {
+                self.now = deadline;
+                return TcpRead::Failed;
             };
             buf[..r.len()].copy_from_slice(&r);
-            Some(r.len())
+            TcpRead::Message(r.len())
         }
     }
 
@@ -1648,7 +1883,7 @@ mod tests {
         );
         assert_eq!(got, NssAnswer::NotFound);
         assert!(s.log.is_empty());
-        // A TCP reply with another id is read past, up to the cap.
+        // A TCP reply with another id is read past, until the deadline.
         let mut s = Script::default();
         let mut other = good_reply(&q);
         other[0] ^= 1;
@@ -1664,6 +1899,190 @@ mod tests {
             .insert(a, VecDeque::from([other.clone(), other, good_reply(&q)]));
         let got = run(
             "nameserver 127.0.0.53\noptions timeout:1 attempts:1 use-vc\n",
+            &mut s,
+        );
+        assert_eq!(got, NssAnswer::Success("good".into()));
+    }
+
+    /// A server's datagram socket stays open across its timeout, so its
+    /// late reply is read at its next attempt; a refusal (or a reply that
+    /// moves on) closes every server's, and a late reply is lost with it, as
+    /// glibc's `send_dg()` keeps and closes them (measured through the C).
+    #[test]
+    fn a_late_reply_is_read_on_the_kept_socket_and_lost_on_a_refusal() {
+        let (a, b) = (v4("127.0.0.53"), v4("127.0.0.54"));
+        let two = "nameserver 127.0.0.53\nnameserver 127.0.0.54\noptions timeout:1 attempts:2\n";
+        // One server, 1.5 s late: read in the second attempt.
+        let mut s = Script::default();
+        s.udp
+            .insert(a, VecDeque::from([vec![Reply::AfterMs(1500, good_reply)]]));
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:2\n",
+            &mut s,
+        );
+        assert_eq!(got, NssAnswer::Success("good".into()));
+        assert_eq!(s.now, Duration::from_millis(1500));
+        assert_eq!(s.log, vec![(0, a, "udp"), (1, a, "udp")]);
+        // The first late, the second refusing: every socket closed, the
+        // late reply lost.
+        let mut s = Script::default();
+        s.udp
+            .insert(a, VecDeque::from([vec![Reply::AfterMs(1500, good_reply)]]));
+        s.udp.insert(
+            b,
+            VecDeque::from([vec![Reply::Refused], vec![Reply::Refused]]),
+        );
+        assert_eq!(run(two, &mut s), NssAnswer::NotFound);
+        assert_eq!(s.now.as_secs(), 2);
+        assert_eq!(
+            s.log.iter().map(|l| l.1).collect::<Vec<_>>(),
+            vec![a, b, a, b]
+        );
+        // ...and the same where the second's reply moves on (REFUSED).
+        let mut s = Script::default();
+        s.udp
+            .insert(a, VecDeque::from([vec![Reply::AfterMs(1500, good_reply)]]));
+        s.udp.insert(
+            b,
+            VecDeque::from([
+                vec![Reply::After(0, refused_reply)],
+                vec![Reply::After(0, refused_reply)],
+            ]),
+        );
+        assert_eq!(run(two, &mut s), NssAnswer::NotFound);
+        // The first late, the second silent: the first's reply is read when
+        // it is asked again.
+        let mut s = Script::default();
+        s.udp
+            .insert(a, VecDeque::from([vec![Reply::AfterMs(1500, good_reply)]]));
+        let got = run(two, &mut s);
+        assert_eq!(
+            (got, s.now.as_secs()),
+            (NssAnswer::Success("good".into()), 2)
+        );
+        assert_eq!(s.log.iter().map(|l| l.1).collect::<Vec<_>>(), vec![a, b, a]);
+    }
+
+    /// The TCP exchange after `TC` has the same server's wait, given to
+    /// every step of it (connect, send, each read), where glibc's has none;
+    /// it ends there however many messages come, reads past any number of
+    /// replies with another id, and connects again once after a reset of
+    /// a length's read, as glibc's `connreset` does.
+    #[test]
+    fn the_tcp_exchange_is_bounded_and_tried_again_after_a_reset() {
+        let (a, b) = (v4("127.0.0.53"), v4("127.0.0.54"));
+        let q = ptr_query(0x4242, "127.0.0.7".parse().unwrap(), &ResolvConf::default());
+        let two = "nameserver 127.0.0.53\nnameserver 127.0.0.54\noptions timeout:3 attempts:1\n";
+        // TC from the first at 1 s: the first over TCP, every step by 1 + 3 s.
+        let mut s = Script::default();
+        s.udp
+            .insert(a, VecDeque::from([vec![Reply::After(1, tc_reply)]]));
+        s.tcp.insert(a, VecDeque::from([good_reply(&q)]));
+        assert_eq!(run(two, &mut s), NssAnswer::Success("good".into()));
+        assert!(!s.tcp_deadlines.is_empty());
+        assert!(
+            s.tcp_deadlines
+                .iter()
+                .all(|&(_, d)| d == Duration::from_secs(4)),
+            "{:?}",
+            s.tcp_deadlines
+        );
+        // A hundred strangers' replies, then the query's own: taken.
+        let mut other = good_reply(&q);
+        other[0] ^= 1;
+        let mut s = Script::default();
+        let mut many: VecDeque<Vec<u8>> = std::iter::repeat_n(other.clone(), 100).collect();
+        many.push_back(good_reply(&q));
+        s.tcp.insert(a, many);
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:1 use-vc\n",
+            &mut s,
+        );
+        assert_eq!(got, NssAnswer::Success("good".into()));
+        // Strangers until the deadline: the exchange ends there.
+        let mut s = Script::default();
+        s.tcp.insert(a, VecDeque::from([other]));
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:1 use-vc\n",
+            &mut s,
+        );
+        assert_eq!((got, s.now.as_secs()), (NssAnswer::NotFound, 1));
+        // A reset: the same server again, once.
+        let mut s = Script::default();
+        s.tcp.insert(a, VecDeque::from([good_reply(&q)]));
+        s.resets.insert(a, 1);
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:1 use-vc\n",
+            &mut s,
+        );
+        assert_eq!(got, NssAnswer::Success("good".into()));
+        assert_eq!(s.connects, vec![a, a]);
+        // Both always reset: each twice, then nothing (measured: the C
+        // sends .53 twice, then .54 twice).
+        let mut s = Script::default();
+        s.tcp.insert(a, VecDeque::from([good_reply(&q)]));
+        s.tcp.insert(b, VecDeque::from([good_reply(&q)]));
+        s.resets.insert(a, 9);
+        s.resets.insert(b, 9);
+        let got = run(&format!("{two}options use-vc\n"), &mut s);
+        assert_eq!(got, NssAnswer::NotFound);
+        assert_eq!(s.connects, vec![a, a, b, b]);
+        // A server that accepts and never answers holds the exchange until
+        // its deadline and no longer: the worst case, `TC` at the end of the
+        // last server's last round.
+        let three = "nameserver 127.0.0.53\nnameserver 127.0.0.54\nnameserver 127.0.0.55\noptions timeout:30 attempts:5\n";
+        let c = v4("127.0.0.55");
+        let mut s = Script::default();
+        let mut rounds: VecDeque<Vec<Reply>> = std::iter::repeat_n(Vec::new(), 4).collect();
+        rounds.push_back(vec![Reply::AfterMs(39_999, tc_reply)]);
+        s.udp.insert(c, rounds);
+        s.tcp.insert(c, VecDeque::new());
+        assert_eq!(run(three, &mut s), NssAnswer::NotFound);
+        assert_eq!(s.now, conf(three).worst_case() - Duration::from_millis(1));
+        assert!(s.now <= conf(three).worst_case());
+    }
+
+    /// `edns0` and a server that answers FORMERR: one query, the 51-byte
+    /// one with its OPT record, and no name; glibc 2.39 does not ask again
+    /// without EDNS (measured).
+    #[test]
+    fn a_formerr_to_edns0_is_no_name_after_one_query() {
+        fn formerr(q: &[u8]) -> Vec<u8> {
+            reply(q, [0x81, 0x81], 0, &[])
+        }
+        let mut s = Script::default();
+        s.udp.insert(
+            v4("127.0.0.53"),
+            VecDeque::from([vec![Reply::After(0, formerr)]]),
+        );
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:2 edns0\n",
+            &mut s,
+        );
+        assert_eq!(got, NssAnswer::NotFound);
+        assert_eq!(s.sent, vec![51]);
+    }
+
+    /// An answer longer than 512 bytes is read whole: glibc's buffer holds
+    /// 65,536 bytes, and so does the one read into here.
+    #[test]
+    fn an_answer_past_512_bytes_is_read_whole() {
+        fn long(q: &[u8]) -> Vec<u8> {
+            let mut records: Vec<Vec<u8>> = (0..40)
+                .map(|_| rr(&lab(&[b"other", b"example"]), 1, &[1, 2, 3, 4], 1))
+                .collect();
+            records.push(rr(PTR_OWNER, 12, &lab(&[b"good"]), 1));
+            reply(q, OK, 41, &records)
+        }
+        let q = ptr_query(0x4242, "127.0.0.7".parse().unwrap(), &ResolvConf::default());
+        assert!(long(&q).len() > 512);
+        let mut s = Script::default();
+        s.udp.insert(
+            v4("127.0.0.53"),
+            VecDeque::from([vec![Reply::After(0, long)]]),
+        );
+        let got = run(
+            "nameserver 127.0.0.53\noptions timeout:1 attempts:1\n",
             &mut s,
         );
         assert_eq!(got, NssAnswer::Success("good".into()));
@@ -1698,5 +2117,76 @@ mod tests {
             Some((b"\x01b\x01a\0".to_vec(), 4))
         );
         let _ = Ipv6Addr::LOCALHOST;
+    }
+
+    /// `/etc/resolv.conf` as glibc's `__resolv_conf_load()` finds it: read
+    /// to its end, or its defaults, or no configuration at all, where the
+    /// C names no host and asks nothing (each state measured through the
+    /// C, DIVERGENCES 154).
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "it makes files, a FIFO and a socket")]
+    fn resolv_conf_is_read_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-resolv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("resolv.conf");
+        let small = (64, 256);
+        let read = |path: &std::path::Path| {
+            resolv_conf_within(path, None, &no_scope, small).map(|c| c.servers)
+        };
+        let write = |text: &[u8]| std::fs::write(&path, text).unwrap();
+        // Read to its end, its last line with no `\n` too.
+        write(b"options timeout:1\nnameserver 127.0.0.53");
+        assert_eq!(read(&path), Some(vec![v4("127.0.0.53")]));
+        // Past the first bytes as well as before them: the whole file.
+        let mut text = b"#".repeat(60);
+        text.push(b'\n');
+        let mut long = text.repeat(3);
+        long.extend_from_slice(b"nameserver 127.0.0.54\n");
+        write(&long);
+        assert_eq!(read(&path), Some(vec![v4("127.0.0.54")]));
+        // A line past the bound, or a file past it: nothing, never a server
+        // read from part of either.
+        let mut cut = b"nameserver 127.0.0.5".to_vec();
+        cut.extend(b" ".repeat(60));
+        cut.extend_from_slice(b"3\n");
+        write(&cut);
+        assert_eq!(read(&path), None, "a line past the bound");
+        let mut big = b"nameserver 127.0.0.53\n".to_vec();
+        big.extend(text.repeat(5));
+        big.extend_from_slice(b"options attempts:0\n");
+        write(&big);
+        assert_eq!(read(&path), None, "a file past the bound");
+        // RES_OPTIONS after the file, on the defaults too.
+        write(b"nameserver 127.0.0.53\noptions attempts:2\n");
+        let c = resolv_conf_within(&path, Some(b"attempts:0"), &no_scope, small).unwrap();
+        assert_eq!(c.retry, 0);
+        // No file: the defaults.
+        let missing = dir.join("nosuch");
+        assert_eq!(read(&missing), Some(vec![v4("127.0.0.1")]));
+        assert_eq!(read(&missing.join("below")), Some(vec![v4("127.0.0.1")]));
+        let c = resolv_conf_within(&missing, Some(b"attempts:0"), &no_scope, small).unwrap();
+        assert_eq!(c.retry, 0);
+        // A directory, a socket, a FIFO: no configuration.
+        assert_eq!(read(&dir), None, "a directory");
+        let sock = dir.join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert_eq!(read(&sock), None, "a socket");
+        let fifo = dir.join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            assert_eq!(read(&fifo), None, "a FIFO, never opened");
+        }
+        // The null device is an empty file; another device is none.
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                read(std::path::Path::new("/dev/null")),
+                Some(vec![v4("127.0.0.1")])
+            );
+            assert_eq!(read(std::path::Path::new("/dev/zero")), None);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

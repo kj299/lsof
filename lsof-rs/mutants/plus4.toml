@@ -40,8 +40,25 @@
 #   unit test waits on the FIFO for ever, which is what it pins.
 # * The query's id and the rotate start from `RandomState` (backend's
 #   `Net::random`): no output depends on them; `ids_differ` pins spread.
-# * `+m not supported` off Linux (`args.rs`): the arm is FreeBSD's, which
-#   no Linux gate builds; `plus_m_reads_its_file_as_the_c_does` pins Linux.
+# * `+m not supported` off Linux (`args.rs`): the arm builds on FreeBSD and
+#   on Windows, whose cfg-gated args tests pin it there; no Linux gate
+#   builds it, and `plus_m_reads_its_file_as_the_c_does` pins Linux.
+# * Bounds this file left without a mutant, each given one or a reason in
+#   `mutants/plus4-fix.toml` (2026-11-14, the review): query_ptr's
+#   65,535-byte buffer (`message-buffer-512`), NAME_KEPT (`name-kept-short`),
+#   +m's closed-pipe exit (`plus-m-pipe-exit`), `-Q` and +r's status
+#   (`quiet-mutes-idle`), TZIF_MAX_BYTES (`zone-file-max-unbounded`),
+#   RESOLV_CONF_LIMIT (now a line's and a file's bound, see there); gone
+#   since: SERVICES_KEPT (the scan streams), ZONE_NAME_MAX (names kept
+#   whole), MAX_TCP_MESSAGES (the deadline ends the exchange).
+#
+# Amended 2026-11-14 by the review: `linux-names-off`, which only the
+# differential (root) killed, is killed on the CI runner too by
+# `crates/lsof-cli/tests/names.rs`; eight anchors moved with the fixes
+# (maxns-not-kept, no-default-server, res-options-not-read,
+# tcp-first-message-only, tryagain-walks-as-notfound, scan-protocol-case,
+# scan-last-entry-wins, json-names-hosts) and were run again: 8 of 8 killed (7 by
+# lsof-core's tests, 1 by the CLI's).
 
 [run]
 dir = ".."
@@ -64,8 +81,8 @@ name = "maxns-not-kept"
 rule = "past the third nameserver none is read (MAXNS, 154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/dns.rs"
-old = '''                if conf.servers.len() >= MAXNS {'''
-new = '''                if conf.servers.len() >= 99 {'''
+old = '''            if self.servers.len() >= MAXNS {'''
+new = '''            if self.servers.len() >= 99 {'''
 
 [[mutant]]
 name = "timeout-not-capped"
@@ -96,10 +113,10 @@ name = "no-default-server"
 rule = "with no server, 127.0.0.1 (154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/dns.rs"
-old = '''        if conf.servers.is_empty() {
-            conf.servers'''
-new = '''        if conf.servers.len() > 99 {
-            conf.servers'''
+old = '''        if self.servers.is_empty() {
+            self.servers'''
+new = '''        if self.servers.len() > 99 {
+            self.servers'''
 
 [[mutant]]
 name = "res-options-not-read"
@@ -107,7 +124,7 @@ rule = "RES_OPTIONS is read after the file (154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/dns.rs"
 old = '''        if let Some(env) = env {
-            conf.options(env);
+            self.options(env);
         }'''
 new = '''        let _ = env;'''
 
@@ -295,8 +312,17 @@ name = "tcp-first-message-only"
 rule = "over TCP, messages with another id are read past (154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/dns.rs"
-old = '''    for _ in 0..MAX_TCP_MESSAGES {'''
-new = '''    for _ in 0..1 {'''
+old = '''            if reply.get(..2) == query.get(..2) {
+                return Exchange::Answer(reply.to_vec());
+            }
+        }
+        return Exchange::Next;'''
+new = '''            if reply.get(..2) == query.get(..2) {
+                return Exchange::Answer(reply.to_vec());
+            }
+            return Exchange::Next;
+        }
+        return Exchange::Next;'''
 
 [[mutant]]
 name = "class-not-skipped"
@@ -349,8 +375,8 @@ name = "tryagain-walks-as-notfound"
 rule = "the walk takes TRYAGAIN's action (154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/netnames.rs"
-old = '''            NssAnswer::TryAgain => NssStatus::TryAgain,'''
-new = '''            NssAnswer::TryAgain => NssStatus::NotFound,'''
+old = '''            NssAnswer::TryAgain => (NssStatus::TryAgain, None),'''
+new = '''            NssAnswer::TryAgain => (NssStatus::NotFound, None),'''
 
 [[mutant]]
 name = "name-room-doubled"
@@ -381,16 +407,16 @@ name = "scan-protocol-case"
 rule = "the scan compares protocols in any case (154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/sockname.rs"
-old = '''            let proto = if e.protocol.eq_ignore_ascii_case(b"tcp") {'''
-new = '''            let proto = if e.protocol == b"tcp" {'''
+old = '''            let proto = if protocol.eq_ignore_ascii_case(b"tcp") {'''
+new = '''            let proto = if protocol == b"tcp" {'''
 
 [[mutant]]
 name = "scan-last-entry-wins"
 rule = "the scan keeps the first entry of each port (154)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/sockname.rs"
-old = '''                m.entry(e.port).or_insert(e.name);'''
-new = '''                m.insert(e.port, e.name);'''
+old = '''                m.entry(port).or_insert_with(|| name.to_vec());'''
+new = '''                m.insert(port, name.to_vec());'''
 
 [[mutant]]
 name = "port-zero-a-number"
@@ -501,10 +527,10 @@ name = "json-names-hosts"
 rule = "JSON keeps the numeric name and asks nothing (154)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        let name = if json {
-            numeric.name(info, &mut NoNames)'''
-new = '''        let name = if json && false {
-            numeric.name(info, &mut NoNames)'''
+old = '''        let renamed = if json {
+            renamed_socket(f, &mut numeric, &mut NoNames)'''
+new = '''        let renamed = if json && false {
+            renamed_socket(f, &mut numeric, &mut NoNames)'''
 
 [[mutant]]
 name = "default-delay-not-15"

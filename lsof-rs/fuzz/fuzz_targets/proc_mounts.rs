@@ -55,6 +55,7 @@ fuzz_target!(|data: &[u8]| {
         .map(|r| ExemptFs {
             path: r.dir.clone(),
             plus: data.len() % 2 == 0,
+            device: None,
         })
         .into_iter()
         .collect();

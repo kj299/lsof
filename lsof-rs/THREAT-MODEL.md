@@ -76,7 +76,7 @@ it is a gap, not a formatting choice.
 | `/etc/hosts`, `/etc/services`, `/etc/host.conf` (or the file `RESOLV_HOST_CONF` names), `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name`; `/proc/self/auxv`, read where `RESOLV_HOST_CONF` is set | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
 | the system's resolver's answer to an `-i @name` the hosts file does not hold (`getaddrinfo()` through `std`): addresses only | **a remote name server**, and whoever is on the path to it | **hostile** to availability; the addresses untrusted | `lsof-core::netnames::system_addresses` | not applicable: no bytes of the answer are parsed here (libc parses the reply, `std` hands over addresses); see below |
 | Linux: the replies to the PTR queries a socket's NAME makes, by default (`-n` turns them off; DIVERGENCES 154), over UDP and, after a truncated reply or under `use-vc`, TCP | **a remote name server**, and whoever can send to this host's ephemeral port | **hostile**: parsed here, and printed | `lsof-core::dns` (the reply's readers, the query loop), `lsof-backend-linux::dns` (the sockets) | `dns_reply` (every reader and the whole loop over a transport made of the input; `-timeout=10`) |
-| Linux: `/etc/resolv.conf` and `RES_OPTIONS` (not in secure-execution mode), and `/etc/hosts`, `/etc/services` and `/etc/nsswitch.conf` read for a socket's NAME | operator; the variable the invoking user | semi-trusted | `lsof-core::dns::ResolvConf`, `lsof-core::netnames` | `dns_reply`, `netnames` |
+| Linux: `/etc/resolv.conf` and `RES_OPTIONS` (not in secure-execution mode), `/etc/host.conf` (or `RESOLV_HOST_CONF`'s) and `RESOLV_ADD_TRIM_DOMAINS`/`RESOLV_OVERRIDE_TRIM_DOMAINS`, and `/etc/hosts`, `/etc/services` and `/etc/nsswitch.conf` read for a socket's NAME | operator; the variable the invoking user | semi-trusted | `lsof-core::dns::ResolvConf`, `lsof-core::netnames` | `dns_reply`, `netnames` |
 | `-r mFMT`: the format, `TZ`, `TZDIR` (not in secure-execution mode), and the zone file they name or `/etc/localtime` | the invoking user; the operator for the zone files | untrusted | `lsof-core::timefmt` | `timefmt` |
 | `+m m`: the mount supplement file | the invoking user | untrusted | `lsof-backend-linux::mounts::parse_supplement` | `mount_supplement` |
 | the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
@@ -350,7 +350,7 @@ parse prints holds a control character (U+2028 and U+2029 included); the
 `parse_args` fuzz target asserts the same of every error it reaches.
 
 **Reverse DNS on Windows tells a resolver which peers the host talks to.** It
-is the default there, as in the C (Linux behaves as if `-n` were always given).
+is the default there, as in the C, and as on Linux (below).
 The names that come back are chosen by whoever answers for the peer's address,
 and they are escaped like any name; each lookup is waited on for at most 2 s,
 each distinct address is looked up once per run, and at most 8 lookups are
@@ -577,7 +577,8 @@ timeouts, once a name (measured: 2.0 s under `timeout:1 attempts:2`, where
 the C, which asks once for each IP version, took 4.0 s), and there is no
 bound of lsof-rs's own, as the C has none; the bounded helper (`-S`) is for
 the file system, and is not asked. A run with no `-i @name`, or with an
-address, asks nothing: lsof-rs still resolves nothing it prints on Linux.
+address, asks nothing for its selection; the names of the sockets it
+prints are a separate lookup, below (DIVERGENCES 154).
 What comes back is a list of addresses, kept to 128 a name; a wrong answer
 selects the wrong sockets of the invoker's own listing, nothing more. A
 service name is read from `/etc/services` alone, where nsswitch.conf has
@@ -592,11 +593,19 @@ because `std` has no reverse lookup and these crates may not call
 `getnameinfo()`. What that adds:
 
 * *What the query tells a name server.* Which addresses this host has
-  sockets with, as the C's queries tell it; `-n` sends none, and so do `-t`,
-  `-F` without `n` and JSON, which print no host name. Every test and gate
-  of this repository runs with `RES_OPTIONS=attempts:0`, under which neither
-  binary asks a server at all, or in a namespace whose only server is the
-  harness's own.
+  sockets with, as the C's queries tell it, and no more of them than the C's:
+  each row is named as it is written, so a reader that goes away (`| head`)
+  ends the lookups at the next 4 KiB write, as the C dies of SIGPIPE at its
+  next flush (measured, 300 sockets: 85 queries, the C 84; 301 before the
+  review), and a `-r` run that cannot `stat` /etc/passwd ends before any
+  lookup (0 in both). `-n` sends none, and so do `-t`, `-F` without `n` and
+  JSON, which print no host name. Every differential case and resource-gate
+  run sets `RES_OPTIONS=attempts:0`, under which neither binary asks a
+  server at all (passed through `sudo` too), or runs in a namespace whose
+  only server is the harness's own; the integration tests in
+  `crates/lsof-cli/tests` that can list a socket pass `-n -P`, are narrowed
+  to rows that are no Internet socket, set `attempts:0`, or run in a network
+  namespace of their own (`names.rs`).
 * *Who can answer.* Each datagram socket is connected to its server, so the
   kernel drops a datagram from any other address or port; a reply must carry
   the query's id, 16 bits from `std`'s randomly keyed hasher (glibc uses its
@@ -609,40 +618,58 @@ because `std` has no reverse lookup and these crates may not call
   against the message's length, so a pointer loop ends after at most that
   many bytes; at most 255 bytes in wire form, 256 characters as text (glibc's
   limits, measured), or it is no name. No recursion, no loop longer than the
-  reply. Fuzzed: `dns_reply`, 1,930,475 runs in 181 s with no failure.
+  reply. Fuzzed: `dns_reply`, 986,632 runs in 91 s on the final reader (the transport
+  with its reset and its deadline-only TCP loop; 1,930,475 in 181 s and
+  1,033,156 in 91 s on earlier readers) with no failure.
 * *What a reply can make lsof-rs print.* A name with an ESC, a newline or a
   byte past ASCII is written as glibc writes it, `\027`, and that again
   through `safestrprt()`'s rules (`\\027`), as the C prints it (measured): no
   byte of a reply reaches the terminal raw. JSON prints no looked-up name.
-* *How long a server can hold a run.* glibc's own schedule, no longer: each
-  of the first three servers in turn for `attempts` rounds, waited for
-  `timeout << n` seconds (divided by the servers' count but for the first,
-  one second at least), a stranger's datagram extending nothing. A TCP
-  exchange after a truncated reply, which glibc waits on without a limit,
-  has the same server's datagram deadline, and at most 64 messages. Worst
-  case, as the C's: 450 s an address (`timeout:30 attempts:5`, three
-  servers), each distinct address once a run. Measured against the C with a
-  server that never answers (`timeout:1 attempts:1`, five addresses): 5.14 s
-  against 5.04 s, and 3.50 MB of RSS against 2.75 MB (the resource gate's
-  `names-silent-resolver`).
+* *How long a server can hold a run.* glibc's own schedule for its
+  datagrams: each of the first three servers in turn for `attempts` rounds,
+  waited for `timeout << n` seconds (divided by the servers' count but for
+  the first, one second at least), a stranger's datagram extending nothing.
+  A TCP exchange after a truncated reply, which glibc waits on without a
+  limit, has as long again as the same server's datagram attempt, however
+  many messages come (a reset of the first is connected again once, within
+  that time, as glibc does). Worst case: 490 s an address (`timeout:30
+  attempts:5`, three servers: 450 s of datagrams and 40 s of TCP), each
+  distinct address once a run; the C's has no bound, its TCP path blocking
+  in `connect()` and `read()`. Measured against the C with a server that
+  never answers (`timeout:1 attempts:1`, five addresses): 5.15 s against the C's 5.03 s (1.02x), and 3.62 MB of RSS against
+  2.80 MB (1.29x) (the
+  resource gate's `names-silent-resolver`, one sample; it varies from run
+  to run).
 * *What a run keeps.* Each distinct address's name, cut at 4,097 bytes (past
   what the C's NAME buffer prints: a longer one prints as no name at all);
-  each port's service name; the services file read whole once the C's ten
-  single lookups are spent, within 16 MiB of names.
+  each port's service name; once the C's ten single lookups are spent, the
+  services file read once, a line at a time, keeping at most one name a port
+  and protocol, as the C's `fill_porttab()` keeps them (2 x 65,536 names of
+  at most 4,097 bytes, whatever the file's size; measured with 2 million
+  entries `a N/b`: 10.2 MB of RSS, the C 10.2 MB, 238 MB before the review).
 
 **The files a name is read from are read in bounded memory and time, and
 only if they are files.** `/etc/hosts`, `/etc/services` and `/etc/passwd`
 are read a line at a time, a line to 1 MiB (a longer one is passed over, as
 one that names nothing; glibc reads a line of any length into memory it
 grows) and a file to 256 MiB; `/etc/nsswitch.conf` and `/etc/host.conf` to
-1 MiB; the addresses kept for a name to 128, the accounts kept from a
-password file to 1,048,576, the resolver's answers kept to 64 names. Each
-is opened only if it is a regular file, looked at before it is opened and
-again after: a FIFO in its place would hold `open(2)` for good, which holds
-the C (measured), and a device has no end. Such a hosts, services, password
-or host.conf file is read as none; such an nsswitch.conf, like a directory
-there, as one glibc cannot read, under which no login, host or service name
-is known. And a name is not handed to `getaddrinfo()`, which reads those
+1 MiB; `/etc/resolv.conf` a line at a time to its end, a line to 1 MiB and
+the file to 256 MiB (glibc reads any size), past either taken as a file
+glibc cannot load, never parsed in part; the addresses kept for a name to
+128, the accounts kept from a password file to 1,048,576, the resolver's
+answers kept to 64 names. Each is opened only if it is a regular file,
+looked at before it is opened and again after, and opened without blocking:
+a FIFO in its place would hold `open(2)` for good, which holds the C
+(measured), and one put there between the look and the open is opened
+without waiting and refused; a device has no end. The null device is read as
+the empty file glibc reads (no `open(2)`). Such a services or password file
+is read as none; such a hosts file ends a host lookup with no name and no
+query (glibc never gets past it: it waits, or its buffer grows until the
+lookup fails); such a host.conf or resolv.conf names no host and asks
+nothing, as glibc cannot read on past it (a resolv.conf that is a
+directory or a socket is the same: glibc's load fails, measured); such an
+nsswitch.conf, like a directory there, as one glibc cannot read, under
+which no login, host or service name is known. And a name is not handed to `getaddrinfo()`, which reads those
 files itself with no such care, while one of them (or `/etc/resolv.conf`,
 `/etc/gai.conf`) is a FIFO or a device: the name then has no address.
 Measured, each of the five as `/dev/zero`, a FIFO, a directory and
@@ -658,20 +685,27 @@ login, and older than these rows. The readers take arbitrary bytes (fuzzed,
 read only if it is a regular file of at most 1 MiB (glibc reads any size),
 and parsed as glibc's `__tzfile_read()` parses it, every count checked
 against the bytes left before anything is kept (fuzzed, `timefmt`,
-3,287,580 runs in 181 s); in secure-execution mode only the system's zone
-files, as glibc. The marker's buffer is the C's, eight bytes a byte of the
+3,287,580 runs in 181 s; the file reader's rules by unit tests); in
+secure-execution mode only the system's zone files, as glibc. A zone name is
+kept whole, as glibc keeps it, within the `TZ` value or the file's 1 MiB.
+The marker's buffer is the C's, eight bytes a byte of the
 format and nine more, so at most 1 MiB for the longest argument Linux
 passes. The mount supplement is read only if it is a regular file, at most
 16 MiB, in the C's 8,191-byte lines, and a line it quotes in a complaint is
 escaped where the C prints it raw (fuzzed, `mount_supplement`, 1,521,540
-runs in 181 s); a FIFO or a device is never opened, and every other file is
-opened without blocking, so neither a FIFO named as the file nor one put in
-a regular file's place after it was looked at can hold the run. Measured,
-the C's `fopen()` waits on a FIFO for a writer (the first version of this
-reader did too, before the inventory's cross-check found it), reads
-`/dev/zero` until it is killed, and dies (exit 139) on an empty file or
-`/dev/null`; lsof-rs says `error reading` the FIFO or device and reads no
-mount from the empty file. The zone file is opened the same way.
+runs in 181 s); a FIFO, a pipe or a device named as the file is never
+opened, and every other file is opened without blocking, so neither a FIFO
+named as the file nor one put in a regular file's place after it was looked
+at can hold the run (one swapped in is opened, without waiting, and refused
+unread; no FIFO or device is ever read). Measured, the C's `fopen()` waits
+on a FIFO with no writer (the first version of this reader did too, before
+the inventory's cross-check found it), reads one that has a writer to its
+close, reads `/dev/zero` until it is killed, and dies (exit 139) on an
+empty file or `/dev/null`; lsof-rs says `error reading` the FIFO, pipe or
+device and reads no mount from the empty file. A name that leads to a
+descriptor lsof-rs inherited is read as gone, as the C, which closes them,
+finds it. The zone file is opened the same way (on FreeBSD too, with
+FreeBSD's `O_NONBLOCK`).
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
 structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares
@@ -691,22 +725,28 @@ version by `cfg`, a choice a cast would inherit silently. The parsers and the
 row rules are fuzzed (`freebsd_kinfo`) and run under miri on Linux. The FFI
 itself has run under no sanitizer, and on no FreeBSD host yet (DIVERGENCES 140).
 
-**The environment surface is four variables, and the resolver's own.** The
+**The environment surface is a handful of variables, and the resolver's own.** The
 C `lsof` reads considerably more, including the personal device-cache path;
-lsof-rs reads the two trace switches above and, on Linux for an `-i @name`,
+lsof-rs reads the two trace switches above; on Linux `RES_OPTIONS`, read by
+its own PTR client after `/etc/resolv.conf` as glibc reads it, and ignored
+in secure-execution mode, where glibc's loader removes it;
+`RESOLV_ADD_TRIM_DOMAINS` and `RESOLV_OVERRIDE_TRIM_DOMAINS`, the domains cut
+from a socket's host name (which glibc's loader leaves, and so does
+lsof-rs); `TZ` and `TZDIR` for `-r mFMT`'s zone (`TZDIR` ignored, and
+`TZ` read as a file only under the system's directory, in secure-execution
+mode, as glibc's `tzset()`); and, for an `-i @name` and a socket's name,
 `RESOLV_MULTI` (`on` or `off`: whether every hosts-file line that names a
 host gives an address, as glibc reads it; it can add or drop addresses of the
 invoker's own selection, nothing else) and `RESOLV_HOST_CONF`, which names
-the file read in place of `/etc/host.conf` for that one setting (it is read
-by the bounded reader, as a regular file, for `multi on` or `off` and
-nothing else). glibc's loader takes `RESOLV_HOST_CONF` out of the
+the file read in place of `/etc/host.conf` (it is read by the bounded
+reader, as a regular file, for `multi` and `trim` and nothing else). glibc's loader takes `RESOLV_HOST_CONF` out of the
 environment of a set-user-ID or set-group-ID program and leaves
 `RESOLV_MULTI` (measured with a set-user-ID copy of the C), and lsof-rs
 does the same of its own accord: it reads `AT_SECURE` from
 `/proc/self/auxv` and ignores the variable where that is set, or cannot be
 read. Where a name goes to the system's
-resolver, libc reads what it reads (`RES_OPTIONS`, `LOCALDOMAIN`,
-`HOSTALIASES`), as under the C. On Windows `SystemRoot` names the services
+resolver for an `-i @name`, libc reads what it reads (`LOCALDOMAIN`,
+`HOSTALIASES`, and `RES_OPTIONS` for that lookup), as under the C. On Windows `SystemRoot` names the services
 file's directory. The device cache is not ported (it is a
 Unix kernel-memory-access feature this port does not need — see §5), so the class
 of issues around a user-writable cache file consulted by a privileged binary does

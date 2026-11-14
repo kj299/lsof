@@ -81,7 +81,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-p s` | sel | ✅ shipped | PID filter (comma-separated, accepts `^excl`) |
 | `-P` | out | ✅ shipped | Numeric port instead of service name; `+P` names them again. On Linux since 2026-11-14 from `/etc/services`, with the C's caches (DIVERGENCES 154) |
 | `-Q` | misc | ✅ shipped (5A) | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
-| `+|-r [t[c<N>][m<fmt>]]` | misc | ✅ shipped; the whole grammar 2026-11-14 | Repeat (default 15 s); `c<N>` a count, `m<fmt>` a `strftime(3)` marker in the local zone, `+r` ends at a cycle that lists nothing (DIVERGENCES 152) |
+| `+|-r [t[c<N>][m<fmt>]]` | misc | ✅ shipped; the whole grammar 2026-11-14 | Repeat (default 15 s); `c<N>` a count, `m<fmt>` a `strftime(3)` marker in the local zone (Windows: `TZ`'s POSIX rule string, else UTC; no zone file is read), `+r` ends at a cycle that lists nothing (DIVERGENCES 152). FreeBSD's marker follows glibc's rules: unverified against FreeBSD's libc |
 | `-R` | out | ✅ shipped | PPID column |
 | `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. Since 2026-09-25 the C's: names checked against the platform's table, each included state a search item, and TCP lists applied to every socket with a TCP state — UDP too on Linux (DIVERGENCES 32). |
 | `-S [t]` | prec | ✅ shipped 2026-10-09 | Each of those calls gets t seconds (15, at least 2) in a helper process on Linux, and fails with `Connection timed out` after (DIVERGENCES 94). Windows: accepted, and changes nothing; the calls are in-process |

@@ -315,6 +315,34 @@ pub fn render_with_offset_digits(
     offset_digits: i32,
     file_flags: FileFlags,
 ) -> String {
+    let mut buf = Vec::new();
+    write_with_names(
+        &mut buf,
+        procs,
+        (nul, only, tcp_show, esc),
+        offset_digits,
+        file_flags,
+        &mut |_| None,
+    )
+    .expect("writing to a Vec cannot fail");
+    String::from_utf8(buf).expect("every field is a String, so the text is UTF-8")
+}
+
+/// [`render_with_offset_digits`], written to `w` a set at a time, each
+/// file's NAME first offered to `rename`, which may give back the file as
+/// it is to be printed (a socket's hosts and ports named). The C names a
+/// socket as it prints its `n` into stdout's buffer, so a reader that goes
+/// away stops the lookups at the next write (DIVERGENCES 154); this asks
+/// `rename` only once every set before it is in `w`, and a write error
+/// ends it at once.
+pub fn write_with_names(
+    w: &mut dyn std::io::Write,
+    procs: &[Process],
+    (nul, only, tcp_show, esc): (bool, Option<&[char]>, TcpInfoFlags, Escaper),
+    offset_digits: i32,
+    file_flags: FileFlags,
+    rename: &mut dyn FnMut(&crate::model::OpenFile) -> Option<crate::model::OpenFile>,
+) -> std::io::Result<()> {
     let term = if nul { '\0' } else { '\n' };
     // No list is the C's default set, which is every letter but a few; a
     // list is exactly those letters (the parser spells out the default set
@@ -383,7 +411,11 @@ pub fn render_with_offset_digits(
             }
         }
         end_set!();
+        w.write_all(out.as_bytes())?;
+        out.clear();
         for f in &p.files {
+            let renamed = if want('n') { rename(f) } else { None };
+            let f = renamed.as_ref().unwrap_or(f);
             let fd = match f.fd {
                 FdType::Handle(n) => n.to_string(),
                 _ => f.fd.code(),
@@ -518,9 +550,11 @@ pub fn render_with_offset_digits(
                 }
             }
             end_set!();
+            w.write_all(out.as_bytes())?;
+            out.clear();
         }
     }
-    out
+    Ok(())
 }
 
 /// The uid `-F u` and JSON's `uid` print: the C's `(int)Lp->uid`

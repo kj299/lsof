@@ -117,6 +117,33 @@ fn wants_privilege_hint(elevated: bool, selection: &Selection, format: &Format) 
         && !selection.has_path_filter()
 }
 
+/// The help's `-n`/`-P` entries: what lsof-rs names on this platform.
+#[cfg(target_os = "linux")]
+const HELP_NAMES: &str =
+    "    -n / +n       hosts as numbers / named (the default), the last one wins;
+                  a name comes from /etc/hosts or DNS, as the C's
+                  gethostbyaddr() gives it, each address asked once a run
+    -P / +P       ports as numbers / service names from /etc/services (the
+                  default), the last one wins
+";
+#[cfg(windows)]
+const HELP_NAMES: &str =
+    "    -n / +n       hosts as numbers / named by reverse DNS (the default), the
+                  last one wins
+    -P / +P       ports as numbers / named from a built-in table of common
+                  services (the default), the last one wins
+";
+#[cfg(not(any(target_os = "linux", windows)))]
+const HELP_NAMES: &str = "    -n / +n       accepted; hosts always print as numbers here
+    -P / +P       accepted; ports always print as numbers here
+";
+
+/// Where the help says `-r`'s marker takes its zone from.
+#[cfg(windows)]
+const HELP_ZONE: &str = "TZ's rule string, else UTC";
+#[cfg(not(windows))]
+const HELP_ZONE: &str = "TZ, TZDIR, /etc/localtime";
+
 fn usage() -> String {
     // Real newlines, not `\n\` continuations: a continuation also eats the
     // next line's leading spaces, which printed every line flush left.
@@ -171,12 +198,7 @@ SELECTION:
                   if an argument names no mount
 
 OUTPUT:
-    -n / +n       hosts as numbers / named (the default), the last one wins;
-                  on Linux a name comes from /etc/hosts or DNS, as the C's
-                  gethostbyaddr() gives it, each address asked once a run
-    -P / +P       ports as numbers / service names from /etc/services (the
-                  default), the last one wins
-    -R            add a PPID (parent PID) column
+{names}    -R            add a PPID (parent PID) column
     -o [n]        an OFFSET column (0t<decimal>, 0x<hex> past n digits,
                   default 8); -o <n> alone sets the digit limit and keeps
                   SIZE/OFF
@@ -201,11 +223,11 @@ OUTPUT:
     -j            JSON Lines, one object per file (-J's keys, flattened)
     -r [t[c<n>][m<fmt>]]
                   repeat every t seconds (default 15) until interrupted, or n
-                  times; between cycles print `=======`, or the strftime(3)
-                  format fmt (TZ, TZDIR, /etc/localtime); -r0 is one cycle.
-                  The rest of the value after t and before m is read again as
-                  options, as the C reads it (-r 1c2 is also -c 2); beside -F,
-                  -J or -j, fmt may not hold %n
+                  times; after each cycle print `=======`, or the strftime(3)
+                  format fmt ({zone}); -r0 is one cycle.
+                  Unless m<fmt> follows, what follows t's digits is read again
+                  as options, as the C reads it (-r 1c2 is also -c 2; -r 1c2mX
+                  is not); beside -F, -J or -j, fmt may not hold %n
     +r [t[c<n>][m<fmt>]]
                   the same, ending at the first cycle that lists nothing;
                   exit 1 if that was the first (and after +r0's one cycle)
@@ -253,7 +275,9 @@ Without elevation, lsof-rs shows the processes you can access; run as
 Administrator (Windows) or root (Linux) for a system-wide view. On Windows,
 privileges are enabled only for the operations that need them.
 ",
-        ver = env!("CARGO_PKG_VERSION")
+        ver = env!("CARGO_PKG_VERSION"),
+        names = HELP_NAMES,
+        zone = HELP_ZONE
     )
 }
 
@@ -794,6 +818,10 @@ fn main() {
     {
         std::process::exit(lsof_backend_linux::safefs::serve());
     }
+    // What the C closes first (`closefrom_shim(ctx, 3)`): noted before any
+    // descriptor of lsof-rs's own is opened (DIVERGENCES 153).
+    #[cfg(target_os = "linux")]
+    lsof_backend_linux::note_inherited_fds();
 
     // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
     // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —
@@ -1218,10 +1246,12 @@ fn main() {
         // drops is still located; see `Selection::locate`.
         let located = selection.locate(&gathered);
         let mut procs = selection.apply_with(gathered, env.backend.take_endpoint_tables());
-        // Each printed Internet socket's hosts and ports named, in print
-        // order, as the C names them as it prints (DIVERGENCES 154).
-        if let Some(service) = name_service.as_ref() {
-            name_sockets(&mut procs, &format, &selection, &names, service);
+        // JSON's numeric `name`, which looks nothing up; the table's and
+        // `-F`'s names are asked as each row is written, below.
+        if matches!(format, Format::Json(_)) {
+            if let Some(service) = name_service.as_ref() {
+                name_sockets(&mut procs, &format, &selection, &names, service);
+            }
         }
         // A `stat` that failed is the C's `Error()` where it looks a login
         // up, before this cycle prints anything (`print.c:1726-1731`).
@@ -1244,69 +1274,31 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
-        // platform rule is whether `\` is (Unix) or is the path separator
-        // (Windows). See lsof_core::render::escape.
-        let esc = Escaper::for_host();
         let listed = prints_a_process(&procs, &format);
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
-        // host (DIVERGENCES 30). JSON is written a process at a time; `-F` still builds its text first.
+        // host (DIVERGENCES 30). JSON is written a process at a time, `-F` a set at a time.
         // The C writes these as it prints, unbuffered, while its listing
         // waits in stdout's buffer; here they come first, before any of it
         // (DIVERGENCES 36).
         for uid in pwd_warnings(&procs, &format, &selection) {
             say!("lsof: no pwd entry for UID {uid}");
         }
+        // Through a buffer of the C's stdout's size on a pipe (glibc's
+        // `st_blksize`, 4096), each socket named as its row is written: a
+        // reader that goes away ends the lookups at the next write, as the
+        // C dies of SIGPIPE at its next flush (DIVERGENCES 154).
         let stdout = std::io::stdout();
-        let mut sink = std::io::BufWriter::new(stdout.lock());
-        let written = match &format {
-            Format::Table => table::render_to(
-                &mut sink,
-                &procs,
-                TableOpts {
-                    terse: selection.terse,
-                    show_ppid: columns.ppid,
-                    show_pgid: columns.pgid,
-                    show_offset: columns.offset,
-                    show_size: columns.size,
-                    offset_digits: columns.offset_digits,
-                    show_links: columns.nlink,
-                    file_flags: columns.file_flags,
-                    human_size: selection.human_size,
-                    command_width: selection.command_width.cap(),
-                    tcp_show: selection.tcp_info(),
-                    ..TableOpts::new(esc)
-                },
-            ),
-            Format::Fields { nul, only } => sink.write_all(
-                fields::render_with_offset_digits(
-                    &procs,
-                    *nul,
-                    only.as_deref(),
-                    selection.tcp_info(),
-                    esc,
-                    columns.offset_digits,
-                    columns.file_flags,
-                )
-                .as_bytes(),
-            ),
-            Format::Json(j) => {
-                let opts = json::JsonOpts {
-                    only: j.only.as_deref(),
-                    tcp_show: j.tcp_show,
-                    file_flags: j.file_flags,
-                    numeric_ids: selection.numeric_ids,
-                    version: env!("CARGO_PKG_VERSION"),
-                };
-                if j.lines {
-                    json::write_lines(&mut sink, &procs, &opts)
-                } else {
-                    json::write_aggregated(&mut sink, &procs, &opts)
-                }
-            }
-        };
+        let mut sink = std::io::BufWriter::with_capacity(4096, stdout.lock());
+        let written = write_listing(
+            &mut sink,
+            &procs,
+            &format,
+            &selection,
+            &columns,
+            (&names, name_service.as_ref()),
+        );
         let written = written.and_then(|()| sink.flush());
         exit_on_write_error(written);
         let mut all = located_all.borrow_mut();
@@ -1425,14 +1417,122 @@ fn prints_a_process(procs: &[lsof_core::Process], format: &Format) -> bool {
     }
 }
 
-/// Every printed Internet socket's NAME with its hosts and ports named, in
-/// print order, as the C's `printinaddr()` names them as it prints
-/// (DIVERGENCES 154): only where NAME is printed (the table but `-t`, `-F`
-/// with `n`), and in JSON, whose `name` the C does not print, the numeric
-/// form, with nothing looked up. A row is renamed only where its NAME is
-/// still the composition the backend made of its socket, so a name a path
-/// argument gave it, or anything else, is left alone; an addition after it
-/// (`-E`'s ends) is kept.
+/// The names a run keeps (`gethostnm()`'s and `lkup_port()`'s caches) and
+/// the service that answers them, where the backend has one.
+type Naming<'a> = (
+    &'a std::cell::RefCell<lsof_core::sockname::SocketNames>,
+    Option<&'a std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>>>,
+);
+
+/// One cycle's listing, written to `sink` in `format`. The table and `-F`
+/// name each Internet socket as its row is written, where NAME prints
+/// ([`renamed_socket`]), so a write that fails asks nothing more; JSON's
+/// numeric `name` is [`name_sockets`]'s, made before.
+fn write_listing(
+    sink: &mut dyn Write,
+    procs: &[lsof_core::Process],
+    format: &Format,
+    selection: &Selection,
+    columns: &lsof_cli::args::Columns,
+    (names, service): Naming<'_>,
+) -> std::io::Result<()> {
+    // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
+    // platform rule is whether `\` is (Unix) or is the path separator
+    // (Windows). See lsof_core::render::escape.
+    let esc = Escaper::for_host();
+    let prints = prints_names(format, selection);
+    let mut names = names.borrow_mut();
+    let mut service = service.map(std::cell::RefCell::borrow_mut);
+    let mut rename = |f: &lsof_core::OpenFile| match service.as_mut() {
+        Some(service) if prints => renamed_socket(f, &mut names, service.as_mut()),
+        _ => None,
+    };
+    match format {
+        Format::Table => table::render_naming(
+            sink,
+            procs,
+            TableOpts {
+                terse: selection.terse,
+                show_ppid: columns.ppid,
+                show_pgid: columns.pgid,
+                show_offset: columns.offset,
+                show_size: columns.size,
+                offset_digits: columns.offset_digits,
+                show_links: columns.nlink,
+                file_flags: columns.file_flags,
+                human_size: selection.human_size,
+                command_width: selection.command_width.cap(),
+                tcp_show: selection.tcp_info(),
+                ..TableOpts::new(esc)
+            },
+            &mut rename,
+        ),
+        Format::Fields { nul, only } => fields::write_with_names(
+            sink,
+            procs,
+            (*nul, only.as_deref(), selection.tcp_info(), esc),
+            columns.offset_digits,
+            columns.file_flags,
+            &mut rename,
+        ),
+        Format::Json(j) => {
+            let opts = json::JsonOpts {
+                only: j.only.as_deref(),
+                tcp_show: j.tcp_show,
+                file_flags: j.file_flags,
+                numeric_ids: selection.numeric_ids,
+                version: env!("CARGO_PKG_VERSION"),
+            };
+            if j.lines {
+                json::write_lines(sink, procs, &opts)
+            } else {
+                json::write_aggregated(sink, procs, &opts)
+            }
+        }
+    }
+}
+
+/// Whether NAME is printed under `format`: the table but `-t`, `-F` and
+/// JSON with `n` (the C's `printinaddr()` runs only where it is).
+fn prints_names(format: &Format, sel: &Selection) -> bool {
+    match format {
+        Format::Table => !sel.terse,
+        Format::Fields { only, .. } => only.as_ref().is_none_or(|l| l.contains(&'n')),
+        Format::Json(j) => j.only.as_ref().is_none_or(|l| l.contains(&'n')),
+    }
+}
+
+/// `f` as it is printed when it is an Internet socket whose NAME is still
+/// the composition the backend made of it, its hosts and ports named by
+/// `names` as the C's `printinaddr()` names them (DIVERGENCES 154); `None`
+/// for any other row, and for one whose name does not change. So a name a
+/// path argument gave it, or anything else, is left alone, and an addition
+/// after it (`-E`'s ends) is kept.
+fn renamed_socket(
+    f: &lsof_core::OpenFile,
+    names: &mut lsof_core::sockname::SocketNames,
+    service: &mut dyn lsof_core::sockname::NameService,
+) -> Option<lsof_core::OpenFile> {
+    if !f.is_internet() {
+        return None;
+    }
+    let info = f.socket.as_deref()?;
+    let backend_name = info.display_name(false, false);
+    if f.base_name().unwrap_or_default() != backend_name {
+        return None;
+    }
+    let name = names.name(info, service);
+    (name != backend_name).then(|| {
+        let mut f = f.clone();
+        f.set_base_name(&name);
+        f
+    })
+}
+
+/// Every printed Internet socket's NAME renamed in place: for the table
+/// and `-F` with `names`' lookups ([`renamed_socket`], which a run asks as
+/// each row is written instead, [`write_listing`]), and in JSON, whose
+/// `name` the C does not print, the numeric form, with nothing looked up.
 fn name_sockets(
     procs: &mut [lsof_core::Process],
     format: &Format,
@@ -1441,12 +1541,7 @@ fn name_sockets(
     service: &std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>>,
 ) {
     use lsof_core::sockname::{NoNames, SocketNames};
-    let prints = match format {
-        Format::Table => !sel.terse,
-        Format::Fields { only, .. } => only.as_ref().is_none_or(|l| l.contains(&'n')),
-        Format::Json(j) => j.only.as_ref().is_none_or(|l| l.contains(&'n')),
-    };
-    if !prints {
+    if !prints_names(format, sel) {
         return;
     }
     let json = matches!(format, Format::Json(_));
@@ -1454,23 +1549,13 @@ fn name_sockets(
     let mut service = service.borrow_mut();
     let mut numeric = SocketNames::new(false, false);
     for f in procs.iter_mut().flat_map(|p| p.files.iter_mut()) {
-        if !f.is_internet() {
-            continue;
-        }
-        let Some(info) = f.socket.as_deref() else {
-            continue;
-        };
-        let backend_name = info.display_name(false, false);
-        if f.base_name().unwrap_or_default() != backend_name {
-            continue;
-        }
-        let name = if json {
-            numeric.name(info, &mut NoNames)
+        let renamed = if json {
+            renamed_socket(f, &mut numeric, &mut NoNames)
         } else {
-            names.name(info, service.as_mut())
+            renamed_socket(f, &mut names, service.as_mut())
         };
-        if name != backend_name {
-            f.set_base_name(&name);
+        if let Some(r) = renamed {
+            *f = r;
         }
     }
 }
@@ -1755,6 +1840,27 @@ mod tests {
         for line in help.lines() {
             assert!(line.chars().count() <= 80, "too wide: {line:?}");
         }
+    }
+
+    /// The help says what this platform names: Linux from /etc/hosts or DNS
+    /// and /etc/services, Windows by reverse DNS and a built-in table,
+    /// FreeBSD nothing; and where the marker's zone comes from.
+    #[test]
+    fn the_help_says_what_this_platform_names() {
+        let help = super::usage();
+        if cfg!(target_os = "linux") {
+            assert!(help.contains("service names from /etc/services"));
+            assert!(help.contains("(TZ, TZDIR, /etc/localtime)"));
+        } else if cfg!(windows) {
+            assert!(!help.contains("/etc/services"));
+            assert!(help.contains("named by reverse DNS"));
+            assert!(help.contains("(TZ's rule string, else UTC)"));
+        } else {
+            assert!(!help.contains("named (the default)"));
+            assert!(help.contains("hosts always print as numbers"));
+        }
+        assert!(help.contains("after each cycle"));
+        assert!(help.contains("-r 1c2mX\n                  is not"));
     }
 
     #[test]
@@ -2631,9 +2737,7 @@ mod tests {
         fn service_by_port(&mut self, _: u16, _: &[u8]) -> Option<Vec<u8>> {
             None
         }
-        fn services(&mut self) -> Vec<lsof_core::netnames::ServiceEntry> {
-            Vec::new()
-        }
+        fn for_each_service(&mut self, _: &mut lsof_core::netnames::ServiceVisitor<'_>) {}
     }
 
     /// One process holding a UDP socket from 127.0.0.1:5000 to `remote`,
@@ -2736,6 +2840,147 @@ mod tests {
             super::name_sockets(&mut procs, &format, &sel, &names, &service);
         }
         assert_eq!(asked.get(), 2);
+    }
+
+    /// A sink that takes `room` bytes, then fails as a pipe whose reader
+    /// has gone does.
+    struct Closing {
+        room: usize,
+    }
+
+    impl std::io::Write for Closing {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.room == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Each socket is named as its row is written, as the C's
+    /// `printinaddr()` names it as it prints into stdout's buffer: a reader
+    /// that goes away after one buffer leaves the rest of the rows unasked,
+    /// in the table and under `-F` (DIVERGENCES 154; measured with 300
+    /// sockets and `| head -1`: the C 84 queries, `-F pfn` 223).
+    #[test]
+    fn sockets_are_named_as_their_rows_are_written() {
+        // Fewer rows and a smaller buffer under miri, where each row costs
+        // about a quarter of a second; the same proportions.
+        let (rows, room) = if cfg!(miri) { (40, 512) } else { (200, 4096) };
+        let procs: Vec<lsof_core::Process> = (0..rows)
+            .map(|i| socket_proc(&format!("10.0.{}.{}:9", i / 100, i % 100 + 1), None))
+            .collect();
+        // At most the rows `room` bytes hold, and the one local address: a
+        // table row is 60 bytes or more here, a `-F pfn` set 27.
+        for (argv, most) in [
+            (&["+n", "-p", "1"][..], room / 60 + 2),
+            (&["+n", "-F", "pfn", "-p", "1"], room / 27 + 2),
+        ] {
+            let (sel, format) = parsed(argv);
+            let counting = Counting::default();
+            let asked = counting.hosts.clone();
+            let service: std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>> =
+                std::cell::RefCell::new(Box::new(counting));
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(true, true));
+            let got = super::write_listing(
+                &mut Closing { room },
+                &procs,
+                &format,
+                &sel,
+                &lsof_cli::args::Columns::default(),
+                (&names, Some(&service)),
+            );
+            assert_eq!(
+                got.map_err(|e| e.kind()),
+                Err(std::io::ErrorKind::BrokenPipe),
+                "{argv:?}"
+            );
+            assert!(
+                (2..=most).contains(&asked.get()),
+                "{argv:?}: {}",
+                asked.get()
+            );
+            // Written whole, every one is asked once (not under miri, where
+            // the rows cost the time).
+            if cfg!(miri) {
+                continue;
+            }
+            let mut all = Vec::new();
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(true, true));
+            super::write_listing(
+                &mut all,
+                &procs,
+                &format,
+                &sel,
+                &lsof_cli::args::Columns::default(),
+                (&names, Some(&service)),
+            )
+            .unwrap();
+            assert!(String::from_utf8(all)
+                .unwrap()
+                .contains("named:5000->named:9"));
+        }
+    }
+
+    /// Under `-n -P` (and in JSON's numeric `name`) an IPv6 socket's NAME is
+    /// the C's numeric form, not the backend's: an IPv4-mapped end makes
+    /// both ends IPv4 (`dsock.c:3903-3911`), and an IPv4-compatible address
+    /// is glibc's `inet_ntop()` form (`::1.2.3.4`, measured through glibc),
+    /// where lsof-rs had printed Rust's (`[::ffff:127.0.0.1]`, `[::102:304]`).
+    #[test]
+    fn a_mapped_end_is_written_as_the_c_writes_it_under_dash_n_dash_p() {
+        use lsof_core::{FileType, Protocol, SocketInfo};
+        let v6 = |local: &str, remote: Option<&str>| {
+            let mut p = socket_proc("10.0.0.2:9", None);
+            let info = SocketInfo {
+                protocol: Protocol::Tcp,
+                local: Some(local.parse().unwrap()),
+                remote: remote.map(|r| r.parse().unwrap()),
+                state: None,
+                tcp: None,
+                bound: None,
+            };
+            p.files[0].name = info.display_name(false, false);
+            p.files[0].file_type = FileType::Ipv6;
+            p.files[0].socket = Some(Box::new(info));
+            p
+        };
+        for argv in [&["-n", "-P", "-p", "1"][..], &["-J", "-p", "1"]] {
+            let (sel, format) = parsed(argv);
+            let service: std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>> =
+                std::cell::RefCell::new(Box::new(Counting::default()));
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(
+                !sel.no_host_resolve,
+                !sel.no_port_resolve,
+            ));
+            let mut procs = vec![
+                v6("[::ffff:127.0.0.1]:80", Some("[::ffff:127.0.0.2]:5000")),
+                v6("[::1.2.3.4]:80", None),
+            ];
+            let mut out = Vec::new();
+            super::name_sockets(&mut procs, &format, &sel, &names, &service);
+            super::write_listing(
+                &mut out,
+                &procs,
+                &format,
+                &sel,
+                &lsof_cli::args::Columns::default(),
+                (&names, Some(&service)),
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains("127.0.0.1:80->127.0.0.2:5000"),
+                "{argv:?}: {out}"
+            );
+            assert!(out.contains("[::1.2.3.4]:80"), "{argv:?}: {out}");
+            assert!(!out.contains("::ffff"), "{argv:?}: {out}");
+        }
     }
 
     /// What `+r` ends on: a process printed (the C's `n`).

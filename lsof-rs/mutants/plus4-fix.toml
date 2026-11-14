@@ -1,0 +1,589 @@
+# Mutants for the review of DIVERGENCES 152-154 (2026-11-14): one a rule,
+# bound, branch or default the fixes of the 58 confirmed findings added or
+# that had none. The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/plus4-fix.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, for the
+# differential's fixtures and `names` modes and the resource gate's
+# namespaces. CI runs only --apply-only.
+#
+# Run 2026-11-14 as root with --first-kill, in a copy of the tree, the unit
+# gate split by crate (`cargo test -p lsof-core --lib`, `-p
+# lsof-backend-linux --lib`, `-p lsof-cli`), the differential narrowed to
+# the names-socket, repeat, plus-m, offset- and links-next cases (72), then
+# the resource gate: 57 of 57 killed, 30 by lsof-core's tests, 7 by the
+# backend's, 10 by the CLI's (`tests/names.rs` kills no-name-service), 7 by
+# the differential alone (exempt-row-device-unknown, trim-env-ignored,
+# name-kept-short, local-zone-ignores-tz, -tzdir, -always-secure,
+# quiet-mutes-idle) and 3 by the resource gate's `names-reader-gone` alone
+# (names-before-writing, stdout-buffer-64k, fields-written-at-the-end: the
+# unit test's processes hold one socket each). subformat-depth-zero first
+# set the depth to 1, which survived (one level is all the C locale's
+# conversions need) and was changed to 0, then killed.
+#
+# Rules with no mutant here, and why:
+# * The values of `RESOLV_LINE_LIMIT` (1 MiB a line) and `RESOLV_CONF_LIMIT`
+#   (256 MiB): `resolv_conf_is_read_whole_or_not_at_all` pins both rules
+#   through `resolv_conf_within` with small bounds (`resolv-line-past-bound-
+#   read`, `resolv-file-past-bound-read`); a test of the values themselves
+#   would write 256 MiB.
+# * `read_zone_file`'s two regular-file looks and its non-blocking open:
+#   each covers the others but in a race (a FIFO swapped in between the look
+#   and the open), which no test can make without timing; the unit test
+#   pins that a FIFO, a device, a directory and a socket are refused.
+# * `holds_glibcs_reader` for a block device: no test can make one.
+# * Net's `connect_timeout` and `set_write_timeout`: a loopback listener
+#   accepts at once and takes a query whole, so neither can be made to wait
+#   without a host that drops packets.
+# * The host.conf path `RESOLV_HOST_CONF` names for `trim`: the same
+#   `host_conf_path()` as `multi`'s, whose mutant is row38.toml's
+#   `names-host-conf-environment-not-read`.
+# * `interface_index`'s name checks: an IPv6 server's `%scope` needs IPv6,
+#   which this project's test host has not.
+# * `+m not supported` off Linux (`args.rs`): FreeBSD and Windows both build
+#   the arm, and the args tests gated on them pin it there; no Linux gate
+#   builds it.
+# * `note_inherited_fds`'s exclusion of its own listing's descriptor: the
+#   descriptor is closed before any supplement is read, so a mutant that
+#   kept it would name a number no path can reach.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+[[run.gate]]
+name = "resource"
+cmd = ["python3", "differential/resource_gate.py", "--oracle", "../lsof", "--rust", "target/release/lsof", "--warn-wall"]
+timeout = 1800
+
+
+[[mutant]]
+name = "repeat-next-word-not-resumed"
+rule = "-r's next word given back after its digits is read on as letters, not as a word (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            resumed = true;
+                            j = chars.len();'''
+new = '''                            j = chars.len();'''
+
+[[mutant]]
+name = "take-digits-next-word-not-resumed"
+rule = "-o/-S/-L's next word given back after the digits is read on as letters (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        *resumed = true;
+'''
+new = ''''''
+
+[[mutant]]
+name = "resumed-word-ends-options"
+rule = "a word given back is never the `--` that ends the options (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if !resumed_here && tok == "--" {'''
+new = '''        if tok == "--" {'''
+
+[[mutant]]
+name = "table-names-while-sizing"
+rule = "a socket is named as its row is printed, not while the columns are sized (154, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        any = true;
+'''
+new = '''        any = true;
+        let _ = rename(f);
+'''
+
+[[mutant]]
+name = "fields-written-at-the-end"
+rule = "-F is written a set at a time, each n named once what is before it is written (154, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''            end_set!();
+            w.write_all(out.as_bytes())?;
+            out.clear();
+        }
+    }
+    Ok(())'''
+new = '''            end_set!();
+        }
+    }
+    w.write_all(out.as_bytes())?;
+    Ok(())'''
+
+[[mutant]]
+name = "exempt-device-from-a-stat"
+rule = "an -e mount's files take the device only a supplement gave (130, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    .filter(|m| m.supplied)
+'''
+new = ''''''
+
+[[mutant]]
+name = "exempt-row-device-unknown"
+rule = "a file on an -e mount the supplement gave a device shows it (isefsys(), the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            fs_device: e.device,'''
+new = '''            fs_device: None,'''
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            device: Some(e.device.map_or_else(|| "UNKNOWN".to_string(), dev_string)),'''
+new = '''            device: Some("UNKNOWN".to_string()),'''
+
+[[mutant]]
+name = "supplied-never"
+rule = "a supplement hit marks the mount's device as the file's (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                        supplied = hit.is_some();'''
+new = '''                        supplied = false;'''
+
+[[mutant]]
+name = "inherited-fd-read"
+rule = "a supplement named through an inherited descriptor is gone, as the C finds it (153, the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    if names_an_inherited_fd(Path::new(path), inherited_fds()) {'''
+new = '''    if false && names_an_inherited_fd(Path::new(path), inherited_fds()) {'''
+
+[[mutant]]
+name = "inherited-fds-not-noted"
+rule = "the inherited descriptors are noted before lsof opens any (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    lsof_backend_linux::note_inherited_fds();
+'''
+new = ''''''
+
+[[mutant]]
+name = "inherited-fd-link-not-followed"
+rule = "the name's links are followed one by one to /proc/PID/fd/N (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                    push_front(&mut todo, &target);'''
+new = '''                    let _ = target;'''
+
+[[mutant]]
+name = "resolv-conf-failure-defaults"
+rule = "a resolv.conf glibc cannot load names no host and asks nothing (154, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if !meta.is_file() {
+        return None;
+    }
+    let mut open'''
+new = '''    if !meta.is_file() {
+        return defaults();
+    }
+    let mut open'''
+
+[[mutant]]
+name = "resolv-conf-null-fails"
+rule = "the null device as resolv.conf is glibc's empty file, its defaults (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if crate::netnames::is_null_device(&meta) {
+        return defaults();'''
+new = '''    if crate::netnames::is_null_device(&meta) {
+        return None;'''
+
+[[mutant]]
+name = "resolv-line-past-bound-read"
+rule = "a resolv.conf line past its bound is never parsed in part (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            None if line.len() > line_limit => return None,'''
+new = '''            None if false => return None,'''
+
+[[mutant]]
+name = "resolv-file-past-bound-read"
+rule = "a resolv.conf past its bound is never parsed in part (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        if read > file_limit {'''
+new = '''        if false {'''
+
+[[mutant]]
+name = "resolv-failure-walks-on"
+rule = "resolv.conf is loaded before the walk, whatever hosts: says (NEED__RES, the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        let conf = self.resolver()?.clone();'''
+new = '''        let conf = self.resolver().cloned().unwrap_or_default();'''
+
+[[mutant]]
+name = "host-conf-held-ignored"
+rule = "a host.conf that would hold glibc's reader names no host (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''        if self.host_conf().held {'''
+new = '''        if false && self.host_conf().held {'''
+
+[[mutant]]
+name = "trim-env-ignored"
+rule = "RESOLV_ADD_TRIM_DOMAINS adds to host.conf's trim domains (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/netnames.rs"
+old = '''                add.as_deref().map(std::ffi::OsStr::as_bytes),'''
+new = '''                None,'''
+
+[[mutant]]
+name = "held-hosts-read"
+rule = "a hosts file glibc would wait on or read for ever ends the lookup (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            b"files" if holds_glibcs_reader(files.hosts) => {'''
+new = '''            b"files" if false && holds_glibcs_reader(files.hosts) => {'''
+
+[[mutant]]
+name = "trim-not-applied"
+rule = "the trim domains cut a found name (POSTPROCESS, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    trim_domain(&mut name, trim);'''
+new = '''    let _ = trim;'''
+
+[[mutant]]
+name = "trim-max-ignored"
+rule = "at most four trim domains (TRIMDOMAINS_MAX, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if domains.len() >= TRIMDOMAINS_MAX {'''
+new = '''        if domains.len() >= 99 {'''
+
+[[mutant]]
+name = "trim-case-sensitive"
+rule = "a trim domain is compared in any case (strcasecmp, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                .is_some_and(|tail| tail.eq_ignore_ascii_case(domain))'''
+new = '''                .is_some_and(|tail| tail == domain.as_slice())'''
+
+[[mutant]]
+name = "trim-separator-not-skipped"
+rule = "`;` and `:` after blanks separate trim domains (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if let Some((b',' | b';' | b':', after)) = rest.split_first() {'''
+new = '''        if let Some((b',', after)) = rest.split_first() {'''
+
+[[mutant]]
+name = "trim-equal-length-cut"
+rule = "a trim domain cuts only a longer name (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if name.len() > domain.len() {
+            let at'''
+new = '''        if name.len() >= domain.len() {
+            let at'''
+
+[[mutant]]
+name = "merge-success-kept"
+rule = "a source that succeeds after a merge fails it (MERGE_FN, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                status = NssStatus::Unavail;
+                found = None;
+                merging = None;'''
+new = '''                merging = None;'''
+
+[[mutant]]
+name = "merge-not-given-back"
+rule = "a source that fails after a merge gives the kept answer back (DEEPCOPY_FN, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''                status = NssStatus::Success;
+                found = Some(kept.clone());'''
+new = '''                let _ = kept;'''
+
+[[mutant]]
+name = "null-device-not-empty-conf"
+rule = "nsswitch.conf etc. as the null device is the empty file glibc reads (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        Ok(meta) if is_null_device(&meta) => return Conf::Text(Vec::new()),
+'''
+new = ''''''
+
+[[mutant]]
+name = "null-device-not-empty-file"
+rule = "a hosts/services/passwd file that is the null device has no line, NOTFOUND (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    if std::fs::metadata(path).is_ok_and(|meta| is_null_device(&meta)) {
+        return true;'''
+new = '''    if false {
+        return true;'''
+
+[[mutant]]
+name = "null-device-any-char"
+rule = "only the null device, 1:3, is an empty file (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        meta.file_type().is_char_device() && meta.rdev() == 0x103'''
+new = '''        meta.file_type().is_char_device()'''
+
+[[mutant]]
+name = "open-blocking"
+rule = "a file read as a file is opened without blocking (a FIFO raced in, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, crate::safefs::NONBLOCK);
+    let file = open.open(path).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)'''
+new = '''    let file = open.open(path).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)'''
+
+[[mutant]]
+name = "name-kept-short"
+rule = "a name is kept to 4,097 bytes, past what the C's NAME prints (154, the review's list)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''pub const NAME_KEPT: usize = 4097;'''
+new = '''pub const NAME_KEPT: usize = 64;'''
+
+[[mutant]]
+name = "tcp-reset-not-retried"
+rule = "a TCP reset of a length's read is connected again once (send_vc's connreset, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                TcpRead::Reset if !reset => {'''
+new = '''                TcpRead::Reset if false => {'''
+
+[[mutant]]
+name = "tcp-reset-retried-always"
+rule = "a TCP reset is connected again once only (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                    reset = true;
+                    continue 'connect;'''
+new = '''                    continue 'connect;'''
+
+[[mutant]]
+name = "tcp-deadline-longer"
+rule = "the TCP exchange has the same server's wait (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    let deadline = t.now().saturating_add(wait);
+    let mut reset = false;'''
+new = '''    let deadline = t.now().saturating_add(wait * 2);
+    let mut reset = false;'''
+
+[[mutant]]
+name = "late-reply-socket-closed"
+rule = "a timed-out server's socket stays open for its late reply (send_dg, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            Received::TimedOut => return Exchange::Next,'''
+new = '''            Received::TimedOut => {
+                close_all(socks);
+                return Exchange::Next;
+            }'''
+
+[[mutant]]
+name = "refusal-keeps-sockets"
+rule = "a refusal closes every server's socket (send_dg, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            Received::Refused | Received::Failed => {
+                close_all(socks);
+                return Exchange::Next;'''
+new = '''            Received::Refused | Received::Failed => {
+                return Exchange::Next;'''
+
+[[mutant]]
+name = "next-server-keeps-sockets"
+rule = "a reply that moves on closes every server's socket (send_dg, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                    Verdict::NextServer => {
+                        close_all(socks);'''
+new = '''                    Verdict::NextServer => {'''
+
+[[mutant]]
+name = "worst-case-no-tcp"
+rule = "the worst case counts the TCP exchange's wait (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            .and_then(|all| all.checked_add(waits().max().unwrap_or_default()))'''
+new = '''            .and_then(|all| all.checked_add(Duration::ZERO))'''
+
+[[mutant]]
+name = "message-buffer-512"
+rule = "a reply is read into glibc's 65,536-byte buffer, not 512 (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    let mut buf = vec![0u8; MAX_MESSAGE];
+    let mut vc'''
+new = '''    let mut buf = vec![0u8; 512];
+    let mut vc'''
+
+[[mutant]]
+name = "reset-not-reported"
+rule = "the backend reports a reset of a length's read as such (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/dns.rs"
+old = '''            Err(ErrorKind::ConnectionReset) => return TcpRead::Reset,'''
+new = '''            Err(ErrorKind::ConnectionReset) => return TcpRead::Failed,'''
+
+[[mutant]]
+name = "tcp-length-little-endian"
+rule = "a TCP message's length is big-endian (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/dns.rs"
+old = '''        let len = usize::from(u16::from_be_bytes(len));'''
+new = '''        let len = usize::from(u16::from_le_bytes(len));'''
+
+[[mutant]]
+name = "tcp-read-unbounded"
+rule = "each TCP read has what is left of the deadline (the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/dns.rs"
+old = '''            conn.set_read_timeout(Some(left)).map_err(|e| e.kind())?;'''
+new = '''            let _ = left;
+            conn.set_read_timeout(None).map_err(|e| e.kind())?;'''
+
+[[mutant]]
+name = "month-past-twelve-leap-row"
+rule = "a refused month 14-25 in a common year is read from the leap row (compute_change, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''                } else if !leap && (14..=25).contains(&m) {'''
+new = '''                } else if false {'''
+
+[[mutant]]
+name = "zone-file-max-unbounded"
+rule = "a zone file is read to 1 MiB at most (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''pub const TZIF_MAX_BYTES: u64 = 1 << 20;'''
+new = '''pub const TZIF_MAX_BYTES: u64 = 1 << 40;'''
+
+[[mutant]]
+name = "secure-tz-any-file"
+rule = "in secure-execution mode TZ is a file only under the system's directory (tzset, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            || (secure
+'''
+new = '''            || (false && secure
+'''
+
+[[mutant]]
+name = "secure-tzdir-read"
+rule = "in secure-execution mode TZDIR is not read (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''                    .filter(|dir| !dir.is_empty() && !secure)'''
+new = '''                    .filter(|dir| !dir.is_empty())'''
+
+[[mutant]]
+name = "local-zone-ignores-tz"
+rule = "the marker's zone is TZ's (F4, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let tz = std::env::var_os("TZ");'''
+new = '''    let tz: Option<std::ffi::OsString> = None;'''
+
+[[mutant]]
+name = "local-zone-ignores-tzdir"
+rule = "the marker's zone file is looked for under TZDIR (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let tzdir = std::env::var_os("TZDIR");'''
+new = '''    let tzdir: Option<std::ffi::OsString> = None;'''
+
+[[mutant]]
+name = "local-zone-always-secure"
+rule = "outside secure-execution mode TZ and TZDIR are read whole (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let secure = lsof_backend_linux::secure_execution();'''
+new = '''    let secure = true;'''
+
+[[mutant]]
+name = "repeating-always"
+rule = "only a delay makes the C stat /etc/passwd (RptTm; -r0 and +r0 do not, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let repeating = repeat.delay > 0;'''
+new = '''    let repeating = true;'''
+
+[[mutant]]
+name = "quiet-mutes-idle"
+rule = "-Q mutes the search's status, not +r's (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let code = if ((!misses.is_empty() || dropped_an_argument) && !quiet) || ended.idle_error {'''
+new = '''    let code = if (!misses.is_empty() || dropped_an_argument || ended.idle_error) && !quiet {'''
+
+[[mutant]]
+name = "plus-m-pipe-exit"
+rule = "+m's print into a closed pipe exits 141, as the C's SIGPIPE (the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            std::process::exit(141);'''
+new = '''            let _ = 141;'''
+
+[[mutant]]
+name = "no-name-service"
+rule = "Linux names a socket by default (LinuxNames, the review: tests/names.rs)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''Some(Box::new(crate::netnames::LinuxNames::new()))'''
+new = '''None'''
+
+[[mutant]]
+name = "names-before-writing"
+rule = "each socket is named as its row is written, not before (154, the review: names-reader-gone)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        if matches!(format, Format::Json(_)) {
+            if let Some(service) = name_service.as_ref() {'''
+new = '''        if true {
+            if let Some(service) = name_service.as_ref() {'''
+
+[[mutant]]
+name = "stdout-buffer-64k"
+rule = "the listing goes through the C's 4096-byte stdout buffer (the review: names-reader-gone)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        let mut sink = std::io::BufWriter::with_capacity(4096, stdout.lock());'''
+new = '''        let mut sink = std::io::BufWriter::with_capacity(65536, stdout.lock());'''
+
+[[mutant]]
+name = "scan-keeps-non-tcp-udp"
+rule = "the scan keeps only TCP and UDP entries (fill_porttab, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''            } else {
+                return;
+            };
+            if name.is_empty() {'''
+new = '''            } else {
+                0
+            };
+            if name.is_empty() {'''
+
+[[mutant]]
+name = "subformat-depth-zero"
+rule = "a conversion that formats another (%c, %x, %D...) is formatted at all: its depth is at least one (two kept, one would do in the C locale; the review's list)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''const SUBFORMAT_DEPTH: u8 = 2;'''
+new = '''const SUBFORMAT_DEPTH: u8 = 0;'''
+

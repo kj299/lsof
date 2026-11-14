@@ -14,7 +14,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
-use lsof_core::dns::{Opened, Received, Transport, MAX_MESSAGE};
+use lsof_core::dns::{Opened, Received, TcpRead, Transport, MAX_MESSAGE};
 
 /// The network, and a monotonic clock started with it.
 pub struct Net {
@@ -136,36 +136,48 @@ impl Transport for Net {
         true
     }
 
-    fn tcp_recv(
-        &mut self,
-        conn: &mut TcpStream,
-        buf: &mut [u8],
-        deadline: Duration,
-    ) -> Option<usize> {
+    fn tcp_recv(&mut self, conn: &mut TcpStream, buf: &mut [u8], deadline: Duration) -> TcpRead {
+        // Its length, big-endian, as `send_vc()` reads it; a reset there is
+        // the one glibc connects again for.
         let mut len = [0u8; 2];
-        self.read_full(conn, &mut len, deadline)?;
+        match self.read_full(conn, &mut len, deadline) {
+            Ok(()) => {}
+            Err(ErrorKind::ConnectionReset) => return TcpRead::Reset,
+            Err(_) => return TcpRead::Failed,
+        }
         let len = usize::from(u16::from_be_bytes(len));
-        let into = buf.get_mut(..len)?;
-        self.read_full(conn, into, deadline)?;
-        Some(len)
+        let Some(into) = buf.get_mut(..len) else {
+            return TcpRead::Failed;
+        };
+        match self.read_full(conn, into, deadline) {
+            Ok(()) => TcpRead::Message(len),
+            Err(_) => TcpRead::Failed,
+        }
     }
 }
 
 impl Net {
-    /// `buf` filled from `conn` by `deadline`.
-    fn read_full(&self, conn: &mut TcpStream, buf: &mut [u8], deadline: Duration) -> Option<()> {
+    /// `buf` filled from `conn` by `deadline`, or why not: the read's error,
+    /// `UnexpectedEof` where the connection ended, `TimedOut` where the
+    /// deadline came.
+    fn read_full(
+        &self,
+        conn: &mut TcpStream,
+        buf: &mut [u8],
+        deadline: Duration,
+    ) -> Result<(), ErrorKind> {
         let mut got = 0usize;
         while got < buf.len() {
-            let left = self.left(deadline)?;
-            conn.set_read_timeout(Some(left)).ok()?;
+            let left = self.left(deadline).ok_or(ErrorKind::TimedOut)?;
+            conn.set_read_timeout(Some(left)).map_err(|e| e.kind())?;
             match conn.read(buf.get_mut(got..).unwrap_or_default()) {
-                Ok(0) => return None,
+                Ok(0) => return Err(ErrorKind::UnexpectedEof),
                 Ok(n) => got = got.saturating_add(n),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(_) => return None,
+                Err(e) => return Err(e.kind()),
             }
         }
-        Some(())
+        Ok(())
     }
 }
 
@@ -221,14 +233,15 @@ mod tests {
             query_ptr(&conf, ip, &mut Net::new(), &mut Rotation::default()),
             NssAnswer::NotFound
         );
+        // The least glibc waits; no upper bound here, where a loaded host
+        // could pass it (the waits are lsof-core's tests', on a script).
         let took = started.elapsed();
-        assert!(
-            took >= Duration::from_millis(990) && took < Duration::from_secs(3),
-            "{took:?}"
-        );
+        assert!(took >= Duration::from_millis(990), "{took:?}");
         drop(silent);
 
-        // Closed: refused at once (the port of a socket just closed).
+        // Closed: refused (the port of a socket just closed). Another
+        // socket may have the port by now, and be silent: the verdict is
+        // the same, and the bound only one a hang would pass.
         let closed = UdpSocket::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -244,7 +257,122 @@ mod tests {
             query_ptr(&conf, ip, &mut Net::new(), &mut Rotation::default()),
             NssAnswer::NotFound
         );
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    /// A datagram and a stream socket of the test's on one loopback port:
+    /// the first answers `TC`, the second what `serve` makes of each
+    /// connection, in turn. `None` where the port could not be had for both.
+    fn tc_server(
+        serve: Vec<fn(TcpStream)>,
+    ) -> Option<(SocketAddr, std::thread::JoinHandle<usize>)> {
+        for _ in 0..16 {
+            let tcp = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+            let addr = tcp.local_addr().ok()?;
+            let Ok(udp) = UdpSocket::bind(addr) else {
+                continue;
+            };
+            let handle = std::thread::spawn(move || {
+                let mut buf = [0u8; 512];
+                if let Ok((n, peer)) = udp.recv_from(&mut buf) {
+                    let mut r = buf[..n].to_vec();
+                    r[2] = 0x83;
+                    r[3] = 0x80;
+                    let _ = udp.send_to(&r, peer);
+                }
+                let mut served = 0;
+                for f in serve {
+                    let Ok((conn, _)) = tcp.accept() else {
+                        break;
+                    };
+                    served += 1;
+                    f(conn);
+                }
+                served
+            });
+            return Some((addr, handle));
+        }
+        None
+    }
+
+    /// The framed query a connection carries.
+    fn read_query(conn: &mut TcpStream) -> Vec<u8> {
+        let mut len = [0u8; 2];
+        conn.read_exact(&mut len).unwrap();
+        let mut q = vec![0u8; usize::from(u16::from_be_bytes(len))];
+        conn.read_exact(&mut q).unwrap();
+        q
+    }
+
+    /// `query_ptr` over `Net` in a thread of its own, given 30 s: a hang
+    /// fails the test instead of holding it.
+    fn ask(conf: ResolvConf) -> (NssAnswer<String>, Duration) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let ip = std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 7));
+            let got = query_ptr(&conf, ip, &mut Net::new(), &mut Rotation::default());
+            let _ = tx.send((got, started.elapsed()));
+        });
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("the query did not end")
+    }
+
+    /// After `TC` the same server over TCP: the message framed by its
+    /// big-endian length both ways and read whole; a server that accepts
+    /// and never answers holds it until the datagram attempt's time and no
+    /// longer; a reset of the first connection is met by a second, as
+    /// glibc's `send_vc()` meets it.
+    #[test]
+    #[cfg_attr(miri, ignore = "it opens sockets")]
+    fn tc_then_tcp_is_framed_bounded_and_tried_again_after_a_reset() {
+        fn answer(mut conn: TcpStream) {
+            let q = read_query(&mut conn);
+            let mut r = q[..2].to_vec();
+            r.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+            r.extend_from_slice(&q[12..]);
+            r.extend_from_slice(&[
+                0xc0, 0x0c, 0, 12, 0, 1, 0, 0, 0, 60, 0, 6, 4, b'h', b'o', b's', b't', 0,
+            ]);
+            let mut framed = u16::try_from(r.len()).unwrap().to_be_bytes().to_vec();
+            framed.extend_from_slice(&r);
+            conn.write_all(&framed).unwrap();
+        }
+        fn silent(mut conn: TcpStream) {
+            let _ = read_query(&mut conn);
+            let mut rest = [0u8; 1];
+            let _ = conn.read(&mut rest);
+        }
+        // Closed with what it was sent unread: the kernel resets it. The
+        // query came in one write, so once a byte of it is here the rest
+        // is too.
+        fn reset(mut conn: TcpStream) {
+            let mut first = [0u8; 3];
+            conn.read_exact(&mut first).unwrap();
+        }
+        let conf = |addr| ResolvConf {
+            servers: vec![addr],
+            retrans: 1,
+            retry: 1,
+            ..ResolvConf::default()
+        };
+        let Some((addr, server)) = tc_server(vec![answer]) else {
+            return;
+        };
+        assert_eq!(ask(conf(addr)).0, NssAnswer::Success("host".into()));
+        assert_eq!(server.join().unwrap(), 1);
+        let Some((addr, server)) = tc_server(vec![silent]) else {
+            return;
+        };
+        let (got, took) = ask(conf(addr));
+        assert_eq!(got, NssAnswer::NotFound);
+        assert!(took >= Duration::from_millis(990), "{took:?}");
+        assert_eq!(server.join().unwrap(), 1);
+        let Some((addr, server)) = tc_server(vec![reset, answer]) else {
+            return;
+        };
+        assert_eq!(ask(conf(addr)).0, NssAnswer::Success("host".into()));
+        assert_eq!(server.join().unwrap(), 2);
     }
 
     #[test]

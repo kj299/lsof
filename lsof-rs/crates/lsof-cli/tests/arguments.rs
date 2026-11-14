@@ -1626,3 +1626,40 @@ fn dash_m_is_not_supported_in_the_cs_words() {
         assert_eq!(stderr_of(&out), lines.join("\n") + "\n", "{args:?}");
     }
 }
+
+/// A mount supplement named through a descriptor lsof inherited
+/// (`/dev/fd/9`): the C closes every descriptor from 3 up as it starts, so
+/// it finds no such file, warns, and takes no device from it (measured);
+/// lsof-rs, which cannot close them, reads the name as the C finds it
+/// (DIVERGENCES 153).
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+)]
+fn a_supplement_through_an_inherited_descriptor_is_none() {
+    let dir = std::env::temp_dir().join(format!("lsof-rs-inh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sup = dir.join("sup");
+    std::fs::write(&sup, "/proc 0x15\n").unwrap();
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            "exec 9<\"$1\"; exec \"$2\" -e /proc +m /dev/fd/9 -a -d cwd -p $$",
+            "sh",
+        ])
+        .arg(&sup)
+        .arg(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
+        .output()
+        .expect("run lsof");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("lsof: WARNING: access /dev/fd/9: No such file or directory\n")
+            && err.contains("lsof: assuming dev=0 for /proc from /dev/fd/9\n"),
+        "{err}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

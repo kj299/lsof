@@ -131,7 +131,8 @@ item is shipped or a documented closed gate — and the release criteria are in
   that follows glibc's resolver (so a run that lists a socket may ask a name
   server, as the C does; `-n`/`-P` keep numbers, `+n`/`+P` name them again).
 - ✅ **`-r [t[c<N>][m<fmt>]]` and `+r`** repeat as the C's do (#152): a
-  count, a `strftime(3)` marker in the local zone, `+r` ending at a cycle that
+  count, a `strftime(3)` marker in the local zone (on Windows `TZ`'s rule
+  string, else UTC), `+r` ending at a cycle that
   lists nothing; **`+m [m]`** prints or reads the C's mount supplement
   (#153).
 - ✅ **L2** — `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock

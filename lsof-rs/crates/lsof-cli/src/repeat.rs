@@ -193,6 +193,52 @@ mod tests {
         assert!(!ended.idle_error);
     }
 
+    /// A reader gone: the first write after the cycle fails, and the run
+    /// ends there, its error the caller's to turn into the closed-pipe
+    /// exit (row 36), and no second cycle starts. The C, with SIGPIPE
+    /// ignored, writes on into the dead pipe until its count or `+r` ends
+    /// it (measured; DIVERGENCES 152, residue); with SIGPIPE left alone both
+    /// die at that write.
+    #[test]
+    fn a_write_that_fails_ends_the_run() {
+        struct Gone(Script);
+        impl Cycles for Gone {
+            fn cycle(&mut self) -> bool {
+                self.0.cycle()
+            }
+            fn now(&mut self) -> i64 {
+                self.0.now()
+            }
+            fn sleep(&mut self, secs: u64) {
+                self.0.sleep(secs)
+            }
+            fn out(&mut self) -> &mut dyn Write {
+                self
+            }
+        }
+        impl Write for Gone {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        for until_idle in [false, true] {
+            let zone = utc();
+            let mut host = Gone(Script::new(&[]));
+            let got = run(
+                &rep(1, 3, until_idle),
+                &mut None,
+                &zone,
+                Marking::Table,
+                &mut host,
+            );
+            assert_eq!(got.err().map(|e| e.kind()), Some(io::ErrorKind::BrokenPipe));
+            assert_eq!(host.0.events, ["cycle1"], "+r: {until_idle}");
+        }
+    }
+
     #[test]
     fn no_delay_is_one_cycle_and_no_marker() {
         let (ended, s) = go(rep(0, 3, false), Marking::Table, &[], None);

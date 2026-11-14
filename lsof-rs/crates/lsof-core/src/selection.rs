@@ -755,6 +755,9 @@ pub struct ExemptFs {
     /// directory and source when the table is read (the C's `rdlnk`). A file
     /// on it says `(+e PATH)`, one on an `-e` mount `(-e PATH)`.
     pub plus: bool,
+    /// The device the supplement gave the mount this path names (`ep->mp`
+    /// with `SB_DEV` alone), shown for every file on it; `None` otherwise.
+    pub device: Option<u64>,
 }
 
 /// One `+d`/`+D` directory, as the C's `enter_dir()` met it (`arg.c`).
@@ -3229,6 +3232,7 @@ mod tests {
             source_is_block: block,
             fsname: source.into(),
             kind: crate::backend::MountKind::Regular,
+            supplied: false,
         };
         let table = vec![
             mount("/", "/dev/vda", true, 100),
@@ -4460,6 +4464,7 @@ mod tests {
             source_is_block: false,
             fsname: "srv:/x".into(),
             kind: crate::backend::MountKind::Nfs,
+            supplied: false,
         };
         let row = |name: &str, dev: u64, file_type: FileType| OpenFile {
             rdev: None,
@@ -4543,6 +4548,7 @@ mod tests {
             source_is_block: false,
             fsname: "srv:/x".into(),
             kind: crate::backend::MountKind::Nfs,
+            supplied: false,
         };
         let row = |fd: u64, name: &str, ty: FileType| OpenFile {
             rdev: None,
