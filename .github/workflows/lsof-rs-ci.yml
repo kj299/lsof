@@ -318,12 +318,40 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: install cargo-deny
-        run: cargo install cargo-deny --locked
-      - name: cargo deny check
-        # advisories + licenses + bans + sources, per lsof-rs/deny.toml. The
-        # third-party surface is just the windows-sys family (MIT/Apache-2.0).
-        run: cargo deny check
+      # A release binary checked against the SHA-256 that cargo-deny's release
+      # publishes for it. This was `cargo install cargo-deny --locked`: whatever
+      # version was newest that day, built from source on every run, so the tool
+      # that judges this tree's dependencies was itself an unpinned one
+      # (LESSONS #089). A new version is a reviewed change to this line.
+      - name: install cargo-deny (pinned release binary)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfLo deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  deny.tgz" | sha256sum -c -
+          tar xzf deny.tgz
+          install -m 0755 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny "$HOME/.cargo/bin/"
+          cargo deny --version
+      - name: cargo deny check (every lockfile)
+        # advisories + licenses + bans + sources, per lsof-rs/deny.toml, for
+        # EVERY lockfile git tracks under lsof-rs/. This step was a bare
+        # `cargo deny check`, which reads the root workspace only; fuzz/ is a
+        # workspace of its own, and its lockfile (libfuzzer-sys, and the `cc`
+        # build script that compiles libFuzzer) had never been audited. The
+        # lockfiles are listed from git rather than named, so a workspace added
+        # later is audited the day it lands (LESSONS #089). Every one is checked
+        # before the step fails, so one run reports them all.
+        run: |
+          set -euo pipefail
+          locks=$(git ls-files '*Cargo.lock')
+          [ -n "$locks" ] || { echo "::error::git tracks no Cargo.lock under lsof-rs/"; exit 1; }
+          rc=0
+          for lock in $locks; do
+            dir=$(dirname "$lock")
+            echo "=== $dir"
+            cargo deny --manifest-path "$dir/Cargo.toml" --config deny.toml check || rc=1
+          done
+          exit "$rc"
 
   fuzz:
     name: fuzz smoke (every target)

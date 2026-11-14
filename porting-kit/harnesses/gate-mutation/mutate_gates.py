@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # KIT-IMPORT: from the c2rust-port lineage of this kit.
-# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082, #083, #086 (see below).
+# Local: #053, #057, #058, #059, #060, #064, #065, #066, #070, #071, #073, #082, #083, #086, #090 (see below).
 # Re-cited: #6->#036, #13->#033, #14->#037, #16->#050, #21->#041, #22->#051,
 #          #25->#052, #44->#060, #48->#069; #20 by title, #36 by title (no
 #          entry in this log).
@@ -384,6 +384,15 @@ MUTATIONS = [
      "old": '    required = {f"optword:{o}" for o in takes_value if o in options}',
      "new": "    required = set()",
      "why": "the next-word spelling is never required, so no case need give an option its value that way",
+     "cmd": ["harnesses/coverage/coverage_gate.py", "--self-test"]},
+
+    # An option a case claims in `covers` must be one its args pass
+    # (LESSONS #090): lsof-rs credited `opt:x` from a case that runs no `-x`.
+    {"gate": "coverage-unspelled-claim", "file": "harnesses/coverage/coverage_gate.py",
+     "old": "    return sorted(c for c in map(str, covers)\n"
+            "                  if c.startswith((\"opt:\", \"optword:\")) and c not in spelled)",
+     "new": "    return []",
+     "why": "a case may claim an option its args never pass, and the claim is credited",
      "cmd": ["harnesses/coverage/coverage_gate.py", "--self-test"]},
 
     {"gate": "ledgers", "file": "harnesses/ledgers/check_ledgers.py",

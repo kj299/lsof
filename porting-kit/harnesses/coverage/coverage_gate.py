@@ -289,7 +289,8 @@ def spelling_requirements(
 def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
     """Feature ids the matrix's cases exercise: option letters inferred from
     `args` (short-option clusters; `--long` and bare `-` are skipped) plus each
-    case's explicit `covers` list.
+    case's explicit `covers` list, less any option a case claims there and its
+    args never pass (`unspelled_claims`).
 
     Scanning a cluster STOPS after a value-taking option, because everything
     after it is that option's argument, not more options: `-iTCP:80` is `-i`
@@ -297,28 +298,63 @@ def matrix_coverage(path: str, takes_value: set[str] | None = None) -> set[str]:
     a gate that over-credits hides exactly the gaps it exists to find
     (LESSONS #012 — on lsof-rs's real suite this inflated coverage by three
     options; the fix was already in the C's optstring, as `takes_value`)."""
+    return matrix_claims(path, takes_value)[0]
+
+
+def args_coverage(args: list, takes_value: set[str]) -> set[str]:
+    """The option ids one case's `args` spell: `opt:L` per letter, and
+    `optword:L` where a value-taking letter gets its value as the next word."""
+    spelled: set[str] = set()
+    for pos, tok in enumerate(args):
+        if not isinstance(tok, str) or len(tok) < 2:
+            continue
+        if tok.startswith("--"):
+            continue
+        if tok[0] in "-+":
+            for k, ch in enumerate(tok[1:], 1):
+                if not ch.isalnum():
+                    break  # punctuation: the rest is a value
+                spelled.add(f"opt:{ch}")
+                if ch in takes_value:
+                    if _value_as_next_word(args, pos, tok, k):
+                        spelled.add(f"optword:{ch}")
+                    break  # the remainder is this option's argument
+    return spelled
+
+
+def unspelled_claims(spelled: set[str], covers) -> list[str]:
+    """The option ids a case's `covers` claims that its own `args` do not spell.
+
+    `covers` is for what no flag spells: the TYPE a fixture creates. An option
+    is covered by the args that run it, so a case that claims one its args
+    never pass is a claim about a path it does not take. lsof-rs's
+    `linux/differential-opt-x-symlink-rule` credited `opt:x` from a case that
+    runs `+d` WITHOUT `-x`, the default rule, for as long as it stood
+    (LESSONS #090; the primary line's entry 061 is the same claim in a
+    library's manifest, a row naming a driver mode no case ran). Such a claim
+    credits nothing, and the gate fails naming it."""
+    return sorted(c for c in map(str, covers)
+                  if c.startswith(("opt:", "optword:")) and c not in spelled)
+
+
+def matrix_claims(
+    path: str, takes_value: set[str] | None = None
+) -> tuple[set[str], list[tuple[str, str]]]:
+    """(the feature ids the matrix covers, the `(case, id)` claims it refused).
+    A case's `covers` ids are credited except an option its args do not spell;
+    those are returned instead, for the gate to fail on."""
     takes_value = takes_value or set()
     data = load_toml_or_json(path)
     covered: set[str] = set()
+    refused: list[tuple[str, str]] = []
     for case in data.get("case", []):
-        args = case.get("args", [])
-        for pos, tok in enumerate(args):
-            if not isinstance(tok, str) or len(tok) < 2:
-                continue
-            if tok.startswith("--"):
-                continue
-            if tok[0] in "-+":
-                for k, ch in enumerate(tok[1:], 1):
-                    if not ch.isalnum():
-                        break  # punctuation: the rest is a value
-                    covered.add(f"opt:{ch}")
-                    if ch in takes_value:
-                        if _value_as_next_word(args, pos, tok, k):
-                            covered.add(f"optword:{ch}")
-                        break  # the remainder is this option's argument
-        for cid in case.get("covers", []):
-            covered.add(str(cid))
-    return covered
+        spelled = args_coverage(case.get("args", []), takes_value)
+        covers = case.get("covers", [])
+        bad = unspelled_claims(spelled, covers)
+        covered |= spelled
+        covered |= {str(c) for c in covers} - set(bad)
+        refused += [(str(case.get("name", "?")), c) for c in bad]
+    return covered, refused
 
 
 def _value_as_next_word(args: list, pos: int, tok: str, k: int) -> bool:
@@ -341,7 +377,7 @@ def run_gate(
     platform: str | None = None,
 ) -> int:
     required, waives, takes_value = load_inventory(inventory_path, platform)
-    covered = matrix_coverage(matrix_path, takes_value)
+    covered, unspelled = matrix_claims(matrix_path, takes_value)
     waived_ids = {w["id"] for w in waives}
     stale_waives = sorted(waived_ids - required)
     uncovered = sorted(required - waived_ids - covered)
@@ -352,10 +388,14 @@ def run_gate(
         "waived": sorted(waived_ids & required),
         "stale_waives": stale_waives,
         "uncovered": uncovered,
+        "unspelled": [{"case": name, "id": cid} for name, cid in unspelled],
     }
     if as_json:
         print(json.dumps(report, indent=2))
     else:
+        for name, cid in unspelled:
+            o = cid.split(":", 1)[1]
+            print(f"UNSPELLED {cid}  (case {name!r} claims it in `covers`, and its args never pass -{o})")
         for fid in uncovered:
             if fid.startswith("optword:"):
                 o = fid[len("optword:"):]
@@ -370,9 +410,10 @@ def run_gate(
         scope = f" [platform: {platform}]" if platform else ""
         print(
             f"\nfeatures: {len(required)}  covered: {report['covered']}"
-            f"  waived: {len(report['waived'])}  UNCOVERED: {len(uncovered)}{scope}"
+            f"  waived: {len(report['waived'])}  UNCOVERED: {len(uncovered)}"
+            f"  UNSPELLED: {len(unspelled)}{scope}"
         )
-    if uncovered and not warn:
+    if (uncovered or unspelled) and not warn:
         return 1
     return 0
 
@@ -720,6 +761,57 @@ def self_test() -> int:
             "optword:F" in {w["id"] for w in pw_win}
             and "optword:F" not in {w["id"] for w in pw_lin},
         )
+
+        # --- an option claimed in `covers` that the args never pass ---------
+        # The miss this models is lsof-rs's own (LESSONS #090): a declaration
+        # credited `opt:x` from a case that runs `+d` without `-x`, while
+        # another case did spell `-x`, so the false claim changed no verdict
+        # and nothing could see it. Every feature below is covered by a case
+        # that runs it; the gate must still fail on the claim.
+        check("a claimed option the args never pass is refused",
+              unspelled_claims(args_coverage(["+d", "DIR"], set()), ["opt:x"]) == ["opt:x"])
+        check("an option the args do pass may be claimed as well",
+              unspelled_claims(args_coverage(["-X"], set()), ["opt:X"]) == [])
+        check("a TYPE claim needs no flag: that is what `covers` is for",
+              unspelled_claims(set(), ["type:REG"]) == [])
+        check("an attached value does not spell the next-word id it claims",
+              unspelled_claims(args_coverage(["-Fpn"], {"F"}), ["optword:F"]) == ["optword:F"])
+        cinv = os.path.join(td, "cinv.json")
+        cmat = os.path.join(td, "cmat.json")
+        json.dump({"features": {"options": ["X", "d", "x"], "types": ["REG"]}},
+                  open(cinv, "w"))
+        claim_cases = [
+            {"name": "plus-d-default", "args": ["+d", "DIR"], "covers": ["opt:x"]},
+            {"name": "dash-x", "args": ["-x"]},
+            {"name": "dash-X", "args": ["-X"], "covers": ["opt:X"]},
+            {"name": "fixture", "args": [], "covers": ["type:REG"]},
+        ]
+        json.dump({"case": claim_cases}, open(cmat, "w"))
+        c_cov, c_refused = matrix_claims(cmat)
+        check("the refused claim is named with its case",
+              c_refused == [("plus-d-default", "opt:x")])
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            c_rc = run_gate(cinv, cmat, warn=False, as_json=False)
+        check("the gate fails on the claim, though every feature is covered", c_rc == 1)
+        check("the text report says which case claims what",
+              "UNSPELLED opt:x  (case 'plus-d-default' claims it in `covers`, "
+              "and its args never pass -x)\n" in said.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            run_gate(cinv, cmat, warn=True, as_json=True)
+        try:
+            c_rep = json.loads(said.getvalue())
+        except ValueError:
+            c_rep = {}
+        check("--json reports the claim, and nothing uncovered",
+              c_rep.get("unspelled") == [{"case": "plus-d-default", "id": "opt:x"}]
+              and c_rep.get("uncovered") == [])
+        json.dump({"case": claim_cases[:1]}, open(cmat, "w"))
+        check("a refused claim credits nothing: alone, it leaves opt:x uncovered",
+              "opt:x" not in matrix_claims(cmat)[0])
+        json.dump({"case": [dict(claim_cases[0], covers=[])] + claim_cases[1:]},
+                  open(cmat, "w"))
+        check("with the claim dropped, the same matrix passes",
+              run_gate(cinv, cmat, warn=False, as_json=False) == 0)
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

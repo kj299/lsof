@@ -689,9 +689,14 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-X", "-p", "PID"]
 covers = ["opt:X"]
 
 [[case]]
-name = "linux/differential-opt-x-symlink-rule"
+# The `+d` symlink rule WITHOUT `-x`: by default a link out of the directory is
+# skipped. This case runs no `-x`, so it covers what its args spell and nothing
+# more. Until 2026-11-14 it was `differential-opt-x-symlink-rule` and claimed
+# `opt:x`, a path it does not take; the coverage gate now refuses an option a
+# case claims and never passes (porting-kit LESSONS #090). `-x` itself is
+# spelled by `linux/differential-opt-x-letters-as-the-next-word`, below.
+name = "linux/differential-opt-x-plus-d-skips-symlinks-by-default"
 args = ["-n", "-P", "-a", "-d", "^mem", "+d", "DIR", "-p", "PID"]
-covers = ["opt:x"]
 
 [[case]]
 # Every numbered fd, cwd, rtd and txt of fixture A, exempted: the C's

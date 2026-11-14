@@ -63,6 +63,10 @@ It runs in the `core + lints (linux)` CI job — pure stdlib Python, no toolchai
 - **TYPE codes** must be declared per case with `covers = ["type:KEY", …]`,
   because no flag spells what a *fixture* creates. That declaration is the whole
   mechanism: it is the thing that was missing when the object types vanished.
+- An **option** named in `covers` must be one the case's own `args` pass. If
+  not, the gate reports it `UNSPELLED` and fails, and the claim credits nothing:
+  a case that runs `+d` without `-x` once claimed `opt:x` here, while another
+  case's `-x` kept the verdict green (porting-kit LESSONS #090).
 
 Keep the matrix truthful. A case belongs there only if a test really runs those
 args and really asserts on that output — declaring coverage you don't have turns

@@ -10,13 +10,28 @@ ignore = []            # add "RUSTSEC-XXXX-YYYY" only with a written justificati
 [bans]
 # Multiple versions of the same crate bloat the trusted surface; warn and prune.
 multiple-versions = "warn"
-wildcard-dependencies = "deny"
+# A `*` version is an unreviewed upgrade path; deny it. (The key is `wildcards`:
+# this template said `wildcard-dependencies` until 2026-11-14, which cargo-deny
+# rejects outright, so a port that copied it got a policy that never loaded —
+# LESSONS #089, and the primary line's entry 065, where it was found.)
+wildcards = "deny"
+# ...except a path dependency on a crate that is never published: a workspace's
+# own crates (`lsof-core = { path = "../lsof-core" }`) carry no version to pin.
+# Mark such crates `publish = false`.
+allow-wildcard-paths = true
 # Keep the dependency count auditable. A safety port earns trust by being small.
 # deny = [{ name = "openssl-sys" }]   # example: prefer rustls over C OpenSSL
 
 [licenses]
 # Allow-list, not deny-list: you must positively approve every license present.
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+# NCSA (University of Illinois/NCSA, permissive, OSI-approved) is LLVM's
+# libFuzzer, which `libfuzzer-sys` vendors: every cargo-fuzz target a port builds
+# for CLAUDE.md's "no panic on input" control carries it. Excepted for that one
+# crate, not allowed for all, so nothing else arrives under it unreviewed.
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
 confidence-threshold = 0.9
 
 [sources]
