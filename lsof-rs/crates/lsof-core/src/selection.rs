@@ -634,6 +634,32 @@ pub struct Located {
     pub paths: Vec<bool>,
 }
 
+impl Located {
+    /// What either located: the C's search items are marked found by any
+    /// cycle of `-r` and never unmarked, and reported once after the loop
+    /// (DIVERGENCES 54). Items are parallel to the one selection, so the
+    /// two are the same length; a longer `other` adds nothing.
+    pub fn merge(&mut self, other: &Located) {
+        fn or(a: &mut [bool], b: &[bool]) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x |= *y;
+            }
+        }
+        or(&mut self.pids, &other.pids);
+        or(&mut self.pgids, &other.pgids);
+        or(&mut self.uids, &other.uids);
+        or(&mut self.users, &other.users);
+        or(&mut self.commands, &other.commands);
+        or(&mut self.command_regexes, &other.command_regexes);
+        or(&mut self.inet, &other.inet);
+        self.inet_all |= other.inet_all;
+        self.nfs |= other.nfs;
+        or(&mut self.states, &other.states);
+        self.tasks |= other.tasks;
+        or(&mut self.paths, &other.paths);
+    }
+}
+
 /// One path argument, or one entry of a `+d`/`+D` expansion, as the search
 /// item the C reports on (an `Sfile` entry).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -729,6 +755,9 @@ pub struct ExemptFs {
     /// directory and source when the table is read (the C's `rdlnk`). A file
     /// on it says `(+e PATH)`, one on an `-e` mount `(-e PATH)`.
     pub plus: bool,
+    /// The device the supplement gave the mount this path names (`ep->mp`
+    /// with `SB_DEV` alone), shown for every file on it; `None` otherwise.
+    pub device: Option<u64>,
 }
 
 /// One `+d`/`+D` directory, as the C's `enter_dir()` met it (`arg.c`).
@@ -843,10 +872,14 @@ pub struct Selection {
     pub inet: InetFilter,
     /// `-a`: AND together the specified process selectors.
     pub and_mode: bool,
-    /// `-n`: do not resolve host names.
+    /// `-n`: show hosts as numbers; `+n` names them again, the last of the
+    /// two winning. Where a run starts is the platform's default (on Linux
+    /// `LINUX_NAMES_BY_DEFAULT` in the CLI, DIVERGENCES 154).
     pub no_host_resolve: bool,
-    /// `-P`: do not resolve port names.
+    /// `-P`: show ports as numbers; `+P` names them again.
     pub no_port_resolve: bool,
+    /// `+m [m]`, the mount supplement (DIVERGENCES 153).
+    pub mount_supplement: crate::backend::MountSupplement,
     /// `-t`: terse output (PIDs only).
     pub terse: bool,
     /// `-V`: verbose — report inaccessible processes and unmatched search items.
@@ -2428,6 +2461,55 @@ mod tests {
     use super::*;
     use crate::mock;
 
+    /// A search item one cycle of `-r` located stays located: the C sets
+    /// its `f` and never clears it, and reports once after the loop
+    /// (measured: `+r 1 -p P -V`, P gone after two cycles, says nothing).
+    #[test]
+    fn what_any_cycle_located_stays_located() {
+        let item = |v: bool| vec![v, !v];
+        let cycle = |v: bool| Located {
+            pids: item(v),
+            pgids: item(v),
+            uids: item(v),
+            users: item(v),
+            commands: item(v),
+            command_regexes: item(v),
+            inet: item(v),
+            inet_all: v,
+            nfs: v,
+            states: item(v),
+            tasks: v,
+            paths: item(v),
+        };
+        let every = |l: &Located| {
+            [
+                &l.pids,
+                &l.pgids,
+                &l.uids,
+                &l.users,
+                &l.commands,
+                &l.command_regexes,
+                &l.inet,
+                &l.states,
+                &l.paths,
+            ]
+            .iter()
+            .all(|v| v.as_slice() == [true, true])
+                && l.inet_all
+                && l.nfs
+                && l.tasks
+        };
+        let mut all = cycle(true);
+        all.merge(&cycle(false));
+        assert!(every(&all), "{all:?}");
+        let mut all = cycle(false);
+        all.merge(&cycle(true));
+        assert!(every(&all), "{all:?}");
+        // A later cycle that locates nothing unmarks nothing.
+        all.merge(&Located::default());
+        assert!(every(&all), "{all:?}");
+    }
+
     /// `-c` compares bytes: a needle that is not UTF-8 matches a command
     /// whose bytes begin with it, the raw bytes where the command is not
     /// UTF-8, and a needle cut inside a character a command that is.
@@ -3150,6 +3232,7 @@ mod tests {
             source_is_block: block,
             fsname: source.into(),
             kind: crate::backend::MountKind::Regular,
+            supplied: false,
         };
         let table = vec![
             mount("/", "/dev/vda", true, 100),
@@ -4381,6 +4464,7 @@ mod tests {
             source_is_block: false,
             fsname: "srv:/x".into(),
             kind: crate::backend::MountKind::Nfs,
+            supplied: false,
         };
         let row = |name: &str, dev: u64, file_type: FileType| OpenFile {
             rdev: None,
@@ -4464,6 +4548,7 @@ mod tests {
             source_is_block: false,
             fsname: "srv:/x".into(),
             kind: crate::backend::MountKind::Nfs,
+            supplied: false,
         };
         let row = |fd: u64, name: &str, ty: FileType| OpenFile {
             rdev: None,

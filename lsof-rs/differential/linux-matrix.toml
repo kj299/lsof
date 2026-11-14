@@ -24,9 +24,9 @@
 # names — and a whole-system case cannot be gated at all, because each binary
 # lists ITSELF, under a pid that differs on every run.
 #
-# -n -P wherever a socket can appear: the C resolves hostnames and service
-# names by default; lsof-rs on Linux never does (docs/known-limitations.md), so
-# the C is asked for the numeric form it will otherwise not print.
+# -n -P wherever a socket can appear and the case is not about names: the C,
+# and lsof-rs since 2026-11-14 (DIVERGENCES 154), name hosts and ports by
+# default, and -n -P keeps the cases numeric and away from any name server.
 #
 # -d ^mem on most file cases: a process maps a dozen libraries, and excluding
 # them lets each case measure the surface it names instead of drowning in them.
@@ -4705,9 +4705,9 @@ args = ["-m", "--", "-W"]
 name = "illegal-option-character-then-dash-d-upper-and-dash-dash"
 args = ["-W", "-D", "--", "-Y"]
 
-# `+m` is the C's mount supplement, which lsof-rs refuses (row 149): with an
-# error beside it both end in usage, exit 1, and the rest of a `+m` word is
-# never read as letters.
+# `+m` is the C's mount supplement (row 153; until 2026-11-14 lsof-rs refused
+# it, row 149): with an error beside it both end in usage, exit 1, before any
+# table is read, and the rest of a `+m` word is its file, never letters.
 [[case]]
 name = "illegal-option-character-then-plus-m"
 args = ["-W", "+m"]
@@ -6904,3 +6904,480 @@ name = "names-host-conf-is-named-by-the-environment"
 args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38multi"]
 env = { LSOF_DIFF_MT = "names-hostconf", RESOLV_HOST_CONF = "/etc/host.conf.off" }
 with_stderr = true
+
+# ------------------------- host and service names in NAME (DIVERGENCES 154)
+#
+# Both binaries name a socket's hosts and ports by default, as the C does,
+# `-n`/`-P` turn either off and `+n`/`+P` on again. Every case runs in the
+# `names` mode, whose /etc holds the harness's hosts, services and resolv.conf
+# files and whose only name server is the harness's own on a loopback
+# address ([`NamesResolver`]): no query leaves the host, and nothing depends
+# on what listens on port 53. `RES_OPTIONS` is set empty, where every other
+# case has `attempts:0`, so that these ask that server. Fixture NS holds a
+# TCP listener on 127.0.0.1:{NSPORT} (named `nslisten` for TCP), a UDP
+# socket on 127.0.0.1:{NSUPORT} (named `nstcponly`, for TCP alone), and a
+# UDP socket connected to each of 127.53.0.1 (a PTR record, `ns-name.example`),
+# .2 (NXDOMAIN), .3 (no reply: one second, `timeout:1 attempts:1`), .4 (a
+# name holding an ESC), .5 (an answer with no PTR, glibc's TRYAGAIN; the
+# hosts file's `files-five`), .6 (an answer glibc cannot read, its UNAVAIL;
+# `files-six`), .7 (DNS's `dns-name.example`, the hosts file's
+# `files-seven`), 127.0.0.2 (the hosts file's `r38other`) and 127.53.0.9
+# (which the hosts file names in 4,200 bytes, past the C's NAME buffer: an
+# empty NAME, and an empty `n` field). A case with `compare_queries` is run
+# once more on each side and the names each asked the server compared, in
+# order (linux_diff.py's `compare_queries`): a query asked twice, or a
+# source asked out of turn, shows there.
+
+[[case]]
+name = "names-socket-hosts-and-ports-by-default"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+[[case]]
+name = "names-socket-field-n"
+args = ["-F", "pfn", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+# Hosts as numbers, ports still named; nothing asked of the name server.
+name = "names-socket-dash-n"
+args = ["-n", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+
+[[case]]
+name = "names-socket-dash-p-upper"
+args = ["-P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+# The last of each wins (measured).
+name = "names-socket-plus-n-plus-p-after-dash"
+args = ["-n", "-P", "+n", "+P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+name = "names-socket-plus-p-after-dash-np"
+args = ["-nP", "+P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+
+[[case]]
+# A selection by address is by number, whatever NAME then shows.
+name = "names-socket-selected-by-number"
+args = ["-a", "-p", "{NS}", "-i", "@127.53.0.1"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+
+[[case]]
+# Each address is asked once a run: the second cycle asks nothing, so the
+# silent one costs its second once.
+name = "names-socket-repeat-asks-once"
+args = ["-r", "1c2mX", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+[[case]]
+# `attempts:0`, as every other case has: neither asks a server, and only
+# the hosts file names a host.
+name = "names-socket-no-attempts"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names" }
+
+[[case]]
+# `hosts: files` alone: no server asked.
+name = "names-socket-hosts-files-only"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-hostsfiles", RES_OPTIONS = "" }
+
+[[case]]
+# DNS first: 127.0.0.1 is asked of the server (REFUSED), then found in the
+# hosts file; 127.53.0.7 is DNS's `dns-name.example`, not `files-seven`.
+name = "names-socket-dns-first"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-dnsfirst", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = "retries"
+
+[[case]]
+# `[NOTFOUND=return]` after DNS: no name from the hosts file for an address
+# the server said NXDOMAIN of.
+name = "names-socket-dns-notfound-returns"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-dnsreturn", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = "retries"
+
+[[case]]
+# `[UNAVAIL=return]` after DNS: an answer glibc cannot read (127.53.0.6)
+# ends the walk, numeric; one with no PTR (.5, TRYAGAIN) goes on to the
+# hosts file's `files-five`.
+name = "names-socket-dns-unavail-returns"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-dnsunavail", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = "retries"
+
+[[case]]
+# `hosts: files [SUCCESS=merge] dns`: the hosts file's name stands where
+# DNS then does not succeed (127.0.0.1 REFUSED, .5, .6), none where DNS
+# names the address (.7 numeric); each asked of DNS (measured).
+name = "names-socket-files-merge"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-filesmerge", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+[[case]]
+# host.conf's `trim .example`: `ns-name.example` from DNS is `ns-name`.
+name = "names-socket-host-conf-trim"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-trim", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+[[case]]
+# RESOLV_ADD_TRIM_DOMAINS after host.conf's: the hosts file's `files-five`
+# is `files`.
+name = "names-socket-trim-from-the-environment"
+args = ["-F", "pfn", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-trim", RES_OPTIONS = "", RESOLV_ADD_TRIM_DOMAINS = "-five" }
+timeout = 60
+
+[[case]]
+# resolv.conf a directory: glibc's gethostbyaddr() cannot load the
+# resolver's configuration, so it names no host at all, not even from the
+# hosts file, and asks nothing; ports are still named (measured). Under
+# the harness's `attempts:0`, so that no binary asks a server here.
+name = "names-socket-resolv-conf-a-directory"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-resolvdir" }
+
+[[case]]
+name = "names-socket-resolv-conf-a-directory-dash-p-upper"
+args = ["-P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-resolvdir" }
+
+[[case]]
+# The hosts file `/dev/zero`: the C's buffer grows until gethostbyaddr()
+# fails (ENOMEM, under the wrapper's memory limit), so no host is named
+# and no query sent; lsof-rs never reads the device and does the same.
+name = "names-socket-hosts-file-is-dev-zero"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-hostszero", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+[[case]]
+# nsswitch.conf the null device: the empty file glibc reads it as, its
+# built-in sources (hosts `files dns`).
+name = "names-socket-nsswitch-is-dev-null"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-nssnull", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+[[case]]
+# The hosts file the null device: a file with no line, NOTFOUND, which
+# `[NOTFOUND=return]` ends the walk at: every host a number, no query.
+name = "names-socket-hosts-file-is-dev-null"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-hostsnull", RES_OPTIONS = "" }
+timeout = 60
+compare_queries = true
+
+# ------------------------------------- -r's count and marker, +r (DIVERGENCES 152)
+#
+# Each runs a cycle a second, two at most: four seconds a case.
+
+[[case]]
+name = "repeat-count-and-marker"
+args = ["-r", "1c2mX", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# What follows the delay's digits is read again as options, the count's `c`
+# with it: a count of 2, and `-c 2`, which nothing matches.
+name = "repeat-count-is-also-dash-c"
+args = ["-r", "1c2", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# `+r 1c2`: `+c 2`, and two cycles that list.
+name = "repeat-plus-r-count"
+args = ["+r", "1c2", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# Nothing listed: no marker, no sleep, nothing said, exit 1.
+name = "repeat-plus-r-nothing-listed"
+args = ["+r", "1mX", "-a", "-d", "999", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# No delay: one cycle, and `+r`'s status stays an error (measured).
+name = "repeat-plus-r-zero-delay"
+args = ["+r0", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "repeat-field-marker"
+args = ["-r", "1c2mabc", "-F", "pf", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "repeat-field-marker-nul"
+args = ["-r", "1c2", "-F0pf", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# A line a file, and an empty line after each cycle.
+name = "repeat-json-lines"
+args = ["-r", "1c2mX", "-j", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "repeat-terse-marker"
+args = ["-r1c2mX", "-t", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# A format whose text does not change within the run.
+name = "repeat-marker-strftime"
+args = ["-r", "1c1m[%Z%%%n%Y]", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# `-V`'s report comes once, after the loop, of what no cycle located.
+name = "repeat-verbose-after-the-loop"
+args = ["-r", "1c2mX", "-V", "-p", "999999", "-p", "{A}", "-a", "-d", "cwd"]
+
+[[case]]
+name = "repeat-plus-r-verbose-nothing"
+args = ["+r", "1mX", "-V", "-p", "999999"]
+
+[[case]]
+name = "repeat-marker-empty-is-illegal"
+args = ["-r", "1c1m", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# 24 characters do not fit (2 + 1) * 8 bytes with the NUL.
+name = "repeat-marker-too-long-is-illegal"
+args = ["-r", "1m%c", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "repeat-marker-newline-with-dash-f"
+args = ["-r", "1m%n", "-F", "p", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A format refused where it is read is still looked at for `%n`, as the
+# C's `fmt` is: both lines, then the usage (measured).
+name = "repeat-marker-illegal-and-newline-with-dash-f"
+args = ["-F", "-r1m%n%c%c%c", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# The marker's zone is TZ's, read as tzset() reads it: a rule string (no
+# zone file), a zone file under the system's directory, one under TZDIR.
+# %Z%z alone: linux-rules.json masks a clock time and an offset after one.
+# None of these zones has daylight time, so no case depends on the date.
+name = "repeat-marker-follows-tz"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { TZ = "<+0330>-3:30" }
+
+[[case]]
+name = "repeat-marker-follows-tz-file"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { TZ = "Asia/Tokyo" }
+
+[[case]]
+name = "repeat-marker-follows-tzdir"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { TZDIR = "/usr/share/zoneinfo/Asia", TZ = "Tokyo" }
+
+[[case]]
+# A zone name of 300 bytes is kept whole, as glibc keeps it: `%Z` and 34
+# more characters do not fit (36 + 1) * 8 bytes, `illegal <fmt>`; lsof-rs
+# had cut the name at 256 and taken the format.
+name = "repeat-marker-long-zone-name-does-not-fit"
+args = ["-r", "1c1m%ZXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", "-a", "-d", "cwd", "-p", "{A}"]
+env = { TZ = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA5" }
+with_stderr = true
+
+[[case]]
+# `-r0` does not repeat, and the C `stat`s /etc/passwd only for a delay
+# (`if (RptTm) CkPasswd = 1`): with no /etc, it lists, says `no pwd entry`,
+# and exits 0.
+name = "repeat-zero-does-not-stat-passwd"
+args = ["-r0", "-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "noetc" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# The same for `+r0`, whose status stays an error.
+name = "repeat-plus-r-zero-does-not-stat-passwd"
+args = ["+r0", "-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "noetc" }
+with_stderr = true
+timeout = 30
+
+[[case]]
+# `-Q` mutes the search's status, not `+r`'s: nothing listed, exit 1.
+name = "repeat-plus-r-quiet-keeps-idle-status"
+args = ["-Q", "+r", "1mX", "-p", "999999"]
+with_stderr = true
+
+[[case]]
+# `+r ''`: the empty word is `+r`'s value, the default delay.
+name = "repeat-plus-r-empty-value"
+args = ["+r", "", "-a", "-d", "999", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# What follows the digits of a value in the next word is read on as letters
+# inside that word, as the C's GetOpt resumes there: `-r 1-` is the letter
+# `-`, illegal, not the `--` that would end the options (measured; lsof-rs
+# had listed the words after it as names, or repeated until killed).
+name = "repeat-next-word-dash-is-an-option-letter"
+args = ["-r", "1-", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# The same rule for `-o`'s digits (take_digits): the C exits 1.
+name = "offset-next-word-dash-is-an-option-letter"
+args = ["-o", "1-", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# `-L`'s refused digits, then the letter `-`: both lines (measured).
+name = "links-next-word-dash-after-the-count-error"
+args = ["-L", "1-", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# `-r 1-unicode` is the letter `-`, then `-u nicode`, not the long option
+# `--unicode`; the first `-r`'s count keeps a wrong parse to one cycle.
+name = "repeat-next-word-dash-unicode-is-not-a-long-option"
+args = ["-r", "1c1mX", "-r", "1-unicode", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+# ---------------------------------------------- +m, the mount supplement (DIVERGENCES 153)
+
+[[case]]
+# Each mount the table records, `DIR 0xDEV`, and the run ends, exit 0.
+name = "plus-m-prints-the-mounts"
+args = ["+m"]
+
+[[case]]
+name = "plus-m-ends-before-listing"
+args = ["+m", "-p", "{A}", "-V"]
+
+[[case]]
+# An `-e` mount is never stat()ed: `0x0`.
+name = "plus-m-exempt-mount-has-no-device"
+args = ["-e", "/proc", "+m"]
+
+[[case]]
+# A table read before `+m` was given printed nothing, and nothing is
+# printed now (measured).
+name = "plus-m-after-plus-d-prints-nothing"
+args = ["+d", "{AXDIR}", "+m"]
+
+[[case]]
+name = "plus-m-before-plus-d-prints-there"
+args = ["+m", "+d", "{AXDIR}"]
+
+[[case]]
+# `--` is no value: the print, then a path, which reads the table.
+name = "plus-m-then-a-path"
+args = ["+m", "--", "{AXDIR}"]
+
+[[case]]
+# Under `-b` no mount is stat()ed: each takes its device from the file, and
+# where the file has none, the last device the C's buffer held is said.
+name = "plus-m-file-under-b"
+args = ["+m", "{SUPPART}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-under-b-quiet"
+args = ["+m", "{SUPPART}", "-b", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-bad-lines"
+args = ["+m", "{SUPBAD}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A directory given two devices, but `/` is the first looked up under `-b`:
+# a repeat of another length is not seen, the later line wins and the file
+# is kept (`plus-m-file-duplicate-detected` has one that is).
+name = "plus-m-file-duplicate"
+args = ["+m", "{SUPDUP}", "-b", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-missing"
+args = ["+m", "{SUPPART}.nosuch", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-a-directory"
+args = ["+m", "{AXDIR}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# `access()` passes and `fopen()` fails: `can't open(F): ERR` (measured).
+name = "plus-m-file-a-socket"
+args = ["+m", "{YSOCK}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A supplement on a pipe that has a writer: the C reads it to the writer's
+# close and takes `/proc`'s device; lsof-rs refuses every FIFO and pipe
+# unread, `error reading /dev/stdin`, as one whose writer may never close
+# it would hold the run. Ledgered.
+name = "plus-m-file-a-pipe-with-a-writer"
+args = ["-e", "/proc", "+m", "/dev/stdin", "-a", "-d", "cwd", "-p", "{A}"]
+stdin = "/proc 0x15\n"
+with_stderr = true
+
+[[case]]
+# `+m ''`: the empty word is the supplement's name, `access : No such file
+# or directory` under `-b`, then the listing (row 116, amended).
+name = "plus-m-file-empty-name"
+args = ["-b", "+m", "", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A file on an `-e` mount the supplement gave a device: its DEVICE is that
+# device, as the C's `isefsys()` gives it (`/dev 0x4242` is 66,66), where
+# without `+m m` it is UNKNOWN (measured).
+name = "plus-m-file-exempt-row-device"
+args = ["-e", "/dev", "+m", "{SUPEX}", "-a", "-d", "0", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# The same in `-F`: `D0x4242` and no `d`.
+name = "plus-m-file-exempt-row-device-fields"
+args = ["-e", "/dev", "+m", "{SUPEX}", "-F", "pfdD", "-a", "-d", "0", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# `+e`, in JSON: `device_number`.
+name = "plus-m-file-exempt-row-device-plus-e"
+args = ["+e", "/dev", "+m", "{SUPEX}", "-J", "-a", "-d", "0", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# `/proc` is the first mount looked up (`-e`), so the file's second line
+# for it is a duplicate at that length: said even under `-w`, and the file
+# discarded, its devices unused (`assuming dev=…` takes the stale one).
+name = "plus-m-file-duplicate-detected"
+args = ["-e", "/proc", "+m", "{SUPDUP}", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# An empty file: the C dies at its first lookup (exit 139, measured); lsof-rs
+# reads it as a file that names no mount. Ledgered.
+name = "plus-m-file-empty-crashes-the-c"
+args = ["+m", "{SUPEMPTY}", "-b", "-a", "-d", "cwd", "-p", "{A}"]

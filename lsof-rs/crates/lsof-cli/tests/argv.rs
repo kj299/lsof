@@ -22,6 +22,7 @@ fn a_path_that_is_not_utf8_is_looked_up_and_named_escaped() {
     // An ESC as well as the undecodable byte: the argument is quoted back in
     // the error, and it is attacker text, so it must come back escaped.
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .arg(OsStr::from_bytes(b"/tmp/no\xff\x1b[2Jsuch"))
         .output()
         .expect("run lsof");
@@ -46,6 +47,7 @@ fn a_path_that_is_not_utf8_is_looked_up_and_named_escaped() {
 )]
 fn an_option_that_reads_text_says_the_cs_words_about_what_is_not() {
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .arg("-p")
         .arg(OsStr::from_bytes(b"x\xff\x1b[2J"))
         .output()
@@ -62,6 +64,7 @@ fn an_option_that_reads_text_says_the_cs_words_about_what_is_not() {
     // `-u` reads bytes, as the C's `getpwnam()`: a login no account has
     // is its error, the bytes escaped (DIVERGENCES 92).
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .arg("-u")
         .arg(OsStr::from_bytes(b"x\xff\x1b[2J"))
         .output()
@@ -87,6 +90,7 @@ fn a_file_named_by_bytes_is_listed() {
     let path = dir.join(OsStr::from_bytes(b"bad\xffname"));
     let held = std::fs::File::create(&path).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(["-Fn", "-a", "-p", &std::process::id().to_string()])
         .arg(&path)
         .output()

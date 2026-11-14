@@ -1,0 +1,913 @@
+# Mutants for DIVERGENCES 152-154 (2026-11-14): `+n`, `+P`, `+r` and `+m`,
+# like the C. One a rule, bound, cap or default: the resolver's
+# (`lsof-core/src/dns.rs`: MAXNS, timeout:, attempts:, the waits, rotate,
+# edns0, which replies move on, TC, the answer's reading, the NSS statuses),
+# the names' (`sockname.rs`: the 4096-byte NAME, PORTTABTHRESH, the failure
+# list, the scan, port 0, TCP and UDP alone, the cache, the IPv4-mapped
+# rule; `netnames.rs`'s files), the repeat loop's and its grammar's
+# (`repeat.rs`, `args.rs`, `timefmt.rs`'s buffer and `%n` scan), and the
+# supplement's (`mounts.rs`: its grammar, its messages, the C's stat buffer,
+# the bounds). The kill table is this file, run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/plus4.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo, for the differential's fixtures and its `names` modes.
+# CI runs only --apply-only.
+#
+# Run 2026-11-14 as root with --first-kill, in a copy of the tree, the unit
+# gate split by crate (`cargo test -p lsof-core --lib`, `-p
+# lsof-backend-linux --lib`, `-p lsof-cli`) and the differential narrowed to
+# this round's 42 cases (`--matrix` over linux-matrix.toml from its "host and
+# service names in NAME" section on): 87 of 94 killed, 45 by lsof-core's
+# tests, 15 by the backend's, 23 by the CLI's, and 4 by the differential
+# alone (linux-names-off, idle-error-not-in-status,
+# plus-m-print-reads-nothing, plus-m-print-lists: main.rs and the default,
+# which no unit test runs). The 7 that survived each had a rule no test
+# asked (specials-not-escaped, short-datagram-taken, tcp-first-message-only,
+# scan-last-entry-wins, helper-stat-not-zeroed, timeout-zeroes,
+# j1-leap-day-counted); the tests were added (dns.rs, sockname.rs,
+# mounts.rs, and 60 glibc vectors around February 29 in
+# lsof-core/tests/timefmt_glibc.txt) and the 7 run again with the whole
+# differential as the last gate: 7 of 7 killed, by the unit gates. No code
+# changed between the runs, only tests.
+#
+# Rules with no mutant here, and why:
+# * `RES_OPTIONS` ignored in secure-execution mode (`LinuxNames::resolver`):
+#   no test runs set-uid; `at_secure` itself is row 38's, unit-tested.
+# * A FIFO or device supplement never opened (`supplement_bytes`): with its
+#   non-blocking open the refusal is said either way; without both, the
+#   unit test waits on the FIFO for ever, which is what it pins.
+# * The query's id and the rotate start from `RandomState` (backend's
+#   `Net::random`): no output depends on them; `ids_differ` pins spread.
+# * `+m not supported` off Linux (`args.rs`): the arm builds on FreeBSD and
+#   on Windows, whose cfg-gated args tests pin it there; no Linux gate
+#   builds it, and `plus_m_reads_its_file_as_the_c_does` pins Linux.
+# * Bounds this file left without a mutant, each given one or a reason in
+#   `mutants/plus4-fix.toml` (2026-11-14, the review): query_ptr's
+#   65,535-byte buffer (`message-buffer-512`), NAME_KEPT (`name-kept-short`),
+#   +m's closed-pipe exit (`plus-m-pipe-exit`), `-Q` and +r's status
+#   (`quiet-mutes-idle`), TZIF_MAX_BYTES (`zone-file-max-unbounded`),
+#   RESOLV_CONF_LIMIT (now a line's and a file's bound, see there); gone
+#   since: SERVICES_KEPT (the scan streams), ZONE_NAME_MAX (names kept
+#   whole), MAX_TCP_MESSAGES (the deadline ends the exchange).
+#
+# Amended 2026-11-14 by the review: `linux-names-off`, which only the
+# differential (root) killed, is killed on the CI runner too by
+# `crates/lsof-cli/tests/names.rs`; eight anchors moved with the fixes
+# (maxns-not-kept, no-default-server, res-options-not-read,
+# tcp-first-message-only, tryagain-walks-as-notfound, scan-protocol-case,
+# scan-last-entry-wins, json-names-hosts) and were run again: 8 of 8 killed (7 by
+# lsof-core's tests, 1 by the CLI's).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-linux"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+
+[[mutant]]
+name = "maxns-not-kept"
+rule = "past the third nameserver none is read (MAXNS, 154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            if self.servers.len() >= MAXNS {'''
+new = '''            if self.servers.len() >= 99 {'''
+
+[[mutant]]
+name = "timeout-not-capped"
+rule = "timeout: is at most 30 (RES_MAXRETRANS, 154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                self.retrans = atoi(v).min(RES_MAXRETRANS);'''
+new = '''                self.retrans = atoi(v);'''
+
+[[mutant]]
+name = "attempts-not-capped"
+rule = "attempts: is at most 5 (RES_MAXRETRY, 154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                self.retry = atoi(v).min(RES_MAXRETRY);'''
+new = '''                self.retry = atoi(v);'''
+
+[[mutant]]
+name = "keyword-needs-no-blank"
+rule = "a keyword counts only followed by a blank (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            (line.starts_with(word) && matches!(line.get(word.len()), Some(b' ') | Some(b'\t')))'''
+new = '''            (line.starts_with(word))'''
+
+[[mutant]]
+name = "no-default-server"
+rule = "with no server, 127.0.0.1 (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        if self.servers.is_empty() {
+            self.servers'''
+new = '''        if self.servers.len() > 99 {
+            self.servers'''
+
+[[mutant]]
+name = "res-options-not-read"
+rule = "RES_OPTIONS is read after the file (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        if let Some(env) = env {
+            self.options(env);
+        }'''
+new = '''        let _ = env;'''
+
+[[mutant]]
+name = "wait-not-shifted"
+rule = "server n waits timeout << n (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        let mut seconds = self.retrans.checked_shl(shift).unwrap_or(i64::MAX);'''
+new = '''        let mut seconds = self.retrans + 0 * i64::from(shift);'''
+
+[[mutant]]
+name = "wait-not-divided"
+rule = "but for the first, the wait is divided by the servers' count (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        if ns > 0 {
+            seconds /= count;'''
+new = '''        if ns > 99 {
+            seconds /= count;'''
+
+[[mutant]]
+name = "wait-no-floor"
+rule = "a wait is one second at least (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        Duration::from_secs(u64::try_from(seconds.max(1)).unwrap_or(1))'''
+new = '''        Duration::from_secs(u64::try_from(seconds).unwrap_or(0))'''
+
+[[mutant]]
+name = "rotate-ignored"
+rule = "rotate starts each query at another server (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        if !conf.rotate || count <= 1 {'''
+new = '''        if true || count <= 1 {'''
+
+[[mutant]]
+name = "rotate-not-advanced"
+rule = "rotate's next query starts at the next server (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        self.0 = Some(at.wrapping_add(1));'''
+new = '''        self.0 = Some(at);'''
+
+[[mutant]]
+name = "edns0-no-opt"
+rule = "edns0 adds an OPT record (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if conf.edns0 {
+        q.extend_from_slice(&[0, 0, 41,'''
+new = '''    if false {
+        q.extend_from_slice(&[0, 0, 41,'''
+
+[[mutant]]
+name = "wire-name-256"
+rule = "a name of 256 bytes in wire form is none (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                let room = MAX_WIRE_NAME.checked_sub(1)?.checked_sub(out.len())?;'''
+new = '''                let room = MAX_WIRE_NAME.checked_sub(out.len())?;'''
+
+[[mutant]]
+name = "text-past-256"
+rule = "a name's text is at most 256 characters (MAXHOSTNAMELEN, 154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''name_text(&target, MAX_NAME_TEXT.saturating_add(1))'''
+new = '''name_text(&target, MAX_NAME_TEXT.saturating_add(2))'''
+
+[[mutant]]
+name = "specials-not-escaped"
+rule = "ns_name_ntop escapes \" . ; \\ ( ) @ $ (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            if matches!(c, b'"' | b'.' | b';' | b'\\' | b'(' | b')' | b'@' | b'$') {'''
+new = '''            if matches!(c, b'.' | b'\\') {'''
+
+[[mutant]]
+name = "space-printed-raw"
+rule = "a space is \\032 (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            } else if c <= 0x20 || c >= 0x7f {'''
+new = '''            } else if c < 0x20 || c >= 0x7f {'''
+
+[[mutant]]
+name = "root-not-a-dot"
+rule = "the root is . (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if out.is_empty() {
+        if !fits(&out, 1) {
+            return None;
+        }
+        out.push('.');'''
+new = '''    if out.len() > usize::MAX - 1 {
+        if !fits(&out, 1) {
+            return None;
+        }
+        out.push('.');'''
+
+[[mutant]]
+name = "owner-case-sensitive"
+rule = "names are compared but for case (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))'''
+new = '''    a == b'''
+
+[[mutant]]
+name = "short-datagram-taken"
+rule = "a datagram under 12 bytes moves to the next server (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if reply.len() < HEADER {
+        return Verdict::NextServer;'''
+new = '''    if reply.len() < 2 {
+        return Verdict::NextServer;'''
+
+[[mutant]]
+name = "other-id-taken"
+rule = "a reply with another id is waited past (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if reply.get(..2) != query.get(..2) || !question_matches(query, reply) {'''
+new = '''    if !question_matches(query, reply) {'''
+
+[[mutant]]
+name = "other-question-taken"
+rule = "a reply with another question is waited past (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if reply.get(..2) != query.get(..2) || !question_matches(query, reply) {'''
+new = '''    if reply.get(..2) != query.get(..2) {'''
+
+[[mutant]]
+name = "servfail-is-an-answer"
+rule = "SERVFAIL moves to the next server (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if matches!(rcode, SERVFAIL | NOTIMP | REFUSED) {'''
+new = '''    if matches!(rcode, NOTIMP | REFUSED) {'''
+
+[[mutant]]
+name = "lame-is-an-answer"
+rule = "an empty unauthoritative NOERROR moves to the next server (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if rcode == NOERROR && ancount == 0 && !aa && !ra && arcount == 0 {'''
+new = '''    if rcode == NOERROR && ancount == 0 && !aa && !ra && arcount == 99 {'''
+
+[[mutant]]
+name = "tc-ignored"
+rule = "TC asks over TCP (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if tc {
+        return Verdict::Truncated;'''
+new = '''    if tc && false {
+        return Verdict::Truncated;'''
+
+[[mutant]]
+name = "tc-later-servers-over-udp"
+rule = "after TC every later server is asked over TCP (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                vc = true;
+                round = conf.retry;
+                exchange = tcp_attempt'''
+new = '''                round = conf.retry;
+                exchange = tcp_attempt'''
+
+[[mutant]]
+name = "one-round-too-many"
+rule = "attempts rounds, 0 none (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    while round < conf.retry {'''
+new = '''    while round <= conf.retry {'''
+
+[[mutant]]
+name = "tcp-first-message-only"
+rule = "over TCP, messages with another id are read past (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''            if reply.get(..2) == query.get(..2) {
+                return Exchange::Answer(reply.to_vec());
+            }
+        }
+        return Exchange::Next;'''
+new = '''            if reply.get(..2) == query.get(..2) {
+                return Exchange::Answer(reply.to_vec());
+            }
+            return Exchange::Next;
+        }
+        return Exchange::Next;'''
+
+[[mutant]]
+name = "class-not-skipped"
+rule = "a record of another class is passed over (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        if rclass != C_IN {
+            continue;'''
+new = '''        if rclass != C_IN && false {
+            continue;'''
+
+[[mutant]]
+name = "cname-not-followed"
+rule = "a CNAME makes its target the name looked for (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''                Some((target, _)) => expected = target,'''
+new = '''                Some((_target, _)) => {}'''
+
+[[mutant]]
+name = "ptr-owner-unchecked"
+rule = "a PTR counts only at the name looked for (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''        } else if rtype == T_PTR && same_name(&owner, &expected) {'''
+new = '''        } else if rtype == T_PTR {'''
+
+[[mutant]]
+name = "rcode-not-checked"
+rule = "another rcode than NOERROR is no name (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    if rcode != NOERROR || ancount == 0 {'''
+new = '''    if ancount == 0 {'''
+
+[[mutant]]
+name = "no-ptr-is-notfound"
+rule = "records with no PTR at the name are TRYAGAIN (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/dns.rs"
+old = '''    }
+    NssAnswer::TryAgain
+}'''
+new = '''    }
+    NssAnswer::NotFound
+}'''
+
+[[mutant]]
+name = "tryagain-walks-as-notfound"
+rule = "the walk takes TRYAGAIN's action (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            NssAnswer::TryAgain => (NssStatus::TryAgain, None),'''
+new = '''            NssAnswer::TryAgain => (NssStatus::NotFound, None),'''
+
+[[mutant]]
+name = "name-room-doubled"
+rule = "a NAME past 4096 bytes is none (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''        let mut room = i64::try_from(NAME_ROOM).unwrap_or(i64::MAX);'''
+new = '''        let mut room = i64::try_from(NAME_ROOM).unwrap_or(i64::MAX).saturating_mul(2);'''
+
+[[mutant]]
+name = "threshold-off-by-one"
+rule = "ten getservbyport() calls, then the scan (PORTTABTHRESH, 154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''        } else if self.calls < PORTTABTHRESH {'''
+new = '''        } else if self.calls <= PORTTABTHRESH {'''
+
+[[mutant]]
+name = "failure-list-ignored"
+rule = "a port not found is not asked again, for either protocol (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''            if self.failed.contains(&port) {'''
+new = '''            if self.failed.contains(&port) && false {'''
+
+[[mutant]]
+name = "scan-protocol-case"
+rule = "the scan compares protocols in any case (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''            let proto = if protocol.eq_ignore_ascii_case(b"tcp") {'''
+new = '''            let proto = if protocol == b"tcp" {'''
+
+[[mutant]]
+name = "scan-last-entry-wins"
+rule = "the scan keeps the first entry of each port (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''                m.entry(port).or_insert_with(|| name.to_vec());'''
+new = '''                m.insert(port, name.to_vec());'''
+
+[[mutant]]
+name = "port-zero-a-number"
+rule = "port 0 is * (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''        if port == 0 {
+            return b"*".to_vec();'''
+new = '''        if port == 0 && false {
+            return b"*".to_vec();'''
+
+[[mutant]]
+name = "udplite-port-named"
+rule = "only TCP and UDP ports are named (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''            Protocol::Udp => Some(1),
+            _ => None,'''
+new = '''            Protocol::Udp => Some(1),
+            _ => Some(1),'''
+
+[[mutant]]
+name = "host-asked-again"
+rule = "each address is asked once a run (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''        if let Some(name) = self.host_cache.get(&ip) {'''
+new = '''        if let Some(name) = self.host_cache.get(&ip).filter(|_| false) {'''
+
+[[mutant]]
+name = "mapped-needs-both-ends"
+rule = "either end IPv4-mapped makes both IPv4 (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = '''    if !(mapped(&local) || mapped(&remote)) {'''
+new = '''    if !(mapped(&local) && mapped(&remote)) {'''
+
+[[mutant]]
+name = "hosts-last-line-wins"
+rule = "the first hosts line with the address gives the name (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        found = hosts_line_name(line, ip).map(kept);
+        found.is_some()'''
+new = '''        found = hosts_line_name(line, ip).map(kept).or(found.take());
+        false'''
+
+[[mutant]]
+name = "service-protocol-any-case"
+rule = "getservbyport() compares the protocol exactly (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''            .filter(|&(_, p, proto)| p == port && proto == protocol)'''
+new = '''            .filter(|&(_, p, proto)| p == port && proto.eq_ignore_ascii_case(protocol))'''
+
+[[mutant]]
+name = "inet-empty-name-no-n"
+rule = "-F prints an empty n for an Internet socket with no NAME (154)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''            if want('n') && (!f.name.is_empty() || f.is_internet()) {'''
+new = '''            if want('n') && !f.name.is_empty() {'''
+
+[[mutant]]
+name = "linux-names-off"
+rule = "Linux names hosts and ports by default (LINUX_NAMES_BY_DEFAULT, 154)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''pub const LINUX_NAMES_BY_DEFAULT: bool = true;'''
+new = '''pub const LINUX_NAMES_BY_DEFAULT: bool = false;'''
+
+[[mutant]]
+name = "plus-n-not-on"
+rule = "+n names hosts again (154)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                'n' => sel.no_host_resolve = !plus,'''
+new = '''                'n' => sel.no_host_resolve = true,'''
+
+[[mutant]]
+name = "plus-p-not-on"
+rule = "+P names ports again (154)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                'P' => sel.no_port_resolve = !plus,'''
+new = '''                'P' => sel.no_port_resolve = true,'''
+
+[[mutant]]
+name = "terse-looks-up"
+rule = "-t looks no name up (154)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Format::Table => !sel.terse,
+        Format::Fields { only, .. } => only.as_ref().is_none_or(|l| l.contains(&'n')),'''
+new = '''        Format::Table => true,
+        Format::Fields { only, .. } => only.as_ref().is_none_or(|l| l.contains(&'n')),'''
+
+[[mutant]]
+name = "fields-without-n-look-up"
+rule = "-F without n looks no name up (154)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Format::Fields { only, .. } => only.as_ref().is_none_or(|l| l.contains(&'n')),'''
+new = '''        Format::Fields { .. } => true,'''
+
+[[mutant]]
+name = "json-names-hosts"
+rule = "JSON keeps the numeric name and asks nothing (154)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        let renamed = if json {
+            renamed_socket(f, &mut numeric, &mut NoNames)'''
+new = '''        let renamed = if json && false {
+            renamed_socket(f, &mut numeric, &mut NoNames)'''
+
+[[mutant]]
+name = "default-delay-not-15"
+rule = "-r with no digits repeats every 15 s (RPTTM, 152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let delay = if digits > 0 { number(0, digits) } else { RPTTM };'''
+new = '''    let delay = if digits > 0 { number(0, digits) } else { 1 };'''
+
+[[mutant]]
+name = "count-not-reread"
+rule = "what follows the delay's digits is read again as options (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        RepeatRest::Letters(digits) if !next => j += 1 + digits,'''
+new = '''                        RepeatRest::Letters(digits) if !next => j = chars.len() + 0 * digits,'''
+
+[[mutant]]
+name = "plus-r-not-idle"
+rule = "+r ends at the first cycle that lists nothing (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if plus {
+                        repeat.until_idle = true;'''
+new = '''                    if plus && false {
+                        repeat.until_idle = true;'''
+
+[[mutant]]
+name = "marker-not-tried"
+rule = "a marker format is tried where it is read (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                            if (host.marker_ok)(&format) {'''
+new = '''                            if true {'''
+
+[[mutant]]
+name = "refused-marker-not-checked"
+rule = "a refused format is still looked at for %n (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if let Some(format) = last_marker.as_deref().filter(|_| fields_given || json) {'''
+new = '''    if let Some(format) = repeat.marker.as_deref().filter(|_| fields_given || json) {'''
+
+[[mutant]]
+name = "n-check-not-under-json"
+rule = "-J and -j refuse %n too (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if let Some(format) = last_marker.as_deref().filter(|_| fields_given || json) {'''
+new = '''    if let Some(format) = last_marker.as_deref().filter(|_| fields_given) {'''
+
+[[mutant]]
+name = "json-lines-no-blank-line"
+rule = "-j prints an empty line after each repeating cycle (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''        if marking == Marking::JsonLines && delay > 0 {'''
+new = '''        if marking == Marking::JsonLines && delay > 99 {'''
+
+[[mutant]]
+name = "json-lines-blank-without-delay"
+rule = "-j's empty line only where the run repeats (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''        if marking == Marking::JsonLines && delay > 0 {'''
+new = '''        if marking == Marking::JsonLines {'''
+
+[[mutant]]
+name = "idle-cycle-goes-on"
+rule = "+r: a cycle that lists nothing ends the run, before its marker (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''                if !listed {
+                    break;'''
+new = '''                if !listed && false {
+                    break;'''
+
+[[mutant]]
+name = "idle-error-not-cleared"
+rule = "+r: a cycle that listed clears the error (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''                ended.idle_error = false;'''
+new = '''                ended.idle_error = ended.idle_error;'''
+
+[[mutant]]
+name = "plus-r-zero-exits-0"
+rule = "+r0 lists once and exits 1 (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''        idle_error: repeat.until_idle,'''
+new = '''        idle_error: repeat.until_idle && repeat.delay > 0,'''
+
+[[mutant]]
+name = "count-one-cycle-more"
+rule = "a count of N ends the run after N cycles (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''        if repeat.count > 0 && ended.cycles == repeat.count {'''
+new = '''        if repeat.count > 0 && ended.cycles > repeat.count {'''
+
+[[mutant]]
+name = "default-marker-eight"
+rule = "the marker is seven = (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''unwrap_or(b"======="))?;'''
+new = '''unwrap_or(b"========"))?;'''
+
+[[mutant]]
+name = "nul-marker-no-newline"
+rule = "-F0's marker ends NUL and a newline (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''                    out.write_all(if nul { b"\0\n" } else { b"\n" })?;'''
+new = '''                    out.write_all(if nul { b"\0" } else { b"\n" })?;'''
+
+[[mutant]]
+name = "marker-not-reformatted"
+rule = "the marker is formatted anew at each cycle (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/repeat.rs"
+old = '''marker.as_mut().map(|m| m.at(zone, now).to_vec());'''
+new = '''marker.as_mut().map(|m| m.at(zone, 0 * now).to_vec());'''
+
+[[mutant]]
+name = "idle-error-not-in-status"
+rule = "+r's status is the exit status (152)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    let code = if ((!misses.is_empty() || dropped_an_argument) && !quiet) || ended.idle_error {'''
+new = '''    let code = if (!misses.is_empty() || dropped_an_argument) && !quiet {'''
+
+[[mutant]]
+name = "located-not-merged"
+rule = "what any cycle located stays located (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        or(&mut self.pids, &other.pids);'''
+new = '''        let _ = &other.pids;'''
+
+[[mutant]]
+name = "marker-buffer-bigger"
+rule = "the marker's buffer is (len + 1) * 8 + 1 bytes (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            .checked_mul(8)?
+            .checked_add(1)?;'''
+new = '''            .checked_mul(9)?
+            .checked_add(1)?;'''
+
+[[mutant]]
+name = "percent-percent-not-skipped"
+rule = "%% is no %n (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            b'%' => i = i.saturating_add(1),'''
+new = '''            b'%' => {}'''
+
+[[mutant]]
+name = "plus-m-word-is-a-file"
+rule = "+m with no value, or one that opens an option, prints (153)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        None => {
+                            sel.mount_supplement = lsof_core::MountSupplement::Print;'''
+new = '''                        None => {
+                            sel.mount_supplement = lsof_core::MountSupplement::File("".into());'''
+
+[[mutant]]
+name = "plus-m-print-reads-nothing"
+rule = "+m reads the table where it has not, and prints (153)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            if table.is_none() {
+                let _ = read_table(&sel);'''
+new = '''            if false {
+                let _ = read_table(&sel);'''
+
+[[mutant]]
+name = "plus-m-print-lists"
+rule = "+m ends the run before anything is gathered (153)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            calls.finish();
+            std::process::exit(0);
+        }'''
+new = '''            calls.finish();
+        }'''
+
+[[mutant]]
+name = "print-zero-alternate"
+rule = "a mount with no device prints 0x0 (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                0 => format!("{shown} 0x0\n"),'''
+new = '''                0 => format!("{shown} 0\n"),'''
+
+[[mutant]]
+name = "assuming-zero-0x0"
+rule = "assuming dev=%#lx: 0 is 0 (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    if n == 0 {
+        "0".to_string()'''
+new = '''    if n == 0 {
+        "0x0".to_string()'''
+
+[[mutant]]
+name = "assuming-muted-by-w"
+rule = "assuming dev= is said under -w too (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                        fs.tell(&format!(
+                            "lsof: assuming dev={} for {} from {}",
+                            alternate_hex(sb_dev),
+                            esc.bytes(dir.as_bytes()),
+                            esc.bytes(path.as_bytes())
+                        ));'''
+new = '''                        if fs.warns() {
+                        fs.tell(&format!(
+                            "lsof: assuming dev={} for {} from {}",
+                            alternate_hex(sb_dev),
+                            esc.bytes(dir.as_bytes()),
+                            esc.bytes(path.as_bytes())
+                        ));
+                        }'''
+
+[[mutant]]
+name = "hit-not-in-buffer"
+rule = "a device the file gives is left in the C's stat buffer (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                        if let Some(dev) = hit {
+                            sb_dev = dev;'''
+new = '''                        if let Some(dev) = hit.filter(|_| false) {
+                            sb_dev = dev;'''
+
+[[mutant]]
+name = "helper-stat-not-zeroed"
+rule = "a failed helper stat zeroes the C's buffer (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        .then_some(0)
+}'''
+new = '''        .then_some(0)
+        .filter(|_| false)
+}'''
+
+[[mutant]]
+name = "timeout-zeroes"
+rule = "a timed-out stat leaves the buffer as it was (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''!lsof_core::safefs::is_timed_out(e) && !lost)'''
+new = '''!lost)'''
+
+[[mutant]]
+name = "nul-not-cut"
+rule = "a NUL ends a supplement line (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let line = chunk.split(|&b| b == 0).next().unwrap_or_default();'''
+new = '''        let line = chunk;'''
+
+[[mutant]]
+name = "line-not-in-chunks"
+rule = "a supplement line is read 8191 bytes at a time (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        let window = rest.get(..SUPPLEMENT_LINE).unwrap_or(rest);'''
+new = '''        let window = rest;'''
+
+[[mutant]]
+name = "device-needs-no-0x"
+rule = "a device opens with 0x (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            .filter(|&at| line.get(at.saturating_add(1)..at.saturating_add(3)) == Some(&b"0x"[..]))'''
+new = '''            .filter(|_| true)'''
+
+[[mutant]]
+name = "illegal-device-taken"
+rule = "a device with a byte that is no hex digit is illegal (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        if hex != digits.len() {'''
+new = '''        if hex == 99999 + digits.len() {'''
+
+[[mutant]]
+name = "device-saturates"
+rule = "the device wraps past 64 bits (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            (dev << 4).wrapping_add(d)'''
+new = '''            dev.saturating_mul(16).saturating_add(d)'''
+
+[[mutant]]
+name = "duplicate-any-length"
+rule = "a duplicate is seen only at the first lookup's length (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        if path.len() == first {'''
+new = '''        if path.len() == first || true {'''
+
+[[mutant]]
+name = "same-device-duplicate-said"
+rule = "a repeat with the same device is no error (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''                if had != dev {'''
+new = '''                if had == had {'''
+
+[[mutant]]
+name = "bad-line-keeps-file"
+rule = "any bad line discards the file (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    (!err).then_some(found)'''
+new = '''    Some(found)'''
+
+[[mutant]]
+name = "line-errors-not-muted"
+rule = "-w mutes the line errors (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''        if line.first() != Some(&b'/') {
+            if warn {'''
+new = '''        if line.first() != Some(&b'/') {
+            if true {'''
+
+[[mutant]]
+name = "socket-says-access"
+rule = "fopen() failing past access() is can't open (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => access(&e),'''
+new = '''            _ if true => access(&e),'''
+
+[[mutant]]
+name = "supplement-unbounded"
+rule = "a supplement past 16 MiB is not read (153)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    if text.len() as u64 > SUPPLEMENT_MAX_BYTES {
+        return Err(error());'''
+new = '''    if text.len() as u64 > u64::MAX - 1 {
+        return Err(error());'''
+
+[[mutant]]
+name = "j1-leap-day-counted"
+rule = "Jn never counts February 29 (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''                if rule.d >= 60 && leap {'''
+new = '''                if rule.d >= 60 && leap && false {'''
+
+[[mutant]]
+name = "leap-century"
+rule = "a century is no leap year but every fourth (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)'''
+new = '''    year % 4 == 0'''
+
+[[mutant]]
+name = "v1-block-read-in-v2"
+rule = "a version 2 file is read from its 64-bit block (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            if version != 0 && !wide {'''
+new = '''            if version == 99 && !wide {'''
+
+[[mutant]]
+name = "e-zero-padded"
+rule = "%e pads with a space (152)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            b'e' => unless_e(Is::Number(2, i64::from(tm.mday), true)),'''
+new = '''            b'e' => unless_e(Is::Number(2, i64::from(tm.mday), false)),'''

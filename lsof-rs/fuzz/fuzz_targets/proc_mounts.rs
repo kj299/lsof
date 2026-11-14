@@ -13,7 +13,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_backend_linux::fuzz_api::{parse_mounts, resolve_table};
-use lsof_core::{Blocking, ExemptFs, MountRequest, SafeFs};
+use lsof_core::{Blocking, ExemptFs, MountRequest, MountSupplement, SafeFs};
 
 fuzz_target!(|data: &[u8]| {
     // Bytes, as the kernel writes them: only space, tab, newline and backslash
@@ -55,10 +55,33 @@ fuzz_target!(|data: &[u8]| {
         .map(|r| ExemptFs {
             path: r.dir.clone(),
             plus: data.len() % 2 == 0,
+            device: None,
         })
         .into_iter()
         .collect();
-    let table = resolve_table(&rows, &MountRequest { exempt }, &quiet);
+    // `+m`'s print, by the input's length: one line each time a mount is
+    // recorded, so at least one a mount kept (an NFS `/` after another `/`
+    // is recorded twice, as the C prints it twice) and at most one a line.
+    let supplement = if data.len() % 3 == 0 {
+        MountSupplement::Print
+    } else {
+        MountSupplement::None
+    };
+    let print = supplement == MountSupplement::Print;
+    let table = resolve_table(&rows, &MountRequest { exempt, supplement }, &quiet);
+    let printed = table
+        .supplement_out
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    if print {
+        assert!(
+            printed >= table.entries.len() && printed <= rows.len(),
+            "{printed} lines printed: {table:?}"
+        );
+    } else {
+        assert_eq!(printed, 0, "{table:?}");
+    }
     assert!(table.entries.len() <= 1, "{table:?}");
     assert!(table.entries.iter().all(|m| m.device.is_none()), "{table:?}");
     assert!(table.has_nfs <= 2);

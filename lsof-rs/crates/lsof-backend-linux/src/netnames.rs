@@ -103,6 +103,12 @@ fn at_secure(auxv: &[u8]) -> bool {
     true
 }
 
+/// Whether this process runs in secure-execution mode, as its auxiliary
+/// vector says (`at_secure`; a vector that cannot be read says it does).
+pub fn secure_execution() -> bool {
+    at_secure(&lsof_core::netnames::small_file(Path::new(AUXV), 1 << 16))
+}
+
 /// The file `multi` is read from, as glibc's `_res_hconf_init()` names it:
 /// `RESOLV_HOST_CONF` from the environment (`env`) if it is set, whatever
 /// it holds, and `/etc/host.conf` if not. In secure-execution mode
@@ -154,6 +160,189 @@ pub fn lookup_service(name: &[u8], protocol: &str) -> Option<u16> {
         Path::new(SERVICES),
         Path::new(NSSWITCH),
     )
+}
+
+/// `/etc/resolv.conf`, which glibc reads at its first query.
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+
+/// The index of network interface `name`, for an IPv6 name server's
+/// `%scope` (`if_nametoindex(3)`, which `std` has not): what
+/// `/sys/class/net/NAME/ifindex` says, for a name that is one file name.
+fn interface_index(name: &[u8]) -> Option<u32> {
+    use std::os::unix::ffi::OsStrExt;
+    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') || name.contains(&0)
+    {
+        return None;
+    }
+    let path = Path::new("/sys/class/net")
+        .join(std::ffi::OsStr::from_bytes(name))
+        .join("ifindex");
+    let text = lsof_core::netnames::small_file(&path, 32);
+    std::str::from_utf8(&text).ok()?.trim().parse().ok()
+}
+
+/// A socket's names as the C's C library gives them on Linux
+/// (`lsof_core::sockname::NameService`): `gethostbyaddr()` by glibc's
+/// walk of nsswitch.conf's `hosts` sources, `files` the hosts file and
+/// `dns` [`lsof_core::dns::query_ptr`] over [`crate::dns::Net`], under
+/// `/etc/resolv.conf` and `RES_OPTIONS` (not in secure-execution mode,
+/// where glibc's loader takes it out of the environment); a service from
+/// `/etc/services` where the `services` walk reaches `files`. What glibc
+/// reads before its first host lookup is read at this one's and kept for
+/// the run, where glibc reads `resolv.conf` again when the file changes:
+/// `/etc/host.conf` (its `trim` domains, [`HostConf`]) and the resolver's
+/// configuration ([`lsof_core::dns::resolv_conf_file`]); where either
+/// stops glibc, no host is named and nothing is asked.
+pub struct LinuxNames {
+    host_conf: Option<HostConf>,
+    /// The resolver's configuration once read: `None` inside where glibc's
+    /// load fails.
+    resolver: Option<Option<lsof_core::dns::ResolvConf>>,
+    rotation: lsof_core::dns::Rotation,
+    net: crate::dns::Net,
+    paths: NamePaths,
+}
+
+/// The files a [`LinuxNames`] reads: the system's, or a test's.
+struct NamePaths {
+    hosts: PathBuf,
+    nsswitch: PathBuf,
+    services: PathBuf,
+    resolv_conf: PathBuf,
+    /// `None`: `RESOLV_HOST_CONF`, or `/etc/host.conf`, as glibc names it.
+    host_conf: Option<PathBuf>,
+}
+
+/// `/etc/host.conf` as `gethostbyaddr()` takes it (`_res_hconf_init()`,
+/// before the first lookup): the `trim` domains it and the environment
+/// give, or that it would hold glibc's reader ([`HostConf::held`]).
+struct HostConf {
+    /// A FIFO or a device other than the null device: glibc waits on its
+    /// `fopen()` for ever, or reads it for ever (measured: the C never
+    /// returns with `/dev/zero` or a FIFO there); no host is named.
+    held: bool,
+    trim: Vec<Vec<u8>>,
+}
+
+impl HostConf {
+    fn read(path: &Path) -> HostConf {
+        use std::os::unix::ffi::OsStrExt;
+        if lsof_core::netnames::holds_glibcs_reader(path) {
+            return HostConf {
+                held: true,
+                trim: Vec::new(),
+            };
+        }
+        let text = lsof_core::netnames::small_file(path, HOST_CONF_LIMIT);
+        let add = std::env::var_os("RESOLV_ADD_TRIM_DOMAINS");
+        let replace = std::env::var_os("RESOLV_OVERRIDE_TRIM_DOMAINS");
+        HostConf {
+            held: false,
+            trim: lsof_core::netnames::trim_domains(
+                &text,
+                add.as_deref().map(std::ffi::OsStr::as_bytes),
+                replace.as_deref().map(std::ffi::OsStr::as_bytes),
+            ),
+        }
+    }
+}
+
+/// The most of a host.conf that is read for its `trim` lines, as for
+/// `multi` (DIVERGENCES 38).
+const HOST_CONF_LIMIT: u64 = 1 << 20;
+
+impl LinuxNames {
+    pub fn new() -> Self {
+        Self::with_paths(NamePaths {
+            hosts: PathBuf::from(HOSTS),
+            nsswitch: PathBuf::from(NSSWITCH),
+            services: PathBuf::from(SERVICES),
+            resolv_conf: PathBuf::from(RESOLV_CONF),
+            host_conf: None,
+        })
+    }
+
+    fn with_paths(paths: NamePaths) -> Self {
+        LinuxNames {
+            host_conf: None,
+            resolver: None,
+            rotation: lsof_core::dns::Rotation::default(),
+            net: crate::dns::Net::new(),
+            paths,
+        }
+    }
+
+    fn host_conf(&mut self) -> &HostConf {
+        let named = self.paths.host_conf.clone();
+        self.host_conf.get_or_insert_with(|| {
+            let path = named.unwrap_or_else(|| match std::env::var_os("RESOLV_HOST_CONF") {
+                None => PathBuf::from(HOST_CONF),
+                env => {
+                    let auxv = lsof_core::netnames::small_file(Path::new(AUXV), 1 << 16);
+                    host_conf_path(env, at_secure(&auxv))
+                }
+            });
+            HostConf::read(&path)
+        })
+    }
+
+    fn resolver(&mut self) -> Option<&lsof_core::dns::ResolvConf> {
+        let path = &self.paths.resolv_conf;
+        self.resolver
+            .get_or_insert_with(|| {
+                use std::os::unix::ffi::OsStrExt;
+                let env = std::env::var_os("RES_OPTIONS").filter(|_| {
+                    let auxv = lsof_core::netnames::small_file(Path::new(AUXV), 1 << 16);
+                    !at_secure(&auxv)
+                });
+                lsof_core::dns::resolv_conf_file(
+                    path,
+                    env.as_deref().map(std::ffi::OsStr::as_bytes),
+                    &interface_index,
+                )
+            })
+            .as_ref()
+    }
+}
+
+impl Default for LinuxNames {
+    fn default() -> Self {
+        LinuxNames::new()
+    }
+}
+
+impl lsof_core::sockname::NameService for LinuxNames {
+    fn host_by_addr(&mut self, ip: IpAddr) -> Option<Vec<u8>> {
+        // glibc's `gethostbyaddr_r()`: host.conf first, then the resolver's
+        // configuration (`NEED__RES`), and only then the nsswitch walk,
+        // whatever `hosts:` says.
+        if self.host_conf().held {
+            return None;
+        }
+        let conf = self.resolver()?.clone();
+        let trim = self.host_conf().trim.clone();
+        let files = GlibcFiles {
+            hosts: &self.paths.hosts,
+            host_conf: Path::new(HOST_CONF),
+            nsswitch: &self.paths.nsswitch,
+        };
+        let (net, rotation) = (&mut self.net, &mut self.rotation);
+        let mut dns = |ip: IpAddr| lsof_core::dns::query_ptr(&conf, ip, net, rotation);
+        lsof_core::netnames::glibc_host_by_addr(ip, &files, &trim, &mut dns)
+    }
+
+    fn service_by_port(&mut self, port: u16, protocol: &[u8]) -> Option<Vec<u8>> {
+        lsof_core::netnames::glibc_service_by_port(
+            port,
+            protocol,
+            &self.paths.services,
+            &self.paths.nsswitch,
+        )
+    }
+
+    fn for_each_service(&mut self, each: &mut lsof_core::netnames::ServiceVisitor<'_>) {
+        lsof_core::netnames::glibc_services(&self.paths.services, &self.paths.nsswitch, each);
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +528,72 @@ mod tests {
                 "/etc/gai.conf"
             ]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What `gethostbyaddr()` reads before its walk, as glibc 2.39 reads
+    /// it (each measured through the C): a resolv.conf glibc cannot load
+    /// names no host at all, from the hosts file either, and a host.conf
+    /// that would hold glibc's reader none either, while ports are still
+    /// named; host.conf's `trim` cuts the name.
+    #[test]
+    #[cfg_attr(miri, ignore = "it makes files and a FIFO")]
+    fn what_glibc_reads_before_the_walk_decides_it() {
+        use lsof_core::sockname::NameService;
+        let dir = std::env::temp_dir().join(format!("lsof-rs-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("hosts"),
+            "127.0.0.1 localhost\n127.0.0.2 two.Example\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("nsswitch.conf"), "hosts: files\nservices: files\n").unwrap();
+        std::fs::write(dir.join("services"), "svc 4001/tcp\n").unwrap();
+        std::fs::write(dir.join("host.conf"), "trim .example\n").unwrap();
+        let names = |resolv: &str, host_conf: &str| {
+            LinuxNames::with_paths(NamePaths {
+                hosts: dir.join("hosts"),
+                nsswitch: dir.join("nsswitch.conf"),
+                services: dir.join("services"),
+                resolv_conf: dir.join(resolv),
+                host_conf: Some(dir.join(host_conf)),
+            })
+        };
+        let lo = ip(0x7f00_0001);
+        let two = ip(0x7f00_0002);
+        // No resolv.conf: glibc's defaults, and the hosts file's names,
+        // trimmed.
+        let mut n = names("nosuch", "host.conf");
+        assert_eq!(n.host_by_addr(lo), Some(b"localhost".to_vec()));
+        assert_eq!(n.host_by_addr(two), Some(b"two".to_vec()));
+        let mut n = names("nosuch", "nosuch.conf");
+        assert_eq!(n.host_by_addr(two), Some(b"two.Example".to_vec()));
+        // A resolv.conf that is a directory: no host named, even by the
+        // hosts file under `hosts: files`; the port still is.
+        std::fs::create_dir(dir.join("resolv.d")).unwrap();
+        let mut n = names("resolv.d", "host.conf");
+        assert_eq!(n.host_by_addr(lo), None);
+        assert_eq!(n.service_by_port(4001, b"tcp"), Some(b"svc".to_vec()));
+        // A host.conf that is a FIFO: glibc's `fopen()` waits for ever; no
+        // host named, and nothing opened.
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.join("host.fifo"))
+            .status();
+        if made.is_ok_and(|s| s.success()) {
+            let mut n = names("nosuch", "host.fifo");
+            assert_eq!(n.host_by_addr(lo), None);
+            assert_eq!(n.service_by_port(4001, b"tcp"), Some(b"svc".to_vec()));
+        }
+        // The null device as host.conf is the empty file it is to glibc.
+        let mut n = LinuxNames::with_paths(NamePaths {
+            hosts: dir.join("hosts"),
+            nsswitch: dir.join("nsswitch.conf"),
+            services: dir.join("services"),
+            resolv_conf: dir.join("nosuch"),
+            host_conf: Some(PathBuf::from("/dev/null")),
+        });
+        assert_eq!(n.host_by_addr(two), Some(b"two.Example".to_vec()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

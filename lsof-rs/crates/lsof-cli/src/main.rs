@@ -117,6 +117,33 @@ fn wants_privilege_hint(elevated: bool, selection: &Selection, format: &Format) 
         && !selection.has_path_filter()
 }
 
+/// The help's `-n`/`-P` entries: what lsof-rs names on this platform.
+#[cfg(target_os = "linux")]
+const HELP_NAMES: &str =
+    "    -n / +n       hosts as numbers / named (the default), the last one wins;
+                  a name comes from /etc/hosts or DNS, as the C's
+                  gethostbyaddr() gives it, each address asked once a run
+    -P / +P       ports as numbers / service names from /etc/services (the
+                  default), the last one wins
+";
+#[cfg(windows)]
+const HELP_NAMES: &str =
+    "    -n / +n       hosts as numbers / named by reverse DNS (the default), the
+                  last one wins
+    -P / +P       ports as numbers / named from a built-in table of common
+                  services (the default), the last one wins
+";
+#[cfg(not(any(target_os = "linux", windows)))]
+const HELP_NAMES: &str = "    -n / +n       accepted; hosts always print as numbers here
+    -P / +P       accepted; ports always print as numbers here
+";
+
+/// Where the help says `-r`'s marker takes its zone from.
+#[cfg(windows)]
+const HELP_ZONE: &str = "TZ's rule string, else UTC";
+#[cfg(not(windows))]
+const HELP_ZONE: &str = "TZ, TZDIR, /etc/localtime";
+
 fn usage() -> String {
     // Real newlines, not `\n\` continuations: a continuation also eats the
     // next line's leading spaces, which printed every line flush left.
@@ -171,9 +198,7 @@ SELECTION:
                   if an argument names no mount
 
 OUTPUT:
-    -n            do not resolve host names (Windows; Linux never does)
-    -P            do not resolve port names (Windows; Linux never does)
-    -R            add a PPID (parent PID) column
+{names}    -R            add a PPID (parent PID) column
     -o [n]        an OFFSET column (0t<decimal>, 0x<hex> past n digits,
                   default 8); -o <n> alone sets the digit limit and keeps
                   SIZE/OFF
@@ -196,7 +221,16 @@ OUTPUT:
                   -F ? lists the field letters
     -J            one JSON object, the C's schema; -F selects its fields
     -j            JSON Lines, one object per file (-J's keys, flattened)
-    -r [delay]    repeat every <delay>s (default 15) until interrupted
+    -r [t[c<n>][m<fmt>]]
+                  repeat every t seconds (default 15) until interrupted, or n
+                  times; after each cycle print `=======`, or the strftime(3)
+                  format fmt ({zone}); -r0 is one cycle.
+                  Unless m<fmt> follows, what follows t's digits is read again
+                  as options, as the C reads it (-r 1c2 is also -c 2; -r 1c2mX
+                  is not); beside -F, -J or -j, fmt may not hold %n
+    +r [t[c<n>][m<fmt>]]
+                  the same, ending at the first cycle that lists nothing;
+                  exit 1 if that was the first (and after +r0's one cycle)
     +c <n>        cap COMMAND column width at <n> characters
 
 MISCELLANEOUS:
@@ -205,6 +239,9 @@ MISCELLANEOUS:
                   enable non-fatal stderr warnings (default: report, on)
     -X            toggle: leave TCP and UDP sockets unidentified, without
                   reading their tables; -i is refused while it is on
+    +m [m]        (Linux) without m: print each mount, DIR 0xDEV, and exit;
+                  with m, a file of such lines: a mount whose directory is not
+                  stat()ed (-b, -e, an error) takes its device from it
     -e <fs>       do not stat files on this mounted file system, nor the
                   mount point; they show as UNKN... rows. <fs> is read
                   through its links; +e <fs> is taken as typed, and the
@@ -238,7 +275,9 @@ Without elevation, lsof-rs shows the processes you can access; run as
 Administrator (Windows) or root (Linux) for a system-wide view. On Windows,
 privileges are enabled only for the operations that need them.
 ",
-        ver = env!("CARGO_PKG_VERSION")
+        ver = env!("CARGO_PKG_VERSION"),
+        names = HELP_NAMES,
+        zone = HELP_ZONE
     )
 }
 
@@ -716,6 +755,38 @@ fn exit_on_write_error(r: std::io::Result<()>) {
     }
 }
 
+/// The zone glibc's `tzset()` settles on for this process: `TZ`, `TZDIR`
+/// and `/etc/localtime`, each zone file read whole and only if it is a
+/// regular file within `TIMEFMT`'s bound; in secure-execution mode only the
+/// system's zone files (DIVERGENCES 152). On Windows only a `TZ` rule
+/// string, or UTC.
+fn local_zone() -> lsof_core::timefmt::Zone {
+    let tz = std::env::var_os("TZ");
+    let tzdir = std::env::var_os("TZDIR");
+    #[cfg(target_os = "linux")]
+    let secure = lsof_backend_linux::secure_execution();
+    #[cfg(not(target_os = "linux"))]
+    let secure = false;
+    let mut read = |path: &[u8]| -> Option<Vec<u8>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            lsof_core::timefmt::read_zone_file(Path::new(std::ffi::OsStr::from_bytes(path)))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            None
+        }
+    };
+    lsof_core::timefmt::Zone::from_env(
+        tz.as_ref().map(|t| t.as_encoded_bytes()),
+        tzdir.as_ref().map(|t| t.as_encoded_bytes()),
+        secure,
+        &mut read,
+    )
+}
+
 /// What `-h`, `-F ?` and `-v` ask for, on stderr, in the C's order whatever
 /// order they were given in: the help, the field letters, the version
 /// (`usage.c`; measured, `-v -h` prints the help and then the version). The
@@ -747,6 +818,10 @@ fn main() {
     {
         std::process::exit(lsof_backend_linux::safefs::serve());
     }
+    // What the C closes first (`closefrom_shim(ctx, 3)`): noted before any
+    // descriptor of lsof-rs's own is opened (DIVERGENCES 153).
+    #[cfg(target_os = "linux")]
+    lsof_backend_linux::note_inherited_fds();
 
     // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
     // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —
@@ -784,6 +859,10 @@ fn main() {
     // `-h`, `-v` and a usage error make none unless one of those asked (on
     // Windows, no token is asked whether it is elevated).
     let env_cell: std::cell::OnceCell<Env> = std::cell::OnceCell::new();
+    // The zone `-r m<fmt>` is tried in where the parse reads it, as the C's
+    // `util_strftime()` calls `localtime()` there, and later printed in
+    // (DIVERGENCES 152): read only by a run that gives a marker format.
+    let marker_zone: std::cell::OnceCell<lsof_core::timefmt::Zone> = std::cell::OnceCell::new();
     let parsed = {
         let read_table = |req: &MountRequest, fs: &SafeFs| {
             env_cell.get_or_init(make_env).backend.mount_table(req, fs)
@@ -813,12 +892,17 @@ fn main() {
                 .backend
                 .lookup_service(name, protocol)
         };
+        let marker_ok = |format: &[u8]| {
+            let zone = marker_zone.get_or_init(local_zone);
+            lsof_core::timefmt::Marker::new(format, zone, now_seconds()).is_some()
+        };
         let host = HostChecks {
             lookup_user: &lookup_user,
             selinux_enabled: &selinux_enabled,
             identifies_paths: &identifies_paths,
             lookup_host: &lookup_host,
             lookup_service: &lookup_service,
+            marker_ok: &marker_ok,
         };
         parse_reporting(argv, &fs, &read_table, &host)
     };
@@ -1066,6 +1150,19 @@ fn main() {
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             std::process::exit(1);
         }
+        // `+m`: the C reads its table (and prints each mount as it records
+        // it) where it has not yet, and ends the run, exit 0, before
+        // anything is gathered (`main.c:1326-1331`). A table read before
+        // `+m` was given printed nothing, and nothing is printed now
+        // (measured: `+d /tmp +m`). DIVERGENCES 153.
+        if sel.mount_supplement == lsof_core::MountSupplement::Print {
+            if table.is_none() {
+                let _ = read_table(&sel);
+            }
+            #[cfg(target_os = "linux")]
+            calls.finish();
+            std::process::exit(0);
+        }
         if table.is_none() && needs_table {
             table = Some(read_table(&sel));
         }
@@ -1111,19 +1208,23 @@ fn main() {
         );
     }
 
-    // The between-cycle separator `-r` prints is format-aware (see
-    // `Format::repeat_marker`). Captured before `run_cycle` moves `format` in.
-    let repeat_marker = format.repeat_marker();
-    // Captured before `run_cycle` takes `selection`: `-Q` decides the exit
-    // status, and the closure needs the selection itself.
+    // What the C keeps from one cycle to the next: the names it looked up
+    // (`gethostnm()`'s and `lkup_port()`'s caches) and the search items any
+    // cycle located (each item's `f`, never cleared).
+    let name_service = env.backend.name_service().map(std::cell::RefCell::new);
+    let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(
+        !selection.no_host_resolve,
+        !selection.no_port_resolve,
+    ));
+    let located_all: std::cell::RefCell<Option<Located>> = std::cell::RefCell::new(None);
+    let marking = marking_of(&format);
+    // Under `-r` the C re-reads the password file when it changed, and so
+    // does lsof-rs (DIVERGENCES 70): a run that repeats at all.
+    #[cfg(target_os = "linux")]
+    let repeating = repeat.delay > 0;
     let quiet = selection.quiet;
-    // The C reports what it did not locate once, after its repeat loop, and a
-    // plain `-r` loop ends only on a signal, which kills it first: under `-r`
-    // there is no report at all (DIVERGENCES 54). lsof-rs refuses `+r` and a
-    // repeat count, the two ways the C's loop can end by itself.
-    let repeating = repeat.is_some();
 
-    let run_cycle = move || -> usize {
+    let run_cycle = || -> bool {
         // Under `-r` the C `stat`s `/etc/passwd` at each cycle's first login
         // and forgets the names it keeps when the file changed (DIVERGENCES
         // 70); here before the gather that names the owners.
@@ -1144,7 +1245,14 @@ fn main() {
         // gathered BEFORE any file is selected, so a PID whose files `-a`
         // drops is still located; see `Selection::locate`.
         let located = selection.locate(&gathered);
-        let procs = selection.apply_with(gathered, env.backend.take_endpoint_tables());
+        let mut procs = selection.apply_with(gathered, env.backend.take_endpoint_tables());
+        // JSON's numeric `name`, which looks nothing up; the table's and
+        // `-F`'s names are asked as each row is written, below.
+        if matches!(format, Format::Json(_)) {
+            if let Some(service) = name_service.as_ref() {
+                name_sockets(&mut procs, &format, &selection, &names, service);
+            }
+        }
         // A `stat` that failed is the C's `Error()` where it looks a login
         // up, before this cycle prints anything (`print.c:1726-1731`).
         #[cfg(target_os = "linux")]
@@ -1166,123 +1274,288 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
-        // platform rule is whether `\` is (Unix) or is the path separator
-        // (Windows). See lsof_core::render::escape.
-        let esc = Escaper::for_host();
-        let misses = if repeating {
-            Vec::new()
-        } else {
-            unlocated(&selection, &located, esc)
-        };
+        let listed = prints_a_process(&procs, &format);
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
-        // host (DIVERGENCES 30). JSON is written a process at a time; `-F` still builds its text first.
+        // host (DIVERGENCES 30). JSON is written a process at a time, `-F` a set at a time.
         // The C writes these as it prints, unbuffered, while its listing
         // waits in stdout's buffer; here they come first, before any of it
         // (DIVERGENCES 36).
         for uid in pwd_warnings(&procs, &format, &selection) {
             say!("lsof: no pwd entry for UID {uid}");
         }
+        // Through a buffer of the C's stdout's size on a pipe (glibc's
+        // `st_blksize`, 4096), each socket named as its row is written: a
+        // reader that goes away ends the lookups at the next write, as the
+        // C dies of SIGPIPE at its next flush (DIVERGENCES 154).
         let stdout = std::io::stdout();
-        let mut sink = std::io::BufWriter::new(stdout.lock());
-        let written = match &format {
-            Format::Table => table::render_to(
-                &mut sink,
-                &procs,
-                TableOpts {
-                    terse: selection.terse,
-                    show_ppid: columns.ppid,
-                    show_pgid: columns.pgid,
-                    show_offset: columns.offset,
-                    show_size: columns.size,
-                    offset_digits: columns.offset_digits,
-                    show_links: columns.nlink,
-                    file_flags: columns.file_flags,
-                    human_size: selection.human_size,
-                    command_width: selection.command_width.cap(),
-                    tcp_show: selection.tcp_info(),
-                    ..TableOpts::new(esc)
-                },
-            ),
-            Format::Fields { nul, only } => sink.write_all(
-                fields::render_with_offset_digits(
-                    &procs,
-                    *nul,
-                    only.as_deref(),
-                    selection.tcp_info(),
-                    esc,
-                    columns.offset_digits,
-                    columns.file_flags,
-                )
-                .as_bytes(),
-            ),
-            Format::Json(j) => {
-                let opts = json::JsonOpts {
-                    only: j.only.as_deref(),
-                    tcp_show: j.tcp_show,
-                    file_flags: j.file_flags,
-                    numeric_ids: selection.numeric_ids,
-                    version: env!("CARGO_PKG_VERSION"),
-                };
-                if j.lines {
-                    json::write_lines(&mut sink, &procs, &opts)
-                } else {
-                    json::write_aggregated(&mut sink, &procs, &opts)
-                }
-            }
-        };
-        // `-V`'s lines follow the listing, on the same stream, as the C's do.
-        // `-Q` does not mute them: it changes only the exit status, as the
-        // C's `FsearchErr` does (DIVERGENCES 53).
-        let written = written.and_then(|()| {
-            if selection.verbose {
-                for m in &misses {
-                    writeln!(sink, "{m}")?;
-                }
-            }
-            sink.flush()
-        });
+        let mut sink = std::io::BufWriter::with_capacity(4096, stdout.lock());
+        let written = write_listing(
+            &mut sink,
+            &procs,
+            &format,
+            &selection,
+            &columns,
+            (&names, name_service.as_ref()),
+        );
+        let written = written.and_then(|()| sink.flush());
         exit_on_write_error(written);
-        misses.len()
+        let mut all = located_all.borrow_mut();
+        match all.as_mut() {
+            Some(all) => all.merge(&located),
+            None => *all = Some(located),
+        }
+        listed
     };
 
-    // `-r`: repeat until interrupted, printing the format-aware cycle marker.
-    // Exit promptly after the final cycle: handle enumeration may have abandoned
-    // a worker thread blocked uninterruptibly in `NtQueryObject` (a synchronous
-    // pipe/device), which can otherwise stall normal process teardown. lsof's
-    // exit status is 1 when a specified `-p`/path search item was not located.
-    match repeat {
-        Some(delay) => loop {
-            run_cycle();
-            // lsof flushes each cycle so a piped consumer sees output promptly.
-            let mut out = std::io::stdout();
-            exit_on_write_error(
-                out.write_all(repeat_marker.as_bytes())
-                    .and_then(|()| out.flush()),
-            );
-            std::thread::sleep(std::time::Duration::from_secs(delay));
-        },
-        None => {
-            // `-Q` suppresses the search-failure status as well as the
-            // message: `main.c` clears `ErrStat` under it and never sets
-            // `LSOF_SEARCH_FAILURE`, so `lsof -Q /nope` and `lsof -Q -p 999999`
-            // both exit 0. lsof-rs had muted the message alone and still
-            // exited 1, which is the half that scripts actually branch on.
-            let code = if (run_cycle() > 0 || dropped_an_argument) && !quiet {
-                1
-            } else {
-                0
+    // `-r`, `+r`: the C's loop (DIVERGENCES 54, 152), its marker formatted
+    // in the zone the parse read for it. Exit promptly after the final
+    // cycle: handle enumeration may have abandoned a worker thread blocked
+    // uninterruptibly in `NtQueryObject` (a synchronous pipe/device), which
+    // can otherwise stall normal process teardown.
+    let zone = marker_zone.into_inner().unwrap_or_else(|| {
+        lsof_core::timefmt::Zone::Rules(lsof_core::timefmt::PosixTz::utc(b"UTC"))
+    });
+    let mut marker = repeat
+        .marker
+        .as_deref()
+        .and_then(|fmt| lsof_core::timefmt::Marker::new(fmt, &zone, now_seconds()));
+    let mut host = RunHost {
+        cycle: run_cycle,
+        out: std::io::stdout(),
+    };
+    let ended = lsof_cli::repeat::run(&repeat, &mut marker, &zone, marking, &mut host);
+    exit_on_write_error(
+        ended
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| std::io::Error::new(e.kind(), e.to_string())),
+    );
+    let ended = ended.unwrap_or(lsof_cli::repeat::Ended {
+        idle_error: false,
+        cycles: 0,
+    });
+    // What no cycle located, once, after the loop, on stdout; `-Q` does not
+    // mute the lines, only the status (DIVERGENCES 53, 54).
+    let located = located_all.into_inner().unwrap_or_default();
+    let misses = unlocated(&selection, &located, Escaper::for_host());
+    if selection.verbose && !misses.is_empty() {
+        let mut out = std::io::stdout().lock();
+        let written = misses
+            .iter()
+            .try_for_each(|m| writeln!(out, "{m}"))
+            .and_then(|()| out.flush());
+        exit_on_write_error(written);
+    }
+    // `-Q` suppresses the search-failure status as well as the message:
+    // `main.c` clears `ErrStat` under it and never sets
+    // `LSOF_SEARCH_FAILURE`, so `lsof -Q /nope` and `lsof -Q -p 999999`
+    // both exit 0. `+r`'s status is not muted (`if (!rv && rc) rv = ev`).
+    let code = if ((!misses.is_empty() || dropped_an_argument) && !quiet) || ended.idle_error {
+        1
+    } else {
+        0
+    };
+    // The helper is idle; closing its pipe ends it. Kept until now so
+    // that, like the C's child, it is there when lsof lists itself.
+    #[cfg(target_os = "linux")]
+    calls.finish();
+    #[cfg(windows)]
+    lsof_backend_windows::exit_now(code);
+    #[cfg(not(windows))]
+    std::process::exit(code);
+}
+
+/// The run's side of the repeat loop: its cycle, the clock, the sleep.
+struct RunHost<F: FnMut() -> bool> {
+    cycle: F,
+    out: std::io::Stdout,
+}
+
+impl<F: FnMut() -> bool> lsof_cli::repeat::Cycles for RunHost<F> {
+    fn cycle(&mut self) -> bool {
+        (self.cycle)()
+    }
+    fn now(&mut self) -> i64 {
+        now_seconds()
+    }
+    fn sleep(&mut self, secs: u64) {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+    }
+    fn out(&mut self) -> &mut dyn Write {
+        &mut self.out
+    }
+}
+
+/// `time(NULL)`: seconds since the epoch, before it negative.
+fn now_seconds() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => i64::try_from(e.duration().as_secs()).map_or(i64::MIN, |s| s.saturating_neg()),
+    }
+}
+
+/// How `-r`'s marker is printed under `format`.
+fn marking_of(format: &Format) -> lsof_cli::repeat::Marking {
+    use lsof_cli::repeat::Marking;
+    match format {
+        Format::Table => Marking::Table,
+        Format::Fields { nul, .. } => Marking::Fields { nul: *nul },
+        Format::Json(j) if j.lines => Marking::JsonLines,
+        Format::Json(_) => Marking::JsonDoc,
+    }
+}
+
+/// Whether printing `procs` under `format` prints a process: what the C's
+/// `print_proc()` counts, which `+r` ends on. A process with no file left
+/// prints in the table alone (a blank row); JSON and `-F` leave it out.
+fn prints_a_process(procs: &[lsof_core::Process], format: &Format) -> bool {
+    match format {
+        Format::Table => !procs.is_empty(),
+        Format::Fields { .. } | Format::Json(_) => procs.iter().any(|p| !p.files.is_empty()),
+    }
+}
+
+/// The names a run keeps (`gethostnm()`'s and `lkup_port()`'s caches) and
+/// the service that answers them, where the backend has one.
+type Naming<'a> = (
+    &'a std::cell::RefCell<lsof_core::sockname::SocketNames>,
+    Option<&'a std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>>>,
+);
+
+/// One cycle's listing, written to `sink` in `format`. The table and `-F`
+/// name each Internet socket as its row is written, where NAME prints
+/// ([`renamed_socket`]), so a write that fails asks nothing more; JSON's
+/// numeric `name` is [`name_sockets`]'s, made before.
+fn write_listing(
+    sink: &mut dyn Write,
+    procs: &[lsof_core::Process],
+    format: &Format,
+    selection: &Selection,
+    columns: &lsof_cli::args::Columns,
+    (names, service): Naming<'_>,
+) -> std::io::Result<()> {
+    // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
+    // platform rule is whether `\` is (Unix) or is the path separator
+    // (Windows). See lsof_core::render::escape.
+    let esc = Escaper::for_host();
+    let prints = prints_names(format, selection);
+    let mut names = names.borrow_mut();
+    let mut service = service.map(std::cell::RefCell::borrow_mut);
+    let mut rename = |f: &lsof_core::OpenFile| match service.as_mut() {
+        Some(service) if prints => renamed_socket(f, &mut names, service.as_mut()),
+        _ => None,
+    };
+    match format {
+        Format::Table => table::render_naming(
+            sink,
+            procs,
+            TableOpts {
+                terse: selection.terse,
+                show_ppid: columns.ppid,
+                show_pgid: columns.pgid,
+                show_offset: columns.offset,
+                show_size: columns.size,
+                offset_digits: columns.offset_digits,
+                show_links: columns.nlink,
+                file_flags: columns.file_flags,
+                human_size: selection.human_size,
+                command_width: selection.command_width.cap(),
+                tcp_show: selection.tcp_info(),
+                ..TableOpts::new(esc)
+            },
+            &mut rename,
+        ),
+        Format::Fields { nul, only } => fields::write_with_names(
+            sink,
+            procs,
+            (*nul, only.as_deref(), selection.tcp_info(), esc),
+            columns.offset_digits,
+            columns.file_flags,
+            &mut rename,
+        ),
+        Format::Json(j) => {
+            let opts = json::JsonOpts {
+                only: j.only.as_deref(),
+                tcp_show: j.tcp_show,
+                file_flags: j.file_flags,
+                numeric_ids: selection.numeric_ids,
+                version: env!("CARGO_PKG_VERSION"),
             };
-            // The helper is idle; closing its pipe ends it. Kept until now so
-            // that, like the C's child, it is there when lsof lists itself.
-            #[cfg(target_os = "linux")]
-            calls.finish();
-            #[cfg(windows)]
-            lsof_backend_windows::exit_now(code);
-            #[cfg(not(windows))]
-            std::process::exit(code);
+            if j.lines {
+                json::write_lines(sink, procs, &opts)
+            } else {
+                json::write_aggregated(sink, procs, &opts)
+            }
+        }
+    }
+}
+
+/// Whether NAME is printed under `format`: the table but `-t`, `-F` and
+/// JSON with `n` (the C's `printinaddr()` runs only where it is).
+fn prints_names(format: &Format, sel: &Selection) -> bool {
+    match format {
+        Format::Table => !sel.terse,
+        Format::Fields { only, .. } => only.as_ref().is_none_or(|l| l.contains(&'n')),
+        Format::Json(j) => j.only.as_ref().is_none_or(|l| l.contains(&'n')),
+    }
+}
+
+/// `f` as it is printed when it is an Internet socket whose NAME is still
+/// the composition the backend made of it, its hosts and ports named by
+/// `names` as the C's `printinaddr()` names them (DIVERGENCES 154); `None`
+/// for any other row, and for one whose name does not change. So a name a
+/// path argument gave it, or anything else, is left alone, and an addition
+/// after it (`-E`'s ends) is kept.
+fn renamed_socket(
+    f: &lsof_core::OpenFile,
+    names: &mut lsof_core::sockname::SocketNames,
+    service: &mut dyn lsof_core::sockname::NameService,
+) -> Option<lsof_core::OpenFile> {
+    if !f.is_internet() {
+        return None;
+    }
+    let info = f.socket.as_deref()?;
+    let backend_name = info.display_name(false, false);
+    if f.base_name().unwrap_or_default() != backend_name {
+        return None;
+    }
+    let name = names.name(info, service);
+    (name != backend_name).then(|| {
+        let mut f = f.clone();
+        f.set_base_name(&name);
+        f
+    })
+}
+
+/// Every printed Internet socket's NAME renamed in place: for the table
+/// and `-F` with `names`' lookups ([`renamed_socket`], which a run asks as
+/// each row is written instead, [`write_listing`]), and in JSON, whose
+/// `name` the C does not print, the numeric form, with nothing looked up.
+fn name_sockets(
+    procs: &mut [lsof_core::Process],
+    format: &Format,
+    sel: &Selection,
+    names: &std::cell::RefCell<lsof_core::sockname::SocketNames>,
+    service: &std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>>,
+) {
+    use lsof_core::sockname::{NoNames, SocketNames};
+    if !prints_names(format, sel) {
+        return;
+    }
+    let json = matches!(format, Format::Json(_));
+    let mut names = names.borrow_mut();
+    let mut service = service.borrow_mut();
+    let mut numeric = SocketNames::new(false, false);
+    for f in procs.iter_mut().flat_map(|p| p.files.iter_mut()) {
+        let renamed = if json {
+            renamed_socket(f, &mut numeric, &mut NoNames)
+        } else {
+            renamed_socket(f, &mut names, service.as_mut())
+        };
+        if let Some(r) = renamed {
+            *f = r;
         }
     }
 }
@@ -1567,6 +1840,27 @@ mod tests {
         for line in help.lines() {
             assert!(line.chars().count() <= 80, "too wide: {line:?}");
         }
+    }
+
+    /// The help says what this platform names: Linux from /etc/hosts or DNS
+    /// and /etc/services, Windows by reverse DNS and a built-in table,
+    /// FreeBSD nothing; and where the marker's zone comes from.
+    #[test]
+    fn the_help_says_what_this_platform_names() {
+        let help = super::usage();
+        if cfg!(target_os = "linux") {
+            assert!(help.contains("service names from /etc/services"));
+            assert!(help.contains("(TZ, TZDIR, /etc/localtime)"));
+        } else if cfg!(windows) {
+            assert!(!help.contains("/etc/services"));
+            assert!(help.contains("named by reverse DNS"));
+            assert!(help.contains("(TZ's rule string, else UTC)"));
+        } else {
+            assert!(!help.contains("named (the default)"));
+            assert!(help.contains("hosts always print as numbers"));
+        }
+        assert!(help.contains("after each cycle"));
+        assert!(help.contains("-r 1c2mX\n                  is not"));
     }
 
     #[test]
@@ -2427,5 +2721,281 @@ mod tests {
             assert_eq!(tree.count("stat", "/v/r"), 0);
             assert_eq!(tree.count("read_dir", "/v/l"), 1);
         }
+    }
+
+    /// A name service that counts what it is asked and names everything.
+    #[derive(Default)]
+    struct Counting {
+        hosts: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl lsof_core::sockname::NameService for Counting {
+        fn host_by_addr(&mut self, _: std::net::IpAddr) -> Option<Vec<u8>> {
+            self.hosts.set(self.hosts.get() + 1);
+            Some(b"named".to_vec())
+        }
+        fn service_by_port(&mut self, _: u16, _: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        fn for_each_service(&mut self, _: &mut lsof_core::netnames::ServiceVisitor<'_>) {}
+    }
+
+    /// One process holding a UDP socket from 127.0.0.1:5000 to `remote`,
+    /// named as the backend names it, with `addition` after it.
+    fn socket_proc(remote: &str, addition: Option<&str>) -> lsof_core::Process {
+        use lsof_core::{AccessMode, FdType, FileType, OpenFile, Protocol, SocketInfo};
+        let info = SocketInfo {
+            protocol: Protocol::Udp,
+            local: Some("127.0.0.1:5000".parse().unwrap()),
+            remote: Some(remote.parse().unwrap()),
+            state: None,
+            tcp: None,
+            bound: None,
+        };
+        let mut f = OpenFile {
+            rdev: None,
+            fs_device: None,
+            file_flags: None,
+            lock: None,
+            fd: FdType::Handle(4),
+            access: AccessMode::ReadWrite,
+            file_type: FileType::Ipv4,
+            name: info.display_name(false, false),
+            device: None,
+            size: None,
+            offset: None,
+            node: None,
+            links: None,
+            socket: Some(Box::new(info)),
+            name_addition: None,
+        };
+        if let Some(a) = addition {
+            f.add_name_addition(a);
+        }
+        let mut p = owned(0, Some("root"), 0);
+        p.files = vec![f];
+        p
+    }
+
+    /// Hosts are named only where NAME prints (DIVERGENCES 154): the table
+    /// and `-F` with `n`, never `-t`, `-F` without `n`, or JSON, which gets
+    /// the numeric form; each address is asked once across calls (a run's
+    /// cycles); an addition after the name is kept, and a name that is not
+    /// the backend's composition is left alone.
+    #[test]
+    fn socket_names_are_asked_only_where_name_prints() {
+        let run = |argv: &[&str], procs: &mut [lsof_core::Process]| -> usize {
+            let (sel, format) = parsed(argv);
+            let counting = Counting::default();
+            let asked = counting.hosts.clone();
+            let service: std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>> =
+                std::cell::RefCell::new(Box::new(counting));
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(
+                !sel.no_host_resolve,
+                !sel.no_port_resolve,
+            ));
+            super::name_sockets(procs, &format, &sel, &names, &service);
+            asked.get()
+        };
+        let mut procs = vec![socket_proc("10.0.0.2:9", None)];
+        assert_eq!(run(&["+n", "-p", "1"], &mut procs), 2);
+        assert_eq!(procs[0].files[0].name, "named:5000->named:9");
+        for argv in [
+            &["+n", "-t", "-p", "1"][..],
+            &["+n", "-F", "p", "-p", "1"],
+            &["+n", "-J"],
+            &["+n", "-j"],
+        ] {
+            let mut procs = vec![socket_proc("10.0.0.2:9", None)];
+            assert_eq!(run(argv, &mut procs), 0, "{argv:?}");
+            assert_eq!(
+                procs[0].files[0].name, "127.0.0.1:5000->10.0.0.2:9",
+                "{argv:?}"
+            );
+        }
+        let mut procs = vec![socket_proc("10.0.0.2:9", None)];
+        assert_eq!(run(&["+n", "-F", "pn", "-p", "1"], &mut procs), 2);
+        // `-n`: numbers, nothing asked.
+        let mut procs = vec![socket_proc("10.0.0.2:9", None)];
+        assert_eq!(run(&["-n", "-p", "1"], &mut procs), 0);
+        // An addition stays.
+        let mut procs = vec![socket_proc("10.0.0.2:9", Some("1234,cmd,4u"))];
+        run(&["+n", "-p", "1"], &mut procs);
+        assert_eq!(procs[0].files[0].name, "named:5000->named:9 1234,cmd,4u");
+        // A row whose NAME is not the composition is not renamed.
+        let mut procs = vec![socket_proc("10.0.0.2:9", None)];
+        procs[0].files[0].name = "/a/path".into();
+        assert_eq!(run(&["+n", "-p", "1"], &mut procs), 0);
+        assert_eq!(procs[0].files[0].name, "/a/path");
+        // Across cycles one cache: a second pass over the same rows asks
+        // nothing more.
+        let (sel, format) = parsed(&["+n", "-p", "1"]);
+        let counting = Counting::default();
+        let asked = counting.hosts.clone();
+        let service: std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>> =
+            std::cell::RefCell::new(Box::new(counting));
+        let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(true, true));
+        for _ in 0..3 {
+            let mut procs = vec![socket_proc("10.0.0.2:9", None)];
+            super::name_sockets(&mut procs, &format, &sel, &names, &service);
+        }
+        assert_eq!(asked.get(), 2);
+    }
+
+    /// A sink that takes `room` bytes, then fails as a pipe whose reader
+    /// has gone does.
+    struct Closing {
+        room: usize,
+    }
+
+    impl std::io::Write for Closing {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.room == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Each socket is named as its row is written, as the C's
+    /// `printinaddr()` names it as it prints into stdout's buffer: a reader
+    /// that goes away after one buffer leaves the rest of the rows unasked,
+    /// in the table and under `-F` (DIVERGENCES 154; measured with 300
+    /// sockets and `| head -1`: the C 84 queries, `-F pfn` 223).
+    #[test]
+    fn sockets_are_named_as_their_rows_are_written() {
+        // Fewer rows and a smaller buffer under miri, where each row costs
+        // about a quarter of a second; the same proportions.
+        let (rows, room) = if cfg!(miri) { (40, 512) } else { (200, 4096) };
+        let procs: Vec<lsof_core::Process> = (0..rows)
+            .map(|i| socket_proc(&format!("10.0.{}.{}:9", i / 100, i % 100 + 1), None))
+            .collect();
+        // At most the rows `room` bytes hold, and the one local address: a
+        // table row is 60 bytes or more here, a `-F pfn` set 27.
+        for (argv, most) in [
+            (&["+n", "-p", "1"][..], room / 60 + 2),
+            (&["+n", "-F", "pfn", "-p", "1"], room / 27 + 2),
+        ] {
+            let (sel, format) = parsed(argv);
+            let counting = Counting::default();
+            let asked = counting.hosts.clone();
+            let service: std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>> =
+                std::cell::RefCell::new(Box::new(counting));
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(true, true));
+            let got = super::write_listing(
+                &mut Closing { room },
+                &procs,
+                &format,
+                &sel,
+                &lsof_cli::args::Columns::default(),
+                (&names, Some(&service)),
+            );
+            assert_eq!(
+                got.map_err(|e| e.kind()),
+                Err(std::io::ErrorKind::BrokenPipe),
+                "{argv:?}"
+            );
+            assert!(
+                (2..=most).contains(&asked.get()),
+                "{argv:?}: {}",
+                asked.get()
+            );
+            // Written whole, every one is asked once (not under miri, where
+            // the rows cost the time).
+            if cfg!(miri) {
+                continue;
+            }
+            let mut all = Vec::new();
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(true, true));
+            super::write_listing(
+                &mut all,
+                &procs,
+                &format,
+                &sel,
+                &lsof_cli::args::Columns::default(),
+                (&names, Some(&service)),
+            )
+            .unwrap();
+            assert!(String::from_utf8(all)
+                .unwrap()
+                .contains("named:5000->named:9"));
+        }
+    }
+
+    /// Under `-n -P` (and in JSON's numeric `name`) an IPv6 socket's NAME is
+    /// the C's numeric form, not the backend's: an IPv4-mapped end makes
+    /// both ends IPv4 (`dsock.c:3903-3911`), and an IPv4-compatible address
+    /// is glibc's `inet_ntop()` form (`::1.2.3.4`, measured through glibc),
+    /// where lsof-rs had printed Rust's (`[::ffff:127.0.0.1]`, `[::102:304]`).
+    #[test]
+    fn a_mapped_end_is_written_as_the_c_writes_it_under_dash_n_dash_p() {
+        use lsof_core::{FileType, Protocol, SocketInfo};
+        let v6 = |local: &str, remote: Option<&str>| {
+            let mut p = socket_proc("10.0.0.2:9", None);
+            let info = SocketInfo {
+                protocol: Protocol::Tcp,
+                local: Some(local.parse().unwrap()),
+                remote: remote.map(|r| r.parse().unwrap()),
+                state: None,
+                tcp: None,
+                bound: None,
+            };
+            p.files[0].name = info.display_name(false, false);
+            p.files[0].file_type = FileType::Ipv6;
+            p.files[0].socket = Some(Box::new(info));
+            p
+        };
+        for argv in [&["-n", "-P", "-p", "1"][..], &["-J", "-p", "1"]] {
+            let (sel, format) = parsed(argv);
+            let service: std::cell::RefCell<Box<dyn lsof_core::sockname::NameService>> =
+                std::cell::RefCell::new(Box::new(Counting::default()));
+            let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(
+                !sel.no_host_resolve,
+                !sel.no_port_resolve,
+            ));
+            let mut procs = vec![
+                v6("[::ffff:127.0.0.1]:80", Some("[::ffff:127.0.0.2]:5000")),
+                v6("[::1.2.3.4]:80", None),
+            ];
+            let mut out = Vec::new();
+            super::name_sockets(&mut procs, &format, &sel, &names, &service);
+            super::write_listing(
+                &mut out,
+                &procs,
+                &format,
+                &sel,
+                &lsof_cli::args::Columns::default(),
+                (&names, Some(&service)),
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains("127.0.0.1:80->127.0.0.2:5000"),
+                "{argv:?}: {out}"
+            );
+            assert!(out.contains("[::1.2.3.4]:80"), "{argv:?}: {out}");
+            assert!(!out.contains("::ffff"), "{argv:?}: {out}");
+        }
+    }
+
+    /// What `+r` ends on: a process printed (the C's `n`).
+    #[test]
+    fn a_cycle_lists_when_it_prints_a_process() {
+        let (_, table) = parsed(&["-p", "1"]);
+        let (_, fields) = parsed(&["-F", "p", "-p", "1"]);
+        let bare = owned(0, Some("root"), 0);
+        let one = owned(0, Some("root"), 1);
+        assert!(!super::prints_a_process(&[], &table));
+        assert!(super::prints_a_process(std::slice::from_ref(&bare), &table));
+        assert!(!super::prints_a_process(
+            std::slice::from_ref(&bare),
+            &fields
+        ));
+        assert!(super::prints_a_process(std::slice::from_ref(&one), &fields));
     }
 }

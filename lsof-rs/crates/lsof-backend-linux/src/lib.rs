@@ -104,6 +104,8 @@ mod backend;
 #[cfg(target_os = "linux")]
 mod diag;
 #[cfg(target_os = "linux")]
+mod dns;
+#[cfg(target_os = "linux")]
 mod files;
 #[cfg(target_os = "linux")]
 mod locks;
@@ -126,6 +128,15 @@ mod users;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
+/// What lsof-rs inherited from 3 up, noted before it opens any (DIVERGENCES
+/// 153: the C closes them at its start).
+#[cfg(target_os = "linux")]
+pub use mounts::note_inherited_fds;
+/// Whether this process runs in secure-execution mode (`AT_SECURE`), where
+/// glibc's loader takes `TZDIR`, `RES_OPTIONS` and the like out of the
+/// environment and `tzset()` reads only the system's zone files.
+#[cfg(target_os = "linux")]
+pub use netnames::secure_execution;
 /// The C's `-r` check of the password file, at each cycle (DIVERGENCES 70).
 #[cfg(target_os = "linux")]
 pub use users::new_cycle as passwd_new_cycle;
@@ -150,7 +161,7 @@ pub mod fuzz_api {
     pub use crate::files::{name_for_target, parse_fdinfo, FdInfo};
     pub use crate::locks::parse_locks;
     pub use crate::maps::{parse_maps, parse_maps_bytes, Mapping};
-    pub use crate::mounts::{parse_mounts, resolve_table, MountLine};
+    pub use crate::mounts::{parse_mounts, parse_supplement, resolve_table, MountLine};
     pub use crate::net::{
         fields_with_rest, packet_node, parse_addr, parse_queues, socket_inode, socket_type_suffix,
         tcp_state, unix_state, unix_suffix, SocketTable,

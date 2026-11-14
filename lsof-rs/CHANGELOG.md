@@ -12,6 +12,57 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **On Linux a socket's NAME names its hosts and ports by default, as the
+  C's does** (DIVERGENCES 154): `TCP localhost:nfs (LISTEN)` where lsof-rs
+  printed `TCP 127.0.0.1:2049 (LISTEN)`, in the table and in `-F n`. **A run
+  that lists an Internet socket may now ask DNS** for each of its hosts'
+  addresses that `/etc/hosts` does not name, as the C asks: once an address
+  a run (across `-r`'s cycles too), in print order, as its row is written
+  (so `lsof -i | head` asks about the rows the C would, measured), under
+  `/etc/resolv.conf`'s and `RES_OPTIONS`' `timeout` and `attempts`, so a
+  name server that does not answer costs each such address what it costs
+  the C (by the rule measured, at glibc's defaults 10 s an address for one
+  name server that does not answer and 20 s for two; measured, 10.04 s for
+  three at `timeout:2`). `-n` keeps
+  hosts numeric and asks nothing, `-P` keeps ports numeric, and `+n`/`+P`
+  turn names back on, the last of each winning; `-n -P` is the old output
+  but for an IPv6 socket with an IPv4-mapped end, both of whose ends are now
+  written as IPv4, as the C writes them (`10.0.0.1:443->192.0.2.7:51000`
+  where lsof-rs printed `[::ffff:10.0.0.1]:443->[::ffff:192.0.2.7]:51000`),
+  and an IPv4-compatible address, now glibc's `inet_ntop()` form
+  (`[::1.2.3.4]` where it was `[::102:304]`). Nothing is asked for a row
+  that prints no NAME: `-t`, `-F` without `n`, and JSON, whose numeric
+  `name` (which the C does not print for an Internet socket) changes the
+  same way (unmeasured: this project's test host has no IPv6). The one-line switch back to numbers by default is
+  `LINUX_NAMES_BY_DEFAULT` in `crates/lsof-cli/src/args.rs`. Windows
+  already named them; FreeBSD does not.
+- **`-r`'s value is read whole, as the C reads it** (DIVERGENCES 152): `-r
+  1c3` is a count of three cycles *and*, as in the C, `-c 3` (what follows
+  the delay's digits is read again as options, inside its word, unless the
+  count is followed by `m<fmt>`: `-r 1- x` is `illegal option character:
+  -`, not `--` and a file, and the same for `-o`, `-S` and `-L`'s digits,
+  which lsof-rs had read as `--` since before this release); `-r 2mX`
+  prints `X` after each cycle. Where lsof-rs had refused `c` and `m`, the run
+  now ends after its count, each cycle followed by its sleep, and prints
+  what `-V` found missing once, after the last; `-r` with no count still
+  runs until it is killed and reports nothing.
+- **What the review of `+n`, `+P`, `+r` and `+m` found, fixed like the C**
+  (DIVERGENCES 152-154, each measured): glibc's `gethostbyaddr()` reads
+  `/etc/resolv.conf` before its walk, so one it cannot load (a directory, a
+  socket, `/dev/zero`) names no host at all, from the hosts file either,
+  and asks nothing; one past 1 MiB is read whole; the null device is the
+  empty file glibc reads (as nsswitch.conf too: its built-in sources, where
+  lsof-rs had named nothing); a hosts file glibc would wait on or read for
+  ever ends the lookup with no query; host.conf's `trim` domains (and
+  `RESOLV_ADD_TRIM_DOMAINS`, `RESOLV_OVERRIDE_TRIM_DOMAINS`) cut every name;
+  `[SUCCESS=merge]` keeps the answer for the next source to give back where
+  it fails; a TCP connection reset while a reply's length is read is
+  connected again once. A file on an `-e`/`+e` mount the supplement gave a
+  device shows that device, not `UNKNOWN`; a supplement named through a
+  descriptor lsof inherited (`/dev/fd/9`) is gone, as the C, which closes
+  them, finds it. `-r`'s marker keeps a zone name of any length, and a TZ
+  rule's refused month 14 to 25 is read from the leap year's row, as
+  glibc reads it.
 - **`-i` with a name no longer exits 1 as a refusal**: a name that
   resolves selects (Added, below), and a lookup may now ask a name server (once
   a name, under `/etc/resolv.conf`'s timeouts; never for an address or a
@@ -171,9 +222,9 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   -W` the `W` line and then `-o and -s are mutually exclusive`). `-D` and
   `-m`, which lsof-rs does not implement, read on the same way, each taking
   its value word as the C's does, and `-m` says `-m not supported`, the C's
-  words on Linux. `+n`, `+P`, `+r` and `+m`, `+` spellings of options the C
-  has and lsof-rs does not, still end the parse with `unsupported option`,
-  the rest of the word unread. A `--` after `-D` or `-m` ends the options,
+  words on Linux. (`+n`, `+P`, `+r` and `+m`, which had still ended the
+  parse with `unsupported option`, are options now: Added, below.) A `--`
+  after `-D` or `-m` ends the options,
   as the C's does, rather than being taken as their value. The lines are
   kept a byte a letter until printed, so a long argument list of unknown
   letters costs about its own size.
@@ -207,12 +258,83 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **DNS replies are read by a parser of lsof-rs's own** (DIVERGENCES 154,
+  THREAT-MODEL): a reverse lookup's reply is bytes from the network, chosen
+  by whoever answers. It is read in safe Rust, in bounded time and memory
+  (65,535 bytes at most; every compression pointer counted against the
+  message's length, as glibc's `ns_name_unpack()` counts them; a name of at
+  most 255 bytes in wire form and 256 characters in text, glibc's limits),
+  taken only from the name server asked (a connected socket) with the
+  query's random 16-bit id and, over UDP, its question (over TCP the id
+  alone, as glibc's `send_vc()` compares it), and printed escaped, glibc's
+  `\DDD` and lsof's `safestrprt()` both, so a name holding an ESC cannot
+  reach the terminal raw. Every datagram wait ends at glibc's deadline for
+  that server; a TCP fallback, which glibc waits on without a limit, has as
+  long again as that server's datagram attempt (one address: at most 490 s
+  at `timeout:30 attempts:5` with three servers, where the C's has no
+  bound). Names are asked as each row is written, so a reader that goes
+  away asks nothing more. `/etc/resolv.conf`, the hosts file and host.conf
+  are opened only as regular files, without blocking (a FIFO in their place
+  holds the C for ever, measured); a resolv.conf glibc cannot load names
+  no host and asks nothing, as in the C. The services scan keeps one name a
+  port (2 million entries: 10.2 MB, as the C; it had held all, 238 MB).
+  Fuzzed (`dns_reply`). No new crate.
+- A mount supplement file (`+m m`) is read only if it is a regular file,
+  at most 16 MiB of it, opened without blocking; a FIFO, a pipe or a device
+  is never read (measured: the C's `fopen()` waits on a FIFO with no writer
+  for ever and reads one that has a writer until it closes, and an empty
+  file or `/dev/null` kills the C, exit 139, where lsof-rs reads no mount
+  from it); a FIFO or device named as the file is not opened, and one put
+  in its place after the look is opened without blocking and refused
+  unread. Its name, its bad lines and the directories it names are escaped
+  where the C prints them raw (`mount_supplement` fuzz target). A `TZ` zone
+  file for `-r m<fmt>` is read the same way, a regular file of at most 1
+  MiB (unit tests `a_zone_file_that_is_no_regular_file_is_not_read` and
+  `secure_mode_reads_only_the_system_zone_files`; the `timefmt` fuzz target
+  reads no file).
 - `rustix` moves from =1.1.5 to =1.1.6 for RUSTSEC-2026-0486: the xattr
   functions marked unwritten bytes as initialized when given a zero-length
   buffer. lsof-rs's one `getxattr` call passes a fixed 32-byte buffer and
   did not reach that path. No new crate; the build script is unchanged.
 
 ### Added
+- **`+n`, `+P`, `+r` and `+m`, which lsof-rs refused**, work as the C's
+  (DIVERGENCES 152-154):
+  * `+n`/`+P` name hosts and ports again after `-n`/`-P`. On Linux a host
+    is named as glibc's `gethostbyaddr()` names it: the sources
+    `/etc/nsswitch.conf` gives `hosts` (`files dns` where it gives none),
+    `files` being the first line of `/etc/hosts` with the address (an
+    address with no name there is an empty host, `:22`, as the C prints
+    it), and `dns` a PTR query of lsof-rs's own, glibc's in every rule
+    measured (its servers, their order and waits, `rotate`, `use-vc`,
+    `edns0`, a truncated reply asked again over TCP, which reply it takes
+    and which it waits past, CNAMEs, and the `\DDD` escapes of the name);
+    a port by `getservbyport()` over `/etc/services`, with the C's own
+    caches, which give up looking a port up singly after ten and read the
+    whole file once, and remember a port none was found for under either
+    protocol (measured: a TCP socket on a port the file names for UDP alone
+    makes a later UDP socket on it print the number). UDP-Lite's ports, as
+    in the C, are numbers. A DNS reply whose records hold no PTR is glibc's
+    `TRYAGAIN` and one it cannot read its `UNAVAIL`, so `hosts: dns
+    [NOTFOUND=return] files` goes on to the hosts file past either, as
+    glibc's walk does (measured).
+  * `+r [t[c<N>][m<fmt>]]` repeats until a cycle lists nothing, and exits 1
+    where none listed anything (`+r0` lists once and exits 1, as the C
+    does); `-r` and `+r` take `c<N>`, a count, and `m<fmt>`, a marker
+    printed in place of `=======`: a `strftime(3)` format formatted in the
+    local time zone at each cycle, read as glibc reads `TZ`, `TZDIR` and
+    `/etc/localtime` (a zone file of at most 1 MiB, or a POSIX rule string;
+    on Windows only a `TZ` rule string, else UTC),
+    every conversion and flag of glibc 2.39 in the C locale (measured over
+    118,516 calls of its `strftime()`), into the C's buffer of eight bytes a
+    format byte: a format whose marker does not fit, or is empty, is the C's
+    `illegal <fmt>`, and `%n` beside `-F`, `-J` or `-j` its `%n illegal in
+    -r m<fmt> when -F has been specified`.
+  * `+m` prints the mount table as the C's supplement, `DIR 0xDEV` a mount,
+    and exits 0; `+m m` reads such a file, and a mount whose directory is
+    not `stat`ed (`-b`, `-e`, or a `stat` that failed) takes its device from
+    it and is kept, with the C's `assuming dev=… for DIR from m` (Linux).
+    `-m` stays the Linux C's `-m not supported`.
 - **`-c /regex/[bix]` selects by a POSIX regular expression**, as the C
   (DIVERGENCES 38): the text between the slashes is an extended expression,
   or a basic one with `b` after it (`x` says extended), and `i` ignores

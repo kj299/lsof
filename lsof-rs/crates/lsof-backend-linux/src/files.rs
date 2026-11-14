@@ -893,14 +893,14 @@ fn row(
         let kind = unkn_suffix(&fd);
         let mut f = OpenFile {
             rdev: None,
-            fs_device: None,
+            fs_device: e.device,
             file_flags: info.flags,
             lock: None,
             fd,
             access: AccessMode::Unknown,
             file_type: FileType::Exempt(kind),
             name: target.to_string_lossy().into_owned(),
-            device: Some("UNKNOWN".to_string()),
+            device: Some(e.device.map_or_else(|| "UNKNOWN".to_string(), dev_string)),
             size: None,
             // Pass the fdinfo position through rather than defaulting it:
             // a numeric fd has one (`o0t0`), and cwd/rtd/txt have none, so
@@ -1352,6 +1352,7 @@ mod tests {
             .map(|p| ExemptFs {
                 path: (*p).into(),
                 plus: false,
+                device: None,
             })
             .collect()
     }
@@ -1785,6 +1786,7 @@ mod tests {
         let plus = ExemptFs {
             path: "/dev/shm".into(),
             plus: true,
+            device: None,
         };
         assert_eq!(exempt_note(&plus), "(+e /dev/shm)");
         assert_eq!(exempt_note(&shm[0]), "(-e /dev/shm)");
@@ -2617,6 +2619,7 @@ mod tests {
         let exempt = [ExemptFs {
             path: "/other".into(),
             plus: false,
+            device: None,
         }];
         let a = Answers {
             socket: vec!["/srv/s.sock"],
@@ -2663,6 +2666,7 @@ mod tests {
             source_is_block: false,
             fsname: src.into(),
             kind: lsof_core::MountKind::Nfs,
+            supplied: false,
         }
     }
 

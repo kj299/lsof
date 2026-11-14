@@ -71,17 +71,17 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-l` | out | ✅ shipped (5A) | Numeric ID instead of resolved name. Windows: show the raw SID string instead of `DOMAIN\user` |
 | `-L [l]` | out | ✅ shipped (5A) | **No link count column** — the default; `-L` takes no count. Shipped reading `-L` as "show the column", which is `+L`'s meaning; corrected 2026-09-26 (DIVERGENCES 41). Windows: `BY_HANDLE_FILE_INFORMATION.nNumberOfLinks` is already in the existing `disk_details()` call — just plumb it through `OpenFile`. |
 | `+L [l]` | sel | ✅ shipped (5A) | **The link count column**, and with `l`, also select files whose link count is known and < `l` (`+L1` is unlinked-but-open files — a security-interesting case on Windows too). A row with no count (a socket, a pipe) is never selected (DIVERGENCES 42). |
-| `-m m` | misc | ❌ N/A | Mount supplement — Unix mtab |
-| `+m [m]` | misc | ❌ N/A | Mount supplement output |
+| `-m m` | misc | ❌ N/A | The kernel memory file; the Linux C's `-m not supported`, as lsof-rs's |
+| `+m [m]` | misc | ❌ N/A on Windows; ✅ Linux 2026-11-14 | The C's mount supplement: `+m` prints the table (`DIR 0xDEV`) and exits 0; `+m m` reads such a file for the mounts not `stat`ed (DIVERGENCES 153). Elsewhere `+m not supported`, the FreeBSD C's words by its source (`HASMOPT` without `HASMNTSUP`; unmeasured) |
 | `+|-M` | misc | ❌ N/A | Portmapper — Unix RPC |
-| `-n` | out | ✅ shipped | No host name resolution |
+| `-n` | out | ✅ shipped | No host name resolution; `+n` turns it back on, the last winning. On Linux since 2026-11-14 hosts are named by default as the C names them, from `/etc/hosts` and DNS (DIVERGENCES 154) |
 | `-N` | sel | ❌ N/A on Windows; ✅ Linux 2026-09-20 | NFS-file listing (DIVERGENCES 28) |
 | `-o [o]` | out | ✅ shipped | The `OFFSET` column, and `-o <digits>`'s hex limit (DIVERGENCES 6) |
 | `-O` | prec | ✅ shipped (5A); real 2026-10-09 | Make those calls in lsof, with no time limit (*risky*); `+O` undoes it. Was a no-op until DIVERGENCES 94. Windows: the calls are in-process anyway |
 | `-p s` | sel | ✅ shipped | PID filter (comma-separated, accepts `^excl`) |
-| `-P` | out | ✅ shipped | Numeric port instead of service name |
+| `-P` | out | ✅ shipped | Numeric port instead of service name; `+P` names them again. On Linux since 2026-11-14 from `/etc/services`, with the C's caches (DIVERGENCES 154) |
 | `-Q` | misc | ✅ shipped (5A) | Quiet exit on no matches — we already do roughly this; explicit flag + the exit-code semantic |
-| `+|-r [t]` | misc | ✅ shipped (`-r`) | Repeat (default 15s). `+r` is refused |
+| `+|-r [t[c<N>][m<fmt>]]` | misc | ✅ shipped; the whole grammar 2026-11-14 | Repeat (default 15 s); `c<N>` a count, `m<fmt>` a `strftime(3)` marker in the local zone (Windows: `TZ`'s POSIX rule string, else UTC; no zone file is read), `+r` ends at a cycle that lists nothing (DIVERGENCES 152). FreeBSD's marker follows glibc's rules: unverified against FreeBSD's libc |
 | `-R` | out | ✅ shipped | PPID column |
 | `-s [p:s]` | sel | ✅ shipped (5A) | **Protocol-state filter**: `-sTCP:LISTEN`, `-sTCP:^TIME_WAIT,^CLOSE_WAIT`. State already on the row — pure filter work. Single most-requested missing switch. Since 2026-09-25 the C's: names checked against the platform's table, each included state a search item, and TCP lists applied to every socket with a TCP state — UDP too on Linux (DIVERGENCES 32). |
 | `-S [t]` | prec | ✅ shipped 2026-10-09 | Each of those calls gets t seconds (15, at least 2) in a helper process on Linux, and fails with `Connection timed out` after (DIVERGENCES 94). Windows: accepted, and changes nothing; the calls are in-process |
@@ -154,14 +154,15 @@ Switches that need new Windows API work, or significant data-model expansion:
 
 ## Out of scope (Unix-only — accept-and-no-op or reject)
 
-`-A`, `-C`, `-D`, `-k`, `-m/+m`, `+M`, `-z`. Each is refused rather than
+`-A`, `-C`, `-D`, `-k`, `-m`, `+M`, `-z` (and `+m` but on Linux). Each is refused rather than
 silently ignored; that's better than appearing to accept and surprising the
 user. Since DIVERGENCES 149 the refusal is in the C's words: a letter the
 port has no case for (`-A`, `-C`, `-k`, `+M`, `-z`) is `lsof: illegal option
 character: A`, and the parse reads on to report every such letter; `-D` is
 `lsof: unsupported option: -D` and `-m` is `lsof: -m not supported`, each
-taking its value word as the C does; `+m` is `lsof: unsupported option: +m`
-and ends the parse. The run exits 1 in every case. (This list once also held `-e`,
+taking its value word as the C does; `+m` is the Linux C's mount supplement
+since 2026-11-14 (DIVERGENCES 153), and elsewhere `lsof: +m not supported`,
+the FreeBSD C's words by its source (unmeasured). The run exits 1 in every case. (This list once also held `-e`,
 `-f/+f`, `-H`, `-N`, `-x`, `-X` and `-Z`; see the note at the top; and `-b`
 and `-S`, until 2026-10-09.)
 

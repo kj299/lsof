@@ -18,6 +18,10 @@
 #
 # Re-anchored 2026-11-01 (Batch B's review fixes): illegal-letter-kept-as-a-
 # line, as each way of storing a line now ends in `Early::spill`.
+#
+# Removed 2026-11-14: plus-m-read-on-as-letters, whose rule (`+m` refused,
+# the rest of its word never read) ended with `+m` itself (DIVERGENCES 153);
+# what `+m` takes as its value is mutants/plus4.toml's.
 
 [run]
 dir = ".."
@@ -171,14 +175,6 @@ old = '''                        early.line("-m not supported");'''
 new = '''                        early.line(&format!("unsupported option: -{c}"));'''
 
 # ------------------------------------------------- the review's findings
-
-[[mutant]]
-name = "plus-m-read-on-as-letters"
-rule = "+m is refused and ends the parse; the rest of its word is never read as letters (149)"
-[[mutant.edit]]
-file = "crates/lsof-cli/src/args.rs"
-old = '''                'n' | 'P' | 'r' | 'm' if plus => {'''
-new = '''                'n' | 'P' | 'r' if plus => {'''
 
 [[mutant]]
 name = "d-and-m-take-dash-dash"

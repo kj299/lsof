@@ -19,7 +19,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 use lsof_core::render::Escaper;
-use lsof_core::{MountEntry, MountKind, MountRequest, MountTable, SafeFs};
+use lsof_core::{MountEntry, MountKind, MountRequest, MountSupplement, MountTable, SafeFs};
 
 /// At most this many bytes of `/proc/mounts` are read. The table is the
 /// kernel's, but a local user who may mount (a FUSE file system through
@@ -159,6 +159,360 @@ fn is_nfs(fstype: &OsStr) -> bool {
         .any(|t| ty.eq_ignore_ascii_case(t))
 }
 
+/// The most of a mount supplement file that is read (`+m m`, DIVERGENCES
+/// 153): one line a mount, so a host of 100,000 mounts of 160 bytes each.
+/// A longer file is an error reading it, where the C reads any length.
+pub const SUPPLEMENT_MAX_BYTES: u64 = 16 << 20;
+
+/// What one `fgets(buf, sizeof(buf) - 1, fs)` reads of a supplement line:
+/// `buf` is `(MAXPATHLEN * 2) + 1` bytes, so 8,191 of them, and a longer
+/// line is read as more lines, each counted.
+const SUPPLEMENT_LINE: usize = 8191;
+
+/// A supplement's entry: the device, and the line it came from.
+type SupplementEntry = (u64, usize);
+
+/// `getmntdev()`'s reading of the supplement file's bytes (`dmnt.c:148-345`):
+/// its lines, each a directory, a space, `0x` and hexadecimal digits to the
+/// line's end. `None` where any line is wrong, or two give one directory
+/// two devices, which the C reports and then discards the file for: every
+/// line is read and every complaint made first. A line is what `fgets()`
+/// reads, cut at a NUL as the C's string is, its newline dropped; the device
+/// wraps past 64 bits as the C's `dev_t` does.
+///
+/// `first` is the length of the directory whose lookup has the file read:
+/// the C compares a repeated directory's length with it rather than with the
+/// line's (`mp->dir_name_len == dir_name_len`), so a repeat is found only
+/// for a directory that long, and any other repeat is a second entry, the
+/// later of which is the one found (the C puts each new entry first). Its
+/// complaints go to `say` in its words, the line and the file escaped where
+/// the C prints them raw; `warn` (no `-w`) lets the ones `-w` mutes through,
+/// and `path duplicate` is said whatever it says.
+pub fn parse_supplement(
+    text: &[u8],
+    file: &[u8],
+    first: usize,
+    warn: bool,
+    say: &mut dyn FnMut(&str),
+) -> Option<HashMap<Vec<u8>, SupplementEntry>> {
+    let esc = Escaper::UNIX;
+    let shown = esc.bytes(file);
+    let mut found: HashMap<Vec<u8>, SupplementEntry> = HashMap::new();
+    let mut err = false;
+    let mut rest = text;
+    let mut ln = 0usize;
+    while !rest.is_empty() {
+        let window = rest.get(..SUPPLEMENT_LINE).unwrap_or(rest);
+        let take = window
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(window.len(), |nl| nl.saturating_add(1));
+        let chunk = rest.get(..take).unwrap_or_default();
+        rest = rest.get(take..).unwrap_or_default();
+        ln = ln.saturating_add(1);
+        let line = chunk.split(|&b| b == 0).next().unwrap_or_default();
+        let line = line.split(|&b| b == b'\n').next().unwrap_or_default();
+        let quoted = esc.bytes(line);
+        if line.first() != Some(&b'/') {
+            if warn {
+                say(&format!("lsof: {shown} line {ln}: no path: \"{quoted}\""));
+            }
+            err = true;
+            continue;
+        }
+        let space = line.iter().position(|&b| b == b' ');
+        let Some(space) = space
+            .filter(|&at| line.get(at.saturating_add(1)..at.saturating_add(3)) == Some(&b"0x"[..]))
+        else {
+            if warn {
+                say(&format!("lsof: {shown} line {ln}: no device: \"{quoted}\""));
+            }
+            err = true;
+            continue;
+        };
+        let path = line.get(..space).unwrap_or_default();
+        let digits = line.get(space.saturating_add(3)..).unwrap_or_default();
+        let hex = digits.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        if hex != digits.len() {
+            if warn {
+                say(&format!(
+                    "lsof: {shown} line {ln}: illegal device: \"{quoted}\""
+                ));
+            }
+            err = true;
+            continue;
+        }
+        let dev = digits.iter().fold(0u64, |dev, &b| {
+            let d = char::from(b).to_digit(16).map_or(0, u64::from);
+            (dev << 4).wrapping_add(d)
+        });
+        if path.len() == first {
+            if let Some(&(had, at)) = found.get(path) {
+                if had != dev {
+                    say(&format!(
+                        "lsof: {shown} line {ln} path duplicate of {at}: \"{quoted}\""
+                    ));
+                    err = true;
+                }
+                continue;
+            }
+        }
+        found.insert(path.to_vec(), (dev, ln));
+    }
+    (!err).then_some(found)
+}
+
+/// The supplement of one run: read at the first mount that needs it, at
+/// most once (`getmntdev()`'s `static int err`, and its hash).
+#[derive(Debug, Default)]
+pub struct Supplement {
+    state: SupplementState,
+}
+
+#[derive(Debug, Default)]
+enum SupplementState {
+    #[default]
+    Unread,
+    Read(HashMap<Vec<u8>, SupplementEntry>),
+    Failed,
+}
+
+/// The file's bytes, or the C's words for why there are none (each muted
+/// by `-w`): `access()` failing (`WARNING: access F: ERR`), `fopen()`
+/// failing past it (`can't open(F): ERR`: a socket, measured), a file that
+/// cannot be read through to its end (`error reading F`: a directory, as the
+/// C says). Where the C would wait or read with no bound, lsof-rs reads
+/// nothing and says `error reading F` too: a FIFO or a pipe (measured: the
+/// C's `fopen()` waits for ever on one with no writer, and reads one that
+/// has a writer, `printf … | lsof +m /dev/stdin`, until the writer closes
+/// it, which may be never), a device, or a file past
+/// [`SUPPLEMENT_MAX_BYTES`] (opened, read to that bound and refused). No
+/// FIFO or device named as the file is opened, and the rest are opened
+/// without blocking: one put in a regular file's place after the look may
+/// be opened, cannot hold the open, and is refused unread (DIVERGENCES 153).
+fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    let shown = Escaper::UNIX.bytes(path.as_bytes()).into_owned();
+    let access = |e: &std::io::Error| {
+        format!(
+            "lsof: WARNING: access {shown}: {}",
+            lsof_core::errno_text(e)
+        )
+    };
+    let error = || format!("lsof: error reading {shown}");
+    // A descriptor lsof inherited is one the C has closed by now
+    // (`closefrom_shim(ctx, 3)`, `main.c:173-176`): its name, `/dev/fd/N`
+    // or `/proc/self/fd/N`, is none to the C's `access()` (measured).
+    if names_an_inherited_fd(Path::new(path), inherited_fds()) {
+        return Err(access(&std::io::Error::from_raw_os_error(ENOENT)));
+    }
+    let meta = std::fs::metadata(path).map_err(|e| access(&e))?;
+    let kind = meta.file_type();
+    if kind.is_fifo() || kind.is_char_device() || kind.is_block_device() {
+        return Err(error());
+    }
+    // Not under miri, whose `open` refuses the flag; a FIFO is refused
+    // by the type check above there as well.
+    let nonblocking = if cfg!(miri) {
+        0
+    } else {
+        i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0)
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblocking)
+        .open(path)
+        .map_err(|e| match e.kind() {
+            // What `access(R_OK)` would have refused first.
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => access(&e),
+            _ => format!("lsof: can't open({shown}): {}", lsof_core::errno_text(&e)),
+        })?;
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(error());
+    }
+    let mut text = Vec::new();
+    file.take(SUPPLEMENT_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut text)
+        .map_err(|_| error())?;
+    if text.len() as u64 > SUPPLEMENT_MAX_BYTES {
+        return Err(error());
+    }
+    Ok(text)
+}
+
+/// The descriptors from 3 up this process had when [`note_inherited_fds`]
+/// looked, first thing in `main`: what the C closes at its start.
+static INHERITED: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+
+/// Note the descriptors from 3 up this process holds now, before it opens
+/// any: those it inherited. lsof-rs cannot close them as the C does
+/// (`closefrom_shim()`; a close is `unsafe` in Rust, which this crate
+/// forbids), so it reads a name that leads to one as the C would find it,
+/// gone (DIVERGENCES 153). The listing of `/proc/self/fd` used to look is
+/// itself a descriptor, and is told apart by what it is.
+pub fn note_inherited_fds() {
+    let own = Path::new("/proc/self/fd");
+    let listing = Path::new("/proc")
+        .join(std::process::id().to_string())
+        .join("fd");
+    let fds = std::fs::read_dir(own)
+        .map(|dir| {
+            dir.filter_map(Result::ok)
+                .filter_map(|e| {
+                    let n: u32 = e.file_name().to_str()?.parse().ok()?;
+                    let target = std::fs::read_link(e.path()).ok()?;
+                    // The directory listing's own descriptor names this
+                    // process's fd directory.
+                    (n >= 3 && target != listing).then_some(n)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = INHERITED.set(fds);
+}
+
+/// `ENOENT`, which `access()` says of a closed descriptor's name.
+const ENOENT: i32 = 2;
+
+fn inherited_fds() -> &'static [u32] {
+    INHERITED.get().map_or(&[], Vec::as_slice)
+}
+
+/// Whether `path`, its links followed one by one as the kernel follows
+/// them, leads through `/proc/PID/fd/N` (or a task's) of this process, `N`
+/// one of `inherited`: `/dev/fd/9`, `/proc/self/fd/9`, `<(cmd)`. At most 40
+/// links, as the kernel follows.
+fn names_an_inherited_fd(path: &Path, inherited: &[u32]) -> bool {
+    use std::path::Component;
+    if inherited.is_empty() {
+        return false;
+    }
+    let pid = std::process::id().to_string();
+    let ours = |p: &Path| -> bool {
+        let parts: Vec<&OsStr> = p
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        let fd = match parts.as_slice() {
+            [proc, id, fd, n] if *proc == "proc" && *id == pid.as_str() && *fd == "fd" => n,
+            [proc, id, task, _, fd, n]
+                if *proc == "proc" && *id == pid.as_str() && *task == "task" && *fd == "fd" =>
+            {
+                n
+            }
+            _ => return false,
+        };
+        fd.to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| inherited.contains(&n))
+    };
+    let start = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return false,
+        }
+    };
+    let mut todo: std::collections::VecDeque<std::ffi::OsString> =
+        std::collections::VecDeque::new();
+    let push_front = |todo: &mut std::collections::VecDeque<std::ffi::OsString>, p: &Path| {
+        for c in p.components().rev() {
+            todo.push_front(c.as_os_str().to_os_string());
+        }
+    };
+    push_front(&mut todo, &start);
+    let mut done = std::path::PathBuf::from("/");
+    let mut links = 0u32;
+    while let Some(c) = todo.pop_front() {
+        match c.to_str() {
+            Some("/") => done = std::path::PathBuf::from("/"),
+            Some(".") => {}
+            Some("..") => {
+                done.pop();
+            }
+            _ => {
+                done.push(&c);
+                if ours(&done) {
+                    return true;
+                }
+                let is_link =
+                    std::fs::symlink_metadata(&done).is_ok_and(|m| m.file_type().is_symlink());
+                if is_link {
+                    links = links.saturating_add(1);
+                    if links > 40 {
+                        return false;
+                    }
+                    let Ok(target) = std::fs::read_link(&done) else {
+                        return false;
+                    };
+                    done.pop();
+                    push_front(&mut todo, &target);
+                }
+            }
+        }
+    }
+    false
+}
+
+impl Supplement {
+    /// `getmntdev()` for mount directory `dir`: its device in the file at
+    /// `path`, read now if this is the first lookup. What the read has to
+    /// say goes to `fs`'s sink, warnings only where `fs` warns.
+    pub fn device(&mut self, path: &OsStr, dir: &[u8], fs: &SafeFs) -> Option<u64> {
+        if let SupplementState::Unread = self.state {
+            let bytes = supplement_bytes(path);
+            self.state = match bytes {
+                Ok(text) => {
+                    let mut say = |line: &str| fs.tell(line);
+                    match parse_supplement(&text, path.as_bytes(), dir.len(), fs.warns(), &mut say)
+                    {
+                        Some(map) => SupplementState::Read(map),
+                        None => SupplementState::Failed,
+                    }
+                }
+                Err(line) => {
+                    // `access()`'s and `error reading` are muted by `-w`.
+                    if fs.warns() {
+                        fs.tell(&line);
+                    }
+                    SupplementState::Failed
+                }
+            };
+        }
+        match &self.state {
+            SupplementState::Read(map) => map.get(dir).map(|&(dev, _)| dev),
+            _ => None,
+        }
+    }
+}
+
+/// `%#lx`: `0` for zero, else `0x` and the lowercase digits.
+fn alternate_hex(n: u64) -> String {
+    if n == 0 {
+        "0".to_string()
+    } else {
+        format!("{n:#x}")
+    }
+}
+
+/// What a `statsafely()` that failed leaves in the C's `struct stat`, which
+/// the C prints as the device it assumes where the supplement has none
+/// (DIVERGENCES 153): zeros where its child made the call and answered
+/// (it zeroes the buffer before the call and sends it whatever happened);
+/// what was there before where no child did: under `-b`, under `-O`, and
+/// where the child ran out of time or went away.
+fn after_failed_stat(fs: &SafeFs, e: &std::io::Error) -> Option<u64> {
+    let blocking = fs.blocking();
+    let lost = e.raw_os_error().is_some()
+        && e.raw_os_error() == lsof_core::safefs::lost_child().raw_os_error();
+    (!blocking.avoid && !blocking.in_process && !lsof_core::safefs::is_timed_out(e) && !lost)
+        .then_some(0)
+}
+
 /// The table as the C's `readmnt()` makes it of the kernel's lines
 /// (`dmnt.c:400-660`), mount by mount in the kernel's order:
 ///
@@ -192,6 +546,12 @@ fn is_nfs(fstype: &OsStr) -> bool {
 pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> MountTable {
     let esc = Escaper::UNIX;
     let mut table = MountTable::default();
+    let mut supplement = Supplement::default();
+    // The device in the C's `struct stat sb`, which it reuses for every
+    // `stat` it makes and prints where the supplement has nothing for a
+    // mount (`assuming dev=…`): what its last `stat` or supplement hit left
+    // there, zero to begin with (measured; the C's is uninitialised).
+    let mut sb_dev = 0u64;
     // Where each directory recorded is in `table.entries`: the duplicate
     // test asks it of every row, and a table may hold as many rows as the
     // cap lets in (100,000 mounts or more), so a scan of the entries for
@@ -237,12 +597,15 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
                 continue;
             }
         }
-        let device = if no_stat {
-            None
-        } else {
-            match fs.stat(Path::new(&dir)) {
-                Ok(st) => Some(st.dev),
-                Err(_) => {
+        let stated = (!no_stat).then(|| fs.stat(Path::new(&dir)));
+        let mut supplied = false;
+        let device = match stated {
+            Some(Ok(st)) => {
+                sb_dev = st.dev;
+                Some(st.dev)
+            }
+            failed => {
+                if let Some(Err(e)) = &failed {
                     if fs.warns() {
                         fs.tell(&format!(
                             "lsof: WARNING: can't stat() {} file system {}",
@@ -251,7 +614,32 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
                         ));
                         fs.tell(INCOMPLETE);
                     }
-                    continue;
+                    if let Some(dev) = after_failed_stat(fs, e) {
+                        sb_dev = dev;
+                    }
+                }
+                match &req.supplement {
+                    // The supplement is asked for every mount not
+                    // `stat`ed, an `-e` one's too, and the mount kept,
+                    // with its device or none; what the C says of it is
+                    // said whether or not the file had one, and `-w` does
+                    // not mute it (`dmnt.c:545-560`).
+                    MountSupplement::File(path) => {
+                        let hit = supplement.device(path, dir.as_bytes(), fs);
+                        if let Some(dev) = hit {
+                            sb_dev = dev;
+                        }
+                        supplied = hit.is_some();
+                        fs.tell(&format!(
+                            "lsof: assuming dev={} for {} from {}",
+                            alternate_hex(sb_dev),
+                            esc.bytes(dir.as_bytes()),
+                            esc.bytes(path.as_bytes())
+                        ));
+                        hit
+                    }
+                    _ if no_stat => None,
+                    _ => continue,
                 }
             }
         };
@@ -265,7 +653,17 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
         } else {
             MountKind::Regular
         };
-        let (source_resolved, source_is_block) = source(&line.source, exempt, fs, esc);
+        // `+m`: each mount as it is recorded (`dmnt.c:613-620`), escaped
+        // where the C prints its bytes raw.
+        if req.supplement == MountSupplement::Print {
+            let shown = esc.bytes(dir.as_bytes());
+            let line = match device.unwrap_or(0) {
+                0 => format!("{shown} 0x0\n"),
+                dev => format!("{shown} {dev:#x}\n"),
+            };
+            table.supplement_out.extend_from_slice(line.as_bytes());
+        }
+        let (source_resolved, source_is_block) = source(&line.source, exempt, fs, esc, &mut sb_dev);
         let entry = MountEntry {
             dir,
             device,
@@ -273,6 +671,7 @@ pub fn resolve_table(lines: &[MountLine], req: &MountRequest, fs: &SafeFs) -> Mo
             source_is_block,
             fsname: line.source.clone(),
             kind,
+            supplied,
         };
         match duplicate {
             Some(i) => table.entries[i] = entry,
@@ -305,16 +704,28 @@ fn source(
     exempt: Option<&lsof_core::ExemptFs>,
     fs: &SafeFs,
     esc: Escaper,
+    sb_dev: &mut u64,
 ) -> (Option<OsString>, bool) {
     if exempt.is_some_and(|e| e.plus) || raw.as_bytes().first() != Some(&b'/') {
         return (Some(raw.to_os_string()), false);
     }
     match lsof_core::readlink::resolve(raw, fs) {
         Ok(path) => {
+            // The C makes this `stat` into the same buffer
+            // ([`resolve_table`]'s `sb_dev`).
             let is_block = exempt.is_none()
-                && fs
-                    .stat(Path::new(&path))
-                    .is_ok_and(|st| st.is_block_device());
+                && match fs.stat(Path::new(&path)) {
+                    Ok(st) => {
+                        *sb_dev = st.dev;
+                        st.is_block_device()
+                    }
+                    Err(e) => {
+                        if let Some(dev) = after_failed_stat(fs, &e) {
+                            *sb_dev = dev;
+                        }
+                        false
+                    }
+                };
             (Some(path), is_block)
         }
         Err(e) => {
@@ -692,6 +1103,7 @@ mod tests {
         ExemptFs {
             path: path.into(),
             plus,
+            device: None,
         }
     }
 
@@ -707,12 +1119,463 @@ mod tests {
         let said = RefCell::new(Vec::new());
         let say = |l: &str| said.borrow_mut().push(l.to_string());
         let fs = SafeFs::new(host, &say).with(blocking, warn);
-        let t = resolve_table(&table(text), &MountRequest { exempt }, &fs);
+        let t = resolve_table(
+            &table(text),
+            &MountRequest {
+                exempt,
+                supplement: MountSupplement::None,
+            },
+            &fs,
+        );
         (t, said.into_inner())
     }
 
     fn resolve(host: &Host, text: &str, exempt: Vec<ExemptFs>) -> (MountTable, Vec<String>) {
         resolve_with(host, text, exempt, Blocking::default(), true)
+    }
+
+    /// `resolve_table` under `+m` (`supplement`), `-b`/`-O`/`-S` and `-w`.
+    fn resolve_sup(
+        host: &Host,
+        text: &str,
+        exempt: Vec<ExemptFs>,
+        supplement: MountSupplement,
+        blocking: Blocking,
+        warn: bool,
+    ) -> (MountTable, Vec<String>) {
+        let said = RefCell::new(Vec::new());
+        let say = |l: &str| said.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(host, &say).with(blocking, warn);
+        let t = resolve_table(&table(text), &MountRequest { exempt, supplement }, &fs);
+        (t, said.into_inner())
+    }
+
+    fn sup_parse(
+        text: &[u8],
+        first: usize,
+        warn: bool,
+    ) -> (Option<Vec<(String, u64)>>, Vec<String>) {
+        let mut said = Vec::new();
+        let got = parse_supplement(text, b"F", first, warn, &mut |l: &str| {
+            said.push(l.to_string())
+        });
+        let got = got.map(|m| {
+            let mut v: Vec<(String, u64)> = m
+                .into_iter()
+                .map(|(k, (dev, _))| (String::from_utf8_lossy(&k).into_owned(), dev))
+                .collect();
+            v.sort();
+            v
+        });
+        (got, said)
+    }
+
+    /// `getmntdev()`'s reading of a supplement, each rule measured against
+    /// the C (DIVERGENCES 153).
+    #[test]
+    fn a_supplement_is_read_as_getmntdev_reads_it() {
+        let ok =
+            |pairs: &[(&str, u64)]| Some(pairs.iter().map(|(d, n)| (d.to_string(), *n)).collect());
+        assert_eq!(
+            sup_parse(b"/proc 0x15\n/dev 0x6\n", 5, true),
+            (ok(&[("/dev", 6), ("/proc", 0x15)]), vec![])
+        );
+        // No newline at the end; `0x` with no digits is 0; case.
+        assert_eq!(sup_parse(b"/proc 0xAb", 5, true).0, ok(&[("/proc", 0xab)]));
+        assert_eq!(sup_parse(b"/proc 0x\n", 5, true).0, ok(&[("/proc", 0)]));
+        // Past 64 bits the device wraps (measured: `0x1234567890abcdef12`
+        // is `0x34567890abcdef12`).
+        assert_eq!(
+            sup_parse(b"/proc 0x1234567890abcdef12\n", 5, true).0,
+            ok(&[("/proc", 0x34567890abcdef12)])
+        );
+        // Each wrong line said, every line read, and the file then discarded.
+        let (got, said) = sup_parse(
+            b"proc 0x15\n/dev 15\n/x 0x15 \n/y 0xG\n/z 0x1\r\n/ok 0x1\n",
+            5,
+            true,
+        );
+        assert_eq!(got, None);
+        assert_eq!(
+            said,
+            [
+                "lsof: F line 1: no path: \"proc 0x15\"",
+                "lsof: F line 2: no device: \"/dev 15\"",
+                "lsof: F line 3: illegal device: \"/x 0x15 \"",
+                "lsof: F line 4: illegal device: \"/y 0xG\"",
+                "lsof: F line 5: illegal device: \"/z 0x1\\r\"",
+            ]
+        );
+        // `-w` mutes those, but not a duplicate's.
+        assert_eq!(sup_parse(b"proc 0x15\n", 5, false), (None, vec![]));
+        let (got, said) = sup_parse(b"/proc 0x15\n/proc 0x16\n", 5, false);
+        assert_eq!(got, None);
+        assert_eq!(said, ["lsof: F line 2 path duplicate of 1: \"/proc 0x16\""]);
+        // A duplicate with the same device is passed over in silence.
+        assert_eq!(
+            sup_parse(b"/proc 0x15\n/proc 0x15\n", 5, true),
+            (ok(&[("/proc", 0x15)]), vec![])
+        );
+        // A duplicate is found only for a directory as long as the first one
+        // looked up; any other is a second entry, the later one found.
+        assert_eq!(
+            sup_parse(b"/proc 0x15\n/proc 0x16\n", 4, true),
+            (ok(&[("/proc", 0x16)]), vec![])
+        );
+        // A NUL ends the line as it ends the C's string; a line longer than
+        // `fgets()` reads is more lines.
+        let (got, said) = sup_parse(b"/proc\0 0x15\n", 5, true);
+        assert_eq!(
+            (got, said),
+            (
+                None,
+                vec!["lsof: F line 1: no device: \"/proc\"".to_string()]
+            )
+        );
+        let mut long = b"/a 0x1\n".to_vec();
+        long.extend(std::iter::repeat_n(b'/', SUPPLEMENT_LINE));
+        long.extend_from_slice(b" 0x2\n");
+        let (got, said) = sup_parse(&long, 2, true);
+        assert_eq!(got, None);
+        assert_eq!(said.len(), 2);
+        assert!(
+            said[0].starts_with("lsof: F line 2: no device: \"///"),
+            "{said:?}"
+        );
+        assert_eq!(
+            said[0].len(),
+            "lsof: F line 2: no device: \"\"".len() + SUPPLEMENT_LINE
+        );
+        assert_eq!(said[1], "lsof: F line 3: no path: \" 0x2\"");
+        // Hostile bytes in a complaint are escaped.
+        let (_, said) = sup_parse(b"\x1b[2J 0x1\n", 5, true);
+        assert_eq!(said, ["lsof: F line 1: no path: \"^[[2J 0x1\""]);
+    }
+
+    /// Under `+m m`, a mount not `stat`ed takes its device from the file and
+    /// is kept; the C says so for each, with the device its `stat` buffer
+    /// holds, and that is the last one there where the file has none
+    /// (measured: a file of `/proc` and `/dev` alone gives `/sys` `/proc`'s
+    /// 0x15 under `-b`).
+    /// What the file is decides what is said of it, and nothing waits on a
+    /// FIFO, which the C's `fopen()` waits on for ever (measured), or reads
+    /// a device; a socket is the C's `can't open` (measured).
+    #[test]
+    #[cfg_attr(miri, ignore = "it makes files")]
+    fn a_supplement_that_is_no_regular_file_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-supk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shown = |p: &Path| p.to_str().unwrap().to_string();
+        let sock = dir.join("sock");
+        let _ = std::fs::remove_file(&sock);
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert_eq!(
+            supplement_bytes(sock.as_os_str()).unwrap_err(),
+            format!(
+                "lsof: can't open({}): No such device or address",
+                shown(&sock)
+            )
+        );
+        let fifo = dir.join("fifo");
+        let _ = std::fs::remove_file(&fifo);
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            std::ffi::CString::new(fifo.as_os_str().as_bytes())
+                .unwrap()
+                .as_c_str(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            supplement_bytes(fifo.as_os_str()).unwrap_err(),
+            format!("lsof: error reading {}", shown(&fifo))
+        );
+        assert_eq!(
+            supplement_bytes(OsStr::new("/dev/null")).unwrap_err(),
+            "lsof: error reading /dev/null"
+        );
+        // A pipe whose writer holds it open, the supplement in it: the C
+        // reads it and takes `/proc`'s device (measured, `printf '/proc
+        // 0x15\n' | lsof +m /dev/stdin`); lsof-rs refuses it unread, a read
+        // that waits for as long as the writer keeps it.
+        let mut holder = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut w = holder.stdin.take().unwrap();
+            w.write_all(b"/proc 0x15\n").unwrap();
+            let pipe = format!("/proc/{}/fd/0", holder.id());
+            assert_eq!(
+                supplement_bytes(OsStr::new(&pipe)).unwrap_err(),
+                format!("lsof: error reading {pipe}")
+            );
+            drop(w);
+        }
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert_eq!(
+            supplement_bytes(dir.as_os_str()).unwrap_err(),
+            format!("lsof: error reading {}", shown(&dir))
+        );
+        let gone = dir.join("gone");
+        assert_eq!(
+            supplement_bytes(gone.as_os_str()).unwrap_err(),
+            format!(
+                "lsof: WARNING: access {}: No such file or directory",
+                shown(&gone)
+            )
+        );
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(supplement_bytes(empty.as_os_str()).unwrap(), b"");
+        // The bound: a file of 16 MiB is read, one byte more is not.
+        let big = dir.join("big");
+        let at_most = usize::try_from(SUPPLEMENT_MAX_BYTES).unwrap();
+        std::fs::write(&big, vec![b'/'; at_most]).unwrap();
+        assert_eq!(supplement_bytes(big.as_os_str()).unwrap().len(), at_most);
+        std::fs::write(&big, vec![b'/'; at_most + 1]).unwrap();
+        assert_eq!(
+            supplement_bytes(big.as_os_str()).unwrap_err(),
+            format!("lsof: error reading {}", shown(&big))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A name that leads to a descriptor lsof inherited is gone, as the C
+    /// finds it: `/dev/fd/N`, `/proc/self/fd/N`, `/proc/PID/fd/N`; another
+    /// descriptor's, or the file's own name, is not.
+    #[test]
+    #[cfg_attr(miri, ignore = "it opens a file and reads /proc")]
+    fn a_name_through_an_inherited_descriptor_is_none() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/proc/self/stat").unwrap();
+        let n = u32::try_from(file.as_raw_fd()).unwrap();
+        let held = [n];
+        let pid = std::process::id();
+        for name in [
+            format!("/dev/fd/{n}"),
+            format!("/proc/self/fd/{n}"),
+            format!("/proc/{pid}/fd/{n}"),
+            format!("/proc/thread-self/fd/{n}"),
+            format!("/dev/../dev/fd/{n}"),
+        ] {
+            assert!(names_an_inherited_fd(Path::new(&name), &held), "{name}");
+            assert!(!names_an_inherited_fd(Path::new(&name), &[n + 1]), "{name}");
+        }
+        assert!(!names_an_inherited_fd(Path::new("/proc/self/stat"), &held));
+        assert!(!names_an_inherited_fd(Path::new("/dev/fd/0"), &held));
+        drop(file);
+    }
+
+    /// An empty supplement names no mount: each mount not `stat`ed is
+    /// `assuming dev=0 … from F` and kept, and the run goes on (the C dies
+    /// at its first lookup, exit 139: ledger
+    /// `plus-m-file-empty-crashes-the-c`).
+    #[test]
+    #[cfg_attr(miri, ignore = "it writes a file")]
+    fn an_empty_supplement_names_no_mount() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-supe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("empty");
+        std::fs::write(&file, "").unwrap();
+        let shown = file.to_str().unwrap().to_string();
+        let b = Blocking {
+            avoid: true,
+            ..Blocking::default()
+        };
+        let (t, said) = resolve_sup(
+            &Host::default(),
+            "proc /proc proc rw 0 0\nsysfs /sys sysfs rw 0 0\n",
+            vec![],
+            MountSupplement::File(file.clone().into()),
+            b,
+            false,
+        );
+        assert_eq!(dirs(&t), ["/proc", "/sys"]);
+        assert!(t.entries.iter().all(|m| m.device.is_none() && !m.supplied));
+        assert_eq!(
+            said,
+            [
+                format!("lsof: assuming dev=0 for /proc from {shown}"),
+                format!("lsof: assuming dev=0 for /sys from {shown}"),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "it writes a supplement file")]
+    fn a_mount_not_stated_takes_the_supplements_device() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-sup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sup");
+        std::fs::write(&file, "/proc 0x15\n/dev 0x6\n").unwrap();
+        let shown = file.to_str().unwrap().to_string();
+        let text =
+            "proc /proc proc rw 0 0\nsysfs /sys sysfs rw 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n";
+        let b = Blocking {
+            avoid: true,
+            ..Blocking::default()
+        };
+        let host = Host::default();
+        let (t, said) = resolve_sup(
+            &host,
+            text,
+            vec![],
+            MountSupplement::File(file.clone().into()),
+            b,
+            false,
+        );
+        assert_eq!(dirs(&t), ["/proc", "/sys", "/dev"]);
+        let devs: Vec<Option<u64>> = t.entries.iter().map(|m| m.device).collect();
+        assert_eq!(devs, [Some(0x15), None, Some(6)]);
+        assert_eq!(
+            said,
+            [
+                format!("lsof: assuming dev=0x15 for /proc from {shown}"),
+                format!("lsof: assuming dev=0x15 for /sys from {shown}"),
+                format!("lsof: assuming dev=0x6 for /dev from {shown}"),
+            ]
+        );
+        // A failed `stat` made by the helper leaves zeros in the C's buffer,
+        // a timeout what was there; an `-e` mount is never `stat`ed but asks
+        // the file too.
+        let mut host = Host::default();
+        host.stats.insert("/proc", errno(13));
+        host.stats.insert("/sys", dir_on(0x22));
+        host.stats
+            .insert("/dev", Err(lsof_core::safefs::timed_out()));
+        let text3 = "proc /proc proc rw 0 0\nsysfs /sys sysfs rw 0 0\ndevtmpfs /dev devtmpfs rw 0 0\nnone /x tmpfs rw 0 0\n";
+        let (t, said) = resolve_sup(
+            &host,
+            text3,
+            vec![e("/x", false)],
+            MountSupplement::File(file.clone().into()),
+            Blocking::default(),
+            false,
+        );
+        let devs: Vec<Option<u64>> = t.entries.iter().map(|m| m.device).collect();
+        assert_eq!(devs, [Some(0x15), Some(0x22), Some(6), None]);
+        // Which device came from the file (the C's `ds` of `SB_DEV` alone,
+        // which `isefsys()` shows for an `-e` mount's files): a hit, for a
+        // failed `stat` or a timeout as for one not made; never a `stat`'s,
+        // nor a miss.
+        let supplied: Vec<bool> = t.entries.iter().map(|m| m.supplied).collect();
+        assert_eq!(supplied, [true, false, true, false]);
+        assert_eq!(
+            said,
+            [
+                format!("lsof: assuming dev=0x15 for /proc from {shown}"),
+                format!("lsof: assuming dev=0x6 for /dev from {shown}"),
+                format!("lsof: assuming dev=0x6 for /x from {shown}"),
+            ]
+        );
+        // Where the file has no line, what the buffer held is said: what a
+        // good `stat` left, kept by a timeout, zeroed by the helper's failure.
+        let mut host = Host::default();
+        host.stats.insert("/sys", dir_on(0x22));
+        host.stats.insert("/t", Err(lsof_core::safefs::timed_out()));
+        host.stats.insert("/a", errno(13));
+        let text4 = "sysfs /sys sysfs rw 0 0
+none /t tmpfs rw 0 0
+none /a tmpfs rw 0 0
+";
+        let (t, said) = resolve_sup(
+            &host,
+            text4,
+            vec![],
+            MountSupplement::File(file.clone().into()),
+            Blocking::default(),
+            false,
+        );
+        let devs: Vec<Option<u64>> = t.entries.iter().map(|m| m.device).collect();
+        assert_eq!(devs, [Some(0x22), None, None]);
+        assert_eq!(
+            said,
+            [
+                format!("lsof: assuming dev=0x22 for /t from {shown}"),
+                format!("lsof: assuming dev=0 for /a from {shown}"),
+            ]
+        );
+        // No file: `access()`'s warning once, every mount kept without a
+        // device, its line said with the zero the buffer starts with.
+        let host = Host::default();
+        let missing = dir.join("nosuch");
+        let (t, said) = resolve_sup(
+            &host,
+            text,
+            vec![],
+            MountSupplement::File(missing.clone().into()),
+            b,
+            true,
+        );
+        assert_eq!(t.entries.len(), 3);
+        assert!(t.entries.iter().all(|m| m.device.is_none()));
+        let m = missing.to_str().unwrap();
+        assert!(
+            said.contains(&format!(
+                "lsof: WARNING: access {m}: No such file or directory"
+            )),
+            "{said:?}"
+        );
+        assert!(
+            said.contains(&format!("lsof: assuming dev=0 for /sys from {m}")),
+            "{said:?}"
+        );
+        // A directory, a FIFO or a device is an error reading it, read
+        // never; so is a file past the bound.
+        for path in [dir.clone(), std::path::PathBuf::from("/dev/zero")] {
+            let (_, said) = resolve_sup(
+                &Host::default(),
+                text,
+                vec![],
+                MountSupplement::File(path.clone().into()),
+                b,
+                true,
+            );
+            let p = path.to_str().unwrap();
+            assert!(
+                said.contains(&format!("lsof: error reading {p}")),
+                "{said:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `+m`: each mount recorded, as it is recorded, `DIR 0xDEV` or
+    /// `DIR 0x0`; a mount left out is not printed (DIVERGENCES 153).
+    #[test]
+    fn plus_m_prints_each_mount_it_records() {
+        let mut host = Host::default();
+        host.stats.insert("/proc", dir_on(0x15));
+        host.stats.insert("/gone", errno(2));
+        let text = "proc /proc proc rw 0 0\nnone /gone tmpfs rw 0 0\nnone /x tmpfs rw 0 0\nnone /proc tmpfs rw 0 0\nnone /e\\033 tmpfs rw 0 0\n";
+        let (t, said) = resolve_sup(
+            &host,
+            text,
+            vec![e("/x", false)],
+            MountSupplement::Print,
+            Blocking::default(),
+            false,
+        );
+        assert_eq!(dirs(&t), ["/proc", "/x", "/e\x1b"]);
+        assert_eq!(t.supplement_out, b"/proc 0x15\n/x 0x0\n/e^[ 0x1\n");
+        assert!(said.is_empty());
+        // Without `+m`, nothing.
+        let (t, _) = resolve_sup(
+            &host,
+            text,
+            vec![],
+            MountSupplement::None,
+            Blocking::default(),
+            false,
+        );
+        assert!(t.supplement_out.is_empty());
     }
 
     fn dirs(t: &MountTable) -> Vec<&str> {
@@ -1109,7 +1972,7 @@ mod tests {
         let say = |l: &str| said.borrow_mut().push(l.to_string());
         let fs = SafeFs::new(&host, &say).with(four, true);
         assert_eq!(
-            source(OsStr::new("/dev/disk/x"), None, &fs, Escaper::UNIX),
+            source(OsStr::new("/dev/disk/x"), None, &fs, Escaper::UNIX, &mut 0),
             (Some("/dev/disk/../../vda".into()), true)
         );
         let made = host.asked.take();
@@ -1131,18 +1994,30 @@ mod tests {
         // A name is kept as it stands; an `-e` mount's path source is read
         // and not stat()ed, a `+e` one's neither.
         assert_eq!(
-            source(OsStr::new("tmpfs"), None, &fs, Escaper::UNIX),
+            source(OsStr::new("tmpfs"), None, &fs, Escaper::UNIX, &mut 0),
             (Some("tmpfs".into()), false)
         );
         let minus = e("/m", false);
         assert_eq!(
-            source(OsStr::new("/dev/disk/x"), Some(&minus), &fs, Escaper::UNIX),
+            source(
+                OsStr::new("/dev/disk/x"),
+                Some(&minus),
+                &fs,
+                Escaper::UNIX,
+                &mut 0
+            ),
             (Some("/dev/disk/../../vda".into()), false)
         );
         assert!(!host.asked.take().iter().any(|(c, _, _)| *c == "stat"));
         let plus = e("/m", true);
         assert_eq!(
-            source(OsStr::new("/dev/disk/x"), Some(&plus), &fs, Escaper::UNIX),
+            source(
+                OsStr::new("/dev/disk/x"),
+                Some(&plus),
+                &fs,
+                Escaper::UNIX,
+                &mut 0
+            ),
             (Some("/dev/disk/x".into()), false)
         );
         assert!(host.asked.take().is_empty());
@@ -1154,12 +2029,12 @@ mod tests {
         // `tmpfs`, `proc`: no Readlink(), and never a block device.
         let fs = SafeFs::in_process();
         assert_eq!(
-            source(OsStr::new("tmpfs"), None, &fs, Escaper::UNIX),
+            source(OsStr::new("tmpfs"), None, &fs, Escaper::UNIX, &mut 0),
             (Some("tmpfs".into()), false)
         );
         // A path is Readlink()'s spelling: here it holds no link.
         assert_eq!(
-            source(OsStr::new("/dev/null"), None, &fs, Escaper::UNIX),
+            source(OsStr::new("/dev/null"), None, &fs, Escaper::UNIX, &mut 0),
             (Some("/dev/null".into()), false)
         );
         // The canonical temp directory: a symlinked TMPDIR would be replaced
@@ -1173,7 +2048,13 @@ mod tests {
         let mut want = dir.clone().into_os_string();
         want.push("/../null");
         assert_eq!(
-            source(dir.join("rel").as_os_str(), None, &fs, Escaper::UNIX),
+            source(
+                dir.join("rel").as_os_str(),
+                None,
+                &fs,
+                Escaper::UNIX,
+                &mut 0
+            ),
             (Some(want), false)
         );
         let _ = std::fs::remove_dir_all(&dir);

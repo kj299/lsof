@@ -315,6 +315,34 @@ pub fn render_with_offset_digits(
     offset_digits: i32,
     file_flags: FileFlags,
 ) -> String {
+    let mut buf = Vec::new();
+    write_with_names(
+        &mut buf,
+        procs,
+        (nul, only, tcp_show, esc),
+        offset_digits,
+        file_flags,
+        &mut |_| None,
+    )
+    .expect("writing to a Vec cannot fail");
+    String::from_utf8(buf).expect("every field is a String, so the text is UTF-8")
+}
+
+/// [`render_with_offset_digits`], written to `w` a set at a time, each
+/// file's NAME first offered to `rename`, which may give back the file as
+/// it is to be printed (a socket's hosts and ports named). The C names a
+/// socket as it prints its `n` into stdout's buffer, so a reader that goes
+/// away stops the lookups at the next write (DIVERGENCES 154); this asks
+/// `rename` only once every set before it is in `w`, and a write error
+/// ends it at once.
+pub fn write_with_names(
+    w: &mut dyn std::io::Write,
+    procs: &[Process],
+    (nul, only, tcp_show, esc): (bool, Option<&[char]>, TcpInfoFlags, Escaper),
+    offset_digits: i32,
+    file_flags: FileFlags,
+    rename: &mut dyn FnMut(&crate::model::OpenFile) -> Option<crate::model::OpenFile>,
+) -> std::io::Result<()> {
     let term = if nul { '\0' } else { '\n' };
     // No list is the C's default set, which is every letter but a few; a
     // list is exactly those letters (the parser spells out the default set
@@ -383,7 +411,11 @@ pub fn render_with_offset_digits(
             }
         }
         end_set!();
+        w.write_all(out.as_bytes())?;
+        out.clear();
         for f in &p.files {
+            let renamed = if want('n') { rename(f) } else { None };
+            let f = renamed.as_ref().unwrap_or(f);
             let fd = match f.fd {
                 FdType::Handle(n) => n.to_string(),
                 _ => f.fd.code(),
@@ -476,8 +508,12 @@ pub fn render_with_offset_digits(
             }
             // Emit NAME only when there is one. Some rows (e.g. `-K` thread
             // `task` rows) have no name; a bare `n` field code with an empty
-            // value is just noise.
-            if want('n') && !f.name.is_empty() {
+            // value is just noise. An Internet socket's is the exception:
+            // the C prints its `n` whatever `printinaddr()` made of it, and
+            // it makes nothing of a NAME too long for its buffer, so the
+            // field is empty there (measured: a 4,200-byte host name in
+            // the hosts file, DIVERGENCES 154).
+            if want('n') && (!f.name.is_empty() || f.is_internet()) {
                 push!('n', &f.printed_name(&esc));
             }
             // The TCP/TPI tokens come last, *after* the name: `print.c` calls
@@ -514,9 +550,11 @@ pub fn render_with_offset_digits(
                 }
             }
             end_set!();
+            w.write_all(out.as_bytes())?;
+            out.clear();
         }
     }
-    out
+    Ok(())
 }
 
 /// The uid `-F u` and JSON's `uid` print: the C's `(int)Lp->uid`
@@ -609,5 +647,43 @@ mod tests {
         for c in "xyqQ?/1-+ ".chars() {
             assert!(!field_known(c), "{c:?}");
         }
+    }
+
+    /// An Internet socket's NAME prints, empty or not, as the C's `n`
+    /// (DIVERGENCES 154); any other row's empty one is left out.
+    #[test]
+    fn an_internet_sockets_empty_name_is_an_empty_n() {
+        use crate::model::{FileType, Protocol, SocketInfo};
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(1);
+        p.files[0].name.clear();
+        let mut inet = p.files[0].clone();
+        inet.file_type = FileType::Ipv4;
+        inet.socket = Some(Box::new(SocketInfo {
+            protocol: Protocol::Udp,
+            local: Some("127.0.0.1:5000".parse().unwrap()),
+            remote: None,
+            state: None,
+            tcp: None,
+            bound: None,
+        }));
+        let only = Some(&['n'][..]);
+        let plain = render(
+            std::slice::from_ref(&p),
+            false,
+            only,
+            TcpInfoFlags::default(),
+            Escaper::UNIX,
+        );
+        assert!(!plain.contains("\nn\n"), "{plain:?}");
+        p.files[0] = inet;
+        let out = render(
+            std::slice::from_ref(&p),
+            false,
+            only,
+            TcpInfoFlags::default(),
+            Escaper::UNIX,
+        );
+        assert!(out.ends_with("\nn\n"), "{out:?}");
     }
 }

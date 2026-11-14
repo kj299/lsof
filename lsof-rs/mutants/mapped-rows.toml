@@ -37,6 +37,9 @@
 # has none, so the guard only saves that call (the code before the
 # re-anchoring has the same `let link = link?;`).
 
+# Re-anchored 2026-11-14 by the review of 152-154 (the code they name moved):
+# exempt-repeat-kept; run again as root with --first-kill: killed by the CLI's tests.
+
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -282,9 +285,17 @@ rule = "-e repeated is entered once (104)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
 old = '''    if !sel.exempt_fs.iter().any(|e| e.path == path) {
-        sel.exempt_fs.push(ExemptFs { path, plus });
+        sel.exempt_fs.push(ExemptFs {
+            path,
+            plus,
+            device: None,
+        });
     }'''
-new = '''    sel.exempt_fs.push(ExemptFs { path, plus });'''
+new = '''    sel.exempt_fs.push(ExemptFs {
+        path,
+        plus,
+        device: None,
+    });'''
 
 [[mutant]]
 name = "exempt-relative-accepted"

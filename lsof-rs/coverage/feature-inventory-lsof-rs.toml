@@ -108,16 +108,14 @@ platforms = ["windows"]
 reason = "mount-table concepts (exempt FS, FS detail, mtab supplement, cross-mount walk) — Windows has no mount table in this sense"
 
 # 1c. Linux-scoped option waivers. These are the waivers above whose
-#     justification was "Unix-only" — true of Windows, false here. Of them, -m
-#     and -M are absent from this C's Linux build too (NOT IN THE DIALECT), and
-#     -Z is the one still DEBT, declared with what closes it, NOT re-waived as
-#     out of scope: a waiver says "we will never do this", and that would be
-#     untrue. (-S and -b left this section when they shipped, 2026-10-09.)
-
-[[waive]]
-id = "opt:m"
-platforms = ["linux"]
-reason = "NOT IN THE DIALECT — `lsof -m <file>` on this C answers `-m not supported`. Waived as absent upstream rather than as debt."
+#     justification was "Unix-only" — true of Windows, false here. Of them, -M
+#     is absent from this C's Linux build too (NOT IN THE DIALECT), and -Z is
+#     the one still DEBT, declared with what closes it, NOT re-waived as out of
+#     scope: a waiver says "we will never do this", and that would be untrue.
+#     (-S and -b left this section when they shipped, 2026-10-09; -m on
+#     2026-11-14, when `+m [m]`, the Linux C's mount supplement, did: the
+#     `linux/differential-plus-m-*` cases cover the letter and its next-word
+#     value, and `-m` is still the C's `-m not supported`, DIVERGENCES 148.)
 
 [[waive]]
 id = "opt:M"
