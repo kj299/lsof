@@ -476,8 +476,12 @@ pub fn render_with_offset_digits(
             }
             // Emit NAME only when there is one. Some rows (e.g. `-K` thread
             // `task` rows) have no name; a bare `n` field code with an empty
-            // value is just noise.
-            if want('n') && !f.name.is_empty() {
+            // value is just noise. An Internet socket's is the exception:
+            // the C prints its `n` whatever `printinaddr()` made of it, and
+            // it makes nothing of a NAME too long for its buffer, so the
+            // field is empty there (measured: a 4,200-byte host name in
+            // the hosts file, DIVERGENCES 154).
+            if want('n') && (!f.name.is_empty() || f.is_internet()) {
                 push!('n', &f.printed_name(&esc));
             }
             // The TCP/TPI tokens come last, *after* the name: `print.c` calls
@@ -609,5 +613,43 @@ mod tests {
         for c in "xyqQ?/1-+ ".chars() {
             assert!(!field_known(c), "{c:?}");
         }
+    }
+
+    /// An Internet socket's NAME prints, empty or not, as the C's `n`
+    /// (DIVERGENCES 154); any other row's empty one is left out.
+    #[test]
+    fn an_internet_sockets_empty_name_is_an_empty_n() {
+        use crate::model::{FileType, Protocol, SocketInfo};
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(1);
+        p.files[0].name.clear();
+        let mut inet = p.files[0].clone();
+        inet.file_type = FileType::Ipv4;
+        inet.socket = Some(Box::new(SocketInfo {
+            protocol: Protocol::Udp,
+            local: Some("127.0.0.1:5000".parse().unwrap()),
+            remote: None,
+            state: None,
+            tcp: None,
+            bound: None,
+        }));
+        let only = Some(&['n'][..]);
+        let plain = render(
+            std::slice::from_ref(&p),
+            false,
+            only,
+            TcpInfoFlags::default(),
+            Escaper::UNIX,
+        );
+        assert!(!plain.contains("\nn\n"), "{plain:?}");
+        p.files[0] = inet;
+        let out = render(
+            std::slice::from_ref(&p),
+            false,
+            only,
+            TcpInfoFlags::default(),
+            Escaper::UNIX,
+        );
+        assert!(out.ends_with("\nn\n"), "{out:?}");
     }
 }

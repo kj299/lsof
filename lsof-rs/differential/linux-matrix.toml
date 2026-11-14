@@ -6904,3 +6904,240 @@ name = "names-host-conf-is-named-by-the-environment"
 args = ["-V", "-n", "-P", "-a", "-p", "{B}", "-i", "@r38multi"]
 env = { LSOF_DIFF_MT = "names-hostconf", RESOLV_HOST_CONF = "/etc/host.conf.off" }
 with_stderr = true
+
+# ------------------------- host and service names in NAME (DIVERGENCES 154)
+#
+# Both binaries name a socket's hosts and ports by default, as the C does,
+# `-n`/`-P` turn either off and `+n`/`+P` on again. Every case runs in the
+# `names` mode, whose /etc holds the harness's hosts, services and resolv.conf
+# files and whose only name server is the harness's own on a loopback
+# address ([`NamesResolver`]): no query leaves the host, and nothing depends
+# on what listens on port 53. `RES_OPTIONS` is set empty, where every other
+# case has `attempts:0`, so that these ask that server. Fixture NS holds a
+# TCP listener on 127.0.0.1:{NSPORT} (named `nslisten` for TCP), a UDP
+# socket on 127.0.0.1:{NSUPORT} (named `nstcponly`, for TCP alone), and a
+# UDP socket connected to each of 127.53.0.1 (a PTR record, `ns-name.example`),
+# .2 (NXDOMAIN), .3 (no reply: one second, `timeout:1 attempts:1`), .4 (a
+# name holding an ESC), 127.0.0.2 (the hosts file's `r38other`) and
+# 127.53.0.9 (which the hosts file names in 4,200 bytes, past the C's NAME
+# buffer: an empty NAME, and an empty `n` field).
+
+[[case]]
+name = "names-socket-hosts-and-ports-by-default"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+name = "names-socket-field-n"
+args = ["-F", "pfn", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+# Hosts as numbers, ports still named; nothing asked of the name server.
+name = "names-socket-dash-n"
+args = ["-n", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+
+[[case]]
+name = "names-socket-dash-p-upper"
+args = ["-P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+# The last of each wins (measured).
+name = "names-socket-plus-n-plus-p-after-dash"
+args = ["-n", "-P", "+n", "+P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+name = "names-socket-plus-p-after-dash-np"
+args = ["-nP", "+P", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+
+[[case]]
+# A selection by address is by number, whatever NAME then shows.
+name = "names-socket-selected-by-number"
+args = ["-a", "-p", "{NS}", "-i", "@127.53.0.1"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+
+[[case]]
+# Each address is asked once a run: the second cycle asks nothing, so the
+# silent one costs its second once.
+name = "names-socket-repeat-asks-once"
+args = ["-r", "1c2mX", "-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+# `attempts:0`, as every other case has: neither asks a server, and only
+# the hosts file names a host.
+name = "names-socket-no-attempts"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names" }
+
+[[case]]
+# `hosts: files` alone: no server asked.
+name = "names-socket-hosts-files-only"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-hostsfiles", RES_OPTIONS = "" }
+
+[[case]]
+# DNS first: 127.0.0.1 is asked of the server (REFUSED), then found in the
+# hosts file.
+name = "names-socket-dns-first"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-dnsfirst", RES_OPTIONS = "" }
+timeout = 60
+
+[[case]]
+# `[NOTFOUND=return]` after DNS: no name from the hosts file for an address
+# the server said NXDOMAIN of.
+name = "names-socket-dns-notfound-returns"
+args = ["-a", "-p", "{NS}", "-i"]
+env = { LSOF_DIFF_MT = "names-dnsreturn", RES_OPTIONS = "" }
+timeout = 60
+
+# ------------------------------------- -r's count and marker, +r (DIVERGENCES 152)
+#
+# Each runs a cycle a second, two at most: four seconds a case.
+
+[[case]]
+name = "repeat-count-and-marker"
+args = ["-r", "1c2mX", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# What follows the delay's digits is read again as options, the count's `c`
+# with it: a count of 2, and `-c 2`, which nothing matches.
+name = "repeat-count-is-also-dash-c"
+args = ["-r", "1c2", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# `+r 1c2`: `+c 2`, and two cycles that list.
+name = "repeat-plus-r-count"
+args = ["+r", "1c2", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# Nothing listed: no marker, no sleep, nothing said, exit 1.
+name = "repeat-plus-r-nothing-listed"
+args = ["+r", "1mX", "-a", "-d", "999", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# No delay: one cycle, and `+r`'s status stays an error (measured).
+name = "repeat-plus-r-zero-delay"
+args = ["+r0", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "repeat-field-marker"
+args = ["-r", "1c2mabc", "-F", "pf", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "repeat-field-marker-nul"
+args = ["-r", "1c2", "-F0pf", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# A line a file, and an empty line after each cycle.
+name = "repeat-json-lines"
+args = ["-r", "1c2mX", "-j", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+name = "repeat-terse-marker"
+args = ["-r1c2mX", "-t", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# A format whose text does not change within the run.
+name = "repeat-marker-strftime"
+args = ["-r", "1c1m[%Z%%%n%Y]", "-a", "-d", "cwd", "-p", "{A}"]
+
+[[case]]
+# `-V`'s report comes once, after the loop, of what no cycle located.
+name = "repeat-verbose-after-the-loop"
+args = ["-r", "1c2mX", "-V", "-p", "999999", "-p", "{A}", "-a", "-d", "cwd"]
+
+[[case]]
+name = "repeat-plus-r-verbose-nothing"
+args = ["+r", "1mX", "-V", "-p", "999999"]
+
+[[case]]
+name = "repeat-marker-empty-is-illegal"
+args = ["-r", "1c1m", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# 24 characters do not fit (2 + 1) * 8 bytes with the NUL.
+name = "repeat-marker-too-long-is-illegal"
+args = ["-r", "1m%c", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "repeat-marker-newline-with-dash-f"
+args = ["-r", "1m%n", "-F", "p", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+# ---------------------------------------------- +m, the mount supplement (DIVERGENCES 153)
+
+[[case]]
+# Each mount the table records, `DIR 0xDEV`, and the run ends, exit 0.
+name = "plus-m-prints-the-mounts"
+args = ["+m"]
+
+[[case]]
+name = "plus-m-ends-before-listing"
+args = ["+m", "-p", "{A}", "-V"]
+
+[[case]]
+# An `-e` mount is never stat()ed: `0x0`.
+name = "plus-m-exempt-mount-has-no-device"
+args = ["-e", "/proc", "+m"]
+
+[[case]]
+# A table read before `+m` was given printed nothing, and nothing is
+# printed now (measured).
+name = "plus-m-after-plus-d-prints-nothing"
+args = ["+d", "{AXDIR}", "+m"]
+
+[[case]]
+name = "plus-m-before-plus-d-prints-there"
+args = ["+m", "+d", "{AXDIR}"]
+
+[[case]]
+# `--` is no value: the print, then a path, which reads the table.
+name = "plus-m-then-a-path"
+args = ["+m", "--", "{AXDIR}"]
+
+[[case]]
+# Under `-b` no mount is stat()ed: each takes its device from the file, and
+# where the file has none, the last device the C's buffer held is said.
+name = "plus-m-file-under-b"
+args = ["+m", "{SUPPART}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-under-b-quiet"
+args = ["+m", "{SUPPART}", "-b", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-bad-lines"
+args = ["+m", "{SUPBAD}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A directory given two devices: said even under -w, and the file discarded.
+name = "plus-m-file-duplicate"
+args = ["+m", "{SUPDUP}", "-b", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-missing"
+args = ["+m", "{SUPPART}.nosuch", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+name = "plus-m-file-a-directory"
+args = ["+m", "{AXDIR}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+with_stderr = true

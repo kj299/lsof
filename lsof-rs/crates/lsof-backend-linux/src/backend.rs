@@ -120,6 +120,10 @@ impl Backend for LinuxBackend {
         crate::netnames::lookup_service(name, protocol)
     }
 
+    fn name_service(&self) -> Option<Box<dyn lsof_core::sockname::NameService>> {
+        Some(Box::new(crate::netnames::LinuxNames::new()))
+    }
+
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         self.gather_with(sel, &lsof_core::SafeFs::in_process())
     }

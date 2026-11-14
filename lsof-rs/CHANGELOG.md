@@ -12,6 +12,32 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **On Linux a socket's NAME names its hosts and ports by default, as the
+  C's does** (DIVERGENCES 154): `TCP localhost:nfs (LISTEN)` where lsof-rs
+  printed `TCP 127.0.0.1:2049 (LISTEN)`, in the table and in `-F n`. **A run
+  that lists an Internet socket may now ask DNS** for each of its hosts'
+  addresses that `/etc/hosts` does not name, as the C asks: once an address
+  a run (across `-r`'s cycles too), in print order, under
+  `/etc/resolv.conf`'s and `RES_OPTIONS`' `timeout` and `attempts`, so a
+  name server that does not answer costs each such address what it costs
+  the C (with glibc's defaults, 10 s an address for one name server that
+  does not answer, 20 s for two). `-n` keeps
+  hosts numeric and asks nothing, `-P` keeps ports numeric, and `+n`/`+P`
+  turn names back on, the last of each winning; `-n -P` is the old output
+  exactly. Nothing is asked for a row that prints no NAME: `-t`, `-F`
+  without `n`, and JSON, whose `name` (which the C does not print for an
+  Internet socket) stays the numeric form. An IPv4-mapped IPv6 end is
+  written as the C writes it, as IPv4 (unmeasured: this project's test host
+  has no IPv6). The one-line switch back to numbers by default is
+  `LINUX_NAMES_BY_DEFAULT` in `crates/lsof-cli/src/args.rs`. Windows
+  already named them; FreeBSD does not.
+- **`-r`'s value is read whole, as the C reads it** (DIVERGENCES 152): `-r
+  1c3` is a count of three cycles *and*, as in the C, `-c 3` (what follows
+  the delay's digits, but `m<fmt>`, is read again as options); `-r 2mX`
+  prints `X` between cycles. Where lsof-rs had refused `c` and `m`, the run
+  now ends after its count, each cycle followed by its sleep, and prints
+  what `-V` found missing once, after the last; `-r` with no count still
+  runs until it is killed and reports nothing.
 - **`-i` with a name no longer exits 1 as a refusal**: a name that
   resolves selects (Added, below), and a lookup may now ask a name server (once
   a name, under `/etc/resolv.conf`'s timeouts; never for an address or a
@@ -207,12 +233,60 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **DNS replies are read by a parser of lsof-rs's own** (DIVERGENCES 154,
+  THREAT-MODEL): a reverse lookup's reply is bytes from the network, chosen
+  by whoever answers. It is read in safe Rust, in bounded time and memory
+  (65,535 bytes at most; every compression pointer counted against the
+  message's length, as glibc's `ns_name_unpack()` counts them; a name of at
+  most 255 bytes in wire form and 256 characters in text, glibc's limits),
+  taken only from the name server asked (a connected socket) with the
+  query's random 16-bit id and its question, and printed escaped, glibc's
+  `\DDD` and lsof's `safestrprt()` both, so a name holding an ESC cannot
+  reach the terminal raw. Every wait ends at glibc's deadline for that
+  server; a TCP fallback, which glibc waits on without a limit, has the
+  same server's datagram deadline. Fuzzed (`dns_reply`). No new crate.
+- A mount supplement file (`+m m`) is read only if it is a regular file,
+  at most 16 MiB of it, and what it says of a bad line is escaped where the
+  C prints the line raw (`mount_supplement` fuzz target).
 - `rustix` moves from =1.1.5 to =1.1.6 for RUSTSEC-2026-0486: the xattr
   functions marked unwritten bytes as initialized when given a zero-length
   buffer. lsof-rs's one `getxattr` call passes a fixed 32-byte buffer and
   did not reach that path. No new crate; the build script is unchanged.
 
 ### Added
+- **`+n`, `+P`, `+r` and `+m`, which lsof-rs refused**, work as the C's
+  (DIVERGENCES 152-154):
+  * `+n`/`+P` name hosts and ports again after `-n`/`-P`. On Linux a host
+    is named as glibc's `gethostbyaddr()` names it: the sources
+    `/etc/nsswitch.conf` gives `hosts` (`files dns` where it gives none),
+    `files` being the first line of `/etc/hosts` with the address (an
+    address with no name there is an empty host, `:22`, as the C prints
+    it), and `dns` a PTR query of lsof-rs's own, glibc's in every rule
+    measured (its servers, their order and waits, `rotate`, `use-vc`,
+    `edns0`, a truncated reply asked again over TCP, which reply it takes
+    and which it waits past, CNAMEs, and the `\DDD` escapes of the name);
+    a port by `getservbyport()` over `/etc/services`, with the C's own
+    caches, which give up looking a port up singly after ten and read the
+    whole file once, and remember a port none was found for under either
+    protocol (measured: a TCP socket on a port the file names for UDP alone
+    makes a later UDP socket on it print the number). UDP-Lite's ports, as
+    in the C, are numbers.
+  * `+r [t[c<N>][m<fmt>]]` repeats until a cycle lists nothing, and exits 1
+    where none listed anything (`+r0` lists once and exits 1, as the C
+    does); `-r` and `+r` take `c<N>`, a count, and `m<fmt>`, a marker
+    printed in place of `=======`: a `strftime(3)` format formatted in the
+    local time zone at each cycle, read as glibc reads `TZ`, `TZDIR` and
+    `/etc/localtime` (a zone file of at most 1 MiB, or a POSIX rule string),
+    every conversion and flag of glibc 2.39 in the C locale (measured over
+    118,516 calls of its `strftime()`), into the C's buffer of eight bytes a
+    format byte: a format whose marker does not fit, or is empty, is the C's
+    `illegal <fmt>`, and `%n` beside `-F`, `-J` or `-j` its `%n illegal in
+    -r m<fmt> when -F has been specified`.
+  * `+m` prints the mount table as the C's supplement, `DIR 0xDEV` a mount,
+    and exits 0; `+m m` reads such a file, and a mount whose directory is
+    not `stat`ed (`-b`, `-e`, or a `stat` that failed) takes its device from
+    it and is kept, with the C's `assuming dev=… for DIR from m` (Linux).
+    `-m` stays the Linux C's `-m not supported`.
 - **`-c /regex/[bix]` selects by a POSIX regular expression**, as the C
   (DIVERGENCES 38): the text between the slashes is an extended expression,
   or a basic one with `b` after it (`x` says extended), and `i` ignores

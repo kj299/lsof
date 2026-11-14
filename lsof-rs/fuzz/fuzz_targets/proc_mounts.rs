@@ -13,7 +13,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_backend_linux::fuzz_api::{parse_mounts, resolve_table};
-use lsof_core::{Blocking, ExemptFs, MountRequest, SafeFs};
+use lsof_core::{Blocking, ExemptFs, MountRequest, MountSupplement, SafeFs};
 
 fuzz_target!(|data: &[u8]| {
     // Bytes, as the kernel writes them: only space, tab, newline and backslash
@@ -58,7 +58,16 @@ fuzz_target!(|data: &[u8]| {
         })
         .into_iter()
         .collect();
-    let table = resolve_table(&rows, &MountRequest { exempt }, &quiet);
+    // `+m`'s print, by the input's length: one line a mount recorded.
+    let supplement = if data.len() % 3 == 0 {
+        MountSupplement::Print
+    } else {
+        MountSupplement::None
+    };
+    let print = supplement == MountSupplement::Print;
+    let table = resolve_table(&rows, &MountRequest { exempt, supplement }, &quiet);
+    let printed = table.supplement_out.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
+    assert_eq!(printed, if print { table.entries.len() } else { 0 }, "{table:?}");
     assert!(table.entries.len() <= 1, "{table:?}");
     assert!(table.entries.iter().all(|m| m.device.is_none()), "{table:?}");
     assert!(table.has_nfs <= 2);

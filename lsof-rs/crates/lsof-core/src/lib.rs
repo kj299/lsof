@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backend;
+pub mod dns;
 mod endpoints;
 pub use endpoints::{EndpointTables, UnixEnds};
 pub mod mock;
@@ -26,11 +27,12 @@ pub mod render;
 pub mod safefs;
 pub mod selection;
 pub mod service;
+pub mod sockname;
 pub mod timefmt;
 
 pub use backend::{
-    errno_text, Backend, BackendError, MountEntry, MountKind, MountRequest, MountTable, Privilege,
-    UserLookup,
+    errno_text, Backend, BackendError, MountEntry, MountKind, MountRequest, MountSupplement,
+    MountTable, Privilege, UserLookup,
 };
 pub use model::{
     AccessMode, BoundPath, FdType, FileId, FileType, NameAddition, OpenFile, Process, Protocol,

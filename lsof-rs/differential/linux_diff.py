@@ -1382,6 +1382,9 @@ NAMES_HOSTS = (
     "0.0.0.0 r38zero\n"
     "127.0.0.9 r38multi\n"
     "127.0.0.1 r38multi\n"
+    # Fixture NS's 127.53.0.9, named past what the C's NAME buffer holds
+    # (`MAXPATHLEN + 1`): its NAME is none at all (DIVERGENCES 154).
+    "127.53.0.9 " + "h" * 4200 + "\n"
 )
 # No name server answers a name: the one named is this harness's own
 # ([`NamesResolver`]), bound to a loopback address nothing else has a
@@ -1389,6 +1392,9 @@ NAMES_HOSTS = (
 # reaches a resolver the host itself runs on port 53 (dnsmasq, unbound, a
 # stub on 127.0.0.53), let alone one it would forward.
 NAMES_RESOLVER = "127.238.38.53"
+# What every binary this harness runs has in its environment beside the
+# fixtures' (see the kit runner's call): the locale, and no name server.
+NO_DNS = {"LC_ALL": LOCALE, "RES_OPTIONS": "attempts:0"}
 NAMES_RESOLV = f"nameserver {NAMES_RESOLVER}\noptions timeout:1 attempts:1\n"
 NAMES_NSSWITCH = "passwd: files\nhosts: files dns\nservices: files\n"
 
@@ -1417,18 +1423,36 @@ NAMES_VARIANTS = {
     },
     # `multi on`, for a run whose RESOLV_HOST_CONF names /etc/host.conf.off.
     "hostconf": {"host.conf": "multi on\n", "host.conf.off": "multi off\n"},
+    # The `hosts` walk a socket's NAME is looked up by (DIVERGENCES 154):
+    # the hosts file alone; DNS first; and DNS's NOTFOUND ending it.
+    "hostsfiles": {"nsswitch.conf": "passwd: files\nhosts: files\nservices: files\n"},
+    "dnsfirst": {"nsswitch.conf": "passwd: files\nhosts: dns files\nservices: files\n"},
+    "dnsreturn": {"nsswitch.conf": "passwd: files\nhosts: dns [NOTFOUND=return] files\nservices: files\n"},
 }
 NAMES_FILES = ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf", "host.conf", "host.conf.off")
+
+
+# What the names modes' name server says of fixture NS's remote addresses
+# (DIVERGENCES 154): a PTR record; NXDOMAIN; nothing at all, so that a
+# lookup waits its `timeout:1`; a PTR record whose name holds an ESC, which
+# glibc writes `\027` and both print escaped again; anything else, REFUSED.
+NAMES_PTR = {
+    "1.0.53.127.in-addr.arpa": b"\x07ns-name\x07example\x00",
+    "2.0.53.127.in-addr.arpa": "NXDOMAIN",
+    "3.0.53.127.in-addr.arpa": None,
+    "4.0.53.127.in-addr.arpa": b"\x08esc\x1b[31m\x07example\x00",
+}
 
 
 class NamesResolver:
     """The name server of the `names` modes: a UDP socket on
     [`NAMES_RESOLVER`], port 53, that answers every query REFUSED, so that a
     lookup of a name the hosts file lacks fails at once and alike for both
-    binaries, whatever else on the host answers DNS. Bound with
-    SO_REUSEPORT, so that two runs of this harness can each hold it; a
-    resolver of the host's that holds the port on every address without it
-    makes the bind fail, and then the modes cannot be isolated: INFRA."""
+    binaries, whatever else on the host answers DNS, but for fixture NS's
+    PTR names ([`NAMES_PTR`]). Bound with SO_REUSEPORT, so that two runs of
+    this harness can each hold it; a resolver of the host's that holds the
+    port on every address without it makes the bind fail, and then the
+    modes cannot be isolated: INFRA."""
 
     def __init__(self):
         self.sock = None
@@ -1458,13 +1482,36 @@ class NamesResolver:
         flags = 0x8000 | (query[2] & 0x79) << 8 | 0x0005
         return query[:2] + flags.to_bytes(2, "big") + query[4:6] + b"\0" * 6 + query[12:]
 
+    @staticmethod
+    def answer(query: bytes) -> bytes | None:
+        """What the server sends for `query`: [`NAMES_PTR`]'s answer for a
+        PTR query of one of its names, as a response with recursion
+        available, and the refusal for anything else."""
+        labels, at = [], 12
+        while at < len(query) and query[at]:
+            n = query[at]
+            labels.append(query[at + 1:at + 1 + n])
+            at += 1 + n
+        end = at + 5
+        name = b".".join(labels).decode("latin-1").lower()
+        if len(query) < end or query[end - 4:end] != b"\0\x0c\0\x01" or name not in NAMES_PTR:
+            return NamesResolver.refusal(query)
+        what = NAMES_PTR[name]
+        if what is None:
+            return None
+        head = query[:2] + bytes([0x81 | (query[2] & 0x01), 0x80])
+        if what == "NXDOMAIN":
+            return head[:3] + b"\x83" + query[4:6] + b"\0" * 6 + query[12:end]
+        record = b"\xc0\x0c\0\x0c\0\x01\0\0\0\x3c" + len(what).to_bytes(2, "big") + what
+        return head + query[4:6] + b"\0\x01\0\0\0\0" + query[12:end] + record
+
     def serve(self):
         while True:
             try:
                 query, peer = self.sock.recvfrom(4096)
             except OSError:
                 return
-            answer = self.refusal(query)
+            answer = self.answer(query)
             if answer is not None:
                 try:
                     self.sock.sendto(answer, peer)
@@ -1484,7 +1531,7 @@ def names_dir(work: str) -> str:
     return os.path.join(work, "names")
 
 
-def write_names_services(work: str, port: str, uport: str) -> None:
+def write_names_services(work: str, port: str, uport: str, nsport: str = "0", nsuport: str = "0") -> None:
     """The services file of the `names` modes, once fixture B's ports are
     known: its TCP listener's port under a name with an alias and a
     comment, its UDP socket's under another, a name both protocols give on
@@ -1502,6 +1549,11 @@ def write_names_services(work: str, port: str, uport: str) -> None:
             f"r38same {port}/udp\n"
             f"r38-dash {port}/tcp\n"
             "r38hex 0x50/tcp\n"
+            # Fixture NS (DIVERGENCES 154): its listener's port named for
+            # TCP, its UDP socket's named for TCP alone, which a UDP socket
+            # is not given.
+            f"nslisten {nsport}/tcp\n"
+            f"nstcponly {nsuport}/tcp\n"
         )
 
 
@@ -1832,6 +1884,52 @@ def netns_listener(work: str) -> Fixture:
         expect_fds=4,
         optional=True,
     )
+
+
+def names_socket_holder(work: str) -> Fixture:
+    """Fixture NS: the sockets whose hosts and ports the `names` modes name
+    (DIVERGENCES 154). A TCP listener and a UDP socket on 127.0.0.1, their
+    ports published (the services file names the first for TCP, the second
+    for TCP alone), and a UDP socket connected to each address the names
+    modes' name server answers its own way ([`NAMES_PTR`]): 127.53.0.1 (a
+    PTR record), .2 (NXDOMAIN), .3 (no reply), .4 (a name with an ESC), .9
+    (which the hosts file names past the C's NAME buffer), and to 127.0.0.2,
+    which it names `r38other`. All on `lo`."""
+    ndir = os.path.join(work, "names-sockets")
+    os.makedirs(ndir)
+    py = (
+        "import os,socket,time\n"
+        "t=socket.socket(); t.bind(('127.0.0.1',0)); t.listen(1)\n"
+        "u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); u.bind(('127.0.0.1',0))\n"
+        "c=[]\n"
+        "for a in ('127.53.0.1','127.53.0.2','127.53.0.3','127.53.0.4','127.0.0.2','127.53.0.9'):\n"
+        "    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((a,9)); c.append(s)\n"
+        "open(os.path.join(%r,'ports.tmp'),'w').write('%%d %%d' %% (t.getsockname()[1],u.getsockname()[1]))\n"
+        "os.rename(os.path.join(%r,'ports.tmp'),os.path.join(%r,'ports'))\n"
+        "time.sleep(600)\n" % (ndir, ndir, ndir)
+    )
+    return Fixture("NS(names)", [sys.executable, "-c", py], cwd=ndir, expect_fds=11)
+
+
+# A mount supplement file each, for the `+m m` cases (DIVERGENCES 153): its
+# lines, in the C's format; another with one of each line the C complains
+# of; another that gives one directory two devices.
+SUPPLEMENTS = {
+    "sup-part": "/proc 0x15\n/dev 0x6\n",
+    "sup-bad": "proc 0x15\n/dev 15\n/x 0x15 \n/y 0xG\n/ok 0x1\n",
+    "sup-dup": "/proc 0x15\n/proc 0x16\n/dev 0x6\n",
+}
+
+
+def write_supplements(work: str) -> dict:
+    """The [`SUPPLEMENTS`] files under `work`, by name."""
+    out = {}
+    for name, text in SUPPLEMENTS.items():
+        path = os.path.join(work, name)
+        with open(path, "w") as f:
+            f.write(text)
+        out[name] = path
+    return out
 
 
 def packet_holder(work: str) -> Fixture:
@@ -3287,6 +3385,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     dn = devnode_holder(work)
     sf = socket_file_holder(work)
     wr = walk_race_holder(work)
+    ns = names_socket_holder(work)
     # MT's and AUTOFS's base: a directory here, mounted over in each run's
     # namespace, where the cases' paths ({MTPLAIN}...) lead.
     os.makedirs(os.path.join(work, "mt"))
@@ -3296,7 +3395,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
         em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw, cr,
-        nlk, nsx, nlc, mq, nfs, ep,
+        nlk, nsx, nlc, mq, nfs, ep, ns,
     )
 
 
@@ -3445,6 +3544,7 @@ def run(args) -> int:
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
             sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
             crcomm, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles, endpoints,
+            namesocks,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -3720,9 +3820,19 @@ def run(args) -> int:
             infra(f"fixture B did not publish its UDP port: {e}")
         if not uport.isdigit():
             infra(f"fixture B published a non-numeric UDP port: {uport!r}")
+        # Fixture NS's two ports, published together once both are bound.
+        ns_file = os.path.join(namesocks.cwd, "ports")
+        while not os.path.exists(ns_file) and time.monotonic() < deadline + 3.0:
+            time.sleep(0.02)
+        try:
+            with open(ns_file) as f:
+                nsport, nsuport = f.read().split()
+        except (OSError, ValueError) as e:
+            infra(f"fixture NS did not publish its ports: {e}")
         # The services file the `names` modes put at /etc/services names
-        # those two ports (DIVERGENCES 38).
-        write_names_services(work, port, uport)
+        # those ports (DIVERGENCES 38, 154).
+        write_names_services(work, port, uport, nsport, nsuport)
+        supplements = write_supplements(work)
         cases = render_matrix(
             args.matrix,
             {
@@ -3734,6 +3844,12 @@ def run(args) -> int:
                     for key, (fx, _) in optional.items()
                 },
                 "A": str(a.pid),
+                "NS": str(namesocks.pid),
+                "NSPORT": nsport,
+                "NSUPORT": nsuport,
+                "SUPPART": supplements["sup-part"],
+                "SUPBAD": supplements["sup-bad"],
+                "SUPDUP": supplements["sup-dup"],
                 "NFS": str(nfsfiles.pid),
                 "NFSDIR": nfsfiles.cwd,
                 "B": str(b.pid),
@@ -3932,9 +4048,14 @@ def run(args) -> int:
         resolver = NamesResolver()
         if any(c.get("env", {}).get("LSOF_DIFF_MT", "").startswith("names") for c in cases):
             resolver.start()
-        # The kit runner hands its own environment to both binaries.
+        # The kit runner hands its own environment to both binaries: with
+        # `RES_OPTIONS=attempts:0`, under which glibc's resolver and
+        # lsof-rs's ask no name server at all, so a case that prints a
+        # socket whose address no hosts file names sends no query anywhere
+        # (DIVERGENCES 154). The cases that are about names set it empty,
+        # in a `names` mode whose only server is this harness's.
         try:
-            p = subprocess.run(cmd, env={**os.environ, "LC_ALL": LOCALE})
+            p = subprocess.run(cmd, env={**os.environ, **NO_DNS})
         finally:
             resolver.stop()
         if p.returncode not in (0, 1):
@@ -3976,7 +4097,7 @@ def invalid_json_cases(cases: list, rust: str) -> list:
             continue
         r = subprocess.run(
             [rust, *args], capture_output=True, timeout=c.get("timeout", 60),
-            env={**os.environ, "LC_ALL": LOCALE, **c.get("env", {})}, cwd=c.get("cwd"),
+            env={**os.environ, **NO_DNS, **c.get("env", {})}, cwd=c.get("cwd"),
         )
         try:
             json_lines_of(r.stdout.decode("utf-8"))
@@ -4168,6 +4289,16 @@ def self_test() -> int:
         check("the names modes' name server refuses a query",
               refused == b"\x12\x34\x81\x05\x00\x01" + b"\0" * 6 + query[12:]
               and NamesResolver.refusal(b"\x12\x34") is None)
+        ptr = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+               b"\x011\x010\x0253\x03127\x07in-addr\x04arpa\x00\x00\x0c\x00\x01")
+        answered = NamesResolver.answer(ptr)
+        nx = NamesResolver.answer(ptr.replace(b"\x011\x010", b"\x012\x010"))
+        silent = NamesResolver.answer(ptr.replace(b"\x011\x010", b"\x013\x010"))
+        check("...and answers fixture NS's PTR names, each its way",
+              answered is not None and answered.endswith(NAMES_PTR["1.0.53.127.in-addr.arpa"])
+              and answered[2:4] == b"\x81\x80" and answered[6:8] == b"\0\x01"
+              and nx is not None and nx[3] == 0x83 and silent is None
+              and NamesResolver.answer(query) == refused)
         write_names_services(td, "4001", "4002")
         services = open(os.path.join(td, "names", "services")).read()
         check("...and a services file of fixture B's two ports",

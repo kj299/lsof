@@ -224,6 +224,83 @@ CASES = {"-i": ["-i"], "whole-host": [], "whole-host-E": ["-E"],
          "state-empty-names": ["-s", "tcp:" + "," * STATE_COMMAS],
          "fd-list-items": ["-d", "^1" + ",2" * FD_ITEMS] * FD_WORDS}
 
+# names with a resolver that never answers (DIVERGENCES 154), in a network
+# and mount namespace of its own: only `lo`, a resolv.conf naming one server
+# on it (`timeout:1 attempts:1`) that receives and never answers, and
+# SILENT_ADDRESSES sockets connected to as many addresses no hosts file
+# names. Each binary waits for each distinct address once, as the C's
+# `gethostnm()` does, so both take a second an address (the four, and the
+# silent server's own, which the listing holds too); the ceiling is "not
+# slower than the C" with a runner's margin, and the RSS one `-i`'s, the
+# listing being as small. Measured 2026-11-14: 5.14 s against the C's 5.04
+# s (1.02x), 3.50 MB against 2.75 MB (1.28x). Needs root and `unshare`:
+# SKIP otherwise.
+SILENT_ADDRESSES = 4
+SILENT_REPEATS = 2
+SILENT_CEILING = {"wall": 1.25, "rss": 2.00}
+
+SILENT_PY = r"""
+import fcntl, json, os, shutil, socket, struct, subprocess, sys, tempfile
+meter, oracle, rust, k, repeats = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+ifr = struct.pack("16sH14s", b"lo", 0, b"")
+flags = struct.unpack("16sH14s", fcntl.ioctl(s, 0x8913, ifr))[1]
+fcntl.ioctl(s, 0x8914, struct.pack("16sH14s", b"lo", flags | 1, b""))
+work = tempfile.mkdtemp(prefix="resource-gate-dns-")
+files = {"resolv.conf": "nameserver 127.0.0.53\noptions timeout:1 attempts:1\n",
+         "hosts": "127.0.0.1 localhost\n",
+         "nsswitch.conf": "passwd: files\ngroup: files\nhosts: files dns\nservices: files\n"}
+for name, text in files.items():
+    path = os.path.join(work, name)
+    with open(path, "w") as f:
+        f.write(text)
+    subprocess.check_call(["mount", "--bind", path, "/etc/" + name])
+silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+silent.bind(("127.0.0.53", 53))
+socks = []
+for i in range(k):
+    c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    c.connect(("127.0.2.%d" % (i + 1), 9))
+    socks.append(c)
+argv = ["-a", "-p", str(os.getpid()), "-i"]
+env = {k_: v for k_, v in os.environ.items() if k_ != "RES_OPTIONS"}
+out = {"C": [], "rust": []}
+try:
+    for _ in range(repeats):
+        for side, binary in (("C", oracle), ("rust", rust)):
+            p = subprocess.run([meter, binary] + argv, capture_output=True, text=True, env=env)
+            ms, kb, st = p.stdout.split()
+            out[side].append([float(ms), int(kb) * 1024, int(st)])
+finally:
+    shutil.rmtree(work, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+
+def silent_resolver_case(meter, oracle, rust, report=print):
+    """The `names-silent-resolver` case's accumulator entry, or None (SKIP)
+    where no namespace can be made."""
+    if os.geteuid() != 0 or shutil.which("unshare") is None:
+        report("SKIP names-silent-resolver: needs root and unshare")
+        return None
+    p = subprocess.run(
+        ["unshare", "-m", "-n", "--propagation", "private", sys.executable, "-I",
+         "-c", SILENT_PY, meter, oracle, rust, str(SILENT_ADDRESSES), str(SILENT_REPEATS)],
+        capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        report(f"SKIP names-silent-resolver: no namespace ({p.stderr.strip()[:200]})")
+        return None
+    got = json.loads(p.stdout.strip().splitlines()[-1])
+    acc = {side: {"w": [], "r": []} for side in ("C", "rust")}
+    for side in ("C", "rust"):
+        for w, r, st in got[side]:
+            if st not in (0, 1):
+                raise GateError(f"{side} binary exited {st} under the silent resolver")
+            acc[side]["w"].append(w)
+            acc[side]["r"].append(r)
+    return acc
+
+
 MIN_TRUE_MB, MAX_TRUE_MB = 0.2, 3.0      # /bin/true: a real floor, not a guess
 MIN_ALLOC_MB, MAX_ALLOC_MB = 190.0, 260.0  # a known 200 MB allocation
 
@@ -258,9 +335,21 @@ def build_helpers(workdir):
     return out
 
 
-def measure_once(meter, argv):
+# Every measured run's environment: `attempts:0` has glibc's resolver, and
+# lsof-rs's, which reads `RES_OPTIONS` as glibc does, ask no name server at
+# all (DIVERGENCES 154). Both binaries name a socket's host by default, and a
+# whole-host listing holds sockets on addresses the hosts file does not name,
+# so without it this gate would send their PTR queries to whatever the host's
+# resolv.conf names. Names from the hosts and services files are still read
+# and timed; a resolver's cost is the `names-silent-resolver` case's, in a
+# network namespace of its own.
+NO_DNS_ENV = {**os.environ, "RES_OPTIONS": "attempts:0"}
+
+
+def measure_once(meter, argv, env=None):
     """(wall_ms, peak_rss_bytes, exit_status) for one run of argv."""
-    p = subprocess.run([meter] + argv, capture_output=True, text=True)
+    p = subprocess.run([meter] + argv, capture_output=True, text=True,
+                       env=NO_DNS_ENV if env is None else env)
     if p.returncode != 0 or not p.stdout.strip():
         raise GateError(f"meter failed on {argv[0]}: rc={p.returncode} "
                         f"{p.stderr.strip()[:200]}")
@@ -403,6 +492,10 @@ def run(oracle, rust, procs, fds, repeats, as_json, warn, ceilings=None,
             acc = sweep(helpers["meter"], oracle, rust, repeats)
         finally:
             kill_load(pids)
+        silent = silent_resolver_case(helpers["meter"], oracle, rust, report)
+        if silent is not None:
+            acc["names-silent-resolver"] = silent
+            ceilings = {**ceilings, "names-silent-resolver": SILENT_CEILING}
         rows = verdicts(acc, ceilings)
 
     # `--warn-wall` is the CI mode, and it is what the measurement supports

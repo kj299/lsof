@@ -118,18 +118,40 @@ pub struct MountTable {
     /// (DIVERGENCES 128): the CLI hands it to the backend as
     /// [`Selection::mqueue_device`](crate::Selection::mqueue_device).
     pub mqueue_device: Option<u64>,
+    /// What `+m` prints of the read, in order: a line `DIR 0xDEV` (or `DIR
+    /// 0x0`) for each mount recorded, as `readmnt()` prints it the moment it
+    /// records one. Empty unless the read was made under
+    /// [`MountSupplement::Print`].
+    pub supplement_out: Vec<u8>,
+}
+
+/// `+m [m]`, the C's mount supplement (`MntSup`, `MntSupP`; `dmnt.c`,
+/// DIVERGENCES 153), as it stood where the table was read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MountSupplement {
+    /// Neither: a mount whose directory cannot be `stat`ed is left out.
+    #[default]
+    None,
+    /// `+m`: each mount the read records is printed, `DIR 0xDEV`, and the
+    /// run ends there, exit 0.
+    Print,
+    /// `+m m`: a mount whose directory is not `stat`ed (`-b`, `-e`, or a
+    /// `stat` that failed) takes its device from file `m`, and is kept.
+    File(std::ffi::OsString),
 }
 
 /// What a read of the mount table needs to know of the options: the
 /// `-e`/`+e` file systems entered so far, which it neither `stat`s nor,
-/// for `+e`, reads the links of. The C reads its table once, where it first
-/// needs it, under the options in force there (`-b`, `-O`, `-S` and `-w`
-/// travel in the [`SafeFs`](crate::safefs::SafeFs) view the read is made
-/// through).
+/// for `+e`, reads the links of, and the mount supplement. The C reads its
+/// table once, where it first needs it, under the options in force there
+/// (`-b`, `-O`, `-S` and `-w` travel in the
+/// [`SafeFs`](crate::safefs::SafeFs) view the read is made through).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MountRequest {
     /// The C's `Efsysl` as it stood.
     pub exempt: Vec<crate::selection::ExemptFs>,
+    /// The C's `MntSup` and `MntSupP` as they stood.
+    pub supplement: MountSupplement,
 }
 
 /// Errors a backend can report. Selection that simply yields no rows is *not*
@@ -302,6 +324,17 @@ pub trait Backend {
     /// `-i :name`: the C's `getservbyname(3)`. None for a name that names
     /// nothing, the default.
     fn lookup_service(&self, _name: &[u8], _protocol: &str) -> Option<u16> {
+        None
+    }
+
+    /// What names an Internet socket's NAME: the C's `gethostbyaddr(3)`,
+    /// `getservbyport(3)` and `getservent(3)`, as far as this platform can
+    /// follow them ([`crate::sockname`]), for the core to look its hosts and
+    /// ports up in print order with the C's caches, as `printinaddr()` does
+    /// (DIVERGENCES 154). `None`, the default, where the backend names its
+    /// sockets itself (Windows, at gather time) or does not name them at all
+    /// (FreeBSD): the NAME it wrote is printed as it stands.
+    fn name_service(&self) -> Option<Box<dyn crate::sockname::NameService>> {
         None
     }
 

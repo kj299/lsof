@@ -125,7 +125,15 @@ item is shipped or a documented closed gate — and the release criteria are in
   `socket:[N]` resolves by that key into a real TYPE, protocol, addresses and
   TCP state. **`-i` and `-U` work** in every form the C takes, host and
   service names among them since 2026-11-11 (#38), `-i udplite` included, as does `-T q`; a raw socket is the C's `raw` row, which no `-i`
-  selects (#108).
+  selects (#108). **A socket's NAME names its hosts and ports by default**,
+  as the C's does (#154, since 2026-11-14): from `/etc/hosts` and, where
+  `/etc/nsswitch.conf` says so, from DNS, by a PTR client of lsof-rs's own
+  that follows glibc's resolver (so a run that lists a socket may ask a name
+  server, as the C does; `-n`/`-P` keep numbers, `+n`/`+P` name them again).
+- ✅ **`-r [t[c<N>][m<fmt>]]` and `+r`** repeat as the C's do (#152): a
+  count, a `strftime(3)` marker in the local zone, `+r` ending at a cycle that
+  lists nothing; **`+m [m]`** prints or reads the C's mount supplement
+  (#153).
 - ✅ **L2** — `mem` and `DEL` rows from `/proc/<pid>/maps`; ✅ the lock
   column (`3uW`) from `/proc/locks`; ✅ named `anon_inode` kinds
   (`[eventpoll:4,6]`, `[eventfd:6]`, `[pidfd:N]`); ✅ **path arguments matched

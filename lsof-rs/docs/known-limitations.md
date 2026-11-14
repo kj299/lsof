@@ -59,6 +59,36 @@ system); nor does `-n`. `LSOF_RS_TRACE=1` prints `resolve hosts start (N
 distinct)` and `done (answered, named)` around the phase. Where even that is
 too slow, `-n` skips it.
 
+### On Linux, a socket's host name may cost a DNS query
+
+As in the C, each address a printed socket row holds is named once a run
+(across `-r`'s cycles too), in print order: from `/etc/hosts`, or from DNS
+where `/etc/nsswitch.conf` says so (`files dns` where it says nothing), by
+lsof-rs's own PTR query (`std` has no reverse lookup, and the three
+`forbid(unsafe_code)` crates cannot call `getnameinfo()`). The query follows
+glibc 2.39's resolver in every rule measured against the C (DIVERGENCES 154):
+`/etc/resolv.conf`'s first three name servers in turn, `attempts` rounds,
+each server waited for `timeout << n` seconds, divided by the servers'
+count but for the first, one second at least; `RES_OPTIONS` read after the
+file; `rotate`, `use-vc`, `edns0`, `trust-ad`. So a name server that does not
+answer costs each such address what it costs the C: 10 s with glibc's
+defaults and one server, 20 s with two, `attempts:N` times the round. `-n`
+asks nothing; so do `-t`, `-F` without `n`, and JSON, which print no host
+name. A run with no Internet socket row asks nothing.
+
+What is not followed, and why: a source other than `files` and `dns` in
+`hosts:` (`mdns`, `resolve`, `myhostname`, `sss`) cannot be asked without
+the C library and is taken as not installed (`UNAVAIL`), as row 38 takes
+one; nscd is not asked; `/etc/resolv.conf` is read once a run, where glibc
+reads it again when it changes; an `edns0` query whose server answers
+`FORMERR` is not asked again without EDNS, as glibc would; an IPv6 name
+server's `%scope` naming an interface is looked up in
+`/sys/class/net/NAME/ifindex`. A TCP exchange after a truncated reply,
+which glibc waits on without a limit, has the time the same server's
+datagram attempt had. IPv6 sockets are named by glibc's rules (`ip6.arpa`,
+an IPv4-mapped end as IPv4) but could not be measured: this project's
+test host has no IPv6.
+
 ### On Windows, `-i` covers TCP and UDP by default; raw/ICMP/AF_UNIX are ETW-sourced
 
 There is no public IP Helper table for raw sockets (`SOCK_RAW`), ICMP, or
@@ -221,17 +251,20 @@ of a login name (70) are still open.
 cap of zero and is now unlimited. Both are checked against the C oracle by the
 differential's hostile-name fixtures.
 
-A fourth difference is deliberate and stays: **on Linux, lsof-rs never resolves
-host names or service names**, so it behaves as though `-n -P` were always
-given, and both flags change nothing there. The core renders the numeric form it
-is handed (`model::SocketInfo::display_name`), and resolution is a backend
-concern. The C resolves by default, so `192.0.2.2:43378->160.79.104.10:443` here
-is `192.0.2.2:43378->api.anthropic.com:https` there. Resolution costs DNS
-traffic from a diagnostic tool, which is a poor default for the environments
-this runs in. **On Windows** lsof-rs resolves both by default (reverse DNS
-through `GetNameInfoW`, bounded at 2 s, each distinct address once: see
+A fourth difference was deliberate until 2026-11-14 and is gone: **on Linux,
+lsof-rs names a socket's hosts and ports as the C does** (DIVERGENCES 154).
+`192.0.2.2:43378->160.79.104.10:443` is `192.0.2.2:43378->api.anthropic.com:https`
+in both, `-n` keeps the hosts numeric, `-P` the ports, and `+n`/`+P` name them
+again, the last of each winning. It had printed numbers whatever was given,
+because a name costs a DNS query from a diagnostic tool; it now costs what it
+costs the C (see [On Linux, a socket's host name may cost a DNS
+query](#on-linux-a-sockets-host-name-may-cost-a-dns-query)), and `-n` is the
+way to pay nothing. The maintainer can make numbers the default again in one
+line, `LINUX_NAMES_BY_DEFAULT` in `crates/lsof-cli/src/args.rs`. **On
+Windows** lsof-rs names both by default as before (reverse DNS through
+`GetNameInfoW`, bounded at 2 s, each distinct address once: see
 [Sockets](#on-windows-socket-host-names-cost-up-to-2-s-per-distinct-address)),
-and `-n` and `-P` turn that off.
+and `-n`/`-P`/`+n`/`+P` read the same flags. On FreeBSD nothing is named.
 
 What lsof-rs does resolve, on every platform, is a name it is **given**: `-i
 @localhost` and `-i :http` are looked up where the option is read, as the C
@@ -239,8 +272,7 @@ looks them up (DIVERGENCES 38). On Linux a host name comes from `/etc/hosts`
 by glibc's rules, and one the file does not hold from the system's resolver
 (`getaddrinfo()`), so such a name can cost one DNS lookup, under
 `/etc/resolv.conf`'s timeouts; an address, a number (`@127.1`) and a name the
-file holds cost none. A service name comes from `/etc/services`. What the
-listing prints stays numeric.
+file holds cost none. A service name comes from `/etc/services`.
 
 ## Open differences from the C
 
@@ -254,13 +286,24 @@ meet. Each number is a row there, with the measurement behind it.
   POSIX expression glibc takes is taken); a value that is not UTF-8, in a command line that
   also holds one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
-- **Names only the files know** (38, 39): a service name is read from
+- **Names only the files know** (38, 39, 154): a service name is read from
   `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
   has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves
-  is unknown; its port or UID works. A host name does reach DNS and the other
-  NSS sources, through the system's resolver, but one `/etc/hosts` holds for
-  IPv4 alone is not asked of DNS for IPv6, as the C asks it. nscd is not
-  asked.
+  is unknown; its port or UID works. A host name given to `-i` does reach DNS
+  and the other NSS sources, through the system's resolver, but one
+  `/etc/hosts` holds for IPv4 alone is not asked of DNS for IPv6, as the C
+  asks it. A socket's host is named from `/etc/hosts` and DNS alone (154):
+  another source in `hosts:` is not asked. nscd is not asked.
+- **Linux, the time a name costs** (154): a socket row's host that
+  `/etc/hosts` does not name is asked of DNS once a run, as the C asks it,
+  under `/etc/resolv.conf`'s timeouts (above); `-n` asks nothing.
+- **`-r m<fmt>`, `+m m` and their residues** (152, 153): a `TZ` naming a
+  zone with daylight time and no rule (`EST5EDT`) takes the United States'
+  rule (glibc reads `posixrules`, which is that rule where it links to
+  `America/New_York`); a zone file past 1 MiB, or one that is no regular file,
+  is no zone. A mount supplement that is no regular file, or past 16 MiB,
+  is `error reading` it, where the C would wait on a FIFO or read
+  `/dev/zero` forever, and its bad lines are quoted escaped.
 - **Linux, and worth knowing before running it on a busy host:** a run that
   needs the mount table — every run but `-i` alone, and that too with `-e` —
   reads it as the C does, and `stat`s each mount point once (again for a

@@ -75,6 +75,10 @@ it is a gap, not a formatting choice.
 | `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has; `-timeout=10`) |
 | `/etc/hosts`, `/etc/services`, `/etc/host.conf` (or the file `RESOLV_HOST_CONF` names), `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name`; `/proc/self/auxv`, read where `RESOLV_HOST_CONF` is set | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
 | the system's resolver's answer to an `-i @name` the hosts file does not hold (`getaddrinfo()` through `std`): addresses only | **a remote name server**, and whoever is on the path to it | **hostile** to availability; the addresses untrusted | `lsof-core::netnames::system_addresses` | not applicable: no bytes of the answer are parsed here (libc parses the reply, `std` hands over addresses); see below |
+| Linux: the replies to the PTR queries a socket's NAME makes, by default (`-n` turns them off; DIVERGENCES 154), over UDP and, after a truncated reply or under `use-vc`, TCP | **a remote name server**, and whoever can send to this host's ephemeral port | **hostile**: parsed here, and printed | `lsof-core::dns` (the reply's readers, the query loop), `lsof-backend-linux::dns` (the sockets) | `dns_reply` (every reader and the whole loop over a transport made of the input; `-timeout=10`) |
+| Linux: `/etc/resolv.conf` and `RES_OPTIONS` (not in secure-execution mode), and `/etc/hosts`, `/etc/services` and `/etc/nsswitch.conf` read for a socket's NAME | operator; the variable the invoking user | semi-trusted | `lsof-core::dns::ResolvConf`, `lsof-core::netnames` | `dns_reply`, `netnames` |
+| `-r mFMT`: the format, `TZ`, `TZDIR` (not in secure-execution mode), and the zone file they name or `/etc/localtime` | the invoking user; the operator for the zone files | untrusted | `lsof-core::timefmt` | `timefmt` |
+| `+m m`: the mount supplement file | the invoking user | untrusted | `lsof-backend-linux::mounts::parse_supplement` | `mount_supplement` |
 | the bounded helper's frames, both ways over its pipes (the names and link targets inside are any local user's), and `/proc/PID/cmdline` of a process named as lsof is, read to recognise another run's helper | lsof-rs's own helper; the kernel | untrusted | `lsof-backend-linux::safefs` | none — see below |
 | path arguments, `+d`/`+D` trees, and the symbolic links along them | **any local user** (link targets) | **hostile** | `lsof-core::readlink`, `lsof-cli` (the walk) | none — see below |
 | Windows handle table, object names | **any local process** | **hostile** | `lsof-backend-windows::handles` (enumeration), `::names` (parsing) | `windows_names` (covers `names`; the enumeration runs under ASan, not a fuzzer) |
@@ -579,6 +583,53 @@ selects the wrong sockets of the invoker's own listing, nothing more. A
 service name is read from `/etc/services` alone, where nsswitch.conf has
 glibc read it.
 
+**A socket's host name, on Linux, is a PTR query of lsof-rs's own, and its
+reply is attacker-controlled bytes** (DIVERGENCES 154). The C asks glibc's
+`gethostbyaddr()` for each address a printed socket row holds, once a run,
+and so, by default, does lsof-rs: from `/etc/hosts`, and from DNS where
+`/etc/nsswitch.conf` puts it, by a query it makes itself over `std::net`,
+because `std` has no reverse lookup and these crates may not call
+`getnameinfo()`. What that adds:
+
+* *What the query tells a name server.* Which addresses this host has
+  sockets with, as the C's queries tell it; `-n` sends none, and so do `-t`,
+  `-F` without `n` and JSON, which print no host name. Every test and gate
+  of this repository runs with `RES_OPTIONS=attempts:0`, under which neither
+  binary asks a server at all, or in a namespace whose only server is the
+  harness's own.
+* *Who can answer.* Each datagram socket is connected to its server, so the
+  kernel drops a datagram from any other address or port; a reply must carry
+  the query's id, 16 bits from `std`'s randomly keyed hasher (glibc uses its
+  own), and its question, or it is waited past as glibc waits past it; the
+  source port is the kernel's ephemeral one. An attacker off the path must
+  guess both, as against glibc.
+* *What a reply can make the parser do.* It is read in safe Rust from a
+  buffer of at most 65,535 bytes. A name is unpacked as glibc's
+  `ns_name_unpack()` unpacks it: every label and compression pointer counted
+  against the message's length, so a pointer loop ends after at most that
+  many bytes; at most 255 bytes in wire form, 256 characters as text (glibc's
+  limits, measured), or it is no name. No recursion, no loop longer than the
+  reply. Fuzzed: `dns_reply`, 1,930,475 runs in 181 s with no failure.
+* *What a reply can make lsof-rs print.* A name with an ESC, a newline or a
+  byte past ASCII is written as glibc writes it, `\027`, and that again
+  through `safestrprt()`'s rules (`\\027`), as the C prints it (measured): no
+  byte of a reply reaches the terminal raw. JSON prints no looked-up name.
+* *How long a server can hold a run.* glibc's own schedule, no longer: each
+  of the first three servers in turn for `attempts` rounds, waited for
+  `timeout << n` seconds (divided by the servers' count but for the first,
+  one second at least), a stranger's datagram extending nothing. A TCP
+  exchange after a truncated reply, which glibc waits on without a limit,
+  has the same server's datagram deadline, and at most 64 messages. Worst
+  case, as the C's: 450 s an address (`timeout:30 attempts:5`, three
+  servers), each distinct address once a run. Measured against the C with a
+  server that never answers (`timeout:1 attempts:1`, five addresses): 5.14 s
+  against 5.04 s, and 3.50 MB of RSS against 2.75 MB (the resource gate's
+  `names-silent-resolver`).
+* *What a run keeps.* Each distinct address's name, cut at 4,097 bytes (past
+  what the C's NAME buffer prints: a longer one prints as no name at all);
+  each port's service name; the services file read whole once the C's ten
+  single lookups are spent, within 16 MiB of names.
+
 **The files a name is read from are read in bounded memory and time, and
 only if they are files.** `/etc/hosts`, `/etc/services` and `/etc/passwd`
 are read a line at a time, a line to 1 MiB (a longer one is passed over, as
@@ -601,6 +652,20 @@ The first version read a line with no bound, and `/dev/zero` as
 failure (SIGABRT); for `/etc/passwd` that was every run that prints a
 login, and older than these rows. The readers take arbitrary bytes (fuzzed,
 `netnames`).
+
+**`-r mFMT` and `+m m` read files the invoker names, in bounded memory**
+(DIVERGENCES 152, 153). The zone file `TZ` names, or `/etc/localtime`, is
+read only if it is a regular file of at most 1 MiB (glibc reads any size),
+and parsed as glibc's `__tzfile_read()` parses it, every count checked
+against the bytes left before anything is kept (fuzzed, `timefmt`,
+3,287,580 runs in 181 s); in secure-execution mode only the system's zone
+files, as glibc. The marker's buffer is the C's, eight bytes a byte of the
+format and nine more, so at most 1 MiB for the longest argument Linux
+passes. The mount supplement is read only if it is a regular file, at most
+16 MiB, in the C's 8,191-byte lines, and a line it quotes in a complaint is
+escaped where the C prints it raw (fuzzed, `mount_supplement`, 1,521,540
+runs in 181 s); where the C would wait on a FIFO or read `/dev/zero` until
+it is killed, lsof-rs says `error reading` it.
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
 structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares

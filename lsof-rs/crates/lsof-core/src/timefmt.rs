@@ -446,7 +446,8 @@ impl PosixTz {
                 let m1 = (i64::from(rule.m) + 9) % 12 + 1;
                 let yy0 = if rule.m <= 2 { year - 1 } else { year };
                 let (yy1, yy2) = (yy0 / 100, yy0 % 100);
-                let dow = ((26 * m1 - 2) / 10 + 1 + yy2 + yy2 / 4 + yy1 / 4 - 2 * yy1).rem_euclid(7);
+                let dow =
+                    ((26 * m1 - 2) / 10 + 1 + yy2 + yy2 / 4 + yy1 / 4 - 2 * yy1).rem_euclid(7);
                 let mut d = i64::from(rule.d) - dow;
                 if d < 0 {
                     d += 7;
@@ -490,6 +491,26 @@ impl PosixTz {
 /// zone). A longer file is no zone file here, where glibc reads any length
 /// into memory (DIVERGENCES).
 pub const TZIF_MAX_BYTES: u64 = 1 << 20;
+
+/// A zone file's bytes, for [`Zone::from_env`]: the file at `path` read
+/// whole if it is a regular file of at most [`TZIF_MAX_BYTES`] (looked at
+/// before it is opened and once it is, so a FIFO or a device in its place
+/// is never read), and nothing otherwise.
+pub fn read_zone_file(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(TZIF_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= TZIF_MAX_BYTES).then_some(bytes)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TtInfo {
@@ -643,7 +664,8 @@ impl TzFile {
     fn name(&self, idx: u8) -> &[u8] {
         let from = self.names.get(usize::from(idx)..).unwrap_or_default();
         let name = from.split(|&b| b == 0).next().unwrap_or_default();
-        name.get(..name.len().min(ZONE_NAME_MAX)).unwrap_or_default()
+        name.get(..name.len().min(ZONE_NAME_MAX))
+            .unwrap_or_default()
     }
 
     /// `__tzfile_compute()`: the offset, whether it is the alternative and
@@ -657,7 +679,11 @@ impl TzFile {
             // time, or the first.
             let i = self.types.iter().position(|ty| !ty.isdst).unwrap_or(0);
             let info = self.types.get(i)?;
-            (i64::from(info.offset), info.isdst, self.name(info.idx).to_vec())
+            (
+                i64::from(info.offset),
+                info.isdst,
+                self.name(info.idx).to_vec(),
+            )
         } else if let (Some(spec), true) = (&self.spec, last.is_some_and(|last| t >= last)) {
             let year = i64::from(offtime(t, 0)?.year) + 1900;
             let (offset, isdst, name) = spec.at(t, year);
@@ -667,7 +693,11 @@ impl TzFile {
             let after = self.transitions.partition_point(|&when| when <= t);
             let idx = *self.type_idxs.get(after.checked_sub(1)?)?;
             let info = self.types.get(usize::from(idx))?;
-            (i64::from(info.offset), info.isdst, self.name(info.idx).to_vec())
+            (
+                i64::from(info.offset),
+                info.isdst,
+                self.name(info.idx).to_vec(),
+            )
         };
         let mut correction = 0i64;
         let mut hit = 0i32;
@@ -749,7 +779,9 @@ impl Zone {
             let path = if file.first() == Some(&b'/') {
                 file.to_vec()
             } else {
-                let dir = tzdir.filter(|dir| !dir.is_empty() && !secure).unwrap_or(TZDIR);
+                let dir = tzdir
+                    .filter(|dir| !dir.is_empty() && !secure)
+                    .unwrap_or(TZDIR);
                 [dir, b"/", file].concat()
             };
             if let Some(zone) = read(&path).and_then(|bytes| TzFile::parse(&bytes)) {
@@ -831,9 +863,7 @@ impl Out<'_> {
     /// otherwise. `false` where they do not fit; nothing is written then.
     fn add(&mut self, text: &[u8], width: i64, pad: u8, case: Case) -> bool {
         let n = text.len();
-        let delta = usize::try_from(width)
-            .unwrap_or(0)
-            .saturating_sub(n);
+        let delta = usize::try_from(width).unwrap_or(0).saturating_sub(n);
         let incr = n.saturating_add(delta);
         if incr >= self.buf.len().saturating_sub(self.at) {
             return false;
@@ -1149,7 +1179,11 @@ fn format_into(out: &mut Out<'_>, format: &[u8], tm: &Tm, epoch: i64, depth: u8)
             Is::Bad => {
                 // As written, from its `%`: through this byte, or to the
                 // format's end where it ends inside one.
-                let end = if conversion == 0 { f } else { f.saturating_add(1) };
+                let end = if conversion == 0 {
+                    f
+                } else {
+                    f.saturating_add(1)
+                };
                 let mut from = start;
                 // glibc looks back for the nearest `%`, which is this
                 // byte itself where the conversion is one (`%E%`).
@@ -1186,7 +1220,11 @@ impl Marker {
     /// eight bytes for each of the format's, and one.
     pub fn new(format: &[u8], zone: &Zone, now: i64) -> Option<Marker> {
         let format = format.split(|&b| b == 0).next().unwrap_or_default();
-        let size = format.len().checked_add(1)?.checked_mul(8)?.checked_add(1)?;
+        let size = format
+            .len()
+            .checked_add(1)?
+            .checked_mul(8)?
+            .checked_add(1)?;
         let mut marker = Marker {
             format: format.to_vec(),
             buf: vec![0; size],
@@ -1330,7 +1368,11 @@ mod tests {
             bad.is_empty(),
             "{} of {count} differ:\n{}",
             bad.len(),
-            bad.iter().take(4000).cloned().collect::<Vec<_>>().join("\n")
+            bad.iter()
+                .take(4000)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 }

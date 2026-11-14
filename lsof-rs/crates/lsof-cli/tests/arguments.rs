@@ -41,6 +41,7 @@ fn plus_f_reports_a_plain_directory_as_typed_and_escaped() {
     std::fs::create_dir(dir.0.join("plain")).expect("mkdir plain");
     std::fs::create_dir(dir.0.join("esc\x1b[2J")).expect("mkdir esc");
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .current_dir(&dir.0)
         .args(["+f", "--", "./plain", "esc\x1b[2J"])
         .output()
@@ -69,6 +70,7 @@ fn plus_f_reports_a_plain_directory_as_typed_and_escaped() {
 fn a_status_error_escapes_the_argument() {
     let dir = Scratch::new("status-error");
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .current_dir(&dir.0)
         .arg("no\x1b[2Jsuch")
         .output()
@@ -92,6 +94,7 @@ fn a_status_error_escapes_the_argument() {
 )]
 fn a_parse_error_escapes_the_argument_it_quotes() {
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(["-p", "1\x1b[2J"])
         .output()
         .expect("run lsof");
@@ -110,6 +113,7 @@ fn a_parse_error_escapes_the_argument_it_quotes() {
 /// Run the binary with `args`, from nowhere in particular.
 fn lsof(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(args)
         .output()
         .expect("run lsof")
@@ -228,6 +232,7 @@ fn a_refusal_the_c_makes_in_silence_under_dash_t_still_ends_the_run() {
     // `-w` set, mutes the message, not the refusal: only the usage follows.
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .args(args)
             .output()
             .expect("run lsof")
@@ -266,6 +271,7 @@ fn stderr_of(out: &std::process::Output) -> String {
 /// Run the binary in `dir` with `args`, which may hold any bytes.
 fn lsof_in(dir: &std::path::Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .current_dir(dir)
         .args(args)
         .output()
@@ -483,6 +489,7 @@ fn minus_v_reports_under_minus_q_and_never_under_minus_r() {
     // The first two lines are therefore two cycles' markers, where lsof-rs
     // had printed the report before each.
     let mut child = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .current_dir(&dir.0)
         .args(["-V", "-r", "1", "a"])
         .stdout(std::process::Stdio::piped())
@@ -608,6 +615,7 @@ fn dash_b_avoids_a_path_argument_and_says_so_escaped() {
     std::fs::write(dir.0.join("e\x1b[2Jx"), b"").expect("make a file");
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .current_dir(&dir.0)
             .args(args)
             .output()
@@ -669,6 +677,7 @@ fn what_the_parse_says_comes_in_the_cs_order() {
     std::fs::create_dir(dir.0.join("d")).expect("mkdir d");
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .current_dir(&dir.0)
             .args(args)
             .output()
@@ -814,6 +823,7 @@ fn a_path_through_proc_self_is_lsof_however_it_is_spelt() {
     }
     for (cwd, arg) in spellings {
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .current_dir(cwd)
             .args(["-n", "-P", "-a", "-d", "0", "-p", &pid, arg])
             .stdin(std::fs::File::open("/dev/null").expect("open /dev/null"))
@@ -887,6 +897,7 @@ fn the_helper_is_named_and_placed_as_lsof_is() {
     // `-r` lists, sleeps, lists again: the helper the first listing started
     // waits for the next call meanwhile. `f`: a path argument, so a call.
     let mut lsof = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .current_dir(&dir.0)
         .args(["-r", "30", "-n", "-P", "f"])
         .stdout(std::process::Stdio::null())
@@ -1336,12 +1347,14 @@ fn dash_f_dash_e_of_a_mount_is_accepted() {
     }
     let me = std::process::id().to_string();
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(["-w", "-f", "-e", "/dev/shm", "-a", "-d", "cwd", "-p", &me])
         .output()
         .expect("run lsof");
     assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
     assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args([
             "-w",
             "-f",

@@ -49,6 +49,7 @@ fn a_normal_run_writes_its_table_and_exits_0() {
     // ever looks at a failing write. Nothing else in `cargo test` runs this
     // binary on Linux.
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(["-p", &self_pid()])
         .output()
         .expect("run lsof");
@@ -80,6 +81,7 @@ fn a_closed_pipe_exits_141_and_says_nothing() {
     // The read end is dropped before lsof has written a byte — it spends
     // milliseconds reading /proc first — so the first write meets EPIPE.
     let mut child = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(["-p", &self_pid()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -114,6 +116,7 @@ fn any_other_write_error_is_reported_not_panicked() {
         .open("/dev/full")
         .expect("open /dev/full");
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
         .args(["-p", &self_pid()])
         .stdout(Stdio::from(full))
         .stderr(Stdio::piped())
@@ -159,6 +162,7 @@ fn dev_full() -> Stdio {
 fn the_help_on_a_failing_stderr() {
     for args in [&["-h"][..], &["-F", "?"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .args(args)
             .stdout(Stdio::piped())
             .stderr(dev_full())
@@ -167,6 +171,7 @@ fn the_help_on_a_failing_stderr() {
         assert_eq!(out.status.code(), Some(0), "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .args(args)
             .stdout(Stdio::piped())
             .stderr(a_closed_pipe())
@@ -232,6 +237,7 @@ fn a_listing_on_a_failing_stderr() {
         // The control: the warning is written, so the runs below meet a
         // failing write.
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .args(["-p", &pid])
             .output()
             .expect("run lsof");
@@ -246,6 +252,7 @@ fn a_listing_on_a_failing_stderr() {
         assert!(listed.lines().count() > 1, "{listed}");
 
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .args(["-p", &pid])
             .stdout(Stdio::piped())
             .stderr(dev_full())
@@ -259,6 +266,7 @@ fn a_listing_on_a_failing_stderr() {
         );
 
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
             .args(["-p", &pid])
             .stdout(Stdio::piped())
             .stderr(a_closed_pipe())

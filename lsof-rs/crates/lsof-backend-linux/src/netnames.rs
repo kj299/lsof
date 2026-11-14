@@ -103,6 +103,12 @@ fn at_secure(auxv: &[u8]) -> bool {
     true
 }
 
+/// Whether this process runs in secure-execution mode, as its auxiliary
+/// vector says ([`at_secure`]; a vector that cannot be read says it does).
+pub fn secure_execution() -> bool {
+    at_secure(&lsof_core::netnames::small_file(Path::new(AUXV), 1 << 16))
+}
+
 /// The file `multi` is read from, as glibc's `_res_hconf_init()` names it:
 /// `RESOLV_HOST_CONF` from the environment (`env`) if it is set, whatever
 /// it holds, and `/etc/host.conf` if not. In secure-execution mode
@@ -154,6 +160,107 @@ pub fn lookup_service(name: &[u8], protocol: &str) -> Option<u16> {
         Path::new(SERVICES),
         Path::new(NSSWITCH),
     )
+}
+
+/// `/etc/resolv.conf`, which glibc reads at its first query.
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+
+/// The index of network interface `name`, for an IPv6 name server's
+/// `%scope` (`if_nametoindex(3)`, which `std` has not): what
+/// `/sys/class/net/NAME/ifindex` says, for a name that is one file name.
+fn interface_index(name: &[u8]) -> Option<u32> {
+    use std::os::unix::ffi::OsStrExt;
+    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') || name.contains(&0)
+    {
+        return None;
+    }
+    let path = Path::new("/sys/class/net")
+        .join(std::ffi::OsStr::from_bytes(name))
+        .join("ifindex");
+    let text = lsof_core::netnames::small_file(&path, 32);
+    std::str::from_utf8(&text).ok()?.trim().parse().ok()
+}
+
+/// A socket's names as the C's C library gives them on Linux
+/// (`lsof_core::sockname::NameService`): `gethostbyaddr()` by glibc's
+/// walk of nsswitch.conf's `hosts` sources, `files` the hosts file and
+/// `dns` [`lsof_core::dns::query_ptr`] over [`crate::dns::Net`], under
+/// `/etc/resolv.conf` and `RES_OPTIONS` (not in secure-execution mode,
+/// where glibc's loader takes it out of the environment); a service from
+/// `/etc/services` where the `services` walk reaches `files`. The resolver's
+/// configuration is read at the first query and kept for the run, where
+/// glibc reads it again when the file changes.
+pub struct LinuxNames {
+    resolver: Option<lsof_core::dns::ResolvConf>,
+    rotation: lsof_core::dns::Rotation,
+    net: crate::dns::Net,
+}
+
+impl LinuxNames {
+    pub fn new() -> Self {
+        LinuxNames {
+            resolver: None,
+            rotation: lsof_core::dns::Rotation::default(),
+            net: crate::dns::Net::new(),
+        }
+    }
+
+    fn resolver(&mut self) -> &lsof_core::dns::ResolvConf {
+        self.resolver.get_or_insert_with(|| {
+            use std::os::unix::ffi::OsStrExt;
+            let file = match lsof_core::netnames::conf_file(
+                Path::new(RESOLV_CONF),
+                lsof_core::dns::RESOLV_CONF_LIMIT,
+            ) {
+                lsof_core::netnames::Conf::Text(text) => Some(text),
+                _ => None,
+            };
+            let env = std::env::var_os("RES_OPTIONS").filter(|_| {
+                let auxv = lsof_core::netnames::small_file(Path::new(AUXV), 1 << 16);
+                !at_secure(&auxv)
+            });
+            lsof_core::dns::ResolvConf::parse(
+                file.as_deref(),
+                env.as_deref().map(std::ffi::OsStr::as_bytes),
+                &interface_index,
+            )
+        })
+    }
+}
+
+impl Default for LinuxNames {
+    fn default() -> Self {
+        LinuxNames::new()
+    }
+}
+
+impl lsof_core::sockname::NameService for LinuxNames {
+    fn host_by_addr(&mut self, ip: IpAddr) -> Option<Vec<u8>> {
+        let host_conf = PathBuf::from(HOST_CONF);
+        let files = GlibcFiles {
+            hosts: Path::new(HOSTS),
+            host_conf: &host_conf,
+            nsswitch: Path::new(NSSWITCH),
+        };
+        let mut dns = |ip: IpAddr| {
+            let conf = self.resolver().clone();
+            lsof_core::dns::query_ptr(&conf, ip, &mut self.net, &mut self.rotation)
+        };
+        lsof_core::netnames::glibc_host_by_addr(ip, &files, &mut dns)
+    }
+
+    fn service_by_port(&mut self, port: u16, protocol: &[u8]) -> Option<Vec<u8>> {
+        lsof_core::netnames::glibc_service_by_port(
+            port,
+            protocol,
+            Path::new(SERVICES),
+            Path::new(NSSWITCH),
+        )
+    }
+
+    fn services(&mut self) -> Vec<lsof_core::netnames::ServiceEntry> {
+        lsof_core::netnames::glibc_services(Path::new(SERVICES), Path::new(NSSWITCH))
+    }
 }
 
 #[cfg(test)]

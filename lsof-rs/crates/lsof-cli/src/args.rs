@@ -101,8 +101,23 @@ pub type MountReader<'a> = &'a dyn Fn(&MountRequest, &SafeFs) -> MountTable;
 pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -> MountTable {
     let req = MountRequest {
         exempt: sel.exempt_fs.clone(),
+        supplement: sel.mount_supplement.clone(),
     };
-    mounts(&req, &fs.with(sel.blocking, !sel.omit_unreadable))
+    let table = mounts(&req, &fs.with(sel.blocking, !sel.omit_unreadable));
+    // `+m`'s lines, on stdout, as the C prints them while it reads
+    // (DIVERGENCES 153). A reader that has gone ends the run as the C's
+    // SIGPIPE does.
+    if !table.supplement_out.is_empty() {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let written = out
+            .write_all(&table.supplement_out)
+            .and_then(|()| out.flush());
+        if written.is_err_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) {
+            std::process::exit(141);
+        }
+    }
+    table
 }
 
 /// What the parse asks the host where the C asks it while it reads its
@@ -338,6 +353,16 @@ fn digits_value(digits: &str) -> usize {
     })
 }
 
+/// Whether Linux names a socket's hosts and ports by default, as the C
+/// does: `-n` and `-P` turn either off, `+n` and `+P` on again, the last one
+/// winning (DIVERGENCES 154). A run that lists an Internet socket may then
+/// ask DNS for its hosts' names, as the C asks. `false` here makes every
+/// host and port a number unless `+n`/`+P` asks, as lsof-rs printed them on
+/// Linux before 2026-11-14; nothing else changes with it. Windows names its
+/// sockets by default whatever this says (its backend resolves them as it
+/// gathers, under the same `-n`/`-P`); on FreeBSD nothing names them.
+pub const LINUX_NAMES_BY_DEFAULT: bool = true;
+
 /// `-r`'s delay where it gives none: the C's `RPTTM`.
 pub const RPTTM: u64 = 15;
 
@@ -401,7 +426,10 @@ fn repeat_value(value: &str) -> RepeatValue {
     let mut count = None;
     if bytes.get(at) == Some(&b'c') {
         at += 1;
-        let len = bytes[at..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let len = bytes[at..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
         count = Some(number(at, len));
         at += len;
     }
@@ -915,7 +943,12 @@ fn parse_options<'s>(
     early: &mut Early<'s>,
     reports: &mut Reports,
 ) -> Result<Action, String> {
-    let mut sel = Selection::default();
+    let numeric = cfg!(target_os = "linux") && !LINUX_NAMES_BY_DEFAULT;
+    let mut sel = Selection {
+        no_host_resolve: numeric,
+        no_port_resolve: numeric,
+        ..Selection::default()
+    };
     // What is held is printed through the parse's own view, ahead of a line
     // the parse prints itself and past [`Early::SPILL`]; `early.told` says
     // whether it has been.
@@ -1100,10 +1133,6 @@ fn parse_options<'s>(
                 text_from = Some(i);
             }
             match c {
-                // The C gives these a `+` meaning lsof-rs does not implement
-                // (`+n`/`+P` resolve names, `+r` repeats until nothing is
-                // open), so the `+` spelling is refused rather than read as
-                // the `-` one.
                 // `+J`/`+j`: the C says so and reads on (`main.c:567-584`).
                 'J' | 'j' if plus => early.plus_json(c),
                 // A `-` inside a word is no option letter to the C's
@@ -1114,12 +1143,50 @@ fn parse_options<'s>(
                 // lsof-rs had taken both as GNU-style long options and exited
                 // 0 (DIVERGENCES 114).
                 '-' => early.illegal('-'),
-                // `+m` is the C's mount supplement (`[+m [m]]`, exit 0 on
-                // Linux, measured), which lsof-rs does not write: refused
-                // here, before `-m`'s arm below could read the rest of the
-                // word as letters (`+mfoo` as `-f -o -o`).
-                'n' | 'P' | 'm' if plus => {
-                    return Err(quoting("unsupported option: +", &c.to_string()))
+                // `+m [m]`, the C's mount supplement (`main.c:692-704`,
+                // DIVERGENCES 153): with no value, or one that opens an
+                // option, each mount the table records is printed and the
+                // run ends; with one, the attached rest of the word or else
+                // the next word, it is a file a mount whose directory is
+                // not `stat`ed takes its device from. Any word: `+m /tmp`
+                // names `/tmp` as that file (measured: then everything is
+                // listed), and `--` is no value. The last `+m` wins. The
+                // C has it on Linux alone (`HASMNTSUP`); elsewhere it says
+                // `+m not supported`, its value taken.
+                'm' if plus && cfg!(target_os = "linux") => {
+                    match value_word(&chars, j, &args, i) {
+                        None => {
+                            sel.mount_supplement = lsof_core::MountSupplement::Print;
+                            j = past_value(&chars, j);
+                        }
+                        Some((_, next)) => {
+                            let bytes = if next {
+                                raw.get(i + 1).map(|w| w.as_encoded_bytes())
+                            } else {
+                                raw.get(i).and_then(|w| {
+                                    w.as_encoded_bytes()
+                                        .get(letter_offset(&chars, j, letters_ok)..)
+                                })
+                            };
+                            let path = os_from_bytes(bytes.unwrap_or_default().to_vec());
+                            sel.mount_supplement = lsof_core::MountSupplement::File(path);
+                            took_bytes = true;
+                            if next {
+                                i += 1;
+                            }
+                            j = chars.len();
+                        }
+                    }
+                    continue;
+                }
+                'm' if plus => {
+                    early.line("+m not supported");
+                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
+                        i += 1;
+                        took_bytes = true;
+                    }
+                    j = chars.len();
+                    continue;
                 }
                 // `+d` is ONE level (the directory and its immediate entries);
                 // `+D` descends the whole tree. lsof distinguishes them. Both
@@ -1228,8 +1295,12 @@ fn parse_options<'s>(
                     continue;
                 }
                 'a' => sel.and_mode = true,
-                'n' => sel.no_host_resolve = true,
-                'P' => sel.no_port_resolve = true,
+                // `-n`/`+n` and `-P`/`+P`: hosts and ports as numbers, or
+                // named, the last of each winning (`main.c:723-765`, `Fhost
+                // = (GOp == '-') ? 0 : 1`; measured, `-n -P +n +P` names
+                // both again). DIVERGENCES 154.
+                'n' => sel.no_host_resolve = !plus,
+                'P' => sel.no_port_resolve = !plus,
                 // The C's `-t` sets `Fwarn` as well, which is what makes an
                 // unreadable file leave no row — and a process with nothing
                 // else, no PID (DIVERGENCES 37). `+w` after it undoes that.
@@ -1263,10 +1334,13 @@ fn parse_options<'s>(
                             let bytes = if next {
                                 raw.get(i + 1).map(|w| w.as_encoded_bytes())
                             } else {
-                                raw.get(i)
-                                    .and_then(|w| w.as_encoded_bytes().get(letter_offset(&chars, j, letters_ok)..))
+                                raw.get(i).and_then(|w| {
+                                    w.as_encoded_bytes()
+                                        .get(letter_offset(&chars, j, letters_ok)..)
+                                })
                             };
-                            let format = bytes.and_then(|b| b.get(at..)).unwrap_or_default().to_vec();
+                            let format =
+                                bytes.and_then(|b| b.get(at..)).unwrap_or_default().to_vec();
                             took_bytes = true;
                             if (host.marker_ok)(&format) {
                                 repeat.marker = Some(format);
@@ -3899,7 +3973,7 @@ mod tests {
         assert_eq!(sel.blocking.limit, 15, "no digits is the default");
         let (c, sel) = columns(&["+L", ""]).unwrap();
         assert!(c.nlink && sel.max_links.is_none(), "+L '' is +L");
-        assert_eq!(repeat(&["-r", ""]), Some(15));
+        assert_eq!(repeat(&["-r", ""]).delay, 15);
         // Only an empty word: one with no digits is still given back.
         let (c, sel) = columns(&["-o", "x"]).unwrap();
         assert!(c.offset && sel.paths == ["x"]);
@@ -5648,19 +5722,161 @@ mod tests {
         ));
     }
 
-    fn repeat(argv: &[&str]) -> Option<u64> {
+    fn repeat(argv: &[&str]) -> Repeat {
+        repeat_and_selection(argv).0
+    }
+
+    fn repeat_and_selection(argv: &[&str]) -> (Repeat, Selection) {
         match parse(argv.iter().map(|s| s.to_string()).collect()).unwrap() {
-            Action::Run { repeat, .. } => repeat,
+            Action::Run {
+                repeat, selection, ..
+            } => (repeat, selection),
             other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    fn rep(delay: u64, count: u64, until_idle: bool, marker: Option<&str>) -> Repeat {
+        Repeat {
+            delay,
+            count,
+            until_idle,
+            marker: marker.map(|m| m.as_bytes().to_vec()),
         }
     }
 
     #[test]
     fn repeat_flag() {
-        assert_eq!(repeat(&["-r"]), Some(15));
-        assert_eq!(repeat(&["-r5"]), Some(5));
-        assert_eq!(repeat(&[]), None);
+        assert_eq!(repeat(&["-r"]).delay, 15);
+        assert_eq!(repeat(&["-r5"]).delay, 5);
+        assert_eq!(repeat(&[]), Repeat::default());
         assert!(parse::<String>(vec!["-rx".into()]).is_err());
+    }
+
+    /// `-r [t[c<N>][m<fmt>]]` and `+r`, each read as `main.c:766-837` reads
+    /// it and each measured against the C (DIVERGENCES 152).
+    #[test]
+    fn repeat_reads_a_delay_a_count_and_a_marker_as_the_c_does() {
+        assert_eq!(repeat(&["-r", "1c2mX"]), rep(1, 2, false, Some("X")));
+        assert_eq!(repeat(&["-r1c2mX"]), rep(1, 2, false, Some("X")));
+        assert_eq!(repeat(&["+r", "1c2mX"]), rep(1, 2, true, Some("X")));
+        assert_eq!(repeat(&["-r0"]), rep(0, 0, false, None));
+        assert_eq!(repeat(&["+r0"]), rep(0, 0, true, None));
+        // `c` with no digits is no count; spaces before `c` and `m` are
+        // passed over.
+        assert_eq!(repeat(&["-r", "1cmX"]), rep(1, 0, false, Some("X")));
+        assert_eq!(repeat(&["-r", "1 c1mX"]), rep(1, 1, false, Some("X")));
+        assert_eq!(repeat(&["-r", "1 mX"]), rep(1, 0, false, Some("X")));
+        // The format is the rest of the word, whatever it holds.
+        assert_eq!(
+            repeat(&["-r", "2m%H -x %%"]),
+            rep(2, 0, false, Some("%H -x %%"))
+        );
+        // No value, or an option where one would be: 15 seconds.
+        assert_eq!(repeat(&["-r", "-p", "1"]).delay, 15);
+        assert_eq!(repeat(&["-r", ""]).delay, 15);
+        // What follows the delay's digits but no `m` is options again, the
+        // count's `c` with it: `-r 1c2` is a count of 2 and `-c 2`, `+r 1c2`
+        // a count and `+c 2` (measured).
+        let (r, sel) = repeat_and_selection(&["-r", "1c2"]);
+        assert_eq!(r, rep(1, 2, false, None));
+        assert_eq!(sel.commands, vec![OsString::from("2")]);
+        let (r, sel) = repeat_and_selection(&["-r1c2"]);
+        assert_eq!((r.count, sel.commands.len()), (2, 1));
+        let (r, sel) = repeat_and_selection(&["+r", "1c3"]);
+        assert_eq!((r.count, r.until_idle, sel.commands.len()), (3, true, 0));
+        // A next word with no digits is not taken: a name, its count kept.
+        let (r, sel) = repeat_and_selection(&["-r", "c2"]);
+        assert_eq!((r.delay, r.count), (15, 2));
+        assert_eq!(sel.paths, vec![OsString::from("c2")]);
+        // A later `-r` keeps the marker and the count it does not give,
+        // and `+r` stays.
+        assert_eq!(repeat(&["-r1mX", "-r", "2c1"]), rep(2, 1, false, Some("X")));
+        assert_eq!(repeat(&["+r", "1c1", "-r", "3"]), rep(3, 1, true, None));
+        // The count saturates, as the delay does (DIVERGENCES 121).
+        assert_eq!(
+            repeat(&["-r", "1c99999999999999999999mX"]).count,
+            usize::MAX as u64
+        );
+    }
+
+    /// A marker format that gives no marker now, and `%n` beside `-F`, are
+    /// the C's errors (`main.c:825-829`, `1103-1117`).
+    #[test]
+    fn a_marker_format_is_tried_where_it_is_read() {
+        let err = |argv: &[&str]| error_lines(parse_on_host(argv, false));
+        assert_eq!(err(&["-r", "1c1m"]), ["illegal <fmt>: \"\"".to_string()]);
+        assert_eq!(err(&["-r", "m"]), ["illegal <fmt>: \"\"".to_string()]);
+        // 24 characters do not fit (2 + 1) * 8 = 24 bytes with the NUL.
+        assert_eq!(err(&["-r1m%c"]), ["illegal <fmt>: \"%c\"".to_string()]);
+        assert!(parse_on_host(&["-r1m%cX"], false).is_ok());
+        assert_eq!(
+            err(&["-r1m%99999999999999999999d"]),
+            ["illegal <fmt>: \"%99999999999999999999d\"".to_string()]
+        );
+        // The format is quoted escaped.
+        assert_eq!(
+            err(&["-r1m%c%c\x1b"]),
+            ["illegal <fmt>: \"%c%c^[\"".to_string()]
+        );
+        let n = "%n illegal in -r m<fmt> when -F has been specified: \"%n\"".to_string();
+        assert_eq!(err(&["-r1m%n", "-F", "p"]), [n.clone()]);
+        assert_eq!(err(&["-r1m%n", "-J"]), [n.clone()]);
+        assert_eq!(err(&["-r1m%n", "-j"]), [n.clone()]);
+        assert!(parse_on_host(&["-r1m%n"], false).is_ok());
+        assert!(parse_on_host(&["-r1m%%n", "-F", "p"], false).is_ok());
+        assert!(parse_on_host(&["-r1m%_n", "-F", "p"], false).is_ok());
+        // After `-F and -t`, as the C checks them.
+        assert_eq!(
+            err(&["-r1m%n", "-t", "-F", "p"]),
+            ["-F and -t are mutually exclusive".to_string(), n]
+        );
+    }
+
+    /// `+n`/`-n` and `+P`/`-P`, the last of each winning; the default is
+    /// [`LINUX_NAMES_BY_DEFAULT`] on Linux (DIVERGENCES 154).
+    #[test]
+    fn names_are_switched_by_the_last_n_and_p() {
+        let flags = |argv: &[&str]| {
+            let (_, sel) = repeat_and_selection(argv);
+            (sel.no_host_resolve, sel.no_port_resolve)
+        };
+        let default = cfg!(target_os = "linux") && !LINUX_NAMES_BY_DEFAULT;
+        assert_eq!(flags(&["-p", "1"]), (default, default));
+        assert_eq!(flags(&["-n", "-p", "1"]), (true, default));
+        assert_eq!(flags(&["-P", "-p", "1"]), (default, true));
+        assert_eq!(flags(&["-n", "-P", "+n", "+P", "-p", "1"]), (false, false));
+        assert_eq!(flags(&["+n", "-n", "-p", "1"]), (true, default));
+        assert_eq!(flags(&["-nP", "+P", "-p", "1"]), (true, false));
+    }
+
+    /// `+m [m]` (DIVERGENCES 153): no value, or an option where it would be,
+    /// is the print; a word is the file, `--` none; the last one wins.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn plus_m_reads_its_file_as_the_c_does() {
+        use lsof_core::MountSupplement;
+        let sup = |argv: &[&str]| repeat_and_selection(argv).1.mount_supplement;
+        assert_eq!(sup(&["+m"]), MountSupplement::Print);
+        assert_eq!(sup(&["+m", "-p", "1"]), MountSupplement::Print);
+        assert_eq!(sup(&["+m", "/tmp"]), MountSupplement::File("/tmp".into()));
+        assert_eq!(sup(&["+m/x/y"]), MountSupplement::File("/x/y".into()));
+        assert_eq!(sup(&["+m", "rel"]), MountSupplement::File("rel".into()));
+        let (_, sel) = repeat_and_selection(&["+m", "--", "/tmp"]);
+        assert_eq!(sel.mount_supplement, MountSupplement::Print);
+        assert_eq!(sel.paths, vec![OsString::from("/tmp")]);
+        assert_eq!(sup(&["+m", "f", "+m"]), MountSupplement::Print);
+        assert_eq!(sup(&["+m", "+m", "f"]), MountSupplement::File("f".into()));
+        assert_eq!(sup(&["-p", "1"]), MountSupplement::None);
+        // A file name that is not UTF-8 is its bytes.
+        use std::os::unix::ffi::OsStringExt;
+        let raw = vec![OsString::from("+m"), OsString::from_vec(b"s\xff".to_vec())];
+        match parse(raw).unwrap() {
+            Action::Run { selection, .. } => assert_eq!(
+                selection.mount_supplement,
+                MountSupplement::File(OsString::from_vec(b"s\xff".to_vec()))
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The C accumulates `-r`'s digits in an `int` (main.c:779-783) and wraps:
@@ -5672,13 +5888,13 @@ mod tests {
     /// one (run under miri for i686-unknown-linux-gnu).
     #[test]
     fn repeat_interval_saturates_rather_than_wrapping() {
-        let saturated = Some(usize::MAX as u64);
-        assert_eq!(repeat(&["-r99999999999999999999"]), saturated);
-        assert_eq!(repeat(&["-r", "99999999999999999999"]), saturated);
+        let saturated = usize::MAX as u64;
+        assert_eq!(repeat(&["-r99999999999999999999"]).delay, saturated);
+        assert_eq!(repeat(&["-r", "99999999999999999999"]).delay, saturated);
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(repeat(&["-r4294967297"]), Some(4294967297));
+        assert_eq!(repeat(&["-r4294967297"]).delay, 4294967297);
         #[cfg(target_pointer_width = "32")]
-        assert_eq!(repeat(&["-r4294967297"]), saturated);
+        assert_eq!(repeat(&["-r4294967297"]).delay, saturated);
     }
 
     fn paths(argv: &[&str]) -> Vec<OsString> {
@@ -6412,16 +6628,22 @@ mod tests {
             columns(&["+E", "-E"]).unwrap().1.endpoints,
             Some(EndpointMode::Files)
         );
-        // What the C gives a `+` meaning lsof-rs lacks is refused, never read
-        // as the `-` meaning — and the refusal names the `+` spelling.
+        // `+n`, `+P`, `+r` and `+m` are the C's (DIVERGENCES 152-154): read
+        // under their `+` meanings, never as the `-` ones.
+        let (_, sel) = columns(&["-n", "-P", "+nP", "-p", "1"]).unwrap();
+        assert!(!sel.no_host_resolve && !sel.no_port_resolve);
+        assert!(repeat(&["+r"]).until_idle);
+        #[cfg(target_os = "linux")]
+        {
+            // `+m`'s value is never read as letters (`+mfoo` is not
+            // `-f -o -o`): it is the supplement's file.
+            let (_, sel) = columns(&["+mfoo", "-p", "1"]).unwrap();
+            assert_eq!(
+                sel.mount_supplement,
+                lsof_core::MountSupplement::File("foo".into())
+            );
+        }
         for (o, want) in [
-            ("+n", "unsupported option: +n"),
-            ("+P", "unsupported option: +P"),
-            ("+r", "unsupported option: +r"),
-            // `+m`'s value, if any, is never read as letters (`+mfoo` is not
-            // `-f -o -o`); the refusal ends the parse (DIVERGENCES 149).
-            ("+m", "unsupported option: +m"),
-            ("+mfoo", "unsupported option: +m"),
             ("+J", "+J is not supported"),
             ("+aq", "illegal option character: q"),
             ("+", "unsupported option: +"),
@@ -6544,10 +6766,10 @@ mod tests {
     /// for a file called `2`.
     #[test]
     fn dash_r_takes_its_delay_as_the_next_word() {
-        assert_eq!(repeat(&["-r", "2"]), Some(2));
+        assert_eq!(repeat(&["-r", "2"]).delay, 2);
         assert!(paths(&["-r", "2"]).is_empty());
-        assert_eq!(repeat(&["-r", "-p", "1"]), Some(15));
-        assert_eq!(repeat(&["-r", "abc"]), Some(15));
+        assert_eq!(repeat(&["-r", "-p", "1"]).delay, 15);
+        assert_eq!(repeat(&["-r", "abc"]).delay, 15);
         assert_eq!(
             paths(&["-r", "abc"]),
             vec!["abc"],
@@ -6556,17 +6778,13 @@ mod tests {
         for argv in [&["-r2a", "-p", "1"][..], &["-r", "2a", "-p", "1"][..]] {
             let (_, sel) = columns(argv).unwrap();
             assert!(sel.and_mode, "{argv:?} is -r2 -a");
-            assert_eq!(repeat(argv), Some(2), "{argv:?}");
+            assert_eq!(repeat(argv).delay, 2, "{argv:?}");
         }
-        // The C's count and marker suffixes are refused, never half-read.
-        for argv in [&["-r5c3"][..], &["-r", "5m%T"][..], &["-r", "c3"][..]] {
-            assert!(
-                parse(argv.iter().map(|s| s.to_string()).collect())
-                    .unwrap_err()
-                    .contains("not supported"),
-                "{argv:?}"
-            );
-        }
+        // The C's count and marker suffixes are read (DIVERGENCES 152; the
+        // grammar is `repeat_reads_a_delay_a_count_and_a_marker_as_the_c_does`'s).
+        assert_eq!(repeat(&["-r5c3"]).count, 3);
+        assert_eq!(repeat(&["-r", "5m%T"]).marker.as_deref(), Some(&b"%T"[..]));
+        assert_eq!(repeat(&["-r", "c3"]).count, 3);
     }
 
     /// `-x [fl]` and `-f`/`+f`: a value may be the next word, and one that
@@ -7116,6 +7334,7 @@ mod tests {
             identifies_paths: &walk_deferred,
             lookup_host: &named_hosts,
             lookup_service: &named_services,
+            marker_ok: &marker_in_utc,
         };
         parse_with_host(
             argv.iter().map(|s| s.to_string()).collect(),
@@ -7421,14 +7640,24 @@ mod tests {
                 vec![ill("W"), "unsupported option: -D".into()],
             ),
             (&["-D", "--"], vec!["unsupported option: -D".into()]),
-            // `+m` is refused and ends the parse, never read on through:
-            // the C's mount supplement, which lsof-rs does not write.
-            (&["+m"], vec!["unsupported option: +m".into()]),
-            (&["+mfoo"], vec!["unsupported option: +m".into()]),
-            (&["+m", "-h"], vec!["unsupported option: +m".into()]),
+            // `+m` is the mount supplement on Linux: no error, and an option
+            // after it is no value of it; elsewhere the C's words, its value
+            // taken (DIVERGENCES 153).
             (
                 &["-W", "+m", "-Y"],
-                vec![ill("W"), "unsupported option: +m".into()],
+                if cfg!(target_os = "linux") {
+                    vec![ill("W"), ill("Y")]
+                } else {
+                    vec![ill("W"), "+m not supported".into(), ill("Y")]
+                },
+            ),
+            (
+                &["+mfoo", "-W"],
+                if cfg!(target_os = "linux") {
+                    vec![ill("W")]
+                } else {
+                    vec!["+m not supported".into(), ill("W")]
+                },
             ),
             // A backslash is escaped as row 122 escapes it, where the C
             // prints it raw; a NUL letter is shown and does not end the list.

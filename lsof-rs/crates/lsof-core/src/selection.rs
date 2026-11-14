@@ -634,6 +634,32 @@ pub struct Located {
     pub paths: Vec<bool>,
 }
 
+impl Located {
+    /// What either located: the C's search items are marked found by any
+    /// cycle of `-r` and never unmarked, and reported once after the loop
+    /// (DIVERGENCES 54). Items are parallel to the one selection, so the
+    /// two are the same length; a longer `other` adds nothing.
+    pub fn merge(&mut self, other: &Located) {
+        fn or(a: &mut [bool], b: &[bool]) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x |= *y;
+            }
+        }
+        or(&mut self.pids, &other.pids);
+        or(&mut self.pgids, &other.pgids);
+        or(&mut self.uids, &other.uids);
+        or(&mut self.users, &other.users);
+        or(&mut self.commands, &other.commands);
+        or(&mut self.command_regexes, &other.command_regexes);
+        or(&mut self.inet, &other.inet);
+        self.inet_all |= other.inet_all;
+        self.nfs |= other.nfs;
+        or(&mut self.states, &other.states);
+        self.tasks |= other.tasks;
+        or(&mut self.paths, &other.paths);
+    }
+}
+
 /// One path argument, or one entry of a `+d`/`+D` expansion, as the search
 /// item the C reports on (an `Sfile` entry).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -843,10 +869,14 @@ pub struct Selection {
     pub inet: InetFilter,
     /// `-a`: AND together the specified process selectors.
     pub and_mode: bool,
-    /// `-n`: do not resolve host names.
+    /// `-n`: show hosts as numbers; `+n` names them again, the last of the
+    /// two winning. Where a run starts is the platform's default (on Linux
+    /// `LINUX_NAMES_BY_DEFAULT` in the CLI, DIVERGENCES 154).
     pub no_host_resolve: bool,
-    /// `-P`: do not resolve port names.
+    /// `-P`: show ports as numbers; `+P` names them again.
     pub no_port_resolve: bool,
+    /// `+m [m]`, the mount supplement (DIVERGENCES 153).
+    pub mount_supplement: crate::backend::MountSupplement,
     /// `-t`: terse output (PIDs only).
     pub terse: bool,
     /// `-V`: verbose — report inaccessible processes and unmatched search items.

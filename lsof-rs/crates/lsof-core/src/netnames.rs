@@ -1036,6 +1036,188 @@ pub fn glibc_service(
     })
 }
 
+// ------------------------------------------------- names for an address
+
+/// The most of a name a reverse lookup keeps: past what the C's NAME buffer
+/// can hold (`Namech`, `MAXPATHLEN + 1`), so that a longer name is still
+/// known to be longer, and prints as the C prints one, while a hosts or
+/// services file of any size keeps a bounded copy of each.
+pub const NAME_KEPT: usize = 4097;
+
+/// `name`, at most [`NAME_KEPT`] bytes of it.
+fn kept(name: &[u8]) -> Vec<u8> {
+    name.get(..name.len().min(NAME_KEPT))
+        .unwrap_or_default()
+        .to_vec()
+}
+
+/// One line of a hosts file as `_nss_files_gethostbyaddr2_r()` reads it for
+/// `ip`: the line's first name where its address, read for `ip`'s family
+/// ([`hosts_line`]), is `ip`. A line that gives an address and no name
+/// gives the empty name, which the C prints as no host at all (`:4006`,
+/// measured).
+fn hosts_line_name(line: &[u8], ip: IpAddr) -> Option<&[u8]> {
+    let (addr, rest) = hosts_line(line, ip.is_ipv6())?;
+    (addr == ip).then(|| string_field(rest).0)
+}
+
+/// `ip`'s name in the hosts file at `path`: the first line that gives it
+/// ([`hosts_line_name`]), at most [`NAME_KEPT`] bytes of it.
+pub fn host_by_addr_in_file(path: &std::path::Path, ip: IpAddr) -> NssAnswer<Vec<u8>> {
+    let mut found = None;
+    let read = file_lines(path, |line| {
+        found = hosts_line_name(line, ip).map(kept);
+        found.is_some()
+    });
+    match found {
+        Some(name) => NssAnswer::Success(name),
+        None if read => NssAnswer::NotFound,
+        None => NssAnswer::Unavail,
+    }
+}
+
+/// One entry of a services file: what `getservent()` gives for a line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceEntry {
+    /// The line's first field, at most [`NAME_KEPT`] bytes of it.
+    pub name: Vec<u8>,
+    /// The port, kept to 16 bits as `htons()` keeps it.
+    pub port: u16,
+    /// The protocol as written.
+    pub protocol: Vec<u8>,
+}
+
+/// One line of a services file read by glibc's `files` parser, whatever
+/// it names: [`services_line`]'s rules.
+fn services_entry(line: &[u8]) -> Option<(&[u8], u16, &[u8])> {
+    let line = files_line(line)?;
+    let (first, rest) = string_field(line);
+    let (value, used) = strtoul0(rest)?;
+    let rest = rest.get(used..)?;
+    let rest = match rest.first() {
+        Some(b'/') => {
+            let skip = rest.iter().position(|&b| b != b'/').unwrap_or(rest.len());
+            rest.get(skip..)?
+        }
+        Some(_) => return None,
+        None => rest,
+    };
+    if value > u64::from(u32::MAX) {
+        return None;
+    }
+    let port = u16::try_from(value & 0xffff).ok()?;
+    Some((first, port, string_field(rest).0))
+}
+
+/// `getservbyport(htons(port), protocol)` of the services file at `path`:
+/// the first line that gives `port` for `protocol`, compared exactly
+/// (`_nss_files_getservbyport_r()`: `strcmp`, so `TCP` is not `tcp`).
+pub fn service_by_port_in_file(
+    path: &std::path::Path,
+    port: u16,
+    protocol: &[u8],
+) -> NssAnswer<Vec<u8>> {
+    let mut found = None;
+    let read = file_lines(path, |line| {
+        found = services_entry(line)
+            .filter(|&(_, p, proto)| p == port && proto == protocol)
+            .map(|(name, _, _)| kept(name));
+        found.is_some()
+    });
+    match found {
+        Some(name) => NssAnswer::Success(name),
+        None if read => NssAnswer::NotFound,
+        None => NssAnswer::Unavail,
+    }
+}
+
+/// The most of a services file's names [`services_in_file`] keeps, all
+/// together: thousands of times a distribution's `/etc/services`. What a
+/// file holds past it is not kept, where the C keeps every entry.
+pub const SERVICES_KEPT: usize = 16 << 20;
+
+/// Every entry of the services file at `path`, in its order, as a
+/// `getservent()` scan gives them, within [`SERVICES_KEPT`]; `None` where
+/// there is no file to read.
+pub fn services_in_file(path: &std::path::Path) -> Option<Vec<ServiceEntry>> {
+    let mut entries = Vec::new();
+    let mut bytes = 0usize;
+    let read = file_lines(path, |line| {
+        if let Some((name, port, protocol)) = services_entry(line) {
+            let size = name.len().saturating_add(protocol.len());
+            if bytes.saturating_add(size) > SERVICES_KEPT {
+                return true;
+            }
+            bytes = bytes.saturating_add(size);
+            entries.push(ServiceEntry {
+                name: kept(name),
+                port,
+                protocol: kept(protocol),
+            });
+        }
+        false
+    });
+    read.then_some(entries)
+}
+
+/// `gethostbyaddr()`'s answer for `ip` where this module can follow it: the
+/// sources nsswitch.conf gives `hosts` walked by glibc's rules
+/// ([`nss_walk`]), `files` being the hosts file at `files.hosts`
+/// ([`host_by_addr_in_file`]) and `dns` the resolver, `dns`. Any other
+/// source is taken as not installed (DIVERGENCES 38, 154). `None`: no name.
+pub fn glibc_host_by_addr(
+    ip: IpAddr,
+    files: &GlibcFiles<'_>,
+    dns: &mut dyn FnMut(IpAddr) -> NssAnswer<String>,
+) -> Option<Vec<u8>> {
+    let conf = nsswitch_conf(files.nsswitch);
+    let sources = nsswitch_database(&conf, b"hosts", HOSTS_DEFAULT)?;
+    nss_walk(&sources, |module| match module {
+        b"files" => Some(host_by_addr_in_file(files.hosts, ip)),
+        b"dns" => Some(match dns(ip) {
+            NssAnswer::Success(name) => NssAnswer::Success(name.into_bytes()),
+            NssAnswer::NotFound => NssAnswer::NotFound,
+            NssAnswer::Unavail => NssAnswer::Unavail,
+        }),
+        _ => None,
+    })
+}
+
+/// `getservbyport(htons(port), protocol)` where this module can follow it:
+/// the `services` sources walked, `files` the services file.
+pub fn glibc_service_by_port(
+    port: u16,
+    protocol: &[u8],
+    services: &std::path::Path,
+    nsswitch: &std::path::Path,
+) -> Option<Vec<u8>> {
+    let conf = nsswitch_conf(nsswitch);
+    let sources = nsswitch_database(&conf, b"services", FILES_DEFAULT)?;
+    nss_walk(&sources, |module| {
+        (module == b"files").then(|| service_by_port_in_file(services, port, protocol))
+    })
+}
+
+/// A `getservent()` scan where this module can follow it: the services
+/// file's entries where the walk of the `services` sources reaches `files`
+/// (sources before it that cannot be asked passed over where their
+/// `UNAVAIL` action is `continue`), and none otherwise.
+pub fn glibc_services(services: &std::path::Path, nsswitch: &std::path::Path) -> Vec<ServiceEntry> {
+    let conf = nsswitch_conf(nsswitch);
+    let Some(sources) = nsswitch_database(&conf, b"services", FILES_DEFAULT) else {
+        return Vec::new();
+    };
+    for source in &sources {
+        if source.module == b"files" {
+            return services_in_file(services).unwrap_or_default();
+        }
+        if source.on(NssStatus::Unavail) != NssAction::Continue {
+            break;
+        }
+    }
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2008,5 +2190,130 @@ last 19/tcp";
         assert_eq!(system_addresses(""), ips(&[]));
         assert_eq!(system_addresses("a\0b"), ips(&[]));
         assert_eq!(system_host(b"\xff", false), ips(&[]));
+    }
+
+    /// `gethostbyaddr()` and `getservbyport()` read off the files by glibc's
+    /// rules (DIVERGENCES 154), each measured through the C: the first line
+    /// that gives the address, its first name, empty where it has none, an
+    /// IPv6 loopback or v4-mapped line naming the IPv4 address; a service by
+    /// port and protocol, compared exactly; the whole file for the scan.
+    #[test]
+    fn names_for_addresses_and_ports_are_read_as_glibc_reads_them() {
+        let name = |line: &str, ip: &str| {
+            hosts_line_name(line.as_bytes(), ip.parse().unwrap())
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+        };
+        assert_eq!(
+            name("127.0.0.1 localhost x", "127.0.0.1").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(name("127.0.0.7", "127.0.0.7").as_deref(), Some(""));
+        assert_eq!(name("127.0.0.7 # c", "127.0.0.7").as_deref(), Some(""));
+        assert_eq!(
+            name("127.0.0.4\tfour\ttab", "127.0.0.4").as_deref(),
+            Some("four")
+        );
+        assert_eq!(
+            name(" 127.0.0.8 lead", "127.0.0.8").as_deref(),
+            Some("lead")
+        );
+        assert_eq!(name("#127.0.0.3 c", "127.0.0.3"), None);
+        assert_eq!(name("::1 six", "127.0.0.1").as_deref(), Some("six"));
+        assert_eq!(
+            name("::ffff:127.0.0.9 m", "127.0.0.9").as_deref(),
+            Some("m")
+        );
+        assert_eq!(name("::1 six", "::1").as_deref(), Some("six"));
+        assert_eq!(name("127.0.0.1 four", "::1"), None);
+        assert_eq!(name("127.0.0.01 z", "127.0.0.1"), None);
+        let entry = |line: &str| {
+            services_entry(line.as_bytes()).map(|(n, p, pr)| {
+                (
+                    String::from_utf8_lossy(n).into_owned(),
+                    p,
+                    String::from_utf8_lossy(pr).into_owned(),
+                )
+            })
+        };
+        assert_eq!(
+            entry("http 80/tcp www # web"),
+            Some(("http".into(), 80, "tcp".into()))
+        );
+        assert_eq!(entry("x 0x50/udp"), Some(("x".into(), 80, "udp".into())));
+        assert_eq!(entry("x 65616/TCP"), Some(("x".into(), 80, "TCP".into())));
+        assert_eq!(entry("x 80"), Some(("x".into(), 80, "".into())));
+        assert_eq!(entry("x 80x/tcp"), None);
+        assert_eq!(entry("x 99999999999/tcp"), None);
+        assert_eq!(entry("# x 80/tcp"), None);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "it writes and reads files, slowly under miri")]
+    fn reverse_lookups_walk_nsswitch_over_files_of_their_own() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-rnames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (hosts, conf, nss, svc) = (
+            dir.join("hosts"),
+            dir.join("host.conf"),
+            dir.join("nsswitch.conf"),
+            dir.join("services"),
+        );
+        std::fs::write(
+            &hosts,
+            "127.0.0.1 localhost\n127.0.0.2 two\n127.0.0.2 dup\n",
+        )
+        .unwrap();
+        std::fs::write(&svc, "s1 4001/tcp\nU 4005/TCP\nu1 4002/udp\n").unwrap();
+        let files = GlibcFiles {
+            hosts: &hosts,
+            host_conf: &conf,
+            nsswitch: &nss,
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let by_addr = |ip: &str, answer: NssAnswer<String>| {
+            let mut dns = |ip: IpAddr| {
+                asked.borrow_mut().push(ip);
+                answer.clone()
+            };
+            glibc_host_by_addr(ip.parse().unwrap(), &files, &mut dns)
+                .map(|n| String::from_utf8_lossy(&n).into_owned())
+        };
+        let found = || NssAnswer::Success("dns.example".to_string());
+        std::fs::write(&nss, "hosts: files dns\n").unwrap();
+        assert_eq!(by_addr("127.0.0.2", found()).as_deref(), Some("two"));
+        assert_eq!(
+            by_addr("127.0.0.3", found()).as_deref(),
+            Some("dns.example")
+        );
+        assert_eq!(by_addr("127.0.0.3", NssAnswer::NotFound), None);
+        assert_eq!(asked.borrow().len(), 2);
+        std::fs::write(&nss, "hosts: dns files\n").unwrap();
+        assert_eq!(
+            by_addr("127.0.0.2", NssAnswer::NotFound).as_deref(),
+            Some("two")
+        );
+        std::fs::write(&nss, "hosts: dns [NOTFOUND=return] files\n").unwrap();
+        assert_eq!(by_addr("127.0.0.2", NssAnswer::NotFound), None);
+        std::fs::write(&nss, "hosts: files\n").unwrap();
+        asked.borrow_mut().clear();
+        assert_eq!(by_addr("127.0.0.3", found()), None);
+        assert!(asked.borrow().is_empty());
+        // No file: glibc's built-in `files dns`.
+        std::fs::remove_file(&nss).unwrap();
+        assert_eq!(by_addr("127.0.0.1", found()).as_deref(), Some("localhost"));
+        // Services.
+        assert_eq!(
+            glibc_service_by_port(4001, b"tcp", &svc, &nss),
+            Some(b"s1".to_vec())
+        );
+        assert_eq!(glibc_service_by_port(4001, b"udp", &svc, &nss), None);
+        assert_eq!(glibc_service_by_port(4005, b"tcp", &svc, &nss), None);
+        assert_eq!(glibc_services(&svc, &nss).len(), 3);
+        std::fs::write(&nss, "services: db files\n").unwrap();
+        assert_eq!(glibc_services(&svc, &nss).len(), 3);
+        std::fs::write(&nss, "services: db [UNAVAIL=return] files\n").unwrap();
+        assert!(glibc_services(&svc, &nss).is_empty());
+        assert_eq!(glibc_service_by_port(4001, b"tcp", &svc, &nss), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

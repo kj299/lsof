@@ -161,3 +161,38 @@ path = "fuzz_targets/netnames.rs"
 test = false
 doc = false
 bench = false
+
+# Reverse DNS for a socket's NAME (lsof-core, `dns`; DIVERGENCES 154): a
+# PTR reply is bytes from the network.
+[[bin]]
+name = "dns_reply"
+path = "fuzz_targets/dns_reply.rs"
+test = false
+doc = false
+bench = false
+
+# `-r m<fmt>` (lsof-core, `timefmt`; DIVERGENCES 152): a zone file, a `TZ`
+# rule, a strftime(3) format.
+[[bin]]
+name = "timefmt"
+path = "fuzz_targets/timefmt.rs"
+test = false
+doc = false
+bench = false
+
+# `+m m`'s mount supplement file (lsof-backend-linux, `mounts`;
+# DIVERGENCES 153).
+[[bin]]
+name = "mount_supplement"
+path = "fuzz_targets/mount_supplement.rs"
+test = false
+doc = false
+bench = false
+
+# `-r`/`+r`'s value (lsof-cli, `args`; DIVERGENCES 152).
+[[bin]]
+name = "repeat_arg"
+path = "fuzz_targets/repeat_arg.rs"
+test = false
+doc = false
+bench = false
