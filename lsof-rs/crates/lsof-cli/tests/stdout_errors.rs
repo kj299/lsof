@@ -12,6 +12,20 @@
 
 use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
+
+/// One test of this file at a time. A child that another test thread forks
+/// while a pipe's read end is still open in this process holds that end too,
+/// until it execs, so a write that should meet EPIPE could succeed instead
+/// (measured: about 1 run in 25 of this file, `-h` exiting 0, not 141).
+/// Running the tests one after another removes that by construction.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn self_pid() -> String {
     std::process::id().to_string()
@@ -43,6 +57,7 @@ fn stderr_of(stderr: &[u8]) -> String {
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
 fn a_normal_run_writes_its_table_and_exits_0() {
+    let _serial = serial();
     // The control for the two tests below, and not a formality: a mutation
     // that sent EVERY run down the write-error path — table printed, then
     // "lsof: write error", exit 1 — passed both of them, because each one only
@@ -78,6 +93,7 @@ fn a_normal_run_writes_its_table_and_exits_0() {
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
 fn a_closed_pipe_exits_141_and_says_nothing() {
+    let _serial = serial();
     // The read end is dropped before lsof has written a byte — it spends
     // milliseconds reading /proc first — so the first write meets EPIPE.
     let mut child = Command::new(env!("CARGO_BIN_EXE_lsof"))
@@ -108,6 +124,7 @@ fn a_closed_pipe_exits_141_and_says_nothing() {
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
 fn any_other_write_error_is_reported_not_panicked() {
+    let _serial = serial();
     // /dev/full accepts the open and fails every write with ENOSPC — the
     // `lsof > file` on a full disk case. That IS an error, and it is one line
     // on stderr and exit 1, not a Rust panic message and exit 101.
@@ -160,6 +177,7 @@ fn dev_full() -> Stdio {
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
 fn the_help_on_a_failing_stderr() {
+    let _serial = serial();
     for args in [&["-h"][..], &["-F", "?"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
             .env("RES_OPTIONS", "attempts:0")
@@ -232,6 +250,7 @@ fn with_a_nameless_owner(f: impl FnOnce(u32, u32)) -> Option<()> {
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
 fn a_listing_on_a_failing_stderr() {
+    let _serial = serial();
     with_a_nameless_owner(|pid, uid| {
         let pid = pid.to_string();
         // The control: the warning is written, so the runs below meet a
@@ -284,6 +303,7 @@ fn a_listing_on_a_failing_stderr() {
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
 fn the_mount_print_into_a_closed_pipe_exits_141() {
+    let _serial = serial();
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
         .env("RES_OPTIONS", "attempts:0")
         .args(["+m"])
