@@ -1657,7 +1657,11 @@ fn a_supplement_through_an_inherited_descriptor_is_none() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("lsof: WARNING: access /dev/fd/9: No such file or directory\n")
-            && err.contains("lsof: assuming dev=0 for /proc from /dev/fd/9\n"),
+            && err.contains("lsof: assuming dev=")
+            && err.contains(" for /proc from /dev/fd/9\n")
+            // The device the mount table gives (host-dependent: 0 here,
+            // 0x19 on a CI runner), never the one the file would have.
+            && !err.contains("dev=0x15 "),
         "{err}"
     );
     assert_eq!(out.status.code(), Some(0), "{err}");

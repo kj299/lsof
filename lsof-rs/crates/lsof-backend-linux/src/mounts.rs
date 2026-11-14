@@ -311,7 +311,13 @@ fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
     if kind.is_fifo() || kind.is_char_device() || kind.is_block_device() {
         return Err(error());
     }
-    let nonblocking = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+    // Not under miri, whose `open` refuses the flag; a FIFO is refused
+    // by the type check above there as well.
+    let nonblocking = if cfg!(miri) {
+        0
+    } else {
+        i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0)
+    };
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nonblocking)

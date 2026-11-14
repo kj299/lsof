@@ -262,12 +262,15 @@ mod sys {
 /// `O_NONBLOCK` where its value is known (0 elsewhere): a file opened to be
 /// read whole is opened with it, so that a FIFO put where a regular file
 /// was looked at cannot hold the open, which the read then refuses.
+///
+/// 0 under miri, whose `open` refuses the flag ("unsupported flags 0x800");
+/// the FIFO it guards against is a native-only concern, tested natively.
 #[cfg(all(unix, not(target_os = "freebsd")))]
-pub(crate) const NONBLOCK: i32 = sys::O_NONBLOCK;
+pub(crate) const NONBLOCK: i32 = if cfg!(miri) { 0 } else { sys::O_NONBLOCK };
 /// FreeBSD's `O_NONBLOCK` (`<sys/fcntl.h>`: `0x0004`), so that a file read
 /// whole is opened there as on Linux.
 #[cfg(target_os = "freebsd")]
-pub(crate) const NONBLOCK: i32 = 0x0004;
+pub(crate) const NONBLOCK: i32 = if cfg!(miri) { 0 } else { 0x0004 };
 
 /// `errno` as an error, so that `strerror()`'s words are the C library's,
 /// byte for byte the C's; where the number was not checked, those words.

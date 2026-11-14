@@ -7830,7 +7830,8 @@ mod tests {
                 if cfg!(target_os = "linux") {
                     vec![ill("W"), ill("Y")]
                 } else {
-                    vec![ill("W"), "+m not supported".into(), ill("Y")]
+                    // `-Y` is `+m`'s value there, as `GetOpt` gives it.
+                    vec![ill("W"), "+m not supported".into()]
                 },
             ),
             (
