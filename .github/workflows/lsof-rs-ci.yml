@@ -378,7 +378,7 @@ jobs:
             echo "::error::cargo fuzz list names $n target(s); fuzz/fuzz_targets holds $files"
             exit 1
           fi
-          minutes=$(awk '/^  fuzz:$/ {f=1} f && /timeout-minutes:/ {print $2; exit}' .github/workflows/lsof-rs-ci.yml)
+          minutes=$(awk '/^  fuzz:$/ {f=1} f && /timeout-minutes:/ {print $2; exit}' "$GITHUB_WORKSPACE/.github/workflows/lsof-rs-ci.yml")
           budget=$(( n * 65 + 300 ))
           if [ -z "$minutes" ] || [ "$budget" -gt $(( minutes * 60 )) ]; then
             echo "::error::$n fuzz targets x 65 s + 300 s = ${budget} s does not fit the job's timeout-minutes (${minutes:-unread})"
