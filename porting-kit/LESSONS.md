@@ -4243,3 +4243,29 @@ the same, since the day before this entry.]*
   unspelled_claims, matrix_claims, run_gate, self-test;
   harnesses/gate-mutation/mutate_gates.py · MUTATIONS;
   lsof-rs/coverage/coverage-matrix.toml.
+
+---
+
+## 091. An entry said the primary line had the same harness, and it had none
+
+- **Date:** 2026-11-14
+- **Codebase:** this log's entry 086, read against the primary line's entry 058
+  and its history
+- **What happened:** entry 086 ends: "The primary line (kj299/c2rust-port)
+  carries the same harness and needed the same change. Its maintainer upstreams
+  it there". A note added to it on 2026-10-21 calls what followed an
+  upstreaming, "the same day, 2026-10-10, as that line's entry 058". The
+  primary line had no such harness. Its 058 says "This kit had no such harness
+  and asked for no kill table at all", and its `mutate_port.py` first appears
+  in caa58a2, which brought this line's harness over whole. So what a reader
+  of 086 would act on, that a second copy with the same defect existed and was
+  fixed in step, was not so when it was written, and the note kept it
+  standing. Nothing could have caught it: `check_lesson_refs.py` and
+  `check_imports.py` check this log's own numbers, and a claim about another
+  repository's code names none.
+- **The rule.** A claim about what another lineage has, needs or did is
+  checked against that lineage before it is written: its tree, its log, its
+  history. "It needed the same change" claims that it had the same code.
+- **Kit change:** none. Entry 086 stands as written, because this log is
+  append-only; this entry is its correction.
+- **Section amended:** LESSONS.md · 086, by this correction.
