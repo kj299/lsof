@@ -125,6 +125,8 @@ pub mod safefs;
 mod text;
 #[cfg(target_os = "linux")]
 mod users;
+#[cfg(target_os = "linux")]
+pub mod zonefile;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
@@ -140,6 +142,25 @@ pub use netnames::secure_execution;
 /// The C's `-r` check of the password file, at each cycle (DIVERGENCES 70).
 #[cfg(target_os = "linux")]
 pub use users::new_cycle as passwd_new_cycle;
+
+/// One `write(2)` to file descriptor 1 itself, as glibc's stdio makes
+/// them: no buffer of std's between (`std::io::Stdout` is line-buffered,
+/// and would cut and join the C's writes otherwise), and no retry on a
+/// short count or an error. lsof-cli's `stdio` buffers above it.
+#[cfg(target_os = "linux")]
+pub fn write_stdout(data: &[u8]) -> std::io::Result<usize> {
+    use std::os::fd::AsFd;
+    rustix::io::write(std::io::stdout().as_fd(), data).map_err(std::io::Error::from)
+}
+
+/// `fstat(1)`'s `st_blksize`, which glibc sizes stdout's buffer by.
+#[cfg(target_os = "linux")]
+pub fn stdout_blksize() -> Option<u64> {
+    use std::os::fd::AsFd;
+    rustix::fs::fstat(std::io::stdout().as_fd())
+        .ok()
+        .and_then(|st| u64::try_from(st.st_blksize).ok())
+}
 
 /// The pure text parsers, exposed for the cargo-fuzz targets in `../../fuzz`.
 ///

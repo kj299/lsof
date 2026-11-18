@@ -587,7 +587,7 @@ name = "json-lines-no-blank-line"
 rule = "-j prints an empty line after each repeating cycle (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''        if marking == Marking::JsonLines && delay > 0 {'''
+old = '''        if marking == Marking::JsonLines && delay != 0 {'''
 new = '''        if marking == Marking::JsonLines && delay > 99 {'''
 
 [[mutant]]
@@ -595,7 +595,7 @@ name = "json-lines-blank-without-delay"
 rule = "-j's empty line only where the run repeats (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''        if marking == Marking::JsonLines && delay > 0 {'''
+old = '''        if marking == Marking::JsonLines && delay != 0 {'''
 new = '''        if marking == Marking::JsonLines {'''
 
 [[mutant]]
@@ -629,32 +629,32 @@ name = "count-one-cycle-more"
 rule = "a count of N ends the run after N cycles (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''        if repeat.count > 0 && ended.cycles == repeat.count {'''
-new = '''        if repeat.count > 0 && ended.cycles > repeat.count {'''
+old = '''        if repeat.count != 0 && pr_count == repeat.count {'''
+new = '''        if repeat.count != 0 && pr_count == repeat.count.wrapping_add(1) {'''
 
 [[mutant]]
 name = "default-marker-eight"
 rule = "the marker is seven = (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''unwrap_or(b"======="))?;'''
-new = '''unwrap_or(b"========"))?;'''
+old = '''unwrap_or(b"======="));'''
+new = '''unwrap_or(b"========"));'''
 
 [[mutant]]
 name = "nul-marker-no-newline"
 rule = "-F0's marker ends NUL and a newline (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''                    out.write_all(if nul { b"\0\n" } else { b"\n" })?;'''
-new = '''                    out.write_all(if nul { b"\0" } else { b"\n" })?;'''
+old = '''                    let _ = out.write_all(if nul { b"\0\n" } else { b"\n" });'''
+new = '''                    let _ = out.write_all(if nul { b"\0" } else { b"\n" });'''
 
 [[mutant]]
 name = "marker-not-reformatted"
 rule = "the marker is formatted anew at each cycle (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''marker.as_mut().map(|m| m.at(zone, now).to_vec());'''
-new = '''marker.as_mut().map(|m| m.at(zone, 0 * now).to_vec());'''
+old = '''marker.as_mut().map(|m| m.at(lt, now).to_vec());'''
+new = '''marker.as_mut().map(|m| m.at(lt, 0 * now).to_vec());'''
 
 [[mutant]]
 name = "idle-error-not-in-status"
@@ -716,7 +716,7 @@ rule = "+m ends the run before anything is gathered (153)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
 old = '''            calls.finish();
-            std::process::exit(0);
+            lsof_cli::stdio::exit(0);
         }'''
 new = '''            calls.finish();
         }'''
@@ -901,8 +901,8 @@ name = "v1-block-read-in-v2"
 rule = "a version 2 file is read from its 64-bit block (152)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/timefmt.rs"
-old = '''            if version != 0 && !wide {'''
-new = '''            if version == 99 && !wide {'''
+old = '''            if !wide && head.get(4).copied().unwrap_or(0) != 0 {'''
+new = '''            if !wide && head.get(4).copied().unwrap_or(0) == 99 {'''
 
 [[mutant]]
 name = "e-zero-padded"

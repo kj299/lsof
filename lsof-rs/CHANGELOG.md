@@ -12,6 +12,37 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **A closed pipe and a full disk are what they are for the C** (DIVERGENCES
+  36, 152). With `SIGPIPE` at its default, as a shell leaves it, a reader
+  that has gone kills lsof with the signal at the write that meets it, as
+  it kills the C (the shell's status is 141, as before; a parent that
+  `wait()`s now sees `WIFSIGNALED`, Python's `returncode` -13, where lsof-rs
+  had exited 141 itself). With `SIGPIPE` ignored (`trap '' PIPE`, `nohup`)
+  or blocked, and on a full disk, a failed write is dropped and nothing is
+  said: the run goes on and exits with its usual status, as the C's does
+  (`lsof > /dev/full` exits 0 where lsof-rs printed `lsof: write error` and
+  exited 1; `-r` under `trap '' PIPE` into a dead pipe goes on, a cycle each
+  delay, until its count, `+r` or a signal ends it). Standard output is
+  buffered as glibc buffers it, 4096 bytes on a pipe, flushed before each
+  `-r` sleep and at exit. The same for stderr's reader gone. A new crate,
+  `lsof-sigpipe`, reads the inherited disposition before the Rust runtime
+  replaces it (three audited `unsafe` sites; `libc` its one dependency,
+  already in the lock file). Windows, which has no `SIGPIPE`, still exits
+  141 for a closed pipe.
+- **`-r`'s delay and count wrap as the C's `int`s do** (DIVERGENCES 121,
+  152): `-r 4294967297` repeats every second, `-r 4294967296` is one cycle
+  and no marker, `-r 1c4294967298mX` two cycles, where lsof-rs had slept
+  4294967297 seconds or counted that many cycles.
+- **`-r m<fmt>`'s marker is glibc's in every case measured** (DIVERGENCES
+  152): `%s` is `mktime()`'s, which in an hour a zone repeats with one
+  `tm_isdst` is the later time in a new process (Asia/Almaty 2024-02-29
+  23:30 +06 prints 1709231400); with `TZ` unset `/etc/localtime` is looked
+  at again at each marker and read again where it changed (a new zone, or
+  UTC where it has gone); a `TZ` that names daylight time and no rule
+  reads `posixrules`; a zone file of any size is read (it had been refused
+  past 1 MiB), and one that is a FIFO or a device is read as glibc reads
+  it, for at most 3 seconds, where the C waits for ever.
+
 - **On Linux a socket's NAME names its hosts and ports by default, as the
   C's does** (DIVERGENCES 154): `TCP localhost:nfs (LISTEN)` where lsof-rs
   printed `TCP 127.0.0.1:2049 (LISTEN)`, in the table and in `-F n`. **A run
@@ -298,6 +329,11 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   did not reach that path. No new crate; the build script is unchanged.
 
 ### Added
+- **`docs/lsof-rs.1`**, a man page, whose DIFFERENCES FROM THE C LSOF
+  section lists what lsof-rs does differently on purpose: arguments
+  escaped in every message, the 3-second wait for a zone file that is no
+  regular file, `-v`, `-Z`, Windows' closed pipe. `lsof -h` says the first
+  two beside `-r` and at its end.
 - **`+n`, `+P`, `+r` and `+m`, which lsof-rs refused**, work as the C's
   (DIVERGENCES 152-154):
   * `+n`/`+P` name hosts and ports again after `-n`/`-P`. On Linux a host

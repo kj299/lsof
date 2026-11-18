@@ -256,6 +256,16 @@ RULES = os.path.join(HERE, "linux-rules.json")
 # line of the C's and lsof-rs's line become `<USAGE>`, the C's other eight
 # nothing, each matched whole, so that a case with `with_stderr = true`
 # compares the message before the usage and that there is a usage.
+# The `%s` markers of `repeat-marker-percent-s-is-mktimes` are the time a
+# run printed them, `MKT` and its digits: all but the leading ones are
+# masked, so the two binaries' runs a second apart compare, and the 2^30
+# seconds `mktime()` takes in a new process does not (DIVERGENCES 152).
+MKTIME_RULE = {
+    "name": "repeat-mktime-digits",
+    "regex": "MKT(-?\\d*?)\\d{7}(?!\\d)",
+    "replacement": "MKT\\1<7>",
+}
+
 USAGE_RULES = [
     {"name": "usage-c-version", "regex": "^lsof \\d+\\.\\d+\\.\\d+$", "replacement": "<USAGE>"},
     {"name": "usage-c-links",
@@ -1639,6 +1649,69 @@ def write_names_services(work: str, port: str, uport: str, nsport: str = "0", ns
         )
 
 
+# The `wr-closed*` modes' runner: the command with its stdout on a pipe
+# whose reader is closed before it starts, `SIGPIPE` as the mode says (``
+# its default, `-ign` ignored, `-blk` blocked, as a parent leaves them), and
+# its status on stdout, a signal as minus its number.
+WR_CLOSED = (
+    "import os, signal, subprocess, sys\n"
+    "how = sys.argv[1]\n"
+    "def pre():\n"
+    "    signal.signal(signal.SIGPIPE, signal.SIG_IGN if how == '-ign' else signal.SIG_DFL)\n"
+    "    if how == '-blk':\n"
+    "        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})\n"
+    "r, w = os.pipe()\n"
+    "os.close(r)\n"
+    "p = subprocess.run(sys.argv[2:], stdout=w, preexec_fn=pre)\n"
+    "print('status', p.returncode)\n"
+)
+WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk")
+
+
+# The `tz-*` modes' variants (DIVERGENCES 152).
+TZ_VARIANTS = ("swap", "inplace", "gone", "fold", "posix", "big", "zero", "null", "dir", "fifo", "v1fifo", "v2fifo")
+
+
+def write_tz_zones(work: str) -> str:
+    """The zone files the `tz-*` modes put under /etc: copies of the
+    system's Asia/Tokyo, Asia/Kolkata and Australia/Sydney (for
+    `posixrules`, whose daylight time is the United States' winter), a
+    version 1 file of one type, `ABC` an hour east, and `fold`: a version 1
+    file whose one change, at 1700000000, takes the clock back 2^30 seconds,
+    so that every time from then to 2057 is a wall-clock time an earlier
+    one also had, with the same `tm_isdst`, and `mktime()` of it, `%s`,
+    the earlier time in a new process (glibc 2.39: `__mktime_internal()`'s
+    first guess is the time read as UTC)."""
+    import struct
+    d = os.path.join(work, "tz")
+    os.makedirs(d, exist_ok=True)
+    for name, zone in (("tokyo", "Asia/Tokyo"), ("kolkata", "Asia/Kolkata"), ("sydney", "Australia/Sydney")):
+        with open(os.path.join("/usr/share/zoneinfo", zone), "rb") as src, open(os.path.join(d, name), "wb") as dst:
+            dst.write(src.read())
+
+    def v1(times, idxs, types, chars):
+        head = b"TZif\0" + bytes(15) + struct.pack(">6l", 0, 0, 0, len(times), len(types), len(chars))
+        body = b"".join(struct.pack(">l", t) for t in times) + bytes(idxs)
+        body += b"".join(struct.pack(">lBB", off, dst, idx) for off, dst, idx in types)
+        return head + body + chars
+
+    with open(os.path.join(d, "v1"), "wb") as f:
+        f.write(v1([], [], [(3600, 0, 0)], b"ABC\0"))
+    with open(os.path.join(d, "fold"), "wb") as f:
+        f.write(v1([1700000000], [1], [(0, 0, 0), (-(1 << 30), 0, 4)], b"AAA\0BBB\0"))
+    # `big`: a version 2 file of one type whose footer is `QQQ-3`, a NUL and
+    # 20 MiB more, which glibc reads whole and lsof-rs had refused (1 MiB).
+    # One change, at 0, so that the footer decides from then on.
+    with open(os.path.join(d, "big"), "wb") as f:
+        one = v1([0], [0], [(0, 0, 0)], b"UTC\0").replace(b"TZif\0", b"TZif2", 1)
+        wide = one[:44] + struct.pack(">q", 0) + one[48:]
+        f.write(one + wide + b"\nQQQ-3\0" + b"A" * (20 << 20) + b"\n")
+    for name in os.listdir(d):
+        os.chmod(os.path.join(d, name), 0o644)
+    os.chmod(d, 0o755)
+    return d
+
+
 def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     """The script fixture MT's and AUTOFS's cases run in, already in a mount
     namespace of their own: mount a tmpfs at `base` and, in `table` mode,
@@ -1729,6 +1802,7 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     os.chmod(names, 0o755)
     for name in os.listdir(names):
         os.chmod(os.path.join(names, name), 0o644)
+    zones = write_tz_zones(work)
     with open(path, "w") as f:
         f.write(
             "#!/bin/sh\n"
@@ -1798,6 +1872,49 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             '    rm -f "$T"\n'
             '    "$@"\n'
             "    exit $?\n"
+            "fi\n"
+            # The `wr-*` modes (DIVERGENCES 36): stdout on /dev/full, or on
+            # a pipe whose reader has gone, `SIGPIPE` at its default, ignored
+            # or blocked; the binary's status (a signal as minus its number)
+            # is printed in place of its output.
+            'if [ "$mode" = wr-full ]; then\n'
+            '    "$@" > /dev/full\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "${mode#wr-closed}" != "$mode" ]; then\n'
+            f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_CLOSED)} \"${{mode#wr-closed}}\" \"$@\"\n"
+            "fi\n"
+            # The `tz-*` modes (DIVERGENCES 152): a tmpfs over /etc holding
+            # the host's password file and the zone files a case reads; a
+            # job changes them while the run repeats, half a second in,
+            # between its first marker and its second.
+            'if [ "${mode#tz-}" != "$mode" ]; then\n'
+            f"    Z={shlex.quote(zones)}\n"
+            '    mount -t tmpfs lsof-rs-tz /etc || { echo "linux_diff: no MT tz ($$)"; exit 2; }\n'
+            f"    cat {shlex.quote(passwd)} > /etc/passwd || exit 2\n"
+            '    job=\n'
+            '    case "${mode#tz-}" in\n'
+            '    swap) cat "$Z/tokyo" > /etc/localtime || exit 2\n'
+            '          (sleep 0.5; cat "$Z/kolkata" > /etc/localtime.new && mv -f /etc/localtime.new /etc/localtime) & job=$! ;;\n'
+            '    inplace) cat "$Z/tokyo" > /etc/localtime && touch -d @1000000000 /etc/localtime || exit 2\n'
+            '          (sleep 0.5; cat "$Z/kolkata" > /etc/localtime; touch -d @1000000000 /etc/localtime) & job=$! ;;\n'
+            '    gone) cat "$Z/tokyo" > /etc/localtime || exit 2\n'
+            '          (sleep 0.5; rm -f /etc/localtime; sleep 1; cat "$Z/kolkata" > /etc/localtime) & job=$! ;;\n'
+            '    fold) cat "$Z/fold" > /etc/foldzone || exit 2 ;;\n'
+            '    posix) cat "$Z/sydney" > /etc/posixrules || exit 2 ;;\n'
+            '    big) cat "$Z/big" > /etc/bigzone || exit 2 ;;\n'
+            '    zero) ln -s /dev/zero /etc/localtime || exit 2 ;;\n'
+            '    null) ln -s /dev/null /etc/localtime || exit 2 ;;\n'
+            '    dir) mkdir /etc/localtime || exit 2 ;;\n'
+            '    fifo) mkfifo /etc/localtime || exit 2 ;;\n'
+            '    v1fifo) mkfifo /etc/tzfifo || exit 2; cat "$Z/v1" > /etc/tzfifo & job=$! ;;\n'
+            '    v2fifo) mkfifo /etc/tzfifo || exit 2; cat "$Z/kolkata" > /etc/tzfifo & job=$! ;;\n'
+            '    *) echo "linux_diff: no MT tz variant ($$)"; exit 2 ;;\n'
+            '    esac\n'
+            '    "$@"\n'
+            "    rc=$?\n"
+            '    [ -n "$job" ] && { kill "$job" 2>/dev/null; wait "$job" 2>/dev/null; }\n'
+            "    exit $rc\n"
             "fi\n"
             'mount -t tmpfs lsof-rs-mt "$B" || { echo "linux_diff: no MT table ($$)"; exit 2; }\n'
             'if [ "$mode" = mqueue ]; then\n'
@@ -4089,6 +4206,8 @@ def run(args) -> int:
                         needs_mt(c, mode)
                         for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc", "names", "namesmulti", "namesnopw")
                         + tuple(f"names-{v}" for v in NAMES_VARIANTS)
+                        + tuple(f"tz-{v}" for v in TZ_VARIANTS)
+                        + WR_MODES
                     )
                     and c["name"] not in dropped
                 ]
@@ -4579,7 +4698,7 @@ def self_test() -> int:
         "replacement": '"lsof_version":"<V>"',
     }
     check("linux-rules.json is the kit's default rules, lsof_version and the usage rules",
-          dumped.returncode == 0 and rules == json.loads(dumped.stdout) + [version_rule] + USAGE_RULES)
+          dumped.returncode == 0 and rules == json.loads(dumped.stdout) + [version_rule] + USAGE_RULES + [MKTIME_RULE])
     # The usage rules: the C's usage block and lsof-rs's one line come out
     # as the same one line, so that a case can compare the message before
     # it (DIVERGENCES 114 is the usage text itself); and nothing else does.

@@ -22,6 +22,11 @@
 # set the depth to 1, which survived (one level is all the C locale's
 # conversions need) and was changed to 0, then killed.
 #
+# Re-anchored 2026-11-18 (the -r parity round, mutants/r-parity.toml): the
+# zone and stdout mutants to the new code; `zone-file-max-unbounded` and
+# `plus-m-pipe-exit` retired with the rules they pinned (no 1 MiB bound on a
+# zone file; no 141 of lsof-rs's own for a closed pipe: the C's SIGPIPE).
+#
 # Rules with no mutant here, and why:
 # * The values of `RESOLV_LINE_LIMIT` (1 MiB a line) and `RESOLV_CONF_LIMIT`
 #   (256 MiB): `resolv_conf_is_read_whole_or_not_at_all` pins both rules
@@ -466,61 +471,53 @@ old = '''                } else if !leap && (14..=25).contains(&m) {'''
 new = '''                } else if false {'''
 
 [[mutant]]
-name = "zone-file-max-unbounded"
-rule = "a zone file is read to 1 MiB at most (the review)"
-[[mutant.edit]]
-file = "crates/lsof-core/src/timefmt.rs"
-old = '''pub const TZIF_MAX_BYTES: u64 = 1 << 20;'''
-new = '''pub const TZIF_MAX_BYTES: u64 = 1 << 40;'''
-
-[[mutant]]
 name = "secure-tz-any-file"
 rule = "in secure-execution mode TZ is a file only under the system's directory (tzset, the review)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/timefmt.rs"
-old = '''            || (secure
-'''
-new = '''            || (false && secure
-'''
+old = '''        if self.secure
+            && ((file.first()'''
+new = '''        if false && self.secure
+            && ((file.first()'''
 
 [[mutant]]
 name = "secure-tzdir-read"
 rule = "in secure-execution mode TZDIR is not read (the review)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/timefmt.rs"
-old = '''                    .filter(|dir| !dir.is_empty() && !secure)'''
-new = '''                    .filter(|dir| !dir.is_empty())'''
+old = '''                .filter(|d| !d.is_empty() && !self.secure)'''
+new = '''                .filter(|d| !d.is_empty())'''
 
 [[mutant]]
 name = "local-zone-ignores-tz"
 rule = "the marker's zone is TZ's (F4, the review)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''    let tz = std::env::var_os("TZ");'''
-new = '''    let tz: Option<std::ffi::OsString> = None;'''
+old = '''        Box::new(|name| std::env::var_os(name).map(|v| v.as_encoded_bytes().to_vec())),'''
+new = '''        Box::new(|name| std::env::var_os(name).filter(|_| name != "TZ").map(|v| v.as_encoded_bytes().to_vec())),'''
 
 [[mutant]]
 name = "local-zone-ignores-tzdir"
 rule = "the marker's zone file is looked for under TZDIR (the review)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''    let tzdir = std::env::var_os("TZDIR");'''
-new = '''    let tzdir: Option<std::ffi::OsString> = None;'''
+old = '''        Box::new(|name| std::env::var_os(name).map(|v| v.as_encoded_bytes().to_vec())),'''
+new = '''        Box::new(|name| std::env::var_os(name).filter(|_| name != "TZDIR").map(|v| v.as_encoded_bytes().to_vec())),'''
 
 [[mutant]]
 name = "local-zone-always-secure"
 rule = "outside secure-execution mode TZ and TZDIR are read whole (the review)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''    let secure = lsof_backend_linux::secure_execution();'''
-new = '''    let secure = true;'''
+old = '''        lsof_backend_linux::secure_execution(),'''
+new = '''        true,'''
 
 [[mutant]]
 name = "repeating-always"
 rule = "only a delay makes the C stat /etc/passwd (RptTm; -r0 and +r0 do not, the review)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''    let repeating = repeat.delay > 0;'''
+old = '''    let repeating = repeat.delay != 0;'''
 new = '''    let repeating = true;'''
 
 [[mutant]]
@@ -530,14 +527,6 @@ rule = "-Q mutes the search's status, not +r's (the review)"
 file = "crates/lsof-cli/src/main.rs"
 old = '''    let code = if ((!misses.is_empty() || dropped_an_argument) && !quiet) || ended.idle_error {'''
 new = '''    let code = if (!misses.is_empty() || dropped_an_argument || ended.idle_error) && !quiet {'''
-
-[[mutant]]
-name = "plus-m-pipe-exit"
-rule = "+m's print into a closed pipe exits 141, as the C's SIGPIPE (the review)"
-[[mutant.edit]]
-file = "crates/lsof-cli/src/args.rs"
-old = '''            std::process::exit(141);'''
-new = '''            let _ = 141;'''
 
 [[mutant]]
 name = "no-name-service"
@@ -561,9 +550,9 @@ new = '''        if true {
 name = "stdout-buffer-64k"
 rule = "the listing goes through the C's 4096-byte stdout buffer (the review: names-reader-gone)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''        let mut sink = std::io::BufWriter::with_capacity(4096, stdout.lock());'''
-new = '''        let mut sink = std::io::BufWriter::with_capacity(65536, stdout.lock());'''
+file = "crates/lsof-cli/src/stdio.rs"
+old = '''    let size = buffer_size(lsof_backend_linux::stdout_blksize());'''
+new = '''    let size = 65536;'''
 
 [[mutant]]
 name = "scan-keeps-non-tcp-udp"

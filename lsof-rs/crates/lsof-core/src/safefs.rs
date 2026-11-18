@@ -463,19 +463,22 @@ pub fn to_stderr(line: &str) {
 }
 
 /// `text` on stderr, written as the C's unchecked `fprintf(stderr, …)`
-/// writes it: a failure is no reason to stop listing. `eprint!` PANICS on
-/// one, so `lsof 2>/dev/full` on a host with an owner the password file
-/// lacks died (exit 101) before its first row, where the C lists everything
-/// and exits 0. A stderr whose reader has gone is the one failure that
-/// ends the run, as the C dies of `SIGPIPE` there: exit 141, the status the
-/// shell shows for that, as lsof-rs's stdout does (`exit_on_write_error` in
-/// the binary). Anything else is ignored. Every warning and the help go
-/// through here.
+/// writes it, in one write (stderr is unbuffered): a failure is no reason
+/// to stop listing, and it is not reported. `eprint!` PANICS on one, so
+/// `lsof 2>/dev/full` on a host with an owner the password file lacks died
+/// (exit 101) before its first row, where the C lists everything and exits
+/// 0. A stderr whose reader has gone kills lsof-rs with `SIGPIPE` at this
+/// write where the signal was inherited at its default, as it kills the C
+/// (the binary puts the default back, `lsof_sigpipe`), and is ignored like
+/// any other failure where it was ignored or blocked, as the C ignores it
+/// (DIVERGENCES 36). Off Unix, where there is no `SIGPIPE`, a reader gone
+/// ends the run with 141, the status a shell shows for the signal. Every
+/// warning and the help go through here.
 pub fn write_stderr(text: &str) {
     use std::io::Write as _;
     let written = std::io::stderr().lock().write_all(text.as_bytes());
     if let Err(e) = written {
-        if e.kind() == io::ErrorKind::BrokenPipe {
+        if !cfg!(unix) && e.kind() == io::ErrorKind::BrokenPipe {
             std::process::exit(141);
         }
     }

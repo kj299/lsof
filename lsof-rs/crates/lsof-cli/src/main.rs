@@ -27,7 +27,8 @@ use lsof_core::{
 
 /// `eprintln!`, without its panic: one line on stderr through
 /// [`to_stderr`], which ignores a failed write as the C's `fprintf(stderr)`
-/// does and ends the run with 141 only when stderr's reader has gone.
+/// does (a reader gone kills the run with `SIGPIPE` where it was inherited
+/// at its default, as it kills the C).
 macro_rules! say {
     ($($arg:tt)*) => {
         to_stderr(&format!($($arg)*))
@@ -227,7 +228,14 @@ OUTPUT:
                   format fmt ({zone}); -r0 is one cycle.
                   Unless m<fmt> follows, what follows t's digits is read again
                   as options, as the C reads it (-r 1c2 is also -c 2; -r 1c2mX
-                  is not); beside -F, -J or -j, fmt may not hold %n
+                  is not); beside -F, -J or -j, fmt may not hold %n.
+                  As in the C: t and n wrap as a C int; %s is mktime()'s;
+                  with TZ unset /etc/localtime is looked at again at each
+                  marker; a closed pipe kills the run unless SIGPIPE is
+                  ignored or blocked, and no write error is reported. Unlike
+                  the C, a zone file that is no regular file (a FIFO, a
+                  device) is waited on 3 seconds at most, where the C waits
+                  for ever
     +r [t[c<n>][m<fmt>]]
                   the same, ending at the first cycle that lists nothing;
                   exit 1 if that was the first (and after +r0's one cycle)
@@ -274,6 +282,10 @@ MISCELLANEOUS:
 Without elevation, lsof-rs shows the processes you can access; run as
 Administrator (Windows) or root (Linux) for a system-wide view. On Windows,
 privileges are enabled only for the operations that need them.
+
+Unlike the C, a message that quotes an argument always escapes its control
+and non-UTF-8 bytes (^[, \\xNN), where the C prints some raw. lsof-rs(1)
+lists these differences.
 ",
         ver = env!("CARGO_PKG_VERSION"),
         names = HELP_NAMES,
@@ -733,57 +745,28 @@ fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     miss
 }
 
-/// What a failed write to stdout means (LESSONS #063).
-///
-/// **A closed pipe is not an error for lsof.** `lsof | head -1` is ordinary
-/// use, and the C dies of `SIGPIPE` silently; the shell reports 141 for it.
-/// This port had been ending the same pipeline with a panic —
-/// `failed printing to stdout: Broken pipe (os error 32)`, exit 101 — because
-/// `print!` panics on any write error, and the whole table went out in one
-/// `print!`. Re-raising the signal needs `unsafe` and this crate forbids it,
-/// so the port exits with the status the shell shows for the C, 141, which is
-/// the same `$?` and the same verdict under `set -o pipefail`, and says
-/// nothing. Any other write failure — a full disk under `lsof > file` — is a
-/// real error and is reported as one, not as a panic.
-fn exit_on_write_error(r: std::io::Result<()>) {
-    if let Err(e) = r {
-        if e.kind() == std::io::ErrorKind::BrokenPipe {
-            std::process::exit(141);
-        }
-        say!("lsof: write error: {e}");
-        std::process::exit(1);
-    }
-}
-
-/// The zone glibc's `tzset()` settles on for this process: `TZ`, `TZDIR`
-/// and `/etc/localtime`, each zone file read whole and only if it is a
-/// regular file within `TIMEFMT`'s bound; in secure-execution mode only the
-/// system's zone files (DIVERGENCES 152). On Windows only a `TZ` rule
-/// string, or UTC.
-fn local_zone() -> lsof_core::timefmt::Zone {
-    let tz = std::env::var_os("TZ");
-    let tzdir = std::env::var_os("TZDIR");
+/// This process's local time, as glibc keeps it (DIVERGENCES 152): `TZ`,
+/// `TZDIR` and the zone files read as `tzset()` reads them, again where
+/// glibc reads them again; in secure-execution mode only the system's zone
+/// files. On Linux a zone file that is no regular file is waited on 3
+/// seconds at most (`lsof_backend_linux::zonefile`); elsewhere on Unix it is
+/// not read; on Windows no file is read, only a `TZ` rule string.
+fn local_time() -> lsof_core::timefmt::LocalTime {
     #[cfg(target_os = "linux")]
-    let secure = lsof_backend_linux::secure_execution();
-    #[cfg(not(target_os = "linux"))]
-    let secure = false;
-    let mut read = |path: &[u8]| -> Option<Vec<u8>> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            lsof_core::timefmt::read_zone_file(Path::new(std::ffi::OsStr::from_bytes(path)))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            None
-        }
-    };
-    lsof_core::timefmt::Zone::from_env(
-        tz.as_ref().map(|t| t.as_encoded_bytes()),
-        tzdir.as_ref().map(|t| t.as_encoded_bytes()),
+    let (secure, fs): (bool, Box<dyn lsof_core::timefmt::ZoneFs>) = (
+        lsof_backend_linux::secure_execution(),
+        Box::new(lsof_backend_linux::zonefile::LinuxZoneFs::default()),
+    );
+    #[cfg(all(unix, not(target_os = "linux")))]
+    let (secure, fs): (bool, Box<dyn lsof_core::timefmt::ZoneFs>) =
+        (false, Box::new(lsof_core::timefmt::StdZoneFs));
+    #[cfg(not(unix))]
+    let (secure, fs): (bool, Box<dyn lsof_core::timefmt::ZoneFs>) =
+        (false, Box::new(lsof_core::timefmt::NoZoneFiles));
+    lsof_core::timefmt::LocalTime::new(
+        Box::new(|name| std::env::var_os(name).map(|v| v.as_encoded_bytes().to_vec())),
         secure,
-        &mut read,
+        fs,
     )
 }
 
@@ -816,7 +799,17 @@ fn main() {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(lsof_backend_linux::safefs::HELPER_ARG))
     {
-        std::process::exit(lsof_backend_linux::safefs::serve());
+        lsof_cli::stdio::exit(lsof_backend_linux::safefs::serve());
+    }
+    // `SIGPIPE` as the C has it (DIVERGENCES 36): the C never touches it, so
+    // a closed pipe kills it at the write that meets it unless its parent
+    // ignored or blocked the signal. The Rust runtime ignores it before
+    // `main`; `lsof_sigpipe` read what was inherited before that, and the
+    // default is put back where it was the default and is not blocked. (The
+    // helper above keeps the runtime's `SIG_IGN`: a write to a reader that
+    // has gone is an error it ends on.)
+    if lsof_sigpipe::inherited_ignored() == Some(false) && !lsof_sigpipe::blocked() {
+        lsof_sigpipe::restore_default();
     }
     // What the C closes first (`closefrom_shim(ctx, 3)`): noted before any
     // descriptor of lsof-rs's own is opened (DIVERGENCES 153).
@@ -859,10 +852,15 @@ fn main() {
     // `-h`, `-v` and a usage error make none unless one of those asked (on
     // Windows, no token is asked whether it is elevated).
     let env_cell: std::cell::OnceCell<Env> = std::cell::OnceCell::new();
-    // The zone `-r m<fmt>` is tried in where the parse reads it, as the C's
-    // `util_strftime()` calls `localtime()` there, and later printed in
-    // (DIVERGENCES 152): read only by a run that gives a marker format.
-    let marker_zone: std::cell::OnceCell<lsof_core::timefmt::Zone> = std::cell::OnceCell::new();
+    // The local time `-r m<fmt>` is tried in where the parse reads it, as
+    // the C's `util_strftime()` calls `localtime()` there, and later printed
+    // in (DIVERGENCES 152): made only by a run that gives a marker format.
+    // The marker tried is kept, its buffer as the C's `fmtr` is left, so
+    // that no `localtime()` or `mktime()` is made the C does not make.
+    let marker_time: std::cell::OnceCell<std::cell::RefCell<lsof_core::timefmt::LocalTime>> =
+        std::cell::OnceCell::new();
+    let tried_marker: std::cell::RefCell<Option<lsof_core::timefmt::Marker>> =
+        std::cell::RefCell::new(None);
     let parsed = {
         let read_table = |req: &MountRequest, fs: &SafeFs| {
             env_cell.get_or_init(make_env).backend.mount_table(req, fs)
@@ -893,8 +891,12 @@ fn main() {
                 .lookup_service(name, protocol)
         };
         let marker_ok = |format: &[u8]| {
-            let zone = marker_zone.get_or_init(local_zone);
-            lsof_core::timefmt::Marker::new(format, zone, now_seconds()).is_some()
+            let lt = marker_time.get_or_init(|| std::cell::RefCell::new(local_time()));
+            let marker =
+                lsof_core::timefmt::Marker::new(format, &mut lt.borrow_mut(), now_seconds());
+            let ok = marker.is_some();
+            *tried_marker.borrow_mut() = marker;
+            ok
         };
         let host = HostChecks {
             lookup_user: &lookup_user,
@@ -917,7 +919,7 @@ fn main() {
             // An error the C's `Error()` ends the run at, at once: no usage,
             // whatever `-h` asked for (`-d foo -h`, measured).
             if e.is_fatal() {
-                std::process::exit(1);
+                lsof_cli::stdio::exit(1);
             }
             // The C's `usage()` after an error: its usage line, then the
             // help if `-h` was given, else a pointer to it, then the field
@@ -931,7 +933,7 @@ fn main() {
             if reports.help || reports.field_help {
                 report(reports);
             }
-            std::process::exit(1);
+            lsof_cli::stdio::exit(1);
         }
     };
 
@@ -980,7 +982,7 @@ fn main() {
             // exactly the hosts that use the option. A loud refusal is the
             // honest failure; DIVERGENCES records it.
             say!("lsof: -Z (SELinux context) is not implemented");
-            std::process::exit(1);
+            lsof_cli::stdio::exit(1);
         }
         // The mount table, which lsof reads once and only on a run that needs
         // it: not under `-i` alone (`Selection::needs_mount_table`), where
@@ -1148,7 +1150,7 @@ fn main() {
         // exits 1), while `lsof -p 123 /nope` lists nothing at all. `-Q` makes
         // it non-fatal.
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
-            std::process::exit(1);
+            lsof_cli::stdio::exit(1);
         }
         // `+m`: the C reads its table (and prints each mount as it records
         // it) where it has not yet, and ends the run, exit 0, before
@@ -1161,7 +1163,7 @@ fn main() {
             }
             #[cfg(target_os = "linux")]
             calls.finish();
-            std::process::exit(0);
+            lsof_cli::stdio::exit(0);
         }
         if table.is_none() && needs_table {
             table = Some(read_table(&sel));
@@ -1221,7 +1223,7 @@ fn main() {
     // Under `-r` the C re-reads the password file when it changed, and so
     // does lsof-rs (DIVERGENCES 70): a run that repeats at all.
     #[cfg(target_os = "linux")]
-    let repeating = repeat.delay > 0;
+    let repeating = repeat.delay != 0;
     let quiet = selection.quiet;
 
     let run_cycle = || -> bool {
@@ -1235,10 +1237,10 @@ fn main() {
         let gathered = match env.backend.gather_with(&selection, &fs) {
             Ok(p) => p,
             // Said already, in the C's words.
-            Err(lsof_core::BackendError::Reported) => std::process::exit(1),
+            Err(lsof_core::BackendError::Reported) => lsof_cli::stdio::exit(1),
             Err(e) => {
                 say!("lsof: {e}");
-                std::process::exit(1);
+                lsof_cli::stdio::exit(1);
             }
         };
         // The process-level search items, marked from what the backend
@@ -1266,12 +1268,10 @@ fn main() {
                 // written (DIVERGENCES 70).
                 if let (Format::Fields { nul, only }, Some(first)) = (&format, procs.first()) {
                     let head = before_login(first, *nul, only.as_deref());
-                    let mut out = std::io::stdout().lock();
-                    let _ = out.write_all(head.as_bytes());
-                    let _ = out.flush();
+                    let _ = lsof_cli::stdio::Stdout.write_all(head.as_bytes());
                 }
                 say!("lsof: can't stat(/etc/passwd): {}", errno_text(&e));
-                std::process::exit(1);
+                lsof_cli::stdio::exit(1);
             }
         }
         let listed = prints_a_process(&procs, &format);
@@ -1285,22 +1285,20 @@ fn main() {
         for uid in pwd_warnings(&procs, &format, &selection) {
             say!("lsof: no pwd entry for UID {uid}");
         }
-        // Through a buffer of the C's stdout's size on a pipe (glibc's
-        // `st_blksize`, 4096), each socket named as its row is written: a
-        // reader that goes away ends the lookups at the next write, as the
-        // C dies of SIGPIPE at its next flush (DIVERGENCES 154).
-        let stdout = std::io::stdout();
-        let mut sink = std::io::BufWriter::with_capacity(4096, stdout.lock());
-        let written = write_listing(
-            &mut sink,
+        // Into stdout's buffer, glibc's (`lsof_cli::stdio`: 4096 bytes on a
+        // pipe, written as it fills, flushed before `-r`'s sleep and at
+        // exit), each socket named as its row is written: a reader that goes
+        // away kills lsof-rs at the next write that meets it, as it kills
+        // the C, and the lookups stop there (DIVERGENCES 154). A failed
+        // write is dropped, as glibc drops it, and the run goes on.
+        let _ = write_listing(
+            &mut lsof_cli::stdio::Stdout,
             &procs,
             &format,
             &selection,
             &columns,
             (&names, name_service.as_ref()),
         );
-        let written = written.and_then(|()| sink.flush());
-        exit_on_write_error(written);
         let mut all = located_all.borrow_mut();
         match all.as_mut() {
             Some(all) => all.merge(&located),
@@ -1314,39 +1312,33 @@ fn main() {
     // cycle: handle enumeration may have abandoned a worker thread blocked
     // uninterruptibly in `NtQueryObject` (a synchronous pipe/device), which
     // can otherwise stall normal process teardown.
-    let zone = marker_zone.into_inner().unwrap_or_else(|| {
-        lsof_core::timefmt::Zone::Rules(lsof_core::timefmt::PosixTz::utc(b"UTC"))
-    });
-    let mut marker = repeat
-        .marker
-        .as_deref()
-        .and_then(|fmt| lsof_core::timefmt::Marker::new(fmt, &zone, now_seconds()));
+    let mut lt = marker_time.into_inner().map_or_else(
+        lsof_core::timefmt::LocalTime::utc,
+        std::cell::RefCell::into_inner,
+    );
+    let mut marker = tried_marker
+        .into_inner()
+        .filter(|m| Some(m.format()) == repeat.marker.as_deref())
+        .or_else(|| {
+            repeat
+                .marker
+                .as_deref()
+                .and_then(|fmt| lsof_core::timefmt::Marker::new(fmt, &mut lt, now_seconds()))
+        });
     let mut host = RunHost {
         cycle: run_cycle,
-        out: std::io::stdout(),
+        out: lsof_cli::stdio::Stdout,
     };
-    let ended = lsof_cli::repeat::run(&repeat, &mut marker, &zone, marking, &mut host);
-    exit_on_write_error(
-        ended
-            .as_ref()
-            .map(|_| ())
-            .map_err(|e| std::io::Error::new(e.kind(), e.to_string())),
-    );
-    let ended = ended.unwrap_or(lsof_cli::repeat::Ended {
-        idle_error: false,
-        cycles: 0,
-    });
+    let ended = lsof_cli::repeat::run(&repeat, &mut marker, &mut lt, marking, &mut host);
     // What no cycle located, once, after the loop, on stdout; `-Q` does not
     // mute the lines, only the status (DIVERGENCES 53, 54).
     let located = located_all.into_inner().unwrap_or_default();
     let misses = unlocated(&selection, &located, Escaper::for_host());
     if selection.verbose && !misses.is_empty() {
-        let mut out = std::io::stdout().lock();
-        let written = misses
-            .iter()
-            .try_for_each(|m| writeln!(out, "{m}"))
-            .and_then(|()| out.flush());
-        exit_on_write_error(written);
+        let mut out = lsof_cli::stdio::Stdout;
+        for m in &misses {
+            let _ = writeln!(out, "{m}");
+        }
     }
     // `-Q` suppresses the search-failure status as well as the message:
     // `main.c` clears `ErrStat` under it and never sets
@@ -1362,15 +1354,18 @@ fn main() {
     #[cfg(target_os = "linux")]
     calls.finish();
     #[cfg(windows)]
-    lsof_backend_windows::exit_now(code);
+    {
+        lsof_cli::stdio::flush();
+        lsof_backend_windows::exit_now(code);
+    }
     #[cfg(not(windows))]
-    std::process::exit(code);
+    lsof_cli::stdio::exit(code);
 }
 
 /// The run's side of the repeat loop: its cycle, the clock, the sleep.
 struct RunHost<F: FnMut() -> bool> {
     cycle: F,
-    out: std::io::Stdout,
+    out: lsof_cli::stdio::Stdout,
 }
 
 impl<F: FnMut() -> bool> lsof_cli::repeat::Cycles for RunHost<F> {
@@ -1380,8 +1375,8 @@ impl<F: FnMut() -> bool> lsof_cli::repeat::Cycles for RunHost<F> {
     fn now(&mut self) -> i64 {
         now_seconds()
     }
-    fn sleep(&mut self, secs: u64) {
-        std::thread::sleep(std::time::Duration::from_secs(secs));
+    fn sleep(&mut self, secs: u32) {
+        std::thread::sleep(std::time::Duration::from_secs(u64::from(secs)));
     }
     fn out(&mut self) -> &mut dyn Write {
         &mut self.out

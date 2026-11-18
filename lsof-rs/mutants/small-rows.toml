@@ -620,8 +620,8 @@ name = "fields-before-login-dropped"
 rule = "-F writes the fields before L before the passwd stat error (70)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''                    let _ = out.write_all(head.as_bytes());'''
-new = '''                    let _ = out.write_all(b"");'''
+old = '''                    let _ = lsof_cli::stdio::Stdout.write_all(head.as_bytes());'''
+new = '''                    let _ = lsof_cli::stdio::Stdout.write_all(b"");'''
 
 [[mutant]]
 name = "rollback-drops-told-lines"

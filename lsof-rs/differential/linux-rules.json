@@ -53,5 +53,10 @@
     "name": "usage-rs",
     "regex": "^Try 'lsof -h' for usage\\.$",
     "replacement": "<USAGE>"
+  },
+  {
+    "name": "repeat-mktime-digits",
+    "regex": "MKT(-?\\d*?)\\d{7}(?!\\d)",
+    "replacement": "MKT\\1<7>"
   }
 ]

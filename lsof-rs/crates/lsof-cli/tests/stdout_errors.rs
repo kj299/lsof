@@ -1,16 +1,20 @@
 //! What lsof does when its standard output fails (LESSONS #063), or its
-//! standard error does.
+//! standard error does: what the C does (DIVERGENCES 36, measured against
+//! it in every case here). The C never checks a write: with `SIGPIPE` at
+//! its default a closed pipe kills it at the write that meets it, silently;
+//! with `SIGPIPE` ignored (`trap '' PIPE`) or blocked the write fails and
+//! the C goes on, as it does on a full disk (`/dev/full`), and exits with
+//! its usual status, saying nothing.
 //!
 //! The table used to go out in one `print!`, and `print!` panics on any write
 //! error, so `lsof | head -1` ended with
-//! `failed printing to stdout: Broken pipe (os error 32)` and exit 101 — where
-//! the C dies of SIGPIPE, silently, and the shell reports 141. Now that the
-//! table is written as it is formatted, a closed pipe is met mid-stream as
-//! often as not, so the behaviour is pinned here rather than left to whichever
-//! write happens to fail.
+//! `failed printing to stdout: Broken pipe (os error 32)` and exit 101; then
+//! with exit 141 where the C is killed, and with `lsof: write error`, exit 1,
+//! on `/dev/full`, where the C exits 0.
 #![cfg(target_os = "linux")]
 
 use std::fs::OpenOptions;
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
@@ -87,28 +91,42 @@ fn a_normal_run_writes_its_table_and_exits_0() {
     );
 }
 
+/// `SIGPIPE`, which a `Command`'s child starts with at its default (std
+/// puts the default back before `exec`), as a shell's child does.
+const SIGPIPE: i32 = 13;
+
+/// lsof run as a child of `sh -c "trap '' PIPE; exec …"`: `SIGPIPE` ignored,
+/// as `trap '' PIPE`, `nohup` and a Python child with
+/// `restore_signals=False` leave it.
+fn lsof_with_sigpipe_ignored() -> Command {
+    let mut c = Command::new("sh");
+    c.args([
+        "-c",
+        "trap '' PIPE; exec \"$0\" \"$@\"",
+        env!("CARGO_BIN_EXE_lsof"),
+    ])
+    .env("RES_OPTIONS", "attempts:0");
+    c
+}
+
 #[test]
 #[cfg_attr(
     miri,
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
-fn a_closed_pipe_exits_141_and_says_nothing() {
+fn a_closed_pipe_kills_with_sigpipe_and_says_nothing() {
     let _serial = serial();
-    // The read end is dropped before lsof has written a byte — it spends
-    // milliseconds reading /proc first — so the first write meets EPIPE.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lsof"))
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
         .env("RES_OPTIONS", "attempts:0")
         .args(["-p", &self_pid()])
-        .stdout(Stdio::piped())
+        .stdout(a_closed_pipe())
         .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn lsof");
-    drop(child.stdout.take());
-    let out = child.wait_with_output().expect("wait for lsof");
+        .output()
+        .expect("run lsof");
     assert_eq!(
-        out.status.code(),
-        Some(141),
-        "the status the shell shows for the C's SIGPIPE; stderr: {}",
+        (out.status.code(), out.status.signal()),
+        (None, Some(SIGPIPE)),
+        "killed by the signal, as the C is (the shell's 141); stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
@@ -118,31 +136,96 @@ fn a_closed_pipe_exits_141_and_says_nothing() {
     );
 }
 
+/// `SIGPIPE` ignored: the write fails, nothing is said, and lsof exits as
+/// it would have, 0 (measured: the C under `trap '' PIPE`).
 #[test]
 #[cfg_attr(
     miri,
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
-fn any_other_write_error_is_reported_not_panicked() {
+fn with_sigpipe_ignored_a_closed_pipe_is_no_error() {
     let _serial = serial();
-    // /dev/full accepts the open and fails every write with ENOSPC — the
-    // `lsof > file` on a full disk case. That IS an error, and it is one line
-    // on stderr and exit 1, not a Rust panic message and exit 101.
-    let full = OpenOptions::new()
-        .write(true)
-        .open("/dev/full")
-        .expect("open /dev/full");
-    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
-        .env("RES_OPTIONS", "attempts:0")
-        .args(["-p", &self_pid()])
-        .stdout(Stdio::from(full))
+    for args in [
+        &["-p", &self_pid()][..],
+        &["-F", "pcfn", "-p", &self_pid()],
+        &["-J", "-p", &self_pid()],
+    ] {
+        let out = lsof_with_sigpipe_ignored()
+            .args(args)
+            .stdout(a_closed_pipe())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(
+            stderr_of(&out.stderr).is_empty(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// A repeating run into a closed pipe, `SIGPIPE` ignored, goes on to its
+/// count, sleeping between cycles, as the C does (measured: `-r1c3mX`
+/// takes three seconds, the C's and lsof-rs's), and exits as it would have.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
+fn with_sigpipe_ignored_a_repeating_run_goes_on() {
+    let _serial = serial();
+    let started = std::time::Instant::now();
+    let out = lsof_with_sigpipe_ignored()
+        .args(["-r", "1c2mX", "-p", &self_pid()])
+        .stdout(a_closed_pipe())
         .stderr(Stdio::piped())
         .output()
         .expect("run lsof");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "stderr: {err}");
-    assert!(err.starts_with("lsof: write error: "), "stderr: {err}");
-    assert!(!err.contains("panicked"), "stderr: {err}");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "two cycles, each followed by its sleep: {:?}",
+        started.elapsed()
+    );
+    // At its default, the first write ends it.
+    let started = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
+        .args(["-r", "1c2mX", "-p", &self_pid()])
+        .stdout(a_closed_pipe())
+        .output()
+        .expect("run lsof");
+    assert_eq!(out.status.signal(), Some(SIGPIPE));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
+)]
+fn a_full_disk_is_no_error() {
+    let _serial = serial();
+    // /dev/full accepts the open and fails every write with ENOSPC — the
+    // `lsof > file` on a full disk case. The C says nothing and exits 0
+    // (measured), its stdio errors unchecked; and 1 where the search
+    // failed, its usual status.
+    for (args, code) in [
+        (vec!["-p".to_string(), self_pid()], 0),
+        (vec!["-p".into(), "999999999".into()], 1),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+            .env("RES_OPTIONS", "attempts:0")
+            .args(&args)
+            .stdout(dev_full())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run lsof");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "{args:?} stderr: {err}");
+        assert!(stderr_of(&out.stderr).is_empty(), "stderr: {err}");
+    }
 }
 
 /// A pipe whose reader is gone before lsof starts: the stdin of a `true`
@@ -169,8 +252,9 @@ fn dev_full() -> Stdio {
 
 /// The help, written where the C's `usage()` writes it, to stderr: a failed
 /// write is ignored as the C ignores its unchecked `fprintf(stderr)`'s, exit
-/// 0, and a reader that has gone is the C's SIGPIPE, 141. `eprint!` had
-/// panicked on both, exit 101.
+/// 0, and a reader that has gone kills it with `SIGPIPE`, as it kills the
+/// C, or, the signal ignored, is ignored too, exit 0. `eprint!` had panicked
+/// on both, exit 101.
 #[test]
 #[cfg_attr(
     miri,
@@ -195,8 +279,15 @@ fn the_help_on_a_failing_stderr() {
             .stderr(a_closed_pipe())
             .output()
             .expect("run lsof");
-        assert_eq!(out.status.code(), Some(141), "{args:?}");
+        assert_eq!(out.status.signal(), Some(SIGPIPE), "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
+        let out = lsof_with_sigpipe_ignored()
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(a_closed_pipe())
+            .output()
+            .expect("run lsof");
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
     }
 }
 
@@ -243,7 +334,7 @@ fn with_a_nameless_owner(f: impl FnOnce(u32, u32)) -> Option<()> {
 /// listing writes on a host with a nameless owner, which containers often
 /// have. With stderr on a full device the C lists everything and exits 0;
 /// lsof-rs had panicked before its first row, exit 101. With stderr's
-/// reader gone the C dies of SIGPIPE: 141.
+/// reader gone the C is killed by `SIGPIPE`, and so is lsof-rs.
 #[test]
 #[cfg_attr(
     miri,
@@ -291,18 +382,19 @@ fn a_listing_on_a_failing_stderr() {
             .stderr(a_closed_pipe())
             .output()
             .expect("run lsof");
-        assert_eq!(out.status.code(), Some(141));
+        assert_eq!(out.status.signal(), Some(SIGPIPE));
     });
 }
 
-/// `+m`'s print to a reader that has gone: the C dies of SIGPIPE at its
-/// write, 141, and says nothing (DIVERGENCES 153), and so does lsof-rs.
+/// `+m`'s print to a reader that has gone: the C is killed by `SIGPIPE` at
+/// its write and says nothing (DIVERGENCES 153), and so is lsof-rs; with
+/// the signal ignored both exit 0.
 #[test]
 #[cfg_attr(
     miri,
     ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's exit status"
 )]
-fn the_mount_print_into_a_closed_pipe_exits_141() {
+fn the_mount_print_into_a_closed_pipe_is_killed_by_sigpipe() {
     let _serial = serial();
     let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
         .env("RES_OPTIONS", "attempts:0")
@@ -312,8 +404,8 @@ fn the_mount_print_into_a_closed_pipe_exits_141() {
         .output()
         .expect("run lsof");
     assert_eq!(
-        out.status.code(),
-        Some(141),
+        out.status.signal(),
+        Some(SIGPIPE),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -322,4 +414,11 @@ fn the_mount_print_into_a_closed_pipe_exits_141() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let out = lsof_with_sigpipe_ignored()
+        .args(["+m"])
+        .stdout(a_closed_pipe())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run lsof");
+    assert_eq!(out.status.code(), Some(0));
 }

@@ -5,7 +5,8 @@
 //! which remains the primary artifact.
 //!
 //! It has no third-party dependency of its own (`lsof-core` brings `regex`,
-//! for `-c /regex/`, and on Linux the backend it links brings `rustix`) and
+//! for `-c /regex/`, on Linux the backend it links brings `rustix`, and
+//! `lsof-sigpipe`, the inherited `SIGPIPE`, brings `libc`) and
 //! is `#![forbid(unsafe_code)]`. The
 //! attribute is per crate root, and this package builds two crates, so the
 //! binary in `main.rs` carries its own copy.
@@ -13,3 +14,4 @@
 
 pub mod args;
 pub mod repeat;
+pub mod stdio;

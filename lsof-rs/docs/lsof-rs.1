@@ -1,0 +1,146 @@
+.\" lsof-rs(1): the memory-safe lsof. Kept short: the options are lsof(8)'s
+.\" (Lsof.8 in the C tree) and `lsof -h`; this page says what lsof-rs does
+.\" differently, each item measured against the C lsof 4.99.6 on glibc 2.39.
+.TH LSOF-RS 1 2026-11-18 "lsof-rs 2.0.0" "User Commands"
+.SH NAME
+lsof-rs \- list open files, a memory-safe lsof
+.SH SYNOPSIS
+.B lsof
+[\fIoptions\fR] [\fB\-\-\fR] [\fIpath\fR ...]
+.SH DESCRIPTION
+.B lsof
+from lsof-rs lists the files processes have open, as the C
+.BR lsof (8)
+does, with the C's options, output formats (the table,
+.B \-F
+fields,
+.B \-J
+and
+.B \-j
+JSON) and exit status.
+It runs on Linux, Windows and FreeBSD.
+.B lsof \-h
+lists the options.
+.PP
+Its output is meant to be the C's byte for byte.
+On Linux a differential harness runs both on the same processes and
+compares them; every difference it finds is fixed or recorded in
+.IR DIVERGENCES.md ,
+with the reason.
+.SS Repeat mode
+.B \-r
+.RI [ t [\fBc\fIn\fR][\fBm\fIfmt\fR]]
+and
+.B +r
+repeat as the C's do:
+.I t
+and
+.I n
+are read as the C's
+.I int
+reads them, wrapping
+.RB ( "\-r 4294967297"
+is a delay of 1 second);
+.I fmt
+is glibc's
+.BR strftime (3)
+in the C locale, its
+.B %s
+glibc's
+.BR mktime (3);
+with
+.B TZ
+unset,
+.I /etc/localtime
+is looked at again at each marker and read again where it changed;
+a zone that names daylight time and no rule reads
+.IR posixrules .
+Standard output is buffered as glibc buffers it and flushed where the C
+flushes it.
+A closed pipe kills
+.B lsof
+with
+.B SIGPIPE
+at the write that meets it, unless the signal was ignored or blocked when
+it started; then, as on a full disk, the write is dropped, nothing is said,
+and the run goes on and exits with its usual status.
+.SH DIFFERENCES FROM THE C LSOF
+These are deliberate, and each is user-visible.
+.TP
+.B Escaped arguments in messages
+Every message that quotes an argument escapes its control bytes and the
+bytes that are not UTF-8, as the C's
+.B safestrprt()
+does (\fB^[\fR for ESC, \fB\\x\fINN\fR otherwise).
+The C prints some arguments raw: the option letter in
+.BR "illegal option character" ,
+.BR \-i 's
+protocol, host and service names,
+.BR \-K ,
+.BR \-s ,
+.BR \-e ,
+.B \-c
+conflicts,
+.B "avoiding stat(P): \-b was specified"
+and
+.BR +m 's
+lines.
+A name holding an escape sequence cannot drive the terminal of whoever
+reads the message.
+.TP
+.B A zone file that is no regular file
+When the zone file
+.B TZ
+or
+.I /etc/localtime
+names is a FIFO, a device or anything else but a regular file, glibc opens
+it and reads it without a time limit: a FIFO with no writer holds the C for
+ever.
+.B lsof
+opens it without blocking and waits at most 3 seconds in all for what glibc
+could use of it (a version 1 zone file's data); after that it is taken as
+unreadable, as glibc takes a file that ends short.
+Where the data comes in time the zone is the C's.
+On FreeBSD such a file is not read at all.
+.TP
+.B Version
+.B \-v
+prints one line, the lsof-rs version, where the C prints a report of its
+build.
+.TP
+.B SELinux contexts
+.B \-Z
+is refused where SELinux is enabled
+.RB ( "\-Z (SELinux context) is not implemented" ),
+where the C prints a CONTEXT column.
+.TP
+.B Windows
+A closed pipe ends the run with exit status 141, as there is no
+.B SIGPIPE
+to inherit; other write errors are dropped, as on Unix.
+.PP
+.I DIVERGENCES.md
+in the source tree records every known difference, these and those that
+arise only from the C's undefined behaviour or its defects.
+.SH ENVIRONMENT
+.TP
+.B TZ, TZDIR
+The zone of
+.BR \-r 's
+marker, read as glibc's
+.BR tzset (3)
+reads them.
+.TP
+.B RES_OPTIONS
+Read as glibc's resolver reads it; host names are looked up as the C looks
+them up unless
+.B \-n
+is given.
+.SH EXIT STATUS
+0 when every search item was found, 1 otherwise or on an error, as the C's;
+.B +r
+exits 1 when its first cycle lists nothing.
+.SH SEE ALSO
+.BR lsof (8),
+.BR strftime (3),
+.BR tzset (3)

@@ -335,13 +335,11 @@ new = '''    eprint!("{text}");
 
 [[mutant]]
 name = "stderr-broken-pipe-ignored"
-rule = "a stderr whose reader has gone ends the run, 141, as the C's SIGPIPE (36, the review's F1)"
+rule = "on Unix a stderr whose reader has gone is ignored where SIGPIPE was, and kills the run with the signal where it was not (36, the review's F1; re-anchored 2026-11-18, -r parity)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/safefs.rs"
-old = '''        if e.kind() == io::ErrorKind::BrokenPipe {
-            std::process::exit(141);
-        }'''
-new = '''        let _ = e;'''
+old = '''        if !cfg!(unix) && e.kind() == io::ErrorKind::BrokenPipe {'''
+new = '''        if e.kind() == io::ErrorKind::BrokenPipe {'''
 
 [[mutant]]
 name = "users-resolved-after-help"

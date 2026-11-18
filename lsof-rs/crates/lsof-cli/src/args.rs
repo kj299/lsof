@@ -104,18 +104,12 @@ pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -
         supplement: sel.mount_supplement.clone(),
     };
     let table = mounts(&req, &fs.with(sel.blocking, !sel.omit_unreadable));
-    // `+m`'s lines, on stdout, as the C prints them while it reads
-    // (DIVERGENCES 153). A reader that has gone ends the run as the C's
-    // SIGPIPE does.
+    // `+m`'s lines, into stdout's buffer, as the C `printf()`s them while it
+    // reads (DIVERGENCES 153), written as glibc writes them
+    // ([`crate::stdio`]).
     if !table.supplement_out.is_empty() {
         use std::io::Write;
-        let mut out = std::io::stdout().lock();
-        let written = out
-            .write_all(&table.supplement_out)
-            .and_then(|()| out.flush());
-        if written.is_err_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) {
-            std::process::exit(141);
-        }
+        let _ = crate::stdio::Stdout.write_all(&table.supplement_out);
     }
     table
 }
@@ -171,8 +165,8 @@ impl HostChecks<'static> {
 /// [`HostChecks::DEFERRED`]'s marker check: the format at the epoch, in
 /// UTC, so that it asks no clock and reads no zone file.
 fn marker_in_utc(format: &[u8]) -> bool {
-    use lsof_core::timefmt::{Marker, PosixTz, Zone};
-    Marker::new(format, &Zone::Rules(PosixTz::utc(b"UTC")), 0).is_some()
+    use lsof_core::timefmt::{LocalTime, Marker};
+    Marker::new(format, &mut LocalTime::utc(), 0).is_some()
 }
 
 /// [`HostChecks::DEFERRED`]'s host lookup: no name is known, and no
@@ -343,10 +337,10 @@ fn json_format(
     })
 }
 
-/// A run of ASCII digits as a count, saturating rather than wrapping: `-r`'s
-/// delay, `+L`'s count and `-S`'s limit, which the C accumulates in an `int`
-/// and overflows. `-o`'s count is the exception, wrapped as the C wraps it
-/// ([`offset_digits_value`]).
+/// A run of ASCII digits as a count, saturating rather than wrapping: `+L`'s
+/// count and `-S`'s limit, which the C accumulates in an `int` and
+/// overflows. `-o`'s count and `-r`'s delay and count are the exceptions,
+/// wrapped as the C wraps them ([`c_int_digits`]).
 fn digits_value(digits: &str) -> usize {
     digits.bytes().fold(0usize, |n, b| {
         n.saturating_mul(10).saturating_add(usize::from(b - b'0'))
@@ -366,17 +360,20 @@ fn digits_value(digits: &str) -> usize {
 pub const LINUX_NAMES_BY_DEFAULT: bool = true;
 
 /// `-r`'s delay where it gives none: the C's `RPTTM`.
-pub const RPTTM: u64 = 15;
+pub const RPTTM: i32 = 15;
 
 /// `-r` and `+r` as the options left them (the C's `RptTm`, `RptMaxCount`,
 /// `rc` and `fmt`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Repeat {
-    /// Seconds between cycles; 0 is one cycle and no marker (`-r0`, and no
-    /// `-r` at all).
-    pub delay: u64,
-    /// `c<N>`: the cycles after which the run ends; 0 is no such end.
-    pub count: u64,
+    /// Seconds between cycles, the C's `int RptTm`: 0 is one cycle and no
+    /// marker (`-r0`, and no `-r` at all); any other value repeats, and the
+    /// sleep is its `unsigned int` (`sleep(RptTm)`), so a delay that wrapped
+    /// negative sleeps up to 136 years, as the C's does (DIVERGENCES 121).
+    pub delay: i32,
+    /// `c<N>`: the C's `int RptMaxCount`, the cycles after which the run
+    /// ends (`++pr_count == RptMaxCount`, in an `int` too); 0 is no such end.
+    pub count: i32,
     /// `+r`: the run ends at the first cycle that lists nothing, and exits 1
     /// if none listed anything.
     pub until_idle: bool,
@@ -398,24 +395,21 @@ enum RepeatRest {
 
 /// `-r`'s value as the C reads it (`main.c:779-805`).
 struct RepeatValue {
-    delay: u64,
-    count: Option<u64>,
+    delay: i32,
+    count: Option<i32>,
     rest: RepeatRest,
 }
 
 /// The delay's digits, 15 with none; then, past any spaces, `c` and the
 /// count's digits (`c` alone is 0, no count); then `m` and the format, or
 /// whatever else, which is given back from after the delay's digits, count
-/// and all. Both numbers saturate, where the C's `int` wraps
-/// ([`digits_value`]).
+/// and all. Both numbers wrap as the C's `int` does (`i = (i * 10) + d`,
+/// [`c_int_digits`]): `-r 4294967297` is a delay of 1, `c4294967296` no
+/// count (measured; DIVERGENCES 121).
 fn repeat_value(value: &str) -> RepeatValue {
     let bytes = value.as_bytes();
     let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-    let number = |from: usize, len: usize| {
-        value
-            .get(from..from + len)
-            .map_or(0, |d| digits_value(d) as u64)
-    };
+    let number = |from: usize, len: usize| value.get(from..from + len).map_or(0, c_int_digits);
     let delay = if digits > 0 { number(0, digits) } else { RPTTM };
     if digits == bytes.len() {
         return RepeatValue {
@@ -451,6 +445,14 @@ fn repeat_value(value: &str) -> RepeatValue {
 /// wraps to 0, no limit, and `-o 4294967297` to 1. The wrap is explicit, so
 /// the release build's overflow checks never see it.
 fn offset_digits_value(digits: &str) -> i32 {
+    c_int_digits(digits)
+}
+
+/// Digits summed as the C sums them in an `int`, `i = (i * 10) + digit`,
+/// wrapping (two's complement, as the C's build does): `-o`'s and `-r`'s
+/// delay and count. The wrap is explicit, so the release build's overflow
+/// checks never see it.
+fn c_int_digits(digits: &str) -> i32 {
     digits.bytes().fold(0i32, |n, b| {
         n.wrapping_mul(10)
             .wrapping_add(i32::from(b.wrapping_sub(b'0')))
@@ -5785,7 +5787,7 @@ mod tests {
         }
     }
 
-    fn rep(delay: u64, count: u64, until_idle: bool, marker: Option<&str>) -> Repeat {
+    fn rep(delay: i32, count: i32, until_idle: bool, marker: Option<&str>) -> Repeat {
         Repeat {
             delay,
             count,
@@ -5842,11 +5844,16 @@ mod tests {
         // and `+r` stays.
         assert_eq!(repeat(&["-r1mX", "-r", "2c1"]), rep(2, 1, false, Some("X")));
         assert_eq!(repeat(&["+r", "1c1", "-r", "3"]), rep(3, 1, true, None));
-        // The count saturates, as the delay does (DIVERGENCES 121).
+        // The count wraps as the C's `int` does (DIVERGENCES 121): measured,
+        // `c4294967297` one cycle, `c4294967298` two, `c4294967296` none.
         assert_eq!(
             repeat(&["-r", "1c99999999999999999999mX"]).count,
-            usize::MAX as u64
+            1_661_992_959
         );
+        assert_eq!(repeat(&["-r", "1c4294967297mX"]).count, 1);
+        assert_eq!(repeat(&["-r", "1c4294967298mX"]).count, 2);
+        assert_eq!(repeat(&["-r", "1c4294967296mX"]).count, 0);
+        assert_eq!(repeat(&["-r", "1c2147483648mX"]).count, i32::MIN);
     }
 
     /// What follows the digits of a value in the next word is read on as
@@ -6012,22 +6019,21 @@ mod tests {
         }
     }
 
-    /// The C accumulates `-r`'s digits in an `int` (main.c:779-783) and wraps:
-    /// `-r 4294967297` repeats every second, as `-r 1` does (measured: 4
-    /// `=======` markers in 3.5 s from both). lsof-rs saturates; a regression
-    /// to a plain `n * 10 + d` would panic here, as it would in the release
-    /// build, which checks overflow. The count saturates at `usize::MAX`
-    /// (`digits_value`): `u64::MAX` on a 64-bit target, 4294967295 on a 32-bit
-    /// one (run under miri for i686-unknown-linux-gnu).
+    /// The C accumulates `-r`'s digits in an `int` (main.c:779-783), and so
+    /// does lsof-rs, wrapping as it does (DIVERGENCES 121): `-r 4294967297`
+    /// repeats every second, as `-r 1` does (measured: 4 `=======` markers in
+    /// 3.5 s from both), `-r4294967296` is one cycle and no marker,
+    /// `-r2147483648` a delay of `INT_MIN`, which `sleep()` takes as
+    /// 2147483648 s (measured with strace). A plain `n * 10 + d` would panic
+    /// here, as it would in the release build, which checks overflow.
     #[test]
-    fn repeat_interval_saturates_rather_than_wrapping() {
-        let saturated = usize::MAX as u64;
-        assert_eq!(repeat(&["-r99999999999999999999"]).delay, saturated);
-        assert_eq!(repeat(&["-r", "99999999999999999999"]).delay, saturated);
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(repeat(&["-r4294967297"]).delay, 4294967297);
-        #[cfg(target_pointer_width = "32")]
-        assert_eq!(repeat(&["-r4294967297"]).delay, saturated);
+    fn repeat_interval_wraps_as_the_cs_int() {
+        assert_eq!(repeat(&["-r99999999999999999999"]).delay, 1_661_992_959);
+        assert_eq!(repeat(&["-r", "99999999999999999999"]).delay, 1_661_992_959);
+        assert_eq!(repeat(&["-r4294967297"]).delay, 1);
+        assert_eq!(repeat(&["-r4294967296"]).delay, 0);
+        assert_eq!(repeat(&["-r2147483648"]).delay, i32::MIN);
+        assert_eq!(repeat(&["-r6442450945"]).delay, i32::MIN + 1);
     }
 
     fn paths(argv: &[&str]) -> Vec<OsString> {

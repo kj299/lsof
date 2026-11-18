@@ -485,9 +485,9 @@ compromised release could do.
 `rustix` ships a build script (`build.rs`, 281 lines, identical in 1.1.5 and 1.1.6) that cargo
 compiles and runs at build time, on every developer's and CI's machine, with
 their privileges; it runs `$RUSTC` (or `$RUSTC_WRAPPER`) to probe the
-compiler. It is the only crate with a build script in the Linux build
-(`bitflags` and `linux-raw-sys` have none, and `libc`'s is built only for the
-targets and the miri runs that use it). And any code linked into lsof-rs can
+compiler. It and `libc` (since 2026-11-18, through `lsof-sigpipe`, below) are the
+crates with a build script in the Linux build (`bitflags` and
+`linux-raw-sys` have none). And any code linked into lsof-rs can
 run before `main` (static constructors, `.init_array`) or wherever its call
 graph reaches, inside lsof-rs, often as root, `forbid(unsafe_code)` in this
 repository notwithstanding. The mitigations are the ones that apply to any
@@ -497,7 +497,29 @@ checksum, so a crates.io artifact that changed under the same version fails
 the build; `cargo deny check` gates licences, sources (crates.io only),
 bans and advisories in CI; and a bump is a change of its own, reviewed
 (including its `build.rs`), taken at least two weeks after publication. The
-Windows binary links no new crate.
+Windows binary links no new crate. Since 2026-11-18 `rustix` also has its
+`std` feature (its file descriptors are std's, so a descriptor std opened
+can be polled and a rustix one read as a `File`; no crate added) and
+`event`, for the `poll(2)` that waits on a zone file that is no regular
+file.
+
+**`lsof-sigpipe` is the one crate of the workspace's own with `unsafe` on
+every Unix target, three sites, for `SIGPIPE`** (DIVERGENCES 36). The Rust
+runtime sets `SIGPIPE` to `SIG_IGN` before `main` and keeps nothing of what
+it replaced; to die at a closed pipe as the C does, lsof-rs must know what
+it inherited. A constructor in `.init_array`, which glibc and FreeBSD's
+rtld run before the runtime's initialisation, makes one query-only
+`sigaction(SIGPIPE, NULL, &old)` into a zeroed local and stores one atomic;
+`restore_default()` is one `signal(SIGPIPE, SIG_DFL)`, which installs no
+handler, so no code of lsof-rs's runs on the signal. Each site carries a
+`SAFETY:` comment and is in the `unsafe-audit` gate; lsof-core, lsof-cli
+and lsof-backend-linux keep `#![forbid(unsafe_code)]`. Its one dependency
+is `libc` (`=0.2.190`, already in the lock file for rustix's other
+targets, MIT OR Apache-2.0, no default features, a build script that
+probes the compiler), built on Linux and FreeBSD only; `cargo deny` audits
+it with the workspace. The constructor runs in every process of the binary,
+the `-S` helper too, before anything else; under miri, which has no
+`sigaction`, it reads nothing.
 
 **A second third-party crate, `regex`, reaches every platform's binary, for
 `-c /regex/`.** The C compiles the expression with `regcomp(3)`; safe Rust
@@ -682,12 +704,28 @@ login, and older than these rows. The readers take arbitrary bytes (fuzzed,
 
 **`-r mFMT` and `+m m` read files the invoker names, in bounded memory**
 (DIVERGENCES 152, 153). The zone file `TZ` names, or `/etc/localtime`, is
-read only if it is a regular file of at most 1 MiB (glibc reads any size),
-and parsed as glibc's `__tzfile_read()` parses it, every count checked
-against the bytes left before anything is kept (fuzzed, `timefmt`,
-3,287,580 runs in 181 s; the file reader's rules by unit tests); in
-secure-execution mode only the system's zone files, as glibc. A zone name is
-kept whole, as glibc keeps it, within the `TZ` value or the file's 1 MiB.
+opened `O_RDONLY|O_CLOEXEC|O_NONBLOCK` and `fstat`ed (since 2026-11-18;
+`lsof-backend-linux/src/zonefile.rs`). A regular file of any size is parsed
+as glibc's `__tzfile_read()` parses it, every read bounded by `st_size`,
+every count checked against the bytes the file holds before anything is
+kept; its data is copied into memory up to 64 MiB and past that read where
+it lies through the descriptor, a 64 KiB piece at a time, and a name is
+kept to 16 MiB (more than any marker can show), so memory does not grow
+with the file. Measured, `-r1c1m%Z%z`: a 20 MiB footer, the C 23,240 KiB
+of RSS and lsof-rs 10,344; 10,485,760 transitions (90 MiB), the C 94,936
+KiB and lsof-rs 10,328, 0.16 s past its one-second sleep (the same output
+in each). Anything else is read only after `poll(POLLIN)` says it is
+ready, for 3 seconds in all, the 44-byte header and then at most a version
+1 file's data, as glibc can use from a stream: a FIFO with no writer holds
+lsof-rs 3 seconds where the C waits for ever (measured: `TZ=FIFO`, the C
+killed at 8 s, lsof-rs done in 4.03 s with its one-second sleep), and
+`/dev/zero` costs one 44-byte read. Opening a device has whatever side
+effects its driver gives an open, as glibc's open does; `O_NONBLOCK`
+removes only the wait (a terminal's for its carrier). With `TZ` unset
+`/etc/localtime` is `stat`ed at each marker and read again where it
+changed, as glibc does. Fuzzed (`timefmt`, 1,890,400 runs in 1,201 s, the
+file read as a regular file and as a stream); in secure-execution mode only
+the system's zone files, as glibc.
 The marker's buffer is the C's, eight bytes a byte of the
 format and nine more, so at most 1 MiB for the longest argument Linux
 passes. The mount supplement is read only if it is a regular file, at most
@@ -704,8 +742,8 @@ close, reads `/dev/zero` until it is killed, and dies (exit 139) on an
 empty file or `/dev/null`; lsof-rs says `error reading` the FIFO, pipe or
 device and reads no mount from the empty file. A name that leads to a
 descriptor lsof-rs inherited is read as gone, as the C, which closes them,
-finds it. The zone file is opened the same way (on FreeBSD too, with
-FreeBSD's `O_NONBLOCK`).
+finds it. On FreeBSD the zone file is opened the same way, with FreeBSD's
+`O_NONBLOCK`, and anything but a regular file is not read.
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
 structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares
