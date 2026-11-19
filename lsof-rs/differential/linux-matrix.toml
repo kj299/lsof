@@ -157,8 +157,10 @@ args = ["-n", "-P", "-Fcn", "-a", "-d", "^mem", "-p", "{A}"]
 #
 # THE OPTION MUST COME BEFORE THE PATH. lsof stops option parsing at the first
 # non-option argument, so `lsof FILE -iTCP:N` reads `-iTCP:N` as a second
-# FILENAME (which does not exist, hence exit 1); lsof-rs permutes and reads it
-# as an option. That is DIVERGENCES.md #12, found by this case.
+# FILENAME (which does not exist, hence exit 1); lsof-rs permuted and read it
+# as an option. That was DIVERGENCES.md #12, found by this case, and resolved
+# on 2026-11-19: lsof-rs ends its options there too
+# (`inet-after-a-name-is-a-name`).
 name = "or-semantics-path-or-inet"
 args = ["-n", "-P", "-iTCP:{PORT}", "{FILE}"]
 
@@ -3179,12 +3181,164 @@ args = ["-n", "-P", "-V", "-a", "-p", "{S}", "-sUDP:Idle"]
 # ------------------------------------------------------------- argument order
 
 [[case]]
-# LEDGERED (DECISION, DIVERGENCES 12). The C stops reading options at the
-# first file name, so `-a -p A` after {FILE} are three more names that do not
-# exist: it lists A's row for the file and exits 1. lsof-rs reads them as
-# options, lists the same row, and exits 0.
-name = "options-after-a-name-are-still-options-in-lsof-rs"
+# DIVERGENCES 12, resolved 2026-11-19: the C's `GetOpt()` ends the options at
+# the first name, so `-a -p A` after {FILE} are three more names that do not
+# exist: it lists A's row for the file, says a status error for each, and
+# exits 1. lsof-rs had read them as options and exited 0.
+name = "options-after-a-name-are-names"
 args = ["-n", "-P", "{FILE}", "-a", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# Each word after the first name is a name, `-t` too: the table, not PIDs,
+# and `status error on -t`, exit 1.
+name = "terse-after-a-name-is-a-name"
+args = ["-n", "-P", "{FILE}", "-t"]
+with_stderr = true
+
+[[case]]
+# `--` after a name is a name too, and so is all after it.
+name = "double-dash-after-a-name-is-a-name"
+args = ["-n", "-P", "{FILE}", "--", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# After two names, one that does not exist, every option word is a name.
+name = "options-after-two-names-are-names"
+args = ["-n", "-P", "{FILE}", "{NOPE}", "-a", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# `-iTCP:N` after a name: a name, so B's listener is not listed (the brief's
+# own example).
+name = "inet-after-a-name-is-a-name"
+args = ["-n", "-P", "{FILE}", "-iTCP:{PORT}"]
+with_stderr = true
+
+[[case]]
+# `+D DIR` after a name: `+D` a name that does not exist, DIR a directory
+# named as a file, so its own entry alone, not the tree.
+name = "plus-d-after-a-name-is-a-name"
+args = ["-n", "-P", "{FILE}", "+D", "{ADIR}"]
+with_stderr = true
+
+[[case]]
+# `+m` after a name is a name: no mount table printed.
+name = "plus-m-after-a-name-is-a-name"
+args = ["-n", "-P", "{FILE}", "+m"]
+with_stderr = true
+
+[[case]]
+# `-h` after a name is a name: no help.
+name = "help-after-a-name-is-a-name"
+args = ["-n", "-P", "{FILE}", "-h"]
+with_stderr = true
+
+[[case]]
+# `-` alone is no option: the C's options end there and it is the first name
+# (lsof-rs had refused it, `a lone '-' is not a valid option`).
+name = "lone-dash-is-the-first-name"
+args = ["-n", "-P", "-", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# `+` alone the same (lsof-rs had said `unsupported option: +`).
+name = "lone-plus-is-the-first-name"
+args = ["-n", "-P", "+", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# `++` is `GetOpt()`'s `--`: the options end and it is taken (lsof-rs had
+# said `illegal option character: +`).
+name = "double-plus-ends-the-options"
+args = ["-n", "-P", "++", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# ...and after the options, with no name after it, it is taken, nothing more.
+name = "double-plus-after-the-options-is-taken"
+args = ["-n", "-P", "-p", "{A}", "++"]
+with_stderr = true
+
+[[case]]
+# A whole next word an option gives back is read where a word starts: `x`,
+# no width for `+c`, is the first name, so `-W` after it is a name, not an
+# illegal letter (DIVERGENCES 83 had kept this as row 12's).
+name = "plus-c-word-given-back-ends-the-options"
+args = ["-n", "-P", "+c", "x", "-W"]
+with_stderr = true
+
+[[case]]
+# The same for an optional value with no digits: `-o x` keeps `-o` and gives
+# `x` back, the first name, so `-t` after it is a name (lsof-rs had read it).
+name = "offset-word-given-back-ends-the-options"
+args = ["-n", "-P", "-o", "x", "-t"]
+with_stderr = true
+
+[[case]]
+# An option whose value is optional takes a next word only when it opens
+# with neither `-` nor `+`, so `-L` gives `++` back, and `++` ends the
+# options, taken.
+name = "links-double-plus-given-back-ends-the-options"
+args = ["-n", "-P", "-L", "++", "-p", "{A}"]
+with_stderr = true
+
+[[case]]
+# A 0xff byte (`GetOpt()`'s EOF) in what an option gives back after its
+# digits ends the options there, and the names start at that word as given
+# (`argv[GOx1]`): `status error on 1\xfft`, then FILE's row, exit 1. lsof-rs
+# had named the word it rebuilt, `-\xfft`. The C's raw byte in `illegal
+# option character` and lsof-rs's `\xff` read the same once decoded.
+name = "nonutf8-0xff-after-digits-names-the-word-o"
+args = ["-n", "-P", "-o", "1{BYTEFF}t", "{FILE}"]
+with_stderr = true
+
+[[case]]
+name = "nonutf8-0xff-after-digits-names-the-word-S"
+args = ["-n", "-P", "-S", "5{BYTEFF}t", "{FILE}"]
+with_stderr = true
+
+[[case]]
+name = "nonutf8-0xff-after-digits-names-the-word-plus-L"
+args = ["-n", "-P", "+L", "1{BYTEFF}t", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# `+r`: nothing to list, so one cycle, exit 1.
+name = "nonutf8-0xff-after-digits-names-the-word-plus-r"
+args = ["-n", "-P", "+r", "1{BYTEFF}t"]
+with_stderr = true
+
+[[case]]
+# Letters first: `-t`, then the 0xff, and `1t\xffa` the name.
+name = "nonutf8-0xff-after-digits-names-the-word-terse"
+args = ["-n", "-P", "-o", "1t{BYTEFF}a", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# `--etw`, `--unicode` and `--ascii` are letters to the C: `-` is illegal,
+# then `-e tw`, `-u nicode`, `-s cii`, the usage, exit 1. lsof-rs had taken
+# each as its own and listed FILE, exit 0. On Windows they are lsof-rs's
+# (DIVERGENCES 155).
+name = "long-option-etw-is-letters"
+args = ["-n", "-P", "--etw", "{FILE}"]
+with_stderr = true
+
+[[case]]
+name = "long-option-unicode-is-letters"
+args = ["-n", "-P", "--unicode", "{FILE}"]
+with_stderr = true
+
+[[case]]
+name = "long-option-ascii-is-letters"
+args = ["-n", "-P", "--ascii", "{FILE}"]
+with_stderr = true
+
+[[case]]
+# Given back whole by `-L`, the word is read where a word starts: letters.
+name = "long-option-given-back-is-letters"
+args = ["-n", "-P", "-L", "--etw", "{FILE}"]
+with_stderr = true
 
 # ------------------------------------------------------------------- layout
 # Every case compares its whitespace (linux_diff.py), so every case checks the
@@ -3556,7 +3710,9 @@ args = ["-Sx", "-p", "{A}"]
 
 [[case]]
 # Before a word with no digits -S is bare, and the word is a name: here
-# the last argument, so no option comes after it (DIVERGENCES 12).
+# the last argument, so no option comes after it (before DIVERGENCES 12 was
+# resolved, lsof-rs read an option after it as an option;
+# `offset-word-given-back-ends-the-options`).
 name = "opt-S-word-without-digits-is-a-name"
 args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}", "-S", "{NOPE}"]
 with_stderr = true

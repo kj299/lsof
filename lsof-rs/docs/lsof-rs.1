@@ -1,7 +1,7 @@
 .\" lsof-rs(1): the memory-safe lsof. Kept short: the options are lsof(8)'s
 .\" (Lsof.8 in the C tree) and `lsof -h`; this page says what lsof-rs does
 .\" differently, each item measured against the C lsof 4.99.6 on glibc 2.39.
-.TH LSOF-RS 1 2026-11-18 "lsof-rs 2.0.0" "User Commands"
+.TH LSOF-RS 1 2026-11-19 "lsof-rs 2.0.0" "User Commands"
 .SH NAME
 lsof-rs \- list open files, a memory-safe lsof
 .SH SYNOPSIS
@@ -21,6 +21,25 @@ JSON) and exit status.
 It runs on Linux, Windows and FreeBSD.
 .B lsof \-h
 lists the options.
+As in the C, the options end at the first word that opens with neither
+.B \-
+nor
+.BR + ,
+or is
+.B \-
+or
+.B +
+alone, which is the first
+.IR path ,
+and at
+.B \-\-
+or
+.BR ++ ;
+every word after is a
+.IR path ,
+so
+.B "lsof f \-p 1"
+names three files.
 .PP
 Its output is meant to be the C's byte for byte.
 On Linux a differential harness runs both on the same processes and
@@ -123,6 +142,29 @@ where the C prints a CONTEXT column.
 A closed pipe ends the run with exit status 141, as there is no
 .B SIGPIPE
 to inherit; other write errors are dropped, as on Unix.
+.BR \-\-etw ,
+.B \-\-unicode
+and
+.B \-\-ascii
+are options there (the ETW capture; the console switched to UTF-8 once
+the options are read, the last of the two deciding), read only where an
+option word stands: after a
+.IR path ,
+.B \-\-
+or
+.BR ++ ,
+or given back by an option
+.RB ( "\-L \-\-etw" ),
+each is read as the C reads it.
+Elsewhere they are no options, as in the C:
+.B "lsof \-\-etw f"
+is
+.B "illegal option character: \-"
+and
+.BR \-e 's
+error for
+.BR tw ,
+exit 1.
 .PP
 .I DIVERGENCES.md
 in the source tree records every known difference, these and those that

@@ -10,10 +10,13 @@ a user is likely to meet are summarised under [Open differences from the
 C](#open-differences-from-the-c) below.
 
 On **Linux** the first three sections do not apply: a socket row carries its fd
-number, `-U` and raw sockets come from `/proc/net` without Administrator (and
-`--etw` is accepted and ignored; a raw socket is the C's `raw` row, and `-i
-icmp` and `-i raw` are refused there, as the C refuses them), and the lock
-column is read from `/proc/locks`.
+number, `-U` and raw sockets come from `/proc/net` without Administrator (a
+raw socket is the C's `raw` row, and `-i icmp` and `-i raw` are refused
+there, as the C refuses them), and the lock column is read from
+`/proc/locks`. `--etw`, `--unicode` and `--ascii` are Windows options: on
+Linux each is the C's letters, refused as the C refuses them (`illegal
+option character: -`, then `-e tw`'s, `-u nicode`'s or `-s cii`'s error;
+DIVERGENCES 155).
 
 ## Sockets
 
@@ -397,8 +400,10 @@ meet. Each number is a row there, with the measurement behind it.
   whose listing passes 4 KiB they sit where the C's do not (the C writes the
   printing pass's where its stdout buffer flushes, mid-line), though each
   stream alone is byte-identical (36, not emulated).
-- **Deliberate:** options after the first file name are still options (12); a
-  `+d`/`+D` walk stops at 200,000 entries or 16 MiB of names, and says so (81).
+- **Deliberate:** a `+d`/`+D` walk stops at 200,000 entries or 16 MiB of
+  names, and says so (81).
+- Options after the first file name are names since 2026-11-19, as in the
+  C (row 12, resolved).
   The rest, including the stderr-only differences, are in the ledger.
 
 ## Where these limitations are tracked

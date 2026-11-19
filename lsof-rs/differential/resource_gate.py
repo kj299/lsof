@@ -167,8 +167,13 @@ CROSS_WALL, CROSS_RSS = 4.00, 3.50
 # and past a 4 GB address-space cap at 130000 (some 17 GB unbounded). Now it
 # checks as each line is stored, and quotes the word once. Measured: 4.20-4.58
 # MB against the C's 2.39-2.57 MB, 1.6-1.8x RSS, and 2.9 s against the C's
-# 19.4 s. The C's wall makes this the gate's slowest case.
-STATE_COMMAS = 130000
+# 19.4 s. The C's wall makes this the gate's slowest case: on CI's runner the
+# C took 65 s a run at 130000 commas, nine runs of it pushed the differential
+# job past its 25-minute limit (2026-11-19), so the word is 40000 commas. That
+# is 1.5 s for the C here against 16.5 s at 130000, and still far past the
+# bound: the build that held every line held 1.57 GB at 40000, hundreds of
+# times this case's RSS ceiling.
+STATE_COMMAS = 40000
 STATE_WALL, STATE_RSS = 4.00, 3.50
 
 # -d list items (DIVERGENCES 83). Each item of `-d ^1,2,2,…` after the first
