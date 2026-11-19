@@ -266,7 +266,10 @@ MISCELLANEOUS:
     -S [t]        give each of those calls t seconds (default 15, at least
                   2), in a helper process (Linux; elsewhere they are made in
                   lsof). One that times out fails: `Connection timed out`
-    --            end of options; remaining args are paths
+    --, ++        end of options; remaining args are paths. The options
+                  also end at the first path, or a lone - or +: every
+                  word after it is a path, as in the C (lsof f -p 1
+                  names three files)
 
     --etw         (Windows, opt-in) short ETW capture against the AFD
                   provider to extend `-i` coverage to socket families

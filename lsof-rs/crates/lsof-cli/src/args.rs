@@ -1043,14 +1043,25 @@ fn parse_options<'s>(
             i += 1;
             continue;
         }
-        // `--` ends option parsing; remaining tokens are paths.
-        if !resumed_here && tok == "--" {
-            i += 1;
-            while i < raw.len() {
-                sel.paths.push(raw[i].clone());
-                i += 1;
+        // Where the C's `GetOpt()` ends the options (`main.c:1900-1915`), at
+        // a word's start alone: at `--` or `++`, which it takes, and at a
+        // word that opens with neither `-` nor `+`, or is `-` or `+` alone,
+        // which it leaves as the first name. Every word after is a name,
+        // whatever it opens with: `lsof FILE -a -p PID` names four files
+        // (measured: three status errors, exit 1). lsof-rs had read options
+        // wherever they stood (DIVERGENCES 12).
+        if !resumed_here {
+            let first_name = if tok == "--" || tok == "++" {
+                Some(i + 1)
+            } else if !(tok.starts_with('-') || tok.starts_with('+')) || tok.len() == 1 {
+                Some(i)
+            } else {
+                None
+            };
+            if let Some(start) = first_name {
+                sel.paths.extend(raw.iter().skip(start).cloned());
+                break;
             }
-            break;
         }
 
         // An option word is a cluster of letters under one prefix, `-` or `+`,
@@ -1060,23 +1071,10 @@ fn parse_options<'s>(
         // lsof-rs read one letter per `+` word and dropped the rest, so
         // `lsof +wa -p P -d 3` ORed where the C ANDs: 28 rows where the C
         // lists one, measured.
-        let (plus, body) = match (tok.strip_prefix('+'), tok.strip_prefix('-')) {
-            (Some(body), _) => (true, body),
-            (None, Some(body)) => (false, body),
-            (None, None) => {
-                // A bare argument is a path/name to look up, as typed.
-                sel.paths.push(raw[i].clone());
-                i += 1;
-                continue;
-            }
-        };
-        if body.is_empty() {
-            return Err(if plus {
-                "unsupported option: +".to_string()
-            } else {
-                "a lone '-' is not a valid option".to_string()
-            });
-        }
+        // Past the stop above, the word opens with `-` or `+` and holds a
+        // letter after it: one given back to be read on holds the rest of
+        // its word, which is never empty, behind its prefix.
+        let plus = tok.starts_with('+');
         let prefix = if plus { '+' } else { '-' };
 
         // The letters, each byte that is no character standing as one of its
@@ -6750,6 +6748,54 @@ mod tests {
         assert_eq!(links(&["-L", "+L3"]), (true, Some(3)));
     }
 
+    /// The options end where the C's `GetOpt()` ends them (DIVERGENCES 12):
+    /// at the first word that opens with neither `-` nor `+`, or is one of
+    /// them alone, which is the first name; at `--` and `++`, which are
+    /// taken. Every word after is a name, whatever it opens with. Measured
+    /// against the C: `lsof FILE -a -p PID` says a status error for each of
+    /// the last three and exits 1.
+    #[test]
+    fn options_end_where_getopt_ends_them() {
+        let names = |argv: &[&str]| run(argv).0.paths;
+        let (sel, _) = run(&["/f", "-a", "-p", "1"]);
+        assert_eq!(sel.paths, ["/f", "-a", "-p", "1"]);
+        assert!(!sel.and_mode && sel.pids.is_empty(), "no option read");
+        let (sel, _) = run(&["-p", "1", "f", "-t", "--", "-x"]);
+        assert_eq!(sel.pids, [1]);
+        assert_eq!(sel.paths, ["f", "-t", "--", "-x"], "`--` a name");
+        assert!(!sel.terse);
+        // `--` and `++` are taken, and nothing after them is an option.
+        for stop in ["--", "++"] {
+            assert_eq!(names(&[stop, "-p", "1"]), ["-p", "1"], "{stop}");
+            let (sel, _) = run(&["-p", "1", stop]);
+            assert!(sel.paths.is_empty(), "{stop} taken");
+            assert_eq!(sel.pids, [1], "{stop}");
+            assert_eq!(names(&[stop, stop]), [stop], "{stop} {stop}");
+        }
+        assert_eq!(names(&["++", "--"]), ["--"]);
+        // `-` and `+` alone, and an empty word, are the first name.
+        for first in ["-", "+", ""] {
+            let (sel, _) = run(&[first, "-t"]);
+            assert_eq!(sel.paths, [first, "-t"], "{first:?}");
+            assert!(!sel.terse, "{first:?}");
+        }
+        // A word of two letters or more under a prefix is an option word.
+        let (sel, _) = run(&["-t", "+w", "f"]);
+        assert!(sel.terse);
+        assert_eq!(sel.paths, ["f"]);
+        // A whole next word an option gives back is read where a word
+        // starts: `-o x` is `-o`, and `x` the first name.
+        let (sel, _) = run(&["-o", "x", "-t"]);
+        assert_eq!(sel.paths, ["x", "-t"]);
+        assert!(!sel.terse);
+        // `+c x` gives `x` back too: it ends the options, so `-W` after it
+        // is a name, and `+c`'s own error is the only one (the C's usage).
+        assert_eq!(
+            error_lines(parse_on_host(&["+c", "x", "-W"], false)),
+            ["+c not followed by width number"]
+        );
+    }
+
     /// A `+` word is a cluster, as a `-` word is, and a letter the C reads the
     /// same under either prefix means the same thing (`+wa` is `+w -a`).
     /// lsof-rs had read one letter per `+` word and dropped the rest.
@@ -6786,10 +6832,12 @@ mod tests {
         for (o, want) in [
             ("+J", "+J is not supported"),
             ("+aq", "illegal option character: q"),
-            ("+", "unsupported option: +"),
         ] {
             assert_eq!(columns(&[o]).unwrap_err(), want, "{o}");
         }
+        // `+` alone is no option word: the C's options end there, and it is
+        // the first name (DIVERGENCES 12).
+        assert_eq!(run(&["+", "-p", "1"]).0.paths, ["+", "-p", "1"]);
         assert_eq!(columns(&["-q"]).unwrap_err(), "illegal option character: q");
     }
 

@@ -97,8 +97,12 @@ name = "resumed-word-ends-options"
 rule = "a word given back is never the `--` that ends the options (the review)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''        if !resumed_here && tok == "--" {'''
-new = '''        if tok == "--" {'''
+# Re-anchored 2026-11-19 (DIVERGENCES 12): the `--` test is now one of the
+# word-start tests that end the options, all under `!resumed_here`.
+old = '''        if !resumed_here {
+            let first_name ='''
+new = '''        if !resumed_here || tok == "--" {
+            let first_name ='''
 
 [[mutant]]
 name = "table-names-while-sizing"

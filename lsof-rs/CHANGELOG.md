@@ -12,6 +12,16 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **The options end where the C's end them** (DIVERGENCES 12, a DECISION
+  until the maintainer reversed it): at the first name, at `-` or `+`
+  alone (the first name) and at `--` or `++` (taken); every word after is a
+  name, whatever it opens with. `lsof /nonexist -p 1` now says a status
+  error for each of the three words and exits 1, as the C does, where
+  lsof-rs had read `-p 1` and exited 0; `lsof FILE -t` lists FILE's table
+  and names `-t`. A whole next word an option gives back is read where a
+  word starts, so `-o x -t` names `x` and `-t`, and `+c x -W` says `+c`'s
+  error alone. `-`, `+` and `++` had been refused. A script that puts
+  options after its names must move them in front. Every platform.
 - **Standard output is written in the C's stdio calls** (DIVERGENCES 36):
   a port of glibc 2.39's `printf()`, `fputs()`, `putchar()` and `puts()`
   output paths, fed the calls `print.c` makes for the same text, so that a

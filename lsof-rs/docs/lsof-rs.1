@@ -21,6 +21,25 @@ JSON) and exit status.
 It runs on Linux, Windows and FreeBSD.
 .B lsof \-h
 lists the options.
+As in the C, the options end at the first word that opens with neither
+.B \-
+nor
+.BR + ,
+or is
+.B \-
+or
+.B +
+alone, which is the first
+.IR path ,
+and at
+.B \-\-
+or
+.BR ++ ;
+every word after is a
+.IR path ,
+so
+.B "lsof f \-p 1"
+names three files.
 .PP
 Its output is meant to be the C's byte for byte.
 On Linux a differential harness runs both on the same processes and

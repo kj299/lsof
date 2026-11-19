@@ -105,10 +105,12 @@ name = "bare-path-read-as-text"
 rule = "a bare path argument is its bytes (92)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                // A bare argument is a path/name to look up, as typed.
-                sel.paths.push(raw[i].clone());'''
-new = '''                // A bare argument is a path/name to look up, as typed.
-                sel.paths.push(args[i].clone().into());'''
+# Re-anchored 2026-11-19 (DIVERGENCES 12): a bare argument now ends the
+# options, and it and every word after are taken as names together.
+old = '''            if let Some(start) = first_name {
+                sel.paths.extend(raw.iter().skip(start).cloned());'''
+new = '''            if let Some(start) = first_name {
+                sel.paths.extend(args.iter().skip(start).cloned().map(Into::into));'''
 
 [[mutant]]
 name = "attached-path-value-misplaced"
