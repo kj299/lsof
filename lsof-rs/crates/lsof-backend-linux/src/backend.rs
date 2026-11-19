@@ -650,8 +650,30 @@ mod tests {
     /// process was skipped outright — `lsof -p` said it did not exist. And a
     /// mapped file with such a name emptied its process's `mem` rows the same
     /// way. The kernel takes `comm` from the exec'd file's name, so exec'ing a
-    /// copy of `sleep` named `sl\xffeep` does both at once, with no `prctl`
-    /// (the differential's fixtures C and D use the same trick).
+    /// copy of a program named `sl\xffeep` does both at once, with no `prctl`
+    /// (the differential's fixtures C and D use the same trick). The program
+    /// is this test binary itself, running [`a_sleeper_for_the_renamed_copy`]:
+    /// a copy of `/bin/sleep` failed on Ubuntu 26.04, whose `sleep` is a
+    /// uutils multi-call binary.
+    /// Set (to a number of seconds) in the environment of the renamed copy
+    /// that [`a_process_named_with_a_non_utf8_byte_is_still_gathered`] runs.
+    const SLEEPER: &str = "LSOF_RS_TEST_SLEEPER";
+
+    /// The file the renamed copy creates once it is running, before it sleeps.
+    const SLEEPER_READY: &str = "LSOF_RS_TEST_SLEEPER_READY";
+
+    /// Not a test of its own: in the renamed copy, the process that test
+    /// lists. Elsewhere `SLEEPER` is unset and it returns at once.
+    #[test]
+    fn a_sleeper_for_the_renamed_copy() {
+        if let Some(secs) = std::env::var(SLEEPER).ok().and_then(|s| s.parse().ok()) {
+            if let Some(ready) = std::env::var_os(SLEEPER_READY) {
+                std::fs::write(ready, b"").expect("say the copy is running");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+        }
+    }
+
     #[test]
     #[cfg_attr(
         miri,
@@ -660,23 +682,40 @@ mod tests {
     fn a_process_named_with_a_non_utf8_byte_is_still_gathered() {
         use lsof_core::model::FdType;
         use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::CommandExt;
         let dir = std::env::temp_dir().join(format!("lsof-rs-comm-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join(std::ffi::OsStr::from_bytes(b"sl\xffeep"));
-        std::fs::copy("/bin/sleep", &exe).expect("copy /bin/sleep");
+        let me = std::env::current_exe().expect("this test binary");
+        std::fs::copy(&me, &exe).expect("copy this test binary");
         // `ETXTBSY` is a race, not a failure: a test on another thread that
         // forks while the copy is still open for writing hands its child a
         // duplicate of that fd until the child execs, and exec'ing a file
         // someone holds open for writing is refused. It clears on its own.
         let mut tries = 0;
         let mut child = loop {
-            match std::process::Command::new(&exe).arg("30").spawn() {
+            // A UTF-8 argv[0]: libtest panics on one that is not, and the
+            // copy died before its test body ran. The comm still comes from
+            // the file's name.
+            match std::process::Command::new(&exe)
+                .arg0("renamed-copy")
+                .args([
+                    "--exact",
+                    "backend::tests::a_sleeper_for_the_renamed_copy",
+                    "--test-threads=1",
+                ])
+                .env(SLEEPER, "30")
+                .env(SLEEPER_READY, dir.join("ready"))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
                 Ok(child) => break child,
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
                     tries += 1;
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(e) => panic!("spawn the renamed sleep: {e}"),
+                Err(e) => panic!("spawn the renamed copy: {e}"),
             }
         };
         let pid = child.id();
@@ -688,7 +727,25 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        // Running its test body, not merely exec'd: a copy that dies at
+        // startup is a zombie, which is never listed.
+        while !dir.join("ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the renamed copy never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let strict = std::fs::read_to_string(format!("/proc/{pid}/status"));
+        // What /proc showed, for the failure message: the CI image once hid
+        // the process where no local host did.
+        let seen: Vec<String> = ["stat", "status", "maps"]
+            .iter()
+            .map(|f| match std::fs::read(format!("/proc/{pid}/{f}")) {
+                Ok(b) => format!("{f}: {:?}", String::from_utf8_lossy(&b[..b.len().min(400)])),
+                Err(e) => format!("{f}: {e}"),
+            })
+            .collect();
         let procs = LinuxBackend::new()
             .gather(&Selection {
                 pids: vec![pid],
@@ -702,12 +759,12 @@ mod tests {
             strict.is_err(),
             "control: the strict read must fail on this name"
         );
-        let p = procs
-            .iter()
-            .find(|p| p.pid == pid)
-            .expect("a non-UTF-8 name must not hide the process");
+        let p = procs.iter().find(|p| p.pid == pid).unwrap_or_else(|| {
+            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+            panic!("a non-UTF-8 name must not hide the process {pid}: gathered {pids:?}; {seen:#?}")
+        });
         assert_eq!(p.command, "sl\u{FFFD}eep");
-        // /bin/sleep is dynamically linked, so libc is mapped: `mem` rows exist
+        // This binary is dynamically linked, so libc is mapped: `mem` rows exist
         // only if `maps` survived the executable's own undecodable path.
         assert!(
             p.files.iter().any(|f| f.fd == FdType::Mem),

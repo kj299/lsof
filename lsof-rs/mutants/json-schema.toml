@@ -34,24 +34,24 @@ rule = "the file keys are in json_print_file()'s order: size, then offset"
 file = "crates/lsof-core/src/render/json.rs"
 old = '''    if o.want('s') {
         if let Some(s) = f.size {
-            m.str("size", &s.to_string());
+            m.quoted("size", s);
         }
     }
     // Plain decimal whatever `-o` says: the C prints it `PRIu64`
     // (`print.c:1965-1970`), not as the table's `0t`/`0x`.
     if o.want('o') {
         if let Some(off) = f.offset {
-            m.str("offset", &off.to_string());
+            m.quoted("offset", off);
         }
     }'''
 new = '''    if o.want('o') {
         if let Some(off) = f.offset {
-            m.str("offset", &off.to_string());
+            m.quoted("offset", off);
         }
     }
     if o.want('s') {
         if let Some(s) = f.size {
-            m.str("size", &s.to_string());
+            m.quoted("size", s);
         }
     }'''
 
@@ -60,7 +60,7 @@ name = "offset-as-the-table-prints-it"
 rule = "offset is a plain decimal string whatever -o says (print.c:1965)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/json.rs"
-old = '''m.str("offset", &off.to_string());'''
+old = '''m.quoted("offset", off);'''
 new = '''m.str("offset", &crate::render::offset_text(off, 8));'''
 
 [[mutant]]
@@ -101,15 +101,15 @@ name = "uppercase-hex-escape"
 rule = "\\u escapes are lowercase hex (print.c:141)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/json.rs"
-old = '''format_args!("\\u{:04x}", u32::from(c))'''
-new = '''format_args!("\\u{:04X}", u32::from(c))'''
+old = '''o.call(format!("\\u{:04x}", u32::from(c)))'''
+new = '''o.call(format!("\\u{:04X}", u32::from(c)))'''
 
 [[mutant]]
 name = "backspace-as-u0008"
 rule = "BS is \\b, as the C writes it"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/json.rs"
-old = '''            '\u{8}' => o.push_str("\\b"),
+old = '''            '\u{8}' => o.call("\\b"),
 '''
 new = ''''''
 

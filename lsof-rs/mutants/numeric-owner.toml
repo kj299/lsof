@@ -48,8 +48,8 @@ name = "fields-uid-unsigned"
 rule = "-F u prints (int)Lp->uid (68)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/fields.rs"
-old = '''                push!('u', &uid_as_the_c_prints_it(uid).to_string());'''
-new = '''                push!('u', &uid.to_string());'''
+old = '''                push!(b'u', &uid_as_the_c_prints_it(uid).to_string());'''
+new = '''                push!(b'u', &uid.to_string());'''
 
 [[mutant]]
 name = "json-uid-unsigned"

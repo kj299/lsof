@@ -256,6 +256,16 @@ RULES = os.path.join(HERE, "linux-rules.json")
 # line of the C's and lsof-rs's line become `<USAGE>`, the C's other eight
 # nothing, each matched whole, so that a case with `with_stderr = true`
 # compares the message before the usage and that there is a usage.
+# The `%s` markers of `repeat-marker-percent-s-is-mktimes` are the time a
+# run printed them, `MKT` and its digits: all but the leading ones are
+# masked, so the two binaries' runs a second apart compare, and the 2^30
+# seconds `mktime()` takes in a new process does not (DIVERGENCES 152).
+MKTIME_RULE = {
+    "name": "repeat-mktime-digits",
+    "regex": "MKT(-?\\d*?)\\d{7}(?!\\d)",
+    "replacement": "MKT\\1<7>",
+}
+
 USAGE_RULES = [
     {"name": "usage-c-version", "regex": "^lsof \\d+\\.\\d+\\.\\d+$", "replacement": "<USAGE>"},
     {"name": "usage-c-links",
@@ -324,6 +334,8 @@ class Fixture:
         # runner starts, under a pid that differs between the two runs.
         self.new_session = new_session
         self.proc: subprocess.Popen | None = None
+        # An optional fixture that could not start (its cases are skipped).
+        self.skipped = False
 
     @property
     def pid(self) -> int:
@@ -361,6 +373,8 @@ class Fixture:
 
     def _failed(self, why: str) -> "NoReturn":  # type: ignore[name-defined]
         if self.optional:
+            # Its cases are skipped; that it is not running is no news.
+            self.skipped = True
             raise FixtureUnavailable(f"{self.name}: {why}")
         infra(f"fixture {self.name} {why}")
 
@@ -404,8 +418,20 @@ HOSTILE_FILE = "n\x1b[31m\r\t \\\x7fé.txt"
 LOCALE = "C.UTF-8"
 
 
+def renamed_sleeper(link: bytes) -> list:
+    """The command of a fixture that sleeps under the name `link`.
+
+    The kernel names a process after the file it exec'd, so a symlink of the
+    wanted name gives the comm. The program behind it is this harness's own
+    Python, not `sleep`: Ubuntu 26.04's `sleep` is a uutils multi-call binary
+    that works out which tool it is from the path it was run by, and exits 1
+    under any other name, even with argv[0] kept as `sleep`. Python opens no
+    file it keeps, so the fixture still holds only 0, 1 and 2."""
+    return [link, b"-c", b"import time; time.sleep(3600)"]
+
+
 def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
-    """A `sleep` whose comm is `comm`: exec'd through a symlink of that name.
+    """A sleeper whose comm is `comm`: exec'd through a symlink of that name.
 
     Bytes, not str, on the way to the kernel: the string must arrive as UTF-8
     whatever Python decided the filesystem encoding is (a POSIX locale would
@@ -414,10 +440,10 @@ def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
     cdir = os.path.join(work, name)
     os.makedirs(cdir)
     link = os.path.join(cdir.encode(), comm.encode("utf-8"))
-    os.symlink(shutil.which("sleep"), link)
+    os.symlink(sys.executable, link)
     return Fixture(
         f"{name}(comm)",
-        [b"bash", b"-c", b'exec "$0" 600', link],
+        renamed_sleeper(link),
         cwd=cdir,
         expect_fds=3,
         expect_comm=comm.encode("utf-8"),
@@ -489,7 +515,7 @@ def mapping_holder(work: str) -> Fixture:
         "ring=libc.syscall(425,4,(ctypes.c_char*120)())\n"
         "if ring>=0: libc.mmap(None,4096,3,1,ring,0)\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (live, gone, gone)
+        "time.sleep(3600)\n" % (live, gone, gone)
     )
     return Fixture(
         "E(mappings)", [sys.executable, "-c", py, mdir], cwd=mdir, expect_fds=3
@@ -538,7 +564,7 @@ def lock_holder(work: str) -> Fixture:
         "fcntl.lockf(mx, fcntl.LOCK_SH, 2, 10)\n"
         "fcntl.lockf(mx, fcntl.LOCK_EX, 2, 20)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (ldir, ldir)
+        "time.sleep(3600)\n" % (ldir, ldir)
     )
     # 0,1,2 + the four lock files, /dev/null, the cwd, the executable, mixed.
     return Fixture("F(locks)", [sys.executable, "-c", py], cwd=ldir, expect_fds=11)
@@ -567,7 +593,7 @@ def anon_inode_holder(work: str) -> Fixture:
         "pf=os.pidfd_open(os.getpid())\n"
         "ino=ctypes.CDLL('libc.so.6').inotify_init()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % adir
+        "time.sleep(3600)\n" % adir
     )
     return Fixture("G(anon inodes)", [sys.executable, "-c", py], cwd=adir, expect_fds=3)
 
@@ -587,10 +613,10 @@ def long_command_holder(work: str) -> Fixture:
     cdir = os.path.join(work, "longcmd")
     os.makedirs(cdir)
     binary = os.path.join(cdir, LONG_COMM)
-    shutil.copy("/bin/sleep", binary)
+    os.symlink(sys.executable, binary)
     return Fixture(
         "H(long command)",
-        [binary.encode(), b"600"],
+        renamed_sleeper(binary.encode()),
         cwd=cdir,
         expect_fds=3,  # 0,1,2
         expect_comm=LONG_COMM.encode(),
@@ -638,14 +664,14 @@ def thread_holder(work: str) -> Fixture:
         "        os.chdir(os.path.join(%r,'t2cwd'))\n"
         "    libc.prctl(15, n.encode(), 0,0,0)\n"
         "    up.set()\n"
-        "    time.sleep(600)\n"
+        "    time.sleep(3600)\n"
         "ups=[]\n"
         "for n in ('taskname-long-1','t2'):\n"
         "    ups.append(threading.Event())\n"
         "    threading.Thread(target=w, args=(n,ups[-1]), daemon=True).start()\n"
         "for up in ups: up.wait()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (tdir, tdir, tdir)
+        "time.sleep(3600)\n" % (tdir, tdir, tdir)
     )
     # 4 fds: stdio on /dev/null plus held.txt. The fd count alone would go
     # true before the threads exist (held.txt opens first), so the real gate is
@@ -671,7 +697,7 @@ def offset_holder(work: str) -> Fixture:
         "b=open(os.path.join(%r,'big'),'wb'); b.seek(123456789)\n"
         "s=open(os.path.join(%r,'small'),'wb'); s.write(b'x'*20); s.flush(); s.seek(12)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (odir, odir, odir)
+        "time.sleep(3600)\n" % (odir, odir, odir)
     )
     return Fixture("O(offsets)", [sys.executable, "-c", py], cwd=odir, expect_fds=5)
 
@@ -708,7 +734,7 @@ def non_utf8_holder(work: str) -> Fixture:
         "m=mmap.mmap(f.fileno(),4096)\n"
         "ctypes.CDLL(None).prctl(15, %r, 0, 0, 0)\n"
         "open(os.path.join(d,b'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (xdir, NON_UTF8_COMM)
+        "time.sleep(3600)\n" % (xdir, NON_UTF8_COMM)
     )
     return Fixture(
         "X(non-UTF-8)",
@@ -823,7 +849,7 @@ def endpoint_holder(work: str) -> Fixture:
         "            try: os.close(n)\n"
         "            except OSError: pass\n"
         "    open(os.path.join(d,'child2'),'w').close()\n"
-        "    time.sleep(600); os._exit(0)\n"
+        "    time.sleep(3600); os._exit(0)\n"
         "os.close(65)\n"
         "while not os.path.exists(os.path.join(d,'child2')): time.sleep(0.01)\n"
         "pid=os.fork()\n"
@@ -843,7 +869,7 @@ def endpoint_holder(work: str) -> Fixture:
         "    f=os.open(os.path.join(d,'ff'),os.O_RDONLY|os.O_NONBLOCK)\n"
         "    c=socket.create_connection(srv.getsockname()); srv.close()\n"
         "    open(os.path.join(d,'child'),'w').close()\n"
-        "    time.sleep(600); os._exit(0)\n"
+        "    time.sleep(3600); os._exit(0)\n"
         "os.close(r); b.close(); u2.close()\n"
         "for n in (47,49,55):\n"
         "    try: os.close(n)\n"
@@ -864,7 +890,7 @@ def endpoint_holder(work: str) -> Fixture:
         "f=os.open(os.path.join(d,'ff'),os.O_WRONLY|os.O_NONBLOCK)\n"
         "open(os.path.join(d,'epc.pid'),'w').write(str(pid))\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (edir,)
+        "time.sleep(3600)\n" % (edir,)
     )
     return Fixture("EP(endpoints)", [sys.executable, "-c", py], cwd=edir, expect_fds=3)
 
@@ -884,7 +910,7 @@ def tab_name_holder(work: str) -> Fixture:
         "d=sys.argv[1]\n"
         "mk(os.path.join(d,'tab\\there')); mp(os.path.join(d,'tab\\there'))\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture("T(a name with a TAB)", [sys.executable, "-c", py, tdir], cwd=tdir, expect_fds=3)
 
@@ -909,7 +935,7 @@ def relative_name_holder(work: str) -> Fixture:
         "if ring<0: sys.exit(3)\n"
         "libc.mmap(None,4096,3,1,ring,0)\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "RN(a mapping named by no path)",
@@ -942,7 +968,7 @@ def zombie_holder(work: str) -> Fixture:
         "def live():\n"
         "    libc.prctl(15, b'zombie-live', 0,0,0)\n"
         "    up.set()\n"
-        "    time.sleep(600)\n"
+        "    time.sleep(3600)\n"
         "threading.Thread(target=live).start()\n"
         "up.wait()\n"
         "pid=os.fork()\n"
@@ -983,9 +1009,9 @@ def unreadable_holder(work: str) -> Fixture:
         "import ctypes,os,threading,time\n"
         "held=open(os.path.join(%r,'held'),'w')\n"
         "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0\n"
-        "threading.Thread(target=time.sleep,args=(600,),daemon=True).start()\n"
+        "threading.Thread(target=time.sleep,args=(3600,),daemon=True).start()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (udir, udir)
+        "time.sleep(3600)\n" % (udir, udir)
     )
     return Fixture(
         "U(unreadable)", [sys.executable, "-c", py], cwd=udir, expect_fds=0, optional=True
@@ -1019,9 +1045,9 @@ def state_holder(work: str) -> Fixture:
         "uc=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); uc.connect(uu.getsockname())\n"
         "x=socket.socket(socket.AF_UNIX); x.bind(os.path.join(%r,'s.sock')); x.listen(1)\n"
         "f=open(os.path.join(%r,'held'),'w')\n"
-        "threading.Thread(target=time.sleep,args=(600,),daemon=True).start()\n"
+        "threading.Thread(target=time.sleep,args=(3600,),daemon=True).start()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (sdir, sdir, sdir)
+        "time.sleep(3600)\n" % (sdir, sdir, sdir)
     )
     # 0,1,2 + listener, the TCP pair, two UDP, the unix socket and the file.
     return Fixture("S(states)", [sys.executable, "-c", py], cwd=sdir, expect_fds=10)
@@ -1048,7 +1074,7 @@ def unlinked_holder(work: str) -> Fixture:
         "a,b=socket.socketpair()\n"
         "r,w=os.pipe()\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (ndir, ndir, ndir, ndir, ndir, ndir)
+        "time.sleep(3600)\n" % (ndir, ndir, ndir, ndir, ndir, ndir)
     )
     # 0,1,2 + the three files, the socket pair and the pipe's two ends.
     return Fixture("N(unlinked)", [sys.executable, "-c", py], cwd=ndir, expect_fds=10)
@@ -1075,7 +1101,7 @@ def device_holder(work: str) -> Fixture:
         "except OSError:\n"
         "    b=None\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (vdir,)
+        "time.sleep(3600)\n" % (vdir,)
     )
     # 0,1,2 + urandom and the pty pair; loop0 only where it opens.
     return Fixture("V(devices)", [sys.executable, "-c", py], cwd=vdir, expect_fds=6)
@@ -1125,7 +1151,7 @@ def flags_holder(work: str) -> Fixture:
         "except OSError:\n"
         "    pass\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (qdir,)
+        "time.sleep(3600)\n" % (qdir,)
     )
     # 0,1,2 + the eleven above, the opendir() fd and the pipe's two ends; the
     # O_TMPFILE fd only where it opens.
@@ -1313,7 +1339,7 @@ def fuse_probe(work: str) -> Fixture:
         f"{shlex.quote(os.path.join(fdir, 'fuse'))} || {{ kill $s; exit 4; }}\n"
         "kill $s; wait $s\n"
         f"touch {shlex.quote(os.path.join(fdir, 'ready'))}\n"
-        "exec sleep 600\n"
+        "exec sleep 3600\n"
     )
     why = fuse_unavailable()
     return Fixture(
@@ -1639,6 +1665,148 @@ def write_names_services(work: str, port: str, uport: str, nsport: str = "0", ns
         )
 
 
+# The `wr-closed*` modes' runner: the command with its stdout on a pipe
+# whose reader is closed before it starts, `SIGPIPE` as the mode says (``
+# its default, `-ign` ignored, `-blk` blocked, as a parent leaves them), and
+# its status on stdout, a signal as minus its number.
+WR_CLOSED = (
+    "import os, signal, subprocess, sys\n"
+    "how = sys.argv[1]\n"
+    "def pre():\n"
+    "    signal.signal(signal.SIGPIPE, signal.SIG_IGN if how == '-ign' else signal.SIG_DFL)\n"
+    "    if how == '-blk':\n"
+    "        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})\n"
+    "r, w = os.pipe()\n"
+    "os.close(r)\n"
+    "p = subprocess.run(sys.argv[2:], stdout=w, preexec_fn=pre)\n"
+    "print('status', p.returncode)\n"
+)
+# The `wr-trace-*` modes' runner (DIVERGENCES 36): the command under
+# strace, its stdout on a pipe (`pipe`) or a pseudo-terminal (`tty`), each
+# write to it that `when` names failing with EAGAIN as a non-blocking
+# stdout's can (`none`: none fails). It prints the size of each write to
+# fd 1 (`-1` for one that failed), the status, and what the reader got:
+# which bytes a failed write takes with it, and where a line-buffered
+# terminal's writes end, follow the C's stdio calls, not only its bytes.
+WR_TRACE = (
+    "import os, pty, shutil, subprocess, sys, tempfile\n"
+    "kind, when = sys.argv[1], sys.argv[2]\n"
+    "if not shutil.which('strace'):\n"
+    "    print('linux_diff: no strace'); sys.exit(2)\n"
+    "fd, log = tempfile.mkstemp(); os.close(fd)\n"
+    "cmd = ['strace', '-qq', '-e', 'trace=write', '--trace-fds=1', '-e', 'signal=none', '-o', log]\n"
+    "if when != 'none':\n"
+    "    cmd += ['-e', 'inject=write:error=EAGAIN:when=' + when]\n"
+    "cmd += sys.argv[3:]\n"
+    "got = b''\n"
+    "if kind == 'tty':\n"
+    "    m, s = pty.openpty()\n"
+    "    p = subprocess.Popen(cmd, stdout=s)\n"
+    "    os.close(s)\n"
+    "    while True:\n"
+    "        try:\n"
+    "            d = os.read(m, 65536)\n"
+    "        except OSError:\n"
+    "            break\n"
+    "        if not d:\n"
+    "            break\n"
+    "        got += d\n"
+    "    rc = p.wait()\n"
+    "    got = got.replace(b'\\r\\n', b'\\n')\n"
+    "else:\n"
+    "    p = subprocess.run(cmd, stdout=subprocess.PIPE)\n"
+    "    rc, got = p.returncode, p.stdout\n"
+    "sizes = []\n"
+    "for line in open(log, errors='replace'):\n"
+    "    if line.startswith('write(1,'):\n"
+    "        r = line.rsplit('= ', 1)[-1].split()[0]\n"
+    "        sizes.append(r)\n"
+    "os.unlink(log)\n"
+    "print('writes', ' '.join(sizes))\n"
+    "print('status', rc)\n"
+    "sys.stdout.flush()\n"
+    "os.write(1, got)\n"
+)
+WR_TRACE_MODES = tuple(
+    f"wr-trace-{kind}-{when}" for kind in ("pipe", "tty") for when in ("none", "1", "2+2", "3+3", "4..6")
+)
+WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk") + WR_TRACE_MODES
+
+
+# The `tz-*` modes' variants (DIVERGENCES 152).
+TZ_VARIANTS = (
+    "swap", "inplace", "gone", "fold", "posix", "big", "zero", "null", "dir", "fifo", "v1fifo", "v2fifo",
+    "nofoot", "nofootnorules", "lease",
+)
+
+# The `tz-lease` mode's holder: a write lease on the file, let go a second
+# after the `SIGIO` that says another process opens it, as a holder that
+# writes its last changes first would (DIVERGENCES 152).
+LEASE_HOLD = (
+    "import fcntl, os, signal, sys, time\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "def gone(*_):\n"
+    "    time.sleep(1)\n"
+    "    fcntl.fcntl(fd, 1024, fcntl.F_UNLCK)\n"
+    "    os._exit(0)\n"
+    "signal.signal(signal.SIGIO, gone)\n"
+    "fcntl.fcntl(fd, 1024, fcntl.F_WRLCK)\n"
+    "open(sys.argv[2], 'w').close()\n"
+    "time.sleep(60)\n"
+)
+
+
+def write_tz_zones(work: str) -> str:
+    """The zone files the `tz-*` modes put under /etc: copies of the
+    system's Asia/Tokyo, Asia/Kolkata and Australia/Sydney (for
+    `posixrules`, whose daylight time is the United States' winter), a
+    version 1 file of one type, `ABC` an hour east, and `fold`: a version 1
+    file whose one change, at 1700000000, takes the clock back 2^30 seconds,
+    so that every time from then to 2057 is a wall-clock time an earlier
+    one also had, with the same `tm_isdst`, and `mktime()` of it, `%s`,
+    the earlier time in a new process (glibc 2.39: `__mktime_internal()`'s
+    first guess is the time read as UTC)."""
+    import struct
+    d = os.path.join(work, "tz")
+    os.makedirs(d, exist_ok=True)
+    for name, zone in (("tokyo", "Asia/Tokyo"), ("kolkata", "Asia/Kolkata"), ("sydney", "Australia/Sydney")):
+        with open(os.path.join("/usr/share/zoneinfo", zone), "rb") as src, open(os.path.join(d, name), "wb") as dst:
+            dst.write(src.read())
+
+    def v1(times, idxs, types, chars):
+        head = b"TZif\0" + bytes(15) + struct.pack(">6l", 0, 0, 0, len(times), len(types), len(chars))
+        body = b"".join(struct.pack(">l", t) for t in times) + bytes(idxs)
+        body += b"".join(struct.pack(">lBB", off, dst, idx) for off, dst, idx in types)
+        return head + body + chars
+
+    with open(os.path.join(d, "v1"), "wb") as f:
+        f.write(v1([], [], [(3600, 0, 0)], b"ABC\0"))
+    with open(os.path.join(d, "fold"), "wb") as f:
+        f.write(v1([1700000000], [1], [(0, 0, 0), (-(1 << 30), 0, 4)], b"AAA\0BBB\0"))
+    # `big`: a version 2 file of one type whose footer is `QQQ-3`, a NUL and
+    # 20 MiB more, which glibc reads whole and lsof-rs had refused (1 MiB).
+    # One change, at 0, so that the footer decides from then on.
+    with open(os.path.join(d, "big"), "wb") as f:
+        one = v1([0], [0], [(0, 0, 0)], b"UTC\0").replace(b"TZif\0", b"TZif2", 1)
+        wide = one[:44] + struct.pack(">q", 0) + one[48:]
+        f.write(one + wide + b"\nQQQ-3\0" + b"A" * (20 << 20) + b"\n")
+    # `nofoot`: one change, at 0, to `BBB` two hours east, and a footer that
+    # names daylight time and no rule, `FOO3BAR`: past the change glibc
+    # reads `posixrules` in place of the zone (`__tzfile_default()`) and
+    # works the time out from the rules the string left cleared.
+    with open(os.path.join(d, "nofoot"), "wb") as f:
+        one = v1([], [], [(0, 0, 0)], b"UTC\0").replace(b"TZif\0", b"TZif2", 1)
+        head = b"TZif2" + bytes(15) + struct.pack(">6l", 0, 0, 0, 1, 2, 8)
+        body = struct.pack(">q", 0) + bytes([1]) + struct.pack(">lBBlBB", 3600, 0, 0, 7200, 0, 4) + b"AAA\0BBB\0"
+        f.write(one + head + body + b"\nFOO3BAR\n")
+    with open("/usr/share/zoneinfo/America/New_York", "rb") as src, open(os.path.join(d, "newyork"), "wb") as dst:
+        dst.write(src.read())
+    for name in os.listdir(d):
+        os.chmod(os.path.join(d, name), 0o644)
+    os.chmod(d, 0o755)
+    return d
+
+
 def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     """The script fixture MT's and AUTOFS's cases run in, already in a mount
     namespace of their own: mount a tmpfs at `base` and, in `table` mode,
@@ -1729,6 +1897,7 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     os.chmod(names, 0o755)
     for name in os.listdir(names):
         os.chmod(os.path.join(names, name), 0o644)
+    zones = write_tz_zones(work)
     with open(path, "w") as f:
         f.write(
             "#!/bin/sh\n"
@@ -1798,6 +1967,58 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             '    rm -f "$T"\n'
             '    "$@"\n'
             "    exit $?\n"
+            "fi\n"
+            # The `wr-*` modes (DIVERGENCES 36): stdout on /dev/full, or on
+            # a pipe whose reader has gone, `SIGPIPE` at its default, ignored
+            # or blocked; the binary's status (a signal as minus its number)
+            # is printed in place of its output.
+            'if [ "$mode" = wr-full ]; then\n'
+            '    "$@" > /dev/full\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "${mode#wr-closed}" != "$mode" ]; then\n'
+            f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_CLOSED)} \"${{mode#wr-closed}}\" \"$@\"\n"
+            "fi\n"
+            'if [ "${mode#wr-trace-}" != "$mode" ]; then\n'
+            '    t=${mode#wr-trace-}\n'
+            f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_TRACE)} \"${{t%%-*}}\" \"${{t#*-}}\" \"$@\"\n"
+            "fi\n"
+            # The `tz-*` modes (DIVERGENCES 152): a tmpfs over /etc holding
+            # the host's password file and the zone files a case reads; a
+            # job changes them while the run repeats, half a second in,
+            # between its first marker and its second.
+            'if [ "${mode#tz-}" != "$mode" ]; then\n'
+            f"    Z={shlex.quote(zones)}\n"
+            '    mount -t tmpfs lsof-rs-tz /etc || { echo "linux_diff: no MT tz ($$)"; exit 2; }\n'
+            f"    cat {shlex.quote(passwd)} > /etc/passwd || exit 2\n"
+            '    job=\n'
+            '    case "${mode#tz-}" in\n'
+            '    swap) cat "$Z/tokyo" > /etc/localtime || exit 2\n'
+            '          (sleep 0.5; cat "$Z/kolkata" > /etc/localtime.new && mv -f /etc/localtime.new /etc/localtime) & job=$! ;;\n'
+            '    inplace) cat "$Z/tokyo" > /etc/localtime && touch -d @1000000000 /etc/localtime || exit 2\n'
+            '          (sleep 0.5; cat "$Z/kolkata" > /etc/localtime; touch -d @1000000000 /etc/localtime) & job=$! ;;\n'
+            '    gone) cat "$Z/tokyo" > /etc/localtime || exit 2\n'
+            '          (sleep 0.5; rm -f /etc/localtime; sleep 1; cat "$Z/kolkata" > /etc/localtime) & job=$! ;;\n'
+            '    fold) cat "$Z/fold" > /etc/foldzone || exit 2 ;;\n'
+            '    posix) cat "$Z/sydney" > /etc/posixrules || exit 2 ;;\n'
+            '    big) cat "$Z/big" > /etc/bigzone || exit 2 ;;\n'
+            '    zero) ln -s /dev/zero /etc/localtime || exit 2 ;;\n'
+            '    null) ln -s /dev/null /etc/localtime || exit 2 ;;\n'
+            '    dir) mkdir /etc/localtime || exit 2 ;;\n'
+            '    fifo) mkfifo /etc/localtime || exit 2 ;;\n'
+            '    v1fifo) mkfifo /etc/tzfifo || exit 2; cat "$Z/v1" > /etc/tzfifo & job=$! ;;\n'
+            '    v2fifo) mkfifo /etc/tzfifo || exit 2; cat "$Z/kolkata" > /etc/tzfifo & job=$! ;;\n'
+            '    nofoot) cat "$Z/nofoot" > /etc/nofoot && cat "$Z/newyork" > /etc/posixrules || exit 2 ;;\n'
+            '    nofootnorules) cat "$Z/nofoot" > /etc/nofoot || exit 2 ;;\n'
+            '    lease) cat "$Z/kolkata" > /etc/leased || exit 2\n'
+            f"          {shlex.quote(sys.executable)} -I -c {shlex.quote(LEASE_HOLD)} /etc/leased /etc/leased.ready & job=$!\n"
+            '          i=0; while [ ! -e /etc/leased.ready ]; do i=$((i+1)); [ $i -gt 200 ] && { echo "linux_diff: no lease ($$)"; exit 2; }; sleep 0.05; done ;;\n'
+            '    *) echo "linux_diff: no MT tz variant ($$)"; exit 2 ;;\n'
+            '    esac\n'
+            '    "$@"\n'
+            "    rc=$?\n"
+            '    [ -n "$job" ] && { kill "$job" 2>/dev/null; wait "$job" 2>/dev/null; }\n'
+            "    exit $rc\n"
             "fi\n"
             'mount -t tmpfs lsof-rs-mt "$B" || { echo "linux_diff: no MT table ($$)"; exit 2; }\n'
             'if [ "$mode" = mqueue ]; then\n'
@@ -1876,7 +2097,7 @@ def mt_probe(work: str, wrap: str, mode: str) -> Fixture:
     script = (
         f"sh {shlex.quote(wrap)} {mode} true || exit 3\n"
         f"touch {shlex.quote(os.path.join(pdir, 'ready'))}\n"
-        "exec sleep 600\n"
+        "exec sleep 3600\n"
     )
     why = mt_unavailable()
     if why is None and mode == "autofs":
@@ -1963,7 +2184,7 @@ def netns_listener(work: str) -> Fixture:
         "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
         "s.bind(('127.0.0.1',0)); s.listen(1)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % ndir
+        "time.sleep(3600)\n" % ndir
     )
     return Fixture(
         "J(netns)",
@@ -1996,7 +2217,7 @@ def names_socket_holder(work: str) -> Fixture:
         "    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((a,9)); c.append(s)\n"
         "open(os.path.join(%r,'ports.tmp'),'w').write('%%d %%d' %% (t.getsockname()[1],u.getsockname()[1]))\n"
         "os.rename(os.path.join(%r,'ports.tmp'),os.path.join(%r,'ports'))\n"
-        "time.sleep(600)\n" % (ndir, ndir, ndir)
+        "time.sleep(3600)\n" % (ndir, ndir, ndir)
     )
     return Fixture("NS(names)", [sys.executable, "-c", py], cwd=ndir, expect_fds=14)
 
@@ -2049,7 +2270,7 @@ def packet_holder(work: str) -> Fixture:
         "  (socket.SOCK_RAW,0x0003),(socket.SOCK_DGRAM,0x0800),\n"
         "  (socket.SOCK_RAW,0x9000),(socket.SOCK_RAW,0x1234))]\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % pdir
+        "time.sleep(3600)\n" % pdir
     )
     return Fixture(
         "K(packet)",
@@ -2092,7 +2313,7 @@ def userns_socket_holder(work: str) -> Fixture:
         "p.setsockopt(263,5,struct.pack('IIII',4096,1,2048,2))\n"
         "if libc.mmap(None,4096,3,1,p.fileno(),0) in (None,2**64-1): sys.exit(3)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % udir
+        "time.sleep(3600)\n" % udir
     )
     return Fixture(
         "L(userns sockets)",
@@ -2126,7 +2347,7 @@ def raw_holder(work: str) -> Fixture:
         "i=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP)\n"
         "r=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_RAW)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % rdir
+        "time.sleep(3600)\n" % rdir
     )
     return Fixture(
         "RAW(raw sockets)",
@@ -2161,7 +2382,7 @@ def udplite_holder(work: str) -> Fixture:
         "c=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136)\n"
         "open(os.path.join(%r,'port'),'w').write(str(a.getsockname()[1]))\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (udir, udir)
+        "time.sleep(3600)\n" % (udir, udir)
     )
     return Fixture(
         "UDPL(udplite)",
@@ -2192,7 +2413,7 @@ def userns_raw_holder(work: str) -> Fixture:
         "i=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_ICMP)\n"
         "u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,136); u.bind(('0.0.0.0',0))\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % ndir
+        "time.sleep(3600)\n" % ndir
     )
     return Fixture(
         "NSRAW(userns raw and udplite)",
@@ -2227,7 +2448,7 @@ def unlisted_socket_holder(work: str) -> Fixture:
         "d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
         "t=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % ndir
+        "time.sleep(3600)\n" % ndir
     )
     return Fixture(
         "NLK(netlink and unlisted sockets)",
@@ -2257,7 +2478,7 @@ def userns_unlisted_holder(work: str) -> Fixture:
         "n=socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,0)\n"
         "d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % ndir
+        "time.sleep(3600)\n" % ndir
     )
     return Fixture(
         "NSX(userns unlisted sockets)",
@@ -2291,12 +2512,12 @@ def newline_comm_holder(work: str) -> Fixture:
         "def w():\n"
         "    libc.prctl(15, %r, 0, 0, 0)\n"
         "    up.set()\n"
-        "    time.sleep(600)\n"
+        "    time.sleep(3600)\n"
         "threading.Thread(target=w, daemon=True).start()\n"
         "up.wait()\n"
         "libc.prctl(15, %r, 0, 0, 0)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % (cdir, NEWLINE_TASK, NEWLINE_COMM, cdir)
+        "time.sleep(3600)\n" % (cdir, NEWLINE_TASK, NEWLINE_COMM, cdir)
     )
     return Fixture("NLC(newline comm)", [sys.executable, "-c", py], cwd=cdir, expect_fds=4)
 
@@ -2327,7 +2548,7 @@ def mqueue_holder(work: str) -> Fixture:
         "for n in names: lib.mq_unlink(n)\n"
         "if (a, b) != (3, 4): sys.exit(4)\n"
         "open(os.path.join(%r,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % qdir
+        "time.sleep(3600)\n" % qdir
     )
     return Fixture(
         "MQ(POSIX message queues)",
@@ -2378,7 +2599,7 @@ def nfs_holder(work: str) -> Fixture:
         "more=[open(os.path.join(%r,p)) for p in ('nfs/sub/e','nfsx/b','nfs2/c','plain/d')]\n"
         "if [m.fileno() for m in more]!=[12,13,14,15]: raise SystemExit(5)\n"
         "open('ready','w').close()\n"
-        "time.sleep(600)\n" % (ndir, ndir, work)
+        "time.sleep(3600)\n" % (ndir, ndir, work)
     )
     return Fixture("NFS(files on a listed NFS mount)", [sys.executable, "-c", py], cwd=ndir, expect_fds=16)
 
@@ -2429,7 +2650,7 @@ def socket_path_holder(work: str) -> Fixture:
         "os.unlink(os.path.join(d,'gone.sock'))\n"
         "open(os.path.join(d,'gone.sock'),'w').write('not a socket\\n')\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n" % ydir
+        "time.sleep(3600)\n" % ydir
     )
     # 0,1,2 + listener, client, accepted, the socket whose file is gone, and
     # the three under odd/.
@@ -2471,7 +2692,7 @@ def mount_ns_holder(work: str) -> Fixture:
         "ring=libc.syscall(425,4,(ctypes.c_char*120)())\n"
         "if ring>=0: libc.mmap(None,4096,3,1,ring,0)\n"
         "open(%r,'w').close()\n"
-        "time.sleep(600)\n" % os.path.join(mdir, "ready")
+        "time.sleep(3600)\n" % os.path.join(mdir, "ready")
     )
     sh = 'mount -t tmpfs lsofdiff "$1" && cd "$1" && echo inner > f && exec "$2" -c "$3"'
     return Fixture(
@@ -2516,7 +2737,7 @@ def userns_device_mapping_holder(work: str) -> Fixture:
     py = MMAP_PRELUDE + (
         "mp('/dev/zero')\n"
         "open('ready','w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "MZ(userns /dev/zero)",
@@ -2545,7 +2766,7 @@ def pty_holder(work: str) -> Fixture:
         "m,s=os.openpty()\n"
         "open('pts.tmp','w').write(os.ttyname(s)); os.rename('pts.tmp','pts')\n"
         "open('ready','w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "PTH(pty)", [sys.executable, "-c", py], cwd=hdir, expect_fds=5, optional=True
@@ -2587,7 +2808,7 @@ def devpts_instance_holder(work: str) -> Fixture:
         "if n!=want: sys.exit(5)\n"
         "keep.append(os.open('/dev/pts/%d'%n,os.O_RDWR|os.O_NOCTTY))\n"
         "open('ready','w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "PTG(devpts instance)",
@@ -2635,7 +2856,7 @@ def socket_file_holder(work: str) -> Fixture:
         "u=socket.socket(socket.AF_UNIX); u.bind('s.sock'); u.listen(1)\n"
         "o=os.open('s.sock',os.O_PATH)\n"
         "if (t.fileno(),u.fileno(),o)!=(3,4,5): raise SystemExit(3)\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture("SF(socket files)", [sys.executable, "-c", py], cwd=sdir, expect_fds=6)
 
@@ -2702,7 +2923,7 @@ def mount_point_socket_holder(work: str) -> Fixture:
         "x=open(%r,'w')\n"
         "mk(%r); mp(%r)\n"
         "open(%r,'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
         % (SHM, SHM + "x", SHM + "x/f", SHM + "x/m", SHM + "x/m", os.path.join(mdir, "ready"))
     )
     sh = 'mount -t tmpfs lsofdiff /dev && exec "$1" -c "$2"'
@@ -2751,7 +2972,7 @@ def exempt_mapping_holder(work: str) -> Fixture:
         "os.unlink(os.path.join(s,'gone'))\n"
         "mk(os.path.join(s,'held')); h=open(os.path.join(s,'held'))\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "EM(exempt mappings)",
@@ -2805,7 +3026,7 @@ def path_note_holder(work: str) -> Fixture:
         "for n in ('ovl/hidden','shadow/s','t/b'):\n"
         "    mk(os.path.join(d,n)); mp(os.path.join(d,n))\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "P(path notes)",
@@ -2898,7 +3119,7 @@ def devnode_holder(work: str) -> Fixture:
         "y=open(os.path.join(d,'t','y'))\n"
         "n=os.open(os.path.join(d,'u','node'),os.O_PATH)\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "DN(device node)",
@@ -3005,7 +3226,7 @@ def walk_race_holder(work: str) -> Fixture:
         "      os.open(os.path.join(d,'odir','f'),os.O_RDONLY),\n"
         "      os.open(os.path.join(s,'secret'),os.O_RDONLY)]\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "WRACE(walk race)",
@@ -3151,7 +3372,7 @@ def path_spelling_holder(work: str) -> Fixture:
         "keep(os.open(os.path.join(R,b'xd'),D),21)\n"
         "keep(os.open(os.path.join(R,b'xl'),D),22)\n"
         "open(os.path.join(R,b'ready'),'w').close()\n"
-        "time.sleep(600)\n"
+        "time.sleep(3600)\n"
     )
     return Fixture(
         "R(path spellings)",
@@ -3275,7 +3496,7 @@ def owner_holder(work: str) -> Fixture:
         "    os.setresuid(real, eff, real)\n"
         "    libc.prctl(1, signal.SIGKILL, 0, 0, 0)\n"
         "    if os.getppid() != parent: os._exit(0)\n"
-        "    time.sleep(600)\n"
+        "    time.sleep(3600)\n"
         "    os._exit(0)\n"
         "me=os.getpid()\n"
         "for key, (real, eff) in %r:\n"
@@ -3400,7 +3621,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
             b"bash",
             b"-c",
             b'exec 3>f.txt 4<"$1" 5<sub 6<>fifo 7<sz1023 8<sz1048575 9<sz25847420'
-            b" && exec sleep 600",
+            b" && exec sleep 3600",
             b"fixture-a",
             hostile,
         ],
@@ -3429,7 +3650,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
         "an=socket.socket(socket.AF_UNIX)\n"
         "g=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); g.bind(('127.0.0.1',0))\n"
         "open(os.path.join(%r,'uport'),'w').write(str(g.getsockname()[1]))\n"
-        "time.sleep(600)\n" % (sdir, sdir, sdir, sdir)
+        "time.sleep(3600)\n" % (sdir, sdir, sdir, sdir)
     )
     # 0,1,2 + TCP listener, unix listener, unix client, unix accepted,
     # unix unconnected, UDP.
@@ -4089,6 +4310,8 @@ def run(args) -> int:
                         needs_mt(c, mode)
                         for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc", "names", "namesmulti", "namesnopw")
                         + tuple(f"names-{v}" for v in NAMES_VARIANTS)
+                        + tuple(f"tz-{v}" for v in TZ_VARIANTS)
+                        + WR_MODES
                     )
                     and c["name"] not in dropped
                 ]
@@ -4159,6 +4382,17 @@ def run(args) -> int:
             # The kit runner sys.exit()s with a message on its own infra errors
             # (missing binary, unparseable matrix); those are not verdicts.
             infra(f"kit runner exited {p.returncode}")
+        # A fixture that died mid-run makes both binaries find nothing of it,
+        # which MATCHes -- and a ledgered divergence then reads as fixed. A
+        # slow runner took twelve minutes over a run the fixtures had slept
+        # ten for, and 25 ledger entries went stale at once. Not a verdict.
+        dead = [
+            fx.name
+            for fx in fixtures
+            if fx.proc is not None and not fx.skipped and fx.proc.poll() is not None
+        ]
+        if dead:
+            infra("fixture(s) died during the run, so their cases compared nothing: " + ", ".join(dead))
         bad = invalid_json_cases(cases, rust)
         for name, why in bad:
             print(f"linux_diff: {name}: lsof-rs printed invalid JSON: {why}")
@@ -4319,6 +4553,7 @@ def self_test() -> int:
         check("optional fixture failure raises", False)
     except FixtureUnavailable as unavailable:
         check("optional fixture raises FixtureUnavailable", "opt" in str(unavailable))
+        check("an optional fixture that could not start is marked skipped", opt.skipped)
     finally:
         opt.stop()
 
@@ -4579,7 +4814,7 @@ def self_test() -> int:
         "replacement": '"lsof_version":"<V>"',
     }
     check("linux-rules.json is the kit's default rules, lsof_version and the usage rules",
-          dumped.returncode == 0 and rules == json.loads(dumped.stdout) + [version_rule] + USAGE_RULES)
+          dumped.returncode == 0 and rules == json.loads(dumped.stdout) + [version_rule] + USAGE_RULES + [MKTIME_RULE])
     # The usage rules: the C's usage block and lsof-rs's one line come out
     # as the same one line, so that a case can compare the message before
     # it (DIVERGENCES 114 is the usage text itself); and nothing else does.

@@ -158,9 +158,12 @@ jobs:
         run: python3 ../porting-kit/harnesses/unsafe-audit/check_forbid_unsafe.py crates/lsof-core crates/lsof-cli crates/lsof-backend-linux
       - name: unsafe-audit (// SAFETY on every unsafe block)
         # Toolchain-free text scan from the porting kit. HARD gate: every unsafe
-        # block in the backend carries a // SAFETY: justification, so a new
-        # undocumented block fails CI.
-        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src crates/lsof-backend-freebsd/src
+        # block in the backends, and in lsof-sigpipe (the inherited SIGPIPE
+        # disposition, read from an .init_array constructor before the Rust
+        # runtime ignores the signal: DIVERGENCES 36), carries a // SAFETY:
+        # justification, so a new undocumented block fails CI. cargo deny
+        # below audits lsof-sigpipe's one dependency, libc, with the workspace.
+        run: python3 ../porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/lsof-backend-windows/src crates/lsof-backend-freebsd/src crates/lsof-sigpipe/src
 
       - name: coverage gate (test surface vs the C's feature surface)
         # The question no other gate asks: are we testing everything the port
@@ -614,7 +617,7 @@ jobs:
         # 14 tests had passed. Disabling it keeps every soundness check.
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli
+        run: cargo +nightly-2026-08-31 miri test -p lsof-core -p lsof-cli -p lsof-sigpipe
       - name: miri over the FreeBSD backend's parsers and row rules
         # Its own step, so a failure names the crate. On Linux only the pure
         # modules of lsof-backend-freebsd build (kinfo, rows, names, mounts,

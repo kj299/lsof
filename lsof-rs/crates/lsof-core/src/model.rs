@@ -780,6 +780,35 @@ impl OpenFile {
         std::borrow::Cow::Owned(out)
     }
 
+    /// [`OpenFile::printed_name`] into `out` a call at a time, as the C's
+    /// `printname()` prints it: `safestrprt()`'s `putc()`s and `fputs()`s,
+    /// the addition kept printed cut by [`crate::render::Calls::printed`].
+    pub fn printed_name_calls(
+        &self,
+        esc: &crate::render::escape::Escaper,
+        out: &mut crate::render::Calls,
+    ) {
+        let split = self
+            .name_addition
+            .filter(|a| a.printed())
+            .map(|a| a.base() as usize)
+            .filter(|&at| self.name.is_char_boundary(at));
+        let Some(at) = split else {
+            esc.text_calls(&self.name, out);
+            return;
+        };
+        let (text, tail) = self.name.split_at(at);
+        if tail
+            .chars()
+            .any(crate::render::escape::is_unprintable_unicode)
+        {
+            esc.text_calls(&self.name, out);
+            return;
+        }
+        esc.text_calls(text, out);
+        out.printed(tail);
+    }
+
     /// Append `text` to NAME as an addition (the C's `Lf->nma`), after one
     /// space, or alone on an empty NAME. Where the base ends is recorded so
     /// JSON can leave the addition out ([`OpenFile::base_name`]); a base too

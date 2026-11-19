@@ -1,0 +1,21 @@
+[package]
+name = "lsof-sigpipe"
+description = "The one place lsof-rs reads the SIGPIPE disposition it inherited: a constructor in .init_array that runs before the Rust runtime ignores the signal, and the call that puts it back to the default, so a closed pipe ends lsof-rs as it ends the C lsof."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# libc, for its `sigaction` layout and its `sigaction()` and `signal()`:
+# std has neither, and the disposition must be read before std's runtime
+# sets SIGPIPE to SIG_IGN and drops what was there. Already in the lock file
+# (rustix brings it for its other targets), MIT OR Apache-2.0, no default
+# features; pinned exactly, as rustix and regex are. Only Linux and FreeBSD
+# link it: elsewhere this crate is an empty shell.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+libc = { version = "=0.2.190", default-features = false }
+
+[lints]
+workspace = true

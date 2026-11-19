@@ -2,9 +2,9 @@
 //! its sleep handed in, so that what it prints, when it sleeps and how it
 //! ends is tested without a second going by (DIVERGENCES 54, 152).
 
-use std::io::{self, Write};
+use std::io::Write;
 
-use lsof_core::timefmt::{Marker, Zone};
+use lsof_core::timefmt::{LocalTime, Marker};
 
 use crate::args::Repeat;
 
@@ -30,10 +30,17 @@ pub trait Cycles {
     fn cycle(&mut self) -> bool;
     /// `time(NULL)`.
     fn now(&mut self) -> i64;
-    /// `sleep(secs)`.
-    fn sleep(&mut self, secs: u64);
-    /// Standard output, where the markers go.
+    /// `sleep(secs)`: the C's `unsigned int`.
+    fn sleep(&mut self, secs: u32);
+    /// Standard output, where the markers go: each `write()` one `printf()`
+    /// or `putchar()`.
     fn out(&mut self) -> &mut dyn Write;
+    /// `puts(line)`: the line, and its newline where all of it went in.
+    fn puts(&mut self, line: &[u8]) {
+        let out = self.out();
+        let _ = out.write_all(line);
+        let _ = out.write_all(b"\n");
+    }
 }
 
 /// How the loop ended.
@@ -44,24 +51,34 @@ pub struct Ended {
     /// with no delay (`+r0`) runs once and leaves it set, as the C does
     /// (measured: it lists and exits 1).
     pub idle_error: bool,
-    /// How many cycles ran.
+    /// How many cycles ran (saturating; a run with no count may go on).
     pub cycles: u64,
 }
 
 /// The C's loop: a cycle; under `-j` and a delay, an empty line; then, with
 /// a delay, `+r`'s test (a cycle that listed nothing ends the run before
-/// its marker), the marker (`m<fmt>` formatted anew for the time now in
-/// `zone`), a flush and the sleep; then the count, which ends the run once
+/// its marker), the marker (`m<fmt>` formatted anew for the time now by
+/// `lt`, the process's local time: `localtime()`, and `mktime()` for `%s`),
+/// a flush and the sleep; then the count, which ends the run once
 /// that many cycles have run, each followed by its sleep (measured: `-r 1c3`
-/// takes three seconds). No delay is one cycle and no marker.
+/// takes three seconds). No delay is one cycle and no marker. The delay and
+/// the count are the C's `int`s: any delay but 0 repeats and sleeps its
+/// `unsigned int` (a negative one, from a wrapped value, up to 136 years, as
+/// the C's `sleep()` does), and the count is met by a cycle counter that
+/// wraps as the C's `int pr_count` does, so a negative count is reached
+/// only after 2^32 less its size cycles (DIVERGENCES 121).
+/// Every write's result is dropped, as the C casts away `putchar()`'s,
+/// `printf()`'s and `fflush()`'s: a failed write never ends the loop
+/// (DIVERGENCES 36).
 pub fn run(
     repeat: &Repeat,
     marker: &mut Option<Marker>,
-    zone: &Zone,
+    lt: &mut LocalTime,
     marking: Marking,
     host: &mut dyn Cycles,
-) -> io::Result<Ended> {
+) -> Ended {
     let mut delay = repeat.delay;
+    let mut pr_count: i32 = 0;
     let mut ended = Ended {
         idle_error: repeat.until_idle,
         cycles: 0,
@@ -69,10 +86,10 @@ pub fn run(
     loop {
         let listed = host.cycle();
         ended.cycles = ended.cycles.saturating_add(1);
-        if marking == Marking::JsonLines && delay > 0 {
-            host.out().write_all(b"\n")?;
+        if marking == Marking::JsonLines && delay != 0 {
+            let _ = host.out().write_all(b"\n");
         }
-        if delay > 0 {
+        if delay != 0 {
             if repeat.until_idle {
                 if !listed {
                     break;
@@ -80,39 +97,43 @@ pub fn run(
                 ended.idle_error = false;
             }
             let now = host.now();
-            let text: Option<Vec<u8>> = marker.as_mut().map(|m| m.at(zone, now).to_vec());
+            let text: Option<Vec<u8>> = marker.as_mut().map(|m| m.at(lt, now).to_vec());
             match marking {
                 Marking::JsonDoc | Marking::JsonLines => {}
+                // `putchar('m')`, `printf("%s", fmtr)`, `putchar(Terminator)`
+                // and, after a NUL, `putchar('\n')`.
                 Marking::Fields { nul } => {
                     let out = host.out();
-                    out.write_all(b"m")?;
-                    out.write_all(text.as_deref().unwrap_or_default())?;
-                    out.write_all(if nul { b"\0\n" } else { b"\n" })?;
+                    let _ = out.write_all(b"m");
+                    let _ = out.write_all(text.as_deref().unwrap_or_default());
+                    let _ = out.write_all(if nul { b"\0" } else { b"\n" });
+                    if nul {
+                        let _ = out.write_all(b"\n");
+                    }
                 }
-                Marking::Table => {
-                    let out = host.out();
-                    out.write_all(text.as_deref().unwrap_or(b"======="))?;
-                    out.write_all(b"\n")?;
-                }
+                // `puts(cp)`.
+                Marking::Table => host.puts(text.as_deref().unwrap_or(b"=======")),
             }
-            host.out().flush()?;
-            host.sleep(delay);
+            // `(void)fflush(stdout)`, then the sleep.
+            let _ = host.out().flush();
+            // `sleep(RptTm)`: the `int` as the `unsigned int` it is passed as.
+            host.sleep(u32::from_ne_bytes(delay.to_ne_bytes()));
         }
-        if repeat.count > 0 && ended.cycles == repeat.count {
+        // `if (RptMaxCount && (++pr_count == RptMaxCount))`.
+        pr_count = pr_count.wrapping_add(1);
+        if repeat.count != 0 && pr_count == repeat.count {
             delay = 0;
         }
         if delay == 0 {
             break;
         }
     }
-    host.out().flush()?;
-    Ok(ended)
+    ended
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsof_core::timefmt::PosixTz;
 
     /// A run whose cycles list what `listed` says, in turn, and whose clock
     /// moves only when it sleeps.
@@ -120,7 +141,7 @@ mod tests {
         listed: Vec<bool>,
         cycle: usize,
         now: i64,
-        slept: Vec<u64>,
+        slept: Vec<u32>,
         out: Vec<u8>,
         events: Vec<String>,
     }
@@ -150,29 +171,51 @@ mod tests {
         fn now(&mut self) -> i64 {
             self.now
         }
-        fn sleep(&mut self, secs: u64) {
+        fn sleep(&mut self, secs: u32) {
             self.events.push(format!("sleep{secs}"));
             self.slept.push(secs);
-            self.now += i64::try_from(secs).unwrap();
+            self.now += i64::from(secs);
         }
         fn out(&mut self) -> &mut dyn Write {
-            &mut self.out
+            self
         }
     }
 
-    fn utc() -> Zone {
-        Zone::Rules(PosixTz::utc(b"UTC"))
+    /// The script's stdout: its bytes, and each `fflush()` as an event.
+    impl Write for Script {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.out.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.events.push("flush".into());
+            Ok(())
+        }
+    }
+
+    /// The C's `(void)fflush(stdout)` comes after the marker and before the
+    /// sleep, each cycle (strace: the cycle's last write, then
+    /// `clock_nanosleep`), and none after the loop: exit flushes.
+    #[test]
+    fn stdout_is_flushed_before_each_sleep() {
+        let (_, s) = go(rep(1, 2, false), Marking::Table, &[], None);
+        assert_eq!(
+            s.events,
+            ["cycle1", "flush", "sleep1", "cycle2", "flush", "sleep1"]
+        );
+        let (_, s) = go(rep(0, 0, false), Marking::Table, &[], None);
+        assert_eq!(s.events, ["cycle1"]);
     }
 
     fn go(r: Repeat, marking: Marking, listed: &[bool], fmt: Option<&[u8]>) -> (Ended, Script) {
-        let zone = utc();
-        let mut marker = fmt.map(|f| Marker::new(f, &zone, 0).expect("a format"));
+        let mut lt = LocalTime::utc();
+        let mut marker = fmt.map(|f| Marker::new(f, &mut lt, 0).expect("a format"));
         let mut s = Script::new(listed);
-        let ended = run(&r, &mut marker, &zone, marking, &mut s).unwrap();
+        let ended = run(&r, &mut marker, &mut lt, marking, &mut s);
         (ended, s)
     }
 
-    fn rep(delay: u64, count: u64, until_idle: bool) -> Repeat {
+    fn rep(delay: i32, count: i32, until_idle: bool) -> Repeat {
         Repeat {
             delay,
             count,
@@ -193,14 +236,14 @@ mod tests {
         assert!(!ended.idle_error);
     }
 
-    /// A reader gone: the first write after the cycle fails, and the run
-    /// ends there, its error the caller's to turn into the closed-pipe
-    /// exit (row 36), and no second cycle starts. The C, with SIGPIPE
-    /// ignored, writes on into the dead pipe until its count or `+r` ends
-    /// it (measured; DIVERGENCES 152, residue); with SIGPIPE left alone both
-    /// die at that write.
+    /// A reader gone, or a full disk: every write fails, and the run goes
+    /// on to its count, each cycle followed by its sleep, as the C's does
+    /// with `SIGPIPE` ignored or blocked (measured: `-r1c3` into a closed
+    /// pipe under `trap '' PIPE` takes three seconds and lists all three
+    /// times; with `SIGPIPE` at its default both are killed at the first
+    /// write).
     #[test]
-    fn a_write_that_fails_ends_the_run() {
+    fn a_write_that_fails_does_not_end_the_run() {
         struct Gone(Script);
         impl Cycles for Gone {
             fn cycle(&mut self) -> bool {
@@ -209,7 +252,7 @@ mod tests {
             fn now(&mut self) -> i64 {
                 self.0.now()
             }
-            fn sleep(&mut self, secs: u64) {
+            fn sleep(&mut self, secs: u32) {
                 self.0.sleep(secs)
             }
             fn out(&mut self) -> &mut dyn Write {
@@ -217,26 +260,54 @@ mod tests {
             }
         }
         impl Write for Gone {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::ErrorKind::BrokenPipe.into())
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
             }
-            fn flush(&mut self) -> io::Result<()> {
-                Err(io::ErrorKind::BrokenPipe.into())
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
             }
         }
         for until_idle in [false, true] {
-            let zone = utc();
+            let mut lt = LocalTime::utc();
             let mut host = Gone(Script::new(&[]));
-            let got = run(
+            let ended = run(
                 &rep(1, 3, until_idle),
                 &mut None,
-                &zone,
+                &mut lt,
                 Marking::Table,
                 &mut host,
             );
-            assert_eq!(got.err().map(|e| e.kind()), Some(io::ErrorKind::BrokenPipe));
-            assert_eq!(host.0.events, ["cycle1"], "+r: {until_idle}");
+            assert_eq!(ended.cycles, 3);
+            assert_eq!(
+                host.0.events,
+                ["cycle1", "sleep1", "cycle2", "sleep1", "cycle3", "sleep1"],
+                "+r: {until_idle}"
+            );
         }
+    }
+
+    /// The C's `int`s: a delay that wrapped negative repeats and sleeps its
+    /// `unsigned int` (measured: `-r2147483648` sleeps 2147483648 s,
+    /// `-r6442450945` 2147483649 s), and a negative count is not met by the
+    /// first cycles (the C's `pr_count` must wrap round to it).
+    #[test]
+    fn a_wrapped_delay_and_count_act_as_the_cs_ints() {
+        let (ended, s) = go(rep(i32::MIN, 1, false), Marking::Table, &[], None);
+        assert_eq!(
+            (ended.cycles, s.slept.as_slice()),
+            (1, &[2_147_483_648u32][..])
+        );
+        let (_, s) = go(rep(-1, 1, false), Marking::Table, &[], None);
+        assert_eq!(s.slept, [u32::MAX]);
+        // A negative count, under `+r` so that the run still ends: every
+        // cycle listed until the fourth, and the count never met.
+        let (ended, s) = go(
+            rep(1, -3, true),
+            Marking::Table,
+            &[true, true, true, false],
+            None,
+        );
+        assert_eq!((ended.cycles, s.slept.len()), (4, 3));
     }
 
     #[test]

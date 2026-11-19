@@ -148,7 +148,7 @@ rule = "lsof prints no usage hint and no help after a fatal error (83)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
 old = '''            if e.is_fatal() {
-                std::process::exit(1);
+                lsof_cli::stdio::exit(1);
             }'''
 new = ''
 

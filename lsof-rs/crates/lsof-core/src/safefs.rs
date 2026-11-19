@@ -462,20 +462,52 @@ pub fn to_stderr(line: &str) {
     write_stderr(&text);
 }
 
+/// What [`exit`] runs before the process ends: the binary's stdout flush
+/// (`lsof_cli::stdio::flush`), registered once at the start of `main`.
+static EXIT_FLUSH: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Register `flush` as what [`exit`] runs first. The first registration
+/// stands.
+pub fn set_exit_flush(flush: fn()) {
+    let _ = EXIT_FLUSH.set(flush);
+}
+
+/// What [`exit`] does before it ends the process: the registered flush, if
+/// there is one.
+pub fn before_exit() {
+    if let Some(flush) = EXIT_FLUSH.get() {
+        flush();
+    }
+}
+
+/// `exit(code)` as the C's `Exit()` and `exit()` end a run from where an
+/// error is found, deep in a backend: stdout's buffer flushed first, as
+/// glibc's `exit()` flushes it, whatever that gives, then the process ends
+/// with `code`. A backend cannot reach the binary's stdout, so the binary
+/// hands it the flush ([`set_exit_flush`]); `std::process::exit` alone
+/// would drop what the buffer holds.
+pub fn exit(code: i32) -> ! {
+    before_exit();
+    std::process::exit(code)
+}
+
 /// `text` on stderr, written as the C's unchecked `fprintf(stderr, …)`
-/// writes it: a failure is no reason to stop listing. `eprint!` PANICS on
-/// one, so `lsof 2>/dev/full` on a host with an owner the password file
-/// lacks died (exit 101) before its first row, where the C lists everything
-/// and exits 0. A stderr whose reader has gone is the one failure that
-/// ends the run, as the C dies of `SIGPIPE` there: exit 141, the status the
-/// shell shows for that, as lsof-rs's stdout does (`exit_on_write_error` in
-/// the binary). Anything else is ignored. Every warning and the help go
-/// through here.
+/// writes it, in one write (stderr is unbuffered): a failure is no reason
+/// to stop listing, and it is not reported. `eprint!` PANICS on one, so
+/// `lsof 2>/dev/full` on a host with an owner the password file lacks died
+/// (exit 101) before its first row, where the C lists everything and exits
+/// 0. A stderr whose reader has gone kills lsof-rs with `SIGPIPE` at this
+/// write where the signal was inherited at its default, as it kills the C
+/// (the binary puts the default back, `lsof_sigpipe`), and is ignored like
+/// any other failure where it was ignored or blocked, as the C ignores it
+/// (DIVERGENCES 36). Off Unix, where there is no `SIGPIPE`, a reader gone
+/// ends the run with 141, the status a shell shows for the signal. Every
+/// warning and the help go through here.
 pub fn write_stderr(text: &str) {
     use std::io::Write as _;
     let written = std::io::stderr().lock().write_all(text.as_bytes());
     if let Err(e) = written {
-        if e.kind() == io::ErrorKind::BrokenPipe {
+        if !cfg!(unix) && e.kind() == io::ErrorKind::BrokenPipe {
             std::process::exit(141);
         }
     }
@@ -641,6 +673,25 @@ impl SafeFs<'static> {
 
 #[cfg(test)]
 mod tests {
+    /// `exit()` runs the flush the binary registered first, and only that
+    /// one: the backends end a run through it, so what stdout's buffer
+    /// holds is written as the C's `exit()` writes it.
+    #[test]
+    fn exit_runs_the_registered_flush_first() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RAN: AtomicUsize = AtomicUsize::new(0);
+        fn flush() {
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        fn other() {
+            RAN.fetch_add(100, Ordering::SeqCst);
+        }
+        super::set_exit_flush(flush);
+        super::set_exit_flush(other);
+        super::before_exit();
+        assert_eq!(RAN.load(Ordering::SeqCst), 1);
+    }
+
     use super::*;
     use std::cell::RefCell;
 

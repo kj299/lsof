@@ -528,8 +528,8 @@ name = "fields-c-from-lossy-text"
 rule = "-F c prints a command's bytes (92)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/fields.rs"
-old = '''            push!('c', &esc.bytes(p.command_bytes()));'''
-new = '''            push!('c', &esc.text(&p.command));'''
+old = '''            esc.bytes_calls(p.command_bytes(), &mut out);'''
+new = '''            esc.text_calls(&p.command, &mut out);'''
 
 [[mutant]]
 name = "fields-l-from-lossy-text"
@@ -620,8 +620,10 @@ name = "fields-before-login-dropped"
 rule = "-F writes the fields before L before the passwd stat error (70)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''                    let _ = out.write_all(head.as_bytes());'''
-new = '''                    let _ = out.write_all(b"");'''
+old = '''                    for call in before_login(first, *nul, only.as_deref()) {
+                        let _ = lsof_cli::stdio::Stdout.write_all(&call);
+                    }'''
+new = '''                    let _ = before_login(first, *nul, only.as_deref());'''
 
 [[mutant]]
 name = "rollback-drops-told-lines"

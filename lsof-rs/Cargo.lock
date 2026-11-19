@@ -70,6 +70,7 @@ dependencies = [
  "lsof-backend-linux",
  "lsof-backend-windows",
  "lsof-core",
+ "lsof-sigpipe",
 ]
 
 [[package]]
@@ -77,6 +78,13 @@ name = "lsof-core"
 version = "2.0.0"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "lsof-sigpipe"
+version = "2.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

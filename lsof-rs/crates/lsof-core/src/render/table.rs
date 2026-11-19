@@ -17,7 +17,7 @@ use std::io::{self, Write};
 
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
 use crate::render::fflags::{self, FileFlags};
-use crate::render::{offset_text, tcp_info_socket, Escaper, DEFAULT_OFFSET_DIGITS};
+use crate::render::{offset_text, tcp_info_socket, Calls, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 
 /// The `-T` annotation the table appends to a socket's NAME: **one**
@@ -41,8 +41,42 @@ use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 /// `print_unix()` honours only the state, and a unix row never carries queues,
 /// so selecting them yields nothing on its own.
 fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
-    if !show.any() {
+    let Some(parts) = tcp_parts(f, show) else {
         return String::new();
+    };
+    // The separator, then the group if there turned out to be one.
+    let mut out = String::from(" ");
+    if !parts.is_empty() {
+        out.push('(');
+        out.push_str(&parts.join(" "));
+        out.push(')');
+    }
+    out
+}
+
+/// [`tcp_suffix`] as the C's `print_tcptpi()` prints it, a call at a time:
+/// `printname()`'s `putchar(' ')`, then for each fact a `putchar('(')` (the
+/// first) or `putchar(' ')` and one `fputs()` or `printf()`, then
+/// `putchar(')')`.
+fn tcp_suffix_calls(f: &OpenFile, show: TcpInfoFlags, out: &mut Calls) {
+    let Some(parts) = tcp_parts(f, show) else {
+        return;
+    };
+    out.putc(b' ');
+    for (i, part) in parts.iter().enumerate() {
+        out.putc(if i == 0 { b'(' } else { b' ' });
+        out.call(part);
+    }
+    if !parts.is_empty() {
+        out.putc(b')');
+    }
+}
+
+/// The facts [`tcp_suffix`] prints, in order; `None` where the row gets no
+/// separator either.
+fn tcp_parts(f: &OpenFile, show: TcpInfoFlags) -> Option<Vec<String>> {
+    if !show.any() {
+        return None;
     }
     // Only a row the C keeps a TCP/TPI record for: `Lf->lts.type >= 0`, which
     // the Linux dialect sets for TCP, UDP, UDP-Lite and AF_UNIX sockets and
@@ -50,9 +84,7 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
     // once the differential compared whitespace (DIVERGENCES 35): lsof-rs had
     // ended every packet-socket NAME with a space the C does not print. A
     // UDP-Lite row gets one, and its queues under `-T q` (measured).
-    let Some(sock) = tcp_info_socket(f) else {
-        return String::new();
-    };
+    let sock = tcp_info_socket(f)?;
     let mut parts: Vec<String> = Vec::new();
     if show.state {
         if let Some(st) = sock.shown_state() {
@@ -74,14 +106,7 @@ fn tcp_suffix(f: &OpenFile, show: TcpInfoFlags) -> String {
             }
         }
     }
-    // The separator, then the group if there turned out to be one.
-    let mut out = String::from(" ");
-    if !parts.is_empty() {
-        out.push('(');
-        out.push_str(&parts.join(" "));
-        out.push(')');
-    }
-    out
+    Some(parts)
 }
 
 /// The FD cell's name part: `cwd`, `txt`, `NOFD`, or the descriptor number.
@@ -202,8 +227,9 @@ fn render_terse(w: &mut dyn Write, procs: &[Process]) -> io::Result<()> {
     let mut pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
     pids.sort_unstable();
     pids.dedup();
+    // One `printf("%d\n")` each.
     for pid in pids {
-        writeln!(w, "{pid}")?;
+        w.write_all(format!("{pid}\n").as_bytes())?;
     }
     Ok(())
 }
@@ -288,37 +314,115 @@ const FD_MODE: Col = Col {
     glued: true,
 };
 
-/// One line: every cell but NAME padded to its column's width the column's
-/// way, NAME written as it is. Straight to `w` — `format!` per cell would
-/// allocate a string only to copy it into the output.
-fn emit_line<S: AsRef<str>>(
-    w: &mut dyn Write,
-    cells: &[S],
-    widths: &[usize],
-    cols: &[Col],
-) -> io::Result<()> {
-    let last = cols.len() - 1;
-    for (i, cell) in cells.iter().enumerate() {
-        let cell = cell.as_ref();
-        if i > 0 && !cols[i].glued {
-            w.write_all(b" ")?;
+/// `cell` padded to `width` the column's way: right-aligned by BYTES, as
+/// the C's `printf(" %*s")` pads, to the width measured in bytes (a login
+/// name `jöhn` fills a five-wide USER column, DIVERGENCES 71, measured), or
+/// left-aligned.
+fn padded(out: &mut Vec<u8>, cell: &str, width: usize, right: bool) {
+    let pad = width.saturating_sub(cell.len());
+    if right {
+        out.resize(out.len() + pad, b' ');
+        out.extend_from_slice(cell.as_bytes());
+    } else {
+        out.extend_from_slice(cell.as_bytes());
+        out.resize(out.len() + pad, b' ');
+    }
+}
+
+/// The header, as `print_file()`'s `printf()`s print it: `"%-*.*s %*s"`
+/// for COMMAND and PID, one call for each optional column, `" %*s %*s
+/// %*s"` for USER, FD and TYPE, and `" %*s %s\n"` for NODE and NAME.
+fn emit_header(w: &mut dyn Write, widths: &[usize], cols: &[Col]) -> io::Result<()> {
+    let mut out = Calls::new();
+    let mut call: Vec<u8> = Vec::new();
+    for (i, col) in cols.iter().enumerate() {
+        let joins = i > 0 && matches!(col.title, "PID" | "FD" | "" | "TYPE" | "NAME");
+        if i > 0 && !joins {
+            out.call(&call);
+            call.clear();
         }
-        if i == last {
-            w.write_all(cell.as_bytes())?; // NAME: never padded
-        } else if cols[i].right {
-            // Padded by BYTES, as the C's `printf(" %*s")` pads, to the width
-            // measured in bytes: a login name `jöhn` fills a five-wide USER
-            // column (DIVERGENCES 71, measured). `{:>width$}` counts chars,
-            // and shifted every multibyte name right by one column per extra
-            // byte. USER is the one right-aligned cell that can hold
-            // multibyte text; every other one is ASCII, where the two agree.
-            let pad = widths[i].saturating_sub(cell.len());
-            write!(w, "{:pad$}{cell}", "")?;
+        if i > 0 && !col.glued {
+            call.push(b' ');
+        }
+        if i == cols.len() - 1 {
+            call.extend_from_slice(col.title.as_bytes());
         } else {
-            write!(w, "{cell:<width$}", width = widths[i])?;
+            padded(&mut call, col.title, widths[i], col.right);
         }
     }
-    w.write_all(b"\n")
+    call.push(b'\n');
+    out.call(&call);
+    out.write_to(w)
+}
+
+/// What a row's cell is printed as.
+enum Cell<'a> {
+    /// COMMAND: `safestrprtn()`, a call a character, padded with a
+    /// `putc(' ')` each.
+    Command(&'a [u8]),
+    /// TASKCMD: `printf(" ")`, then as COMMAND.
+    TaskCommand(&'a str),
+    /// SIZE/OFF: `putchar(' ')`, then one `printf()`.
+    SizeOff,
+    /// NAME: `putchar(' ')`, `printname()`'s calls, `putchar('\n')`.
+    Name(&'a OpenFile),
+    /// Any other: one `printf(" %*s")`, joined to the one before it where
+    /// `print_file()` prints the two in one (FD and its mode).
+    Plain,
+}
+
+/// One row, as `print_file()` prints it ([`Cell`]): `cells` sized it,
+/// `kinds` say how each is printed.
+fn emit_row(
+    w: &mut dyn Write,
+    cells: &[String],
+    kinds: &[Cell<'_>],
+    widths: &[usize],
+    cols: &[Col],
+    (esc, tcp_show): (Escaper, TcpInfoFlags),
+) -> io::Result<()> {
+    let mut out = Calls::new();
+    let mut call: Vec<u8> = Vec::new();
+    for (i, (cell, kind)) in cells.iter().zip(kinds).enumerate() {
+        if !cols[i].glued {
+            out.call(&call);
+            call.clear();
+        }
+        let width = widths[i];
+        match kind {
+            Cell::Command(b) => {
+                let used = esc.command_bytes_truncated_calls(b, width, &mut out);
+                for _ in used..width {
+                    out.putc(b' ');
+                }
+            }
+            Cell::TaskCommand(c) => {
+                out.putc(b' ');
+                let used = esc.command_truncated_calls(c, width, &mut out);
+                for _ in used..width {
+                    out.putc(b' ');
+                }
+            }
+            Cell::SizeOff => {
+                out.putc(b' ');
+                padded(&mut call, cell, width, true);
+            }
+            Cell::Name(f) => {
+                out.putc(b' ');
+                f.printed_name_calls(&esc, &mut out);
+                tcp_suffix_calls(f, tcp_show, &mut out);
+                out.putc(b'\n');
+            }
+            Cell::Plain => {
+                if !cols[i].glued {
+                    call.push(b' ');
+                }
+                padded(&mut call, cell, width, cols[i].right);
+            }
+        }
+    }
+    out.call(&call);
+    out.write_to(w)
 }
 
 /// How the table is drawn. Every field is one lsof option, named, because the
@@ -599,19 +703,35 @@ pub fn render_naming(
     if !any {
         return Ok(());
     }
+    // COMMAND and TASKCMD are as wide as pass one made them, `CmdColW` and
+    // `TaskCmdColW`, which `safestrprtn()` pads to: a cell cut short of it
+    // by an escape that does not fit whole is padded the rest of the way
+    // (measured: a command `abcdefgh^A` under the default `+c 9` prints in
+    // nine columns in the C; lsof-rs had made the column eight wide).
+    widths[0] = cmd_cut;
+    if let Some(i) = cols.iter().position(|c| c.title == "TASKCMD") {
+        widths[i] = task_cut;
+    }
 
     // Pass three: print. The same `row_for`, so a line cannot disagree with
     // the width it was measured at.
-    let titles: Vec<&str> = cols.iter().map(|c| c.title).collect();
-    emit_line(w, &titles, &widths, &cols)?;
+    emit_header(w, &widths, &cols)?;
     for (p, f) in rows_of(procs, &blank) {
         let renamed = rename(f);
-        emit_line(
-            w,
-            &row_for(p, renamed.as_ref().unwrap_or(f)),
-            &widths,
-            &cols,
-        )?;
+        let f = renamed.as_ref().unwrap_or(f);
+        let cells = row_for(p, f);
+        let kinds: Vec<Cell<'_>> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match c.title {
+                _ if i == 0 => Cell::Command(p.command_bytes()),
+                "TASKCMD" => Cell::TaskCommand(p.task_command.as_deref().unwrap_or("")),
+                "NAME" => Cell::Name(f),
+                t if t == size_off.header() => Cell::SizeOff,
+                _ => Cell::Plain,
+            })
+            .collect();
+        emit_row(w, &cells, &kinds, &widths, &cols, (esc, tcp_show))?;
     }
     Ok(())
 }

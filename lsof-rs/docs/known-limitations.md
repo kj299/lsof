@@ -316,19 +316,27 @@ meet. Each number is a row there, with the measurement behind it.
 - **Linux, the time a name costs** (154): a socket row's host that
   `/etc/hosts` does not name is asked of DNS once a run, as the C asks it,
   under `/etc/resolv.conf`'s timeouts (above); `-n` asks nothing.
-- **`-r m<fmt>`, `+m m` and their residues** (152, 153): a `TZ` naming a
-  zone with daylight time and no rule (`EST5EDT`) takes the United States'
-  rule (glibc reads `posixrules`, which is that rule where it links to
-  `America/New_York`); a zone file past 1 MiB, or one that is no regular file,
-  is no zone; the zone is read once a run, where glibc's `localtime()`
-  looks at `/etc/localtime` again at each marker; `%s` is the time itself,
-  where glibc's `mktime()` takes the later of an hour a zone repeats with
-  the same daylight flag; on Windows the marker's zone is `TZ`'s POSIX rule
-  string (`CET-1CEST,M3.5.0,M10.5.0/3`), else UTC: the Windows time-zone
-  setting is not read; on FreeBSD it follows glibc's rules, unmeasured
-  against FreeBSD's libc. With SIGPIPE ignored and the reader gone, lsof-rs
-  exits 141 at its first failed write, where the C writes on into the dead
-  pipe until its count or `+r` ends the loop. A mount supplement that is a
+- **`-r m<fmt>`, `+m m` and their residues** (152, 153): a zone file that is
+  no regular file (a FIFO, a device) is waited on 3 seconds at most in all,
+  where glibc's waits for ever, and then taken as unreadable (a FIFO with
+  no writer: UTC); a regular one under another process's write lease is
+  waited for the same 3 seconds, where glibc's waits until the lease is let
+  go or broken (`lease-break-time`, 45 s by default); a stream's version 1
+  data past 64 MiB is refused, where glibc reads it whole; on FreeBSD such
+  a file is not read at all. On Windows
+  the marker's zone is `TZ`'s POSIX rule string
+  (`CET-1CEST,M3.5.0,M10.5.0/3`), else UTC: the Windows time-zone setting is
+  not read; on FreeBSD it follows glibc's rules, unmeasured against
+  FreeBSD's libc. (Since 2026-11-18 the rest is the C's: `%s` is
+  `mktime()`'s, `/etc/localtime` is looked at again at each marker with
+  `TZ` unset, `posixrules`, any size of zone file, the delay and count
+  wrapping as the C's `int`s.) A closed pipe kills lsof-rs with `SIGPIPE`
+  where the signal was left at its default, and with it ignored or blocked
+  lsof-rs writes on into the dead pipe, as the C does, until its count or
+  `+r` ends the loop (a plain `-r` until it is killed); on Windows a closed
+  pipe ends the run with exit 141. A write error is never reported, nor
+  does it change the exit status, as in the C: `lsof > /dev/full` exits 0.
+  A mount supplement that is a
   FIFO, a pipe or a device is `error reading` it and is never read, where the
   C waits on a FIFO with no writer, reads a pipe that has one (`printf … |
   lsof +m /dev/stdin`) or reads `/dev/zero` forever; one past 16 MiB is read

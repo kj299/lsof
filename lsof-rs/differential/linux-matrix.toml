@@ -2765,8 +2765,12 @@ name = "inet-port-range-that-misses"
 args = ["-n", "-P", "-a", "-p", "{B}", "-i:1-2"]
 
 [[case]]
+# No protocol: `-iTCP:9,{PORT}` makes two entries sharing one protocol
+# string, which the C frees twice at exit (`lib/lsof.c`, the network
+# address list), and glibc 2.43 (the Ubuntu 26.04 runner) aborts on that
+# double free. See DIVERGENCES, "The C frees a protocol twice".
 name = "inet-port-list"
-args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:9,{PORT}"]
+args = ["-n", "-P", "-a", "-p", "{B}", "-i:9,{PORT}"]
 
 [[case]]
 # The bare -i is located by a socket B keeps even though `-d 0` hides it:
@@ -7230,6 +7234,327 @@ with_stderr = true
 name = "repeat-plus-r-empty-value"
 args = ["+r", "", "-a", "-d", "999", "-p", "{A}"]
 with_stderr = true
+
+[[case]]
+# The delay and the count are the C's `int`s and wrap (DIVERGENCES 121):
+# 4294967297 is a delay of 1, a cycle a second, and the count's
+# 4294967298 is 2 (measured; lsof-rs had saturated both, so it slept
+# 4294967297 s after the first cycle).
+name = "repeat-delay-and-count-wrap-as-the-cs-int"
+args = ["-r", "4294967297c4294967298mX", "-a", "-d", "cwd", "-p", "{A}"]
+timeout = 10
+
+[[case]]
+# A delay that wraps to 0 is no repeat: one cycle, no marker (measured).
+name = "repeat-delay-wraps-to-zero"
+args = ["-r4294967296", "-a", "-d", "cwd", "-p", "{A}"]
+timeout = 10
+
+[[case]]
+# `c4294967297` is a count of one.
+name = "repeat-count-wraps-to-one"
+args = ["-r", "1c4294967297mX", "-a", "-d", "cwd", "-p", "{A}"]
+timeout = 10
+
+[[case]]
+# `TZ` unset: each marker's `localtime()` `stat`s /etc/localtime and reads
+# it again where it changed (glibc 2.39's tzset.c and tzfile.c): renamed
+# over half a second in, the second and third markers are Kolkata's.
+# lsof-rs had read the zone once a run (DIVERGENCES 152).
+name = "repeat-tz-unset-reads-a-new-localtime"
+args = ["-r", "1c3m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-swap" }
+timeout = 20
+
+[[case]]
+# Rewritten in place with its time put back: the same device, inode and
+# second, so glibc does not read it again, and neither does lsof-rs.
+name = "repeat-tz-unset-in-place-rewrite-is-not-seen"
+args = ["-r", "1c3m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-inplace" }
+timeout = 20
+
+[[case]]
+# Gone at half a second, back at one and a half: UTC named `UTC`, then the
+# new file, opened with no `stat` first.
+name = "repeat-tz-unset-localtime-gone-is-utc"
+args = ["-r", "1c3m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-gone" }
+timeout = 20
+
+[[case]]
+# `TZ` set and unchanged: nothing is read again, whatever it names.
+name = "repeat-tz-set-is-not-read-again"
+args = ["-r", "1c3m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-swap", TZ = "/etc/localtime" }
+timeout = 20
+
+[[case]]
+# `%s` is `mktime()` of the time broken down, which in a time the zone's
+# clock went back over, with one `tm_isdst`, a new process takes as the
+# earlier: 2^30 seconds before now. linux-rules.json masks the last seven
+# digits after `MKT`. lsof-rs had printed the time itself.
+name = "repeat-marker-percent-s-is-mktimes"
+args = ["-r", "1c2mMKT%s", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-fold", TZ = "/etc/foldzone" }
+timeout = 20
+
+[[case]]
+# Daylight time named and no rule, and no file of that name: glibc reads
+# `posixrules` (here Sydney's, in daylight time from October to April) and
+# moves its changes to the offsets given. lsof-rs had taken the United
+# States' rule.
+name = "repeat-tz-no-rule-reads-posixrules"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-posix", TZ = "FOO3BAR", TZDIR = "/etc" }
+timeout = 20
+
+[[case]]
+# A zone file whose footer names daylight time and no rule, `FOO3BAR`,
+# past its last change: glibc reads `posixrules` in place of the zone and
+# works the time out from the rules the string left cleared, so that most
+# of a year is daylight time (`BAR-0200`, each marker); lsof-rs had taken
+# the United States' rule (`FOO-0300` from November to March).
+name = "repeat-tz-footer-with-no-rule-reads-posixrules"
+args = ["-r", "1c2m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-nofoot", TZ = "/etc/nofoot", TZDIR = "/etc" }
+timeout = 20
+
+[[case]]
+# The same with no `posixrules`: the zone is gone for good, and the
+# string's names with the United States' rule are the time (a control).
+name = "repeat-tz-footer-with-no-rule-and-no-posixrules"
+args = ["-r", "1c2m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-nofootnorules", TZ = "/etc/nofoot", TZDIR = "/etc" }
+timeout = 20
+
+[[case]]
+# A zone file another process holds a write lease on, which it lets go a
+# second after it is told of the open: glibc's blocking `fopen()` waits
+# for it and reads the zone, `IST+0530`; lsof-rs's `O_NONBLOCK` open had
+# failed at once (`+0000`), and now tries again every 10 ms for 3 s.
+name = "repeat-tz-file-under-a-lease-is-waited-for"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-lease", TZ = "/etc/leased" }
+timeout = 20
+
+[[case]]
+# A zone file of 20 MiB, its footer `QQQ-3` and the rest past a NUL: glibc
+# reads any length; lsof-rs had refused one past 1 MiB.
+name = "repeat-tz-file-past-a-mebibyte"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-big", TZ = "/etc/bigzone" }
+timeout = 20
+
+[[case]]
+# /etc/localtime a link to /dev/zero, to /dev/null, or a directory: glibc
+# reads it (one buffer of zeros, nothing, `EISDIR`) and refuses it: UTC
+# named `UTC`.
+name = "repeat-tz-localtime-dev-zero"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-zero" }
+timeout = 20
+
+[[case]]
+name = "repeat-tz-localtime-dev-null"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-null" }
+timeout = 20
+
+[[case]]
+name = "repeat-tz-localtime-a-directory"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-dir" }
+timeout = 20
+
+[[case]]
+# A FIFO a writer sends a version 1 file through: glibc reads it whole,
+# `ABC+0100`; lsof-rs had refused any file that is no regular one.
+name = "repeat-tz-fifo-with-a-version-1-writer"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-v1fifo", TZ = "/etc/tzfifo" }
+timeout = 20
+
+[[case]]
+# The same with a version 2 file: glibc's seek to the second header fails
+# on a pipe, so `TZ` is read as a rule string, UTC with no name.
+name = "repeat-tz-fifo-with-a-version-2-writer"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-v2fifo", TZ = "/etc/tzfifo" }
+timeout = 20
+
+[[case]]
+# A FIFO with no writer: glibc's open waits for one for ever (the C is
+# killed at the case's limit); lsof-rs waits 3 seconds at each look and
+# takes it as unreadable, UTC named `UTC` (ledgered).
+name = "repeat-tz-fifo-with-no-writer-holds-the-c"
+args = ["-r", "1c1m%Z%z", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "tz-fifo" }
+timeout = 12
+
+[[case]]
+# stdout on a full disk: the C never checks a write, says nothing and exits
+# 0 (DIVERGENCES 36); lsof-rs had said `lsof: write error` and exited 1.
+name = "write-error-full-disk-is-no-error"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-full" }
+with_stderr = true
+
+[[case]]
+# A search failure keeps its status on a full disk.
+name = "write-error-full-disk-keeps-the-search-status"
+args = ["-n", "-P", "-p", "999999999"]
+env = { LSOF_DIFF_MT = "wr-full" }
+with_stderr = true
+
+[[case]]
+# A closed pipe, `SIGPIPE` at its default: killed by the signal at the
+# write, `status -13` (lsof-rs had exited 141 itself).
+name = "write-error-closed-pipe-is-sigpipe"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed" }
+with_stderr = true
+
+[[case]]
+name = "write-error-closed-pipe-is-sigpipe-fields"
+args = ["-n", "-P", "-F", "pcfn", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed" }
+with_stderr = true
+
+[[case]]
+name = "write-error-closed-pipe-is-sigpipe-json"
+args = ["-n", "-P", "-J", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed" }
+with_stderr = true
+
+[[case]]
+# `SIGPIPE` ignored, as `trap '' PIPE` leaves it, or blocked: the write
+# fails, nothing is said, exit 0.
+name = "write-error-closed-pipe-sigpipe-ignored"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed-ign" }
+with_stderr = true
+
+[[case]]
+name = "write-error-closed-pipe-sigpipe-blocked"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed-blk" }
+with_stderr = true
+
+[[case]]
+# A repeating run, `SIGPIPE` ignored: every cycle and its sleep, then its
+# usual status, 0 here, and 1 for `+r`'s nothing listed.
+name = "write-error-closed-pipe-repeats-to-its-count"
+args = ["-n", "-P", "-r", "1c2mX", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed-ign" }
+with_stderr = true
+timeout = 20
+
+[[case]]
+name = "write-error-closed-pipe-plus-r-nothing"
+args = ["-n", "-P", "+r", "1mX", "-a", "-d", "999", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-closed-ign" }
+with_stderr = true
+timeout = 20
+
+[[case]]
+# stderr: the help, written to stderr, with stdout on a full disk is the
+# help; `-h` with a closed stdout is no error either (it writes none).
+name = "write-error-help-on-a-full-stdout"
+args = ["-h"]
+env = { LSOF_DIFF_MT = "wr-full" }
+
+# ---------------------------------------------- the C's stdio calls (DIVERGENCES 36): `wr-trace-*`
+
+[[case]]
+# `+m`'s lines are in stdout's buffer when the parse reads the table, and
+# `-h` ends the run through `exit()`, which writes them (measured: the C
+# prints them, 551 bytes on the review host; lsof-rs had returned from
+# `main` without its flush, and printed nothing).
+name = "plus-m-before-help-is-written"
+args = ["+m", "+d", "{AXDIR}", "-h"]
+
+[[case]]
+# `+m`'s table on a terminal: a `printf("%s %#lx\n")` a mount, so a write
+# a line (lsof-rs had written the table in one).
+name = "write-trace-plus-m-on-a-terminal"
+args = ["+m"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-none" }
+
+[[case]]
+# On a terminal, line-buffered: the C's `-F` writes each field's line as
+# its `printf("%c%s%c")` or `putchar('\n')` ends it (lsof-rs had written a
+# whole set in one write). The sizes of the writes are the output.
+name = "write-trace-fields-on-a-terminal-a-line-a-write"
+args = ["-n", "-P", "-F", "-a", "-d", "0-9", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-none" }
+
+[[case]]
+# Writes that fail (EAGAIN, as a non-blocking terminal's can): each takes
+# its line and nothing more.
+name = "write-trace-fields-on-a-terminal-writes-failing"
+args = ["-n", "-P", "-F", "-a", "-d", "0-9", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-2+2" }
+
+[[case]]
+# A control: the same before the stdio calls were followed.
+name = "write-trace-table-on-a-terminal"
+args = ["-n", "-P", "-p", "{A},{N}"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-3+3" }
+
+[[case]]
+# On a pipe, 4096 bytes a write; one that fails takes its buffer and the
+# rest of the stdio call it was made in, the C's `printf()`, `putchar()`
+# or `fputs()` (lsof-rs had dropped the rest of a whole set).
+name = "write-trace-fields-on-a-pipe-writes-failing"
+args = ["-n", "-P", "-F", "-p", "{A},{N},{Q},{V}"]
+env = { LSOF_DIFF_MT = "wr-trace-pipe-1" }
+
+[[case]]
+# A control: the same before the stdio calls were followed.
+name = "write-trace-fields-nul-on-a-pipe-writes-failing"
+args = ["-n", "-P", "-F0", "-p", "{A},{N},{Q},{V}"]
+env = { LSOF_DIFF_MT = "wr-trace-pipe-2+2" }
+
+[[case]]
+# A control: the same before the stdio calls were followed.
+name = "write-trace-table-on-a-pipe-writes-failing"
+args = ["-n", "-P", "-p", "{A},{N},{Q},{V}"]
+env = { LSOF_DIFF_MT = "wr-trace-pipe-1" }
+
+[[case]]
+name = "write-trace-json-lines-on-a-pipe-writes-failing"
+args = ["-n", "-P", "-j", "-p", "{N},{Q},{V}"]
+env = { LSOF_DIFF_MT = "wr-trace-pipe-1" }
+
+[[case]]
+# A control: the same before the stdio calls were followed.
+name = "write-trace-json-lines-on-a-terminal"
+args = ["-n", "-P", "-j", "-a", "-d", "0-3", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-4..6" }
+
+[[case]]
+# `puts()` of the marker on a terminal: the marker and its newline in one
+# write; markers of `-F` a `putchar()`, a `printf()`, a `putchar()`.
+# A control: the same before the stdio calls were followed.
+name = "write-trace-repeat-markers-on-a-terminal"
+args = ["-n", "-P", "-r", "1c2mMARK", "-a", "-d", "0-2", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-none" }
+timeout = 20
+
+[[case]]
+name = "write-trace-repeat-field-markers-on-a-terminal"
+args = ["-n", "-P", "-F", "pfn", "-r", "1c2mMARK", "-a", "-d", "0-2", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-none" }
+timeout = 20
+
+[[case]]
+# `-V`'s lines: a `printf()` of the words, then the argument a byte at a
+# time (`safestrprt()`), on a terminal.
+# A control: the same before the stdio calls were followed.
+name = "write-trace-misses-on-a-terminal"
+args = ["-n", "-P", "-V", "-a", "-p", "{A}", "-c", "nosuchcommand", "-u", "54321", "-i", "@127.0.0.9"]
+env = { LSOF_DIFF_MT = "wr-trace-tty-none" }
 
 [[case]]
 # What follows the digits of a value in the next word is read on as letters
