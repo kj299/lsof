@@ -660,6 +660,7 @@ mod tests {
     fn a_process_named_with_a_non_utf8_byte_is_still_gathered() {
         use lsof_core::model::FdType;
         use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::CommandExt;
         let dir = std::env::temp_dir().join(format!("lsof-rs-comm-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join(std::ffi::OsStr::from_bytes(b"sl\xffeep"));
@@ -670,7 +671,14 @@ mod tests {
         // someone holds open for writing is refused. It clears on its own.
         let mut tries = 0;
         let mut child = loop {
-            match std::process::Command::new(&exe).arg("30").spawn() {
+            // argv[0] stays `sleep`: a multi-call `sleep` (uutils coreutils,
+            // Ubuntu 26.04) picks its tool from argv[0] and exits under any
+            // other name. The comm still comes from the file's name.
+            match std::process::Command::new(&exe)
+                .arg0("sleep")
+                .arg("30")
+                .spawn()
+            {
                 Ok(child) => break child,
                 Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
                     tries += 1;

@@ -427,7 +427,10 @@ def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
     os.symlink(shutil.which("sleep"), link)
     return Fixture(
         f"{name}(comm)",
-        [b"bash", b"-c", b'exec "$0" 600', link],
+        # `exec -a sleep`: the kernel names the process after the file, but a
+        # multi-call `sleep` (uutils coreutils, Ubuntu 26.04) picks its tool
+        # from argv[0] and exits 1 under any other name.
+        [b"bash", b"-c", b'exec -a sleep "$0" 600', link],
         cwd=cdir,
         expect_fds=3,
         expect_comm=comm.encode("utf-8"),
@@ -600,7 +603,9 @@ def long_command_holder(work: str) -> Fixture:
     shutil.copy("/bin/sleep", binary)
     return Fixture(
         "H(long command)",
-        [binary.encode(), b"600"],
+        # argv[0] stays `sleep` for a multi-call `sleep` (see hostile_sleeper);
+        # the comm still comes from the file's name.
+        [b"bash", b"-c", b'exec -a sleep "$0" 600', binary.encode()],
         cwd=cdir,
         expect_fds=3,  # 0,1,2
         expect_comm=LONG_COMM.encode(),
