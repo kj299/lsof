@@ -659,11 +659,17 @@ mod tests {
     /// that [`a_process_named_with_a_non_utf8_byte_is_still_gathered`] runs.
     const SLEEPER: &str = "LSOF_RS_TEST_SLEEPER";
 
+    /// The file the renamed copy creates once it is running, before it sleeps.
+    const SLEEPER_READY: &str = "LSOF_RS_TEST_SLEEPER_READY";
+
     /// Not a test of its own: in the renamed copy, the process that test
     /// lists. Elsewhere `SLEEPER` is unset and it returns at once.
     #[test]
     fn a_sleeper_for_the_renamed_copy() {
         if let Some(secs) = std::env::var(SLEEPER).ok().and_then(|s| s.parse().ok()) {
+            if let Some(ready) = std::env::var_os(SLEEPER_READY) {
+                std::fs::write(ready, b"").expect("say the copy is running");
+            }
             std::thread::sleep(std::time::Duration::from_secs(secs));
         }
     }
@@ -694,6 +700,7 @@ mod tests {
                     "--test-threads=1",
                 ])
                 .env(SLEEPER, "30")
+                .env(SLEEPER_READY, dir.join("ready"))
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -712,6 +719,15 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the child never exec'd"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Running, not merely exec'd: on the Ubuntu 26.04 CI image the scan
+        // missed a copy still being loaded, where no local host ever did.
+        while !dir.join("ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the renamed copy never started"
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
