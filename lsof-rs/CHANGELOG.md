@@ -16,12 +16,28 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   until the maintainer reversed it): at the first name, at `-` or `+`
   alone (the first name) and at `--` or `++` (taken); every word after is a
   name, whatever it opens with. `lsof /nonexist -p 1` now says a status
-  error for each of the three words and exits 1, as the C does, where
-  lsof-rs had read `-p 1` and exited 0; `lsof FILE -t` lists FILE's table
-  and names `-t`. A whole next word an option gives back is read where a
-  word starts, so `-o x -t` names `x` and `-t`, and `+c x -W` says `+c`'s
-  error alone. `-`, `+` and `++` had been refused. A script that puts
-  options after its names must move them in front. Every platform.
+  error for each of the three words, as the C does, where lsof-rs had read
+  `-p 1` and said one (exit 1 either way); `lsof FILE -a -p PID`, FILE open
+  by PID, now names `-a`, `-p` and PID too and exits 1, where it had listed
+  FILE and exited 0; `lsof FILE -t` lists FILE's table and names `-t`. A
+  whole next word an option gives back is read where a word starts, so
+  `-o x -t` names `x` and `-t`, and `+c x -W` says `+c`'s error alone. `-`, `+` and `++` had been refused. A script that puts
+  options after its names must move them in front. Every platform, and so
+  `--etw`, `--unicode` and `--ascii` after a path are paths too. A name
+  taken from inside a word an option gave back after its digits, where a
+  0xff byte ends the options, is that word as given: `-o $'1\xfft' FILE`
+  names `1\xfft`, where lsof-rs had named `-\xfft`.
+- **`--etw`, `--unicode` and `--ascii` are Windows options only**
+  (DIVERGENCES 155). Elsewhere each is the letters the C reads in it, as
+  the C reads them: `lsof --etw FILE` says `illegal option character: -`
+  and `-e not followed by a file system path: "tw"`, then the usage, and
+  exits 1, where lsof-rs had listed FILE and exited 0 (Linux had accepted
+  `--etw` and ignored it). On Windows they are read only where the C would
+  read an option word: not after a path, `--` or `++`, and not as a word
+  an option was offered and gave back (`-L --etw`); and `--unicode`
+  switches the console to UTF-8 only once the parse has read it as the
+  option and the run goes on, where any `--unicode` on the command line,
+  a path or an option's value included, had switched it before the parse.
 - **Standard output is written in the C's stdio calls** (DIVERGENCES 36):
   a port of glibc 2.39's `printf()`, `fputs()`, `putchar()` and `puts()`
   output paths, fed the calls `print.c` makes for the same text, so that a

@@ -267,18 +267,22 @@ MISCELLANEOUS:
                   2), in a helper process (Linux; elsewhere they are made in
                   lsof). One that times out fails: `Connection timed out`
     --, ++        end of options; remaining args are paths. The options
-                  also end at the first path, or a lone - or +: every
-                  word after it is a path, as in the C (lsof f -p 1
-                  names three files)
+                  also end at the first path, and a lone - or + is that
+                  first path: it and every word after it are paths, --
+                  and ++ included, as in the C (lsof f -p 1 names three
+                  files)
 
     --etw         (Windows, opt-in) short ETW capture against the AFD
                   provider to extend `-i` coverage to socket families
                   IP Helper doesn't enumerate (raw/ICMP/AF_UNIX).
-                  Needs Administrator. Linux accepts it and ignores it
-    --unicode     (Windows) switch the console to UTF-8 (CP 65001) at
-                  startup. The output is the same either way: a printable
-                  non-ASCII name prints as it is
-    --ascii       accepted; changes nothing
+                  Needs Administrator
+    --unicode     (Windows) switch the console to UTF-8 (CP 65001) once
+                  the options are read. The output is the same either
+                  way: a printable non-ASCII name prints as it is
+    --ascii       (Windows) undo an earlier --unicode
+                  These three are options on Windows alone, where an
+                  option word stands; elsewhere, as in the C, they are
+                  letters (--etw is an illegal -, then -e tw)
 
     -h, -?        show this help
     -v            show version
@@ -881,15 +885,6 @@ fn main() {
     // that reads text refuses what is not.
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
 
-    // Default output is ASCII (safe on PowerShell 5.1 / cmd.exe whose console
-    // is Windows-1252). Users on modern terminals can pass `--unicode` to
-    // switch the console code page to UTF-8 (and opt in to Unicode glyphs in
-    // any future output).
-    #[cfg(windows)]
-    if argv.iter().any(|a| a == "--unicode") {
-        lsof_backend_windows::enable_utf8_console();
-    }
-
     // Where a path the user named is `stat`ed and its links read: a helper
     // process that gives each call `-S` seconds (DIVERGENCES 94, 110). One
     // at a time, started by the first call that needs it — a `+d` while the
@@ -1014,6 +1009,18 @@ fn main() {
             mounts,
         } => (selection, format, repeat, columns, mounts),
     };
+    // Default output is ASCII (safe on PowerShell 5.1 / cmd.exe whose console
+    // is Windows-1252). Users on modern terminals can pass `--unicode` to
+    // switch the console code page to UTF-8 (and opt in to Unicode glyphs in
+    // any future output). Only a `--unicode` the parser read as the option
+    // switches it, the last of `--unicode`/`--ascii` deciding: one after a
+    // path, after `--`, or that an option took or gave back is a word like
+    // any other. A run the parse ended (an error, `-h`, `-v`) does not
+    // switch it either.
+    #[cfg(windows)]
+    if selection.unicode_output {
+        lsof_backend_windows::enable_utf8_console();
+    }
     let env = env_cell.into_inner().unwrap_or_else(make_env);
     // The path arguments, as the C's `ck_file_arg()` enters them once its
     // options are parsed (`arg.c`), and then the `+d`/`+D` directories the

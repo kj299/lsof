@@ -18,6 +18,19 @@
 # and `small-rows.toml` bare-path-read-as-text. The differential's 15
 # argument-order cases (`options-after-a-name-are-names` and the 14 after
 # it) diverge on b761c96 and match after.
+#
+# Run again 2026-11-19 with the review's fixes, the same way: 19 of 19
+# killed, 18 by the unit gate (`args.rs`
+# `long_options_are_windows_words_where_an_option_stands`,
+# `a_path_that_is_not_utf8_is_read_as_bytes` and the two above) and
+# `long-options-everywhere` by the differential (`long-option-*`; the unit
+# build reads the Windows parse through a test switch). Re-run with them,
+# each killed by the unit gate: `small-rows.toml` option-0xff-names-from-
+# next-word and option-0xff-reads-on (their anchor's neighbourhood
+# changed), `plus4-fix.toml` resumed-word-ends-options. Not mutated: the
+# restore of the given word under `if resumed_here` run for every word
+# (equivalent: only a resumed word was rebuilt), and main.rs's console
+# switch, Windows-only code no gate here runs.
 
 [run]
 dir = ".."
@@ -117,3 +130,104 @@ new = '''                if let Some(name) = raw.get(start) {
                 continue;
             }
         }'''
+
+# Added 2026-11-19 by the review fix: `--` and `++` each on their own, the
+# name from inside a word given back after digits, and the long options.
+
+[[mutant]]
+name = "double-dash-no-stop"
+rule = "`--` ends the options and is taken (12)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            let first_name = if tok == "--" || tok == "++" {'''
+new = '''            let first_name = if tok == "++" {'''
+
+[[mutant]]
+name = "double-plus-not-taken"
+rule = "`++` is taken as `--` is, not left as the first name (12)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            let first_name = if tok == "--" || tok == "++" {
+                Some(i + 1)'''
+new = '''            let first_name = if tok == "++" {
+                Some(i)
+            } else if tok == "--" {
+                Some(i + 1)'''
+
+[[mutant]]
+name = "resumed-0xff-names-the-rebuilt-word"
+rule = "a 0xff in a word given back after digits names that word as given, `1\\xfft`, not `-\\xfft` (12, 92)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    if resumed_here {
+                        if let (Some(w), Some(whole))'''
+new = '''                    if false {
+                        if let (Some(w), Some(whole))'''
+
+[[mutant]]
+name = "long-options-everywhere"
+rule = "`--etw`, `--unicode`, `--ascii` are the C's letters but on Windows (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''fn long_options_are_read() -> bool {
+    cfg!(windows)
+}'''
+new = '''fn long_options_are_read() -> bool {
+    true
+}'''
+
+[[mutant]]
+name = "long-option-in-a-resumed-word"
+rule = "no long option inside a word given back after digits: `-o 3-etw` is letters (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    !resumed_here && !offered_word(last_letter, i)'''
+new = '''    !offered_word(last_letter, i)'''
+
+[[mutant]]
+name = "long-option-given-back"
+rule = "no long option in a whole word an option was offered and gave back: `-L --etw` is letters (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    !resumed_here && !offered_word(last_letter, i)'''
+new = '''    !resumed_here'''
+
+[[mutant]]
+name = "offered-not-at-the-end"
+rule = "a letter is offered the next word only when it ends its word: `-cfoo --etw` (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        at_end && word.checked_add(1) == Some(i) && VALUE_LETTERS.contains(c)'''
+new = '''        word.checked_add(1) == Some(i) && VALUE_LETTERS.contains(c)'''
+
+[[mutant]]
+name = "offered-any-later-word"
+rule = "only the very next word is offered (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        at_end && word.checked_add(1) == Some(i) && VALUE_LETTERS.contains(c)'''
+new = '''        at_end && word < i && VALUE_LETTERS.contains(c)'''
+
+[[mutant]]
+name = "offered-by-any-letter"
+rule = "only a letter whose rule carries a `:` is offered the next word (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        at_end && word.checked_add(1) == Some(i) && VALUE_LETTERS.contains(c)'''
+new = '''        at_end && word.checked_add(1) == Some(i)'''
+
+[[mutant]]
+name = "value-letters-lose-L"
+rule = "`-L` is offered the next word, as the C's mask says (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''const VALUE_LETTERS: &str = "cDdefFgiKLmoprsSTuxZ";'''
+new = '''const VALUE_LETTERS: &str = "cDdefFgiKmoprsSTuxZ";'''
+
+[[mutant]]
+name = "last-letter-always-at-the-end"
+rule = "whether the last letter ended its word is recorded as read: `-cfoo --etw` (155)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            last_letter = Some((i, c, j + 1 == chars.len()));'''
+new = '''            last_letter = Some((i, c, true));'''

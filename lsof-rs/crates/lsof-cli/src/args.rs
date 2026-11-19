@@ -1024,24 +1024,46 @@ fn parse_options<'s>(
     // on inside it, with no word-start check, so `-r 1-` is `-` as a letter
     // and not `--`.
     let mut resumed = false;
+    // Each word as the command line gave it: a name taken from inside a
+    // word an option gave back after its digits is the whole word, as the
+    // C's names start at `argv[GOx1]` (`-o $'1\xfft'` names `1\xfft`).
+    let given: Vec<OsString> = raw.clone();
+    // The last letter read, the word it stood in, and whether it ended that
+    // word: an option whose rule carries a `:` is then offered the next
+    // word, and one it gives back is read again from its start
+    // (`GOx1 = GObk[0]; GOx2 = GObk[1]` with `GObk[1] == 0`).
+    let mut last_letter: Option<(usize, char, bool)> = None;
     while i < args.len() {
         let tok = &args[i];
         let resumed_here = std::mem::take(&mut resumed);
-        if !resumed_here && tok == "--etw" {
-            sel.use_etw = true;
-            i += 1;
-            continue;
-        }
-        if !resumed_here && tok == "--unicode" {
-            sel.unicode_output = true;
-            i += 1;
-            continue;
-        }
-        if !resumed_here && tok == "--ascii" {
-            // Explicit opt-out; redundant with the default, kept for symmetry.
-            sel.unicode_output = false;
-            i += 1;
-            continue;
+        // lsof-rs's own long options, on Windows alone, where the C would
+        // read an option word: not inside a word given back after digits,
+        // not a whole word an option was offered and gave back (`-L --etw`),
+        // and not after the options end (below). Elsewhere each is letters,
+        // as the C reads it: `--etw` is `illegal option character: -` and
+        // `-e tw` (measured).
+        if long_options_are_read() && reads_long_option(resumed_here, last_letter, i) {
+            let long = match tok.as_str() {
+                "--etw" => {
+                    sel.use_etw = true;
+                    true
+                }
+                "--unicode" => {
+                    sel.unicode_output = true;
+                    true
+                }
+                // Explicit opt-out; redundant with the default, kept for
+                // symmetry.
+                "--ascii" => {
+                    sel.unicode_output = false;
+                    true
+                }
+                _ => false,
+            };
+            if long {
+                i += 1;
+                continue;
+            }
         }
         // Where the C's `GetOpt()` ends the options (`main.c:1900-1915`), at
         // a word's start alone: at `--` or `++`, which it takes, and at a
@@ -1072,7 +1094,7 @@ fn parse_options<'s>(
         // `lsof +wa -p P -d 3` ORed where the C ANDs: 28 rows where the C
         // lists one, measured.
         // Past the stop above, the word opens with `-` or `+` and holds a
-        // letter after it: one given back to be read on holds the rest of
+        // byte after it: one given back to be read on holds the rest of
         // its word, which is never empty, behind its prefix.
         let plus = tok.starts_with('+');
         let prefix = if plus { '+' } else { '-' };
@@ -1116,6 +1138,7 @@ fn parse_options<'s>(
             }
             mark = early.mark();
             let c = chars[j];
+            last_letter = Some((i, c, j + 1 == chars.len()));
             if let Some(b) = byte_letter(c).filter(|_| letters_ok) {
                 if b == 0xff {
                     // 0xff is `(char)-1`, EOF, to `GetOpt`: it says the
@@ -1130,6 +1153,13 @@ fn parse_options<'s>(
                         shown_bytes(&[b])
                     ));
                     ended = Some(if j + 1 < chars.len() { word } else { word + 1 });
+                    // Inside a word given back after an option's digits,
+                    // the names start at that word as it was given.
+                    if resumed_here {
+                        if let (Some(w), Some(whole)) = (raw.get_mut(word), given.get(word)) {
+                            *w = whole.clone();
+                        }
+                    }
                     break;
                 }
                 early.line(&format!("illegal option character: {}", shown_bytes(&[b])));
@@ -3043,6 +3073,55 @@ const HAS_TCP_WINDOW: bool = true;
 const HAS_FILE_FLAGS: bool = true;
 #[cfg(not(target_os = "linux"))]
 const HAS_FILE_FLAGS: bool = false;
+
+/// Whether `--etw`, `--unicode` and `--ascii` are lsof-rs's own options:
+/// on Windows alone, where there is no C to match (DIVERGENCES 155).
+#[cfg(not(test))]
+fn long_options_are_read() -> bool {
+    cfg!(windows)
+}
+
+/// [`long_options_are_read`], which a test may turn on anywhere to read the
+/// Windows parse ([`LONG_OPTIONS`]).
+#[cfg(test)]
+fn long_options_are_read() -> bool {
+    LONG_OPTIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread's parses read the long options, as on Windows.
+    static LONG_OPTIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(cfg!(windows)) };
+}
+
+/// Whether word `i` stands where the C would read an option word, so that a
+/// long option of lsof-rs's own may be read there: not inside a word given
+/// back after an option's digits, and not a whole word an option was
+/// offered and gave back ([`offered_word`]). After the options end nothing
+/// is read at all.
+fn reads_long_option(
+    resumed_here: bool,
+    last_letter: Option<(usize, char, bool)>,
+    i: usize,
+) -> bool {
+    !resumed_here && !offered_word(last_letter, i)
+}
+
+/// The letters whose rule carries a `:` in the Linux C's `GetOpt()` option
+/// mask (`main.c:205-255`; measured: `-D -x`, `-m -x` and `-Z -x` take
+/// `-x`, and `-A`, `-k`, `-z` are illegal there): each is offered the next
+/// word when it ends its own word.
+const VALUE_LETTERS: &str = "cDdefFgiKLmoprsSTuxZ";
+
+/// Whether word `i` is one an option was offered as its value and gave back
+/// whole: the last letter read ([`parse_options`]'s `last_letter`) ended the
+/// word just before and carries a `:`. One that took it would have moved
+/// the scan past it.
+fn offered_word(last_letter: Option<(usize, char, bool)>, i: usize) -> bool {
+    last_letter.is_some_and(|(word, c, at_end)| {
+        at_end && word.checked_add(1) == Some(i) && VALUE_LETTERS.contains(c)
+    })
+}
 
 /// The word an option's optional value would be, as the C's `GetOpt` offers
 /// it to every option whose rule letter carries a `:` — the rest of this
@@ -6796,6 +6875,94 @@ mod tests {
         );
     }
 
+    /// `--etw`, `--unicode` and `--ascii` are lsof-rs's own on Windows alone,
+    /// and only where the C would read an option word; elsewhere each is
+    /// letters, as the C reads it (measured: `--etw f` is `illegal option
+    /// character: -` and `-e not followed by a file system path: "tw"`).
+    #[test]
+    fn long_options_are_windows_words_where_an_option_stands() {
+        // A word offered to a letter whose rule carries a `:`, at its word's
+        // end, and given back.
+        assert!(offered_word(Some((0, 'L', true)), 1));
+        assert!(!offered_word(Some((0, 'L', false)), 1), "not at the end");
+        assert!(!offered_word(Some((0, 'L', true)), 2), "not the next word");
+        assert!(!offered_word(Some((0, 't', true)), 1), "no value");
+        assert!(!offered_word(None, 0));
+        assert!(!offered_word(Some((usize::MAX, 'L', true)), 0));
+        for c in "cDdefFgiKLmoprsSTuxZ".chars() {
+            assert!(offered_word(Some((3, c, true)), 4), "{c}");
+        }
+        for c in "aAbChHjJkklMnNOPQRtUvVwXz?".chars() {
+            assert!(!offered_word(Some((3, c, true)), 4), "{c}");
+        }
+        let names = |argv: &[&str]| run(argv).0.paths;
+        // Wherever a path stands, each is a path everywhere.
+        for long in ["--etw", "--unicode", "--ascii"] {
+            assert_eq!(names(&["f", long]), ["f", long], "{long}");
+            assert_eq!(names(&["--", long]), [long], "{long}");
+            assert_eq!(names(&["-o", "x", long]), ["x", long], "{long}");
+        }
+        assert!(reads_long_option(false, None, 0));
+        assert!(!reads_long_option(true, None, 0), "a resumed word");
+        assert!(
+            !reads_long_option(false, Some((0, 'o', true)), 1),
+            "given back"
+        );
+        assert!(reads_long_option(false, Some((0, 'o', false)), 1));
+        // The Windows parse, read here on any platform.
+        let windows = |on: bool| LONG_OPTIONS.with(|l| l.set(on));
+        let was = LONG_OPTIONS.with(std::cell::Cell::get);
+        windows(true);
+        {
+            let etw = |argv: &[&str]| {
+                matches!(
+                    parse(argv.iter().map(|s| s.to_string()).collect()),
+                    Ok(Action::Run { selection, .. }) if selection.use_etw
+                )
+            };
+            assert!(etw(&["--etw", "f"]));
+            assert!(etw(&["-cfoo", "--etw"]), "-c took its value attached");
+            assert!(etw(&["-t", "--etw"]));
+            assert!(!etw(&["-L", "--etw", "f"]), "given back whole");
+            assert!(!etw(&["-o", "3-etw"]), "inside a resumed word");
+            assert!(!etw(&["f", "--etw"]), "after a path");
+            assert!(!etw(&["--", "--etw"]), "after --");
+            let (sel, _) = run(&["--etw", "--unicode", "f"]);
+            assert!(sel.use_etw && sel.unicode_output);
+            assert_eq!(sel.paths, ["f"]);
+            let (sel, _) = run(&["--unicode", "--ascii"]);
+            assert!(!sel.unicode_output, "the last decides");
+            let (sel, _) = run(&["f", "--etw", "--unicode"]);
+            assert!(!sel.use_etw && !sel.unicode_output, "after a path");
+            let (sel, _) = run(&["--", "--unicode"]);
+            assert!(!sel.unicode_output, "after --");
+            let (sel, _) = run(&["-t", "--unicode", "-a", "-p", "1"]);
+            assert!(sel.unicode_output && sel.and_mode, "an option word");
+        }
+        windows(was);
+        if cfg!(target_os = "linux") && !was {
+            let err = |argv: &[&str]| error_lines(parse_on_host(argv, false));
+            let dash = || "illegal option character: -".to_string();
+            for prefix in [&[][..], &["-L"], &["-o"], &["-T"]] {
+                let argv = |long: &'static str| [prefix, &[long, "f"]].concat();
+                let (got, said) = parse_saying(&argv("--etw"));
+                assert_eq!(said, [format!("lsof: {}", dash())], "{prefix:?}");
+                assert_eq!(
+                    error_lines(got),
+                    ["-e not followed by a file system path: \"tw\"".to_string()]
+                );
+                assert_eq!(
+                    err(&argv("--unicode")),
+                    [dash(), "can't get UID for nicode".to_string()]
+                );
+                assert_eq!(
+                    err(&argv("--ascii")),
+                    [dash(), "unknown -s protocol: \"cii\"".to_string()]
+                );
+            }
+        }
+    }
+
     /// A `+` word is a cluster, as a `-` word is, and a letter the C reads the
     /// same under either prefix means the same thing (`+wa` is `+w -a`).
     /// lsof-rs had read one letter per `+` word and dropped the rest.
@@ -9033,6 +9200,24 @@ mod tests {
         assert!(sel(vec![os(b"-o3\xff")]).paths.is_empty());
         assert!(sel(vec![os(b"-o"), os(b"3\xff")]).paths.is_empty());
         assert!(sel(vec![os(b"+\xff"), os(b"x")]).paths == [os(b"x")]);
+        // Inside what an option gives back after its digits, the names start
+        // at the word as it was given, as the C's start at `argv[GOx1]`
+        // (measured: `-o $'1\xfft' f` says `status error on 1\xfft`).
+        for letter in [&b"-o"[..], b"-S", b"+L", b"-r", b"+r", b"-to"] {
+            assert_eq!(
+                sel(vec![os(letter), os(b"1\xfft"), os(b"f")]).paths,
+                [os(b"1\xfft"), os(b"f")],
+                "{letter:?}"
+            );
+        }
+        let s = sel(vec![os(b"-o"), os(b"1t\xffa")]);
+        assert!(s.terse);
+        assert_eq!(s.paths, [os(b"1t\xffa")]);
+        // Ending it, the next word is the first.
+        assert_eq!(
+            sel(vec![os(b"-o"), os(b"1t\xff"), os(b"-a")]).paths,
+            [os(b"-a")]
+        );
         // `-o 34\xfe`: the letters after `-o`'s digits are the word's own
         // bytes under the prefix, not its digits.
         let err = parse(vec![os(b"-o"), os(b"34\xfe")]).unwrap_err();
