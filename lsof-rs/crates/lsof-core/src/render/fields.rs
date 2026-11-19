@@ -614,7 +614,12 @@ mod tests {
         write_with_names(
             &mut log,
             std::slice::from_ref(&p),
-            (false, Some(&['c', 'f', 's', 'i', 'n']), TcpInfoFlags::default(), Escaper::UNIX),
+            (
+                false,
+                Some(&['c', 'f', 's', 'i', 'n']),
+                TcpInfoFlags::default(),
+                Escaper::UNIX,
+            ),
             DEFAULT_OFFSET_DIGITS,
             FileFlags::Off,
             &mut |_| None,

@@ -2897,7 +2897,13 @@ fn a_row_is_written_a_c_call_at_a_time() {
     let header: Vec<&str> = calls[..=header_end].iter().map(|c| c.trim()).collect();
     assert_eq!(
         header,
-        ["COMMAND PID", "USER FD   TYPE", "DEVICE", "SIZE/OFF", "NODE NAME"],
+        [
+            "COMMAND PID",
+            "USER FD   TYPE",
+            "DEVICE",
+            "SIZE/OFF",
+            "NODE NAME"
+        ],
         "{calls:?}"
     );
     let row = &calls[header_end + 1..];

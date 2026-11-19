@@ -3307,7 +3307,11 @@ mod tests {
             String::from_utf8_lossy(&buf[..n]).into_owned()
         };
         let mut fs = MemZoneFiles::default();
-        fs.put(b"/z", key(1, 1), include_bytes!("../tests/tzif/rightnorule"));
+        fs.put(
+            b"/z",
+            key(1, 1),
+            include_bytes!("../tests/tzif/rightnorule"),
+        );
         let mut lt = local(Some(b"/z"), Some(b"/tzd"), fs);
         let got: Vec<String> = [0, 2_000_000_000, 2_000_000_000]
             .iter()

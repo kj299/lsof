@@ -447,7 +447,8 @@ fn a_run_that_ends_at_its_help_writes_what_it_printed() {
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.lines().any(|l| l.starts_with("/ 0x") || l.ends_with(" 0x0")),
+        text.lines()
+            .any(|l| l.starts_with("/ 0x") || l.ends_with(" 0x0")),
         "{text:?}"
     );
 }

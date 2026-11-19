@@ -389,6 +389,15 @@ new = '''        let ignored = old.sa_sigaction != libc::SIG_IGN;'''
 # ------------------------------------------- the review's fixes (2026-11-19)
 # The stdio calls (S1-S4) and the zone files (T1-T4) of the review of
 # a46e03c; the gate `render` (lsof-core's whole suite) was added for them.
+# Run 2026-11-19 as root with --first-kill in a copy of the tree: 26 of 28
+# killed (render 11, core 7, cli 4, backend 3, differential 1:
+# plus-m-one-call by write-trace-plus-m-on-a-terminal). The two survivors,
+# stdio-printf-never-direct and stdio-no-one-byte-stage, are the same as
+# glibc for every buffer of 128 bytes or more; a test with a 16-byte buffer
+# (`fputs_writes_whole_blocks_and_printf_a_buffer_at_a_time`, measured with
+# glibc) was added and both were killed (cli). 28 of 28. The 14 older
+# mutants whose anchors moved were re-anchored and re-run: 14 of 14 killed
+# (unit 9, cli 3 (r-parity's stdio ones), resource 1, differential 1).
 # Rules with no mutant here, and why:
 # * The backends' `lsof_core::safefs::exit` (mounts.rs, safefs.rs): no run
 #   measured has output in stdout's buffer where either ends it; the hook
