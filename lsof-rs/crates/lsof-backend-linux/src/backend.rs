@@ -716,6 +716,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let strict = std::fs::read_to_string(format!("/proc/{pid}/status"));
+        // What /proc showed, for the failure message: the CI image once hid
+        // the process where no local host did.
+        let seen: Vec<String> = ["stat", "status", "maps"]
+            .iter()
+            .map(|f| match std::fs::read(format!("/proc/{pid}/{f}")) {
+                Ok(b) => format!("{f}: {:?}", String::from_utf8_lossy(&b[..b.len().min(400)])),
+                Err(e) => format!("{f}: {e}"),
+            })
+            .collect();
         let procs = LinuxBackend::new()
             .gather(&Selection {
                 pids: vec![pid],
@@ -729,10 +738,10 @@ mod tests {
             strict.is_err(),
             "control: the strict read must fail on this name"
         );
-        let p = procs
-            .iter()
-            .find(|p| p.pid == pid)
-            .expect("a non-UTF-8 name must not hide the process");
+        let p = procs.iter().find(|p| p.pid == pid).unwrap_or_else(|| {
+            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+            panic!("a non-UTF-8 name must not hide the process {pid}: gathered {pids:?}; {seen:#?}")
+        });
         assert_eq!(p.command, "sl\u{FFFD}eep");
         // This binary is dynamically linked, so libc is mapped: `mem` rows exist
         // only if `maps` survived the executable's own undecodable path.
