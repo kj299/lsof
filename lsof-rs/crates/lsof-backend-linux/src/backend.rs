@@ -682,6 +682,7 @@ mod tests {
     fn a_process_named_with_a_non_utf8_byte_is_still_gathered() {
         use lsof_core::model::FdType;
         use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::CommandExt;
         let dir = std::env::temp_dir().join(format!("lsof-rs-comm-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join(std::ffi::OsStr::from_bytes(b"sl\xffeep"));
@@ -693,7 +694,11 @@ mod tests {
         // someone holds open for writing is refused. It clears on its own.
         let mut tries = 0;
         let mut child = loop {
+            // A UTF-8 argv[0]: libtest panics on one that is not, and the
+            // copy died before its test body ran. The comm still comes from
+            // the file's name.
             match std::process::Command::new(&exe)
+                .arg0("renamed-copy")
                 .args([
                     "--exact",
                     "backend::tests::a_sleeper_for_the_renamed_copy",
@@ -722,8 +727,8 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        // Running, not merely exec'd: on the Ubuntu 26.04 CI image the scan
-        // missed a copy still being loaded, where no local host ever did.
+        // Running its test body, not merely exec'd: a copy that dies at
+        // startup is a zombie, which is never listed.
         while !dir.join("ready").exists() {
             assert!(
                 std::time::Instant::now() < deadline,
