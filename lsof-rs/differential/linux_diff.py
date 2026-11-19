@@ -334,6 +334,8 @@ class Fixture:
         # runner starts, under a pid that differs between the two runs.
         self.new_session = new_session
         self.proc: subprocess.Popen | None = None
+        # An optional fixture that could not start (its cases are skipped).
+        self.skipped = False
 
     @property
     def pid(self) -> int:
@@ -371,6 +373,8 @@ class Fixture:
 
     def _failed(self, why: str) -> "NoReturn":  # type: ignore[name-defined]
         if self.optional:
+            # Its cases are skipped; that it is not running is no news.
+            self.skipped = True
             raise FixtureUnavailable(f"{self.name}: {why}")
         infra(f"fixture {self.name} {why}")
 
@@ -4382,7 +4386,11 @@ def run(args) -> int:
         # which MATCHes -- and a ledgered divergence then reads as fixed. A
         # slow runner took twelve minutes over a run the fixtures had slept
         # ten for, and 25 ledger entries went stale at once. Not a verdict.
-        dead = [fx.name for fx in fixtures if fx.proc is not None and fx.proc.poll() is not None]
+        dead = [
+            fx.name
+            for fx in fixtures
+            if fx.proc is not None and not fx.skipped and fx.proc.poll() is not None
+        ]
         if dead:
             infra("fixture(s) died during the run, so their cases compared nothing: " + ", ".join(dead))
         bad = invalid_json_cases(cases, rust)
@@ -4545,6 +4553,7 @@ def self_test() -> int:
         check("optional fixture failure raises", False)
     except FixtureUnavailable as unavailable:
         check("optional fixture raises FixtureUnavailable", "opt" in str(unavailable))
+        check("an optional fixture that could not start is marked skipped", opt.skipped)
     finally:
         opt.stop()
 
