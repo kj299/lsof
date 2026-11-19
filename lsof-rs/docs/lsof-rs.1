@@ -102,6 +102,11 @@ could use of it (a version 1 zone file's data); after that it is taken as
 unreadable, as glibc takes a file that ends short.
 Where the data comes in time the zone is the C's.
 On FreeBSD such a file is not read at all.
+A regular zone file that another process holds a write lease on is
+waited for the same 3 seconds (its open tried again every 10 ms), where
+glibc's open waits until the holder lets go or the kernel breaks the lease
+.RI ( /proc/sys/fs/lease-break-time ,
+45 seconds by default).
 .TP
 .B Version
 .B \-v

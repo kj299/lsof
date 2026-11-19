@@ -2845,3 +2845,73 @@ fn user_is_padded_by_bytes() {
     assert!(lines[1].starts_with("sleep     7 j\u{f6}hn 4r"), "{out}");
     assert!(lines[2].starts_with("sleep     7    ab 4r"), "{out}");
 }
+
+/// COMMAND is `CmdColW` wide even where no cell fills it: `abcdefgh^A`
+/// counts nine under the default `+c 9`, and its cut stops at eight, the
+/// escape not fitting whole; `safestrprtn()` pads it to nine (measured
+/// against lsof 4.99.6 with a process `prctl()` named so: the header's
+/// `COMMAND` is followed by five spaces and `PID`, the row by two).
+#[test]
+fn the_command_column_is_its_sized_width_where_an_escape_cut_a_cell_short() {
+    let p = named("abcdefgh\u{1}", "u", "f");
+    let out = table::render(std::slice::from_ref(&p), TableOpts::new(Escaper::UNIX));
+    let mut lines = out.lines();
+    let header = lines.next().unwrap();
+    let row = lines.next().unwrap();
+    assert!(header.starts_with("COMMAND   PID"), "{header:?}");
+    assert!(row.starts_with("abcdefgh  "), "{row:?}");
+}
+
+/// Each row is written as the C's `print_file()` calls write it, one
+/// `write()` a stdio call: the COMMAND a byte at a time and padded a space
+/// at a time, then `printf(" %*d")` for PID, and NAME a byte at a time
+/// after a `putchar(' ')`, ending in `putchar('\n')`.
+#[test]
+fn a_row_is_written_a_c_call_at_a_time() {
+    struct Log(Vec<Vec<u8>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+            self.0.push(d.to_vec());
+            Ok(d.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let p = named("sh", "u", "f");
+    let mut log = Log(Vec::new());
+    table::render_to(
+        &mut log,
+        std::slice::from_ref(&p),
+        TableOpts::new(Escaper::UNIX),
+    )
+    .unwrap();
+    let calls: Vec<String> = log
+        .0
+        .iter()
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    // The header: `"%-*.*s %*s"`, `" %*s %*s   %*s"` for USER, FD and
+    // TYPE, then `" %*s"` DEVICE and SIZE/OFF, `" %*s %s\n"` NODE and NAME.
+    let header_end = calls.iter().position(|c| c.ends_with(" NAME\n")).unwrap();
+    let header: Vec<&str> = calls[..=header_end].iter().map(|c| c.trim()).collect();
+    assert_eq!(
+        header,
+        ["COMMAND PID", "USER FD   TYPE", "DEVICE", "SIZE/OFF", "NODE NAME"],
+        "{calls:?}"
+    );
+    let row = &calls[header_end + 1..];
+    // COMMAND a byte at a time and padded a space at a time; PID, USER,
+    // FD and its mode, TYPE, DEVICE a `printf(" %*s")` each; SIZE/OFF a
+    // `putchar(' ')` and a `printf("%*s")`; NODE; NAME a `putchar(' ')`,
+    // its bytes, a `putchar('\n')`.
+    let pid = format!("{:>4}", p.pid);
+    assert_eq!(
+        row,
+        [
+            "s", "h", " ", " ", " ", " ", " ", &pid, "    u", " 4r ", "  REG", "       ", " ",
+            "        ", "     ", " ", "f", "\n"
+        ],
+        "{row:?}"
+    );
+}

@@ -174,6 +174,94 @@ impl Escaper {
     }
 }
 
+impl Escaper {
+    /// [`Escaper::text`] into `out` as `safestrprt()` prints it, a call at a
+    /// time: a `putc()` for each byte of a character it prints, a `fputs()`
+    /// for each escape.
+    pub fn text_calls(&self, s: &str, out: &mut crate::render::Calls) {
+        for c in s.chars() {
+            unit_calls(c, Mode::Text, self.backslash, out);
+        }
+    }
+
+    /// [`Escaper::bytes`] into `out`, a call at a time.
+    pub fn bytes_calls(&self, b: &[u8], out: &mut crate::render::Calls) {
+        for chunk in b.utf8_chunks() {
+            self.text_calls(chunk.valid(), out);
+            for &byte in chunk.invalid() {
+                let mut e = String::with_capacity(4);
+                push_hex(&mut e, byte);
+                out.call(e);
+            }
+        }
+    }
+
+    /// [`Escaper::command_bytes_truncated`] into `out`, a call at a time
+    /// (`safestrprtn()`'s `putc()`s and `fputs()`s); how many bytes it
+    /// printed.
+    pub fn command_bytes_truncated_calls(
+        &self,
+        b: &[u8],
+        width: usize,
+        out: &mut crate::render::Calls,
+    ) -> usize {
+        let mut used = 0usize;
+        for chunk in b.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                let w = escaped_width(c, Mode::Command, self.backslash);
+                if used + w > width {
+                    return used;
+                }
+                used += w;
+                unit_calls(c, Mode::Command, self.backslash, out);
+            }
+            for &byte in chunk.invalid() {
+                if used + 4 > width {
+                    return used;
+                }
+                used += 4;
+                let mut e = String::with_capacity(4);
+                push_hex(&mut e, byte);
+                out.call(e);
+            }
+        }
+        used
+    }
+
+    /// [`Escaper::command`] of a string cut to `width`, a call at a time.
+    pub fn command_truncated_calls(
+        &self,
+        s: &str,
+        width: usize,
+        out: &mut crate::render::Calls,
+    ) -> usize {
+        self.command_bytes_truncated_calls(s.as_bytes(), width, out)
+    }
+}
+
+/// `c` printed as the C's printer prints it, into `out`: a `putc()` for
+/// each of its bytes where it passes, one `fputs()` for an ASCII escape,
+/// one for each byte's `\xNN` where a multibyte character is escaped.
+fn unit_calls(c: char, mode: Mode, backslash: bool, out: &mut crate::render::Calls) {
+    let mut buf = [0u8; 4];
+    let bytes = c.encode_utf8(&mut buf).as_bytes();
+    if escaped_width(c, mode, backslash) == 1 {
+        out.each_byte(bytes);
+        return;
+    }
+    if c.is_ascii() && c != ' ' && c != '\x7f' {
+        let mut e = String::with_capacity(2);
+        push(&mut e, c, mode, backslash);
+        out.call(e);
+        return;
+    }
+    for &b in bytes {
+        let mut e = String::with_capacity(4);
+        push_hex(&mut e, b);
+        out.call(e);
+    }
+}
+
 /// Which of the C's two printers is being mirrored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -267,6 +355,54 @@ fn push_hex(out: &mut String, b: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pieces(f: impl FnOnce(&mut crate::render::Calls)) -> Vec<String> {
+        struct Log(Vec<String>);
+        impl std::io::Write for Log {
+            fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+                self.0.push(String::from_utf8_lossy(d).into_owned());
+                Ok(d.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut calls = crate::render::Calls::new();
+        f(&mut calls);
+        let mut log = Log(Vec::new());
+        calls.write_to(&mut log).unwrap();
+        log.0
+    }
+
+    /// `safestrprt()` a call at a time: a `putc()` for each byte of a
+    /// character it prints (each of `é`'s two), one `fputs()` for an
+    /// escape, one for each byte's `\xNN` of an escaped multibyte one; and
+    /// `safestrprtn()`'s cut. Text already printed is cut the same way, a
+    /// `^` before `@` to `_` taken for an escape.
+    #[test]
+    fn escaped_text_is_cut_where_the_cs_calls_cut_it() {
+        assert_eq!(
+            pieces(|c| U.text_calls("a\u{1b}\\é\u{9b} ", c)),
+            ["a", "^[", "\\\\", "\u{fffd}", "\u{fffd}", "\\xc2", "\\x9b", " "]
+        );
+        assert_eq!(
+            pieces(|c| {
+                U.bytes_calls(b"x\xffy", c);
+            }),
+            ["x", "\\xff", "y"]
+        );
+        assert_eq!(
+            pieces(|c| {
+                let used = U.command_bytes_truncated_calls(b"a b\x01c", 5, c);
+                assert_eq!(used, 5);
+            }),
+            ["a", "\\x20"]
+        );
+        assert_eq!(
+            pieces(|c| c.printed("x\\n^Ay\\x7f^a")),
+            ["x", "\\n", "^A", "y", "\\x7f", "^", "a"]
+        );
+    }
 
     const U: Escaper = Escaper::UNIX;
     const W: Escaper = Escaper::WINDOWS;

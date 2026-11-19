@@ -23,7 +23,9 @@ use crate::model::{FdType, FileType, OpenFile, Process};
 use crate::render::escape::is_unprintable_unicode;
 use crate::render::fflags::{self, FileFlags};
 use crate::render::fields::field_is_default;
-use crate::render::{access_code, device_text, lock_code, node_is_protocol, tcp_info_socket};
+use crate::render::{
+    access_code, device_text, lock_code, node_is_protocol, tcp_info_socket, Calls,
+};
 use crate::selection::TcpInfoFlags;
 
 /// What a JSON run prints, resolved from its options by the CLI.
@@ -60,46 +62,49 @@ impl JsonOpts<'_> {
 /// CSI), and the two separators end a line to JavaScript and to some
 /// line-oriented readers of `-j`. A decoder recovers the same string
 /// (DIVERGENCES, the escape row).
-fn push_str(o: &mut String, s: &str) {
-    o.push('"');
+///
+/// A call at a time, as `json_puts_escaped()` prints it ([`Calls`]): each
+/// escape one `fputs()` or `printf()`, every other byte one `putchar()`,
+/// the quotes a `putchar()` each.
+fn push_str(o: &mut Calls, s: &str) {
+    o.putc(b'"');
     for c in s.chars() {
         match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\u{8}' => o.push_str("\\b"),
-            '\u{c}' => o.push_str("\\f"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if is_unprintable_unicode(c) => {
-                // Infallible: a String sink.
-                let _ = std::fmt::Write::write_fmt(o, format_args!("\\u{:04x}", u32::from(c)));
-            }
-            c => o.push(c),
+            '"' => o.call("\\\""),
+            '\\' => o.call("\\\\"),
+            '\u{8}' => o.call("\\b"),
+            '\u{c}' => o.call("\\f"),
+            '\n' => o.call("\\n"),
+            '\r' => o.call("\\r"),
+            '\t' => o.call("\\t"),
+            c if is_unprintable_unicode(c) => o.call(format!("\\u{:04x}", u32::from(c))),
+            c => o.each_byte(c.encode_utf8(&mut [0; 4]).as_bytes()),
         }
     }
-    o.push('"');
+    o.putc(b'"');
 }
 
 /// One object's members, comma-joined as they are added.
 struct Members<'o> {
-    out: &'o mut String,
+    out: &'o mut Calls,
     first: bool,
 }
 
 impl<'o> Members<'o> {
-    fn new(out: &'o mut String) -> Self {
+    fn new(out: &'o mut Calls) -> Self {
         Self { out, first: true }
     }
 
-    fn key(&mut self, k: &str) -> &mut String {
+    /// `json_print_key()`: `putchar(',')` after the first, `putchar('"')`,
+    /// the key a `putchar()` a byte, `printf("\":")`.
+    fn key(&mut self, k: &str) -> &mut Calls {
         if !self.first {
-            self.out.push(',');
+            self.out.putc(b',');
         }
         self.first = false;
-        self.out.push('"');
-        self.out.push_str(k);
-        self.out.push_str("\":");
+        self.out.putc(b'"');
+        self.out.each_byte(k.as_bytes());
+        self.out.call("\":");
         self.out
     }
 
@@ -107,10 +112,14 @@ impl<'o> Members<'o> {
         push_str(self.key(k), v);
     }
 
+    /// `json_print_int()`, `json_print_long()`: one `printf("%d")`.
     fn num(&mut self, k: &str, v: impl std::fmt::Display) {
-        let o = self.key(k);
-        // Infallible: a String sink.
-        let _ = std::fmt::Write::write_fmt(o, format_args!("{v}"));
+        self.key(k).call(v.to_string());
+    }
+
+    /// `json_print_uint64_str()`: one `printf("\"%" PRIu64 "\"")`.
+    fn quoted(&mut self, k: &str, v: u64) {
+        self.key(k).call(format!("\"{v}\""));
     }
 }
 
@@ -198,20 +207,24 @@ fn file_members(m: &mut Members<'_>, f: &OpenFile, o: &JsonOpts<'_>) {
     }
     if o.want('s') {
         if let Some(s) = f.size {
-            m.str("size", &s.to_string());
+            m.quoted("size", s);
         }
     }
     // Plain decimal whatever `-o` says: the C prints it `PRIu64`
     // (`print.c:1965-1970`), not as the table's `0t`/`0x`.
     if o.want('o') {
         if let Some(off) = f.offset {
-            m.str("offset", &off.to_string());
+            m.quoted("offset", off);
         }
     }
     let protocol = node_is_protocol(f);
     if o.want('i') && !protocol {
         if let Some(n) = &f.node {
-            m.str("inode", n);
+            // The C's `(uint64_t)Lf->inode`; NODE is that number.
+            match n.parse::<u64>() {
+                Ok(v) => m.quoted("inode", v),
+                Err(_) => m.str("inode", n),
+            }
         }
     }
     if o.want('k') {
@@ -238,9 +251,13 @@ fn file_members(m: &mut Members<'_>, f: &OpenFile, o: &JsonOpts<'_>) {
     }
     if o.want('T') {
         if let Some(sock) = tcp_info_socket(f) {
-            let t = m.key("tcp_info");
-            t.push('{');
-            let mut tm = Members::new(t);
+            // `if (*sep) putchar(','); printf("\"tcp_info\":{")`.
+            if !m.first {
+                m.out.putc(b',');
+            }
+            m.first = false;
+            m.out.call("\"tcp_info\":{");
+            let mut tm = Members::new(m.out);
             // Never a unix row's: the C's writer reads a state the unix path
             // never sets, and prints `{}` (measured, DIVERGENCES 91).
             if o.tcp_show.state && f.file_type != FileType::Unix {
@@ -263,7 +280,7 @@ fn file_members(m: &mut Members<'_>, f: &OpenFile, o: &JsonOpts<'_>) {
                     }
                 }
             }
-            t.push('}');
+            tm.out.putc(b'}');
         }
     }
 }
@@ -276,33 +293,57 @@ pub fn write_aggregated<W: Write + ?Sized>(
     procs: &[Process],
     o: &JsonOpts<'_>,
 ) -> io::Result<()> {
-    let mut buf = String::from("{\"lsof_version\":");
-    push_str(&mut buf, o.version);
-    buf.push_str(",\"processes\":[");
+    let mut buf = Calls::new();
+    // `json_open_envelope()`: one `printf()`, the version `%s` raw.
+    let mut head = Calls::new();
+    push_str(&mut head, o.version);
+    let mut open = b"{\"lsof_version\":".to_vec();
+    open.extend_from_slice(head.bytes());
+    open.extend_from_slice(b",\"processes\":[");
+    buf.call(open);
     let mut first = true;
     for p in procs.iter().filter(|p| !p.files.is_empty()) {
         if !first {
-            buf.push(',');
+            buf.putc(b',');
         }
         first = false;
-        buf.push('{');
+        buf.putc(b'{');
         let mut m = Members::new(&mut buf);
         proc_members(&mut m, p, o);
-        m.key("files").push('[');
+        // `if (sep) putchar(','); printf("\"files\":[")`.
+        if !m.first {
+            buf.putc(b',');
+        }
+        buf.call("\"files\":[");
         for (i, f) in p.files.iter().enumerate() {
             if i > 0 {
-                buf.push(',');
+                buf.putc(b',');
             }
-            buf.push('{');
+            buf.putc(b'{');
             file_members(&mut Members::new(&mut buf), f, o);
-            buf.push('}');
+            buf.putc(b'}');
         }
-        buf.push_str("]}");
-        w.write_all(buf.as_bytes())?;
-        buf.clear();
+        buf.call("]}");
+        buf.write_to(&mut WriteRef(w))?;
     }
-    buf.push_str("]}\n");
-    w.write_all(buf.as_bytes())
+    // `json_close_envelope()`.
+    buf.call("]}\n");
+    buf.write_to(&mut WriteRef(w))
+}
+
+/// A `&mut W` as a `dyn Write`, for an unsized `W`.
+struct WriteRef<'a, W: Write + ?Sized>(&'a mut W);
+
+impl<W: Write + ?Sized> Write for WriteRef<'_, W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.0.write(data)
+    }
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        self.0.write_all(data)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
 }
 
 /// `-j`: one object per file, the process's keys and then the file's, each
@@ -312,22 +353,16 @@ pub fn write_lines<W: Write + ?Sized>(
     procs: &[Process],
     o: &JsonOpts<'_>,
 ) -> io::Result<()> {
-    let mut head = String::new();
-    let mut buf = String::new();
+    let mut buf = Calls::new();
     for p in procs {
-        head.clear();
-        proc_members(&mut Members::new(&mut head), p, o);
         for f in &p.files {
-            buf.clear();
-            buf.push('{');
-            buf.push_str(&head);
-            let mut m = Members {
-                out: &mut buf,
-                first: head.is_empty(),
-            };
+            buf.putc(b'{');
+            let mut m = Members::new(&mut buf);
+            proc_members(&mut m, p, o);
             file_members(&mut m, f, o);
-            buf.push_str("}\n");
-            w.write_all(buf.as_bytes())?;
+            // `printf("}\n")`.
+            buf.call("}\n");
+            buf.write_to(&mut WriteRef(w))?;
         }
     }
     Ok(())
@@ -347,4 +382,48 @@ pub fn render_lines(procs: &[Process], o: &JsonOpts<'_>) -> String {
     // A Vec sink cannot fail, and every byte written came from a `str`.
     let _ = write_lines(&mut v, procs, o);
     String::from_utf8(v).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A member as `json_print_key()` and its value's printer write it, one
+    /// `write()` a stdio call: `putchar(',')`, `putchar('"')`, the key a
+    /// `putchar()` a byte, `printf("\":")`; a number one `printf()`, a size
+    /// one `printf("\"%" PRIu64 "\"")`, a string its quotes and each byte
+    /// a `putchar()`, an escape one call; the object's end `printf("}\n")`.
+    #[test]
+    fn a_line_is_written_a_c_call_at_a_time() {
+        struct Log(Vec<String>);
+        impl Write for Log {
+            fn write(&mut self, d: &[u8]) -> io::Result<usize> {
+                self.0.push(String::from_utf8_lossy(d).into_owned());
+                Ok(d.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(1);
+        p.files[0].size = Some(42);
+        p.files[0].name = "a\"".into();
+        p.files[0].name_addition = None;
+        let o = JsonOpts {
+            only: Some(&['s', 'n']),
+            tcp_show: TcpInfoFlags::default(),
+            file_flags: FileFlags::Off,
+            numeric_ids: false,
+            version: "0",
+        };
+        let mut log = Log(Vec::new());
+        write_lines(&mut log, std::slice::from_ref(&p), &o).unwrap();
+        let pid = p.pid.to_string();
+        let want = [
+            "{", "\"", "p", "i", "d", "\":", &pid, ",", "\"", "s", "i", "z", "e", "\":", "\"42\"",
+            ",", "\"", "n", "a", "m", "e", "\":", "\"", "a", "\\\"", "\"", "}\n",
+        ];
+        assert_eq!(log.0, want);
+    }
 }

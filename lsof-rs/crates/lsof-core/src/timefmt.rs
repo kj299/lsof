@@ -246,6 +246,11 @@ pub(crate) struct DefaultRules {
     pub(crate) dst: Vec<u8>,
     pub(crate) stdoff: i64,
     pub(crate) dstoff: i64,
+    /// `tz_rules` as `__tzset_parse_tz()` leaves them where
+    /// `__tzfile_default()` finds `posixrules`: cleared by its `memset()`
+    /// (the day `J0` 0, the change at second 0), the names and offsets
+    /// read. What `__tz_compute()` then works from.
+    pub(crate) as_read: PosixTz,
 }
 
 impl PosixTz {
@@ -472,6 +477,7 @@ impl PosixTz {
                     dst,
                     stdoff: tz.offset_of(0),
                     dstoff: tz.offset_of(1),
+                    as_read: tz.clone(),
                 });
             }
         }
@@ -608,13 +614,84 @@ impl ReadAt for std::fs::File {
     }
 }
 
+/// What tells a regular file from any other that has since taken its path
+/// or been written: device, inode, size, and modification and change times
+/// to the nanosecond.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime: (i64, i64),
+    pub ctime: (i64, i64),
+}
+
+/// A regular file read at an offset by opening its path again for each
+/// read (`O_RDONLY|O_CLOEXEC|O_NONBLOCK`), and reading nothing from what is
+/// not the file it was ([`FileId`]): no descriptor is kept between reads.
+/// Where it was replaced or written since, glibc has its copy; that is
+/// read as failing (DIVERGENCES 152).
+#[cfg(unix)]
+pub struct Reopened {
+    path: std::path::PathBuf,
+    id: FileId,
+}
+
+#[cfg(unix)]
+impl Reopened {
+    /// The file at `path`, known by `id`.
+    pub fn new(path: &[u8], id: FileId) -> Reopened {
+        use std::os::unix::ffi::OsStrExt;
+        Reopened {
+            path: std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+            id,
+        }
+    }
+
+    /// `m` as a [`FileId`].
+    pub fn id_of(m: &std::fs::Metadata) -> FileId {
+        use std::os::unix::fs::MetadataExt;
+        FileId {
+            dev: m.dev(),
+            ino: m.ino(),
+            size: m.size(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl ReadAt for Reopened {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(crate::safefs::NONBLOCK)
+            .open(&self.path)?;
+        let m = file.metadata()?;
+        if !m.is_file() || Self::id_of(&m) != self.id {
+            return Err(std::io::ErrorKind::NotFound.into());
+        }
+        std::os::unix::fs::FileExt::read_at(&file, buf, offset)
+    }
+}
+
 /// A zone file as it was opened, `fopen()` and `fstat()`.
 pub enum ZoneSource {
-    /// A regular file of `size` bytes (`st_size`), read where it is asked.
+    /// A regular file of `size` bytes (`st_size`), read where it is asked
+    /// through `data`, the descriptor opened, while it is read as glibc's
+    /// `__tzfile_read()` reads it; which `fclose()`s it at the end. Where
+    /// its data is more than [`DATA_IN_MEMORY`] and is read where it lies
+    /// after that, it is read through `later`, which holds no descriptor
+    /// (it opens the file again for each read, and reads nothing from one
+    /// that is not the file it was), so that lsof-rs keeps none open where
+    /// the C keeps none (measured: the C lists no zone file of its own).
     Regular {
         key: FileKey,
         size: u64,
         data: Rc<dyn ReadAt>,
+        later: Rc<dyn ReadAt>,
     },
     /// Anything else, a FIFO, a device, a directory: what it gave before it
     /// ended, failed or ran out of time. glibc reads such a file with stdio
@@ -706,6 +783,7 @@ impl ZoneFs for MemZoneFiles {
             .borrow_mut()
             .push(format!("O {}", String::from_utf8_lossy(path)));
         let f = self.find(path)?;
+        let bytes: Rc<dyn ReadAt> = Rc::new(f.bytes.clone());
         Some(if f.stream {
             ZoneSource::Stream {
                 key: f.key,
@@ -715,7 +793,8 @@ impl ZoneFs for MemZoneFiles {
             ZoneSource::Regular {
                 key: f.key,
                 size: f.bytes.len() as u64,
-                data: Rc::new(f.bytes.clone()),
+                data: Rc::clone(&bytes),
+                later: bytes,
             }
         })
     }
@@ -916,7 +995,7 @@ struct TzData {
     names: Vec<u8>,
     leapcnt: u64,
     leaps: Region,
-    spec: Option<PosixTz>,
+    spec: Option<(PosixTz, Option<DefaultRules>)>,
     moved: Option<Moved>,
 }
 
@@ -999,9 +1078,23 @@ impl TzData {
     /// `size_t` arithmetic where that decides; what is undefined there (a
     /// file with no type, which glibc reads one past) is refused.
     fn load(src: &ZoneSource) -> Option<TzData> {
-        let (data, size, stream): (Rc<dyn ReadAt>, u64, bool) = match src {
-            ZoneSource::Regular { data, size, .. } => (Rc::clone(data), *size, false),
-            ZoneSource::Stream { bytes, .. } => (Rc::new(bytes.clone()), bytes.len() as u64, true),
+        let (data, size, stream, later): (Rc<dyn ReadAt>, u64, bool, Rc<dyn ReadAt>) = match src {
+            ZoneSource::Regular {
+                data, size, later, ..
+            } => match v1_read_to_eof(data.as_ref(), *size) {
+                // A version 1 file is read as a stream is, to its end,
+                // whatever `st_size` says (glibc never looks at it there).
+                Some(bytes) => {
+                    let len = bytes.len() as u64;
+                    let bytes: Rc<dyn ReadAt> = Rc::new(bytes);
+                    (Rc::clone(&bytes), len, false, bytes)
+                }
+                None => (Rc::clone(data), *size, false, Rc::clone(later)),
+            },
+            ZoneSource::Stream { bytes, .. } => {
+                let bytes: Rc<dyn ReadAt> = Rc::new(bytes.clone());
+                (Rc::clone(&bytes), bytes_len(src), true, bytes)
+            }
         };
         let file = Region::new(Rc::clone(&data), 0, size);
         let mut pos: u64 = 0;
@@ -1099,8 +1192,9 @@ impl TzData {
         if pos.checked_add(block).is_none_or(|end| end > size) {
             return None;
         }
-        // Held in memory where it fits, else read where it lies.
-        let file_data = Rc::clone(&data);
+        // Held in memory where it fits, else read where it lies, through
+        // `later`: nothing kept holds the descriptor the file was read
+        // through, which the caller closes, as glibc's `fclose()`.
         let (data, base): (Option<Rc<Vec<u8>>>, u64) = if block <= DATA_IN_MEMORY {
             let mut copy = vec![0u8; usize::try_from(block).ok()?];
             let mut have = 0usize;
@@ -1118,9 +1212,13 @@ impl TzData {
             (None, pos)
         };
         let at = |off: u64| base.saturating_add(off);
+        let kept: Rc<dyn ReadAt> = match &data {
+            Some(held) => Rc::clone(held) as Rc<dyn ReadAt>,
+            None => later,
+        };
         let region = |start: u64, len: u64| Region {
             held: data.clone(),
-            ..Region::new(Rc::clone(&file_data), at(start), len)
+            ..Region::new(Rc::clone(&kept), at(start), len)
         };
         let trans = region(0, trans_len);
         let idxs = region(trans_len, timecnt);
@@ -1180,7 +1278,7 @@ impl TzData {
                     nul: std::cell::Cell::new(None),
                 };
                 if footer.at(0) != 0 {
-                    spec = Some(PosixTz::parse_with_default(&footer).0);
+                    spec = Some(PosixTz::parse_with_default(&footer));
                 }
                 // A name that runs past `zone_names` runs into it.
                 if names.len() as u64 == chars {
@@ -1214,6 +1312,50 @@ impl TzData {
             moved: None,
         })
     }
+}
+
+/// A stream's length.
+fn bytes_len(src: &ZoneSource) -> u64 {
+    match src {
+        ZoneSource::Stream { bytes, .. } => bytes.len() as u64,
+        ZoneSource::Regular { size, .. } => *size,
+    }
+}
+
+/// A regular file whose header is a version 1 file's and whose `st_size`
+/// is short of what that header says follows it, read from its start to
+/// its end or that length, as glibc's `fread()`s read it: they never ask
+/// `st_size`, so a file that says it is empty and is not (`/proc/self/
+/// environ`, measured: the C reads a zone from it) is a zone. `None` for
+/// any other file, which is read where it lies. What it reads is at most
+/// what the file holds, and never more than [`DATA_IN_MEMORY`] of data (a
+/// stream's bound).
+fn v1_read_to_eof(data: &dyn ReadAt, size: u64) -> Option<Vec<u8>> {
+    let head = read_from(data, 0, 44);
+    let len = stream_data_len(&head)?;
+    let need = 44u64.checked_add(len)?;
+    if size >= need || len > DATA_IN_MEMORY {
+        return None;
+    }
+    Some(read_from(data, 0, need))
+}
+
+/// Up to `len` bytes of `data` from `at`, read in turn until it ends or a
+/// read fails: as much memory as the file gave.
+fn read_from(data: &dyn ReadAt, at: u64, len: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; usize::try_from(len.min(PIECE)).unwrap_or(0)];
+    while (out.len() as u64) < len {
+        let want = usize::try_from((len - out.len() as u64).min(PIECE)).unwrap_or(0);
+        let Some(chunk) = buf.get_mut(..want) else {
+            break;
+        };
+        match data.read_at(chunk, at.saturating_add(out.len() as u64)) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+        }
+    }
+    out
 }
 
 /// Zone files through `std` alone: a regular file is read as glibc reads
@@ -1254,6 +1396,7 @@ impl ZoneFs for StdZoneFs {
                 key,
                 size: m.len(),
                 data: Rc::new(file),
+                later: Rc::new(Reopened::new(path, Reopened::id_of(&m))),
             }
         } else {
             ZoneSource::Stream {
@@ -1536,8 +1679,17 @@ impl LocalTime {
 
     /// `__tzset_parse_tz()`.
     fn parse_tz(&mut self, tz: &[u8]) {
-        let (rules, wants) = PosixTz::parse_with_default(tz);
+        self.parsed_tz(PosixTz::parse_with_default(tz));
+    }
+
+    /// `__tzset_parse_tz()` once the string is read: where it names an
+    /// alternative and no rule, `__tzfile_default()` (`posixrules`), and
+    /// where that loads, `tz_rules` left as the string was read to there,
+    /// `old_tz` forgotten and nothing more; else the rules, and `tzname`
+    /// from them.
+    fn parsed_tz(&mut self, (rules, wants): (PosixTz, Option<DefaultRules>)) {
         if let Some(d) = wants {
+            self.rules = d.as_read.clone();
             self.tzfile_default(d);
             if self.use_tzfile {
                 self.old_tz = None;
@@ -1766,21 +1918,44 @@ impl LocalTime {
             Branch::Past => match self.data.as_ref()?.spec.clone() {
                 None => found_at(self.data.as_ref()?, &mut names, n, n),
                 Some(spec) => {
-                    // `__tzset_parse_tz(tzspec)`, then its rules at `t`.
-                    self.rules = spec;
-                    self.update_vars();
+                    // `__tzset_parse_tz(tzspec)`. A rule string that names
+                    // daylight time and no rule (`EST5EDT`) loads
+                    // `posixrules` in place of the zone being computed
+                    // from, as glibc does in the middle of this function
+                    // (its zone is freed under it): the rules then are the
+                    // string's names and offsets with `tz_rules` cleared,
+                    // the leap seconds `posixrules`', and the zone is read
+                    // again at the next `localtime()`; where `posixrules`
+                    // is missing, the zone is gone, the United States'
+                    // rule is the string's and no leap second is left,
+                    // and with `TZ` unchanged that is all there is from
+                    // then on (measured, DIVERGENCES 152).
+                    // Where nothing is loaded after it, glibc's `leap:`
+                    // reads the zone it freed, whose leap seconds are still
+                    // there to read (measured, a 3797-byte zone: its 27).
+                    let freed_leaps = self.leap_at(t);
+                    self.parsed_tz(spec);
                     match offtime(t, 0) {
                         Some(ut) => {
+                            // `__tz_compute(timer, tp, 1)`: `tm_zone` is
+                            // `tzname[isdst]`.
                             let (offset, isdst) = self.rules.at(t, i64::from(ut.year) + 1900);
                             let zone = self.tzname(isdst).to_vec();
-                            let (correction, hit) = self.leap_at(t);
+                            let (correction, hit) = if self.data.is_some() {
+                                self.leap_at(t)
+                            } else {
+                                freed_leaps
+                            };
                             return Some((offset, isdst, zone, correction, hit));
                         }
                         None => {
-                            // The rules read and not used: the last type.
+                            // The rules read and not used: the last type of
+                            // what is loaded now.
                             let [r0, r1] = self.tzname.clone();
                             names = [Some(r0), Some(r1)];
-                            found_at(self.data.as_ref()?, &mut names, n, n)
+                            let data = self.data.as_ref()?;
+                            let n = data.timecnt;
+                            found_at(data, &mut names, n, n)
                         }
                     }
                 }
@@ -2237,7 +2412,11 @@ fn format_into(out: &mut Out<'_>, format: &[u8], tm: &Tm, call: &mut Call<'_>, d
             Bad,
         }
         let hour12 = if tm.hour % 12 == 0 { 12 } else { tm.hour % 12 };
-        let year = i64::from(tm.year) + 1900;
+        // `int year = tp->tm_year + TM_YEAR_BASE`: an `int`, which wraps
+        // past 2^31 - 1 (measured: a time in the year 2^31 prints `%Y`
+        // `-2147483648`).
+        let year32 = tm.year.wrapping_add(1900);
+        let year = i64::from(year32);
         let e = modifier == b'E';
         let o = modifier == b'O';
         let number = |digits: i64, value: i64| Is::Number(digits, value, false);
@@ -2301,19 +2480,22 @@ fn format_into(out: &mut Out<'_>, format: &[u8], tm: &Tm, call: &mut Call<'_>, d
             b'V' | b'g' | b'G' if e => Is::Bad,
             b'V' | b'g' | b'G' => {
                 let (yday, wday) = (i64::from(tm.yday), i64::from(tm.wday));
-                let mut iso_year = year;
+                let mut iso_year = year32;
                 let mut days = iso_week_days(yday, wday);
                 if days < 0 {
                     // The week belongs to the year before.
-                    iso_year -= 1;
-                    days = iso_week_days(yday + 365 + i64::from(is_leap(iso_year)), wday);
+                    iso_year = iso_year.wrapping_sub(1);
+                    let leap = is_leap(i64::from(iso_year));
+                    days = iso_week_days(yday + 365 + i64::from(leap), wday);
                 } else {
-                    let d = iso_week_days(yday - (365 + i64::from(is_leap(iso_year))), wday);
+                    let leap = is_leap(i64::from(iso_year));
+                    let d = iso_week_days(yday - (365 + i64::from(leap)), wday);
                     if d >= 0 {
-                        iso_year += 1;
+                        iso_year = iso_year.wrapping_add(1);
                         days = d;
                     }
                 }
+                let iso_year = i64::from(iso_year);
                 match conversion {
                     b'g' => number(2, iso_year.rem_euclid(100)),
                     b'G' => number(1, iso_year),
@@ -2327,7 +2509,8 @@ fn format_into(out: &mut Out<'_>, format: &[u8], tm: &Tm, call: &mut Call<'_>, d
             b'w' => unless_e(number(1, i64::from(tm.wday))),
             b'Y' if o => Is::Bad,
             b'Y' => number(1, year),
-            b'y' => number(2, year.rem_euclid(100)),
+            // `(tp->tm_year % 100 + 100) % 100`: of `tm_year` itself.
+            b'y' => number(2, i64::from(tm.year).rem_euclid(100)),
             b'Z' => {
                 let case = if change_case { Case::Lower } else { case };
                 if tm.zone.is_empty() {
@@ -3052,6 +3235,156 @@ mod tests {
         );
     }
 
+    /// A zone file whose footer names daylight time and no rule
+    /// (`FOO3BAR`), past its last change: glibc's `__tzset_parse_tz()` of
+    /// it reads `posixrules` in place of the zone (`__tzfile_default()`),
+    /// and works the time out from `tz_rules` as the parse left them,
+    /// cleared (the day `J0` 0, at second 0), so that for most of a year
+    /// it is daylight time; the zone is read again at the next call. With
+    /// no `posixrules`, the zone is gone for good and the United States'
+    /// rule is the string's, at every time after. Measured with glibc 2.39
+    /// (`localtime()` and `strftime("%F %T %Z %z %s")`, a call a line, in
+    /// one process): lsof-rs had taken the United States' rule each time
+    /// and kept the zone.
+    #[test]
+    fn a_footer_with_daylight_time_and_no_rule_reads_posixrules_in_its_place() {
+        let show = |lt: &mut LocalTime, t: i64| {
+            let tm = lt.localtime(t).unwrap();
+            let mut buf = [0u8; 64];
+            let n = strftime(&mut buf, b"%F %T %Z %z %s", &tm, lt);
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        };
+        let times = [-100, 0, 1_000_000_000, 2_224_000_000, 972_799_200, -100];
+        let mut fs = MemZoneFiles::default();
+        fs.put(b"/z", key(1, 1), include_bytes!("../tests/tzif/nofoot"));
+        fs.put(
+            b"/tzd/posixrules",
+            key(2, 1),
+            include_bytes!("../tests/tzif/new_york"),
+        );
+        let mut without = fs.clone();
+        without.files.retain(|(p, _)| !p.ends_with(b"posixrules"));
+        let mut lt = local(Some(b"/z"), Some(b"/tzd"), fs);
+        let got: Vec<String> = times.iter().map(|&t| show(&mut lt, t)).collect();
+        assert_eq!(
+            got,
+            [
+                "1970-01-01 00:58:20 AAA +0100 14300",
+                "1969-12-31 22:00:00 BAR -0200 0",
+                "2001-09-08 23:46:40 BAR -0200 1000000000",
+                "2040-06-22 15:46:40 BAR -0200 2224000000",
+                "2000-10-29 04:00:00 BAR -0200 972799200",
+                "1970-01-01 00:58:20 AAA +0100 14300",
+            ]
+        );
+        let mut lt = local(Some(b"/z"), Some(b"/tzd"), without);
+        let got: Vec<String> = times.iter().map(|&t| show(&mut lt, t)).collect();
+        assert_eq!(
+            got,
+            [
+                "1970-01-01 00:58:20 AAA +0100 14300",
+                "1969-12-31 21:00:00 FOO -0300 0",
+                "2001-09-08 23:46:40 BAR -0200 1000000000",
+                "2040-06-22 15:46:40 BAR -0200 2224000000",
+                "2000-10-29 04:00:00 BAR -0200 972799200",
+                "1969-12-31 20:58:20 FOO -0300 -100",
+            ]
+        );
+    }
+
+    /// Past the last change of a zone with leap seconds whose footer names
+    /// daylight time and no rule, with no `posixrules`: glibc frees the
+    /// zone in `__tzfile_default()` and its `leap:` then reads the freed
+    /// zone's leap seconds, here still there (measured, 6 runs of 6: the
+    /// 27 of a `right/` New York at 2000000000), and none at the next call,
+    /// the zone gone.
+    #[test]
+    fn the_call_that_loses_the_zone_reads_its_leap_seconds() {
+        let show = |lt: &mut LocalTime, t: i64| {
+            let tm = lt.localtime(t).unwrap();
+            let mut buf = [0u8; 64];
+            let n = strftime(&mut buf, b"%F %T %Z %z %s", &tm, lt);
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        };
+        let mut fs = MemZoneFiles::default();
+        fs.put(b"/z", key(1, 1), include_bytes!("../tests/tzif/rightnorule"));
+        let mut lt = local(Some(b"/z"), Some(b"/tzd"), fs);
+        let got: Vec<String> = [0, 2_000_000_000, 2_000_000_000]
+            .iter()
+            .map(|&t| show(&mut lt, t))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "1969-12-31 19:00:00 EST -0500 0",
+                "2033-05-17 23:32:53 EDT -0400 1999999973",
+                "2033-05-17 23:33:20 EDT -0400 2000000000",
+            ]
+        );
+    }
+
+    /// A regular file whose `st_size` says less than its version 1 header
+    /// says follows, read to its end as glibc's `fread()`s read it: a file
+    /// that says it is empty and is a zone (`/proc/self/environ` holding
+    /// one, measured: the C prints `ABC+0100`, lsof-rs had `+0000`). A
+    /// version 2 file is read by `st_size`, as glibc reads its footer, and
+    /// is no zone there.
+    #[test]
+    fn a_version_1_file_is_read_to_its_end_whatever_its_size_says() {
+        struct Sized0(Vec<u8>);
+        impl ZoneFs for Sized0 {
+            fn stat(&mut self, _: &[u8]) -> Option<FileKey> {
+                None
+            }
+            fn open(&mut self, _: &[u8]) -> Option<ZoneSource> {
+                let data: Rc<dyn ReadAt> = Rc::new(self.0.clone());
+                Some(ZoneSource::Regular {
+                    key: FileKey::default(),
+                    size: 0,
+                    data: Rc::clone(&data),
+                    later: data,
+                })
+            }
+        }
+        let zone = |bytes: &[u8]| {
+            let mut lt = LocalTime::new(
+                Box::new(|n| (n == "TZ").then(|| b"/z".to_vec())),
+                false,
+                Box::new(Sized0(bytes.to_vec())),
+            );
+            let tm = lt.localtime(0).unwrap();
+            (String::from_utf8_lossy(&tm.zone).into_owned(), tm.gmtoff)
+        };
+        let v1 = include_bytes!("../tests/tzif/v1only");
+        let mut fs = MemZoneFiles::default();
+        fs.put(b"/z", key(1, 1), v1);
+        let sized = local(Some(b"/z"), None, fs).localtime(0).unwrap();
+        assert!(!sized.zone.is_empty());
+        assert_eq!(
+            zone(v1),
+            (
+                String::from_utf8_lossy(&sized.zone).into_owned(),
+                sized.gmtoff
+            )
+        );
+        // Short of its data: no zone, as glibc's short `fread()`.
+        assert_eq!(zone(&v1[..v1.len() - 1]).0, "");
+        assert_eq!(zone(include_bytes!("../tests/tzif/new_york")).0, "");
+    }
+
+    /// `%Y`, `%C` and `%G` of a year past an `int`: glibc's `int year =
+    /// tp->tm_year + 1900` wraps (measured, `TZ=UTC`, the second
+    /// 67767976233532800: `-2147483648 -21474837 -2147483648 52 01 48` for
+    /// `%Y %C %G %g %V %y`); `%y` is of `tm_year` itself.
+    #[test]
+    fn the_year_is_the_cs_int() {
+        let mut lt = LocalTime::utc();
+        let tm = lt.localtime(67_767_976_233_532_800).unwrap();
+        let mut buf = [0u8; 128];
+        let n = strftime(&mut buf, b"%Y %C %G %g %V %y", &tm, &mut lt);
+        assert_eq!(&buf[..n], b"-2147483648 -21474837 -2147483648 52 01 48");
+    }
+
     /// A zone file glibc reads from a pipe or a device: a version 1 file
     /// alone (measured: one sent through a FIFO is `ABC +0100`; the same as
     /// version 2 is no zone, so `TZ`'s own reading of the path, UTC with no
@@ -3133,6 +3466,47 @@ mod tests {
         assert_eq!(lt.tzname(true), b"CCC");
     }
 
+    /// Nothing the zone keeps holds what the file was read through, which
+    /// its opener closes once it is read, as glibc `fclose()`s it: lsof-rs
+    /// listed its own `/usr/share/zoneinfo/America/New_York` (fd 3) where
+    /// the C lists none (measured). A file read where it lies later is
+    /// read through `later`, which holds no descriptor.
+    #[test]
+    fn the_file_read_through_is_not_kept() {
+        struct Watched {
+            bytes: Vec<u8>,
+            data: Rc<RefCell<Vec<std::rc::Weak<dyn ReadAt>>>>,
+        }
+        impl ZoneFs for Watched {
+            fn stat(&mut self, _: &[u8]) -> Option<FileKey> {
+                None
+            }
+            fn open(&mut self, _: &[u8]) -> Option<ZoneSource> {
+                let data: Rc<dyn ReadAt> = Rc::new(self.bytes.clone());
+                self.data.borrow_mut().push(Rc::downgrade(&data));
+                Some(ZoneSource::Regular {
+                    key: FileKey::default(),
+                    size: self.bytes.len() as u64,
+                    data,
+                    later: Rc::new(Vec::new()),
+                })
+            }
+        }
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let mut lt = LocalTime::new(
+            Box::new(|n| (n == "TZ").then(|| b"/z".to_vec())),
+            false,
+            Box::new(Watched {
+                bytes: include_bytes!("../tests/tzif/new_york").to_vec(),
+                data: Rc::clone(&opened),
+            }),
+        );
+        assert_eq!(lt.localtime(0).unwrap().zone, b"EST");
+        assert_eq!(opened.borrow().len(), 1);
+        assert!(opened.borrow().iter().all(|w| w.upgrade().is_none()));
+        assert_eq!(lt.localtime(1_000_000_000).unwrap().zone, b"EDT");
+    }
+
     /// A file's data up to [`DATA_IN_MEMORY`] is copied at the read, as
     /// glibc copies it, and the file is not read again; a longer one is
     /// read where it lies, at each conversion.
@@ -3151,10 +3525,12 @@ mod tests {
                 None
             }
             fn open(&mut self, _: &[u8]) -> Option<ZoneSource> {
+                let data: Rc<dyn ReadAt> = Rc::new(Counted(self.0.clone(), Rc::clone(&self.1)));
                 Some(ZoneSource::Regular {
                     key: FileKey::default(),
                     size: self.0.len() as u64,
-                    data: Rc::new(Counted(self.0.clone(), Rc::clone(&self.1))),
+                    data: Rc::clone(&data),
+                    later: data,
                 })
             }
         }

@@ -27,7 +27,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use lsof_core::timefmt::{stream_data_len, FileKey, ZoneFs, ZoneSource, DATA_IN_MEMORY};
+use lsof_core::timefmt::{
+    stream_data_len, FileId, FileKey, Reopened, ZoneFs, ZoneSource, DATA_IN_MEMORY,
+};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{fstat, open, FileType, Mode, OFlags};
 
@@ -66,25 +68,69 @@ impl ZoneFs for LinuxZoneFs {
     }
 
     fn open(&mut self, path: &[u8]) -> Option<ZoneSource> {
-        let fd = open(
-            OsStr::from_bytes(path),
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .ok()?;
+        let deadline = Instant::now() + self.deadline;
+        let fd = open_waiting(
+            || {
+                open(
+                    OsStr::from_bytes(path),
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+            },
+            deadline,
+            &mut |d| std::thread::sleep(d),
+        )?;
         let st = fstat(&fd).ok()?;
         let key = key_of(&st);
         if FileType::from_raw_mode(st.st_mode) == FileType::RegularFile {
+            let id = FileId {
+                dev: st.st_dev,
+                ino: st.st_ino,
+                size: u64::try_from(st.st_size).unwrap_or(0),
+                mtime: (st.st_mtime, i64::try_from(st.st_mtime_nsec).unwrap_or(-1)),
+                ctime: (st.st_ctime, i64::try_from(st.st_ctime_nsec).unwrap_or(-1)),
+            };
             return Some(ZoneSource::Regular {
                 key,
-                size: u64::try_from(st.st_size).unwrap_or(0),
+                size: id.size,
                 data: Rc::new(std::fs::File::from(fd)),
+                later: Rc::new(Reopened::new(path, id)),
             });
         }
         Some(ZoneSource::Stream {
             key,
-            bytes: read_stream(&fd, Instant::now() + self.deadline),
+            bytes: read_stream(&fd, deadline),
         })
+    }
+}
+
+/// How often an open a lease holds back is tried again.
+pub const LEASE_RETRY: Duration = Duration::from_millis(10);
+
+/// `open` until it does not fail with `EWOULDBLOCK`, at most until
+/// `deadline`, [`LEASE_RETRY`] apart (`sleep`). A regular file another
+/// process holds a write lease on refuses an `O_NONBLOCK` open so, and the
+/// kernel starts breaking the lease; glibc's blocking `fopen()` waits for
+/// the break (measured: a holder that lets go a second after its `SIGIO`,
+/// the C reads the zone after it, `IST+0530`; lsof-rs had read none,
+/// `+0000`). Any other failure is the open's.
+fn open_waiting(
+    mut open: impl FnMut() -> rustix::io::Result<rustix::fd::OwnedFd>,
+    deadline: Instant,
+    sleep: &mut dyn FnMut(Duration),
+) -> Option<rustix::fd::OwnedFd> {
+    loop {
+        match open() {
+            Ok(fd) => return Some(fd),
+            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                sleep(left.min(LEASE_RETRY));
+            }
+            Err(_) => return None,
+        }
     }
 }
 
@@ -155,6 +201,94 @@ mod tests {
 
     fn path(p: &std::path::Path) -> Vec<u8> {
         p.as_os_str().as_bytes().to_vec()
+    }
+
+    /// An open a lease holds back is tried again, 10 ms apart, until it
+    /// opens or the deadline passes; any other failure ends it at once.
+    #[test]
+    #[cfg_attr(miri, ignore = "opens /dev/null")]
+    fn an_open_a_lease_holds_back_is_tried_again() {
+        let mut tries = 0;
+        let mut slept = Vec::new();
+        let fd = open_waiting(
+            || {
+                tries += 1;
+                if tries < 3 {
+                    Err(rustix::io::Errno::WOULDBLOCK)
+                } else {
+                    open("/dev/null", OFlags::RDONLY, Mode::empty())
+                }
+            },
+            Instant::now() + Duration::from_secs(3600),
+            &mut |d| slept.push(d),
+        );
+        assert!(fd.is_some());
+        assert_eq!(tries, 3);
+        assert_eq!(slept, [LEASE_RETRY, LEASE_RETRY]);
+        // Past the deadline: given up, without a sleep.
+        let mut slept = Vec::new();
+        let gone = open_waiting(
+            || Err(rustix::io::Errno::WOULDBLOCK),
+            Instant::now(),
+            &mut |d| slept.push(d),
+        );
+        assert!(gone.is_none() && slept.is_empty());
+        // Another failure: none.
+        let mut tries = 0;
+        let refused = open_waiting(
+            || {
+                tries += 1;
+                Err(rustix::io::Errno::ACCESS)
+            },
+            Instant::now() + Duration::from_secs(3600),
+            &mut |_| {},
+        );
+        assert!(refused.is_none());
+        assert_eq!(tries, 1);
+    }
+
+    /// What a regular zone file is read through after its load holds no
+    /// descriptor: it opens the path again for each read, and reads
+    /// nothing once another file has taken the path or the file has been
+    /// written (glibc keeps its copy there; DIVERGENCES 152).
+    #[test]
+    #[cfg_attr(miri, ignore = "makes files")]
+    fn later_reads_open_the_file_again_and_only_the_same_file() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-zonelater-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("z");
+        std::fs::write(&p, b"0123456789").unwrap();
+        let Some(ZoneSource::Regular { data, later, .. }) = short().open(&path(&p)) else {
+            panic!("not regular");
+        };
+        drop(data);
+        let mut buf = [0u8; 4];
+        assert_eq!(later.read_at(&mut buf, 3).unwrap(), 4);
+        assert_eq!(&buf, b"3456");
+        // No descriptor of it is left open in this process.
+        let open_here = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+            .any(|t| t == p);
+        assert!(!open_here);
+        // Replaced: another file at the path is not read.
+        let q = dir.join("q");
+        std::fs::write(&q, b"abcdefghij").unwrap();
+        std::fs::rename(&q, &p).unwrap();
+        assert!(later.read_at(&mut buf, 3).is_err());
+        // Written in place: not the file it was either.
+        let Some(ZoneSource::Regular { later, .. }) = short().open(&path(&p)) else {
+            panic!("not regular");
+        };
+        assert!(later.read_at(&mut buf, 0).is_ok());
+        // (Its size changes too, so that a file system whose times are
+        // whole seconds tells it as well.)
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"X").unwrap();
+        drop(f);
+        assert!(later.read_at(&mut buf, 0).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn short() -> LinuxZoneFs {

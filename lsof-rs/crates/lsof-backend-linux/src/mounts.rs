@@ -96,7 +96,8 @@ pub fn load(req: &MountRequest, fs: &SafeFs) -> MountTable {
         Ok(table) => table,
         Err(line) => {
             lsof_core::safefs::to_stderr(&line);
-            std::process::exit(1);
+            // The C's `Exit()`: stdout flushed, then 1.
+            lsof_core::safefs::exit(1);
         }
     }
 }

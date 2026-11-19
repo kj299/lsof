@@ -706,15 +706,23 @@ login, and older than these rows. The readers take arbitrary bytes (fuzzed,
 (DIVERGENCES 152, 153). The zone file `TZ` names, or `/etc/localtime`, is
 opened `O_RDONLY|O_CLOEXEC|O_NONBLOCK` and `fstat`ed (since 2026-11-18;
 `lsof-backend-linux/src/zonefile.rs`). A regular file of any size is parsed
-as glibc's `__tzfile_read()` parses it, every read bounded by `st_size`,
-every count checked against the bytes the file holds before anything is
-kept; its data is copied into memory up to 64 MiB and past that read where
-it lies through the descriptor, a 64 KiB piece at a time, and a name is
-kept to 16 MiB (more than any marker can show), so memory does not grow
-with the file. Measured, `-r1c1m%Z%z`: a 20 MiB footer, the C 23,240 KiB
-of RSS and lsof-rs 10,344; 10,485,760 transitions (90 MiB), the C 94,936
-KiB and lsof-rs 10,328, 0.16 s past its one-second sleep (the same output
-in each). Anything else is read only after `poll(POLLIN)` says it is
+as glibc's `__tzfile_read()` parses it, a version 2 file's reads bounded by
+`st_size` and a version 1 file's by what its header says follows (read to
+its end where `st_size` says less, as glibc's `fread()`s read it, at most
+64 MiB of data), every count checked against the bytes the file holds
+before anything is kept; its data is copied into memory up to 64 MiB and
+the descriptor closed when the read is done, and past that read where it
+lies, a 64 KiB piece at a time, the path opened again for each piece and
+checked to be the same file (device, inode, size, modification and change
+times), no descriptor kept between them; a name is kept to 16 MiB (more
+than any marker can show), so memory does not grow with the file.
+Measured, `-r1c1m%Z%z`: a 20 MiB footer, the C 23,240 KiB of RSS and
+lsof-rs 10,344; 10,485,760 transitions (90 MiB), the C 94,908 KiB of peak
+RSS and lsof-rs 3,748 (`VmHWM`, 2026-11-19, after the change; 3,728
+before it), the same output (`CCC+0300`) and run time (1.1 s with its
+one-second sleep). An open that a write lease another process holds
+refuses (`EWOULDBLOCK`) is tried again every 10 ms within the same 3
+seconds a stream has, never in a loop that does not sleep. Anything else is read only after `poll(POLLIN)` says it is
 ready, for 3 seconds in all, the 44-byte header and then at most a version
 1 file's data, as glibc can use from a stream: a FIFO with no writer holds
 lsof-rs 3 seconds where the C waits for ever (measured: `TZ=FIFO`, the C

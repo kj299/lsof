@@ -637,16 +637,19 @@ name = "default-marker-eight"
 rule = "the marker is seven = (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''unwrap_or(b"======="));'''
-new = '''unwrap_or(b"========"));'''
+old = '''unwrap_or(b"=======")),'''
+new = '''unwrap_or(b"========")),'''
 
 [[mutant]]
 name = "nul-marker-no-newline"
 rule = "-F0's marker ends NUL and a newline (152)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/repeat.rs"
-old = '''                    let _ = out.write_all(if nul { b"\0\n" } else { b"\n" });'''
-new = '''                    let _ = out.write_all(if nul { b"\0" } else { b"\n" });'''
+old = '''                    if nul {
+                        let _ = out.write_all(b"\n");
+                    }
+'''
+new = ''''''
 
 [[mutant]]
 name = "marker-not-reformatted"

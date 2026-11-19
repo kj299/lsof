@@ -422,3 +422,32 @@ fn the_mount_print_into_a_closed_pipe_is_killed_by_sigpipe() {
         .expect("run lsof");
     assert_eq!(out.status.code(), Some(0));
 }
+
+/// What is in stdout's buffer when a run ends without listing is written,
+/// as the C's `exit()` writes it: `+m`'s lines, printed while `+d` reads
+/// the mount table, before `-h` ends the run (measured: `lsof +m +d /tmp
+/// -h 2>/dev/null | wc -c` is 551 bytes in the C on the review host;
+/// lsof-rs had returned from `main` past its flush and printed none).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's output"
+)]
+fn a_run_that_ends_at_its_help_writes_what_it_printed() {
+    let _serial = serial();
+    let dir = std::env::temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_lsof"))
+        .env("RES_OPTIONS", "attempts:0")
+        .args(["-n", "-P", "+m", "+d"])
+        .arg(&dir)
+        .arg("-h")
+        .stderr(Stdio::null())
+        .output()
+        .expect("run lsof");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines().any(|l| l.starts_with("/ 0x") || l.ends_with(" 0x0")),
+        "{text:?}"
+    );
+}

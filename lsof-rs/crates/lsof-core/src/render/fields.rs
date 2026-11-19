@@ -40,7 +40,7 @@
 use crate::model::{FdType, Process};
 use crate::render::fflags::{self, FileFlags};
 use crate::render::{
-    access_code, device_text, lock_code, node_is_protocol, offset_text, Escaper,
+    access_code, device_text, lock_code, node_is_protocol, offset_text, Calls, Escaper,
     DEFAULT_OFFSET_DIGITS,
 };
 use crate::selection::TcpInfoFlags;
@@ -343,103 +343,114 @@ pub fn write_with_names(
     file_flags: FileFlags,
     rename: &mut dyn FnMut(&crate::model::OpenFile) -> Option<crate::model::OpenFile>,
 ) -> std::io::Result<()> {
-    let term = if nul { '\0' } else { '\n' };
+    let term = if nul { b'\0' } else { b'\n' };
     // No list is the C's default set, which is every letter but a few; a
     // list is exactly those letters (the parser spells out the default set
     // when a letter outside it is added to it, `-F -Fr`).
     let want = |c: char| only.map_or_else(|| field_is_default(c), |s| s.contains(&c));
-    let mut out = String::new();
-    // Field emitter (macro, not a closure, so `end_set!` can also touch `out`).
+    // Each field as the C's `print_proc()` prints it, a stdio call at a time
+    // ([`Calls`]): most are one `printf("%c%s%c")`; `c` and `n` are a
+    // `putchar()`, `safestrprt()`'s calls and a `putchar()`; `s`, `o` and
+    // `i` a `putchar()`, a `printf()` and a `putchar()`.
+    let mut out = Calls::new();
+    // One `printf("%c%s%c", letter, value, Terminator)`.
     macro_rules! push {
         ($c:expr, $v:expr) => {{
-            out.push($c);
-            out.push_str($v);
-            out.push(term);
+            let mut f = Vec::with_capacity(2 + $v.len());
+            f.push($c);
+            f.extend_from_slice($v.as_bytes());
+            f.push(term);
+            out.call(f);
         }};
     }
-    // Close a process/file set. In `-F0` the set's last field keeps its NUL and
-    // gets a NL *appended* — `print.c` does `putchar('\0')` for the field, then
-    // `putchar('\n')` for the set — so the bytes are `…\0\n`. Appending rather
-    // than replacing matters: a consumer that splits the stream on NUL, which is
-    // the whole point of `-F0`, otherwise finds the last field of one set glued
-    // to the first field of the next. In default `-F` every field is already
-    // NL-terminated and this is a no-op.
-    macro_rules! end_set {
-        () => {{
-            if nul && out.ends_with('\0') {
-                out.push('\n');
-            }
+    // `putchar(letter); printf("%s", value); putchar(Terminator)`.
+    macro_rules! split {
+        ($c:expr, $v:expr) => {{
+            out.putc($c);
+            out.call($v.as_bytes());
+            out.putc(term);
         }};
     }
 
     for p in procs {
         // `p` is the one field Lsof.8 calls "always selected".
-        push!('p', &p.pid.to_string());
+        push!(b'p', &p.pid.to_string());
         // `-K`: the task id and the task's own command, emitted right after
         // `p` and only for a task entry (`print.c`'s HASTASKS block).
         if want('K') {
             if let Some(tid) = p.tid {
-                push!('K', &tid.to_string());
+                push!(b'K', &tid.to_string());
             }
         }
         if want('M') {
             if let Some(tc) = &p.task_command {
-                push!('M', &esc.text(tc));
+                push!(b'M', &esc.text(tc));
             }
         }
         if want('g') {
             if let Some(pgid) = p.pgid {
-                push!('g', &pgid.to_string());
+                push!(b'g', &pgid.to_string());
             }
         }
         if want('R') {
             if let Some(ppid) = p.ppid {
-                push!('R', &ppid.to_string());
+                push!(b'R', &ppid.to_string());
             }
         }
         if want('c') {
-            push!('c', &esc.bytes(p.command_bytes()));
+            out.putc(b'c');
+            esc.bytes_calls(p.command_bytes(), &mut out);
+            out.putc(term);
         }
         if want('u') {
             if let Some(uid) = p.uid {
-                push!('u', &uid_as_the_c_prints_it(uid).to_string());
+                push!(b'u', &uid_as_the_c_prints_it(uid).to_string());
             }
         }
         if want('L') {
             if let Some(user) = p.login_bytes() {
-                push!('L', &esc.bytes(user));
+                push!(b'L', &esc.bytes(user));
             }
         }
-        end_set!();
-        w.write_all(out.as_bytes())?;
-        out.clear();
+        // In `-F0` a set's last field keeps its NUL and gets a NL after it —
+        // `print.c` does `putchar('\0')` for the field, then `putchar('\n')`
+        // for the set — so the bytes are `…\0\n`. A consumer that splits the
+        // stream on NUL, the whole point of `-F0`, otherwise finds the last
+        // field of one set glued to the first field of the next. In default
+        // `-F` every field is already NL-terminated and there is none.
+        if nul {
+            out.putc(b'\n');
+        }
+        out.write_to(w)?;
         for f in &p.files {
             let renamed = if want('n') { rename(f) } else { None };
             let f = renamed.as_ref().unwrap_or(f);
+            // Whether this set printed a field (the C's `lc`).
+            let before = out.bytes().len();
             let fd = match f.fd {
                 FdType::Handle(n) => n.to_string(),
                 _ => f.fd.code(),
             };
             if want('f') {
-                push!('f', &fd);
+                push!(b'f', &fd);
             }
             // Empty, not absent: the C prints `a ` and `l ` so every file set
             // has the same shape.
             if want('a') {
-                push!('a', &access_code(f).unwrap_or(' ').to_string());
+                push!(b'a', &access_code(f).unwrap_or(' ').to_string());
             }
             if want('l') {
-                push!('l', &lock_code(f).unwrap_or(' ').to_string());
+                push!(b'l', &lock_code(f).unwrap_or(' ').to_string());
             }
             if want('t') && f.file_type.has_code() {
-                push!('t', &f.file_type.code());
+                push!(b't', &f.file_type.code());
             }
             if want('G') {
                 // In hex, `0x<file flags>;0x<per-open flags>` (the second is the
                 // C's `pof`, which its Linux dialect never sets), or by name
                 // after a `+f g` (DIVERGENCES 46).
                 if let Some(g) = f.file_flags.filter(|&g| fflags::shown(g, file_flags)) {
-                    push!('G', &fflags::text(g, file_flags));
+                    push!(b'G', &fflags::text(g, file_flags));
                 }
             }
             // `d` is the file's device CHARACTER code, `D` its device NUMBER
@@ -451,29 +462,29 @@ pub fn write_with_names(
             // for rows with no filesystem device, such as sockets.
             if want('d') {
                 if let Some(d) = device_text(f) {
-                    push!('d', d);
+                    push!(b'd', d);
                 }
             }
             if want('D') {
                 if let Some(dev) = f.fs_device {
-                    push!('D', &format!("0x{dev:x}"));
+                    push!(b'D', &format!("0x{dev:x}"));
                 }
             }
             // The device a character or block special names, in hex, after `D`
             // where `print.c` puts it (DIVERGENCES 47).
             if want('r') {
                 if let Some(rdev) = f.rdev {
-                    push!('r', &format!("0x{:x}", rdev.get()));
+                    push!(b'r', &format!("0x{:x}", rdev.get()));
                 }
             }
             if want('s') {
                 if let Some(s) = f.size {
-                    push!('s', &s.to_string());
+                    split!(b's', &s.to_string());
                 }
             }
             if want('o') {
                 if let Some(o) = f.offset {
-                    push!('o', &offset_text(o, offset_digits));
+                    split!(b'o', &offset_text(o, offset_digits));
                 }
             }
             // `i` and `P` are the same cell under two names, and the C picks
@@ -493,17 +504,17 @@ pub fn write_with_names(
             let node_is_protocol = node_is_protocol(f);
             if want('i') && !node_is_protocol {
                 if let Some(n) = &f.node {
-                    push!('i', n);
+                    split!(b'i', n);
                 }
             }
             if want('k') {
                 if let Some(n) = f.links {
-                    push!('k', &n.to_string());
+                    push!(b'k', &n.to_string());
                 }
             }
             if want('P') && node_is_protocol {
                 if let Some(n) = &f.node {
-                    push!('P', n);
+                    push!(b'P', n);
                 }
             }
             // Emit NAME only when there is one. Some rows (e.g. `-K` thread
@@ -514,7 +525,9 @@ pub fn write_with_names(
             // field is empty there (measured: a 4,200-byte host name in
             // the hosts file, DIVERGENCES 154).
             if want('n') && (!f.name.is_empty() || f.is_internet()) {
-                push!('n', &f.printed_name(&esc));
+                out.putc(b'n');
+                f.printed_name_calls(&esc, &mut out);
+                out.putc(term);
             }
             // The TCP/TPI tokens come last, *after* the name: `print.c` calls
             // `print_tcptpi()` once `printname()` has run.
@@ -526,32 +539,34 @@ pub fn write_with_names(
                 if let Some(sock) = &f.socket {
                     if tcp_show.state {
                         if let Some(st) = sock.shown_state() {
-                            push!('T', &format!("ST={}", st.as_str()));
+                            push!(b'T', &format!("ST={}", st.as_str()));
                         }
                     }
                     // Extended info as repeated `T` fields with lsof's own
                     // prefixes: QR (read queue), QS (send queue), WR (window
-                    // read size = our advertised receive window).
+                    // read size = our advertised receive window); each a
+                    // `putchar('T')`, a `printf()` and a `putchar()`.
                     if let Some(tcp) = &sock.tcp {
                         if tcp_show.queue {
                             if let Some(q) = tcp.recv_queue {
-                                push!('T', &format!("QR={q}"));
+                                split!(b'T', &format!("QR={q}"));
                             }
                             if let Some(q) = tcp.send_queue {
-                                push!('T', &format!("QS={q}"));
+                                split!(b'T', &format!("QS={q}"));
                             }
                         }
                         if tcp_show.window {
                             if let Some(w) = tcp.recv_window {
-                                push!('T', &format!("WR={w}"));
+                                split!(b'T', &format!("WR={w}"));
                             }
                         }
                     }
                 }
             }
-            end_set!();
-            w.write_all(out.as_bytes())?;
-            out.clear();
+            if nul && out.bytes().len() > before {
+                out.putc(b'\n');
+            }
+            out.write_to(w)?;
         }
     }
     Ok(())
@@ -568,6 +583,69 @@ pub(crate) fn uid_as_the_c_prints_it(uid: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each field is written as `print_proc()`'s calls write it, one
+    /// `write()` a call: `printf("%c%s%c")` for most, `putchar('c')`, a
+    /// `putc()` a byte and `putchar(Terminator)` for `c` and `n`, and
+    /// `putchar()`, `printf()`, `putchar()` for `s`, `o` and `i`.
+    #[test]
+    fn each_field_is_written_a_c_call_at_a_time() {
+        struct Log(Vec<String>);
+        impl std::io::Write for Log {
+            fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+                self.0.push(String::from_utf8_lossy(d).into_owned());
+                Ok(d.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(1);
+        p.command = "ab".into();
+        p.raw_names = None;
+        let f = &mut p.files[0];
+        f.name = "n\\x".into();
+        f.name_addition = None;
+        f.size = Some(42);
+        f.offset = None;
+        f.node = Some("7".into());
+        let mut log = Log(Vec::new());
+        write_with_names(
+            &mut log,
+            std::slice::from_ref(&p),
+            (false, Some(&['c', 'f', 's', 'i', 'n']), TcpInfoFlags::default(), Escaper::UNIX),
+            DEFAULT_OFFSET_DIGITS,
+            FileFlags::Off,
+            &mut |_| None,
+        )
+        .unwrap();
+        let fd = match p.files[0].fd {
+            FdType::Handle(n) => n.to_string(),
+            _ => p.files[0].fd.code(),
+        };
+        let want: Vec<String> = [
+            format!("p{}\n", p.pid),
+            "c".into(),
+            "a".into(),
+            "b".into(),
+            "\n".into(),
+            format!("f{fd}\n"),
+            "s".into(),
+            "42".into(),
+            "\n".into(),
+            "i".into(),
+            "7".into(),
+            "\n".into(),
+            "n".into(),
+            "n".into(),
+            "\\\\".into(),
+            "x".into(),
+            "\n".into(),
+        ]
+        .to_vec();
+        assert_eq!(log.0, want);
+    }
 
     /// A command or login that is not UTF-8 is printed from its bytes, each
     /// byte that is no character `\xNN`, as `safestrprt()` prints it; JSON

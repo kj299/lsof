@@ -32,8 +32,15 @@ pub trait Cycles {
     fn now(&mut self) -> i64;
     /// `sleep(secs)`: the C's `unsigned int`.
     fn sleep(&mut self, secs: u32);
-    /// Standard output, where the markers go.
+    /// Standard output, where the markers go: each `write()` one `printf()`
+    /// or `putchar()`.
     fn out(&mut self) -> &mut dyn Write;
+    /// `puts(line)`: the line, and its newline where all of it went in.
+    fn puts(&mut self, line: &[u8]) {
+        let out = self.out();
+        let _ = out.write_all(line);
+        let _ = out.write_all(b"\n");
+    }
 }
 
 /// How the loop ended.
@@ -93,17 +100,19 @@ pub fn run(
             let text: Option<Vec<u8>> = marker.as_mut().map(|m| m.at(lt, now).to_vec());
             match marking {
                 Marking::JsonDoc | Marking::JsonLines => {}
+                // `putchar('m')`, `printf("%s", fmtr)`, `putchar(Terminator)`
+                // and, after a NUL, `putchar('\n')`.
                 Marking::Fields { nul } => {
                     let out = host.out();
                     let _ = out.write_all(b"m");
                     let _ = out.write_all(text.as_deref().unwrap_or_default());
-                    let _ = out.write_all(if nul { b"\0\n" } else { b"\n" });
+                    let _ = out.write_all(if nul { b"\0" } else { b"\n" });
+                    if nul {
+                        let _ = out.write_all(b"\n");
+                    }
                 }
-                Marking::Table => {
-                    let out = host.out();
-                    let _ = out.write_all(text.as_deref().unwrap_or(b"======="));
-                    let _ = out.write_all(b"\n");
-                }
+                // `puts(cp)`.
+                Marking::Table => host.puts(text.as_deref().unwrap_or(b"=======")),
             }
             // `(void)fflush(stdout)`, then the sleep.
             let _ = host.out().flush();

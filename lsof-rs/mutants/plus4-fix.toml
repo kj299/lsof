@@ -116,16 +116,19 @@ name = "fields-written-at-the-end"
 rule = "-F is written a set at a time, each n named once what is before it is written (154, the review)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/fields.rs"
-old = '''            end_set!();
-            w.write_all(out.as_bytes())?;
-            out.clear();
+old = '''            if nul && out.bytes().len() > before {
+                out.putc(b'\n');
+            }
+            out.write_to(w)?;
         }
     }
     Ok(())'''
-new = '''            end_set!();
+new = '''            if nul && out.bytes().len() > before {
+                out.putc(b'\n');
+            }
         }
     }
-    w.write_all(out.as_bytes())?;
+    out.write_to(w)?;
     Ok(())'''
 
 [[mutant]]

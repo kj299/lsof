@@ -142,9 +142,8 @@ name = "user-padded-by-characters"
 rule = "a right-aligned cell is padded by bytes (71)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/table.rs"
-old = '''            let pad = widths[i].saturating_sub(cell.len());
-            write!(w, "{:pad$}{cell}", "")?;'''
-new = '''            write!(w, "{cell:>width$}", width = widths[i])?;'''
+old = '''    let pad = width.saturating_sub(cell.len());'''
+new = '''    let pad = width.saturating_sub(cell.chars().count());'''
 
 # -------------------------------------------------------------------- 36
 

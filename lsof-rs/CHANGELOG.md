@@ -12,6 +12,22 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **Standard output is written in the C's stdio calls** (DIVERGENCES 36):
+  a port of glibc 2.39's `printf()`, `fputs()`, `putchar()` and `puts()`
+  output paths, fed the calls `print.c` makes for the same text, so that a
+  write that fails for a moment (`EAGAIN` on a non-blocking stdout) drops
+  the bytes the C's drops, and a terminal gets a write a line where the C
+  writes one (`-F` wrote a whole set at once). `lsof +m +d DIR -h` writes
+  `+m`'s lines, where lsof-rs had printed none. The COMMAND column is as
+  wide as the C sizes it where an escape cut every cell short of it.
+- **`-r m<fmt>`'s zone, as glibc reads it, in four more cases** (DIVERGENCES
+  152): a zone file whose footer names daylight time and no rule
+  (`EST5EDT`) reads `posixrules` past its last change, as glibc does; a
+  version 1 file is read to its end whatever its `st_size` says
+  (`/proc/self/environ`); a file another process holds a write lease on is
+  waited for, up to 3 seconds; and no zone file is kept open, where
+  lsof-rs had listed its own. `%Y` past the year 2^31 - 1 wraps as the C's
+  `int`.
 - **A closed pipe and a full disk are what they are for the C** (DIVERGENCES
   36, 152). With `SIGPIPE` at its default, as a shell leaves it, a reader
   that has gone kills lsof with the signal at the write that meets it, as

@@ -107,9 +107,10 @@ pub fn read_mount_table(sel: &Selection, fs: &SafeFs, mounts: MountReader<'_>) -
     // `+m`'s lines, into stdout's buffer, as the C `printf()`s them while it
     // reads (DIVERGENCES 153), written as glibc writes them
     // ([`crate::stdio`]).
-    if !table.supplement_out.is_empty() {
+    // A `printf("%s %#lx\n")` a line.
+    for line in table.supplement_out.split_inclusive(|&b| b == b'\n') {
         use std::io::Write;
-        let _ = crate::stdio::Stdout.write_all(&table.supplement_out);
+        let _ = crate::stdio::Stdout.write_all(line);
     }
     table
 }

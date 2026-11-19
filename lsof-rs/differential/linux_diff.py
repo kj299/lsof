@@ -1665,11 +1665,79 @@ WR_CLOSED = (
     "p = subprocess.run(sys.argv[2:], stdout=w, preexec_fn=pre)\n"
     "print('status', p.returncode)\n"
 )
-WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk")
+# The `wr-trace-*` modes' runner (DIVERGENCES 36): the command under
+# strace, its stdout on a pipe (`pipe`) or a pseudo-terminal (`tty`), each
+# write to it that `when` names failing with EAGAIN as a non-blocking
+# stdout's can (`none`: none fails). It prints the size of each write to
+# fd 1 (`-1` for one that failed), the status, and what the reader got:
+# which bytes a failed write takes with it, and where a line-buffered
+# terminal's writes end, follow the C's stdio calls, not only its bytes.
+WR_TRACE = (
+    "import os, pty, shutil, subprocess, sys, tempfile\n"
+    "kind, when = sys.argv[1], sys.argv[2]\n"
+    "if not shutil.which('strace'):\n"
+    "    print('linux_diff: no strace'); sys.exit(2)\n"
+    "fd, log = tempfile.mkstemp(); os.close(fd)\n"
+    "cmd = ['strace', '-qq', '-e', 'trace=write', '--trace-fds=1', '-e', 'signal=none', '-o', log]\n"
+    "if when != 'none':\n"
+    "    cmd += ['-e', 'inject=write:error=EAGAIN:when=' + when]\n"
+    "cmd += sys.argv[3:]\n"
+    "got = b''\n"
+    "if kind == 'tty':\n"
+    "    m, s = pty.openpty()\n"
+    "    p = subprocess.Popen(cmd, stdout=s)\n"
+    "    os.close(s)\n"
+    "    while True:\n"
+    "        try:\n"
+    "            d = os.read(m, 65536)\n"
+    "        except OSError:\n"
+    "            break\n"
+    "        if not d:\n"
+    "            break\n"
+    "        got += d\n"
+    "    rc = p.wait()\n"
+    "    got = got.replace(b'\\r\\n', b'\\n')\n"
+    "else:\n"
+    "    p = subprocess.run(cmd, stdout=subprocess.PIPE)\n"
+    "    rc, got = p.returncode, p.stdout\n"
+    "sizes = []\n"
+    "for line in open(log, errors='replace'):\n"
+    "    if line.startswith('write(1,'):\n"
+    "        r = line.rsplit('= ', 1)[-1].split()[0]\n"
+    "        sizes.append(r)\n"
+    "os.unlink(log)\n"
+    "print('writes', ' '.join(sizes))\n"
+    "print('status', rc)\n"
+    "sys.stdout.flush()\n"
+    "os.write(1, got)\n"
+)
+WR_TRACE_MODES = tuple(
+    f"wr-trace-{kind}-{when}" for kind in ("pipe", "tty") for when in ("none", "1", "2+2", "3+3", "4..6")
+)
+WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk") + WR_TRACE_MODES
 
 
 # The `tz-*` modes' variants (DIVERGENCES 152).
-TZ_VARIANTS = ("swap", "inplace", "gone", "fold", "posix", "big", "zero", "null", "dir", "fifo", "v1fifo", "v2fifo")
+TZ_VARIANTS = (
+    "swap", "inplace", "gone", "fold", "posix", "big", "zero", "null", "dir", "fifo", "v1fifo", "v2fifo",
+    "nofoot", "nofootnorules", "lease",
+)
+
+# The `tz-lease` mode's holder: a write lease on the file, let go a second
+# after the `SIGIO` that says another process opens it, as a holder that
+# writes its last changes first would (DIVERGENCES 152).
+LEASE_HOLD = (
+    "import fcntl, os, signal, sys, time\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "def gone(*_):\n"
+    "    time.sleep(1)\n"
+    "    fcntl.fcntl(fd, 1024, fcntl.F_UNLCK)\n"
+    "    os._exit(0)\n"
+    "signal.signal(signal.SIGIO, gone)\n"
+    "fcntl.fcntl(fd, 1024, fcntl.F_WRLCK)\n"
+    "open(sys.argv[2], 'w').close()\n"
+    "time.sleep(60)\n"
+)
 
 
 def write_tz_zones(work: str) -> str:
@@ -1706,6 +1774,17 @@ def write_tz_zones(work: str) -> str:
         one = v1([0], [0], [(0, 0, 0)], b"UTC\0").replace(b"TZif\0", b"TZif2", 1)
         wide = one[:44] + struct.pack(">q", 0) + one[48:]
         f.write(one + wide + b"\nQQQ-3\0" + b"A" * (20 << 20) + b"\n")
+    # `nofoot`: one change, at 0, to `BBB` two hours east, and a footer that
+    # names daylight time and no rule, `FOO3BAR`: past the change glibc
+    # reads `posixrules` in place of the zone (`__tzfile_default()`) and
+    # works the time out from the rules the string left cleared.
+    with open(os.path.join(d, "nofoot"), "wb") as f:
+        one = v1([], [], [(0, 0, 0)], b"UTC\0").replace(b"TZif\0", b"TZif2", 1)
+        head = b"TZif2" + bytes(15) + struct.pack(">6l", 0, 0, 0, 1, 2, 8)
+        body = struct.pack(">q", 0) + bytes([1]) + struct.pack(">lBBlBB", 3600, 0, 0, 7200, 0, 4) + b"AAA\0BBB\0"
+        f.write(one + head + body + b"\nFOO3BAR\n")
+    with open("/usr/share/zoneinfo/America/New_York", "rb") as src, open(os.path.join(d, "newyork"), "wb") as dst:
+        dst.write(src.read())
     for name in os.listdir(d):
         os.chmod(os.path.join(d, name), 0o644)
     os.chmod(d, 0o755)
@@ -1884,6 +1963,10 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             'if [ "${mode#wr-closed}" != "$mode" ]; then\n'
             f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_CLOSED)} \"${{mode#wr-closed}}\" \"$@\"\n"
             "fi\n"
+            'if [ "${mode#wr-trace-}" != "$mode" ]; then\n'
+            '    t=${mode#wr-trace-}\n'
+            f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_TRACE)} \"${{t%%-*}}\" \"${{t#*-}}\" \"$@\"\n"
+            "fi\n"
             # The `tz-*` modes (DIVERGENCES 152): a tmpfs over /etc holding
             # the host's password file and the zone files a case reads; a
             # job changes them while the run repeats, half a second in,
@@ -1909,6 +1992,11 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             '    fifo) mkfifo /etc/localtime || exit 2 ;;\n'
             '    v1fifo) mkfifo /etc/tzfifo || exit 2; cat "$Z/v1" > /etc/tzfifo & job=$! ;;\n'
             '    v2fifo) mkfifo /etc/tzfifo || exit 2; cat "$Z/kolkata" > /etc/tzfifo & job=$! ;;\n'
+            '    nofoot) cat "$Z/nofoot" > /etc/nofoot && cat "$Z/newyork" > /etc/posixrules || exit 2 ;;\n'
+            '    nofootnorules) cat "$Z/nofoot" > /etc/nofoot || exit 2 ;;\n'
+            '    lease) cat "$Z/kolkata" > /etc/leased || exit 2\n'
+            f"          {shlex.quote(sys.executable)} -I -c {shlex.quote(LEASE_HOLD)} /etc/leased /etc/leased.ready & job=$!\n"
+            '          i=0; while [ ! -e /etc/leased.ready ]; do i=$((i+1)); [ $i -gt 200 ] && { echo "linux_diff: no lease ($$)"; exit 2; }; sleep 0.05; done ;;\n'
             '    *) echo "linux_diff: no MT tz variant ($$)"; exit 2 ;;\n'
             '    esac\n'
             '    "$@"\n'

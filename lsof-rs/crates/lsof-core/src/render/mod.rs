@@ -23,6 +23,97 @@ pub use escape::Escaper;
 pub use fflags::FileFlags;
 pub use table::TableOpts;
 
+/// Output cut where the C's stdio calls cut it: each `printf()`, `fputs()`
+/// and `putchar()` the C's `print.c` makes for the same text is one piece.
+///
+/// Which bytes a failed write takes with it, and where a terminal's
+/// line-buffered stream ends each `write(2)`, depend on those calls, not
+/// only on the bytes (DIVERGENCES 36): glibc drops the rest of the call a
+/// failed write happened in, and writes a terminal's line at a newline
+/// that a `putchar()` puts but not inside a call that fits whole. So each
+/// piece is written to the sink as one `write()`, which lsof-cli's stdout
+/// takes as one `printf()` (a one-byte `printf()` is a `putchar()` and a
+/// `fputs()` of no more than 128 bytes a `printf()`, in glibc, for a buffer
+/// of at least 128 bytes). A `Vec` sink gets the same bytes.
+#[derive(Debug, Default)]
+pub struct Calls {
+    text: Vec<u8>,
+    /// Where each piece ends in `text`, in order.
+    ends: Vec<usize>,
+}
+
+impl Calls {
+    /// No pieces.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One `printf()` or `fputs()` whose output is `s`.
+    pub fn call(&mut self, s: impl AsRef<[u8]>) {
+        let s = s.as_ref();
+        if !s.is_empty() {
+            self.text.extend_from_slice(s);
+            self.ends.push(self.text.len());
+        }
+    }
+
+    /// One `putchar()`.
+    pub fn putc(&mut self, b: u8) {
+        self.call([b]);
+    }
+
+    /// A `putc()` for each byte of `s` (`safestrprt()`'s printable bytes).
+    pub fn each_byte(&mut self, s: &[u8]) {
+        for &b in s {
+            self.putc(b);
+        }
+    }
+
+    /// Text already in printed form, cut as `safestrprt()` printed it: a
+    /// `\` escape (`\\`, `\n`, …, `\xNN`) or a `^X` one is one `fputs()`,
+    /// every other byte one `putc()`. (Text lsof-rs escaped itself is cut by
+    /// the escaper, which knows where a `^` is text; this is for an
+    /// addition kept already printed.)
+    pub fn printed(&mut self, s: &str) {
+        let b = s.as_bytes();
+        let mut i = 0usize;
+        while let Some(&c) = b.get(i) {
+            let n = match (c, b.get(i + 1)) {
+                (b'\\', Some(b'x')) => 4,
+                (b'\\', Some(_)) => 2,
+                (b'^', Some(0x40..=0x5f)) => 2,
+                _ => 1,
+            };
+            let n = n.min(b.len() - i);
+            self.call(&b[i..i + n]);
+            i += n;
+        }
+    }
+
+    /// The pieces' bytes, joined.
+    pub fn bytes(&self) -> &[u8] {
+        &self.text
+    }
+
+    /// Each piece written to `w` with one `write_all()`, then none held.
+    pub fn write_to(&mut self, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+        let mut at = 0usize;
+        let mut result = Ok(());
+        for &end in &self.ends {
+            if let Some(piece) = self.text.get(at..end) {
+                if let Err(e) = w.write_all(piece) {
+                    result = Err(e);
+                    break;
+                }
+            }
+            at = end;
+        }
+        self.text.clear();
+        self.ends.clear();
+        result
+    }
+}
+
 /// How many decimal digits an offset may have before it is printed in hex —
 /// the C's `OFFDECDIG` (`lib/common.h`), which `-o <digits>` overrides. An
 /// `i32` because the C's `OffDecDig` is an `int`, and how it wraps is what

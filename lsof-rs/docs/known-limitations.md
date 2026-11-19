@@ -319,7 +319,11 @@ meet. Each number is a row there, with the measurement behind it.
 - **`-r m<fmt>`, `+m m` and their residues** (152, 153): a zone file that is
   no regular file (a FIFO, a device) is waited on 3 seconds at most in all,
   where glibc's waits for ever, and then taken as unreadable (a FIFO with
-  no writer: UTC); on FreeBSD such a file is not read at all. On Windows
+  no writer: UTC); a regular one under another process's write lease is
+  waited for the same 3 seconds, where glibc's waits until the lease is let
+  go or broken (`lease-break-time`, 45 s by default); a stream's version 1
+  data past 64 MiB is refused, where glibc reads it whole; on FreeBSD such
+  a file is not read at all. On Windows
   the marker's zone is `TZ`'s POSIX rule string
   (`CET-1CEST,M3.5.0,M10.5.0/3`), else UTC: the Windows time-zone setting is
   not read; on FreeBSD it follows glibc's rules, unmeasured against

@@ -45,6 +45,11 @@ cmd = ["cargo", "test", "-p", "lsof-core", "--lib", "timefmt"]
 timeout = 900
 
 [[run.gate]]
+name = "render"
+cmd = ["cargo", "test", "-p", "lsof-core"]
+timeout = 900
+
+[[run.gate]]
 name = "cli"
 cmd = ["cargo", "test", "-p", "lsof-cli"]
 timeout = 1200
@@ -325,26 +330,28 @@ name = "stdio-rest-kept-on-failure"
 rule = "a write that fails drops the rest of that call's bytes (36)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/stdio.rs"
-old = '''        if !self.write_buffer() {
-            return;
-        }'''
-new = '''        let _ = self.write_buffer();'''
+old = '''        if to_do > 0 || must_flush {
+            if !self.overflow(None) {
+                return false;
+            }'''
+new = '''        if to_do > 0 || must_flush {
+            let _ = self.overflow(None);'''
 
 [[mutant]]
 name = "stdio-no-line-buffering"
 rule = "stdout on a terminal is line-buffered (36)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/stdio.rs"
-old = '''        if self.line && space >= data.len() {'''
-new = '''        if false && self.line && space >= data.len() {'''
+old = '''        if self.line && c == b'\n' {'''
+new = '''        if false && self.line && c == b'\n' {'''
 
 [[mutant]]
 name = "stdio-small-blocks-aligned"
 rule = "under 128 bytes a block the rest is written whole (36)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/stdio.rs"
-old = '''if block >= 128 { rest.len() % block } else { 0 }'''
-new = '''if block >= 1 { rest.len() % block } else { 0 }'''
+old = '''if block >= 128 { to_do % block } else { 0 }'''
+new = '''if block >= 1 { to_do % block } else { 0 }'''
 
 [[mutant]]
 name = "stdio-exit-no-flush"
@@ -378,3 +385,283 @@ rule = "the constructor reads SIG_IGN as ignored (36)"
 file = "crates/lsof-sigpipe/src/lib.rs"
 old = '''        let ignored = old.sa_sigaction == libc::SIG_IGN;'''
 new = '''        let ignored = old.sa_sigaction != libc::SIG_IGN;'''
+
+# ------------------------------------------- the review's fixes (2026-11-19)
+# The stdio calls (S1-S4) and the zone files (T1-T4) of the review of
+# a46e03c; the gate `render` (lsof-core's whole suite) was added for them.
+# Rules with no mutant here, and why:
+# * The backends' `lsof_core::safefs::exit` (mounts.rs, safefs.rs): no run
+#   measured has output in stdout's buffer where either ends it; the hook
+#   itself is `exit-skips-the-flush`.
+# * The table marker's `puts()` rather than two `printf()`s: they differ
+#   only where the `fputs()` of the marker fails, which needs a full buffer
+#   and a failing write at that call.
+# * The 64 MiB bound on a version 1 file read past its `st_size`: a test
+#   would read 64 MiB.
+
+[[mutant]]
+name = "stdio-printf-never-direct"
+rule = "printf() writes into the stream's buffer while it has room (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/stdio.rs"
+old = '''        let mut mode = switch(self);
+'''
+new = '''        let mut mode = Mode::Stage(0);
+'''
+
+[[mutant]]
+name = "stdio-no-one-byte-stage"
+rule = "printf() goes on through a one-byte stage once the buffer is full (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/stdio.rs"
+old = '''                    mode = Mode::One(None);
+'''
+new = '''                    mode = Mode::Stage(0);
+'''
+
+[[mutant]]
+name = "stdio-printf-rest-kept"
+rule = "a write that fails ends its printf() (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/stdio.rs"
+old = '''                    if !self.overflow(Some(c)) || i == data.len() {'''
+new = '''                    if (!self.overflow(Some(c)) && false) || i == data.len() {'''
+
+[[mutant]]
+name = "stdio-puts-newline-always"
+rule = "puts() adds its newline only where the string all went in (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/stdio.rs"
+old = '''        if self.fputs(data) {
+            self.putc(b'\n');
+        }'''
+new = '''        self.fputs(data);
+        self.putc(b'\n');'''
+
+[[mutant]]
+name = "calls-printed-no-caret"
+rule = "an addition kept printed is cut at its caret escapes as at its backslash ones (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = '''                (b'^', Some(0x40..=0x5f)) => 2,
+'''
+new = ''''''
+
+[[mutant]]
+name = "escape-multibyte-one-call"
+rule = "an escaped multibyte character is an fputs() a byte (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''    for &b in bytes {
+        let mut e = String::with_capacity(4);
+        push_hex(&mut e, b);
+        out.call(e);
+    }
+}'''
+new = '''    let mut e = String::new();
+    for &b in bytes {
+        push_hex(&mut e, b);
+    }
+    out.call(e);
+}'''
+
+[[mutant]]
+name = "escape-printable-one-call"
+rule = "a printed character is a putc() a byte (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''    if escaped_width(c, mode, backslash) == 1 {
+        out.each_byte(bytes);'''
+new = '''    if escaped_width(c, mode, backslash) == 1 {
+        out.call(bytes);'''
+
+[[mutant]]
+name = "fields-size-one-call"
+rule = "-F s is putchar(), printf(), putchar() (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''                    split!(b's', &s.to_string());'''
+new = '''                    push!(b's', &s.to_string());'''
+
+[[mutant]]
+name = "fields-name-one-call"
+rule = "-F n is printname()'s calls (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''                out.putc(b'n');
+                f.printed_name_calls(&esc, &mut out);'''
+new = '''                out.putc(b'n');
+                out.call(f.printed_name(&esc).as_bytes());'''
+
+[[mutant]]
+name = "json-size-per-byte"
+rule = "a JSON size is one quoted printf (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''            m.quoted("size", s);'''
+new = '''            m.str("size", &s.to_string());'''
+
+[[mutant]]
+name = "json-key-one-call"
+rule = "a JSON key is a putchar() a byte, then one printf (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''        self.out.each_byte(k.as_bytes());
+        self.out.call("\":");'''
+new = '''        self.out.call(format!("{k}\":"));'''
+
+[[mutant]]
+name = "table-header-type-alone"
+rule = "the header prints USER, FD and TYPE in one printf() (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''matches!(col.title, "PID" | "FD" | "" | "TYPE" | "NAME")'''
+new = '''matches!(col.title, "PID" | "FD" | "" | "NAME")'''
+
+[[mutant]]
+name = "table-size-space-joined"
+rule = "SIZE/OFF is a putchar(' ') and a printf() (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''            Cell::SizeOff => {
+                out.putc(b' ');'''
+new = '''            Cell::SizeOff => {
+                call.push(b' ');'''
+
+[[mutant]]
+name = "table-command-width-max-cell"
+rule = "COMMAND is CmdColW wide (the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''    widths[0] = cmd_cut;
+'''
+new = ''''''
+
+[[mutant]]
+name = "misses-one-call"
+rule = "a -V line quoting an argument is a printf() and safestrprt()'s calls (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    match words.and_then(|n| line.split_at_checked(n)) {'''
+new = '''    match words.and(None::<(&str, &str)>) {'''
+
+[[mutant]]
+name = "plus-m-one-call"
+rule = "+m prints a printf() a mount (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    for line in table.supplement_out.split_inclusive(|&b| b == b'\n') {'''
+new = '''    for line in std::iter::once(&table.supplement_out[..]) {'''
+
+[[mutant]]
+name = "report-returns-unflushed"
+rule = "a run that ends at -h writes stdout's buffer (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Action::Report(reports) => {
+            report(reports);
+            lsof_cli::stdio::exit(0);
+        }'''
+new = '''        Action::Report(reports) => {
+            report(reports);
+            return;
+        }'''
+
+[[mutant]]
+name = "exit-skips-the-flush"
+rule = "lsof_core::safefs::exit runs the flush the binary registered (36, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/safefs.rs"
+old = '''    if let Some(flush) = EXIT_FLUSH.get() {
+        flush();
+    }'''
+new = '''    let _ = EXIT_FLUSH.get();'''
+
+[[mutant]]
+name = "footer-default-keeps-old-rules"
+rule = "a footer that loads posixrules leaves tz_rules as the string was read (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            self.rules = d.as_read.clone();
+'''
+new = ''''''
+
+[[mutant]]
+name = "footer-default-loses-freed-leaps"
+rule = "the call that loses the zone reads the freed zone's leap seconds (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''                            } else {
+                                freed_leaps
+                            };'''
+new = '''                            } else {
+                                let _ = freed_leaps;
+                                (0, 0)
+                            };'''
+
+[[mutant]]
+name = "footer-not-parsed-in-place"
+rule = "past the last change the footer is __tzset_parse_tz()'d, posixrules and all (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''                    self.parsed_tz(spec);
+'''
+new = '''                    self.rules = spec.0;
+                    self.update_vars();
+'''
+
+[[mutant]]
+name = "v1-bounded-by-st-size"
+rule = "a version 1 file is read to its end whatever st_size says (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''    if size >= need || len > DATA_IN_MEMORY {'''
+new = '''    if true || len > DATA_IN_MEMORY {'''
+
+[[mutant]]
+name = "zone-descriptor-kept"
+rule = "nothing kept holds the descriptor a zone file was read through (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            Some(held) => Rc::clone(held) as Rc<dyn ReadAt>,'''
+new = '''            Some(_) => Rc::clone(&file.data),'''
+
+[[mutant]]
+name = "reopened-any-file"
+rule = "a zone file read again by path is read only if it is the same file (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''        if !m.is_file() || Self::id_of(&m) != self.id {'''
+new = '''        if !m.is_file() {'''
+
+[[mutant]]
+name = "lease-not-waited"
+rule = "an open a write lease refuses is tried again (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/zonefile.rs"
+old = '''            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => {'''
+new = '''            Err(rustix::io::Errno::INTR) => {'''
+
+[[mutant]]
+name = "lease-retry-not-10ms"
+rule = "a lease's open is tried again every 10 ms (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/zonefile.rs"
+old = '''                sleep(left.min(LEASE_RETRY));'''
+new = '''                sleep(left);'''
+
+[[mutant]]
+name = "year-saturates"
+rule = "%Y's year is the C's int, which wraps (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''        let year32 = tm.year.wrapping_add(1900);'''
+new = '''        let year32 = tm.year.saturating_add(1900);'''
+
+[[mutant]]
+name = "y-of-the-wrapped-year"
+rule = "%y is of tm_year itself (152, the review)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/timefmt.rs"
+old = '''            b'y' => number(2, i64::from(tm.year).rem_euclid(100)),'''
+new = '''            b'y' => number(2, year.rem_euclid(100)),'''

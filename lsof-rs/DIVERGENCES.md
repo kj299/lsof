@@ -449,13 +449,12 @@ first.
   `main` puts `SIG_DFL` back where it was inherited and the signal is not
   blocked (`SigBlk` of `/proc/thread-self/status`); `lsof-cli/src/stdio.rs`
   is glibc's buffer: `st_blksize` up to `BUFSIZ` (4096 on a pipe),
-  line-buffered on a terminal, `_IO_new_file_xsputn()`'s rules, written to
-  descriptor 1 itself, flushed before each `-r` sleep and at exit, never an
-  error. strace of `-r1c3mX` into a dead pipe, `SIGPIPE` ignored: the C
-  `write(1, …, 4096)` and `write(1, …, 257)`, both `EPIPE`, and its sleep,
-  each cycle; lsof-rs 4096 and 261 and its sleep (the bytes the write that
-  overflowed drops differ, as the C's `printf()` calls and lsof-rs's writes
-  are cut differently; nothing of either reaches anyone). stderr was
+  line-buffered on a terminal, written to descriptor 1 itself, flushed
+  before each `-r` sleep and at exit, never an error; since the review
+  (below) a port of glibc's `printf()`, `fputs()`, `putchar()` and `puts()`
+  paths, fed the C's own calls. strace of `-r1c3mX` into a dead pipe,
+  `SIGPIPE` ignored: the C `write(1, …, 4096)` and `write(1, …, 257)`,
+  both `EPIPE`, and its sleep, each cycle; lsof-rs the same. stderr was
   already the C's unchecked `fprintf()`; a reader gone now kills the run
   with the signal there too, rather than exit 141. Off Unix (Windows),
   which has no `SIGPIPE` to inherit, a closed pipe still ends the run with
@@ -473,16 +472,27 @@ first.
 * The sleep is `std::thread::sleep`, `CLOCK_MONOTONIC`, where glibc's
   `sleep()` is `CLOCK_REALTIME` (strace): the same unless the clock is set
   during a sleep.
-* A footer whose rule string itself names daylight time and no rule would
-  make glibc's `__tzfile_compute()` call `__tzfile_default()` and free the
-  zone it is computing from, which is undefined: lsof-rs takes the United
-  States' rule there (C-DEFECT, not reproduced). A version 1 file with no
-  type, and a version 1 abbreviation with no NUL, are glibc reads past its
-  allocation: no zone, and the name cut at `charcnt`.
-* A zone file of more than 64 MiB of data is read where it lies, so one
-  rewritten in place while it is in use (same inode) is read as it now is,
-  where glibc keeps its copy; a stream's version 1 data past 64 MiB is
-  refused (unmeasured either way).
+* A footer whose rule string names daylight time and no rule is now glibc's
+  (see the review section below); one undefined read is left: where
+  `posixrules` is missing, the first time past the zone's last change reads
+  the leap seconds of the zone glibc has just freed, whose first 16 bytes
+  its allocator has written over, so the result changes from run to run
+  (measured: 2 runs in 8 of a 460-byte zone put a leap second at 0, 6 did
+  not); lsof-rs reads the zone's leap seconds as they were (C-DEFECT, not
+  reproduced). A file with no type (in its version 1 block or its version
+  2 one), and a version 1 abbreviation with no NUL, are glibc reads past
+  its allocation: no zone, and the name cut at `charcnt` (a fuzzed Kolkata
+  whose second header counts no type is `+2330141` in the C, garbage, and
+  UTC in lsof-rs).
+* A zone file of more than 64 MiB of data is read where it lies, its path
+  opened again for each read and no descriptor kept; one replaced or
+  written while it is in use is read as failing (its bytes 0), where glibc
+  keeps its copy. A stream's (or a version 1 file's past its `st_size`)
+  version 1 data past 64 MiB is refused, to keep memory bounded, where
+  glibc reads it whole (measured: a FIFO sending 64 MiB and 50 bytes of
+  data is `ABC+0100` in the C, `+0000` in lsof-rs). A file so large that
+  glibc's `malloc()` of it fails is no zone in the C and is one in lsof-rs
+  (host-dependent, unmeasured).
 * A name kept to 16 MiB where glibc keeps every byte: the same output,
   since no marker's buffer is that long (a Linux argument is at most 128
   KiB, so a marker at most 1 MiB).
@@ -516,6 +526,119 @@ kept vectors and the 22 `mktime()` sequences among them), `zonefile.rs`
 (2), `stdio.rs` (6), `lsof-sigpipe` (2), `repeat.rs`, `args.rs`;
 `tests/stdout_errors.rs` rewritten to the C's behaviour (8, two new under
 `trap '' PIPE`). Mutants: `mutants/r-parity.toml`.
+
+## Fixed after the review of `-r` like the C (2026-11-19)
+
+Two reviews of the `-r` work found output that was still not the C's.
+Each is now measured against the C and reproduced, a test failing before.
+
+* **Each stdio call the C makes is one here** (36). glibc drops what is
+  left of the call a failed write happened in, and on a terminal writes a
+  line where a `putchar('\n')` ends it but not inside a call that fits
+  whole; lsof-rs had written a `-F` set, a table row, `+m`'s table at once
+  (a transient `EAGAIN` on fd 1, measured with `strace -e
+  inject=write:error=EAGAIN:when=1+2`: the C's reader got 16384 bytes of a
+  `-F`, lsof-rs's 19708; on a terminal the C wrote 2328 writes, lsof-rs
+  one a set). `lsof-cli/src/stdio.rs` is now a port of glibc 2.39's output
+  path (`fileops.c`, `genops.c`, `printf_buffer_to_file.c`): `printf()`
+  straight into the buffer while it has room, then a one-byte stage, or a
+  128-byte one where the buffer has none (a terminal's); `fputs()` and
+  `puts()` as `_IO_new_file_xsputn()`; `putchar()` as
+  `_IO_putc_unlocked()`. A harness ran 850 random call sequences through
+  it and through glibc itself (`setvbuf()` buffers of 1 to 4096 bytes,
+  line- and fully-buffered, writes failing as strace injects): the same
+  bytes and the same writes in every one. The renderers cut their output
+  where `print.c`'s calls cut it (`render::Calls`): the table's `printf("
+  %*s")` a cell, the header's grouped `printf()`s, `safestrprt()`'s
+  `putc()` a printable byte and `fputs()` an escape, `-F`'s
+  `printf("%c%s%c")`, `putchar()`, `printf()` and `putchar()` for `c`,
+  `n`, `s`, `o` and `i`, `print_tcptpi()`'s calls, JSON's
+  `json_puts_escaped()` a byte or an escape, the marker's `puts()` and
+  `-F`'s `putchar()`s, `+m`'s `printf()` a line, `-V`'s `printf()` and
+  `safestrprt()`. Measured with strace injecting `EAGAIN` at writes 1, 2,
+  3, 1+2, 2+3 and 5..9 of fd 1, on a pipe and on a pseudo-terminal, under
+  `-F`, `-F0`, the table, `-T qs`, `-j`, `-F pcfn`, `-r1c3`, `-F -r1c2m…`,
+  `-t`, `-V`, `-K`: the same bytes received and the same writes as the C
+  in all 140 runs; `-J` differs only by its `lsof_version`. Residue: where
+  stdout's buffer is under 128 bytes (an `st_blksize` that small), glibc's
+  `fputs()` and `putchar()` write differently from a `printf()` of the
+  same bytes, and lsof-rs writes every call as a `printf()` but `puts()`;
+  a `^` followed by `@` to `_` in an addition lsof-rs keeps printed is
+  taken for one `^X` escape (one call where the C's `putc()`s make two);
+  `printname()`'s `fputs(" (")` and the like are a `putc()` a byte. Each
+  matters only to a write that fails at that byte.
+* **A run that ends at `-h`, `-v` or `-F ?` writes stdout's buffer**:
+  `lsof +m +d /tmp -h 2>/dev/null | wc -c` is 551 in the C on the review
+  host, and was 0 in lsof-rs, which returned from `main` past its flush.
+* **A backend that ends the run flushes stdout first**, as the C's
+  `exit()` does: `can't fopen(/proc/mounts, …)` and a `-S` helper that
+  cannot start end through `lsof_core::safefs::exit`, which runs the flush
+  the binary registers (`set_exit_flush`). Neither has output before it in
+  any run measured; the order is the C's.
+* **A footer that names daylight time and no rule** (`EST5EDT`,
+  `FOO3BAR`), past the zone's last change: glibc 2.39's
+  `__tzfile_compute()` calls `__tzset_parse_tz()` on it, which calls
+  `__tzfile_default()`, which reads `posixrules` over the zone being
+  computed from. Where `posixrules` is there, the time is worked out from
+  `tz_rules` as the parse left them, cleared (the day `J0` 0, at second
+  0, so that daylight time is most of the year: `BAR -0200` in January),
+  the leap seconds are `posixrules`', and the zone is read again at the
+  next call; where it is not, the zone is gone for good: the string's
+  names with the United States' rule are the time at every later call,
+  before the zone's last change too, with no leap second (measured with
+  glibc's `localtime()` and `strftime()`, a call a line in one process,
+  `-100 0 1000000000 2224000000 972799200 -100`: `AAA +0100 14300`, `BAR
+  -0200`, …, `AAA +0100 14300` with `posixrules`; `AAA`, `FOO -0300`,
+  `BAR -0200`, `BAR -0200`, `BAR -0200`, `FOO -0300 -100` without it).
+  lsof-rs had taken the United States' rule each time and kept the zone.
+  This was ledgered as a C-DEFECT, not reproduced; it is reproduced. A
+  reviewer's fuzzer of mutated zone files and footers (6000 runs, half of
+  them with no `posixrules`, the times in one process) finds no
+  difference but the undefined reads of "What stays open" above (one
+  file in 6000, a header that counts no type).
+* **A version 1 file is read to its end whatever `st_size` says**:
+  glibc's `fread()`s never ask it, so `TZ=/proc/self/environ` holding a
+  version 1 zone is `ABC+0100` in the C, and was `+0000` in lsof-rs,
+  which bounded every regular file by its `st_size` of 0. The read is
+  bounded by what the header says follows and by 64 MiB, and holds what
+  the file gave.
+* **No zone file is kept open**: lsof-rs listed `3r REG
+  /usr/share/zoneinfo/America/New_York` of its own where the C, which
+  `fclose()`s it, lists none, and its descriptors were one off the C's. Data
+  up to 64 MiB is copied and the descriptor closed at the end of the read;
+  more is read where it lies, the path opened again for each read and
+  checked to be the same file (device, inode, size, and the modification
+  and change times to the nanosecond). Measured with a 90 MiB zone: both
+  `CCC+0300`, neither lists the file.
+* **A zone file under another process's write lease is waited for**: an
+  `O_NONBLOCK` open of it fails with `EWOULDBLOCK` (and starts the break),
+  where glibc's blocking `fopen()` waits until the holder lets go:
+  measured with a holder that lets go a second after its `SIGIO`, the C
+  `IST+0530` after it, lsof-rs `+0000` at once. The open is tried again
+  every 10 ms, within the 3-second deadline a stream has; past it the file
+  is unreadable, where the C waits up to `lease-break-time` (45 s).
+* Found on the way: **the COMMAND column is `CmdColW` wide** even where an
+  escape that does not fit cuts every cell short of it (`abcdefgh^A` under
+  `+c 9`: the C nine columns, lsof-rs eight); and **`%Y`, `%C`, `%G` of a
+  year past an `int` wrap** as glibc's `int year = tm_year + 1900` does
+  (`-2147483648`, where lsof-rs printed `2147483648`), and `%y` is of
+  `tm_year`.
+
+Cases: `plus-m-before-help-is-written`; twelve in the new
+`LSOF_DIFF_MT=wr-trace-{pipe,tty}-{none,1,2+2,3+3,4..6}` modes (the run
+under strace, writes to fd 1 failing as named, the sizes of the writes,
+the status and what the reader got), of which seven fail on a46e03c
+(`write-trace-plus-m-on-a-terminal` among them);
+`repeat-tz-footer-with-no-rule-reads-posixrules`,
+`…-and-no-posixrules` (a control) and
+`repeat-tz-file-under-a-lease-is-waited-for` in the `tz-*` modes (new
+variants `nofoot`, `nofootnorules`, `lease`). Unit: `stdio.rs` (the
+vectors measured with glibc), `golden.rs` (a row's calls, the COMMAND
+width), `timefmt.rs` (the footer, the version 1 file, the file not kept,
+the year), `zonefile.rs` (the lease's retries, the reads by path),
+`safefs.rs` (the exit flush), `main.rs` (the calls before a login),
+`stdout_errors.rs` (`+m` before `-h`). Mutants: the review's section of
+`mutants/r-parity.toml` (28), and 14 older ones whose anchors moved.
 
 ## Fixed by `+n`, `+P`, `+r` and `+m`, like the C (2026-11-14)
 

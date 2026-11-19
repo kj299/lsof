@@ -909,8 +909,9 @@ impl Helper {
                 helper_command("/proc/self/exe", &args)
             }),
             Box::new(|e| {
-                eprintln!("lsof: {}", cannot_start(e));
-                std::process::exit(1);
+                lsof_core::safefs::write_stderr(&format!("lsof: {}\n", cannot_start(e)));
+                // The C's `Exit()`: stdout flushed, then 1.
+                lsof_core::safefs::exit(1);
             }),
         )
     }

@@ -235,7 +235,8 @@ OUTPUT:
                   ignored or blocked, and no write error is reported. Unlike
                   the C, a zone file that is no regular file (a FIFO, a
                   device) is waited on 3 seconds at most, where the C waits
-                  for ever
+                  for ever, and one under another process's lease is too,
+                  where the C waits until the lease is broken
     +r [t[c<n>][m<fmt>]]
                   the same, ending at the first cycle that lists nothing;
                   exit 1 if that was the first (and after +r0's one cycle)
@@ -366,7 +367,7 @@ fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selectio
 /// selected fields that come before `L` (`p`, `K`, `M`, `g`, `R`, `c`, `u`),
 /// each terminated, and no end to the set, which the C never reaches.
 #[cfg(target_os = "linux")]
-fn before_login(p: &lsof_core::Process, nul: bool, only: Option<&[char]>) -> String {
+fn before_login(p: &lsof_core::Process, nul: bool, only: Option<&[char]>) -> Vec<Vec<u8>> {
     let wanted =
         |c: char| c == 'p' || only.map_or_else(|| fields::field_is_default(c), |s| s.contains(&c));
     let letters: Vec<char> = ['p', 'K', 'M', 'g', 'R', 'c', 'u']
@@ -377,17 +378,36 @@ fn before_login(p: &lsof_core::Process, nul: bool, only: Option<&[char]>) -> Str
         files: Vec::new(),
         ..p.clone()
     };
-    let mut text = fields::render(
-        std::slice::from_ref(&head),
-        nul,
-        Some(&letters),
-        lsof_core::TcpInfoFlags::default(),
-        Escaper::for_host(),
-    );
-    if nul && text.ends_with("\0\n") {
-        text.pop();
+    // Each call the C made, as `fields` writes it: one `write()` a call.
+    struct CallLog(Vec<Vec<u8>>);
+    impl Write for CallLog {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.push(data.to_vec());
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    text
+    let mut log = CallLog(Vec::new());
+    let _ = fields::write_with_names(
+        &mut log,
+        std::slice::from_ref(&head),
+        (
+            nul,
+            Some(&letters),
+            lsof_core::TcpInfoFlags::default(),
+            Escaper::for_host(),
+        ),
+        lsof_core::render::DEFAULT_OFFSET_DIGITS,
+        lsof_core::render::FileFlags::Off,
+        &mut |_| None,
+    );
+    // The set's `putchar('\n')` after a NUL is never reached.
+    if nul && log.0.last().is_some_and(|c| c == b"\n") {
+        log.0.pop();
+    }
+    log.0
 }
 
 /// Resolve a user-typed path selector (`+D` directory, bare path) to its
@@ -568,6 +588,37 @@ fn strip_verbatim(s: &str) -> String {
         rest.to_string()
     } else {
         s.to_string()
+    }
+}
+
+/// A `-V` line of [`unlocated`] as `main.c` prints it, a stdio call at a
+/// time: where it quotes what was asked for, a `printf()` of the words and
+/// `safestrprt(…, 1)`'s calls (a `putc()` a printable byte, an `fputs()` an
+/// escape, then `putc('\n')`); else one `printf()` of the line.
+fn miss_calls(line: &str, out: &mut lsof_core::render::Calls) {
+    const QUOTING: [&str; 5] = [
+        "lsof: command not located: ",
+        "lsof: no command found for regex: ",
+        "lsof: no file use located: ",
+        "lsof: no file system use located: ",
+        "lsof: Internet address not located: ",
+    ];
+    let words = QUOTING
+        .iter()
+        .find(|q| line.starts_with(**q))
+        .map(|q| q.len())
+        .or_else(|| {
+            line.strip_prefix("lsof: login name (UID ")
+                .and_then(|rest| rest.find(") not located: "))
+                .map(|at| "lsof: login name (UID ".len() + at + ") not located: ".len())
+        });
+    match words.and_then(|n| line.split_at_checked(n)) {
+        Some((head, arg)) => {
+            out.call(head);
+            out.printed(arg);
+            out.putc(b'\n');
+        }
+        None => out.call(format!("{line}\n")),
     }
 }
 
@@ -811,6 +862,10 @@ fn main() {
     if lsof_sigpipe::inherited_ignored() == Some(false) && !lsof_sigpipe::blocked() {
         lsof_sigpipe::restore_default();
     }
+    // A backend that ends the run (`lsof: can't fopen(/proc/mounts, …)`, a
+    // helper that cannot start) ends it through `lsof_core::safefs::exit`,
+    // which flushes stdout first, as the C's `exit()` does.
+    lsof_core::safefs::set_exit_flush(lsof_cli::stdio::flush);
     // What the C closes first (`closefrom_shim(ctx, 3)`): noted before any
     // descriptor of lsof-rs's own is opened (DIVERGENCES 153).
     #[cfg(target_os = "linux")]
@@ -941,9 +996,12 @@ fn main() {
         // To stderr, as the C's `usage()` writes them, and exit 0
         // (DIVERGENCES 114, 150): `lsof -h 2>/dev/null` and `lsof -v
         // 2>/dev/null` print nothing in either.
+        // Through `exit()`, which flushes stdout: what `+m` printed while
+        // the parse read the mount table is in its buffer (`lsof +m +d /tmp
+        // -h`, measured: the C prints it, 551 bytes).
         Action::Report(reports) => {
             report(reports);
-            return;
+            lsof_cli::stdio::exit(0);
         }
         Action::Run {
             selection,
@@ -1267,8 +1325,9 @@ fn main() {
                 // `…,"uid":0` and no more, is not valid JSON and is not
                 // written (DIVERGENCES 70).
                 if let (Format::Fields { nul, only }, Some(first)) = (&format, procs.first()) {
-                    let head = before_login(first, *nul, only.as_deref());
-                    let _ = lsof_cli::stdio::Stdout.write_all(head.as_bytes());
+                    for call in before_login(first, *nul, only.as_deref()) {
+                        let _ = lsof_cli::stdio::Stdout.write_all(&call);
+                    }
                 }
                 say!("lsof: can't stat(/etc/passwd): {}", errno_text(&e));
                 lsof_cli::stdio::exit(1);
@@ -1336,8 +1395,10 @@ fn main() {
     let misses = unlocated(&selection, &located, Escaper::for_host());
     if selection.verbose && !misses.is_empty() {
         let mut out = lsof_cli::stdio::Stdout;
+        let mut calls = lsof_core::render::Calls::new();
         for m in &misses {
-            let _ = writeln!(out, "{m}");
+            miss_calls(m, &mut calls);
+            let _ = calls.write_to(&mut out);
         }
     }
     // `-Q` suppresses the search-failure status as well as the message:
@@ -1380,6 +1441,9 @@ impl<F: FnMut() -> bool> lsof_cli::repeat::Cycles for RunHost<F> {
     }
     fn out(&mut self) -> &mut dyn Write {
         &mut self.out
+    }
+    fn puts(&mut self, line: &[u8]) {
+        lsof_cli::stdio::puts(line);
     }
 }
 
@@ -1665,6 +1729,42 @@ mod tests {
         assert!(looks(&["-n"], &bare), "the table prints its blank row");
     }
 
+    /// `-V`'s lines as `main.c` writes them: the words in one `printf()`,
+    /// then the argument `safestrprt(…, 1)` prints, a byte or an escape a
+    /// call and a `putc('\n')`; a line with no argument quoted in one call.
+    #[test]
+    fn a_miss_is_written_a_c_call_at_a_time() {
+        let pieces = |line: &str| {
+            struct Log(Vec<String>);
+            impl std::io::Write for Log {
+                fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+                    self.0.push(String::from_utf8_lossy(d).into_owned());
+                    Ok(d.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut calls = lsof_core::render::Calls::new();
+            super::miss_calls(line, &mut calls);
+            let mut log = Log(Vec::new());
+            calls.write_to(&mut log).unwrap();
+            log.0
+        };
+        assert_eq!(
+            pieces("lsof: command not located: a\\\\b"),
+            ["lsof: command not located: ", "a", "\\\\", "b", "\n"]
+        );
+        assert_eq!(
+            pieces("lsof: login name (UID 7) not located: jo"),
+            ["lsof: login name (UID 7) not located: ", "j", "o", "\n"]
+        );
+        assert_eq!(
+            pieces("lsof: process ID not located: 9"),
+            ["lsof: process ID not located: 9\n"]
+        );
+    }
+
     /// `-F` under `-r` with `/etc/passwd` gone: the first process's fields
     /// before `L`, the set left open, as the C writes them (measured).
     #[test]
@@ -1674,17 +1774,27 @@ mod tests {
         p.pgid = Some(7);
         p.ppid = Some(1);
         p.command = "sleep".into();
+        let joined = |calls: Vec<Vec<u8>>| String::from_utf8(calls.concat()).unwrap_or_default();
         assert_eq!(
-            super::before_login(&p, false, Some(&['p', 'L'])),
+            joined(super::before_login(&p, false, Some(&['p', 'L']))),
             format!("p{}\n", p.pid)
         );
         assert_eq!(
-            super::before_login(&p, false, None),
+            joined(super::before_login(&p, false, None)),
             format!("p{}\ng7\nR1\ncsleep\nu0\n", p.pid)
         );
         assert_eq!(
-            super::before_login(&p, true, Some(&['c', 'L', 'f'])),
+            joined(super::before_login(&p, true, Some(&['c', 'L', 'f']))),
             format!("p{}\0csleep\0", p.pid)
+        );
+        // A call at a time, as `print_proc()` makes them: `printf("%c%d%c")`
+        // for `p`, `putchar('c')`, a `putc()` a byte, `putchar('\0')`.
+        let calls = super::before_login(&p, true, Some(&['c', 'L', 'f']));
+        let calls: Vec<&[u8]> = calls.iter().map(Vec::as_slice).collect();
+        let pid = format!("p{}\0", p.pid);
+        assert_eq!(
+            calls,
+            [pid.as_bytes(), b"c", b"s", b"l", b"e", b"e", b"p", b"\0"]
         );
     }
 
