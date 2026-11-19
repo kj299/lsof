@@ -414,8 +414,20 @@ HOSTILE_FILE = "n\x1b[31m\r\t \\\x7fé.txt"
 LOCALE = "C.UTF-8"
 
 
+def renamed_sleeper(link: bytes) -> list:
+    """The command of a fixture that sleeps under the name `link`.
+
+    The kernel names a process after the file it exec'd, so a symlink of the
+    wanted name gives the comm. The program behind it is this harness's own
+    Python, not `sleep`: Ubuntu 26.04's `sleep` is a uutils multi-call binary
+    that works out which tool it is from the path it was run by, and exits 1
+    under any other name, even with argv[0] kept as `sleep`. Python opens no
+    file it keeps, so the fixture still holds only 0, 1 and 2."""
+    return [link, b"-c", b"import time; time.sleep(600)"]
+
+
 def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
-    """A `sleep` whose comm is `comm`: exec'd through a symlink of that name.
+    """A sleeper whose comm is `comm`: exec'd through a symlink of that name.
 
     Bytes, not str, on the way to the kernel: the string must arrive as UTF-8
     whatever Python decided the filesystem encoding is (a POSIX locale would
@@ -424,13 +436,10 @@ def hostile_sleeper(name: str, work: str, comm: str) -> Fixture:
     cdir = os.path.join(work, name)
     os.makedirs(cdir)
     link = os.path.join(cdir.encode(), comm.encode("utf-8"))
-    os.symlink(shutil.which("sleep"), link)
+    os.symlink(sys.executable, link)
     return Fixture(
         f"{name}(comm)",
-        # `exec -a sleep`: the kernel names the process after the file, but a
-        # multi-call `sleep` (uutils coreutils, Ubuntu 26.04) picks its tool
-        # from argv[0] and exits 1 under any other name.
-        [b"bash", b"-c", b'exec -a sleep "$0" 600', link],
+        renamed_sleeper(link),
         cwd=cdir,
         expect_fds=3,
         expect_comm=comm.encode("utf-8"),
@@ -600,12 +609,10 @@ def long_command_holder(work: str) -> Fixture:
     cdir = os.path.join(work, "longcmd")
     os.makedirs(cdir)
     binary = os.path.join(cdir, LONG_COMM)
-    shutil.copy("/bin/sleep", binary)
+    os.symlink(sys.executable, binary)
     return Fixture(
         "H(long command)",
-        # argv[0] stays `sleep` for a multi-call `sleep` (see hostile_sleeper);
-        # the comm still comes from the file's name.
-        [b"bash", b"-c", b'exec -a sleep "$0" 600', binary.encode()],
+        renamed_sleeper(binary.encode()),
         cwd=cdir,
         expect_fds=3,  # 0,1,2
         expect_comm=LONG_COMM.encode(),
