@@ -2765,8 +2765,12 @@ name = "inet-port-range-that-misses"
 args = ["-n", "-P", "-a", "-p", "{B}", "-i:1-2"]
 
 [[case]]
+# No protocol: `-iTCP:9,{PORT}` makes two entries sharing one protocol
+# string, which the C frees twice at exit (`lib/lsof.c`, the network
+# address list), and glibc 2.43 (the Ubuntu 26.04 runner) aborts on that
+# double free. See DIVERGENCES, "The C frees a protocol twice".
 name = "inet-port-list"
-args = ["-n", "-P", "-a", "-p", "{B}", "-iTCP:9,{PORT}"]
+args = ["-n", "-P", "-a", "-p", "{B}", "-i:9,{PORT}"]
 
 [[case]]
 # The bare -i is located by a socket B keeps even though `-d 0` hides it:

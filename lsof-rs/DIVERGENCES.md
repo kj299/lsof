@@ -640,6 +640,24 @@ the year), `zonefile.rs` (the lease's retries, the reads by path),
 `stdout_errors.rs` (`+m` before `-h`). Mutants: the review's section of
 `mutants/r-parity.toml` (28), and 14 older ones whose anchors moved.
 
+## The C frees a protocol twice (2026-11-19)
+
+C-DEFECT, not reproduced. `-i` with a protocol and a port list
+(`-iTCP:9,22`) makes one network-address entry per port, each a copy of the
+parsed spec (`enter_nwad()`, `nc = *n`), so every entry holds the same
+`proto` string; the C's cleanup at exit frees each entry's `proto`
+(`lib/lsof.c`, "Free network address list"), the same pointer once per
+entry. A double free is undefined behaviour, and what it does depends on
+the C library: glibc 2.39 here passes it silently (the run's output and
+status are the C's own), but with `MALLOC_CHECK_=3` it aborts, `free():
+double free detected in tcache 2`, status 134; and glibc 2.43 (the Ubuntu
+26.04 CI runner) aborts every time, its buffered stdout lost, so the C
+printed nothing and died of `SIGABRT`. lsof-rs has no such free and
+prints the listing with the C's status as glibc 2.39 runs it. Not a
+ledgered case, since the C's result is the C library's choice; the
+differential's `inet-port-list` gives its list no protocol (`-i:9,PORT`),
+which shares nothing and still tests the list.
+
 ## Fixed by `+n`, `+P`, `+r` and `+m`, like the C (2026-11-14)
 
 Rows 152, 153 and 154, the four `+` options lsof-rs had refused (`unsupported
