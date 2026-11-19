@@ -12,6 +12,25 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **`-c /regex/` takes a back-reference, and expressions past the `regex`
+  crate's bounds** (DIVERGENCES 38): `-c '/sl(e)\1p/'` and `-c
+  '/sl\(e\)\1p/b'` list sleep, as the C does, where lsof-rs had said
+  `back references are not supported` and exited 1; `-c '/^\w{0,800}/'`
+  and an expression of 64 large classes (`\w*` 64 times) select what they
+  match, where lsof-rs had said `Regular expression too big`. lsof-rs's own
+  engine answers what the crate cannot or will not (`lsof-core`,
+  `posix_regex/engine.rs`); its leaves are read by `regex-syntax`, now a
+  direct dependency of `lsof-core` (it was already the crate's). A
+  back-reference matches where some binding of its groups gives a match:
+  glibc's search misses some (`(e){0,2}\1` against sleep) and finds some
+  that are not there (`^(.*)(.*)\2\1$` against every command), and lsof-rs
+  does neither (two C-DEFECTs). Under `i` a back-reference compares each
+  character in the case `towupper()` gives it, as glibc does. Still `too
+  big`: nesting 100 deep, and more than 262,144 nodes (no argument holds
+  that many). A search with a back-reference is bounded at a million steps
+  a command (under half a second, measured), past which the command is
+  taken as not matching, where glibc's own runs on for minutes. On every
+  platform.
 - **The options end where the C's end them** (DIVERGENCES 12, a DECISION
   until the maintainer reversed it): at the first name, at `-` or `+`
   alone (the first name) and at `--` or `++` (taken); every word after is a

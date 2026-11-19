@@ -301,13 +301,19 @@ file holds cost none. A service name comes from `/etc/services`.
 The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
-- **Refused, where the C works:** a back-reference in `-c /regex/` (38:
-  `\(a\)\1`), and an expression past lsof-rs's bounds: a compiled size of
-  8 MiB (`.{32767}`, `\w{0,800}`), 64 of the locale's large classes or
-  65,536 characters, groups and repetitions nested 100 deep (every other
-  POSIX expression glibc takes is taken); a value that is not UTF-8, in a command line that
+- **Refused, where the C works:** a `-c /regex/` expression with groups
+  and repetitions nested 100 deep (38; every other POSIX expression glibc
+  takes is taken, back-references and intervals of any size among them); a
+  value that is not UTF-8, in a command line that
   also holds one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
+- **`-c /regex/` with a back-reference** (38): lsof-rs matches where some
+  binding of the groups gives a match, as POSIX has it; glibc's search
+  misses some such matches (`(e){0,2}\1` against `sleep`) and finds some
+  that are not there (`^(.*)(.*)\2\1$` matches every command in the C).
+  The search is bounded at a million steps a command: past it (nine
+  groups named in reverse against 15 bytes, where the C runs on for over a
+  minute) the command is taken as not matching.
 - **Names only the files know** (38, 39, 154): a service name is read from
   `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
   has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves

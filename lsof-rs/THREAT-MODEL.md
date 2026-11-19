@@ -538,55 +538,84 @@ files, gated by `cargo deny`; none has a build script. `regex-syntax` forbids
 fifty `unsafe` blocks, most in the engines the `perf-*` features would
 build), and, as for `rustix` above, code linked in runs with lsof-rs's
 privileges whatever this repository forbids. The Linux release binary grows
-from 636 KB to 1.66 MB. What bounds the engine:
+from 636 KB to 1.66 MB (1.85 MB with lsof-rs's own engine, 2026-11-19, from
+1.80 MB). What bounds the engine:
 
 * **Nothing typed reaches it as syntax.** `posix_regex::translate` parses
   the expression by glibc's grammar and writes every literal as a code point
   (`\x{61}`), a byte that is no character as `(?-u:\xNN)`, and only the
-  operators, classes and anchors it chose; the fuzz target asserts that the
-  engine refuses nothing the translator wrote but a program past the size
-  limit (a debug assertion in `CommandRegex::new`, which the fuzz build
-  keeps).
+  operators, classes and anchors it chose; the fuzz target asserts that
+  neither engine refuses what the translator wrote (the crate's refusal of
+  a program past the size limit sends it to lsof-rs's own; a debug
+  assertion in `CommandRegex::new`, which the fuzz build keeps), and that
+  the two answer alike for every expression the crate takes.
 * **The reader is one pass, and its depth is bounded.** It recurses only
   into a group, counted against the nesting limit. (Its first version had
   glibc's own look-ahead for a `$` in a basic expression, which calls
   itself once for each `$` of a run: 100,000 of them overflowed the stack,
   as 70,000 end the C with SIGSEGV. It looks at the next two items now.)
-* **Time is linear.** The crate has no back-references and no look-around,
-  and its engines (here the PikeVM alone, the `perf-*` features being off)
-  match in time proportional to the command's length times the program's
-  size: there is no expression that backtracks. A back-reference, which
-  glibc takes, is refused in the reader. A command is at most 15 bytes on
-  Linux (64 for a kernel thread).
-* **What the engine is asked is bounded before it is asked.** The compiled
+* **The crate's time is linear.** It has no back-references and no
+  look-around, and its engines (here the PikeVM alone, the `perf-*`
+  features being off) match in time proportional to the command's length
+  times the program's size: there is no expression that backtracks. A
+  command is at most 15 bytes on Linux (63 for a kernel thread).
+* **What the crate is asked is bounded before it is asked.** The compiled
   program is held to 8 MiB (`size_limit`), but that alone bounds neither
-  the memory nor the time of compiling: the engine first builds each class
+  the memory nor the time of compiling: the crate first builds each class
   of the locale's as thousands of ranges, folded for case under `i`, and
   60,000 `\W` took 20 s and 2.5 GB before the program was found too big.
   So the reader counts what an expression asks as it reads it
   (`COST_LIMIT`, 65,536 units: a character one, a large class 1,024, so 63
-  of them at most) and refuses one past that before the engine sees it;
-  nesting is held to 100 groups, alternations or repetitions (the reader's
-  own count; the engine's limit is set above the deepest that lets it
-  write, 332 of its levels, and its compiler recurses once a level), and an
-  interval's count to 32767, glibc's. Measured on the worst expressions
-  found for each bound (release build, this host): an expression past the
-  cost limit is refused in under 10 ms and 7 MB (those 60,000 `\W`: 8 ms,
-  5 MB); one inside it and past the size limit in under 75 ms and 36 MB;
-  the costliest that is taken compiles in 81 ms and 40 MB peak (65,000 `é`
-  under `i`). glibc expands `(a{32767}){32767}` until memory runs out.
-* **A match costs at most the program's size times the command's length**,
-  and the size limit is what bounds it: 18 ms for the worst program found
-  under 8 MiB against a 15-byte command (`(.*){1,16000}z`; about 1.2 ms a
-  byte), where a plain expression takes microseconds. Each expression keeps
-  its answer for a command name (1,024 names of at most 256 bytes), so a
-  run pays for a name once, not once a process: 1.1 s for `(.*.*){8000}z`
-  over this host's 79 processes. The expression is the invoking user's, so
-  what an expensive one costs is that user's own run, and so is how many
-  `-c /regex/` words a command line holds: there is no bound on their
-  number, as the C has none, each within its own bounds (a word of argv per
-  8 MiB of program at worst). The command names it runs over are other
-  users' and cannot make a match cost more than that.
+  of them at most), and the crate is not asked for one past that; nesting
+  is held to 100 groups, alternations or repetitions (the reader's own
+  count; the crate's limit is set above the deepest that lets it write, 332
+  of its levels, and its compiler recurses once a level), and an interval's
+  count to 32767, glibc's. Measured (release build, this host): the
+  costliest the crate takes compiles in 120 ms and 46 MB peak (65,000 `é`
+  under `i`); one past the size limit is found so in at most 61 ms and
+  16 MB (`^\w{0,800}`, `.{32767}`, `(.{200}){150}`, `[[:alpha:]]{1000}`),
+  and is then lsof-rs's own engine's.
+* **lsof-rs's own engine takes what the crate cannot or will not** (since
+  2026-11-19, DIVERGENCES 38): a back-reference, and what is past the two
+  bounds above. It is `lsof-core`'s, safe Rust, and reads each character,
+  list and class with `regex-syntax`, the crate's own parser (a direct
+  dependency now, at the crate's version; nothing new is built). Its work is
+  bounded in the expression and in the command, never by what an interval
+  counts: the tree it matches has a node per atom and operator, at most
+  262,144 (`TREE_LIMIT`; an argument of 128 KiB holds fewer), and it
+  recurses once a level of the tree, whose depth the nesting limit holds to
+  about 200; a class
+  of the locale's is built once for an expression, however many lists name
+  it. Without a back-reference it answers by reachability, a square of bits
+  over the command for each node it is working on, held only along the
+  tree's depth: polynomial in the command (its cube at worst, for an
+  interval), linear in the tree, and no interval written out (glibc writes
+  each out, and runs out of memory on `\w*` 32,000 times, on `a{0,32767}`
+  12,000 times and on `(a{32767}){32767}`, after 10 to 15 s at an 8 GB
+  limit). With a back-reference matching is NP-complete, glibc's own search
+  is exponential, and lsof-rs's is held to `SEARCH_BUDGET`, a million steps
+  a command, each thing it keeps paid for before it is kept: past it the
+  command is taken as not matching (DIVERGENCES 38). A command longer than
+  1,024 bytes (`OWN_COMMAND_MAX`; no system names a process so) is not
+  searched. Measured, against 63 bytes (release build, this host, peak
+  RSS of the process): `\w*` 32,000 times compiles in 26 ms and matches in
+  0.45 s at 17 MB; 9,000 distinct `[[:alpha:]X]` 30 ms and 23 ms, 10 MB;
+  60,000 `\W` under `i` 54 ms and 0.10 s, 23 MB; `a{0,32767}` 12,000 times
+  46 ms and 0.15 s, 23 MB; `((((.?){32767}){32767}){32767}){32767}r` 45 ms
+  and 4 ms. With back-references: `(.*)(.*)(.*)\3\2\1$` 36 ms (glibc
+  18.5 s); nine `(a*)*` and `\1`..`\9` 0.1 s; at the budget, nine `(.*)`
+  named in reverse, 0.32 s and 103 MB, no match (glibc over a minute);
+  `(.)\1` 30,000 times 1 ms.
+* **A match is asked once a command name.** Each expression keeps its
+  answer for a command name (1,024 names of at most 256 bytes), so a run
+  pays for a name once, not once a process: 1.1 s for `(.*.*){8000}z` over
+  this host's 79 processes, by the crate (18 ms for the worst program under
+  8 MiB against a 15-byte command, `(.*){1,16000}z`, 70 ms against 63
+  bytes). The expression is the invoking user's, so what an expensive one
+  costs is that user's own run, and so is how many `-c /regex/` words a
+  command line holds: there is no bound on their number, as the C has none,
+  each within its own bounds. The command names it runs over are other
+  users' and cannot make a match cost more than the bounds above.
 
 **`-i @name` can make lsof-rs wait on a name server, as it makes the C.**
 A host name is looked up where the option is read, before anything is

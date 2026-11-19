@@ -24,6 +24,11 @@
 
 use std::fmt::Write as _;
 
+mod engine;
+
+use engine::{Look, Node, Tree, UnitSpec};
+pub use engine::{OWN_COMMAND_MAX, SEARCH_BUDGET};
+
 /// Why an expression was refused: glibc's `reg_errcode_t`, by the names
 /// `regerror()` has for them, and what only lsof-rs refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,13 +57,10 @@ pub enum RegexError {
     BadRepeat,
     /// `REG_ESIZE`, and an expression past lsof-rs's own bounds.
     Size,
-    /// A back-reference glibc accepts (`\(a\)\1`): the engine has none.
-    BackReference,
 }
 
 impl RegexError {
-    /// The text `regerror()` gives; lsof-rs's own words for a
-    /// back-reference.
+    /// The text `regerror()` gives.
     pub fn text(self) -> &'static str {
         match self {
             Self::BadPattern => "Invalid regular expression",
@@ -73,7 +75,6 @@ impl RegexError {
             Self::Range => "Invalid range end",
             Self::BadRepeat => "Invalid preceding regular expression",
             Self::Size => "Regular expression too big",
-            Self::BackReference => "back references are not supported",
         }
     }
 }
@@ -132,6 +133,12 @@ pub const SIZE_LIMIT: usize = 1 << 23;
 /// this limit an expression holds at most 63 such classes, or 65,536
 /// characters.
 pub const COST_LIMIT: u64 = 1 << 16;
+
+/// The most nodes an expression's tree may have: past it the expression is
+/// `Regular expression too big`. An argument on Linux is at most 128 KiB
+/// (`MAX_ARG_STRLEN`), and no expression of it has this many, so it bounds
+/// only what lsof-core is given some other way.
+pub const TREE_LIMIT: usize = 1 << 18;
 
 /// What a class of thousands of ranges costs ([`COST_LIMIT`]): `[:alpha:]`,
 /// `[:alnum:]`, `[:upper:]`, `[:lower:]`, `[:punct:]`, `[:graph:]`,
@@ -241,9 +248,11 @@ enum Elem {
     Class(Vec<Item>),
 }
 
-/// A parsed piece, written in the engine's syntax.
+/// A parsed piece, written in the engine's syntax, and its node in the
+/// tree.
 struct Frag {
     s: String,
+    node: u32,
     /// Whether a repetition operator may follow it as it stands.
     atomic: bool,
     /// How deep it nests.
@@ -261,6 +270,11 @@ pub struct Translated {
     /// by bytes (its `optimize_utf8()`), and a byte of the expression that
     /// is no character matches that byte wherever it is.
     pub by_chars: bool,
+    /// The same expression for lsof-rs's own engine.
+    tree: Tree,
+    root: Option<u32>,
+    /// What it asks of the `regex` crate ([`COST_LIMIT`]).
+    cost: u64,
 }
 
 struct Parser {
@@ -272,9 +286,9 @@ struct Parser {
     nsub: usize,
     completed: u16,
     by_chars: bool,
-    back_reference: bool,
     /// What the expression asks of the engine so far ([`COST_LIMIT`]).
     cost: u64,
+    tree: Tree,
 }
 
 /// Read `expression` as `regcomp()` does, extended or basic, and write it
@@ -292,28 +306,28 @@ pub fn translate(expression: &[u8], extended: bool, icase: bool) -> Result<Trans
         nsub: 0,
         completed: 0,
         by_chars: icase,
-        back_reference: false,
         cost: 0,
+        tree: Tree::default(),
     };
     p.fetch(true);
     let tree = p.parse_reg_exp(0)?;
-    if p.back_reference {
-        return Err(RegexError::BackReference);
-    }
     // After every refusal of glibc's own, which reading on may yet find.
-    if p.cost > COST_LIMIT {
+    if p.tree.nodes.len() > TREE_LIMIT {
         return Err(RegexError::Size);
     }
     // `.` and a non-matching list take a newline (`RE_DOT_NEWLINE`, no
     // `RE_HAT_LISTS_NOT_NEWLINE`), and `^` and `$` are the text's ends (no
     // `REG_NEWLINE`).
     let mut pattern = String::from(if icase { "(?si)" } else { "(?s)" });
-    if let Some(tree) = tree {
+    if let Some(tree) = &tree {
         pattern.push_str(&tree.s);
     }
     Ok(Translated {
         pattern,
         by_chars: p.by_chars,
+        root: tree.map(|t| t.node),
+        tree: p.tree,
+        cost: p.cost,
     })
 }
 
@@ -321,8 +335,8 @@ fn push_char(s: &mut String, c: char) {
     let _ = write!(s, "\\x{{{:X}}}", u32::from(c));
 }
 
-/// One literal character, or a byte that is none.
-fn literal(item: Item) -> Frag {
+/// One literal character, or a byte that is none, in the engine's syntax.
+fn literal_text(item: Item) -> String {
     let mut s = String::new();
     match item {
         Item::Char(c) => push_char(&mut s, c),
@@ -330,19 +344,7 @@ fn literal(item: Item) -> Frag {
             let _ = write!(s, "(?-u:\\x{b:02X})");
         }
     }
-    Frag {
-        s,
-        atomic: true,
-        depth: 1,
-    }
-}
-
-fn atom(s: &str) -> Frag {
-    Frag {
-        s: s.to_string(),
-        atomic: true,
-        depth: 1,
-    }
+    s
 }
 
 /// glibc's character classes under a UTF-8 locale, in the engine's Unicode
@@ -387,6 +389,29 @@ fn class_set(name: &[u8], icase: bool) -> Option<String> {
 }
 
 impl Parser {
+    /// A piece of one node.
+    fn atom(&mut self, s: String, node: Node) -> Frag {
+        Frag {
+            s,
+            node: self.tree.push(node),
+            atomic: true,
+            depth: 1,
+        }
+    }
+
+    /// One character or byte, `s` in the engine's syntax.
+    fn unit(&mut self, s: String) -> Frag {
+        let spec = UnitSpec {
+            negated: false,
+            sets: vec![s.clone()],
+        };
+        self.atom(s, Node::Unit(spec))
+    }
+
+    fn literal(&mut self, item: Item) -> Frag {
+        self.unit(literal_text(item))
+    }
+
     fn at(&self, i: usize) -> Option<Item> {
         self.items.get(i).copied()
     }
@@ -503,22 +528,34 @@ impl Parser {
         let mut depth = first.as_ref().map_or(0, |f| f.depth);
         let mut s = String::from("(?:");
         s.push_str(first.as_ref().map_or("", |f| &f.s));
+        let mut branches = vec![self.node_of(first.as_ref())];
         while self.token.kind == Kind::Alt {
             self.fetch(true);
             s.push('|');
+            let mut branch = None;
             if !self.ends_branch(nest) {
                 let accumulated = self.completed;
                 self.completed = initial;
-                let branch = self.parse_branch(nest)?;
+                branch = self.parse_branch(nest)?;
                 self.completed |= accumulated;
-                if let Some(branch) = branch {
+                if let Some(branch) = &branch {
                     depth = depth.max(branch.depth);
                     s.push_str(&branch.s);
                 }
             }
+            branches.push(self.node_of(branch.as_ref()));
         }
         s.push(')');
-        nested(s, depth)
+        let node = self.tree.push(Node::Alt(branches));
+        nested(s, depth, node)
+    }
+
+    /// A piece's node, or an empty one for glibc's null tree.
+    fn node_of(&mut self, frag: Option<&Frag>) -> u32 {
+        match frag {
+            Some(f) => f.node,
+            None => self.tree.push(Node::Empty),
+        }
     }
 
     /// `parse_branch()`: expressions side by side.
@@ -529,6 +566,7 @@ impl Parser {
             tree = match (tree, expr) {
                 (Some(mut a), Some(b)) => {
                     a.s.push_str(&b.s);
+                    a.node = self.tree.concat(a.node, b.node);
                     a.atomic = false;
                     a.depth = a.depth.max(b.depth);
                     Some(a)
@@ -551,17 +589,16 @@ impl Parser {
         let lit = self.token.lit;
         self.charge(1);
         let mut tree = match self.token.kind {
-            Kind::Char | Kind::CloseDup => Some(literal(lit)),
+            Kind::Char | Kind::CloseDup => Some(self.literal(lit)),
             Kind::OpenSub => Some(self.parse_sub_exp(nest.saturating_add(1))?),
             Kind::OpenBracket => Some(self.parse_bracket_exp()?),
             Kind::BackRef(n) => {
                 if self.completed & (1u16 << n) == 0 {
                     return Err(RegexError::SubReg);
                 }
-                // glibc reads on, and may yet refuse the expression in its
-                // own words; if it does not, lsof-rs refuses it in its own.
-                self.back_reference = true;
-                Some(atom("(?:)"))
+                // The `regex` crate has none: lsof-rs's own engine matches
+                // it, and this is never compiled.
+                Some(self.atom("(?:)".to_string(), Node::BackRef(n)))
             }
             // Basic: an interval with nothing before it
             // (`RE_CONTEXT_INVALID_DUP`).
@@ -572,7 +609,7 @@ impl Parser {
                 if x {
                     return Err(RegexError::BadRepeat);
                 }
-                Some(literal(lit))
+                Some(self.literal(lit))
             }
             // Extended: a `)` that closes nothing is itself
             // (`RE_UNMATCHED_RIGHT_PAREN_ORD`).
@@ -580,7 +617,7 @@ impl Parser {
                 if !x {
                     return Err(RegexError::Paren);
                 }
-                Some(literal(lit))
+                Some(self.literal(lit))
             }
             Kind::Anchor(text, word) => {
                 self.by_chars |= word;
@@ -588,14 +625,19 @@ impl Parser {
                 // expression of its own (and in a basic expression a `^`
                 // there is a character: `^^a` matches `^a`).
                 self.fetch(false);
-                return Ok(Some(atom(text)));
+                let look = match text {
+                    r"\A" => Look::Start,
+                    r"\z" => Look::End,
+                    word => Look::Word(word),
+                };
+                return Ok(Some(self.atom(text.to_string(), Node::Look(look))));
             }
             Kind::Period => {
                 // Every character: more of a program than one is.
                 self.charge(1);
-                Some(atom("."))
+                Some(self.unit(".".to_string()))
             }
-            Kind::Never => Some(atom(NOTHING)),
+            Kind::Never => Some(self.atom(NOTHING.to_string(), Node::Unit(UnitSpec::default()))),
             Kind::Word | Kind::NotWord | Kind::Space | Kind::NotSpace => {
                 self.by_chars = true;
                 let set = match self.token.kind {
@@ -609,7 +651,12 @@ impl Parser {
                     }
                 };
                 let not = matches!(self.token.kind, Kind::NotWord | Kind::NotSpace);
-                Some(atom(&format!("[{}{set}]", if not { "^" } else { "" })))
+                let spec = UnitSpec {
+                    negated: not,
+                    sets: vec![format!("[{set}]")],
+                };
+                let s = format!("[{}{set}]", if not { "^" } else { "" });
+                Some(self.atom(s, Node::Unit(spec)))
             }
             Kind::Alt | Kind::End => return Ok(None),
             Kind::BackSlash => return Err(RegexError::Escape),
@@ -650,7 +697,16 @@ impl Parser {
         }
         let depth = tree.as_ref().map_or(0, |f| f.depth);
         let s = format!("(?:{})", tree.as_ref().map_or("", |f| &f.s));
-        nested(s, depth).map(|f| f.unwrap_or_else(|| atom("(?:)")))
+        let child = self.node_of(tree.as_ref());
+        let node = self.tree.push(Node::Group { index: this, child });
+        nested(s, depth, node).map(|f| {
+            f.unwrap_or_else(|| Frag {
+                s: String::new(),
+                node,
+                atomic: true,
+                depth: 1,
+            })
+        })
     }
 
     /// Whether the token is a `,` read as a character.
@@ -740,6 +796,11 @@ impl Parser {
         if start == 0 && end == 0 {
             return Ok(None);
         }
+        let node = self.tree.push(Node::Repeat {
+            child: elem.node,
+            min: u32::try_from(start).unwrap_or(u32::MAX),
+            max: u32::try_from(end).ok(),
+        });
         let mut s = if elem.atomic {
             elem.s
         } else {
@@ -759,7 +820,7 @@ impl Parser {
                 let _ = write!(s, "{{{n},{m}}}");
             }
         }
-        nested(s, elem.depth).map(|f| {
+        nested(s, elem.depth, node).map(|f| {
             f.map(|mut f| {
                 f.atomic = false;
                 f
@@ -806,6 +867,11 @@ impl Parser {
     /// `parse_bracket_exp()`: a bracket expression, its `[` read.
     fn parse_bracket_exp(&mut self) -> Result<Frag, RegexError> {
         let mut set = String::new();
+        // The same list for lsof-rs's own engine: its characters, and each
+        // class apart, so that the engine builds a class once however many
+        // lists name it.
+        let mut own = String::new();
+        let mut classes = Vec::new();
         let mut complex = false;
         let (mut token, mut len) = self.peek_bracket();
         if token.kind == BrKind::End {
@@ -851,6 +917,8 @@ impl Parser {
                 }
             }
             complex |= matches!(start, Elem::Equiv(_));
+            let before = set.len();
+            let is_class = matches!((&start, &end), (Elem::Class(_), None));
             match (start, end) {
                 (start, Some(end)) => {
                     complex = true;
@@ -883,6 +951,12 @@ impl Parser {
                     let _ = write!(set, "[{class}]");
                 }
             }
+            let written = set.get(before..).unwrap_or_default();
+            if is_class {
+                classes.push(written.to_string());
+            } else {
+                own.push_str(written);
+            }
             if token.kind == BrKind::End {
                 return Err(RegexError::Bracket);
             }
@@ -899,7 +973,16 @@ impl Parser {
             (false, true) => NOTHING.to_string(),
             (true, true) => r"[\x{0}-\x{10FFFF}]".to_string(),
         };
-        Ok(atom(&s))
+        let mut sets = Vec::with_capacity(classes.len().saturating_add(1));
+        if !own.is_empty() {
+            sets.push(format!("[{own}]"));
+        }
+        sets.extend(classes);
+        let spec = UnitSpec {
+            negated: non_match,
+            sets,
+        };
+        Ok(self.atom(s, Node::Unit(spec)))
     }
 
     /// `parse_bracket_element()`.
@@ -1014,13 +1097,14 @@ fn single_byte(name: &[Item]) -> Option<Item> {
     }
 }
 /// A piece that wraps pieces `depth` deep, or too deep to write.
-fn nested(s: String, depth: u32) -> Result<Option<Frag>, RegexError> {
+fn nested(s: String, depth: u32, node: u32) -> Result<Option<Frag>, RegexError> {
     let depth = depth.saturating_add(1);
     if depth > NEST_LIMIT {
         return Err(RegexError::Size);
     }
     Ok(Some(Frag {
         s,
+        node,
         atomic: true,
         depth,
     }))
@@ -1037,8 +1121,7 @@ pub struct CommandRegex {
     expression: Vec<u8>,
     extended: bool,
     icase: bool,
-    regex: regex::bytes::Regex,
-    by_chars: bool,
+    matcher: Matcher,
     /// What it answered for the commands asked so far: a command is
     /// asked about once for each time it is selected or located, and many
     /// processes share one, while the worst expression inside
@@ -1059,28 +1142,75 @@ impl PartialEq for CommandRegex {
 
 impl Eq for CommandRegex {}
 
+/// What answers for an expression: the `regex` crate, or lsof-rs's own
+/// engine for what the crate cannot run or will not.
+#[derive(Clone, Debug)]
+enum Matcher {
+    Crate {
+        regex: regex::bytes::Regex,
+        by_chars: bool,
+    },
+    Own(std::sync::Arc<engine::Engine>),
+}
+
 impl CommandRegex {
     /// Compile `expression`, the text between the slashes, as `regcomp()`
     /// would: extended or basic, and with `REG_ICASE` or without.
     pub fn new(expression: &[u8], extended: bool, icase: bool) -> Result<Self, RegexError> {
+        Self::compile(expression, extended, icase, false)
+    }
+
+    /// [`Self::new`], with lsof-rs's own engine whatever the expression
+    /// (`own`): for the tests and the fuzz target, which hold the two to
+    /// the same answers.
+    #[doc(hidden)]
+    pub fn new_own(expression: &[u8], extended: bool, icase: bool) -> Result<Self, RegexError> {
+        Self::compile(expression, extended, icase, true)
+    }
+
+    fn compile(
+        expression: &[u8],
+        extended: bool,
+        icase: bool,
+        own: bool,
+    ) -> Result<Self, RegexError> {
         let translated = translate(expression, extended, icase)?;
-        let regex = regex::bytes::RegexBuilder::new(&translated.pattern)
-            .size_limit(SIZE_LIMIT)
-            .nest_limit(ENGINE_NEST_LIMIT)
-            .build()
-            .map_err(|e| {
-                // The translator writes only what the engine reads, so the
-                // one thing it can refuse is a program past the limit; the
-                // fuzz target holds it to that.
-                debug_assert!(matches!(e, regex::Error::CompiledTooBig(_)), "{e}");
-                RegexError::Size
-            })?;
+        // The crate first, where it can: it is linear in the command. A
+        // back-reference it has not; past the cost limit it is not asked,
+        // and past the size limit it refuses (and the translator writes
+        // nothing else it can refuse; the fuzz target holds it to that).
+        let back_references = translated
+            .tree
+            .nodes
+            .iter()
+            .any(|n| matches!(n, Node::BackRef(_)));
+        let regex = if own || back_references || translated.cost > COST_LIMIT {
+            None
+        } else {
+            regex::bytes::RegexBuilder::new(&translated.pattern)
+                .size_limit(SIZE_LIMIT)
+                .nest_limit(ENGINE_NEST_LIMIT)
+                .build()
+                .map_err(|e| debug_assert!(matches!(e, regex::Error::CompiledTooBig(_)), "{e}"))
+                .ok()
+        };
+        let matcher = match regex {
+            Some(regex) => Matcher::Crate {
+                regex,
+                by_chars: translated.by_chars,
+            },
+            None => Matcher::Own(std::sync::Arc::new(engine::Engine::new(
+                &translated.tree,
+                translated.root,
+                translated.by_chars,
+                icase,
+            )?)),
+        };
         Ok(Self {
             expression: expression.to_vec(),
             extended,
             icase,
-            regex,
-            by_chars: translated.by_chars,
+            matcher,
             answers: std::sync::Arc::default(),
         })
     }
@@ -1111,6 +1241,23 @@ impl CommandRegex {
         answer
     }
 
+    /// The same, with lsof-rs's own engine's search held to `budget`.
+    #[cfg(test)]
+    fn with_budget(&self, budget: u64) -> Self {
+        let mut copy = self.clone();
+        if let Matcher::Own(engine) = &self.matcher {
+            copy.matcher = Matcher::Own(std::sync::Arc::new(engine.with_budget(budget)));
+            copy.answers = std::sync::Arc::default();
+        }
+        copy
+    }
+
+    /// Whether lsof-rs's own engine answers.
+    #[cfg(test)]
+    fn is_own(&self) -> bool {
+        matches!(self.matcher, Matcher::Own(_))
+    }
+
     /// How many answers are kept.
     #[cfg(test)]
     fn kept(&self) -> usize {
@@ -1120,11 +1267,16 @@ impl CommandRegex {
             .len()
     }
 
-    /// [`Self::is_match`], asked of the engine: time linear in the
-    /// command and in the program.
+    /// [`Self::is_match`], asked of the engine.
     fn search(&self, command: &[u8]) -> bool {
-        if !self.by_chars {
-            return self.regex.is_match(command);
+        let (regex, by_chars) = match &self.matcher {
+            Matcher::Crate { regex, by_chars } => (regex, *by_chars),
+            // A search past its budget is taken as no match.
+            Matcher::Own(engine) => return engine.is_match(command).unwrap_or(false),
+        };
+        // Time linear in the command and in the program.
+        if !by_chars {
+            return regex.is_match(command);
         }
         // glibc starts a match only at a character's first byte, or at a
         // byte that is part of none.
@@ -1141,7 +1293,7 @@ impl CommandRegex {
         }
         let mut from = 0usize;
         while from <= command.len() {
-            let Some(found) = self.regex.find_at(command, from) else {
+            let Some(found) = regex.find_at(command, from) else {
                 return false;
             };
             if boundary.get(found.start()).copied().unwrap_or(false) {
@@ -1380,27 +1532,22 @@ mod tests {
         assert_eq!(Range.text(), "Invalid range end");
         assert_eq!(BadRepeat.text(), "Invalid preceding regular expression");
         assert_eq!(Size.text(), "Regular expression too big");
-        assert_eq!(BackReference.text(), "back references are not supported");
     }
 
-    /// A back-reference glibc takes is refused, in lsof-rs's words, unless
-    /// glibc refuses the expression for something after it, in its own.
+    /// A back-reference glibc takes is taken, and lsof-rs's own engine
+    /// answers for it; one glibc refuses is refused in its words, and so is
+    /// an expression it refuses for something after one.
     #[test]
-    fn a_back_reference_is_refused_once_the_rest_is_read() {
-        assert_eq!(
-            pattern("(a)\\1", true, false),
-            Err(RegexError::BackReference)
-        );
-        assert_eq!(
-            pattern("\\(a\\)\\1", false, false),
-            Err(RegexError::BackReference)
-        );
+    fn a_back_reference_glibc_takes_is_taken() {
+        let taken = |e: &str, x| {
+            let regex = CommandRegex::new(e.as_bytes(), x, false);
+            regex.as_ref().is_ok_and(CommandRegex::is_own)
+        };
+        assert!(taken("(a)\\1", true));
+        assert!(taken("\\(a\\)\\1", false));
         assert_eq!(pattern("(a)\\1[", true, false), Err(RegexError::BadPattern));
         // The tenth group is no back-reference's.
-        assert_eq!(
-            pattern("(a)(a)(a)(a)(a)(a)(a)(a)(a)\\9", true, false),
-            Err(RegexError::BackReference)
-        );
+        assert!(taken("(a)(a)(a)(a)(a)(a)(a)(a)(a)\\9", true));
         assert_eq!(
             pattern("(a)(a)(a)(a)(a)(a)(a)(a)\\9", true, false),
             Err(RegexError::SubReg)
@@ -1436,18 +1583,108 @@ mod tests {
             ("((a)|(b))\\3", true),
             ("(a)|(b)|(c)\\3", true),
         ] {
-            let want = if valid {
-                RegexError::BackReference
-            } else {
-                RegexError::SubReg
-            };
-            assert_eq!(pattern(expression, true, false), Err(want), "{expression}");
             let basic = expression
                 .replace('(', "\\(")
                 .replace(')', "\\)")
                 .replace('|', "\\|");
-            assert_eq!(pattern(&basic, false, false), Err(want), "{basic}");
+            for (e, x) in [(expression, true), (basic.as_str(), false)] {
+                if valid {
+                    assert!(taken(e, x), "{e}");
+                } else {
+                    assert_eq!(pattern(e, x, false), Err(RegexError::SubReg), "{e}");
+                }
+            }
         }
+    }
+
+    /// A back-reference matches what its group matched last, under
+    /// `REG_ICASE` in the case `towupper()` gives; nothing where its group
+    /// matched nothing; and a match is found wherever some way of binding
+    /// the groups gives one, and nowhere else (each line glibc's answer,
+    /// through `regexec()`, but the last four: glibc misses the first
+    /// three, and finds the last where it is not; DIVERGENCES 38).
+    #[test]
+    fn a_back_reference_matches_what_its_group_matched() {
+        let m = |e: &str, flags: &str, command: &str| {
+            let (x, i) = (!flags.contains('b'), flags.contains('i'));
+            CommandRegex::new(e.as_bytes(), x, i)
+                .unwrap()
+                .is_match(command.as_bytes())
+        };
+        for (e, flags, yes, no) in [
+            ("sl(e)\\1p", "", &["sleep"][..], &["slep", "sle1p"][..]),
+            ("sl\\(e\\)\\1p", "b", &["sleep"], &["slep"]),
+            (
+                "^(.*)\\1$",
+                "",
+                &["", "aa", "abab", "abcabc"],
+                &["aba", "a"],
+            ),
+            ("^(.+)\\1$", "", &["aa", "abab"], &["", "aba"]),
+            ("^(a)?\\1$", "", &["aa"], &["", "a"]),
+            ("^(a)*\\1$", "", &["aa", "aaa"], &["", "a"]),
+            (
+                "^((a)|b)*\\2$",
+                "",
+                &["aa", "aba", "abaa"],
+                &["", "a", "ab", "aab"],
+            ),
+            ("^((a)|b)+\\2$", "", &["aba", "abaa"], &["ba", "abb", "aab"]),
+            (
+                "^(a*)*\\1$",
+                "",
+                &["", "a", "aa", "aaa", "aaaa"],
+                &["b", "ab", "aab"],
+            ),
+            ("^(.)(.)\\2\\1$", "", &["abba", "aaaa"], &["abab"]),
+            ("(.)\\10", "", &["aa0"], &["aa"]),
+            ("^(a)\\1{3}$", "", &["aaaa"], &["aaa", "aaaaa"]),
+            ("^(a)(b\\1)*$", "", &["a", "aba", "ababa"], &["abab"]),
+            ("^((a)b\\2)*$", "", &["", "aba", "abaaba"], &["abab"]),
+            ("^\\(\\)\\1*$", "b", &[""], &["x"]),
+            ("(a){0}\\1", "", &[], &["", "a"]),
+            ("^(a|(b))*\\2$", "", &["bb", "bab", "bbab"], &["a", "ba"]),
+            ("^(()|a)+\\2$", "", &["a", "aa"], &[]),
+            ("(a)\\1", "i", &["aA", "Aa", "aa"], &["ab"]),
+            ("(é)\\1", "i", &["éÉ", "Éé", "ÉÉ", "xéé"], &["aé"]),
+            ("(σ)\\1", "i", &["σς"], &["σa"]),
+            ("(ǅ)\\1", "i", &["ǅǆ", "ǅǅ"], &["ǆa"]),
+            ("(ß)\\1", "i", &["ßß"], &["ßẞ", "ßs", "ßS"]),
+            ("(ŉ)\\1", "i", &["ŉŉ"], &["ŉʼ"]),
+            ("(k)\\1", "i", &["kK", "kk"], &["k\u{212A}"]),
+            ("(é)\\1", "", &["éé", "xéé"], &["éÉ"]),
+            ("^(.)\\1$", "", &["éé", "ǅǅ"], &["éÉ"]),
+            (
+                "^(a|ab)(c|bcd)(d*)\\3$",
+                "",
+                &["abcd", "abcdd", "abcddd"],
+                &["acd"],
+            ),
+            // glibc's search misses these.
+            ("^(a+)+\\1$", "", &["aa", "aaa", "aaaa"], &["a"]),
+            ("(a){0,2}\\1", "", &["aa"], &["a"]),
+            ("^(b+){2}\\1", "", &["bbb"], &["bb"]),
+            (
+                "^(.*)(.*)\\2\\1$",
+                "",
+                &["", "aa", "abba", "abab"],
+                &["a", "abc", "aab"],
+            ),
+        ] {
+            for command in yes {
+                assert!(m(e, flags, command), "{e} {flags} {command:?}");
+            }
+            for command in no {
+                assert!(!m(e, flags, command), "{e} {flags} {command:?}");
+            }
+        }
+        // A byte that is no character is matched as itself.
+        let regex = CommandRegex::new(b"(\xff)\\1", true, false).unwrap();
+        assert!(regex.is_match(b"\xff\xff"));
+        assert!(!regex.is_match(b"\xff\xfe"));
+        let regex = CommandRegex::new(b"(.)\\1", true, true).unwrap();
+        assert!(!regex.is_match(b"\xff\xff"));
+        assert!(regex.is_match(b"x\xffaA"));
     }
 
     /// In a basic expression a `$` is an anchor only where the expression,
@@ -1500,43 +1737,45 @@ mod tests {
         }
     }
 
-    /// What an expression may ask of the engine is bounded before the
-    /// engine sees it ([`COST_LIMIT`]): the classes of thousands of ranges
-    /// above all, which the size limit alone let through at 20 s and 2.5 GB
-    /// (60,000 `\W` under `i`).
+    /// What an expression asks of the `regex` crate is counted before the
+    /// crate sees it ([`COST_LIMIT`]): past it the crate is not asked, and
+    /// lsof-rs's own engine answers, which builds a class once for the
+    /// expression. The crate builds one each time it is named, which for
+    /// 60,000 `\W` under `i` took 20 s and 2.5 GB.
     #[test]
     #[cfg_attr(
         miri,
         ignore = "it reads expressions of 65,536 characters: minutes under miri"
     )]
-    fn an_expression_past_the_cost_limit_is_too_big_before_it_is_compiled() {
+    fn an_expression_past_the_cost_limit_is_not_the_crates() {
         assert_eq!(
             (COST_LIMIT, CLASS_COST, SMALL_CLASS_COST),
             (1 << 16, 1 << 10, 1 << 6)
         );
-        let size = Err(RegexError::Size);
-        let ok = |e: &str, x, i| translate(e.as_bytes(), x, i).is_ok();
-        // A character costs one: the limit's worth is taken, one more is
-        // not.
+        let cost = |e: &str, x, i| translate(e.as_bytes(), x, i).unwrap().cost;
+        let ok = |e: &str, x, i| cost(e, x, i) <= COST_LIMIT;
+        let past = |e: &str, x, i| cost(e, x, i) > COST_LIMIT;
+        // A character costs one: the limit's worth is the crate's, one more
+        // is not.
         let most = usize::try_from(COST_LIMIT).unwrap();
         assert!(ok(&"a".repeat(most), true, false));
-        assert_eq!(pattern(&"a".repeat(most + 1), true, false), size);
+        assert!(past(&"a".repeat(most + 1), true, false));
         assert!(ok(&"a".repeat(most), false, true));
-        assert_eq!(pattern(&"a".repeat(most + 1), false, true), size);
+        assert!(past(&"a".repeat(most + 1), false, true));
         // A `.` two, a repetition one more, a list one for each element
         // and one more where it is a non-matching one.
         assert!(ok(&".".repeat(most / 2), true, false));
-        assert_eq!(pattern(&".".repeat(most / 2 + 1), true, false), size);
+        assert!(past(&".".repeat(most / 2 + 1), true, false));
         assert!(ok(&"a*".repeat(most / 2), true, false));
-        assert_eq!(pattern(&"a*".repeat(most / 2 + 1), true, false), size);
+        assert!(past(&"a*".repeat(most / 2 + 1), true, false));
         assert!(ok(&"a{2,3}".repeat(most / 2), true, false));
-        assert_eq!(pattern(&"a{2,3}".repeat(most / 2 + 1), true, false), size);
+        assert!(past(&"a{2,3}".repeat(most / 2 + 1), true, false));
         assert!(ok(&"[abc]".repeat(most / 4), true, false));
-        assert_eq!(pattern(&"[abc]".repeat(most / 4 + 1), true, false), size);
+        assert!(past(&"[abc]".repeat(most / 4 + 1), true, false));
         assert!(ok(&"[a-c]".repeat(most / 2), true, false));
-        assert_eq!(pattern(&"[a-c]".repeat(most / 2 + 1), true, false), size);
+        assert!(past(&"[a-c]".repeat(most / 2 + 1), true, false));
         assert!(ok(&"[^a]".repeat(most / 3), true, false));
-        assert_eq!(pattern(&"[^a]".repeat(most / 3 + 1), true, false), size);
+        assert!(past(&"[^a]".repeat(most / 3 + 1), true, false));
         // A class of thousands of ranges 1,024: 63 of them with what
         // carries them, never 64.
         for class in [
@@ -1553,37 +1792,43 @@ mod tests {
         ] {
             for icase in [false, true] {
                 assert!(ok(&class.repeat(63), true, icase), "{class}");
-                assert_eq!(pattern(&class.repeat(64), true, icase), size, "{class}");
+                assert!(past(&class.repeat(64), true, icase), "{class}");
             }
         }
         // Two in one list are two.
         assert!(ok(&"[[:alpha:][:punct:]]".repeat(31), true, false));
-        assert_eq!(
-            pattern(&"[[:alpha:][:punct:]]".repeat(32), true, false),
-            size
-        );
-        assert_eq!(
-            pattern(&format!("[{}]", "[:alpha:]".repeat(64)), true, false),
-            size
-        );
+        assert!(past(&"[[:alpha:][:punct:]]".repeat(32), true, false));
+        assert!(past(&format!("[{}]", "[:alpha:]".repeat(64)), true, false));
         // A class of tens 64, and of digits one.
         for class in ["\\s", "\\S", "[[:space:]]", "[[:blank:]]", "[[:cntrl:]]"] {
             assert!(ok(&class.repeat(900), true, true), "{class}");
-            assert_eq!(pattern(&class.repeat(1024), true, true), size, "{class}");
+            assert!(past(&class.repeat(1024), true, true), "{class}");
         }
         assert!(ok(&"\\s".repeat(1008), true, false));
-        assert_eq!(pattern(&"\\s".repeat(1009), true, false), size);
+        assert!(past(&"\\s".repeat(1009), true, false));
         assert!(ok(&"[[:digit:]]".repeat(most / 3), true, false));
         assert!(ok(&"[[:xdigit:]]".repeat(most / 3), true, false));
-        assert_eq!(
-            pattern(&"[[:digit:]]".repeat(most / 3 + 1), true, false),
-            size
-        );
+        assert!(past(&"[[:digit:]]".repeat(most / 3 + 1), true, false));
         // A repetition does not multiply the cost: the program's size is
-        // the size limit's to refuse.
+        // the size limit's.
         assert!(ok("[[:alpha:]]{32767}", true, false));
         assert!(ok("(\\w{1,255}){1,255}", true, true));
-        // What glibc refuses for itself is said first, wherever it is.
+        // Within the limit the crate answers; past it lsof-rs's engine,
+        // the same answers.
+        let regex = |e: &str| CommandRegex::new(e.as_bytes(), true, false).unwrap();
+        let within = regex(&"\\w*".repeat(63));
+        let beyond = regex(&"\\w*".repeat(64));
+        assert!(!within.is_own() && beyond.is_own());
+        for command in ["sleep", "", "-"] {
+            assert!(within.is_match(command.as_bytes()));
+            assert!(beyond.is_match(command.as_bytes()));
+        }
+        let beyond = regex(&format!("^{}$", "[[:alpha:]]".repeat(64)));
+        assert!(beyond.is_own());
+        assert!(beyond.is_match("é".repeat(64).as_bytes()));
+        assert!(!beyond.is_match("é".repeat(63).as_bytes()));
+        assert!(!beyond.is_match(format!("{}1", "a".repeat(63)).as_bytes()));
+        // What glibc refuses for itself is said, wherever it is.
         let long = "\\W".repeat(100);
         assert_eq!(
             pattern(&format!("{long}("), true, true),
@@ -1593,26 +1838,36 @@ mod tests {
             pattern(&format!("{long}[z-a]"), true, true),
             Err(RegexError::Range)
         );
-        // The reviewers' reproducers, and argv's worst: refused at once.
-        if !cfg!(miri) {
-            let started = std::time::Instant::now();
-            for (unit, count, extended, icase) in [
-                ("\\W", 60_000, true, true),
-                ("\\w\\W\\s\\S", 15_000, true, true),
-                ("[^[:punct:]]", 10_000, true, true),
-                ("[[:alpha:]]", 10_000, true, false),
-                ("\\W*", 1_365, true, true),
-                ("\\W", 2_047, true, true),
-                ("$", 100_000, false, false),
-            ] {
+        // The reviewers' reproducers, and argv's worst: compiled at once,
+        // and answered.
+        let started = std::time::Instant::now();
+        for (unit, count, extended, icase) in [
+            ("\\W", 60_000, true, true),
+            ("\\w\\W\\s\\S", 15_000, true, true),
+            ("[^[:punct:]]", 10_000, true, true),
+            ("[[:alpha:]]", 10_000, true, false),
+            ("\\W*", 1_365, true, true),
+            ("\\W", 2_047, true, true),
+            ("$", 100_000, false, false),
+        ] {
+            let regex = CommandRegex::new(unit.repeat(count).as_bytes(), extended, icase)
+                .unwrap_or_else(|e| panic!("{unit} x {count}: {e:?}"));
+            assert!(regex.is_own(), "{unit} x {count}");
+            // A command is too short for them all but the one that takes
+            // the empty command.
+            for command in ["x", "kworker/u16:0-kvfree_rcu_reclaim"] {
                 assert_eq!(
-                    CommandRegex::new(unit.repeat(count).as_bytes(), extended, icase).err(),
-                    Some(RegexError::Size),
+                    regex.is_match(command.as_bytes()),
+                    unit == "\\W*",
                     "{unit} x {count}"
                 );
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(5));
         }
+        // As long as a command can be ([`OWN_COMMAND_MAX`]), they match.
+        let regex = CommandRegex::new("\\W".repeat(1024).as_bytes(), true, true).unwrap();
+        assert!(regex.is_match("-".repeat(1024).as_bytes()));
+        assert!(!regex.is_match("-".repeat(1023).as_bytes()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     /// An answer is kept for the next time the command is asked about,
@@ -1658,6 +1913,137 @@ mod tests {
                 assert!(regex.kept() <= KEPT_ANSWERS);
             }
         }
+    }
+
+    /// lsof-rs's own engine answers as the crate does, and as glibc does
+    /// (each line glibc's answers, through `regexec()`, but the one noted):
+    /// intervals at and past the command's length, commands longer than a
+    /// word of 64 bits, and a repetition whose passes that match nothing
+    /// set groups.
+    #[test]
+    fn the_own_engine_answers_as_glibc() {
+        let a = |n: usize| "a".repeat(n);
+        let cases: Vec<(&str, Vec<String>, &str)> = vec![
+            ("^a{3}$", vec![a(2), a(3), a(4)], "010"),
+            ("^a{3,}$", vec![a(2), a(3), a(70)], "011"),
+            (
+                "^(a|b){2,3}$",
+                vec!["ab".into(), "abb".into(), "abba".into(), a(1)],
+                "1100",
+            ),
+            ("^(.{2}){3}$", vec![a(5), a(6), a(7)], "010"),
+            ("^(a{0,2}){40}$", vec![a(80), a(81), a(0)], "101"),
+            ("^a*$", vec![a(100), format!("{}b", a(100))], "10"),
+            (
+                "^(ab)*$",
+                vec!["ab".repeat(65), format!("{}a", "ab".repeat(65))],
+                "10",
+            ),
+            ("^(..)*$", vec![a(128), a(129)], "10"),
+            ("a{65}$", vec![a(64), a(65), a(130)], "011"),
+            ("^(a?){70}a{70}$", vec![a(70), a(140), a(141)], "110"),
+            ("^\\w{0,100}$", vec![a(100), a(101)], "10"),
+            ("\\<a", vec!["ba".into(), "b a".into()], "01"),
+            ("^.{1,3}$", vec!["éé".into(), "\u{ff}".into()], "11"),
+            ("^(()|()){2}\\2\\3$", vec![String::new(), a(1)], "10"),
+            ("^(()|()|()){3}\\2\\3\\4$", vec![String::new(), a(1)], "10"),
+            (
+                "^(a|ab)b?(\\1)$",
+                vec![
+                    "abab".into(),
+                    "abaa".into(),
+                    "aba".into(),
+                    a(2),
+                    "abb".into(),
+                ],
+                "10110",
+            ),
+            ("(a)(\\1){2}", vec![a(2), a(3)], "01"),
+            // glibc says both match: neither does (an odd length, and a
+            // `b` at one end and not the other). DIVERGENCES 38.
+            (
+                "^(.*)(.*)(.*)\\3\\2\\1$",
+                vec![a(63), format!("{}b", a(62)), a(62)],
+                "001",
+            ),
+            ("^(a|())+\\2$", vec![a(3)], "1"),
+        ];
+        for (expression, commands, want) in cases {
+            let own = CommandRegex::new_own(expression.as_bytes(), true, false).unwrap();
+            let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
+            for (command, want) in commands.iter().zip(want.chars()) {
+                let want = want == '1';
+                assert_eq!(
+                    own.is_match(command.as_bytes()),
+                    want,
+                    "{expression} {command:?}"
+                );
+                assert_eq!(
+                    regex.is_match(command.as_bytes()),
+                    want,
+                    "{expression} {command:?}"
+                );
+            }
+        }
+        // Bytes that are no character: `.` takes none.
+        let own = CommandRegex::new_own(b"^.{1,3}$", true, false).unwrap();
+        assert!(!own.is_match(b"\xff\xff"));
+    }
+
+    /// A search with a back-reference is bounded ([`SEARCH_BUDGET`]): past
+    /// it a command is taken as not matching, where glibc's search runs on
+    /// (over a minute, measured, for nine groups against 15 bytes); and
+    /// what is cheaper is answered within it.
+    #[test]
+    fn a_search_past_its_budget_is_no_match() {
+        assert_eq!(SEARCH_BUDGET, 1 << 20);
+        let three = CommandRegex::new(b"^(.*)(.*)(.*)\\3\\2\\1$", true, false).unwrap();
+        let command = "a".repeat(if cfg!(miri) { 8 } else { 40 });
+        // Within its budget, it matches.
+        assert!(three.is_match(command.as_bytes()));
+        // Held to a small one, the same search is past it: no match.
+        assert!(!three.with_budget(64).is_match(command.as_bytes()));
+        // The first way found is enough: an expression that matches where
+        // it starts is answered at once, whatever it would cost to list
+        // every way it matches.
+        let star = format!("{}\\2{}", "((.*)".repeat(9), ")*".repeat(9));
+        let regex = CommandRegex::new(star.as_bytes(), true, false).unwrap();
+        assert!(regex.with_budget(64).is_match(command.as_bytes()));
+        if cfg!(miri) {
+            return;
+        }
+        // What the budget is for: three groups against the longest Linux
+        // command, glibc 18.5 s, here within it; nine `(a*)*` too.
+        assert!(three.is_match("a".repeat(62).as_bytes()));
+        let nine = format!("^{}\\1\\2\\3\\4\\5\\6\\7\\8\\9$", "(a*)*".repeat(9));
+        let regex = CommandRegex::new(nine.as_bytes(), true, false).unwrap();
+        assert!(regex.is_match("a".repeat(63).as_bytes()));
+        assert!(!regex.is_match(b"ab"));
+        // And what it is past: nine groups named in reverse, which match at
+        // the command's end (every group empty), but the search from the
+        // starts before it is past the budget first.
+        let nine = format!("{}\\9\\8\\7\\6\\5\\4\\3\\2\\1$", "(.*)".repeat(9));
+        let regex = CommandRegex::new(nine.as_bytes(), true, false).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!regex.is_match("a".repeat(15).as_bytes()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert!(regex.is_match(b"aaaa"));
+    }
+
+    /// A command longer than any process name is not searched by lsof-rs's
+    /// own engine ([`OWN_COMMAND_MAX`]), whose work is the square of it.
+    #[test]
+    fn a_command_past_the_longest_is_not_searched() {
+        assert_eq!(OWN_COMMAND_MAX, 1024);
+        let own = CommandRegex::new_own(b"^a*$", true, false).unwrap();
+        assert!(own.is_match("a".repeat(OWN_COMMAND_MAX).as_bytes()));
+        assert!(!own.is_match("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()));
+        let own = CommandRegex::new(b"(a)\\1", true, false).unwrap();
+        assert!(own.is_match("a".repeat(OWN_COMMAND_MAX).as_bytes()));
+        assert!(!own.is_match("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()));
+        // The crate searches any length.
+        let regex = CommandRegex::new(b"^a*$", true, false).unwrap();
+        assert!(regex.is_match("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()));
     }
 
     /// A `[:name:]`, `[.name.]` or `[=name=]` of 32 bytes or more is no
@@ -1731,39 +2117,46 @@ mod tests {
         assert!(pattern(&stars(99), true, false).is_ok());
         assert_eq!(pattern(&stars(100), true, false), Err(RegexError::Size));
         assert_eq!(pattern(&stars(many), true, false), Err(RegexError::Size));
-        // A program past the size limit, each interval one glibc takes.
+        // A program past the size limit, each interval one glibc takes:
+        // lsof-rs's own engine answers, which writes out no interval.
         if !cfg!(miri) {
             assert_eq!(SIZE_LIMIT, 1 << 23);
-            for refused in [
-                "(a{1000}){1000}",
-                "[[:alpha:]]{1000}",
-                "(.{200}){150}",
-                ".{32767}",
-                "\\w{0,800}z",
-                ".{0,20000}z",
-                "(.*){1,32767}z",
+            let kworker = b"kworker/u16:0-kvfree_rcu_reclaim";
+            for (own, expression, matches) in [
+                (true, "(a{1000}){1000}", false),
+                (true, "[[:alpha:]]{1000}", false),
+                (true, "(.{200}){150}", false),
+                (true, ".{32767}", false),
+                (true, "^\\w{0,800}", true),
+                (true, "\\w{0,800}z", false),
+                (true, ".{0,20000}m", true),
+                (true, "(.*){1,32767}z", false),
+                (true, "^(.*){1,32767}$", true),
+                (true, "(a{32767}){32767}", false),
+                (true, "((((.?){32767}){32767}){32767}){32767}r", true),
+                // Inside it, the crate.
+                (false, "a{32767}", false),
+                (false, ".{20000}", false),
+                (false, "[[:graph:]]{1,255}", true),
+                (false, "[[:alpha:]]{300}", false),
+                (false, "(.{200}){75}", false),
+                (false, "\\w{0,400}z", false),
+                (false, ".{0,10000}m", true),
             ] {
-                assert_eq!(
-                    CommandRegex::new(refused.as_bytes(), true, false).err(),
-                    Some(RegexError::Size),
-                    "{refused}"
-                );
+                let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
+                assert_eq!(regex.is_own(), own, "{expression}");
+                assert_eq!(regex.is_match(kworker), matches, "{expression}");
             }
-            // Inside it, what an expression for a command name asks.
-            for taken in [
-                "a{32767}",
-                ".{20000}",
-                "[[:graph:]]{1,255}",
-                "[[:alpha:]]{300}",
-                "(.{200}){75}",
-                "\\w{0,400}z",
-                ".{0,10000}z",
-            ] {
-                assert!(
-                    CommandRegex::new(taken.as_bytes(), true, false).is_ok(),
-                    "{taken}"
-                );
-            }
+        }
+        // The tree is bounded: an argument holds nothing near it.
+        if !cfg!(miri) {
+            assert_eq!(TREE_LIMIT, 1 << 18);
+            // A character is a node, and their concatenation one more.
+            assert!(translate(&vec![b'a'; TREE_LIMIT - 1], true, false).is_ok());
+            assert_eq!(
+                pattern(&"a".repeat(TREE_LIMIT), true, false),
+                Err(RegexError::Size)
+            );
         }
     }
 
@@ -1811,6 +2204,17 @@ mod tests {
             for icase in [false, true] {
                 let regex = CommandRegex::new(shape(deepest).as_bytes(), true, icase);
                 assert!(regex.is_ok(), "{name} at {deepest}: {:?}", regex.err());
+                // lsof-rs's own engine, which recurses once a level of its
+                // tree, takes it too, and answers as the crate does.
+                let own = CommandRegex::new_own(shape(deepest).as_bytes(), true, icase).unwrap();
+                let regex = regex.unwrap();
+                for command in ["a", "abc", "sleep", "a b"] {
+                    assert_eq!(
+                        own.is_match(command.as_bytes()),
+                        regex.is_match(command.as_bytes()),
+                        "{name} {command}"
+                    );
+                }
             }
         }
     }

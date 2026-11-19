@@ -6546,10 +6546,64 @@ args = ["-t", "-a", "-p", "{A},{B},{H}", "-c", "/^[a-o]+$/"]
 with_stderr = true
 
 [[case]]
-# A back-reference, which glibc takes and the engine cannot: refused, in
-# lsof-rs's words. Ledgered.
+# A back-reference: what its group matched, again. glibc takes it, and
+# lsof-rs's own engine matches it (the `regex` crate has none).
 name = "rx-back-reference"
 args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sl(e)\\1p/"]
+with_stderr = true
+
+[[case]]
+# The same in a basic expression.
+name = "rx-back-reference-basic"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/sl\\(e\\)\\1p/b"]
+with_stderr = true
+
+[[case]]
+# Any character twice: `ee` in sleep, in no other command.
+name = "rx-back-reference-any-character-twice"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/(.)\\1/"]
+with_stderr = true
+
+[[case]]
+# Under `i`, the group's match again in either case.
+name = "rx-back-reference-ignore-case"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/(E)\\1/i"]
+with_stderr = true
+
+[[case]]
+# A group that matched nothing: its back-reference matches nothing either,
+# not the empty string. No command, exit 1.
+name = "rx-back-reference-to-a-group-that-matched-nothing"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/^sle(x)?\\1ep$/"]
+with_stderr = true
+
+[[case]]
+# A group in a repetition: what it matched in the last pass that took it.
+name = "rx-back-reference-last-pass"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/^(.)l((e)|x)*\\3p$/"]
+with_stderr = true
+
+[[case]]
+# A back-reference to a group still open: glibc's `Invalid back reference`.
+name = "rx-back-reference-to-an-open-group"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/(s\\1)/"]
+with_stderr = true
+
+[[case]]
+# A match glibc's search misses: one pass of `(e)` and `\1` again is
+# sleep's `ee`. The C finds no command (exit 1); lsof-rs lists sleep.
+# Ledgered, C-DEFECT.
+name = "rx-back-reference-glibc-misses-a-match"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/(e){0,2}\\1/"]
+with_stderr = true
+
+[[case]]
+# A match glibc's search finds where there is none: two groups and their
+# back-references the other way round, which glibc matches against every
+# command. None of these is a string twice over, so lsof-rs lists nothing
+# (exit 1); the C lists all three. Ledgered, C-DEFECT.
+name = "rx-back-reference-glibc-finds-a-match-that-is-not-there"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/^(.*)(.*)\\2\\1$/"]
 with_stderr = true
 
 [[case]]
@@ -6891,17 +6945,32 @@ args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/^[[:graph:]]{1,255}$
 with_stderr = true
 
 [[case]]
-# Past lsof-rs's own bound on a compiled program, where glibc compiles it:
-# ledgered.
+# Past the `regex` crate's bound on a compiled program, where glibc
+# compiles it: lsof-rs's own engine, which writes out no interval, answers.
 name = "rx-past-the-size-limit"
-args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/^\\w{0,800}/"]
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H},{X}", "-c", "/^\\w{0,800}/"]
 with_stderr = true
 
 [[case]]
-# ...and past its bound on what an expression asks before it is compiled:
-# 64 of the locale's large classes. Ledgered.
+# An interval of a class too big for the crate, which each command but
+# the hostile ones and X's fills.
+name = "rx-past-the-size-limit-whole-command"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{C},{D},{CR},{H},{X},{NLC}", "-c", "/^[[:alnum:]]{0,1000}$/"]
+with_stderr = true
+
+[[case]]
+# An interval of an interval, for the crate a program of 150 copies of 200
+# characters, past its bound; 30,000 characters is longer than any command:
+# the search fails, exit 1.
+name = "rx-past-the-size-limit-nested-intervals"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/(.{200}){150}/"]
+with_stderr = true
+
+[[case]]
+# ...and past the bound on what an expression may ask of the crate: 64 of
+# the locale's large classes, which lsof-rs's own engine builds once.
 name = "rx-past-the-cost-limit"
-args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A}", "-c", "/^\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*/"]
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H},{X}", "-c", "/^\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*\\w*/"]
 with_stderr = true
 
 [[case]]

@@ -61,6 +61,11 @@
 # Run again 2026-11-14 with --first-kill (unit gates split by crate, then
 # the whole differential): each killed by a unit gate.
 
+# Re-anchored 2026-11-19 by the regex parity work (mutants/regex-parity.toml),
+# the code they name moved: rx-back-reference-matches-nothing-silently (its
+# rule turned: a back-reference is taken now, and matched), rx-caret-after-an-
+# anchor-is-an-anchor, rx-searched-by-bytes-always.
+
 # Re-anchored 2026-11-14 by the review of 152-154 (the code they name moved):
 # nss-walk-reads-on-past-a-return, nss-walk-merge-is-an-answer (rewritten: a merge keeps the answer aside), nss-walk-keeps-an-earlier-answer, names-fifo-opened-for-reading, names-host-conf-environment-not-read; run again as root with --first-kill: 5 of 5 killed (3 by lsof-core's tests, 1 by the backend's, 1 by the differential).
 
@@ -225,11 +230,11 @@ new = '''                if self.completed & (1u16 << n) == 0 && n > 9 {'''
 
 [[mutant]]
 name = "rx-back-reference-matches-nothing-silently"
-rule = "a back-reference glibc takes is refused, not dropped"
+rule = "a back-reference matches its group's match again, not the empty string (re-anchored 2026-11-19: a back-reference is taken)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex.rs"
-old = '''                self.back_reference = true;'''
-new = '''                self.back_reference = false;'''
+old = '''                Some(self.atom("(?:)".to_string(), Node::BackRef(n)))'''
+new = '''                Some(self.atom("(?:)".to_string(), Node::Empty))'''
 
 [[mutant]]
 name = "rx-extended-leading-star-is-a-character"
@@ -269,9 +274,9 @@ rule = "basic: ^ after an anchor is a character (^^a matches ^a)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex.rs"
 old = '''                self.fetch(false);
-                return Ok(Some(atom(text)));'''
+                let look = match text {'''
 new = '''                self.fetch(true);
-                return Ok(Some(atom(text)));'''
+                let look = match text {'''
 
 [[mutant]]
 name = "rx-basic-caret-anchors-anywhere"
@@ -445,11 +450,11 @@ name = "rx-searched-by-bytes-always"
 rule = "glibc searches by characters under i, a word operator or a list past ASCII: a match starts at a character"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex.rs"
-old = '''        if !self.by_chars {
-            return self.regex.is_match(command);
+old = '''        if !by_chars {
+            return regex.is_match(command);
         }'''
-new = '''        if !self.by_chars || !command.is_empty() {
-            return self.regex.is_match(command);
+new = '''        if !by_chars || !command.is_empty() {
+            return regex.is_match(command);
         }'''
 
 [[mutant]]

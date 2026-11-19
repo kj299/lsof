@@ -9,7 +9,8 @@ rust-version.workspace = true
 publish = false
 
 # The portable core is pure safe Rust (`forbid(unsafe_code)`, below) with
-# one dependency, declared at the end of this file.
+# one dependency and one of that dependency's own crates, declared at the
+# end of this file.
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -29,5 +30,11 @@ unsafe_code = "forbid"
 # `memchr` are in the lock file and never built. With it come
 # `regex-automata` and `regex-syntax`, its own; all three MIT OR Apache-2.0,
 # none with a build script (see deny.toml and THREAT-MODEL.md).
+# `regex-syntax` is named here too, at the version and with the features the
+# crate builds it with, so nothing new is built (2026-11-19, DIVERGENCES 38):
+# lsof-rs's own engine, for a back-reference and for what is past the
+# crate's bounds, reads each character, list and class of an expression with
+# it, as the crate reads them, so the two take the same characters.
 [dependencies]
 regex = { version = "=1.12.3", default-features = false, features = ["std", "unicode-case", "unicode-bool", "unicode-gencat", "unicode-perl"] }
+regex-syntax = { version = "=0.8.11", default-features = false, features = ["std", "unicode-case", "unicode-bool", "unicode-gencat", "unicode-perl"] }

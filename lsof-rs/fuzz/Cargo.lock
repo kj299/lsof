@@ -139,6 +139,7 @@ name = "lsof-core"
 version = "2.0.0"
 dependencies = [
  "regex",
+ "regex-syntax",
 ]
 
 [[package]]
