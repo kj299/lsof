@@ -112,6 +112,10 @@ impl Backend for LinuxBackend {
         crate::users::lookup(value)
     }
 
+    fn login_name(&self, uid: u32) -> Option<Box<[u8]>> {
+        crate::users::name_for(uid, false)
+    }
+
     fn lookup_host(&self, name: &[u8], v6: bool) -> Vec<std::net::IpAddr> {
         crate::netnames::lookup_host(name, v6)
     }
@@ -137,7 +141,7 @@ impl Backend for LinuxBackend {
         sel: &Selection,
         fs: &lsof_core::SafeFs,
     ) -> Result<Vec<Process>, BackendError> {
-        let process::Enumerated { mut procs, zombies } = process::enumerate(sel.numeric_ids);
+        let process::Enumerated { mut procs, zombies } = process::enumerate();
         // Nothing of an earlier cycle's (`-r`) is left for this one.
         self.keep_ends(lsof_core::EndpointTables::default());
 
@@ -629,7 +633,7 @@ mod tests {
             })
             .unwrap();
         // The control: the process is there to be found, and known for what it is.
-        let seen = process::enumerate(false);
+        let seen = process::enumerate();
         child.wait().expect("reap the zombie");
         assert!(
             seen.procs.iter().any(|p| p.pid == pid) && seen.zombies.contains(&pid),

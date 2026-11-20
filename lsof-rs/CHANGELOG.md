@@ -12,6 +12,26 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **`-u name` and USER ask the C library, as the C does** (DIVERGENCES
+  39): `getpwnam_r(3)` and `getpwuid_r(3)`, so an account only LDAP, SSSD,
+  systemd-homed, NIS or Hesiod serves has its name in USER, `-F L` and
+  JSON's `login`, and `-u` takes it, where lsof-rs printed the uid and `no
+  pwd entry for UID N` and said `can't get UID for name`. Measured against
+  the C with Hesiod, output and queries alike (`-u` asks each name twice,
+  as the C does); `passwd: compat` with `passwd_compat: files` now follows
+  its `+` lines. A login is asked only as it is printed, for the processes
+  listed: `-t`, `-F` without `L` and `-l` ask nothing, as in the C. Where
+  nsswitch.conf has a shape that makes glibc read past a heap block
+  (`passwd:` with no source) or recurse until its stack is gone (`compat` in
+  both `passwd:` and `passwd_compat:`, where the C dies, SIGSEGV), or the
+  answer would not fit in 16 MiB, lsof-rs reads `/etc/passwd` itself as
+  before. A source that blocks blocks lsof-rs as it blocks the C (`-S`
+  bounds neither).
+- **A new workspace crate, `lsof-getpw`** (no third-party crate): the one
+  place lsof-rs calls the C library for an account, three audited `unsafe`
+  blocks, its one dependency `libc =0.2.190` (already in the lock for
+  lsof-sigpipe). lsof-core, lsof-cli and lsof-backend-linux stay
+  `#![forbid(unsafe_code)]`. FreeBSD asks its libc through it too.
 - **`-c /regex/` takes a back-reference, and expressions past the `regex`
   crate's bounds** (DIVERGENCES 38): `-c '/sl(e)\1p/'` and `-c
   '/sl\(e\)\1p/b'` list sleep, as the C does, where lsof-rs had said

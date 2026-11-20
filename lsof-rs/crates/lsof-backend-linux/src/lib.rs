@@ -1,13 +1,15 @@
 //! Linux data-acquisition backend for lsof-rs — phases L0 to L3 are done.
 //!
-//! Implements [`lsof_core::backend::Backend`] over `/proc`, with `/etc/passwd`
-//! for login names: process identity from `/proc/<pid>/status`, open files from
+//! Implements [`lsof_core::backend::Backend`] over `/proc`, with glibc's
+//! `getpwnam_r()` and `getpwuid_r()` for login names (through the workspace's
+//! `lsof-getpw`, and `/etc/passwd` where glibc is not asked: `users`,
+//! DIVERGENCES 39): process identity from `/proc/<pid>/status`, open files from
 //! `/proc/<pid>/fd` (plus the `cwd`/`root`/`exe` magic links), file attributes
 //! from `stat`, and sockets from `/proc/net/*` and, for a socket no table
 //! lists, the kernel's `system.sockprotoname` extended attribute.
 //! `std::os::unix::fs::MetadataExt` exposes every field needed but that
 //! attribute: `getxattr(2)` has no `std` API, so this crate has **one
-//! dependency**, `rustix` (pinned, `fs` only), for that one call
+//! third-party dependency**, `rustix` (pinned, `fs` only), for that one call
 //! (DIVERGENCES 22; the maintainer chose a dependency over FFI of the crate's
 //! own, 2026-10-30). See `Cargo.toml` and `THREAT-MODEL.md`.
 //!

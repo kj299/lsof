@@ -1,0 +1,304 @@
+# Mutants for DIVERGENCES 39 (2026-11-20): `-u name` and USER asked of the
+# C library, as the C asks getpwnam() and getpwuid(), through the new
+# workspace crate `lsof-getpw` (getpwnam_r(3), getpwuid_r(3)); glibc not
+# asked where nsswitch.conf has it read past a heap block or recurse until
+# its stack is gone; the owners' logins asked only for what is printed. One
+# per bound, default and branch the change added. The kill table is this
+# file, run:
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/row39.toml
+#
+# It needs the C oracle built at ../lsof and root: the differential's
+# `names-*` modes mount a tmpfs over /etc in a mount namespace of each run's
+# own, and the `names-hesiod` cases send Hesiod's TXT queries to the
+# harness's own name server on a loopback address. CI runs only
+# --apply-only.
+#
+# Run 2026-11-20 as root with --first-kill: 29 of 29 killed, 15 by
+# unit-getpw (lsof-getpw's tests and lsof-core's), 7 by the Linux backend's
+# and lsof-cli's, and 7 by the differential alone (the `nss-hesiod-*`
+# cases, their outputs and their `compare_queries`; and the `passwd`
+# mode's 40-byte login for the LOGINML cut), which no unit test reaches:
+# where glibc is asked and how often, and the logins asked only for what is
+# printed.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit-getpw"
+cmd = ["cargo", "test", "-p", "lsof-getpw", "-p", "lsof-core", "--lib"]
+timeout = 600
+
+[[run.gate]]
+name = "unit"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-cli", "--lib", "--bins"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 1800
+
+# ---- lsof-getpw: the buffer, the call's reading
+
+[[mutant]]
+name = "getpw-start-not-glibcs"
+rule = "the first buffer is glibc's NSS_BUFLEN_PASSWD, 1024 bytes"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''pub const START: usize = 1024;'''
+new = '''pub const START: usize = 2048;'''
+
+[[mutant]]
+name = "getpw-cap-raised"
+rule = "the buffer is bounded at 16 MiB"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''pub const CAP: usize = 1 << 24;'''
+new = '''pub const CAP: usize = 1 << 25;'''
+
+[[mutant]]
+name = "getpw-buffer-grows-other-than-doubling"
+rule = "ERANGE doubles the buffer"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''size = size.saturating_mul(2).min(cap)'''
+new = '''size = size.saturating_mul(4).min(cap)'''
+
+[[mutant]]
+name = "getpw-cap-itself-not-asked"
+rule = "a buffer of the cap's own size is asked with before ERANGE is the answer"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''Step::TooSmall if size < cap => size'''
+new = '''Step::TooSmall if size < cap / 2 => size'''
+
+[[mutant]]
+name = "getpw-erange-at-the-cap-is-no-entry"
+rule = "ERANGE at the cap is a failure, kept apart from no entry"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''Step::TooSmall => return Answer::Failed(ERANGE),'''
+new = '''Step::TooSmall => return Answer::NotFound,'''
+
+[[mutant]]
+name = "getpw-erange-number-wrong"
+rule = "ERANGE is 34 on Linux and FreeBSD"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''const ERANGE: i32 = 34;'''
+new = '''const ERANGE: i32 = 35;'''
+
+[[mutant]]
+name = "getpw-empty-buffer-allowed"
+rule = "a buffer is never empty, so doubling it grows it"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''let mut size = start.clamp(1, cap.max(1));'''
+new = '''let mut size = start.clamp(0, cap.max(1));'''
+
+[[mutant]]
+name = "getpw-name-without-nul-read-to-the-end"
+rule = "a name no NUL ends in the buffer is no name"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''let len = rest.iter().position(|&b| b == 0)?;'''
+new = '''let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());'''
+
+[[mutant]]
+name = "getpw-name-with-nul-not-cut"
+rule = "a name is asked up to its first NUL, as a C string"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());'''
+new = '''let end = name.len();'''
+
+[[mutant]]
+name = "getpw-erange-not-retried"
+rule = "ERANGE asks again with a larger buffer"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''(ERANGE, _) => Err(Step::TooSmall),'''
+new = '''(ERANGE, _) => Ok(Got::Error(ERANGE)),'''
+
+[[mutant]]
+name = "getpw-no-result-is-an-entry"
+rule = "a call that leaves the result pointer elsewhere than the passwd has no entry"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''(result == std::ptr::addr_of_mut!(pwd)).then_some('''
+new = '''true.then_some('''
+
+[[mutant]]
+name = "getpw-no-entry-is-an-error"
+rule = "a call that returns 0 and no entry is no account, not a failure"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''(0, None) => Ok(Got::None),'''
+new = '''(0, None) => Ok(Got::Error(0)),'''
+
+[[mutant]]
+name = "getpw-uid-entry-without-name-found"
+rule = "by uid, an entry whose name is not in the buffer is not found"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''Ok(Got::Entry { name: None, .. } | Got::None) => Step::Done(Answer::NotFound),'''
+new = '''Ok(Got::Entry { uid, name: None }) => Step::Done(Answer::Found(Account { name: Vec::new(), uid })),
+        Ok(Got::None) => Step::Done(Answer::NotFound),'''
+
+[[mutant]]
+name = "getpw-erange-at-the-cap-not-told-apart"
+rule = "an answer past the cap is told apart, so that the caller reads the file"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''        *self == Answer::Failed(ERANGE)'''
+new = '''        *self == Answer::Failed(0)'''
+
+# ---- the guard, and where glibc is asked
+
+[[mutant]]
+name = "too-large-answer-taken-as-none"
+rule = "an answer glibc could not fit in the cap leaves the password file to be read here"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    (!answer.too_large()).then(|| answer.found())'''
+new = '''    Some(answer.found())'''
+
+[[mutant]]
+name = "guard-asks-with-no-source"
+rule = "glibc is not asked where passwd: lists no source (it reads past a heap block)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    if passwd.is_empty() {
+        return false;
+    }'''
+new = '''    if passwd.is_empty() {
+        return true;
+    }'''
+
+[[mutant]]
+name = "guard-asks-compat-asking-itself"
+rule = "glibc is not asked where compat is in both passwd and passwd_compat (it recurses)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''            .is_some_and(|sources| names_compat(&sources)))'''
+new = '''            .is_some_and(|_| false))'''
+
+[[mutant]]
+name = "guard-compat-matched-without-case"
+rule = "a source's name is matched as written: COMPAT is no library"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''sources.iter().any(|s| s.module == b"compat")'''
+new = '''sources.iter().any(|s| s.module.eq_ignore_ascii_case(b"compat"))'''
+
+[[mutant]]
+name = "guard-passwd-compat-default-compat"
+rule = "passwd_compat's default is nis"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''nsswitch_database(conf, b"passwd_compat", b"nis")'''
+new = '''nsswitch_database(conf, b"passwd_compat", b"compat")'''
+
+[[mutant]]
+name = "guard-refused-file-not-asked"
+rule = "a nsswitch.conf glibc refuses is asked (EINVAL, nothing read out of bounds)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    let Some(passwd) = nsswitch_database(conf, b"passwd", FILES_DEFAULT) else {
+        return true;
+    };'''
+new = '''    let Some(passwd) = nsswitch_database(conf, b"passwd", FILES_DEFAULT) else {
+        return false;
+    };'''
+
+[[mutant]]
+name = "dash-u-reads-the-file-alone"
+rule = "-u name asks glibc's getpwnam(), whose sources include Hesiod's"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    let found = if glibc_may_be_asked() {'''
+new = '''    let found = if false {'''
+
+[[mutant]]
+name = "dash-u-asks-once"
+rule = "-u name asks getpwnam() twice, as the C's arg.c and lsof_select_login() do"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    if ask()?.is_none() {
+        return Some(None);
+    }
+    ask()'''
+new = '''    ask()'''
+
+[[mutant]]
+name = "dash-u-unknown-is-not-asked"
+rule = "a login glibc does not know is unknown, not a lookup that could not be made"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        return Some(None);
+    }
+    ask()'''
+new = '''        return None;
+    }
+    ask()'''
+
+[[mutant]]
+name = "user-reads-the-file-alone"
+rule = "USER asks glibc's getpwuid()"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    let asked = if glibc_may_be_asked() {'''
+new = '''    let asked = if false {'''
+
+[[mutant]]
+name = "user-asked-not-kept-to-loginml"
+rule = "a name glibc gives is kept to LOGINML bytes, as the C's strncpy()"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        Some(found) => login_name(&found?.name),'''
+new = '''        Some(found) => found?.name.into(),'''
+
+# ---- the logins asked for what is printed
+
+[[mutant]]
+name = "logins-asked-where-none-is-printed"
+rule = "no login is asked where none is printed (-t, -F without L)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        if looks_up_logins(&procs, &format, &selection) {
+            name_owners(&mut procs, env.backend.as_ref());'''
+new = '''        if true {
+            name_owners(&mut procs, env.backend.as_ref());'''
+
+[[mutant]]
+name = "logins-never-asked"
+rule = "the owners' logins are asked where they are printed"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        if looks_up_logins(&procs, &format, &selection) {
+            name_owners(&mut procs, env.backend.as_ref());'''
+new = '''        if false {
+            name_owners(&mut procs, env.backend.as_ref());'''
+
+[[mutant]]
+name = "logins-a-named-owner-asked-again"
+rule = "a process named already (Windows) is not asked"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        if p.user.is_some() {
+            continue;
+        }
+        if let Some(login)'''
+new = '''        if let Some(login)'''
+
+[[mutant]]
+name = "login-bytes-kept-for-text"
+rule = "a login's bytes are kept where they are not UTF-8, and only there"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''        if std::str::from_utf8(&login).is_err() {'''
+new = '''        if std::str::from_utf8(&login).is_ok() {'''

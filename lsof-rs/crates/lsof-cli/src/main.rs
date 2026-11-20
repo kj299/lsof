@@ -353,7 +353,6 @@ fn pwd_warnings(procs: &[lsof_core::Process], format: &Format, sel: &Selection) 
 /// Whether printing `procs` calls the C's `printuid()` at all: where
 /// [`pwd_warnings`] says it does, for any owner. Not under `-l`, which looks
 /// nothing up (`Futol`).
-#[cfg(target_os = "linux")]
 fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selection) -> bool {
     if sel.numeric_ids || procs.is_empty() {
         return false;
@@ -366,6 +365,22 @@ fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selectio
         Format::Fields { only, .. } => wants_login(only.as_deref()),
         Format::Json(j) => {
             wants_login(j.only.as_deref()) && procs.iter().any(|p| !p.files.is_empty())
+        }
+    }
+}
+
+/// Give each of `procs` its owner's login where the backend has one for
+/// its uid ([`lsof_core::Backend::login_name`]) and it has none yet: a
+/// platform that names its owners as it gathers them (Windows) keeps its
+/// names. A uid with no login is asked again for each process that has it,
+/// as the C's `printuid()` caches only the names it found.
+fn name_owners(procs: &mut [lsof_core::Process], backend: &dyn lsof_core::Backend) {
+    for p in procs.iter_mut() {
+        if p.user.is_some() {
+            continue;
+        }
+        if let Some(login) = p.uid.and_then(|uid| backend.login_name(uid)) {
+            p.set_login(login);
         }
     }
 }
@@ -1343,6 +1358,13 @@ fn main() {
                 lsof_cli::stdio::exit(1);
             }
         }
+        // The owners' logins, asked as the C asks `getpwuid()`: only where
+        // the listing prints one, and only for what it lists (DIVERGENCES
+        // 39). A source that blocks (LDAP, SSSD) blocks here, as it blocks
+        // the C's `printuid()`; nothing bounds it there either.
+        if looks_up_logins(&procs, &format, &selection) {
+            name_owners(&mut procs, env.backend.as_ref());
+        }
         let listed = prints_a_process(&procs, &format);
         // Written as it is formatted rather than built into one String and
         // printed: the table was being held three times over at the end of a
@@ -1710,6 +1732,50 @@ mod tests {
         assert_eq!(super::pwd_warnings(&empty, &format, &sel), [65000, 65000]);
         let (sel, format) = parsed(&["-J"]);
         assert!(super::pwd_warnings(&empty, &format, &sel).is_empty());
+    }
+
+    /// The owners are named by the backend, as they are printed: a uid it
+    /// knows gets its login (as bytes, where it is no UTF-8), one it does not
+    /// stays a number, and a process named already (Windows) or with no uid
+    /// is not asked.
+    #[test]
+    fn owners_are_named_by_the_backend() {
+        struct Names(std::cell::RefCell<Vec<u32>>);
+        impl lsof_core::Backend for Names {
+            fn name(&self) -> &str {
+                "names"
+            }
+            fn gather(
+                &self,
+                _: &Selection,
+            ) -> Result<Vec<lsof_core::Process>, lsof_core::BackendError> {
+                Ok(Vec::new())
+            }
+            fn login_name(&self, uid: u32) -> Option<Box<[u8]>> {
+                self.0.borrow_mut().push(uid);
+                match uid {
+                    0 => Some(b"root"[..].into()),
+                    7 => Some(b"ab\xffcd"[..].into()),
+                    _ => None,
+                }
+            }
+        }
+        let names = Names(Default::default());
+        let mut procs = [
+            owned(0, None, 1),
+            owned(7, None, 1),
+            owned(9, None, 1),
+            owned(5, Some("EXAMPLE\\alice"), 1),
+            owned(0, None, 0),
+        ];
+        procs[4].uid = None;
+        super::name_owners(&mut procs, &names);
+        assert_eq!(procs[0].user.as_deref(), Some("root"));
+        assert_eq!(procs[1].login_bytes(), Some(&b"ab\xffcd"[..]));
+        assert_eq!(procs[2].user, None);
+        assert_eq!(procs[3].user.as_deref(), Some("EXAMPLE\\alice"));
+        assert_eq!(procs[4].user, None);
+        assert_eq!(*names.0.borrow(), [0, 7, 9]);
     }
 
     /// Whether a run calls the C's `printuid()` at all, which decides

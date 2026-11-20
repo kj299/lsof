@@ -17,7 +17,9 @@
 # (`net`, DIVERGENCES 56, 2026-11-06), `rustix` pinned at =1.1.6 with `bitflags`
 # and `linux-raw-sys` (and, for rustix's other targets only, `errno`;
 # `libc`, pinned at =0.2.190, is built on Linux and FreeBSD since 2026-11-18
-# for `lsof-sigpipe`'s `sigaction()`, DIVERGENCES 36), each MIT OR
+# for `lsof-sigpipe`'s `sigaction()`, DIVERGENCES 36, and since 2026-11-20
+# for `lsof-getpw`'s `getpwnam_r()` and `getpwuid_r()`, DIVERGENCES 39, the
+# same version, no crate added), each MIT OR
 # Apache-2.0 at least: rustix and linux-raw-sys are
 # `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`, which the allow
 # list below satisfies through either plain licence, so nothing new is

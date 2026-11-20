@@ -4,8 +4,6 @@ use std::collections::HashSet;
 
 use lsof_core::model::Process;
 
-use crate::users;
-
 /// Every process in `/proc`, and which of them are zombies.
 pub struct Enumerated {
     /// Every process, zombies included, sorted by pid.
@@ -23,12 +21,13 @@ pub struct Enumerated {
     pub zombies: HashSet<u32>,
 }
 
-/// Every process currently in `/proc`, with pid, ppid, command and owner.
+/// Every process currently in `/proc`, with pid, ppid, command and owner
+/// (its uid: the login is asked later, for what is printed).
 ///
 /// A pid that vanishes mid-scan is skipped, not reported: `/proc` is a live
 /// view, and a process exiting while we walk it is normal operation rather
 /// than an error. Every read here is therefore best-effort.
-pub fn enumerate(numeric_ids: bool) -> Enumerated {
+pub fn enumerate() -> Enumerated {
     let mut out = Enumerated {
         procs: Vec::new(),
         zombies: HashSet::new(),
@@ -43,7 +42,7 @@ pub fn enumerate(numeric_ids: bool) -> Enumerated {
         let Ok(pid) = name.parse::<u32>() else {
             continue;
         };
-        if let Some((p, zombie)) = read_one(pid, numeric_ids) {
+        if let Some((p, zombie)) = read_one(pid) {
             if zombie {
                 out.zombies.insert(pid);
             }
@@ -100,29 +99,21 @@ pub fn raw_comm(status: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The login a process is shown by, decoded (lossily, for JSON and what
-/// reads it as text), and the bytes of its login and command where they are
-/// not UTF-8 ([`lsof_core::RawNames`]), which USER, `-F L`, COMMAND, `-F c`
-/// and `-c` use.
-fn names(
-    login: Option<Box<[u8]>>,
-    raw_command: Option<Vec<u8>>,
-) -> (Option<String>, Option<Box<lsof_core::RawNames>>) {
-    let user = login
-        .as_deref()
-        .map(|l| String::from_utf8_lossy(l).into_owned());
-    let raw_login = login.filter(|l| std::str::from_utf8(l).is_err());
-    let raw_names = (raw_command.is_some() || raw_login.is_some()).then(|| {
+/// The bytes of a command that is not UTF-8 ([`lsof_core::RawNames`]),
+/// which COMMAND, `-F c` and `-c` use. The owner's login is not looked up
+/// here: lsof asks for it only for a process it prints by name
+/// ([`lsof_core::Backend::login_name`], DIVERGENCES 39).
+fn raw_names(raw_command: Option<Vec<u8>>) -> Option<Box<lsof_core::RawNames>> {
+    raw_command.map(|command| {
         Box::new(lsof_core::RawNames {
-            command: raw_command.map(Vec::into_boxed_slice),
-            login: raw_login,
+            command: Some(command.into_boxed_slice()),
+            login: None,
         })
-    });
-    (user, raw_names)
+    })
 }
 
 /// One process, and whether it is a zombie.
-fn read_one(pid: u32, numeric_ids: bool) -> Option<(Process, bool)> {
+fn read_one(pid: u32) -> Option<(Process, bool)> {
     // `status` rather than `stat`: `stat`'s second field is the command in
     // parentheses, and a command containing ") " defeats naive splitting — a
     // real and exploitable parsing trap, since process names are attacker-
@@ -135,10 +126,7 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<(Process, bool)> {
     let status = crate::text::lossy(bytes);
     let st = parse_status(&status);
     let zombie = st.state == Some('Z');
-    let (user, raw_names) = names(
-        st.uid.and_then(|u| users::name_for(u, numeric_ids)),
-        raw_command,
-    );
+    let raw_names = raw_names(raw_command);
 
     let p = Process {
         tid: None,
@@ -148,7 +136,7 @@ fn read_one(pid: u32, numeric_ids: bool) -> Option<(Process, bool)> {
         pid,
         ppid: st.ppid,
         command: st.command,
-        user,
+        user: None,
         files: Vec::new(),
         endpoint_peer: false,
         unlisted: false,
@@ -357,25 +345,19 @@ pub fn is_root() -> bool {
 mod tests {
     use super::*;
 
+    /// A command that is not UTF-8 is kept as its bytes, and no login is
+    /// named as the process is read.
+    #[test]
+    fn a_command_that_is_not_utf8_is_kept_as_bytes() {
+        assert_eq!(raw_names(None), None);
+        let raw = raw_names(Some(b"x\xff".to_vec())).expect("kept");
+        assert_eq!(raw.command.as_deref(), Some(&b"x\xff"[..]));
+        assert_eq!(raw.login, None);
+    }
+
     /// The comm of a `status` that is not UTF-8, as bytes: unescaped as
     /// the kernel escapes it (`\\` and `\n`), a newline made `?`; none
     /// where the comm is text, which [`parse_status`] reads.
-    /// A login that is not UTF-8 is kept as its bytes beside its lossy
-    /// text; one that is, and a command that is, keep nothing extra.
-    #[test]
-    fn a_login_or_command_that_is_not_utf8_is_kept_as_bytes() {
-        let (user, raw) = names(Some(b"ab\xffcd"[..].into()), None);
-        assert_eq!(user.as_deref(), Some("ab\u{fffd}cd"));
-        let raw = raw.expect("kept");
-        assert_eq!(raw.login.as_deref(), Some(&b"ab\xffcd"[..]));
-        assert_eq!(raw.command, None);
-        let (user, raw) = names(Some(b"root"[..].into()), None);
-        assert_eq!((user.as_deref(), raw), (Some("root"), None));
-        let (user, raw) = names(None, Some(b"x\xff".to_vec()));
-        assert_eq!(user, None);
-        assert_eq!(raw.and_then(|r| r.command).as_deref(), Some(&b"x\xff"[..]));
-    }
-
     #[test]
     fn the_raw_comm_is_the_name_lines_bytes() {
         assert_eq!(

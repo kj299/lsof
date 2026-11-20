@@ -1,12 +1,16 @@
-//! uid ↔ login name, from `/etc/passwd`.
+//! uid ↔ login name, as FreeBSD's libc gives them: `getpwnam_r(3)` and
+//! `getpwuid_r(3)`, through `lsof-getpw`, which follow `nsswitch.conf(5)`
+//! through `nsdispatch(3)` (files, NIS, LDAP...) as the C's `getpwnam()` and
+//! `getpwuid()` do (DIVERGENCES 39). Not measured against the C on FreeBSD,
+//! and not guarded as the Linux backend guards glibc: FreeBSD's
+//! `nsdispatch()` is another parser, with no crash measured.
 //!
-//! The same rule as the Linux backend's, for the same reason: `getpwuid(3)`
-//! is libc, and the password file is a file. FreeBSD's `/etc/passwd` is the
-//! seven-field file `pwd_mkdb(8)` writes from `master.passwd`; an account
-//! served only by NIS or LDAP is not in it, and shows as its number.
+//! Where libc cannot be asked (this module's tests, which build on Linux
+//! too, and miri) `/etc/passwd` is read: the seven-field file `pwd_mkdb(8)`
+//! writes from `master.passwd`.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 fn passwd_text() -> String {
     std::fs::read("/etc/passwd")
@@ -42,11 +46,54 @@ fn maps() -> &'static Maps {
 
 /// The login for `uid`, or `None` where the C shows the number: under `-l`,
 /// and for a uid no account has.
+/// The C keeps each name it found and nothing it did not, so a uid with no
+/// name is asked again each time (`printuid()`).
 pub fn name_for(uid: u32, numeric: bool) -> Option<String> {
     if numeric {
         return None;
     }
-    maps().0.get(&uid).cloned()
+    static FOUND: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+    let mut found = FOUND
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(name) = found.get(&uid) {
+        return Some(name.clone());
+    }
+    let name = match asked_by_uid(uid) {
+        Some(name) => name?,
+        None => maps().0.get(&uid).cloned()?,
+    };
+    found.insert(uid, name.clone());
+    Some(name)
+}
+
+/// libc's name for `uid`: `None` where it cannot be asked, `Some(None)`
+/// where it has none.
+fn asked_by_uid(uid: u32) -> Option<Option<String>> {
+    if !cfg!(target_os = "freebsd") {
+        return None;
+    }
+    let answer = lsof_getpw::by_uid(uid)?;
+    Some(
+        answer
+            .found()
+            .map(|a| String::from_utf8_lossy(&a.name).into_owned()),
+    )
+}
+
+/// libc's uid for the login `name`, asked twice as the C asks it
+/// (`arg.c:2030`, `lsof.c:1220`): `None` where it cannot be asked,
+/// `Some(None)` where it has no such account.
+fn asked_by_name(name: &str) -> Option<Option<u32>> {
+    if !cfg!(target_os = "freebsd") {
+        return None;
+    }
+    let uid = |answer: lsof_getpw::Answer| answer.found().map(|a| a.uid);
+    if uid(lsof_getpw::by_name(name.as_bytes())?).is_none() {
+        return Some(None);
+    }
+    Some(lsof_getpw::by_name(name.as_bytes()).and_then(uid))
 }
 
 /// A `-u` value as the C's `enter_uid()` reads it: digits are a uid, a name
@@ -58,8 +105,12 @@ pub fn lookup(value: &str) -> lsof_core::UserLookup {
             return UserLookup::Uid(uid);
         }
     }
-    match maps().1.get(value) {
-        Some(&uid) => UserLookup::Uid(uid),
+    let uid = match asked_by_name(value) {
+        Some(uid) => uid,
+        None => maps().1.get(value).copied(),
+    };
+    match uid {
+        Some(uid) => UserLookup::Uid(uid),
         None => UserLookup::Unknown,
     }
 }

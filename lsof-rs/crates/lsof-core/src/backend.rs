@@ -298,6 +298,18 @@ pub trait Backend {
         crate::EndpointTables::default()
     }
 
+    /// The login of `uid`, as bytes, for an owner the listing prints by
+    /// name: the C's `getpwuid(3)` in `printuid()`, which it calls only as
+    /// it prints a USER cell, an `-F L` field or a JSON `login`
+    /// (`print.c:1788`), so lsof-rs asks only then, for the processes it
+    /// lists, and never under `-l`, `-t`, or a field list without `L`
+    /// (DIVERGENCES 39). `None` for a uid with no name, which prints as the
+    /// number; the default, for a backend that names its owners as it
+    /// gathers them (Windows) or not at all.
+    fn login_name(&self, _uid: u32) -> Option<Box<[u8]>> {
+        None
+    }
+
     /// Resolve a `-u` value the way the platform names users.
     ///
     /// The C does it with `getpwnam(3)` while it parses its options: a number

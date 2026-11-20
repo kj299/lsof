@@ -7163,6 +7163,101 @@ args = ["-a", "-p", "{A}", "-d", "cwd"]
 env = { LSOF_DIFF_MT = "names-compat" }
 with_stderr = true
 
+# ------------------- row 39: glibc asked, getpwnam_r() and getpwuid_r() (2026-11-20)
+#
+# lsof-rs asks glibc for an account as the C does (crates/lsof-getpw), so
+# every source nsswitch.conf names answers it, not only the password file.
+# Hesiod (libnss_hesiod, which this host and CI's runner have) after the
+# file, its TXT queries answered by the names modes' server for one account
+# the file lacks, 65010 `hsjohn`, the uid fixture W's WJ runs as
+# (`NAMES_TXT`): before this, lsof-rs printed 65010 and `no pwd entry`,
+# and knew no `hsjohn`. RES_OPTIONS is cleared so that glibc's resolver
+# sends Hesiod's queries, to that server alone (the names modes'
+# resolv.conf); `compare_queries` holds the queries each binary sent to
+# the C's: the login asked twice for `-u` (arg.c:2030 and lsof.c:1220), a
+# uid once where its name was found, nothing where no login is printed.
+
+[[case]]
+name = "nss-hesiod-names-an-owner-the-file-lacks"
+args = ["-a", "-p", "{WJ}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
+name = "nss-hesiod-knows-a-login-the-file-lacks"
+args = ["-a", "-p", "{WJ}", "-d", "cwd", "-u", "hsjohn"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
+# `-F L` prints the login, `-F p` asks for none, nor does `-t`.
+name = "nss-hesiod-field-login"
+args = ["-F", "pL", "-a", "-p", "{WJ}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
+name = "nss-hesiod-no-login-printed-none-asked"
+args = ["-F", "p", "-a", "-p", "{WJ}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
+name = "nss-hesiod-terse-asks-none"
+args = ["-t", "-a", "-p", "{WJ}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
+# A login no source has: Hesiod's REFUSED (class IN, then HS), and the
+# C's words.
+name = "nss-hesiod-unknown-login"
+args = ["-a", "-p", "{WJ}", "-d", "cwd", "-u", "hsnobody"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
+# `passwd: compat` with `passwd_compat: files`, and a password file that
+# opens with `+`: glibc's `compat` asks `files` for each `+` account, and
+# finds root; lsof-rs's own reader, which took a `+` line as NIS's, knew no
+# login after it.
+name = "nss-compat-plus-asks-passwd-compat"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwcompatfiles" }
+with_stderr = true
+
+[[case]]
+name = "nss-compat-plus-names-the-owner-through-passwd-compat"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-pwcompatfiles" }
+with_stderr = true
+
+[[case]]
+# `passwd:` with no source: glibc is not asked (it reads past a heap block
+# there, valgrind), and nothing is found, as the C finds nothing where it
+# survives (200 of 200 runs of this command here; it died printing USER
+# in some runs of other commands, SIGSEGV).
+name = "nss-passwd-no-source-knows-no-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwempty" }
+with_stderr = true
+
+[[case]]
+# `compat` asking itself at a `+` line: the C dies in glibc (SIGSEGV, its
+# stack gone), on `-u root` and on USER alike. lsof-rs does not ask glibc
+# there, and reads the file as with no NIS: no login after the `+`.
+# Ledgered, C-DEFECT.
+name = "nss-compat-asking-itself-crashes-the-c"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwcompatloop" }
+with_stderr = true
+
 [[case]]
 # RESOLV_HOST_CONF names the file `multi` is read from: `multi off` there,
 # `multi on` in /etc/host.conf, so the name's first address alone

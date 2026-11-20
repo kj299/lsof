@@ -54,8 +54,10 @@ A call is counted as walk111's `a_walk_entry_is_stated_once` counts it: an
 succeeds or not, matched by its exact path. The counts are of the processes
 lsof starts to make them in, the C's child (`doinchild()`) and lsof-rs's
 helper: the C's own process `stat`s `/dev` for `DEVDEV_PATH` (`main.c`)
-and, through glibc's name service, `/`, on every run, neither a read of the
-table. A `stat` by name is looked for in every process. The mount
+and, through glibc's name service, `/`, on every run that looks a login
+up, neither a read of the table; lsof-rs's own process `stat`s `/` by name
+too since it asks glibc for logins (DIVERGENCES 39), which is not counted
+as a stat by name where the C's own process makes the same call. A `stat` by name is looked for in every process. The mount
 directories are this process's `/proc/self/mounts`, decoded.
 
 Usage:
@@ -426,8 +428,17 @@ def audit(oracle: str, rust: str) -> int:
                 }
             c, rs = stats("c"), stats("rs")
             problems = counted(reads_table, c, rs)
+            # glibc's name service `stat`s `/` by name in the process that
+            # asks it (nss_database.c's check for a changed root): the C's
+            # own process for its `getpwuid()`, and since DIVERGENCES 39
+            # lsof-rs's, which asks `getpwuid_r()` as the C does. That one
+            # is no read of the table where the C's own process makes it too.
+            c_asks_glibc = any(
+                own and n and p == "/" and k in ("stat", "lstat") for k, p, n, own in got["c"]
+            )
             by_name = sorted(
-                {p for k, p, n, _ in got["rs"] if n and k != "readlink" and p in mounts}
+                {p for k, p, n, own in got["rs"] if n and k != "readlink" and p in mounts
+                 and not (p == "/" and own and c_asks_glibc)}
             )
             if by_name:
                 problems.append(f"lsof-rs stat()ed a mount by name: {by_name[:5]}")

@@ -1,0 +1,23 @@
+[package]
+name = "lsof-getpw"
+description = "The one place lsof-rs asks the C library for an account: getpwnam_r(3) and getpwuid_r(3), so that `-u name` and the USER column follow /etc/nsswitch.conf (LDAP, SSSD, systemd-homed, NIS, Hesiod) as the C lsof's getpwnam() and getpwuid() do."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# libc, for `struct passwd` and the two reentrant lookups: std has neither,
+# and no safe route to NSS for an account (it has one for hosts,
+# getaddrinfo(), and none for passwd). The same crate and version
+# lsof-sigpipe takes, already in the lock file: MIT OR Apache-2.0, no default
+# features, pinned exactly. Only Linux and FreeBSD link it; elsewhere, and
+# under miri, which cannot call C, this crate asks nothing and says so
+# (`None`), and its callers read the password file themselves. No other
+# crate is added (DIVERGENCES 39, 2026-11-20).
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+libc = { version = "=0.2.190", default-features = false }
+
+[lints]
+workspace = true

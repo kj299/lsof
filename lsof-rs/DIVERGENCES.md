@@ -252,6 +252,15 @@ disagreeing, and it names the C code so anyone can check the triage.
   (0);`), so with `-c /sle/ -c /sleep/` the second is `no command found for
   regex: sleep` and the run exits 1 although `sleep` matched both. lsof-rs
   marks every expression a command matches. Not pinned: A's pid.
+- [x] nss-compat-asking-itself-crashes-the-c [sha256:cc33747ff987]: C-DEFECT, not reproduced
+  (row 39) — `-u root` under `passwd: compat` and `passwd_compat: compat`,
+  the password file opening with `+`: glibc's `compat` source asks
+  `passwd_compat`'s sources for each `+` account, itself among them, until
+  the stack is gone, and the C dies (SIGSEGV, exit 139, nothing printed; on
+  printing USER too). lsof-rs does not ask glibc where nsswitch.conf has
+  that shape, and reads the file as it did before it asked glibc, a `+`
+  line as with no NIS: `can't get UID for root`, exit 1.
+  Pid-free, pinned.
 - [x] names-multi-host-with-two-addresses: C-DEFECT, not reproduced (item
   38) — `-i @r38multi` under `multi on`, where the name has two addresses.
   `enter_nwad()` enters one `struct nwad` for each address of the `hostent`
@@ -335,6 +344,97 @@ disagreeing, and it names the C code so anyone can check the triage.
   mapped file are not UTF-8: the C writes the raw bytes (0xff, 0xfe), so its
   output is not valid UTF-8 and so no JSON; lsof-rs writes U+FFFD and stays
   valid. Not pinned: X's pid and inodes.
+
+## Fixed by asking the C library for accounts, like the C (2026-11-20)
+
+Row 39, as the owner decided on 2026-11-20 ("Isolated getpwnam crate"):
+`-u name` and USER asked of the C library, as the C asks them, through a
+new workspace crate, `crates/lsof-getpw`, kept outside lsof-core, lsof-cli
+and lsof-backend-linux, which stay `#![forbid(unsafe_code)]`. No
+third-party crate is added: its one dependency is `libc =0.2.190`, which
+lsof-sigpipe already takes.
+
+**What the C does** (measured against lsof 4.99.6, glibc 2.39-0ubuntu8.9):
+
+* `-u name`: `enter_uid()` calls `getpwnam(lnm)` (`src/arg.c:2030`), `can't
+  get UID for name` where it is NULL (`err = 1`, read on), and then
+  `lsof_select_login()` calls `getpwnam(login)` again (`lib/lsof.c:1220`)
+  and selects that answer's uid: two lookups of each name (measured: two
+  TXT queries under Hesiod). An all-digit value is a uid, never looked up.
+* USER, `-F L`, JSON's `login`: `printuid()` (`src/print.c:1706-1815`)
+  calls `getpwuid(uid)` (`:1788`) for a uid its cache does not hold, and
+  caches the names it finds (cut to `LOGINML`, 32) and nothing else; `no
+  pwd entry for UID N` unless `-w`. It is called only as a login is
+  printed: never under `-l` (`Futol`), `-t`, or a field list without `L`
+  (measured: no query). Nothing bounds the call, `-S` included: `-S`
+  bounds the kernel calls (`lib/misc.c`), not the C library's.
+* `lib/dvch.c:388,503` call `getpwuid(Myuid)` for the device cache's path,
+  which Linux does not build (`HASDCACHE`, `lib/dialects/linux/machine.h:81`).
+
+**What lsof-rs does now.** `lsof-getpw::by_name` and `::by_uid` call
+`getpwnam_r(3)` and `getpwuid_r(3)` (reentrant: lsof-rs has threads, and
+glibc's `getpwnam()` is `getpwnam_r()` in a loop) into a buffer of 1024
+bytes (glibc's `NSS_BUFLEN_PASSWD`, its `sysconf(_SC_GETPW_R_SIZE_MAX)`),
+doubled on `ERANGE` to 16 MiB. Nothing the C library writes is read through
+a pointer: the uid is read from the `passwd` the crate owns, only where the
+result points at it, and the name from the buffer by its offset, to its NUL
+there. A name is asked up to its first NUL, as a C string (an argv word
+holds none). The Linux backend asks `by_name` twice for a `-u` login, as
+the C does, the second answer kept; the CLI asks the backend for each
+listed process's login (`Backend::login_name`) only where the listing
+prints one, after selection, so `-t`, `-F p` and `-l` ask nothing
+(the backend no longer names every process as it reads it).
+
+**Where glibc is not asked.** Two shapes of nsswitch.conf make glibc
+itself misbehave, and lsof-rs reads the file (nsswitch.conf, once a run,
+by the parser written for 38/39) and does not ask it there
+(`users::glibc_may_be_asked`):
+
+* `passwd:` with no source, or opening with an action: glibc 2.39 reads
+  past the heap block of the empty list (valgrind, invalid reads in
+  `__nss_lookup()`); the C finds nothing where it survives.
+* `compat` in both `passwd:` and `passwd_compat:`: `compat` asks itself at
+  a `+` line until the stack is gone; the C dies (SIGSEGV, exit 139) on
+  `-u root` and on printing USER alike (ledgered,
+  `nss-compat-asking-itself-crashes-the-c`).
+
+There, and under miri (which cannot call C), and where glibc's answer does
+not fit in 16 MiB, lsof-rs reads the password file itself, as it did before
+(2026-11-11, below). The last is a bound the C does not have: glibc's
+`files` source fails every lookup once one line of the file is longer than
+the buffer, and the C grows its buffer without end (measured: behind a
+20 MB line the C finds root in 42 MB of RSS; lsof-rs, asking to 16 MiB and
+then reading the file, finds root in 21 MB, and cannot name the 20 MB
+line's own account, which the C can). With a 2 MB line both name all
+accounts (lsof-rs before this could not name that line's).
+
+**Measured, each against the C, in a namespace of the run's own** (the
+differential's `names-*` modes, and by hand, scratchpad kit): Hesiod after
+the file, its TXT records served by the differential's own name server for
+65010 `hsjohn` (fixture W's WJ): USER, `-F L`, `-u hsjohn`, an unknown
+login, `-t` and `-F p`, each the C's output and the C's queries in order
+(`compare_queries`: 1, 3, 1, 2, 0, 0 queries); `passwd: compat` with
+`passwd_compat: files` and a leading `+`: root, where the file's own reader
+knew no login after the `+`; the two guarded shapes; the base commit's
+binary fails five of the new cases and sends other queries in four. With a
+source that never answers (resolv.conf `timeout:1 attempts:1`, Hesiod's
+two classes), each lookup waits 2.0 s in both binaries: `-u hsjohn` 2.0 s
+each, a nameless owner's row 2.0 s (the C 4.0 s: it asks twice a row), `-S
+1` bounds neither, `-t` 0.02 s in both. Under valgrind the guarded shapes
+give lsof-rs no invalid read.
+
+**Left**: an owner no source names is asked once a process where the C asks
+twice a table row (no output differs; fewer queries); a `-u` login whose
+second lookup fails is `can't get UID`, read on after, where the C's
+`Error()` stops at once; the guard reads nsswitch.conf once a run, where
+glibc reads it again when it changes (a file rewritten into a guarded shape
+mid-run is asked, as the C would be); FreeBSD asks its libc through the same
+crate (`nsdispatch(3)`), with no guard and not measured against the C there;
+Windows is unchanged.
+
+`mutants/row39.toml`: 29 mutants (the buffer's bounds and growth, the
+call's reading, the guard, where glibc is asked and how often, the logins
+asked only for what is printed).
 
 ## Fixed by matching a back-reference, and expressions past the `regex` crate's bounds, in `-c /regex/` (2026-11-19)
 
@@ -1589,7 +1689,12 @@ then measured again:
   `passwd:`, `hosts:` or `services:` line that lists no source (or opens
   with an action) the C dies in glibc on `-u name`, `-i @name` or `-i
   :name` (SIGSEGV, as `getent` does); lsof-rs knows no such name, and says
-  so.
+  so. [2026-11-20, row 39: for `passwd:` the death is the heap's luck, not
+  the rule. glibc 2.39-0ubuntu8.9 reads past the end of the heap block that
+  holds the empty list (valgrind: `__nss_lookup()`, `nss/nsswitch.c:73,82`),
+  and the C here finds nothing in 200 of 200 runs of `-u root`, and died
+  printing USER in some runs of other commands. lsof-rs, which asks glibc
+  for accounts now, does not ask it there.]
 
 `mutants/row38.toml` gained 93 mutants for these (169 in all; 9 of the
 first 85 were replaced with the code they changed).
@@ -6082,7 +6187,7 @@ C-DEFECT not reproduced.
 | 36 | a UID with no password entry, or any UID under `-l`: no `-F L` field, the number eight wide in USER, and `lsof: no pwd entry for UID N` on stderr | ~~prints `L<uid>`, and a bare number~~ **resolved 2026-09-26**; ~~the stderr line~~ **resolved 2026-10-30** | the table and `-F` matched since 2026-09-26 (measured with UID 65000 and with `-l`). The stderr line, measured 2026-10-30 with UID 65000 and fixture W's WB (3000000000): the C's `printuid()` writes it each time it is asked about an owner it has no entry for — it caches the names it finds and nothing else — and it is asked twice per table row (sizing USER, `print.c:937`, then printing it, `:941`, every sizing call before any printing one), once per `-F` process set when `L` is selected (`:2224`), once per `-J` process and once per `-j` line (`:2088`); never under `-l` (`Futol`), `-w` or `-t` (`Fwarn`, which `+w` clears again), and `-t` prints no USER. lsof-rs writes the same lines in the same order (`pwd_warnings` in `main.rs`), all of them before the listing, where the C's interleave with a stdout it buffers: the same bytes and the same count on each stream. **Corrected 2026-10-30 (Batch A's review):** on a merged stream (`lsof >file 2>&1`, `2>&1 | less`) the two differ once stdout passes its stdio buffer, not only on a terminal: the C writes the sizing pass's warnings before line 1, and the printing pass's where glibc flushes its 4096-byte stdout buffer, which cuts a listing line in the middle (measured: `lsof -u 65016,0 >file 2>&1` put 8 at lines 1-8 and 8 at 384-391, mid-line; `-F` at line 3523, `-j` at 371-378), where lsof-rs puts all of them at lines 1-16. A listing under 4 KiB per cycle (`-r1` with a small one) merges identically. Since 2026-11-18 stdout is glibc's buffer (`lsof-cli/src/stdio.rs`: `st_blksize`, flushed where the buffer fills, `xsputn`'s rule for long writes, line buffering on a tty), but each warning is still written before the listing, not at the C's call site, so a merged stream still differs as above: not emulated, by decision. A stderr write that fails no longer ends the listing (exit 101 before the first row, found by the review): it is ignored, as the C's unchecked `fprintf(stderr)`; a stderr whose reader has gone had exited 141, and since 2026-11-18 kills the run with `SIGPIPE` where the signal was inherited at its default, as it kills the C, and is ignored where it was ignored or blocked (`lsof_core::safefs::write_stderr`, `lsof-sigpipe`; `tests/stdout_errors.rs`). **Stdout, 2026-11-18**: lsof-rs had exited 141 at its first failed write whatever the disposition, and on a full disk said `lsof: write error` and exited 1; it now writes as the C writes, the C's status and silence in each case (see "Fixed by making `-r` operate like the C"). Linux only: Windows has no uid. |
 | 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed — yet still located: `lsof -t -p 1` prints nothing on this host, and exits 0 | ~~the blank row, and `-t` prints the pid~~ **resolved 2026-09-25** | see "Fixed by reporting what could not be read" above. The fast path still skips the file walk; it asks whether one link reads. |
 | 38 | `-c /regex/[bix]` is a POSIX regular expression (`regcomp()`, extended unless `b`), and `-i` takes host names (`@localhost`, `gethostbyname2()`) and service names (`:http`, `getservbyname()`) | ~~refused, with an error~~ the same: the expression read by glibc's grammar and run by the `regex` crate, a host name from the hosts file by glibc's `files` rules and then from the system's resolver, a service name from the services file | **resolved 2026-11-11, like the C** but for what is left — see "Fixed by `-c /regex/` and `-i`'s host and service names" above; the owner's decision ("Add regex crate. For `-i` match what the original version did"). Measured: 336,840 expressions exhaustively and 1.1 million at random against glibc's `regcomp()`/`regexec()`, 13,800 hosts and services lookups and 4,354 numeric names against `gethostbyname2()`/`getservbyname()`, 189 command lines against the C. **C-DEFECT, not reproduced**: the C frees an `-i` argument once for each address a host name gave it and aborts (`double free`), on `-i @localhost` wherever `multi on` gives it two. **Reviewed 2026-11-11** ("The review's fixes" there): the reader no longer recurses on a run of `$` (the C dies on 70,000, SIGSEGV); an expression's cost is bounded before the engine sees it (60,000 `\W` under `i` took 20 s and 2.5 GB) and its program at 8 MiB, which takes `.{20000}`, `[[:graph:]]{1,255}` and `[[:alpha:]]{300}`; a hosts or services file is read in bounded lines and only if it is a regular file; nsswitch.conf is read and walked by glibc's rules, with `files dns` where it gives hosts no line, and `services:` followed; `RESOLV_HOST_CONF` is read; `(a)|\1` is glibc's `Invalid back reference`; the C's second double free (`-i TCP:22,1x`) is ledgered. **Resolved 2026-11-19, like the C** — see "Fixed by matching a back-reference, and expressions past the `regex` crate's bounds" above: a back-reference is matched (lsof-rs's own engine, by every binding of the groups, with glibc's reading of a group nested in a repetition; where glibc's search misses a match, finds one that is not there or dies of SIGSEGV, C-DEFECTs, not reproduced, pinned; reviewed 2026-11-20: every start searched in turns, so the reviews' cases are answered as glibc answers them, and `towupper()`'s simple mapping under `i`), and an expression past the crate's bounds (a program past 8 MiB, 64 large classes, 65,536 characters) is answered by that engine. **Left**: word operators, `^`/`$` beside a newline, six characters' case and encodings Rust does not read are the crate's; an expression 100 deep, or of more than 262,144 nodes, is too big; a search with a back-reference past 4,194,304 steps or 32 MiB a command is taken as no match (measured: none of the reviews' cases; 3 of 9,000 random expressions of three to nine groups named in random order against 63 bytes, each with no match; 60 of 6,000 repetitions and runs of groups each named again against names of 14 to 63 bytes, 2 of them with a match glibc finds in 0.09 and 0.53 s), and so is a command past 1,024 bytes in the own engine; a name the hosts file holds in one family is not asked of DNS for the other; a service, like a login (39), comes from its file or not at all; a line past 1 MiB of those files is passed over; nscd is not asked. History: recorded 2026-09-25 as a refusal that replaced a silent wrong answer (`-c /re/` was a literal that matched nothing, `-i:http` every Internet file); amended 2026-10-17 (item 112), when `-i` was read in the C's grammar and each name refused in words of lsof-rs's own (`host names are not resolved`, `service names are not resolved`), which are gone. |
-| 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, and only where `/etc/nsswitch.conf` has glibc read it, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. **Amended 2026-11-11, like the C as far as the file goes**: the file is read by glibc's `files` rules (70) and, since this date, only where glibc's walk through nsswitch.conf's `passwd:` sources reaches `files` or `compat` (or there is no line, or no file: glibc's default, `files`). The line is read by glibc 2.39's own parser and walked by its rules (reviewed the same day, 38's "The review's fixes"): measured over 69 shapes of the file, 1,409 `-u` command lines and listings agree with the C but where the C dies. Under `passwd: sss` (no such service installed), `passwd: FILES`, `sss [UNAVAIL=return] files`, `sss [!SUCCESS=return] files`, `files [SUCCESS=merge]`, or any line glibc cannot parse, for any database (`sss [NOTFOUND] files`, `hosts: files [`), the C knows no login (`can't get UID for root`) and prints USER as the number with `no pwd entry for UID 0`, and lsof-rs does the same (`nss-*`), where it had read the file regardless; under `sss files`, `db files`, `sss # files` (no comment there), `sss [NOTFOUND=return] files`, `compat`, a last line with no newline (not read), and with two lines (the last wins), both read it. **`compat`** reads the file by `nss_compat`'s rules where it holds a `+` or `-` line: `-name` excludes the name (not its uid's name), `+name` and a `+` alone leave names to NIS, and after any `+` line no uid is found (31 files measured). With an empty source list, or one that opens with an action, the C dies in glibc on `-u name` (SIGSEGV, as `getent` does; **C-DEFECT, not reproduced**: lsof-rs says `can't get UID for name`). **Left, and why**: an account only another source serves (LDAP, SSSD, systemd-homed, NIS) has no name here. `getpwnam()` is libc's; calling it needs `unsafe` or a crate that wraps it, which the three `forbid(unsafe_code)` crates do not take for a name alone, and `std` has no route to it (there is one for hosts, `getaddrinfo()`, which is why 38 could follow NSS for those and this cannot). A source lsof-rs cannot ask is taken as not installed (`UNAVAIL`), which is a guess where it is installed and would have answered; `compat`'s `+` lines are read as with no NIS. nsswitch.conf is read once a run, where glibc reads it again when it changes; nscd is not asked. |
+| 39 | `-u <name>` resolves through NSS (`getpwnam(3)`), and USER through `getpwuid(3)` | ~~reads `/etc/passwd` only, and only where `/etc/nsswitch.conf` has glibc read it, so an LDAP/SSSD account cannot be named — its UID can~~ the same: glibc's `getpwnam_r()` and `getpwuid_r()`, through the workspace's own crate `lsof-getpw` | **resolved 2026-11-20, like the C** — see "Fixed by asking the C library for accounts, like the C" above. The owner chose an isolated crate holding the one audited `unsafe` boundary (three blocks), outside the three `forbid(unsafe_code)` crates, with no third-party crate added (`libc =0.2.190`, already in the lock). Every source nsswitch.conf names answers now, as for the C: measured with Hesiod (`libnss_hesiod`, served by the differential's own name server), whose account 65010 `hsjohn` lsof-rs printed as `65010` with `no pwd entry` and could not name with `-u`, and the queries each binary sends are the C's (`-u` asks twice, `arg.c:2030` and `lsof.c:1220`); with `passwd: compat` and `passwd_compat: files`, whose `+` lines the file's own reader could not follow; nscd, where it runs, is asked by glibc as for the C (not measured: none runs here). **Kept from the reader, deliberately**: glibc is not asked where nsswitch.conf's `passwd:` lists no source or opens with an action (glibc reads past a heap block there, valgrind; the C survives as the heap allows and finds nothing, and died printing USER in some runs) nor where `compat` is in both `passwd:` and `passwd_compat:` (glibc recurses until the stack is gone: the C dies, SIGSEGV, ledgered `nss-compat-asking-itself-crashes-the-c`); there, under miri, and where glibc's answer does not fit in 16 MiB, lsof-rs reads the password file itself as it did before, with the answer recorded under 2026-11-11 here before. **Left**: an owner no source names is asked once a process, where the C asks twice a table row (measured with a source that never answers: 2.0 s, the C 4.0 s); a `-u` login whose second `getpwnam()` fails is `can't get UID`, read on after, where the C stops at once; nsswitch.conf is read once a run for the guard, where glibc reads it again when it changes; FreeBSD asks its libc the same way, not measured against the C there. |
 | 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | ~~stats the mapped file and prints `REG`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-09-25, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it; the cwd/rtd/txt/fd half of `-e` had matched since 2026-09-20. |
 | 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | ~~`-L` **shows** the column, and a bare `+L` is refused~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. Windows changed with it: its smoke case now asserts the C's reading. |
 | 42 | `+L1` selects only files whose link count `stat` recorded and found below 1 (`dnode.c`: `SB_NLINK && nlink < Nlink`). ~~A socket's inode reports 1~~ A socket never has a count: `process_proc_node()` hands it to `process_proc_sock()` first | ~~a row whose count lsof-rs never read passes the filter~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. The reason this row first gave was wrong, and `+L2` shows it: no socket is selected there either. |

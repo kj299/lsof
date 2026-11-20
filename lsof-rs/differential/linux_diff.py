@@ -1508,8 +1508,38 @@ NAMES_VARIANTS = {
     # NOTFOUND `[NOTFOUND=return]` ends the walk at.
     "nssnull": {"nsswitch.conf": NAMES_NULL},
     "hostsnull": {"hosts": NAMES_NULL, "nsswitch.conf": "passwd: files\nhosts: files [NOTFOUND=return] dns\nservices: files\n"},
+    # The `passwd` sources glibc is asked through (DIVERGENCES 39): Hesiod
+    # after the file, whose TXT queries the names modes' server answers for
+    # an account the file lacks ([`NAMES_TXT`]); `compat` with its `+`
+    # lines read through `passwd_compat: files`, which the file's own
+    # reader could not follow; and the two shapes glibc is not asked in, a
+    # `passwd:` line with no source (where it reads past a heap block) and
+    # `compat` asking itself (where it recurses until the stack is gone).
+    "hesiod": {
+        "nsswitch.conf": "passwd: files hesiod\nhosts: files\nservices: files\n",
+        "hesiod.conf": "lhs=.ns\nrhs=.lsof-rs.test\n",
+    },
+    "pwcompatfiles": {
+        "nsswitch.conf": "passwd: compat\npasswd_compat: files\nhosts: files\nservices: files\n",
+        "passwd": "+\n{PASSWD}",
+    },
+    "pwcompatloop": {
+        "nsswitch.conf": "passwd: compat\npasswd_compat: compat\nhosts: files\nservices: files\n",
+        "passwd": "+\n{PASSWD}",
+    },
+    "pwempty": {"nsswitch.conf": "passwd:\nhosts: files\nservices: files\n"},
 }
-NAMES_FILES = ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf", "host.conf", "host.conf.off")
+NAMES_FILES = ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf", "host.conf", "host.conf.off", "hesiod.conf")
+
+# What the names modes' name server answers to a TXT query (class IN) of
+# these names: the Hesiod entries of `names-hesiod`'s account, by name and
+# by uid (`NAME.passwd.LHS.RHS`, `UID.uid.LHS.RHS`), one fixture W's WJ
+# runs as (65010) and the password file lacks. Any other TXT query is
+# REFUSED.
+NAMES_TXT = {
+    "hsjohn.passwd.ns.lsof-rs.test": b"hsjohn:*:65010:65010:Hesiod:/:/bin/false",
+    "65010.uid.ns.lsof-rs.test": b"hsjohn:*:65010:65010:Hesiod:/:/bin/false",
+}
 
 
 # What the names modes' name server says of fixture NS's remote addresses
@@ -1591,8 +1621,9 @@ class NamesResolver:
     @staticmethod
     def answer(query: bytes) -> bytes | None:
         """What the server sends for `query`: [`NAMES_PTR`]'s answer for a
-        PTR query of one of its names, as a response with recursion
-        available, and the refusal for anything else."""
+        PTR query of one of its names, and [`NAMES_TXT`]'s for a TXT query
+        of one of its, as a response with recursion available, and the
+        refusal for anything else."""
         labels, at = [], 12
         while at < len(query) and query[at]:
             n = query[at]
@@ -1600,6 +1631,12 @@ class NamesResolver:
             at += 1 + n
         end = at + 5
         name = b".".join(labels).decode("latin-1").lower()
+        if len(query) >= end and query[end - 4:end] == b"\0\x10\0\x01" and name in NAMES_TXT:
+            text = NAMES_TXT[name]
+            rdata = bytes([len(text)]) + text
+            head = query[:2] + bytes([0x81 | (query[2] & 0x01), 0x80])
+            record = b"\xc0\x0c\0\x10\0\x01\0\0\0\x3c" + len(rdata).to_bytes(2, "big") + rdata
+            return head + query[4:6] + b"\0\x01\0\0\0\0" + query[12:end] + record
         if len(query) < end or query[end - 4:end] != b"\0\x0c\0\x01" or name not in NAMES_PTR:
             return NamesResolver.refusal(query)
         what = NAMES_PTR[name]
@@ -4715,6 +4752,16 @@ def self_test() -> int:
               and answered[2:4] == b"\x81\x80" and answered[6:8] == b"\0\x01"
               and nx is not None and nx[3] == 0x83 and silent is None
               and NamesResolver.answer(query) == refused)
+        txt = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+               b"\x0565010\x03uid\x02ns\x07lsof-rs\x04test\x00\x00\x10\x00\x01")
+        hs = NamesResolver.answer(txt)
+        check("...and the Hesiod account's TXT names, and no other TXT query",
+              hs is not None and hs.endswith(bytes([len(NAMES_TXT["65010.uid.ns.lsof-rs.test"])])
+                                           + NAMES_TXT["65010.uid.ns.lsof-rs.test"])
+              and hs[2:4] == b"\x81\x80" and hs[6:8] == b"\0\x01"
+              and NamesResolver.answer(txt[:-1] + b"\x04") == NamesResolver.refusal(txt[:-1] + b"\x04")
+              and NamesResolver.answer(txt.replace(b"65010", b"65011")) == NamesResolver.refusal(txt.replace(b"65010", b"65011"))
+              and open(os.path.join(td, "names", "hesiod.conf.hesiod")).read() == "lhs=.ns\nrhs=.lsof-rs.test\n")
         write_names_services(td, "4001", "4002")
         services = open(os.path.join(td, "names", "services")).read()
         check("...and a services file of fixture B's two ports",

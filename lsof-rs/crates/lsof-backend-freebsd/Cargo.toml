@@ -17,6 +17,12 @@ publish = false
 [dependencies]
 lsof-core = { path = "../lsof-core" }
 
+# getpwnam_r(3) and getpwuid_r(3), for `-u name` and USER (DIVERGENCES 39):
+# the workspace's own crate that holds the two C calls. Linux too, for the
+# pure modules' tests, where it is not asked.
+[target.'cfg(any(target_os = "freebsd", target_os = "linux"))'.dependencies]
+lsof-getpw = { path = "../lsof-getpw" }
+
 [features]
 # Exposes the pure record parsers through `fuzz_api` for the cargo-fuzz target
 # in ../../fuzz. Never enabled by the CLI (porting-kit PLAYBOOK Phase 4 gate 3).

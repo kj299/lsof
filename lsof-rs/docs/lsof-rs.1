@@ -127,6 +127,24 @@ glibc's open waits until the holder lets go or the kernel breaks the lease
 .RI ( /proc/sys/fs/lease-break-time ,
 45 seconds by default).
 .TP
+.B Accounts where glibc would crash
+A login is the C library's, as for the C, but where
+.I /etc/nsswitch.conf
+has a shape that makes glibc 2.39 misbehave: a
+.B passwd:
+line with no source (glibc reads past a heap block), or
+.B compat
+in both
+.B passwd:
+and
+.B passwd_compat:
+(glibc recurses until its stack is gone, and the C dies).
+There, and for an entry that would not fit in 16 MiB,
+.B lsof
+reads
+.I /etc/passwd
+itself.
+.TP
 .B Version
 .B \-v
 prints one line, the lsof-rs version, where the C prints a report of its

@@ -105,6 +105,11 @@ name = "bare-path-read-as-text"
 rule = "a bare path argument is its bytes (92)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
+# Re-anchored 2026-11-20 (DIVERGENCES 39): login-bytes-dropped mutates
+# `Process::set_login` in lsof-core, where the owner's login is now given
+# as the listing asks for it (the backend no longer names it as it reads
+# the process).
+
 # Re-anchored 2026-11-19 (DIVERGENCES 12): a bare argument now ends the
 # options, and it and every word after are taken as names together.
 old = '''            if let Some(start) = first_name {
@@ -579,9 +584,9 @@ new = '''            (b'\\', Some(b'n')) => {
 name = "login-bytes-dropped"
 rule = "a login that is not UTF-8 is kept as bytes (70)"
 [[mutant.edit]]
-file = "crates/lsof-backend-linux/src/process.rs"
-old = '''    let raw_login = login.filter(|l| std::str::from_utf8(l).is_err());'''
-new = '''    let raw_login: Option<Box<[u8]>> = login.filter(|_| false);'''
+file = "crates/lsof-core/src/model.rs"
+old = '''            self.raw_names.get_or_insert_with(Box::default).login = Some(login);'''
+new = '''            drop(login);'''
 
 [[mutant]]
 name = "uid-cr-not-blank"

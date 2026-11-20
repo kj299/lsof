@@ -105,6 +105,7 @@ name = "lsof-backend-freebsd"
 version = "2.0.0"
 dependencies = [
  "lsof-core",
+ "lsof-getpw",
 ]
 
 [[package]]
@@ -112,6 +113,7 @@ name = "lsof-backend-linux"
 version = "2.0.0"
 dependencies = [
  "lsof-core",
+ "lsof-getpw",
  "rustix",
 ]
 
@@ -140,6 +142,13 @@ version = "2.0.0"
 dependencies = [
  "regex",
  "regex-syntax",
+]
+
+[[package]]
+name = "lsof-getpw"
+version = "2.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
