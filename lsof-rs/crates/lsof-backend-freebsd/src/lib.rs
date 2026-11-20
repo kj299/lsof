@@ -59,6 +59,8 @@ mod mounts;
 mod names;
 #[cfg(any(target_os = "freebsd", test, feature = "fuzzing"))]
 mod rows;
+#[cfg(any(target_os = "freebsd", all(unix, test)))]
+pub mod safefs;
 #[cfg(any(target_os = "freebsd", all(unix, any(test, feature = "fuzzing"))))]
 mod users;
 
@@ -76,8 +78,8 @@ pub use backend::FreeBsdBackend;
 #[doc(hidden)]
 pub mod fuzz_api {
     pub use crate::kinfo::{
-        files, inet_addr, locks, pcblist, procs, statfs_list, unix_path, xfiles, KFile, Pcb,
+        files, inet_addr, locks, pcblist, procs, statfs_list, unix_path, xfiles, KFile, Pcb, XFile,
     };
     pub use crate::layout::{PROC_AMD64, PROC_I386, XINPCB, XTCPCB, XUNPCB};
-    pub use crate::rows::{numbered, special, Env, Opts, Vfs};
+    pub use crate::rows::{file_struct, numbered, special, Env, Opts, Vfs};
 }

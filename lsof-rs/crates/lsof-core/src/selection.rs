@@ -1112,6 +1112,11 @@ pub struct Selection {
     /// extended TCP stats (`GetPerTcpConnectionEStats` on Windows), which
     /// require elevation. See `docs/feature-parity-plan.md` Phase 5B.
     pub tcp_info_opt: Option<TcpInfoFlags>,
+    /// Whether the output shows any of the file structure's values: `+f
+    /// c`/`f`/`g`/`n`, a `-F` with `C`, `F`, `G` or `N` (the default set has
+    /// them), or JSON's flags. A backend that has to read more to give them
+    /// reads it only then: FreeBSD's `kern.file` (DIVERGENCES 142).
+    pub file_struct: bool,
     /// `-U`: list UNIX-domain (AF_UNIX) sockets. On Windows these surface only
     /// via the ETW AFD path, so `-U` implies the (Administrator-only) ETW
     /// capture and restricts socket output to the AF_UNIX family.
@@ -3361,6 +3366,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![
                 row("/usr/bin/python3", 65024), // on the named filesystem
                 row("/dev/null", 6),            // NOT on it — a different mount
@@ -3417,6 +3423,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![
                 // The file itself, open under a DIFFERENT name (a hard link).
                 row("C:\\other\\name.txt", "C:", "42"),
@@ -3472,6 +3479,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files,
         }
     }
@@ -3767,6 +3775,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![
                 // The same path, another file: a tmpfs over /d/mnt elsewhere.
                 row("/d/mnt", "1", None),
@@ -3847,6 +3856,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files,
         };
         let item = |id: Option<(u64, u64)>, fs: Option<u64>, name: &str| PathItem {
@@ -4196,6 +4206,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![file(name)],
         };
         assert_eq!(sel.locate(&[p("c:\\dir\\a.txt")]).paths, [true, false]);
@@ -4378,6 +4389,7 @@ mod tests {
             endpoint_peer: true,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![pipe.clone(), reg.clone()],
         };
         // 8888 matches no selector and is no peer: dropped as usual.
@@ -4393,6 +4405,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![pipe, reg],
         };
         let sel = Selection {
@@ -4833,6 +4846,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
         }
     }
 

@@ -659,6 +659,7 @@ pub fn parse_queues(s: &str) -> Option<TcpExtInfo> {
         recv_window: None,
         send_queue: u64::from_str_radix(tx, 16).ok(),
         recv_queue: u64::from_str_radix(rx, 16).ok(),
+        bsd: None,
     })
 }
 

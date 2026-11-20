@@ -548,6 +548,7 @@ fn header(p: &Process) -> Process {
         // The command's own bytes, where it is not UTF-8: a row `+E` adds
         // prints them as the process's own rows do (DIVERGENCES 93).
         raw_names: p.raw_names.clone(),
+        file_structs: p.file_structs.clone(),
     }
 }
 
@@ -612,6 +613,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
         }
     }
 

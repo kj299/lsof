@@ -10,7 +10,7 @@ use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{FdType, LockKind, Process};
 use lsof_core::selection::Selection;
 
-use crate::kinfo::{self, KFile, Pcb};
+use crate::kinfo::{self, KFile, Pcb, XFile};
 use crate::layout::{self, kf, sock};
 use crate::rows::{self, Env, Opts, Vfs};
 use crate::{devnames, mounts, sys, users};
@@ -77,9 +77,9 @@ struct Live<'a> {
     vfs: RefCell<Vec<Vfs>>,
     locks: OnceCell<HashMap<(i32, u64, u64), LockKind>>,
     pcbs: OnceCell<Pcbs>,
-    devs: OnceCell<HashMap<u64, String>>,
+    devs: OnceCell<devnames::DevTable>,
     dev_dev: OnceCell<Option<u64>>,
-    xfiles: OnceCell<HashMap<(i32, i32), u64>>,
+    xfiles: OnceCell<HashMap<(i32, i32), XFile>>,
 }
 
 impl<'a> Live<'a> {
@@ -93,6 +93,23 @@ impl<'a> Live<'a> {
             dev_dev: OnceCell::new(),
             xfiles: OnceCell::new(),
         }
+    }
+
+    /// `readdev()`: the table of `/dev`, made the first time a row needs it,
+    /// with its warnings. With no character device in it the C says so and
+    /// ends the run (`lib/rdev.c:380-382`), and so does this.
+    fn devs(&self) -> &devnames::DevTable {
+        self.devs.get_or_init(|| {
+            let t = devnames::scan(Path::new("/dev"));
+            for w in &t.warnings {
+                warn(self.sel, w);
+            }
+            if t.is_empty() {
+                lsof_core::safefs::to_stderr("lsof: no character devices found");
+                lsof_core::safefs::exit(1);
+            }
+            t
+        })
     }
 
     fn pcbs(&self) -> &Pcbs {
@@ -193,11 +210,12 @@ impl Env for Live<'_> {
         table.get(&pcb).copied()
     }
 
-    fn dev_name(&self, rdev: u64) -> Option<String> {
-        self.devs
-            .get_or_init(|| devnames::scan(Path::new("/dev")))
-            .get(&rdev)
-            .cloned()
+    fn dev_name(&self, rdev: u64, inode: Option<u64>) -> Option<String> {
+        self.devs().name(rdev, inode)
+    }
+
+    fn dev_inode(&self, rdev: u64) -> Option<u64> {
+        self.devs().inode(rdev)
     }
 
     fn dev_dev(&self) -> Option<u64> {
@@ -207,7 +225,7 @@ impl Env for Live<'_> {
             .get_or_init(|| std::fs::metadata("/dev").ok().map(|m| m.dev()))
     }
 
-    fn file_addr(&self, pid: i32, fd: i32) -> Option<u64> {
+    fn xfile(&self, pid: i32, fd: i32) -> Option<XFile> {
         self.xfiles
             .get_or_init(|| {
                 sys::sysctl_mib(&[layout::CTL_KERN, layout::KERN_FILE])
@@ -225,15 +243,21 @@ impl Env for Live<'_> {
     }
 }
 
-/// The rows of one process, in the kernel's order (`process_file_descriptors()`).
+/// A process's [`lsof_core::Process::file_structs`].
+type FileStructs = Option<Box<[(u64, lsof_core::FileStruct)]>>;
+
+/// The rows of one process, in the kernel's order (`process_file_descriptors()`),
+/// and, where `+f` asks for it, each numbered row's file structure, by
+/// descriptor number.
 fn rows_of(
     pid: i32,
     files: &[KFile],
     env: &Live<'_>,
     sockets_only: bool,
     opts: Opts,
-) -> Vec<lsof_core::model::OpenFile> {
+) -> (Vec<lsof_core::model::OpenFile>, FileStructs) {
     let mut out = Vec::with_capacity(files.len());
+    let mut structs = Vec::new();
     for k in files {
         let special = match k.fd() {
             kf::FD_CWD => Some(FdType::Cwd),
@@ -261,12 +285,22 @@ fn rows_of(
                 if sockets_only && k.kind() != kf::TYPE_SOCKET {
                     continue;
                 }
-                out.push(rows::numbered(k, pid, env, opts));
+                let row = rows::numbered(k, pid, env, opts);
+                if opts.file_struct {
+                    if let lsof_core::model::FdType::Handle(n) = row.fd {
+                        structs.push((n, rows::file_struct(k, env.xfile(pid, k.fd()))));
+                    }
+                }
+                out.push(row);
             }
         }
     }
     out.shrink_to_fit();
-    out
+    // Sorted and one per descriptor, for `Process::file_struct`'s search.
+    structs.sort_by_key(|(n, _)| *n);
+    structs.dedup_by_key(|(n, _)| *n);
+    let structs = opts.file_struct.then(|| structs.into_boxed_slice());
+    (out, structs)
 }
 
 impl Backend for FreeBsdBackend {
@@ -364,6 +398,7 @@ impl Backend for FreeBsdBackend {
                     endpoint_peer: false,
                     unlisted: false,
                     raw_names: None,
+                    file_structs: None,
                 })
             })
             .collect();
@@ -394,7 +429,7 @@ impl Backend for FreeBsdBackend {
         let env = Live::new(sel);
         let opts = Opts {
             inet: sel.inet.enabled,
-            queues: sel.tcp_info().queue,
+            file_struct: sel.file_struct,
         };
         let sockets_only = sel.socket_rows_only();
         for p in procs.iter_mut() {
@@ -407,9 +442,9 @@ impl Backend for FreeBsdBackend {
             // A process whose descriptors cannot be read has no rows, and so
             // no line, as in the C (`kinfo_getfile()` returns NULL, and
             // nothing is linked): there is no `NOFD` row on FreeBSD.
-            p.files = match filedesc(pid) {
+            (p.files, p.file_structs) = match filedesc(pid) {
                 Ok(files) => rows_of(pid, &files, &env, sockets_only, opts),
-                Err(_) => Vec::new(),
+                Err(_) => (Vec::new(), None),
             };
             p.unlisted = p.files.is_empty();
         }

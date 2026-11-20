@@ -69,7 +69,7 @@ mismatch rather than misread it.
 |---|---|---|
 | **F0** | processes, every `kinfo_file` kind the C decodes (vnode, socket, pipe, PTS, kqueue, eventfd, SHM, procdesc), `cwd`/`rtd`/`jld`/`txt`/`ctty`, locks, TCP state, AF_UNIX naming, nullfs, procfs types, device names from `/dev`, the mount table, `-u` names | **done, unrun** |
 | **F1** | the first run on FreeBSD, and triage of what it shows into DIVERGENCES; `lsof_rs_task`'s side-by-side made the FreeBSD differential; `-K`; the coverage gate run with `--platform freebsd` | needs a FreeBSD runner |
-| **F2** | `+f c/f/g/G/n` from `kern.file`; `-T f` socket options and TCP flags; `statfs` and mount-point `stat` bounded by `-S` (no helper process yet on FreeBSD) | open: DIVERGENCES 142–144, 147 |
+| **F2** | `+f c/f/g/G/n` from `kern.file`; `-T f` socket options and TCP flags; the mount point's `stat` (and every bounded call) through a helper under `-S`; KQUEUE's DEVICE from `kern.file`; `readdev()`'s device table | **done from source, unrun** (2026-11-20): DIVERGENCES 142–147; `statfs` of a vnode's path stays unbounded, as the C's (143) |
 
 Estimate against actual: the Linux scope note estimated about 2,200 lines for
 L0–L1. F0 here is about 3,100 lines, of which about 830 are tests, against

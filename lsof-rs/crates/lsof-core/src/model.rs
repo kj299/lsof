@@ -545,6 +545,57 @@ pub struct TcpExtInfo {
     pub recv_queue: Option<u64>,
     /// Bytes queued to send (`-Tq`; lsof's `QS=`).
     pub send_queue: Option<u64>,
+    /// What FreeBSD's pcblists say of the socket, for `-T f` and for where
+    /// the C prints its TCP/TPI facts at all (DIVERGENCES 147). `None` on
+    /// every other platform.
+    pub bsd: Option<BsdSocket>,
+}
+
+/// A FreeBSD socket's `-T` record, as the C's `process_socket()` fills
+/// `Lf->lts` from the `kinfo_file` and the socket's `xsocket` and `xtcpcb`
+/// (`dsock.c:404-430`, `:558-572`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BsdSocket {
+    /// `Lf->lts.type >= 0`: a TCP socket whose `xtcpcb` was found. Only such
+    /// a row has its facts printed in `-F` and JSON, and in the table unless
+    /// `-T q` (whose queues every FreeBSD socket has) is asked for.
+    pub record: bool,
+    /// The socket's `xsocket`, where its pcblist entry was found.
+    pub xsocket: Option<BsdXSocket>,
+    /// `kf_sock_rcv_sb_state` and `kf_sock_snd_sb_state`.
+    pub sbs_rcv: u16,
+    pub sbs_snd: u16,
+    /// A TCP socket's `t_flags` and `t_maxseg`, where its `xtcpcb` was found.
+    pub tcp: Option<(u32, u32)>,
+}
+
+/// What `-T f` prints of a FreeBSD `struct xsocket` (`sys/socketvar.h`):
+/// the fields as the kernel holds them, signed where it holds them signed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BsdXSocket {
+    pub options: i16,
+    pub linger: i16,
+    pub state: i16,
+    pub qlen: u32,
+    pub incqlen: u32,
+    pub qlimit: u32,
+    pub rcv_mbmax: u32,
+    pub snd_mbmax: u32,
+}
+
+/// A FreeBSD numbered descriptor's `struct file` values, which `+f c`, `+f f`
+/// and `+f n` show (DIVERGENCES 142): the C's `Lf->fct`, `Lf->fsa` and
+/// `Lf->fna`, each `None` where its `Lf->fsv` bit is not set. Kept per
+/// process ([`Process::file_structs`]), not per row: only FreeBSD has them,
+/// and a row on every host would pay for them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileStruct {
+    /// `kf_ref_count` (FCT).
+    pub count: Option<i64>,
+    /// `xf_file` (FILE-ADDR), as wide as the C's `KA_T`.
+    pub addr: Option<u64>,
+    /// `xf_data`, or a vnode's `xf_vnode` (NODE-ID).
+    pub node: Option<u64>,
 }
 
 impl SocketInfo {
@@ -984,6 +1035,10 @@ pub struct Process {
     /// ([`RawNames`]); `None`, the common case, where both are UTF-8 (or the
     /// platform's names are text).
     pub raw_names: Option<Box<RawNames>>,
+    /// FreeBSD: each numbered descriptor's [`FileStruct`], by descriptor
+    /// number, sorted; `None` where none was asked for (no `+f c`/`f`/`n`)
+    /// and on every other platform.
+    pub file_structs: Option<Box<[(u64, FileStruct)]>>,
 }
 
 /// A command or login name that is not UTF-8, kept as the bytes it is, for
@@ -1001,6 +1056,19 @@ pub struct RawNames {
 }
 
 impl Process {
+    /// The [`FileStruct`] of `f`, one of this process's rows: a numbered
+    /// descriptor's, where the backend recorded one.
+    pub fn file_struct(&self, f: &OpenFile) -> Option<&FileStruct> {
+        let FdType::Handle(n) = f.fd else {
+            return None;
+        };
+        let all = self.file_structs.as_deref()?;
+        all.binary_search_by_key(&n, |(fd, _)| *fd)
+            .ok()
+            .and_then(|i| all.get(i))
+            .map(|(_, s)| s)
+    }
+
     /// The command as bytes: [`RawNames::command`], or [`Process::command`].
     pub fn command_bytes(&self) -> &[u8] {
         self.raw_names

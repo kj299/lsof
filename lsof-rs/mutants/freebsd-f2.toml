@@ -1,0 +1,404 @@
+# Mutants for DIVERGENCES 142-147 (FreeBSD F2, 2026-11-20): +f c/f/g/n,
+# the bounded calls' helper, KQUEUE's DEVICE, the /dev table, -T f. Written
+# from the C's FreeBSD dialect and FreeBSD 14.3/15.0's headers; no FreeBSD
+# host runs them, so every gate is a unit suite that runs on Linux: the
+# FreeBSD backend's pure modules (cfg(test) on any Unix) and lsof-core's
+# renderers. The parser's c/f/n letters are cfg(target_os = "freebsd") and
+# have no mutant here (no Linux test can see them; they are type-checked by
+# the freebsd-cross job). One per rule, bound and branch the change added.
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/freebsd-f2.toml
+#
+# Run 2026-11-20 with --first-kill: 47 mutants, 46 killed (unit-bsd 28,
+# unit-core 18); name-length-unbounded survived (no case had a length just
+# past MAX_NAME), a case was added, and it was re-run alone: killed.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "-p", "lsof-backend-freebsd", "-p", "lsof-core"]]
+
+[[run.gate]]
+name = "unit-bsd"
+cmd = ["cargo", "test", "-p", "lsof-backend-freebsd", "--lib"]
+timeout = 900
+
+[[run.gate]]
+name = "unit-core"
+cmd = ["cargo", "test", "-p", "lsof-core", "--lib", "--test", "golden"]
+timeout = 900
+
+[[mutant]]
+name = "so-listening-never"
+rule = "a listening socket shows its queue lengths, any other its buffers (DIVERGENCES 147)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "let listening = options & SO_ACCEPTCONN != 0;"
+new = "let listening = false;"
+
+[[mutant]]
+name = "so-linger-only-positive"
+rule = "LINGER=%d of so_linger whenever it is not 0, a negative one too"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "if x.linger != 0 {"
+new = "if x.linger > 0 {"
+
+[[mutant]]
+name = "so-options-not-sign-extended"
+rule = "so_options is an int16_t the C widens with its sign"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "let options = i32::from(x.options) as u32;"
+new = "let options = u32::from(x.options as u16);"
+
+[[mutant]]
+name = "ss-printed-for-buffer-state"
+rule = "SS= only where so_state is not 0"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "if state != 0 {"
+new = "if state != 0 || b.sbs_rcv != 0 {"
+
+[[mutant]]
+name = "unknown-without-0x"
+rule = "UNKNOWN=%#x"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "self.item(&format!(\"UNKNOWN={left:#x}\"));"
+new = "self.item(&format!(\"UNKNOWN={left:x}\"));"
+
+[[mutant]]
+name = "cantrcvmore-from-state"
+rule = "CANTRCVMORE is the receive buffer's state (HASSBSTATE)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "(From::Rcv, 0x20, \"CANTRCVMORE\"),"
+new = "(From::State, 0x20, \"CANTRCVMORE\"),"
+
+[[mutant]]
+name = "mss-is-flags"
+rule = "MSS=t_maxseg"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "g.item(&format!(\"MSS={maxseg}\"));"
+new = "g.item(&format!(\"MSS={flags}\"));"
+
+[[mutant]]
+name = "isconfirming-dropped"
+rule = "SS_ISCONFIRMING, which the 14 headers define"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/sockopt.rs"
+old = "    (From::State, 0x400, \"ISCONFIRMING\"),\n"
+new = ""
+
+[[mutant]]
+name = "bsd-gate-always"
+rule = "a FreeBSD row's TCP/TPI facts only for the C's record, or with -T q"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = "let shown = b.record || show.is_some_and(|s| s.queue && queues);"
+new = "let shown = true;"
+
+[[mutant]]
+name = "bsd-gate-without-q"
+rule = "without -T q a non-record row shows nothing"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/mod.rs"
+old = "let shown = b.record || show.is_some_and(|s| s.queue && queues);"
+new = "let shown = b.record || show.is_some_and(|_| queues);"
+
+[[mutant]]
+name = "fields-bsd-gate-off"
+rule = "-F prints T fields for the C's record alone on FreeBSD"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = "let sock = if bsd {"
+new = "let sock = if false {"
+
+[[mutant]]
+name = "fields-so-not-printed"
+rule = "-F prints TSO=, TSS=, TTF= under -T f"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = "if tcp_show.options {\n                            if let Some(b) = &tcp.bsd {"
+new = "if false {\n                            if let Some(b) = &tcp.bsd {"
+
+[[mutant]]
+name = "table-addr-by-count"
+rule = "FILE-ADDR is +f f's column (DIVERGENCES 142)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = "if file_struct.addr {\n        cols.push(Col::right(\"FILE-ADDR\"));"
+new = "if file_struct.count {\n        cols.push(Col::right(\"FILE-ADDR\"));"
+
+[[mutant]]
+name = "table-node-cell-is-addr"
+rule = "NODE-ID is the node address"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = "                fs.and_then(|s| s.node)\n                    .map(fflags::kptr)"
+new = "                fs.and_then(|s| s.addr)\n                    .map(fflags::kptr)"
+
+[[mutant]]
+name = "fields-f-not-gated"
+rule = "-F's F only where Fsv & FSV_FA"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = "if want('F') && fsv.addr {"
+new = "if want('F') {"
+
+[[mutant]]
+name = "fields-n-before-g"
+rule = "-F's N after G"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = "if want('N') && fsv.node {"
+new = "if want('N') && fsv.node && false {"
+
+[[mutant]]
+name = "freebsd-nb-is-nd"
+rule = "FreeBSD's Pff_tab gives FNONBLOCK's bit to NB, first"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fflags.rs"
+old = "    (0x4, \"NB\"),\n"
+new = ""
+
+[[mutant]]
+name = "file-struct-by-next-fd"
+rule = "a row's file structure is its own descriptor's"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "all.binary_search_by_key(&n, |(fd, _)| *fd)"
+new = "all.binary_search_by_key(&n.wrapping_add(1), |(fd, _)| *fd)"
+
+[[mutant]]
+name = "kf-nonblock-is-append"
+rule = "kf_flags_to_fflags(): KF_FLAG_NONBLOCK is FNONBLOCK"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/layout.rs"
+old = "(0x20, 0x4),       // KF_FLAG_NONBLOCK -> FNONBLOCK"
+new = "(0x20, 0x8),       // KF_FLAG_NONBLOCK -> FNONBLOCK"
+
+[[mutant]]
+name = "node-vnode-swapped"
+rule = "NODE-ID is xf_vnode for a vnode, xf_data else (dnode.c:338)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "node: xfile.map(|x| ka(if vnode { x.vnode } else { x.data })),"
+new = "node: xfile.map(|x| ka(if vnode { x.data } else { x.vnode })),"
+
+[[mutant]]
+name = "fifo-not-vnode"
+rule = "a FIFO goes through process_vnode too"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let vnode = matches!(k.kind(), kf::TYPE_VNODE | kf::TYPE_FIFO);"
+new = "let vnode = matches!(k.kind(), kf::TYPE_VNODE);"
+
+[[mutant]]
+name = "flags-always"
+rule = "the flags are read only when asked for"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "    if opts.file_struct {\n        f.file_flags"
+new = "    if true {\n        f.file_flags"
+
+[[mutant]]
+name = "flags-never-xf-flag"
+rule = "FILE-FLAG is xf_flag where kern.file lists the descriptor"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "f.file_flags = Some(xfile().map_or_else(|| kf_flags_to_fflags(k.flags()), |x| x.flag));"
+new = "f.file_flags = Some(kf_flags_to_fflags(k.flags()));"
+
+[[mutant]]
+name = "kqueue-device-is-file"
+rule = "KQUEUE DEVICE is xf_data (DIVERGENCES 145)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "f.device = Some(kptr(xfile().map_or(0, |x| x.data)));"
+new = "f.device = Some(kptr(xfile().map_or(0, |x| x.file)));"
+
+[[mutant]]
+name = "kqueue-device-record"
+rule = "KQUEUE DEVICE is not the record's kf_kqueue_addr: 0 where kern.file lists none"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "f.device = Some(kptr(xfile().map_or(0, |x| x.data)));"
+new = "f.device = Some(kptr(xfile().map_or(k.offset() as u64 | 0x77, |x| x.data)));"
+
+[[mutant]]
+name = "record-any-protocol"
+rule = "the C's TCP/TPI record is TCP's alone"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        && k.sock_protocol() == IPPROTO_TCP\n"
+new = ""
+
+[[mutant]]
+name = "tcp-flags-for-any"
+rule = "t_flags only where the socket is TCP"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "tcp: pcb.and_then(|p| p.tcp).filter(|_| tcp_found),"
+new = "tcp: pcb.and_then(|p| p.tcp),"
+
+[[mutant]]
+name = "xsocket-short-read"
+rule = "an xsocket the record cannot hold whole is none of it"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/kinfo.rs"
+old = "    if at.checked_add(xso::SIZE).is_none_or(|end| end > rec.len()) {\n        return BsdXSocket::default();\n    }\n"
+new = ""
+
+[[mutant]]
+name = "t-flags-offset"
+rule = "t_flags at 572 (measured)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/layout.rs"
+old = "    t_flags: Some(572),"
+new = "    t_flags: Some(568),"
+
+[[mutant]]
+name = "xf-vnode-is-data"
+rule = "xf_vnode at 64"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/kinfo.rs"
+old = "vnode: u64_at(rec, xf::VNODE).unwrap_or(0),"
+new = "vnode: u64_at(rec, xf::DATA).unwrap_or(0),"
+
+[[mutant]]
+name = "xfile-last-kept"
+rule = "of two xfiles for one descriptor the first is the one"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/kinfo.rs"
+old = "out.entry((pid, fd)).or_insert(XFile {"
+new = "out.insert((pid, fd), XFile {"
+
+[[mutant]]
+name = "dedup-by-device"
+rule = "rmdupdev(): one per device AND inode (DIVERGENCES 146)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "devs.dedup_by(|b, a| a.rdev == b.rdev && a.inode == b.inode);"
+new = "devs.dedup_by(|b, a| a.rdev == b.rdev);"
+
+[[mutant]]
+name = "sort-without-name"
+rule = "compdev() sorts by name last, so strcmp's first is kept"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "(a.rdev, a.inode, &a.name[..]).cmp(&(b.rdev, b.inode, &b.name[..]))"
+new = "(a.rdev, a.inode).cmp(&(b.rdev, b.inode))"
+
+[[mutant]]
+name = "search-midpoint"
+rule = "lkupdev()'s midpoint (low + hi) / 2"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "let mid = low + (hi - 1 - low) / 2;"
+new = "let mid = low + (hi - low) / 2;"
+
+[[mutant]]
+name = "block-devices-kept"
+rule = "readdev() keeps character specials alone (no HASBLKDEV)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "} else if ft.is_char_device() && devs.len() < MAX_DEVS {"
+new = "} else if (ft.is_char_device() || ft.is_block_device()) && devs.len() < MAX_DEVS {"
+
+[[mutant]]
+name = "find-ch-ino-anywhere"
+rule = "find_ch_ino() only on /dev's file system"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if inode.is_none() && vtype == kf::VTYPE_VCHR && dev.is_some() && dev == env.dev_dev() {"
+new = "if inode.is_none() && vtype == kf::VTYPE_VCHR && dev.is_some() {"
+
+[[mutant]]
+name = "devname-anywhere"
+rule = "printdevname() names a device only on /dev's file system, else (like ...)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "    if dev.is_some() && dev == env.dev_dev() {\n        if let Some(n) = env.dev_name(rdev, inode) {"
+new = "    if dev.is_some() {\n        if let Some(n) = env.dev_name(rdev, inode) {"
+
+[[mutant]]
+name = "like-char-word"
+rule = "(like character special NAME)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let what = if block { \"block\" } else { \"character\" };"
+new = "let what = if block { \"block\" } else { \"char\" };"
+
+[[mutant]]
+name = "no-fsdir-fallback"
+rule = "a row with no NAME prints its file system's dir (fsdev)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "Some(v) => format!(\"{} ({})\", lossy(&v.dir), lossy(&v.fsname)),"
+new = "Some(_) => String::new(),"
+
+[[mutant]]
+name = "devname-replaces-path"
+rule = "a device with a path is named by its path, as any vnode"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        None if !k.path().is_empty() => {"
+new = "        None if !k.path().is_empty() && !device_node => {"
+
+[[mutant]]
+name = "timeout-is-lost"
+rule = "a call past -S is ETIMEDOUT (DIVERGENCES 144)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "Err(RecvTimeoutError::Timeout) => break Err(timed_out()),"
+new = "Err(RecvTimeoutError::Timeout) => break Err(lost_child()),"
+
+[[mutant]]
+name = "helper-kept-after-timeout"
+rule = "a helper that timed out is killed and replaced"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        if outcome.is_err() {\n            // Timed out or lost"
+new = "        if false {\n            // Timed out or lost"
+
+[[mutant]]
+name = "hello-first-line-only"
+rule = "what comes before HELLO is read past"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    while read <= BEFORE_HELLO {"
+new = "    while read < 1 {"
+
+[[mutant]]
+name = "listing-count-unbounded"
+rule = "a listing's count is bounded before it is read"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "            if count > READ_DIR_MAX_NAMES {\n                return Err(bad());"
+new = "            if count > usize::MAX - 1 {\n                return Err(bad());"
+
+[[mutant]]
+name = "name-length-unbounded"
+rule = "a name's length is bounded before anything is allocated"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        if len > MAX_NAME {\n            return Err(bad());"
+new = "        if len > MAX_NAME * 4096 {\n            return Err(bad());"
+
+[[mutant]]
+name = "errno-zero-taken"
+rule = "an errno of 0 is no answer"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "n if n > 0 => Ok(Err(io::Error::from_raw_os_error(n))),"
+new = "n if n >= 0 => Ok(Err(io::Error::from_raw_os_error(n))),"
+
+[[mutant]]
+name = "request-unbounded"
+rule = "a path longer than MAX_NAME is no request"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    if p.len() > MAX_NAME {\n        return Err(name_too_long());"
+new = "    if p.len() > MAX_NAME + 1 {\n        return Err(name_too_long());"

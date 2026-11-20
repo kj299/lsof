@@ -124,6 +124,8 @@ pub mod kf {
     pub const PIPE_SIZE: usize = 332;
     pub const PTS_DEV: usize = 312;
     pub const PROC_PID: usize = 304;
+    /// `kf_kqueue_addr`, which the C does not print (DIVERGENCES 145).
+    #[cfg(test)]
     pub const KQ_ADDR: usize = 32;
     pub const KQ_COUNT: usize = 40;
     pub const KQ_STATE: usize = 44;
@@ -180,6 +182,49 @@ pub mod sock {
     pub const SUN_PATH_LEN: usize = 104;
 }
 
+/// `kf_flags`' bits (`KF_FLAG_*`, `sys/user.h`) and the `struct file` flag
+/// each stands for (`sys/fcntl.h`), in the order of the C's
+/// `kf_flags_to_fflags()` table (`dproc.c:137-158`): FILE-FLAG's value for a
+/// descriptor `kern.file` does not list. Measured, with the other numbers
+/// here, by preprocessing the dialect's headers against FreeBSD 14.3's and
+/// 15.0's (amd64 and i386 agree).
+pub const KF_TO_FFLAGS: &[(i32, u32)] = &[
+    (0x4, 0x8),        // KF_FLAG_APPEND -> FAPPEND
+    (0x8, 0x40),       // KF_FLAG_ASYNC -> FASYNC
+    (0x10, 0x80),      // KF_FLAG_FSYNC -> FFSYNC
+    (0x80, 0x4000),    // KF_FLAG_HASLOCK -> FHASLOCK
+    (0x20, 0x4),       // KF_FLAG_NONBLOCK -> FNONBLOCK
+    (0x1, 0x1),        // KF_FLAG_READ -> FREAD
+    (0x2, 0x2),        // KF_FLAG_WRITE -> FWRITE
+    (0x800, 0x200),    // KF_FLAG_CREAT -> O_CREAT
+    (0x40, 0x10000),   // KF_FLAG_DIRECT -> O_DIRECT
+    (0x2000, 0x800),   // KF_FLAG_EXCL -> O_EXCL
+    (0x4000, 0x40000), // KF_FLAG_EXEC -> O_EXEC
+    (0x200, 0x20),     // KF_FLAG_EXLOCK -> O_EXLOCK
+    (0x400, 0x100),    // KF_FLAG_NOFOLLOW -> O_NOFOLLOW
+    (0x100, 0x10),     // KF_FLAG_SHLOCK -> O_SHLOCK
+    (0x1000, 0x400),   // KF_FLAG_TRUNC -> O_TRUNC
+];
+
+/// `struct xsocket` (`sys/socketvar.h`), 240 bytes, as each pcblist record
+/// holds it: the fields `-T f` prints, from the `xsocket`'s own start.
+pub mod xso {
+    pub const SIZE: usize = 240;
+    pub const QLEN: usize = 104;
+    pub const INCQLEN: usize = 108;
+    pub const QLIMIT: usize = 112;
+    /// `int16_t so_options`.
+    pub const OPTIONS: usize = 158;
+    /// `int16_t so_linger`.
+    pub const LINGER: usize = 160;
+    /// `int16_t so_state`.
+    pub const STATE: usize = 162;
+    /// `so_rcv.sb_mbmax`.
+    pub const RCV_MBMAX: usize = 188;
+    /// `so_snd.sb_mbmax`.
+    pub const SND_MBMAX: usize = 224;
+}
+
 /// One kind of `struct xinpgen`-framed list from a `*.pcblist` sysctl:
 /// how long each record is, and where in it the fields lsof reads are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +239,11 @@ pub struct PcbLayout {
     pub xso_so: usize,
     /// `t_state`, for TCP alone.
     pub t_state: Option<usize>,
+    /// Where the record's `struct xsocket` starts.
+    pub xsocket: usize,
+    /// `t_flags` and `t_maxseg`, for TCP alone.
+    pub t_flags: Option<usize>,
+    pub t_maxseg: Option<usize>,
 }
 
 /// `net.inet.tcp.pcblist`: `struct xtcpcb`, 744 bytes.
@@ -202,6 +252,9 @@ pub const XTCPCB: PcbLayout = PcbLayout {
     so_pcb: 32,
     xso_so: 24,
     t_state: Some(568),
+    xsocket: 16,
+    t_flags: Some(572),
+    t_maxseg: Some(624),
 };
 
 /// `net.inet.udp.pcblist`: `struct xinpcb`, 400 bytes.
@@ -210,6 +263,9 @@ pub const XINPCB: PcbLayout = PcbLayout {
     so_pcb: 24,
     xso_so: 16,
     t_state: None,
+    xsocket: 8,
+    t_flags: None,
+    t_maxseg: None,
 };
 
 /// `net.local.{stream,dgram,seqpacket}.pcblist`: `struct xunpcb`, 904 bytes.
@@ -218,6 +274,9 @@ pub const XUNPCB: PcbLayout = PcbLayout {
     so_pcb: 680,
     xso_so: 672,
     t_state: None,
+    xsocket: 664,
+    t_flags: None,
+    t_maxseg: None,
 };
 
 /// `struct kinfo_lockf` (`sys/user.h`), from `kern.lockf`: fixed-size
@@ -242,6 +301,9 @@ pub mod xf {
     pub const PID: usize = 8;
     pub const FD: usize = 16;
     pub const FILE: usize = 24;
+    pub const DATA: usize = 56;
+    pub const VNODE: usize = 64;
+    pub const FLAG: usize = 72;
 }
 
 /// `struct statfs` (`sys/mount.h`): 2344 bytes, the same on every target.

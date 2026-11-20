@@ -196,6 +196,7 @@ fn table_offset_with_dash_o() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -270,6 +271,7 @@ fn the_size_off_column_has_three_modes() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![
             file(FdType::Handle(3), FileType::Regular, Some(100), Some(42)),
             file(FdType::Cwd, FileType::Dir, Some(4096), None),
@@ -398,6 +400,7 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -460,6 +463,7 @@ fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -590,6 +594,7 @@ fn a_task_row_is_distinguishable_from_a_thread_handle() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![file(FdType::Task), file(FdType::Handle(180))],
     };
     let out = table::render(&[p], TableOpts::new(Escaper::WINDOWS));
@@ -626,6 +631,7 @@ fn table_command_width_caps() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -688,6 +694,7 @@ fn fields_skips_empty_name() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -827,6 +834,7 @@ fn windows_object_types_render() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![
             mk(0x1a4, FileType::Key, "\\REGISTRY\\MACHINE\\SOFTWARE"),
             mk(
@@ -956,6 +964,7 @@ fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -1170,6 +1179,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
             recv_window: Some(262144),
             recv_queue: Some(0),
             send_queue: Some(12),
+            bsd: None,
         }),
     };
     vec![Process {
@@ -1201,6 +1211,7 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
     }]
 }
 
@@ -1466,6 +1477,7 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -1831,6 +1843,7 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -1936,6 +1949,7 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files: vec![OpenFile {
             rdev: None,
             fs_device: None,
@@ -2021,6 +2035,7 @@ fn python3(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
     }
 }
 
@@ -2355,6 +2370,7 @@ fn jproc(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
+        file_structs: None,
         files,
     }
 }
@@ -2374,6 +2390,7 @@ fn jsock(
             recv_window: None,
             recv_queue: Some(r),
             send_queue: Some(s),
+            bsd: None,
         }),
     }))
 }
@@ -2919,5 +2936,227 @@ fn a_row_is_written_a_c_call_at_a_time() {
             "        ", "     ", " ", "f", "\n"
         ],
         "{row:?}"
+    );
+}
+
+/// FreeBSD's file structure (DIVERGENCES 142), as `print.c` lays it out
+/// (`:782-801`, `:982-1030`, `:2280-2298`): FILE-ADDR, FCT, FILE-FLAG and
+/// NODE-ID after TYPE, each right-aligned, at least its title's width and
+/// blank where the row has none; `-F`'s `F`, `C`, `G` and `N` in that order,
+/// each only where the row has one. A row the backend recorded no structure
+/// for (a `cwd`) has none of them. From the C's source, not measured.
+#[test]
+fn freebsd_file_structure_columns_are_the_cs_by_its_source() {
+    use lsof_core::render::{FsShow, FsValues};
+    use lsof_core::{AccessMode, FdType, FileStruct, FileType};
+    let mut reg = row(
+        FdType::Handle(3),
+        AccessMode::ReadWrite,
+        None,
+        FileType::Other("VREG".into()),
+        "0,90",
+        Some(0),
+        None,
+        "1234",
+        "/tmp/x",
+    );
+    reg.file_flags = Some(0x3);
+    let cwd = row(
+        FdType::Cwd,
+        AccessMode::Unknown,
+        None,
+        FileType::Other("VDIR".into()),
+        "0,90",
+        Some(512),
+        None,
+        "2",
+        "/tmp",
+    );
+    let mut p = python3(vec![cwd, reg]);
+    p.file_structs = Some(Box::new([(
+        3,
+        FileStruct {
+            count: Some(2),
+            addr: Some(0xffff_f800_1234_5678),
+            node: Some(0xffff_f800_9abc_def0),
+        },
+    )]));
+    let all = FsValues {
+        addr: true,
+        count: true,
+        node: true,
+    };
+    let t = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            file_flags: FileFlags::Hex,
+            file_struct: all,
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert_eq!(
+        t,
+        concat!(
+            "COMMAND PID USER  FD   TYPE          FILE-ADDR FCT FILE-FLAG            NODE-ID DEVICE SIZE/OFF NODE NAME\n",
+            "python3 496 root cwd   VDIR                                                       0,90      512    2 /tmp\n",
+            "python3 496 root   3u  VREG 0xfffff80012345678   2   0x3;0x0 0xfffff8009abcdef0   0,90        0 1234 /tmp/x\n",
+        )
+    );
+    // Only the columns asked for, in their order.
+    let t = table::render(
+        std::slice::from_ref(&p),
+        TableOpts {
+            file_struct: FsValues {
+                count: true,
+                ..FsValues::default()
+            },
+            ..TableOpts::new(Escaper::UNIX)
+        },
+    );
+    assert!(
+        t.starts_with("COMMAND PID USER  FD   TYPE FCT DEVICE"),
+        "{t}"
+    );
+    let f = |show: FsShow, only: &[char]| {
+        let mut out = Vec::new();
+        fields::write_with_names(
+            &mut out,
+            std::slice::from_ref(&p),
+            (false, Some(only), TcpInfoFlags::DEFAULT, Escaper::UNIX),
+            lsof_core::render::DEFAULT_OFFSET_DIGITS,
+            show,
+            &mut |_| None,
+            &mut |_| None,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let every = FsShow {
+        flags: FileFlags::Hex,
+        values: all,
+    };
+    assert_eq!(
+        f(every, &['f', 'F', 'C', 'G', 'N']),
+        "p496\nfcwd\nf3\nF0xfffff80012345678\nC2\nG0x3;0x0\nN0xfffff8009abcdef0\n"
+    );
+    // Selected but not shown (`-F C -f c`), or shown but not selected:
+    // nothing.
+    let none = FsShow {
+        flags: FileFlags::Hex,
+        values: FsValues::default(),
+    };
+    assert_eq!(f(none, &['f', 'F', 'C', 'N']), "p496\nfcwd\nf3\n");
+    assert_eq!(f(every, &['f']), "p496\nfcwd\nf3\n");
+}
+
+/// `-T f` on FreeBSD (DIVERGENCES 147), from `ptti.c` and `print.c`: the
+/// socket's options, state and TCP flags follow its state and queues in
+/// the table's group and as `T` fields; a TCP socket with a found `xtcpcb`
+/// is the C's TCP/TPI record and the only row `-F` gives `T` fields to; the
+/// table shows any other socket's only when `-T q` is asked too (its queues
+/// are always there), and then with no state. From the source, not measured.
+#[test]
+fn freebsd_socket_options_follow_the_cs_print_tcptpi() {
+    use lsof_core::model::{BsdSocket, BsdXSocket, TcpExtInfo};
+    use lsof_core::{AccessMode, FdType, FileType, Protocol, SockState, TcpState};
+    let xso = BsdXSocket {
+        options: 0x2 | 0x4,
+        qlen: 0,
+        incqlen: 0,
+        qlimit: 128,
+        ..BsdXSocket::default()
+    };
+    let sock = |protocol, state, record, tcp| {
+        let mut f = row(
+            FdType::Handle(3),
+            AccessMode::ReadWrite,
+            None,
+            FileType::Ipv4,
+            "0xfffff80001",
+            Some(0),
+            None,
+            "TCP",
+            "*:22",
+        );
+        f.socket = Some(Box::new(lsof_core::SocketInfo {
+            bound: None,
+            protocol,
+            local: Some("0.0.0.0:22".parse().unwrap()),
+            remote: None,
+            state,
+            tcp: Some(TcpExtInfo {
+                recv_window: None,
+                recv_queue: Some(0),
+                send_queue: Some(0),
+                bsd: Some(BsdSocket {
+                    record,
+                    xsocket: Some(xso),
+                    sbs_rcv: 0,
+                    sbs_snd: 0,
+                    tcp,
+                }),
+            }),
+        }));
+        f
+    };
+    let tcp = sock(
+        Protocol::Tcp,
+        Some(SockState::Tcp(TcpState::Listen)),
+        true,
+        Some((0x4, 16344)),
+    );
+    let udp = sock(Protocol::Udp, None, false, None);
+    let p = python3(vec![tcp, udp]);
+    let show = |s: &str| {
+        let mut t = TcpInfoFlags::default();
+        for c in s.chars() {
+            match c {
+                'f' => t.options = true,
+                'q' => t.queue = true,
+                's' => t.state = true,
+                _ => unreachable!(),
+            }
+        }
+        t
+    };
+    let names = |tcp_show| {
+        table::render(
+            std::slice::from_ref(&p),
+            TableOpts {
+                tcp_show,
+                ..TableOpts::new(Escaper::UNIX)
+            },
+        )
+        .lines()
+        .skip(1)
+        .map(|l| l[l.find("*:22").unwrap()..].to_string())
+        .collect::<Vec<_>>()
+    };
+    let so = "SO=ACCEPTCONN,PQLEN=0,QLEN=0,QLIM=128,RCVBUF=0,REUSEADDR,SNDBUF=0";
+    assert_eq!(
+        names(show("sf")),
+        [
+            format!("*:22 (LISTEN {so} TF=MSS=16344,NODELAY)"),
+            "*:22".to_string()
+        ],
+        "a UDP socket is no record: no group and no separator"
+    );
+    assert_eq!(
+        names(show("fq")),
+        [
+            format!("*:22 (QR=0 QS=0 {so} TF=MSS=16344,NODELAY)"),
+            format!("*:22 (QR=0 QS=0 {so})")
+        ]
+    );
+    let fields_t = fields::render(
+        std::slice::from_ref(&p),
+        false,
+        Some(&['f', 'T']),
+        show("sqf"),
+        Escaper::UNIX,
+    );
+    assert_eq!(
+        fields_t,
+        format!("p496\nf3\nTST=LISTEN\nTQR=0\nTQS=0\nT{so}\nTTF=MSS=16344,NODELAY\nf3\n")
     );
 }
