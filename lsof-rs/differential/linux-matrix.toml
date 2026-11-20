@@ -6591,19 +6591,50 @@ with_stderr = true
 
 [[case]]
 # A match glibc's search misses: one pass of `(e)` and `\1` again is
-# sleep's `ee`. The C finds no command (exit 1); lsof-rs lists sleep.
-# Ledgered, C-DEFECT.
+# sleep's `ee`. The C says `no command found for regex` (exit 1); lsof-rs
+# finds sleep, and says nothing (exit 0). `-d 999`, which no process has,
+# keeps the pids out of the output, so that the ledger can pin the diff:
+# lsof-rs's answer is checked, not just the C's. Ledgered, C-DEFECT.
 name = "rx-back-reference-glibc-misses-a-match"
-args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/(e){0,2}\\1/"]
+args = ["-V", "-F", "pc", "-a", "-d", "999", "-p", "{A},{B},{H}", "-c", "/(e){0,2}\\1/"]
 with_stderr = true
 
 [[case]]
 # A match glibc's search finds where there is none: two groups and their
 # back-references the other way round, which glibc matches against every
-# command. None of these is a string twice over, so lsof-rs lists nothing
-# (exit 1); the C lists all three. Ledgered, C-DEFECT.
+# command. None of these is a string twice over, so lsof-rs finds none and
+# says `no command found for regex` (exit 1); the C finds all three and
+# says nothing (exit 0). Pid-free, as above, and pinned. Ledgered, C-DEFECT.
 name = "rx-back-reference-glibc-finds-a-match-that-is-not-there"
-args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{B},{H}", "-c", "/^(.*)(.*)\\2\\1$/"]
+args = ["-V", "-F", "pc", "-a", "-d", "999", "-p", "{A},{B},{H}", "-c", "/^(.*)(.*)\\2\\1$/"]
+with_stderr = true
+
+[[case]]
+# Another, with no anchor at the end, against fixture CR's `crcomm\r`: no
+# binding of the groups gives a match (Python's exhaustive `re` agrees),
+# and glibc finds one. lsof-rs `no command found for regex`, exit 1; the
+# C nothing, exit 0. Ledgered, C-DEFECT.
+name = "rx-back-reference-glibc-finds-a-match-in-crcomm"
+args = ["-V", "-F", "pc", "-a", "-d", "999", "-p", "{CR}", "-c", "/^(.+)(.*)((.*)*)\\2\\3\\1/"]
+with_stderr = true
+
+[[case]]
+# glibc's `regexec()` dies of SIGSEGV on fixture H's command for a
+# back-reference to a group inside a repetition that names it twice: the C
+# exits 139, having printed nothing. lsof-rs finds the match (no pass of
+# the group, and H's `a`) and says nothing, exit 0. Ledgered, C-DEFECT.
+name = "rx-back-reference-glibc-segfaults"
+args = ["-V", "-F", "pc", "-a", "-d", "999", "-p", "{H}", "-c", "/((a*)\\2\\2)*a/"]
+with_stderr = true
+
+[[case]]
+# Seven groups, each named again in order at the end: every group matching
+# nothing at the end of the command is a match, and glibc finds it (about
+# five seconds on H's 15 bytes). lsof-rs searched each start in turn under
+# one budget, spent it from the first, and said no match (2026-11-19's
+# engine); it searches the starts in turns now, and finds it at once.
+name = "rx-back-reference-seven-groups-at-the-end"
+args = ["-F", "pc", "-a", "-d", "cwd", "-p", "{A},{H}", "-c", "/(.*)(.*)(.*)(.*)(.*)(.*)(.*)\\1\\2\\3\\4\\5\\6\\7$/"]
 with_stderr = true
 
 [[case]]

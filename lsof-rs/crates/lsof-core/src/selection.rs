@@ -1207,14 +1207,6 @@ impl Selection {
         if self.users_match(p) {
             k.insert(SelKinds::UID);
         }
-        if self.commands.iter().any(|c| self.command_matches(c, p))
-            || self
-                .command_regexes
-                .iter()
-                .any(|r| r.is_match(p.command_bytes()))
-        {
-            k.insert(SelKinds::CMD);
-        }
         if p.pgid.is_some_and(|g| self.pgids.contains(&g)) {
             k.insert(SelKinds::PGID);
         }
@@ -1222,6 +1214,23 @@ impl Selection {
         // list (the closest analog to PGID selection on Unix).
         if !self.ppid_filter.is_empty() && p.ppid.is_some_and(|pp| self.ppid_filter.contains(&pp)) {
             k.insert(SelKinds::PGID);
+        }
+        // Under `-a`, a process that fails `-p`, `-g` or `-u` is excluded by
+        // `is_proc_excl()` before `is_cmd_excl()` asks about its command
+        // (`dproc.c`: `is_proc_excl(...) || is_cmd_excl(...)`), so the C
+        // runs no `-c /regex/` on it, and its kinds never hold `-c`'s.
+        let by_id = SelKinds::PID.union(SelKinds::UID).union(SelKinds::PGID);
+        let needed = self.specified().intersection(by_id);
+        if self.and_mode && !k.contains(needed) {
+            return k;
+        }
+        if self.commands.iter().any(|c| self.command_matches(c, p))
+            || self
+                .command_regexes
+                .iter()
+                .any(|r| r.is_match(p.command_bytes()))
+        {
+            k.insert(SelKinds::CMD);
         }
         k
     }
@@ -5137,6 +5146,54 @@ mod tests {
         };
         assert!(bytes.selects_process(&raw));
         assert!(!bytes.selects_process(&who(13, "py\u{fffd}", 0, 1)));
+    }
+
+    /// Under `-a`, the C asks `-c` only of a process `-p`, `-g` and `-u`
+    /// have let through (`is_proc_excl() || is_cmd_excl()`), so an
+    /// expression is matched against no other process's command: what a
+    /// costly one costs a run is what the processes let through cost.
+    #[test]
+    fn under_and_a_command_regex_is_asked_only_of_what_the_ids_let_through() {
+        use crate::posix_regex::CommandRegex;
+        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let and = Selection {
+            pids: vec![11],
+            command_regexes: vec![rx.clone()],
+            and_mode: true,
+            ..Default::default()
+        };
+        let procs = [
+            who(10, "aa", 0, 1),
+            who(11, "bb", 0, 1),
+            who(12, "cc", 0, 1),
+            who(13, "dd", 0, 1),
+        ];
+        assert!(!and.selects_process(&procs[0]));
+        assert!(and.selects_process(&procs[1]));
+        assert_eq!(and.locate(&procs).command_regexes, [true]);
+        assert_eq!(rx.kept(), 1);
+        // Without -a, every process is asked.
+        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let or = Selection {
+            pids: vec![11],
+            command_regexes: vec![rx.clone()],
+            ..Default::default()
+        };
+        assert!(or.selects_process(&procs[0]));
+        assert_eq!(or.locate(&procs).command_regexes, [true]);
+        assert_eq!(rx.kept(), 4);
+        // Under -a with -u, a process of another user is not asked either.
+        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let user = Selection {
+            users: vec!["u1".to_string()],
+            command_regexes: vec![rx.clone()],
+            and_mode: true,
+            ..Default::default()
+        };
+        let mixed = [who(10, "aa", 1, 1), who(11, "bb", 2, 1)];
+        assert!(user.selects_process(&mixed[0]));
+        assert!(!user.selects_process(&mixed[1]));
+        assert_eq!(rx.kept(), 1);
     }
 
     #[test]

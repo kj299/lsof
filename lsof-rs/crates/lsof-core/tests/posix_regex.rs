@@ -97,7 +97,8 @@ fn every_expression_is_read_as_glibc_reads_it() {
 const BACK_REFERENCES: &str = include_str!("posix_regex_backref.txt");
 
 /// An expression with a back-reference matches where some way of binding
-/// its groups gives a match, as POSIX has it. glibc's search answers the
+/// its groups gives a match (a group nested in a repetition read as glibc
+/// reads it, where POSIX is unclear). glibc's search answers the
 /// same here but for the matches it misses (and in this table never finds
 /// one that is not there; DIVERGENCES 38 has some it does find).
 #[test]
@@ -112,8 +113,8 @@ fn a_back_reference_matches_where_some_binding_of_the_groups_does() {
         .collect();
     assert_eq!(commands.len(), 68);
     // Under miri, which interprets every step, a sample.
-    let step = if cfg!(miri) { 50 } else { 1 };
-    let (mut cases, mut missed) = (0, 0);
+    let step = if cfg!(miri) { 100 } else { 1 };
+    let (mut cases, mut missed, mut asked) = (0, 0, 0);
     for line in lines.step_by(step) {
         let fields: Vec<&str> = line.split(' ').collect();
         let [expression, flags, every, glibc] = fields[..] else {
@@ -125,7 +126,14 @@ fn a_back_reference_matches_where_some_binding_of_the_groups_does() {
             .unwrap_or_else(|e| panic!("{shown:?} {flags}: {e:?}"));
         cases += 1;
         missed += usize::from(every != glibc);
-        for ((command, want), theirs) in commands.iter().zip(every.chars()).zip(glibc.chars()) {
+        // Under miri, the shortest commands alone (up to three bytes).
+        let most = if cfg!(miri) { 15 } else { commands.len() };
+        for ((command, want), theirs) in commands
+            .iter()
+            .zip(every.chars())
+            .zip(glibc.chars())
+            .take(most)
+        {
             // In this table glibc finds no match that is not there.
             assert!(theirs == want || theirs == '0', "{shown:?} {flags}");
             assert_eq!(
@@ -134,9 +142,20 @@ fn a_back_reference_matches_where_some_binding_of_the_groups_does() {
                 "{shown:?} {flags} against {:?}",
                 String::from_utf8_lossy(command)
             );
+            // A plain search over every way of matching says the same
+            // (`CommandRegex::oracle`, on commands of up to 8 bytes; not
+            // under miri, which interprets every one of its steps).
+            if let Some(oracle) = (!cfg!(miri))
+                .then(|| regex.oracle(command, 200_000))
+                .flatten()
+            {
+                assert_eq!(oracle, want == '1', "{shown:?} {flags} oracle");
+                asked += 1;
+            }
         }
     }
     if !cfg!(miri) {
         assert_eq!((cases, missed), (500, 10));
+        assert!(asked > 25_000, "{asked}");
     }
 }

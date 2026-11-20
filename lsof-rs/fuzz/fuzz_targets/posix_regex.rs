@@ -14,13 +14,23 @@
 // engine accepts too, so that nothing typed reaches either as syntax of its
 // own; and the two engines give the same answer for every expression the
 // crate runs, so that the own engine is held to the crate's, which is held
-// to glibc's by the table of `lsof-core/tests/posix_regex.rs`.
+// to glibc's by the table of `lsof-core/tests/posix_regex.rs`; and on a
+// command of a few bytes, the own engine's search says what a plain
+// exhaustive search over every way of matching says (`oracle`), which is
+// what holds the search for a back-reference to its definition.
 
 use libfuzzer_sys::fuzz_target;
-use lsof_core::posix_regex::{translate, CommandRegex};
+use lsof_core::posix_regex::{translate, CommandRegex, ORACLE_COMMAND_MAX, OWN_COMMAND_MAX};
 
-/// The longest command matched: the longest process name Linux has.
+/// The longest command matched: the longest process name Linux has; and,
+/// for a short expression, the longest the own engine searches, so that
+/// its bounds are reached (THREAT-MODEL.md has what a long one costs there).
 const COMMAND_MAX: usize = 64;
+const SHORT_EXPRESSION: usize = 8;
+
+/// How many steps the exhaustive search may take: past them it says
+/// nothing.
+const ORACLE_STEPS: u64 = 100_000;
 
 fuzz_target!(|data: &[u8]| {
     // The first byte picks the flags; a NUL parts the expression from the
@@ -37,6 +47,16 @@ fuzz_target!(|data: &[u8]| {
     // the size limit (THREAT-MODEL.md), so the timeout is held to commands
     // of the lengths there are.
     let command = parts.next().unwrap_or_default();
+    // Past the longest Linux name, for a short expression, the own engine
+    // alone: the crate is linear in the command, and its cost for a long
+    // one is THREAT-MODEL.md's, not this target's to time.
+    let long = command.get(..OWN_COMMAND_MAX).unwrap_or(command);
+    if long.len() > COMMAND_MAX && expression.len() <= SHORT_EXPRESSION {
+        if let Ok(own) = CommandRegex::new_own(expression, extended, icase) {
+            let hit = own.is_match(long);
+            assert_eq!(own.clone().is_match(long), hit);
+        }
+    }
     let command = command.get(..COMMAND_MAX).unwrap_or(command);
     let translated = translate(expression, extended, icase);
     let own = CommandRegex::new_own(expression, extended, icase);
@@ -54,6 +74,18 @@ fuzz_target!(|data: &[u8]| {
             // The own engine says what the crate says.
             let own = own.expect("the own engine takes what the crate takes");
             assert_eq!(own.is_match(command), hit);
+            // And what every way of matching says, where that is quick to
+            // ask (a search past its budget says no match).
+            if command.len() <= ORACLE_COMMAND_MAX {
+                if let Some(every) = own.oracle(command, ORACLE_STEPS) {
+                    let (found, steps) = own.search_steps(command);
+                    let within = steps.is_some_and(|s| s < lsof_core::posix_regex::SEARCH_BUDGET);
+                    if within {
+                        assert_eq!(found, every);
+                        assert_eq!(hit, every);
+                    }
+                }
+            }
         }
         // Neither engine refuses what the translator wrote.
         Err(e) => {

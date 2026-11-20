@@ -308,12 +308,15 @@ meet. Each number is a row there, with the measurement behind it.
   also holds one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
 - **`-c /regex/` with a back-reference** (38): lsof-rs matches where some
-  binding of the groups gives a match, as POSIX has it; glibc's search
-  misses some such matches (`(e){0,2}\1` against `sleep`) and finds some
-  that are not there (`^(.*)(.*)\2\1$` matches every command in the C).
-  The search is bounded at a million steps a command: past it (nine
-  groups named in reverse against 15 bytes, where the C runs on for over a
-  minute) the command is taken as not matching.
+  binding of the groups gives a match, reading a group nested in a
+  repetition as glibc does (where POSIX is unclear); glibc's search misses
+  some such matches (`(e){0,2}\1` against `sleep`), finds some that are not
+  there (`^(.*)(.*)\2\1$` matches every command in the C) and dies on some
+  (`((a*)\2\2)*a`, SIGSEGV). The search is bounded at 4,194,304 steps a
+  command (about half a second): past it the command is taken as not
+  matching. No case either review found comes near it; of 9,000 random
+  expressions of three to nine groups each named again in random order,
+  against a 63-byte name, 6 reach it, and none of those 6 has a match.
 - **Names only the files know** (38, 39, 154): a service name is read from
   `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
   has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves

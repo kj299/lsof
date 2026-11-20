@@ -245,20 +245,20 @@ name = "rx-unset-group-matches-empty"
 rule = "a back-reference to a group that matched nothing matches nothing"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''        if g == UNSET || g == UNCHANGED {
-            return None;
-        }'''
-new = '''        if g == UNSET || g == UNCHANGED {
-            return Some(0);
-        }'''
+old = '''    if g == UNSET || g == UNCHANGED {
+        return None;
+    }'''
+new = '''    if g == UNSET || g == UNCHANGED {
+        return Some(0);
+    }'''
 
 [[mutant]]
 name = "rx-icase-back-reference-exact"
 rule = "under i a back-reference matches its group in either case"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''        if !self.engine.icase {'''
-new = '''        if self.engine.icase || !self.engine.icase {'''
+old = '''    if !icase {'''
+new = '''    if icase || !icase {'''
 
 [[mutant]]
 name = "rx-icase-back-reference-lower"
@@ -323,15 +323,15 @@ name = "rx-tail-repetition-needs-no-pass"
 rule = "a repetition at the end still makes its minimum of passes"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''                for _ in 0..(*min).min(self.cap(*child)) {'''
-new = '''                for _ in 0..(*min).min(self.cap(*child)).min(0) {'''
+old = '''        for _ in 0..min.min(self.cap(child)) {'''
+new = '''        for _ in 0..min.min(self.cap(child)).min(0) {'''
 
 [[mutant]]
 name = "rx-search-budget-small"
-rule = "the budget is a million steps: what a 63-byte command needs of three groups is within it"
+rule = "the budget is four million steps: what the reviews' cases and the random ones measured need is within it"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''pub const SEARCH_BUDGET: u64 = 1 << 20;'''
+old = '''pub const SEARCH_BUDGET: u64 = 1 << 22;'''
 new = '''pub const SEARCH_BUDGET: u64 = 1 << 14;'''
 
 [[mutant]]
@@ -341,3 +341,221 @@ rule = "past the budget the command is taken as not matching"
 file = "crates/lsof-core/src/posix_regex/engine.rs"
 old = '''        if self.spent > self.engine.budget {'''
 new = '''        if self.spent > self.engine.budget.saturating_mul(1 << 12) {'''
+
+# ------------------------------------------- the fix after the reviews
+# (2026-11-20): every start searched in turns, the regular look first, a
+# group checked against where it is named, finished states shared, the
+# groups a node always sets, towupper()'s simple mapping, a byte under i.
+# Left out as equivalent: dropping, before a pass, a group the pass reads
+# as well as sets (it reads it only after setting it: a back-reference
+# before its group closes is refused), so `again` is all the pass sets.
+# The "cost" mutants change no answer, only the steps a search takes; the
+# step counts of `the_search_takes_few_steps` kill them.
+
+[[mutant]]
+name = "rx-live-repeat-child-reads-dropped"
+rule = "a group a later pass of the same repetition reads is kept from pass to pass"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                        here | reads.get(*child as usize).copied().unwrap_or(0),'''
+new = '''                        here,'''
+
+[[mutant]]
+name = "rx-must-alternation-is-any"
+rule = "an alternation always sets only what every alternative sets"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''children.iter().fold(Mask::MAX, |acc, c| acc & get(c))'''
+new = '''children.iter().fold(0, |acc, c| acc | get(c))'''
+
+[[mutant]]
+name = "rx-must-optional-repetition"
+rule = "a repetition that may make no pass always sets nothing"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                Some(Node::Repeat { child, min, .. }) if *min > 0 => get(child),'''
+new = '''                Some(Node::Repeat { child, min, .. }) if *min < u32::MAX => get(child),'''
+
+[[mutant]]
+name = "rx-step-keeps-what-is-set-again"
+rule = "what a pass always sets is dropped before the pass (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''        if again != 0 {'''
+new = '''        if again != again {'''
+
+[[mutant]]
+name = "rx-starts-not-looked-at-first"
+rule = "a start the regular look cannot match from is not searched (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''        let starts: Vec<usize> = starts.filter(|&at| over.row_any(at)).collect();'''
+new = '''        let starts: Vec<usize> = starts.filter(|&at| over.row_any(at) || true).collect();'''
+
+[[mutant]]
+name = "rx-back-reference-looked-at-as-nothing"
+rule = "in the regular look a back-reference matches anything from where it is, not nothing"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''            Node::BackRef(_) => Mat::onwards(n),'''
+new = '''            Node::BackRef(_) => Mat::identity(n),'''
+
+[[mutant]]
+name = "rx-turns-not-doubled"
+rule = "each round's turns are twice the last's, so a repetition that takes long is answered"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''            self.slice = self.slice.saturating_mul(2);'''
+new = '''            self.slice = self.slice.saturating_mul(1);'''
+
+[[mutant]]
+name = "rx-turns-unbounded"
+rule = "a start is searched in turns, not to its end before the next (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''        if self.round > self.slice {'''
+new = '''        if self.round > u64::MAX {'''
+
+[[mutant]]
+name = "rx-turn-ends-skip-a-state"
+rule = "a state whose turn ended before it was walked is walked next turn"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                            *done = done.saturating_sub(1);'''
+new = '''                            *done = done.saturating_sub(0);'''
+
+[[mutant]]
+name = "rx-dead-states-walked-again"
+rule = "a state nothing matches from is not walked again (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                if self.dead.contains(&to) {'''
+new = '''                if self.dead.contains(&to) && false {'''
+
+[[mutant]]
+name = "rx-tail-repetition-walked"
+rule = "a repetition with nothing after it is answered by its passes, not every way it matches (cost)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                if rest == 0 {'''
+new = '''                if rest == u32::MAX {'''
+
+[[mutant]]
+name = "rx-close-not-checked"
+rule = "a group that cannot be matched where it is named ends the search there (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                if !self.may_finish(rest, at, &groups)? {'''
+new = '''                if !self.may_finish(rest, at, &groups)? && false {'''
+
+[[mutant]]
+name = "rx-repetition-groups-not-checked"
+rule = "a repetition's way that sets a group is checked as a closed group is (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                    if changed != KEEP && !self.may_finish(rest, end, &now)? {'''
+new = '''                    if changed != KEEP && !self.may_finish(rest, end, &now)? && false {'''
+
+[[mutant]]
+name = "rx-check-reads-nothing"
+rule = "the check reads up to 64 items of what is left to match"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''const CHECKED: usize = 64;'''
+new = '''const CHECKED: usize = 0;'''
+
+[[mutant]]
+name = "rx-check-closed-group-still-known"
+rule = "a group closed again in what is checked is no longer what the state has"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                        known &= !group_bit(*index);'''
+new = '''                        known &= !0;'''
+
+[[mutant]]
+name = "rx-check-set-group-still-known"
+rule = "a group a node in what is checked may set is no longer what the state has"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                            known &= !e.writes.get(id as usize).copied().unwrap_or(0);'''
+new = '''                            known &= Mask::MAX;'''
+
+[[mutant]]
+name = "rx-check-back-reference-anything"
+rule = "in the check a back-reference to a known group matches what the group matched (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                        Node::BackRef(k) if known & group_bit(usize::from(*k)) != 0 => {'''
+new = '''                        Node::BackRef(k) if known & group_bit(usize::from(*k)) == Mask::MAX => {'''
+
+[[mutant]]
+name = "rx-towupper-full-mapping"
+rule = "towupper() is the simple mapping of glibc 2.39's tables, not Rust's"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''    if let Ok(i) = TOWUPPER_ELSE.binary_search_by_key(&c, |&(from, _)| from) {'''
+new = '''    if let Ok(i) = TOWUPPER_ELSE.get(..0).unwrap_or_default().binary_search_by_key(&c, |&(from, _)| from) {'''
+
+[[mutant]]
+name = "rx-icase-bytes-not-folded"
+rule = "under i a byte is compared with the folded command, as glibc compares it"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                        let same = if u.len_utf8() == c.len_utf8() { u } else { c };'''
+new = '''                        let same = c;'''
+
+[[mutant]]
+name = "rx-icase-folding-changes-length"
+rule = "a character whose upper case is of another length is kept as itself in the folded command"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                        let same = if u.len_utf8() == c.len_utf8() { u } else { c };'''
+new = '''                        let same = u;'''
+
+[[mutant]]
+name = "rx-icase-byte-branch-always-equal"
+rule = "under i a byte that is no character matches only the same byte, folded"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                if command.folded.get(i)? != command.folded.get(j)? {'''
+new = '''                if command.folded.get(i)? != command.folded.get(i)? {'''
+
+[[mutant]]
+name = "rx-and-mode-command-never-asked"
+rule = "under -a a process that fails -p/-g/-u is not asked about -c; one that passes them is"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if self.and_mode && !k.contains(needed) {'''
+new = '''        if self.and_mode {'''
+
+[[mutant]]
+name = "rx-or-mode-command-not-asked"
+rule = "without -a every process is asked about -c"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if self.and_mode && !k.contains(needed) {'''
+new = '''        if !k.contains(needed) {'''
+
+[[mutant]]
+name = "rx-and-mode-command-always-asked"
+rule = "under -a a process that fails -p/-g/-u is not asked about -c (cost: the answers kept)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if self.and_mode && !k.contains(needed) {'''
+new = '''        if self.and_mode && !k.contains(needed) && false {'''
+
+[[mutant]]
+name = "rx-canon-where-it-is"
+rule = "a group is kept as the first place that holds its text, so that starts share states (cost: the step counts)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''        let first = (0..start).find(|&p| same(p)).unwrap_or(start);'''
+new = '''        let first = (0..start).find(|&p| same(p) && false).unwrap_or(start);'''
+
+[[mutant]]
+name = "rx-canon-ignores-folded"
+rule = "under i a group is the same text elsewhere only where the folded command is the same too"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/engine.rs"
+old = '''                && (!self.engine.icase || c.folded.get(p..end_p) == c.folded.get(start..end))'''
+new = '''                && (self.engine.icase || !self.engine.icase)'''

@@ -19,15 +19,20 @@
 //! What is read is the C's reading under a UTF-8 locale, the one lsof-rs
 //! takes everywhere, and `C.UTF-8`'s where locales differ (a range's ends
 //! are ASCII there, and there are no collating symbols but a character
-//! itself). The engine is linear in the command and in the compiled
+//! itself). The `regex` crate is linear in the command and in the compiled
 //! program, and the program is bounded ([`SIZE_LIMIT`], [`NEST_LIMIT`]).
+//! What it cannot run (a back-reference) or will not (past [`COST_LIMIT`]
+//! or [`SIZE_LIMIT`]) lsof-rs's own engine answers (`engine.rs`): without a
+//! back-reference in time polynomial (cubic at most) in the command and
+//! linear in the expression, with one by a search held to
+//! [`SEARCH_BUDGET`] steps a command.
 
 use std::fmt::Write as _;
 
 mod engine;
 
 use engine::{Look, Node, Tree, UnitSpec};
-pub use engine::{OWN_COMMAND_MAX, SEARCH_BUDGET};
+pub use engine::{ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET};
 
 /// Why an expression was refused: glibc's `reg_errcode_t`, by the names
 /// `regerror()` has for them, and what only lsof-rs refuses.
@@ -1241,6 +1246,33 @@ impl CommandRegex {
         answer
     }
 
+    /// [`Self::is_match`], not kept, and how many steps of
+    /// [`SEARCH_BUDGET`] lsof-rs's own engine took: `None` where the
+    /// `regex` crate answers. For the tests and the fuzz target.
+    #[doc(hidden)]
+    pub fn search_steps(&self, command: &[u8]) -> (bool, Option<u64>) {
+        match &self.matcher {
+            Matcher::Own(engine) => {
+                let (answer, steps) = engine.search(command);
+                (answer.unwrap_or(false), Some(steps))
+            }
+            Matcher::Crate { .. } => (self.search(command), None),
+        }
+    }
+
+    /// Whether `command` matches, as a plain exhaustive search over every
+    /// way of matching finds, for lsof-rs's own engine: `None` where the
+    /// crate answers, for a command longer than [`ORACLE_COMMAND_MAX`], or
+    /// past `limit` steps. For the tests and the fuzz target, which hold
+    /// the engine's search to it.
+    #[doc(hidden)]
+    pub fn oracle(&self, command: &[u8], limit: u64) -> Option<bool> {
+        match &self.matcher {
+            Matcher::Own(engine) => engine.oracle(command, limit),
+            Matcher::Crate { .. } => None,
+        }
+    }
+
     /// The same, with lsof-rs's own engine's search held to `budget`.
     #[cfg(test)]
     fn with_budget(&self, budget: u64) -> Self {
@@ -1260,7 +1292,7 @@ impl CommandRegex {
 
     /// How many answers are kept.
     #[cfg(test)]
-    fn kept(&self) -> usize {
+    pub(crate) fn kept(&self) -> usize {
         self.answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1605,13 +1637,7 @@ mod tests {
     /// three, and finds the last where it is not; DIVERGENCES 38).
     #[test]
     fn a_back_reference_matches_what_its_group_matched() {
-        let m = |e: &str, flags: &str, command: &str| {
-            let (x, i) = (!flags.contains('b'), flags.contains('i'));
-            CommandRegex::new(e.as_bytes(), x, i)
-                .unwrap()
-                .is_match(command.as_bytes())
-        };
-        for (e, flags, yes, no) in [
+        let rows = [
             ("sl(e)\\1p", "", &["sleep"][..], &["slep", "sle1p"][..]),
             ("sl\\(e\\)\\1p", "b", &["sleep"], &["slep"]),
             (
@@ -1641,6 +1667,26 @@ mod tests {
             ("^(a)\\1{3}$", "", &["aaaa"], &["aaa", "aaaaa"]),
             ("^(a)(b\\1)*$", "", &["a", "aba", "ababa"], &["abab"]),
             ("^((a)b\\2)*$", "", &["", "aba", "abaaba"], &["abab"]),
+            // A group a later pass of the same repetition reads.
+            (
+                "^((a)?b\\2)*$",
+                "",
+                &["ababa", "", "aba"],
+                &["abab", "bb", "ab"],
+            ),
+            ("^((a)?b\\2){2}$", "", &["ababa", "abaaba"], &["abab"]),
+            // A repetition that reads a group is asked again for each thing
+            // the group holds, at the same offset (glibc's answers).
+            (
+                "^(a*)a*b(\\1x)*$",
+                "",
+                &["aabax", "aabaxax", "aabaax"],
+                &["aabaxx"],
+            ),
+            // A group set inside another, both named after it.
+            ("^((a)b)\\1\\2$", "", &["ababa"], &["abab"]),
+            // A pass that sets no group leaves what an earlier one set.
+            ("^((a)?b)*\\2$", "", &["abba", "aba"], &["abb", "bba", "ab"]),
             ("^\\(\\)\\1*$", "b", &[""], &["x"]),
             ("(a){0}\\1", "", &[], &["", "a"]),
             ("^(a|(b))*\\2$", "", &["bb", "bab", "bbab"], &["a", "ba"]),
@@ -1652,6 +1698,19 @@ mod tests {
             ("(ß)\\1", "i", &["ßß"], &["ßẞ", "ßs", "ßS"]),
             ("(ŉ)\\1", "i", &["ŉŉ"], &["ŉʼ"]),
             ("(k)\\1", "i", &["kK", "kk"], &["k\u{212A}"]),
+            // `towupper()` is the simple mapping, one character for one:
+            // a Greek letter with an iota is the capital with one, and the
+            // dotless i is I (glibc's answers; the full mapping is two
+            // characters for the first, which are not the second).
+            (
+                "(.)\\1",
+                "i",
+                &["ᾳᾼ", "ᾼᾳ", "ᾀᾈ", "ᾈᾀ", "ᾠᾨ", "ῃῌ", "ῳῼ", "iı", "ıI"],
+                &["ᾳΑ", "ᾈἈ", "ᾀἈ"],
+            ),
+            ("(ᾳ)\\1", "i", &["ᾳᾼ"], &["ᾳα"]),
+            // Pairs Unicode added after glibc 2.39's tables: none to glibc.
+            ("(.)\\1", "i", &["ƛƛ"], &["ƛ\u{A7DC}"]),
             ("(é)\\1", "", &["éé", "xéé"], &["éÉ"]),
             ("^(.)\\1$", "", &["éé", "ǅǅ"], &["éÉ"]),
             (
@@ -1670,12 +1729,25 @@ mod tests {
                 &["", "aa", "abba", "abab"],
                 &["a", "abc", "aab"],
             ),
-        ] {
+        ];
+        for (row, (e, flags, yes, no)) in rows.into_iter().enumerate() {
+            // miri, which interprets every step, is given every sixteenth.
+            if cfg!(miri) && row % 16 != 0 {
+                continue;
+            }
+            let (x, i) = (!flags.contains('b'), flags.contains('i'));
+            let regex = CommandRegex::new(e.as_bytes(), x, i).unwrap();
             for command in yes {
-                assert!(m(e, flags, command), "{e} {flags} {command:?}");
+                assert!(
+                    regex.is_match(command.as_bytes()),
+                    "{e} {flags} {command:?}"
+                );
             }
             for command in no {
-                assert!(!m(e, flags, command), "{e} {flags} {command:?}");
+                assert!(
+                    !regex.is_match(command.as_bytes()),
+                    "{e} {flags} {command:?}"
+                );
             }
         }
         // A byte that is no character is matched as itself.
@@ -1685,6 +1757,61 @@ mod tests {
         let regex = CommandRegex::new(b"(.)\\1", true, true).unwrap();
         assert!(!regex.is_match(b"\xff\xff"));
         assert!(regex.is_match(b"x\xffaA"));
+        // Under `REG_ICASE`, where a side is no character, byte by byte, as
+        // glibc compares its copy of the command in upper case: the first
+        // byte of `é` is that of `É` (glibc's answers).
+        let regex = CommandRegex::new(b"(\xff)\\1", true, true).unwrap();
+        assert!(regex.is_match(b"\xff\xff"));
+        assert!(!regex.is_match(b"\xff\xfe"));
+        let regex = CommandRegex::new(b"(\xc3)\\1", true, true).unwrap();
+        assert!(regex.is_match(b"\xc3\xc3\xa9"));
+        assert!(regex.is_match(b"\xc3\xc3\x89"));
+        assert!(regex.is_match(b"\xc3\xc3"));
+        assert!(!regex.is_match(b"\xc3\xc4"));
+        // A character whose upper case is shorter (`ı`, `I`) is kept as it
+        // is in the folded command, so the bytes after it stay where they
+        // are.
+        let regex = CommandRegex::new(b"(\xff)\\1", true, true).unwrap();
+        assert!(regex.is_match(b"\xc4\xb1\xff\xff"));
+        // A byte that is the end of a character in one place and no
+        // character in another is not the same byte to a back-reference.
+        let regex = CommandRegex::new(b"(\xa9)\\1", true, true).unwrap();
+        assert!(regex.is_match(b"\xc3\xa9\xa9\xa9"));
+        // `Ы` starts with the byte `ы` does not.
+        let regex = CommandRegex::new(b"(\xd0)\\1", true, true).unwrap();
+        assert!(regex.is_match(b"\xd0\xd1\x8b"));
+        assert!(regex.is_match(b"\xd0\xd0\xab"));
+        assert!(!regex.is_match(b"\xd0\xd1"));
+        let regex = CommandRegex::new(b"(\xd0)\\1", true, false).unwrap();
+        assert!(!regex.is_match(b"\xd0\xd1\x8b"));
+        let regex = CommandRegex::new(b"(\xc3)\\1", true, false).unwrap();
+        assert!(regex.is_match(b"\xc3\xc3\xa9"));
+        assert!(!regex.is_match(b"\xc3\xc4\xa9"));
+    }
+
+    /// `towupper()` as glibc 2.39 has it in C.UTF-8, every character:
+    /// measured through ctypes, 1,450 characters it changes, and an FNV-1a
+    /// hash of each and what it becomes, as two little-endian `u32`s. Rust's
+    /// tables move with the toolchain; this says when they do.
+    #[test]
+    #[cfg_attr(miri, ignore = "every character, 1.1 million: minutes under miri")]
+    fn upper_is_glibcs_towupper() {
+        let (mut changed, mut hash) = (0u32, 0xcbf2_9ce4_8422_2325u64);
+        for c in (0..=0x10_FFFFu32).filter_map(char::from_u32) {
+            let u = engine::upper(c);
+            if u == c {
+                continue;
+            }
+            changed += 1;
+            for byte in u32::from(c)
+                .to_le_bytes()
+                .into_iter()
+                .chain(u32::from(u).to_le_bytes())
+            {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        assert_eq!((changed, hash), (1450, 0xdd8a_a892_0e74_fe15));
     }
 
     /// In a basic expression a `$` is an anchor only where the expression,
@@ -1717,7 +1844,7 @@ mod tests {
         assert_eq!(pattern("a$\\", false, false), Err(RegexError::Escape));
         // A run of them of any length is read in one pass and no depth:
         // every one a character but the last.
-        let run = if cfg!(miri) { 2_000 } else { 60_000 };
+        let run = if cfg!(miri) { 500 } else { 60_000 };
         let dollars = "$".repeat(run);
         let translated = pattern(&dollars, false, false).unwrap();
         assert_eq!(translated.matches(r"\x{24}").count(), run - 1);
@@ -1838,9 +1965,8 @@ mod tests {
             pattern(&format!("{long}[z-a]"), true, true),
             Err(RegexError::Range)
         );
-        // The reviewers' reproducers, and argv's worst: compiled at once,
-        // and answered.
-        let started = std::time::Instant::now();
+        // The reviewers' reproducers, and argv's worst: compiled, and
+        // answered (THREAT-MODEL.md has how long they take).
         for (unit, count, extended, icase) in [
             ("\\W", 60_000, true, true),
             ("\\w\\W\\s\\S", 15_000, true, true),
@@ -1867,7 +1993,6 @@ mod tests {
         let regex = CommandRegex::new("\\W".repeat(1024).as_bytes(), true, true).unwrap();
         assert!(regex.is_match("-".repeat(1024).as_bytes()));
         assert!(!regex.is_match("-".repeat(1023).as_bytes()));
-        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     /// An answer is kept for the next time the command is asked about,
@@ -1901,7 +2026,7 @@ mod tests {
         // However many commands are asked about, a bounded number of
         // answers is kept, and each is still the engine's.
         assert_eq!((KEPT_ANSWERS, KEPT_COMMAND), (1024, 256));
-        let commands = if cfg!(miri) { 40 } else { 5000 };
+        let commands = if cfg!(miri) { 20 } else { 5000 };
         for round in 0..2 {
             for i in 0..commands {
                 let command = format!("a{i}");
@@ -1968,7 +2093,11 @@ mod tests {
             ),
             ("^(a|())+\\2$", vec![a(3)], "1"),
         ];
-        for (expression, commands, want) in cases {
+        for (row, (expression, commands, want)) in cases.into_iter().enumerate() {
+            // miri, which interprets every step, is given a few short ones.
+            if cfg!(miri) && (row % 15 != 0 || commands.iter().any(|c| c.len() > 8)) {
+                continue;
+            }
             let own = CommandRegex::new_own(expression.as_bytes(), true, false).unwrap();
             let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
             for (command, want) in commands.iter().zip(want.chars()) {
@@ -1990,44 +2119,134 @@ mod tests {
         assert!(!own.is_match(b"\xff\xff"));
     }
 
-    /// A search with a back-reference is bounded ([`SEARCH_BUDGET`]): past
-    /// it a command is taken as not matching, where glibc's search runs on
-    /// (over a minute, measured, for nine groups against 15 bytes); and
-    /// what is cheaper is answered within it.
+    /// A search with a back-reference is bounded ([`SEARCH_BUDGET`]), in
+    /// steps: past it a command is taken as not matching. Every start is
+    /// searched in turns, so a match easy to find from one start is found
+    /// in few steps however long the search from the others would take:
+    /// the reviewers' cases, where the old search, from each start in turn,
+    /// went past the budget before it reached the start where every group
+    /// matches nothing, and said no match where glibc says match.
     #[test]
-    fn a_search_past_its_budget_is_no_match() {
-        assert_eq!(SEARCH_BUDGET, 1 << 20);
+    fn a_search_is_bounded_and_finds_an_easy_match_first() {
+        assert_eq!(SEARCH_BUDGET, 1 << 22);
+        let steps = |e: &str, command: &str| {
+            let regex = CommandRegex::new(e.as_bytes(), true, false).unwrap();
+            let (answer, steps) = regex.search_steps(command.as_bytes());
+            (answer, steps.unwrap())
+        };
+        let groups = |k: usize| "(.*)".repeat(k);
+        let refs = |k: usize, reverse: bool| {
+            let mut r: Vec<String> = (1..=k).map(|i| format!("\\{i}")).collect();
+            if reverse {
+                r.reverse();
+            }
+            r.concat()
+        };
+        let kworker = "kworker/u16:0-ext4-rsv-conversion";
+        let long = if cfg!(miri) { 4 } else { 9 };
+        for (expression, command) in [
+            (
+                format!("{}{}$", groups(long), refs(long, true)),
+                "abcdefghijklmno",
+            ),
+            (
+                format!("{}{}$", groups(7), refs(7, false)),
+                "sleepsleepsleep",
+            ),
+            (format!("{}{}$", groups(4), refs(4, true)), kworker),
+            (format!("{}{}$", groups(5), refs(5, true)), kworker),
+            (
+                "(.+)(.+).*\\1\\2".to_string(),
+                "kworker/u8:2-events_unbound",
+            ),
+            ("((.*)*)*\\2".to_string(), kworker),
+        ]
+        .into_iter()
+        // miri, which interprets every step, is given the first, shorter.
+        .take(if cfg!(miri) { 1 } else { usize::MAX })
+        {
+            let command = if cfg!(miri) { &command[..8] } else { command };
+            let (answer, steps) = steps(&expression, command);
+            assert!(answer, "{expression} {command}");
+            assert!(steps < 50_000, "{expression} {command}: {steps}");
+        }
+        // Where nothing matches, every way is tried, and none twice.
+        let none = if cfg!(miri) { "abcd" } else { "abcdefgh" };
+        let (answer, steps_taken) = steps("(.*)(.*)\\2\\1x", none);
+        assert!(!answer);
+        assert!(steps_taken < 20_000, "{steps_taken}");
+        // What glibc's search answers and this one need not: past the
+        // budget, no match.
         let three = CommandRegex::new(b"^(.*)(.*)(.*)\\3\\2\\1$", true, false).unwrap();
-        let command = "a".repeat(if cfg!(miri) { 8 } else { 40 });
-        // Within its budget, it matches.
+        let command = "a".repeat(if cfg!(miri) { 6 } else { 40 });
         assert!(three.is_match(command.as_bytes()));
-        // Held to a small one, the same search is past it: no match.
-        assert!(!three.with_budget(64).is_match(command.as_bytes()));
-        // The first way found is enough: an expression that matches where
-        // it starts is answered at once, whatever it would cost to list
-        // every way it matches.
+        assert!(!three.with_budget(16).is_match(command.as_bytes()));
+        // Nothing to match after a repetition: the passes it must make are
+        // enough, at once, whatever it would cost to list them all.
         let star = format!("{}\\2{}", "((.*)".repeat(9), ")*".repeat(9));
         let regex = CommandRegex::new(star.as_bytes(), true, false).unwrap();
         assert!(regex.with_budget(64).is_match(command.as_bytes()));
-        if cfg!(miri) {
-            return;
+        // A start the expression cannot match from, back-references taken
+        // to match anything, is not searched; where there is none, there is
+        // no search at all.
+        assert_eq!(steps("(a)\\1z", "aaaaaaaaaaaaaaay"), (false, 0));
+        assert_eq!(steps("^(a)\\1", "baa"), (false, 0));
+    }
+
+    /// What the search costs, in steps, on what the reviewers found it slow
+    /// or wrong on, and on what each of the ways it saves steps is for: a
+    /// start the regular look cannot match from, a group checked against
+    /// where it is named, the groups a node always sets, the states
+    /// nothing matches from, shared by every start, and each start's turns.
+    /// Each bound is what was measured, and a little more.
+    #[test]
+    #[cfg_attr(miri, ignore = "63-byte commands: minutes under miri")]
+    fn the_search_takes_few_steps() {
+        let k33 = "kworker/u16:0-ext4-rsv-conversion";
+        let k63 = "kworker/u16:7-events_unbound_flush_rcu_reclaim_and_more_stuff_x";
+        for (expression, command, matches, most) in [
+            ("(.*)(.*)(.*)(.*)\\4\\3\\2\\1$", k33, true, 10_500),
+            ("((.*)*)*\\2", k63, true, 8_000),
+            ("(.)\\1.*", k63, true, 1_700),
+            ("(.+)(.+).*\\1\\2", k63, true, 52_000),
+            // A group's text where it is first held: two starts, one state.
+            (
+                "^((.)(.*)\\2)*\\3$",
+                "abcabcabcabcabcabcabcabc",
+                true,
+                2_900,
+            ),
+            (
+                "((.*)*)(a*)([^/]*)(.+)([0-9]*)[0-9](..)((.*)*)\\2\\2\\2\\5\\6",
+                k63,
+                true,
+                380_000,
+            ),
+            (
+                "([a-z]*)([[:alpha:]]+)([0-9]*)(.*.*)\\4x$",
+                k63,
+                false,
+                150_000,
+            ),
+            (
+                "(\\w*)([^/]*)(.+)(.+)([a-z]*)((a|b)*)\\4\\1\\2$",
+                k63,
+                false,
+                160_000,
+            ),
+            (
+                "((.*)*)(.*.*)(.*)(..)(.?)(..)(..)\\7\\4\\5\\1\\4\\5\\2",
+                k33,
+                false,
+                280_000,
+            ),
+        ] {
+            let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
+            let (answer, steps) = regex.search_steps(command.as_bytes());
+            let steps = steps.unwrap();
+            assert_eq!(answer, matches, "{expression}");
+            assert!(steps <= most, "{expression}: {steps} steps");
         }
-        // What the budget is for: three groups against the longest Linux
-        // command, glibc 18.5 s, here within it; nine `(a*)*` too.
-        assert!(three.is_match("a".repeat(62).as_bytes()));
-        let nine = format!("^{}\\1\\2\\3\\4\\5\\6\\7\\8\\9$", "(a*)*".repeat(9));
-        let regex = CommandRegex::new(nine.as_bytes(), true, false).unwrap();
-        assert!(regex.is_match("a".repeat(63).as_bytes()));
-        assert!(!regex.is_match(b"ab"));
-        // And what it is past: nine groups named in reverse, which match at
-        // the command's end (every group empty), but the search from the
-        // starts before it is past the budget first.
-        let nine = format!("{}\\9\\8\\7\\6\\5\\4\\3\\2\\1$", "(.*)".repeat(9));
-        let regex = CommandRegex::new(nine.as_bytes(), true, false).unwrap();
-        let started = std::time::Instant::now();
-        assert!(!regex.is_match("a".repeat(15).as_bytes()));
-        assert!(started.elapsed() < std::time::Duration::from_secs(20));
-        assert!(regex.is_match(b"aaaa"));
     }
 
     /// A command longer than any process name is not searched by lsof-rs's
@@ -2035,12 +2254,17 @@ mod tests {
     #[test]
     fn a_command_past_the_longest_is_not_searched() {
         assert_eq!(OWN_COMMAND_MAX, 1024);
+        // miri is spared the search of 1,024 bytes: past them there is none.
+        let at_most = !cfg!(miri);
         let own = CommandRegex::new_own(b"^a*$", true, false).unwrap();
-        assert!(own.is_match("a".repeat(OWN_COMMAND_MAX).as_bytes()));
+        assert!(!at_most || own.is_match("a".repeat(OWN_COMMAND_MAX).as_bytes()));
         assert!(!own.is_match("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()));
         let own = CommandRegex::new(b"(a)\\1", true, false).unwrap();
-        assert!(own.is_match("a".repeat(OWN_COMMAND_MAX).as_bytes()));
-        assert!(!own.is_match("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()));
+        assert!(!at_most || own.is_match("a".repeat(OWN_COMMAND_MAX).as_bytes()));
+        assert_eq!(
+            own.search_steps("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()),
+            (false, Some(0))
+        );
         // The crate searches any length.
         let regex = CommandRegex::new(b"^a*$", true, false).unwrap();
         assert!(regex.is_match("a".repeat(OWN_COMMAND_MAX + 1).as_bytes()));

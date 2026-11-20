@@ -24,13 +24,22 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   back-reference matches where some binding of its groups gives a match:
   glibc's search misses some (`(e){0,2}\1` against sleep) and finds some
   that are not there (`^(.*)(.*)\2\1$` against every command), and lsof-rs
-  does neither (two C-DEFECTs). Under `i` a back-reference compares each
-  character in the case `towupper()` gives it, as glibc does. Still `too
-  big`: nesting 100 deep, and more than 262,144 nodes (no argument holds
-  that many). A search with a back-reference is bounded at a million steps
-  a command (under half a second, measured), past which the command is
-  taken as not matching, where glibc's own runs on for minutes. On every
-  platform.
+  does neither (C-DEFECTs, with glibc's SIGSEGV on `((a*)\2\2)*a`); a
+  group nested in a repetition keeps an earlier pass's match, as glibc
+  reads it. Under `i` a back-reference compares each character in the case
+  `towupper()` gives it, the simple mapping of glibc 2.39's tables (`(.)\1`
+  matches `ᾳᾼ`), and a byte that is no character as glibc compares it.
+  Still `too big`: nesting 100 deep, and more than 262,144 nodes (no
+  argument holds that many). A search with a back-reference tries every
+  start in turns and finds an easy match first (`(.*)(.*)(.*)(.*)\4\3\2\1$`
+  against a 33-byte kernel thread, seven groups against 15 bytes: a
+  millisecond, where glibc takes up to 5 s); it is bounded at 4,194,304
+  steps a command and expression (about 0.5 s, measured), past which the
+  command is taken as not matching (6 of 9,000 random expressions of three
+  to nine groups named again in random order, against 63 bytes, each with
+  no match when searched to its end). Under `-a`, `-c` is
+  asked only of the processes `-p`, `-g` and `-u` let through, as the C
+  asks it. On every platform.
 - **The options end where the C's end them** (DIVERGENCES 12, a DECISION
   until the maintainer reversed it): at the first name, at `-` or `+`
   alone (the first name) and at `--` or `++` (taken); every word after is a
@@ -442,13 +451,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   command's bytes; an expression `regcomp()` refuses is refused in
   `regerror()`'s words (`regexp error: /a[/: Invalid regular expression`),
   and with `-V` one that matched nothing is `no command found for regex:
-  EXPR`. lsof-rs had refused every regular expression. Not taken: a
-  back-reference (`\(a\)\1`), which the engine cannot match in linear
-  time (`back references are not supported`), and an expression past
-  lsof-rs's bounds (`Regular expression too big`): a compiled program of 8
-  MiB (`.{20000}` and `[[:alpha:]]{300}` fit, `.{32767}` does not), 64 of
-  the locale's large classes (`[[:alpha:]]`, `\w`) or 65,536 characters,
-  nesting 100 deep. On every platform.
+  EXPR`. lsof-rs had refused every regular expression. Not taken: an
+  expression nested 100 deep (`Regular expression too big`); a
+  back-reference and an expression past the `regex` crate's bounds are
+  taken too (the entry above). On every platform.
 - **`-i` takes host names and service names**, as the C (DIVERGENCES 38):
   `-i @localhost`, `-i tcp@db.example:5432`, `-i :http`, `-i :1-http`. On
   Linux a host name is looked up as glibc's `gethostbyname2()` looks it up

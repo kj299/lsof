@@ -72,7 +72,7 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it (DIVERGENCES 143) |
 | `/etc/passwd`, and `/etc/nsswitch.conf`, which says whether it is read: **both on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l` reads neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
-| `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has; `-timeout=10`) |
+| `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine), lsof-rs's own engine (`posix_regex/engine.rs`: a back-reference, and past the crate's bounds) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has, 1,024 for an 8-byte expression; an exhaustive search as the back-reference oracle on 8-byte commands; `-timeout=10`) |
 | `/etc/hosts`, `/etc/services`, `/etc/host.conf` (or the file `RESOLV_HOST_CONF` names), `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name`; `/proc/self/auxv`, read where `RESOLV_HOST_CONF` is set | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
 | the system's resolver's answer to an `-i @name` the hosts file does not hold (`getaddrinfo()` through `std`): addresses only | **a remote name server**, and whoever is on the path to it | **hostile** to availability; the addresses untrusted | `lsof-core::netnames::system_addresses` | not applicable: no bytes of the answer are parsed here (libc parses the reply, `std` hands over addresses); see below |
 | Linux: the replies to the PTR queries a socket's NAME makes, by default (`-n` turns them off; DIVERGENCES 154), over UDP and, after a truncated reply or under `use-vc`, TCP | **a remote name server**, and whoever can send to this host's ephemeral port | **hostile**: parsed here, and printed | `lsof-core::dns` (the reply's readers, the query loop), `lsof-backend-linux::dns` (the sockets) | `dns_reply` (every reader and the whole loop over a transport made of the input; `-timeout=10`) |
@@ -593,29 +593,66 @@ from 636 KB to 1.66 MB (1.85 MB with lsof-rs's own engine, 2026-11-19, from
   each out, and runs out of memory on `\w*` 32,000 times, on `a{0,32767}`
   12,000 times and on `(a{32767}){32767}`, after 10 to 15 s at an 8 GB
   limit). With a back-reference matching is NP-complete, glibc's own search
-  is exponential, and lsof-rs's is held to `SEARCH_BUDGET`, a million steps
+  is exponential, and lsof-rs's is held to `SEARCH_BUDGET`, 4,194,304 steps
   a command, each thing it keeps paid for before it is kept: past it the
-  command is taken as not matching (DIVERGENCES 38). A command longer than
-  1,024 bytes (`OWN_COMMAND_MAX`; no system names a process so) is not
-  searched. Measured, against 63 bytes (release build, this host, peak
-  RSS of the process): `\w*` 32,000 times compiles in 26 ms and matches in
-  0.45 s at 17 MB; 9,000 distinct `[[:alpha:]X]` 30 ms and 23 ms, 10 MB;
-  60,000 `\W` under `i` 54 ms and 0.10 s, 23 MB; `a{0,32767}` 12,000 times
-  46 ms and 0.15 s, 23 MB; `((((.?){32767}){32767}){32767}){32767}r` 45 ms
-  and 4 ms. With back-references: `(.*)(.*)(.*)\3\2\1$` 36 ms (glibc
-  18.5 s); nine `(a*)*` and `\1`..`\9` 0.1 s; at the budget, nine `(.*)`
-  named in reverse, 0.32 s and 103 MB, no match (glibc over a minute);
-  `(.)\1` 30,000 times 1 ms.
-* **A match is asked once a command name.** Each expression keeps its
-  answer for a command name (1,024 names of at most 256 bytes), so a run
-  pays for a name once, not once a process: 1.1 s for `(.*.*){8000}z` over
-  this host's 79 processes, by the crate (18 ms for the worst program under
-  8 MiB against a 15-byte command, `(.*){1,16000}z`, 70 ms against 63
-  bytes). The expression is the invoking user's, so what an expensive one
-  costs is that user's own run, and so is how many `-c /regex/` words a
+  command is taken as not matching (DIVERGENCES 38). Every start is
+  searched in turns of the same length, doubled each round, so a match the
+  search from one start finds in `t` steps is found within about
+  `4 (n + 2) t` steps (`n` the command's length) however long the others
+  would take; and before any search the expression is matched as a regular
+  one whose back-references match anything, which rules out the starts
+  nothing can match from, and a command no start can match costs no search
+  at all. A command longer than 1,024 bytes (`OWN_COMMAND_MAX`; no system
+  names a process so) is not searched. Measured, against 63 bytes (release
+  build, this host, peak RSS of the process): `\w*` 32,000 times compiles
+  in 26 ms and matches in 0.45 s at 17 MB; `((((.?)*)*)*)*` 9,000 times
+  (128 KiB, the worst found) matches in 1.0 s at 14 MB; 9,000 distinct
+  `[[:alpha:]X]` 30 ms and 23 ms, 10 MB; 60,000 `\W` under `i` 54 ms and
+  0.10 s, 23 MB; `a{0,32767}` 12,000 times 46 ms and 0.15 s, 23 MB;
+  `((((.?){32767}){32767}){32767}){32767}r` 45 ms and 4 ms. Without a
+  back-reference the cost grows with the cube of the command: against
+  1,024 bytes each `(.{0,1000})` costs about 10 ms (300 of them 3.2 s,
+  1,200 12.5 s, measured), so 128 KiB of them would take about two minutes
+  for one command; only a Windows image's name, of up to about 777 bytes,
+  comes near that length (a minute), Linux's are at most 63 and FreeBSD's
+  19. With back-references, every case the reviews found is answered in at
+  most 5 ms (`(.*)(.*)(.*)\3\2\1$` against 63 `a` 2 ms, glibc 18.5 s;
+  seven `(.*)` and `\1`..`\7$` against 15 bytes 3 ms, glibc 5 s; nine
+  named in reverse 2 ms, glibc over a minute); at the budget about 0.5 s
+  and under 20 MB (4.36 million steps 0.47 s, 17 MB), no match. How often
+  the budget is reached: never on the reviews' cases, nor on 18,000 random
+  pairs of an expression of one to seven groups and a command name of this
+  host (the most 700,000 steps); on 6 of 9,000 random expressions of three
+  to nine groups each named again in random order, against a 63-byte name,
+  and each of the 6 has no match when searched to its end (glibc says no
+  match for 5, after 0.02 to 1.9 s, and runs past 20 s on the sixth); the
+  3,942 that match were all found within the budget.
+* **A match is asked once a command name, and only where the C asks it.**
+  Each expression keeps its answer for a command name (1,024 names of at
+  most 256 bytes), so a run pays for a name once, not once a process (by
+  the crate, the worst program under 8 MiB costs 18 ms a 15-byte name and
+  70 ms a 63-byte one: 1.1 s for `(.*.*){8000}z` over 79 processes); and
+  under `-a` a process that `-p`, `-g` or `-u` excludes is not asked about
+  `-c` at all, as the C's `is_proc_excl() || is_cmd_excl()` does not ask
+  it. So a run costs at most the cost of a command (above) times the
+  distinct command names it asks about times the `-c /regex/` words. The
+  expression is the invoking user's, and so is how many `-c /regex/` words a
   command line holds: there is no bound on their number, as the C has none,
-  each within its own bounds. The command names it runs over are other
-  users' and cannot make a match cost more than the bounds above.
+  each within its own bounds. The number of distinct names is other users'
+  to choose (each process names itself), so the product is theirs to
+  raise too, never past those bounds. Measured on this host with 400
+  sleepers of distinct 15-byte names added (490 distinct names in all),
+  whole-host runs (`-t -c /EXPR/`), lsof-rs against the C (on a host busy
+  with other work, so roughly): `sl(e)\1p` 0.02 s and 0.02 s; four `(.*)`
+  named in reverse at the end 0.14 s and 1.1 s; seven named in order
+  0.28 s, and the C past 20 minutes (about 5 s a name); nine named in
+  reverse 0.33 s, and the C past 20 minutes; `((.?)*)*` 16,000 times
+  (128 KiB, no back-reference, lsof-rs's matrices) 43 s, and the C past 20
+  minutes; a nine-group expression with no match (the slowest kind for
+  lsof-rs) 0.96 s, and the C 0.05 s, which is the one measured where the C
+  is the faster.
+  Under `-a -p` of one 15-byte process, seven `(.*)` named in order: lsof-rs
+  0.01 s, the C 4.6 s (lsof-rs of 2026-11-19: 12.6 s, and no match).
 
 **`-i @name` can make lsof-rs wait on a name server, as it makes the C.**
 A host name is looked up where the option is read, before anything is
@@ -905,16 +942,22 @@ sanitizer gates are pointed at it.
   so review still has to. (This line once claimed the lint was denied
   workspace-wide; it never was.)
 - **Names its process to make `-c /regex/` expensive, or answers a DNS
-  query slowly.** A command name is matched by an engine with no
+  query slowly.** A command name is matched by the `regex` crate, with no
   backtracking, in time linear in its fifteen bytes and the program's size,
-  which the invoker's expression and an 8 MiB limit set, and once for each
-  name. A name server is asked only for a host name the invoker typed and
+  which the invoker's expression and an 8 MiB limit set; or, for what the
+  crate cannot or will not run, by lsof-rs's own engine, in time cubic at
+  most in the name and linear in the expression, or held to 4,194,304 steps
+  with a back-reference (above); once for each name. Many processes of
+  distinct names multiply what a run costs by their number, never past
+  each name's bound. A name server is asked only for a host name the invoker typed and
   the hosts file does not hold (or any name, where nsswitch.conf does not
   put `files` first for hosts), once, under the system's own timeouts.
   Defence: the `posix_regex` fuzz target under `-timeout=10` (expressions
   to 64 KB in the local runs; its commands held to 64 bytes, the longest a
-  process has), the cost, size and nesting limits, and no lookup that the C
-  does not make.
+  process has, and to 1,024 for an expression of 8 bytes, which lsof-rs's
+  own engine alone answers; an exhaustive search holds the back-reference
+  search to its answer on commands of 8 bytes), the cost, size and nesting
+  limits, the search budget, and no lookup that the C does not make.
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit
   between `readdir` and the read of its entries, and a PID can be recycled.
   Defence: treat every per-process read as fallible and skip, never abort the
