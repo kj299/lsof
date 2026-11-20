@@ -366,6 +366,9 @@ enum Cell<'a> {
     SizeOff,
     /// NAME: `putchar(' ')`, `printname()`'s calls, `putchar('\n')`.
     Name(&'a OpenFile),
+    /// USER: one `printf(" %*.*s")` of what `printuid()` gives as it is
+    /// printed, asked once the cells before it are written.
+    User,
     /// Any other: one `printf(" %*s")`, joined to the one before it where
     /// `print_file()` prints the two in one (FD and its mode).
     Plain,
@@ -380,6 +383,7 @@ fn emit_row(
     widths: &[usize],
     cols: &[Col],
     (esc, tcp_show): (Escaper, TcpInfoFlags),
+    user: &mut dyn FnMut() -> String,
 ) -> io::Result<()> {
     let mut out = Calls::new();
     let mut call: Vec<u8> = Vec::new();
@@ -390,6 +394,22 @@ fn emit_row(
         }
         let width = widths[i];
         match kind {
+            Cell::User => {
+                // The C has printed the cells before USER into stdout's
+                // buffer when `printuid()` asks for the login, so they are
+                // in `w` first, and a reader gone by then stops the lookup
+                // (DIVERGENCES 39). `" %*.*s"`: padded to the width the
+                // sizing pass found, and cut to it.
+                out.write_to(w)?;
+                let mut cell = user();
+                let mut cut = width.min(cell.len());
+                while !cell.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                cell.truncate(cut);
+                call.push(b' ');
+                padded(&mut call, &cell, width, cols[i].right);
+            }
             Cell::Command(b) => {
                 let used = esc.command_bytes_truncated_calls(b, width, &mut out);
                 for _ in used..width {
@@ -514,7 +534,9 @@ pub fn render(procs: &[Process], opts: TableOpts) -> String {
 /// (DIVERGENCES 30). Formatting a row twice costs CPU; holding it costs memory
 /// for the rest of the run, and a table grows with the host.
 pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::Result<()> {
-    render_naming(w, procs, opts, &mut |_| None)
+    render_naming(w, procs, opts, &mut |_| None, &mut |p| {
+        p.login_bytes().map(Box::from)
+    })
 }
 
 /// [`render_to`], each row's file first offered to `rename` as the row is
@@ -524,11 +546,19 @@ pub fn render_to(w: &mut dyn Write, procs: &[Process], opts: TableOpts) -> io::R
 /// being sized by none (`print.c:1179-1190`); so here, in pass three, once
 /// every row before it is in `w`, and a write error ends it at once
 /// (DIVERGENCES 154).
+///
+/// Each row's login is `login`'s, asked where the C's `printuid()` asks
+/// it: once a row as pass two sizes USER (`print.c:937`), every sizing call
+/// before any printing one, and once a row again as pass three prints it
+/// (`:941`), once the cells before it are in `w`. `None` is the number.
+/// What it keeps between calls is its own: the C keeps the names it found
+/// and nothing else (DIVERGENCES 39).
 pub fn render_naming(
     w: &mut dyn Write,
     procs: &[Process],
     opts: TableOpts,
     rename: &mut dyn FnMut(&OpenFile) -> Option<OpenFile>,
+    login: &mut dyn FnMut(&Process) -> Option<Box<[u8]>>,
 ) -> io::Result<()> {
     let TableOpts {
         terse,
@@ -606,7 +636,14 @@ pub fn render_naming(
     }
     cols.extend([Col::right("NODE"), Col::left("NAME")]);
 
-    let row_for = |p: &Process, f: &OpenFile| -> Vec<String> {
+    // A name, escaped; or, where there is none, the number the way the C's
+    // `printuid()` writes it (DIVERGENCES 68).
+    let user_cell = |p: &Process, login: Option<&[u8]>| match (login, p.uid) {
+        (Some(u), _) => esc.bytes(u).into_owned(),
+        (None, Some(uid)) => numeric_user(uid),
+        (None, None) => String::new(),
+    };
+    let row_for = |p: &Process, f: &OpenFile, user: String| -> Vec<String> {
         // Escaped and cut the way the C's safestrprtn() does it:
         // whitespace-free, pure ASCII, and a cut that never leaves half an
         // escape at the end of the cell. `cmd_cut` is the column width from
@@ -629,13 +666,7 @@ pub fn render_naming(
         if show_pgid {
             r.push(p.pgid.map(|v| v.to_string()).unwrap_or_default());
         }
-        // A name, escaped; or, where there is none, the number the way the
-        // C's `printuid()` writes it (DIVERGENCES 68).
-        r.push(match (p.login_bytes(), p.uid) {
-            (Some(u), _) => esc.bytes(u).into_owned(),
-            (None, Some(uid)) => numeric_user(uid),
-            (None, None) => String::new(),
-        });
+        r.push(user);
         r.push(fd_name(f));
         r.push(fd_mode(f));
         r.push(f.file_type.code());
@@ -695,7 +726,8 @@ pub fn render_naming(
     let mut any = false;
     for (p, f) in rows_of(procs, &blank) {
         any = true;
-        for (i, cell) in row_for(p, f).iter().enumerate() {
+        let user = user_cell(p, login(p).as_deref());
+        for (i, cell) in row_for(p, f, user).iter().enumerate() {
             widths[i] = widths[i].max(cell.len());
         }
     }
@@ -719,7 +751,8 @@ pub fn render_naming(
     for (p, f) in rows_of(procs, &blank) {
         let renamed = rename(f);
         let f = renamed.as_ref().unwrap_or(f);
-        let cells = row_for(p, f);
+        // USER is asked as it is printed, below.
+        let cells = row_for(p, f, String::new());
         let kinds: Vec<Cell<'_>> = cols
             .iter()
             .enumerate()
@@ -727,11 +760,21 @@ pub fn render_naming(
                 _ if i == 0 => Cell::Command(p.command_bytes()),
                 "TASKCMD" => Cell::TaskCommand(p.task_command.as_deref().unwrap_or("")),
                 "NAME" => Cell::Name(f),
+                "USER" => Cell::User,
                 t if t == size_off.header() => Cell::SizeOff,
                 _ => Cell::Plain,
             })
             .collect();
-        emit_row(w, &cells, &kinds, &widths, &cols, (esc, tcp_show))?;
+        let mut user = || user_cell(p, login(p).as_deref());
+        emit_row(
+            w,
+            &cells,
+            &kinds,
+            &widths,
+            &cols,
+            (esc, tcp_show),
+            &mut user,
+        )?;
     }
     Ok(())
 }
@@ -748,4 +791,63 @@ pub(crate) fn numeric_user(uid: u32) -> String {
     let mut s = format!("{uid:>8}");
     s.truncate(8);
     s
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A sink whose bytes the test reads while the table is written.
+    struct Shared<'a>(&'a RefCell<Vec<u8>>);
+    impl Write for Shared<'_> {
+        fn write(&mut self, d: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(d);
+            Ok(d.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// USER is asked as the C's `printuid()` is: once a row as pass two
+    /// sizes it, before anything is written, and once a row as pass three
+    /// prints it, once the cells before it are written (DIVERGENCES 39);
+    /// what the printing call gives is cut to the width the sizing found,
+    /// `" %*.*s"`.
+    #[test]
+    fn user_is_asked_to_size_it_and_again_as_it_is_printed() {
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(2);
+        assert_eq!(p.files.len(), 2);
+        p.uid = Some(7);
+        p.user = None;
+        p.raw_names = None;
+        let out = RefCell::new(Vec::new());
+        let mut at = Vec::new();
+        render_naming(
+            &mut Shared(&out),
+            std::slice::from_ref(&p),
+            TableOpts::new(Escaper::UNIX),
+            &mut |_| None,
+            &mut |_| {
+                at.push(out.borrow().len());
+                Some(if at.len() <= 2 {
+                    b"ab"[..].into()
+                } else {
+                    b"abcdefghij"[..].into()
+                })
+            },
+        )
+        .unwrap_or_default();
+        assert_eq!(at.len(), 4, "{at:?}");
+        assert_eq!(at[..2], [0, 0], "sized before anything is written");
+        let text = out.borrow();
+        for &a in &at[2..] {
+            assert!(a > 0 && text[a - 1] != b'\n', "{at:?}");
+        }
+        let text = String::from_utf8_lossy(&text);
+        let row = text.lines().nth(1).unwrap_or_default();
+        assert!(row.contains(" abcd "), "{text}");
+    }
 }

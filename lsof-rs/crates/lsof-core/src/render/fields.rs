@@ -323,6 +323,7 @@ pub fn render_with_offset_digits(
         offset_digits,
         file_flags,
         &mut |_| None,
+        &mut |p| p.login_bytes().map(Box::from),
     )
     .expect("writing to a Vec cannot fail");
     String::from_utf8(buf).expect("every field is a String, so the text is UTF-8")
@@ -335,6 +336,11 @@ pub fn render_with_offset_digits(
 /// away stops the lookups at the next write (DIVERGENCES 154); this asks
 /// `rename` only once every set before it is in `w`, and a write error
 /// ends it at once.
+///
+/// The `L` field is `login`'s, asked as the C's `printuid()` is
+/// (`print.c:2224`): once a process set, where `L` is selected, once the
+/// fields before it are in `w`; `None` writes none. A process with no file
+/// is no set at all, as the C prints none (`print_proc()`).
 pub fn write_with_names(
     w: &mut dyn std::io::Write,
     procs: &[Process],
@@ -342,6 +348,7 @@ pub fn write_with_names(
     offset_digits: i32,
     file_flags: FileFlags,
     rename: &mut dyn FnMut(&crate::model::OpenFile) -> Option<crate::model::OpenFile>,
+    login: &mut dyn FnMut(&Process) -> Option<Box<[u8]>>,
 ) -> std::io::Result<()> {
     let term = if nul { b'\0' } else { b'\n' };
     // No list is the C's default set, which is every letter but a few; a
@@ -372,7 +379,7 @@ pub fn write_with_names(
         }};
     }
 
-    for p in procs {
+    for p in procs.iter().filter(|p| !p.files.is_empty()) {
         // `p` is the one field Lsof.8 calls "always selected".
         push!(b'p', &p.pid.to_string());
         // `-K`: the task id and the task's own command, emitted right after
@@ -408,8 +415,9 @@ pub fn write_with_names(
             }
         }
         if want('L') {
-            if let Some(user) = p.login_bytes() {
-                push!(b'L', &esc.bytes(user));
+            out.write_to(w)?;
+            if let Some(user) = login(p) {
+                push!(b'L', &esc.bytes(&user));
             }
         }
         // In `-F0` a set's last field keeps its NUL and gets a NL after it —
@@ -582,6 +590,55 @@ pub(crate) fn uid_as_the_c_prints_it(uid: u32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// `L` is asked once the fields before it are written, as the C's
+    /// `printuid()` is asked once they are in stdout's buffer, and once a
+    /// process set (DIVERGENCES 39).
+    #[test]
+    fn a_login_is_asked_once_the_fields_before_it_are_written() {
+        use std::cell::RefCell;
+        struct Shared<'a>(&'a RefCell<Vec<u8>>);
+        impl std::io::Write for Shared<'_> {
+            fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(d);
+                Ok(d.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let p = crate::mock::sample_processes().remove(0);
+        assert!(!p.files.is_empty());
+        let out = RefCell::new(Vec::new());
+        let mut at = Vec::new();
+        write_with_names(
+            &mut Shared(&out),
+            &[p.clone(), p.clone()],
+            (
+                false,
+                Some(&['p', 'L', 'f']),
+                TcpInfoFlags::default(),
+                Escaper::UNIX,
+            ),
+            DEFAULT_OFFSET_DIGITS,
+            FileFlags::Off,
+            &mut |_| None,
+            &mut |_| {
+                at.push(out.borrow().len());
+                Some(b"who"[..].into())
+            },
+        )
+        .unwrap_or_default();
+        let set = format!("p{}\n", p.pid);
+        assert_eq!(at.len(), 2, "{at:?}");
+        assert_eq!(at[0], set.len());
+        let text = String::from_utf8_lossy(&out.borrow()).into_owned();
+        assert!(text.starts_with(&format!("{set}Lwho\nf")), "{text}");
+        assert!(
+            at[1] > at[0] && text[..at[1]].ends_with(&set),
+            "{at:?} {text}"
+        );
+    }
     use super::*;
 
     /// Each field is written as `print_proc()`'s calls write it, one
@@ -623,6 +680,7 @@ mod tests {
             DEFAULT_OFFSET_DIGITS,
             FileFlags::Off,
             &mut |_| None,
+            &mut |_| None,
         )
         .unwrap();
         let fd = match p.files[0].fd {
@@ -659,7 +717,20 @@ mod tests {
     #[test]
     fn a_command_and_login_of_bytes_print_their_bytes() {
         let mut p = crate::mock::sample_processes().remove(0);
+        // A process with no file is no set in `-F`, as in the C.
         p.files.clear();
+        assert_eq!(
+            render(
+                std::slice::from_ref(&p),
+                false,
+                Some(&['c', 'L']),
+                TcpInfoFlags::default(),
+                Escaper::UNIX,
+            ),
+            ""
+        );
+        p.files
+            .push(crate::mock::sample_processes().remove(0).files.remove(0));
         p.command = "x\u{fffd}".into();
         p.user = Some("ab\u{fffd}cd".into());
         p.raw_names = Some(Box::new(crate::model::RawNames {

@@ -21,22 +21,26 @@
 //!
 //! # What a caller must check first
 //!
-//! glibc 2.39 reads past the end of a heap block when nsswitch.conf's
-//! `passwd:` line lists no source, or opens with an action (`passwd:
-//! [NOTFOUND=return] files`): valgrind reports the invalid reads in
-//! `__nss_lookup()` (`nss/nsswitch.c:73,82`), and the C's survival is the
-//! heap's luck. Under `passwd: compat` with `passwd_compat: compat`, and a
-//! `+` line in the password file, glibc's `compat` source asks itself until
-//! the stack is gone (SIGSEGV, the C's exit 139, measured). Neither is
-//! anything this crate can see, so its caller reads nsswitch.conf first and
-//! does not ask where it holds either (`lsof-backend-linux`'s `users.rs`).
+//! glibc 2.39 reads past the end of a heap block when a database it walks
+//! for the lookup has an empty list of sources: nsswitch.conf's `passwd:`
+//! line listing none, or opening with an action (`passwd: [NOTFOUND=return]
+//! files`), and, under `passwd: compat` with a `+@group` or `-@group` line
+//! in the password file, such a `netgroup:` line (`compat` asks
+//! `innetgr()`). Valgrind reports the invalid reads in `__nss_lookup()`
+//! (`nss/nsswitch.c:73,82`), and the C's survival is the heap's luck. Under
+//! `passwd: compat` with `passwd_compat: compat`, and a `+` line in the
+//! password file, glibc's `compat` source asks itself until the stack is
+//! gone (SIGSEGV, the C's exit 139, measured). None of it is anything this
+//! crate can see, so its caller reads nsswitch.conf first and does not ask
+//! where it could hold any of them (`lsof-backend-linux`'s `users.rs`).
 //!
 //! # Safety
 //!
 //! Three `unsafe` sites, each with a `SAFETY` comment: the zeroed `struct
 //! passwd` the call fills, and the two calls. Each call is given a buffer
-//! this crate owns and the length it has, a `passwd` it owns, and a result
-//! pointer it owns, and nothing of what the C library wrote is read through
+//! this crate owns and the length it has (a byte buffer, which a `passwd`'s
+//! strings need no alignment of), a `passwd` it owns, and a result pointer
+//! it owns, and nothing of what the C library wrote is read through
 //! a pointer: the uid is a field of the `passwd`, read only where the result
 //! pointer points at it, and the name is found in the buffer by its offset
 //! and read as a slice of it (`name_at`), so a source that points
@@ -245,25 +249,7 @@ pub fn by_name(name: &[u8]) -> Option<Answer> {
     {
         let name = c_name(name);
         Some(ask_growing(START, CAP, |buf| {
-            uid_answer(sys::call(buf, |pwd, buf, result| {
-                // getpwnam_r() is MT-Safe (glibc's manual: `MT-Safe
-                // locale`; FreeBSD's getpwent(3)) and writes nowhere of
-                // ours but the three it is given.
-                // SAFETY: `name` is NUL-terminated and outlives the call;
-                // `pwd` and `result` are `call`'s own, valid for a write of
-                // a `passwd` and of a pointer; `buf` is valid for writes of
-                // `buf.len()` bytes, the length given, and nothing else
-                // refers to it during the call.
-                unsafe {
-                    libc::getpwnam_r(
-                        name.as_ptr(),
-                        pwd,
-                        buf.as_mut_ptr().cast(),
-                        buf.len(),
-                        result,
-                    )
-                }
-            }))
+            uid_answer(sys::getpwnam_into(&name, buf))
         }))
     }
     #[cfg(not(all(any(target_os = "linux", target_os = "freebsd"), not(miri))))]
@@ -281,12 +267,7 @@ pub fn by_uid(uid: u32) -> Option<Answer> {
     #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
     {
         Some(ask_growing(START, CAP, |buf| {
-            name_answer(sys::call(buf, |pwd, buf, result| {
-                // SAFETY: as in `by_name`: `pwd`, `result` and `buf` are
-                // `call`'s own and valid for the writes the call makes, `buf`
-                // for the `buf.len()` bytes it is told of; `uid` is a value.
-                unsafe { libc::getpwuid_r(uid, pwd, buf.as_mut_ptr().cast(), buf.len(), result) }
-            }))
+            name_answer(sys::getpwuid_into(uid, buf))
         }))
     }
     #[cfg(not(all(any(target_os = "linux", target_os = "freebsd"), not(miri))))]
@@ -298,11 +279,49 @@ pub fn by_uid(uid: u32) -> Option<Answer> {
 
 #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
 mod sys {
+    /// One `getpwnam_r()` of `name` into `buf`, read ([`call`]).
+    pub(crate) fn getpwnam_into(
+        name: &std::ffi::CStr,
+        buf: &mut [u8],
+    ) -> Result<super::Got, super::Step> {
+        call(buf, |pwd, buf, result| {
+            // getpwnam_r() is MT-Safe (glibc's manual: `MT-Safe locale`;
+            // FreeBSD's getpwent(3)) and writes nowhere of ours but the three
+            // it is given. A `struct passwd` holds strings alone, no array of
+            // pointers (as `struct group`'s `gr_mem` is), so the C library
+            // writes only bytes into `buf` and needs no alignment of it.
+            // SAFETY: `name` is NUL-terminated and outlives the call; `pwd`
+            // and `result` are `call`'s own, valid for a write of a `passwd`
+            // and of a pointer; `buf` is valid for writes of `buf.len()`
+            // bytes, the length given, at any alignment (above).
+            unsafe {
+                libc::getpwnam_r(
+                    name.as_ptr(),
+                    pwd,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    result,
+                )
+            }
+        })
+    }
+
+    /// One `getpwuid_r()` of `uid` into `buf`, read ([`call`]).
+    pub(crate) fn getpwuid_into(uid: u32, buf: &mut [u8]) -> Result<super::Got, super::Step> {
+        call(buf, |pwd, buf, result| {
+            // SAFETY: as in `getpwnam_into`: `pwd`, `result` and `buf` are
+            // `call`'s own and valid for the writes the call makes, `buf` for
+            // the `buf.len()` bytes it is told of, with no alignment needed
+            // (a `passwd` holds no array of pointers); `uid` is a value.
+            unsafe { libc::getpwuid_r(uid, pwd, buf.as_mut_ptr().cast(), buf.len(), result) }
+        })
+    }
+
     /// One call, `call(pwd, buf, result)`, with a `passwd` and a result
     /// pointer of its own, read by [`super::read_call`]: the entry's two
     /// fields are read from the `passwd` itself, where the result pointer
     /// points at it, and nothing is read through a pointer.
-    pub(crate) fn call(
+    fn call(
         buf: &mut [u8],
         call: impl FnOnce(*mut libc::passwd, &mut [u8], *mut *mut libc::passwd) -> libc::c_int,
     ) -> Result<super::Got, super::Step> {
@@ -501,5 +520,48 @@ mod tests {
         );
         assert_eq!(none, Some(Answer::NotFound));
         assert_eq!(by_uid(u32::MAX - 7), Some(Answer::NotFound));
+    }
+
+    /// The C library is told the true length of the buffer it is given:
+    /// a 4-byte slice of a 64-byte one is too small for root's entry, which
+    /// the 64 bytes would hold, and the C library says `ERANGE` and leaves
+    /// every byte past the 4 as it was. A length told too long would have it
+    /// write root's entry into them.
+    #[test]
+    #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+    fn the_c_library_writes_only_inside_the_length_it_is_told() {
+        let mut big = [0xa5u8; 64];
+        let got = sys::getpwuid_into(0, &mut big[..4]);
+        assert_eq!(got, Err(Step::TooSmall));
+        assert!(big[4..].iter().all(|&b| b == 0xa5), "{big:?}");
+        let mut big = [0xa5u8; 64];
+        let root = std::ffi::CString::new("root").unwrap_or_default();
+        let got = sys::getpwnam_into(&root, &mut big[..4]);
+        assert_eq!(got, Err(Step::TooSmall));
+        assert!(big[4..].iter().all(|&b| b == 0xa5), "{big:?}");
+        // The whole 64 bytes hold it.
+        let got = sys::getpwuid_into(0, &mut big);
+        assert!(
+            matches!(&got, Ok(Got::Entry { uid: 0, name: Some(n) }) if n == b"root"),
+            "{got:?}"
+        );
+    }
+
+    /// From a buffer of one byte, glibc's `ERANGE` grows it until root's
+    /// entry fits, through the real calls: each `ERANGE` is read as too
+    /// small, and the growth reaches an answer well before the cap.
+    #[test]
+    #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(miri)))]
+    fn a_buffer_too_small_for_the_c_library_grows_until_it_answers() {
+        let mut sizes = Vec::new();
+        let answer = ask_growing(1, CAP, |buf| {
+            sizes.push(buf.len());
+            name_answer(sys::getpwuid_into(0, buf))
+        });
+        assert_eq!(answer.found().map(|a| a.name), Some(b"root".to_vec()));
+        assert!(sizes.len() > 1 && sizes.starts_with(&[1, 2]), "{sizes:?}");
+        let root = std::ffi::CString::new("root").unwrap_or_default();
+        let answer = ask_growing(1, CAP, |buf| uid_answer(sys::getpwnam_into(&root, buf)));
+        assert_eq!(answer.found().map(|a| a.uid), Some(0));
     }
 }

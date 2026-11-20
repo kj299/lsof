@@ -527,8 +527,12 @@ name = "user-column-from-lossy-text"
 rule = "USER prints a login's bytes (70)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/table.rs"
-old = '''        r.push(match (p.login_bytes(), p.uid) {'''
-new = '''        r.push(match (p.user.as_deref().map(str::as_bytes), p.uid) {'''
+old = '''    render_naming(w, procs, opts, &mut |_| None, &mut |p| {
+        p.login_bytes().map(Box::from)
+    })'''
+new = '''    render_naming(w, procs, opts, &mut |_| None, &mut |p| {
+        p.user.as_deref().map(|u| Box::from(u.as_bytes()))
+    })'''
 
 [[mutant]]
 name = "fields-c-from-lossy-text"
@@ -543,8 +547,8 @@ name = "fields-l-from-lossy-text"
 rule = "-F L prints a login's bytes (70)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/fields.rs"
-old = '''            if let Some(user) = p.login_bytes() {'''
-new = '''            if let Some(user) = p.user.as_deref().map(str::as_bytes) {'''
+old = '''        &mut |p| p.login_bytes().map(Box::from),'''
+new = '''        &mut |p| p.user.as_deref().map(|u| Box::from(u.as_bytes())),'''
 
 [[mutant]]
 name = "command-bytes-cut-midescape"
@@ -610,9 +614,9 @@ rule = "-t looks up no login (70)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
 old = '''        Format::Table => !sel.terse,
-        Format::Fields { only, .. } => wants_login(only.as_deref()),'''
+        Format::Fields { only, .. } => {'''
 new = '''        Format::Table => true,
-        Format::Fields { only, .. } => wants_login(only.as_deref()),'''
+        Format::Fields { only, .. } => {'''
 
 [[mutant]]
 name = "logins-looked-up-for-empty-json"

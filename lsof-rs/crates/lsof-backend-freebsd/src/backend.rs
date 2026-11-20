@@ -309,11 +309,15 @@ impl Backend for FreeBsdBackend {
     }
 
     fn lookup_user(&self, value: &str) -> lsof_core::UserLookup {
+        users::lookup(value.as_bytes())
+    }
+
+    fn lookup_user_bytes(&self, value: &[u8]) -> lsof_core::UserLookup {
         users::lookup(value)
     }
 
     fn login_name(&self, uid: u32) -> Option<Box<[u8]>> {
-        users::name_for(uid, false).map(|name| name.into_bytes().into_boxed_slice())
+        users::name_for(uid, false)
     }
 
     /// `-i @name`: the system's resolver, through `std` (`getaddrinfo(3)`),

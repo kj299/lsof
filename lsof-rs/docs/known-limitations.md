@@ -326,12 +326,18 @@ meet. Each number is a row there, with the measurement behind it.
   that only a `db` map or NIS serves is unknown; its port works. A login is
   glibc's since 2026-11-20 (39): `getpwnam_r()` and `getpwuid_r()`, every
   source nsswitch.conf names (LDAP, SSSD, systemd-homed, NIS, Hesiod)
-  answering as for the C, but where nsswitch.conf has a shape that makes
-  glibc read past a heap block (`passwd:` with no source) or recurse
-  (`compat` in `passwd:` and `passwd_compat:`), or the answer would not fit
-  in 16 MiB: there lsof-rs reads `/etc/passwd` itself, as before. A source
-  that blocks (LDAP, SSSD) blocks lsof-rs where it blocks the C, as a login
-  is printed or `-u name` read; `-S` bounds neither; `-l` asks nothing. A host name given to `-i` does reach DNS
+  answering as for the C, but where nsswitch.conf has a shape in which
+  glibc could read past a heap block (`passwd:` with no source; under
+  `compat`, `netgroup:` or `passwd_compat:` with no source) or recurse
+  (`compat` in `passwd:` and `passwd_compat:`), on any line for those
+  databases, not only the last, which glibc keeps, or where the answer would
+  not fit in 16 MiB: there lsof-rs reads `/etc/passwd` itself, as before
+  (a second `passwd_compat:` line naming `files` after one naming `compat`
+  is so read, its `+` lines as with no NIS, where glibc 2.39 follows them).
+  A source that blocks (LDAP, SSSD) blocks lsof-rs where and as long as it
+  blocks the C, as a login is printed or `-u name` read, asked as often as
+  the C asks it; `-S` bounds neither; `-l` asks nothing. What an LDAP or
+  SSSD module itself asks in turn is not looked into. A host name given to `-i` does reach DNS
   and the other NSS sources, through the system's resolver, but one
   `/etc/hosts` holds for IPv4 alone is not asked of DNS for IPv6, as the C
   asks it. A socket's host is named from `/etc/hosts` and DNS alone (154):

@@ -7249,6 +7249,51 @@ env = { LSOF_DIFF_MT = "names-pwempty" }
 with_stderr = true
 
 [[case]]
+# `passwd: compat`, `netgroup:` with no source, and a password file that
+# opens with `+@grp`: glibc's `compat` asks innetgr() at that line, whose
+# walk over the empty list reads past a heap block (valgrind: two invalid
+# reads in __nss_lookup(), for the C and for the base commit's lsof-rs).
+# lsof-rs does not ask glibc there and reads the file itself, nobody in a
+# netgroup: the C's answer where it survives (200 of 200 runs here). Its
+# output is the base commit's too: what differs there is the invalid
+# read, which valgrind shows and the output does not (DIVERGENCES 39).
+name = "nss-compat-netgroup-with-no-source-is-not-asked"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-pwnetgroup" }
+with_stderr = true
+
+[[case]]
+name = "nss-compat-netgroup-with-no-source-login"
+args = ["-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwnetgroup" }
+with_stderr = true
+
+[[case]]
+# The same with `-@grp`, and a `netgroup:` line that opens with an action.
+name = "nss-compat-netgroup-opening-with-an-action-is-not-asked"
+args = ["-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_MT = "names-pwnetgroupminus" }
+with_stderr = true
+
+[[case]]
+name = "nss-compat-netgroup-opening-with-an-action-login"
+args = ["-F", "pL", "-a", "-p", "{A}", "-d", "cwd", "-u", "root"]
+env = { LSOF_DIFF_MT = "names-pwnetgroupminus" }
+with_stderr = true
+
+[[case]]
+# A login the first getpwnam() finds and the second does not (Hesiod's
+# server answers `hsonce` at every other query, NAMES_TXT_EVERY_OTHER):
+# lsof_select_login() fails, and the C's Error() ends the run at once,
+# `can't get UID for hsonce`, exit 1, no usage, the `-p xx` after it never
+# read. The base commit read on: the `-p` error and the usage hint too.
+name = "nss-hesiod-login-lost-at-the-second-lookup-ends-the-run"
+args = ["-a", "-d", "cwd", "-u", "hsonce", "-p", "xx"]
+env = { LSOF_DIFF_MT = "names-hesiod", RES_OPTIONS = "" }
+with_stderr = true
+compare_queries = true
+
+[[case]]
 # `compat` asking itself at a `+` line: the C dies in glibc (SIGSEGV, its
 # stack gone), on `-u root` and on USER alike. lsof-rs does not ask glibc
 # there, and reads the file as with no NIS: no login after the `+`.

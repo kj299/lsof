@@ -195,6 +195,15 @@ pub enum UserLookup {
     /// an option error while it parses — `lsof: can't get UID for nosuchuser`,
     /// then the usage message, exit 1 — so nothing is listed.
     Unknown,
+    /// The value named an account when it was first looked up, and none
+    /// when it was looked up again: the C asks `getpwnam()` twice, once as
+    /// it reads the value (`arg.c:2030`) and once as it selects the login
+    /// (`lsof_select_login()`, `lib/lsof.c:1220`), and a second lookup that
+    /// fails is its `Error()`: `lsof: can't get UID for NAME` and exit 1 at
+    /// once, with no usage and no later option read (`arg.c:2057-2060`).
+    /// A source that answers one lookup and not the next does it (an LDAP
+    /// server that goes away; measured with Hesiod, DIVERGENCES 39).
+    Lost,
     /// This platform selects users by name, and has no ID to resolve to.
     ByName,
 }

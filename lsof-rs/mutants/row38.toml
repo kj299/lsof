@@ -1157,12 +1157,8 @@ name = "names-nsswitch-first-line-wins"
 rule = "the last line for a database is the one kept"
 [[mutant.edit]]
 file = "crates/lsof-core/src/netnames.rs"
-old = '''        if keep {
-            found = Some(sources);
-        }'''
-new = '''        if keep {
-            found = found.or(Some(sources));
-        }'''
+old = '''    nsswitch_lines(conf, database, |sources| found = Some(sources))?;'''
+new = '''    nsswitch_lines(conf, database, |sources| found = found.take().or(Some(sources)))?;'''
 
 [[mutant]]
 name = "names-nsswitch-unreadable-is-the-default"

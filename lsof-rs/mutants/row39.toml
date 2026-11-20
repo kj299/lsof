@@ -14,13 +14,15 @@
 # harness's own name server on a loopback address. CI runs only
 # --apply-only.
 #
-# Run 2026-11-20 as root with --first-kill: 29 of 29 killed, 15 by
-# unit-getpw (lsof-getpw's tests and lsof-core's), 7 by the Linux backend's
-# and lsof-cli's, and 7 by the differential alone (the `nss-hesiod-*`
-# cases, their outputs and their `compare_queries`; and the `passwd`
-# mode's 40-byte login for the LOGINML cut), which no unit test reaches:
-# where glibc is asked and how often, and the logins asked only for what is
-# printed.
+# Run 2026-11-20 as root with --first-kill: 29 of 29 killed. After the
+# safety and parity reviews (the netgroup and passwd_compat guard over every
+# line, the second -u lookup's Error(), the logins asked where and as often
+# as the C's printuid() asks them, the length told to the C library, FreeBSD
+# as Linux), re-run as root with --first-kill: 47 mutants, all killed; 4 by
+# differential-accounts alone (where glibc is asked, the lost -u login, the
+# LOGINML cut of glibc's answer). One mutant (the list glibc keeps looked at
+# beside every line) survived as equivalent and its code was removed; the
+# guard's mutants were then re-run on the code that remains: killed.
 
 [run]
 dir = ".."
@@ -35,6 +37,20 @@ timeout = 600
 name = "unit"
 cmd = ["cargo", "test", "-p", "lsof-backend-linux", "-p", "lsof-cli", "--lib", "--bins"]
 timeout = 1200
+
+[[run.gate]]
+name = "unit-bsd"
+cmd = ["cargo", "test", "-p", "lsof-backend-freebsd", "--lib"]
+timeout = 600
+
+[[run.gate]]
+# The differential's cases in the `names-*` and `passwd*` modes alone (109
+# of the matrix's), the C run beside each, so that a mutant only they kill
+# is killed in minutes; the whole matrix after it, for any other.
+name = "differential-accounts"
+cmd = ["sh", "-c", '''m=$(mktemp) && python3 -c 'import sys; s = open("differential/linux-matrix.toml").read().split("\n[[case]]"); open(sys.argv[1], "w").write(s[0] + "".join("\n[[case]]" + c for c in s[1:] if "LSOF_DIFF_MT = \"names" in c or "LSOF_DIFF_MT = \"passwd" in c))' "$m" && unshare -m --propagation private python3 differential/linux_diff.py --oracle ../lsof --rust target/release/lsof --matrix "$m"; r=$?; rm -f "$m"; exit $r''']
+infra = [2]
+timeout = 900
 
 [[run.gate]]
 name = "differential"
@@ -172,10 +188,10 @@ name = "guard-asks-with-no-source"
 rule = "glibc is not asked where passwd: lists no source (it reads past a heap block)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/users.rs"
-old = '''    if passwd.is_empty() {
+old = '''    if empty(&passwd) {
         return false;
     }'''
-new = '''    if passwd.is_empty() {
+new = '''    if empty(&passwd) {
         return true;
     }'''
 
@@ -184,36 +200,72 @@ name = "guard-asks-compat-asking-itself"
 rule = "glibc is not asked where compat is in both passwd and passwd_compat (it recurses)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/users.rs"
-old = '''            .is_some_and(|sources| names_compat(&sources)))'''
-new = '''            .is_some_and(|_| false))'''
+old = '''    !(empty(&passwd_compat) || compat(&passwd_compat) || empty(&netgroup))'''
+new = '''    !(empty(&passwd_compat) || empty(&netgroup))'''
+
+[[mutant]]
+name = "guard-asks-with-empty-netgroup"
+rule = "under compat, glibc is not asked where netgroup: lists no source (innetgr() reads past a heap block)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    !(empty(&passwd_compat) || compat(&passwd_compat) || empty(&netgroup))'''
+new = '''    !(empty(&passwd_compat) || compat(&passwd_compat))'''
+
+[[mutant]]
+name = "guard-asks-with-empty-passwd-compat"
+rule = "under compat, glibc is not asked where passwd_compat: lists no source (conservative)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    !(empty(&passwd_compat) || compat(&passwd_compat) || empty(&netgroup))'''
+new = '''    !(compat(&passwd_compat) || empty(&netgroup))'''
+
+[[mutant]]
+name = "guard-netgroup-and-passwd-compat-asked-without-compat"
+rule = "netgroup and passwd_compat are looked at only where passwd: names compat"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    if !compat(&passwd) {
+        return true;
+    }'''
+new = ''''''
+
+[[mutant]]
+name = "guard-last-line-alone"
+rule = "every line of each database is looked at, not only the one glibc 2.39 keeps"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''    lsof_core::netnames::nsswitch_lines(conf, database, |sources| lists.push(sources))?;'''
+new = '''    lsof_core::netnames::nsswitch_lines(conf, database, |_| {})?;'''
 
 [[mutant]]
 name = "guard-compat-matched-without-case"
 rule = "a source's name is matched as written: COMPAT is no library"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/users.rs"
-old = '''sources.iter().any(|s| s.module == b"compat")'''
-new = '''sources.iter().any(|s| s.module.eq_ignore_ascii_case(b"compat"))'''
-
-[[mutant]]
-name = "guard-passwd-compat-default-compat"
-rule = "passwd_compat's default is nis"
-[[mutant.edit]]
-file = "crates/lsof-backend-linux/src/users.rs"
-old = '''nsswitch_database(conf, b"passwd_compat", b"nis")'''
-new = '''nsswitch_database(conf, b"passwd_compat", b"compat")'''
+old = '''lists.iter().flatten().any(|s| s.module == b"compat")'''
+new = '''lists.iter().flatten().any(|s| s.module.eq_ignore_ascii_case(b"compat"))'''
 
 [[mutant]]
 name = "guard-refused-file-not-asked"
 rule = "a nsswitch.conf glibc refuses is asked (EINVAL, nothing read out of bounds)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/users.rs"
-old = '''    let Some(passwd) = nsswitch_database(conf, b"passwd", FILES_DEFAULT) else {
+old = '''    let Some(passwd) = every_list(conf, b"passwd") else {
         return true;
     };'''
-new = '''    let Some(passwd) = nsswitch_database(conf, b"passwd", FILES_DEFAULT) else {
+new = '''    let Some(passwd) = every_list(conf, b"passwd") else {
         return false;
     };'''
+
+[[mutant]]
+name = "nsswitch-lines-hands-every-database"
+rule = "nsswitch_lines hands the lines of the database asked for alone"
+[[mutant.edit]]
+file = "crates/lsof-core/src/netnames.rs"
+old = '''        if keep {
+            each(sources);
+        }'''
+new = '''        each(sources);'''
 
 [[mutant]]
 name = "dash-u-reads-the-file-alone"
@@ -228,23 +280,40 @@ name = "dash-u-asks-once"
 rule = "-u name asks getpwnam() twice, as the C's arg.c and lsof_select_login() do"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/users.rs"
-old = '''    if ask()?.is_none() {
-        return Some(None);
+old = '''    if once()?.is_none() {
+        return Some(Twice::NotFound);
     }
-    ask()'''
-new = '''    ask()'''
+'''
+new = '''    let _ = &mut once;
+'''
 
 [[mutant]]
 name = "dash-u-unknown-is-not-asked"
 rule = "a login glibc does not know is unknown, not a lookup that could not be made"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/users.rs"
-old = '''        return Some(None);
-    }
-    ask()'''
-new = '''        return None;
-    }
-    ask()'''
+old = '''        return Some(Twice::NotFound);'''
+new = '''        return None;'''
+
+[[mutant]]
+name = "dash-u-lost-login-read-on"
+rule = "a login the second getpwnam() does not find is the C's Error(), not can't get UID read on after"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/users.rs"
+old = '''        Some(Twice::Lost) => return UserLookup::Lost,'''
+new = '''        Some(Twice::Lost) => None,'''
+
+[[mutant]]
+name = "dash-u-lost-not-fatal"
+rule = "UserLookup::Lost ends the parse at once (early.fatal), with no usage"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            UserLookup::Lost => {
+                // The C's `Error()`: at once, with no usage.
+                early.fatal = true;
+                return Err(format!("can't get UID for {}", shown_bytes(name)));
+            }'''
+new = '''            UserLookup::Lost => early.no_uid(&shown_bytes(name)),'''
 
 [[mutant]]
 name = "user-reads-the-file-alone"
@@ -262,38 +331,95 @@ file = "crates/lsof-backend-linux/src/users.rs"
 old = '''        Some(found) => login_name(&found?.name),'''
 new = '''        Some(found) => found?.name.into(),'''
 
-# ---- the logins asked for what is printed
+# ---- the logins asked where the C's printuid() asks them
 
 [[mutant]]
-name = "logins-asked-where-none-is-printed"
-rule = "no login is asked where none is printed (-t, -F without L)"
-[[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''        if looks_up_logins(&procs, &format, &selection) {
-            name_owners(&mut procs, env.backend.as_ref());'''
-new = '''        if true {
-            name_owners(&mut procs, env.backend.as_ref());'''
-
-[[mutant]]
-name = "logins-never-asked"
-rule = "the owners' logins are asked where they are printed"
-[[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''        if looks_up_logins(&procs, &format, &selection) {
-            name_owners(&mut procs, env.backend.as_ref());'''
-new = '''        if false {
-            name_owners(&mut procs, env.backend.as_ref());'''
-
-[[mutant]]
-name = "logins-a-named-owner-asked-again"
+name = "printuid-a-named-owner-asked-again"
 rule = "a process named already (Windows) is not asked"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        if p.user.is_some() {
-            continue;
-        }
-        if let Some(login)'''
-new = '''        if let Some(login)'''
+old = '''    if let Some(login) = p.login_bytes() {
+        return Some(login.into());
+    }
+    if sel.numeric_ids {'''
+new = '''    if sel.numeric_ids {'''
+
+[[mutant]]
+name = "table-user-not-asked-to-size"
+rule = "the table asks USER once a row as it sizes the column"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        let user = user_cell(p, login(p).as_deref());'''
+new = '''        let user = user_cell(p, p.login_bytes());'''
+
+[[mutant]]
+name = "table-user-asked-before-the-cells-before-it-are-written"
+rule = "the row's cells before USER are written before USER is asked"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''                out.write_to(w)?;
+                let mut cell = user();'''
+new = '''                let mut cell = user();'''
+
+[[mutant]]
+name = "table-user-not-cut-to-its-width"
+rule = "USER as printed is cut to the width the sizing pass found (%*.*s)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''                cell.truncate(cut);'''
+new = '''                let _ = cut;'''
+
+[[mutant]]
+name = "fields-login-asked-before-the-fields-before-it-are-written"
+rule = "-F asks L once the fields before it are written"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''            out.write_to(w)?;
+            if let Some(user) = login(p) {'''
+new = '''            if let Some(user) = login(p) {'''
+
+[[mutant]]
+name = "fields-login-not-asked"
+rule = "-F asks L of the login closure, once a set"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''            if let Some(user) = login(p) {'''
+new = '''            if let Some(user) = p.login_bytes().map(Box::<[u8]>::from) {'''
+
+[[mutant]]
+name = "fields-process-with-no-file-printed"
+rule = "-F prints no set for a process with no file, and asks no login for it"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''    for p in procs.iter().filter(|p| !p.files.is_empty()) {'''
+new = '''    for p in procs.iter() {'''
+
+[[mutant]]
+name = "json-login-asked-before-what-is-before-it-is-written"
+rule = "JSON asks login once the members before it are written"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''        m.out.write_to(w)?;
+        if let Some(login) = login(p) {'''
+new = '''        if let Some(login) = login(p) {'''
+
+[[mutant]]
+name = "json-login-not-asked"
+rule = "JSON asks login of the login closure, once a -J process and once a -j line"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/json.rs"
+old = '''        if let Some(login) = login(p) {'''
+new = '''        if let Some(login) = p.login_bytes().map(Box::<[u8]>::from) {'''
+
+[[mutant]]
+name = "logins-looked-up-for-fields-without-a-file"
+rule = "-F calls printuid() only where it prints a process, one with a file"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        Format::Fields { only, .. } => {
+            wants_login(only.as_deref()) && procs.iter().any(|p| !p.files.is_empty())
+        }'''
+new = '''        Format::Fields { only, .. } => wants_login(only.as_deref()),'''
 
 [[mutant]]
 name = "login-bytes-kept-for-text"
@@ -302,3 +428,51 @@ rule = "a login's bytes are kept where they are not UTF-8, and only there"
 file = "crates/lsof-core/src/model.rs"
 old = '''        if std::str::from_utf8(&login).is_err() {'''
 new = '''        if std::str::from_utf8(&login).is_ok() {'''
+
+# ---- lsof-getpw: the length the C library is told, the name it is given
+
+[[mutant]]
+name = "getpw-getpwuid-length-overstated"
+rule = "getpwuid_r() is told the buffer's true length"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''libc::getpwuid_r(uid, pwd, buf.as_mut_ptr().cast(), buf.len(), result)'''
+new = '''libc::getpwuid_r(uid, pwd, buf.as_mut_ptr().cast(), buf.len() * 16, result)'''
+
+[[mutant]]
+name = "getpw-getpwnam-length-overstated"
+rule = "getpwnam_r() is told the buffer's true length"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''                    buf.len(),
+                    result,'''
+new = '''                    buf.len() * 16,
+                    result,'''
+
+[[mutant]]
+name = "getpw-name-not-made-a-c-string-as-the-c-would"
+rule = "a name is asked as the C string it would be (c_name), cut at its first NUL"
+[[mutant.edit]]
+file = "crates/lsof-getpw/src/lib.rs"
+old = '''        let name = c_name(name);
+        Some(ask_growing('''
+new = '''        let name = std::ffi::CString::new(name).unwrap_or_default();
+        Some(ask_growing('''
+
+# ---- FreeBSD's backend, as Linux's (not measured against the C there)
+
+[[mutant]]
+name = "freebsd-login-not-cut"
+rule = "FreeBSD keeps a login to LOGINML bytes, as the C"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/users.rs"
+old = '''    name.get(..LOGINML).unwrap_or(name).into()'''
+new = '''    name.into()'''
+
+[[mutant]]
+name = "freebsd-too-large-answer-taken-as-none"
+rule = "FreeBSD leaves an answer past the cap to the file's reader"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/users.rs"
+old = '''    (!answer.too_large()).then(|| answer.found())'''
+new = '''    Some(answer.found())'''

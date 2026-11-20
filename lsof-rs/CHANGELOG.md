@@ -19,19 +19,36 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   pwd entry for UID N` and said `can't get UID for name`. Measured against
   the C with Hesiod, output and queries alike (`-u` asks each name twice,
   as the C does); `passwd: compat` with `passwd_compat: files` now follows
-  its `+` lines. A login is asked only as it is printed, for the processes
-  listed: `-t`, `-F` without `L` and `-l` ask nothing, as in the C. Where
-  nsswitch.conf has a shape that makes glibc read past a heap block
-  (`passwd:` with no source) or recurse until its stack is gone (`compat` in
-  both `passwd:` and `passwd_compat:`, where the C dies, SIGSEGV), or the
-  answer would not fit in 16 MiB, lsof-rs reads `/etc/passwd` itself as
-  before. A source that blocks blocks lsof-rs as it blocks the C (`-S`
-  bounds neither).
+  its `+` lines. A login is asked where the C's `printuid()` asks it, as
+  each row, `-F` set or JSON object is written: twice a table row (sizing,
+  then printing) for an owner no source names, once a run for one found,
+  once a `-F` set or `-J` process, once a `-j` line; `-t`, `-F` without `L`
+  and `-l` ask nothing; a reader that goes away (`| head`) stops the
+  lookups where it stops the C's. Measured against the C with strace, the
+  counts equal in every shape tried. `no pwd entry for UID N` is written as
+  each lookup fails, where the C writes it, so `lsof >file 2>&1` is now the
+  C's to the byte (it had put every warning before the listing;
+  DIVERGENCES 36). A `-u` login the second lookup does not find
+  (`lsof_select_login()`'s) ends the run at once, `can't get UID for X`,
+  exit 1, no usage, as in the C. Where nsswitch.conf has a shape in which
+  glibc could read past a heap block (`passwd:` with no source; under
+  `compat`, `netgroup:` or `passwd_compat:` with no source) or recurse until
+  its stack is gone (`compat` in both `passwd:` and `passwd_compat:`, where
+  the C dies, SIGSEGV), on any line for those databases, not only the one
+  glibc keeps, or where the answer would not fit in 16 MiB, lsof-rs reads
+  `/etc/passwd` itself as before. A source that blocks blocks lsof-rs as
+  long as it blocks the C (`-S` bounds neither).
+- **`-F` writes no set for a process with no file**, as the C prints none
+  (no output changed: the listing never handed one over), and asks no
+  login for it.
 - **A new workspace crate, `lsof-getpw`** (no third-party crate): the one
   place lsof-rs calls the C library for an account, three audited `unsafe`
   blocks, its one dependency `libc =0.2.190` (already in the lock for
   lsof-sigpipe). lsof-core, lsof-cli and lsof-backend-linux stay
-  `#![forbid(unsafe_code)]`. FreeBSD asks its libc through it too.
+  `#![forbid(unsafe_code)]`. FreeBSD asks its libc through it too, with
+  the Linux backend's rules (a login kept to 32 bytes, as bytes; an answer
+  past the cap left to the file; the second `-u` lookup), not measured
+  against the C there.
 - **`-c /regex/` takes a back-reference, and expressions past the `regex`
   crate's bounds** (DIVERGENCES 38): `-c '/sl(e)\1p/'` and `-c
   '/sl\(e\)\1p/b'` list sleep, as the C does, where lsof-rs had said

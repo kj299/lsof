@@ -152,48 +152,62 @@ name = "pwd-warnings-never"
 rule = "an owner with no password entry is warned about (36)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''        for uid in pwd_warnings(&procs, &format, &selection) {'''
-new = '''        for uid in pwd_warnings(&procs, &format, &selection).into_iter().take(0) {'''
+old = '''        warn(uid);'''
+new = '''        let _ = (uid, &warn);'''
 
 [[mutant]]
 name = "pwd-warnings-once-per-row"
 rule = "the table looks an owner up twice per row (36)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''            rows.iter().chain(&rows).copied().collect()'''
-new = '''            rows'''
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        let mut user = || user_cell(p, login(p).as_deref());'''
+new = '''        let mut user = || user_cell(p, p.login_bytes());'''
 
 [[mutant]]
 name = "pwd-warnings-under-dash-w"
 rule = "-w and -t silence the warning (36)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''    if sel.omit_unreadable || sel.numeric_ids {'''
-new = '''    if sel.numeric_ids {'''
+old = '''    if login.is_none() && !sel.omit_unreadable {'''
+new = '''    if login.is_none() {'''
 
 [[mutant]]
 name = "pwd-warnings-under-dash-l"
 rule = "-l looks nothing up (36)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/main.rs"
-old = '''    if sel.omit_unreadable || sel.numeric_ids {'''
-new = '''    if sel.omit_unreadable {'''
+old = '''    if sel.numeric_ids {
+        return None;
+    }
+    let uid = p.uid?;'''
+new = '''    let uid = p.uid?;'''
 
 [[mutant]]
 name = "pwd-warnings-fields-without-L"
 rule = "-F looks an owner up only for L (36)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''        Format::Fields { only, .. } if wants_login(only.as_deref()) => {'''
-new = '''        Format::Fields { only, .. } if wants_login(only.as_deref()) || only.is_some() => {'''
+file = "crates/lsof-core/src/render/fields.rs"
+old = '''        if want('L') {
+            out.write_to(w)?;'''
+new = '''        if want('L') || only.is_some() {
+            out.write_to(w)?;'''
 
 [[mutant]]
 name = "pwd-warnings-json-lines-per-process"
 rule = "-j looks an owner up once per line (36)"
 [[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''if j.lines { p.files.len() } else { 1 }'''
-new = '''if j.lines { 1 } else { 1 }'''
+file = "crates/lsof-core/src/render/json.rs"
+old = '''            let mut m = Members::new(&mut buf);
+            proc_members(&mut m, p, o, &mut WriteRef(w), login)?;'''
+new = '''            let mut m = Members::new(&mut buf);
+            let first = std::ptr::eq(f, &p.files[0]);
+            proc_members(&mut m, p, o, &mut WriteRef(w), &mut |p| {
+                if first {
+                    login(p)
+                } else {
+                    p.login_bytes().map(Box::from)
+                }
+            })?;'''
 
 # ------------------------------------------------------------------- 128
 
