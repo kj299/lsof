@@ -1642,7 +1642,8 @@ fn a_supplement_through_an_inherited_descriptor_is_none() {
     let dir = std::env::temp_dir().join(format!("lsof-rs-inh-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let sup = dir.join("sup");
-    std::fs::write(&sup, "/proc 0x15\n").unwrap();
+    // A device no host gives /proc (a runner's was 0x15 once).
+    std::fs::write(&sup, "/proc 0x7ffe1234\n").unwrap();
     let out = Command::new("sh")
         .args([
             "-c",
@@ -1659,9 +1660,9 @@ fn a_supplement_through_an_inherited_descriptor_is_none() {
         err.contains("lsof: WARNING: access /dev/fd/9: No such file or directory\n")
             && err.contains("lsof: assuming dev=")
             && err.contains(" for /proc from /dev/fd/9\n")
-            // The device the mount table gives (host-dependent: 0 here,
-            // 0x19 on a CI runner), never the one the file would have.
-            && !err.contains("dev=0x15 "),
+            // The device the mount table gives (host-dependent), never
+            // the one the file would have.
+            && !err.contains("dev=0x7ffe1234 "),
         "{err}"
     );
     assert_eq!(out.status.code(), Some(0), "{err}");
