@@ -4877,9 +4877,9 @@ mod tests {
             (r"/a\{1/b", r"Unmatched \{"),
             (r"/\1/", "Invalid back reference"),
             (r"/a\/", "Trailing backslash"),
-            // What glibc takes and the engine cannot: lsof-rs's own words.
-            (r"/(a)\1/", "back references are not supported"),
-            (r"/\(a\)\1/b", "back references are not supported"),
+            // A back-reference to a group still open, or to none.
+            (r"/(a\1)/", "Invalid back reference"),
+            (r"/\(a\)\2/b", "Invalid back reference"),
         ] {
             assert_eq!(
                 err(&["-c", value]),

@@ -160,7 +160,7 @@ SELECTION:
     -c <cmd>      select by command name: a prefix (case-insensitive substring
                   on Windows); ^cmd excludes. -c /regex/[bix] selects by a
                   POSIX regular expression: extended, or basic with b; i
-                  ignores case. Back-references are refused
+                  ignores case
     -g [pgids]    process groups: the PGID column, and with pgids, selection
                   (^ excludes). On Windows: select children of these PPIDs
     -d <fds>      filter by FD: cwd,rtd,txt,mem,DEL,NOFD,unk,fd (every number),

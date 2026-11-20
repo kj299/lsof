@@ -179,7 +179,9 @@ ledger — those are the kit's, on purpose.
 
 A case may also set LSOF_DIFF_NOFILE: both binaries then run under that
 descriptor limit (`ulimit -n`), for what a run does when it cannot open
-another descriptor.
+another descriptor; or LSOF_DIFF_STACK: both run under that stack limit in
+KiB (`ulimit -s`), for a C defect whose cost is the depth of its recursion,
+so that it ends the same way on every host whatever stack the host gives.
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -1219,6 +1221,8 @@ def unprivileged_wrapper(
     # A case that sets LSOF_DIFF_NOFILE runs under that descriptor limit,
     # whatever else it sets: both binaries, the same limit.
     lines.append('if [ -n "$LSOF_DIFF_NOFILE" ]; then ulimit -n "$LSOF_DIFF_NOFILE" || exit 2; fi\n')
+    # And a case that sets LSOF_DIFF_STACK under that stack limit (KiB).
+    lines.append('if [ -n "$LSOF_DIFF_STACK" ]; then ulimit -s "$LSOF_DIFF_STACK" || exit 2; fi\n')
     if race is not None:
         argv = " ".join(shlex.quote(a) for a in race)
         lines.append(
@@ -2015,7 +2019,10 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             '          i=0; while [ ! -e /etc/leased.ready ]; do i=$((i+1)); [ $i -gt 200 ] && { echo "linux_diff: no lease ($$)"; exit 2; }; sleep 0.05; done ;;\n'
             '    *) echo "linux_diff: no MT tz variant ($$)"; exit 2 ;;\n'
             '    esac\n'
-            '    "$@"\n'
+            # A run the case's limit ends (`tz-fifo`: the C's open of a FIFO
+            # with no writer waits for ever) is ended with this shell, which
+            # is what the runner kills: it had been left running, orphaned.
+            '    if command -v setpriv >/dev/null 2>&1; then setpriv --pdeathsig KILL -- "$@"; else "$@"; fi\n'
             "    rc=$?\n"
             '    [ -n "$job" ] && { kill "$job" 2>/dev/null; wait "$job" 2>/dev/null; }\n'
             "    exit $rc\n"
@@ -4332,7 +4339,9 @@ def run(args) -> int:
             if optional["FUSE"][0] is not None
             else None
         )
-        nofile = any("LSOF_DIFF_NOFILE" in c.get("env", {}) for c in cases)
+        nofile = any(
+            k in c.get("env", {}) for c in cases for k in ("LSOF_DIFF_NOFILE", "LSOF_DIFF_STACK")
+        )
         race = optional["WRACE"][0] is not None and any(needs_race(c) for c in cases)
         mt = (
             os.path.join(work, "mt-wrap.sh")
@@ -4597,6 +4606,9 @@ def self_test() -> int:
         check("the wrapper runs any other case directly", text.rstrip().endswith('exec /bin/true "$@"'))
         check("the wrapper sets a case's descriptor limit first",
               text.index("LSOF_DIFF_NOFILE") < text.index("LSOF_DIFF_FUSE"))
+        check("the wrapper sets a case's stack limit before it runs anything",
+              'ulimit -s "$LSOF_DIFF_STACK"' in text
+              and text.index("LSOF_DIFF_STACK") < text.index("LSOF_DIFF_FUSE"))
         w = unprivileged_wrapper(td, "r.sh", "/bin/true", None, None, ["race.py", "--side", "rs"])
         with open(w) as f:
             text = f.read()
@@ -4640,6 +4652,9 @@ def self_test() -> int:
         # every other mode runs it at the last `"$@"`.
         check("the MT script mounts before the binary and unmounts after it",
               text.index("mount -t tmpfs lsof-rs-mt") < text.rindex('"$@"') < text.rindex('umount -l "$B"'))
+        tz_branch = text.split('if [ "${mode#tz-}" != "$mode" ]; then', 1)[-1].split("\nfi\n", 1)[0]
+        check("the MT tz modes end their binary with the shell the runner kills",
+              'setpriv --pdeathsig KILL -- "$@"' in tz_branch)
         check("the MT script fails a run that triggered the automount",
               "rc=3" in text and text.rindex('"$@"') < text.index("auto.state\" 2>/dev/null"))
         check("the MT passwd mode binds its password file before its binary",

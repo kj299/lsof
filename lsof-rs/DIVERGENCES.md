@@ -207,13 +207,45 @@ disagreeing, and it names the C code so anyone can check the triage.
   the C selects 1.0.0.1, listing A in OR form; lsof-rs saturates it, so it
   is no IPv4 address but a host name, refused (`host names are not
   resolved`), exit 1. Not pinned: A's pid.
-- [x] rx-back-reference: DEBT (item 38) — `-c '/sl(e)\1p/'`. glibc takes a
-  back-reference in a POSIX expression, basic or extended, and the C lists
-  fixture A's `sleep`; the `regex` crate has none (it matches in linear
-  time, which a back-reference cannot be matched in), so lsof-rs refuses
-  the expression where it is read: `regexp error: /sl(e)\\1p/: back
-  references are not supported`, exit 1, nothing listed. Not pinned: the
-  case holds A's pid.
+- [x] rx-back-reference-glibc-misses-a-match [sha256:a9e33e673d8f]: C-DEFECT, not reproduced
+  (item 38) — `-c '/(e){0,2}\1/'`. POSIX has a back-reference match
+  what its group matched last, and the expression match where any binding
+  of its groups gives a match: one pass of `(e)` and `\1` again is
+  sleep's `ee`. glibc's `regexec()` does not search every binding (its
+  `get_subexp()` and `sift_states_backward()` keep some): it finds no
+  match there, and the C says `no command found for regex: (e){0,2}\1`,
+  exit 1. lsof-rs finds sleep and says nothing, exit 0 (`-d 999` keeps the
+  pids out, so the diff is pinned). Measured against glibc
+  2.39 over 7,291 random expressions with a back-reference against short
+  commands: glibc misses a match in 140 of them (1.9%), each with the group named under a
+  repetition (`(a){0,2}\1` and `aa`, `^(a+)+\1$` and `aaa`).
+- [x] rx-back-reference-glibc-finds-a-match-that-is-not-there [sha256:f2fe874d814e]: C-DEFECT,
+  not reproduced (item 38) — `-c '/^(.*)(.*)\2\1$/'`. No binding of the
+  two groups makes `sleep`, `python3` or `abcdefghijklmno` (each would be
+  some string, another twice, and the first again: of even length), but
+  glibc's `regexec()` matches the expression against every command: the C
+  finds all three and says nothing, exit 0; lsof-rs says `no command found
+  for regex`, exit 1 (pid-free, pinned). Not rare on several groups:
+  measured, 2 of 1,500 random expressions of starred groups named in
+  another order than they open (`^(.*)(.*)a(a*)a\3\2\3$` and `baaab`), 5
+  of 300 random expressions of two to six groups against real command
+  names (`(.+)([[:alpha:]]+)(.*)(.?)(.*)\4\5\3\2\5` and
+  `kworker/u8:2-ev`), and with no star at all: `^(.?)(.?)\2\1$` matches
+  `a` and `b`. Each checked against Python's exhaustive `re`, which agrees
+  with lsof-rs.
+- [x] rx-back-reference-glibc-finds-a-match-in-crcomm [sha256:91d0fa52b601]: C-DEFECT, not
+  reproduced (item 38) — `-c '/^(.+)(.*)((.*)*)\2\3\1/'` against
+  fixture CR's `crcomm\r`: no binding gives a match (Python's `re` agrees),
+  glibc finds one. The C says nothing, exit 0; lsof-rs `no command found
+  for regex`, exit 1. Pid-free, pinned.
+- [x] rx-back-reference-glibc-segfaults [sha256:12ed45ada920]: C-DEFECT, not reproduced (item 38)
+  — `-c '/((a*)\2\2)*a/'` against fixture H's `abcdefghijklmno`:
+  glibc's `regexec()` dies of SIGSEGV after some 3.5 s, and so does the C
+  (exit 139, nothing printed). lsof-rs finds the match (no pass of the
+  group, and H's `a`) and says nothing, exit 0. The parity review's random
+  runs hit about 30 such expressions (`a\|\(\(a*a\{0,2\}\)\2\{2\}\)*a`
+  under `b` among them), each a back-reference inside a repetition; a
+  process named `a` gives the same. Pid-free, pinned.
 - [x] rx-every-matching-expression-is-located: C-DEFECT, not reproduced —
   item 13, for `-c /regex/` as for `-c name`: `is_cmd_excl()` marks the
   first expression that matches and returns (`CmdRx[i].mc = 1; … return
@@ -236,18 +268,6 @@ disagreeing, and it names the C code so anyone can check the triage.
   twice, and the C aborts as above. This is every host whose `/etc/host.conf`
   says `multi on` (Debian's and Ubuntu's do) and whose hosts file names
   `localhost` on both loopback lines. Not pinned: B's pid and ports.
-- [x] rx-past-the-size-limit: DEBT (item 38) — `-c '/^\w{0,800}/'`. glibc
-  compiles it and the C lists fixture A's process; the program the `regex`
-  crate would compile for it is past lsof-rs's 8 MiB bound
-  (`posix_regex::SIZE_LIMIT`), which is what bounds the time a match takes,
-  and it is refused: `regexp error: …: Regular expression too big`, exit 1.
-  Not pinned: A's pid.
-- [x] rx-past-the-cost-limit: DEBT (item 38) — an expression of 64 `\w*`.
-  glibc compiles it and the C lists fixture A's process; lsof-rs counts what
-  an expression asks of its engine as it reads it, 63 of the locale's large
-  classes at most (`posix_regex::COST_LIMIT`), because the engine builds
-  each as thousands of ranges before any size limit applies, and refuses it
-  with the same words. Not pinned: A's pid.
 - [x] inet-protocol-port-list-frees-twice-in-the-c: C-DEFECT, not reproduced
   (item 38) — `-i TCP:22,1x`. `enter_network_address()` enters one `struct
   nwad` for each port entry with the one copy of the protocol's name
@@ -315,6 +335,178 @@ disagreeing, and it names the C code so anyone can check the triage.
   mapped file are not UTF-8: the C writes the raw bytes (0xff, 0xfe), so its
   output is not valid UTF-8 and so no JSON; lsof-rs writes U+FFFD and stays
   valid. Not pinned: X's pid and inodes.
+
+## Fixed by matching a back-reference, and expressions past the `regex` crate's bounds, in `-c /regex/` (2026-11-19)
+
+Row 38's three DEBTs (ledger `rx-back-reference`, `rx-past-the-size-limit`,
+`rx-past-the-cost-limit`): glibc's `regcomp()` takes a back-reference
+(`\(a\)\1`, `(a)\1`), an interval of a large class (`^\w{0,800}`) and an
+expression of 64 of the locale's large classes (64 `\w*`), and the C lists
+what they match; lsof-rs refused each, `back references are not supported`
+or `Regular expression too big`, exit 1. Each is taken now, and matched.
+
+**How.** The `regex` crate still answers every expression it took
+(`posix_regex::CommandRegex`, the same translation, the same bounds), and
+lsof-rs's own engine (`posix_regex/engine.rs`) the rest: an expression with a
+back-reference, one past the crate's cost bound (`COST_LIMIT`, now the bound
+on what the crate is asked, not on what is taken) and one whose program the
+crate refuses for size (`SIZE_LIMIT`). The translator builds a tree beside
+the pattern it writes; its leaves are the pattern's own atoms, read by
+`regex-syntax` as the crate reads them (now a direct dependency of
+`lsof-core`; it was already the crate's), so a character, a list, a class or
+a word operator takes in the engine exactly what it takes in the crate. A
+list's classes are built once for the expression, however many lists name
+them. Without a back-reference the engine answers by reachability over the
+command, an interval of more passes than the command has bytes being that
+many; with one it searches every way of binding the groups, keeping only
+the groups some back-reference names while one may still be read. Where
+POSIX is unclear it reads as glibc does: a group inside a repetition keeps
+what it matched in an earlier pass through a later pass that does not
+reach it (`^(a|(b))*\2$` matches `bab`, glibc's answer; a strict reading of
+POSIX's rule for nested groups would not match it). The search
+(2026-11-20, after the reviews) first matches the expression as a regular
+one whose back-references match anything, which rules out the starts
+nothing can match from; then walks what is left to match depth first,
+the fewest passes of a repetition and the first alternative first, from
+every start in turns of the same length, doubled each round, so that a
+match easy to find from one start is found in few steps however long the
+others would take; a state nothing matches from is walked once for every
+start, a group is kept as the first place in the command that holds its
+text, and a group just set is checked against where it is named next.
+Measured, against glibc 2.39's `regcomp()`/`regexec()` under
+`LC_ALL=C.UTF-8` with lsof's flags: the 1,500 expressions of
+`tests/posix_regex_glibc.txt` give glibc's answers by both engines, and the
+500 of `tests/posix_regex_backref.txt` (back-references, basic and
+extended, against 68 commands) POSIX's; 7,291 random expressions with a
+back-reference, with lists, classes, case, characters past ASCII and word
+operators among them, against 159 commands each, give glibc's answer but
+where glibc's search is wrong (below) or a word operator meets a byte that
+is no character (as before). On this host, `-c` against every process
+(kernel threads' names of up to 33 bytes among them) lists what the C
+lists for a back-reference and for a name of 27 bytes; the fuzz target holds
+the two engines to the same answer for every expression the crate takes
+(3,502 inputs of the corpus, then five minutes of fuzzing, no difference).
+
+**What glibc's search gets wrong, and lsof-rs does not follow.** glibc's
+`regexec()` does not search every binding: `get_subexp()` and
+`sift_states_backward()` keep some. It misses a match that exists where the
+group named sits under a repetition (`(a){0,2}\1` and `aa`; `^(a+)+\1$` and
+`aaa`): 140 of the 7,291 random expressions, 1.9%. And, more rarely, it
+finds one that does not exist: `^(.*)(.*)\2\1$` matches every command, and
+`^(.*)(.*)a(a*)a\3\2\3$` matches `baaab` (2 of 1,500 random expressions of
+starred groups named in another order; 5 of 300 of two to six groups
+against real command names, `(.+)([[:alpha:]]+)(.*)(.?)(.*)\4\5\3\2\5` and
+`kworker/u8:2-ev` among them; with no star, `^(.?)(.?)\2\1$` matches `a`;
+each checked against Python's exhaustive `re`). And it dies: `regexec()`
+gets SIGSEGV for some back-references inside a repetition against short
+commands (`((a*)\2\2)*a` against `a` or `abcdefghijklmno`: the C exits
+139, after 3.6 s at an 8 MiB stack, 0.07 s at 1 MiB, and runs on past a
+minute with no limit; CI's runner killed it at the case's 15 s, so the
+differential's case runs both binaries under a 1 MiB stack,
+`LSOF_DIFF_STACK`). Following it would mean porting its matcher; lsof-rs answers by the
+definition, and these are ledgered C-DEFECTs, each pinned
+(`rx-back-reference-glibc-misses-a-match`,
+`rx-back-reference-glibc-finds-a-match-that-is-not-there`,
+`rx-back-reference-glibc-finds-a-match-in-crcomm`,
+`rx-back-reference-glibc-segfaults`). Under `REG_ICASE` a back-reference
+compares as glibc does, each character in the case `towupper()` gives it,
+the simple mapping, one character for one, as glibc 2.39's tables have it
+(`(é)\1` matches `éÉ`, `(σ)\1` matches `σς`, `(.)\1` matches `ᾳᾼ`, `(ß)\1`
+does not match `ßẞ`; measured for every character: 1,450 that
+`towupper()` changes), and where a side is a byte that is no character,
+byte by byte as glibc compares its upper-case copy of the command
+(`(\xc3)\1` matches `\xc3é`). glibc fails where `towupper()` changes a
+character's length in UTF-8 (`(ȿ)\1` and `ȿȿ` under `i`, and 17 more such
+characters, `ɐ`, `ɑ`, `ɒ`, `ɜ`, `ɡ`, `ɥ` among them; also a literal: `ȿȿ`
+against itself); lsof-rs matches. No fixture carries such a name, so this
+one has no differential case.
+
+**Where the C does not answer, and lsof-rs does.** glibc writes an interval
+out as copies of what it repeats, and builds sets for every pair of copies:
+`\w*` 32,000 times (96 KB) and `a{0,32767}` 12,000 times end in `Memory
+exhausted` after 10 to 12 s at an 8 GB limit, `(a{32767}){32767}` and
+`(.{0,32767}){0,32767}\1` too, and `(.*){1,32767}z` compiles for longer than
+two minutes. lsof-rs writes nothing out: each of these compiles in under
+100 ms and answers a 63-byte command in at most about a second (the worst
+found, `((((.?)*)*)*)*` 9,000 times, 128 KiB; `\w*` x 32,000 0.45 s; most
+in milliseconds). glibc's back-reference search is exponential: it took
+18.5 s for `(.*)(.*)(.*)\3\2\1$` against 63 `a` (lsof-rs 2 ms), 5 s for
+seven groups named in order (`(.*)` x 7, `\1`..`\7$`) against
+`abcdefghijklmno` (lsof-rs 3 ms), and over a minute for nine named in
+reverse against 15 bytes (lsof-rs 2 ms).
+
+**What is left.** lsof-rs's search with a back-reference is bounded
+(`SEARCH_BUDGET`, 4,194,304 steps a command, about 0.4 s; `SEARCH_MEMORY`,
+32 MiB of what it holds, measured at most 28.5 MB); past either the command
+is taken as not matching. Until 2026-11-20 the budget was a million steps,
+one for the starts tried from the first, and a search spent it there before
+it reached the start where every group matches nothing:
+`(.*)(.*)(.*)(.*)\4\3\2\1$` against `kworker/u16:0-ext4-rsv-conversion`, or
+seven groups against 15 bytes, said no match where glibc says match in
+milliseconds (the reviews' cases). Now every start has its turn, and a match
+the search from one start finds in `t` steps is found within about
+`4 (n + 2) t` steps however long the others would take (`n` the command's
+length). And until the same day's second review a repetition was answered
+by every way it can end with every group it sets, a relation of about
+`n^(2g+1)` entries for `g` groups read after it, which ran past the budget
+on 15-byte names glibc matches in milliseconds: `^((.)|(.*)|(.*))*\4\3$`
+against `systemd-journal` (glibc 5 ms), `^(.|(.*)|(.*))*\2\3`,
+`^(.|(.*)|(.*)|(.*))*\2\3\4` (glibc 0.11 s) and
+`^((.)|(.*)|(.*)|(.+))*\4\3` against 14, 15 and 63 bytes said no match,
+and the search held up to 123 MB. Now such a repetition is walked a pass at
+a time: a pass that matches nothing is made at once, as the sets of groups
+it sets to nothing; a pass that sets at most two groups is listed whole and
+one that sets more walked item by item; and a group the passes set whose
+text no back-reference after it can read (as far as the expression read as
+a regular one tells) is taken as unset, so that the states that differ only
+there are one. Each of those cases matches within 5,639 steps (2 to 4 ms,
+a harness's start included) and 3.5 MB; end to end, `lsof -n -P -a -p P -c
+'/^(.|(.*)|(.*)|(.*))*\2\3\4/' -t` lists P named `systemd-journal` in
+0.01 s, the C in 0.15 s, where lsof-rs had listed nothing in 0.5 s and
+exited 1. Measured since: of 9,000 random expressions of three to nine
+groups each named again in random order, against a 63-byte name, 3 reach a
+bound, and none of those has a match when searched with 32 times the budget
+(glibc says no match for each); the 3,942 that match are all found within
+it. Of 6,000 random pairs of a repetition of an alternation or a run of
+groups, each named again, and a name of 14 to 63 bytes (313 of the first
+3,000 had reached the budget before), 60 reach a bound, and 2 of them have
+a match, found past 4.2 million steps, which glibc finds in 0.09 and 0.53 s:
+`((.+)|((.*)*)|(..)|([^/]*)|(\w*))*\6\5\4\3\2` against a 63-byte kernel
+thread, and a repetition of eleven alternatives against
+`kworker/R-kthrotld`. There lsof-rs says no match where the C matches; of
+the other 58, 55 have no match and 3 are not answered with 32 times the
+budget (glibc says no match for all but one, on which it runs past 20 s).
+On a 63-byte name a pass of four groups each read again can take past the
+budget where glibc takes longer still: `^((.+)|([^/]*)|([^/]*)|(.*.*))*\5\2\4\3\2`
+has a match lsof-rs finds in 7.0 million steps (0.8 s) and glibc does not
+answer within 30 s. Random expressions of one to seven groups and their
+back-references against this host's command names (18,000 expression and
+name pairs) never come near a bound (the most 97,271 steps), and every
+answer is glibc's but where glibc finds a match that is not there (4
+expressions, 14 pairs; Python's `re` and an exhaustive model say no).
+A command of more than 1,024 bytes (`OWN_COMMAND_MAX`; no
+system names a process so) is not searched by the engine and is taken as
+not matching; an expression of more than 262,144 nodes (`TREE_LIMIT`; no
+argument of 128 KiB holds one) or nested 100 deep is still `Regular
+expression too big`. What a run costs is that of a command times the
+distinct command names (each answer is kept) times the expressions; under
+`-a`, as in the C, only the processes `-p`, `-g` and `-u` let through are
+asked (THREAT-MODEL.md has the measured figures).
+
+### What the gate gained
+
+The differential's `rx-back-reference`, `rx-past-the-size-limit` and
+`rx-past-the-cost-limit` match the C now, and with them
+`rx-back-reference-basic`, `-any-character-twice`, `-ignore-case`,
+`-to-a-group-that-matched-nothing`, `-last-pass`, `-to-an-open-group`,
+`rx-past-the-size-limit-whole-command` and `-nested-intervals`; each but
+`-to-an-open-group` fails on 4b5e99e. The C-DEFECTs are ledgered and
+pinned: their cases keep the pids out of the output (`-V -d 999`), so the
+diff that is accepted is lsof-rs's answer as well as the C's. 2026-11-20:
+`rx-back-reference-seven-groups-at-the-end` matches the C and fails on the
+search of 2026-11-19. `mutants/regex-parity.toml` holds a mutant for each
+bound and rule the engine added; those that only save steps are killed by
+the step counts of `the_search_takes_few_steps`.
 
 ## Fixed by ending the options where the C's `GetOpt()` ends them (2026-11-19)
 
@@ -1408,7 +1600,9 @@ first 85 were replaced with the code they changed).
   syntaxes: the engine has none, and the expression is refused, `regexp
   error: …: back references are not supported` (an invalid one is glibc's
   `Invalid back reference`, one into another alternative too). Ledgered:
-  `rx-back-reference`.
+  `rx-back-reference`. Resolved 2026-11-19: lsof-rs's own engine matches it
+  (see "Fixed by matching a back-reference, and expressions past the
+  `regex` crate's bounds", above).
 * **A word operator** (`\b`, `\B`, `\<`, `\>`) takes Unicode's word
   characters, which are glibc's (`iswalnum()` or `_`) and a combining mark,
   a connector other than `_` and the zero-width joiners; and beside a byte
@@ -1420,13 +1614,18 @@ first 85 were replaced with the code they changed).
   only in a command that holds a newline.
 * **Case**: the engine folds by Unicode's simple case folding, glibc
   compares `towupper()`: six characters differ (`ı`, `ϴ`, `ẞ`, the ohm,
-  kelvin and ångström signs), and `ÿ` in a range that ends at `\xff`.
+  kelvin and ångström signs), and `ÿ` in a range that ends at `\xff`; and
+  the case pairs Unicode added after glibc 2.39's tables, which the
+  `regex` crate's (Unicode 16) have and glibc's do not (`ƛ` under `i`
+  takes U+A7DC, measured; glibc's does not). A back-reference under `i`
+  compares by glibc's `towupper()` itself since 2026-11-20 (above).
 * **Encodings glibc reads as characters and Rust does not**: a surrogate's
   three bytes and a code past U+10FFFF, to `.` alone.
 * **Bounds** glibc lacks: a program past 8 MiB (`[[:alpha:]]{1000}`,
   `.{32767}`, `\w{0,800}`), an expression past the cost limit (64 of the
   locale's large classes, or more than 65,536 characters) and nesting past
-  100 are `Regular expression too big`. There is no bound on how many `-c
+  100 are `Regular expression too big`. Resolved 2026-11-19 but for the
+  nesting: past the first two lsof-rs's own engine answers (above). There is no bound on how many `-c
   /regex/` a command line holds, as the C has none: each is compiled within
   its own.
 * **Locales.** All of the above is the C under a UTF-8 locale, `C.UTF-8`'s
@@ -5882,7 +6081,7 @@ C-DEFECT not reproduced.
 | 35 | every column is **right-aligned** but COMMAND and TASKCMD (`print.c`: `" %*s"`), FD is the descriptor right-aligned plus its access and lock characters, and NAME follows one space unpadded | ~~USER, FD, TYPE, DEVICE and NODE left-aligned~~ **resolved 2026-09-26** | see "Fixed by laying the table out as `print.c` does" above. The item named four of the five columns. Every case now compares whitespace, and that found one more difference, a space after every packet-socket NAME. |
 | 36 | a UID with no password entry, or any UID under `-l`: no `-F L` field, the number eight wide in USER, and `lsof: no pwd entry for UID N` on stderr | ~~prints `L<uid>`, and a bare number~~ **resolved 2026-09-26**; ~~the stderr line~~ **resolved 2026-10-30** | the table and `-F` matched since 2026-09-26 (measured with UID 65000 and with `-l`). The stderr line, measured 2026-10-30 with UID 65000 and fixture W's WB (3000000000): the C's `printuid()` writes it each time it is asked about an owner it has no entry for — it caches the names it finds and nothing else — and it is asked twice per table row (sizing USER, `print.c:937`, then printing it, `:941`, every sizing call before any printing one), once per `-F` process set when `L` is selected (`:2224`), once per `-J` process and once per `-j` line (`:2088`); never under `-l` (`Futol`), `-w` or `-t` (`Fwarn`, which `+w` clears again), and `-t` prints no USER. lsof-rs writes the same lines in the same order (`pwd_warnings` in `main.rs`), all of them before the listing, where the C's interleave with a stdout it buffers: the same bytes and the same count on each stream. **Corrected 2026-10-30 (Batch A's review):** on a merged stream (`lsof >file 2>&1`, `2>&1 | less`) the two differ once stdout passes its stdio buffer, not only on a terminal: the C writes the sizing pass's warnings before line 1, and the printing pass's where glibc flushes its 4096-byte stdout buffer, which cuts a listing line in the middle (measured: `lsof -u 65016,0 >file 2>&1` put 8 at lines 1-8 and 8 at 384-391, mid-line; `-F` at line 3523, `-j` at 371-378), where lsof-rs puts all of them at lines 1-16. A listing under 4 KiB per cycle (`-r1` with a small one) merges identically. Since 2026-11-18 stdout is glibc's buffer (`lsof-cli/src/stdio.rs`: `st_blksize`, flushed where the buffer fills, `xsputn`'s rule for long writes, line buffering on a tty), but each warning is still written before the listing, not at the C's call site, so a merged stream still differs as above: not emulated, by decision. A stderr write that fails no longer ends the listing (exit 101 before the first row, found by the review): it is ignored, as the C's unchecked `fprintf(stderr)`; a stderr whose reader has gone had exited 141, and since 2026-11-18 kills the run with `SIGPIPE` where the signal was inherited at its default, as it kills the C, and is ignored where it was ignored or blocked (`lsof_core::safefs::write_stderr`, `lsof-sigpipe`; `tests/stdout_errors.rs`). **Stdout, 2026-11-18**: lsof-rs had exited 141 at its first failed write whatever the disposition, and on a full disk said `lsof: write error` and exited 1; it now writes as the C writes, the C's status and silence in each case (see "Fixed by making `-r` operate like the C"). Linux only: Windows has no uid. |
 | 37 | under `-w`, and so under `-t` (which sets it), the rows for files that cannot be read are never made, so a process whose every file is unreadable is not listed — yet still located: `lsof -t -p 1` prints nothing on this host, and exits 0 | ~~the blank row, and `-t` prints the pid~~ **resolved 2026-09-25** | see "Fixed by reporting what could not be read" above. The fast path still skips the file walk; it asks whether one link reads. |
-| 38 | `-c /regex/[bix]` is a POSIX regular expression (`regcomp()`, extended unless `b`), and `-i` takes host names (`@localhost`, `gethostbyname2()`) and service names (`:http`, `getservbyname()`) | ~~refused, with an error~~ the same: the expression read by glibc's grammar and run by the `regex` crate, a host name from the hosts file by glibc's `files` rules and then from the system's resolver, a service name from the services file | **resolved 2026-11-11, like the C** but for what is left — see "Fixed by `-c /regex/` and `-i`'s host and service names" above; the owner's decision ("Add regex crate. For `-i` match what the original version did"). Measured: 336,840 expressions exhaustively and 1.1 million at random against glibc's `regcomp()`/`regexec()`, 13,800 hosts and services lookups and 4,354 numeric names against `gethostbyname2()`/`getservbyname()`, 189 command lines against the C. **C-DEFECT, not reproduced**: the C frees an `-i` argument once for each address a host name gave it and aborts (`double free`), on `-i @localhost` wherever `multi on` gives it two. **Reviewed 2026-11-11** ("The review's fixes" there): the reader no longer recurses on a run of `$` (the C dies on 70,000, SIGSEGV); an expression's cost is bounded before the engine sees it (60,000 `\W` under `i` took 20 s and 2.5 GB) and its program at 8 MiB, which takes `.{20000}`, `[[:graph:]]{1,255}` and `[[:alpha:]]{300}`; a hosts or services file is read in bounded lines and only if it is a regular file; nsswitch.conf is read and walked by glibc's rules, with `files dns` where it gives hosts no line, and `services:` followed; `RESOLV_HOST_CONF` is read; `(a)|\1` is glibc's `Invalid back reference`; the C's second double free (`-i TCP:22,1x`) is ledgered. **Left**: a back-reference is refused (no engine has one in linear time); word operators, `^`/`$` beside a newline, six characters' case and encodings Rust does not read are the engine's; a program past 8 MiB, an expression of 64 large classes or 65,536 characters, or 100 deep is too big; a name the hosts file holds in one family is not asked of DNS for the other; a service, like a login (39), comes from its file or not at all; a line past 1 MiB of those files is passed over; nscd is not asked. History: recorded 2026-09-25 as a refusal that replaced a silent wrong answer (`-c /re/` was a literal that matched nothing, `-i:http` every Internet file); amended 2026-10-17 (item 112), when `-i` was read in the C's grammar and each name refused in words of lsof-rs's own (`host names are not resolved`, `service names are not resolved`), which are gone. |
+| 38 | `-c /regex/[bix]` is a POSIX regular expression (`regcomp()`, extended unless `b`), and `-i` takes host names (`@localhost`, `gethostbyname2()`) and service names (`:http`, `getservbyname()`) | ~~refused, with an error~~ the same: the expression read by glibc's grammar and run by the `regex` crate, a host name from the hosts file by glibc's `files` rules and then from the system's resolver, a service name from the services file | **resolved 2026-11-11, like the C** but for what is left — see "Fixed by `-c /regex/` and `-i`'s host and service names" above; the owner's decision ("Add regex crate. For `-i` match what the original version did"). Measured: 336,840 expressions exhaustively and 1.1 million at random against glibc's `regcomp()`/`regexec()`, 13,800 hosts and services lookups and 4,354 numeric names against `gethostbyname2()`/`getservbyname()`, 189 command lines against the C. **C-DEFECT, not reproduced**: the C frees an `-i` argument once for each address a host name gave it and aborts (`double free`), on `-i @localhost` wherever `multi on` gives it two. **Reviewed 2026-11-11** ("The review's fixes" there): the reader no longer recurses on a run of `$` (the C dies on 70,000, SIGSEGV); an expression's cost is bounded before the engine sees it (60,000 `\W` under `i` took 20 s and 2.5 GB) and its program at 8 MiB, which takes `.{20000}`, `[[:graph:]]{1,255}` and `[[:alpha:]]{300}`; a hosts or services file is read in bounded lines and only if it is a regular file; nsswitch.conf is read and walked by glibc's rules, with `files dns` where it gives hosts no line, and `services:` followed; `RESOLV_HOST_CONF` is read; `(a)|\1` is glibc's `Invalid back reference`; the C's second double free (`-i TCP:22,1x`) is ledgered. **Resolved 2026-11-19, like the C** — see "Fixed by matching a back-reference, and expressions past the `regex` crate's bounds" above: a back-reference is matched (lsof-rs's own engine, by every binding of the groups, with glibc's reading of a group nested in a repetition; where glibc's search misses a match, finds one that is not there or dies of SIGSEGV, C-DEFECTs, not reproduced, pinned; reviewed 2026-11-20: every start searched in turns, so the reviews' cases are answered as glibc answers them, and `towupper()`'s simple mapping under `i`), and an expression past the crate's bounds (a program past 8 MiB, 64 large classes, 65,536 characters) is answered by that engine. **Left**: word operators, `^`/`$` beside a newline, six characters' case and encodings Rust does not read are the crate's; an expression 100 deep, or of more than 262,144 nodes, is too big; a search with a back-reference past 4,194,304 steps or 32 MiB a command is taken as no match (measured: none of the reviews' cases; 3 of 9,000 random expressions of three to nine groups named in random order against 63 bytes, each with no match; 60 of 6,000 repetitions and runs of groups each named again against names of 14 to 63 bytes, 2 of them with a match glibc finds in 0.09 and 0.53 s), and so is a command past 1,024 bytes in the own engine; a name the hosts file holds in one family is not asked of DNS for the other; a service, like a login (39), comes from its file or not at all; a line past 1 MiB of those files is passed over; nscd is not asked. History: recorded 2026-09-25 as a refusal that replaced a silent wrong answer (`-c /re/` was a literal that matched nothing, `-i:http` every Internet file); amended 2026-10-17 (item 112), when `-i` was read in the C's grammar and each name refused in words of lsof-rs's own (`host names are not resolved`, `service names are not resolved`), which are gone. |
 | 39 | `-u <name>` resolves through NSS (`getpwnam(3)`) | reads `/etc/passwd` only, and only where `/etc/nsswitch.conf` has glibc read it, so an LDAP/SSSD account cannot be named — its UID can | **DEBT — recorded 2026-09-25**, the limit the USER column already has. **Amended 2026-11-11, like the C as far as the file goes**: the file is read by glibc's `files` rules (70) and, since this date, only where glibc's walk through nsswitch.conf's `passwd:` sources reaches `files` or `compat` (or there is no line, or no file: glibc's default, `files`). The line is read by glibc 2.39's own parser and walked by its rules (reviewed the same day, 38's "The review's fixes"): measured over 69 shapes of the file, 1,409 `-u` command lines and listings agree with the C but where the C dies. Under `passwd: sss` (no such service installed), `passwd: FILES`, `sss [UNAVAIL=return] files`, `sss [!SUCCESS=return] files`, `files [SUCCESS=merge]`, or any line glibc cannot parse, for any database (`sss [NOTFOUND] files`, `hosts: files [`), the C knows no login (`can't get UID for root`) and prints USER as the number with `no pwd entry for UID 0`, and lsof-rs does the same (`nss-*`), where it had read the file regardless; under `sss files`, `db files`, `sss # files` (no comment there), `sss [NOTFOUND=return] files`, `compat`, a last line with no newline (not read), and with two lines (the last wins), both read it. **`compat`** reads the file by `nss_compat`'s rules where it holds a `+` or `-` line: `-name` excludes the name (not its uid's name), `+name` and a `+` alone leave names to NIS, and after any `+` line no uid is found (31 files measured). With an empty source list, or one that opens with an action, the C dies in glibc on `-u name` (SIGSEGV, as `getent` does; **C-DEFECT, not reproduced**: lsof-rs says `can't get UID for name`). **Left, and why**: an account only another source serves (LDAP, SSSD, systemd-homed, NIS) has no name here. `getpwnam()` is libc's; calling it needs `unsafe` or a crate that wraps it, which the three `forbid(unsafe_code)` crates do not take for a name alone, and `std` has no route to it (there is one for hosts, `getaddrinfo()`, which is why 38 could follow NSS for those and this cannot). A source lsof-rs cannot ask is taken as not installed (`UNAVAIL`), which is a guess where it is installed and would have answered; `compat`'s `+` lines are read as with no NIS. nsswitch.conf is read once a run, where glibc reads it again when it changes; nscd is not asked. |
 | 40 | `-e <fs>` exempts **mapped files** too: each `mem` row under it is `UNKNmem` (a deleted one `UNKNdel`), built from the maps line alone, never `stat`ed | ~~stats the mapped file and prints `REG`~~ **resolved 2026-10-04** | see "Fixed by building every mapping's row as the C does" above. Found 2026-09-25, measured with `-e /`, by the coverage ledger's `UNKN*` waiver, which had given another reason for it; the cwd/rtd/txt/fd half of `-e` had matched since 2026-09-20. |
 | 41 | `-L` **disables** the NLINK column (the default) and takes no number (`no number may follow -L`); `+L` enables it, and `+L <n>` enables it and selects files with fewer than `n` links | ~~`-L` **shows** the column, and a bare `+L` is refused~~ **resolved 2026-09-26** | see "Fixed by reading every option the way getopt offers it" above. Windows changed with it: its smoke case now asserts the C's reading. |

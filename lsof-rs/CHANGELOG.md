@@ -12,6 +12,42 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed — output and exit status a script may notice
+- **`-c /regex/` takes a back-reference, and expressions past the `regex`
+  crate's bounds** (DIVERGENCES 38): `-c '/sl(e)\1p/'` and `-c
+  '/sl\(e\)\1p/b'` list sleep, as the C does, where lsof-rs had said
+  `back references are not supported` and exited 1; `-c '/^\w{0,800}/'`
+  and an expression of 64 large classes (`\w*` 64 times) select what they
+  match, where lsof-rs had said `Regular expression too big`. lsof-rs's own
+  engine answers what the crate cannot or will not (`lsof-core`,
+  `posix_regex/engine.rs`); its leaves are read by `regex-syntax`, now a
+  direct dependency of `lsof-core` (it was already the crate's). A
+  back-reference matches where some binding of its groups gives a match:
+  glibc's search misses some (`(e){0,2}\1` against sleep) and finds some
+  that are not there (`^(.*)(.*)\2\1$` against every command), and lsof-rs
+  does neither (C-DEFECTs, with glibc's SIGSEGV on `((a*)\2\2)*a`); a
+  group nested in a repetition keeps an earlier pass's match, as glibc
+  reads it. Under `i` a back-reference compares each character in the case
+  `towupper()` gives it, the simple mapping of glibc 2.39's tables (`(.)\1`
+  matches `ᾳᾼ`), and a byte that is no character as glibc compares it.
+  Still `too big`: nesting 100 deep, and more than 262,144 nodes (no
+  argument holds that many). A search with a back-reference tries every
+  start in turns and finds an easy match first (`(.*)(.*)(.*)(.*)\4\3\2\1$`
+  against a 33-byte kernel thread, seven groups against 15 bytes: a
+  millisecond, where glibc takes up to 5 s). A repetition whose passes set
+  groups read after it is searched a pass at a time, and a group nothing
+  after can read is taken as unset: `^((.)|(.*)|(.*))*\4\3$` against
+  `systemd-journal` matches in 4 ms (glibc: 6 ms), where the search
+  had listed every way the repetition ends with every group it sets, run
+  out of its budget and said no match (a review's case, and five like it).
+  A search is bounded at 4,194,304 steps and 32 MiB a command and
+  expression (about 0.4 s, measured; it had held up to 123 MB), past
+  which the command is taken as not matching (3 of 9,000 random
+  expressions of three to nine groups named again in random order,
+  against 63 bytes, none with a match; 60 of 6,000 repetitions and runs of
+  groups against names of 14 to 63 bytes, 2 with a match glibc finds).
+  Under `-a`, `-c` is
+  asked only of the processes `-p`, `-g` and `-u` let through, as the C
+  asks it. On every platform.
 - **The options end where the C's end them** (DIVERGENCES 12, a DECISION
   until the maintainer reversed it): at the first name, at `-` or `+`
   alone (the first name) and at `--` or `++` (taken); every word after is a
@@ -371,6 +407,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   did not reach that path. No new crate; the build script is unchanged.
 
 ### Added
+- **The Linux differential runs a case under a stack limit of its own**
+  (`LSOF_DIFF_STACK`, KiB, both binaries; `differential/linux_diff.py`):
+  `rx-back-reference-glibc-segfaults` (`((a*)\2\2)*a`), whose C dies when
+  glibc's recursion has used the stack up, after 3.6 s at 8 MiB and past
+  the case's 15 s on CI's runner (killed, so the ledgered fingerprint
+  missed), runs under 1 MiB, where it dies in 0.07 s. And the zone cases'
+  wrapper ends its binary with itself (`setpriv --pdeathsig KILL`): the C
+  that `repeat-tz-fifo-with-no-writer-holds-the-c` leaves waiting on a
+  FIFO had been left running after each run.
 - **`docs/lsof-rs.1`**, a man page, whose DIFFERENCES FROM THE C LSOF
   section lists what lsof-rs does differently on purpose: arguments
   escaped in every message, the 3-second wait for a zone file that is no
@@ -423,13 +468,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   command's bytes; an expression `regcomp()` refuses is refused in
   `regerror()`'s words (`regexp error: /a[/: Invalid regular expression`),
   and with `-V` one that matched nothing is `no command found for regex:
-  EXPR`. lsof-rs had refused every regular expression. Not taken: a
-  back-reference (`\(a\)\1`), which the engine cannot match in linear
-  time (`back references are not supported`), and an expression past
-  lsof-rs's bounds (`Regular expression too big`): a compiled program of 8
-  MiB (`.{20000}` and `[[:alpha:]]{300}` fit, `.{32767}` does not), 64 of
-  the locale's large classes (`[[:alpha:]]`, `\w`) or 65,536 characters,
-  nesting 100 deep. On every platform.
+  EXPR`. lsof-rs had refused every regular expression. Not taken: an
+  expression nested 100 deep (`Regular expression too big`); a
+  back-reference and an expression past the `regex` crate's bounds are
+  taken too (the entry above). On every platform.
 - **`-i` takes host names and service names**, as the C (DIVERGENCES 38):
   `-i @localhost`, `-i tcp@db.example:5432`, `-i :http`, `-i :1-http`. On
   Linux a host name is looked up as glibc's `gethostbyname2()` looks it up

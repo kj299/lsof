@@ -46,7 +46,7 @@ as Selection / Output / Precautionary / Miscellaneous.
 | `-a` | sel | ✅ shipped | AND combinator |
 | `-A A` | sel | ❌ N/A | AFS NWA mode (HP-UX); not portable |
 | `-b` | prec | ✅ shipped 2026-10-09 | Make no call that can block (`stat`, `lstat`, `readlink`) on a path a user names or a mount point, and say so unless `-w`; a path argument is then a status error (DIVERGENCES 94). Windows: accepted; its own handle queries are bounded by its worker model |
-| `-c c` | sel | ✅ shipped | Match by command/image name; `-c /regex/[bix]` by a POSIX regular expression, read in glibc's grammar and run by the `regex` crate (DIVERGENCES 38, 2026-11-11; a back-reference is refused) |
+| `-c c` | sel | ✅ shipped | Match by command/image name; `-c /regex/[bix]` by a POSIX regular expression, read in glibc's grammar and run by the `regex` crate, or by lsof-rs's own engine for a back-reference or past the crate's bounds (DIVERGENCES 38, 2026-11-11 and 2026-11-19) |
 | `+c c` | out | ✅ shipped (5A) | Max command-name width in the COMMAND column — small render tweak |
 | `-C` | prec | ❌ N/A | Kernel name cache; Unix-only |
 | `-d d` | sel | ✅ shipped | FD filter (`cwd`/`txt`/`mem`/numbers/ranges/`^excl`) |

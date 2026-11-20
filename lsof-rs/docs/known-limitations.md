@@ -301,13 +301,26 @@ file holds cost none. A service name comes from `/etc/services`.
 The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
-- **Refused, where the C works:** a back-reference in `-c /regex/` (38:
-  `\(a\)\1`), and an expression past lsof-rs's bounds: a compiled size of
-  8 MiB (`.{32767}`, `\w{0,800}`), 64 of the locale's large classes or
-  65,536 characters, groups and repetitions nested 100 deep (every other
-  POSIX expression glibc takes is taken); a value that is not UTF-8, in a command line that
+- **Refused, where the C works:** a `-c /regex/` expression with groups
+  and repetitions nested 100 deep (38; every other POSIX expression glibc
+  takes is taken, back-references and intervals of any size among them); a
+  value that is not UTF-8, in a command line that
   also holds one of U+10FF00..U+10FFFF as text (92); `-Z`, where SELinux is
   mounted (29: the CONTEXT column is not built).
+- **`-c /regex/` with a back-reference** (38): lsof-rs matches where some
+  binding of the groups gives a match, reading a group nested in a
+  repetition as glibc does (where POSIX is unclear); glibc's search misses
+  some such matches (`(e){0,2}\1` against `sleep`), finds some that are not
+  there (`^(.*)(.*)\2\1$` matches every command in the C) and dies on some
+  (`((a*)\2\2)*a`, SIGSEGV). The search is bounded at 4,194,304 steps a
+  command (about half a second) and 32 MiB: past either the command is
+  taken as not matching. Every case the reviews found is answered within
+  50,000 steps; of 9,000 random expressions of three to nine groups each
+  named again in random order, against a 63-byte name, 3 reach a bound,
+  and none of those has a match; of 6,000 random repetitions of
+  alternations or runs of groups, each named again, against names of 14
+  to 63 bytes, 60 reach one, 2 of which have a match that glibc finds (in
+  0.09 and 0.53 s): there lsof-rs says no match where the C says match.
 - **Names only the files know** (38, 39, 154): a service name is read from
   `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
   has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves
