@@ -1743,10 +1743,14 @@ mod tests {
         assert_eq!(asked, [rows, rows].concat());
         let nameless = [65000, 65000, 65001];
         assert_eq!(warned, [nameless, nameless].concat());
-        assert!(
-            out.contains(" root ") && out.contains(r"EXAMPLE\\alice"),
-            "{out}"
-        );
+        // A backslash prints as itself on Windows, doubled elsewhere
+        // (`render::escape`).
+        let alice = if cfg!(windows) {
+            r"EXAMPLE\alice"
+        } else {
+            r"EXAMPLE\\alice"
+        };
+        assert!(out.contains(" root ") && out.contains(alice), "{out}");
         assert!(out.contains("   65000 "), "{out}");
         for argv in [&["-F"][..], &["-FL"], &["-J"]] {
             let (_, asked, warned) = run(argv);
