@@ -264,19 +264,17 @@ new = '''    if icase || !icase {'''
 name = "rx-icase-back-reference-lower"
 rule = "under i a back-reference compares in the case towupper() gives (sigma's two small forms are one capital)"
 [[mutant.edit]]
-file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''    let mut u = c.to_uppercase();'''
-new = '''    let mut u = c.to_lowercase();'''
+file = "crates/lsof-core/src/posix_regex/towupper.rs"
+old = '''    ('\u{3c2}', '\u{3a3}'),'''
+new = '''    ('\u{3c2}', '\u{3c2}'),'''
 
 [[mutant]]
-name = "rx-icase-back-reference-full-upper"
-rule = "towupper() maps a character to one: sharp s stays itself"
+name = "rx-icase-back-reference-no-upper"
+rule = "under i a back-reference compares characters in the case towupper() gives them"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''        (Some(one), None) => one,
-        _ => c,'''
-new = '''        (Some(one), _) => one,
-        _ => c,'''
+old = '''        .map_or(c, |&(_, to)| to)'''
+new = '''        .map_or(c, |&(from, _)| from)'''
 
 [[mutant]]
 name = "rx-group-not-set"
@@ -490,11 +488,12 @@ new = '''                        Node::BackRef(k) if known & group_bit(usize::fr
 
 [[mutant]]
 name = "rx-towupper-full-mapping"
-rule = "towupper() is the simple mapping of glibc 2.39's tables, not Rust's"
+rule = "towupper() is glibc 2.39's table as measured, each character once"
 [[mutant.edit]]
-file = "crates/lsof-core/src/posix_regex/engine.rs"
-old = '''    if let Ok(i) = TOWUPPER_ELSE.binary_search_by_key(&c, |&(from, _)| from) {'''
-new = '''    if let Ok(i) = TOWUPPER_ELSE.get(..0).unwrap_or_default().binary_search_by_key(&c, |&(from, _)| from) {'''
+file = "crates/lsof-core/src/posix_regex/towupper.rs"
+old = '''    ('\u{1f80}', '\u{1f88}'),'''
+new = '''    ('\u{1f80}', '\u{1f88}'),
+    ('\u{1f80}', '\u{1f88}'),'''
 
 [[mutant]]
 name = "rx-icase-bytes-not-folded"

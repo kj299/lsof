@@ -30,6 +30,7 @@
 use std::fmt::Write as _;
 
 mod engine;
+mod towupper;
 
 use engine::{Look, Node, Tree, UnitSpec};
 pub use engine::{ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET};
@@ -1791,8 +1792,10 @@ mod tests {
 
     /// `towupper()` as glibc 2.39 has it in C.UTF-8, every character:
     /// measured through ctypes, 1,450 characters it changes, and an FNV-1a
-    /// hash of each and what it becomes, as two little-endian `u32`s. Rust's
-    /// tables move with the toolchain; this says when they do.
+    /// hash of each and what it becomes, as two little-endian `u32`s. The
+    /// table is glibc's, not Rust's, whose case tables move with the
+    /// toolchain (a newer one changes 1,470); this holds the table to what
+    /// was measured, and sorted, as the lookup's binary search needs.
     #[test]
     #[cfg_attr(miri, ignore = "every character, 1.1 million: minutes under miri")]
     fn upper_is_glibcs_towupper() {
@@ -1812,6 +1815,9 @@ mod tests {
             }
         }
         assert_eq!((changed, hash), (1450, 0xdd8a_a892_0e74_fe15));
+        assert!(towupper::TOWUPPER
+            .windows(2)
+            .all(|w| matches!(w, [a, b] if a.0 < b.0)));
     }
 
     /// In a basic expression a `$` is an anchor only where the expression,

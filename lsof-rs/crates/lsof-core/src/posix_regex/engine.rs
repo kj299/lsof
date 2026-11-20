@@ -48,6 +48,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use super::towupper::TOWUPPER;
 use super::RegexError;
 
 /// An assertion: where the expression or the command starts or ends, or a
@@ -1775,110 +1776,17 @@ impl Oracle<'_, '_> {
 const ORACLE_DEPTH: u32 = 300;
 
 /// `towupper()` in glibc 2.39's C.UTF-8: the simple upper case of a
-/// character, one character for one (`ᾳ` is `ᾼ`, `ß` is itself). Rust's
-/// tables give the full one, of more than one character for some, and are
-/// of a later Unicode than glibc's; [`TOWUPPER_ELSE`] has where they are
-/// not glibc's, and a test holds the whole mapping to glibc's.
+/// character, one character for one (`ᾳ` is `ᾼ`, `ß` is itself), from a
+/// table measured from glibc, not from Rust's case tables, which follow the
+/// toolchain's Unicode and give the full mapping; a test holds the table to
+/// glibc's.
 pub(super) fn upper(c: char) -> char {
-    if let Ok(i) = TOWUPPER_ELSE.binary_search_by_key(&c, |&(from, _)| from) {
-        return TOWUPPER_ELSE.get(i).map_or(c, |&(_, to)| to);
-    }
-    let mut u = c.to_uppercase();
-    match (u.next(), u.next()) {
-        (Some(one), None) => one,
-        _ => c,
-    }
+    TOWUPPER
+        .binary_search_by_key(&c, |&(from, _)| from)
+        .ok()
+        .and_then(|i| TOWUPPER.get(i))
+        .map_or(c, |&(_, to)| to)
 }
-
-/// Where `towupper()` is not what [`char::to_uppercase`] gives as one
-/// character: the Greek letters with an iota below or beside, whose simple
-/// upper case is one character and full upper case two, and the case pairs
-/// Unicode added after glibc 2.39's tables, which glibc leaves as they are.
-/// Measured: every character, glibc's `towupper()` through ctypes.
-const TOWUPPER_ELSE: &[(char, char)] = &[
-    ('\u{19b}', '\u{19b}'),
-    ('\u{264}', '\u{264}'),
-    ('\u{1c8a}', '\u{1c8a}'),
-    ('\u{1f80}', '\u{1f88}'),
-    ('\u{1f81}', '\u{1f89}'),
-    ('\u{1f82}', '\u{1f8a}'),
-    ('\u{1f83}', '\u{1f8b}'),
-    ('\u{1f84}', '\u{1f8c}'),
-    ('\u{1f85}', '\u{1f8d}'),
-    ('\u{1f86}', '\u{1f8e}'),
-    ('\u{1f87}', '\u{1f8f}'),
-    ('\u{1f90}', '\u{1f98}'),
-    ('\u{1f91}', '\u{1f99}'),
-    ('\u{1f92}', '\u{1f9a}'),
-    ('\u{1f93}', '\u{1f9b}'),
-    ('\u{1f94}', '\u{1f9c}'),
-    ('\u{1f95}', '\u{1f9d}'),
-    ('\u{1f96}', '\u{1f9e}'),
-    ('\u{1f97}', '\u{1f9f}'),
-    ('\u{1fa0}', '\u{1fa8}'),
-    ('\u{1fa1}', '\u{1fa9}'),
-    ('\u{1fa2}', '\u{1faa}'),
-    ('\u{1fa3}', '\u{1fab}'),
-    ('\u{1fa4}', '\u{1fac}'),
-    ('\u{1fa5}', '\u{1fad}'),
-    ('\u{1fa6}', '\u{1fae}'),
-    ('\u{1fa7}', '\u{1faf}'),
-    ('\u{1fb3}', '\u{1fbc}'),
-    ('\u{1fc3}', '\u{1fcc}'),
-    ('\u{1ff3}', '\u{1ffc}'),
-    ('\u{a7cd}', '\u{a7cd}'),
-    ('\u{a7cf}', '\u{a7cf}'),
-    ('\u{a7d3}', '\u{a7d3}'),
-    ('\u{a7d5}', '\u{a7d5}'),
-    ('\u{a7db}', '\u{a7db}'),
-    ('\u{10d70}', '\u{10d70}'),
-    ('\u{10d71}', '\u{10d71}'),
-    ('\u{10d72}', '\u{10d72}'),
-    ('\u{10d73}', '\u{10d73}'),
-    ('\u{10d74}', '\u{10d74}'),
-    ('\u{10d75}', '\u{10d75}'),
-    ('\u{10d76}', '\u{10d76}'),
-    ('\u{10d77}', '\u{10d77}'),
-    ('\u{10d78}', '\u{10d78}'),
-    ('\u{10d79}', '\u{10d79}'),
-    ('\u{10d7a}', '\u{10d7a}'),
-    ('\u{10d7b}', '\u{10d7b}'),
-    ('\u{10d7c}', '\u{10d7c}'),
-    ('\u{10d7d}', '\u{10d7d}'),
-    ('\u{10d7e}', '\u{10d7e}'),
-    ('\u{10d7f}', '\u{10d7f}'),
-    ('\u{10d80}', '\u{10d80}'),
-    ('\u{10d81}', '\u{10d81}'),
-    ('\u{10d82}', '\u{10d82}'),
-    ('\u{10d83}', '\u{10d83}'),
-    ('\u{10d84}', '\u{10d84}'),
-    ('\u{10d85}', '\u{10d85}'),
-    ('\u{16ebb}', '\u{16ebb}'),
-    ('\u{16ebc}', '\u{16ebc}'),
-    ('\u{16ebd}', '\u{16ebd}'),
-    ('\u{16ebe}', '\u{16ebe}'),
-    ('\u{16ebf}', '\u{16ebf}'),
-    ('\u{16ec0}', '\u{16ec0}'),
-    ('\u{16ec1}', '\u{16ec1}'),
-    ('\u{16ec2}', '\u{16ec2}'),
-    ('\u{16ec3}', '\u{16ec3}'),
-    ('\u{16ec4}', '\u{16ec4}'),
-    ('\u{16ec5}', '\u{16ec5}'),
-    ('\u{16ec6}', '\u{16ec6}'),
-    ('\u{16ec7}', '\u{16ec7}'),
-    ('\u{16ec8}', '\u{16ec8}'),
-    ('\u{16ec9}', '\u{16ec9}'),
-    ('\u{16eca}', '\u{16eca}'),
-    ('\u{16ecb}', '\u{16ecb}'),
-    ('\u{16ecc}', '\u{16ecc}'),
-    ('\u{16ecd}', '\u{16ecd}'),
-    ('\u{16ece}', '\u{16ece}'),
-    ('\u{16ecf}', '\u{16ecf}'),
-    ('\u{16ed0}', '\u{16ed0}'),
-    ('\u{16ed1}', '\u{16ed1}'),
-    ('\u{16ed2}', '\u{16ed2}'),
-    ('\u{16ed3}', '\u{16ed3}'),
-];
 
 /// An offset in a command, which is at most [`OWN_COMMAND_MAX`] bytes.
 fn offset(at: usize) -> u16 {
