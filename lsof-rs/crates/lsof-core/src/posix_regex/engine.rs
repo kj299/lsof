@@ -31,18 +31,23 @@
 //!
 //! The search ([`Search`]) walks what is left to match, depth first, so
 //! that the first way found is enough: groups, alternatives and
-//! concatenations one item at a time, a repetition by every way it can end
-//! (kept, for an offset and the groups it reads). Before it, the expression
+//! concatenations one item at a time; a repetition that sets no group a
+//! back-reference names by every way it can end (offsets, kept for an
+//! offset and the groups it reads), and one that does a pass at a time,
+//! each pass that matches nothing made at once and each other one listed
+//! whole where it sets at most two groups or else walked item by item, a
+//! group that no back-reference after can read taken as unset so that the
+//! states that differ only there are one. Before it, the expression
 //! is matched as a regular one whose back-references match anything, which
 //! says where nothing can match. Each start is searched in turns of the
 //! same length, doubled each round, so that a match easy to find from one
 //! start is found however long the others would take; a state from which
 //! nothing matches is walked once, for every start; a group just set is
 //! checked against where it is named next; and only the groups a
-//! back-reference may still read are kept. The search is bounded
-//! ([`SEARCH_BUDGET`]): past it a command is taken as not matching
-//! (THREAT-MODEL.md has how often, measured), where glibc's own search is
-//! exponential and runs on.
+//! back-reference may still read are kept. The search is bounded, in
+//! steps ([`SEARCH_BUDGET`]) and in what it holds ([`SEARCH_MEMORY`]):
+//! past either a command is taken as not matching (THREAT-MODEL.md has how
+//! often, measured), where glibc's own search is exponential and runs on.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -303,12 +308,21 @@ pub const OWN_COMMAND_MAX: usize = 1024;
 /// How much a search for one command may do, with a back-reference: each
 /// state walked, each way a repetition matches, each item checked, each
 /// thing kept is one. Past it the command is taken as not matching.
-/// Measured at about 0.11 s and a few megabytes a million on this host
-/// (THREAT-MODEL.md): every case the reviews found takes under 50,000; of
-/// 9,000 random expressions of up to nine groups against a 63-byte name, 6
-/// go past it, none of which has a match, and the 3,942 that match are
-/// found within it.
+/// Measured at about 0.1 s a million on this host (THREAT-MODEL.md): every
+/// case the reviews found takes under 50,000; of 9,000 random expressions
+/// of up to nine groups against a 63-byte name, 3 go past it (or past
+/// [`SEARCH_MEMORY`]), none of which has a match, and the 3,942 that match
+/// are found within it; of 6,000 random repetitions and runs of groups
+/// against names of 14 to 63 bytes, 60 go past, 2 of which have a match
+/// (found past 4.2 million steps; glibc finds them in 0.09 and 0.53 s).
 pub const SEARCH_BUDGET: u64 = 1 << 22;
+
+/// How many bytes a search for one command may hold, its tables counted by
+/// the room they have, every 1,024 steps and before the two largest grow:
+/// past it, as past [`SEARCH_BUDGET`], the command is taken as not
+/// matching. What it holds is at most this and what 1,024 steps add (each
+/// kept thing is a step; THREAT-MODEL.md has what was measured).
+pub const SEARCH_MEMORY: usize = 32 << 20;
 
 /// The groups a back-reference can name.
 const GROUPS: usize = 9;
@@ -349,12 +363,17 @@ pub(super) struct Engine {
     writes: Vec<Mask>,
     /// Of those, the ones it sets however it matches.
     must: Vec<Mask>,
+    /// The most of those one way of matching it sets: a pass of a
+    /// repetition setting few is listed whole ([`Search::pass`]).
+    path_sets: Vec<u32>,
     /// The groups that may be read after each node, before they are set
     /// again: what a node's answer keeps of what it set.
     live: Vec<Mask>,
     back_references: bool,
     /// [`SEARCH_BUDGET`], but in the tests.
     budget: u64,
+    /// [`SEARCH_MEMORY`], but in the tests.
+    memory: usize,
 }
 
 impl Engine {
@@ -454,6 +473,29 @@ impl Engine {
                 *slot = m & named;
             }
         }
+        // The most groups a way of matching each node sets.
+        let mut path_sets = vec![0u32; nodes.len()];
+        for &id in &order {
+            let get = |c: &u32| path_sets.get(*c as usize).copied().unwrap_or(0);
+            let m = match nodes.get(id as usize) {
+                Some(Node::Concat(children)) => children
+                    .iter()
+                    .fold(0u32, |acc, c| acc.saturating_add(get(c))),
+                Some(Node::Alt(children)) => children.iter().map(get).max().unwrap_or(0),
+                // Its passes, together, may set every group under it.
+                Some(Node::Repeat { .. }) => {
+                    writes.get(id as usize).copied().unwrap_or(0).count_ones()
+                }
+                Some(Node::Group { child, .. }) => get(child).saturating_add(u32::from(
+                    writes.get(id as usize).copied().unwrap_or(0)
+                        != writes.get(*child as usize).copied().unwrap_or(0),
+                )),
+                _ => 0,
+            };
+            if let Some(slot) = path_sets.get_mut(id as usize) {
+                *slot = m;
+            }
+        }
         // What may be read after a node: from the root down, so parents
         // before children.
         let mut live = vec![0 as Mask; nodes.len()];
@@ -501,17 +543,26 @@ impl Engine {
             reads,
             writes,
             must,
+            path_sets,
             live,
             back_references,
             budget: SEARCH_BUDGET,
+            memory: SEARCH_MEMORY,
         })
     }
 
     /// The same, with a search budget of `budget`.
-    #[cfg(test)]
     pub(super) fn with_budget(&self, budget: u64) -> Self {
         Self {
             budget,
+            ..self.clone()
+        }
+    }
+
+    /// The same, with a search held to `memory` bytes.
+    pub(super) fn with_memory(&self, memory: usize) -> Self {
+        Self {
+            memory,
             ..self.clone()
         }
     }
@@ -551,7 +602,11 @@ impl Engine {
             dead: std::collections::HashSet::new(),
             canon: HashMap::new(),
             over: HashMap::new(),
+            star: HashMap::new(),
+            read: HashMap::new(),
+            empties: HashMap::new(),
             spent: 0,
+            kept: 0,
             round: 0,
             slice: FIRST_SLICE,
         };
@@ -977,7 +1032,24 @@ type Ends = Rc<[(u16, Groups)]>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Item {
     Node(u32),
-    Close { group: u32, start: u16 },
+    Close {
+        group: u32,
+        start: u16,
+    },
+    /// A repetition (its node) that has made `passes` passes: it may end
+    /// here, once it has made its least, or make one more. Past its least,
+    /// with no most, the passes are not counted.
+    Rep {
+        node: u32,
+        passes: u32,
+    },
+    /// The end of a pass of repetition `node` that started at `start`, one
+    /// that matched something: a pass that matches nothing is made at once
+    /// ([`Search::empty`]).
+    PassEnd {
+        node: u32,
+        start: u16,
+    },
 }
 
 /// The continuations made so far, each once.
@@ -998,7 +1070,10 @@ type State = (u32, u16, Groups);
 /// The search from one start, depth first, so that the first way found is
 /// enough: the states it is in, each with what it leads to and how many of
 /// those it has walked. Every state leads only to states further on (an
-/// offset further, or what is left to match smaller), so a state none of
+/// offset further; or what is left to match smaller; or, at a repetition,
+/// a pass more counted, or more of the groups matching nothing, as a pass
+/// that matches nothing sets each group it sets to nothing and one that
+/// changes no group is not made, [`Search::pass`]), so a state none of
 /// whose next states matches does not match, and no start walks it again
 /// ([`Search::dead`]).
 #[derive(Default)]
@@ -1006,6 +1081,32 @@ struct Walk {
     path: Vec<(State, Vec<State>, usize)>,
     /// The state it starts from, while it has not been walked.
     first: Option<State>,
+}
+
+/// The most groups a pass of a repetition may set for its passes to be
+/// listed whole, each at once, rather than walked ([`Search::pass`]).
+const EAGER_PASS: u32 = 2;
+
+/// The bytes of a table of `T` with room for `capacity`: a byte of its own
+/// for each entry, and an eighth more entries than it says it has room for.
+fn room<T>(capacity: usize) -> usize {
+    capacity
+        .saturating_add(capacity / 7)
+        .saturating_mul(std::mem::size_of::<T>().saturating_add(1))
+}
+
+fn table<K, V>(m: &HashMap<K, V>) -> usize {
+    room::<(K, V)>(m.capacity())
+}
+
+/// How often, in steps, [`Search::held`] is counted.
+const HELD_EVERY: u64 = 1 << 10;
+
+/// The bytes of one state on a walk's path, with what it leads to.
+fn path_bytes(next: &Vec<State>) -> usize {
+    next.capacity()
+        .saturating_mul(std::mem::size_of::<State>())
+        .saturating_add(std::mem::size_of::<(State, Vec<State>, usize)>())
 }
 
 /// How much of a continuation [`Search::may_finish`] reads.
@@ -1027,8 +1128,17 @@ struct Search<'e, 'c> {
     canon: HashMap<(u16, u16), Span>,
     /// Each node's [`Engine::matrix`], as [`Search::may_finish`] asks.
     over: HashMap<u32, Rc<Mat>>,
+    /// Each repetition's child's [`Engine::matrix`], any number of times.
+    star: HashMap<u32, Rc<Mat>>,
+    /// What [`Search::may_read`] has said.
+    read: HashMap<(u32, u16, u16, Span), bool>,
+    /// What [`Search::empty`] has said.
+    empties: HashMap<(u32, u16, Groups), Rc<[Mask]>>,
     /// Steps taken, by every start.
     spent: u64,
+    /// Bytes held outside the tables: what they point to, and the walks'
+    /// paths ([`Search::held`]).
+    kept: usize,
     /// Steps taken in this turn.
     round: u64,
     /// How many a turn may take.
@@ -1044,13 +1154,57 @@ enum Next {
 impl Search<'_, '_> {
     fn charge(&mut self, units: usize) -> Result<(), Stop> {
         let units = u64::try_from(units).unwrap_or(u64::MAX);
+        let before = self.spent;
         self.spent = self.spent.saturating_add(units);
         self.round = self.round.saturating_add(units);
         if self.spent > self.engine.budget {
             return Err(Stop::Exhausted);
         }
+        // What it holds, counted every so many steps.
+        if before / HELD_EVERY != self.spent / HELD_EVERY && self.held() > self.engine.memory {
+            return Err(Stop::Exhausted);
+        }
         if self.round > self.slice {
             return Err(Stop::Turn);
+        }
+        Ok(())
+    }
+
+    /// About how many bytes the search holds: each table as the room it
+    /// has, and what it keeps outside them.
+    fn held(&self) -> usize {
+        [
+            room::<State>(self.dead.capacity()),
+            table(&self.memo),
+            table(&self.canon),
+            table(&self.over),
+            table(&self.star),
+            table(&self.read),
+            table(&self.empties),
+            table(&self.conts.index),
+            self.conts
+                .items
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(Item, u32)>()),
+            self.conts.needs.capacity().saturating_mul(2),
+            self.kept,
+        ]
+        .iter()
+        .fold(0usize, |acc, &b| acc.saturating_add(b))
+    }
+
+    /// Before an entry is added to a table of `T` holding `len` with room
+    /// for `capacity`: whether the room it then takes, with what the search
+    /// holds, is within [`SEARCH_MEMORY`]. The two largest tables are asked
+    /// this, so that the room a table grows to is held to it before it is
+    /// taken.
+    fn grows<T>(&self, len: usize, capacity: usize) -> Result<(), Stop> {
+        if len < capacity {
+            return Ok(());
+        }
+        let grown = room::<T>(capacity.saturating_mul(2).max(4));
+        if self.held().saturating_add(grown) > self.engine.memory {
+            return Err(Stop::Exhausted);
         }
         Ok(())
     }
@@ -1108,7 +1262,11 @@ impl Search<'_, '_> {
                 let Some(&to) = next.get(*done) else {
                     // None of what it leads to matches.
                     let state = *state;
-                    walk.path.pop();
+                    if let Some((_, next, _)) = walk.path.pop() {
+                        self.kept = self.kept.saturating_sub(path_bytes(&next));
+                    }
+                    let room = self.dead.capacity();
+                    self.grows::<State>(self.dead.len(), room)?;
                     self.dead.insert(state);
                     self.charge(1)?;
                     continue;
@@ -1123,6 +1281,7 @@ impl Search<'_, '_> {
                 Ok(Next::Match) => return Ok(true),
                 Ok(Next::States(states)) => {
                     walk.first = None;
+                    self.kept = self.kept.saturating_add(path_bytes(&states));
                     walk.path.push((state, states, 0));
                 }
                 Err(stop) => {
@@ -1151,6 +1310,10 @@ impl Search<'_, '_> {
                     | e.live.get(id as usize).copied().unwrap_or(0)
             }
             Item::Close { group, .. } => e.live.get(group as usize).copied().unwrap_or(0),
+            Item::Rep { node, .. } | Item::PassEnd { node, .. } => {
+                e.reads.get(node as usize).copied().unwrap_or(0)
+                    | e.live.get(node as usize).copied().unwrap_or(0)
+            }
         };
         self.conts.items.push((item, rest));
         self.conts.needs.push(needs);
@@ -1194,6 +1357,25 @@ impl Search<'_, '_> {
                 if !self.may_finish(rest, at, &groups)? {
                     return Ok(Next::States(Vec::new()));
                 }
+                out.push((rest, at, groups));
+                return self.states(out);
+            }
+            Item::Rep { node, passes } => return self.pass(node, passes, rest, at, groups),
+            Item::PassEnd { start, .. } => {
+                if at <= start {
+                    // A pass that matches nothing is made at once.
+                    return Ok(Next::States(Vec::new()));
+                }
+                let groups = match rest
+                    .checked_sub(1)
+                    .and_then(|i| self.conts.items.get(i as usize))
+                {
+                    Some(&(Item::Rep { node, .. }, after)) => {
+                        let kept = self.keep(rest, &groups);
+                        self.unread(node, rest, after, at, kept)?
+                    }
+                    _ => groups,
+                };
                 out.push((rest, at, groups));
                 return self.states(out);
             }
@@ -1255,18 +1437,403 @@ impl Search<'_, '_> {
                         Next::States(Vec::new())
                     });
                 }
-                let found = self.eval(id, pos, &groups)?;
-                self.charge(found.len())?;
-                for &(end, changed) in found.iter() {
-                    let now = apply(&groups, &changed);
-                    if changed != KEEP && !self.may_finish(rest, end, &now)? {
-                        continue;
-                    }
-                    out.push((rest, end, now));
+                if e.writes.get(*child as usize).copied().unwrap_or(0) == 0 {
+                    // It sets no group that is read: every way it can end
+                    // is an offset, and few.
+                    let found = self.eval(id, pos, &groups)?;
+                    self.charge(found.len())?;
+                    out.extend(found.iter().map(|&(end, _)| (rest, end, groups)));
+                } else {
+                    // One pass at a time, as what is left to match: the
+                    // ways it can end, with every group each way sets, are
+                    // too many to list where it sets two or more that are
+                    // read after it.
+                    let c = self.cont(
+                        Item::Rep {
+                            node: id,
+                            passes: 0,
+                        },
+                        rest,
+                    )?;
+                    out.push((c, at, groups));
                 }
             }
         }
         self.states(out)
+    }
+
+    /// What a state at repetition `node`, after `passes` passes, leads to:
+    /// its end, once it has made its least, first (the fewest passes), and
+    /// then each way one more pass can end. A pass that matches nothing and
+    /// changes no group that may be read leads back to the same state, and
+    /// is left out: a pass that matches nothing sets each group it sets to
+    /// nothing, so a state leads only to states further on, or with more of
+    /// its groups matching nothing.
+    fn pass(
+        &mut self,
+        node: u32,
+        passes: u32,
+        rest: u32,
+        at: u16,
+        groups: Groups,
+    ) -> Result<Next, Stop> {
+        let e = self.engine;
+        let Node::Repeat { child, min, max } = e.node(node) else {
+            return Ok(Next::States(Vec::new()));
+        };
+        let child = *child;
+        // Past `cap` passes a pass more or less changes nothing.
+        let cap = self.cap(child);
+        let min = (*min).min(cap);
+        let max = max.filter(|&m| m < cap);
+        let mut out = Vec::new();
+        if passes >= min {
+            if rest == 0 {
+                return Ok(Next::Match);
+            }
+            // What it set is checked as it was set, and a group nothing
+            // after can read is unset ([`Search::unread`]).
+            out.push((rest, at, groups));
+        }
+        if max.is_none_or(|m| passes < m) {
+            let more = match max {
+                Some(_) => passes.saturating_add(1),
+                None => passes.saturating_add(1).min(min),
+            };
+            let c = self.cont(Item::Rep { node, passes: more }, rest)?;
+            // The passes that match nothing, each a set of groups it sets
+            // to nothing, made at once.
+            let empty = self.empty(child, usize::from(at), &groups)?;
+            let before = self.unread(node, c, rest, at, self.keep(c, &groups))?;
+            for &set in empty.iter() {
+                let mut now = groups;
+                for (k, g) in now.iter_mut().enumerate() {
+                    if set & group_bit(k) != 0 {
+                        *g = span(0, 0);
+                    }
+                }
+                let now = self.unread(node, c, rest, at, self.keep(c, &now))?;
+                if more == passes && now == before {
+                    continue;
+                }
+                out.push((c, at, now));
+            }
+            if e.path_sets.get(child as usize).copied().unwrap_or(u32::MAX) <= EAGER_PASS {
+                // A pass that sets few groups: every way it can end, and
+                // what it sets, are few, and listed at once.
+                let found = self.eval(child, usize::from(at), &groups)?;
+                self.charge(found.len())?;
+                for &(end, changed) in found.iter() {
+                    if end == at {
+                        continue;
+                    }
+                    let now = self.keep(c, &apply(&groups, &changed));
+                    let now = self.unread(node, c, rest, end, now)?;
+                    out.push((c, end, now));
+                }
+            } else {
+                // One that matches something, walked as the rest is.
+                let end = self.cont(Item::PassEnd { node, start: at }, c)?;
+                let walk = self.cont(Item::Node(child), end)?;
+                out.push((walk, at, groups));
+            }
+        }
+        self.states(out)
+    }
+
+    /// The ways `id` can match nothing at `at`, with the groups as `groups`
+    /// has them: each the set of groups (that a back-reference names) it
+    /// sets on the way, each to nothing. A group set to nothing is one a
+    /// back-reference to it then matches nothing with, so where a set of
+    /// them is set no way of matching nothing is lost: the passes of a
+    /// repetition that match nothing make, past enough of them, every set
+    /// they can. Kept, for `id`, `at` and the groups it reads.
+    fn empty(&mut self, id: u32, at: usize, groups: &Groups) -> Result<Rc<[Mask]>, Stop> {
+        let e = self.engine;
+        self.charge(1)?;
+        let none: Rc<[Mask]> = Rc::from([]);
+        let nothing: Rc<[Mask]> = Rc::from([0]);
+        match e.node(id) {
+            Node::Empty => return Ok(nothing),
+            Node::Unit(_) => return Ok(none),
+            Node::Look(look) => {
+                return Ok(if e.look(look, self.command, at) {
+                    nothing
+                } else {
+                    none
+                });
+            }
+            Node::BackRef(n) => {
+                let len = self.back_reference(usize::from(*n), at, groups);
+                return Ok(if len == Some(0) { nothing } else { none });
+            }
+            _ => {}
+        }
+        let reads = e.reads.get(id as usize).copied().unwrap_or(0);
+        let key = (id, offset(at), only(groups, reads));
+        if let Some(found) = self.empties.get(&key) {
+            return Ok(Rc::clone(found));
+        }
+        let with = |set: Mask| {
+            let mut g = *groups;
+            for (k, slot) in g.iter_mut().enumerate() {
+                if set & group_bit(k) != 0 {
+                    *slot = span(0, 0);
+                }
+            }
+            g
+        };
+        let mut out: Vec<Mask> = Vec::new();
+        match e.node(id) {
+            Node::Empty | Node::Unit(_) | Node::Look(_) | Node::BackRef(_) => {}
+            Node::Alt(children) => {
+                for &c in children {
+                    let found = self.empty(c, at, groups)?;
+                    self.charge(found.len())?;
+                    out.extend(found.iter());
+                }
+            }
+            Node::Group { index, child } => {
+                let bit = group_bit(*index) & e.writes.get(id as usize).copied().unwrap_or(0);
+                let found = self.empty(*child, at, groups)?;
+                self.charge(found.len())?;
+                out.extend(found.iter().map(|&m| m | bit));
+            }
+            Node::Concat(children) => {
+                let mut sets: Vec<Mask> = vec![0];
+                for &c in children {
+                    let mut next = Vec::new();
+                    for &set in &sets {
+                        let found = self.empty(c, at, &with(set))?;
+                        self.charge(found.len())?;
+                        next.extend(found.iter().map(|&m| m | set));
+                    }
+                    next.sort_unstable();
+                    next.dedup();
+                    sets = next;
+                    if sets.is_empty() {
+                        break;
+                    }
+                }
+                out = sets;
+            }
+            Node::Repeat { child, min, max } => {
+                if *min == 0 {
+                    out.push(0);
+                }
+                if max.is_none_or(|m| m > 0) {
+                    // What a number of passes can set, each of them
+                    // matching nothing: every set one fewer can (make the
+                    // last again), and more, so that they stop changing
+                    // within a pass for each set there can be.
+                    let most = max.map_or(u32::MAX, |m| m);
+                    let mut sets: Vec<Mask> = vec![0];
+                    let mut all: Vec<Mask> = Vec::new();
+                    let mut pass = 0u32;
+                    while pass < most {
+                        let mut next = Vec::new();
+                        for &set in &sets {
+                            let found = self.empty(*child, at, &with(set))?;
+                            self.charge(found.len())?;
+                            next.extend(found.iter().map(|&m| m | set));
+                        }
+                        next.sort_unstable();
+                        next.dedup();
+                        pass = pass.saturating_add(1);
+                        if next.is_empty() {
+                            break;
+                        }
+                        let same = next == sets;
+                        sets = next;
+                        // Once a pass more adds none, none ever does: what
+                        // these passes make, any more make.
+                        if pass >= *min || same {
+                            all.extend(sets.iter());
+                        }
+                        if same {
+                            break;
+                        }
+                    }
+                    out.extend(all);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        self.charge(out.len())?;
+        let found: Rc<[Mask]> = out.into();
+        self.kept = self.kept.saturating_add(found.len().saturating_mul(2));
+        self.empties.insert(key, Rc::clone(&found));
+        Ok(found)
+    }
+
+    /// `groups`, at repetition `node` (continuation `c`, `rest` after the
+    /// repetition) at `at`, each group whose match nothing after can read
+    /// taken as unset: so the states that differ only in such a group are
+    /// one. Only the groups the passes set are asked about, as those are
+    /// what makes the states of a repetition many; one the passes read is
+    /// kept. A back-reference reads a group's match only while the group
+    /// is as `groups` has it; where none can match its text before the
+    /// group is surely set again ([`Search::may_read`]), what matches from
+    /// the state matches as well with the group unset (a back-reference to
+    /// it matching nothing either way), and what does not, does not.
+    fn unread(
+        &mut self,
+        node: u32,
+        c: u32,
+        rest: u32,
+        at: u16,
+        groups: Groups,
+    ) -> Result<Groups, Stop> {
+        let e = self.engine;
+        let Node::Repeat { child, .. } = e.node(node) else {
+            return Ok(groups);
+        };
+        let child_reads = e.reads.get(*child as usize).copied().unwrap_or(0);
+        let child_writes = e.writes.get(*child as usize).copied().unwrap_or(0);
+        let mut out = groups;
+        for (k, g) in out.iter_mut().enumerate() {
+            let bit = group_bit(k);
+            if *g == UNSET || child_reads & bit != 0 || child_writes & bit == 0 {
+                continue;
+            }
+            if !self.may_read(c, node, rest, at, k, *g)? {
+                *g = UNSET;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether some back-reference to group `k` may read its match `g`:
+    /// from `at`, after more passes of repetition `node` (which do not read
+    /// the group, and may set it again) and then `rest`, as far as
+    /// [`CHECKED`] items tell, every node taken as its [`Engine::matrix`].
+    /// False where none is reached, or none that is reached can match
+    /// `g`'s text from anywhere it may be reached (where it cannot, the
+    /// group has been set again by then, or nothing matches). Kept for `c`
+    /// (the repetition, then `rest`), `at`, `k` and `g`.
+    fn may_read(
+        &mut self,
+        c: u32,
+        node: u32,
+        rest: u32,
+        at: u16,
+        k: usize,
+        g: Span,
+    ) -> Result<bool, Stop> {
+        let key = (c, at, offset(k), g);
+        if let Some(&answer) = self.read.get(&key) {
+            return Ok(answer);
+        }
+        let answer = self.may_read_from(node, rest, at, k, g)?;
+        self.charge(1)?;
+        self.read.insert(key, answer);
+        Ok(answer)
+    }
+
+    /// [`Search::may_read`], not kept.
+    fn may_read_from(
+        &mut self,
+        node: u32,
+        rest: u32,
+        at: u16,
+        k: usize,
+        g: Span,
+    ) -> Result<bool, Stop> {
+        let e = self.engine;
+        let bit = group_bit(k);
+        let n = self.command.len();
+        let words = n.saturating_add(1).div_ceil(64);
+        let Node::Repeat { child, .. } = e.node(node) else {
+            return Ok(true);
+        };
+        // Where any number of passes may end.
+        let star = self.star(*child)?;
+        let mut reach: Vec<u64> = star.row(usize::from(at)).to_vec();
+        let mut cont = rest;
+        let row = |m: &Mat, reach: &[u64]| {
+            let mut next = vec![0u64; words];
+            for from in ones(reach) {
+                for (d, s) in next.iter_mut().zip(m.row(from)) {
+                    *d |= s;
+                }
+            }
+            next
+        };
+        for _ in 0..CHECKED {
+            if reach.iter().all(|&w| w == 0) {
+                return Ok(false);
+            }
+            let Some(&(item, next)) = cont
+                .checked_sub(1)
+                .and_then(|i| self.conts.items.get(i as usize))
+            else {
+                // The end, and the group never read.
+                return Ok(false);
+            };
+            self.charge(1)?;
+            match item {
+                // A group the passes set is under the repetition, and
+                // nothing after it holds that group, so nothing after sets
+                // it again but a repetition the walk is inside of, which
+                // is taken as any number of its passes.
+                Item::PassEnd { .. } | Item::Close { .. } => {}
+                Item::Rep { node: r, .. } => {
+                    if e.reads.get(r as usize).copied().unwrap_or(0) & bit != 0 {
+                        return Ok(true);
+                    }
+                    let Node::Repeat { child: rc, .. } = e.node(r) else {
+                        return Ok(true);
+                    };
+                    let m = self.star(*rc)?;
+                    reach = row(&m, &reach);
+                }
+                Item::Node(id) => match e.node(id) {
+                    Node::BackRef(j) if usize::from(*j) == k => {
+                        let mut hit = false;
+                        for from in ones(&reach) {
+                            if self
+                                .back_reference(k, from, &only(&[g; GROUPS], bit))
+                                .is_some()
+                            {
+                                hit = true;
+                                break;
+                            }
+                        }
+                        if hit {
+                            return Ok(true);
+                        }
+                        // Where it fails, the group may have been set
+                        // again by then.
+                        let m = self.over(id)?;
+                        reach = row(&m, &reach);
+                    }
+                    _ => {
+                        if e.reads.get(id as usize).copied().unwrap_or(0) & bit != 0 {
+                            return Ok(true);
+                        }
+                        let m = self.over(id)?;
+                        reach = row(&m, &reach);
+                    }
+                },
+            }
+            cont = next;
+        }
+        Ok(true)
+    }
+
+    /// Any number of passes of `child`, none included, each as its
+    /// [`Engine::matrix`]: kept.
+    fn star(&mut self, child: u32) -> Result<Rc<Mat>, Stop> {
+        if let Some(m) = self.star.get(&child) {
+            return Ok(Rc::clone(m));
+        }
+        let once = self.over(child)?;
+        self.charge(self.command.len().saturating_add(1))?;
+        let m = Rc::new(once.closure());
+        self.kept = self.kept.saturating_add(m.bits.len().saturating_mul(8));
+        self.star.insert(child, Rc::clone(&m));
+        Ok(m)
     }
 
     /// Whether `cont` may match from `at`, as far as [`CHECKED`] items of
@@ -1301,6 +1868,24 @@ impl Search<'_, '_> {
                     if let Some(Node::Group { index, .. }) = e.nodes.get(group as usize) {
                         known &= !group_bit(*index);
                     }
+                }
+                Item::PassEnd { .. } => {}
+                Item::Rep { node, .. } => {
+                    // The rest of a repetition: any number of passes more,
+                    // as many as there are or none, a superset of what it
+                    // may still make, whatever it has made.
+                    let Node::Repeat { child, .. } = e.node(node) else {
+                        return Ok(true);
+                    };
+                    let m = self.star(*child)?;
+                    known &= !e.writes.get(node as usize).copied().unwrap_or(0);
+                    let mut next = vec![0u64; words];
+                    for from in ones(&reach) {
+                        for (d, s) in next.iter_mut().zip(m.row(from)) {
+                            *d |= s;
+                        }
+                    }
+                    reach = next;
                 }
                 Item::Node(id) => {
                     let next = match e.node(id) {
@@ -1386,6 +1971,7 @@ impl Search<'_, '_> {
             return Err(stop);
         }
         let m = Rc::new(m);
+        self.kept = self.kept.saturating_add(m.bits.len().saturating_mul(8));
         self.over.insert(id, Rc::clone(&m));
         Ok(m)
     }
@@ -1528,6 +2114,12 @@ impl Search<'_, '_> {
         out.sort_unstable();
         out.dedup();
         let found: Ends = out.into();
+        self.kept = self.kept.saturating_add(
+            found
+                .len()
+                .saturating_mul(std::mem::size_of::<(u16, Groups)>()),
+        );
+        self.grows::<((u32, u16, Groups), Ends)>(self.memo.len(), self.memo.capacity())?;
         self.memo.insert(key, Rc::clone(&found));
         Ok(found)
     }

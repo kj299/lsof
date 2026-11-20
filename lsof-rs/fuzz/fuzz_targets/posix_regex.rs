@@ -17,10 +17,17 @@
 // to glibc's by the table of `lsof-core/tests/posix_regex.rs`; and on a
 // command of a few bytes, the own engine's search says what a plain
 // exhaustive search over every way of matching says (`oracle`), which is
-// what holds the search for a back-reference to its definition.
+// what holds the search for a back-reference to its definition, a search
+// that ran out of its budget included (it says no match, so it must be
+// one that has none); and on a command as long as a Linux name, a search
+// that ran out of its budget or its memory finds no match given four
+// times both either, so that no match is missed for want of a budget a
+// little larger (the kind of miss a review found on 15-byte names).
 
 use libfuzzer_sys::fuzz_target;
-use lsof_core::posix_regex::{translate, CommandRegex, ORACLE_COMMAND_MAX, OWN_COMMAND_MAX};
+use lsof_core::posix_regex::{
+    translate, CommandRegex, ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET,
+};
 
 /// The longest command matched: the longest process name Linux has; and,
 /// for a short expression, the longest the own engine searches, so that
@@ -31,6 +38,10 @@ const SHORT_EXPRESSION: usize = 8;
 /// How many steps the exhaustive search may take: past them it says
 /// nothing.
 const ORACLE_STEPS: u64 = 100_000;
+
+/// The longest command a search past its budget is asked again of, with
+/// four times the budget: a Linux name.
+const AGAIN_MAX: usize = 16;
 
 fuzz_target!(|data: &[u8]| {
     // The first byte picks the flags; a NUL parts the expression from the
@@ -75,15 +86,21 @@ fuzz_target!(|data: &[u8]| {
             let own = own.expect("the own engine takes what the crate takes");
             assert_eq!(own.is_match(command), hit);
             // And what every way of matching says, where that is quick to
-            // ask (a search past its budget says no match).
+            // ask: a search past its budget says no match, so it must be
+            // one where there is none.
             if command.len() <= ORACLE_COMMAND_MAX {
                 if let Some(every) = own.oracle(command, ORACLE_STEPS) {
-                    let (found, steps) = own.search_steps(command);
-                    let within = steps.is_some_and(|s| s < lsof_core::posix_regex::SEARCH_BUDGET);
-                    if within {
-                        assert_eq!(found, every);
-                        assert_eq!(hit, every);
-                    }
+                    let (found, _) = own.search_steps(command);
+                    assert_eq!(found, every);
+                    assert_eq!(hit, every);
+                }
+            }
+            // A search that ran out finds no match with four times as much.
+            if command.len() <= AGAIN_MAX {
+                let (answer, _) = own.search_with_budget(command, SEARCH_BUDGET);
+                if answer.is_none() {
+                    let (more, _) = own.search_with_budget(command, 4 * SEARCH_BUDGET);
+                    assert_ne!(more, Some(true));
                 }
             }
         }

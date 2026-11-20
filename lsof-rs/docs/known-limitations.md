@@ -313,10 +313,14 @@ meet. Each number is a row there, with the measurement behind it.
   some such matches (`(e){0,2}\1` against `sleep`), finds some that are not
   there (`^(.*)(.*)\2\1$` matches every command in the C) and dies on some
   (`((a*)\2\2)*a`, SIGSEGV). The search is bounded at 4,194,304 steps a
-  command (about half a second): past it the command is taken as not
-  matching. No case either review found comes near it; of 9,000 random
-  expressions of three to nine groups each named again in random order,
-  against a 63-byte name, 6 reach it, and none of those 6 has a match.
+  command (about half a second) and 32 MiB: past either the command is
+  taken as not matching. Every case the reviews found is answered within
+  50,000 steps; of 9,000 random expressions of three to nine groups each
+  named again in random order, against a 63-byte name, 3 reach a bound,
+  and none of those has a match; of 6,000 random repetitions of
+  alternations or runs of groups, each named again, against names of 14
+  to 63 bytes, 60 reach one, 2 of which have a match that glibc finds (in
+  0.09 and 0.53 s): there lsof-rs says no match where the C says match.
 - **Names only the files know** (38, 39, 154): a service name is read from
   `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
   has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves

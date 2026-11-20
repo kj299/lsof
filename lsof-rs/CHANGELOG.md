@@ -33,11 +33,19 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   argument holds that many). A search with a back-reference tries every
   start in turns and finds an easy match first (`(.*)(.*)(.*)(.*)\4\3\2\1$`
   against a 33-byte kernel thread, seven groups against 15 bytes: a
-  millisecond, where glibc takes up to 5 s); it is bounded at 4,194,304
-  steps a command and expression (about 0.5 s, measured), past which the
-  command is taken as not matching (6 of 9,000 random expressions of three
-  to nine groups named again in random order, against 63 bytes, each with
-  no match when searched to its end). Under `-a`, `-c` is
+  millisecond, where glibc takes up to 5 s). A repetition whose passes set
+  groups read after it is searched a pass at a time, and a group nothing
+  after can read is taken as unset: `^((.)|(.*)|(.*))*\4\3$` against
+  `systemd-journal` matches in 4 ms (glibc: 6 ms), where the search
+  had listed every way the repetition ends with every group it sets, run
+  out of its budget and said no match (a review's case, and five like it).
+  A search is bounded at 4,194,304 steps and 32 MiB a command and
+  expression (about 0.4 s, measured; it had held up to 123 MB), past
+  which the command is taken as not matching (3 of 9,000 random
+  expressions of three to nine groups named again in random order,
+  against 63 bytes, none with a match; 60 of 6,000 repetitions and runs of
+  groups against names of 14 to 63 bytes, 2 with a match glibc finds).
+  Under `-a`, `-c` is
   asked only of the processes `-p`, `-g` and `-u` let through, as the C
   asks it. On every platform.
 - **The options end where the C's end them** (DIVERGENCES 12, a DECISION
@@ -399,6 +407,15 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   did not reach that path. No new crate; the build script is unchanged.
 
 ### Added
+- **The Linux differential runs a case under a stack limit of its own**
+  (`LSOF_DIFF_STACK`, KiB, both binaries; `differential/linux_diff.py`):
+  `rx-back-reference-glibc-segfaults` (`((a*)\2\2)*a`), whose C dies when
+  glibc's recursion has used the stack up, after 3.6 s at 8 MiB and past
+  the case's 15 s on CI's runner (killed, so the ledgered fingerprint
+  missed), runs under 1 MiB, where it dies in 0.07 s. And the zone cases'
+  wrapper ends its binary with itself (`setpriv --pdeathsig KILL`): the C
+  that `repeat-tz-fifo-with-no-writer-holds-the-c` leaves waiting on a
+  FIFO had been left running after each run.
 - **`docs/lsof-rs.1`**, a man page, whose DIFFERENCES FROM THE C LSOF
   section lists what lsof-rs does differently on purpose: arguments
   escaped in every message, the 3-second wait for a zone file that is no

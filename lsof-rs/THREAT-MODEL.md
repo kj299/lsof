@@ -72,7 +72,7 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it (DIVERGENCES 143) |
 | `/etc/passwd`, and `/etc/nsswitch.conf`, which says whether it is read: **both on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l` reads neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
-| `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine), lsof-rs's own engine (`posix_regex/engine.rs`: a back-reference, and past the crate's bounds) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has, 1,024 for an 8-byte expression; an exhaustive search as the back-reference oracle on 8-byte commands; `-timeout=10`) |
+| `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine), lsof-rs's own engine (`posix_regex/engine.rs`: a back-reference, and past the crate's bounds) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has, 1,024 for an 8-byte expression; an exhaustive search as the back-reference oracle on 8-byte commands, and a search past its budget on up to 16 bytes asked again with four times it; `-timeout=10`) |
 | `/etc/hosts`, `/etc/services`, `/etc/host.conf` (or the file `RESOLV_HOST_CONF` names), `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name`; `/proc/self/auxv`, read where `RESOLV_HOST_CONF` is set | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
 | the system's resolver's answer to an `-i @name` the hosts file does not hold (`getaddrinfo()` through `std`): addresses only | **a remote name server**, and whoever is on the path to it | **hostile** to availability; the addresses untrusted | `lsof-core::netnames::system_addresses` | not applicable: no bytes of the answer are parsed here (libc parses the reply, `std` hands over addresses); see below |
 | Linux: the replies to the PTR queries a socket's NAME makes, by default (`-n` turns them off; DIVERGENCES 154), over UDP and, after a truncated reply or under `use-vc`, TCP | **a remote name server**, and whoever can send to this host's ephemeral port | **hostile**: parsed here, and printed | `lsof-core::dns` (the reply's readers, the query loop), `lsof-backend-linux::dns` (the sockets) | `dns_reply` (every reader and the whole loop over a transport made of the input; `-timeout=10`) |
@@ -594,8 +594,13 @@ from 636 KB to 1.66 MB (1.85 MB with lsof-rs's own engine, 2026-11-19, from
   12,000 times and on `(a{32767}){32767}`, after 10 to 15 s at an 8 GB
   limit). With a back-reference matching is NP-complete, glibc's own search
   is exponential, and lsof-rs's is held to `SEARCH_BUDGET`, 4,194,304 steps
-  a command, each thing it keeps paid for before it is kept: past it the
-  command is taken as not matching (DIVERGENCES 38). Every start is
+  a command, each thing it keeps paid for before it is kept, and to
+  `SEARCH_MEMORY`, 32 MiB of what it holds (its tables counted by the room
+  they have, every 1,024 steps, and the two largest before each grows, so
+  that the room a table grows to is counted before it is taken): past
+  either the command is taken as not matching (DIVERGENCES 38). Counted
+  by steps alone it had held up to 123 MB (a review's measurement; about
+  30 bytes a step). Every start is
   searched in turns of the same length, doubled each round, so a match the
   search from one start finds in `t` steps is found within about
   `4 (n + 2) t` steps (`n` the command's length) however long the others
@@ -618,15 +623,30 @@ from 636 KB to 1.66 MB (1.85 MB with lsof-rs's own engine, 2026-11-19, from
   19. With back-references, every case the reviews found is answered in at
   most 5 ms (`(.*)(.*)(.*)\3\2\1$` against 63 `a` 2 ms, glibc 18.5 s;
   seven `(.*)` and `\1`..`\7$` against 15 bytes 3 ms, glibc 5 s; nine
-  named in reverse 2 ms, glibc over a minute); at the budget about 0.5 s
-  and under 20 MB (4.36 million steps 0.47 s, 17 MB), no match. How often
-  the budget is reached: never on the reviews' cases, nor on 18,000 random
+  named in reverse 2 ms, glibc over a minute; a repetition of an
+  alternation of groups each read after it, `^((.)|(.*)|(.*))*\4\3$`
+  against `systemd-journal`, 4 ms, glibc 6 ms, and
+  `^((.)|(.*)|(.*)|(.+))*\4\3` against 63 bytes 2 ms, glibc 0.45 s, where
+  the search before a pass was walked at a time ran past the budget and
+  said no match); at a bound about 0.4 s, and at most 32 MiB above what
+  the process held before (the most measured: 28.5 MB, VmHWM less the
+  harness's 3.4 MB, over 400 random expressions against a 63-byte name
+  and the 60 pairs below that reach a bound), no match. How often a bound
+  is reached: never on the reviews' cases (the most 5,639 steps for the
+  last review's; under 50,000 for the earlier ones), nor on 18,000 random
   pairs of an expression of one to seven groups and a command name of this
-  host (the most 700,000 steps); on 6 of 9,000 random expressions of three
-  to nine groups each named again in random order, against a 63-byte name,
-  and each of the 6 has no match when searched to its end (glibc says no
-  match for 5, after 0.02 to 1.9 s, and runs past 20 s on the sixth); the
-  3,942 that match were all found within the budget.
+  host (the most 97,271 steps); on 3 of 9,000 random
+  expressions of three to nine groups each named again in random order,
+  against a 63-byte name, none of which has a match when searched with 32
+  times the budget (glibc says no match for each), and the 3,942 that
+  match were all found within it; and on 60 of 6,000 random pairs of a
+  repetition of an alternation or a run of groups, each named again, and
+  a name of 14 to 63 bytes (1 in 100), 2 of which have a match, found past
+  4.2 million steps, that glibc finds in 0.09 and 0.53 s: there lsof-rs
+  says no match where the C matches. Of the other 58, 55 have no match
+  when searched to their end and 3 are not answered with 32 times the
+  budget either; glibc says no match for all but one, on which it runs
+  past 20 s.
 * **A match is asked once a command name, and only where the C asks it.**
   Each expression keeps its answer for a command name (1,024 names of at
   most 256 bytes), so a run pays for a name once, not once a process (by
@@ -947,7 +967,7 @@ sanitizer gates are pointed at it.
   which the invoker's expression and an 8 MiB limit set; or, for what the
   crate cannot or will not run, by lsof-rs's own engine, in time cubic at
   most in the name and linear in the expression, or held to 4,194,304 steps
-  with a back-reference (above); once for each name. Many processes of
+  and 32 MiB with a back-reference (above); once for each name. Many processes of
   distinct names multiply what a run costs by their number, never past
   each name's bound. A name server is asked only for a host name the invoker typed and
   the hosts file does not hold (or any name, where nsswitch.conf does not
@@ -956,8 +976,11 @@ sanitizer gates are pointed at it.
   to 64 KB in the local runs; its commands held to 64 bytes, the longest a
   process has, and to 1,024 for an expression of 8 bytes, which lsof-rs's
   own engine alone answers; an exhaustive search holds the back-reference
-  search to its answer on commands of 8 bytes), the cost, size and nesting
-  limits, the search budget, and no lookup that the C does not make.
+  search to its answer on commands of 8 bytes, a search past its budget
+  included, and one past its budget on a command of up to 16 bytes is
+  asked again with four times the budget, which must not find a match),
+  the cost, size and nesting limits, the search budget and memory, and no
+  lookup that the C does not make.
 - **Races the enumeration.** `/proc/PID` is inherently racy: a process can exit
   between `readdir` and the read of its entries, and a PID can be recycled.
   Defence: treat every per-process read as fallible and skip, never abort the

@@ -25,7 +25,7 @@
 //! or [`SIZE_LIMIT`]) lsof-rs's own engine answers (`engine.rs`): without a
 //! back-reference in time polynomial (cubic at most) in the command and
 //! linear in the expression, with one by a search held to
-//! [`SEARCH_BUDGET`] steps a command.
+//! [`SEARCH_BUDGET`] steps and [`SEARCH_MEMORY`] bytes a command.
 
 use std::fmt::Write as _;
 
@@ -33,7 +33,7 @@ mod engine;
 mod towupper;
 
 use engine::{Look, Node, Tree, UnitSpec};
-pub use engine::{ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET};
+pub use engine::{ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET, SEARCH_MEMORY};
 
 /// Why an expression was refused: glibc's `reg_errcode_t`, by the names
 /// `regerror()` has for them, and what only lsof-rs refuses.
@@ -1261,6 +1261,28 @@ impl CommandRegex {
         }
     }
 
+    /// [`Self::search_steps`], with lsof-rs's own engine's search held to
+    /// `budget` steps rather than [`SEARCH_BUDGET`], and to as much more
+    /// than [`SEARCH_MEMORY`] as that is more (never less): `None` for the
+    /// answer past either. For the tests and the fuzz target, which hold a
+    /// search within the budget to one with more.
+    #[doc(hidden)]
+    pub fn search_with_budget(&self, command: &[u8], budget: u64) -> (Option<bool>, Option<u64>) {
+        match &self.matcher {
+            Matcher::Own(engine) => {
+                let times = usize::try_from(budget / SEARCH_BUDGET)
+                    .unwrap_or(usize::MAX)
+                    .max(1);
+                let engine = engine
+                    .with_budget(budget)
+                    .with_memory(SEARCH_MEMORY.saturating_mul(times));
+                let (answer, steps) = engine.search(command);
+                (answer, Some(steps))
+            }
+            Matcher::Crate { .. } => (Some(self.search(command)), None),
+        }
+    }
+
     /// Whether `command` matches, as a plain exhaustive search over every
     /// way of matching finds, for lsof-rs's own engine: `None` where the
     /// crate answers, for a command longer than [`ORACLE_COMMAND_MAX`], or
@@ -1280,6 +1302,18 @@ impl CommandRegex {
         let mut copy = self.clone();
         if let Matcher::Own(engine) = &self.matcher {
             copy.matcher = Matcher::Own(std::sync::Arc::new(engine.with_budget(budget)));
+            copy.answers = std::sync::Arc::default();
+        }
+        copy
+    }
+
+    /// The same, with lsof-rs's own engine's search held to `memory`
+    /// bytes.
+    #[cfg(test)]
+    fn with_memory(&self, memory: usize) -> Self {
+        let mut copy = self.clone();
+        if let Matcher::Own(engine) = &self.matcher {
+            copy.matcher = Matcher::Own(std::sync::Arc::new(engine.with_memory(memory)));
             copy.answers = std::sync::Arc::default();
         }
         copy
@@ -2187,6 +2221,21 @@ mod tests {
         let command = "a".repeat(if cfg!(miri) { 6 } else { 40 });
         assert!(three.is_match(command.as_bytes()));
         assert!(!three.with_budget(16).is_match(command.as_bytes()));
+        // And past what it may hold ([`SEARCH_MEMORY`]), no match either:
+        // counted before the largest tables grow (with no such count 16 KiB
+        // is enough here), and every 1,024 steps (with no such count 64 KiB
+        // is enough on 63 bytes). Not under miri, for which these searches
+        // are long.
+        assert_eq!(SEARCH_MEMORY, 32 << 20);
+        if !cfg!(miri) {
+            let pass = CommandRegex::new(b"^((.)|(.*)|(.*)|(.+))*\\4\\3", true, false).unwrap();
+            assert!(pass.is_match(b"kworker/u16:7-e"));
+            assert!(!pass.with_memory(1 << 10).is_match(b"kworker/u16:7-e"));
+            assert!(!pass.with_memory(1 << 14).is_match(b"kworker/u16:7-e"));
+            let k63 = b"kworker/u16:7-events_unbound_flush_rcu_reclaim_and_more_stuff_x";
+            assert!(pass.is_match(k63));
+            assert!(!pass.with_memory(1 << 16).is_match(k63));
+        }
         // Nothing to match after a repetition: the passes it must make are
         // enough, at once, whatever it would cost to list them all.
         let star = format!("{}\\2{}", "((.*)".repeat(9), ")*".repeat(9));
@@ -2211,41 +2260,51 @@ mod tests {
         let k33 = "kworker/u16:0-ext4-rsv-conversion";
         let k63 = "kworker/u16:7-events_unbound_flush_rcu_reclaim_and_more_stuff_x";
         for (expression, command, matches, most) in [
-            ("(.*)(.*)(.*)(.*)\\4\\3\\2\\1$", k33, true, 10_500),
-            ("((.*)*)*\\2", k63, true, 8_000),
+            ("(.*)(.*)(.*)(.*)\\4\\3\\2\\1$", k33, true, 9_500),
+            ("((.*)*)*\\2", k63, true, 70_000),
             ("(.)\\1.*", k63, true, 1_700),
-            ("(.+)(.+).*\\1\\2", k63, true, 52_000),
+            ("(.+)(.+).*\\1\\2", k63, true, 46_000),
             // A group's text where it is first held: two starts, one state.
             (
                 "^((.)(.*)\\2)*\\3$",
                 "abcabcabcabcabcabcabcabc",
                 true,
-                2_900,
+                1_900,
             ),
             (
                 "((.*)*)(a*)([^/]*)(.+)([0-9]*)[0-9](..)((.*)*)\\2\\2\\2\\5\\6",
                 k63,
                 true,
-                380_000,
+                82_000,
             ),
             (
                 "([a-z]*)([[:alpha:]]+)([0-9]*)(.*.*)\\4x$",
                 k63,
                 false,
-                150_000,
+                130_000,
             ),
             (
                 "(\\w*)([^/]*)(.+)(.+)([a-z]*)((a|b)*)\\4\\1\\2$",
                 k63,
                 false,
-                160_000,
+                140_000,
             ),
             (
                 "((.*)*)(.*.*)(.*)(..)(.?)(..)(..)\\7\\4\\5\\1\\4\\5\\2",
                 k33,
                 false,
-                280_000,
+                230_000,
             ),
+            // A repetition listed whole inside a pass: what each of its
+            // passes sets however it matches is dropped before the pass.
+            (
+                "((.+)|((.*)*)|(..)|([^/]*)|(\\w*))*\\6\\5\\4\\3\\2",
+                "kworker/u16:7-e",
+                false,
+                106_000,
+            ),
+            // Nothing after a repetition: its least passes are enough.
+            ("^(.)((.*)\\1)*", k63, true, 1_200),
         ] {
             let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
             let (answer, steps) = regex.search_steps(command.as_bytes());
@@ -2253,6 +2312,221 @@ mod tests {
             assert_eq!(answer, matches, "{expression}");
             assert!(steps <= most, "{expression}: {steps} steps");
         }
+    }
+
+    /// A repetition whose passes set two or more groups read after it is
+    /// searched a pass at a time, and a group a pass sets whose text
+    /// nothing after can read is taken as unset. The cases a review found:
+    /// glibc matches each in milliseconds (`^((.)|(.*)|(.*))*\4\3$` on
+    /// `systemd-journal`: 5 ms), where 2026-11-19's engine listed every way
+    /// the repetition can end with every group it sets, ran past the
+    /// budget and said no match; and four more that a search of random
+    /// expressions found past the budget after the first change alone, a
+    /// match each, which glibc finds too. Each bound is what was measured,
+    /// and a little more.
+    #[test]
+    fn a_repetition_that_sets_groups_read_after_it_is_searched_a_pass_at_a_time() {
+        let k63 = "kworker/u16:7-events_unbound_flush_rcu_reclaim_and_more_stuff_x";
+        for (expression, command, most) in [
+            // The first, alone under miri, which interprets every step.
+            ("^(.|(.*)|(.*))*\\2\\3", "systemd-journal", 1_300),
+            ("^((.)|(.*)|(.*))*\\4\\3$", "systemd-journal", 6_000),
+            ("^((.)|(.*)|(.*))*\\4\\3$", "abcdefghijklmno", 6_000),
+            ("^(.|(.*)|(.*))*\\2\\3", "abcdefghijklmno", 1_300),
+            ("^(.|(.*)|(.*)|(.*))*\\2\\3\\4", "systemd-journal", 1_800),
+            ("^((.)|(.*)|(.*)|(.+))*\\4\\3", "abcdefghijklmn", 1_500),
+            ("^((.)|(.*)|(.*)|(.+))*\\4\\3", "kworker/u16:7-e", 1_500),
+            ("^((.)|(.*)|(.*)|(.+))*\\4\\3", k63, 6_000),
+            (
+                "((\\w*)|([^a])|(.+)|(.?)|([^_]+)|(.?)|([^_]+)|(\\w*))*\\5\\6\\8\\1",
+                "kworker/R-writeback",
+                136_000,
+            ),
+            (
+                "((..)|(.?)|([[:alpha:]]+)|(\\w*)|(.+)|(\\w*)|([^a]))*\\3\\2\\4\\1",
+                "kworker/R-ext4-rsv-conversion",
+                183_000,
+            ),
+            (
+                "((.*.*)|([a-m])|([^_]+)|(.)|([^/]*)|([a-m])|((a|b)*)|([a-z]*))*\\2\\5\\3\\6\\8",
+                "kworker/2:0H-events_highpri",
+                113_000,
+            ),
+            (
+                "(((a|b)*)|([^a])|(.*.*)|([[:alpha:]]+)|(\\w*)|(.?)|(.)|([^/]*))*\\5\\4\\2\\5\\9\\7",
+                "kworker/R-kthrotld",
+                81_000,
+            ),
+            // A pass of seven groups, walked item by item: listed whole,
+            // its ways are the seventh power of the command, and a search
+            // that listed them went past the budget (glibc: 0.44 s).
+            (
+                "^((\\w*)(.*)((.*)*)((.*)*)([^/]*)([a-z]*)((a|b)*)([^a]))*\\5\\4\\7$",
+                "kworker/R-blkcg_punt_bio",
+                26_000,
+            ),
+            // A match glibc misses (it says no in 3 ms): the second of two
+            // passes from `r`, and `\3\2\6\5` read as `r`, nothing, `i`,
+            // nothing (an exhaustive search of every binding says so too).
+            (
+                "^(([a-z]*)([^a])(.*.*)(\\w*)(.+)(.+)([[:alpha:]]+)){2,}\\3\\2\\6\\5",
+                "kworker/3:0H-events_highpri",
+                975_000,
+            ),
+        ]
+        .into_iter()
+        .take(if cfg!(miri) { 1 } else { usize::MAX })
+        {
+            let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
+            let (answer, steps) = regex.search_steps(command.as_bytes());
+            let steps = steps.unwrap();
+            assert!(answer, "{expression} {command}");
+            assert!(steps <= most, "{expression} {command}: {steps} steps");
+        }
+    }
+
+    /// A pass of a repetition, the ways it can match nothing among them,
+    /// as the definition has it: each row's answer is a plain search's
+    /// over every way of matching ([`CommandRegex::oracle`], where it
+    /// answers) and an exhaustive model's, and glibc's but where it runs
+    /// past ten seconds (the ninth). Each is one a way of getting the
+    /// search wrong answers otherwise.
+    #[test]
+    fn a_pass_that_matches_nothing_sets_its_groups_as_the_definition_does() {
+        for (expression, command, want) in [
+            // A back-reference matches nothing only where its group's text
+            // is nothing.
+            ("^(a)((\\1)(b*))*\\4ac$", "aac", false),
+            ("(b?((x))?){1,3}(((\\3)+)){0,2}\\5", "bccxxa", false),
+            // Passes of a repetition inside one that match nothing set
+            // more each, until they set nothing more.
+            ("^(((a*){2}(b?){2}){2}(x(\\2){1,3})*){0,2}\\3", "", true),
+            // What matches nothing depends on the groups a node reads.
+            (
+                "x{1,3}((b?)((\\2))?((\\3){1,3}|(\\4)))a?\\6$",
+                "xcacx",
+                true,
+            ),
+            // A repetition that may make no pass sets nothing for sure.
+            ("^((()?a{1,3})*(\\3)(\\3){1,3}){2}", "axab", true),
+            // An alternation sets for sure only what each way of it sets.
+            ("^(x(c|(a))*)*\\3$", "xaca", true),
+            // A pass walked item by item may match nothing.
+            ("^((a*)(b*)(c*))*\\2\\3\\4x", "aabbx", true),
+            // A later part of a pass that matches nothing reads the groups
+            // an earlier part set to nothing.
+            ("^((a*)(\\2))*\\3c$", "aac", true),
+            ("((b{0,2}(.{0}b{0,2})?)+\\2){2}aa{0,2}", "aaaabb", true),
+        ]
+        .into_iter()
+        // miri, which interprets every step, is given the first.
+        .take(if cfg!(miri) { 1 } else { usize::MAX })
+        {
+            let regex = CommandRegex::new(expression.as_bytes(), true, false).unwrap();
+            assert_eq!(
+                regex.is_match(command.as_bytes()),
+                want,
+                "{expression} {command:?}"
+            );
+            if let Some(every) = (!cfg!(miri))
+                .then(|| regex.oracle(command.as_bytes(), 50_000_000))
+                .flatten()
+            {
+                assert_eq!(every, want, "{expression} {command:?} oracle");
+            }
+        }
+    }
+
+    /// Random expressions of the kinds that cost the search most, groups
+    /// each named again and repetitions of groups, against names of 14 to
+    /// 33 bytes: where the search goes past [`SEARCH_BUDGET`] (or
+    /// [`SEARCH_MEMORY`]), one with four times both finds no match either,
+    /// so that no match is missed for want of a budget a little larger;
+    /// and the searches past it are few (1 of these 100, 46 matching). On
+    /// a 63-byte name this is measured, not held (THREAT-MODEL.md): a pass
+    /// of four groups each read again can take past the budget there, as
+    /// glibc takes past half a minute.
+    #[test]
+    #[cfg_attr(miri, ignore = "hundreds of searches of up to 63 bytes")]
+    fn a_match_a_longer_search_finds_is_found_within_the_budget() {
+        let names = [
+            "systemd-journal",
+            "abcdefghijklmno",
+            "kworker/u16:7-e",
+            "gnome-shell-cal",
+            "kworker/R-writeback",
+            "kworker/2:0H-events_highpri",
+            "kworker/u16:0-ext4-rsv-conversion",
+            "irq/124-pciehp-0000:00:1c.0-and-x",
+        ];
+        let atoms = [
+            ".*",
+            ".+",
+            ".?",
+            "[a-z]*",
+            "[^/]*",
+            "(a|b)*",
+            ".",
+            "..",
+            "[[:alpha:]]+",
+            "\\w*",
+            ".*.*",
+            "(.*)*",
+            "[^_]+",
+            "[a-m]",
+            "[a-m]*",
+            "[^a]",
+        ];
+        // xorshift64*, seeded: the same expressions every run.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut pick = |n: usize| -> usize {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let r = state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33;
+            usize::try_from(r).unwrap() % n
+        };
+        let (mut past, mut matched) = (0, 0);
+        for _ in 0..100 {
+            let k = 2 + pick(5);
+            let groups: Vec<String> = (0..k)
+                .map(|_| format!("({})", atoms[pick(atoms.len())]))
+                .collect();
+            let (mut expression, named) = match pick(3) {
+                0 => (groups.concat(), k),
+                1 => (
+                    format!(
+                        "({}){}",
+                        groups.concat(),
+                        ["*", "+", "{0,9}", "{2,}"][pick(4)]
+                    ),
+                    k + 1,
+                ),
+                _ => (format!("({})*", groups.join("|")), k + 1),
+            };
+            for _ in 0..1 + pick(6) {
+                expression.push_str(&format!("\\{}", 1 + pick(named.min(9))));
+            }
+            if pick(10) < 3 {
+                expression.insert(0, '^');
+            }
+            if pick(10) < 4 {
+                expression.push('$');
+            }
+            let command = names[pick(names.len())];
+            let Ok(regex) = CommandRegex::new(expression.as_bytes(), true, false) else {
+                continue;
+            };
+            let (answer, _) = regex.search_with_budget(command.as_bytes(), SEARCH_BUDGET);
+            matched += usize::from(answer == Some(true));
+            if answer.is_none() {
+                past += 1;
+                let (more, _) = regex.search_with_budget(command.as_bytes(), 4 * SEARCH_BUDGET);
+                assert_ne!(more, Some(true), "{expression} {command}");
+            }
+        }
+        assert!(past <= 2, "{past} searches past the budget");
+        assert!(matched >= 40, "{matched} matches");
     }
 
     /// A command longer than any process name is not searched by lsof-rs's
