@@ -141,6 +141,7 @@ fn read_one(pid: u32) -> Option<(Process, bool)> {
         endpoint_peer: false,
         unlisted: false,
         raw_names,
+        file_structs: None,
     };
     Some((p, zombie))
 }

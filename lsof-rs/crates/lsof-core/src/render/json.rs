@@ -260,7 +260,7 @@ fn file_members(m: &mut Members<'_>, f: &OpenFile, o: &JsonOpts<'_>) {
         }
     }
     if o.want('T') {
-        if let Some(sock) = tcp_info_socket(f) {
+        if let Some(sock) = tcp_info_socket(f, None) {
             // `if (*sep) putchar(','); printf("\"tcp_info\":{")`.
             if !m.first {
                 m.out.putc(b',');

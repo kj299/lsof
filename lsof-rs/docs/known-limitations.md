@@ -301,6 +301,11 @@ file holds cost none. A service name comes from `/etc/services`.
 The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
+- **FreeBSD** (140-147): every row is the C dialect's rule as read from its
+  source; none has been run on FreeBSD. `-K` lists no task, where the
+  autotools build of the C lists threads (141); `statfs(2)` of a vnode's path
+  is not bounded by `-S`, as the C's is not (143); under `-T q` a routing
+  socket shows no queues, where the C shows them (147).
 - **Refused, where the C works:** a `-c /regex/` expression with groups
   and repetitions nested 100 deep (38; every other POSIX expression glibc
   takes is taken, back-references and intervals of any size among them); a

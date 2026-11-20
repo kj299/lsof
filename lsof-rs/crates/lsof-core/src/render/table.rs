@@ -16,7 +16,7 @@
 use std::io::{self, Write};
 
 use crate::model::{AccessMode, FdType, FileType, OpenFile, Process};
-use crate::render::fflags::{self, FileFlags};
+use crate::render::fflags::{self, FileFlags, FsValues};
 use crate::render::{offset_text, tcp_info_socket, Calls, Escaper, DEFAULT_OFFSET_DIGITS};
 use crate::selection::{TcpInfoFlags, DEFAULT_COMMAND_WIDTH};
 
@@ -84,7 +84,7 @@ fn tcp_parts(f: &OpenFile, show: TcpInfoFlags) -> Option<Vec<String>> {
     // once the differential compared whitespace (DIVERGENCES 35): lsof-rs had
     // ended every packet-socket NAME with a space the C does not print. A
     // UDP-Lite row gets one, and its queues under `-T q` (measured).
-    let sock = tcp_info_socket(f)?;
+    let sock = tcp_info_socket(f, Some(show))?;
     let mut parts: Vec<String> = Vec::new();
     if show.state {
         if let Some(st) = sock.shown_state() {
@@ -103,6 +103,13 @@ fn tcp_parts(f: &OpenFile, show: TcpInfoFlags) -> Option<Vec<String>> {
             }
             if let Some(q) = tcp.send_queue {
                 parts.push(format!("QS={q}"));
+            }
+        }
+        // `-T f`: FreeBSD's socket options, state and TCP flags, after the
+        // queues (`ptti.c`).
+        if show.options {
+            if let Some(b) = &tcp.bsd {
+                parts.extend(crate::render::sockopt::parts(b));
             }
         }
     }
@@ -476,6 +483,10 @@ pub struct TableOpts {
     /// `+f g` / `+f G`: a FILE-FLAG column after TYPE, the flags by name or in
     /// hex (DIVERGENCES 46).
     pub file_flags: FileFlags,
+    /// `+f f`, `+f c`, `+f n` (FreeBSD): FILE-ADDR and FCT before FILE-FLAG
+    /// and NODE-ID after it, each blank where a row has none (DIVERGENCES
+    /// 142).
+    pub file_struct: FsValues,
     /// `+c`: the COMMAND cap in printed characters, `None` for `+c 0` (no cap).
     /// This is the C's `CmdLim`, which is a cap on each row's *contribution* to
     /// the column width, not the width itself — see [`render`].
@@ -499,6 +510,7 @@ impl TableOpts {
             human_size: false,
             show_links: false,
             file_flags: FileFlags::Off,
+            file_struct: FsValues::default(),
             command_width: Some(DEFAULT_COMMAND_WIDTH),
             tcp_show: TcpInfoFlags::DEFAULT,
             esc,
@@ -570,6 +582,7 @@ pub fn render_naming(
         human_size,
         show_links,
         file_flags,
+        file_struct,
         command_width,
         tcp_show,
         esc,
@@ -626,9 +639,20 @@ pub fn render_naming(
     cols.extend([Col::right("USER"), FD_NAME, FD_MODE, Col::right("TYPE")]);
     // FILE-FLAG, right after TYPE, where `print.c` puts it: at least as wide
     // as its title, and blank where a row has no flags to show.
+    // FreeBSD's other file-structure values around it, in `print.c`'s
+    // order (`:782-801`): FILE-ADDR, FCT, FILE-FLAG, NODE-ID.
+    if file_struct.addr {
+        cols.push(Col::right("FILE-ADDR"));
+    }
+    if file_struct.count {
+        cols.push(Col::right("FCT"));
+    }
     let show_flags = file_flags != FileFlags::Off;
     if show_flags {
         cols.push(Col::right("FILE-FLAG"));
+    }
+    if file_struct.node {
+        cols.push(Col::right("NODE-ID"));
     }
     cols.extend([Col::right("DEVICE"), Col::right(size_off.header())]);
     if show_links {
@@ -670,11 +694,33 @@ pub fn render_naming(
         r.push(fd_name(f));
         r.push(fd_mode(f));
         r.push(f.file_type.code());
+        let fs = p.file_struct(f);
+        if file_struct.addr {
+            r.push(
+                fs.and_then(|s| s.addr)
+                    .map(fflags::kptr)
+                    .unwrap_or_default(),
+            );
+        }
+        if file_struct.count {
+            r.push(
+                fs.and_then(|s| s.count)
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+            );
+        }
         if show_flags {
             r.push(match f.file_flags {
                 Some(g) if fflags::shown(g, file_flags) => fflags::text(g, file_flags),
                 _ => String::new(),
             });
+        }
+        if file_struct.node {
+            r.push(
+                fs.and_then(|s| s.node)
+                    .map(fflags::kptr)
+                    .unwrap_or_default(),
+            );
         }
         r.push(f.device.clone().unwrap_or_default());
         r.push(size_off_cell(f, size_off, human_size, offset_digits));

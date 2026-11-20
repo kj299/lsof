@@ -14,7 +14,7 @@ use std::path::Path;
 use lsof_core::model::tcp_state_table;
 use lsof_core::readlink::ReadlinkError;
 use lsof_core::render::fields::{field_is_default, field_known, FIELD_TABLE};
-use lsof_core::render::{Escaper, FileFlags, Format, JsonFormat, DEFAULT_OFFSET_DIGITS};
+use lsof_core::render::{Escaper, FileFlags, Format, FsValues, JsonFormat, DEFAULT_OFFSET_DIGITS};
 use lsof_core::safefs::{TMLIMIT, TMLIMMIN};
 use lsof_core::selection::StateFilter;
 use lsof_core::{
@@ -227,6 +227,10 @@ pub struct Columns {
     /// `+f g` / `+f G`: the open file's flags, by name or in hex, in a
     /// FILE-FLAG column and in `-F`'s `G` field (DIVERGENCES 46).
     pub file_flags: FileFlags,
+    /// `+f f`, `+f c`, `+f n` (FreeBSD): the file structure's address,
+    /// count and node address, in their columns and in `-F`'s `F`, `C` and
+    /// `N` fields (DIVERGENCES 142).
+    pub file_struct: FsValues,
 }
 
 impl Default for Columns {
@@ -239,6 +243,7 @@ impl Default for Columns {
             offset_digits: DEFAULT_OFFSET_DIGITS,
             nlink: false,
             file_flags: FileFlags::Off,
+            file_struct: FsValues::default(),
         }
     }
 }
@@ -990,6 +995,10 @@ fn parse_options<'s>(
     // read.
     let mut flags_shown = false;
     let mut flags_hex = false;
+    // The C's other `Fsv` bits, `FSV_FA`, `FSV_CT` and `FSV_NI`, set and
+    // cleared the same way: by `+f`/`-f`'s `f`, `c` and `n`, and set by
+    // `-F` where it selects `F`, `C` or `N`.
+    let mut fsv = FsValues::default();
     // `-c`'s comparison. The C's case-sensitive prefix everywhere it has an
     // oracle; the Windows port keeps the forgiving match its image names were
     // designed around (see `CommandMatch`).
@@ -1626,6 +1635,11 @@ fn parse_options<'s>(
                                         flags_shown = plus;
                                         flags_hex = c == 'G';
                                     }
+                                    // FreeBSD's, as its C has them
+                                    // (`main.c:412-458`, no `HASNOFS*`).
+                                    'c' | 'C' if HAS_FILE_STRUCT => fsv.count = plus,
+                                    'f' | 'F' if HAS_FILE_STRUCT => fsv.addr = plus,
+                                    'n' | 'N' if HAS_FILE_STRUCT => fsv.node = plus,
                                     // Each one the C's error, and it reads on.
                                     other => early.letter(Early::FILE_STRUCT, other),
                                 }
@@ -1765,6 +1779,12 @@ fn parse_options<'s>(
                         flags_shown = true;
                         flags_hex = true;
                     }
+                    // `F`, `C` and `N` set their `Fsv` bits as `G` sets its
+                    // own (`FieldSel[].opt`, `store.c:111-125`); they print
+                    // only where a backend records them (FreeBSD).
+                    fsv.addr |= this_defaults || letters.contains('F');
+                    fsv.count |= this_defaults || letters.contains('C');
+                    fsv.node |= this_defaults || letters.contains('N');
                     if this_defaults {
                         fields.defaults = true;
                     } else {
@@ -2025,6 +2045,7 @@ fn parse_options<'s>(
         (true, false) => FileFlags::Names,
         (true, true) => FileFlags::Hex,
     };
+    columns.file_struct = fsv;
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
@@ -2141,6 +2162,10 @@ fn parse_options<'s>(
     } else {
         Format::Table
     };
+    // Whether a backend is to read what the file structure needs.
+    let json_flags = matches!(&format, Format::Json(j) if j.file_flags != FileFlags::Off);
+    sel.file_struct =
+        columns.file_flags != FileFlags::Off || json_flags || fsv.addr || fsv.count || fsv.node;
     Ok(Action::Run {
         selection: sel,
         format,
@@ -3074,10 +3099,19 @@ const HAS_TCP_WINDOW: bool = true;
 /// Linux reads them from `fdinfo`. Windows has none to read, and a dialect of
 /// the C without them compiles the letters out (`HASNOFSFLAGS`), so `+f g`
 /// there is refused rather than answered with a column that is always blank.
-#[cfg(target_os = "linux")]
+/// FreeBSD reads them from `kern.file`'s `xf_flag` (DIVERGENCES 142).
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 const HAS_FILE_FLAGS: bool = true;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 const HAS_FILE_FLAGS: bool = false;
+
+/// Whether `c`, `f` and `n` are letters of `-f`/`+f`: the file structure's
+/// count, address and node address, which FreeBSD's C has (`HASFSTRUCT`
+/// with no `HASNOFS*`) and Linux's compiles out (DIVERGENCES 142).
+#[cfg(target_os = "freebsd")]
+const HAS_FILE_STRUCT: bool = true;
+#[cfg(not(target_os = "freebsd"))]
+const HAS_FILE_STRUCT: bool = false;
 
 /// Whether `--etw`, `--unicode` and `--ascii` are lsof-rs's own options:
 /// on Windows alone, where there is no C to match (DIVERGENCES 155).
@@ -7184,7 +7218,7 @@ mod tests {
         // flags, which is the default, and leaves the path arguments alone.
         // Where no flags are recorded it is a letter the platform lacks. The
         // platform is named, not `HAS_FILE_FLAGS`, so a wrong constant fails.
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             let (cols, sel) = columns(&["-f", "g"]).unwrap();
             assert_eq!(cols.file_flags, FileFlags::Off);
             assert_eq!(sel.filesystem_args, FilesystemArgs::default());
@@ -7240,11 +7274,38 @@ mod tests {
         }
     }
 
+    /// FreeBSD's other file-structure letters, `c`, `f` and `n` and their
+    /// capitals, as its C reads them (`main.c:412-458`): `+` shows, `-`
+    /// hides, in argument order; `-F` sets the bit its letter names, and a
+    /// bare `-F` all of them (DIVERGENCES 142).
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn the_file_structure_values_are_shown_as_the_last_option_says() {
+        let fsv = |argv: &[&str]| columns(argv).unwrap().0.file_struct;
+        let v = |addr, count, node| FsValues { addr, count, node };
+        assert_eq!(fsv(&[]), v(false, false, false));
+        assert_eq!(fsv(&["+fc"]), v(false, true, false));
+        assert_eq!(fsv(&["+fFCN"]), v(true, true, true));
+        assert_eq!(fsv(&["+f", "fn"]), v(true, false, true), "the next word");
+        assert_eq!(fsv(&["+fcfn", "-ff"]), v(false, true, true));
+        assert_eq!(fsv(&["-F"]), v(true, true, true));
+        assert_eq!(fsv(&["-FC"]), v(false, true, false));
+        assert_eq!(fsv(&["-F", "-fc"]), v(true, false, true));
+        let (cols, sel) = columns(&["+fg"]).unwrap();
+        assert_eq!(cols.file_flags, FileFlags::Names);
+        assert!(sel.file_struct, "the backend is asked for the flags");
+        assert!(!columns(&[]).unwrap().1.file_struct);
+        assert_eq!(
+            columns(&["+fx"]).unwrap_err(),
+            "unknown file struct option: x"
+        );
+    }
+
     /// Where the backend records no flags (Windows), `g` and `G` are refused
     /// under either prefix, as a C dialect without them refuses them: asking
     /// for the flags is an error, not a FILE-FLAG column of blanks. A bare
     /// `-f`/`+f` is still the path-argument switch.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     #[test]
     fn the_file_flags_letters_are_refused_where_none_are_recorded() {
         for (argv, want) in [

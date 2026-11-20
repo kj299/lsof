@@ -12,11 +12,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 
 use lsof_core::model::{
-    AccessMode, FdType, FileType, LockKind, OpenFile, Protocol, SockState, SocketInfo, TcpExtInfo,
+    AccessMode, BsdSocket, FdType, FileStruct, FileType, LockKind, OpenFile, Protocol, SockState,
+    SocketInfo, TcpExtInfo,
 };
 
-use crate::kinfo::{inet_addr, unix_path, KFile, Pcb};
-use crate::layout::{kf, sock, VNOVAL};
+use crate::kinfo::{inet_addr, unix_path, KFile, Pcb, XFile};
+use crate::layout::{kf, sock, KF_TO_FFLAGS, VNOVAL};
 use crate::names::{alt_hex, dev_string, iproto, kptr, ptr, tcp_state, unknown_family};
 
 /// A mounted file system as `readvfs()` records it: `struct l_vfs`.
@@ -43,13 +44,17 @@ pub trait Env {
     /// The pcblist entry for a socket of this domain and type whose
     /// `so_pcb` is `pcb` (`find_pcb_and_xsocket()`).
     fn pcb(&self, domain: i32, ty: i32, pcb: u64) -> Option<Pcb>;
-    /// The name in `/dev` of the device `rdev` (`printdevname()`).
-    fn dev_name(&self, rdev: u64) -> Option<String>;
+    /// The name in `/dev` of the character device `rdev`: with `inode`, the
+    /// entry with that inode too (`lkupdev(…, 1, …)`), without it the first
+    /// the C's search meets (`lkupdev(…, 0, …)`); `devnames`.
+    fn dev_name(&self, rdev: u64, inode: Option<u64>) -> Option<String>;
+    /// `find_ch_ino()`: the inode `/dev` gives the character device `rdev`.
+    fn dev_inode(&self, rdev: u64) -> Option<u64>;
     /// `DevDev`: the device `/dev` is on.
     fn dev_dev(&self) -> Option<u64>;
-    /// The kernel address of the `struct file` behind `pid`'s `fd`, from
-    /// `kern.file` (`xfile->xf_file`).
-    fn file_addr(&self, pid: i32, fd: i32) -> Option<u64>;
+    /// `kern.file`'s record of `pid`'s `fd` (the C's `bsearch()` of its
+    /// `xfile` list, `dproc.c:248-253`).
+    fn xfile(&self, pid: i32, fd: i32) -> Option<XFile>;
 }
 
 /// What of the run's options a row is built under.
@@ -57,8 +62,42 @@ pub trait Env {
 pub struct Opts {
     /// `-i` was given (the C's `Selinet`): a pipe is then not processed.
     pub inet: bool,
-    /// `-T q`: socket queue lengths are wanted in the row's TCP info.
-    pub queues: bool,
+    /// `+f` (or `-F`, or JSON) asks for the file structure: FILE-FLAG's
+    /// flags on each numbered row, and [`file_struct`] (DIVERGENCES 142).
+    pub file_struct: bool,
+}
+
+/// A kernel address as wide as the C's `KA_T`, a `u_long` (`dlsof.h`): on
+/// i386 the 64-bit `kvaddr_t` is cut to its low half, as the C's cast cuts
+/// it.
+fn ka(addr: u64) -> u64 {
+    if cfg!(target_pointer_width = "32") {
+        addr & 0xffff_ffff
+    } else {
+        addr
+    }
+}
+
+/// `kf_flags_to_fflags()` (`dproc.c:137-158`): a `kinfo_file`'s flags as the
+/// `struct file` flags they stand for.
+pub fn kf_flags_to_fflags(kf_flags: i32) -> u32 {
+    KF_TO_FFLAGS
+        .iter()
+        .filter(|(kf, _)| kf_flags & kf != 0)
+        .fold(0, |f, (_, ff)| f | ff)
+}
+
+/// A numbered descriptor's file structure, as `process_kinfo_file()` sets
+/// it (`dproc.c:177-189`) and `process_vnode()` amends it (`dnode.c:338-343`):
+/// the count from the record, always; the address and node from `kern.file`,
+/// where it lists the descriptor, the node a vnode's for a vnode or a FIFO.
+pub fn file_struct(k: &KFile, xfile: Option<XFile>) -> FileStruct {
+    let vnode = matches!(k.kind(), kf::TYPE_VNODE | kf::TYPE_FIFO);
+    FileStruct {
+        count: Some(i64::from(k.ref_count())),
+        addr: xfile.map(|x| ka(x.file)),
+        node: xfile.map(|x| ka(if vnode { x.vnode } else { x.data })),
+    }
 }
 
 fn blank(fd: FdType) -> OpenFile {
@@ -97,6 +136,14 @@ pub fn special(k: &KFile, fd: FdType, pid: i32, env: &dyn Env) -> OpenFile {
 pub fn numbered(k: &KFile, pid: i32, env: &dyn Env, opts: Opts) -> OpenFile {
     let fd = u64::try_from(k.fd()).unwrap_or(0);
     let mut f = blank(FdType::Handle(fd));
+    // Read once, where a row needs it: the C reads the whole list up front.
+    let xfile = std::cell::OnceCell::new();
+    let xfile = || *xfile.get_or_init(|| env.xfile(pid, k.fd()));
+    // `Lf->ffg`, set for every numbered descriptor: `xf_flag`, or the
+    // record's flags in their place.
+    if opts.file_struct {
+        f.file_flags = Some(xfile().map_or_else(|| kf_flags_to_fflags(k.flags()), |x| x.flag));
+    }
     // `Lf->off = kf->kf_offset; Lf->off_def = 1`, for every descriptor; a
     // row that has a size shows that instead (the renderer's rule).
     f.offset = Some(k.offset() as u64);
@@ -110,13 +157,14 @@ pub fn numbered(k: &KFile, pid: i32, env: &dyn Env, opts: Opts) -> OpenFile {
     }
     match k.kind() {
         kf::TYPE_FIFO | kf::TYPE_VNODE => vnode(&mut f, k, pid, env),
-        kf::TYPE_SOCKET => socket(&mut f, k, env, opts),
+        kf::TYPE_SOCKET => socket(&mut f, k, env),
         kf::TYPE_KQUEUE => {
             // `process_kf_kqueue()`, the 14.0 form: the count and state are
-            // in the record. Its DEVICE is the kqueue's address, which the C
-            // takes from `kern.file` and the record also holds.
+            // in the record. Its DEVICE is `xf_data` from `kern.file`, and
+            // `0x00000000` where that lists no such descriptor
+            // (`dproc.c:200`, DIVERGENCES 145).
             f.file_type = FileType::Other("KQUEUE".into());
-            f.device = Some(kptr(k.kq_addr()));
+            f.device = Some(kptr(xfile().map_or(0, |x| x.data)));
             f.name = format!(
                 "count={}, state={}",
                 k.kq_count(),
@@ -152,7 +200,7 @@ pub fn numbered(k: &KFile, pid: i32, env: &dyn Env, opts: Opts) -> OpenFile {
         }
         other => {
             // No type the dialect decodes: the C names the `struct file`.
-            let addr = env.file_addr(pid, k.fd()).unwrap_or(0);
+            let addr = xfile().map_or(0, |x| x.file);
             f.name = format!("{} file struct, ty={other}", ptr(addr));
         }
     }
@@ -231,9 +279,13 @@ fn vnode(f: &mut OpenFile, k: &KFile, pid: i32, env: &dyn Env) {
     };
     let dev = (fsid != VNOVAL).then_some(fsid);
     let rdev = matches!(vtype, kf::VTYPE_VCHR | kf::VTYPE_VBLK).then(|| k.file_rdev());
-    if k.file_fileid() != VNOVAL {
-        f.node = Some(k.file_fileid().to_string());
+    let mut inode = (k.file_fileid() != VNOVAL).then(|| k.file_fileid());
+    // `find_ch_ino()` (`dnode.c:580`, `lib/fino.c:97`): a character device
+    // on `/dev`'s file system with no inode takes the one `/dev` gives it.
+    if inode.is_none() && vtype == kf::VTYPE_VCHR && dev.is_some() && dev == env.dev_dev() {
+        inode = rdev.and_then(|r| env.dev_inode(r));
     }
+    f.node = inode.map(|i| i.to_string());
     let size = k.file_size();
     f.size = match ntype {
         Ntype::Fifo => None,
@@ -274,17 +326,14 @@ fn vnode(f: &mut OpenFile, k: &KFile, pid: i32, env: &dyn Env) {
     } else if ntype == Ntype::Proc {
         f.file_type = proc_type(&path);
     }
-    // A device node that `/dev` names is printed by that name, in place of
-    // the path (`print.c`, `printdevname()`); its addition stays.
-    if device_node && dev.is_some() {
-        if let Some(n) = rdev.and_then(|r| env.dev_name(r)) {
-            name = Some(n);
-        }
-    }
+    // NAME is the path and its file system's name (`dnode.c:638-646`). A row
+    // with no path is named as `printname()` names a row with no NAME
+    // (`print.c:1448-1592`): a device by its name in `/dev`, then the file
+    // system's directory and name.
+    let mut like = None;
     let base = match name {
         Some(n) => n,
-        None if k.path().is_empty() => String::new(),
-        None => {
+        None if !k.path().is_empty() => {
             let mut n = lossy(k.path());
             if let Some(v) = &vfs {
                 n.push_str(" (");
@@ -293,8 +342,48 @@ fn vnode(f: &mut OpenFile, k: &KFile, pid: i32, env: &dyn Env) {
             }
             n
         }
+        None => {
+            let named = match rdev.filter(|_| device_node && dev.is_some()) {
+                Some(r) => device_name(r, dev, inode, vtype == kf::VTYPE_VBLK, env, &mut like),
+                None => None,
+            };
+            named.unwrap_or_else(|| match &vfs {
+                Some(v) => format!("{} ({})", lossy(&v.dir), lossy(&v.fsname)),
+                None => String::new(),
+            })
+        }
     };
     f.set_base_name(&base);
+    if let Some(like) = like {
+        f.add_name_addition(&like);
+    }
+}
+
+/// `printdevname()` (`lib/pdvn.c:64-166`) of a row whose file system is `dev`
+/// and whose device is `rdev`: the name `/dev` gives the device, where the
+/// row is on `/dev`'s file system and the entry has the row's inode; else,
+/// where `/dev` names the device at all, `(like character special NAME)` in
+/// `like` (block for a block special), and no name. The C's FreeBSD table
+/// holds character devices alone (no `HASBLKDEV`), and both lookups are in
+/// it.
+fn device_name(
+    rdev: u64,
+    dev: Option<u64>,
+    inode: Option<u64>,
+    block: bool,
+    env: &dyn Env,
+    like: &mut Option<String>,
+) -> Option<String> {
+    if dev.is_some() && dev == env.dev_dev() {
+        if let Some(n) = env.dev_name(rdev, inode) {
+            return Some(n);
+        }
+    }
+    if let Some(n) = env.dev_name(rdev, None) {
+        let what = if block { "block" } else { "character" };
+        *like = Some(format!("(like {what} special {n})"));
+    }
+    None
 }
 
 /// `parse_proc_path()`: what a file in procfs is, by its last component.
@@ -349,9 +438,14 @@ fn pts(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
     f.node = Some(d.to_string());
     f.rdev = u32::try_from(d).ok().and_then(NonZeroU32::new);
     f.device = Some(dev_string(d));
+    // `printdevname()` of a row the dialect names nothing (`print.c:1448`):
+    // the inode it has is the terminal's number.
     if f.fs_device.is_some() {
-        if let Some(n) = env.dev_name(d) {
+        let mut like = None;
+        if let Some(n) = device_name(d, f.fs_device, Some(d), false, env, &mut like) {
             f.name = n;
+        } else if let Some(like) = like {
+            f.add_name_addition(&like);
         }
     }
 }
@@ -363,8 +457,11 @@ fn is_v4_mapped(ip: &IpAddr) -> Option<IpAddr> {
     }
 }
 
+/// `IPPROTO_TCP`.
+const IPPROTO_TCP: i32 = 6;
+
 /// `process_socket()`.
-fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env, opts: Opts) {
+fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
     f.file_type = FileType::Socket("sock");
     let domain = k.sock_domain();
     let pcb = env.pcb(domain, k.sock_type(), k.sock_pcb());
@@ -375,10 +472,25 @@ fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env, opts: Opts) {
         AccessMode::Write => sq,
         _ => rq + sq,
     });
-    let tcp = opts.queues.then_some(TcpExtInfo {
+    // `Lf->lts`: the queues, which every socket has (`HAS_KF_SOCK_SENDQ`),
+    // the `xsocket`'s fields where the pcblists hold the socket, and the
+    // buffer states from the record (`dsock.c:404-430`). A TCP socket whose
+    // `xtcpcb` was found adds its flags and maximum segment and is the C's
+    // TCP/TPI record (`lts.type = 0`, `:558-572`).
+    let tcp_found = matches!(domain, sock::AF_INET | sock::AF_INET6)
+        && k.sock_protocol() == IPPROTO_TCP
+        && pcb.is_some();
+    let tcp = Some(TcpExtInfo {
         recv_window: None,
         recv_queue: Some(rq),
         send_queue: Some(sq),
+        bsd: Some(BsdSocket {
+            record: tcp_found,
+            xsocket: pcb.map(|p| p.xsocket),
+            sbs_rcv: k.sock_rcv_sb_state(),
+            sbs_snd: k.sock_snd_sb_state(),
+            tcp: pcb.and_then(|p| p.tcp).filter(|_| tcp_found),
+        }),
     });
     match domain {
         sock::AF_INET | sock::AF_INET6 => {
@@ -445,7 +557,7 @@ fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env, opts: Opts) {
                 local: None,
                 remote: None,
                 state: None,
-                tcp: None,
+                tcp,
                 bound: None,
             }));
             let Some(pcb) = pcb else {
@@ -490,6 +602,7 @@ mod tests {
         locks: HashMap<(i32, u64, u64), LockKind>,
         pcbs: HashMap<u64, Pcb>,
         devs: HashMap<u64, String>,
+        xfiles: HashMap<(i32, i32), XFile>,
     }
 
     impl Env for Fake {
@@ -511,14 +624,17 @@ mod tests {
         fn pcb(&self, _d: i32, _t: i32, pcb: u64) -> Option<Pcb> {
             self.pcbs.get(&pcb).copied()
         }
-        fn dev_name(&self, rdev: u64) -> Option<String> {
+        fn dev_name(&self, rdev: u64, _inode: Option<u64>) -> Option<String> {
             self.devs.get(&rdev).cloned()
+        }
+        fn dev_inode(&self, rdev: u64) -> Option<u64> {
+            self.devs.contains_key(&rdev).then_some(rdev)
         }
         fn dev_dev(&self) -> Option<u64> {
             Some(0x5a)
         }
-        fn file_addr(&self, _pid: i32, _fd: i32) -> Option<u64> {
-            Some(0xffff_f800_0011_2233)
+        fn xfile(&self, pid: i32, fd: i32) -> Option<XFile> {
+            self.xfiles.get(&(pid, fd)).copied()
         }
     }
 
@@ -583,10 +699,58 @@ mod tests {
         put(&mut r, kf::FILE_RDEV, &0x1fu64.to_ne_bytes());
         let f = numbered(&KFile::from_bytes(&r), 7, &env, Opts::default());
         assert_eq!(f.file_type.code(), "VCHR");
-        assert_eq!(f.name, "/dev/null");
+        // A path is the NAME, as for any vnode (`dnode.c:638`): `/dev` names
+        // only a device whose row has none (DIVERGENCES 146).
+        assert_eq!(f.name, "/dev/null (zroot/ROOT/default)");
         assert_eq!(f.device.as_deref(), Some("0,31"));
         assert_eq!(f.size, None, "a device has no size, so the offset shows");
         assert_eq!(f.rdev.map(NonZeroU32::get), Some(0x1f));
+        // No path, on `/dev`'s file system: the name `/dev` gives it.
+        let mut env = root_fs();
+        env.devs.insert(0x1f, "/dev/null".into());
+        env.vfs[0].1.fsid = 0x5a;
+        let mut r = vnode_rec(0, kf::VTYPE_VCHR, b"");
+        put(&mut r, kf::FILE_FSID, &0x5au64.to_ne_bytes());
+        put(&mut r, kf::FILE_RDEV, &0x1fu64.to_ne_bytes());
+        let f = numbered(&KFile::from_bytes(&r), 7, &env, Opts::default());
+        assert_eq!(f.name, "/dev/null");
+        // On another file system: the file system, and what `/dev` calls
+        // the device in an addition.
+        let mut other = r.clone();
+        put(&mut other, kf::FILE_FSID, &0x5a00_ff01u64.to_ne_bytes());
+        let mut env = root_fs();
+        env.devs.insert(0x1f, "/dev/null".into());
+        let f = numbered(&KFile::from_bytes(&other), 7, &env, Opts::default());
+        assert_eq!(
+            f.name,
+            "/ (zroot/ROOT/default) (like character special /dev/null)"
+        );
+        assert_eq!(f.base_name(), Some("/ (zroot/ROOT/default)"));
+        // A device `/dev` does not name, and a file with no path: the file
+        // system alone.
+        env.devs.clear();
+        let f = numbered(&KFile::from_bytes(&other), 7, &env, Opts::default());
+        assert_eq!(f.name, "/ (zroot/ROOT/default)");
+        let plain = vnode_rec(0, kf::VTYPE_VREG, b"");
+        let f = numbered(&KFile::from_bytes(&plain), 7, &env, Opts::default());
+        assert_eq!(f.name, "/ (zroot/ROOT/default)");
+    }
+
+    /// `find_ch_ino()`: a character device on `/dev`'s file system with no
+    /// inode of its own takes the one `/dev` gives it; elsewhere none.
+    #[test]
+    fn a_character_device_with_no_inode_takes_devs() {
+        let mut env = root_fs();
+        env.devs.insert(0x1f, "/dev/null".into());
+        let mut r = vnode_rec(0, kf::VTYPE_VCHR, b"/dev/null");
+        put(&mut r, kf::FILE_FILEID, &VNOVAL.to_ne_bytes());
+        put(&mut r, kf::FILE_RDEV, &0x1fu64.to_ne_bytes());
+        put(&mut r, kf::FILE_FSID, &0x5au64.to_ne_bytes());
+        let f = numbered(&KFile::from_bytes(&r), 7, &env, Opts::default());
+        assert_eq!(f.node.as_deref(), Some("31"));
+        put(&mut r, kf::FILE_FSID, &0x77u64.to_ne_bytes());
+        let f = numbered(&KFile::from_bytes(&r), 7, &env, Opts::default());
+        assert_eq!(f.node, None);
     }
 
     #[test]
@@ -678,6 +842,7 @@ mod tests {
             Pcb {
                 so: 1,
                 t_state: Some(1),
+                ..Pcb::default()
             },
         );
         let mut r = sock_rec(sock::AF_INET, sock::SOCK_STREAM, 6, 0xffff_f800_aaaa_0000);
@@ -728,6 +893,7 @@ mod tests {
             Pcb {
                 so: 2,
                 t_state: Some(4),
+                ..Pcb::default()
             },
         );
         let mut r = sock_rec(sock::AF_INET6, sock::SOCK_STREAM, 6, 0x20);
@@ -760,6 +926,7 @@ mod tests {
             Pcb {
                 so: 0xabc,
                 t_state: None,
+                ..Pcb::default()
             },
         );
         env.pcbs.insert(
@@ -767,6 +934,7 @@ mod tests {
             Pcb {
                 so: 0xdef,
                 t_state: None,
+                ..Pcb::default()
             },
         );
         let mut r = sock_rec(sock::AF_UNIX, sock::SOCK_STREAM, 0, 0x30);
@@ -800,7 +968,14 @@ mod tests {
 
     #[test]
     fn pipes_kqueues_and_unknown_kinds() {
-        let env = Fake::default();
+        let mut env = Fake::default();
+        env.xfiles.insert(
+            (1, 5),
+            XFile {
+                file: 0xffff_f800_0011_2233,
+                ..XFile::default()
+            },
+        );
         let mut p = kf_rec(kf::TYPE_PIPE, 3, b"");
         put(&mut p, kf::PIPE_ADDR, &0x100u64.to_ne_bytes());
         put(&mut p, kf::PIPE_PEER, &0x200u64.to_ne_bytes());
@@ -829,11 +1004,24 @@ mod tests {
         let mut q = kf_rec(kf::TYPE_KQUEUE, 4, b"");
         put(&mut q, kf::KQ_COUNT, &2i32.to_ne_bytes());
         put(&mut q, kf::KQ_STATE, &0x40i32.to_ne_bytes());
+        put(&mut q, kf::KQ_ADDR, &0x77u64.to_ne_bytes());
         let f = numbered(&KFile::from_bytes(&q), 1, &env, Opts::default());
         assert_eq!(
             (f.file_type.code(), f.name.as_str()),
             ("KQUEUE".into(), "count=2, state=0x40")
         );
+        // DEVICE is `xf_data`, not the record's own `kf_kqueue_addr`, and
+        // 0 where `kern.file` lists no such descriptor (DIVERGENCES 145).
+        assert_eq!(f.device.as_deref(), Some("0x00000000"));
+        env.xfiles.insert(
+            (1, 4),
+            XFile {
+                data: 0x1234_5678,
+                ..XFile::default()
+            },
+        );
+        let f = numbered(&KFile::from_bytes(&q), 1, &env, Opts::default());
+        assert_eq!(f.device.as_deref(), Some("0x12345678"));
         let u = kf_rec(14, 5, b"");
         let f = numbered(&KFile::from_bytes(&u), 1, &env, Opts::default());
         assert_eq!(f.file_type, FileType::NoType);
@@ -865,5 +1053,147 @@ mod tests {
         assert_eq!(f.name, "/dev/pts/0");
         assert_eq!(f.device.as_deref(), Some("0,110"));
         assert_eq!((f.node.as_deref(), f.fs_device), (Some("110"), Some(0x5a)));
+    }
+
+    #[test]
+    fn kf_flags_become_the_struct_file_flags_they_stand_for() {
+        assert_eq!(kf_flags_to_fflags(0), 0);
+        assert_eq!(kf_flags_to_fflags(0x1 | 0x2), 0x3);
+        assert_eq!(
+            kf_flags_to_fflags(0x4 | 0x20),
+            0x8 | 0x4,
+            "APPEND, NONBLOCK"
+        );
+        assert_eq!(
+            kf_flags_to_fflags(0x8 | 0x10 | 0x80 | 0x800 | 0x40),
+            0x40 | 0x80 | 0x4000 | 0x200 | 0x10000
+        );
+        assert_eq!(
+            kf_flags_to_fflags(0x2000 | 0x4000 | 0x200 | 0x400 | 0x100 | 0x1000),
+            0x800 | 0x40000 | 0x20 | 0x100 | 0x10 | 0x400
+        );
+        // A bit no entry has is dropped, as the C's loop drops it.
+        assert_eq!(kf_flags_to_fflags(0x1_0000), 0);
+    }
+
+    #[test]
+    fn the_file_structure_is_the_records_count_and_kern_files_addresses() {
+        let x = XFile {
+            file: 0xffff_f800_0000_0010,
+            data: 0xffff_f800_0000_0020,
+            vnode: 0xffff_f800_0000_0030,
+            flag: 0x8003,
+        };
+        let mut v = vnode_rec(3, kf::VTYPE_VREG, b"/a");
+        put(&mut v, kf::REF_COUNT, &2i32.to_ne_bytes());
+        let fs = file_struct(&KFile::from_bytes(&v), Some(x));
+        assert_eq!(fs.count, Some(2));
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            (fs.addr, fs.node),
+            (Some(0xffff_f800_0000_0010), Some(0xffff_f800_0000_0030)),
+            "a vnode's node is xf_vnode"
+        );
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            (fs.addr, fs.node),
+            (Some(0x10), Some(0x30)),
+            "KA_T is 32 bits"
+        );
+        let fifo = kf_rec(kf::TYPE_FIFO, 4, b"/f");
+        assert_eq!(
+            file_struct(&KFile::from_bytes(&fifo), Some(x)).node,
+            Some(ka(x.vnode))
+        );
+        let sock = sock_rec(sock::AF_INET, sock::SOCK_STREAM, 6, 1);
+        let s = file_struct(&KFile::from_bytes(&sock), Some(x));
+        assert_eq!((s.count, s.node), (Some(1), Some(ka(x.data))), "xf_data");
+        // Not in `kern.file`: the count alone.
+        let none = file_struct(&KFile::from_bytes(&sock), None);
+        assert_eq!((none.count, none.addr, none.node), (Some(1), None, None));
+    }
+
+    #[test]
+    fn the_flags_are_kern_files_or_the_records_and_only_when_asked() {
+        let mut env = root_fs();
+        let mut r = vnode_rec(3, kf::VTYPE_VREG, b"/etc/motd");
+        put(&mut r, kf::FLAGS, &(0x1i32 | 0x4).to_ne_bytes());
+        let k = KFile::from_bytes(&r);
+        let asked = Opts {
+            file_struct: true,
+            ..Opts::default()
+        };
+        assert_eq!(numbered(&k, 7, &env, Opts::default()).file_flags, None);
+        assert_eq!(numbered(&k, 7, &env, asked).file_flags, Some(0x1 | 0x8));
+        env.xfiles.insert(
+            (7, 3),
+            XFile {
+                flag: 0x4003,
+                ..XFile::default()
+            },
+        );
+        assert_eq!(numbered(&k, 7, &env, asked).file_flags, Some(0x4003));
+        // A special has none.
+        let c = vnode_rec(kf::FD_CWD, kf::VTYPE_VDIR, b"/");
+        assert_eq!(
+            special(&KFile::from_bytes(&c), FdType::Cwd, 7, &env).file_flags,
+            None
+        );
+    }
+
+    fn bsd(f: &OpenFile) -> BsdSocket {
+        f.socket
+            .as_deref()
+            .and_then(|s| s.tcp)
+            .and_then(|t| t.bsd)
+            .expect("a FreeBSD socket row has its record")
+    }
+
+    #[test]
+    fn a_sockets_tcp_tpi_record_is_the_cs() {
+        let xso = lsof_core::model::BsdXSocket {
+            options: 0x2,
+            qlimit: 5,
+            ..Default::default()
+        };
+        let mut env = Fake::default();
+        env.pcbs.insert(
+            0x10,
+            Pcb {
+                so: 0x11,
+                t_state: Some(1),
+                xsocket: xso,
+                tcp: Some((0x4, 1460)),
+            },
+        );
+        let mut r = sock_rec(sock::AF_INET, sock::SOCK_STREAM, 6, 0x10);
+        put(&mut r, kf::SOCK_RCV_SB_STATE, &0x20u16.to_ne_bytes());
+        put(&mut r, kf::SOCK_SND_SB_STATE, &0x10u16.to_ne_bytes());
+        put(&mut r, kf::SOCK_RECVQ, &9u32.to_ne_bytes());
+        let f = numbered(&KFile::from_bytes(&r), 1, &env, Opts::default());
+        let t = f.socket.as_deref().and_then(|s| s.tcp).unwrap();
+        assert_eq!((t.recv_queue, t.send_queue), (Some(9), Some(0)));
+        assert_eq!(
+            bsd(&f),
+            BsdSocket {
+                record: true,
+                xsocket: Some(xso),
+                sbs_rcv: 0x20,
+                sbs_snd: 0x10,
+                tcp: Some((0x4, 1460)),
+            }
+        );
+        // UDP over the same pcb: its xsocket, no record, no TCP flags.
+        let u = sock_rec(sock::AF_INET, sock::SOCK_DGRAM, 17, 0x10);
+        let b = bsd(&numbered(&KFile::from_bytes(&u), 1, &env, Opts::default()));
+        assert_eq!((b.record, b.xsocket, b.tcp), (false, Some(xso), None));
+        // No pcb: nothing from the lists, and no record.
+        let n = sock_rec(sock::AF_INET, sock::SOCK_STREAM, 6, 0x99);
+        let b = bsd(&numbered(&KFile::from_bytes(&n), 1, &env, Opts::default()));
+        assert_eq!((b.record, b.xsocket, b.tcp), (false, None, None));
+        // A unix socket keeps its xsocket too.
+        let x = sock_rec(sock::AF_UNIX, sock::SOCK_STREAM, 0, 0x10);
+        let b = bsd(&numbered(&KFile::from_bytes(&x), 1, &env, Opts::default()));
+        assert_eq!((b.record, b.xsocket), (false, Some(xso)));
     }
 }

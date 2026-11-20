@@ -38,10 +38,10 @@
 //! `\0` under `-F0`) cannot appear inside a value.
 
 use crate::model::{FdType, Process};
-use crate::render::fflags::{self, FileFlags};
+use crate::render::fflags::{self, FileFlags, FsShow};
 use crate::render::{
-    access_code, device_text, lock_code, node_is_protocol, offset_text, Calls, Escaper,
-    DEFAULT_OFFSET_DIGITS,
+    access_code, device_text, lock_code, node_is_protocol, offset_text, tcp_info_socket, Calls,
+    Escaper, DEFAULT_OFFSET_DIGITS,
 };
 use crate::selection::TcpInfoFlags;
 
@@ -58,6 +58,10 @@ pub struct Field {
     pub default: bool,
 }
 
+/// Whether `-F ?` lists the file structure's count, address and node ID:
+/// on FreeBSD, the one platform that records them.
+const FILE_STRUCT_LISTED: bool = cfg!(target_os = "freebsd");
+
 /// The C's field table, in its order: every letter `-F` accepts, and
 /// how `-F ?` and a bare `-F` treat it.
 ///
@@ -68,7 +72,10 @@ pub struct Field {
 /// every platform. The default set is every letter but the raw device number
 /// (left out "for compatibility"), the security context and the zone. A
 /// letter the C accepts need not print anything: `C`, `F`, `N`, `z` and `Z`
-/// never do here, as none does on a Linux host without SELinux.
+/// never do here, as none does on a Linux host without SELinux. FreeBSD's C
+/// lists and prints `C`, `F` and `N` (`HASFSTRUCT` with none of its
+/// `HASNOFS*`, `usage.c:808-833`), and so does lsof-rs there (DIVERGENCES
+/// 142).
 pub const FIELD_TABLE: &[Field] = &[
     Field {
         id: 'a',
@@ -85,7 +92,7 @@ pub const FIELD_TABLE: &[Field] = &[
     Field {
         id: 'C',
         what: "file struct share count",
-        listed: false,
+        listed: FILE_STRUCT_LISTED,
         default: true,
     },
     Field {
@@ -109,7 +116,7 @@ pub const FIELD_TABLE: &[Field] = &[
     Field {
         id: 'F',
         what: "file struct address as 0x<hex>",
-        listed: false,
+        listed: FILE_STRUCT_LISTED,
         default: true,
     },
     Field {
@@ -169,7 +176,7 @@ pub const FIELD_TABLE: &[Field] = &[
     Field {
         id: 'N',
         what: "file struct node ID as 0x<hex>",
-        listed: false,
+        listed: FILE_STRUCT_LISTED,
         default: true,
     },
     Field {
@@ -346,10 +353,14 @@ pub fn write_with_names(
     procs: &[Process],
     (nul, only, tcp_show, esc): (bool, Option<&[char]>, TcpInfoFlags, Escaper),
     offset_digits: i32,
-    file_flags: FileFlags,
+    file_struct: impl Into<FsShow>,
     rename: &mut dyn FnMut(&crate::model::OpenFile) -> Option<crate::model::OpenFile>,
     login: &mut dyn FnMut(&Process) -> Option<Box<[u8]>>,
 ) -> std::io::Result<()> {
+    let FsShow {
+        flags: file_flags,
+        values: fsv,
+    } = file_struct.into();
     let term = if nul { b'\0' } else { b'\n' };
     // No list is the C's default set, which is every letter but a few; a
     // list is exactly those letters (the parser spells out the default set
@@ -453,12 +464,31 @@ pub fn write_with_names(
             if want('t') && f.file_type.has_code() {
                 push!(b't', &f.file_type.code());
             }
+            // FreeBSD's file structure (DIVERGENCES 142): `F` its address and
+            // `C` its count before `G`, `N` its node address after, each
+            // where it is selected, shown (the C's `Fsv`) and recorded.
+            let fs = p.file_struct(f);
+            if want('F') && fsv.addr {
+                if let Some(a) = fs.and_then(|s| s.addr) {
+                    push!(b'F', &fflags::kptr(a));
+                }
+            }
+            if want('C') && fsv.count {
+                if let Some(n) = fs.and_then(|s| s.count) {
+                    push!(b'C', &n.to_string());
+                }
+            }
             if want('G') {
                 // In hex, `0x<file flags>;0x<per-open flags>` (the second is the
                 // C's `pof`, which its Linux dialect never sets), or by name
                 // after a `+f g` (DIVERGENCES 46).
                 if let Some(g) = f.file_flags.filter(|&g| fflags::shown(g, file_flags)) {
                     push!(b'G', &fflags::text(g, file_flags));
+                }
+            }
+            if want('N') && fsv.node {
+                if let Some(a) = fs.and_then(|s| s.node) {
+                    push!(b'N', &fflags::kptr(a));
                 }
             }
             // `d` is the file's device CHARACTER code, `D` its device NUMBER
@@ -544,7 +574,20 @@ pub fn write_with_names(
             // both output modes, so the two gates are independent and both
             // apply. (Bare `-F` sets `Ftcptpi` itself — see the CLI.)
             if want('T') {
-                if let Some(sock) = &f.socket {
+                // A FreeBSD row's facts are printed only where the C keeps a
+                // TCP/TPI record (`print.c:2385`); any other row's wherever it
+                // has a socket.
+                let bsd = f
+                    .socket
+                    .as_deref()
+                    .and_then(|s| s.tcp.as_ref())
+                    .is_some_and(|t| t.bsd.is_some());
+                let sock = if bsd {
+                    tcp_info_socket(f, None)
+                } else {
+                    f.socket.as_deref()
+                };
+                if let Some(sock) = sock {
                     if tcp_show.state {
                         if let Some(st) = sock.shown_state() {
                             push!(b'T', &format!("ST={}", st.as_str()));
@@ -566,6 +609,14 @@ pub fn write_with_names(
                         if tcp_show.window {
                             if let Some(w) = tcp.recv_window {
                                 split!(b'T', &format!("WR={w}"));
+                            }
+                        }
+                        // `-T f` (FreeBSD): `TSO=…`, `TSS=…`, `TTF=…`.
+                        if tcp_show.options {
+                            if let Some(b) = &tcp.bsd {
+                                for part in crate::render::sockopt::parts(b) {
+                                    split!(b'T', &part);
+                                }
                             }
                         }
                     }

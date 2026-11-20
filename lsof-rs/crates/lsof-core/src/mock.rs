@@ -33,6 +33,7 @@ pub fn sample_processes() -> Vec<Process> {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![
                 OpenFile {
                     rdev: None,
@@ -82,6 +83,7 @@ pub fn sample_processes() -> Vec<Process> {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: vec![
                 OpenFile {
                     rdev: None,

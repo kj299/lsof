@@ -54,6 +54,7 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: Vec::new(),
         });
         // SAFETY: same invariants as Process32FirstW.

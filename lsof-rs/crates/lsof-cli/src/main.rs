@@ -180,7 +180,8 @@ SELECTION:
     -K [i]        list threads: on Linux in TID and TASKCMD columns, as the C
                   does; on Windows as `task` rows, the TID in NODE. -K i: none
     -T [fqsw]     TCP info on socket rows: s=state, q=queue sizes, w=window
-                  (Windows); f is accepted and shows nothing. The letters
+                  (Windows); f socket options, states and TCP flags (FreeBSD;
+                  elsewhere accepted and shows nothing). The letters
                   select: -T alone shows none, +T the state alone (the
                   default). On Windows q and w need Administrator
     -a            AND the selectors together (default is OR); needs one
@@ -215,8 +216,10 @@ OUTPUT:
     +L [count]    an NLINK (link count) column; with a count, also select the
                   files with fewer links (`+L 1` = unlinked but still open).
                   -L: no NLINK column (the default)
-    +f g / +f G   (Linux) a FILE-FLAG column: each file's open flags by name
-                  (W,AP,LG), or in hex; -f g hides it again
+    +f g / +f G   (Linux, FreeBSD) a FILE-FLAG column: each file's open flags
+                  by name (W,AP,LG), or in hex; -f g hides it again
+    +f c / f / n  (FreeBSD) FCT, FILE-ADDR and NODE-ID columns: the file
+                  structure's count, address and node address; -f hides
     -V            verbose: report inaccessible / unmatched search items
     -F [fields]   field (machine-readable) output; 0 = NUL terminators;
                   -F ? lists the field letters
@@ -264,8 +267,9 @@ MISCELLANEOUS:
                   time limit
                   (*RISKY*: a file system that does not answer hangs lsof)
     -S [t]        give each of those calls t seconds (default 15, at least
-                  2), in a helper process (Linux; elsewhere they are made in
-                  lsof). One that times out fails: `Connection timed out`
+                  2), in a helper process (Linux and FreeBSD; on Windows
+                  they are made in lsof). One that times out fails:
+                  `Connection timed out`
     --, ++        end of options; remaining args are paths. The options
                   also end at the first path, and a lone - or + is that
                   first path: it and every word after it are paths, --
@@ -842,6 +846,15 @@ fn main() {
     {
         lsof_cli::stdio::exit(lsof_backend_linux::safefs::serve());
     }
+    // FreeBSD's helper, the C's `doinchild()` child (DIVERGENCES 144).
+    #[cfg(target_os = "freebsd")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            lsof_backend_freebsd::safefs::HELPER_ARG,
+        ))
+    {
+        lsof_cli::stdio::exit(lsof_backend_freebsd::safefs::serve());
+    }
     // `SIGPIPE` as the C has it (DIVERGENCES 36): the C never touches it, so
     // a closed pipe kills it at the write that meets it unless its parent
     // ignored or blocked the signal. The Rust runtime ignores it before
@@ -876,7 +889,9 @@ fn main() {
     // none (`-i` alone, which reads no mount table) starts none.
     #[cfg(target_os = "linux")]
     let calls = lsof_backend_linux::safefs::Helper::new();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "freebsd")]
+    let calls = lsof_backend_freebsd::safefs::Helper::new();
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let calls = lsof_core::InProcess;
     let fs = SafeFs::new(&calls, &lsof_core::safefs::to_stderr);
 
@@ -1520,6 +1535,7 @@ fn write_listing(
                 offset_digits: columns.offset_digits,
                 show_links: columns.nlink,
                 file_flags: columns.file_flags,
+                file_struct: columns.file_struct,
                 human_size: selection.human_size,
                 command_width: selection.command_width.cap(),
                 tcp_show: selection.tcp_info(),
@@ -1533,7 +1549,10 @@ fn write_listing(
             procs,
             (*nul, only.as_deref(), selection.tcp_info(), esc),
             columns.offset_digits,
-            columns.file_flags,
+            lsof_core::render::FsShow {
+                flags: columns.file_flags,
+                values: columns.file_struct,
+            },
             &mut rename,
             login,
         ),
@@ -1663,6 +1682,7 @@ mod tests {
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
+            file_structs: None,
             files: (0..files as u64).map(file).collect(),
         }
     }

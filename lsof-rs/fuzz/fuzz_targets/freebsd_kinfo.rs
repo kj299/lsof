@@ -12,6 +12,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_backend_freebsd::fuzz_api as f;
+use f::Env as _;
 use lsof_core::model::{FdType, LockKind};
 
 /// An environment that knows everything a row can ask, so every branch that
@@ -31,16 +32,19 @@ impl f::Env for Knows {
         self.0.then_some(LockKind::ReadPartial)
     }
     fn pcb(&self, _: i32, _: i32, pcb: u64) -> Option<f::Pcb> {
-        self.0.then_some(f::Pcb { so: pcb, t_state: Some((pcb % 16) as i32) })
+        self.0.then_some(f::Pcb { so: pcb, t_state: Some((pcb % 16) as i32), ..f::Pcb::default() })
     }
-    fn dev_name(&self, rdev: u64) -> Option<String> {
+    fn dev_name(&self, rdev: u64, _inode: Option<u64>) -> Option<String> {
         self.0.then(|| format!("/dev/{rdev}"))
+    }
+    fn dev_inode(&self, rdev: u64) -> Option<u64> {
+        self.0.then_some(rdev)
     }
     fn dev_dev(&self) -> Option<u64> {
         self.0.then_some(0x5a)
     }
-    fn file_addr(&self, _: i32, _: i32) -> Option<u64> {
-        self.0.then_some(u64::MAX)
+    fn xfile(&self, _: i32, _: i32) -> Option<f::XFile> {
+        self.0.then_some(f::XFile { file: u64::MAX, data: 1, vnode: 2, flag: u32::MAX })
     }
 }
 
@@ -49,8 +53,9 @@ fuzz_target!(|data: &[u8]| {
     let mut seen = 0usize;
     for (i, k) in files.iter().enumerate() {
         let env = Knows(i % 2 == 0);
-        let opts = f::Opts { inet: i % 3 == 0, queues: i % 5 == 0 };
+        let opts = f::Opts { inet: i % 3 == 0, file_struct: i % 5 == 0 };
         let row = f::numbered(k, 1, &env, opts);
+        let _ = f::file_struct(k, env.xfile(1, k.fd()));
         let _ = row.base_name();
         let _ = f::special(k, FdType::Cwd, 1, &env);
         seen += 1;

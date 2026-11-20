@@ -11,6 +11,27 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — FreeBSD, written from the C's source (not yet run on FreeBSD)
+- **`+f c`, `+f f`, `+f g`/`G` and `+f n`** (DIVERGENCES 142): FCT,
+  FILE-ADDR, FILE-FLAG and NODE-ID columns, and `-F`'s `C`, `F`, `G` and `N`
+  fields (in a bare `-F`'s set, and listed by `-F ?`), from each
+  descriptor's record and `kern.file`, the flags by FreeBSD's names (`R`,
+  `W`, `NB`, `AP`, `ASYN`, `FSYN`, `LCK`, `NTTY`). `g` and `G` were refused.
+- **`-T f`** (147): `SO=`, `SS=` and `TF=` (with `MSS=`) on a socket's TCP/TPI
+  facts, as the C's `print_tcptpi()` spells them. A UDP or unix row under
+  `-T s` or `-T f` alone no longer ends with a space.
+- **The bounded calls go through a helper process** (144): a mount point's
+  `stat`, a path argument's, `+d`/`+D`'s and a link's `readlink` are each
+  given `-S` seconds, as the C's `doinchild()` gives them; on FreeBSD they
+  had been made in lsof with no limit.
+- **A KQUEUE row's DEVICE is `kern.file`'s `xf_data`** (145), `0x00000000`
+  where it lists no such descriptor.
+- **Device names are `readdev()`'s** (146): character devices alone, one per
+  device and inode, the first by name; a device row with a path is named by
+  its path and ` (fsname)` like any file, and `/dev`'s name is printed only
+  for a row with none, or as `(like character special NAME)`; a row with no
+  path is named by its file system, `dir (fsname)`.
+
 ### Changed — output and exit status a script may notice
 - **`-u name` and USER ask the C library, as the C does** (DIVERGENCES
   39): `getpwnam_r(3)` and `getpwuid_r(3)`, so an account only LDAP, SSSD,

@@ -16,7 +16,9 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use crate::layout::{self, kf, kl, sf, sock, xf, PcbLayout, ProcLayout};
+use lsof_core::model::BsdXSocket;
+
+use crate::layout::{self, kf, kl, sf, sock, xf, xso, PcbLayout, ProcLayout};
 
 fn bytes_at<const N: usize>(b: &[u8], off: usize) -> Option<[u8; N]> {
     b.get(off..off.checked_add(N)?)?.try_into().ok()
@@ -219,9 +221,6 @@ impl KFile {
     pub fn proc_pid(&self) -> i32 {
         self.i32(kf::PROC_PID)
     }
-    pub fn kq_addr(&self) -> u64 {
-        self.u64(kf::KQ_ADDR)
-    }
     pub fn kq_count(&self) -> i32 {
         self.i32(kf::KQ_COUNT)
     }
@@ -315,12 +314,40 @@ pub fn locks(buf: &[u8]) -> Vec<KLock> {
 }
 
 /// What a pcblist says of one socket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pcb {
     /// The socket's own address, `xso_so`.
     pub so: u64,
     /// TCP's `t_state`; `None` for every other list.
     pub t_state: Option<i32>,
+    /// The record's `struct xsocket`, as far as `-T f` reads it.
+    pub xsocket: BsdXSocket,
+    /// TCP's `t_flags` and `t_maxseg`; `None` for every other list.
+    pub tcp: Option<(u32, u32)>,
+}
+
+/// The `-T f` fields of the `struct xsocket` at `at` in `rec`: all 0 where
+/// the record cannot hold a whole one there (a layout that does not fit).
+fn xsocket(rec: &[u8], at: usize) -> BsdXSocket {
+    if at.checked_add(xso::SIZE).is_none_or(|end| end > rec.len()) {
+        return BsdXSocket::default();
+    }
+    let i16_at = |o: usize| {
+        at.checked_add(o)
+            .and_then(|o| bytes_at::<2>(rec, o))
+            .map_or(0, i16::from_ne_bytes)
+    };
+    let u32_at = |o: usize| at.checked_add(o).and_then(|o| u32_at(rec, o)).unwrap_or(0);
+    BsdXSocket {
+        options: i16_at(xso::OPTIONS),
+        linger: i16_at(xso::LINGER),
+        state: i16_at(xso::STATE),
+        qlen: u32_at(xso::QLEN),
+        incqlen: u32_at(xso::INCQLEN),
+        qlimit: u32_at(xso::QLIMIT),
+        rcv_mbmax: u32_at(xso::RCV_MBMAX),
+        snd_mbmax: u32_at(xso::SND_MBMAX),
+    }
 }
 
 /// A `*.pcblist` buffer, as the C walks it (`dsock.c`, `get_tcp_pcbs()`):
@@ -345,6 +372,11 @@ pub fn pcblist(buf: &[u8], l: &PcbLayout) -> HashMap<u64, Pcb> {
         let pcb = Pcb {
             so: u64_at(rec, l.xso_so).unwrap_or(0),
             t_state: l.t_state.and_then(|o| i32_at(rec, o)),
+            xsocket: xsocket(rec, l.xsocket),
+            tcp: l
+                .t_flags
+                .zip(l.t_maxseg)
+                .and_then(|(f, m)| Some((u32_at(rec, f)?, u32_at(rec, m)?))),
         };
         if let Some(key) = u64_at(rec, l.so_pcb) {
             out.entry(key).or_insert(pcb);
@@ -354,20 +386,35 @@ pub fn pcblist(buf: &[u8], l: &PcbLayout) -> HashMap<u64, Pcb> {
     out
 }
 
-/// One `struct xfile` from `kern.file`, as far as lsof reads it: whose
-/// descriptor it is, and the kernel address of its `struct file`.
-pub fn xfiles(buf: &[u8]) -> HashMap<(i32, i32), u64> {
+/// One `struct xfile` from `kern.file`, as far as lsof reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XFile {
+    /// `xf_file`: the kernel address of the `struct file`.
+    pub file: u64,
+    /// `xf_data`: what the file is of (a pipe, a socket, a kqueue…).
+    pub data: u64,
+    /// `xf_vnode`.
+    pub vnode: u64,
+    /// `xf_flag`: the `struct file`'s `f_flag`.
+    pub flag: u32,
+}
+
+/// `kern.file`'s buffer: `struct xfile`s, keyed by whose descriptor each
+/// is. A record whose `xf_size` is not the measured one ends the list; of
+/// two records for one descriptor the first is kept.
+pub fn xfiles(buf: &[u8]) -> HashMap<(i32, i32), XFile> {
     let mut out = HashMap::new();
     for rec in buf.chunks_exact(xf::SIZE) {
         if u64_at(rec, 0) != Some(xf::SIZE as u64) {
             break;
         }
-        if let (Some(pid), Some(fd), Some(file)) = (
-            i32_at(rec, xf::PID),
-            i32_at(rec, xf::FD),
-            u64_at(rec, xf::FILE),
-        ) {
-            out.entry((pid, fd)).or_insert(file);
+        if let (Some(pid), Some(fd)) = (i32_at(rec, xf::PID), i32_at(rec, xf::FD)) {
+            out.entry((pid, fd)).or_insert(XFile {
+                file: u64_at(rec, xf::FILE).unwrap_or(0),
+                data: u64_at(rec, xf::DATA).unwrap_or(0),
+                vnode: u64_at(rec, xf::VNODE).unwrap_or(0),
+                flag: u32_at(rec, xf::FLAG).unwrap_or(0),
+            });
         }
     }
     out
@@ -433,7 +480,7 @@ pub fn unix_path(sa: &[u8]) -> &[u8] {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::layout::{PROC_AMD64, PROC_I386, XTCPCB, XUNPCB};
+    use crate::layout::{PROC_AMD64, PROC_I386, XINPCB, XTCPCB, XUNPCB};
 
     pub fn put(b: &mut [u8], off: usize, v: &[u8]) {
         b[off..off + v.len()].copy_from_slice(v);
@@ -551,6 +598,19 @@ pub(crate) mod tests {
             if let Some(o) = l.t_state {
                 put(&mut r, o, &st.to_ne_bytes());
             }
+            // The `-T f` fields, from each layout's own `xsocket`.
+            put(&mut r, l.xsocket + xso::OPTIONS, &(-2i16).to_ne_bytes());
+            put(&mut r, l.xsocket + xso::LINGER, &7i16.to_ne_bytes());
+            put(&mut r, l.xsocket + xso::STATE, &0x102i16.to_ne_bytes());
+            put(&mut r, l.xsocket + xso::QLEN, &1u32.to_ne_bytes());
+            put(&mut r, l.xsocket + xso::INCQLEN, &2u32.to_ne_bytes());
+            put(&mut r, l.xsocket + xso::QLIMIT, &3u32.to_ne_bytes());
+            put(&mut r, l.xsocket + xso::RCV_MBMAX, &4u32.to_ne_bytes());
+            put(&mut r, l.xsocket + xso::SND_MBMAX, &5u32.to_ne_bytes());
+            if let (Some(f), Some(m)) = (l.t_flags, l.t_maxseg) {
+                put(&mut r, f, &0x204u32.to_ne_bytes());
+                put(&mut r, m, &1448u32.to_ne_bytes());
+            }
             b.extend(r);
         }
         if tail > 0 {
@@ -559,6 +619,32 @@ pub(crate) mod tests {
             b.extend(t);
         }
         b
+    }
+
+    /// What `pcb_buf` puts in each record's `xsocket`.
+    const XSO: BsdXSocket = BsdXSocket {
+        options: -2,
+        linger: 7,
+        state: 0x102,
+        qlen: 1,
+        incqlen: 2,
+        qlimit: 3,
+        rcv_mbmax: 4,
+        snd_mbmax: 5,
+    };
+
+    /// Each list's `xsocket` is where its `xso_so` and `so_pcb`, measured
+    /// first, say it is (`xsocket`'s 8 and 16), and fits in the record.
+    #[test]
+    fn each_lists_xsocket_is_where_its_measured_fields_say() {
+        for l in [XTCPCB, XINPCB, XUNPCB] {
+            assert_eq!(l.xso_so, l.xsocket + 8);
+            assert_eq!(l.so_pcb, l.xsocket + 16);
+            assert!(l.xsocket + xso::SIZE <= l.len as usize);
+        }
+        // A record too short for a whole `xsocket` there gives none of it.
+        assert!(xsocket(&[0xffu8; xso::SIZE - 1], 0) == BsdXSocket::default());
+        assert!(xsocket(&[0xffu8; xso::SIZE], 0) != BsdXSocket::default());
     }
 
     #[test]
@@ -570,7 +656,9 @@ pub(crate) mod tests {
             m[&0x20],
             Pcb {
                 so: 0x21,
-                t_state: Some(4)
+                t_state: Some(4),
+                xsocket: XSO,
+                tcp: Some((0x204, 1448)),
             }
         );
         let u = pcb_buf(&XUNPCB, 32, &[(0x30, 0x31, 0)], 32);
@@ -578,9 +666,13 @@ pub(crate) mod tests {
             pcblist(&u, &XUNPCB)[&0x30],
             Pcb {
                 so: 0x31,
-                t_state: None
+                t_state: None,
+                xsocket: XSO,
+                tcp: None,
             }
         );
+        let i = pcb_buf(&XINPCB, 64, &[(0x40, 0x41, 0)], 64);
+        assert_eq!(pcblist(&i, &XINPCB)[&0x40].xsocket, XSO);
         // A record cut short, a head that points past the end, nothing.
         let mut cut = pcb_buf(&XTCPCB, 64, &[(0x10, 0x11, 1)], 0);
         cut.truncate(64 + 100);
@@ -689,7 +781,30 @@ pub(crate) mod tests {
         put(&mut r, xf::PID, &9i32.to_ne_bytes());
         put(&mut r, xf::FD, &4i32.to_ne_bytes());
         put(&mut r, xf::FILE, &0xffff_f800_0000_1000u64.to_ne_bytes());
-        assert_eq!(xfiles(&r)[&(9, 4)], 0xffff_f800_0000_1000);
+        put(&mut r, xf::DATA, &0xffff_f800_0000_2000u64.to_ne_bytes());
+        put(&mut r, xf::VNODE, &0xffff_f800_0000_3000u64.to_ne_bytes());
+        put(&mut r, xf::FLAG, &0x8000_0003u32.to_ne_bytes());
+        assert_eq!(
+            xfiles(&r)[&(9, 4)],
+            XFile {
+                file: 0xffff_f800_0000_1000,
+                data: 0xffff_f800_0000_2000,
+                vnode: 0xffff_f800_0000_3000,
+                flag: 0x8000_0003,
+            }
+        );
         assert!(xfiles(&r[..64]).is_empty());
+        // A second record for the descriptor is not the one kept, and a
+        // record of another size ends the list.
+        let mut two = r.clone();
+        let mut again = r.clone();
+        put(&mut again, xf::FILE, &1u64.to_ne_bytes());
+        two.extend(&again);
+        let mut bad = r.clone();
+        put(&mut bad, 0, &64u64.to_ne_bytes());
+        put(&mut bad, xf::FD, &5i32.to_ne_bytes());
+        two.extend(&bad);
+        let m = xfiles(&two);
+        assert_eq!((m.len(), m[&(9, 4)].file), (1, 0xffff_f800_0000_1000));
     }
 }

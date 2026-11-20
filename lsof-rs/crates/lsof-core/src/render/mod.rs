@@ -14,13 +14,14 @@ pub mod escape;
 pub mod fflags;
 pub mod fields;
 pub mod json;
+pub mod sockopt;
 pub mod table;
 
 use crate::model::{AccessMode, FileType, OpenFile, Protocol, SocketInfo};
 use crate::selection::TcpInfoFlags;
 
 pub use escape::Escaper;
-pub use fflags::FileFlags;
+pub use fflags::{FileFlags, FsShow, FsValues};
 pub use table::TableOpts;
 
 /// Output cut where the C's stdio calls cut it: each `printf()`, `fputs()`
@@ -241,8 +242,22 @@ pub(crate) fn lock_code(f: &OpenFile) -> Option<char> {
 /// sockets and for nothing else: the table's state/queue suffix and JSON's
 /// `tcp_info` object are printed for these rows alone. A packet, raw or ICMP
 /// row has none (DIVERGENCES 35).
-pub(crate) fn tcp_info_socket(f: &OpenFile) -> Option<&SocketInfo> {
+///
+/// A FreeBSD row says for itself ([`crate::model::BsdSocket`]): the C keeps a
+/// TCP/TPI record for a TCP socket whose `xtcpcb` it found, and the table
+/// also prints the facts of any other socket when `-T q` is asked for, every
+/// FreeBSD socket having its queues (`print.c:1611-1622`). `show` is `None`
+/// for `-F` and JSON, which print the record's alone (`print.c:1996`,
+/// `:2385`).
+pub(crate) fn tcp_info_socket(f: &OpenFile, show: Option<TcpInfoFlags>) -> Option<&SocketInfo> {
     let sock = f.socket.as_deref()?;
+    if let Some(tcp) = sock.tcp.as_ref() {
+        if let Some(b) = &tcp.bsd {
+            let queues = tcp.recv_queue.is_some() || tcp.send_queue.is_some();
+            let shown = b.record || show.is_some_and(|s| s.queue && queues);
+            return shown.then_some(sock);
+        }
+    }
     let annotated = matches!(
         sock.protocol,
         Protocol::Tcp | Protocol::Udp | Protocol::UdpLite
