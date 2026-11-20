@@ -1626,7 +1626,7 @@ impl Search<'_, '_> {
                     // matching nothing: every set one fewer can (make the
                     // last again), and more, so that they stop changing
                     // within a pass for each set there can be.
-                    let most = max.map_or(u32::MAX, |m| m);
+                    let most = max.unwrap_or(u32::MAX);
                     let mut sets: Vec<Mask> = vec![0];
                     let mut all: Vec<Mask> = Vec::new();
                     let mut pass = 0u32;
