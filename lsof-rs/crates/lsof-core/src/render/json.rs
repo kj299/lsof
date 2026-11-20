@@ -125,7 +125,15 @@ impl<'o> Members<'o> {
 
 /// The process's keys, in the C's order (`json_print_proc_fields()`,
 /// `print.c:2049-2093`): pid, tid, task_cmd, pgid, ppid, command, uid, login.
-fn proc_members(m: &mut Members<'_>, p: &Process, o: &JsonOpts<'_>) {
+/// The login is `login`'s, asked once what is before it is in `w`, as the
+/// C's `printuid()` is asked there (`:2088`).
+fn proc_members(
+    m: &mut Members<'_>,
+    p: &Process,
+    o: &JsonOpts<'_>,
+    w: &mut dyn Write,
+    login: &mut dyn FnMut(&Process) -> Option<Box<[u8]>>,
+) -> io::Result<()> {
     m.num("pid", p.pid);
     if o.want('K') {
         if let Some(tid) = p.tid {
@@ -159,10 +167,12 @@ fn proc_members(m: &mut Members<'_>, p: &Process, o: &JsonOpts<'_>) {
         }
     }
     if o.want('L') && !o.numeric_ids {
-        if let Some(login) = &p.user {
-            m.str("login", login);
+        m.out.write_to(w)?;
+        if let Some(login) = login(p) {
+            m.str("login", &String::from_utf8_lossy(&login));
         }
     }
+    Ok(())
 }
 
 /// The file's keys, in the C's order (`json_print_file()`,
@@ -287,11 +297,13 @@ fn file_members(m: &mut Members<'_>, f: &OpenFile, o: &JsonOpts<'_>) {
 
 /// `-J`: `{"lsof_version":V,"processes":[...]}` and a newline, written to `w`
 /// one process at a time. A process with no file left prints nothing, as in
-/// the C; an empty result is the envelope alone.
+/// the C; an empty result is the envelope alone. Each process's login is
+/// `login`'s (`proc_members`).
 pub fn write_aggregated<W: Write + ?Sized>(
     w: &mut W,
     procs: &[Process],
     o: &JsonOpts<'_>,
+    login: &mut dyn FnMut(&Process) -> Option<Box<[u8]>>,
 ) -> io::Result<()> {
     let mut buf = Calls::new();
     // `json_open_envelope()`: one `printf()`, the version `%s` raw.
@@ -309,7 +321,7 @@ pub fn write_aggregated<W: Write + ?Sized>(
         first = false;
         buf.putc(b'{');
         let mut m = Members::new(&mut buf);
-        proc_members(&mut m, p, o);
+        proc_members(&mut m, p, o, &mut WriteRef(w), login)?;
         // `if (sep) putchar(','); printf("\"files\":[")`.
         if !m.first {
             buf.putc(b',');
@@ -347,18 +359,20 @@ impl<W: Write + ?Sized> Write for WriteRef<'_, W> {
 }
 
 /// `-j`: one object per file, the process's keys and then the file's, each
-/// ending in a newline; no envelope and no version.
+/// ending in a newline; no envelope and no version. The login is asked
+/// once a line, as the C asks it (`proc_members`).
 pub fn write_lines<W: Write + ?Sized>(
     w: &mut W,
     procs: &[Process],
     o: &JsonOpts<'_>,
+    login: &mut dyn FnMut(&Process) -> Option<Box<[u8]>>,
 ) -> io::Result<()> {
     let mut buf = Calls::new();
     for p in procs {
         for f in &p.files {
             buf.putc(b'{');
             let mut m = Members::new(&mut buf);
-            proc_members(&mut m, p, o);
+            proc_members(&mut m, p, o, &mut WriteRef(w), login)?;
             file_members(&mut m, f, o);
             // `printf("}\n")`.
             buf.call("}\n");
@@ -372,7 +386,7 @@ pub fn write_lines<W: Write + ?Sized>(
 pub fn render_aggregated(procs: &[Process], o: &JsonOpts<'_>) -> String {
     let mut v = Vec::new();
     // A Vec sink cannot fail, and every byte written came from a `str`.
-    let _ = write_aggregated(&mut v, procs, o);
+    let _ = write_aggregated(&mut v, procs, o, &mut |p| p.login_bytes().map(Box::from));
     String::from_utf8(v).unwrap_or_default()
 }
 
@@ -380,12 +394,64 @@ pub fn render_aggregated(procs: &[Process], o: &JsonOpts<'_>) -> String {
 pub fn render_lines(procs: &[Process], o: &JsonOpts<'_>) -> String {
     let mut v = Vec::new();
     // A Vec sink cannot fail, and every byte written came from a `str`.
-    let _ = write_lines(&mut v, procs, o);
+    let _ = write_lines(&mut v, procs, o, &mut |p| p.login_bytes().map(Box::from));
     String::from_utf8(v).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// The login is asked once what is before it is written, as the C's
+    /// `printuid()` is asked once it is in stdout's buffer: once a `-j`
+    /// line, once a `-J` process (DIVERGENCES 39).
+    #[test]
+    fn a_login_is_asked_once_what_is_before_it_is_written() {
+        use std::cell::RefCell;
+        struct Shared<'a>(&'a RefCell<Vec<u8>>);
+        impl Write for Shared<'_> {
+            fn write(&mut self, d: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(d);
+                Ok(d.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(2);
+        assert_eq!(p.files.len(), 2);
+        let o = JsonOpts {
+            only: Some(&['p', 'u', 'L', 'f']),
+            tcp_show: TcpInfoFlags::default(),
+            file_flags: FileFlags::Off,
+            numeric_ids: false,
+            version: "v",
+        };
+        for lines in [true, false] {
+            let out = RefCell::new(Vec::new());
+            let mut at = Vec::new();
+            let mut login = |_: &Process| {
+                at.push(out.borrow().len());
+                Some(b"who"[..].into())
+            };
+            let mut sink = Shared(&out);
+            let got = if lines {
+                write_lines(&mut sink, std::slice::from_ref(&p), &o, &mut login)
+            } else {
+                write_aggregated(&mut sink, std::slice::from_ref(&p), &o, &mut login)
+            };
+            assert!(got.is_ok());
+            let text = String::from_utf8_lossy(&out.borrow()).into_owned();
+            assert_eq!(at.len(), if lines { 2 } else { 1 }, "{text}");
+            for &a in &at {
+                assert!(
+                    text[..a].ends_with(&format!("\"pid\":{}", p.pid)),
+                    "{at:?} {text}"
+                );
+            }
+            assert!(text.contains("\"login\":\"who\""), "{text}");
+        }
+    }
     use super::*;
 
     /// A member as `json_print_key()` and its value's printer write it, one
@@ -418,7 +484,10 @@ mod tests {
             version: "0",
         };
         let mut log = Log(Vec::new());
-        write_lines(&mut log, std::slice::from_ref(&p), &o).unwrap();
+        write_lines(&mut log, std::slice::from_ref(&p), &o, &mut |p| {
+            p.login_bytes().map(Box::from)
+        })
+        .unwrap();
         let pid = p.pid.to_string();
         let want = [
             "{", "\"", "p", "i", "d", "\":", &pid, ",", "\"", "s", "i", "z", "e", "\":", "\"42\"",

@@ -1,15 +1,24 @@
-//! uid → account name, without `libc`.
+//! uid ↔ account name, as glibc gives them, and the password file where
+//! glibc is not asked.
 //!
-//! `getpwuid` would need a C dependency, so this reads `/etc/passwd` itself,
-//! by the rules glibc's `files` service reads it with (`nss_files`, its
-//! `LINE_PARSER` for `struct passwd`; [`parse_line`]), which is what
-//! `getpwuid(3)` returns where `/etc/nsswitch.conf` says `passwd: files`
-//! (DIVERGENCES 70); where it says `compat` the file is read by
-//! `nss_compat`'s rules ([`compat_line`]), and where glibc's walk through
-//! the line's sources reaches neither, not at all (DIVERGENCES 39). That misses accounts served only by another NSS source
-//! (LDAP, SSSD, systemd-homed: item 39), which is why an unknown uid falls
-//! back to its number rather than to an error: lsof's USER column showing
-//! `1000` is honest, showing the wrong name would not be.
+//! The C asks `getpwnam()` for a `-u` login and `getpwuid()` for an owner it
+//! prints by name, and glibc answers from the sources `/etc/nsswitch.conf`
+//! gives `passwd` (files, compat, LDAP, SSSD, systemd-homed, NIS, Hesiod,
+//! nscd before them). lsof-rs asks the same functions, reentrant, through
+//! `lsof-getpw` (DIVERGENCES 39), the one crate that may call C for it;
+//! this one stays `forbid(unsafe_code)`.
+//!
+//! Where glibc itself could read memory it does not own, or recurse until
+//! its stack is gone, it is not asked ([`glibc_may_be_asked`]), and under
+//! miri, which cannot call C, nothing can be: there the password file is
+//! read here, by the rules glibc's `files` service reads it with
+//! (`nss_files`, its `LINE_PARSER` for `struct passwd`; [`parse_line`]),
+//! and by `nss_compat`'s ([`compat_line`]) where nsswitch.conf says
+//! `compat`, and not at all where glibc's walk through the line's sources
+//! reaches neither: what lsof-rs did everywhere until 2026-11-20 (DIVERGENCES
+//! 70, 39). An unknown uid falls back to its number rather than to an
+//! error, as in the C: lsof's USER column showing `1000` is honest, showing
+//! the wrong name would not be.
 //!
 //! The C keeps each name it found, cut to `LOGINML` (32) bytes, and nothing
 //! it did not: a uid with no name is looked up again each time, and under
@@ -35,8 +44,8 @@ pub const LOGINML: usize = 32;
 struct Cache {
     /// The names found, cut to [`LOGINML`]: the C's UID cache.
     found: HashMap<u32, Box<[u8]>>,
-    /// The file as read for this cycle, uid → first name, read at the first
-    /// uid not in `found`. The C's `getpwuid()` reads the file at every such
+    /// Where glibc is not asked: the file as read for this cycle, uid →
+    /// first name, read at the first uid not in `found`. The C's `getpwuid()` reads the file at every such
     /// call; here once per cycle ([`new_cycle`] forgets it), which is the
     /// same file unless it is written in the instant between two calls.
     snapshot: Option<ByUid>,
@@ -154,6 +163,92 @@ fn passwd_sources() -> Option<&'static [lsof_core::netnames::NssSource<'static>]
             )
         })
         .as_deref()
+}
+
+/// Whether glibc may be asked for an account, by what nsswitch.conf (read
+/// once a run, [`nsswitch`]) holds; where not, lsof-rs reads the password
+/// file itself, as it did before it asked glibc, and gives the answer it
+/// gave then. glibc 2.39 reads memory it does not own, or recurses until its
+/// stack is gone, where a database it walks for a `passwd` lookup has no
+/// source, and is not asked where any could (measured, DIVERGENCES 39):
+///
+/// * `passwd:` lists no source, or opens with an action (`passwd:
+///   [NOTFOUND=return] files`): `__nss_lookup()` reads past the end of the
+///   heap block its parser allocated for the empty list (valgrind: invalid
+///   reads at `nss/nsswitch.c:73` and `:82`). The C survives that as the
+///   heap allows (200 of 200 runs of `-u root` here), and finds nothing; so
+///   does the file's reader, whose walk over no source finds nothing;
+/// * `passwd:` names `compat`, and `netgroup:` (glibc's default `nis`)
+///   lists no source or opens with an action: `compat` asks `innetgr()` at
+///   a `+@group` or `-@group` line, whose walk over `netgroup`'s empty list
+///   reads past the same block (valgrind, `getpwnam_r()` through
+///   `_nss_compat_getpwnam_r` and `innetgr`). The reader takes nobody to be
+///   in a netgroup, as glibc finds where it survives;
+/// * `passwd:` names `compat`, and `passwd_compat:` (default `nis`) lists no
+///   source, or opens with an action, or names `compat` too: `compat` asks
+///   `passwd_compat`'s sources at a `+` line, itself among them until the
+///   stack is gone (SIGSEGV: the C exits 139 on `-u root` and on printing
+///   USER). An empty `passwd_compat` list measured clean here, and is not
+///   asked all the same: it is the same walk over no source. The reader
+///   reads `+` lines as with no NIS.
+///
+/// Every line for each of the three is looked at, not only the last, which
+/// is the one glibc 2.39 keeps: an older parser need not keep the same one
+/// (glibc before 2.33 had another), and a line that is not the one kept
+/// costs nothing but the sources glibc would have asked. So a file with a
+/// second `passwd_compat:` line naming `files` after one naming `compat` is
+/// read here, its `+` lines as with no NIS, where glibc 2.39 follows them
+/// through `files` (DIVERGENCES 39, kept). Other sources are not looked
+/// into: what an LDAP or SSSD module asks in turn (a `hosts` lookup, say)
+/// is not known here (THREAT-MODEL).
+///
+/// A file glibc refuses (`hosts: files [`) is asked: glibc fails each
+/// lookup with `EINVAL`, and nothing is found, as here. glibc reads the
+/// file again when it changes, where this is decided once a run: a file
+/// written into one of those shapes after lsof-rs started is asked, as the
+/// C would be.
+fn glibc_may_be_asked() -> bool {
+    static ASK: OnceLock<bool> = OnceLock::new();
+    *ASK.get_or_init(|| may_ask(nsswitch()))
+}
+
+/// Every list of sources a C library may read for `database` from `conf`:
+/// each of its lines', the one glibc 2.39 keeps (the last) among them.
+/// `None` where glibc refuses the file. A database no line names has
+/// glibc's built-in list (`files` for `passwd`, `nis` for `passwd_compat`
+/// and `netgroup`), which is neither empty nor `compat`, and so is not
+/// looked at.
+fn every_list<'a>(
+    conf: &'a lsof_core::netnames::Conf,
+    database: &[u8],
+) -> Option<Vec<Vec<lsof_core::netnames::NssSource<'a>>>> {
+    let mut lists = Vec::new();
+    lsof_core::netnames::nsswitch_lines(conf, database, |sources| lists.push(sources))?;
+    Some(lists)
+}
+
+/// [`glibc_may_be_asked`] for the nsswitch.conf `conf`.
+fn may_ask(conf: &lsof_core::netnames::Conf) -> bool {
+    use lsof_core::netnames::NssSource;
+    let Some(passwd) = every_list(conf, b"passwd") else {
+        return true;
+    };
+    let empty = |lists: &[Vec<NssSource<'_>>]| lists.iter().any(Vec::is_empty);
+    let compat =
+        |lists: &[Vec<NssSource<'_>>]| lists.iter().flatten().any(|s| s.module == b"compat");
+    if empty(&passwd) {
+        return false;
+    }
+    if !compat(&passwd) {
+        return true;
+    }
+    let (Some(passwd_compat), Some(netgroup)) = (
+        every_list(conf, b"passwd_compat"),
+        every_list(conf, b"netgroup"),
+    ) else {
+        return true;
+    };
+    !(empty(&passwd_compat) || compat(&passwd_compat) || empty(&netgroup))
 }
 
 /// How `sources`, the ones nsswitch.conf lists for `passwd`, answer one
@@ -374,20 +469,21 @@ fn strtoul(s: &[u8]) -> (u64, usize) {
 }
 
 /// A `-u` value as the C's `enter_uid()` reads it: all digits is a UID as it
-/// stands, anything else is a login name looked up in the password file —
-/// the first entry with that name, as `getpwnam(3)` returns it, compared as
-/// bytes (a login need not be UTF-8; DIVERGENCES 92).
+/// stands, anything else is a login name, which glibc's `getpwnam()` is
+/// asked for (DIVERGENCES 39), twice, as the C asks it (`arg.c:2030`, then
+/// `lsof_select_login()`, `lsof.c:1220`; measured: under Hesiod both
+/// binaries send the name's query twice), the second answer the one kept:
+/// a login the first finds and the second does not is
+/// [`lsof_core::UserLookup::Lost`], the C's `Error()` at once.
+/// Where glibc is not asked ([`glibc_may_be_asked`], and under miri) the
+/// password file's first entry with that name, compared as bytes (a login
+/// need not be UTF-8; DIVERGENCES 92).
 ///
-/// Two departures, both deliberate:
-///
-/// * **No wrap-around.** The C accumulates the digits in a `uid_t` and never
-///   checks for overflow, so `-u 4294967296` is UID 0 and lists root's
-///   processes — measured. Here a number that does not fit is not a UID, is
-///   then looked up as a name, and is almost certainly `Unknown` (fatal).
-/// * **`/etc/passwd` only.** Without libc there is no `getpwnam`, so an account
-///   served only by another NSS source (LDAP, SSSD, systemd-homed) cannot be
-///   named here and is reported as unknown; its numeric UID still works. The
-///   USER column has the same limit, and shows the number for such an account.
+/// **No wrap-around**, deliberately: the C accumulates the digits in a
+/// `uid_t` and never checks for overflow, so `-u 4294967296` is UID 0 and
+/// lists root's processes — measured. Here a number that does not fit is
+/// not a UID, is then looked up as a name, and is almost certainly
+/// `Unknown` (fatal).
 pub fn lookup(value: &[u8]) -> lsof_core::UserLookup {
     use lsof_core::UserLookup;
     if !value.is_empty() && value.iter().all(u8::is_ascii_digit) {
@@ -398,10 +494,56 @@ pub fn lookup(value: &[u8]) -> lsof_core::UserLookup {
             return UserLookup::Uid(uid);
         }
     }
-    match names_map().get(passwd_sources(), value) {
+    let found = if glibc_may_be_asked() {
+        asked_by_name(|| lsof_getpw::by_name(value))
+    } else {
+        None
+    };
+    let uid = match found {
+        Some(Twice::Found(uid)) => Some(uid),
+        Some(Twice::NotFound) => None,
+        Some(Twice::Lost) => return UserLookup::Lost,
+        None => names_map().get(passwd_sources(), value),
+    };
+    match uid {
         Some(uid) => UserLookup::Uid(uid),
         None => UserLookup::Unknown,
     }
+}
+
+/// What glibc said of a login, asked twice as the C asks it.
+#[derive(Debug, PartialEq, Eq)]
+enum Twice {
+    /// Both lookups found it: the second's uid, the one the C keeps.
+    Found(u32),
+    /// The first found nothing: the C's `can't get UID`, read on after.
+    NotFound,
+    /// The first found it and the second did not: the C's `Error()`.
+    Lost,
+}
+
+/// glibc's answer for a login, asked through `ask` as the C asks it, twice (`arg.c:2030`, `lsof.c:1220`): `None` where it cannot be
+/// asked (miri) or an answer does not fit in `lsof_getpw::CAP` bytes
+/// ([`glibc_answer`]), and the file is read instead.
+fn asked_by_name(mut ask: impl FnMut() -> Option<lsof_getpw::Answer>) -> Option<Twice> {
+    let mut once = || glibc_answer(ask()?).map(|found| found.map(|a| a.uid));
+    if once()?.is_none() {
+        return Some(Twice::NotFound);
+    }
+    Some(match once()? {
+        Some(uid) => Twice::Found(uid),
+        None => Twice::Lost,
+    })
+}
+
+/// What glibc answered, as lsof-rs takes it: the account, or none; `None`
+/// where the answer would not fit in `lsof_getpw::CAP` (16 MiB), where
+/// glibc's `getpwnam()` would grow its buffer on (a password file with a
+/// line that long fails every lookup, measured: the C finds root behind a
+/// 20 MB line, in 42 MB): the password file is then read here, a line to
+/// 1 MiB, as before glibc was asked, which finds root there too.
+fn glibc_answer(answer: lsof_getpw::Answer) -> Option<Option<lsof_getpw::Account>> {
+    (!answer.too_large()).then(|| answer.found())
 }
 
 /// name → uid as each source that reads the password file has it.
@@ -504,10 +646,18 @@ pub fn name_for(uid: u32, numeric: bool) -> Option<Box<[u8]>> {
     if let Some(name) = c.found.get(&uid) {
         return Some(name.clone());
     }
-    let name = c
-        .snapshot
-        .get_or_insert_with(read_passwd)
-        .get(passwd_sources(), uid)?;
+    let asked = if glibc_may_be_asked() {
+        lsof_getpw::by_uid(uid).and_then(glibc_answer)
+    } else {
+        None
+    };
+    let name = match asked {
+        Some(found) => login_name(&found?.name),
+        None => c
+            .snapshot
+            .get_or_insert_with(read_passwd)
+            .get(passwd_sources(), uid)?,
+    };
     c.found.insert(uid, name.clone());
     Some(name)
 }
@@ -542,6 +692,165 @@ fn new_cycle_of(c: &mut Cache, path: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// glibc is not asked where nsswitch.conf could have it read past a heap
+    /// block or recurse until its stack is gone: a `passwd:` line with no
+    /// source (or one that opens with an action), and, where `passwd:` names
+    /// `compat`, such a `netgroup:` or `passwd_compat:` line or a
+    /// `passwd_compat:` naming `compat`, any line of each, not the last
+    /// alone; everywhere else it is, a file it refuses included (measured:
+    /// `EINVAL`, and nothing read out of bounds; DIVERGENCES 39).
+    #[test]
+    fn glibc_is_asked_but_where_it_would_crash() {
+        use lsof_core::netnames::Conf;
+        let ask = |text: &str| may_ask(&Conf::Text(text.as_bytes().to_vec()));
+        assert!(may_ask(&Conf::Missing), "glibc's default: files");
+        assert!(may_ask(&Conf::Unreadable), "refused: EINVAL, no read");
+        assert!(ask("passwd: files\n"));
+        assert!(ask("passwd: sss [UNAVAIL=return] files\n"));
+        assert!(ask("passwd: files\nservices: files [\n"), "refused");
+        assert!(ask("hosts:\n"), "another database's empty line");
+        // No source, or an action first.
+        assert!(!ask("passwd:\n"));
+        assert!(!ask("passwd: \t \n"));
+        assert!(!ask("hosts: files\npasswd:\n"));
+        assert!(!ask("passwd: [NOTFOUND=return] files\n"));
+        assert!(!ask("passwd:[SUCCESS=return]\n"));
+        // Any line with no source, the last or not (glibc 2.39 reads the
+        // last); one no newline ends is none.
+        assert!(!ask("passwd:\npasswd: files\n"));
+        assert!(!ask("passwd: files\npasswd:\n"));
+        assert!(ask("passwd:"));
+        // `compat` asking itself.
+        assert!(!ask("passwd: compat\npasswd_compat: compat\n"));
+        assert!(!ask("passwd: files compat\npasswd_compat: nis compat\n"));
+        assert!(!ask("passwd_compat: compat\npasswd: compat\n"));
+        assert!(ask("passwd: compat\n"), "passwd_compat's default is nis");
+        assert!(ask("passwd: compat\npasswd_compat: files\n"));
+        assert!(ask("passwd: files\npasswd_compat: compat\n"), "no compat");
+        // `passwd_compat` with no source: measured clean, and not asked.
+        assert!(!ask("passwd: compat\npasswd_compat:\n"));
+        assert!(!ask(
+            "passwd: compat\npasswd_compat: [NOTFOUND=return] files\n"
+        ));
+        assert!(ask("passwd: files\npasswd_compat:\n"), "no compat");
+        // `netgroup` with no source, where `compat` asks innetgr().
+        assert!(!ask("passwd: compat\nnetgroup:\n"));
+        assert!(!ask("passwd: compat\nnetgroup: [NOTFOUND=return] files\n"));
+        assert!(!ask("passwd: files compat\nnetgroup: \t\n"));
+        assert!(ask("passwd: compat\nnetgroup: files\n"));
+        assert!(ask("passwd: compat\nnetgroup: nis\n"));
+        assert!(ask("passwd: files\nnetgroup:\n"), "files asks no netgroup");
+        assert!(ask("passwd: compat\nnetgroups:\n"), "no such database");
+        // Every line, not the last alone: another C library's parser may
+        // keep another.
+        assert!(!ask(
+            "passwd: compat\npasswd_compat: compat\npasswd_compat: files\n"
+        ));
+        assert!(!ask("passwd: compat\nnetgroup:\nnetgroup: files\n"));
+        assert!(!ask(
+            "passwd: compat\npasswd_compat:\npasswd_compat: files\n"
+        ));
+        assert!(!ask(
+            "passwd: compat\npasswd: files\npasswd_compat: compat\n"
+        ));
+        assert!(!ask("passwd: compat\npasswd: files\nnetgroup:\n"));
+        assert!(ask("passwd: files\npasswd_compat: compat\nnetgroup:\n"));
+        // A line no newline ends is none, for any of the three.
+        assert!(ask("passwd: compat\nnetgroup:"));
+        assert!(ask("passwd: compat\npasswd_compat: compat"));
+        // A source's name is matched as written: `COMPAT` is no library.
+        assert!(ask("passwd: COMPAT\npasswd_compat: compat\n"));
+        assert!(ask("passwd: compat\npasswd_compat: Compat\n"));
+    }
+
+    /// A login is asked twice, as the C asks it, and the second answer is
+    /// the one kept: one found and then not is the C's `Error()`
+    /// ([`Twice::Lost`]); nothing found the first time is not asked again;
+    /// an answer past the cap, either time, leaves the file to be read.
+    #[test]
+    fn a_login_is_asked_twice_and_the_second_answer_decides() {
+        use lsof_getpw::{Account, Answer};
+        let found = |uid| {
+            Answer::Found(Account {
+                name: Vec::new(),
+                uid,
+            })
+        };
+        let asked = |answers: Vec<Option<Answer>>| {
+            let mut answers = answers.into_iter();
+            let mut calls = 0;
+            let got = asked_by_name(|| {
+                calls += 1;
+                answers.next().flatten()
+            });
+            (got, calls)
+        };
+        assert_eq!(
+            asked(vec![Some(found(5)), Some(found(6))]),
+            (Some(Twice::Found(6)), 2)
+        );
+        assert_eq!(
+            asked(vec![Some(found(5)), Some(Answer::NotFound)]),
+            (Some(Twice::Lost), 2)
+        );
+        assert_eq!(
+            asked(vec![Some(found(5)), Some(Answer::Failed(5))]),
+            (Some(Twice::Lost), 2)
+        );
+        assert_eq!(
+            asked(vec![Some(Answer::NotFound), Some(found(5))]),
+            (Some(Twice::NotFound), 1)
+        );
+        assert_eq!(asked(vec![None]), (None, 1), "miri: nothing asked");
+        assert_eq!(asked(vec![Some(Answer::Failed(34))]), (None, 1));
+        assert_eq!(
+            asked(vec![Some(found(5)), Some(Answer::Failed(34))]),
+            (None, 2)
+        );
+    }
+
+    /// An answer glibc could not fit in the cap is no answer, and the file
+    /// is read here; any other is glibc's, a failure being no account.
+    #[test]
+    fn an_answer_past_the_cap_leaves_the_file_to_be_read() {
+        use lsof_getpw::{Account, Answer};
+        assert_eq!(glibc_answer(Answer::Failed(34)), None);
+        assert_eq!(glibc_answer(Answer::Failed(5)), Some(None));
+        assert_eq!(glibc_answer(Answer::NotFound), Some(None));
+        let root = Account {
+            name: b"root".to_vec(),
+            uid: 0,
+        };
+        assert_eq!(glibc_answer(Answer::Found(root.clone())), Some(Some(root)));
+    }
+
+    /// The host's own root, asked of glibc and read from the file: the
+    /// same uid and name, by name, by uid, and through the C's double
+    /// `getpwnam()`; under miri the file alone.
+    #[test]
+    fn root_is_root_however_it_is_asked() {
+        if !glibc_may_be_asked() {
+            return;
+        }
+        assert_eq!(lookup(b"root"), lsof_core::UserLookup::Uid(0));
+        assert_eq!(lookup(b"0"), lsof_core::UserLookup::Uid(0));
+        assert_eq!(
+            lookup(b"lsof-rs-no-such-account"),
+            lsof_core::UserLookup::Unknown
+        );
+        let asked = asked_by_name(|| lsof_getpw::by_name(b"root"));
+        if cfg!(miri) {
+            assert_eq!(asked, None, "miri cannot call C");
+        } else {
+            assert_eq!(asked, Some(Twice::Found(0)));
+            assert_eq!(
+                asked_by_name(|| lsof_getpw::by_name(b"lsof-rs-no-such-account")),
+                Some(Twice::NotFound)
+            );
+        }
+        assert_eq!(name_for(0, false).as_deref(), Some(&b"root"[..]));
+    }
 
     #[test]
     fn a_number_is_shown_where_there_is_no_name() {

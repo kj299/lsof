@@ -301,58 +301,43 @@ lists these differences.
     )
 }
 
-/// The owners the C's `printuid()` warns about as it prints `procs`, one per
-/// call, in the order it makes them: `lsof: no pwd entry for UID N` for an
-/// owner no password entry names, each time it is looked up — the C caches a
-/// name it found and nothing it did not (DIVERGENCES 36, measured with UID
-/// 65000). It looks one up wherever it prints a login:
-///
-/// * the table, twice per row: once as it sizes the USER column and once as
-///   it prints it (`print.c:937-941`), every sizing call before any printing
-///   one; `-t` prints no USER;
-/// * `-F`, once per process set, when `L` is selected (`print.c:2224`);
-/// * `-J`, once per process, and `-j`, once per file, when `login` is
-///   (`print.c:2088`).
-///
-/// None under `-l`, which prints numbers and looks nothing up (`Futol`), and
-/// none under `-w` or `-t` (`Fwarn`, which `+w` clears again: `omit_unreadable`
-/// is that flag). An owner with a name, or with no uid at all (Windows), is
-/// never one.
-fn pwd_warnings(procs: &[lsof_core::Process], format: &Format, sel: &Selection) -> Vec<u32> {
-    if sel.omit_unreadable || sel.numeric_ids {
-        return Vec::new();
+/// The C's `printuid()`, for the listing's writers, which call it where
+/// the C calls it (DIVERGENCES 36, 39): the table twice a row, once as it
+/// sizes USER and once as it prints it (`print.c:937-941`), every sizing
+/// call before any printing one, and `-t` prints no USER; `-F` once a
+/// process set, where `L` is selected (`:2224`); `-J` once a process and
+/// `-j` once a line, where `login` is (`:2088`). The login of `p`'s owner:
+/// the one the backend named it with as it gathered it (Windows), or the
+/// backend's for its uid ([`lsof_core::Backend::login_name`], which keeps
+/// the names it found and nothing else, as the C's cache does); `None`
+/// prints the number. Under `-l` nothing is asked (`Futol`). Where no login
+/// is found, `warn` is told the uid, `lsof: no pwd entry for UID N`, each
+/// time, unless `-w` or `-t` (`Fwarn`, which `+w` clears again:
+/// `omit_unreadable`) silences it.
+fn printuid(
+    p: &lsof_core::Process,
+    backend: &dyn lsof_core::Backend,
+    sel: &Selection,
+    warn: &mut dyn FnMut(u32),
+) -> Option<Box<[u8]>> {
+    if let Some(login) = p.login_bytes() {
+        return Some(login.into());
     }
-    let nameless = |p: &lsof_core::Process| if p.user.is_none() { p.uid } else { None };
-    let wants_login = |only: Option<&[char]>| {
-        only.map_or_else(|| fields::field_is_default('L'), |s| s.contains(&'L'))
-    };
-    match format {
-        Format::Table if sel.terse => Vec::new(),
-        Format::Table => {
-            // One per row, a process with no file left being one blank row.
-            let rows: Vec<u32> = procs
-                .iter()
-                .flat_map(|p| std::iter::repeat_n(nameless(p), p.files.len().max(1)))
-                .flatten()
-                .collect();
-            rows.iter().chain(&rows).copied().collect()
-        }
-        Format::Fields { only, .. } if wants_login(only.as_deref()) => {
-            procs.iter().filter_map(nameless).collect()
-        }
-        Format::Json(j) if wants_login(j.only.as_deref()) => procs
-            .iter()
-            .filter(|p| !p.files.is_empty())
-            .flat_map(|p| std::iter::repeat_n(nameless(p), if j.lines { p.files.len() } else { 1 }))
-            .flatten()
-            .collect(),
-        Format::Fields { .. } | Format::Json(_) => Vec::new(),
+    if sel.numeric_ids {
+        return None;
     }
+    let uid = p.uid?;
+    let login = backend.login_name(uid);
+    if login.is_none() && !sel.omit_unreadable {
+        warn(uid);
+    }
+    login
 }
 
 /// Whether printing `procs` calls the C's `printuid()` at all: where
-/// [`pwd_warnings`] says it does, for any owner. Not under `-l`, which looks
-/// nothing up (`Futol`).
+/// [`printuid`] says it does, for any owner: the table but `-t`, `-F` and
+/// JSON with `L` and a process with a file to print. Not under `-l`, which
+/// looks nothing up (`Futol`).
 #[cfg(target_os = "linux")]
 fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selection) -> bool {
     if sel.numeric_ids || procs.is_empty() {
@@ -363,7 +348,9 @@ fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selectio
     };
     match format {
         Format::Table => !sel.terse,
-        Format::Fields { only, .. } => wants_login(only.as_deref()),
+        Format::Fields { only, .. } => {
+            wants_login(only.as_deref()) && procs.iter().any(|p| !p.files.is_empty())
+        }
         Format::Json(j) => {
             wants_login(j.only.as_deref()) && procs.iter().any(|p| !p.files.is_empty())
         }
@@ -372,23 +359,18 @@ fn looks_up_logins(procs: &[lsof_core::Process], format: &Format, sel: &Selectio
 
 /// What `-F` writes of process `p` before it looks its login up: the
 /// selected fields that come before `L` (`p`, `K`, `M`, `g`, `R`, `c`, `u`),
-/// each terminated, and no end to the set, which the C never reaches.
+/// each terminated, and no end to the set, which the C never reaches: the
+/// writer's own calls up to its lookup of the login, and none after it.
 #[cfg(target_os = "linux")]
 fn before_login(p: &lsof_core::Process, nul: bool, only: Option<&[char]>) -> Vec<Vec<u8>> {
-    let wanted =
-        |c: char| c == 'p' || only.map_or_else(|| fields::field_is_default(c), |s| s.contains(&c));
-    let letters: Vec<char> = ['p', 'K', 'M', 'g', 'R', 'c', 'u']
-        .into_iter()
-        .filter(|&c| wanted(c))
-        .collect();
-    let head = lsof_core::Process {
-        files: Vec::new(),
-        ..p.clone()
-    };
-    // Each call the C made, as `fields` writes it: one `write()` a call.
-    struct CallLog(Vec<Vec<u8>>);
-    impl Write for CallLog {
+    // Each call the C made, as `fields` writes it: one `write()` a call,
+    // until the login is asked for, where the C's `Error()` ends the run.
+    struct CallLog<'a>(Vec<Vec<u8>>, &'a std::cell::Cell<bool>);
+    impl Write for CallLog<'_> {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if self.1.get() {
+                return Err(std::io::ErrorKind::Other.into());
+            }
             self.0.push(data.to_vec());
             Ok(data.len())
         }
@@ -396,24 +378,25 @@ fn before_login(p: &lsof_core::Process, nul: bool, only: Option<&[char]>) -> Vec
             Ok(())
         }
     }
-    let mut log = CallLog(Vec::new());
+    let asked = std::cell::Cell::new(false);
+    let mut log = CallLog(Vec::new(), &asked);
     let _ = fields::write_with_names(
         &mut log,
-        std::slice::from_ref(&head),
+        std::slice::from_ref(p),
         (
             nul,
-            Some(&letters),
+            only,
             lsof_core::TcpInfoFlags::default(),
             Escaper::for_host(),
         ),
         lsof_core::render::DEFAULT_OFFSET_DIGITS,
         lsof_core::render::FileFlags::Off,
         &mut |_| None,
+        &mut |_| {
+            asked.set(true);
+            None
+        },
     );
-    // The set's `putchar('\n')` after a NUL is never reached.
-    if nul && log.0.last().is_some_and(|c| c == b"\n") {
-        log.0.pop();
-    }
     log.0
 }
 
@@ -1334,7 +1317,9 @@ fn main() {
                 // sizing its columns first. JSON's half-written document,
                 // `…,"uid":0` and no more, is not valid JSON and is not
                 // written (DIVERGENCES 70).
-                if let (Format::Fields { nul, only }, Some(first)) = (&format, procs.first()) {
+                if let (Format::Fields { nul, only }, Some(first)) =
+                    (&format, procs.iter().find(|p| !p.files.is_empty()))
+                {
                     for call in before_login(first, *nul, only.as_deref()) {
                         let _ = lsof_cli::stdio::Stdout.write_all(&call);
                     }
@@ -1348,18 +1333,18 @@ fn main() {
         // printed: the table was being held three times over at the end of a
         // run (the rows, every cell, then the text), and it grows with the
         // host (DIVERGENCES 30). JSON is written a process at a time, `-F` a set at a time.
-        // The C writes these as it prints, unbuffered, while its listing
-        // waits in stdout's buffer; here they come first, before any of it
-        // (DIVERGENCES 36).
-        for uid in pwd_warnings(&procs, &format, &selection) {
-            say!("lsof: no pwd entry for UID {uid}");
-        }
         // Into stdout's buffer, glibc's (`lsof_cli::stdio`: 4096 bytes on a
         // pipe, written as it fills, flushed before `-r`'s sleep and at
         // exit), each socket named as its row is written: a reader that goes
         // away kills lsof-rs at the next write that meets it, as it kills
         // the C, and the lookups stop there (DIVERGENCES 154). A failed
         // write is dropped, as glibc drops it, and the run goes on.
+        // Each owner's login is asked where the C's `printuid()` asks
+        // `getpwuid()`, as the writer reaches it ([`printuid`]), with its
+        // `no pwd entry` line written then, unbuffered, as the C writes it
+        // (DIVERGENCES 36, 39). A source that blocks (LDAP, SSSD) blocks
+        // there, as it blocks the C; nothing bounds it there either.
+        let backend = env.backend.as_ref();
         let _ = write_listing(
             &mut lsof_cli::stdio::Stdout,
             &procs,
@@ -1367,6 +1352,11 @@ fn main() {
             &selection,
             &columns,
             (&names, name_service.as_ref()),
+            &mut |p| {
+                printuid(p, backend, &selection, &mut |uid| {
+                    say!("lsof: no pwd entry for UID {uid}");
+                })
+            },
         );
         let mut all = located_all.borrow_mut();
         match all.as_mut() {
@@ -1504,6 +1494,7 @@ fn write_listing(
     selection: &Selection,
     columns: &lsof_cli::args::Columns,
     (names, service): Naming<'_>,
+    login: &mut dyn FnMut(&lsof_core::Process) -> Option<Box<[u8]>>,
 ) -> std::io::Result<()> {
     // COMMAND/NAME/USER are escaped like the C's safestrprt(); the one
     // platform rule is whether `\` is (Unix) or is the path separator
@@ -1535,6 +1526,7 @@ fn write_listing(
                 ..TableOpts::new(esc)
             },
             &mut rename,
+            login,
         ),
         Format::Fields { nul, only } => fields::write_with_names(
             sink,
@@ -1543,6 +1535,7 @@ fn write_listing(
             columns.offset_digits,
             columns.file_flags,
             &mut rename,
+            login,
         ),
         Format::Json(j) => {
             let opts = json::JsonOpts {
@@ -1553,9 +1546,9 @@ fn write_listing(
                 version: env!("CARGO_PKG_VERSION"),
             };
             if j.lines {
-                json::write_lines(sink, procs, &opts)
+                json::write_lines(sink, procs, &opts, login)
             } else {
-                json::write_aggregated(sink, procs, &opts)
+                json::write_aggregated(sink, procs, &opts, login)
             }
         }
     }
@@ -1638,7 +1631,7 @@ mod tests {
     use lsof_core::Selection;
 
     /// Processes owned by `uid`, named `user` or by no password entry, with
-    /// `files` files each — what [`super::pwd_warnings`] counts over.
+    /// `files` files each — what [`super::printuid`] is asked about.
     fn owned(uid: u32, user: Option<&str>, files: usize) -> lsof_core::Process {
         use lsof_core::{AccessMode, FdType, FileType, OpenFile, Process};
         let file = |n| OpenFile {
@@ -1674,42 +1667,178 @@ mod tests {
         }
     }
 
-    /// `lsof: no pwd entry for UID N`, as often as the C's `printuid()` is
-    /// asked about an owner it has no name for (DIVERGENCES 36, measured with
-    /// UID 65000 on two and three rows): twice per table row, every sizing
-    /// call first; once per `-F` process set and `-J` process when `L` is
-    /// selected, once per `-j` line; never under `-l`, `-w` or `-t` (unless
-    /// `+w` follows), nor for an owner with a name.
+    /// A backend that names uid 0 `root` and 7 with bytes that are no
+    /// UTF-8, and no other, and keeps each uid it is asked for.
+    struct Names(std::cell::RefCell<Vec<u32>>);
+    impl lsof_core::Backend for Names {
+        fn name(&self) -> &str {
+            "names"
+        }
+        fn gather(
+            &self,
+            _: &Selection,
+        ) -> Result<Vec<lsof_core::Process>, lsof_core::BackendError> {
+            Ok(Vec::new())
+        }
+        fn login_name(&self, uid: u32) -> Option<Box<[u8]>> {
+            self.0.borrow_mut().push(uid);
+            match uid {
+                0 => Some(b"root"[..].into()),
+                7 => Some(b"ab\xffcd"[..].into()),
+                _ => None,
+            }
+        }
+    }
+
+    /// `procs` written under `argv` to `sink` through [`super::printuid`]
+    /// and `backend`: what was written, the uids asked in order, and the
+    /// uids warned about in order.
+    fn listed(
+        argv: &[&str],
+        procs: &[lsof_core::Process],
+        sink: &mut dyn std::io::Write,
+    ) -> (std::io::Result<()>, Vec<u32>, Vec<u32>) {
+        let (sel, format) = parsed(argv);
+        let backend = Names(Default::default());
+        let names = std::cell::RefCell::new(lsof_core::sockname::SocketNames::new(false, false));
+        let mut warned = Vec::new();
+        let got = super::write_listing(
+            sink,
+            procs,
+            &format,
+            &sel,
+            &lsof_cli::args::Columns::default(),
+            (&names, None),
+            &mut |p| super::printuid(p, &backend, &sel, &mut |uid| warned.push(uid)),
+        );
+        let asked = backend.0.into_inner();
+        (got, asked, warned)
+    }
+
+    /// The C's `printuid()` is asked where it prints a login, and says `lsof:
+    /// no pwd entry for UID N` each time it finds none (DIVERGENCES 36, 39;
+    /// measured with UID 65000 on two and three rows, and the lookups with
+    /// strace): twice per table row, every sizing call first; once per `-F`
+    /// process set and `-J` process when `L` is selected, once per `-j`
+    /// line; nothing under `-l` or `-t`; no line under `-w` or `-t` (unless
+    /// `+w` follows), nor for an owner with a name. The backend keeps what
+    /// it found ([`lsof_core::Backend::login_name`]); the writers ask it
+    /// each time the C asks.
     #[test]
-    fn a_nameless_owner_is_warned_about_per_lookup() {
+    fn owners_are_asked_where_the_c_asks_and_warned_about_each_time() {
         let procs = [
             owned(65000, None, 2),
-            owned(0, Some("root"), 1),
+            owned(0, None, 1),
             owned(65001, None, 1),
+            owned(5, Some("EXAMPLE\\alice"), 1),
         ];
-        let warned = |argv: &[&str]| {
-            let (sel, format) = parsed(argv);
-            super::pwd_warnings(&procs, &format, &sel)
+        let run = |argv: &[&str]| {
+            let mut out = Vec::new();
+            let (got, asked, warned) = listed(argv, &procs, &mut out);
+            assert!(got.is_ok());
+            (String::from_utf8_lossy(&out).into_owned(), asked, warned)
         };
-        let table = [65000, 65000, 65001];
-        assert_eq!(warned(&["-n"]), [table, table].concat());
-        assert_eq!(warned(&["-F"]), [65000, 65001]);
-        assert_eq!(warned(&["-FL"]), [65000, 65001]);
-        assert!(warned(&["-Fn"]).is_empty(), "no L, no lookup");
-        assert_eq!(warned(&["-J"]), [65000, 65001]);
-        assert_eq!(warned(&["-j"]), [65000, 65000, 65001]);
-        assert!(warned(&["-J", "-Fn"]).is_empty());
-        for quiet in [&["-l"][..], &["-w"], &["-t"], &["-t", "+w"], &["+w", "-w"]] {
-            assert!(warned(quiet).is_empty(), "{quiet:?}");
+        let rows = [65000, 65000, 0, 65001];
+        let (out, asked, warned) = run(&["-n"]);
+        assert_eq!(asked, [rows, rows].concat());
+        let nameless = [65000, 65000, 65001];
+        assert_eq!(warned, [nameless, nameless].concat());
+        // A backslash prints as itself on Windows, doubled elsewhere
+        // (`render::escape`).
+        let alice = if cfg!(windows) {
+            r"EXAMPLE\alice"
+        } else {
+            r"EXAMPLE\\alice"
+        };
+        assert!(out.contains(" root ") && out.contains(alice), "{out}");
+        assert!(out.contains("   65000 "), "{out}");
+        for argv in [&["-F"][..], &["-FL"], &["-J"]] {
+            let (_, asked, warned) = run(argv);
+            assert_eq!(asked, [65000, 0, 65001], "{argv:?}");
+            assert_eq!(warned, [65000, 65001], "{argv:?}");
         }
-        assert_eq!(warned(&["-w", "+w"]).len(), 6, "+w after -w warns again");
+        let (out, _, _) = run(&["-F", "pL"]);
+        assert!(out.contains("p0\nLroot\n"), "{out}");
+        let (_, asked, warned) = run(&["-j"]);
+        assert_eq!((asked, warned), (rows.to_vec(), vec![65000, 65000, 65001]));
+        for none in [
+            &["-Fn"][..],
+            &["-J", "-Fn"],
+            &["-l"],
+            &["-t"],
+            &["-l", "-F"],
+        ] {
+            let (_, asked, warned) = run(none);
+            assert!(asked.is_empty() && warned.is_empty(), "{none:?}");
+        }
+        for quiet in [&["-w"][..], &["+w", "-w"]] {
+            let (_, asked, warned) = run(quiet);
+            assert_eq!(asked.len(), 8, "{quiet:?}");
+            assert!(warned.is_empty(), "{quiet:?}");
+        }
+        assert_eq!(run(&["-w", "+w"]).2.len(), 6, "+w after -w warns again");
         // A process with no file left is one blank row in the table, and
-        // nothing in -J.
+        // nothing in -F or -J, which print no such process.
         let empty = [owned(65000, None, 0)];
-        let (sel, format) = parsed(&["-n"]);
-        assert_eq!(super::pwd_warnings(&empty, &format, &sel), [65000, 65000]);
-        let (sel, format) = parsed(&["-J"]);
-        assert!(super::pwd_warnings(&empty, &format, &sel).is_empty());
+        let (_, asked, warned) = listed(&["-n"], &empty, &mut Vec::new());
+        assert_eq!((asked, warned), (vec![65000, 65000], vec![65000, 65000]));
+        for argv in [&["-J"][..], &["-F"], &["-F", "pL"]] {
+            let mut out = Vec::new();
+            let (_, asked, _) = listed(argv, &empty, &mut out);
+            assert!(asked.is_empty(), "{argv:?}");
+            if argv[0] == "-F" {
+                assert!(out.is_empty(), "{argv:?}");
+            }
+        }
+        let names = Names(Default::default());
+        let (sel, _) = parsed(&["-n"]);
+        let p = owned(7, None, 1);
+        assert_eq!(
+            super::printuid(&p, &names, &sel, &mut |_| ()).as_deref(),
+            Some(&b"ab\xffcd"[..])
+        );
+        let mut q = owned(9, None, 1);
+        q.uid = None;
+        assert_eq!(super::printuid(&q, &names, &sel, &mut |_| panic!()), None);
+        assert_eq!(*names.0.borrow(), [7]);
+    }
+
+    /// A reader that goes away stops the lookups at the next write, as it
+    /// stops the C's: the table has asked every row as it sized USER, and
+    /// then each row it printed before the write that failed; `-F` and `-j`
+    /// each set or line written. Not under miri, where the rows cost time.
+    #[test]
+    #[cfg_attr(miri, ignore = "hundreds of rows formatted")]
+    fn the_lookups_stop_where_the_reader_goes_away() {
+        struct Gone(usize);
+        impl std::io::Write for Gone {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let n = buf.len().min(self.0);
+                self.0 -= n;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let procs: Vec<lsof_core::Process> = (0..300).map(|i| owned(70000 + i, None, 1)).collect();
+        for (argv, sized, per) in [
+            (&["-n"][..], 300, 40),
+            (&["-F", "pLf"], 0, 10),
+            (&["-j"], 0, 60),
+        ] {
+            let (got, asked, _) = listed(argv, &procs, &mut Gone(2048));
+            assert!(got.is_err(), "{argv:?}");
+            assert!(asked.len() > sized, "{argv:?}: {}", asked.len());
+            assert!(
+                asked.len() <= sized + 2048 / per + 1,
+                "{argv:?}: {}",
+                asked.len()
+            );
+        }
     }
 
     /// Whether a run calls the C's `printuid()` at all, which decides
@@ -1736,6 +1865,7 @@ mod tests {
         assert!(!looks(&["-n"], &[]), "no process, no lookup");
         let bare = [owned(0, Some("root"), 0)];
         assert!(!looks(&["-J"], &bare), "-J prints no process without a row");
+        assert!(!looks(&["-F"], &bare), "-F prints no process without a row");
         assert!(looks(&["-n"], &bare), "the table prints its blank row");
     }
 
@@ -3009,6 +3139,7 @@ mod tests {
                 &sel,
                 &lsof_cli::args::Columns::default(),
                 (&names, Some(&service)),
+                &mut |p| p.login_bytes().map(Box::from),
             );
             assert_eq!(
                 got.map_err(|e| e.kind()),
@@ -3034,6 +3165,7 @@ mod tests {
                 &sel,
                 &lsof_cli::args::Columns::default(),
                 (&names, Some(&service)),
+                &mut |p| p.login_bytes().map(Box::from),
             )
             .unwrap();
             assert!(String::from_utf8(all)
@@ -3086,6 +3218,7 @@ mod tests {
                 &sel,
                 &lsof_cli::args::Columns::default(),
                 (&names, Some(&service)),
+                &mut |p| p.login_bytes().map(Box::from),
             )
             .unwrap();
             let out = String::from_utf8(out).unwrap();

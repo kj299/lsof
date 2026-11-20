@@ -2778,6 +2778,11 @@ fn enter_users(
                 }
             }
             UserLookup::Unknown => early.no_uid(&shown_bytes(name)),
+            UserLookup::Lost => {
+                // The C's `Error()`: at once, with no usage.
+                early.fatal = true;
+                return Err(format!("can't get UID for {}", shown_bytes(name)));
+            }
             UserLookup::ByName => {
                 let name = String::from_utf8_lossy(name).into_owned();
                 if excl {
@@ -8365,6 +8370,7 @@ mod tests {
         let ended = |argv: &[&str]| {
             let lookup = |v: &[u8]| match String::from_utf8_lossy(v).parse() {
                 Ok(uid) => UserLookup::Uid(uid),
+                Err(_) if v == b"lost" => UserLookup::Lost,
                 Err(_) => UserLookup::Unknown,
             };
             let host = HostChecks {
@@ -8407,6 +8413,21 @@ mod tests {
         assert_eq!(
             ended(&["-W", "-h"]),
             (false, "illegal option character: W".to_string(), true)
+        );
+        // A login found by the first `getpwnam()` and not by the second
+        // (`lsof_select_login()`): `can't get UID`, at once, after what was
+        // said before it, and no option after it read (DIVERGENCES 39).
+        assert_eq!(
+            ended(&["-u", "nosuch", "-u", "lost", "-W", "-h"]),
+            (
+                true,
+                "can't get UID for nosuch\nlsof: can't get UID for lost".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            ended(&["-u", "^lost,nosuch"]),
+            (true, "can't get UID for lost".to_string(), false)
         );
         // Under `-w` a mixture is said in silence, and still ends the run.
         assert_eq!(ended(&["-w", "-d", "1,^2"]), (false, String::new(), false));

@@ -1016,6 +1016,42 @@ impl Process {
             .and_then(|r| r.login.as_deref())
             .or(self.user.as_deref().map(str::as_bytes))
     }
+
+    /// Give the process its login, `login`'s bytes: [`Process::user`]
+    /// decoded (lossily), and [`RawNames::login`] where it is not UTF-8.
+    pub fn set_login(&mut self, login: Box<[u8]>) {
+        self.user = Some(String::from_utf8_lossy(&login).into_owned());
+        if std::str::from_utf8(&login).is_err() {
+            self.raw_names.get_or_insert_with(Box::default).login = Some(login);
+        }
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    /// A login is the process's user as text, and its bytes where they are
+    /// not UTF-8, beside a command's that are kept already.
+    #[test]
+    fn a_login_is_set_as_text_and_as_bytes_where_it_is_not_utf8() {
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.user = None;
+        p.raw_names = None;
+        p.set_login(b"root"[..].into());
+        assert_eq!(
+            (p.user.as_deref(), p.raw_names.as_ref()),
+            (Some("root"), None)
+        );
+        p.raw_names = Some(Box::new(RawNames {
+            command: Some(b"c\xff"[..].into()),
+            login: None,
+        }));
+        p.set_login(b"ab\xffcd"[..].into());
+        assert_eq!(p.user.as_deref(), Some("ab\u{fffd}cd"));
+        assert_eq!(p.login_bytes(), Some(&b"ab\xffcd"[..]));
+        assert_eq!(p.command_bytes(), b"c\xff");
+    }
 }
 
 #[cfg(test)]

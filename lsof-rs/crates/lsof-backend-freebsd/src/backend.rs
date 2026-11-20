@@ -309,7 +309,15 @@ impl Backend for FreeBsdBackend {
     }
 
     fn lookup_user(&self, value: &str) -> lsof_core::UserLookup {
+        users::lookup(value.as_bytes())
+    }
+
+    fn lookup_user_bytes(&self, value: &[u8]) -> lsof_core::UserLookup {
         users::lookup(value)
+    }
+
+    fn login_name(&self, uid: u32) -> Option<Box<[u8]>> {
+        users::name_for(uid, false)
     }
 
     /// `-i @name`: the system's resolver, through `std` (`getaddrinfo(3)`),
@@ -346,7 +354,8 @@ impl Backend for FreeBsdBackend {
                     pid: u32::try_from(k.pid).ok()?,
                     ppid: u32::try_from(k.ppid).ok(),
                     command: String::from_utf8_lossy(&k.comm).into_owned(),
-                    user: users::name_for(k.uid, sel.numeric_ids),
+                    // Asked as it is printed (`Backend::login_name`).
+                    user: None,
                     tid: None,
                     task_command: None,
                     uid: Some(k.uid),

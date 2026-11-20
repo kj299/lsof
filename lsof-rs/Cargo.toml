@@ -14,6 +14,7 @@ members = [
     "crates/lsof-backend-linux",
     "crates/lsof-backend-freebsd",
     "crates/lsof-sigpipe",
+    "crates/lsof-getpw",
 ]
 # The fuzz crate is its own workspace (nightly + libfuzzer-sys); keep it out of
 # the main build.

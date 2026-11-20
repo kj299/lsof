@@ -321,10 +321,23 @@ meet. Each number is a row there, with the measurement behind it.
   alternations or runs of groups, each named again, against names of 14
   to 63 bytes, 60 reach one, 2 of which have a match that glibc finds (in
   0.09 and 0.53 s): there lsof-rs says no match where the C says match.
-- **Names only the files know** (38, 39, 154): a service name is read from
-  `/etc/services` and a login from `/etc/passwd` (where `/etc/nsswitch.conf`
-  has glibc read it), so one that only LDAP, SSSD, NIS or a `db` map serves
-  is unknown; its port or UID works. A host name given to `-i` does reach DNS
+- **Names only the files know** (38, 154): a service name is read from
+  `/etc/services` (where `/etc/nsswitch.conf` has glibc read it), so one
+  that only a `db` map or NIS serves is unknown; its port works. A login is
+  glibc's since 2026-11-20 (39): `getpwnam_r()` and `getpwuid_r()`, every
+  source nsswitch.conf names (LDAP, SSSD, systemd-homed, NIS, Hesiod)
+  answering as for the C, but where nsswitch.conf has a shape in which
+  glibc could read past a heap block (`passwd:` with no source; under
+  `compat`, `netgroup:` or `passwd_compat:` with no source) or recurse
+  (`compat` in `passwd:` and `passwd_compat:`), on any line for those
+  databases, not only the last, which glibc keeps, or where the answer would
+  not fit in 16 MiB: there lsof-rs reads `/etc/passwd` itself, as before
+  (a second `passwd_compat:` line naming `files` after one naming `compat`
+  is so read, its `+` lines as with no NIS, where glibc 2.39 follows them).
+  A source that blocks (LDAP, SSSD) blocks lsof-rs where and as long as it
+  blocks the C, as a login is printed or `-u name` read, asked as often as
+  the C asks it; `-S` bounds neither; `-l` asks nothing. What an LDAP or
+  SSSD module itself asks in turn is not looked into. A host name given to `-i` does reach DNS
   and the other NSS sources, through the system's resolver, but one
   `/etc/hosts` holds for IPv4 alone is not asked of DNS for IPv6, as the C
   asks it. A socket's host is named from `/etc/hosts` and DNS alone (154):
@@ -401,9 +414,8 @@ meet. Each number is a row there, with the measurement behind it.
   a socket file is the C's `sock` row (126); 2026-10-30: AF_VSOCK, ping and
   unbound sockets are named as the C names them, from
   `system.sockprotoname` (22), and a bound netlink socket from its table
-  (109)]; a login name is read from `/etc/passwd` only, by glibc's `files`
-  rules, so an LDAP or SSSD account can be named by its UID alone (39, 70),
-  and a control byte in one is escaped where the C prints it raw (70).
+  (109)]; a login name is glibc's (39, since 2026-11-20), and a control
+  byte in one is escaped where the C prints it raw (70).
 - **Output shape:** `-J`/`-j` print the C's schema since 2.0.0 (91), but an
   Internet row keeps a `name` (134) and DEL, C1 and U+2028/2029 are escaped
   (135), both C-DEFECT; a byte that is not UTF-8 prints as U+FFFD in NAME,

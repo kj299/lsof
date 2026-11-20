@@ -1508,8 +1508,56 @@ NAMES_VARIANTS = {
     # NOTFOUND `[NOTFOUND=return]` ends the walk at.
     "nssnull": {"nsswitch.conf": NAMES_NULL},
     "hostsnull": {"hosts": NAMES_NULL, "nsswitch.conf": "passwd: files\nhosts: files [NOTFOUND=return] dns\nservices: files\n"},
+    # The `passwd` sources glibc is asked through (DIVERGENCES 39): Hesiod
+    # after the file, whose TXT queries the names modes' server answers for
+    # an account the file lacks ([`NAMES_TXT`]); `compat` with its `+`
+    # lines read through `passwd_compat: files`, which the file's own
+    # reader could not follow; and shapes glibc is not asked in: a
+    # `passwd:` line with no source (where it reads past a heap block),
+    # `compat` with a `netgroup:` line with no source or opening with an
+    # action and a `+@group` or `-@group` line (innetgr()'s walk reads past
+    # the same block), and `compat` asking itself (where it recurses until
+    # the stack is gone).
+    "hesiod": {
+        "nsswitch.conf": "passwd: files hesiod\nhosts: files\nservices: files\n",
+        "hesiod.conf": "lhs=.ns\nrhs=.lsof-rs.test\n",
+    },
+    "pwcompatfiles": {
+        "nsswitch.conf": "passwd: compat\npasswd_compat: files\nhosts: files\nservices: files\n",
+        "passwd": "+\n{PASSWD}",
+    },
+    "pwcompatloop": {
+        "nsswitch.conf": "passwd: compat\npasswd_compat: compat\nhosts: files\nservices: files\n",
+        "passwd": "+\n{PASSWD}",
+    },
+    "pwempty": {"nsswitch.conf": "passwd:\nhosts: files\nservices: files\n"},
+    "pwnetgroup": {
+        "nsswitch.conf": "passwd: compat\nnetgroup:\nhosts: files\nservices: files\n",
+        "passwd": "+@grp\n{PASSWD}",
+    },
+    "pwnetgroupminus": {
+        "nsswitch.conf": "passwd: compat\nnetgroup: [NOTFOUND=return] files\nhosts: files\nservices: files\n",
+        "passwd": "-@grp\n{PASSWD}",
+    },
 }
-NAMES_FILES = ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf", "host.conf", "host.conf.off")
+NAMES_FILES = ("passwd", "hosts", "services", "nsswitch.conf", "resolv.conf", "host.conf", "host.conf.off", "hesiod.conf")
+
+# What the names modes' name server answers to a TXT query (class IN) of
+# these names: the Hesiod entries of `names-hesiod`'s account, by name and
+# by uid (`NAME.passwd.LHS.RHS`, `UID.uid.LHS.RHS`), one fixture W's WJ
+# runs as (65010) and the password file lacks. Any other TXT query is
+# REFUSED.
+NAMES_TXT = {
+    "hsjohn.passwd.ns.lsof-rs.test": b"hsjohn:*:65010:65010:Hesiod:/:/bin/false",
+    "65010.uid.ns.lsof-rs.test": b"hsjohn:*:65010:65010:Hesiod:/:/bin/false",
+    "hsonce.passwd.ns.lsof-rs.test": b"hsonce:*:65011:65011:Hesiod:/:/bin/false",
+}
+# Of those, the names answered at every other TXT query of class IN alone
+# (the first, the third...), REFUSED at the rest: an account a source has at
+# one lookup and has not at the next, as an LDAP server that goes away does.
+# A run of `-u hsonce` asks it twice (arg.c:2030, lsof.c:1220), so each run
+# of either binary finds it once and then not.
+NAMES_TXT_EVERY_OTHER = {"hsonce.passwd.ns.lsof-rs.test"}
 
 
 # What the names modes' name server says of fixture NS's remote addresses
@@ -1550,6 +1598,8 @@ class NamesResolver:
         self.thread = None
         self.lock = threading.Lock()
         self.asked = []
+        # TXT queries of class IN so far, by name.
+        self.txt_in = {}
 
     def queries(self) -> list:
         """The names asked so far, in order (lower-cased)."""
@@ -1589,10 +1639,21 @@ class NamesResolver:
         return b".".join(labels).decode("latin-1").lower()
 
     @staticmethod
-    def answer(query: bytes) -> bytes | None:
+    def qtype(query: bytes) -> bytes:
+        """The type and class `query` asks, as its four bytes."""
+        at = 12
+        while at < len(query) and query[at]:
+            at += 1 + query[at]
+        return query[at + 1:at + 5]
+
+    @staticmethod
+    def answer(query: bytes, asked_before: int = 0) -> bytes | None:
         """What the server sends for `query`: [`NAMES_PTR`]'s answer for a
-        PTR query of one of its names, as a response with recursion
-        available, and the refusal for anything else."""
+        PTR query of one of its names, and [`NAMES_TXT`]'s for a TXT query
+        of one of its, as a response with recursion available, and the
+        refusal for anything else. `asked_before`: how many TXT queries of
+        class IN of the same name came before this one, which decides the
+        answer of a name in [`NAMES_TXT_EVERY_OTHER`]."""
         labels, at = [], 12
         while at < len(query) and query[at]:
             n = query[at]
@@ -1600,6 +1661,13 @@ class NamesResolver:
             at += 1 + n
         end = at + 5
         name = b".".join(labels).decode("latin-1").lower()
+        if (len(query) >= end and query[end - 4:end] == b"\0\x10\0\x01" and name in NAMES_TXT
+                and not (name in NAMES_TXT_EVERY_OTHER and asked_before % 2)):
+            text = NAMES_TXT[name]
+            rdata = bytes([len(text)]) + text
+            head = query[:2] + bytes([0x81 | (query[2] & 0x01), 0x80])
+            record = b"\xc0\x0c\0\x10\0\x01\0\0\0\x3c" + len(rdata).to_bytes(2, "big") + rdata
+            return head + query[4:6] + b"\0\x01\0\0\0\0" + query[12:end] + record
         if len(query) < end or query[end - 4:end] != b"\0\x0c\0\x01" or name not in NAMES_PTR:
             return NamesResolver.refusal(query)
         what = NAMES_PTR[name]
@@ -1621,9 +1689,14 @@ class NamesResolver:
                 query, peer = self.sock.recvfrom(4096)
             except OSError:
                 return
+            name = self.qname(query)
+            txt_in = self.qtype(query) == b"\0\x10\0\x01"
             with self.lock:
-                self.asked.append(self.qname(query))
-            answer = self.answer(query)
+                before = self.txt_in.get(name, 0)
+                if txt_in:
+                    self.txt_in[name] = before + 1
+                self.asked.append(name)
+            answer = self.answer(query, before)
             if answer is not None:
                 try:
                     self.sock.sendto(answer, peer)
@@ -4715,6 +4788,23 @@ def self_test() -> int:
               and answered[2:4] == b"\x81\x80" and answered[6:8] == b"\0\x01"
               and nx is not None and nx[3] == 0x83 and silent is None
               and NamesResolver.answer(query) == refused)
+        txt = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+               b"\x0565010\x03uid\x02ns\x07lsof-rs\x04test\x00\x00\x10\x00\x01")
+        hs = NamesResolver.answer(txt)
+        check("...and the Hesiod account's TXT names, and no other TXT query",
+              hs is not None and hs.endswith(bytes([len(NAMES_TXT["65010.uid.ns.lsof-rs.test"])])
+                                           + NAMES_TXT["65010.uid.ns.lsof-rs.test"])
+              and hs[2:4] == b"\x81\x80" and hs[6:8] == b"\0\x01"
+              and NamesResolver.answer(txt[:-1] + b"\x04") == NamesResolver.refusal(txt[:-1] + b"\x04")
+              and NamesResolver.answer(txt.replace(b"65010", b"65011")) == NamesResolver.refusal(txt.replace(b"65010", b"65011"))
+              and open(os.path.join(td, "names", "hesiod.conf.hesiod")).read() == "lhs=.ns\nrhs=.lsof-rs.test\n")
+        once = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+                b"\x06hsonce\x06passwd\x02ns\x07lsof-rs\x04test\x00\x00\x10\x00\x01")
+        first, second, third = (NamesResolver.answer(once, n) for n in range(3))
+        check("...and the account found at every other lookup, at the first and the third",
+              first is not None and first.endswith(NAMES_TXT["hsonce.passwd.ns.lsof-rs.test"])
+              and first == third and second == NamesResolver.refusal(once)
+              and NamesResolver.qtype(once) == b"\0\x10\0\x01" and NamesResolver.qtype(txt[:-1] + b"\x04") == b"\0\x10\0\x04")
         write_names_services(td, "4001", "4002")
         services = open(os.path.join(td, "names", "services")).read()
         check("...and a services file of fixture B's two ports",

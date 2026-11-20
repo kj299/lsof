@@ -195,6 +195,15 @@ pub enum UserLookup {
     /// an option error while it parses — `lsof: can't get UID for nosuchuser`,
     /// then the usage message, exit 1 — so nothing is listed.
     Unknown,
+    /// The value named an account when it was first looked up, and none
+    /// when it was looked up again: the C asks `getpwnam()` twice, once as
+    /// it reads the value (`arg.c:2030`) and once as it selects the login
+    /// (`lsof_select_login()`, `lib/lsof.c:1220`), and a second lookup that
+    /// fails is its `Error()`: `lsof: can't get UID for NAME` and exit 1 at
+    /// once, with no usage and no later option read (`arg.c:2057-2060`).
+    /// A source that answers one lookup and not the next does it (an LDAP
+    /// server that goes away; measured with Hesiod, DIVERGENCES 39).
+    Lost,
     /// This platform selects users by name, and has no ID to resolve to.
     ByName,
 }
@@ -296,6 +305,18 @@ pub trait Backend {
     /// ends by. Empty where the backend reads none (DIVERGENCES 56).
     fn take_endpoint_tables(&self) -> crate::EndpointTables {
         crate::EndpointTables::default()
+    }
+
+    /// The login of `uid`, as bytes, for an owner the listing prints by
+    /// name: the C's `getpwuid(3)` in `printuid()`, which it calls only as
+    /// it prints a USER cell, an `-F L` field or a JSON `login`
+    /// (`print.c:1788`), so lsof-rs asks only then, for the processes it
+    /// lists, and never under `-l`, `-t`, or a field list without `L`
+    /// (DIVERGENCES 39). `None` for a uid with no name, which prints as the
+    /// number; the default, for a backend that names its owners as it
+    /// gathers them (Windows) or not at all.
+    fn login_name(&self, _uid: u32) -> Option<Box<[u8]>> {
+        None
     }
 
     /// Resolve a `-u` value the way the platform names users.

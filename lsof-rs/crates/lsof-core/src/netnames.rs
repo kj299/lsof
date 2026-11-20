@@ -510,12 +510,32 @@ pub fn nsswitch_database<'a>(
     database: &[u8],
     default: &'a [u8],
 ) -> Option<Vec<NssSource<'a>>> {
+    let mut found = None;
+    nsswitch_lines(conf, database, |sources| found = Some(sources))?;
+    match found {
+        Some(sources) => Some(sources),
+        None => nss_action_parse(default, true),
+    }
+}
+
+/// Hand `each` every line nsswitch.conf has for `database`, in the file's
+/// order, each read as [`nsswitch_database`] reads the one it keeps (the
+/// last): for a reader that must not depend on which line a C library
+/// keeps, glibc 2.39 keeping the last and others not needing to
+/// (DIVERGENCES 39). `None` where glibc refuses the file (and then `each`
+/// may have been handed lines before the one it refuses), `Some(false)`
+/// where there is no file (glibc's built-in sources then), `Some(true)`
+/// otherwise, whether a line named the database or none did.
+pub fn nsswitch_lines<'a>(
+    conf: &'a Conf,
+    database: &[u8],
+    mut each: impl FnMut(Vec<NssSource<'a>>),
+) -> Option<bool> {
     let text = match conf {
-        Conf::Missing => return nss_action_parse(default, true),
+        Conf::Missing => return Some(false),
         Conf::Unreadable => return None,
         Conf::Text(text) => text.as_slice(),
     };
-    let mut found = None;
     let mut lines = text.split(|&b| b == b'\n').peekable();
     while let Some(line) = lines.next() {
         // What follows the last `\n` is no line.
@@ -534,13 +554,10 @@ pub fn nsswitch_database<'a>(
         let keep = name == database;
         let sources = nss_action_parse(rest.get(skip..).unwrap_or_default(), keep)?;
         if keep {
-            found = Some(sources);
+            each(sources);
         }
     }
-    match found {
-        Some(sources) => Some(sources),
-        None => nss_action_parse(default, true),
-    }
+    Some(true)
 }
 
 /// What a source lsof-rs can ask answered.

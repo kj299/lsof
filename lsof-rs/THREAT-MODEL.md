@@ -71,7 +71,8 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.filedesc.PID`: packed `kinfo_file` records, each with its own length, and `kf_path`, a name any local user's process chose | kernel, and **any local user's process** for the path | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it (DIVERGENCES 143) |
-| `/etc/passwd`, and `/etc/nsswitch.conf`, which says whether it is read: **both on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l` reads neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
+| `/etc/nsswitch.conf`, read by lsof-rs to decide whether glibc may be asked for an account, and `/etc/passwd`, read by lsof-rs where glibc is not (DIVERGENCES 39): **on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l`, `-t` and `-F` without `L` read neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
+| Linux and FreeBSD: what the C library answers for an account, `getpwnam_r(3)` and `getpwuid_r(3)`: the sources nsswitch.conf names, loaded into the process as shared objects (`libnss_files`, `libnss_compat`, `libnss_sss`, `libnss_ldap`, `libnss_systemd`, `libnss_hesiod`...), and the servers they ask (an LDAP or SSSD daemon, Hesiod's name server), nscd before them | the operator for the modules; **a remote server** for what they answer | the modules trusted as the C trusts them; the answer untrusted, **hostile** to availability | `lsof-getpw` (the one `unsafe` boundary: a buffer, a `passwd`, the call), `lsof-backend-linux::users` (the guard, the cache) | not applicable: the C library parses the reply; lsof-rs reads a uid and a name's bytes from its own buffer |
 | `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine), lsof-rs's own engine (`posix_regex/engine.rs`: a back-reference, and past the crate's bounds) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has, 1,024 for an 8-byte expression; an exhaustive search as the back-reference oracle on 8-byte commands, and a search past its budget on up to 16 bytes asked again with four times it; `-timeout=10`) |
 | `/etc/hosts`, `/etc/services`, `/etc/host.conf` (or the file `RESOLV_HOST_CONF` names), `/etc/nsswitch.conf` (and Windows' `drivers\etc\services`), read for an `-i @name` or `-i :name`; `/proc/self/auxv`, read where `RESOLV_HOST_CONF` is set | operator, but arbitrary bytes | semi-trusted | `lsof-core::netnames`, `lsof-backend-linux::netnames` | `netnames` |
 | the system's resolver's answer to an `-i @name` the hosts file does not hold (`getaddrinfo()` through `std`): addresses only | **a remote name server**, and whoever is on the path to it | **hostile** to availability; the addresses untrusted | `lsof-core::netnames::system_addresses` | not applicable: no bytes of the answer are parsed here (libc parses the reply, `std` hands over addresses); see below |
@@ -126,12 +127,14 @@ run: no cargo-fuzz target drives `resolve_with`, although it is pure and could
 be. `etw.rs` parses AFD event payloads (`parse_afd_create`, `parse_afd_address`,
 `parse_sockaddr`) that any process's socket activity shapes; the parsing checks
 its bounds, but it is Windows-only code and no fuzzer reaches it.
-`users::parse_passwd` and the `-u NAME` lookup read each line by one parser,
-`parse_line`, glibc's `files` rules as the C's `getpwuid()` gets them
-(DIVERGENCES 70): bytes, any line length, checked arithmetic for the uid and
-gid; a name is kept as its first 32 bytes and printed escaped, a byte that
-is no character as `\xNN` (the C prints it raw).
-The `passwd` target drives it.
+`users::parse_passwd` and the `-u NAME` lookup, where glibc is not asked
+(DIVERGENCES 39: miri, the nsswitch.conf shapes in which glibc could read
+past a heap block or recurse, an answer past 16 MiB), read each line by one parser, `parse_line`, glibc's
+`files` rules as the C's `getpwuid()` gets them (DIVERGENCES 70): bytes,
+any line length, checked arithmetic for the uid and gid. A name, from
+there or from glibc, is kept as its first 32 bytes and printed escaped, a
+byte that is no character as `\xNN` (the C prints it raw).
+The `passwd` target drives the parser.
 
 **The command line is bytes** (DIVERGENCES 92): `args_os()`, so no argument
 can panic the parse. A path (a bare argument, after `--`, `+d`/`+D`, `-e`/`+e`)
@@ -520,6 +523,93 @@ probes the compiler), built on Linux and FreeBSD only; `cargo deny` audits
 it with the workspace. The constructor runs in every process of the binary,
 the `-S` helper too, before anything else; under miri, which has no
 `sigaction`, it reads nothing.
+
+**`lsof-getpw` is the second crate of the workspace's own with `unsafe`
+on Linux and FreeBSD, three sites, for accounts** (DIVERGENCES 39, the
+owner's decision of 2026-11-20). The C asks `getpwnam()` for each `-u`
+login and `getpwuid()` for each owner it prints by name; std has no route
+to either. `by_name` and `by_uid` call `getpwnam_r(3)` and `getpwuid_r(3)`
+(MT-safe; lsof-rs has threads) with a `struct passwd` zeroed by the crate
+(the first site: all-zero is a valid value of a struct of pointers and
+integers), a result pointer of its own, and a byte vector of its own
+with its true length (a `passwd` holds strings and no array of pointers,
+so the C library writes bytes alone into it and needs no alignment of it):
+1 KiB first, doubled on `ERANGE` to 16 MiB, one buffer
+held at a time, freed before the call returns to the caller. Nothing the
+call wrote is read through a pointer: the uid is a field of the crate's
+own `passwd`, read only where the result points at that `passwd`; the name
+is located by its address's offset into the buffer and read as a slice to
+its NUL there, so a source that points outside the buffer, or writes no
+NUL, gives no name, never a read of memory the crate does not own. The
+name asked is a `CString` the crate made, cut at a NUL. Each site carries a
+`SAFETY:` comment and is in the `unsafe-audit` gate; what is not the call
+(the buffer's growth, the reading of the call's results) is safe code with
+unit tests that miri runs, and under miri the crate asks nothing. lsof-core,
+lsof-cli and lsof-backend-linux keep `#![forbid(unsafe_code)]`. Its one
+dependency is `libc =0.2.190`, lsof-sigpipe's; no crate is added.
+
+*What it lets into the process.* Calling glibc for an account loads the
+NSS modules nsswitch.conf names into lsof-rs, as `dlopen()`ed code with
+lsof-rs's privileges (often root's), as it loads them into the C: an
+operator who can write nsswitch.conf or install a `libnss_*.so` already
+holds what lsof-rs would give them (§5). It also makes the call's
+correctness glibc's, and glibc 2.39 misbehaves where a database it walks
+for the lookup has an empty list of sources. lsof-rs reads nsswitch.conf
+(`users::glibc_may_be_asked`) and does not call glibc, reading
+`/etc/passwd` itself, where any of these could happen, all measured:
+
+- a `passwd:` line with no source or opening with an action: glibc's
+  `__nss_lookup()` reads past the heap block of the empty list (valgrind,
+  `nss/nsswitch.c:73,82`);
+- under `compat`, a `netgroup:` line (glibc's default `nis`) with no source
+  or opening with an action: at a `+@group` or `-@group` line `compat`
+  asks `innetgr()`, whose walk reads past the same block (valgrind, two
+  invalid reads through `_nss_compat_getpwnam_r` and `innetgr`; found by
+  the 2026-11-20 safety review, which the first guard had missed);
+- under `compat`, a `passwd_compat:` line naming `compat` (recursion until
+  the stack is gone: the C's SIGSEGV, 139), or with no source (measured
+  clean, refused all the same: the same walk over no list).
+
+Every line for each of the three databases is looked at, not only the last,
+which glibc 2.39 keeps: a C library whose parser keeps another (glibc before
+2.33 had a different one) cannot be led past the guard by a duplicate
+line. The cost is an answer: a file with a `passwd_compat: compat` line and
+then a `passwd_compat: files` one is read by lsof-rs, its `+` lines as with
+no NIS, where glibc 2.39 follows them through `files` (DIVERGENCES 39).
+Under valgrind lsof-rs makes no invalid read in any of these shapes; the
+base commit made two in the `netgroup:` ones. **Not measured**: what a
+module other than `files` and `compat` asks in turn. An LDAP or SSSD
+module that resolves its server's name calls glibc's `hosts` lookup, and a
+`hosts:` line with no source would have that walk read past its block too;
+lsof-rs does not look at `hosts:` for this, as it cannot know which modules
+ask which database (no LDAP or SSSD module is installed here; Hesiod's,
+which is, asks its name server through the resolver, not `hosts`). The guard reads
+nsswitch.conf once a run, glibc whenever it changed: a file rewritten into
+one of those shapes while lsof-rs runs is asked, as the C would be; writing
+it takes root. FreeBSD's libc has no guard (its `nsdispatch()` was not
+measured).
+
+*What it can cost.* A source that blocks (an LDAP or SSSD server that does
+not answer, Hesiod's name server) blocks lsof-rs where and as long as it
+blocks the C: a login is asked only where the listing prints one, as the
+writer reaches it, as often as the C's `printuid()` asks it (a found name
+once a run, dropped under `-r` when `/etc/passwd` changes, as the C drops
+its cache; a nameless owner each time, twice a table row, once a `-F` set
+or `-J` process, once a `-j` line; none under `-l`, `-t`, `-F` without
+`L`), and a reader that goes away stops the lookups where it stops the C's
+(counts measured with strace against the C, equal in every shape tried,
+`| head` included); `-u` asks each name twice, as the C does. Nothing
+bounds the call, as nothing bounds the C's (`-S` bounds the kernel calls
+only): measured 2026-11-20, after the last change, with a Hesiod server
+that never answers (`timeout:1 attempts:1`, a namespace of the run's own),
+the C and lsof-rs: a nameless owner's one-row table 4.03 s and 4.05 s, two
+rows 8.04 s each, under `-S 1` 4.03 s and 4.04 s, `-F pL` 2.02 s and
+2.03 s, `-j` 2.04 s each, `-u` an unknown login 2.01 s each, `-t` 0.03 s
+and 0.02 s. Memory: one buffer of at
+most 16 MiB at a time, where the C's `getpwnam()` grows its buffer without
+bound for any source's answer (measured: a 20 MB password-file line before
+root, the C's RSS 42 MB, lsof-rs's 21 MB, root found by both; past the cap
+lsof-rs reads the file itself, a line to 1 MiB).
 
 **A second third-party crate, `regex`, reaches every platform's binary, for
 `-c /regex/`.** The C compiles the expression with `regcomp(3)`; safe Rust
@@ -1013,6 +1103,13 @@ Stated so reviewers do not assume coverage that is not there.
   Where an API cannot supply a field, lsof-rs reports it as unknown rather than
   fabricating it. `docs/known-limitations.md` enumerates these; the Windows
   socket-to-handle join is the main one.
+- **The NSS modules glibc loads for an account are trusted as the C trusts
+  them** (DIVERGENCES 39): lsof-rs asks `getpwnam_r()` and `getpwuid_r()`,
+  and glibc `dlopen()`s the sources nsswitch.conf names into the process.
+  Whoever can change those has root already. A source that blocks blocks
+  lsof-rs as long as it blocks the C, asked as often (§2). Which other
+  databases such a module asks in turn (`hosts`, for an LDAP server's
+  name) is not looked into by the guard, and not measured.
 - **The Windows backend's `unsafe` FFI is in scope for review but not for
   formal proof.** It is audited (`audit_unsafe.py`, every block documented) and
   sanitized (ASan on Windows, miri on the portable crates), not verified.
