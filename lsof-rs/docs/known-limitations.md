@@ -304,8 +304,12 @@ meet. Each number is a row there, with the measurement behind it.
 - **FreeBSD** (140-147): every row is the C dialect's rule as read from its
   source; none has been run on FreeBSD. `-K` lists no task, where the
   autotools build of the C lists threads (141); `statfs(2)` of a vnode's path
-  is not bounded by `-S`, as the C's is not (143); under `-T q` a routing
-  socket shows no queues, where the C shows them (147).
+  is not bounded by `-S`, as the C's is not (143). A bounded call's helper
+  greets with the build it is, and a run whose binary was replaced since it
+  started ends `can't fork`, where the C's forked child cannot differ (144).
+  The `/dev` walk stops past 4,096 directories or 65,536 character devices,
+  with a warning, where the C's has no bound; a device cache file (`-D`) is
+  neither read nor written (146, 148).
 - **Refused, where the C works:** a `-c /regex/` expression with groups
   and repetitions nested 100 deep (38; every other POSIX expression glibc
   takes is taken, back-references and intervals of any size among them); a

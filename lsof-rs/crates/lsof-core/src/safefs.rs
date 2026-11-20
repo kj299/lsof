@@ -189,8 +189,8 @@ impl From<&std::fs::Metadata> for FileStat {
 // Only for the architectures whose values were checked: against this host's
 // headers (x86_64: `bits/fcntl-linux.h`, `asm-generic/errno-base.h`,
 // `asm-generic/errno.h`) and the `libc` crate's per-architecture tables
-// (0.2.189). Anywhere else ([`sys::KNOWN`] false) an error is built from its
-// text and a `stat` is std's.
+// (0.2.189). Anywhere else ([`sys::KNOWN`] false) a `stat` is std's. The
+// `errno` numbers are [`errno`]'s.
 #[cfg(all(
     target_os = "linux",
     any(
@@ -207,11 +207,6 @@ impl From<&std::fs::Metadata> for FileStat {
 ))]
 mod sys {
     pub const KNOWN: bool = true;
-    pub const ECHILD: i32 = 10;
-    pub const EAGAIN: i32 = 11;
-    pub const EINVAL: i32 = 22;
-    pub const ENAMETOOLONG: i32 = 36;
-    pub const ETIMEDOUT: i32 = 110;
     pub const O_PATH: i32 = 0o10_000_000;
     pub const O_NONBLOCK: i32 = 0o4000;
     #[cfg(any(
@@ -245,18 +240,82 @@ mod sys {
     )
 )))]
 mod sys {
+    #[cfg(unix)]
     pub const KNOWN: bool = false;
-    pub const ECHILD: i32 = 0;
-    pub const EAGAIN: i32 = 0;
-    pub const EINVAL: i32 = 0;
-    pub const ENAMETOOLONG: i32 = 0;
-    pub const ETIMEDOUT: i32 = 0;
     #[cfg(unix)]
     pub const O_PATH: i32 = 0;
     #[cfg(all(unix, not(target_os = "freebsd")))]
     pub const O_NONBLOCK: i32 = 0;
     #[cfg(unix)]
     pub const O_NOFOLLOW: i32 = 0;
+}
+
+/// The `errno` values the bounded layer's errors carry, so that their words
+/// are the C library's, `strerror()`'s: Linux's (the architectures [`sys`]
+/// knows, whose `asm-generic` numbers every one of them shares) and
+/// FreeBSD's (`sys/errno.h`, the same on every architecture: `ETIMEDOUT` is
+/// 60 there, whose `strerror()` is `Operation timed out`, the words the C's
+/// `doinchild()` prints on FreeBSD). Apart from [`sys`], whose `O_PATH` is
+/// Linux's alone. Anywhere else ([`errno::KNOWN`] false) an error is built
+/// from its text.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "riscv64",
+        target_arch = "powerpc64",
+        target_arch = "powerpc",
+        target_arch = "s390x",
+        target_arch = "loongarch64",
+    )
+))]
+mod errno {
+    pub const KNOWN: bool = true;
+    pub const ECHILD: i32 = 10;
+    pub const EAGAIN: i32 = 11;
+    pub const EINVAL: i32 = 22;
+    pub const ENAMETOOLONG: i32 = 36;
+    pub const ETIMEDOUT: i32 = 110;
+}
+
+/// FreeBSD's (`sys/errno.h`, releng/14.3 and 15.0 alike).
+#[cfg(target_os = "freebsd")]
+mod errno {
+    pub const KNOWN: bool = true;
+    pub const ECHILD: i32 = 10;
+    pub const EAGAIN: i32 = 35;
+    pub const EINVAL: i32 = 22;
+    pub const ENAMETOOLONG: i32 = 63;
+    pub const ETIMEDOUT: i32 = 60;
+}
+
+#[cfg(not(any(
+    target_os = "freebsd",
+    all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "riscv64",
+            target_arch = "powerpc64",
+            target_arch = "powerpc",
+            target_arch = "s390x",
+            target_arch = "loongarch64",
+        )
+    )
+)))]
+mod errno {
+    pub const KNOWN: bool = false;
+    pub const ECHILD: i32 = 0;
+    pub const EAGAIN: i32 = 0;
+    pub const EINVAL: i32 = 0;
+    pub const ENAMETOOLONG: i32 = 0;
+    pub const ETIMEDOUT: i32 = 0;
 }
 
 /// `O_NONBLOCK` where its value is known (0 elsewhere): a file opened to be
@@ -275,18 +334,19 @@ pub(crate) const NONBLOCK: i32 = if cfg!(miri) { 0 } else { 0x0004 };
 /// `errno` as an error, so that `strerror()`'s words are the C library's,
 /// byte for byte the C's; where the number was not checked, those words.
 fn os_error(errno: i32, kind: io::ErrorKind, text: &'static str) -> io::Error {
-    if sys::KNOWN {
+    if self::errno::KNOWN {
         io::Error::from_raw_os_error(errno)
     } else {
         io::Error::new(kind, text)
     }
 }
 
-/// `ETIMEDOUT`, `Connection timed out`: a bounded call ran out of time, as
-/// the C's `doinchild()` says it (`errno = ETIMEDOUT`).
+/// `ETIMEDOUT`, `Connection timed out` (FreeBSD's `strerror()`: `Operation
+/// timed out`): a bounded call ran out of time, as the C's `doinchild()`
+/// says it (`errno = ETIMEDOUT`, `lib/misc.c:286`).
 pub fn timed_out() -> io::Error {
     os_error(
-        sys::ETIMEDOUT,
+        errno::ETIMEDOUT,
         io::ErrorKind::TimedOut,
         "Connection timed out",
     )
@@ -301,7 +361,7 @@ pub fn is_timed_out(e: &io::Error) -> bool {
 /// call `-b` avoided.
 pub fn would_block() -> io::Error {
     os_error(
-        sys::EAGAIN,
+        errno::EAGAIN,
         io::ErrorKind::WouldBlock,
         "Resource temporarily unavailable",
     )
@@ -310,21 +370,25 @@ pub fn would_block() -> io::Error {
 /// `ECHILD`, `No child processes`: the process making a call went away or
 /// answered nonsense, as the C's `doinchild()` says when its pipes fail.
 pub fn lost_child() -> io::Error {
-    os_error(sys::ECHILD, io::ErrorKind::Other, "No child processes")
+    os_error(errno::ECHILD, io::ErrorKind::Other, "No child processes")
 }
 
 /// `EINVAL`, `Invalid argument`: a path no call can take, one holding a NUL.
 /// Only a mount point can (`\000` in the mount table), and the C would have
 /// cut it there; this refuses it, whichever way the call is made.
 pub fn invalid_path() -> io::Error {
-    os_error(sys::EINVAL, io::ErrorKind::InvalidInput, "Invalid argument")
+    os_error(
+        errno::EINVAL,
+        io::ErrorKind::InvalidInput,
+        "Invalid argument",
+    )
 }
 
 /// `ENAMETOOLONG`, `File name too long`: a path longer than a helper takes,
 /// and longer than any the kernel would.
 pub fn name_too_long() -> io::Error {
     os_error(
-        sys::ENAMETOOLONG,
+        errno::ENAMETOOLONG,
         io::ErrorKind::InvalidInput,
         "File name too long",
     )
@@ -794,8 +858,8 @@ mod tests {
         let hostile = Path::new("/tmp/e\x1b[2Jx");
         let e = fs.stat(hostile).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
-        if sys::KNOWN {
-            assert_eq!(e.raw_os_error(), Some(11));
+        if errno::KNOWN {
+            assert_eq!(e.raw_os_error(), Some(errno::EAGAIN));
         }
         #[cfg(not(miri))]
         assert_eq!(crate::errno_text(&e), "Resource temporarily unavailable");
@@ -821,13 +885,32 @@ mod tests {
     #[cfg(not(miri))]
     #[test]
     fn the_errors_read_as_the_c_prints_them() {
-        assert_eq!(crate::errno_text(&timed_out()), "Connection timed out");
+        // FreeBSD's `strerror(ETIMEDOUT)` has its own words, the C's there.
+        let timeout = if cfg!(target_os = "freebsd") {
+            "Operation timed out"
+        } else {
+            "Connection timed out"
+        };
+        assert_eq!(crate::errno_text(&timed_out()), timeout);
         assert_eq!(crate::errno_text(&lost_child()), "No child processes");
         assert_eq!(crate::errno_text(&invalid_path()), "Invalid argument");
         assert_eq!(crate::errno_text(&name_too_long()), "File name too long");
-        if sys::KNOWN {
-            assert_eq!(timed_out().raw_os_error(), Some(110));
+        if errno::KNOWN {
+            let linux = cfg!(target_os = "linux");
+            assert_eq!(
+                timed_out().raw_os_error(),
+                Some(if linux { 110 } else { 60 })
+            );
             assert_eq!(lost_child().raw_os_error(), Some(10));
+            assert_eq!(
+                would_block().raw_os_error(),
+                Some(if linux { 11 } else { 35 })
+            );
+            assert_eq!(invalid_path().raw_os_error(), Some(22));
+            assert_eq!(
+                name_too_long().raw_os_error(),
+                Some(if linux { 36 } else { 63 })
+            );
         }
     }
 

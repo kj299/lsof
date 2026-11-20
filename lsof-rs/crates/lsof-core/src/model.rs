@@ -742,8 +742,8 @@ pub struct OpenFile {
 ///
 /// The base's length is recorded, not the addition's: a base is a path or an
 /// object's name, bounded by `PATH_MAX` (a path argument longer than that
-/// names no file), so 15 bits hold it (32,766 bytes), where an
-/// addition is not. `-E` names every other holder of a pipe in one row, and
+/// names no file), so 14 bits hold it (16,382 bytes, four times Linux's
+/// 4096), where an addition is not. `-E` names every other holder of a pipe in one row, and
 /// 4,000 processes sharing one make an addition of 131,000 bytes, which a
 /// `u16` addition length had dropped, leaking all but the last holder into
 /// JSON's `name` (DIVERGENCES 56).
@@ -752,7 +752,14 @@ pub struct OpenFile {
 /// `+c` *bytes* and prints through `safestrprt()`, so a cut inside a
 /// character prints the bytes it kept as `\xNN` (`\xc3`). A `String` cannot
 /// hold such a byte, so that text is stored as it is printed, and the
-/// renderer does not escape it again ([`OpenFile::printed_name`]). Two
+/// renderer does not escape it again ([`OpenFile::printed_name`]).
+///
+/// A base that is shown, not the row's own name, is the text the C's
+/// `printname()` makes up for a row whose `Lf->nm` is empty — FreeBSD's
+/// device name from `/dev`, or a file system's `dir (fsname)` (DIVERGENCES
+/// 146): the table and `-F n` print it, JSON's `name`, which is `Lf->nm`,
+/// does not, and a path argument that renames the row replaces it, as the
+/// C's `Lf->nm` then hides it ([`OpenFile::set_shown_name`]). Two
 /// bytes, with the `Option` in its niche, in the padding the row already
 /// had: it stays 192 (`a_row_stays_small`, which three bytes fail).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -760,34 +767,41 @@ pub struct NameAddition(std::num::NonZeroU16);
 
 impl NameAddition {
     const PRINTED: u16 = 0x8000;
+    const SHOWN: u16 = 0x4000;
 
     /// NAME's first `base` bytes are its base, the rest an addition in plain
-    /// text; `None` for a base too long to record (32,766 bytes).
+    /// text; `None` for a base too long to record (16,382 bytes).
     pub fn new(base: u32) -> Option<NameAddition> {
-        Self::with(base, false)
+        Self::with(base, false, false)
     }
 
-    fn with(base: u32, printed: bool) -> Option<NameAddition> {
+    fn with(base: u32, printed: bool, shown: bool) -> Option<NameAddition> {
         let stored = u16::try_from(base)
             .ok()?
             .checked_add(1)
-            .filter(|&v| v < Self::PRINTED)?;
-        let flag = if printed { Self::PRINTED } else { 0 };
+            .filter(|&v| v < Self::SHOWN)?;
+        let flag = if printed { Self::PRINTED } else { 0 } | if shown { Self::SHOWN } else { 0 };
         std::num::NonZeroU16::new(stored | flag).map(NameAddition)
     }
 
-    fn at(base: usize, printed: bool) -> Option<NameAddition> {
-        Self::with(u32::try_from(base).ok()?, printed)
+    fn at(base: usize, printed: bool, shown: bool) -> Option<NameAddition> {
+        Self::with(u32::try_from(base).ok()?, printed, shown)
     }
 
     /// How many bytes of NAME are its base.
     pub fn base(self) -> u32 {
-        u32::from((self.0.get() & !Self::PRINTED).saturating_sub(1))
+        u32::from((self.0.get() & !(Self::PRINTED | Self::SHOWN)).saturating_sub(1))
     }
 
     /// Whether the addition is printed text ([`OpenFile::printed_name`]).
     pub fn printed(self) -> bool {
         self.0.get() & Self::PRINTED != 0
+    }
+
+    /// Whether the base is shown text, not the row's name
+    /// ([`OpenFile::set_shown_name`]).
+    pub fn shown(self) -> bool {
+        self.0.get() & Self::SHOWN != 0
     }
 }
 
@@ -797,12 +811,40 @@ impl OpenFile {
     /// whole NAME is the addition. An addition longer than the name, or one
     /// that would split a character, is no addition at all: the whole name,
     /// never a panic.
+    ///
+    /// `None` too for a base that is only shown ([`OpenFile::set_shown_name`]).
     pub fn base_name(&self) -> Option<&str> {
-        let base = self
-            .name_addition
-            .and_then(|a| self.name.get(..a.base() as usize))
-            .unwrap_or(&self.name);
+        if self.name_addition.is_some_and(NameAddition::shown) {
+            return None;
+        }
+        let base = self.base_text();
         (!base.is_empty()).then_some(base)
+    }
+
+    /// NAME's base, shown or not: what an addition follows.
+    fn base_text(&self) -> &str {
+        self.name_addition
+            .and_then(|a| self.name.get(..a.base() as usize))
+            .unwrap_or(&self.name)
+    }
+
+    /// Give a row whose NAME is empty the text the C's `printname()` prints
+    /// for it, where the C's `Lf->nm` is empty (FreeBSD's device name, a
+    /// file system's `dir (fsname)`): the table and `-F n` print it as NAME,
+    /// JSON's `name` is still none ([`OpenFile::base_name`]), and a path
+    /// argument's name replaces it ([`OpenFile::set_base_name`]). An
+    /// addition stays after it. Nothing is done to a row that has a base,
+    /// or for a text too long to record (16,382 bytes).
+    pub fn set_shown_name(&mut self, text: &str) {
+        if text.is_empty() || !self.base_text().is_empty() {
+            return;
+        }
+        let printed = self.name_addition.is_some_and(NameAddition::printed);
+        let Some(shown) = NameAddition::at(text.len(), printed, true) else {
+            return;
+        };
+        self.set_base_name(text);
+        self.name_addition = Some(shown);
     }
 
     /// NAME as the table and `-F n` print it: escaped by `esc`, except an
@@ -863,7 +905,7 @@ impl OpenFile {
     /// Append `text` to NAME as an addition (the C's `Lf->nma`), after one
     /// space, or alone on an empty NAME. Where the base ends is recorded so
     /// JSON can leave the addition out ([`OpenFile::base_name`]); a base too
-    /// long to record (32,766 bytes) leaves none recorded. After printed text,
+    /// long to record (16,382 bytes) leaves none recorded. After printed text,
     /// `text` is escaped into it, so the addition stays one piece.
     pub fn add_name_addition(&mut self, text: &str) {
         if self.name_addition.is_some_and(NameAddition::printed) {
@@ -889,22 +931,22 @@ impl OpenFile {
                     .into_owned();
                 self.name.truncate(at);
                 self.name.push_str(&escaped);
-                self.name_addition = NameAddition::at(at, true);
+                self.name_addition = NameAddition::at(at, true, a.shown());
             }
         }
         self.push_addition(printed, true);
     }
 
     fn push_addition(&mut self, text: &str, printed: bool) {
-        let base = match self.name_addition {
-            Some(a) if (a.base() as usize) <= self.name.len() => a.base() as usize,
-            _ => self.name.len(),
+        let (base, shown) = match self.name_addition {
+            Some(a) if (a.base() as usize) <= self.name.len() => (a.base() as usize, a.shown()),
+            _ => (self.name.len(), false),
         };
         if !self.name.is_empty() {
             self.name.push(' ');
         }
         self.name.push_str(text);
-        self.name_addition = NameAddition::at(base, printed);
+        self.name_addition = NameAddition::at(base, printed, shown);
     }
 
     /// Replace NAME's base, the C's `Lf->nm`, with `base`, keeping its
@@ -912,8 +954,12 @@ impl OpenFile {
     /// locates ([`crate::selection::PathItem::row_name`]). An addition that
     /// stood alone, on an empty name, is joined to the new one by a space,
     /// as [`OpenFile::add_name_addition`] would have joined it.
+    ///
+    /// A base that was only shown ([`OpenFile::set_shown_name`]) is replaced
+    /// as a base is: the C's `printname()` prints `Lf->nm` once it is set,
+    /// and makes nothing up.
     pub fn set_base_name(&mut self, base: &str) {
-        let old = self.base_name().map_or(0, str::len);
+        let old = self.base_text().len();
         // `base_name` gives the whole name back for a base it cannot use, so
         // the tail is then empty and nothing is recorded as an addition.
         let tail = self.name.get(old..).unwrap_or_default().to_string();
@@ -927,7 +973,7 @@ impl OpenFile {
                 self.push_addition(&tail, printed);
             } else {
                 self.name.push_str(&tail);
-                self.name_addition = NameAddition::at(base.len(), printed);
+                self.name_addition = NameAddition::at(base.len(), printed, false);
             }
         }
     }
@@ -1231,6 +1277,49 @@ mod name_addition_tests {
         assert_eq!(g.base_name(), Some("é"));
         g.name_addition = super::NameAddition::new(9);
         assert_eq!(g.base_name(), Some("é"));
+    }
+
+    /// A name only shown (FreeBSD's `printname()` text, DIVERGENCES 146) is
+    /// printed with its additions, is no base for JSON, keeps a printed
+    /// addition printed, is replaced by a path argument's name, and is not
+    /// set over a row's own name. The longest base recorded is 16,382 bytes.
+    #[test]
+    fn a_name_only_shown_is_printed_and_is_no_base() {
+        let mut f = row("");
+        f.set_shown_name("/dev/pts/0");
+        assert_eq!((f.name.as_str(), f.base_name()), ("/dev/pts/0", None));
+        f.add_name_addition("(like character special /dev/x)");
+        assert_eq!(f.name, "/dev/pts/0 (like character special /dev/x)");
+        assert_eq!(f.base_name(), None);
+        f.add_printed_addition("1,a\\xc3,3r");
+        assert_eq!(f.base_name(), None, "still shown after printed text");
+        assert!(f.name_addition.is_some_and(super::NameAddition::printed));
+        f.set_base_name("/arg");
+        assert_eq!(f.base_name(), Some("/arg"));
+        assert!(f.name.starts_with("/arg (like character special /dev/x) "));
+        // An addition first, the shown text before it.
+        let mut g = row("");
+        g.add_name_addition("(like character special /dev/x)");
+        g.set_shown_name("/ (zfs)");
+        assert_eq!(g.name, "/ (zfs) (like character special /dev/x)");
+        assert_eq!(g.base_name(), None);
+        // Never over a name, nor an empty text.
+        let mut h = row("/a");
+        h.set_shown_name("/b");
+        assert_eq!((h.name.as_str(), h.base_name()), ("/a", Some("/a")));
+        let mut e = row("");
+        e.set_shown_name("");
+        assert_eq!((e.name.as_str(), e.name_addition), ("", None));
+        // The bound: 16,382 bytes recorded, one more not.
+        let mut long = row("");
+        long.set_shown_name(&"x".repeat(16_382));
+        assert_eq!(long.base_name(), None);
+        let mut longer = row("");
+        longer.set_shown_name(&"x".repeat(16_383));
+        assert_eq!((longer.name.as_str(), longer.name_addition), ("", None));
+        assert!(super::NameAddition::new(16_382).is_some());
+        assert!(super::NameAddition::new(16_383).is_none());
+        assert!(!super::NameAddition::new(5).unwrap().shown());
     }
 
     /// `-E` names every other holder of a pipe, one addition each: past

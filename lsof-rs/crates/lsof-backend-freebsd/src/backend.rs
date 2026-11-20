@@ -18,13 +18,45 @@ use crate::{devnames, mounts, sys, users};
 /// lsof-rs's native FreeBSD data source.
 pub struct FreeBsdBackend {
     root: bool,
+    /// The run's device table (`devnames::DevCache`): made as the first
+    /// gather starts, as the C makes it as it starts, and kept for the run.
+    devs: OnceCell<devnames::DevCache>,
 }
 
 impl FreeBsdBackend {
     pub fn new() -> Self {
         Self {
             root: sys::euid() == 0,
+            devs: OnceCell::new(),
         }
+    }
+
+    /// `readdev(ctx, 0)` at `main.c:1303-1304`: the table of `/dev`, made
+    /// once, with its warnings (`WARNDEVACCESS`, unless `-w`); with no
+    /// character device in it the C says so and ends the run
+    /// (`lib/rdev.c:380-382`), and so does this, whenever it is read.
+    fn devs(&self, sel: &Selection) -> &devnames::DevCache {
+        let quiet = sel.suppress_warnings;
+        let cache = self.devs.get_or_init(|| {
+            devnames::DevCache::new(
+                Box::new(move || {
+                    let t = devnames::scan(Path::new("/dev"));
+                    if !quiet {
+                        for w in &t.warnings {
+                            lsof_core::safefs::to_stderr(w);
+                        }
+                    }
+                    if t.is_empty() {
+                        lsof_core::safefs::to_stderr("lsof: no character devices found");
+                        lsof_core::safefs::exit(1);
+                    }
+                    t
+                }),
+                Box::new(devnames::check),
+            )
+        });
+        cache.load();
+        cache
     }
 
     /// Whether this process runs as root, which is what lets it read every
@@ -77,39 +109,22 @@ struct Live<'a> {
     vfs: RefCell<Vec<Vfs>>,
     locks: OnceCell<HashMap<(i32, u64, u64), LockKind>>,
     pcbs: OnceCell<Pcbs>,
-    devs: OnceCell<devnames::DevTable>,
+    devs: &'a devnames::DevCache,
     dev_dev: OnceCell<Option<u64>>,
     xfiles: OnceCell<HashMap<(i32, i32), XFile>>,
 }
 
 impl<'a> Live<'a> {
-    fn new(sel: &'a Selection) -> Self {
+    fn new(sel: &'a Selection, devs: &'a devnames::DevCache) -> Self {
         Live {
             sel,
             vfs: RefCell::default(),
             locks: OnceCell::new(),
             pcbs: OnceCell::new(),
-            devs: OnceCell::new(),
+            devs,
             dev_dev: OnceCell::new(),
             xfiles: OnceCell::new(),
         }
-    }
-
-    /// `readdev()`: the table of `/dev`, made the first time a row needs it,
-    /// with its warnings. With no character device in it the C says so and
-    /// ends the run (`lib/rdev.c:380-382`), and so does this.
-    fn devs(&self) -> &devnames::DevTable {
-        self.devs.get_or_init(|| {
-            let t = devnames::scan(Path::new("/dev"));
-            for w in &t.warnings {
-                warn(self.sel, w);
-            }
-            if t.is_empty() {
-                lsof_core::safefs::to_stderr("lsof: no character devices found");
-                lsof_core::safefs::exit(1);
-            }
-            t
-        })
     }
 
     fn pcbs(&self) -> &Pcbs {
@@ -211,11 +226,15 @@ impl Env for Live<'_> {
     }
 
     fn dev_name(&self, rdev: u64, inode: Option<u64>) -> Option<String> {
-        self.devs().name(rdev, inode)
+        self.devs.name(rdev, inode)
     }
 
     fn dev_inode(&self, rdev: u64) -> Option<u64> {
-        self.devs().inode(rdev)
+        self.devs.inode(rdev)
+    }
+
+    fn pts_seen(&self) {
+        self.devs.mark_unsafe();
     }
 
     fn dev_dev(&self) -> Option<u64> {
@@ -373,6 +392,8 @@ impl Backend for FreeBsdBackend {
     }
 
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
+        // The C reads `/dev` before anything else it lists (`main.c:1304`).
+        let devs = self.devs(sel);
         let buf = sys::sysctl_mib(&[layout::CTL_KERN, layout::KERN_PROC, layout::KERN_PROC_PROC])
             .map_err(|e| {
             BackendError::Os(format!("can't read process table: {}", errno(&e)))
@@ -426,7 +447,7 @@ impl Backend for FreeBsdBackend {
                 .map(|p| p.pid)
                 .collect()
         });
-        let env = Live::new(sel);
+        let env = Live::new(sel, devs);
         let opts = Opts {
             inet: sel.inet.enabled,
             file_struct: sel.file_struct,

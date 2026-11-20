@@ -52,6 +52,10 @@ pub trait Env {
     fn dev_inode(&self, rdev: u64) -> Option<u64>;
     /// `DevDev`: the device `/dev` is on.
     fn dev_dev(&self) -> Option<u64>;
+    /// A terminal row was made: `process_pts()`'s `DCunsafe = 1`
+    /// (`dnode.c:750`), after which a lookup that misses reads `/dev` again
+    /// ([`crate::devnames::DevCache`]).
+    fn pts_seen(&self);
     /// `kern.file`'s record of `pid`'s `fd` (the C's `bsearch()` of its
     /// `xfile` list, `dproc.c:248-253`).
     fn xfile(&self, pid: i32, fd: i32) -> Option<XFile>;
@@ -326,13 +330,14 @@ fn vnode(f: &mut OpenFile, k: &KFile, pid: i32, env: &dyn Env) {
     } else if ntype == Ntype::Proc {
         f.file_type = proc_type(&path);
     }
-    // NAME is the path and its file system's name (`dnode.c:638-646`). A row
-    // with no path is named as `printname()` names a row with no NAME
-    // (`print.c:1448-1592`): a device by its name in `/dev`, then the file
-    // system's directory and name.
+    // NAME is the path and its file system's name (`dnode.c:638-646`), the
+    // C's `Lf->nm`. A row with no path has none, and is named as
+    // `printname()` names it (`print.c:1448-1592`): a device by its name in
+    // `/dev`, then the file system's directory and name. That text is only
+    // printed — JSON's `name`, `Lf->nm`, has none (`print.c:1990`).
     let mut like = None;
-    let base = match name {
-        Some(n) => n,
+    match name {
+        Some(n) => f.set_base_name(&n),
         None if !k.path().is_empty() => {
             let mut n = lossy(k.path());
             if let Some(v) = &vfs {
@@ -340,20 +345,20 @@ fn vnode(f: &mut OpenFile, k: &KFile, pid: i32, env: &dyn Env) {
                 n.push_str(&lossy(&v.fsname));
                 n.push(')');
             }
-            n
+            f.set_base_name(&n);
         }
         None => {
             let named = match rdev.filter(|_| device_node && dev.is_some()) {
                 Some(r) => device_name(r, dev, inode, vtype == kf::VTYPE_VBLK, env, &mut like),
                 None => None,
             };
-            named.unwrap_or_else(|| match &vfs {
+            let shown = named.unwrap_or_else(|| match &vfs {
                 Some(v) => format!("{} ({})", lossy(&v.dir), lossy(&v.fsname)),
                 None => String::new(),
-            })
+            });
+            f.set_shown_name(&shown);
         }
-    };
-    f.set_base_name(&base);
+    }
     if let Some(like) = like {
         f.add_name_addition(&like);
     }
@@ -438,12 +443,15 @@ fn pts(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
     f.node = Some(d.to_string());
     f.rdev = u32::try_from(d).ok().and_then(NonZeroU32::new);
     f.device = Some(dev_string(d));
+    env.pts_seen();
     // `printdevname()` of a row the dialect names nothing (`print.c:1448`):
     // the inode it has is the terminal's number.
+    // That name is only printed: the C's `Lf->nm` stays empty
+    // (`dnode.c:747-750`), so JSON's `name` has none.
     if f.fs_device.is_some() {
         let mut like = None;
         if let Some(n) = device_name(d, f.fs_device, Some(d), false, env, &mut like) {
-            f.name = n;
+            f.set_shown_name(&n);
         } else if let Some(like) = like {
             f.add_name_addition(&like);
         }
@@ -546,9 +554,12 @@ fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
         }
         sock::AF_ROUTE => {
             // The pcblists hold no routing socket, so the C never has the
-            // `xsocket` this branch asks for.
+            // `xsocket` this branch asks for. Its queues it has, as every
+            // socket's are set before the family is looked at
+            // (`dsock.c:404-407`): `-T q` shows them (DIVERGENCES 147).
             f.file_type = FileType::Socket("rte");
             f.name = "no protocol control block".into();
+            f.socket = Some(Box::new(queues_only(Protocol::Other("rte"), tcp)));
         }
         sock::AF_UNIX => {
             f.file_type = FileType::Unix;
@@ -586,7 +597,21 @@ fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
         }
         fam => {
             f.name = unknown_family(fam);
+            f.socket = Some(Box::new(queues_only(Protocol::Other("sock"), tcp)));
         }
+    }
+}
+
+/// A socket the C knows nothing of but its record's: no address or state,
+/// only `Lf->lts`'s queues and buffer states, which it sets for every socket.
+fn queues_only(protocol: Protocol, tcp: Option<TcpExtInfo>) -> SocketInfo {
+    SocketInfo {
+        protocol,
+        local: None,
+        remote: None,
+        state: None,
+        tcp,
+        bound: None,
     }
 }
 
@@ -603,6 +628,7 @@ mod tests {
         pcbs: HashMap<u64, Pcb>,
         devs: HashMap<u64, String>,
         xfiles: HashMap<(i32, i32), XFile>,
+        pts_seen: std::cell::Cell<bool>,
     }
 
     impl Env for Fake {
@@ -632,6 +658,9 @@ mod tests {
         }
         fn dev_dev(&self) -> Option<u64> {
             Some(0x5a)
+        }
+        fn pts_seen(&self) {
+            self.pts_seen.set(true);
         }
         fn xfile(&self, pid: i32, fd: i32) -> Option<XFile> {
             self.xfiles.get(&(pid, fd)).copied()
@@ -714,6 +743,11 @@ mod tests {
         put(&mut r, kf::FILE_RDEV, &0x1fu64.to_ne_bytes());
         let f = numbered(&KFile::from_bytes(&r), 7, &env, Opts::default());
         assert_eq!(f.name, "/dev/null");
+        assert_eq!(f.base_name(), None, "printed, not Lf->nm");
+        assert!(
+            !env.pts_seen.get(),
+            "only a terminal makes the table unsafe"
+        );
         // On another file system: the file system, and what `/dev` calls
         // the device in an addition.
         let mut other = r.clone();
@@ -725,12 +759,20 @@ mod tests {
             f.name,
             "/ (zroot/ROOT/default) (like character special /dev/null)"
         );
-        assert_eq!(f.base_name(), Some("/ (zroot/ROOT/default)"));
+        // Printed, not the C's `Lf->nm`: JSON's `name` has none
+        // (`print.c:1990`), and a path argument's name replaces the text,
+        // keeping the addition, as the C prints `Lf->nm` and its `nma`.
+        assert_eq!(f.base_name(), None);
+        let mut renamed = f.clone();
+        renamed.set_base_name("/arg");
+        assert_eq!(renamed.name, "/arg (like character special /dev/null)");
+        assert_eq!(renamed.base_name(), Some("/arg"));
         // A device `/dev` does not name, and a file with no path: the file
         // system alone.
         env.devs.clear();
         let f = numbered(&KFile::from_bytes(&other), 7, &env, Opts::default());
         assert_eq!(f.name, "/ (zroot/ROOT/default)");
+        assert_eq!(f.base_name(), None);
         let plain = vnode_rec(0, kf::VTYPE_VREG, b"");
         let f = numbered(&KFile::from_bytes(&plain), 7, &env, Opts::default());
         assert_eq!(f.name, "/ (zroot/ROOT/default)");
@@ -1051,6 +1093,8 @@ mod tests {
         let f = numbered(&KFile::from_bytes(&r), 1, &env, Opts::default());
         assert_eq!(f.file_type.code(), "PTS");
         assert_eq!(f.name, "/dev/pts/0");
+        assert_eq!(f.base_name(), None, "printed: process_pts() sets no Lf->nm");
+        assert!(env.pts_seen.get(), "DCunsafe = 1");
         assert_eq!(f.device.as_deref(), Some("0,110"));
         assert_eq!((f.node.as_deref(), f.fs_device), (Some("110"), Some(0x5a)));
     }
@@ -1195,5 +1239,23 @@ mod tests {
         let x = sock_rec(sock::AF_UNIX, sock::SOCK_STREAM, 0, 0x10);
         let b = bsd(&numbered(&KFile::from_bytes(&x), 1, &env, Opts::default()));
         assert_eq!((b.record, b.xsocket), (false, Some(xso)));
+        // A routing socket, and one of a family the C does not know: their
+        // queues and buffer states, for `-T q` (`dsock.c:404-407`), and no
+        // record; NAME as before.
+        for (domain, name) in [(sock::AF_ROUTE, "no protocol control block"), (99, "")] {
+            let mut r = sock_rec(domain, sock::SOCK_STREAM, 0, 0x99);
+            put(&mut r, kf::SOCK_RECVQ, &3u32.to_ne_bytes());
+            put(&mut r, kf::SOCK_SENDQ, &4u32.to_ne_bytes());
+            put(&mut r, kf::SOCK_RCV_SB_STATE, &0x20u16.to_ne_bytes());
+            let f = numbered(&KFile::from_bytes(&r), 1, &env, Opts::default());
+            let t = f.socket.as_deref().and_then(|s| s.tcp).unwrap();
+            assert_eq!((t.recv_queue, t.send_queue), (Some(3), Some(4)), "{domain}");
+            let b = bsd(&f);
+            assert_eq!((b.record, b.xsocket, b.sbs_rcv), (false, None, 0x20));
+            if !name.is_empty() {
+                assert_eq!(f.name, name);
+            }
+            assert_eq!(f.size, Some(7));
+        }
     }
 }

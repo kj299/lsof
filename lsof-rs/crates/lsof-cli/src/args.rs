@@ -1637,9 +1637,9 @@ fn parse_options<'s>(
                                     }
                                     // FreeBSD's, as its C has them
                                     // (`main.c:412-458`, no `HASNOFS*`).
-                                    'c' | 'C' if HAS_FILE_STRUCT => fsv.count = plus,
-                                    'f' | 'F' if HAS_FILE_STRUCT => fsv.addr = plus,
-                                    'n' | 'N' if HAS_FILE_STRUCT => fsv.node = plus,
+                                    'c' | 'C' if has_file_struct() => fsv.count = plus,
+                                    'f' | 'F' if has_file_struct() => fsv.addr = plus,
+                                    'n' | 'N' if has_file_struct() => fsv.node = plus,
                                     // Each one the C's error, and it reads on.
                                     other => early.letter(Early::FILE_STRUCT, other),
                                 }
@@ -3108,10 +3108,24 @@ const HAS_FILE_FLAGS: bool = false;
 /// Whether `c`, `f` and `n` are letters of `-f`/`+f`: the file structure's
 /// count, address and node address, which FreeBSD's C has (`HASFSTRUCT`
 /// with no `HASNOFS*`) and Linux's compiles out (DIVERGENCES 142).
-#[cfg(target_os = "freebsd")]
-const HAS_FILE_STRUCT: bool = true;
-#[cfg(not(target_os = "freebsd"))]
-const HAS_FILE_STRUCT: bool = false;
+#[cfg(not(test))]
+fn has_file_struct() -> bool {
+    cfg!(target_os = "freebsd")
+}
+
+/// [`has_file_struct`], which a test may turn on anywhere to read FreeBSD's
+/// parse ([`FILE_STRUCT_LETTERS`]).
+#[cfg(test)]
+fn has_file_struct() -> bool {
+    FILE_STRUCT_LETTERS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread's parses read `c`, `f` and `n`, as on FreeBSD.
+    static FILE_STRUCT_LETTERS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(cfg!(target_os = "freebsd")) };
+}
 
 /// Whether `--etw`, `--unicode` and `--ascii` are lsof-rs's own options:
 /// on Windows alone, where there is no C to match (DIVERGENCES 155).
@@ -7278,9 +7292,17 @@ mod tests {
     /// capitals, as its C reads them (`main.c:412-458`): `+` shows, `-`
     /// hides, in argument order; `-F` sets the bit its letter names, and a
     /// bare `-F` all of them (DIVERGENCES 142).
-    #[cfg(target_os = "freebsd")]
     #[test]
     fn the_file_structure_values_are_shown_as_the_last_option_says() {
+        // Elsewhere the letters are an error ...
+        if !cfg!(target_os = "freebsd") {
+            assert_eq!(
+                columns(&["+fc"]).unwrap_err(),
+                "unknown file struct option: c"
+            );
+        }
+        // ... and FreeBSD's parse is read here as it is there.
+        FILE_STRUCT_LETTERS.with(|on| on.set(true));
         let fsv = |argv: &[&str]| columns(argv).unwrap().0.file_struct;
         let v = |addr, count, node| FsValues { addr, count, node };
         assert_eq!(fsv(&[]), v(false, false, false));
@@ -7291,9 +7313,15 @@ mod tests {
         assert_eq!(fsv(&["-F"]), v(true, true, true));
         assert_eq!(fsv(&["-FC"]), v(false, true, false));
         assert_eq!(fsv(&["-F", "-fc"]), v(true, false, true));
-        let (cols, sel) = columns(&["+fg"]).unwrap();
-        assert_eq!(cols.file_flags, FileFlags::Names);
-        assert!(sel.file_struct, "the backend is asked for the flags");
+        // The flags, where the platform records them (not Windows).
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            let (cols, sel) = columns(&["+fg"]).unwrap();
+            assert_eq!(cols.file_flags, FileFlags::Names);
+            assert!(sel.file_struct, "the backend is asked for the flags");
+        }
+        assert!(columns(&["+fc"]).unwrap().1.file_struct, "and for these");
+        assert!(columns(&["-FN"]).unwrap().1.file_struct);
+        assert!(!columns(&["-Fp"]).unwrap().1.file_struct);
         assert!(!columns(&[]).unwrap().1.file_struct);
         assert_eq!(
             columns(&["+fx"]).unwrap_err(),

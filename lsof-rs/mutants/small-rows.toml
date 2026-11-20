@@ -419,8 +419,8 @@ name = "addition-base-moves"
 rule = "the base is where the first addition began, whatever follows (56)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/model.rs"
-old = '''            Some(a) if (a.base() as usize) <= self.name.len() => a.base() as usize,'''
-new = '''            Some(_) => self.name.len(),'''
+old = '''            Some(a) if (a.base() as usize) <= self.name.len() => (a.base() as usize, a.shown()),'''
+new = '''            Some(_) => (self.name.len(), false),'''
 
 [[mutant]]
 name = "plain-addition-after-printed-raw"

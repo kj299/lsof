@@ -8,8 +8,8 @@ below that had stopped being true. Every claim was checked against the code
 rather than inferred from the C's design.
 
 `lsof` reports which files processes have open. It is an **observer**: it has no
-network listener, and the one process it starts is, on Linux, its own bounded
-helper (the same binary, re-executed; §2, DIVERGENCES 94). On Linux it writes
+network listener, and the one process it starts is, on Linux and FreeBSD, its
+own bounded helper (the same binary, re-executed; §2, DIVERGENCES 94, 144). On Linux it writes
 nothing but that helper's command name. On Windows two opt-in paths change
 transient state: an elevated `-T q` or `-T w`
 turns EStats collection on for each selected TCP connection — other processes'
@@ -44,9 +44,9 @@ gate, not just correctness-as-taste.
 but the two transient Windows states above and, on Linux, a helper killed on a
 timeout, which stays in state D holding the descriptor its call opened until the
 file system answers (§2, DIVERGENCES 123), so this reduces to not being a vector — not executing attacker data, not passing it
-to a shell (the one subprocess is lsof-rs's own bounded helper on Linux: the
-same binary, a fixed argument, no shell and no environment; §2, DIVERGENCES
-94), and not corrupting its own memory.
+to a shell (the one subprocess is lsof-rs's own bounded helper on Linux and
+FreeBSD: the same binary, a fixed argument, no shell and no environment; §2,
+DIVERGENCES 94, 144), and not corrupting its own memory.
 
 ## 2. Trust boundaries — where does untrusted data cross in?
 
@@ -71,8 +71,8 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.filedesc.PID`: packed `kinfo_file` records, each with its own length, and `kf_path`, a name any local user's process chose | kernel, and **any local user's process** for the path | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it, kept by decision (DIVERGENCES 143) |
-| FreeBSD: the bounded calls' helper (this binary, run again with an argument no user types): its answers over a pipe, and how long it takes | this binary; **whoever serves the file system** a call is about, for the time | answers untrusted, every length bounded before it is allocated for; **hostile** to availability, bounded by `-S` | `lsof-backend-freebsd::safefs` | not applicable: a fixed binary framing, unit-tested against every cut and every bound |
-| FreeBSD: `/dev`, walked for device names (`readdev()`) | devfs, and whatever is mounted under `/dev` | untrusted | `lsof-backend-freebsd::devnames` | not applicable: names and numbers from `lstat`, no parsing |
+| FreeBSD: the bounded calls' helper (this binary, run again with an argument no user types, greeting with its build): its frames over a pipe, and how long each takes | this binary; **whoever serves the file system** a call is about, for the time | frames untrusted, every length bounded before it is allocated for, each taken at its exact size; **hostile** to availability, bounded by `-S` per wait | `lsof-backend-freebsd::safefs` | not applicable: a fixed binary framing, unit-tested against every cut and every bound, and driven on Linux by scripted helpers |
+| FreeBSD: `/dev`, walked for device names (`readdev()`), as the run starts and again after a terminal row | devfs, and whatever is mounted under `/dev` | untrusted; bounded at 4,096 directories and 65,536 devices | `lsof-backend-freebsd::devnames` | not applicable: names and numbers from `lstat`, no parsing |
 | `/etc/nsswitch.conf`, read by lsof-rs to decide whether glibc may be asked for an account, and `/etc/passwd`, read by lsof-rs where glibc is not (DIVERGENCES 39): **on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l`, `-t` and `-F` without `L` read neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
 | Linux and FreeBSD: what the C library answers for an account, `getpwnam_r(3)` and `getpwuid_r(3)`: the sources nsswitch.conf names, loaded into the process as shared objects (`libnss_files`, `libnss_compat`, `libnss_sss`, `libnss_ldap`, `libnss_systemd`, `libnss_hesiod`...), and the servers they ask (an LDAP or SSSD daemon, Hesiod's name server), nscd before them | the operator for the modules; **a remote server** for what they answer | the modules trusted as the C trusts them; the answer untrusted, **hostile** to availability | `lsof-getpw` (the one `unsafe` boundary: a buffer, a `passwd`, the call), `lsof-backend-linux::users` (the guard, the cache) | not applicable: the C library parses the reply; lsof-rs reads a uid and a name's bytes from its own buffer |
 | `-c /regex/[bix]`: the expression, and each command it is matched against (the `Name:` line above) | the invoking user for the expression; **any local user's process** for the command | untrusted; the command **hostile** | `lsof-core::posix_regex` (the reader), the `regex` crate (the compiler and the engine), lsof-rs's own engine (`posix_regex/engine.rs`: a back-reference, and past the crate's bounds) | `posix_regex` (the expression arbitrary bytes of any length, the command arbitrary bytes held to the 64 a process name has, 1,024 for an 8-byte expression; an exhaustive search as the back-reference oracle on 8-byte commands, and a search past its budget on up to 16 bytes asked again with four times it; `-timeout=10`) |
@@ -949,24 +949,62 @@ version by `cfg`, a choice a cast would inherit silently. The parsers and the
 row rules are fuzzed (`freebsd_kinfo`) and run under miri on Linux. The FFI
 itself has run under no sanitizer, and on no FreeBSD host yet (DIVERGENCES 140).
 
-**FreeBSD's bounded calls run in a helper process, with no `unsafe`**
-(DIVERGENCES 144). The C forks a child for `statsafely()`, `lstatsafely()`
-and `Readlink()` and gives each call `alarm(TmLimit)`; a threaded Rust
-process cannot fork safely, so `lsof-backend-freebsd::safefs` runs this
-binary again through std's `Command`, with an argument no user types, and
-keeps it. A request is a kind byte and a path no longer than `MAXPATHLEN`;
-an answer's every length (a link, a listing's count and each name, their
-total) is checked against `MAXPATHLEN`, `READ_DIR_MAX_NAMES` and
-`READ_DIR_MAX_BYTES` before anything is allocated for it, and anything
-malformed is `ECHILD`. A reader thread owns the helper's stdout; the caller
-waits on it for `-S` seconds and no longer (measured on Linux: two calls
-to a helper that never answers, each given 1 second, return in 2.00 s),
-then kills the helper and
-starts another at the next call. A killed helper the file system still
-holds is not waited for, only listed (`FsCalls::helper_pids`), so a scan
-does not `stat` what it holds open. What `/dev` holds is walked in-process,
-as the C walks it, bounded at 4,096 directories, each read once, and 65,536
-character devices (DIVERGENCES 146).
+**FreeBSD's bounded calls run in a helper process, protected as Linux's
+is** (DIVERGENCES 144; followed from source, run on Linux only). The C forks
+a child for `statsafely()`, `lstatsafely()` and `Readlink()` and gives each
+call `alarm(TmLimit)`; a threaded Rust process cannot fork safely, so
+`lsof-backend-freebsd::safefs` runs this binary again through std's
+`Command` and keeps it, with the Linux helper's protections:
+
+- **Which program.** The executable lsof is running, by the path the kernel
+  gives for it (`current_exe()`), with no fallback: where there is none, no
+  helper starts and the run ends `can't fork`, never a search of `PATH`.
+  FreeBSD has no `/proc/self/exe` to name the running image itself, so the
+  helper must prove it is this build: its greeting carries lsof-rs's version
+  and the identity of its executable (device, inode, size and modification
+  time), which lsof took of its own as it started; any other greeting, a
+  binary put at the path since then included, is killed and ends the run
+  `can't fork: No child processes`. Not a hash of the code: someone who can
+  rewrite lsof's binary in place, keeping its inode, size and time, owns the
+  next run anyway.
+- **What it is given.** One fixed argument, an empty environment, lsof's
+  working directory, `/dev/null` as stderr and two pipes as stdin and
+  stdout. It serves only on pipes (a FIFO by `fstat`; otherwise `lsof:
+  --lsof-rs-freebsd-bounded-calls-helper is lsof-rs's own, started by lsof;
+  not an option`, exit 2), and then closes every descriptor past stderr it
+  was given (`closefrom(3)`, as the C's child does with `closefrom_shim(ctx,
+  2)`: the one `unsafe` call this adds, in the crate's audited `sys.rs`).
+- **The frames.** Every frame is a kind byte, a length and a payload of at
+  most 64 KiB, the length checked before anything is allocated, on both
+  sides; a request's path is at most `MAXPATHLEN`, a link's target too; a
+  stat record, an `errno` and a listing's end are taken only at their exact
+  size, an `errno` of 0 is no answer (an error with none is sent as
+  `EINVAL`), a listing stops at `READ_DIR_MAX_NAMES` names or
+  `READ_DIR_MAX_BYTES` bytes, and a frame waiting before a request is sent
+  replaces the helper. Each frame is read once, as it comes, so a listing
+  costs what its bytes do: 400,000 names in 0.23 s and 1,000,000 in 0.52 s
+  (measured on Linux with a scripted helper; the first version re-read the
+  whole answer at each chunk and took 17 s for 400,000).
+- **The time.** A reader thread (started by `thread::Builder`: one that
+  cannot be started ends the run `can't fork`) owns the helper's stdout and
+  passes on at most four frames, each with when it began to wait for it and
+  when it had it. A wait for the system longer than `-S` is a timeout, even
+  for a frame already waiting; a listing is sent in frames at least every
+  100 ms, so a large directory that keeps coming is read whole however long
+  it takes, and one that stops is a timeout within the limit (measured:
+  two calls to a helper that never answers, each given 1 second, 2.02 to
+  2.04 s; a listing that stops after 400,000 names under `-S 2`, 2.19 s).
+  The helper is then killed, and the next call starts another.
+- **The killed.** One the file system still holds is not waited for, only
+  listed (`FsCalls::helper_pids`) until it is reaped, so a scan does not
+  `stat` what it holds open; at most 16 (`MAX_WAITING`) may wait at once,
+  after which a call fails at once with `EAGAIN` and one warning says so,
+  as on Linux.
+
+What `/dev` holds is walked in-process, as the C walks it, as the run starts
+and again where the C reads it again (DIVERGENCES 146), bounded at 4,096
+directories and 65,536 character devices, with a warning where either cuts
+it.
 
 **The environment surface is a handful of variables, and the resolver's own.** The
 C `lsof` reads considerably more, including the personal device-cache path;

@@ -854,6 +854,22 @@ mod tests {
         }
     }
 
+    /// `-F ?` lists the file structure's `C`, `F` and `N` on FreeBSD alone,
+    /// where they are recorded (DIVERGENCES 142); a bare `-F` selects them
+    /// everywhere, as the C's table does.
+    #[test]
+    fn the_file_structure_fields_are_listed_on_freebsd_alone() {
+        for c in ['C', 'F', 'N'] {
+            let f = FIELD_TABLE.iter().find(|f| f.id == c).unwrap();
+            assert_eq!(f.listed, cfg!(target_os = "freebsd"), "{c}");
+            assert!(f.default, "{c}");
+        }
+        assert!(FIELD_TABLE
+            .iter()
+            .filter(|f| !"CFNZz".contains(f.id))
+            .all(|f| f.listed));
+    }
+
     /// An Internet socket's NAME prints, empty or not, as the C's `n`
     /// (DIVERGENCES 154); any other row's empty one is left out.
     #[test]

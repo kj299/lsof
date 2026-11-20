@@ -2731,6 +2731,57 @@ fn json_name_is_the_base() {
     );
 }
 
+/// FreeBSD's names the C makes up at print time for a row whose `Lf->nm` is
+/// empty (`printname()`, `print.c:1448-1592`): a device's name in `/dev`, a
+/// file system's `dir (fsname)`, a terminal's `/dev/pts/N`. The table and
+/// `-F n` print them, with any `(like character special …)` after; JSON's
+/// `name` is `Lf->nm` (`print.c:1990`), so none (DIVERGENCES 146). Followed
+/// from source, unmeasured: no FreeBSD host.
+#[test]
+fn json_has_no_name_for_a_name_only_printed() {
+    let mut pts = jrow(
+        lsof_core::FdType::Handle(1),
+        lsof_core::FileType::Other("PTS".into()),
+        "",
+    );
+    pts.set_shown_name("/dev/pts/0");
+    assert_eq!(jfile(pts.clone()), "\"fd\":\"1\",\"type\":\"PTS\"");
+    let mut fsdir = jrow(
+        lsof_core::FdType::Handle(7),
+        lsof_core::FileType::Other("VCHR".into()),
+        "",
+    );
+    fsdir.set_shown_name("/ (zroot/ROOT/default)");
+    fsdir.add_name_addition("(like character special /dev/null)");
+    assert_eq!(jfile(fsdir.clone()), "\"fd\":\"7\",\"type\":\"VCHR\"");
+    // A row the dialect named keeps its name in JSON.
+    let named = jrow(
+        lsof_core::FdType::Handle(8),
+        lsof_core::FileType::Other("VCHR".into()),
+        "/dev/null (devfs)",
+    );
+    assert!(jfile(named.clone()).ends_with("\"name\":\"/dev/null (devfs)\""));
+    let all = jproc(vec![pts, fsdir, named]);
+    let f = fields::render(
+        std::slice::from_ref(&all),
+        false,
+        None,
+        TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
+    assert!(f.contains("n/dev/pts/0\n"), "{f}");
+    assert!(
+        f.contains("n/ (zroot/ROOT/default) (like character special /dev/null)\n"),
+        "{f}"
+    );
+    let t = table::render(&[all], TableOpts::new(Escaper::UNIX));
+    assert!(t.contains(" /dev/pts/0\n"), "{t}");
+    assert!(
+        t.contains(" / (zroot/ROOT/default) (like character special /dev/null)\n"),
+        "{t}"
+    );
+}
+
 /// Whatever the rows, a JSON key is printed exactly when `-F` prints its
 /// letter, with the same value source: the renderers share their row
 /// predicates. The measured exceptions: a blank access or lock (`-F` prints

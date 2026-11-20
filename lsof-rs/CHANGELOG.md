@@ -23,14 +23,28 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 - **The bounded calls go through a helper process** (144): a mount point's
   `stat`, a path argument's, `+d`/`+D`'s and a link's `readlink` are each
   given `-S` seconds, as the C's `doinchild()` gives them; on FreeBSD they
-  had been made in lsof with no limit.
+  had been made in lsof with no limit. One that times out says `Operation
+  timed out`, FreeBSD's words for `ETIMEDOUT`, as `-h` now says there. The
+  helper is protected as Linux's is: the running executable and no other
+  (no `PATH` search; a greeting from another build ends the run `can't
+  fork`), an empty environment, pipes or nothing, other descriptors closed,
+  exact frames, a listing streamed so that `-S` bounds each wait and not the
+  whole (a large directory is read in time linear in its size), and at most
+  16 killed helpers waiting before calls fail at once with a warning.
 - **A KQUEUE row's DEVICE is `kern.file`'s `xf_data`** (145), `0x00000000`
   where it lists no such descriptor.
 - **Device names are `readdev()`'s** (146): character devices alone, one per
   device and inode, the first by name; a device row with a path is named by
   its path and ` (fsname)` like any file, and `/dev`'s name is printed only
   for a row with none, or as `(like character special NAME)`; a row with no
-  path is named by its file system, `dir (fsname)`.
+  path is named by its file system, `dir (fsname)`. Such a made-up NAME, and
+  a terminal's, is printed by the table and `-F n` but is no JSON `name`, as
+  in the C. `/dev` is read as the run starts, every run that lists, with its
+  warnings (and `no character devices found`, exit 1), and read again after a
+  terminal row where a lookup misses, as the C reads it; the walk warns where
+  its bounds cut it.
+- **Under `-T q` a routing socket, and one of a family the C does not decode,
+  shows its queues** (147), as the C sets them for every socket.
 
 ### Changed — output and exit status a script may notice
 - **`-u name` and USER ask the C library, as the C does** (DIVERGENCES
