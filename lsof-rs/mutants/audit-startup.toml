@@ -700,8 +700,8 @@ name = "probe-any-position"
 rule = "the position told must be the one sought (177)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/offtype.rs"
-old = """    crate::files::parse_fdinfo(text).pos == Some(TEST_SEEK)"""
-new = """    crate::files::parse_fdinfo(text).pos.is_some()"""
+old = """    crate::files::parse_fdinfo(text, crate::files::want::POS).pos == Some(TEST_SEEK)"""
+new = """    crate::files::parse_fdinfo(text, crate::files::want::POS).pos.is_some()"""
 
 [[mutant]]
 name = "probe-fdinfo-waits"
@@ -823,3 +823,11 @@ rule = "...and it reaches the columns (177)"
 file = "crates/lsof-cli/src/args.rs"
 old = """    columns.flags_by_f = flags_by_f;"""
 new = """    columns.flags_by_f = flags_by_f && false;"""
+
+[[mutant]]
+name = "helper-null-not-moved-up"
+rule = "the helper's /dev/null is moved out of the pipes' way, so lsof keeps its ends at the C's numbers (123, 166)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = """    Ok(match rustix::io::fcntl_dupfd_cloexec(&null, NULL_ABOVE) {"""
+new = """    Ok(match rustix::io::fcntl_dupfd_cloexec(&null, 0) {"""

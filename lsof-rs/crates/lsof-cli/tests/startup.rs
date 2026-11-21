@@ -184,6 +184,28 @@ fn lsof_lists_no_descriptor_it_was_handed() {
     assert!(!listed.lines().any(|l| l == "f9"), "{listed}");
 }
 
+/// With a path argument the helper starts first, as the C's child is forked
+/// first, and lsof keeps its pipes' ends at the lowest numbers, 4 and 5, as
+/// the C does: its `/dev/null` for the helper is moved out of their way, so
+/// `/proc` is 3 and `/proc/PID/fd` is 6 in both (DIVERGENCES 123, 166).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation)"
+)]
+fn with_a_path_argument_lsof_keeps_the_cs_numbers() {
+    let out = sh("exec \"$1\" -n -P -a -p $$ -F fn /proc", &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listed = text(&out.stdout);
+    let pid = listed
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix('p'))
+        .unwrap_or_default();
+    let want = format!("f3\nn/proc\nf6\nn/proc/{pid}/fd");
+    assert!(listed.contains(&want), "{listed}");
+}
+
 /// The descriptors lsof was handed do not count against its descriptor
 /// limit, as they do not count against the C's: with 3 and 4 handed down
 /// and a limit of 8, the C has five numbers free once it has closed them,

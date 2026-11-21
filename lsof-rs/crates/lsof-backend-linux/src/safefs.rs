@@ -643,12 +643,22 @@ pub fn helper_command(program: impl AsRef<OsStr>, args: &[&OsStr]) -> io::Result
 /// own failed step ([`cannot_start`]). The helper's row for it is `2u`
 /// (DIVERGENCES 123).
 fn dev_null() -> io::Result<Stdio> {
-    std::fs::OpenOptions::new()
+    let null = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/null")
-        .map(Stdio::from)
+        .open("/dev/null")?;
+    // Moved above the numbers the helper's pipes are made at, so that lsof
+    // keeps its ends at the C's numbers (the C's child gets no descriptor 2,
+    // so its pipes are the lowest free numbers: DIVERGENCES 123, 166). Where
+    // the limit leaves no room up there, it stays where it was opened.
+    Ok(match rustix::io::fcntl_dupfd_cloexec(&null, NULL_ABOVE) {
+        Ok(high) => Stdio::from(high),
+        Err(_) => Stdio::from(null),
+    })
 }
+
+/// The lowest number the helper's `/dev/null` is moved to ([`dev_null`]).
+const NULL_ABOVE: std::os::fd::RawFd = 10;
 
 /// How this process was started: `/proc/self/cmdline`'s words, which keep a
 /// dynamic loader's, and the arguments `main` was given, which do not.
