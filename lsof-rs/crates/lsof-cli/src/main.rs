@@ -145,6 +145,13 @@ const HELP_ZONE: &str = "TZ's rule string, else UTC";
 #[cfg(not(windows))]
 const HELP_ZONE: &str = "TZ, TZDIR, /etc/localtime";
 
+/// How the help says a call that timed out fails: the C library's words for
+/// `ETIMEDOUT`, which FreeBSD's `strerror()` gives as its own.
+#[cfg(target_os = "freebsd")]
+const HELP_TIMEOUT: &str = "Operation timed out";
+#[cfg(not(target_os = "freebsd"))]
+const HELP_TIMEOUT: &str = "Connection timed out";
+
 fn usage() -> String {
     // Real newlines, not `\n\` continuations: a continuation also eats the
     // next line's leading spaces, which printed every line flush left.
@@ -269,7 +276,7 @@ MISCELLANEOUS:
     -S [t]        give each of those calls t seconds (default 15, at least
                   2), in a helper process (Linux and FreeBSD; on Windows
                   they are made in lsof). One that times out fails:
-                  `Connection timed out`
+                  `{timeout}`
     --, ++        end of options; remaining args are paths. The options
                   also end at the first path, and a lone - or + is that
                   first path: it and every word after it are paths, --
@@ -301,7 +308,8 @@ lists these differences.
 ",
         ver = env!("CARGO_PKG_VERSION"),
         names = HELP_NAMES,
-        zone = HELP_ZONE
+        zone = HELP_ZONE,
+        timeout = HELP_TIMEOUT
     )
 }
 
@@ -2420,8 +2428,9 @@ mod tests {
         // 110)`, those words first.
         let hung = Path::new("/w").join("hung");
         let want = format!(
-            "lsof: WARNING: can't lstat({}): Connection timed out",
-            hung.display()
+            "lsof: WARNING: can't lstat({}): {}",
+            hung.display(),
+            crate::HELP_TIMEOUT
         );
         let warned = said.borrow();
         assert_eq!(warned.len(), 1, "{warned:?}");

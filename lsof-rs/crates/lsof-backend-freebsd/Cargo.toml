@@ -9,9 +9,9 @@ rust-version.workspace = true
 publish = false
 
 # No dependencies. FreeBSD's open-file data is not a filesystem, as Linux's
-# /proc is: it is sysctl(3), which std has no API for. The four libc calls this
-# crate makes (sysctl, sysctlbyname, getfsstat, statfs) are declared in
-# `src/sys.rs`, the one module allowed `unsafe`; every byte they return is
+# /proc is: it is sysctl(3), which std has no API for. The libc calls this
+# crate makes (sysctl, sysctlbyname, getfsstat, statfs, and geteuid and
+# closefrom) are declared in `src/sys.rs`, the one module allowed `unsafe`; every byte they return is
 # parsed by safe code that bounds-checks each read (`src/kinfo.rs`), so a short
 # or malformed record is skipped or refused, never read past.
 [dependencies]

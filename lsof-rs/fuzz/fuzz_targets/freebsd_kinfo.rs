@@ -43,6 +43,7 @@ impl f::Env for Knows {
     fn dev_dev(&self) -> Option<u64> {
         self.0.then_some(0x5a)
     }
+    fn pts_seen(&self) {}
     fn xfile(&self, _: i32, _: i32) -> Option<f::XFile> {
         self.0.then_some(f::XFile { file: u64::MAX, data: 1, vnode: 2, flag: u32::MAX })
     }

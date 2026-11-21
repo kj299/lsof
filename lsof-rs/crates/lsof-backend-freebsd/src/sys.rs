@@ -3,7 +3,8 @@
 //!
 //! Four libc functions, each declared with the prototype FreeBSD's headers
 //! give it (`sys/sysctl.h`, `sys/mount.h`, `unistd.h`), each wrapped in one
-//! safe function that owns its buffer and hands back bytes. What the bytes
+//! safe function that owns its buffer and hands back bytes; and
+//! `geteuid(2)` and `closefrom(2)`, which take no buffer. What the bytes
 //! mean is [`crate::kinfo`]'s business, in safe code; nothing here interprets
 //! them, casts them to a struct, or keeps a pointer past the call.
 //!
@@ -39,6 +40,7 @@ extern "C" {
     fn getfsstat(buf: *mut c_void, bufsize: c_long, mode: c_int) -> c_int;
     fn statfs(path: *const c_char, buf: *mut c_void) -> c_int;
     fn geteuid() -> u32;
+    fn closefrom(lowfd: c_int);
 }
 
 /// How many times a read that raced a growing table is tried again.
@@ -140,4 +142,18 @@ pub fn euid() -> u32 {
     // SAFETY: `geteuid` takes nothing, cannot fail and touches no memory of
     // ours.
     unsafe { geteuid() }
+}
+
+/// `closefrom(2)` from `lowfd`: every descriptor from `lowfd` on closed.
+/// Only the bounded calls' helper calls it, first thing in
+/// [`crate::safefs::serve`], as the C's child calls `closefrom_shim()`
+/// (`lib/misc.c:345`): what it closes are the descriptors lsof was given
+/// without close-on-exec, which the exec kept.
+pub fn close_from(lowfd: c_int) {
+    // SAFETY: `closefrom` touches no memory of ours. It closes descriptors,
+    // which is unsound only where safe code owns one it closes (an
+    // `OwnedFd`, a `File`, std's own): it is called by the helper before it
+    // has opened anything, when the only descriptors safe code holds are
+    // std's stdin, stdout and stderr, 0 to 2, below `lowfd` (3).
+    unsafe { closefrom(lowfd) }
 }

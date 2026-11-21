@@ -21,10 +21,11 @@
 //!
 //! # Safety
 //!
-//! `std` has no `sysctl`. The four libc calls are declared in `sys`, the
-//! one module where `unsafe` is allowed (`#![deny(unsafe_code)]` everywhere
-//! else), and each is wrapped in a function that owns its buffer and returns
-//! bytes. The bytes are parsed by `kinfo`, safe code that bounds-checks
+//! `std` has no `sysctl`. The four libc calls that return records are
+//! declared in `sys`, the one module where `unsafe` is allowed
+//! (`#![deny(unsafe_code)]` everywhere else), and each is wrapped in a
+//! function that owns its buffer and returns bytes; beside them, `geteuid(2)`
+//! and the bounded calls' helper's `closefrom(2)`, which take no buffer. The bytes are parsed by `kinfo`, safe code that bounds-checks
 //! every read against the record's stated and actual length. The layouts it
 //! reads by (`layout`) were measured from the FreeBSD 14.5 and 15.1
 //! headers, on amd64 and i386, by compiling `offsetof()` with clang; a

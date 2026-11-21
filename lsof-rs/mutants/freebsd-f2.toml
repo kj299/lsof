@@ -2,20 +2,28 @@
 # the bounded calls' helper, KQUEUE's DEVICE, the /dev table, -T f. Written
 # from the C's FreeBSD dialect and FreeBSD 14.3/15.0's headers; no FreeBSD
 # host runs them, so every gate is a unit suite that runs on Linux: the
-# FreeBSD backend's pure modules (cfg(test) on any Unix) and lsof-core's
-# renderers. The parser's c/f/n letters are cfg(target_os = "freebsd") and
-# have no mutant here (no Linux test can see them; they are type-checked by
-# the freebsd-cross job). One per rule, bound and branch the change added.
+# FreeBSD backend's pure modules and its helper (cfg(test) on any Unix),
+# lsof-core's renderers and model, and lsof-cli's parser (whose c/f/n
+# letters a test turns on off FreeBSD). One per rule, bound and branch the
+# change added. The F2 review fixes (2026-11-20) rewrote the helper on the
+# Linux helper's design and added the device cache, the shown NAME and the
+# routing socket's queues; their mutants follow the first set.
 #
 #   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/freebsd-f2.toml
 #
-# Run 2026-11-20 with --first-kill: 47 mutants, 46 killed (unit-bsd 28,
-# unit-core 18); name-length-unbounded survived (no case had a length just
-# past MAX_NAME), a case was added, and it was re-run alone: killed.
+# Run 2026-11-20 after the review fixes, --first-kill: 91 mutants, 91 killed
+# (unit-bsd 69, unit-core 20, unit-cli 2).
+#
+# Not mutated, and why: the FreeBSD-only lines (main.rs's dispatch, the
+# backend's start-of-run read of /dev and its exit, sys.rs's closefrom,
+# lsof-core's FreeBSD errno numbers, FreeBSD's help words) compile on no
+# Linux test; a directory whose read fails part way (map_while) needs a file
+# system that fails one; a link past MAX_NAME from the helper's side needs a
+# link no kernel makes.
 
 [run]
 dir = ".."
-build = [["cargo", "build", "-p", "lsof-backend-freebsd", "-p", "lsof-core"]]
+build = [["cargo", "build", "-p", "lsof-backend-freebsd", "-p", "lsof-core", "-p", "lsof-cli"]]
 
 [[run.gate]]
 name = "unit-bsd"
@@ -25,6 +33,11 @@ timeout = 900
 [[run.gate]]
 name = "unit-core"
 cmd = ["cargo", "test", "-p", "lsof-core", "--lib", "--test", "golden"]
+timeout = 900
+
+[[run.gate]]
+name = "unit-cli"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--lib"]
 timeout = 900
 
 [[mutant]]
@@ -304,8 +317,8 @@ name = "block-devices-kept"
 rule = "readdev() keeps character specials alone (no HASBLKDEV)"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/devnames.rs"
-old = "} else if ft.is_char_device() && devs.len() < MAX_DEVS {"
-new = "} else if (ft.is_char_device() || ft.is_block_device()) && devs.len() < MAX_DEVS {"
+old = "} else if ft.is_char_device() {"
+new = "} else if ft.is_char_device() || ft.is_block_device() {"
 
 [[mutant]]
 name = "find-ch-ino-anywhere"
@@ -349,19 +362,75 @@ new = "        None if !k.path().is_empty() && !device_node => {"
 
 [[mutant]]
 name = "timeout-is-lost"
-rule = "a call past -S is ETIMEDOUT (DIVERGENCES 144)"
+rule = "a wait past -S is ETIMEDOUT (DIVERGENCES 144)"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/safefs.rs"
-old = "Err(RecvTimeoutError::Timeout) => break Err(timed_out()),"
-new = "Err(RecvTimeoutError::Timeout) => break Err(lost_child()),"
+old = "Err(RecvTimeoutError::Timeout) => Err(Failure::TimedOut),"
+new = "Err(RecvTimeoutError::Timeout) => Err(Failure::Lost),"
+
+[[mutant]]
+name = "late-frame-taken"
+rule = "a frame that came too late is a timeout even when it is waiting (H1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "if a.at.saturating_duration_since(a.ready.max(floor)) > wait {"
+new = "if false {"
+
+[[mutant]]
+name = "late-frame-from-ready"
+rule = "the wait is from the request when the reader was ready before it"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "if a.at.saturating_duration_since(a.ready.max(floor)) > wait {"
+new = "if a.at.saturating_duration_since(a.ready) > wait {"
 
 [[mutant]]
 name = "helper-kept-after-timeout"
-rule = "a helper that timed out is killed and replaced"
+rule = "a helper that timed out or broke is killed and replaced"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/safefs.rs"
-old = "        if outcome.is_err() {\n            // Timed out or lost"
-new = "        if false {\n            // Timed out or lost"
+old = "                state.abandon();\n                Err(match failure {"
+new = "                Err(match failure {"
+
+[[mutant]]
+name = "reap-never"
+rule = "a killed helper is reaped once gone, and then not listed (M1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = ".retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));"
+new = ".retain_mut(|_| true);"
+
+[[mutant]]
+name = "reap-all"
+rule = "a killed helper still waiting stays listed"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = ".retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));"
+new = ".retain_mut(|_| false);"
+
+[[mutant]]
+name = "cap-ignored"
+rule = "past MAX_WAITING killed helpers a call fails at once with EAGAIN (M1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "if state.live.is_none() && state.killed.len() >= self.cap {"
+new = "if false {"
+
+[[mutant]]
+name = "cap-value"
+rule = "MAX_WAITING is Linux's 16"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "pub const MAX_WAITING: usize = 16;"
+new = "pub const MAX_WAITING: usize = 17;"
+
+[[mutant]]
+name = "cap-said-every-time"
+rule = "the cap's warning is given once a run"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "            if !state.full {\n                state.full = true;"
+new = "            if true {\n                state.full = true;"
 
 [[mutant]]
 name = "hello-first-line-only"
@@ -372,33 +441,333 @@ old = "    while read <= BEFORE_HELLO {"
 new = "    while read < 1 {"
 
 [[mutant]]
-name = "listing-count-unbounded"
-rule = "a listing's count is bounded before it is read"
+name = "greeting-not-checked"
+rule = "a helper of another build is refused (M2)"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/safefs.rs"
-old = "            if count > READ_DIR_MAX_NAMES {\n                return Err(bad());"
-new = "            if count > usize::MAX - 1 {\n                return Err(bad());"
+old = "Ok((R_HELLO, payload)) if payload == self.greeting => Ok(()),"
+new = "Ok((R_HELLO, _)) => Ok(()),"
+
+[[mutant]]
+name = "leftovers-taken"
+rule = "a frame waiting before a request replaces the helper (L2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "if state.live.as_ref().is_some_and(Live::has_leftovers) {"
+new = "if false {"
+
+[[mutant]]
+name = "listing-count-unbounded"
+rule = "a listing stops at READ_DIR_MAX_NAMES names"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "len == 0 || len > MAX_NAME || names.len() >= READ_DIR_MAX_NAMES"
+new = "len == 0 || len > MAX_NAME || names.len() > READ_DIR_MAX_NAMES"
+
+[[mutant]]
+name = "listing-bytes-unbounded"
+rule = "a listing stops at READ_DIR_MAX_BYTES bytes"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        if *bytes > READ_DIR_MAX_BYTES {"
+new = "        if *bytes > READ_DIR_MAX_BYTES + 1 {"
 
 [[mutant]]
 name = "name-length-unbounded"
-rule = "a name's length is bounded before anything is allocated"
+rule = "a name past MAX_NAME is no name"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/safefs.rs"
-old = "        if len > MAX_NAME {\n            return Err(bad());"
-new = "        if len > MAX_NAME * 4096 {\n            return Err(bad());"
+old = "len == 0 || len > MAX_NAME || names.len()"
+new = "len == 0 || len > MAX_NAME + 1 || names.len()"
+
+[[mutant]]
+name = "empty-name-taken"
+rule = "an empty name is no name: it costs neither cap"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "len == 0 || len > MAX_NAME || names.len()"
+new = "len > MAX_NAME || names.len()"
 
 [[mutant]]
 name = "errno-zero-taken"
-rule = "an errno of 0 is no answer"
+rule = "an errno of 0 is no answer (L3)"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/safefs.rs"
-old = "n if n > 0 => Ok(Err(io::Error::from_raw_os_error(n))),"
-new = "n if n >= 0 => Ok(Err(io::Error::from_raw_os_error(n))),"
+old = "(n > 0).then(|| io::Error::from_raw_os_error(n))"
+new = "(n >= 0).then(|| io::Error::from_raw_os_error(n))"
+
+[[mutant]]
+name = "errno-none-sent-as-zero"
+rule = "an error with no errno is sent as EINVAL (L3)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        .unwrap_or(EINVAL)\n"
+new = "        .unwrap_or(0)\n"
+
+[[mutant]]
+name = "stat-not-exact"
+rule = "a stat record is taken at its exact size (L2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    if b.len() != STAT_LEN {"
+new = "    if b.len() < STAT_LEN {"
 
 [[mutant]]
 name = "request-unbounded"
-rule = "a path longer than MAX_NAME is no request"
+rule = "a path longer than MAX_NAME is refused before any helper starts"
 [[mutant.edit]]
 file = "crates/lsof-backend-freebsd/src/safefs.rs"
-old = "    if p.len() > MAX_NAME {\n        return Err(name_too_long());"
-new = "    if p.len() > MAX_NAME + 1 {\n        return Err(name_too_long());"
+old = "        if path.len() > MAX_NAME {\n            return Err(name_too_long());"
+new = "        if path.len() > MAX_NAME + 1 {\n            return Err(name_too_long());"
+
+[[mutant]]
+name = "serve-request-unbounded"
+rule = "the helper refuses a request past MAX_NAME"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "|| len > MAX_NAME {\n            return 1;"
+new = "|| len > MAX_NAME + 1 {\n            return 1;"
+
+[[mutant]]
+name = "frame-unbounded"
+rule = "a frame past MAX_FRAME is refused unread"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    if !kinds.contains(&head[0]) || len > MAX_FRAME {"
+new = "    if !kinds.contains(&head[0]) || len > MAX_FRAME + 1 {"
+
+[[mutant]]
+name = "link-unbounded"
+rule = "a link past MAX_NAME is no answer (L4)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "R_LINK if payload.len() <= MAX_NAME =>"
+new = "R_LINK =>"
+
+[[mutant]]
+name = "flush-never"
+rule = "names are sent at least every FLUSH_EVERY, so -S bounds each wait (H1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        if since.elapsed() >= FLUSH_EVERY {"
+new = "        if false {"
+
+[[mutant]]
+name = "send-names-count-cap"
+rule = "the helper sends at most READ_DIR_MAX_NAMES names"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        if count == READ_DIR_MAX_NAMES || bytes + name.len() > READ_DIR_MAX_BYTES {"
+new = "        if count == READ_DIR_MAX_NAMES + 1 || bytes + name.len() > READ_DIR_MAX_BYTES {"
+
+[[mutant]]
+name = "send-names-bytes-cap"
+rule = "the helper sends at most READ_DIR_MAX_BYTES bytes of names"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        if count == READ_DIR_MAX_NAMES || bytes + name.len() > READ_DIR_MAX_BYTES {"
+new = "        if count == READ_DIR_MAX_NAMES || bytes + name.len() > READ_DIR_MAX_BYTES + MAX_NAME {"
+
+[[mutant]]
+name = "env-inherited"
+rule = "the helper's environment is empty (M2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        .env_clear()\n        .stdin(Stdio::piped())"
+new = "        .stdin(Stdio::piped())"
+
+[[mutant]]
+name = "pipes-not-checked"
+rule = "the helper serves only on pipes (M3)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    if !is_pipe(io::stdin().as_fd()) || !is_pipe(io::stdout().as_fd()) {"
+new = "    if false {"
+
+[[mutant]]
+name = "is-pipe-anything"
+rule = "a regular file is no pipe"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = ".is_ok_and(|m| m.file_type().is_fifo())"
+new = ".is_ok()"
+
+[[mutant]]
+name = "pts-not-unsafe"
+rule = "a terminal row makes the device table unsafe (DCunsafe, parity 3)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "    env.pts_seen();\n"
+new = ""
+
+[[mutant]]
+name = "pts-name-is-base"
+rule = "a terminal's /dev name is printed, not Lf->nm: no JSON name (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            f.set_shown_name(&n);"
+new = "            f.name = n;"
+
+[[mutant]]
+name = "fsdir-name-is-base"
+rule = "a row's made-up NAME is no JSON name (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            f.set_shown_name(&shown);"
+new = "            f.set_base_name(&shown);"
+
+[[mutant]]
+name = "route-no-queues"
+rule = "a routing socket has its queues for -T q (parity 4)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            f.socket = Some(Box::new(queues_only(Protocol::Other(\"rte\"), tcp)));\n"
+new = ""
+
+[[mutant]]
+name = "unknown-family-no-queues"
+rule = "a socket of an unknown family has its queues for -T q (parity 4)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            f.socket = Some(Box::new(queues_only(Protocol::Other(\"sock\"), tcp)));\n"
+new = ""
+
+[[mutant]]
+name = "dirs-cap-off"
+rule = "the /dev walk reads at most MAX_DIRS directories, and says so (L5)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "        if dirs == max_dirs {"
+new = "        if dirs == max_dirs + 1 {"
+
+[[mutant]]
+name = "devs-cap-off"
+rule = "the /dev walk keeps at most MAX_DEVS devices, and says so (L5)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "                if devs.len() == max_devs {"
+new = "                if devs.len() == max_devs + 1 {"
+
+[[mutant]]
+name = "dirs-cap-value"
+rule = "MAX_DIRS is 4096"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "pub const MAX_DIRS: usize = 4096;"
+new = "pub const MAX_DIRS: usize = 4097;"
+
+[[mutant]]
+name = "load-every-time"
+rule = "the device table is read once and kept (parity 3)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "        if self.table.borrow().is_none() {"
+new = "        if true {"
+
+[[mutant]]
+name = "no-reread-on-miss"
+rule = "unsafe, a name lookup that misses reads /dev again (lkupdev r=1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "None if self.unsafe_.get() && reread_on_miss => Step::Reread,"
+new = "None if false => Step::Reread,"
+
+[[mutant]]
+name = "reread-on-inode-miss"
+rule = "find_ch_ino() reads no table for a miss"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "self.lookup(rdev, None, false, |d| d.inode)"
+new = "self.lookup(rdev, None, true, |d| d.inode)"
+
+[[mutant]]
+name = "never-verified"
+rule = "unsafe, a name found is lstat'ed and /dev read again if it changed (vfy_dev)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "Some(d) if !self.unsafe_.get() || d.verified.get() => Step::Done(Some(take(d))),"
+new = "Some(d) if true => Step::Done(Some(take(d))),"
+
+[[mutant]]
+name = "verified-not-kept"
+rule = "a name verified is not asked again"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "                        d.verified.set(true);\n"
+new = ""
+
+[[mutant]]
+name = "reread-stays-unsafe"
+rule = "a reading of /dev makes the table safe (rereaddev DCunsafe = 0)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/devnames.rs"
+old = "        self.unsafe_.set(false);\n"
+new = ""
+
+[[mutant]]
+name = "shown-is-base"
+rule = "a NAME only shown is no JSON name (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "        if self.name_addition.is_some_and(NameAddition::shown) {\n            return None;"
+new = "        if false {\n            return None;"
+
+[[mutant]]
+name = "shown-lost-on-addition"
+rule = "an addition keeps a shown NAME shown"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "Some(a) if (a.base() as usize) <= self.name.len() => (a.base() as usize, a.shown()),"
+new = "Some(a) if (a.base() as usize) <= self.name.len() => (a.base() as usize, false),"
+
+[[mutant]]
+name = "shown-bit"
+rule = "the shown flag leaves 14 bits, 16,382 bytes, for a base"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "    const SHOWN: u16 = 0x4000;"
+new = "    const SHOWN: u16 = 0x2000;"
+
+[[mutant]]
+name = "rename-keeps-shown"
+rule = "a path argument's name replaces a shown NAME"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "        let old = self.base_text().len();"
+new = "        let old = self.base_name().map_or(0, str::len);"
+
+[[mutant]]
+name = "parser-c-is-f"
+rule = "FreeBSD's +f c is the count, f the address"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'c' | 'C' if has_file_struct() => fsv.count = plus,"
+new = "'c' | 'C' if has_file_struct() => fsv.addr = plus,"
+
+[[mutant]]
+name = "parser-letters-anywhere"
+rule = "c, f and n are letters only where the file structure is recorded"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'n' | 'N' if has_file_struct() => fsv.node = plus,"
+new = "'n' | 'N' => fsv.node = plus,"
+
+[[mutant]]
+name = "file-struct-listed-everywhere"
+rule = "-F ? lists C, F and N on FreeBSD alone"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/fields.rs"
+old = "const FILE_STRUCT_LISTED: bool = cfg!(target_os = \"freebsd\");"
+new = "const FILE_STRUCT_LISTED: bool = true;"
+
+[[mutant]]
+name = "token-without-the-file"
+rule = "a build's token names its executable file, not its version alone (M2)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    for n in [md.dev(), md.ino(), md.size()] {"
+new = "    for n in [0u64; 0] {"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    for n in [md.mtime(), md.mtime_nsec()] {"
+new = "    for n in [0i64; 0] {"
