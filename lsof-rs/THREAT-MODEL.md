@@ -789,6 +789,19 @@ from 636 KB to 1.66 MB (1.85 MB with lsof-rs's own engine, 2026-11-19, from
   glibc's own look-ahead for a `$` in a basic expression, which calls
   itself once for each `$` of a run: 100,000 of them overflowed the stack,
   as 70,000 end the C with SIGSEGV. It looks at the next two items now.)
+* **FreeBSD's grammar (`posix_regex/freebsd.rs`) has the same bounds.**
+  Its reader recurses into a group and an alternation, and `fb_re()`
+  refuses past the nesting limit before it recurses (200,000 `(` are
+  refused in milliseconds; without that check they overflow the stack: the
+  safety review of the third run, and a mutant on it since); the cost,
+  size and tree limits are the shared ones. Under `i` it writes each list
+  out as FreeBSD's `CHIN()` takes it, reading its 2,880-character case
+  table once a distinct list; that work and the text written are held to
+  `CASE_WORK_LIMIT` (16,777,216) an expression, past which it is `out of
+  memory` (the worst inside it, 4,000 lists of different characters or
+  1,000 with a class, takes 0.7 s on this host). Its unit tests cover 99,
+  100 and 101 levels, 200,000 groups in both forms, the cost, the tree and
+  the case work; the fuzz target reads one input byte for the grammar.
 * **The crate's time is linear.** It has no back-references and no
   look-around, and its engines (here the PikeVM alone, the `perf-*`
   features being off) match in time proportional to the command's length
@@ -1114,9 +1127,12 @@ each entry had been given its own copy of its process's rows, so a run's
 memory was the threads times the files: a process any local user runs can
 have `kern.threads.max_threads_per_proc` threads (1,500) and
 `kern.maxfilesperproc` descriptors. The entries now share one list
-(`lsof_core::Files`, copied only for an entry the selection takes rows
-from), so a full listing holds O(files) rows a process and O(threads)
-entries; what it prints is still the threads times the files, as the C's
+(`lsof_core::Files`), so a full listing holds O(files) rows a process and
+O(threads) entries. An entry gets a list of its own where the selection
+drops rows from it (made of the rows kept alone), where a path argument
+renames one of its rows, and under JSON, whose socket names are written
+into every entry's rows; there the memory is the threads times the rows
+kept, as it was before; what it prints is still the threads times the files, as the C's
 does. Measured on FreeBSD 14.5 by the safety review's fixture (1,001
 threads, 206 descriptors) before and after: DIVERGENCES 141. A table read
 while threads come and go is retried (`sys.rs`'s `read_with`: the size
@@ -1333,7 +1349,8 @@ sanitizer gates are pointed at it.
   each name's bound. A name server is asked only for a host name the invoker typed and
   the hosts file does not hold (or any name, where nsswitch.conf does not
   put `files` first for hosts), once, under the system's own timeouts.
-  Defence: the `posix_regex` fuzz target under `-timeout=10` (expressions
+  Defence: the `posix_regex` fuzz target under `-timeout=10`, glibc's
+  grammar or FreeBSD's as one input byte says (expressions
   to 64 KB in the local runs; its commands held to 64 bytes, the longest a
   process has, and to 1,024 for an expression of 8 bytes, which lsof-rs's
   own engine alone answers; an exhaustive search holds the back-reference

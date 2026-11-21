@@ -11,6 +11,40 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — FreeBSD, after the two reviews of the third run (2026-11-21)
+A parity review and a safety review of the fixes below, in the same
+FreeBSD 14.5 guest; what they found, measured there before and after
+(DIVERGENCES "FreeBSD: the two reviews of the third run"):
+- **`-c /regex/i` is FreeBSD's `REG_ICASE`** (183): no case is folded while
+  matching; a letter with another case is the list of itself and its
+  `towlower()`/`towupper()`, by FreeBSD's own tables (2,880 characters,
+  `posix_regex/freebsd_case.rs`), and a list past ASCII takes a character
+  whose `towlower()` or `towupper()` it holds, as `CHIN()` does. `/İ/i` now
+  finds `i` (not `I`), `/^xK$/i` with the Kelvin sign no longer finds `xK`,
+  `[[:upper:]]` under `i` takes `ÿ` and not `ß`, and a back-reference is
+  compared byte for byte (`/\(a\)\1/bi` does not find `aA`). lsof-rs had
+  folded by Unicode's rules. A range that ends at U+0080 leaves it out, as
+  `CHaddrange()` does.
+- **A backslash before a letter alone is refused** (183): `\Ⅻ`, `\ⓐ` and
+  a combining mark, which Unicode calls alphabetic and FreeBSD's
+  `iswalpha()` does not, are the characters, where lsof-rs had said
+  `trailing backslash (\)`.
+- **A command that is not UTF-8 keeps its bytes** (140, 183): COMMAND,
+  `-F c` and `-c` read `ki_comm` itself (`z\xff\xfe`, and `/^q.$/` does
+  not match `q\xe6\x97`), as on Linux; it had been decoded lossily.
+- Measured against FreeBSD 14.5's libc: 2,708 expressions (543 new, for `i`
+  and the escapes) against 116 commands, 204,392 answers, every one asked
+  the same; the 2,000 not asked are each beside a word operator and a
+  character past ASCII (183 lists what is not reproduced: that, nesting 100
+  deep, the C's cost, the locale).
+- **Bounds** (the safety review's LOW-1): the FreeBSD grammar's recursion
+  guard, its nesting, cost and tree limits are tested, the guard by a
+  mutant; the fuzz target `posix_regex` reads one input byte for the
+  grammar, so FreeBSD's is fuzzed on Linux; the lists `i` writes out are
+  bounded (`CASE_WORK_LIMIT`).
+- **`-K`**: a thread's kept rows are copied alone, and a list is copied for
+  the naming only where a row is renamed (the safety review's INFO-1).
+
 ### Changed — FreeBSD, after its first run beside the C (2026-11-21)
 lsof-rs ran on FreeBSD for the first time, beside the C lsof built from this
 tree: FreeBSD 14.5-RELEASE amd64 (UFS; an emulated guest), as a user and as
@@ -76,8 +110,11 @@ DIVERGENCES "FreeBSD: the two reviews of the first-run fixes"):
   refused, a count at most 255, an unmatched `)` a character, FreeBSD's
   classes (`[[:number:]]`, `[[:rune:]]`, …) and `[[:<:]]`/`[[:>:]]`, and its
   `regerror()` words throughout. lsof-rs had read glibc's grammar there.
-  Every answer measured against FreeBSD 14.5's libc: 2,165 expressions
-  against 72 commands (`tests/posix_regex_freebsd.txt`). Linux is unchanged.
+  Measured against FreeBSD 14.5's libc: 2,165 expressions against 72
+  commands (`tests/posix_regex_freebsd.txt`), every answer asked the same;
+  1,908 of the 90,648, beside a character past ASCII (a word operator, a
+  class under `i`), were not asked (corrected: this said every answer was
+  measured; the next entry makes `i` FreeBSD's). Linux is unchanged.
 - **`-k` and `-m`** (149): followed by no word, or by one that opens with
   `-` or `+`, each is the C's `-k not followed by path` (`-m …`), and that
   word is read as options (`-k -p` then says `no process ID specified`).

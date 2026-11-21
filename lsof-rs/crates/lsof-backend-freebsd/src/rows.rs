@@ -180,12 +180,22 @@ pub fn file_struct(k: &KFile, xfile: Option<XFile>) -> FileStruct {
 /// thread of every process is a task, a single-threaded process's one
 /// thread included. The dialect never sets a task's own command
 /// (`Lp->tcmd`): there is no TASKCMD. In PID order, a process's threads in
-/// TID order; a second record of one entry is not kept.
+/// TID order; a second record of one entry is not kept. A command that is
+/// not UTF-8 keeps its bytes ([`lsof_core::RawNames`]), which COMMAND, `-F c`
+/// and `-c` use, as the C prints and matches `ki_comm` itself; the Linux
+/// backend keeps them so too.
 pub fn entries(kprocs: Vec<KProc>, tasks: bool) -> Vec<Process> {
     let mut procs: Vec<Process> = kprocs
         .into_iter()
         .filter(|k| k.stat != 0 && k.stat != SZOMB)
         .filter_map(|k| {
+            let raw_names = std::str::from_utf8(&k.comm).is_err().then(|| {
+                Box::new(lsof_core::RawNames {
+                    command: Some(k.comm.clone().into_boxed_slice()),
+                    login: None,
+                    task_command: None,
+                })
+            });
             Some(Process {
                 pid: u32::try_from(k.pid).ok()?,
                 ppid: u32::try_from(k.ppid).ok(),
@@ -200,7 +210,7 @@ pub fn entries(kprocs: Vec<KProc>, tasks: bool) -> Vec<Process> {
                 files: Vec::new().into(),
                 endpoint_peer: false,
                 unlisted: false,
-                raw_names: None,
+                raw_names,
                 file_structs: None,
             })
         })
@@ -1029,6 +1039,38 @@ mod tests {
             stat,
             comm: comm.as_bytes().to_vec(),
             tid,
+        }
+    }
+
+    /// A command that is not UTF-8 keeps its bytes, which COMMAND, `-F c` and
+    /// `-c` read, and its text is the lossy one (JSON). Measured on FreeBSD
+    /// 14.5 with processes named `z\xff\xfe` and `q\xe6\x97`: the C prints
+    /// and matches the bytes.
+    #[test]
+    fn a_command_that_is_not_utf8_keeps_its_bytes() {
+        let mut bad = kproc(10, 0, 2, "");
+        bad.comm = b"z\xff\xfe".to_vec();
+        let mut cut = kproc(11, 0, 2, "");
+        cut.comm = b"q\xe6\x97".to_vec();
+        let procs = entries(vec![bad, cut, kproc(12, 0, 2, "caf\u{e9}")], false);
+        assert_eq!(procs[0].command_bytes(), b"z\xff\xfe");
+        assert_eq!(procs[0].command, "z\u{fffd}\u{fffd}");
+        assert_eq!(procs[1].command_bytes(), b"q\xe6\x97");
+        assert_eq!(procs[2].command_bytes(), "caf\u{e9}".as_bytes());
+        assert!(procs[2].raw_names.is_none());
+        // `-c /^q.$/` and `/^z..$/` match neither, as FreeBSD's libc says.
+        for (expression, command) in [("^q.$", 1), ("^z..$", 0), ("\u{fffd}", 0), ("\u{fffd}", 1)] {
+            let regex = lsof_core::posix_regex::CommandRegex::new_in(
+                lsof_core::posix_regex::Dialect::FreeBsd,
+                expression.as_bytes(),
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(
+                !regex.is_match(procs[command].command_bytes()),
+                "{expression}"
+            );
         }
     }
 

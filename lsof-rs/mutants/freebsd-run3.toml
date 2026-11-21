@@ -30,7 +30,7 @@
 
 [run]
 dir = ".."
-build = [["cargo", "build", "-p", "lsof-core", "-p", "lsof-cli"]]
+build = [["cargo", "build", "-p", "lsof-core", "-p", "lsof-cli", "-p", "lsof-backend-freebsd"]]
 
 [[run.gate]]
 name = "unit-core"
@@ -40,6 +40,11 @@ timeout = 1200
 [[run.gate]]
 name = "unit-cli"
 cmd = ["cargo", "test", "-p", "lsof-cli", "--lib", "--bin", "lsof"]
+timeout = 900
+
+[[run.gate]]
+name = "unit-fbsd"
+cmd = ["cargo", "test", "-p", "lsof-backend-freebsd", "--lib"]
 timeout = 900
 
 # --- 181: a state inclusion selects under the OR.
@@ -125,7 +130,7 @@ name = "fb-letters-may-be-escaped"
 rule = "a backslash before a letter is REG_EESCAPE (`\\w`) (183)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/freebsd.rs"
-old = "        !(c.is_alphabetic() || c == '\\'' || c == '`')"
+old = "        !(c == '\\'' || c == '`' || is_letter(c))"
 new = "        !(c == '\\'' || c == '`')"
 
 [[mutant]]
@@ -229,24 +234,24 @@ name = "fb-alpha-glibcs"
 rule = "alpha is the letters alone (183)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/freebsd.rs"
-old = '''            b"alpha" => r"\p{L}",'''
-new = '''            b"alpha" => r"\p{Alphabetic}\p{Nd}",'''
+old = '''        b"alpha" => r"\p{L}",'''
+new = '''        b"alpha" => r"\p{Alphabetic}\p{Nd}",'''
 
 [[mutant]]
 name = "fb-blank-glibcs"
 rule = "blank is the tab and the space alone (183)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/freebsd.rs"
-old = '''            b"blank" => r"\t\x20",'''
-new = '''            b"blank" => r"\t\p{Zs}",'''
+old = '''        b"blank" => r"\t\x20",'''
+new = '''        b"blank" => r"\t\p{Zs}",'''
 
 [[mutant]]
 name = "fb-punct-glibcs"
 rule = "punct is the punctuation and ASCII's symbols (183)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex/freebsd.rs"
-old = '''            b"punct" => r"\p{P}$+<=>^`|~",'''
-new = '''            b"punct" => r"\p{P}\p{S}",'''
+old = '''        b"punct" => r"\p{P}$+<=>^`|~",'''
+new = '''        b"punct" => r"\p{P}\p{S}",'''
 
 [[mutant]]
 name = "fb-words-glibcs"
@@ -272,3 +277,157 @@ file = "crates/lsof-core/src/posix_regex.rs"
 old = "        Dialect::FreeBsd => p.freebsd()?,"
 new = "        Dialect::FreeBsd => {\n            p.fetch(true);\n            p.parse_reg_exp(0)?\n        }"
 
+
+# --- C4 (2026-11-21): the two reviews of 9a3fcc6. The safety review's LOW-1
+# (the guard that bounds fb_re()'s recursion, and the case lists' bound),
+# the parity review's 1 (`\X` before a non-letter Unicode calls
+# alphabetic), 2 (REG_ICASE by FreeBSD's case sets and tables), 3 (a FreeBSD
+# command that is not UTF-8 keeps its bytes), and the safety review's INFO-1
+# (a kept list is made of the rows kept; a list is copied only where a row
+# is renamed). Each rule measured in the FreeBSD 14.5 VM (the golden table,
+# 2,708 expressions against 116 commands, and the CHIN() oracle of
+# a_list_under_icase_takes_what_chin_takes, read from regcomp.c).
+
+[[mutant]]
+name = "fb-nest-guard-deleted"
+rule = "fb_re() refuses past NEST_LIMIT before it recurses: 200,000 groups are Size, not a stack overflow (safety LOW-1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        if nest > NEST_LIMIT {\n            return Err(RegexError::Size);\n        }\n        let outer = end == End::Out;"
+new = "        let outer = end == End::Out;"
+
+[[mutant]]
+name = "fb-escape-before-alphabetic"
+rule = "may_escape() refuses a letter alone (iswalpha, category L): a backslash before a letter number is taken (parity 1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        !(c == '\\'' || c == '`' || is_letter(c))"
+new = "        !(c == '\\'' || c == '`' || c.is_alphabetic())"
+
+[[mutant]]
+name = "fb-icase-folded-by-the-engines"
+rule = "under i the engines fold nothing: the Kelvin sign is not K, a back-reference is memcmp() (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        self.icase = false;\n        self.fb_re(End::Out, 0)"
+new = "        self.fb_re(End::Out, 0)"
+
+[[mutant]]
+name = "fb-icase-letter-literal"
+rule = "under i a letter with another case is the list of it (bothcases()) (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                if flags & ALPHA != 0 && othercase(c) != c {"
+new = "                if false {"
+
+[[mutant]]
+name = "fb-othercase-either-table"
+rule = "othercase(): a letter neither iswupper() nor iswlower() calls a case is itself under i (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                if flags & ALPHA != 0 && othercase(c) != c {"
+new = "                if flags & ALPHA != 0 && (lower(c) != c || upper(c) != c) {"
+
+[[mutant]]
+name = "fb-chadd-folds-nothing"
+rule = "CHadd() puts a character's towlower()/towupper() below NC in the bitmap (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "    for x in [c, lower(c), upper(c)] {\n        if u32::from(x) < NC {"
+new = "    for x in [c] {\n        if u32::from(x) < NC {"
+
+[[mutant]]
+name = "fb-chin-own-case-only"
+rule = "CHIN() past NC asks the character, its towlower() and its towupper() (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                chin1(c) || chin1(lower(c)) || chin1(upper(c))"
+new = "                chin1(c)"
+
+[[mutant]]
+name = "fb-wides-compared-as-themselves"
+rule = "CHIN1() under i compares a character with each added one's towlower() and towupper(), not with it (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            .flat_map(|&w| [lower(w), upper(w)])\n            .map(|c| (c, c))"
+new = "            .flat_map(|&w| [w])\n            .map(|c| (c, c))"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        let others = wides.iter().flat_map(|&w| [lower(w), upper(w)]);"
+new = "        let others = wides.iter().flat_map(|&w| [w]);"
+
+[[mutant]]
+name = "fb-nc-single-byte"
+rule = "NC is 128 under a UTF-8 locale (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "const NC: u32 = 128;"
+new = "const NC: u32 = 256;"
+
+[[mutant]]
+name = "fb-u0080-kept"
+rule = "CHaddrange(): a range ending at U+0080 leaves it out (measured)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                    let finish = if u32::from(start) < NC && u32::from(finish) == NC {"
+new = "                    let finish = if false {"
+
+[[mutant]]
+name = "fb-case-negation-ignored"
+rule = "a negated list's CHIN1() is the opposite of each (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            found != *negated\n"
+new = "            found\n"
+
+[[mutant]]
+name = "fb-case-base-dropped"
+rule = "a case list takes past ASCII what CHIN1() takes, not only the characters of FB_CASE (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        if *negated || !base.is_empty() {"
+new = "        if false {"
+
+[[mutant]]
+name = "fb-case-runs-bridge-anything"
+rule = "a run goes on only over characters the list takes (parity 2)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = ".all(|x| char::from_u32(x).is_some_and(&chin));"
+new = ".all(|_| true);"
+
+[[mutant]]
+name = "fb-case-work-unbounded"
+rule = "the case lists' work is bounded (CASE_WORK_LIMIT, safety LOW-1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        if self.fb.work > CASE_WORK_LIMIT {\n            return Err(RegexError::Size);\n        }\n        // What the engine is asked"
+new = "        // What the engine is asked"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            .saturating_add(u64::try_from(FB_CASE.len()).unwrap_or(u64::MAX));\n        if self.fb.work > CASE_WORK_LIMIT {\n            return Err(RegexError::Size);\n        }"
+new = "            .saturating_add(u64::try_from(FB_CASE.len()).unwrap_or(u64::MAX));"
+
+[[mutant]]
+name = "fb-raw-command-dropped"
+rule = "a FreeBSD command that is not UTF-8 keeps its bytes (parity 3)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            let raw_names = std::str::from_utf8(&k.comm).is_err().then(|| {"
+new = "            let raw_names = false.then(|| {"
+
+[[mutant]]
+name = "kept-files-renamed-always"
+rule = "a list no row of which is renamed is not copied for the naming (safety INFO-1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "            if let (Some(ix), true) = (&naming, renames) {"
+new = "            if let (Some(ix), true) = (&naming, naming.is_some()) {"
+
+[[mutant]]
+name = "files-keep-copies-always"
+rule = "a list no other entry shares loses its rows in place (safety INFO-1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "        match std::sync::Arc::get_mut(&mut self.0) {"
+new = "        match None::<&mut Vec<OpenFile>> {"

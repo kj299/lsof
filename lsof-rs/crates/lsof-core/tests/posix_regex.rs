@@ -164,9 +164,11 @@ const FREEBSD: &str = include_str!("posix_regex_freebsd.txt");
 
 /// The same reading by FreeBSD's grammar (`Dialect::FreeBsd`, what lsof-rs
 /// uses on FreeBSD) against what FreeBSD 14.5's libc said of glibc's 1,500
-/// expressions and of 665 more of its own grammar, each against 72
-/// commands, under `LC_CTYPE=C.UTF-8` (DIVERGENCES 183). Every answer is
-/// FreeBSD's: what it refuses, in its words, and what it matches.
+/// expressions, of 665 more of its own grammar and of 543 for `REG_ICASE`
+/// and the escapes, each against 116 commands, under `LC_CTYPE=C.UTF-8`
+/// (DIVERGENCES 183). Every answer is FreeBSD's: what it refuses, in its
+/// words, and what it matches, but a word operator's beside a character
+/// past ASCII.
 #[test]
 fn every_expression_is_read_as_freebsds_libc_reads_it() {
     let mut lines = FREEBSD.lines().filter(|l| !l.starts_with('#'));
@@ -177,7 +179,7 @@ fn every_expression_is_read_as_freebsds_libc_reads_it() {
         .split(' ')
         .map(unhex)
         .collect();
-    assert_eq!(commands.len(), 72);
+    assert_eq!(commands.len(), 116);
     let step = if cfg!(miri) { 300 } else { 1 };
     let (mut cases, mut refused, mut skipped) = (0, 0, 0);
     let mut wrong: Vec<String> = Vec::new();
@@ -212,18 +214,14 @@ fn every_expression_is_read_as_freebsds_libc_reads_it() {
                     continue;
                 }
             };
-            // Beside a character past ASCII two things are not FreeBSD's
+            // Beside a character past ASCII one thing is not FreeBSD's
             // (DIVERGENCES 183): a word operator, which its matcher decides
-            // by the low byte of the character (`ISWORD((uch)c)`), and a
-            // class under `i`, whose other case is its `towupper()` and
-            // `towlower()` where lsof-rs takes Unicode's case folding (`ß`
-            // is no upper case letter's to FreeBSD).
+            // by the low byte of the character (`ISWORD((uch)c)`).
             let word_operator = [&b"\\<"[..], b"\\>", b"[:<:]", b"[:>:]"]
                 .iter()
                 .any(|op| expression.windows(op.len()).any(|w| w == *op));
-            let folded_class = icase && expression.windows(2).any(|w| w == b"[:");
             for (command, want) in commands.iter().zip(want.chars()) {
-                if (word_operator || folded_class) && !command.is_ascii() {
+                if word_operator && !command.is_ascii() {
                     skipped += usize::from(!own);
                     continue;
                 }
@@ -243,7 +241,7 @@ fn every_expression_is_read_as_freebsds_libc_reads_it() {
         wrong.join("\n")
     );
     if !cfg!(miri) {
-        assert_eq!((cases, refused), (2165, 906));
-        assert_eq!(skipped, 1908, "the answers not asked");
+        assert_eq!((cases, refused), (2708, 946));
+        assert_eq!(skipped, 2000, "the answers not asked");
     }
 }

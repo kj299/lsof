@@ -6,7 +6,9 @@
 //! What differs from glibc's grammar, each by the function of `regcomp.c`
 //! that decides it:
 //!
-//! * `may_escape()`: a backslash before a letter, `'` or `` ` `` is
+//! * `may_escape()`: a backslash before a letter (`iswalpha()`: general
+//!   category L, not the letter numbers, marks or circled letters
+//!   Unicode also calls alphabetic), `'` or `` ` `` is
 //!   `REG_EESCAPE`, "trailing backslash (\)"; before anything else (`\|`,
 //!   `\+`, `\?`, `\1` in an extended expression, `\.`) it is that
 //!   character. `\<` and `\>` are the word's ends; there is no `\w`, `\s`,
@@ -14,7 +16,8 @@
 //! * `p_re()`: an empty expression or alternative is `REG_EMPTY`, "empty
 //!   (sub)expression" (`a|`, `a||b`, `(|a)`, `` ``), and so is one whose every
 //!   piece is `{0}`; a basic expression has no alternation at all.
-//! * `p_ere_exp()`: `)` that opens nothing is `REG_EPAREN`; `{` is a
+//! * `p_ere_exp()`: `)` that opens nothing is a character, as `p_re()`
+//!   stops only at the `)` of a group it reads; `{` is a
 //!   repetition only before a digit or a `,`, and `REG_BADRPT` otherwise;
 //!   a repetition of a repetition (`a**`, `a+?`) is `REG_BADRPT`, as is
 //!   one of `^`.
@@ -30,12 +33,62 @@
 //!   there.
 //! * `wgetnext()`: a byte that is no character of the locale (UTF-8, as
 //!   everywhere in lsof-rs) is `REG_ILLSEQ`, "illegal byte sequence".
+//! * `CHaddrange()`: the characters of a range below `NC` (128 in a UTF-8
+//!   locale) are added one by one, and the rest is a range only where it
+//!   is more than one character, so a range that ends at U+0080 leaves it
+//!   out.
+//! * `REG_ICASE` (`ordinary()`, `bothcases()`, `CHadd()`, `CHIN()`): no case
+//!   is folded while matching. A letter with another case is read as the
+//!   list of itself, and a list holds each character added to it, the
+//!   `towlower()` and `towupper()` of each that are ASCII, and past ASCII
+//!   takes a character whose own `towlower()` or `towupper()` it holds, by
+//!   FreeBSD's tables (`freebsd_case.rs`), not Unicode's folding: `İ` is
+//!   `[İi]`, the Kelvin sign is `[\u{212A}k]` and not `K`, `ß` has no other
+//!   case. A back-reference is the bytes its group matched, in their case
+//!   (`memcmp()`).
 //!
-//! Every answer here was measured against FreeBSD 14.5's libc
-//! (`tests/posix_regex_freebsd.txt`).
+//! The answers here were measured against FreeBSD 14.5's libc
+//! (`tests/posix_regex_freebsd.txt`), but those beside a word operator and
+//! a character past ASCII (DIVERGENCES 183).
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::engine::{Look, Node, UnitSpec};
+use super::freebsd_case::{ALPHA, FB_CASE, LOWER, UPPER};
 use super::{class_cost, nested, push_char, Frag, Item, Parser, RegexError, NEST_LIMIT};
+
+/// `NC` in a UTF-8 locale: the characters a list keeps in its bitmap.
+const NC: u32 = 128;
+
+/// How much work the case lists of one expression may take: a list
+/// written out under `REG_ICASE` reads every character of [`FB_CASE`] once,
+/// and each character it writes costs [`CASE_TEXT_COST`]. Past it the
+/// expression is too big ([`RegexError::Size`]), as past lsof-rs's other
+/// bounds; an expression of a command's length takes a few thousand.
+pub(super) const CASE_WORK_LIMIT: u64 = 1 << 24;
+
+/// What one byte of a written case list costs against [`CASE_WORK_LIMIT`].
+const CASE_TEXT_COST: u64 = 1;
+
+/// How far a run of a case list goes on over characters the list takes
+/// anyway ([`Parser::fb_case_list`]).
+const RUN_GAP: u32 = 64;
+
+/// FreeBSD's grammar's state beyond glibc's.
+#[derive(Default)]
+pub(super) struct State {
+    /// `REG_ICASE`, which this grammar applies itself.
+    icase: bool,
+    /// The case lists written so far, by what they hold.
+    lists: HashMap<CaseKey, String>,
+    /// The work they took ([`CASE_WORK_LIMIT`]).
+    work: u64,
+}
+
+/// What a case list holds, as a key: whether it is negated, its bitmap,
+/// its characters past ASCII, its ranges and its classes.
+type CaseKey = (bool, u128, Vec<char>, Vec<(char, char)>, Vec<&'static str>);
 
 /// FreeBSD's `DUPMAX`, `_POSIX2_RE_DUP_MAX`.
 const DUPMAX: i64 = 255;
@@ -169,6 +222,10 @@ impl Parser {
         // Spencer's matcher steps a character at a time under a UTF-8
         // locale (`XMBRTOWC`), so a match starts at a character.
         self.by_chars = true;
+        // `REG_ICASE` is in the lists this grammar writes; the engines fold
+        // nothing (a back-reference is `memcmp()`).
+        self.fb.icase = self.icase;
+        self.icase = false;
         self.fb_re(End::Out, 0)
     }
 
@@ -335,16 +392,27 @@ impl Parser {
         self.atom(text.to_string(), Node::Look(look))
     }
 
-    /// One character, as `ordinary()` emits it.
-    fn fb_ordinary(&mut self, c: char) -> Frag {
+    /// One character, as `ordinary()` emits it: under `REG_ICASE` a letter
+    /// with another case is the list of it (`bothcases()`).
+    fn fb_ordinary(&mut self, c: char) -> Result<Frag, RegexError> {
+        if self.fb.icase {
+            if let Some((_, _, _, flags)) = case_of(c) {
+                if flags & ALPHA != 0 && othercase(c) != c {
+                    let mut list = List::default();
+                    list.add(c);
+                    return self.fb_case_list(&list, false);
+                }
+            }
+        }
         self.charge(1);
-        self.literal(Item::Char(c))
+        Ok(self.literal(Item::Char(c)))
     }
 
     /// `may_escape()`: whether a backslash may stand before `c` (not
-    /// before a letter, `'` or `` ` ``).
+    /// before a letter, `'` or `` ` ``). A letter is `iswalpha()`'s, general
+    /// category L, as `[[:alpha:]]` is ([`fb_class_set`]).
     fn fb_may_escape(c: char) -> bool {
-        !(c.is_alphabetic() || c == '\'' || c == '`')
+        !(c == '\'' || c == '`' || is_letter(c))
     }
 
     /// `p_ere_exp()`: one atom of an extended expression and the
@@ -389,14 +457,14 @@ impl Parser {
                 match self.fb_wgetnext()? {
                     '<' => self.fb_look(r"\b{start}", Look::Word(r"\b{start}")),
                     '>' => self.fb_look(r"\b{end}", Look::Word(r"\b{end}")),
-                    c if Self::fb_may_escape(c) => self.fb_ordinary(c),
+                    c if Self::fb_may_escape(c) => self.fb_ordinary(c)?,
                     _ => return Err(RegexError::Escape),
                 }
             }
             _ => {
                 self.pos = self.pos.saturating_sub(1);
                 let c = self.fb_wgetnext()?;
-                self.fb_ordinary(c)
+                self.fb_ordinary(c)?
             }
         };
         let mut piece = Piece {
@@ -520,7 +588,7 @@ impl Parser {
                 if escaped && !Self::fb_may_escape(ch) {
                     return Err(RegexError::Escape);
                 }
-                Some(self.fb_ordinary(ch))
+                Some(self.fb_ordinary(ch)?)
             }
         };
         let piece = Piece {
@@ -659,6 +727,9 @@ impl Parser {
         if !self.fb_eat(b']') {
             return Err(RegexError::Bracket);
         }
+        if self.fb.icase {
+            return self.fb_case_list(&list, negated);
+        }
         Ok(self.fb_list(list, negated))
     }
 
@@ -698,7 +769,9 @@ impl Parser {
                 }
                 let set = fb_class_set(name.as_bytes()).ok_or(RegexError::CharClass)?;
                 self.charge(class_cost(name.as_bytes()));
-                list.classes.push(set);
+                if !list.classes.contains(&set) {
+                    list.classes.push(set);
+                }
                 if !self.fb_more() {
                     return Err(RegexError::Bracket);
                 }
@@ -743,7 +816,18 @@ impl Parser {
                     if start > finish {
                         return Err(RegexError::Range);
                     }
-                    list.ranges.push((start, finish));
+                    // `CHaddrange()` adds what is below `NC` one by one, and
+                    // the rest only where it is more than one character.
+                    let finish = if u32::from(start) < NC && u32::from(finish) == NC {
+                        '\u{7f}'
+                    } else {
+                        finish
+                    };
+                    if start == finish {
+                        list.add(start);
+                    } else {
+                        list.ranges.push((start, finish));
+                    }
                 }
             }
         }
@@ -797,6 +881,203 @@ impl Parser {
         }
     }
 
+    /// A list under `REG_ICASE`, in the engines' syntax: what FreeBSD's
+    /// `CHIN()` takes of the set `CHadd()`, `CHaddrange()` and `CHaddtype()`
+    /// made of it.
+    ///
+    /// Below `NC` (ASCII) a character is in the set where its bit is: each
+    /// character added, and the `towlower()` and `towupper()` of each that
+    /// are below `NC`. Past it a character is in the set where it, its
+    /// `towlower()` or its `towupper()` is (`CHIN1()`): below `NC` by the
+    /// bitmap, past it where it is the `towlower()` or `towupper()` of a
+    /// character added, in a range or in a class; a negated list's `CHIN1()`
+    /// is the opposite of each, and still any of the three will do. A
+    /// character neither table changes is thus in the set where `CHIN1()`
+    /// puts it, and the list is written as that (its `base`) for every
+    /// character past ASCII, the ASCII characters it takes one by one, and
+    /// each character of [`FB_CASE`] the three take that `base` does not.
+    fn fb_case_list(&mut self, list: &List, negated: bool) -> Result<Frag, RegexError> {
+        // `CHadd()`, each character and each of a range below `NC`;
+        // `CHaddrange()` keeps the rest; `CHaddtype()` the class.
+        let mut bitmap = 0u128;
+        let mut wides: Vec<char> = Vec::new();
+        let mut ranges: Vec<(char, char)> = Vec::new();
+        for &(lo, hi) in &list.ranges {
+            if lo == hi {
+                chadd(lo, &mut bitmap, &mut wides);
+                continue;
+            }
+            let mut c = u32::from(lo);
+            while c < NC && c <= u32::from(hi) {
+                if let Some(ch) = char::from_u32(c) {
+                    chadd(ch, &mut bitmap, &mut wides);
+                }
+                c = c.saturating_add(1);
+            }
+            if c < u32::from(hi) {
+                ranges.push((char::from_u32(c).unwrap_or(lo), hi));
+            }
+        }
+        let mut classes = list.classes.clone();
+        classes.sort_unstable();
+        classes.dedup();
+        for class in &classes {
+            let table = class_ranges(class);
+            for c in 0..NC {
+                if let Some(ch) = char::from_u32(c) {
+                    if in_ranges(table, ch) {
+                        chadd(ch, &mut bitmap, &mut wides);
+                    }
+                }
+            }
+        }
+        wides.sort_unstable();
+        wides.dedup();
+        ranges.sort_unstable();
+        ranges.dedup();
+        let key: CaseKey = (negated, bitmap, wides, ranges, classes);
+        let text = match self.fb.lists.get(&key) {
+            Some(text) => text.clone(),
+            None => {
+                let text = self.fb_case_text(&key)?;
+                self.fb.lists.insert(key, text.clone());
+                text
+            }
+        };
+        self.fb.work = self.fb.work.saturating_add(
+            CASE_TEXT_COST.saturating_mul(u64::try_from(text.len()).unwrap_or(u64::MAX)),
+        );
+        if self.fb.work > CASE_WORK_LIMIT {
+            return Err(RegexError::Size);
+        }
+        // What the engine is asked: a unit for every eight bytes written (a
+        // range is about sixteen), and the classes, charged as they were
+        // read.
+        self.charge(u64::try_from(text.len() / 8).unwrap_or(u64::MAX));
+        Ok(self.atom(
+            text.clone(),
+            Node::Unit(UnitSpec {
+                negated: false,
+                sets: vec![text],
+            }),
+        ))
+    }
+
+    /// The text of a case list ([`Self::fb_case_list`]).
+    fn fb_case_text(&mut self, key: &CaseKey) -> Result<String, RegexError> {
+        let (negated, bitmap, wides, ranges, classes) = key;
+        self.fb.work = self
+            .fb
+            .work
+            .saturating_add(u64::try_from(FB_CASE.len()).unwrap_or(u64::MAX));
+        if self.fb.work > CASE_WORK_LIMIT {
+            return Err(RegexError::Size);
+        }
+        // What `CHIN1()` finds past `NC` before it is negated: the other
+        // cases of the characters added, a range, a class.
+        let mut hit: Vec<(char, char)> = wides
+            .iter()
+            .flat_map(|&w| [lower(w), upper(w)])
+            .map(|c| (c, c))
+            .chain(ranges.iter().copied())
+            .collect();
+        for class in classes {
+            hit.extend_from_slice(class_ranges(class));
+        }
+        let hit = merge(hit);
+        let in_bitmap = |x: char| u32::from(x) < NC && bitmap & (1u128 << u32::from(x)) != 0;
+        let chin1 = |x: char| {
+            let found = if u32::from(x) < NC {
+                in_bitmap(x)
+            } else {
+                in_ranges(&hit, x)
+            };
+            found != *negated
+        };
+        let chin = |c: char| {
+            if u32::from(c) < NC {
+                in_bitmap(c) != *negated
+            } else {
+                chin1(c) || chin1(lower(c)) || chin1(upper(c))
+            }
+        };
+        // The ASCII characters it takes, and the characters of `FB_CASE` it
+        // takes that `base` does not, as runs; a run goes on over what the
+        // list takes anyway (`base`), where that is near, so that a case
+        // list of thousands is written in a few hundred.
+        let mut runs: Vec<(char, char)> = Vec::new();
+        let push = |c: char, runs: &mut Vec<(char, char)>, work: &mut u64| {
+            if let Some(last) = runs.last_mut() {
+                let gap = u32::from(c).saturating_sub(u32::from(last.1));
+                if gap <= RUN_GAP {
+                    let between = (u32::from(last.1).saturating_add(1)..u32::from(c))
+                        .all(|x| char::from_u32(x).is_some_and(&chin));
+                    *work = work.saturating_add(u64::from(gap));
+                    if between {
+                        last.1 = c;
+                        return;
+                    }
+                }
+            }
+            runs.push((c, c));
+        };
+        let mut work = 0u64;
+        for c in (0..NC).filter_map(char::from_u32).filter(|&c| chin(c)) {
+            push(c, &mut runs, &mut work);
+        }
+        for &(c, _, _, _) in FB_CASE {
+            if u32::from(c) >= NC && chin(c) && !chin1(c) {
+                push(c, &mut runs, &mut work);
+            }
+        }
+        self.fb.work = self.fb.work.saturating_add(work);
+        let mut text = String::from("[");
+        for (lo, hi) in runs {
+            push_char(&mut text, lo);
+            if lo != hi {
+                text.push('-');
+                push_char(&mut text, hi);
+            }
+        }
+        // `base`: what `CHIN1()` takes past ASCII, as it was read.
+        let mut base = String::new();
+        let others = wides.iter().flat_map(|&w| [lower(w), upper(w)]);
+        for (lo, hi) in merge(
+            others
+                .map(|c| (c, c))
+                .chain(ranges.iter().copied())
+                .collect(),
+        ) {
+            push_char(&mut base, lo);
+            if lo != hi {
+                base.push('-');
+                push_char(&mut base, hi);
+            }
+        }
+        for class in classes {
+            base.push('[');
+            base.push_str(class);
+            base.push(']');
+        }
+        if *negated || !base.is_empty() {
+            let base = if base.is_empty() {
+                r"\x{0}-\x{10FFFF}".to_string()
+            } else if *negated {
+                format!("^{base}")
+            } else {
+                base
+            };
+            text.push_str("[[");
+            text.push_str(&base);
+            text.push_str(r"]--[\x{0}-\x{7F}]]");
+        }
+        if text.len() == 1 {
+            return Ok(super::NOTHING.to_string());
+        }
+        text.push(']');
+        Ok(text)
+    }
+
     /// The list read, in the engines' syntax.
     fn fb_list(&mut self, list: List, negated: bool) -> Frag {
         let mut own = String::new();
@@ -832,7 +1113,7 @@ impl Parser {
 #[derive(Default)]
 struct List {
     ranges: Vec<(char, char)>,
-    classes: Vec<String>,
+    classes: Vec<&'static str>,
 }
 
 impl List {
@@ -852,25 +1133,520 @@ impl List {
 /// use too, `blank` only the tab and the space; `number` is `digit`,
 /// `rune` every character, and `ideogram`, `phonogram` and `special` take
 /// none.
-fn fb_class_set(name: &[u8]) -> Option<String> {
-    Some(
-        match name {
-            b"alpha" => r"\p{L}",
-            b"alnum" => r"\p{L}\p{Nd}",
-            b"upper" => r"\p{Lu}",
-            b"lower" => r"\p{Ll}",
-            b"digit" | b"number" => r"\p{Nd}",
-            b"xdigit" => r"\p{Nd}A-Fa-f",
-            b"space" => r"\t\n\x0B\x0C\r\p{Zs}\p{Zl}\p{Zp}",
-            b"blank" => r"\t\x20",
-            b"cntrl" => r"\p{Cc}[\p{Cf}--\x{FEFF}]",
-            b"punct" => r"\p{P}$+<=>^`|~",
-            b"graph" => r"\p{L}\p{M}\p{N}\p{P}\p{S}\p{Co}",
-            b"print" => r"\p{L}\p{M}\p{N}\p{P}\p{S}\p{Co}\p{Zs}\p{Zl}\p{Zp}",
-            b"rune" => r"[^\p{Cn}\x{FEFF}]",
-            b"ideogram" | b"phonogram" | b"special" => r"[^\x{0}-\x{10FFFF}]",
-            _ => return None,
+fn fb_class_set(name: &[u8]) -> Option<&'static str> {
+    Some(match name {
+        b"alpha" => r"\p{L}",
+        b"alnum" => r"\p{L}\p{Nd}",
+        b"upper" => r"\p{Lu}",
+        b"lower" => r"\p{Ll}",
+        b"digit" | b"number" => r"\p{Nd}",
+        b"xdigit" => r"\p{Nd}A-Fa-f",
+        b"space" => r"\t\n\x0B\x0C\r\p{Zs}\p{Zl}\p{Zp}",
+        b"blank" => r"\t\x20",
+        b"cntrl" => r"\p{Cc}[\p{Cf}--\x{FEFF}]",
+        b"punct" => r"\p{P}$+<=>^`|~",
+        b"graph" => r"\p{L}\p{M}\p{N}\p{P}\p{S}\p{Co}",
+        b"print" => r"\p{L}\p{M}\p{N}\p{P}\p{S}\p{Co}\p{Zs}\p{Zl}\p{Zp}",
+        b"rune" => r"[^\p{Cn}\x{FEFF}]",
+        b"ideogram" | b"phonogram" | b"special" => r"[^\x{0}-\x{10FFFF}]",
+        _ => return None,
+    })
+}
+
+/// The entry of [`FB_CASE`] for `c`, if either table changes it.
+fn case_of(c: char) -> Option<(char, char, char, u8)> {
+    FB_CASE
+        .binary_search_by_key(&c, |&(from, _, _, _)| from)
+        .ok()
+        .and_then(|i| FB_CASE.get(i))
+        .copied()
+}
+
+/// FreeBSD's `towlower()`.
+fn lower(c: char) -> char {
+    case_of(c).map_or(c, |(_, l, _, _)| l)
+}
+
+/// FreeBSD's `towupper()`.
+fn upper(c: char) -> char {
+    case_of(c).map_or(c, |(_, _, u, _)| u)
+}
+
+/// `othercase()`: an upper case letter's `towlower()`, a lower case one's
+/// `towupper()`, any other character itself.
+fn othercase(c: char) -> char {
+    match case_of(c) {
+        Some((_, l, _, flags)) if flags & UPPER != 0 => l,
+        Some((_, _, u, flags)) if flags & LOWER != 0 => u,
+        _ => c,
+    }
+}
+
+/// Whether `c` is a letter, `iswalpha()`'s (general category L).
+fn is_letter(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphabetic();
+    }
+    fb_class_set(b"alpha").is_some_and(|set| in_ranges(class_ranges(set), c))
+}
+
+/// The characters of one of [`fb_class_set`]'s sets, as `regex-syntax`
+/// reads them, which is how the engines take them; read once.
+fn class_ranges(set: &str) -> &'static [(char, char)] {
+    const NAMES: [&[u8]; 15] = [
+        b"alpha",
+        b"alnum",
+        b"upper",
+        b"lower",
+        b"digit",
+        b"xdigit",
+        b"space",
+        b"blank",
+        b"cntrl",
+        b"punct",
+        b"graph",
+        b"print",
+        b"rune",
+        b"ideogram",
+        b"number",
+    ];
+    type Tables = Vec<(&'static str, Vec<(char, char)>)>;
+    static TABLES: OnceLock<Tables> = OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        let mut tables: Tables = Vec::new();
+        for set in NAMES.iter().filter_map(|name| fb_class_set(name)) {
+            if tables.iter().any(|(s, _)| *s == set) {
+                continue;
+            }
+            let parsed = regex_syntax::ParserBuilder::new()
+                .utf8(false)
+                .unicode(true)
+                .build()
+                .parse(&format!("[{set}]"));
+            let ranges = match parsed.map(regex_syntax::hir::Hir::into_kind) {
+                Ok(regex_syntax::hir::HirKind::Class(regex_syntax::hir::Class::Unicode(class))) => {
+                    class
+                        .ranges()
+                        .iter()
+                        .map(|r| (r.start(), r.end()))
+                        .collect()
+                }
+                // An empty class is no class to `regex-syntax`.
+                _ => Vec::new(),
+            };
+            tables.push((set, ranges));
         }
-        .to_string(),
-    )
+        tables
+    });
+    tables
+        .iter()
+        .find(|(s, _)| *s == set)
+        .map_or(&[][..], |(_, r)| r.as_slice())
+}
+
+/// Ranges sorted, and those that touch or overlap made one.
+fn merge(mut ranges: Vec<(char, char)>) -> Vec<(char, char)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(char, char)> = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges {
+        if let Some(last) = merged.last_mut() {
+            if u32::from(lo) <= u32::from(last.1).saturating_add(1) {
+                last.1 = last.1.max(hi);
+                continue;
+            }
+        }
+        merged.push((lo, hi));
+    }
+    merged
+}
+
+/// Whether `c` is in `ranges`, sorted and apart.
+fn in_ranges(ranges: &[(char, char)], c: char) -> bool {
+    let i = ranges.partition_point(|&(_, hi)| hi < c);
+    ranges.get(i).is_some_and(|&(lo, _)| lo <= c)
+}
+
+/// `CHadd()` under `REG_ICASE`: `c` in the bitmap below `NC` and among the
+/// characters past it, and its `towlower()` and `towupper()` in the bitmap
+/// where they are below `NC`.
+fn chadd(c: char, bitmap: &mut u128, wides: &mut Vec<char>) {
+    for x in [c, lower(c), upper(c)] {
+        if u32::from(x) < NC {
+            *bitmap |= 1u128 << u32::from(x);
+        }
+    }
+    if u32::from(c) >= NC {
+        wides.push(c);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{translate_in, CommandRegex, Dialect, COST_LIMIT, NEST_LIMIT, TREE_LIMIT};
+    use super::*;
+
+    fn read(expression: &str, extended: bool, icase: bool) -> Result<(), RegexError> {
+        translate_in(Dialect::FreeBsd, expression.as_bytes(), extended, icase).map(|_| ())
+    }
+
+    fn regex(expression: &str, extended: bool, icase: bool) -> CommandRegex {
+        CommandRegex::new_in(Dialect::FreeBsd, expression.as_bytes(), extended, icase)
+            .unwrap_or_else(|e| panic!("{expression:?}: {e:?}"))
+    }
+
+    /// The bounds glibc's grammar has (`posix_regex.rs`) hold FreeBSD's
+    /// too: nesting, the crate's cost, the tree, and its own case lists'
+    /// work. The guard at the head of `fb_re()` is what holds the
+    /// recursion: 200,000 groups are refused before they are read, not
+    /// after the stack is gone.
+    #[test]
+    #[cfg_attr(miri, ignore = "it reads expressions of 200,000 groups")]
+    fn the_freebsd_grammar_is_bounded() {
+        assert_eq!(NEST_LIMIT, 100);
+        let ere = |n: usize| format!("{}a{}", "(".repeat(n), ")".repeat(n));
+        let bre = |n: usize| format!("{}a{}", "\\(".repeat(n), "\\)".repeat(n));
+        for icase in [false, true] {
+            assert_eq!(read(&ere(99), true, icase), Ok(()));
+            assert_eq!(read(&ere(100), true, icase), Err(RegexError::Size));
+            assert_eq!(read(&ere(101), true, icase), Err(RegexError::Size));
+            assert_eq!(read(&bre(99), false, icase), Ok(()));
+            assert_eq!(read(&bre(100), false, icase), Err(RegexError::Size));
+            assert_eq!(read(&bre(101), false, icase), Err(RegexError::Size));
+            for n in [101, 200_000] {
+                assert_eq!(read(&ere(n), true, icase), Err(RegexError::Size));
+                assert_eq!(read(&bre(n), false, icase), Err(RegexError::Size));
+                // Unclosed, they are refused for their depth all the same
+                // (and 101 `(` for the 101st, which closes nothing).
+                let open = if n == 101 {
+                    RegexError::Paren
+                } else {
+                    RegexError::Size
+                };
+                assert_eq!(read(&"(".repeat(n), true, icase), Err(open));
+                assert_eq!(read(&"\\(".repeat(n), false, icase), Err(open));
+                let alternatives = format!("{}a{}", "(a|".repeat(n), ")".repeat(n));
+                assert_eq!(read(&alternatives, true, icase), Err(RegexError::Size));
+            }
+        }
+        // The crate's cost: past it, lsof-rs's own engine, the same answer.
+        let most = usize::try_from(COST_LIMIT).unwrap();
+        let within = regex(&"a".repeat(most), true, false);
+        let past = regex(&"a".repeat(most + 1), true, false);
+        assert!(!within.is_own() && past.is_own());
+        assert!(!past.is_match(b"aaa"));
+        let past = regex(&"[[:alpha:]]".repeat(64), true, false);
+        assert!(past.is_own());
+        assert!(past.is_match("é".repeat(64).as_bytes()));
+        assert!(!past.is_match("é".repeat(63).as_bytes()));
+        // A letter with another case under `i` is a list, which costs what
+        // it is written in: past the limit sooner than without `i`.
+        let cost = |e: &str, icase| {
+            translate_in(Dialect::FreeBsd, e.as_bytes(), true, icase)
+                .unwrap()
+                .cost
+        };
+        assert!(cost("[[:upper:]]", true) > cost("[[:upper:]]", false) + 100);
+        let n = (1..64)
+            .find(|&n| regex(&"[[:upper:]]".repeat(n), true, true).is_own())
+            .unwrap();
+        assert!(!regex(&"[[:upper:]]".repeat(n), true, false).is_own());
+        // The tree.
+        assert_eq!(read(&"a".repeat(TREE_LIMIT - 1), true, false), Ok(()));
+        assert_eq!(
+            read(&"a".repeat(TREE_LIMIT), true, false),
+            Err(RegexError::Size)
+        );
+        // The case lists: a list read once for its text, and its text for
+        // each time it is written.
+        assert_eq!(CASE_WORK_LIMIT, 1 << 24);
+        assert_eq!(read(&"[[:upper:]]".repeat(10_000), true, true), Ok(()));
+        assert_eq!(
+            read(&"[[:upper:]]".repeat(20_000), true, true),
+            Err(RegexError::Size)
+        );
+        let distinct = |n: u32, class: &str| -> String {
+            (0..n)
+                .filter_map(|k| char::from_u32(0x10000 + k))
+                .map(|c| format!("[{c}{class}]"))
+                .collect()
+        };
+        assert_eq!(read(&distinct(4_000, ""), true, true), Ok(()));
+        assert_eq!(read(&distinct(4_000, ""), true, false), Ok(()));
+        assert_eq!(
+            read(&distinct(8_000, ""), true, true),
+            Err(RegexError::Size)
+        );
+        assert_eq!(read(&distinct(8_000, ""), true, false), Ok(()));
+        assert_eq!(read(&distinct(1_000, "[:upper:]"), true, true), Ok(()));
+        assert_eq!(
+            read(&distinct(8_000, "[:upper:]"), true, true),
+            Err(RegexError::Size)
+        );
+        // Without `i` no list is written out, and none is bounded so.
+        assert_eq!(read(&"[[:upper:]]".repeat(20_000), true, false), Ok(()));
+        // A letter repeated is one list, however many times.
+        assert_eq!(read(&"İ".repeat(100_000), false, true), Ok(()));
+    }
+
+    /// `may_escape()`: a backslash before a letter is refused, and before
+    /// anything else taken, a letter being `iswalpha()`'s, general category
+    /// L, as FreeBSD 14.5 measured: not a letter number (`Ⅻ`), a circled
+    /// letter (`ⓐ`), or a mark Unicode calls alphabetic.
+    #[test]
+    fn a_backslash_before_a_letter_alone_is_refused() {
+        for extended in [true, false] {
+            for c in [
+                "Ⅻ", "Ⅰ", "ⓐ", "Ⓐ", "\u{345}", "\u{670}", "\u{903}", "\u{1885}", "\u{e31}", "٠",
+                "½", "⁰", "|", "1",
+            ] {
+                if c == "1" && !extended {
+                    continue;
+                }
+                let e = format!("x\\{c}");
+                assert_eq!(read(&e, extended, false), Ok(()), "{e}");
+                assert!(regex(&e, extended, false).is_match(format!("x{c}").as_bytes()));
+            }
+            for c in ["ª", "ǅ", "〆", "ʰ", "µ", "א", "中", "a", "Z", "w", "`", "'"] {
+                let e = format!("x\\{c}");
+                assert_eq!(read(&e, extended, false), Err(RegexError::Escape), "{e}");
+            }
+        }
+    }
+
+    /// `REG_ICASE` as FreeBSD 14.5 has it (each answer measured there).
+    #[test]
+    fn a_case_is_freebsds_under_icase() {
+        let m = |e: &str, extended: bool, command: &str| {
+            regex(e, extended, true).is_match(command.as_bytes())
+        };
+        // `İ` is `[İi]`: `towlower(İ)` is `i`, and `I` is no case of it.
+        assert!(m("^İ$", true, "i") && m("^İ$", true, "İ") && !m("^İ$", true, "I"));
+        assert!(m("^i$", true, "İ") && m("^i$", true, "ı") && m("^I$", true, "İ"));
+        assert!(m("abcdefghijklmnopqrs", true, "abcdefghijklmnopqrs"));
+        assert!(m("İ", true, "abcdefghijklmnopqrs"));
+        // The Kelvin sign is `[\u{212A}k]`, not `K`.
+        for e in ["^x\u{212a}$", "^x[\u{212a}]$"] {
+            assert!(m(e, true, "xk") && m(e, true, "x\u{212a}") && !m(e, true, "xK"));
+        }
+        assert!(m("^K$", true, "\u{212a}") && m("^k$", true, "\u{212a}"));
+        // `ſ` is an `S`'s, `ß` has no other case, `ǅ` has none of its own.
+        assert!(m("^s$", true, "ſ") && m("^ſ$", true, "S") && !m("^ſ$", true, "s"));
+        assert!(m("^ß$", true, "ß") && !m("^ß$", true, "ẞ") && m("^ẞ$", true, "ß"));
+        assert!(m("^ǅ$", true, "ǅ") && !m("^ǅ$", true, "ǆ") && !m("^ǅ$", true, "Ǆ"));
+        assert!(m("^[ǅ]$", true, "ǆ") && m("^[ǅ]$", true, "Ǆ") && !m("^[^ǅ]$", true, "ǅ"));
+        // A class: the characters whose `towlower()` or `towupper()` it has.
+        assert!(m("^[[:upper:]]$", true, "ÿ") && m("^[[:upper:]]$", true, "µ"));
+        assert!(!m("^[[:upper:]]$", true, "ß") && m("^[[:lower:]]$", true, "ß"));
+        assert!(m("^[^[:upper:]]$", true, "ı") && !m("^[^[:upper:]]$", true, "a"));
+        assert!(m("^[À-Þ]$", true, "×") && m("^[À-Þ]$", true, "à") && !m("^[À-Þ]$", true, "÷"));
+        // A back-reference is the bytes its group matched, in their case.
+        assert!(m("^\\(a\\)\\1$", false, "aa") && !m("^\\(a\\)\\1$", false, "aA"));
+        assert!(m("^\\(.\\)\\1$", false, "éé") && !m("^\\(.\\)\\1$", false, "éÉ"));
+        // Without `i` nothing is folded.
+        assert!(!regex("^İ$", true, false).is_match(b"i"));
+    }
+
+    /// Each list under `i` takes what FreeBSD's `CHIN()` takes, read here
+    /// line by line from `regcomp.c` and `regex2.h` (`CHadd()`,
+    /// `CHaddrange()`, `CHaddtype()`, `CHIN1()`, `CHIN()`, `NC` 128), for
+    /// every character below U+3000, every character of [`FB_CASE`] and
+    /// those beside them, and some past them: the runs a list is written in
+    /// go over no character it does not take.
+    #[test]
+    #[cfg_attr(miri, ignore = "tens of thousands of searches")]
+    fn a_list_under_icase_takes_what_chin_takes() {
+        struct Cset {
+            bmp: [bool; 128],
+            wides: Vec<char>,
+            ranges: Vec<(char, char)>,
+            types: Vec<&'static [(char, char)]>,
+            invert: bool,
+        }
+        impl Cset {
+            fn chadd(&mut self, ch: char) {
+                if (ch as u32) < 128 {
+                    self.bmp[ch as usize] = true;
+                } else {
+                    self.wides.push(ch);
+                }
+                for nch in [lower(ch), upper(ch)] {
+                    if (nch as u32) < 128 {
+                        self.bmp[nch as usize] = true;
+                    }
+                }
+            }
+            fn chaddrange(&mut self, min: char, max: char) {
+                let mut min = min as u32;
+                while min < 128 && min <= max as u32 {
+                    self.chadd(char::from_u32(min).unwrap());
+                    min += 1;
+                }
+                if min >= max as u32 {
+                    return;
+                }
+                self.ranges.push((char::from_u32(min).unwrap(), max));
+            }
+            fn chaddtype(&mut self, t: &'static [(char, char)]) {
+                for i in 0..128u8 {
+                    if in_ranges(t, char::from(i)) {
+                        self.chadd(char::from(i));
+                    }
+                }
+                self.types.push(t);
+            }
+            fn chin1(&self, ch: char) -> bool {
+                if (ch as u32) < 128 {
+                    return self.bmp[ch as usize] ^ self.invert;
+                }
+                for &w in &self.wides {
+                    if ch == lower(w) || ch == upper(w) {
+                        return !self.invert;
+                    }
+                }
+                for &(min, max) in &self.ranges {
+                    if min <= ch && ch <= max {
+                        return !self.invert;
+                    }
+                }
+                for t in &self.types {
+                    if in_ranges(t, ch) {
+                        return !self.invert;
+                    }
+                }
+                self.invert
+            }
+            fn chin(&self, ch: char) -> bool {
+                if (ch as u32) < 128 {
+                    return self.bmp[ch as usize] ^ self.invert;
+                }
+                self.chin1(ch) || self.chin1(lower(ch)) || self.chin1(upper(ch))
+            }
+        }
+        // Negated, its characters, its ranges, its classes.
+        type Spec = (
+            bool,
+            &'static str,
+            &'static [(char, char)],
+            &'static [&'static str],
+        );
+        let lists: [Spec; 16] = [
+            (false, "", &[], &["upper"]),
+            (true, "", &[], &["upper"]),
+            (false, "", &[], &["lower"]),
+            (true, "x", &[], &["lower"]),
+            (false, "", &[], &["alpha", "punct"]),
+            (true, "\u{3a9}", &[], &["space"]),
+            (false, "", &[('\u{100}', '\u{17f}')], &[]),
+            (true, "", &[('\u{100}', '\u{17f}')], &[]),
+            (false, "", &[('a', '\u{80}')], &[]),
+            (true, "", &[('a', '\u{80}')], &[]),
+            (false, "\u{1c5}\u{130}\u{212a}\u{b5}", &[], &[]),
+            (true, "\u{1c5}\u{130}\u{212a}\u{b5}", &[], &[]),
+            (
+                false,
+                "",
+                &[('\u{c0}', '\u{de}'), ('\u{391}', '\u{3a9}')],
+                &[],
+            ),
+            (false, "k", &[('A', '\u{212a}')], &["digit"]),
+            (true, "", &[('\u{2160}', '\u{2188}')], &["cntrl"]),
+            (false, "\u{345}\u{24b6}", &[], &["graph"]),
+        ];
+        let mut chars: Vec<char> = (0..0x3000).filter_map(char::from_u32).collect();
+        for &(c, l, u, _) in FB_CASE {
+            for x in [c, l, u] {
+                for d in [-1i64, 0, 1] {
+                    chars.extend(char::from_u32((x as i64 + d) as u32));
+                }
+            }
+        }
+        chars.extend([
+            '\u{ff21}',
+            '\u{ff41}',
+            '\u{10400}',
+            '\u{10428}',
+            '\u{1e900}',
+            '\u{10ffff}',
+        ]);
+        chars.sort_unstable();
+        chars.dedup();
+        for (invert, own, ranges, classes) in lists {
+            let mut cs = Cset {
+                bmp: [false; 128],
+                wides: Vec::new(),
+                ranges: Vec::new(),
+                types: Vec::new(),
+                invert,
+            };
+            let mut e = String::from(if invert { "^[^" } else { "^[" });
+            for c in own.chars() {
+                cs.chadd(c);
+                e.push(c);
+            }
+            for &(lo, hi) in ranges {
+                cs.chaddrange(lo, hi);
+                e.push(lo);
+                e.push('-');
+                e.push(hi);
+            }
+            for class in classes {
+                cs.chaddtype(class_ranges(fb_class_set(class.as_bytes()).unwrap()));
+                e.push_str(&format!("[:{class}:]"));
+            }
+            e.push_str("]$");
+            let crate_ = regex(&e, true, true);
+            let engine =
+                CommandRegex::new_own_in(Dialect::FreeBsd, e.as_bytes(), true, true).unwrap();
+            for &c in &chars {
+                let command = c.to_string();
+                let want = cs.chin(c);
+                assert_eq!(crate_.is_match(command.as_bytes()), want, "{e:?} {c:?}");
+                if c as u32 % 7 == 0 || case_of(c).is_some() {
+                    assert_eq!(engine.is_match(command.as_bytes()), want, "own {e:?} {c:?}");
+                }
+            }
+        }
+    }
+
+    /// `CHaddrange()`: a range that ends at U+0080 leaves it out.
+    #[test]
+    fn a_range_that_ends_at_u0080_leaves_it_out() {
+        for icase in [false, true] {
+            let r = regex("^[a-\u{80}]$", true, icase);
+            assert!(r.is_match(b"a") && r.is_match(b"\x7f") && !r.is_match("\u{80}".as_bytes()));
+            let r = regex("^[^a-\u{80}]$", true, icase);
+            assert!(r.is_match("\u{80}".as_bytes()) && !r.is_match(b"\x7f"));
+            assert!(regex("^[a-\u{81}]$", true, icase).is_match("\u{80}".as_bytes()));
+            assert!(regex("^[\u{80}-\u{81}]$", true, icase).is_match("\u{80}".as_bytes()));
+        }
+    }
+
+    /// The table is FreeBSD's: sorted, and every mapping one of a
+    /// character for one, as `casedump.c` read them.
+    #[test]
+    fn the_case_table_is_sorted_and_freebsds() {
+        assert_eq!(FB_CASE.len(), 2880);
+        assert!(FB_CASE.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(
+            case_of('\u{130}'),
+            Some(('\u{130}', 'i', '\u{130}', UPPER | ALPHA))
+        );
+        assert_eq!(
+            case_of('\u{212a}'),
+            Some(('\u{212a}', 'k', '\u{212a}', UPPER | ALPHA))
+        );
+        assert_eq!(
+            case_of('\u{1c5}'),
+            Some(('\u{1c5}', '\u{1c5}', '\u{1c4}', ALPHA))
+        );
+        assert_eq!(
+            case_of('\u{345}'),
+            Some(('\u{345}', '\u{345}', '\u{399}', 0))
+        );
+        assert_eq!(case_of('ß'), None);
+        assert_eq!(
+            (othercase('İ'), othercase('ı'), othercase('ǅ')),
+            ('i', 'I', 'ǅ')
+        );
+    }
 }

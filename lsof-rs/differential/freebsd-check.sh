@@ -235,7 +235,8 @@ EOF
     sleep 600 < /etc/passwd & P=$!
     tail -f /etc/passwd > /dev/null 2>&1 & K=$!
     nc -l 127.0.0.1 39999 > /dev/null 2>&1 & N=$!
-    trap 'kill $P $K $N $SK $TH 2>/dev/null' EXIT INT TERM
+    Z=
+    trap 'kill $P $K $N $SK $TH $Z 2>/dev/null' EXIT INT TERM
     sleep 2
     S=$$
 
@@ -403,9 +404,26 @@ EOF
         # Row 183: -c /re/ by FreeBSD libc's regcomp(), its grammar and words.
         for re in '/a**/' '/a|/' '//' '/a\w/' '/a[/' '/a{1/' '/*a/' '/[[:foo:]]/' '/\(/b' '/a{2,1}/' \
             '/[z-a]/' '/\/' '/a{256}/' '/[--a]/' '/a)/' '/^sle*p$/' '/sle\+p/b' '/sl\|x/b' '/\(e\)\1/b' \
-            '/[[:<:]]sleep/' '/[[:alpha:]]\{5\}/b' '/SLEEP/i'; do
+            '/[[:<:]]sleep/' '/[[:alpha:]]\{5\}/b' '/SLEEP/i' \
+            '/sl\Ⅻ/' '/sl\ⓐ/b' '/sl\ª/' '/S[[:UPPER:]]/i' '/S[[:upper:]]EEP/i' '/^SL[^[:lower:]]EP$/i' \
+            '/\(E\)\1/bi' '/\(e\)\1/bi' '/İ/i' '/slee\(p\)*/bi' '/sleep/i' '/SLEEP/' \
+            "/$(printf 'sl\342\204\252')/i" '/[a-z]\{5\}/bi' '/[A-Z]{5}/i'; do
             runu -n -P -c "$re" -a -p "$P"
         done
+        # Rows 140, 183: a command that is not UTF-8, by its bytes: sleep,
+        # copied under the name z\377\376, for these runs alone, in -F: its
+        # table row has the C's undersized COMMAND column (ledger
+        # hostile-comm-utf8-table) and its path a NAME of U+FFFD (93).
+        zname=$(printf 'z\377\376')
+        if cp /bin/sleep "$work/$zname" 2>/dev/null; then
+            "$work/$zname" 600 < /dev/null & Z=$!
+            sleep 1
+            run -n -P -a -p "$Z" -d txt -F pc
+            for re in '/^z..$/' '/^z/' "/$(printf '\357\277\275')/" '/^z[^a]/'; do
+                runu -n -P -c "$re" -a -p "$Z" -d txt -F pc
+            done
+            kill "$Z" 2>/dev/null; wait "$Z" 2>/dev/null; Z=
+        fi
         if [ -n "$SK" ]; then
             # Row 180: Internet sockets, each kind; -i by end and by family.
             run -n -P -a -p "$SK" -d 3-30

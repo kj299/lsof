@@ -31,6 +31,7 @@ use std::fmt::Write as _;
 
 mod engine;
 mod freebsd;
+mod freebsd_case;
 mod towupper;
 
 use engine::{Look, Node, Tree, UnitSpec};
@@ -336,6 +337,10 @@ pub struct Translated {
     root: Option<u32>,
     /// What it asks of the `regex` crate ([`COST_LIMIT`]).
     cost: u64,
+    /// Whether the engines are to fold case: glibc's `REG_ICASE`. FreeBSD's
+    /// grammar writes each case set out itself (`freebsd.rs`), and compares
+    /// a back-reference byte for byte, so the engines fold nothing there.
+    fold: bool,
 }
 
 struct Parser {
@@ -350,6 +355,8 @@ struct Parser {
     /// What the expression asks of the engine so far ([`COST_LIMIT`]).
     cost: u64,
     tree: Tree,
+    /// FreeBSD's grammar's own state (`freebsd.rs`).
+    fb: freebsd::State,
 }
 
 /// Read `expression` as glibc's `regcomp()` does, extended or basic, and
@@ -392,6 +399,7 @@ impl Parser {
             by_chars: icase,
             cost: 0,
             tree: Tree::default(),
+            fb: freebsd::State::default(),
         }
     }
 
@@ -416,6 +424,7 @@ impl Parser {
             root: tree.map(|t| t.node),
             tree: p.tree,
             cost: p.cost,
+            fold: icase,
         })
     }
 }
@@ -1332,7 +1341,7 @@ impl CommandRegex {
                 &translated.tree,
                 translated.root,
                 translated.by_chars,
-                icase,
+                translated.fold,
             )?)),
         };
         Ok(Self {

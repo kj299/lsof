@@ -2115,20 +2115,23 @@ impl Selection {
     /// (`dsock.c:3691`). A file-system item names nothing (DIVERGENCES 139,
     /// 17).
     fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if let Some(name) = self.located_name(ix, f) {
+            f.set_base_name(&name);
+        }
+    }
+
+    /// The name [`Selection::rename_located`] gives `f`, if it gives one.
+    fn located_name(&self, ix: &PathIndex<'_>, f: &OpenFile) -> Option<String> {
         if f.is_socket() {
-            return;
+            return None;
         }
         // No NFS mount is asked for: the item a file system locates is a
         // file-system item, which names nothing (`row_name`), whichever
         // of a device's it is.
-        let Some(name) = ix
-            .bound(f, || None)
+        ix.bound(f, || None)
             .and_then(|i| self.path_items.get(i))
             .and_then(PathItem::row_name)
-        else {
-            return;
-        };
-        f.set_base_name(&name.to_string_lossy());
+            .map(|name| name.to_string_lossy().into_owned())
     }
 
     /// Apply the full selection to a backend's raw output, returning the
@@ -2237,11 +2240,17 @@ impl Selection {
                 // and listed a single-threaded one the C does not.
                 !self.and_mode || sf.contains(specified)
             };
-            // A path names the rows it locates as they are read. Otherwise a
-            // list every row of which is kept is left as it is, and so still
-            // shared with the other entries that share it: a `-K` thread's
-            // with its process's (`Files`).
-            if let Some(ix) = &naming {
+            // A path names the rows it locates as they are read. A list no
+            // row of which is renamed and every row of which is kept is left
+            // as it is, and so still shared with the other entries that
+            // share it: a `-K` thread's with its process's (`Files`); one
+            // that loses rows is made of the rows kept alone.
+            let renames = naming.as_ref().is_some_and(|ix| {
+                p.files
+                    .iter()
+                    .any(|f| self.state_matches(f) && self.located_name(ix, f).is_some())
+            });
+            if let (Some(ix), true) = (&naming, renames) {
                 p.files.retain_mut(|f| {
                     if !self.state_matches(f) {
                         return false;
@@ -2250,7 +2259,7 @@ impl Selection {
                     keeps(f)
                 });
             } else if !p.files.iter().all(keeps) {
-                p.files.retain(keeps);
+                p.files.keep(keeps);
             }
             if p.files.is_empty() {
                 // A process with no rows left is a result only when it was
@@ -5016,12 +5025,42 @@ mod tests {
             }),
             ..Default::default()
         }
-        .apply(threads);
+        .apply(threads.clone());
         assert_eq!(one.len(), 3);
         assert!(one
             .iter()
             .all(|t| !t.files.shares(&main.files) && t.files.len() == 1));
         assert_eq!(main.files.len(), 2, "the process's own list is untouched");
+        // `-K -p 10 /` (a path, named as rows are read): no row is renamed,
+        // so the lists stay shared (the safety review's INFO-1).
+        let mut named = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            paths_identified: true,
+            ..Default::default()
+        };
+        named.add_fs_item(99, "/".into(), None);
+        let kept = named.apply(threads.clone());
+        assert_eq!(kept.len(), 3);
+        assert!(kept
+            .iter()
+            .all(|t| t.files.shares(&main.files) && t.files.len() == 2));
+    }
+
+    /// A shared list that loses rows is made of the rows kept alone, and
+    /// one no other entry shares loses them in place.
+    #[test]
+    fn a_shared_list_that_loses_rows_is_made_of_those_kept() {
+        let mut main = who(10, "thr", 0, 10);
+        main.files = vec![tcp(3, 80, None, TcpState::Listen), udp(4, 81, None)].into();
+        let mut thread = main.clone();
+        thread.files.keep(|f| f.fd == FdType::Handle(3));
+        assert!(!thread.files.shares(&main.files));
+        assert_eq!((thread.files.len(), main.files.len()), (1, 2));
+        let before: *const OpenFile = &main.files[0];
+        main.files.keep(|f| f.fd == FdType::Handle(3));
+        assert_eq!(main.files.len(), 1);
+        assert!(std::ptr::eq(before, &main.files[0]), "kept in place");
     }
 
     /// The C's per-process `Ckscko` (`dproc.c:263-286, 909-916`): a network

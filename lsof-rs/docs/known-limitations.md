@@ -329,11 +329,17 @@ meet. Each number is a row there, with the measurement behind it.
   - **`-c /regex/`** is read by FreeBSD libc's `regcomp()` grammar, as the
     C's is, with its refusals in its words (`repetition-operator operand
     invalid`, `empty (sub)expression`, `trailing backslash (\)`; no GNU
-    `\|`, `\+` or `\w`). Two things beside a character past ASCII are not
-    its: a word operator (`\<`, `[[:<:]]`), which FreeBSD's matcher decides
-    by the character's low byte, and a class under `i`, whose other case is
-    Unicode's folding here and FreeBSD's `towupper()`/`towlower()` there
-    (183).
+    `\|`, `\+` or `\w`), and `i` by its case sets and tables. Not
+    reproduced (183), each measured: a word operator (`\<`, `[[:<:]]`)
+    beside a character past ASCII, which FreeBSD's matcher decides by the
+    character's low byte; nesting 100 deep, which the C compiles and
+    lsof-rs refuses (`out of memory`, as on Linux); the C's cost, a safety
+    difference (`/((a{1,255}){1,255}){1,255}/` takes the C 6.3 s and 1.2 GB
+    a process, lsof-rs 0.3 s and 20 MB), and lsof-rs's bound on the lists
+    `i` writes out (20,000 `[[:upper:]]` under `i` are `out of memory`);
+    and the locale: lsof-rs reads expressions and commands as UTF-8
+    whatever `LC_CTYPE` says, where the C under `LC_ALL=C` reads bytes
+    (`/caf.$/` lists `café` in lsof-rs alone).
   - **The bounded calls' helper** (144) keeps `/dev/null` on descriptor 2,
     where the C's child has none: on a run that names a path, a listing that
     holds the helper has that one row more (`lsof /dev/null`). lsof opens

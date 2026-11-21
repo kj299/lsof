@@ -1076,6 +1076,19 @@ impl Files {
     pub fn shares(&self, other: &Files) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
     }
+
+    /// Keep the rows `keep` takes: in place where no other entry shares the
+    /// list, and otherwise as a list of its own made of those rows alone,
+    /// not of a copy of every row first.
+    pub fn keep(&mut self, mut keep: impl FnMut(&OpenFile) -> bool) {
+        match std::sync::Arc::get_mut(&mut self.0) {
+            Some(files) => files.retain(|f| keep(f)),
+            None => {
+                let kept: Vec<OpenFile> = self.0.iter().filter(|f| keep(f)).cloned().collect();
+                self.0 = std::sync::Arc::new(kept);
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for Files {
