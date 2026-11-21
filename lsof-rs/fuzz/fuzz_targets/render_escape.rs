@@ -58,13 +58,20 @@ fuzz_target!(|data: &[u8]| {
         let cut = esc.command_truncated(&text, width);
         assert!(cut.len() <= width, "over width {width}: {cut:?}");
         assert!(c.starts_with(cut.as_str()), "not a prefix: {cut:?} of {c:?}");
-        // The escaped lengths of every prefix of the input, one character at a
-        // time. A cut that split an escape would have a length that is none of
-        // them; a cut that stopped early would be followed by a unit that fit.
+        // The escaped lengths of every prefix of the input, one BYTE at a
+        // time, as the C's `safestrprtn()` walks it (DIVERGENCES 158): an
+        // ASCII byte is its own escape's width, any other byte one `\xNN`,
+        // four wide, even inside a character. A cut that split an escape
+        // would have a length that is none of them; a cut that stopped
+        // early would be followed by a unit that fit.
         let mut ends = vec![0usize];
         let mut buf = [0u8; 4];
-        for ch in text.chars() {
-            let unit = esc.command(ch.encode_utf8(&mut buf)).len();
+        for &byte in text.as_bytes() {
+            let unit = if byte.is_ascii() {
+                esc.command(char::from(byte).encode_utf8(&mut buf)).len()
+            } else {
+                4
+            };
             ends.push(ends.last().unwrap() + unit);
         }
         let at = ends
