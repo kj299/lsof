@@ -4590,7 +4590,10 @@ mod tests {
         // An ASCII letter is one line, as it was, and escaped as it was.
         assert_eq!(said(&["-Fpx"]), "unknown field: x");
         assert_eq!(said(&["-T", "\x1b"]), format!("{tcp}^["));
-        assert_eq!(said(&["-x", "\\"]), format!("{cross}\\\\"));
+        // A backslash is doubled, but on Windows, where it is a path's
+        // separator and is printed as it is (`render::escape`).
+        let backslash = if cfg!(windows) { "\\" } else { "\\\\" };
+        assert_eq!(said(&["-x", "\\"]), format!("{cross}{backslash}"));
         // Beside a byte that is no character, which is one line too: the
         // character's bytes, then the byte.
         #[cfg(unix)]
