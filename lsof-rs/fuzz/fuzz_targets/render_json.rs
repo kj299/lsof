@@ -95,7 +95,7 @@ fuzz_target!(|data: &[u8]| {
         unlisted: false,
         raw_names: None,
         file_structs: None,
-        files: vec![file.clone(), file.clone()],
+        files: vec![file.clone(), file.clone()].into(),
     };
     let o = JsonOpts {
         only: None,
