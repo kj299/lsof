@@ -949,6 +949,7 @@ mod tests {
         raw[1].raw_names = Some(Box::new(crate::model::RawNames {
             command: Some(b"\xffx".to_vec().into()),
             login: None,
+            task_command: None,
         }));
         let index = Index::build(&raw, CommandWidth::Standard);
         let mut out = vec![raw[0].clone()];
@@ -1125,6 +1126,7 @@ mod tests {
         child.raw_names = Some(Box::new(crate::model::RawNames {
             command: Some(b"x\xff".to_vec().into()),
             login: None,
+            task_command: None,
         }));
         let procs = vec![proc_(10, "a", vec![unix(3, "1")]), child];
         let t = tables(&[(1, Some(2), None), (2, Some(1), None)]);

@@ -82,7 +82,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `can't fopen(/proc/mounts, "r"): No such file or directory`, the C's
   words, where lsof-rs said `can't fork` (175).
 - **Linux, eleven differences an audit against the C found** (DIVERGENCES
-  156-168; each now prints what lsof 4.99.6 prints):
+  156-166 and 168; each now prints what lsof 4.99.6 prints):
   - a descriptor on a **namespace file** (`/proc/PID/ns/net`, what
     container runtimes and `ip netns` hold) is NAME `net`, `mnt`, `pid`…,
     where lsof-rs printed the link whole, `net:[4026531833]` (156); a link
@@ -124,7 +124,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   - **`-c ^`**, an exclusion with no name, is accepted, as the C accepts
     it: it excludes every command, so nothing is listed and the run exits
     1, with `command not located: ` under `-V`. lsof-rs refused it:
-    `option -c^ requires a name` (168).
+    `option -c^ requires a name` (168);
+  - and, from the two reviews of that work: a **thread name that is not
+    UTF-8** is cut and escaped in TASKCMD from its own bytes, as COMMAND
+    is (`ab\xc3`, `\xff\xfe`), where the per-byte cut had split the U+FFFD
+    it was read as into `ab\xef` and `\xef\xbf` (93); and **fdinfo** is
+    read for the lines the C asks for, by the descriptor's link, and only
+    until it has them, as the C's `get_fdinfo()` reads it (161: no
+    kernel's file shows the difference, a forged one does).
 
   Recorded and not followed (164): run in a PID namespace whose `/proc`
   is the host's (`unshare -p -f` with no `--mount-proc`), the C takes

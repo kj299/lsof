@@ -1448,7 +1448,10 @@ mod tests {
     #[cfg_attr(miri, ignore = "it reads the live /proc/net tables")]
     fn the_load_reads_the_ping_table_with_and_without_dash_x() {
         const BOUND: u64 = 0xffff_ffff_ffff_fff0;
-        let path = std::env::temp_dir().join(format!("lsof-rs-icmp-table-{}", std::process::id()));
+        // In a fresh private directory: a name of its own in the shared temp
+        // directory is one another user could plant a link at first.
+        let dir = crate::testdir::TestDir::new("icmp-table");
+        let path = dir.join("icmp");
         std::fs::write(
             &path,
             format!(

@@ -2578,6 +2578,7 @@ mod tests {
         raw.raw_names = Some(Box::new(crate::model::RawNames {
             command: Some(b"x\xffname"[..].into()),
             login: None,
+            task_command: None,
         }));
         let text = who(20, "aaaaaaaaézz", 0, 20);
         let sel = |needle: &[u8]| Selection {
@@ -5189,6 +5190,7 @@ mod tests {
             raw_names: Some(Box::new(crate::RawNames {
                 command: Some(b"py\xff"[..].into()),
                 login: None,
+                task_command: None,
             })),
             ..who(13, "py\u{fffd}", 0, 1)
         };

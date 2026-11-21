@@ -1087,18 +1087,22 @@ pub struct Process {
     pub file_structs: Option<Box<[(u64, FileStruct)]>>,
 }
 
-/// A command or login name that is not UTF-8, kept as the bytes it is, for
-/// what the C does with bytes: `-c` compares the command's bytes, COMMAND and
-/// `-F c` print each byte that is not text as `\xNN`, and USER and `-F L`
-/// the login's (DIVERGENCES 92, 70). [`Process::command`] and
-/// [`Process::user`] still hold them decoded lossily, for JSON, which must be
-/// UTF-8, and for whatever reads them as text.
+/// A command, login or thread name that is not UTF-8, kept as the bytes it
+/// is, for what the C does with bytes: `-c` compares the command's bytes,
+/// COMMAND and `-F c` print each byte that is not text as `\xNN`, USER and
+/// `-F L` the login's (DIVERGENCES 92, 70), and TASKCMD the thread name's
+/// (DIVERGENCES 93). [`Process::command`], [`Process::user`] and
+/// [`Process::task_command`] still hold them decoded lossily, for JSON,
+/// which must be UTF-8, for `-F M`, and for whatever reads them as text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RawNames {
     /// The command's bytes, where they are not UTF-8.
     pub command: Option<Box<[u8]>>,
     /// The login's bytes (cut to the C's 32), where they are not UTF-8.
     pub login: Option<Box<[u8]>>,
+    /// A task's own name's bytes ([`Process::task_command`]), where they
+    /// are not UTF-8.
+    pub task_command: Option<Box<[u8]>>,
 }
 
 impl Process {
@@ -1121,6 +1125,18 @@ impl Process {
             .as_deref()
             .and_then(|r| r.command.as_deref())
             .unwrap_or(self.command.as_bytes())
+    }
+
+    /// A task's name as bytes: [`RawNames::task_command`], or
+    /// [`Process::task_command`]. `None` for an entry that is no task.
+    pub fn task_command_bytes(&self) -> Option<&[u8]> {
+        let text = self.task_command.as_deref()?;
+        Some(
+            self.raw_names
+                .as_deref()
+                .and_then(|r| r.task_command.as_deref())
+                .unwrap_or(text.as_bytes()),
+        )
     }
 
     /// The login as bytes: [`RawNames::login`], or [`Process::user`].
@@ -1160,6 +1176,7 @@ mod login_tests {
         p.raw_names = Some(Box::new(RawNames {
             command: Some(b"c\xff"[..].into()),
             login: None,
+            task_command: None,
         }));
         p.set_login(b"ab\xffcd"[..].into());
         assert_eq!(p.user.as_deref(), Some("ab\u{fffd}cd"));

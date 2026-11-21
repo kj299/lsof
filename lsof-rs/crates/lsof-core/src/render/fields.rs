@@ -787,6 +787,7 @@ mod tests {
         p.raw_names = Some(Box::new(crate::model::RawNames {
             command: Some(b"x\xff"[..].into()),
             login: Some(b"ab\xffcd"[..].into()),
+            task_command: None,
         }));
         let out = render(
             std::slice::from_ref(&p),

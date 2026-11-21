@@ -674,7 +674,9 @@ def audit_holder(work: str) -> Fixture:
       40-42   eventpolls watching 31, 32 and 33 descriptors (100 up, dups of
               one pipe's read end at 98): the C marks the list `...` once it
               holds 32 (162)
-      thread  one named `é`, for a TASKCMD cell cut inside a character (158)
+      thread  one named `é`, for a TASKCMD cell cut inside a character (158),
+              and two whose names are not UTF-8, `ab\\xc3` and `\\xff\\xfe`,
+              which TASKCMD prints as their bytes (93)
 
     The deep directory is made under the fixture's own, and removed with it
     (`shutil.rmtree` walks by descriptor, so the length of the path is no
@@ -714,10 +716,11 @@ def audit_holder(work: str) -> Fixture:
         "    e=select.epoll()\n"
         "    for i in range(k): e.register(100+i,select.EPOLLIN)\n"
         "    os.dup2(e.fileno(),n); e.close()\n"
-        "up=threading.Event()\n"
-        "def t():\n"
-        "    libc.prctl(15,b'\\xc3\\xa9',0,0,0); up.set(); time.sleep(3600)\n"
-        "threading.Thread(target=t,daemon=True).start(); up.wait()\n"
+        "def t(name,up):\n"
+        "    libc.prctl(15,name,0,0,0); up.set(); time.sleep(3600)\n"
+        "for name in (b'\\xc3\\xa9',b'ab\\xc3',b'\\xff\\xfe'):\n"
+        "    up=threading.Event()\n"
+        "    threading.Thread(target=t,args=(name,up),daemon=True).start(); up.wait()\n"
         "open(os.path.join(d,'ready'),'w').close()\n"
         "time.sleep(3600)\n" % adir
     )

@@ -552,6 +552,52 @@ fn a_hostile_thread_name_is_escaped_in_taskcmd() {
 }
 
 #[test]
+fn a_thread_name_that_is_not_utf8_is_cut_and_escaped_as_its_bytes() {
+    // A thread named `ab\xc3` or `\xff\xfe` with `prctl()`: the C prints its
+    // bytes, each that is not ASCII an escape of its own, and cuts between
+    // them (`safestrprtn()`, DIVERGENCES 93, 158). Read lossily, the name
+    // had become U+FFFD's bytes, and the cut printed `ab\xef` and
+    // `\xef\xbf`, bytes the thread never had. Measured against the C under
+    // the default width and `+c` 1 to 15.
+    let task = |raw: &[u8]| {
+        let mut p = task_entry("py", &String::from_utf8_lossy(raw));
+        p.raw_names = Some(Box::new(lsof_core::RawNames {
+            task_command: Some(raw.into()),
+            ..Default::default()
+        }));
+        p
+    };
+    let cell = |p: &lsof_core::Process, width: Option<usize>| {
+        let out = table::render(
+            std::slice::from_ref(p),
+            TableOpts {
+                command_width: width,
+                ..TableOpts::new(Escaper::UNIX)
+            },
+        );
+        let row = out.lines().nth(1).unwrap_or_default().to_string();
+        row.split_whitespace()
+            .nth(3)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let ab = task(b"ab\xc3");
+    let ff = task(b"\xff\xfe");
+    assert_eq!(cell(&ab, None), r"ab\xc3");
+    assert_eq!(cell(&ff, None), r"\xff\xfe");
+    assert_eq!(cell(&ab, Some(9)), r"ab\xc3");
+    assert_eq!(cell(&ff, Some(9)), r"\xff\xfe");
+    // TASKCMD is at least `TASKCMD` wide, seven: room for `\xff` and not
+    // for `\xfe`.
+    assert_eq!(cell(&ff, Some(7)), r"\xff");
+    // The command's own bytes stay the command's.
+    assert_eq!(ab.command_bytes(), b"py");
+    assert_eq!(ab.task_command_bytes(), Some(&b"ab\xc3"[..]));
+    // `-F M` and JSON keep the text it was read as (DIVERGENCES 59, 93).
+    assert_eq!(ab.task_command.as_deref(), Some("ab\u{fffd}"));
+}
+
+#[test]
 fn a_task_row_is_distinguishable_from_a_thread_handle() {
     // On Windows BOTH of these render TYPE `THRD`: `-K` emits a task row, and
     // the all-handle scan types a thread HANDLE the same way (`handles.rs`

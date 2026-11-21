@@ -368,7 +368,7 @@ enum Cell<'a> {
     /// `putc(' ')` each.
     Command(&'a [u8]),
     /// TASKCMD: `printf(" ")`, then as COMMAND.
-    TaskCommand(&'a str),
+    TaskCommand(&'a [u8]),
     /// SIZE/OFF: `putchar(' ')`, then one `printf()`.
     SizeOff,
     /// NAME: `putchar(' ')`, `printname()`'s calls, `putchar('\n')`.
@@ -425,7 +425,7 @@ fn emit_row(
             }
             Cell::TaskCommand(c) => {
                 out.putc(b' ');
-                let used = esc.command_truncated_calls(c, width, &mut out);
+                let used = esc.command_bytes_truncated_calls(c, width, &mut out);
                 for _ in used..width {
                     out.putc(b' ');
                 }
@@ -604,9 +604,9 @@ pub fn render_naming(
     // of it under `+c 0`, where the C prints all 22.
     let task_cut = procs
         .iter()
-        .fold("TASKCMD".len(), |w, p| match &p.task_command {
+        .fold("TASKCMD".len(), |w, p| match p.task_command_bytes() {
             Some(c) => {
-                let len = esc.command(c).len();
+                let len = esc.command_bytes(c).len();
                 w.max(command_width.map_or(len, |n| len.min(n)))
             }
             None => w,
@@ -679,8 +679,11 @@ pub fn render_naming(
             // them. TASKCMD is a command name, so it is escaped and cut the
             // same way COMMAND is — but at `task_cut`, its own column width.
             r.push(p.tid.map(|t| t.to_string()).unwrap_or_default());
-            r.push(match &p.task_command {
-                Some(c) => esc.command_truncated(c, task_cut),
+            // Its bytes, as COMMAND's: a thread name that is not UTF-8 is cut
+            // and escaped byte by byte, as the C prints it, not the U+FFFD
+            // it was read as (DIVERGENCES 93).
+            r.push(match p.task_command_bytes() {
+                Some(c) => esc.command_bytes_truncated(c, task_cut),
                 None => String::new(),
             });
         }
@@ -804,7 +807,7 @@ pub fn render_naming(
             .enumerate()
             .map(|(i, c)| match c.title {
                 _ if i == 0 => Cell::Command(p.command_bytes()),
-                "TASKCMD" => Cell::TaskCommand(p.task_command.as_deref().unwrap_or("")),
+                "TASKCMD" => Cell::TaskCommand(p.task_command_bytes().unwrap_or(b"")),
                 "NAME" => Cell::Name(f),
                 "USER" => Cell::User,
                 t if t == size_off.header() => Cell::SizeOff,
@@ -895,5 +898,59 @@ mod login_tests {
         let text = String::from_utf8_lossy(&text);
         let row = text.lines().nth(1).unwrap_or_default();
         assert!(row.contains(" abcd "), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    /// A task entry named `name`, whose bytes are `raw` where given.
+    fn task(name: &str, raw: Option<&[u8]>) -> Process {
+        let mut p = crate::mock::sample_processes().remove(0);
+        p.files.truncate(1);
+        p.tid = Some(9);
+        p.task_command = Some(name.into());
+        p.raw_names = raw.map(|raw| {
+            Box::new(crate::model::RawNames {
+                task_command: Some(raw.into()),
+                ..Default::default()
+            })
+        });
+        p
+    }
+
+    fn table(p: &Process, width: Option<usize>) -> String {
+        render(
+            std::slice::from_ref(p),
+            TableOpts {
+                command_width: width,
+                ..TableOpts::new(Escaper::UNIX)
+            },
+        )
+    }
+
+    /// TASKCMD is sized, cut and printed from the thread name's bytes where
+    /// they are not UTF-8, as COMMAND is from the command's (DIVERGENCES 93,
+    /// 158): `ab\xc3`, not the `ab\xef` of the U+FFFD it was read as.
+    #[test]
+    fn taskcmd_is_the_thread_names_bytes() {
+        // Sized as the six bytes it prints: the table is the one a name of
+        // six letters makes.
+        let raw = task("ab\u{fffd}", Some(b"ab\xc3"));
+        let plain = task("abcdef", None);
+        for width in [None, Some(15)] {
+            assert_eq!(
+                table(&raw, width).replace(r"ab\xc3", "abcdef"),
+                table(&plain, width),
+                "{width:?}"
+            );
+        }
+        // Cut between its bytes at `+c 9`: `abcd\xc3`, eight, and not the
+        // `abcd\xef` of U+FFFD's.
+        let raw = task("abcd\u{fffd}\u{fffd}", Some(b"abcd\xc3\xff"));
+        let text = table(&raw, Some(9));
+        let row = text.lines().nth(1).unwrap_or_default();
+        assert_eq!(row.split_whitespace().nth(3), Some(r"abcd\xc3"), "{text}");
     }
 }

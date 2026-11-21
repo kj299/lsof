@@ -448,10 +448,14 @@ meet. Each number is a row there, with the measurement behind it.
   since 2026-11-21 (`/proc`, held for the scan, and its own
   `/proc/PID/fd`), but for the process that makes the bounded calls: the
   pipes to it are lsof-rs's descriptors 4 and 5 where the C's are 5 and 6
-  (so `/proc/PID/fd` is 6, the C's 4) unless a path argument was given,
-  the helper has `/dev/null` on its fd 2, and `-K` lists the thread that
-  reads its replies. A script that looks for lsof's own `/proc` row finds
-  it at 3 in both.
+  (so `/proc/PID/fd` is 6, the C's 4) unless a path argument was given;
+  under `-b` and `-O`, which start no helper, both have `/proc` at 3 and
+  `/proc/PID/fd` at 4. The helper has `/dev/null` on its fd 2, and the
+  thread that reads its replies is listed as a task (`TID TASKCMD
+  lsof-safe`, its own `/proc/PID/task/TID/fd` at 6) on every run with no
+  selection, where the C lists tasks too, and under `-K`; the C,
+  single-threaded, has none. A script that looks for lsof's own `/proc`
+  row finds it at 3 in both.
 - **Linux, in a PID namespace whose `/proc` is the host's** (`unshare -p
   -f` with no `--mount-proc`, a container given the host's `/proc`; 164):
   lsof-rs prints what it prints on a host. The C, which looks for itself

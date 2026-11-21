@@ -227,6 +227,9 @@ them up unless
 is given.
 .SH EXIT STATUS
 0 when every search item was found, 1 otherwise or on an error, as the C's;
+.B "\-c ^"
+with no name excludes every command, so nothing is listed and the status
+is 1, as the C's;
 .B +r
 exits 1 when its first cycle lists nothing.
 .SH SEE ALSO

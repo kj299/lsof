@@ -8537,6 +8537,17 @@ name = "taskcmd-cut-inside-a-character"
 args = ["-n", "-P", "-K", "+c", "4", "-a", "-p", "{AUD}", "-d", "cwd"]
 
 [[case]]
+# DIVERGENCES 93 (the safety review, LOW-1): AUD's threads `ab\xc3` and
+# `\xff\xfe`, whose names are not UTF-8, are printed as their bytes, each
+# byte that is not ASCII an escape of its own, and cut between them:
+# `ab\xc3` and `\xff` at the title's seven columns, where lsof-rs had cut
+# the U+FFFD it read them as into `ab\xef` and `\xef\xbf`. At a width the
+# C's column is narrower than these escapes (its `safestrlen()`), ledgered
+# `hostile-comm-utf8-table`; seven is the width both take.
+name = "taskcmd-of-a-name-not-utf8-cut"
+args = ["-n", "-P", "-K", "+c", "7", "-a", "-p", "{AUD}", "-d", "cwd"]
+
+[[case]]
 # Under `-E` a process a `-c ^` names is read all the same, but matches no
 # `-c`: `is_cmd_excl()` returns at the exclusion (DIVERGENCES 165). XG is
 # `lsofrsx-gone`, XK `lsofrsx-keep`: XK's row alone. lsof-rs listed XG's

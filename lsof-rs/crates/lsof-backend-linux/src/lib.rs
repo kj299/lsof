@@ -125,6 +125,8 @@ mod netnames;
 mod process;
 #[cfg(target_os = "linux")]
 pub mod safefs;
+#[cfg(all(test, target_os = "linux"))]
+mod testdir;
 #[cfg(target_os = "linux")]
 mod text;
 #[cfg(target_os = "linux")]
@@ -179,7 +181,7 @@ pub fn stdout_blksize() -> Option<u64> {
 #[doc(hidden)]
 pub mod fuzz_api {
     pub use crate::diag::{parse_reply, Ends, Step};
-    pub use crate::files::{name_for_target, parse_fdinfo, FdInfo, LinkNode};
+    pub use crate::files::{fdinfo_wants, name_for_target, parse_fdinfo, FdInfo, LinkNode};
     pub use crate::locks::parse_locks;
     pub use crate::maps::{parse_maps, parse_maps_bytes, Mapping};
     pub use crate::mounts::{parse_mounts, parse_supplement, resolve_table, MountLine};
