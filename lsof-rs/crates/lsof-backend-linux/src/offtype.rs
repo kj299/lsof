@@ -73,9 +73,10 @@ fn read_fdinfo(path: &Path) -> Option<String> {
 }
 
 /// Whether an `fdinfo` text gives the position the probe sought to: its
-/// `pos:` line, read as every descriptor's is ([`crate::files::parse_fdinfo`]).
+/// `pos:` line, read as every descriptor's is ([`crate::files::parse_fdinfo`]),
+/// with the C's mask for the probe, `FDINFO_POS` alone (`dproc.c:650`).
 fn says_the_position(text: &str) -> bool {
-    crate::files::parse_fdinfo(text).pos == Some(TEST_SEEK)
+    crate::files::parse_fdinfo(text, crate::files::want::POS).pos == Some(TEST_SEEK)
 }
 
 #[cfg(test)]
