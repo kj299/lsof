@@ -111,19 +111,43 @@ impl Escaper {
     /// [`Escaper::command`] cut to at most `width` printed bytes — lsof's
     /// `+c`. Like `safestrprtn()`, an escape that does not fit whole is not
     /// started: the cell never ends in half an escape that a reader would take
-    /// for a different character.
+    /// for a different character. An escape is one **byte's**, as the C's
+    /// printer walks bytes (`Escaper::command_cut`): of a character of
+    /// several bytes, the bytes that fit are printed (`\xe6\x97` of `日`
+    /// in a cell of nine, measured).
     pub fn command_truncated(&self, s: &str, width: usize) -> String {
-        let mut out = String::with_capacity(width.min(s.len() + 8));
-        let mut used = 0;
-        for c in s.chars() {
-            let w = escaped_width(c, Mode::Command, self.backslash);
+        self.command_bytes_truncated(s.as_bytes(), width)
+    }
+
+    /// `safestrprtn(b, width, fs, 2)`'s walk (`lib/misc.c:1486-1499`), which
+    /// COMMAND and TASKCMD are printed by (`src/print.c:831, 871`): a byte
+    /// at a time, each either one printed byte or one escape, and the walk
+    /// ends at the first that does not fit in what is left of `width`
+    /// (`if ((i + cl) > len) break;`), never skipping it for a later,
+    /// shorter one. It has no multibyte path, so every byte that is not
+    /// ASCII is an escape of its own, `\xNN`, four wide, whether or not it
+    /// is part of a character: `é` in a cell with four left is `\xc3`.
+    /// lsof-rs had taken a character for one unit, eight wide for `é`, and
+    /// printed none of it (a process named `日本語` had an empty COMMAND
+    /// cell).
+    ///
+    /// `put` is handed each byte that fits, in order; the bytes' printed
+    /// width is returned.
+    fn command_cut(&self, b: &[u8], width: usize, mut put: impl FnMut(u8)) -> usize {
+        let mut used = 0usize;
+        for &byte in b {
+            let w = if byte.is_ascii() {
+                escaped_width(char::from(byte), Mode::Command, self.backslash)
+            } else {
+                4
+            };
             if used + w > width {
                 break;
             }
             used += w;
-            push(&mut out, c, Mode::Command, self.backslash);
+            put(byte);
         }
-        out
+        used
     }
 }
 
@@ -145,31 +169,18 @@ impl Escaper {
     }
 
     /// [`Escaper::command_truncated`] for a command that need not be UTF-8:
-    /// a byte that is no character is a four-byte escape, cut whole or not
-    /// at all, as an escaped character is.
+    /// every byte that is not ASCII is a four-byte escape, cut whole or not
+    /// at all, whether or not it is part of a character
+    /// (`Escaper::command_cut`).
     pub fn command_bytes_truncated(&self, b: &[u8], width: usize) -> String {
-        if let Ok(s) = std::str::from_utf8(b) {
-            return self.command_truncated(s, width);
-        }
-        let mut out = String::with_capacity(width.min(b.len() * 4));
-        let mut used = 0usize;
-        for chunk in b.utf8_chunks() {
-            for c in chunk.valid().chars() {
-                let w = escaped_width(c, Mode::Command, self.backslash);
-                if used + w > width {
-                    return out;
-                }
-                used += w;
-                push(&mut out, c, Mode::Command, self.backslash);
-            }
-            for &byte in chunk.invalid() {
-                if used + 4 > width {
-                    return out;
-                }
-                used += 4;
+        let mut out = String::with_capacity(width.min(b.len().saturating_mul(4)));
+        self.command_cut(b, width, |byte| {
+            if byte.is_ascii() {
+                push(&mut out, char::from(byte), Mode::Command, self.backslash);
+            } else {
                 push_hex(&mut out, byte);
             }
-        }
+        });
         out
     }
 }
@@ -205,27 +216,15 @@ impl Escaper {
         width: usize,
         out: &mut crate::render::Calls,
     ) -> usize {
-        let mut used = 0usize;
-        for chunk in b.utf8_chunks() {
-            for c in chunk.valid().chars() {
-                let w = escaped_width(c, Mode::Command, self.backslash);
-                if used + w > width {
-                    return used;
-                }
-                used += w;
-                unit_calls(c, Mode::Command, self.backslash, out);
-            }
-            for &byte in chunk.invalid() {
-                if used + 4 > width {
-                    return used;
-                }
-                used += 4;
+        self.command_cut(b, width, |byte| {
+            if byte.is_ascii() {
+                unit_calls(char::from(byte), Mode::Command, self.backslash, out);
+            } else {
                 let mut e = String::with_capacity(4);
                 push_hex(&mut e, byte);
                 out.call(e);
             }
-        }
-        used
+        })
     }
 
     /// [`Escaper::command`] of a string cut to `width`, a call at a time.
@@ -523,6 +522,92 @@ mod tests {
         for w in 0..=full.len() + 1 {
             let t = U.command_truncated(s, w);
             assert!(t.len() <= w && full.starts_with(&t), "w={w} {t:?}");
+        }
+    }
+
+    /// `safestrprtn()` walks bytes (`lib/misc.c:1486-1499`): each byte of a
+    /// character of several is an escape of its own, four wide, and the
+    /// walk ends at the first that does not fit. Measured against the C,
+    /// each in COMMAND: `日本語` in the default nine columns is `\xe6\x97`,
+    /// `naïve-app` is `na\xc3`, `é` under `+c 1` (a cell of seven, the
+    /// title's width) is `\xc3`, `aé` under `+c 4` is `a\xc3`. lsof-rs took
+    /// a character for one escape and printed none of it.
+    #[test]
+    fn a_command_is_cut_between_the_bytes_of_a_character() {
+        assert_eq!(U.command_truncated("日本語", 9), "\\xe6\\x97");
+        assert_eq!(U.command_truncated("naïve-app", 9), "na\\xc3");
+        assert_eq!(U.command_truncated("é", 7), "\\xc3");
+        assert_eq!(U.command_truncated("aé", 7), "a\\xc3");
+        // Width by width: an escape is started only where all four of its
+        // bytes fit.
+        for (width, want) in [
+            (0, ""),
+            (3, ""),
+            (4, "\\xc3"),
+            (7, "\\xc3"),
+            (8, "\\xc3\\xa9"),
+            (9, "\\xc3\\xa9z"),
+        ] {
+            assert_eq!(U.command_truncated("éz", width), want, "width {width}");
+        }
+        assert_eq!(U.command_truncated("aé", 4), "a");
+        assert_eq!(U.command_truncated("aé", 5), "a\\xc3");
+        // The walk ends there: a later, shorter unit is not printed in the
+        // room the escape left.
+        assert_eq!(U.command_truncated("éb", 5), "\\xc3");
+        assert_eq!(U.command_truncated("aéb", 4), "a");
+        // A command that is not UTF-8 is walked the same way, byte by
+        // byte, whether or not its bytes make a character.
+        assert_eq!(
+            U.command_bytes_truncated("日本語".as_bytes(), 9),
+            "\\xe6\\x97"
+        );
+        assert_eq!(U.command_bytes_truncated(b"\xe6\x97\xff", 9), "\\xe6\\x97");
+        assert_eq!(
+            U.command_bytes_truncated(b"\xff\xe6\x97\xa5", 9),
+            "\\xff\\xe6"
+        );
+        // Backslash or no backslash, the bytes are cut alike.
+        assert_eq!(W.command_truncated("日本語", 9), "\\xe6\\x97");
+        // A call at a time, as the C's `fputs()`s make it, and the width
+        // used, which the cell is padded from.
+        assert_eq!(
+            pieces(|c| {
+                let used = U.command_truncated_calls("日本語", 9, c);
+                assert_eq!(used, 8);
+            }),
+            ["\\xe6", "\\x97"]
+        );
+        assert_eq!(
+            pieces(|c| {
+                let used = U.command_bytes_truncated_calls("naïve-app".as_bytes(), 9, c);
+                assert_eq!(used, 6);
+            }),
+            ["n", "a", "\\xc3"]
+        );
+        // Every cut is a prefix of the whole, within its width, and the
+        // longest one that ends between two of the C's units.
+        for s in ["日本語", "naïve-app", "x\u{e9}\t \\y\u{9b}z", "\u{1f600}!"] {
+            let full = U.command(s);
+            for w in 0..=full.len() + 1 {
+                let t = U.command_truncated(s, w);
+                assert!(t.len() <= w && full.starts_with(&t), "{s:?} w={w} {t:?}");
+                assert_eq!(t, U.command_bytes_truncated(s.as_bytes(), w));
+                // Nothing more would have fitted: what follows the cut is
+                // an escape too wide for what is left, or nothing.
+                let rest = &full[t.len()..];
+                let next = if rest.starts_with("\\x") {
+                    4
+                } else if rest.starts_with('\\') || rest.starts_with('^') {
+                    2
+                } else {
+                    usize::from(!rest.is_empty())
+                };
+                assert!(
+                    next == 0 || t.len() + next > w,
+                    "{s:?} w={w} {t:?} {rest:?}"
+                );
+            }
         }
     }
 

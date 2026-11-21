@@ -63,7 +63,7 @@ it is a gap, not a formatting choice.
 | `/proc/PID/ns/{net,mnt}` (compared by inode, never parsed), `/proc/self/status` | kernel | untrusted | `lsof-backend-linux::net`, `::maps`, `::process` | not applicable |
 | `/proc/PID/fdinfo/N` | kernel, per-fd | untrusted | `lsof-backend-linux::files` | `proc_fdinfo` |
 | `/proc/PID/maps` | kernel + mapped filenames | **hostile** | `lsof-backend-linux::maps` | `proc_maps` |
-| `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
+| `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix,icmp}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
 | `/proc/self/mounts` | kernel + mount namespace | untrusted | `lsof-backend-linux::mounts` | `proc_mounts` |
 | each mount directory, and its source, read through `Readlink()` and `stat`ed on a run that reads the table (an NFS or FUSE mount among them; never an autofs one, nor an `-e`/`+e` one) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | `proc_mounts` drives the table's rules under `-b`; the calls are a liveness hazard, not a parser: see below |
 | a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |

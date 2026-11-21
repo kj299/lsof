@@ -437,10 +437,8 @@ name = "c-exclusion-kept-under-E"
 rule = "under -E a -c ^ is ignored (56)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''        (!self.reads_every_process()
-            && self'''
-new = '''        (true
-            && self'''
+old = '''        (!self.reads_every_process() && self.command_excluded(p))'''
+new = '''        (true && self.command_excluded(p))'''
 
 [[mutant]]
 name = "excluded-process-listed-under-allproc"
@@ -555,14 +553,14 @@ name = "command-bytes-cut-midescape"
 rule = "a byte escape is cut whole or not at all (92)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/render/escape.rs"
-old = '''                if used + 4 > width {
-                    return out;
-                }
-                used += 4;'''
-new = '''                if used + 1 > width {
-                    return out;
-                }
-                used += 4;'''
+old = '''            if used + w > width {
+                break;
+            }
+            used += w;'''
+new = '''            if used + 1 > width {
+                break;
+            }
+            used += w;'''
 
 [[mutant]]
 name = "raw-comm-dropped"

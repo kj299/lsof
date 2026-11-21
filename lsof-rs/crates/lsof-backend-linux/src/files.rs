@@ -104,8 +104,9 @@ fn fdinfo_for(base: &str, fd: &str) -> FdInfo {
 /// or write.
 const O_PATH: u32 = 0o10000000;
 
-/// The C caps the fds it lists for an eventpoll at 32 and writes `...]` when
-/// there were more (`EPOLL_MAX_TFDS`, `lib/dialects/linux/dproc.c:95`).
+/// The C keeps at most 32 of the fds an eventpoll watches, and writes `...]`
+/// once it holds that many, whether or not there was a 33rd
+/// (`EPOLL_MAX_TFDS`, `lib/dialects/linux/dproc.c:95, 556-559, 1911-1918`).
 const EPOLL_MAX_TFDS: usize = 32;
 
 /// What `/proc/<pid>/fdinfo/<fd>` tells us about one fd.
@@ -116,19 +117,27 @@ const EPOLL_MAX_TFDS: usize = 32;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FdInfo {
     pub access: Option<AccessMode>,
+    /// `pos:`, as the C's `strtoull()` reads it and prints it, unsigned: a
+    /// position the kernel writes negative (`/proc/PID/mem` read above
+    /// 2^63) is the number plus 2^64, and `-1`, which that makes
+    /// `ULLONG_MAX`, is none (`dproc.c:497-507`).
     pub pos: Option<u64>,
     /// `eventfd-id:` — *not* the counter value (`eventfd-count:`) and not the
-    /// fd number; the C prints this one.
-    pub eventfd_id: Option<i64>,
-    /// `Pid:` on a pidfd — the process it refers to.
-    pub pidfd_pid: Option<i64>,
+    /// fd number; the C prints this one. The C's `int`: `None` where it
+    /// keeps -1 ([`c_int`]).
+    pub eventfd_id: Option<i32>,
+    /// `Pid:` on a pidfd — the process it refers to. `None` where the C
+    /// keeps -1 ([`c_int`]): no line, or the `Pid:\t-1` of a process that
+    /// has been reaped, which `strtoul()` makes `ULONG_MAX` and the C skips
+    /// (`dproc.c:528-538`).
+    pub pidfd_pid: Option<i32>,
     /// The raw `flags:` value, octal in the file. lsof's `-F G` prints it in
     /// hex; the access mode above is derived from it.
     pub flags: Option<u32>,
-    /// `tfd:` lines — the fds an eventpoll watches, ascending, capped.
-    pub tfds: Vec<i64>,
-    /// There were more than [`EPOLL_MAX_TFDS`] of them, so the list is cut.
-    pub tfds_truncated: bool,
+    /// `tfd:` lines — the fds an eventpoll watches, ascending, the first
+    /// [`EPOLL_MAX_TFDS`] the file lists. Each is the C's `int`, -1 where a
+    /// number does not fit one (`dproc.c:532-538`).
+    pub tfds: Vec<i32>,
     /// `tty-index:` on a pseudoterminal master, `/dev/ptmx`: the index of
     /// its slave, `/dev/pts/N`, which `-E` names (DIVERGENCES 56). `None`
     /// past the C's `int` (`dproc.c:536-541`).
@@ -169,35 +178,107 @@ pub fn tty_index(base: &str, fd: u64) -> Option<u32> {
     fdinfo_for(base, &fd.to_string()).tty_index
 }
 
+/// A field of a `/proc` line as the C's `strtoul(field, &ep, 0)` and
+/// `strtoull(field, &ep, 0)` read it (one function here: both types are 64
+/// bits wide on every Linux the backend builds for), with the test the C
+/// makes of each: `None` where the conversion stops short of the field's end
+/// (`!ep || *ep`) or gives `ULONG_MAX`, which is also what an overflow gives.
+///
+/// Base 0: `0x` and `0X` open a hexadecimal number, a leading `0` an octal
+/// one, anything else is decimal. A sign is accepted, and `-N` is the two's
+/// complement of N, as glibc returns it: `-10485760` is
+/// `0xffffffffff600000`, and `-1` is `ULONG_MAX`, so refused. White space
+/// before the number is skipped; `0x` with no digit after it is the number 0
+/// and an `x` left over, so refused.
+pub(crate) fn c_strtoul(field: &str) -> Option<u64> {
+    let s = field.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (negative, s) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let b = s.as_bytes();
+    let hex = b.len() > 2 && b[0] == b'0' && (b[1] | 0x20) == b'x' && b[2].is_ascii_hexdigit();
+    let (radix, digits) = if hex {
+        (16, &s[2..])
+    } else if b.first() == Some(&b'0') {
+        (8, s)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value: u64 = 0;
+    for c in digits.chars() {
+        // A character that is no digit of the base is where the C's
+        // conversion ends, short of the field's end.
+        let d = c.to_digit(radix)?;
+        // Past 64 bits the C's answer is `ULONG_MAX`, which it refuses.
+        value = value
+            .checked_mul(u64::from(radix))?
+            .checked_add(u64::from(d))?;
+    }
+    let value = if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    };
+    (value != u64::MAX).then_some(value)
+}
+
+/// What the C keeps of a number [`c_strtoul`] accepted for one of its `int`
+/// fields (`eventfd-id:`, `tty-index:`, `Pid:`, `tfd:`): `val = (int)ul; if
+/// (val < 0) val = -1` (`dproc.c:532-538`). The low 32 bits, so -1 for the
+/// `2147483648` an `int` cannot hold, and for `-2`.
+pub(crate) fn c_int(ul: u64) -> i32 {
+    // `(int)ul` keeps the low 32 bits, whatever the rest holds.
+    let val = (ul & 0xffff_ffff) as u32 as i32;
+    if val < 0 {
+        -1
+    } else {
+        val
+    }
+}
+
 /// The parsing half of [`fdinfo_for`], over the file's text. Pure, so the fuzz
 /// target can drive it with arbitrary bytes; must never panic.
+///
+/// As the C's `get_fdinfo()` reads it (`dproc.c:480-575`): each line is cut
+/// into fields at its blanks and tabs (`get_fields()`), the first names the
+/// value and the second is it, read by `strtoul()` or `strtoull()` in base 0
+/// ([`c_strtoul`]); a line whose number the C refuses changes nothing, and a
+/// line that comes again replaces what the earlier one gave.
 pub fn parse_fdinfo(info: &str) -> FdInfo {
     let mut out = FdInfo::default();
-    for line in info.lines() {
-        if let Some(v) = line.strip_prefix("flags:") {
-            if let Ok(flags) = u32::from_str_radix(v.trim(), 8) {
+    // '\n' only, as `fgets()` ends a line: a '\r' before it is part of the
+    // last field, and no number.
+    for line in info.split('\n') {
+        let mut fields = line.split([' ', '\t']).filter(|f| !f.is_empty());
+        let (Some(key), Some(value)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Some(ul) = (match key {
+            "flags:" | "pos:" | "eventfd-id:" | "tty-index:" | "Pid:" | "tfd:" => c_strtoul(value),
+            _ => None,
+        }) else {
+            continue;
+        };
+        match key {
+            "flags:" => {
+                // `fi->flags = (unsigned int)ul`.
+                let flags = (ul & 0xffff_ffff) as u32;
                 out.flags = Some(flags);
                 out.access = Some(access_from_flags(flags));
             }
-        } else if let Some(v) = line.strip_prefix("pos:") {
-            out.pos = v.trim().parse::<u64>().ok();
-        } else if let Some(v) = line.strip_prefix("eventfd-id:") {
-            out.eventfd_id = v.trim().parse::<i64>().ok();
-        } else if let Some(v) = line.strip_prefix("tty-index:") {
-            out.tty_index = v
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .filter(|&n| i32::try_from(n).is_ok());
-        } else if let Some(v) = line.strip_prefix("Pid:") {
-            out.pidfd_pid = v.trim().parse::<i64>().ok();
-        } else if let Some(v) = line.strip_prefix("tfd:") {
+            "pos:" => out.pos = Some(ul),
+            "eventfd-id:" => out.eventfd_id = Some(c_int(ul)).filter(|&id| id != -1),
+            "tty-index:" => out.tty_index = u32::try_from(c_int(ul)).ok(),
+            "Pid:" => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),
             // `tfd:  6 events: 1f data: ... pos:0 ino:28d1 sdev:9`
-            if let Some(Ok(fd)) = v.split_whitespace().next().map(str::parse::<i64>) {
+            _ => {
                 if out.tfds.len() < EPOLL_MAX_TFDS {
-                    out.tfds.push(fd);
-                } else {
-                    out.tfds_truncated = true;
+                    out.tfds.push(c_int(ul));
                 }
             }
         }
@@ -207,39 +288,80 @@ pub fn parse_fdinfo(info: &str) -> FdInfo {
     out
 }
 
-/// The NAME cell for a magic-link target. Real paths pass through. A pipe's
-/// target is `pipe:[inode]`, and lsof prints just `pipe` — the inode is
-/// already the NODE cell, so repeating it in NAME is noise the C does not
-/// emit. Sockets are resolved elsewhere (`net`), and any other synthetic
-/// target (`anon_inode:[eventfd]`) is kept verbatim until L2 names those.
-pub fn name_for_target(target: &str, info: &FdInfo) -> String {
-    if target.starts_with("pipe:[") && target.ends_with(']') {
-        return "pipe".to_string();
+/// What the C's `process_proc_node()` made of the file a descriptor's link
+/// names, as far as its NAME depends on it (`Lf->ntype`, `dnode.c:690-711`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkNode {
+    /// `N_ANON_INODE`: a numbered descriptor whose `stat` gave no file type
+    /// at all and whose link's source is `anon_inode`.
+    Anon,
+    /// `N_REGLR`, what a numbered descriptor is until its `stat` says
+    /// otherwise: a regular file, a directory, a link, a type with no name,
+    /// and a file whose `stat` failed.
+    Regular,
+    /// A FIFO, a device, a file on an NFS mount; and `cwd`, `rtd` and `txt`,
+    /// of whose links the C asks for no rest.
+    Other,
+}
+
+/// The NAME cell for a `/proc` link's text, as the C names the row.
+///
+/// A path (a text that opens with `/`) is the name, whole. Anything else is
+/// cut at its first `:` by `getlinksrc()` (`dproc.c:587-611`), and the row
+/// is named by what comes before it (`dnode.c:848-855`): `pipe` for
+/// `pipe:[N]`, and `net`, `mnt`, `pid`… for the namespace files `net:[N]`,
+/// `mnt:[N]`, `pid:[N]`, whose number is the NODE cell already. lsof-rs had
+/// kept every text but a pipe's and an anonymous inode's whole
+/// (`net:[4026531833]`). What follows the `:`, the rest, names the row in
+/// two cases only, each a numbered descriptor's (`dproc.c:1283-1328`):
+///
+/// * an anonymous inode (`anon_inode:<kind>`): the kind, and for three kinds
+///   an identity fdinfo carries is put in: `[eventfd:ID]`, `[pidfd:PID]`
+///   where there is a pid (a process that has been reaped has none, and the
+///   name stays `[pidfd]`), and `[eventpoll:FD,FD…]` where it watches
+///   anything, ending in `...` once the C's array of [`EPOLL_MAX_TFDS`] is
+///   full. Every other kind — `inotify`, `[timerfd]`, `[signalfd]`,
+///   `[io_uring]` — prints bare.
+/// * `pidfd:[N]`, the name the C's comment gives a pidfd on Linux 6.9, a
+///   regular file there (lsof issue 317; the kernel this was measured on,
+///   6.18, says `anon_inode:[pidfd]`): `[pidfd:PID]`, the
+///   pid whatever it is, -1 where fdinfo gave none (the C has no test for
+///   it in this branch).
+pub fn name_for_target(target: &str, info: &FdInfo, node: LinkNode) -> String {
+    if target.starts_with('/') {
+        return target.to_string();
     }
-    // An anonymous inode: the kernel writes `anon_inode:<kind>`, and lsof drops
-    // the prefix and prints the kind. Three kinds carry an identity in fdinfo
-    // that the C substitutes in (`lib/dialects/linux/dproc.c:1283-1301`);
-    // every other kind — `inotify`, `[timerfd]`, `[signalfd]`, `[io_uring]` —
-    // prints its bare kind.
-    if let Some(kind) = target.strip_prefix("anon_inode:") {
-        return match kind {
+    let Some((source, rest)) = target.split_once(':') else {
+        return target.to_string();
+    };
+    match node {
+        LinkNode::Anon if !rest.is_empty() => match rest {
             "[eventfd]" => match info.eventfd_id {
                 Some(id) => format!("[eventfd:{id}]"),
-                None => kind.to_string(),
+                None => rest.to_string(),
             },
             "[pidfd]" => match info.pidfd_pid {
                 Some(pid) => format!("[pidfd:{pid}]"),
-                None => kind.to_string(),
+                None => rest.to_string(),
             },
             "[eventpoll]" if !info.tfds.is_empty() => {
-                let fds: Vec<String> = info.tfds.iter().map(i64::to_string).collect();
-                let more = if info.tfds_truncated { "..." } else { "" };
+                let fds: Vec<String> = info.tfds.iter().map(i32::to_string).collect();
+                // `tfd_count == EPOLL_MAX_TFDS`: the array is full, whether
+                // or not a 33rd was there to leave out.
+                let more = if info.tfds.len() == EPOLL_MAX_TFDS {
+                    "..."
+                } else {
+                    ""
+                };
                 format!("[eventpoll:{}{more}]", fds.join(","))
             }
-            _ => kind.to_string(),
-        };
+            _ => rest.to_string(),
+        },
+        LinkNode::Regular if !rest.is_empty() && source == "pidfd" => {
+            format!("[pidfd:{}]", info.pidfd_pid.unwrap_or(-1))
+        }
+        _ => source.to_string(),
     }
-    target.to_string()
 }
 
 /// The exempted mount point a path falls under, if any (`-e`/`+e`), as the
@@ -714,10 +836,23 @@ fn psxmq(ty: FileType, dev: u64, mqueue: Option<u64>) -> FileType {
 /// rtd and txt, a mapping, an fd: `cwd-R`, `txt-R`, `mem-W`, `DEL-W`, `3uW`,
 /// all measured. By the file's own device (`st_dev`) and inode, so a lock on
 /// `/dev/null` is found on its devtmpfs inode, where looking it up by the
-/// DEVICE cell (`1,3`) missed it. A socket row has no such device here, and
-/// an `-e` row was never `stat`ed: neither gets one, as in the C. Only an fd
-/// had got one.
+/// DEVICE cell (`1,3`) missed it. An `-e` row was never `stat`ed, and gets
+/// none, as in the C. Only an fd had got one.
+///
+/// Nor does a socket row, of any kind: `process_proc_node()` hands whatever
+/// `stat`s as a socket to `process_proc_sock()` and returns
+/// (`dnode.c:702-705`) before it reaches `check_lock()` (`dnode.c:765-766`),
+/// and `process_proc_sock()` checks none. The rows the tables name have no
+/// device here to look one up by; the `sock` row of a socket no table names
+/// has sockfs's, and the row of a socket file held by its path the file's,
+/// under which `/proc/locks` lists a `flock()` on it (`FLOCK ADVISORY WRITE
+/// PID 00:09:INO 0 EOF`), so the rule is asked of the row's type: measured,
+/// `s = socket(); flock(s, LOCK_EX)` is `3u sock … protocol: TCP` in the C,
+/// and was `3uW` here.
 fn lock_of(locks: &crate::locks::LockTable, pid: u32, f: &OpenFile) -> Option<LockKind> {
+    if f.is_socket() {
+        return None;
+    }
     let dev = f.fs_device?;
     let ino = f.node.as_deref()?.parse::<u64>().ok()?;
     locks.get(&(pid, dev, ino)).copied()
@@ -1001,13 +1136,16 @@ fn row(
         Looked::Partial(dev) => Some(*dev),
         Looked::Failed(_) => None,
     };
+    // The C's `N_ANON_INODE` (`dnode.c:706-709`): a `stat` that gave no file
+    // type at all, of a link whose source is `anon_inode`.
+    let anon = meta.is_some_and(|m| m.mode & S_IFMT == 0) && source == b"anon_inode";
     let (file_type, device, size, node, links, rdev) = match &meta {
         Some(m) => {
-            // An anonymous inode stats as a regular file, but lsof types it
-            // `a_inode` — the kernel object has no filesystem identity, and
-            // saying REG would invite `-d` and size comparisons that mean
-            // nothing. The link target is the only thing that reveals it.
-            let ty = if name.starts_with("anon_inode:") {
+            // An anonymous inode has no file type for `stat` to give (the
+            // kernel masks one off for lsof's sake where it keeps one), and
+            // lsof types it `a_inode`: the kernel object has no filesystem
+            // identity. The link's source reveals it, with that `stat`.
+            let ty = if anon {
                 FileType::Other("a_inode".into())
             } else {
                 psxmq(type_from_mode(m.mode), m.dev, ctx.mqueue_device)
@@ -1070,16 +1208,27 @@ fn row(
         ),
     };
 
-    // A row the C could not `stat` under NFS is named by the link's source,
-    // as `getlinksrc()` cut it (`pipe`, `socket`, `anon_inode`): fdinfo's
-    // names need the type the `stat` gives (measured: `9 unknown 0t0
-    // anon_inode (lstat: …) (stat: …)` for an eventfd under `-b`).
-    let mut name = if ctx.fs.is_some() && meta.is_none() {
-        String::from_utf8_lossy(source).into_owned()
+    // What the C made of the node decides what a link that is no path is
+    // named ([`name_for_target`]): its source as `getlinksrc()` cut it
+    // (`pipe`, `net`, `anon_inode`), or for a numbered descriptor what
+    // follows the `:`, with fdinfo's identity, where the `stat` typed it an
+    // anonymous inode, and `[pidfd:PID]` for Linux 6.9's `pidfd:[N]`. A row
+    // the C could not `stat` is `N_REGLR` still, so its fdinfo names nothing
+    // (measured under an NFS host's `-b`: `9 unknown 0t0 anon_inode (lstat:
+    // …) (stat: …)` for an eventfd).
+    let nfs = nfs_suffix(ctx.nfs_mounts, &file_type, fs_device, source);
+    let link_node = if !matches!(fd, FdType::Handle(_)) {
+        LinkNode::Other
+    } else if anon {
+        LinkNode::Anon
+    } else if nfs.is_some() || matches!(file_type, FileType::Chr | FileType::Block | FileType::Fifo)
+    {
+        LinkNode::Other
     } else {
-        name_for_target(&name, info)
+        LinkNode::Regular
     };
-    if let Some(nfs) = nfs_suffix(ctx.nfs_mounts, &file_type, fs_device, source) {
+    let mut name = name_for_target(&name, info, link_node);
+    if let Some(nfs) = nfs {
         name.push_str(&nfs);
     }
     let mut f = OpenFile {
@@ -1112,8 +1261,15 @@ fn row(
 /// This is what the C prints for another user's process when it is not root
 /// (`dproc.c`, `process_id()`): lsof-rs printed one bare `unk unknown` line
 /// instead, so a process nothing could read looked like a process with
-/// nothing open. `info` is what fdinfo gave for a numbered fd — nothing, in
-/// every case but a race, since the same permission guards both.
+/// nothing open. `info` is what fdinfo gave for a numbered fd — nothing where
+/// a permission refused the link, since the same permission guards both, and
+/// the flags and the offset where the link alone would not read: a file
+/// whose path is 4096 bytes or longer (`readlink: File name too long`), or a
+/// race. The C keeps those two (`dproc.c:1254-1277`) and prints no access
+/// letter: it takes the letter from the `lstat` of the link, which it does
+/// not make of a link it could not read (`ls = 0`, `dproc.c:1159-1170`;
+/// `dnode.c:679-686`). lsof-rs had taken the letter from the flags here
+/// (`3u` where the C prints `3 `; `-F a` `au`, JSON `"access":"u"`).
 fn unreadable((name, why): (String, Option<String>), fd: FdType, info: &FdInfo) -> OpenFile {
     let mut f = OpenFile {
         rdev: None,
@@ -1121,7 +1277,7 @@ fn unreadable((name, why): (String, Option<String>), fd: FdType, info: &FdInfo) 
         file_flags: info.flags,
         lock: None,
         fd,
-        access: info.access(),
+        access: AccessMode::Unknown,
         file_type: FileType::Unknown,
         name,
         device: None,
@@ -1245,7 +1401,15 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
         }
     }
 
-    let dir = match std::fs::read_dir(format!("{base}/fd")) {
+    // The directory stays open until every descriptor it listed has been
+    // read, as the C's does (`opendir(Dpath)` … `closedir(fdp)`,
+    // `dproc.c:1141-1341`). It makes no difference to any process but lsof
+    // itself, whose own listing then has the row the C's has, `Nr DIR …
+    // /proc/PID/fd`: closed before its links were read, as it had been
+    // here, the descriptor the listing named was gone, and lsof's own row
+    // for it was `N unknown /proc/PID/fd/N (readlink: No such file or
+    // directory)`.
+    let mut dir = match std::fs::read_dir(format!("{base}/fd")) {
         Ok(dir) => dir,
         Err(e) => {
             // `NOFD`: the fd table could not be listed at all. One row says
@@ -1269,6 +1433,7 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
         }
     };
     let mut fds: Vec<(u64, String)> = dir
+        .by_ref()
         .flatten()
         .filter_map(|e| {
             let n = e.file_name().to_str()?.to_string();
@@ -1306,6 +1471,8 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
             break;
         }
     }
+    // `closedir(fdp)`: only now, with every link read.
+    drop(dir);
     // Every process's rows are held until the whole host has been walked and
     // sorted — the C does the same (`gather_proc_info()` fills `Lproc[]`,
     // `main.c` qsorts it, then prints) — so the growth slack a `Vec` keeps
@@ -1582,18 +1749,90 @@ mod tests {
     }
 
     #[test]
-    fn pipe_target_is_named_pipe_everything_else_passes_through() {
-        // The C prints `pipe` for a pipe fd; the inode is already NODE. Found by
-        // the first C-vs-Rust differential fixture, which showed `pipe:[12047]`.
+    fn a_link_that_is_no_path_is_named_up_to_its_first_colon() {
+        // `getlinksrc()` (`dproc.c:602-609`) cuts every link text that does
+        // not open with `/` at its first `:`, and `process_proc_node()`
+        // names the row by what is left (`dnode.c:851-852`). The C prints
+        // `pipe` for a pipe (the inode is already NODE), found by the first
+        // C-vs-Rust differential fixture, which showed `pipe:[12047]`; and
+        // `net`, `mnt`… for a namespace file, where lsof-rs had printed
+        // `net:[4026531833]` (measured against the C on `3</proc/self/ns/net`).
         let none = FdInfo::default();
-        assert_eq!(name_for_target("pipe:[12047]", &none), "pipe");
-        assert_eq!(name_for_target("/etc/passwd", &none), "/etc/passwd");
-        assert_eq!(name_for_target("socket:[99]", &none), "socket:[99]");
-        // Not a pipe target, merely a path that starts like one.
-        assert_eq!(
-            name_for_target("pipe:[unterminated", &none),
-            "pipe:[unterminated"
+        for node in [LinkNode::Regular, LinkNode::Other, LinkNode::Anon] {
+            assert_eq!(name_for_target("/etc/passwd", &none, node), "/etc/passwd");
+            // A path is whole, whatever it holds.
+            assert_eq!(
+                name_for_target("/a:b (deleted)", &none, node),
+                "/a:b (deleted)"
+            );
+            assert_eq!(name_for_target("nocolon", &none, node), "nocolon");
+            assert_eq!(name_for_target("", &none, node), "");
+        }
+        for node in [LinkNode::Regular, LinkNode::Other] {
+            assert_eq!(name_for_target("pipe:[12047]", &none, node), "pipe");
+            for ns in [
+                "net",
+                "mnt",
+                "pid",
+                "uts",
+                "ipc",
+                "user",
+                "cgroup",
+                "time",
+                "pid_for_children",
+                "time_for_children",
+            ] {
+                let link = format!("{ns}:[4026531833]");
+                assert_eq!(name_for_target(&link, &none, node), ns, "{link}");
+            }
+            // A socket no `stat` said is one (`socket (stat: …)`).
+            assert_eq!(name_for_target("socket:[99]", &none, node), "socket");
+            // The first colon, wherever it is and whatever follows it.
+            assert_eq!(name_for_target("pipe:[unterminated", &none, node), "pipe");
+            assert_eq!(name_for_target("a:b:c", &none, node), "a");
+            assert_eq!(name_for_target(":x", &none, node), "");
+            assert_eq!(name_for_target("x:", &none, node), "x");
+            // An anonymous inode's link the `stat` did not type as one (a
+            // failed `stat`, a FIFO's): its source, never its kind.
+            assert_eq!(
+                name_for_target("anon_inode:[eventfd]", &none, node),
+                "anon_inode"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pidfd_linux_6_9_names_pidfd_is_named_by_its_pid() {
+        // Linux 6.9 named a pidfd `pidfd:[INODE]`, a regular file on pidfs,
+        // by the C's comment (lsof issue 317). The kernel this was written
+        // on, 6.18, says `anon_inode:[pidfd]`, so this is from the C's
+        // source alone:
+        // `getlinksrc()` leaves `pidfd`, and `process_id()` then names the
+        // row `[pidfd:PID]` from fdinfo's `Pid:` (`dproc.c:1250-1254,
+        // 1320-1328`). There is no test of the pid in that branch: a
+        // process that has been reaped, `Pid:\t-1`, is `[pidfd:-1]`, where
+        // an `anon_inode:[pidfd]` keeps its bare kind.
+        let live = parse_fdinfo(
+            "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t99\nPid:\t4242\nNSpid:\t4242\n",
         );
+        let reaped = parse_fdinfo("pos:\t0\nflags:\t02000002\nPid:\t-1\nNSpid:\t-1\n");
+        let none = FdInfo::default();
+        let reg = LinkNode::Regular;
+        assert_eq!(name_for_target("pidfd:[99]", &live, reg), "[pidfd:4242]");
+        assert_eq!(name_for_target("pidfd:[99]", &reaped, reg), "[pidfd:-1]");
+        assert_eq!(name_for_target("pidfd:[99]", &none, reg), "[pidfd:-1]");
+        // Only that source, only with something after the colon
+        // (`rest && *rest`), and only where the node stayed `N_REGLR`.
+        assert_eq!(name_for_target("pidfd:", &live, reg), "pidfd");
+        assert_eq!(name_for_target("pidfd", &live, reg), "pidfd");
+        assert_eq!(name_for_target("pidfdx:[99]", &live, reg), "pidfdx");
+        assert_eq!(name_for_target("xpidfd:[99]", &live, reg), "xpidfd");
+        assert_eq!(
+            name_for_target("pidfd:[99]", &live, LinkNode::Other),
+            "pidfd"
+        );
+        assert_eq!(name_for_target("pidfd:[99]", &live, LinkNode::Anon), "[99]");
+        assert_eq!(name_for_target("/pidfd:[99]", &live, reg), "/pidfd:[99]");
     }
 
     #[test]
@@ -1602,16 +1841,25 @@ mod tests {
         // prints the kind, substituting an identity from fdinfo for the three
         // kinds that have one. Every string here was read off the real C.
         let none = FdInfo::default();
-        assert_eq!(name_for_target("anon_inode:inotify", &none), "inotify");
+        let anon = LinkNode::Anon;
+        assert_eq!(
+            name_for_target("anon_inode:inotify", &none, anon),
+            "inotify"
+        );
         // Exactly one prefix is dropped: the kind is everything after the
         // FIRST colon, as it is in the C. Found by the proc_fdinfo fuzz target
         // on CI, whose assertion had been the stronger "never starts with
         // anon_inode:" — wrong, not the parser.
         assert_eq!(
-            name_for_target("anon_inode:anon_inode:3", &none),
+            name_for_target("anon_inode:anon_inode:3", &none, anon),
             "anon_inode:3"
         );
-        assert_eq!(name_for_target("anon_inode:[timerfd]", &none), "[timerfd]");
+        assert_eq!(
+            name_for_target("anon_inode:[timerfd]", &none, anon),
+            "[timerfd]"
+        );
+        // No kind at all (`rest && *rest`): the source stays the name.
+        assert_eq!(name_for_target("anon_inode:", &none, anon), "anon_inode");
         // A pseudoterminal master's slave index (DIVERGENCES 56), as the C's
         // `int`: past it, none.
         let tty = |s: &str| parse_fdinfo(s).tty_index;
@@ -1623,33 +1871,143 @@ mod tests {
         assert_eq!(tty("pos:\t0\n"), None);
         // eventfd: the *id*, not the counter and not the fd number.
         let ev = parse_fdinfo("pos:\t0\neventfd-count:\t7\neventfd-id: 6\n");
-        assert_eq!(name_for_target("anon_inode:[eventfd]", &ev), "[eventfd:6]");
+        assert_eq!(
+            name_for_target("anon_inode:[eventfd]", &ev, anon),
+            "[eventfd:6]"
+        );
         // pidfd: the process it refers to.
         let pf = parse_fdinfo("pos:\t0\nPid:\t4242\nNSpid:\t4242\n");
-        assert_eq!(name_for_target("anon_inode:[pidfd]", &pf), "[pidfd:4242]");
+        assert_eq!(
+            name_for_target("anon_inode:[pidfd]", &pf, anon),
+            "[pidfd:4242]"
+        );
+        // A pid of 0 is a pid to the C (a process no pid names in lsof's
+        // PID namespace).
+        let zero = parse_fdinfo("Pid:\t0\n");
+        assert_eq!(
+            name_for_target("anon_inode:[pidfd]", &zero, anon),
+            "[pidfd:0]"
+        );
         // eventpoll: the watched fds, ascending, however fdinfo ordered them.
         let ep = parse_fdinfo(
             "pos:\t0\ntfd:        6 events: 1f data: 0 pos:0 ino:1 sdev:9\n\
              tfd:        4 events: 1f data: 0 pos:0 ino:2 sdev:9\n",
         );
         assert_eq!(
-            name_for_target("anon_inode:[eventpoll]", &ep),
+            name_for_target("anon_inode:[eventpoll]", &ep, anon),
             "[eventpoll:4,6]"
         );
         // An eventpoll watching nothing keeps the bare kind, as the C does
         // (it substitutes only when tfd_count > 0).
         assert_eq!(
-            name_for_target("anon_inode:[eventpoll]", &none),
+            name_for_target("anon_inode:[eventpoll]", &none, anon),
             "[eventpoll]"
         );
-        // More than the C's 32-fd cap: the list is cut and marked.
-        let many: String = (1..=40)
-            .map(|n| format!("tfd:  {n} events: 1f data: 0\n"))
-            .collect();
-        let big = parse_fdinfo(&many);
-        let name = name_for_target("anon_inode:[eventpoll]", &big);
-        assert!(name.ends_with("...]"), "cap must be visible: {name}");
-        assert_eq!(name.matches(',').count(), 31, "32 fds listed: {name}");
+        // The identities belong to their kinds alone.
+        assert_eq!(
+            name_for_target("anon_inode:[eventfd]", &pf, anon),
+            "[eventfd]"
+        );
+        assert_eq!(name_for_target("anon_inode:[pidfd]", &ev, anon), "[pidfd]");
+        assert_eq!(
+            name_for_target("anon_inode:[eventpoll]", &ev, anon),
+            "[eventpoll]"
+        );
+    }
+
+    #[test]
+    fn a_reaped_pidfd_keeps_its_bare_kind() {
+        // A supervisor that keeps a pidfd after `waitpid()`: the kernel then
+        // writes `Pid:\t-1`. The C's `strtoul()` makes that `ULONG_MAX`, the
+        // line is skipped, `fi.pid` stays -1 and nothing is put in
+        // (`dproc.c:528-538, 1292-1295`): `[pidfd]`, measured, where lsof-rs
+        // printed `[pidfd:-1]`.
+        let reaped = parse_fdinfo(
+            "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t155562\nPid:\t-1\nNSpid:\t-1\n",
+        );
+        assert_eq!(reaped.pidfd_pid, None);
+        assert_eq!(
+            name_for_target("anon_inode:[pidfd]", &reaped, LinkNode::Anon),
+            "[pidfd]"
+        );
+        // And every other number an `int` cannot hold as a pid: `val =
+        // (int)ul; if (val < 0) val = -1`.
+        for no in [
+            "-2",
+            "2147483648",
+            "4294967295",
+            "-2147483648",
+            "18446744073709551614",
+        ] {
+            assert_eq!(
+                parse_fdinfo(&format!("Pid:\t{no}\n")).pidfd_pid,
+                None,
+                "{no}"
+            );
+        }
+        // The low 32 bits, as the cast keeps them: 2^32 + 7 is pid 7.
+        assert_eq!(parse_fdinfo("Pid:\t4294967303\n").pidfd_pid, Some(7));
+        assert_eq!(parse_fdinfo("Pid:\t2147483647\n").pidfd_pid, Some(i32::MAX));
+        // A line the C skips changes nothing: the pid an earlier line gave
+        // stays; one it reads as no pid replaces it.
+        assert_eq!(parse_fdinfo("Pid:\t5\nPid:\t-1\n").pidfd_pid, Some(5));
+        assert_eq!(parse_fdinfo("Pid:\t5\nPid:\tx\n").pidfd_pid, Some(5));
+        assert_eq!(parse_fdinfo("Pid:\t5\nPid:\t-2\n").pidfd_pid, None);
+        // The same rule for an eventfd's id.
+        assert_eq!(parse_fdinfo("eventfd-id: -1\n").eventfd_id, None);
+        assert_eq!(parse_fdinfo("eventfd-id: 2147483648\n").eventfd_id, None);
+        assert_eq!(parse_fdinfo("eventfd-id: 0\n").eventfd_id, Some(0));
+    }
+
+    #[test]
+    fn an_eventpoll_list_is_marked_once_it_holds_the_cs_32() {
+        // The C stores the first 32 `tfd:` lines and writes `...]` when its
+        // array is full (`tfd_count == EPOLL_MAX_TFDS`, `dproc.c:556-559,
+        // 1895, 1911-1918`): at exactly 32 watched descriptors too, though
+        // none was left out. Measured: 31 `…,62,64]`, 32 `…,64,66...]`, 33
+        // `…,66,68...]`. lsof-rs had marked the list only past 32.
+        let watching = |n: usize| {
+            let text: String = (1..=n)
+                .rev()
+                .map(|fd| {
+                    format!("tfd: {fd:8} events:       19 data: {fd:16x}  pos:0 ino:1 sdev:d\n")
+                })
+                .collect();
+            let info = parse_fdinfo(&format!(
+                "pos:\t0\nflags:\t02\nmnt_id:\t16\nino:\t61\n{text}"
+            ));
+            name_for_target("anon_inode:[eventpoll]", &info, LinkNode::Anon)
+        };
+        let list = |n: usize| {
+            (1..=n)
+                .map(|fd| fd.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        assert_eq!(watching(1), "[eventpoll:1]");
+        assert_eq!(watching(31), format!("[eventpoll:{}]", list(31)));
+        assert_eq!(watching(32), format!("[eventpoll:{}...]", list(32)));
+        // Past it: the first 32 the file lists (the most recent), sorted.
+        let last32 = |n: usize| {
+            ((n - 31)..=n)
+                .map(|fd| fd.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        assert_eq!(watching(33), format!("[eventpoll:{}...]", last32(33)));
+        assert_eq!(watching(40), format!("[eventpoll:{}...]", last32(40)));
+        let big = parse_fdinfo(
+            &(1..=40)
+                .map(|n| format!("tfd:  {n} events: 1f data: 0\n"))
+                .collect::<String>(),
+        );
+        assert_eq!(big.tfds.len(), 32, "32 kept");
+        // A descriptor number an `int` cannot hold is the C's -1, and sorts
+        // first; a `-1`, `ULONG_MAX` to `strtoul()`, is a line skipped.
+        let odd = parse_fdinfo(
+            "tfd: 5 events: 1\ntfd: 4294967295 events: 1\ntfd: 2147483648 events: 1\ntfd: -1 events: 1\n",
+        );
+        assert_eq!(odd.tfds, [-1, -1, 5]);
     }
 
     // Excluded from the miri job, not from `cargo test`. This test correlates
@@ -1728,22 +2086,121 @@ mod tests {
         assert_eq!(ap("flags:\t02100003\n").0, AccessMode::ReadWrite, "mode 3");
         assert_eq!(ap("flags:\t02100000\n").0, AccessMode::Read);
         assert_eq!(ap("flags:\t02100001\n").0, AccessMode::Write);
-        // Non-octal flags, a negative or absurd pos, junk lines, no newline at
-        // all: each degrades to Unknown/None, none may panic.
+        // Non-octal flags, an absurd pos, junk lines, no newline at all:
+        // each degrades to Unknown/None, none may panic.
         assert_eq!(ap("flags:\t9z\n"), (AccessMode::Unknown, None));
-        assert_eq!(ap("pos:\t-1\n"), (AccessMode::Unknown, None));
         assert_eq!(ap("pos:\t99999999999999999999999\n").1, None);
         assert_eq!(ap(""), (AccessMode::Unknown, None));
         assert_eq!(ap("flags:pos:flags:\u{FFFD}"), (AccessMode::Unknown, None));
         // A repeated line: the last one wins, which is what a real kernel could
         // never produce and a fuzzer always will.
         assert_eq!(ap("pos:\t1\npos:\t2\n").1, Some(2));
+        // ...unless the C refuses its number, and then it changes nothing.
+        assert_eq!(ap("pos:\t1\npos:\t-1\n").1, Some(1));
+        assert_eq!(ap("flags:\t02\nflags:\tx\n").0, AccessMode::ReadWrite);
         // The anon-inode identities degrade the same way.
         assert_eq!(parse_fdinfo("eventfd-id: nope\n").eventfd_id, None);
         assert_eq!(
             parse_fdinfo("tfd: nope events: 1\n").tfds,
-            Vec::<i64>::new()
+            Vec::<i32>::new()
         );
+    }
+
+    #[test]
+    fn a_negative_position_is_the_cs_unsigned_one() {
+        // `/proc/PID/mem` read above 2^63 (what a debugger leaves at the
+        // vsyscall page): the kernel writes `pos:\t-10485760`. The C reads
+        // it with `strtoull(…, 0)`, which takes the sign and wraps, and
+        // prints it unsigned (`dproc.c:497-507`): measured, OFFSET
+        // `0xffffffffff600000`, `-F o` the same, JSON
+        // `"offset":"18446744073699065856"`. lsof-rs had read no position
+        // at all, and printed none.
+        let pos = |s: &str| parse_fdinfo(&format!("pos:\t{s}\nflags:\t0100000\n")).pos;
+        assert_eq!(pos("-10485760"), Some(0xffff_ffff_ff60_0000));
+        assert_eq!(pos("-10485760"), Some(18_446_744_073_699_065_856));
+        assert_eq!(pos("-140737488355327"), Some(0xffff_8000_0000_0001));
+        assert_eq!(pos("-9223372036854775808"), Some(0x8000_0000_0000_0000));
+        assert_eq!(pos("9223372036854775807"), Some(i64::MAX as u64));
+        assert_eq!(pos("-2"), Some(u64::MAX - 1));
+        // `ULLONG_MAX` is the C's "no position": `-1`, and the number itself.
+        assert_eq!(pos("-1"), None);
+        assert_eq!(pos("18446744073709551615"), None);
+        assert_eq!(pos("18446744073709551614"), Some(u64::MAX - 1));
+        // Past 64 bits `strtoull()` answers `ULLONG_MAX` too.
+        assert_eq!(pos("18446744073709551616"), None);
+        assert_eq!(pos("-18446744073709551616"), None);
+        assert_eq!(pos("0"), Some(0));
+    }
+
+    #[test]
+    fn fdinfo_numbers_are_read_as_strtoul_base_0_reads_them() {
+        // `strtoul(field, &ep, 0)` with the C's test of it: the whole field,
+        // and not `ULONG_MAX` (`dproc.c:492, 503, 529`).
+        let ok = |s: &str, n: u64| assert_eq!(c_strtoul(s), Some(n), "{s:?}");
+        let no = |s: &str| assert_eq!(c_strtoul(s), None, "{s:?}");
+        ok("0", 0);
+        ok("12", 12);
+        ok("+12", 12);
+        // A leading 0 is octal, as the kernel writes `flags:`; `0x` hex.
+        ok("0100002", 0o100002);
+        ok("010", 8);
+        ok("0x10", 16);
+        ok("0X1f", 31);
+        ok("-0x10", (-16i64) as u64);
+        ok("-010", (-8i64) as u64);
+        ok("-5", (-5i64) as u64);
+        ok("-18446744073709551615", 1);
+        ok("18446744073709551614", u64::MAX - 1);
+        // White space before the number is `strtoul()`'s to skip.
+        ok("\r7", 7);
+        ok("\x0b\x0c7", 7);
+        // What ends the conversion short of the field's end.
+        for junk in [
+            "", "-", "+", "x", "12x", "1 2", "08", "0x", "0xg", "0x-1", "--1", "+-1", "1-", "7\r",
+            "１２", "0b11", "1e3", "1.0", "0x 1",
+        ] {
+            no(junk);
+        }
+        // `ULONG_MAX`, by value or by overflow.
+        no("-1");
+        no("18446744073709551615");
+        no("0xffffffffffffffff");
+        no("01777777777777777777777");
+        no("18446744073709551616");
+        no("99999999999999999999999");
+        no("-99999999999999999999999");
+        no("0x10000000000000000");
+        // The C's `int`: the low 32 bits, and -1 for what is negative there.
+        assert_eq!(c_int(0), 0);
+        assert_eq!(c_int(2_147_483_647), i32::MAX);
+        assert_eq!(c_int(2_147_483_648), -1);
+        assert_eq!(c_int(4_294_967_295), -1);
+        assert_eq!(c_int(4_294_967_296), 0);
+        assert_eq!(c_int(4_294_967_303), 7);
+        assert_eq!(c_int(u64::MAX - 1), -1);
+        // `flags:` in base 0, kept as the C's `unsigned int`: what the
+        // kernel writes is octal by its leading 0.
+        let flags = |s: &str| parse_fdinfo(&format!("flags:\t{s}\n")).flags;
+        assert_eq!(flags("0100002"), Some(0o100002));
+        assert_eq!(flags("02"), Some(2));
+        assert_eq!(flags("0x8002"), Some(0x8002));
+        assert_eq!(flags("32770"), Some(32770));
+        assert_eq!(flags("040000000002"), Some(2), "the low 32 bits");
+        assert_eq!(flags("-1"), None);
+        assert_eq!(flags("09"), None);
+        // A line is its fields, cut at blanks and tabs (`get_fields()`): the
+        // first must be the name whole, the second is the number, and what
+        // follows it is not read.
+        let p = |s: &str| parse_fdinfo(s).pos;
+        assert_eq!(p("pos:\t5\n"), Some(5));
+        assert_eq!(p("  pos: \t 5 6\n"), Some(5));
+        assert_eq!(p("pos:5\n"), None, "one field, `pos:5`");
+        assert_eq!(p("xpos:\t5\n"), None);
+        assert_eq!(p("pos:x\t5\n"), None);
+        assert_eq!(p("pos:\n"), None);
+        // '\n' ends a line; a '\r' before it is the number's, and no digit.
+        assert_eq!(p("pos:\t5\r\nflags:\t02\n"), None);
+        assert_eq!(parse_fdinfo("pos:\t5\r\nflags:\t02\n").flags, Some(2));
     }
     #[test]
     fn an_exempt_match_is_a_plain_prefix_and_never_a_socket() {
@@ -1960,6 +2417,292 @@ mod tests {
             "the directory opened"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_fd_whose_link_will_not_read_has_no_access_letter() {
+        // A file opened at a path of 4096 bytes or more: `readlink` of its
+        // fd link is `ENAMETOOLONG` though fdinfo reads. The C made no
+        // `lstat` of a link it could not read (`ls = 0`,
+        // `dproc.c:1159-1170`), and the access letter is that `lstat`'s
+        // (`dnode.c:679-686`); fdinfo still gives the offset and the flags
+        // (`dproc.c:1254-1277`). Measured: `3  unknown 0t0 /proc/P/fd/3
+        // (readlink: File name too long)`, `-F a` `a `, where lsof-rs
+        // printed `3u` and `au`. Here the link is a regular file, whose
+        // `readlink` fails (`EINVAL`) beside an fdinfo that reads.
+        let dir = fake_proc("noletter");
+        std::fs::create_dir(dir.join("fd")).unwrap();
+        std::fs::create_dir(dir.join("fdinfo")).unwrap();
+        std::fs::write(dir.join("fd").join("3"), b"x").unwrap();
+        std::fs::write(dir.join("fdinfo").join("3"), "pos:\t7\nflags:\t0100002\n").unwrap();
+        let base = dir.to_str().unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let fd3 = rows
+            .iter()
+            .find(|f| f.fd == FdType::Handle(3))
+            .expect("fd 3");
+        assert_eq!(fd3.name, format!("{base}/fd/3 (readlink: {})", why(EINVAL)));
+        assert_eq!(fd3.access, AccessMode::Unknown, "no `lstat`, no letter");
+        assert_eq!(
+            (fd3.offset, fd3.file_flags),
+            (Some(7), Some(0o100002)),
+            "fdinfo's offset and flags stay"
+        );
+        // The control: fdinfo's flags do give the letter of a link that reads.
+        std::os::unix::fs::symlink("/dev/null", dir.join("fd").join("4")).unwrap();
+        std::fs::write(dir.join("fdinfo").join("4"), "pos:\t0\nflags:\t0100002\n").unwrap();
+        let rows = walk(&dir, Some(1000), false, false);
+        let fd4 = rows
+            .iter()
+            .find(|f| f.fd == FdType::Handle(4))
+            .expect("fd 4");
+        assert_eq!(fd4.access, AccessMode::ReadWrite);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's emulated fds do not appear in the host's /proc")]
+    fn a_namespace_file_is_named_by_its_kind() {
+        // What a container runtime, `ip netns` and `setns()` callers hold: an
+        // fd on `/proc/PID/ns/net`, whose link reads `net:[4026531833]`. The
+        // C cuts it at the colon (`getlinksrc()`), so the row is `REG … NODE
+        // 4026531833 NAME net` (measured); lsof-rs printed the link whole.
+        use std::os::fd::AsRawFd;
+        for kind in ["net", "mnt", "uts", "ipc", "pid", "user"] {
+            let Ok(held) = std::fs::File::open(format!("/proc/self/ns/{kind}")) else {
+                continue;
+            };
+            let link = std::path::PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
+            let text = std::fs::read_link(&link).unwrap();
+            let text = text.to_str().unwrap();
+            let md = std::fs::metadata(&link).unwrap();
+            assert_eq!(
+                text,
+                format!("{kind}:[{}]", md.ino()),
+                "the link the kernel writes"
+            );
+            let f = row_all(
+                &link,
+                FdType::Handle(3),
+                &FdInfo::default(),
+                &SocketTable::default(),
+                &net::SockProtoNames::new(false),
+                &[],
+            )
+            .expect("a row");
+            assert_eq!(f.name, kind);
+            assert_eq!(f.file_type, FileType::Regular, "{f:?}");
+            assert_eq!(f.node.as_deref(), Some(md.ino().to_string().as_str()));
+            // The same link as a cwd would be named the same way.
+            let c = row_all(
+                &link,
+                FdType::Cwd,
+                &FdInfo::default(),
+                &SocketTable::default(),
+                &net::SockProtoNames::new(false),
+                &[],
+            )
+            .expect("a row");
+            assert_eq!(c.name, kind);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's emulated fds do not appear in the host's /proc")]
+    fn an_anonymous_inode_is_one_by_its_stat_and_its_source() {
+        // `N_ANON_INODE` is a `stat` with no file type at all of a link
+        // whose source is `anon_inode` (`dnode.c:706-709`), and only then is
+        // the kind the name. An eventfd is one; the same link text over a
+        // file that has a type is that type, named `anon_inode`, and one
+        // that cannot be `stat`ed is `unknown`, named `anon_inode` too.
+        use std::os::fd::AsRawFd;
+        let (r, _w) = std::io::pipe().expect("pipe(2)");
+        let link = std::path::PathBuf::from(format!("/proc/self/fd/{}", r.as_raw_fd()));
+        let socks = SocketTable::default();
+        let locks = crate::locks::LockTable::default();
+        let ns = net::SockProtoNames::new(false);
+        let helpers = crate::safefs::HelperFds::default();
+        let ctx = GatherCtx {
+            socks: &socks,
+            locks: &locks,
+            ns: &ns,
+            exempt: &[],
+            sockets_only: false,
+            omit_unreadable: false,
+            bound_paths: false,
+            mnt_ns: None,
+            helpers: &helpers,
+            mqueue_device: None,
+            fs: None,
+            nfs_mounts: &[],
+            unix_stage: None,
+        };
+        let info = parse_fdinfo("pos:\t0\nflags:\t02\neventfd-id: 6\n");
+        // A FIFO behind the link text of an eventfd: typed by its `stat`.
+        let f = row(
+            &link,
+            "anon_inode:[eventfd]".into(),
+            FdType::Handle(3),
+            &info,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            (f.file_type.clone(), f.name.as_str()),
+            (FileType::Fifo, "anon_inode"),
+            "{f:?}"
+        );
+        // A regular file behind it.
+        let dir = fake_proc("anon");
+        let file = dir.join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        let f = row(
+            &file,
+            "anon_inode:[eventfd]".into(),
+            FdType::Handle(3),
+            &info,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            (f.file_type.clone(), f.name.as_str()),
+            (FileType::Regular, "anon_inode"),
+            "{f:?}"
+        );
+        // Nothing behind it: the `stat` fails, and says so.
+        let gone = dir.join("gone");
+        let f = row(
+            &gone,
+            "anon_inode:[eventfd]".into(),
+            FdType::Handle(3),
+            &info,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(f.file_type, FileType::Unknown);
+        assert_eq!(f.name, format!("anon_inode (stat: {})", why(ENOENT)));
+        // And Linux 6.9's pidfd, a regular file: named by its pid, on a
+        // numbered descriptor alone.
+        let pid = parse_fdinfo("pos:\t0\nflags:\t02\nPid:\t77\n");
+        let f = row(&file, "pidfd:[42]".into(), FdType::Handle(3), &pid, &ctx).unwrap();
+        assert_eq!(
+            (f.file_type.clone(), f.name.as_str()),
+            (FileType::Regular, "[pidfd:77]"),
+            "{f:?}"
+        );
+        let f = row(&gone, "pidfd:[42]".into(), FdType::Handle(3), &pid, &ctx).unwrap();
+        assert_eq!(f.name, format!("[pidfd:77] (stat: {})", why(ENOENT)));
+        let f = row(&link, "pidfd:[42]".into(), FdType::Handle(3), &pid, &ctx).unwrap();
+        assert_eq!(
+            (f.file_type.clone(), f.name.as_str()),
+            (FileType::Fifo, "pidfd"),
+            "a FIFO is no N_REGLR"
+        );
+        let f = row(&file, "pidfd:[42]".into(), FdType::Cwd, &pid, &ctx).unwrap();
+        assert_eq!(f.name, "pidfd", "the C asks a cwd's link for no rest");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_socket_row_carries_a_lock() {
+        // `process_proc_node()` hands a socket to `process_proc_sock()` and
+        // returns before `check_lock()` (`dnode.c:702-705, 765-766`), so no
+        // socket row has a lock character, whatever `/proc/locks` lists for
+        // its device and inode. The `sock` row of a socket no table names
+        // carries sockfs's device, which a `flock()` on the socket is listed
+        // under: measured, `3u sock … protocol: TCP` in the C, `3uW` here.
+        let mut locks = crate::locks::LockTable::default();
+        locks.insert((7, 9, 4242), LockKind::WriteFull);
+        let meta = FileStat {
+            dev: 9,
+            ino: 4242,
+            mode: S_IFSOCK | 0o777,
+            nlink: 1,
+            ..FileStat::default()
+        };
+        let sock = unidentified_socket(
+            &FdType::Handle(3),
+            &FdInfo::default(),
+            &meta,
+            "protocol: TCP".to_string(),
+        );
+        assert_eq!(
+            (sock.fs_device, sock.node.as_deref()),
+            (Some(9), Some("4242"))
+        );
+        assert_eq!(lock_of(&locks, 7, &sock), None, "a `sock` row");
+        // The control: any other row on that device and inode has it.
+        let file = OpenFile {
+            file_type: FileType::Regular,
+            ..sock.clone()
+        };
+        assert_eq!(lock_of(&locks, 7, &file), Some(LockKind::WriteFull));
+        assert_eq!(lock_of(&locks, 8, &file), None, "another process's");
+        // And every other kind of socket row, were it to carry a device.
+        for ty in [
+            FileType::Unix,
+            FileType::Ipv4,
+            FileType::Ipv6,
+            FileType::Socket("raw"),
+            FileType::Socket("netlink"),
+            FileType::Socket("icmp"),
+            FileType::Socket("SOCK"),
+        ] {
+            let row = OpenFile {
+                socket: matches!(ty, FileType::Unix | FileType::Ipv4 | FileType::Ipv6).then(|| {
+                    Box::new(lsof_core::model::SocketInfo {
+                        bound: None,
+                        protocol: lsof_core::model::Protocol::Tcp,
+                        local: None,
+                        remote: None,
+                        state: None,
+                        tcp: None,
+                    })
+                }),
+                file_type: ty.clone(),
+                ..sock.clone()
+            };
+            assert_eq!(lock_of(&locks, 7, &row), None, "{ty:?}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's emulated fds do not appear in the host's /proc")]
+    fn the_fd_directory_is_open_while_its_links_are_read() {
+        // The C keeps `opendir("/proc/PID/fd")` open across its `readlink`
+        // loop (`dproc.c:1141-1341`), so its own listing has `Nr DIR …
+        // /proc/PID/fd`. lsof-rs had closed the directory before it read
+        // the links, and its own row for that descriptor was `N unknown
+        // /proc/PID/fd/N (readlink: No such file or directory)`.
+        let pid = self_pid();
+        let files = for_pid(
+            pid,
+            None,
+            &GatherCtx {
+                socks: &SocketTable::default(),
+                locks: &crate::locks::LockTable::default(),
+                ns: &net::SockProtoNames::new(false),
+                exempt: &[],
+                sockets_only: false,
+                omit_unreadable: false,
+                bound_paths: false,
+                mnt_ns: None,
+                helpers: &crate::safefs::HelperFds::default(),
+                mqueue_device: None,
+                fs: None,
+                nfs_mounts: &[],
+                unix_stage: None,
+            },
+        );
+        let own: Vec<&OpenFile> = files
+            .iter()
+            .filter(|f| f.name == format!("/proc/{pid}/fd"))
+            .collect();
+        assert!(
+            own.iter()
+                .any(|f| f.file_type == FileType::Dir && f.access == AccessMode::Read),
+            "the directory being listed is a row of its own: {files:?}"
+        );
     }
 
     #[test]

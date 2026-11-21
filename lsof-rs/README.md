@@ -122,12 +122,12 @@ item is shipped or a documented closed gate — and the release criteria are in
   `/proc/<pid>/fd` plus the `cwd`/`root`/`exe` links; types, DEVICE, SIZE,
   NODE and NLINK from `stat`. Enough for `-p`, `-c`, `-u`, `-t`, `-d`, `-a`,
   `-R`, bare paths and `+D`/`+d`.
-- ✅ **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,udplite,udplite6,raw,raw6,unix}`
+- ✅ **L1** — sockets. `/proc/net/{tcp,tcp6,udp,udp6,udplite,udplite6,raw,raw6,icmp,unix}`
   is read once per gather and indexed by inode; an fd whose target is
   `socket:[N]` resolves by that key into a real TYPE, protocol, addresses and
   TCP state. **`-i` and `-U` work** in every form the C takes, host and
   service names among them since 2026-11-11 (#38), `-i udplite` included, as does `-T q`; a raw socket is the C's `raw` row, which no `-i`
-  selects (#108). **A socket's NAME names its hosts and ports by default**,
+  selects (#108), and a ping socket its `icmp` row, from `/proc/net/icmp` (#159). **A socket's NAME names its hosts and ports by default**,
   as the C's does (#154, since 2026-11-14): from `/etc/hosts` and, where
   `/etc/nsswitch.conf` says so, from DNS, by a PTR client of lsof-rs's own
   that follows glibc's resolver (so a run that lists a socket may ask a name

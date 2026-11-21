@@ -2449,6 +2449,41 @@ name = "search-c-first-match-only-in-the-c"
 args = ["-n", "-P", "-a", "-c", "abcde", "-c", "abcdefgh", "-d", "0"]
 
 [[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 13): the plainest instance of the same
+# rule, a `-c` value given twice. `lsof_select_process()` enters both (it
+# has no test for a value already entered, `lib/lsof.c:143-215`), H marks
+# the first in the list and `is_cmd_excl()` returns (`lib/proc.c:531-538`),
+# so the other is never located: H's row, and exit 1 (under `-V`, `command
+# not located: abcde`). lsof-rs marks every value H matches: the row, exit 0.
+name = "search-c-given-twice-in-the-c"
+args = ["-n", "-P", "-a", "-c", "abcde", "-c", "abcde", "-d", "0"]
+
+[[case]]
+# LEDGERED (C-DEFECT, DIVERGENCES 13): and two regular expressions that
+# both match H, here the same one twice: the loop over them marks the first
+# and returns too (`lib/proc.c:541-548`). With `-V`, which says the C's
+# line, `no command found for regex: ^abcde`, exit 1; a descriptor H does
+# not have is asked for, so that no row (with H's pid in it) stands beside
+# the line in what the ledger pins: H locates a `-c` whatever `-d` keeps.
+name = "search-c-regex-given-twice-in-the-c"
+args = ["-n", "-P", "-V", "-a", "-c", "/^abcde/", "-c", "/^abcde/", "-d", "99999"]
+
+[[case]]
+# Every other search item given twice is one entry to the C, so nothing is
+# left unlocated: `lsof_select_pid_pgid()` and `lsof_select_uid_login()`
+# "avoid entering duplicates" (`lib/lsof.c:1077-1081, 1150-1158`) and
+# `enter_fd_lst()` skips them (`arg.c:817`). H's row, nothing from `-V`,
+# exit 0, in both.
+name = "search-p-g-u-d-given-twice-are-entered-once"
+args = ["-n", "-P", "-V", "-a", "-p", "{H},{H}", "-p", "{H}", "-g", "{H}", "-g", "{H}", "-u", "{UID}", "-u", "{UID}", "-d", "0,0", "-d", "0"]
+
+[[case]]
+# And a path given twice is two search items, in both: the file marks the
+# first, and the second is reported `no file use located`, exit 1.
+name = "search-path-given-twice-is-two-items"
+args = ["-n", "-P", "-V", "-a", "-p", "{A}", "{FILE}", "{FILE}"]
+
+[[case]]
 # LEDGERED (C-DEFECT, DIVERGENCES 13). A `-c ^` value is a search item to the
 # C that nothing can ever mark, so every run that uses one exits 1.
 name = "search-c-negated-is-a-search-item-in-the-c"
@@ -8354,3 +8389,328 @@ with_stderr = true
 name = "letters-multibyte-cjk"
 args = ["-F", "日本"]
 with_stderr = true
+
+# ------------------------------- the 2026-11-21 audit (DIVERGENCES 156-168)
+#
+# Fixtures AUD (one object a descriptor), MBJ/MBN/MBE (commands with a
+# character of several bytes), XK/XG (two commands with one prefix) and PING
+# (ping sockets in a network namespace of its own), and the wrapper's `ping`,
+# `pidns` and `pidns-outer` modes: see `linux_diff.py --help`.
+
+[[case]]
+# A namespace file, what a container runtime, `ip netns` and `setns()`
+# callers hold: the link reads `net:[4026531833]`, and the C names the row
+# by what comes before the colon, `net` (`getlinksrc()`, DIVERGENCES 156).
+# lsof-rs printed the link whole. Fixture AUD's fds 20 and 21.
+name = "namespace-files-are-named-by-their-kind"
+args = ["-n", "-P", "-a", "-p", "{AUD}", "-d", "20,21"]
+
+[[case]]
+name = "namespace-files-fields"
+args = ["-n", "-P", "-F", "-a", "-p", "{AUD}", "-d", "20,21"]
+
+[[case]]
+name = "namespace-files-json"
+args = ["-n", "-P", "-j", "-a", "-p", "{AUD}", "-d", "20,21"]
+
+[[case]]
+# A pidfd a supervisor kept after `waitpid()`: fdinfo says `Pid: -1`, which
+# the C's `strtoul()` makes no pid at all, and the name stays `[pidfd]`
+# (DIVERGENCES 157). lsof-rs printed `[pidfd:-1]`. fd 23, a pidfd of a live
+# process, is the control: `[pidfd:PID]`.
+name = "pidfd-of-a-reaped-process-has-no-pid"
+args = ["-n", "-P", "-a", "-p", "{AUD}", "-d", "22,23"]
+
+[[case]]
+name = "pidfd-of-a-reaped-process-fields"
+args = ["-n", "-P", "-F", "-a", "-p", "{AUD}", "-d", "22,23"]
+
+[[case]]
+name = "pidfd-of-a-reaped-process-json"
+args = ["-n", "-P", "-j", "-a", "-p", "{AUD}", "-d", "22,23"]
+
+[[case]]
+# `/proc/PID/mem` read above 2^63: fdinfo's `pos:` is negative, and the C
+# reads it with `strtoull()` and prints it unsigned, `0xffffffffff600000`
+# (DIVERGENCES 161). lsof-rs printed no offset. fd 25 is at -1, which is
+# `ULLONG_MAX`, the C's "no position": blank in both.
+name = "offset-above-2-63-is-printed-unsigned"
+args = ["-n", "-P", "-o", "-a", "-p", "{AUD}", "-d", "24,25"]
+
+[[case]]
+name = "offset-above-2-63-fields"
+args = ["-n", "-P", "-F", "fo", "-a", "-p", "{AUD}", "-d", "24,25"]
+
+[[case]]
+# In decimal, with room for its twenty digits.
+name = "offset-above-2-63-in-decimal"
+args = ["-n", "-P", "-o", "-o", "20", "-a", "-p", "{AUD}", "-d", "24,25"]
+
+[[case]]
+# JSON's `offset` is the number in decimal.
+name = "offset-above-2-63-json"
+args = ["-n", "-P", "-j", "-a", "-p", "{AUD}", "-d", "24,25"]
+
+[[case]]
+# And on a row `-e` exempted, which has nothing but fdinfo's offset.
+name = "offset-above-2-63-on-an-exempt-row"
+args = ["-n", "-P", "-e", "/proc", "-a", "-p", "{AUD}", "-d", "24,25"]
+
+[[case]]
+# `flock()` on a socket: `/proc/locks` lists it under sockfs's device, which
+# the `sock` row of a socket no table names carries, but the C checks no
+# lock for a socket of any kind (`dnode.c:702-705`; DIVERGENCES 160).
+# lsof-rs printed `26uW`. 27 is a bound UDP socket, 28 a unix socket, each
+# locked too; 29 a locked file, the control, `29uW`.
+name = "socket-flock-is-no-lock-character"
+args = ["-n", "-P", "-a", "-p", "{AUD}", "-d", "26,27,28,29"]
+
+[[case]]
+name = "socket-flock-fields"
+args = ["-n", "-P", "-F", "fl", "-a", "-p", "{AUD}", "-d", "26,27,28,29"]
+
+[[case]]
+# JSON has no `lock` key for them. Without the UDP socket, whose `name`
+# lsof-rs keeps where the C prints none (DIVERGENCES 134).
+name = "socket-flock-json"
+args = ["-n", "-P", "-j", "-a", "-p", "{AUD}", "-d", "26,28,29"]
+
+[[case]]
+# A file opened at a path of more than 4095 bytes: its fd link cannot be
+# read (`readlink: File name too long`) though its fdinfo can. The C made no
+# `lstat` of it, so prints no access letter; the offset and the flags are
+# fdinfo's (DIVERGENCES 163). lsof-rs printed `30u`.
+name = "unreadable-link-has-no-access-letter"
+args = ["-n", "-P", "-a", "-p", "{AUD}", "-d", "30"]
+
+[[case]]
+name = "unreadable-link-fields"
+args = ["-n", "-P", "-F", "-a", "-p", "{AUD}", "-d", "30"]
+
+[[case]]
+name = "unreadable-link-json"
+args = ["-n", "-P", "-j", "-a", "-p", "{AUD}", "-d", "30"]
+
+[[case]]
+# Its offset and its flags stay.
+name = "unreadable-link-keeps-fdinfos-offset-and-flags"
+args = ["-n", "-P", "-o", "+f", "g", "-a", "-p", "{AUD}", "-d", "30"]
+
+[[case]]
+# An eventpoll's list is marked `...` once the C's array of 32 is full: at
+# exactly 32 watched descriptors too (fd 41), where lsof-rs marked it only
+# past 32 (DIVERGENCES 162). 40 watches 31, 42 watches 33.
+name = "eventpoll-list-is-marked-at-32"
+args = ["-n", "-P", "-a", "-p", "{AUD}", "-d", "40,41,42"]
+
+[[case]]
+name = "eventpoll-list-fields"
+args = ["-n", "-P", "-F", "fn", "-a", "-p", "{AUD}", "-d", "40,41,42"]
+
+[[case]]
+# COMMAND cut inside a character: the C's printer walks bytes, so of `日`
+# in a cell of nine it prints the two bytes that fit, `\xe6\x97`, where
+# lsof-rs printed none of the character and left the cell empty
+# (DIVERGENCES 158).
+name = "command-cut-inside-a-character"
+args = ["-n", "-P", "-a", "-p", "{MBJ}", "-d", "cwd"]
+
+[[case]]
+# `naïve-app`: `na\xc3`.
+name = "command-cut-inside-a-character-after-ascii"
+args = ["-n", "-P", "-a", "-p", "{MBN}", "-d", "cwd"]
+
+[[case]]
+# `+c 1` on a command of one character, `é`: the cell is the title's seven
+# columns, and `\xc3` fits.
+name = "command-cut-inside-a-character-plus-c-1"
+args = ["-n", "-P", "+c", "1", "-a", "-p", "{MBE}", "-d", "cwd"]
+
+[[case]]
+# `-F c` has no cell to cut it in.
+name = "command-with-a-character-of-several-bytes-fields"
+args = ["-n", "-P", "-F", "c", "-a", "-p", "{MBJ}", "-d", "cwd"]
+
+[[case]]
+# TASKCMD is printed the same way: AUD's thread `é` under `+c 4`.
+name = "taskcmd-cut-inside-a-character"
+args = ["-n", "-P", "-K", "+c", "4", "-a", "-p", "{AUD}", "-d", "cwd"]
+
+[[case]]
+# Under `-E` a process a `-c ^` names is read all the same, but matches no
+# `-c`: `is_cmd_excl()` returns at the exclusion (DIVERGENCES 165). XG is
+# `lsofrsx-gone`, XK `lsofrsx-keep`: XK's row alone. lsof-rs listed XG's
+# too. The third `-c` names nothing, so both exit 1 and the case compares
+# rows and status; without it the C's exit 1 is item 13's (the next case).
+name = "endpoints-E-c-exclusion-fails-a-c-inclusion"
+args = ["-n", "-P", "-E", "-a", "-d", "cwd", "-c", "^lsofrsx-gone", "-c", "lsofrsx-", "-c", "lsofrsx-nosuch"]
+
+[[case]]
+# LEDGERED (DIVERGENCES 13, C-DEFECT): the rows match, XK's alone; the C
+# exits 1, as for every `-c ^`.
+name = "endpoints-E-c-exclusion-keeps-the-other-command"
+args = ["-n", "-P", "-E", "-a", "-d", "cwd", "-c", "^lsofrsx-gone", "-c", "lsofrsx-"]
+
+[[case]]
+# A regular expression is no more matched than a name: nothing listed, and
+# the expression not located (exit 1 in both).
+name = "endpoints-E-c-exclusion-fails-a-regex-inclusion"
+args = ["-n", "-P", "-E", "-a", "-d", "cwd", "-c", "^lsofrsx-gone", "-c", "/lsofrsx-gone/"]
+
+[[case]]
+# `+E` the same.
+name = "endpoints-plus-E-c-exclusion-fails-a-c-inclusion"
+args = ["-n", "-P", "+E", "-a", "-d", "cwd", "-c", "^lsofrsx-gone", "-c", "lsofrsx-", "-c", "lsofrsx-nosuch"]
+
+[[case]]
+# The marks `is_proc_excl()` gave the process stay: `-p` names it and it is
+# listed, but not with a `-c` it would have matched ANDed in (nothing, and
+# both exit 1: the C for its `-c ^`, lsof-rs for the `-c` never located).
+name = "endpoints-E-c-exclusion-fails-an-and-with-its-pid"
+args = ["-n", "-P", "-E", "-a", "-d", "cwd", "-c", "^lsofrsx-gone", "-p", "{XG}", "-c", "lsofrsx-"]
+
+[[case]]
+# `-c ^`, an exclusion with no name, is entered as the C's `enter_cmd()`
+# enters it and names every command: nothing listed, nothing said, exit 1
+# (DIVERGENCES 168). lsof-rs refused it: `option -c^ requires a name`.
+name = "c-empty-exclusion-excludes-every-command"
+args = ["-n", "-P", "-c", "^", "-a", "-p", "{A}", "-d", "cwd"]
+with_stderr = true
+
+[[case]]
+name = "c-empty-exclusion-attached"
+args = ["-n", "-P", "-c^", "-a", "-p", "{A}", "-d", "cwd"]
+with_stderr = true
+
+[[case]]
+# `-V` says it of every command at once: the C's line, the name empty.
+name = "c-empty-exclusion-is-reported-not-located"
+args = ["-n", "-P", "-V", "-c", "^"]
+with_stderr = true
+
+[[case]]
+# ...where it stood among the names: last entered, first reported.
+name = "c-empty-exclusion-is-reported-among-the-names"
+args = ["-n", "-P", "-V", "-c", "lsofrsx-nosuch1", "-c", "^", "-c", "lsofrsx-nosuch2"]
+with_stderr = true
+
+[[case]]
+# It conflicts with `-c ''`, the inclusion of the same name.
+name = "c-empty-exclusion-conflicts-with-the-empty-name"
+args = ["-n", "-P", "-c", "^", "-c", "", "-a", "-p", "{A}", "-d", "cwd"]
+with_stderr = true
+
+[[case]]
+# Under `-E` the process is read all the same, and `-p` lists it; the run
+# still exits 1, for the exclusion.
+name = "c-empty-exclusion-under-E"
+args = ["-n", "-P", "-E", "-c", "^", "-a", "-p", "{A}", "-d", "cwd"]
+with_stderr = true
+
+[[case]]
+# Ping sockets (`SOCK_DGRAM`, `IPPROTO_ICMP`), once bound or connected, are
+# in `/proc/net/icmp`, which the C reads: TYPE `icmp`, no DEVICE, the inode
+# in NODE, the table's two addresses for a NAME (DIVERGENCES 159). lsof-rs
+# read no such table: `sock … protocol: PING`, which is right only for one
+# never used (fd 22). Fixture PING, in a network namespace of its own,
+# which both binaries enter: 20 bound, 21 connected, 23 an ICMPv6 one where
+# there is IPv6 (the C reads no `/proc/net/icmp6`), 24 a TCP listener.
+name = "ping-sockets-are-icmp-rows"
+args = ["-n", "-P", "-a", "-p", "{PING}", "-d", "20-24"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+# `-F`: `ticmp`, no `d` or `D`, the inode as `i`.
+name = "ping-sockets-fields"
+args = ["-n", "-P", "-F", "-a", "-p", "{PING}", "-d", "20-23"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+name = "ping-sockets-json"
+args = ["-n", "-P", "-j", "-a", "-p", "{PING}", "-d", "20-23"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+# `-X` skips the TCP and UDP tables and not this one (`dsock.c:4095-4100`
+# has no `Fxopt` test): the rows stay `icmp`.
+name = "ping-sockets-are-not-gated-by-X"
+args = ["-n", "-P", "-X", "-a", "-p", "{PING}", "-d", "20-24"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+# No Internet file to the C: `-i` selects the TCP listener alone.
+name = "ping-sockets-are-not-selected-by-i"
+args = ["-n", "-P", "-a", "-p", "{PING}", "-i"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+name = "ping-sockets-are-not-selected-by-an-address"
+args = ["-n", "-P", "-a", "-p", "{PING}", "-i", "@127.0.0.1"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+# Nor has `-T` anything to say of them, or `-E`.
+name = "ping-sockets-have-no-tcp-tpi-info"
+args = ["-n", "-P", "-T", "qs", "-E", "-a", "-p", "{PING}", "-d", "20-24"]
+env = { LSOF_DIFF_MT = "ping" }
+
+[[case]]
+# lsof's own rows (DIVERGENCES 166). The C holds `/proc` open for the whole
+# scan (`opendir(PROCFS)`), so its own descriptor 3 is `DIR … /proc`. Run as
+# PID 1 of a PID namespace with a procfs of its own, so that the pid is the
+# same on both sides. lsof-rs had closed it before it read a file.
+name = "own-rows-proc-is-open-for-the-scan"
+args = ["-n", "-P", "-F", "fatn", "-a", "-p", "1", "-d", "3"]
+env = { LSOF_DIFF_MT = "pidns" }
+
+[[case]]
+# `lsof /proc` names the file system, and finds lsof itself using it: its
+# `/proc`, and the `/proc/1/fd` it holds open while it reads its own links
+# (`opendir(Dpath)` … `closedir(fdp)`). Exit 0. lsof-rs said `no file
+# system use located` and exited 1. With a path argument the helper is
+# started as the C's child is, before anything else is open, so the
+# descriptor numbers are the same too: 3 and 6.
+name = "own-rows-name-the-proc-file-system"
+args = ["-n", "-P", "-F", "fatn", "/proc"]
+env = { LSOF_DIFF_MT = "pidns" }
+
+[[case]]
+name = "own-rows-name-the-proc-file-system-terse"
+args = ["-t", "/proc"]
+env = { LSOF_DIFF_MT = "pidns" }
+
+[[case]]
+# LEDGERED (DIVERGENCES 123, DECISION): the same rows, at other numbers
+# where the helper's pipes are. The C's child is forked while it reads
+# `/proc/mounts` (fd 3 then), so its pipes are 5 and 6 and `/proc/1/fd` 4;
+# lsof-rs's helper is started with nothing else open, pipes 4 and 5, and
+# `/proc/1/fd` is 6.
+name = "own-rows-descriptor-numbers"
+args = ["-n", "-P", "-F", "fatn", "-a", "-p", "1", "-d", "^cwd,^rtd,^txt,^mem"]
+env = { LSOF_DIFF_MT = "pidns" }
+
+[[case]]
+# LEDGERED (DIVERGENCES 164, C-DEFECT): lsof in a PID namespace whose
+# `/proc` is the host's (`unshare -p -f` with no `--mount-proc`): the C
+# looks for itself under `/proc/<getpid()>`, another process there, takes
+# fdinfo for unavailable, and then dies on the first eventpoll it reads
+# (`size_t tfd_count = -1`), here fixture G's: exit 139, nothing printed.
+# lsof-rs lists nothing for fd 999 and exits 1.
+name = "pidns-outer-proc-epoll-crashes-the-c"
+args = ["-n", "-P", "-a", "-p", "{G}", "-d", "999"]
+env = { LSOF_DIFF_MT = "pidns-outer" }
+
+[[case]]
+# LEDGERED (DIVERGENCES 164): there the C drops `-o`, saying so; lsof-rs
+# reads fdinfo whatever `getpid()` says, and keeps it.
+name = "pidns-outer-proc-c-drops-dash-o"
+args = ["-n", "-P", "-o", "-a", "-p", "{A}", "-d", "999"]
+env = { LSOF_DIFF_MT = "pidns-outer" }
+with_stderr = true
+
+[[case]]
+# LEDGERED (DIVERGENCES 164): and the C has no offset for a FIFO (A's fd
+# 6), where lsof-rs prints fdinfo's, `o0t0`.
+name = "pidns-outer-proc-c-reads-no-fdinfo"
+args = ["-n", "-P", "-F", "falto", "-a", "-p", "{A}", "-d", "6"]
+env = { LSOF_DIFF_MT = "pidns-outer" }

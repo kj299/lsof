@@ -19,6 +19,14 @@ pub struct Enumerated {
     /// not `< 0` — so a process whose main thread has exited while another
     /// thread runs on is listed through that live task, and only through it.
     pub zombies: HashSet<u32>,
+    /// `/proc` itself, still open: the C opens it once (`opendir(PROCFS)`,
+    /// `dproc.c:301`) and closes it only when every process has been read
+    /// (`closedir(ps)`, `dproc.c:437-440`), so lsof's own listing has the
+    /// row `Nr DIR … /proc`, and `lsof /proc`, which names the file system,
+    /// finds a user of it and exits 0. Whoever holds this holds the
+    /// descriptor; the gather keeps it until it has read its last file.
+    /// `None` where `/proc` could not be opened.
+    pub proc_dir: Option<std::fs::ReadDir>,
 }
 
 /// Every process currently in `/proc`, with pid, ppid, command and owner
@@ -31,11 +39,14 @@ pub fn enumerate() -> Enumerated {
     let mut out = Enumerated {
         procs: Vec::new(),
         zombies: HashSet::new(),
+        proc_dir: None,
     };
-    let Ok(dir) = std::fs::read_dir("/proc") else {
+    let Ok(mut dir) = std::fs::read_dir("/proc") else {
         return out;
     };
-    for entry in dir.flatten() {
+    // `by_ref()`: the entries are read here, and the directory handed back
+    // open ([`Enumerated::proc_dir`]).
+    for entry in dir.by_ref().flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         // /proc holds plenty of non-pid entries (self, net, meminfo, …).
@@ -50,6 +61,7 @@ pub fn enumerate() -> Enumerated {
         }
     }
     out.procs.sort_by_key(|p| p.pid);
+    out.proc_dir = Some(dir);
     out
 }
 
@@ -345,6 +357,37 @@ pub fn is_root() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The C opens `/proc` once and keeps it open until it has read every
+    /// process (`opendir(PROCFS)` … `closedir(ps)`, `dproc.c:301, 437-440`):
+    /// the enumeration hands the open directory back, and while its caller
+    /// holds it this process has a descriptor on `/proc`, the one lsof's
+    /// own listing shows as `Nr DIR … /proc`. lsof-rs had closed it once
+    /// the pids were read.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's emulated fds do not appear in the host's /proc")]
+    fn enumeration_hands_back_proc_still_open() {
+        let on_proc = || {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("own fd directory")
+                .flatten()
+                .filter(|e| {
+                    std::fs::read_link(e.path()).is_ok_and(|t| t == std::path::Path::new("/proc"))
+                })
+                .count()
+        };
+        let seen = enumerate();
+        assert!(seen.proc_dir.is_some(), "the directory is handed back");
+        assert!(!seen.procs.is_empty(), "and its entries were read");
+        assert!(on_proc() >= 1, "a descriptor on /proc while it is held");
+        let Enumerated { proc_dir, .. } = seen;
+        // Held by whoever takes it, and gone with them: another test's own
+        // enumeration may hold one of its own meanwhile, so the count can
+        // only be compared, never pinned.
+        let held = on_proc();
+        drop(proc_dir);
+        assert!(held >= 1 && on_proc() <= held);
+    }
 
     /// A command that is not UTF-8 is kept as its bytes, and no login is
     /// named as the process is read.

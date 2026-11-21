@@ -81,6 +81,56 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   with no `/proc`, a run that names a path, a `+d`/`+D` or an `-e` ends
   `can't fopen(/proc/mounts, "r"): No such file or directory`, the C's
   words, where lsof-rs said `can't fork` (175).
+- **Linux, eleven differences an audit against the C found** (DIVERGENCES
+  156-168; each now prints what lsof 4.99.6 prints):
+  - a descriptor on a **namespace file** (`/proc/PID/ns/net`, what
+    container runtimes and `ip netns` hold) is NAME `net`, `mnt`, `pid`…,
+    where lsof-rs printed the link whole, `net:[4026531833]` (156); a link
+    that is no path is cut at its first colon, as the C's `getlinksrc()`
+    cuts it, and Linux 6.9's `pidfd:[N]` is `[pidfd:PID]`;
+  - a **pidfd whose process has been reaped** is `[pidfd]`, not
+    `[pidfd:-1]` (157);
+  - **COMMAND and TASKCMD cut inside a character** print the bytes that
+    fit, as the C does: a process named `日本語` is `\xe6\x97` in the
+    default nine columns, where lsof-rs left the cell **empty**;
+    `naïve-app` is `na\xc3` (158). Which characters are escaped is
+    unchanged;
+  - a **ping socket** that has been bound, connected or sent on (what an
+    unprivileged `ping` holds) is TYPE `icmp`, with no DEVICE and the
+    addresses of `/proc/net/icmp` for a NAME
+    (`0100007F:1092->00000000:0000`), under `-X` too, where lsof-rs printed
+    `sock … protocol: PING` (159). No `-i` selects it, as in the C;
+  - **no socket row has a lock character**: a `flock()` on a socket no
+    table names printed `3uW`, `-F l` `lW` and a JSON `lock` (160);
+  - an **offset above 2^63** (`/proc/PID/mem` at the top of the address
+    space, fdinfo `pos: -10485760`) is printed, unsigned
+    (`0xffffffffff600000`, JSON `"offset":"18446744073699065856"`), where
+    lsof-rs printed none (161);
+  - an **eventpoll watching exactly 32 descriptors** ends its list `...`,
+    as one watching more does (162);
+  - a descriptor whose link cannot be read (`readlink: File name too
+    long`) has **no access letter**; lsof-rs printed `3u`, `-F a` `au` and
+    a JSON `access` (163);
+  - under **`-E`/`+E`, a command a `-c ^name` excludes** is no longer
+    selected by another `-c` that matches it: `lsof -E -c ^fixA -c fix`
+    listed `fixA` (165);
+  - **lsof's own rows**: lsof-rs listed itself with a row it could not
+    read, `3 unknown /proc/PID/fd/3 (readlink: No such file or
+    directory)`, in every whole-host listing; it now holds `/proc` and its
+    own `/proc/PID/fd` open as the C does, and lists them (`3r DIR …
+    /proc`), so **`lsof /proc` exits 0**, finding lsof itself, where it
+    exited 1 (166). The descriptor numbers of those rows can differ from
+    the C's where the pipes to lsof-rs's helper are (123);
+  - **`-c ^`**, an exclusion with no name, is accepted, as the C accepts
+    it: it excludes every command, so nothing is listed and the run exits
+    1, with `command not located: ` under `-V`. lsof-rs refused it:
+    `option -c^ requires a name` (168).
+
+  Recorded and not followed (164): run in a PID namespace whose `/proc`
+  is the host's (`unshare -p -f` with no `--mount-proc`), the C takes
+  fdinfo for unavailable (no offsets, no file flags, `-o` dropped) and
+  crashes on the first eventpoll it reads; lsof-rs reads fdinfo there as
+  anywhere.
 - **`-u name` and USER ask the C library, as the C does** (DIVERGENCES
   39): `getpwnam_r(3)` and `getpwuid_r(3)`, so an account only LDAP, SSSD,
   systemd-homed, NIS or Hesiod serves has its name in USER, `-F L` and

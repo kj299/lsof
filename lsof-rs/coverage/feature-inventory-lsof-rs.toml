@@ -185,12 +185,12 @@ reason = "Unix socket families not reachable on Windows"
 
 [[waive]]
 ids = [
-  "type:ax25", "type:icmp", "type:inet", "type:ipx",
+  "type:ax25", "type:inet", "type:ipx",
   "type:key", "type:raw6",
   "type:rte", "type:x.25"
 ]
 platforms = ["linux"]
-reason = "DEBT (L2): lsof's per-family type codes for families lsof-rs does not read, or has no fixture for. `type:raw6` is typed as the C types it since 2026-10-17 (DIVERGENCES 108), but no case covers it: this host has no IPv6, so no raw6 socket to hold or measure (`type:raw` came off this list then, covered by fixture RAW). `type:netlink` came off this list on 2026-10-30 (DIVERGENCES 109, fixture NLK), when a socket no table lists became named from its `system.sockprotoname` xattr as well (22). `type:pack` came off this list when /proc/net/packet shipped; `type:a_inode` and `type:sock`, which lsof-rs emits as the C does, came off it on 2026-10-04, when a retrospective found them still listed."
+reason = "DEBT (L2): lsof's per-family type codes for families lsof-rs does not read, or has no fixture for. `type:raw6` is typed as the C types it since 2026-10-17 (DIVERGENCES 108), but no case covers it: this host has no IPv6, so no raw6 socket to hold or measure (`type:raw` came off this list then, covered by fixture RAW). `type:icmp` came off this list on 2026-11-21 (DIVERGENCES 159, fixture PING), when `/proc/net/icmp` was read as the C reads it. `type:netlink` came off this list on 2026-10-30 (DIVERGENCES 109, fixture NLK), when a socket no table lists became named from its `system.sockprotoname` xattr as well (22). `type:pack` came off this list when /proc/net/packet shipped; `type:a_inode` and `type:sock`, which lsof-rs emits as the C does, came off it on 2026-10-04, when a retrospective found them still listed."
 
 [[waive]]
 ids = [

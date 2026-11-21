@@ -2952,8 +2952,13 @@ fn enter_command(sel: &mut Selection, value: &std::ffi::OsStr) -> Result<(), Str
     if bytes.starts_with(b"-") || bytes.starts_with(b"+") {
         return Err("missing -c option value".to_string());
     }
+    // `enter_cmd()` takes the `^` off and enters what is left, empty or not
+    // (`arg.c:1953-1966`; `lsof_select_process()` has no test of an empty
+    // name, `lib/lsof.c:143-215`). An empty exclusion names every command
+    // (`strncmp(…, 0)`, `lib/proc.c:518-523`): measured, `lsof -c ^` lists
+    // nothing and exits 1 with nothing on stderr, where lsof-rs had refused
+    // it in words of its own (`option -c^ requires a name`).
     let (excl, name) = match bytes.strip_prefix(b"^") {
-        Some(b"") => return Err("option -c^ requires a name".to_string()),
         Some(name) => (true, name),
         None => (false, bytes),
     };
@@ -2992,6 +2997,12 @@ fn enter_command(sel: &mut Selection, value: &std::ffi::OsStr) -> Result<(), Str
         return Err(format!("-c^{name} and -c{name} conflict."));
     }
     this.push(os_from_bytes(name.to_vec()));
+    // The exclusion of every command is an item the C reports unlocated,
+    // where it stands among the `-c` names
+    // ([`Selection::empty_command_excludes`]).
+    if excl && name.is_empty() {
+        sel.empty_command_excludes.push(sel.commands.len());
+    }
     Ok(())
 }
 
@@ -4849,6 +4860,41 @@ mod tests {
                 );
             }
             assert!(err(&["-c", "abcdefghijklmno"]).is_none(), "15 is fine");
+        }
+    }
+
+    /// `-c ^` with no name is entered, as the C's `enter_cmd()` enters it
+    /// (`arg.c:1953-1966`): an exclusion of every command, recorded where
+    /// it stood among the `-c` names, for the line `-V` prints of it. It
+    /// conflicts with `-c ''`, the inclusion of the same (empty) name, in
+    /// the C's words. lsof-rs had refused it, in words of its own.
+    #[test]
+    fn dash_c_with_an_empty_exclusion_is_entered() {
+        let (sel, _) = run(&["-c", "^"]);
+        assert_eq!(sel.command_excludes, [""]);
+        assert!(sel.commands.is_empty());
+        assert_eq!(sel.empty_command_excludes, [0]);
+        // Attached, twice, and among names: each is entered, with how many
+        // names came before it.
+        let (sel, _) = run(&["-ca", "-c^", "-c", "b", "-c", "^", "-c", "^x"]);
+        assert_eq!(sel.commands, ["a", "b"]);
+        assert_eq!(sel.command_excludes, ["", "", "x"]);
+        assert_eq!(sel.empty_command_excludes, [1, 2]);
+        // A named exclusion is none of these.
+        let (sel, _) = run(&["-c", "^x"]);
+        assert!(sel.empty_command_excludes.is_empty());
+        // `-c ''`, the empty inclusion, is a name like any other...
+        let (sel, _) = run(&["-c", ""]);
+        assert_eq!(sel.commands, [""]);
+        assert!(sel.command_excludes.is_empty() && sel.empty_command_excludes.is_empty());
+        // ...and the two conflict, either way round (`lib/lsof.c:155-165`).
+        let err = |argv: &[&str]| parse(argv.iter().map(|s| s.to_string()).collect()).err();
+        for argv in [&["-c", "^", "-c", ""][..], &["-c", "", "-c", "^"][..]] {
+            assert_eq!(
+                err(argv).as_deref(),
+                Some("-c^ and -c conflict."),
+                "{argv:?}"
+            );
         }
     }
 

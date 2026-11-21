@@ -10,8 +10,9 @@
 //!
 //! `/proc/net` resolves to the *calling* process's network namespace, so a
 //! process inside a container has its sockets in tables this one cannot see;
-//! and some sockets are in no table at all — AF_VSOCK, which has none, and a
-//! UDP, UDP-Lite, TCP or netlink socket never bound. The C reads only its own
+//! and some sockets are in no table at all — AF_VSOCK, which has none, a
+//! UDP, UDP-Lite, TCP or netlink socket never bound, and a ping socket never
+//! used (one that has been is in `/proc/net/icmp`). The C reads only its own
 //! namespace's tables and names every such socket from the
 //! `system.sockprotoname` extended attribute (`dsock.c`): `sock … protocol:
 //! TCP`, the kernel's name for the socket's `struct proto`, never an
@@ -85,6 +86,14 @@ impl SocketTable {
     /// would therefore change the output of a plain `lsof -i`, so it stays
     /// gated on the flag.
     pub fn load(want_queues: bool, skip_inet: bool) -> Self {
+        Self::load_with_icmp(want_queues, skip_inet, "/proc/net/icmp")
+    }
+
+    /// [`Self::load`], with the ping sockets' table read from `icmp`. It is
+    /// the one table a host can be made to keep empty for every user
+    /// (`net.ipv4.ping_group_range`, shut by default), so a test hands a
+    /// table of its own here to see that the load reads it, and when.
+    fn load_with_icmp(want_queues: bool, skip_inet: bool, icmp: &str) -> Self {
         let mut t = SocketTable::default();
         // `-X`. Which tables it actually gates was measured, not read from the
         // man page, which says "skip the reporting of information on all open
@@ -114,6 +123,10 @@ impl SocketTable {
         t.load_netlink("/proc/net/netlink");
         t.load_packet("/proc/net/packet");
         t.load_unix("/proc/net/unix");
+        // Last, and whatever `-X` says: the C looks a socket up in
+        // `/proc/net/icmp` only when no other table has it, and has no
+        // `Fxopt` test there (`dsock.c:4095-4100`).
+        t.load_icmp(icmp);
         t
     }
 
@@ -234,8 +247,8 @@ impl SocketTable {
     /// `local_address->rem_address st=st` (`get_raw()`, `dsock.c:3530-3580`;
     /// measured `00000000:0001->00000000:0000 st=07` for a raw ICMP socket).
     /// It is no Internet file to the C, so no `-i` selects it, and `-F` gives
-    /// its NODE as `i` (DIVERGENCES 108). (`/proc/net/icmp` lists ping
-    /// sockets; the C reads it and this backend does not: DIVERGENCES 22.)
+    /// its NODE as `i` (DIVERGENCES 108). (`/proc/net/icmp` lists the ping
+    /// sockets, which are in neither file: [`Self::parse_icmp`].)
     fn load_raw(&mut self, path: &str, v6: bool) {
         if let Some(text) = crate::text::read_lossy(path) {
             self.parse_raw(&text, v6);
@@ -266,6 +279,76 @@ impl SocketTable {
                     type_suffix: None,
                 },
             );
+        }
+    }
+
+    /// `/proc/net/icmp` — the ping sockets (`SOCK_DGRAM`, `IPPROTO_ICMP`:
+    /// what an unprivileged `ping` holds) the kernel has hashed, which is to
+    /// say bound, connected or sent on. One never used is in no table, and
+    /// is named by the kernel (`sock … protocol: PING`, DIVERGENCES 22).
+    fn load_icmp(&mut self, path: &str) {
+        if let Some(text) = crate::text::read_lossy(path) {
+            self.parse_icmp(&text);
+        }
+    }
+
+    /// The parsing half of [`Self::load_icmp`]. Pure; must never panic.
+    ///
+    /// As the C's `get_icmp()` reads it (`dsock.c:1536-1657`): a line is cut
+    /// into fields at its blanks and tabs (`get_fields()`), and one of fewer
+    /// than eleven is skipped, the header too; the first line left is the
+    /// header, which must say `local_address` and `rem_address` in its
+    /// second and third columns and `inode` in its twelfth, or the whole
+    /// table is dropped (the C warns `unsupported format` and stops
+    /// reading; this backend has no channel for the warning, as with
+    /// `/proc/net/packet`). In a socket's line the inode is the **tenth**
+    /// field (the header has `tx_queue rx_queue` and `tr tm->when` as two
+    /// columns each, a socket's line joins each pair with a `:`), read by
+    /// `strtoull()` in base 0; a line whose inode is already recorded keeps
+    /// the first.
+    ///
+    /// A row is TYPE `icmp`, no DEVICE, SIZE/OFF `0t0`, NODE the inode and
+    /// NAME the table's own text, `local_address->rem_address`, with no
+    /// state (`dsock.c:4100-4141`; measured `0100007F:1092->00000000:0000`
+    /// for a socket bound to 127.0.0.1 with id 4242, and
+    /// `0100007F:3F41->0100007F:0000` connected to 127.0.0.1). It is no
+    /// Internet file to the C: no `-i` selects it, and `-s` and `-T` have
+    /// nothing of it. The C looks a socket up here last, after every other
+    /// table, so a socket another table lists keeps that table's row.
+    pub fn parse_icmp(&mut self, text: &str) {
+        let mut lines = text
+            .split('\n')
+            .map(|l| {
+                l.split([' ', '\t'])
+                    .filter(|f| !f.is_empty())
+                    .collect::<Vec<&str>>()
+            })
+            .filter(|f| f.len() >= ICMP_MIN_FIELDS);
+        match lines.next() {
+            Some(h)
+                if h.get(ICMP_LOCAL) == Some(&"local_address")
+                    && h.get(ICMP_REMOTE) == Some(&"rem_address")
+                    && h.get(ICMP_HEADER_INODE) == Some(&"inode") => {}
+            _ => return,
+        }
+        for f in lines {
+            let (Some(local), Some(remote), Some(inode)) = (
+                f.get(ICMP_LOCAL),
+                f.get(ICMP_REMOTE),
+                f.get(ICMP_INODE).and_then(|i| crate::files::c_strtoul(i)),
+            ) else {
+                continue;
+            };
+            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {
+                // The C's LSOF_FILE_ICMP.
+                file_type: FileType::Socket("icmp"),
+                info: None,
+                path: None,
+                device: None,
+                node: inode.to_string(),
+                name: Some(format!("{local}->{remote}")),
+                type_suffix: None,
+            });
         }
     }
 
@@ -559,6 +642,15 @@ const NETLINK_INODE: usize = 9;
 const PACKET_TYPE: usize = 2;
 const PACKET_PROTO: usize = 3;
 const PACKET_INODE: usize = 8;
+/// `/proc/net/icmp`'s columns as the C indexes them (`get_icmp()`,
+/// `dsock.c:1573-1638`): a line of fewer than eleven fields is none of its
+/// lines; the header names the inode in its twelfth column, a socket's line
+/// holds it in its tenth.
+const ICMP_MIN_FIELDS: usize = 11;
+const ICMP_LOCAL: usize = 1;
+const ICMP_REMOTE: usize = 2;
+const ICMP_HEADER_INODE: usize = 11;
+const ICMP_INODE: usize = 9;
 
 /// The NODE cell's width for a packet row — see [`packet_node`].
 const IPROTO_MAX: usize = 7;
@@ -1176,6 +1268,208 @@ mod tests {
         t6.parse_raw(text, true);
         let e = t6.get(390778).unwrap();
         assert_eq!(e.file_type, FileType::Socket("raw6"));
+    }
+
+    /// `/proc/net/icmp` as the kernel wrote it for two ping sockets
+    /// (measured 2026-11-21 in a network namespace of its own, with
+    /// `ping_group_range` opened): one connected to 127.0.0.1, one bound to
+    /// it with id 4242. The C types each `icmp`, leaves DEVICE blank, puts
+    /// the inode in NODE and names it with the table's two addresses and no
+    /// state (`get_icmp()`, `dsock.c:1536-1657, 4100-4141`): measured, `3u
+    /// icmp 0t0 2720190 0100007F:1092->00000000:0000`. lsof-rs read no such
+    /// table, and printed `sock … protocol: PING`.
+    #[test]
+    fn a_ping_socket_is_named_from_its_table_line() {
+        const ICMP: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops             \n\
+    0: 0100007F:973A 0100007F:0000 01 00000000:00000000 00:00000000 00000000     0        0 2720191 2 0000000004615e05 0       \n\
+   24: 0100007F:1092 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 2720190 2 0000000045362c6e 0       \n";
+        let mut t = SocketTable::default();
+        t.parse_icmp(ICMP);
+        assert_eq!(t.by_inode.len(), 2);
+        for (inode, name) in [
+            (2720190, "0100007F:1092->00000000:0000"),
+            (2720191, "0100007F:973A->0100007F:0000"),
+        ] {
+            let e = t.get(inode).unwrap();
+            assert_eq!(e.file_type, FileType::Socket("icmp"));
+            assert_eq!(e.file_type.code(), "icmp");
+            assert_eq!(e.name.as_deref(), Some(name), "no `st=`");
+            assert_eq!(e.node, inode.to_string());
+            assert!(e.device.is_none() && e.info.is_none() && e.path.is_none());
+            // Looked up after `/proc/net/unix`: it brings the C to that
+            // table, and to `-E`'s question (DIVERGENCES 56).
+            assert!(!t.read_before_unix(inode));
+        }
+        let header = ICMP.lines().next().unwrap();
+        let line = |inode: &str| {
+            format!("   24: 0100007F:1092 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 {inode} 2 0000000045362c6e 0\n")
+        };
+        let parsed = |text: &str| {
+            let mut t = SocketTable::default();
+            t.parse_icmp(text);
+            let mut inodes: Vec<u64> = t.by_inode.keys().copied().collect();
+            inodes.sort_unstable();
+            inodes
+        };
+        // The inode is the tenth field, read as `strtoull(…, 0)` reads it:
+        // the whole field, and not `ULONG_MAX`.
+        assert_eq!(parsed(&format!("{header}\n{}", line("77"))), [77]);
+        assert_eq!(parsed(&format!("{header}\n{}", line("0x10"))), [16]);
+        for bad in ["x", "77x", "-1", "18446744073709551615"] {
+            assert!(
+                parsed(&format!("{header}\n{}", line(bad))).is_empty(),
+                "{bad}"
+            );
+        }
+        // A line of fewer than eleven fields is none of the table's lines,
+        // before the header as well as after it.
+        assert_eq!(
+            parsed(&format!(
+                "short line\n\n{header}\n 1: a b 07 q q r u t 5\n{}",
+                line("77")
+            )),
+            [77]
+        );
+        let eleven = "   24: L R 07 q:q t:t r 0 0 88 2\n";
+        assert_eq!(
+            parsed(&format!("{header}\n{eleven}")),
+            [88],
+            "eleven fields are a line"
+        );
+        // The first line of eleven fields or more is the header, and must
+        // name the three columns the C checks, each in its place, or the
+        // whole table is dropped: no line of it is read as a socket's.
+        assert!(
+            parsed(&line("77")).is_empty(),
+            "a socket's line for a header"
+        );
+        for wrong in [
+            header.replace("local_address", "local_addr"),
+            header.replace("rem_address", "remote"),
+            header.replace("inode", "ino"),
+            header.replace(
+                "  sl  local_address rem_address",
+                "  local_address rem_address sl",
+            ),
+            header.replace("timeout inode", "inode timeout"),
+        ] {
+            assert!(
+                parsed(&format!("{wrong}\n{}", line("77"))).is_empty(),
+                "{wrong}"
+            );
+        }
+        assert!(parsed("").is_empty());
+        // A line whose inode is already recorded keeps the first.
+        let mut t = SocketTable::default();
+        t.parse_icmp(&format!(
+            "{header}\n{}{}",
+            line("77"),
+            line("77").replace("0100007F:1092", "0200007F:0001")
+        ));
+        assert_eq!(
+            t.get(77).unwrap().name.as_deref(),
+            Some("0100007F:1092->00000000:0000")
+        );
+        // Fields are cut at blanks and tabs alone, as `get_fields()` cuts
+        // them, and a line ends at its newline.
+        let tabbed = line("77").replace("0100007F:1092 ", "0100007F:1092\t");
+        assert_eq!(parsed(&format!("{header}\n{tabbed}")), [77]);
+        // Any other white space is part of its field: a form feed after the
+        // inode's digits is no digit (`strtoull()` stops there, and the C
+        // skips the line), and a vertical tab in an address stays in it.
+        let ff = line("77").replace(" 77 2 ", " 77\x0c2 x ");
+        assert!(parsed(&format!("{header}\n{ff}")).is_empty(), "{ff:?}");
+        let mut t = SocketTable::default();
+        t.parse_icmp(&format!(
+            "{header}\n{}",
+            line("77").replace("0100007F:1092 ", "0100007F:1092\x0bX ")
+        ));
+        assert_eq!(
+            t.get(77).unwrap().name.as_deref(),
+            Some("0100007F:1092\x0bX->00000000:0000")
+        );
+        // And a CR before the newline is the last field's: a header that
+        // ends `inode\r` does not name the column.
+        let twelve = header.split("inode").next().unwrap();
+        assert_eq!(parsed(&format!("{twelve}inode\n{}", line("77"))), [77]);
+        assert!(parsed(&format!("{twelve}inode\r\n{}", line("77"))).is_empty());
+        assert_eq!(
+            parsed(&format!("{header}\r\n{}", line("77").replace('\n', "\r\n"))),
+            [77],
+            "a CR in a field that is not read changes nothing"
+        );
+    }
+
+    /// The C looks a socket up in `/proc/net/icmp` last (`dsock.c:4095`,
+    /// after raw, netlink, packet, unix, TCP and UDP): a socket another
+    /// table lists keeps that table's row, and `-X`, which skips the TCP
+    /// and UDP tables, does not skip this one.
+    #[test]
+    fn the_ping_table_is_looked_up_last_and_whatever_dash_x_says() {
+        let icmp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+   24: 0100007F:1092 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 71 2 0000000045362c6e 0\n\
+   25: 0100007F:1093 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 72 2 0000000045362c6f 0\n";
+        let raw = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+  85: 00000000:0001 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 71 2 00000000400092a3 0\n";
+        let mut t = SocketTable::default();
+        t.parse_raw(raw, false);
+        t.parse_icmp(icmp);
+        assert_eq!(t.get(71).unwrap().file_type, FileType::Socket("raw"));
+        assert_eq!(t.get(72).unwrap().file_type, FileType::Socket("icmp"));
+        // The live tables: `-X` or not, what `/proc/net/icmp` lists is read
+        // (nothing, on a host where no ping socket is open), and the load
+        // does not fail where the file is missing.
+        for skip_inet in [false, true] {
+            let live = SocketTable::load(false, skip_inet);
+            let listed = crate::text::read_lossy("/proc/net/icmp").map_or(0, |text| {
+                let mut only = SocketTable::default();
+                only.parse_icmp(&text);
+                only.by_inode
+                    .keys()
+                    .filter(|i| {
+                        live.get(**i)
+                            .is_some_and(|e| e.file_type == FileType::Socket("icmp"))
+                    })
+                    .count()
+            });
+            let typed = live
+                .by_inode
+                .values()
+                .filter(|e| e.file_type == FileType::Socket("icmp"))
+                .count();
+            assert!(typed >= listed, "skip_inet={skip_inet}: {typed} < {listed}");
+        }
+    }
+
+    /// The load itself reads the ping sockets' table, and reads it under
+    /// `-X` too: a table of the test's own (this host may let no one open a
+    /// ping socket), whose inodes are far above any a live table lists.
+    #[test]
+    #[cfg_attr(miri, ignore = "it reads the live /proc/net tables")]
+    fn the_load_reads_the_ping_table_with_and_without_dash_x() {
+        const BOUND: u64 = 0xffff_ffff_ffff_fff0;
+        let path = std::env::temp_dir().join(format!("lsof-rs-icmp-table-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+   24: 0100007F:1092 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 {BOUND} 2 0000000045362c6e 0\n"
+            ),
+        )
+        .unwrap();
+        for skip_inet in [false, true] {
+            let t = SocketTable::load_with_icmp(false, skip_inet, path.to_str().unwrap());
+            let e = t
+                .get(BOUND)
+                .unwrap_or_else(|| panic!("skip_inet={skip_inet}: the table was not read"));
+            assert_eq!(e.file_type, FileType::Socket("icmp"));
+            assert_eq!(e.name.as_deref(), Some("0100007F:1092->00000000:0000"));
+        }
+        std::fs::remove_file(&path).unwrap();
+        // And where there is no such file (a kernel without ping sockets),
+        // the other tables are all there is.
+        let none = SocketTable::load_with_icmp(false, false, path.to_str().unwrap());
+        assert!(none.get(BOUND).is_none());
     }
 
     #[test]
