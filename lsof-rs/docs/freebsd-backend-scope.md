@@ -1,13 +1,19 @@
-# lsof-rs — the FreeBSD backend (phase F0)
+# lsof-rs — the FreeBSD backend (phases F0 to F2)
 
-> **Status (2026-10-31).** Phase F0 has landed: `crates/lsof-backend-freebsd`
-> builds, lints and documents for `x86_64-unknown-freebsd` and
-> `i686-unknown-freebsd`. Its parsers and row rules are tested, fuzzed and run
-> under miri on Linux. **It has not yet run on FreeBSD.** The CI task that would
-> run it (`.cirrus.yml`, `lsof_rs_task`) needs Cirrus CI connected to this
-> repository, which it is not (`porting-kit/harnesses/platforms/platforms.toml`).
-> Until a run on a real host, every row this backend prints is the C dialect's
-> rule as read from its source, not as measured (DIVERGENCES 140).
+> **Status (2026-11-21).** `crates/lsof-backend-freebsd` builds, lints and
+> documents for `x86_64-unknown-freebsd` and `i686-unknown-freebsd`; its
+> parsers and row rules are tested, fuzzed and run under miri on Linux.
+> **It has run on one FreeBSD host**: FreeBSD 14.5-RELEASE amd64, UFS, a
+> QEMU guest, beside the C built there with autotools, as a normal user and
+> as root (2026-11-21). The first run found the differences DIVERGENCES'
+> section "FreeBSD: the first run beside the C" lists; the second, of the
+> tree that fixed them, is recorded in row 140, with the one later change
+> that has not run on FreeBSD (the helper's `/dev/null`, row 144). **Not run:** ZFS, FreeBSD
+> 15.x and 13.x, i386, NFS, nullfs, jails. The CI task that would run it on
+> every change (`.cirrus.yml`, `lsof_rs_task`) needs Cirrus CI connected to
+> this repository, which it is not
+> (`porting-kit/harnesses/platforms/platforms.toml`); until then the run is
+> made by hand with `differential/freebsd-check.sh`.
 
 This is the scoping note `porting-kit/PROMPTS/20-new-backend.md` asks for
 before a new platform's code. It was written alongside the code, not before it,
@@ -37,7 +43,7 @@ backend reads the same records:
 
 | What | sysctl | Record | Layout |
 |---|---|---|---|
-| processes | `kern.proc.proc` | `kinfo_proc` | per architecture: 1088 bytes on amd64, 768 on i386 |
+| processes | `kern.proc.proc`; under `-K` `kern.proc.all`, a record a thread | `kinfo_proc` | per architecture: 1088 bytes on amd64, 768 on i386 |
 | a process's files | `kern.proc.filedesc.<pid>` | packed `kinfo_file` | the same everywhere (1392 bytes at most) |
 | locks | `kern.lockf` | `kinfo_lockf` | the same everywhere |
 | TCP state, AF_UNIX peers | `net.inet.{tcp,udp}.pcblist`, `net.local.{stream,dgram,seqpacket}.pcblist` | `xtcpcb`, `xinpcb`, `xunpcb` | the same everywhere |
@@ -63,13 +69,18 @@ whose layout differs between the two architectures. The parser checks each
 record's `ki_structsize` against the layout it expects, and refuses a
 mismatch rather than misread it.
 
+On 2026-11-21 the amd64 layouts met a real kernel (14.5): every row of the
+host was the C's. `ki_tid`'s offset, added for `-K`, was measured there with
+the system's own compiler and headers (600 on amd64; 520 on i386 by
+`cc -target i386-unknown-freebsd14`, which no i386 kernel has confirmed).
+
 ## Phases
 
 | Phase | Scope | State |
 |---|---|---|
-| **F0** | processes, every `kinfo_file` kind the C decodes (vnode, socket, pipe, PTS, kqueue, eventfd, SHM, procdesc), `cwd`/`rtd`/`jld`/`txt`/`ctty`, locks, TCP state, AF_UNIX naming, nullfs, procfs types, device names from `/dev`, the mount table, `-u` names | **done, unrun** |
-| **F1** | the first run on FreeBSD, and triage of what it shows into DIVERGENCES; `lsof_rs_task`'s side-by-side made the FreeBSD differential; `-K`; the coverage gate run with `--platform freebsd` | needs a FreeBSD runner |
-| **F2** | `+f c/f/g/G/n` from `kern.file`; `-T f` socket options and TCP flags; the mount point's `stat` (and every bounded call) through a helper under `-S`; KQUEUE's DEVICE from `kern.file`; `readdev()`'s device table | **done from source, unrun** (2026-11-20): DIVERGENCES 142–147; `statfs` of a vnode's path stays unbounded, as the C's (143) |
+| **F0** | processes, every `kinfo_file` kind the C decodes (vnode, socket, pipe, PTS, kqueue, eventfd, SHM, procdesc), `cwd`/`rtd`/`jld`/`txt`/`ctty`, locks, TCP state, AF_UNIX naming, nullfs, procfs types, device names from `/dev`, the mount table, `-u` names | **done; run on 14.5 amd64** (2026-11-21) |
+| **F1** | the first run on FreeBSD, and triage of what it shows into DIVERGENCES; `lsof_rs_task`'s side-by-side made the FreeBSD differential; `-K`; the coverage gate run with `--platform freebsd` | **partly done** (2026-11-21): the first run and its triage (DIVERGENCES 140-148, 180-185); what it showed fixed (a socket's ends and `-i`, 180, 181; what a run reads and starts, 182; `-K`, 141; the option letters and `-D`, 183, 148); `differential/freebsd-check.sh` is the side-by-side, run by hand. **Left:** host and service names (185); the other systems of row 140; a FreeBSD differential that is a gate, which needs a runner; the coverage gate with `--platform freebsd` |
+| **F2** | `+f c/f/g/G/n` from `kern.file`; `-T f` socket options and TCP flags; the mount point's `stat` (and every bounded call) through a helper under `-S`; KQUEUE's DEVICE from `kern.file`; `readdev()`'s device table | **done; measured on 14.5 amd64** (2026-11-21): DIVERGENCES 142–147; the helper's timeouts and a file system that does not answer are still from source (143, 144); `statfs` of a vnode's path stays unbounded, as the C's (143) |
 
 Estimate against actual: the Linux scope note estimated about 2,200 lines for
 L0–L1. F0 here is about 3,100 lines, of which about 830 are tests, against
@@ -82,17 +93,27 @@ source in the C.
 | Gate | State |
 |---|---|
 | `ported` | yes: `progress.json` says `ported` |
-| `differential` | **no**: the C has never been diffed against it on a host. The side-by-side in `lsof_rs_task` is not a gate yet. |
+| `differential` | **no gate yet**: the C was diffed against it by hand, on one host, twice (2026-11-21, `differential/freebsd-check.sh compare`, as a user and as root; DIVERGENCES 140 has the counts). Nothing runs it on every change: the side-by-side in `lsof_rs_task` calls the same script and is not a gate while Cirrus CI is not connected. |
 | `fuzzed` | `fuzz/fuzz_targets/freebsd_kinfo.rs`: every parser and the row rules on arbitrary bytes. 8.7 million runs locally, and in the CI smoke loop. |
 | `sanitized` | the miri job runs `-p lsof-backend-freebsd`: the pure modules, on Linux. The FFI itself has no sanitizer run. |
-| `unsafe_audited` | `audit_unsafe.py` covers `src/`: six blocks, each with `// SAFETY:`. The crate is `#![deny(unsafe_code)]` with one `#[allow]`, so the `forbid` gate does not apply to it, as it does not to the Windows backend. |
+| `unsafe_audited` | `audit_unsafe.py` covers `src/`: seven blocks, each with `// SAFETY:` (the 2026-11-21 work added none). The crate is `#![deny(unsafe_code)]` with one `#[allow]`, so the `forbid` gate does not apply to it, as it does not to the Windows backend. |
 
-The progress row stays at `ported` until the differential has run. A gate
-that has not run against the C has not been passed.
+The progress row stays at `ported` until a differential runs as a gate. A
+side-by-side made once by hand shows what the two printed that day on that
+host; it is not a gate passed.
+
+The crate's tests ran on FreeBSD too (`cargo test -p lsof-core -p lsof-cli
+-p lsof-backend-freebsd --no-fail-fast`, 14.5 amd64): the first run had nine
+failures, each a test that stated Linux's expectation; each now states what
+FreeBSD does, as measured, or is gated with its reason (DIVERGENCES 140).
+`crates/lsof-cli/tests/freebsd.rs` and the backend's `live` tests run only
+there.
 
 ## Field checkpoint
 
 LESSONS #015 asks for the release artifact on real hardware, in every
 privilege mode, with a time ceiling per case. For FreeBSD that means a root run
-and an unprivileged run on 14.x and 15.x, on amd64 and on i386. None has been
-done.
+and an unprivileged run on 14.x and 15.x, on amd64 and on i386: eight runs.
+Two have been made, and not on hardware: 14.5 amd64 in an emulated guest,
+root and unprivileged, with no time ceiling a slow emulator could make
+meaningful (2026-11-21).

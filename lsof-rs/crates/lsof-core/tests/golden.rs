@@ -528,6 +528,47 @@ fn taskcmd_is_sized_by_its_own_column_not_by_command() {
     assert!(!narrow.contains("taskname"), "{narrow:?}");
 }
 
+/// FreeBSD's `-K`: every thread is a task with a TID, and none has a task
+/// command (the dialect never sets `Lp->tcmd`), so `print.c` prints the TID
+/// column (`TaskPrtTid`) and no TASKCMD (`TaskPrtCmd` stays 0). Measured on
+/// FreeBSD 14.5: `COMMAND PID    TID   USER FD   TYPE …`, and
+/// `socks   978 100175 tester 0r  VCHR …`.
+#[test]
+fn a_task_with_no_command_of_its_own_has_tid_and_no_taskcmd() {
+    let mut p = task_entry("socks", "unused");
+    p.pid = 978;
+    p.tid = Some(100_175);
+    p.task_command = None;
+    p.user = Some("tester".into());
+    let mut q = p.clone();
+    q.tid = Some(100_176);
+    let t = table::render(&[p.clone(), q], TableOpts::new(Escaper::UNIX));
+    let lines: Vec<&str> = t.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "COMMAND PID    TID   USER  FD   TYPE DEVICE SIZE/OFF NODE NAME",
+            "socks   978 100175 tester cwd    DIR                      /tmp",
+            "socks   978 100176 tester cwd    DIR                      /tmp",
+        ]
+    );
+    // `-F`: `K` after `p`, and no `M`; JSON: `tid`, and no `task_cmd`.
+    let f = lsof_core::render::fields::render(
+        std::slice::from_ref(&p),
+        false,
+        None,
+        lsof_core::TcpInfoFlags::DEFAULT,
+        Escaper::UNIX,
+    );
+    assert!(f.starts_with("p978\nK100175\ncsocks\n"), "{f:?}");
+    assert!(!f.contains("\nM"), "{f:?}");
+    // One entry a task with a command and one without: both columns, the
+    // cell blank where there is none (`cp = Lp->tcmd ? Lp->tcmd : ""`).
+    let named = task_entry("socks", "worker");
+    let t = table::render(&[p, named], TableOpts::new(Escaper::UNIX));
+    assert!(t.lines().next().unwrap().contains(" TID TASKCMD "), "{t}");
+}
+
 #[test]
 fn a_hostile_thread_name_is_escaped_in_taskcmd() {
     // A thread names itself with `prctl(PR_SET_NAME)`, so TASKCMD is as
@@ -1648,7 +1689,12 @@ fn the_raw_device_field_is_only_asked_for_and_only_on_devices() {
 /// column and unpadded, so that changes nothing else). FILE-FLAG follows TYPE,
 /// right-aligned and at least as wide as its title; the C's table order
 /// decides which name a shared bit gets.
+///
+/// Linux's numbers and Linux's names, so not on FreeBSD, whose flags are
+/// other numbers its C names from another table: there
+/// `the_file_flags_column_is_freebsds_cs` is the same test.
 #[test]
+#[cfg(not(target_os = "freebsd"))]
 fn the_file_flags_column_is_the_cs() {
     use lsof_core::render::FileFlags;
     use lsof_core::{AccessMode, FdType, FileType};
@@ -1733,6 +1779,107 @@ fn the_file_flags_column_is_the_cs() {
         !fields_with(FileFlags::Off).contains("\nG"),
         "`-F -fG`: no G field"
     );
+}
+
+/// FreeBSD's `+f g`, `+f G` and `-F G`, against its C's own bytes: seven
+/// descriptors of a flags fixture on FreeBSD 14.5 (2026-11-21), printed by
+/// the C with `lsof -n -P +fg -a -d 3-7,11,12 -p P`, then `+fG`, then `-F
+/// fG -d 5,11`: opened `O_RDONLY`; `O_WRONLY|O_APPEND`; `O_RDWR|O_NONBLOCK`;
+/// `O_RDWR|O_SYNC`; `O_RDONLY|O_EXLOCK`; `O_RDWR|O_DIRECT` (a flag
+/// `Pff_tab[]` does not name, so the rest in hex); and
+/// `O_WRONLY|O_APPEND|O_NONBLOCK|O_SYNC`.
+#[test]
+#[cfg(target_os = "freebsd")]
+fn the_file_flags_column_is_freebsds_cs() {
+    use lsof_core::render::FileFlags;
+    use lsof_core::{AccessMode, FdType, FileType};
+    let reg = |fd: u64, access, flags: u32, size: u64, node: &str, name: &str| {
+        let mut f = row(
+            FdType::Handle(fd),
+            access,
+            None,
+            FileType::Other("VREG".into()),
+            "0,61",
+            Some(size),
+            None,
+            node,
+            name,
+        );
+        f.file_flags = Some(flags);
+        f
+    };
+    let a = "/tmp/lsof-flag-a (/dev/gpt/rootfs)";
+    let mut p = python3(vec![
+        reg(
+            3,
+            AccessMode::Read,
+            0x1,
+            1695,
+            "30621",
+            "/etc/passwd (/dev/gpt/rootfs)",
+        ),
+        reg(4, AccessMode::Write, 0xa, 0, "1593", a),
+        reg(5, AccessMode::ReadWrite, 0x7, 0, "1593", a),
+        reg(6, AccessMode::ReadWrite, 0x83, 0, "1593", a),
+        reg(7, AccessMode::Read, 0x4001, 0, "1593", a),
+        reg(11, AccessMode::ReadWrite, 0x10003, 0, "1593", a),
+        reg(12, AccessMode::Write, 0x8e, 0, "1593", a),
+    ]);
+    p.pid = 5078;
+    p.command = "flags".into();
+    p.user = Some("tester".into());
+    let table_with = |file_flags| {
+        table::render(
+            std::slice::from_ref(&p),
+            TableOpts {
+                file_flags,
+                ..TableOpts::new(Escaper::UNIX)
+            },
+        )
+    };
+    assert_eq!(
+        table_with(FileFlags::Names),
+        concat!(
+            "COMMAND  PID   USER FD   TYPE    FILE-FLAG DEVICE SIZE/OFF  NODE NAME\n",
+            "flags   5078 tester  3r  VREG            R   0,61     1695 30621 /etc/passwd (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  4w  VREG         W,AP   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  5u  VREG       R,W,NB   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  6u  VREG     R,W,FSYN   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  7r  VREG        R,LCK   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester 11u  VREG  R,W,0x10000   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester 12w  VREG W,NB,AP,FSYN   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+        )
+    );
+    assert_eq!(
+        table_with(FileFlags::Hex),
+        concat!(
+            "COMMAND  PID   USER FD   TYPE   FILE-FLAG DEVICE SIZE/OFF  NODE NAME\n",
+            "flags   5078 tester  3r  VREG     0x1;0x0   0,61     1695 30621 /etc/passwd (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  4w  VREG     0xa;0x0   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  5u  VREG     0x7;0x0   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  6u  VREG    0x83;0x0   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester  7r  VREG  0x4001;0x0   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester 11u  VREG 0x10003;0x0   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+            "flags   5078 tester 12w  VREG    0x8e;0x0   0,61        0  1593 /tmp/lsof-flag-a (/dev/gpt/rootfs)\n",
+        )
+    );
+    assert!(!table_with(FileFlags::Off).contains("FILE-FLAG"));
+    // `-F fG`: in hex unless `+fg` asks for the names.
+    let fields_with = |file_flags| {
+        fields::render_with_offset_digits(
+            std::slice::from_ref(&p),
+            false,
+            Some(&['f', 'G']),
+            TcpInfoFlags::DEFAULT,
+            Escaper::UNIX,
+            lsof_core::render::DEFAULT_OFFSET_DIGITS,
+            file_flags,
+        )
+    };
+    let hex = fields_with(FileFlags::Hex);
+    assert!(hex.starts_with("p5078\nf3\nG0x1;0x0\n"), "{hex:?}");
+    assert!(hex.contains("\nf5\nG0x7;0x0\n") && hex.contains("\nf11\nG0x10003;0x0\n"));
+    assert!(fields_with(FileFlags::Names).contains("\nf12\nGW,NB,AP,FSYN\n"));
 }
 
 /// One regular-file row carrying `size` and `offset`, for the `-H` cases.
@@ -2554,10 +2701,22 @@ fn json_file_keys_in_the_cs_order() {
     f.offset = Some(0);
     f.node = Some("2834481".into());
     f.links = Some(1);
-    f.file_flags = Some(0o2 | 0o100000 | 0o2000000);
+    // The flags are the platform's numbers under the platform's names:
+    // Linux's `O_RDWR|O_LARGEFILE|O_CLOEXEC`; on FreeBSD
+    // `FREAD|FWRITE|O_DIRECT`, which its C's JSON gave as `R,W,0x10000`
+    // (measured on 14.5: a descriptor opened `O_RDWR|O_DIRECT`), between
+    // the same keys in the same order.
+    let (flags, named) = if cfg!(target_os = "freebsd") {
+        (0x10003, "R,W,0x10000")
+    } else {
+        (0o2 | 0o100000 | 0o2000000, "RW,LG,CX")
+    };
+    f.file_flags = Some(flags);
     assert_eq!(
         jfile(f.clone()),
-        "\"fd\":\"53\",\"access\":\"u\",\"lock\":\"W\",\"type\":\"REG\",\"device_number\":\"0xfe00\",\"size\":\"4\",\"offset\":\"0\",\"inode\":\"2834481\",\"nlink\":1,\"flags\":\"RW,LG,CX\",\"name\":\"/fx/locked.txt\""
+        format!(
+            "\"fd\":\"53\",\"access\":\"u\",\"lock\":\"W\",\"type\":\"REG\",\"device_number\":\"0xfe00\",\"size\":\"4\",\"offset\":\"0\",\"inode\":\"2834481\",\"nlink\":1,\"flags\":\"{named}\",\"name\":\"/fx/locked.txt\""
+        )
     );
     // raw_device is `-F r`'s, outside the default set, after device_number.
     f.rdev = std::num::NonZeroU32::new(0x103);
@@ -2782,7 +2941,9 @@ fn json_name_is_the_base() {
 /// file system's `dir (fsname)`, a terminal's `/dev/pts/N`. The table and
 /// `-F n` print them, with any `(like character special …)` after; JSON's
 /// `name` is `Lf->nm` (`print.c:1990`), so none (DIVERGENCES 146). Followed
-/// from source, unmeasured: no FreeBSD host.
+/// from source; measured on FreeBSD 14.5 for a file with no path (an open
+/// file unlinked: `/ (/dev/gpt/rootfs)` in the table and `-F n`, no `name`
+/// in either JSON), not for a terminal.
 #[test]
 fn json_has_no_name_for_a_name_only_printed() {
     let mut pts = jrow(

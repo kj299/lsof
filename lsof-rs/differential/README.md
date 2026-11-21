@@ -153,3 +153,71 @@ DIVERGE(ledgered), 0 unexplained. Before it was a gate, doing this by hand
 found every fidelity bug in phases L0 and L1 — and on its first fixture it found
 two more (the `0t0` offset cell for devices and FIFOs; `pipe` in NAME), fixed in
 the same PR. It runs on every Linux CI push as a hard gate.
+
+## FreeBSD — the side-by-side (`freebsd-check.sh`)
+
+There is no FreeBSD runner in `.github/workflows`, and Cirrus CI is not
+connected to this repository, so FreeBSD has no differential that gates a
+change. What it has is a script a person runs on a FreeBSD host, which builds
+both binaries from one tree and prints what each says for the same command
+lines, as a normal user and as root:
+
+```sh
+# as root: the build tools, and the kernel sources the C compiles against
+sh lsof-rs/differential/freebsd-check.sh install
+sh lsof-rs/differential/freebsd-check.sh sources
+# as a normal user: the C (autotools) and lsof-rs, and lsof-rs's tests
+SRC=$HOME/lsof sh lsof-rs/differential/freebsd-check.sh build
+sh lsof-rs/differential/freebsd-check.sh compare
+# as root: the same comparisons, system-wide
+sh lsof-rs/differential/freebsd-check.sh compare
+```
+
+`sources` is there because the C's FreeBSD dialect includes kernel headers
+(`-I/usr/src/sys`), which a release image may not carry: it takes
+`usr/src/sys` out of the release's `src.txz`, or clones the release branch.
+`build` runs `cargo test -p lsof-backend-freebsd -p lsof-core -p lsof-cli
+--no-fail-fast`, so one failing suite does not hide the next. `compare`
+takes `LSOF_C` and `LSOF_RS` for binaries built elsewhere and `DIR` for its
+work directory, and writes `lsof-rs-freebsd-compare-<user>.txt` where it is
+run. Every lsof it runs has `-n -P`: no name is looked up and nothing leaves
+the host (DIVERGENCES 185 is what the two print without them).
+
+Reading the result. Each comparison prints `=== lsof ARGS`, both exit
+statuses and line counts, and then `SAME` or a unified diff of the C's output
+(`-`) against lsof-rs's (`+`), standard output and standard error together.
+Six forms of comparison, because some output cannot be equal:
+
+| Form | What is compared | Why |
+|---|---|---|
+| `run` | every byte | the default |
+| `runu` | every byte but the C's usage block and lsof-rs's `Try 'lsof -h' for usage.` | an option error: DIVERGENCES 114 |
+| `runo` | every row but those of processes named `lsof`, which are counted | a listing that holds the lsof making it: its PID, path and output file are its own |
+| `runj` | every byte but `"lsof_version"` | JSON: DIVERGENCES 91 |
+| `runjs` | as `runj`, and without the `"name"` lsof-rs gives an Internet socket's object (they are counted) | JSON that holds such sockets: the C's object has no `name`, DIVERGENCES 134 |
+| `runs` | lsof's own rows, its PID and its output file's name and inode masked | the lsof that lists, compared with itself |
+
+The fixtures are its own: a `sleep`, a `tail -f` (a kqueue), an `nc`
+listener, and two programs it compiles with the base system's `cc`, one
+holding 24 sockets of every kind the dialect names differently (TCP and UDP,
+IPv4, IPv6 and v4-mapped, unbound, bound, listening, connected, accepted,
+shut down; raw, routing, UDP-Lite) and one with four threads. Without a
+compiler those comparisons are skipped, and the file says so.
+
+What is expected not to be `SAME`, on a tree where nothing is wrong:
+
+- the first block, which is no comparison: the C's device cache warnings and
+  its personal cache path, shown once (lsof-rs keeps no cache: 148);
+- `lsof -n -P /dev/null`: one row more in lsof-rs's, its helper's descriptor
+  2 (144);
+- `lsof -D ?`, printed for both and not compared (148);
+- `lsof -n -P` under `run`: the listing lsof's own rows (the `runo` form of
+  the same command line follows it);
+- the timing of `+d` over 50,000 files, in whole seconds, printed and not
+  compared.
+
+Anything else is a finding: fix it, or give it a DIVERGENCES row. The file
+ends `=== summary: N comparisons the same, M with a difference`. The runs
+made so far are recorded in DIVERGENCES 140 (2026-11-21: FreeBSD
+14.5-RELEASE amd64, UFS). `.cirrus.yml`'s `lsof_rs_task` calls the same
+script, for the day Cirrus CI is connected.

@@ -11,7 +11,54 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed — FreeBSD, written from the C's source (not yet run on FreeBSD)
+### Changed — FreeBSD, after its first run beside the C (2026-11-21)
+lsof-rs ran on FreeBSD for the first time, beside the C lsof built from this
+tree: FreeBSD 14.5-RELEASE amd64 (UFS; an emulated guest), as a user and as
+root (`differential/freebsd-check.sh`, DIVERGENCES "FreeBSD: the first
+run"). What follows is what that changed; each is now the C's, measured.
+- **An Internet socket's far end** (DIVERGENCES 180): an IPv4 socket always
+  shows one, `*:*` where there is none (`TCP 127.0.0.1:39999->*:* (LISTEN)`,
+  `UDP *:514->*:*`), an IPv6 socket only a real one (`TCP [::1]:41002
+  (LISTEN)`), and a port of 0 is `*` (an unbound socket was `*:0`). `-i`
+  matches by the ends entered: `-i :0` selects an IPv4 listener, and `-i
+  4TCP` an IPv6 socket whose addresses are IPv4-mapped.
+- **No mount table and no helper process on a run that names no path**
+  (182): `lsof`, `-p`, `-u`, `-i`, `-U`, `-N` and `-K` read no mount, so
+  lsof no longer lists a helper and two pipes of its own, `-b -p PID` prints
+  no `avoiding …` line, and a mount that does not answer costs such a run
+  nothing. `-N` goes by the file system each file is on. A path argument, or
+  `+d`/`+D`, reads the table and starts the helper, as the C forks its
+  child.
+- **`-K` lists every thread** (141): one entry a thread, its TID in a TID
+  column (no TASKCMD: FreeBSD's C names no task), `K` in `-F`, `tid` in
+  JSON; `-K` beside another selector ORs, as root the kernel's threads are
+  listed too. lsof-rs listed none and exited 1.
+- **`-D` is read as the C's device cache control** (148): `?`, `i`, `b`, `r`
+  and `u`, with the C's messages for what it refuses. lsof-rs still keeps no
+  cache file, by decision: `-D ?` reports no path, and the others change
+  nothing. It had been `unsupported option: -D`.
+- **FreeBSD's option letters are its C's** (183): `-e`, `+e`, `-E`, `+E`,
+  `-X` and `-Z` are `illegal option character`, `+M` and `-M` are read, and
+  `-s UDP:x` is `unknown -s protocol`.
+- **`-s TCP:` with `-i`** (181): with a state to include, the bare `-i`
+  lists the TCP sockets in it and no UDP socket.
+- **Smaller**: a process's pipes are no longer blank rows under `-i` beside
+  another selector (`-u U -i TCP:1`); `-K` and `-N` are located by a process
+  with no socket under `-a -U` or `-a -i`; `lsof -b /` says `avoiding
+  readlink(devfs)` for a mount source that is no path; a file with no path
+  is named by its file system when a later descriptor of the process names
+  it; a mount whose `stat` fails is assumed the device `f_fsid.val[0]` with
+  its sign.
+- **The helper's `/dev/null` cannot hold a run** (144): lsof opens it for
+  reading and writing, as the C opens `/dev/null` when it starts, and hands
+  it to the helper as descriptor 2. The open had been for writing alone,
+  which waits for ever where `/dev/null` is a FIFO (the opens, and the
+  helper's `2u`, measured on FreeBSD, DIVERGENCES 140).
+- Not changed, and recorded: the helper keeps a descriptor 2, `/dev/null`,
+  where the C's child has none (144); nothing is named without `-n -P`
+  (185).
+
+### Changed — FreeBSD, written from the C's source (2026-11-20; measured 2026-11-21, see above)
 - **`+f c`, `+f f`, `+f g`/`G` and `+f n`** (DIVERGENCES 142): FCT,
   FILE-ADDR, FILE-FLAG and NODE-ID columns, and `-F`'s `C`, `F`, `G` and `N`
   fields (in a bare `-F`'s set, and listed by `-F ?`), from each

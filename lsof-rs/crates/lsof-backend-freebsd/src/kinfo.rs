@@ -55,7 +55,8 @@ pub(crate) fn cstr_at(b: &[u8], off: usize, len: usize) -> &[u8] {
     }
 }
 
-/// One process, as `kern.proc.proc` describes it.
+/// One process, as `kern.proc.proc` describes it, or one of its threads, as
+/// `kern.proc.all` does: the same record, one for each thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KProc {
     pub pid: i32,
@@ -65,6 +66,9 @@ pub struct KProc {
     pub stat: u8,
     /// `ki_comm`, as bytes: a process names itself, and need not in UTF-8.
     pub comm: Vec<u8>,
+    /// `ki_tid`: the thread the record is of. In a `kern.proc.proc` record
+    /// it is one of the process's threads, which the C does not read there.
+    pub tid: i32,
 }
 
 /// Why a buffer could not be read as the records it should hold.
@@ -99,6 +103,7 @@ pub fn procs(buf: &[u8], layout: Option<&ProcLayout>) -> Result<Vec<KProc>, Layo
             uid: u32_at(rec, l.uid).unwrap_or(0),
             stat: rec.get(l.stat).copied().unwrap_or(0),
             comm: cstr_at(rec, l.comm, layout::COMMLEN + 1).to_vec(),
+            tid: i32_at(rec, l.tid).unwrap_or(0),
         });
     }
     Ok(out)
@@ -495,6 +500,7 @@ pub(crate) mod tests {
         put(&mut r, l.uid, &1001u32.to_ne_bytes());
         r[l.stat] = 3;
         put(&mut r, l.comm, comm);
+        put(&mut r, l.tid, &(100_000 + pid).to_ne_bytes());
         r
     }
 
@@ -511,6 +517,7 @@ pub(crate) mod tests {
                 (42, 1, 42, 1001, 3)
             );
             assert_eq!(p[0].comm, b"sh");
+            assert_eq!((p[0].tid, p[1].tid), (100_042, 100_043), "ki_tid");
             // No NUL in the field: the field's 20 bytes, and no more.
             assert_eq!(p[1].comm.len(), layout::COMMLEN + 1);
         }

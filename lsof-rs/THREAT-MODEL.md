@@ -71,7 +71,7 @@ it is a gap, not a formatting choice.
 | FreeBSD `kern.proc.filedesc.PID`: packed `kinfo_file` records, each with its own length, and `kf_path`, a name any local user's process chose | kernel, and **any local user's process** for the path | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD `kern.proc.proc` (`ki_comm` is the process's own name), `kern.lockf`, `kern.file`, `net.inet.*.pcblist`, `net.local.*.pcblist`, `getfsstat(2)` and `statfs(2)` records | kernel; the command and a socket's bound path from **any local user** | **hostile** | `lsof-backend-freebsd::kinfo`, `::rows` | `freebsd_kinfo` |
 | FreeBSD: each vnode's path `statfs(2)`ed to name its file system, in-process | whoever serves that file system | **hostile** to availability | `lsof-backend-freebsd::backend` | not applicable: a liveness hazard, as the C's `readvfs()` has it, kept by decision (DIVERGENCES 143) |
-| FreeBSD: the bounded calls' helper (this binary, run again with an argument no user types, greeting with its build): its frames over a pipe, and how long each takes | this binary; **whoever serves the file system** a call is about, for the time | frames untrusted, every length bounded before it is allocated for, each taken at its exact size; **hostile** to availability, bounded by `-S` per wait | `lsof-backend-freebsd::safefs` | not applicable: a fixed binary framing, unit-tested against every cut and every bound, and driven on Linux by scripted helpers |
+| FreeBSD: the bounded calls' helper (this binary, run again with an argument no user types, greeting with its build; started only by a run that names a path or `+d`/`+D`, DIVERGENCES 182): its frames over a pipe, and how long each takes | this binary; **whoever serves the file system** a call is about, for the time | frames untrusted, every length bounded before it is allocated for, each taken at its exact size; **hostile** to availability, bounded by `-S` per wait | `lsof-backend-freebsd::safefs` | not applicable: a fixed binary framing, unit-tested against every cut and every bound, and driven on Linux by scripted helpers |
 | FreeBSD: `/dev`, walked for device names (`readdev()`), as the run starts and again after a terminal row | devfs, and whatever is mounted under `/dev` | untrusted; bounded at 4,096 directories and 65,536 devices | `lsof-backend-freebsd::devnames` | not applicable: names and numbers from `lstat`, no parsing |
 | `/etc/nsswitch.conf`, read by lsof-rs to decide whether glibc may be asked for an account, and `/etc/passwd`, read by lsof-rs where glibc is not (DIVERGENCES 39): **on every Linux run that prints a login or takes `-u name`** (a plain listing does; `-l`, `-t` and `-F` without `L` read neither) | operator, but arbitrary bytes | semi-trusted | `lsof-backend-linux::users`, `lsof-core::netnames` (the nsswitch.conf reader and the bounded line reader) | `passwd` (`parse_passwd`, through `parse_line`, which `-u NAME` shares), `netnames` |
 | Linux and FreeBSD: what the C library answers for an account, `getpwnam_r(3)` and `getpwuid_r(3)`: the sources nsswitch.conf names, loaded into the process as shared objects (`libnss_files`, `libnss_compat`, `libnss_sss`, `libnss_ldap`, `libnss_systemd`, `libnss_hesiod`...), and the servers they ask (an LDAP or SSSD daemon, Hesiod's name server), nscd before them | the operator for the modules; **a remote server** for what they answer | the modules trusted as the C trusts them; the answer untrusted, **hostile** to availability | `lsof-getpw` (the one `unsafe` boundary: a buffer, a `passwd`, the call), `lsof-backend-linux::users` (the guard, the cache) | not applicable: the C library parses the reply; lsof-rs reads a uid and a name's bytes from its own buffer |
@@ -1085,10 +1085,12 @@ wrapper's user may read the file anyway. Until 2026-11-21 the file was
 opened as the effective user with no check at all. On FreeBSD the zone file is opened the same way, with FreeBSD's
 `O_NONBLOCK`, and anything but a regular file is not read.
 
-**The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
+**The FreeBSD backend's FFI is six libc calls, and it reads bytes, never
 structs.** `std` has no `sysctl`, so `lsof-backend-freebsd` declares
-`sysctl`, `sysctlbyname`, `getfsstat`, `statfs` and `geteuid` itself, in
-`src/sys.rs`, the only module where `#![deny(unsafe_code)]` is lifted. Each
+`sysctl`, `sysctlbyname`, `getfsstat`, `statfs`, `geteuid` and (for the
+helper below) `closefrom` itself, in `src/sys.rs`, the only module where
+`#![deny(unsafe_code)]` is lifted: seven `unsafe` blocks, each a call, none
+added or changed by the 2026-11-21 work. Each
 wrapper owns a byte vector of the size it tells the kernel, and returns it
 truncated to what the kernel wrote; no pointer outlives a call, and no
 returned byte is cast to a Rust type. Everything after that is safe code in
@@ -1101,10 +1103,15 @@ an error rather than a wrong pid or uid in every row. No dependency was added:
 the `libc` crate was declined because its FreeBSD structs are selected per ABI
 version by `cfg`, a choice a cast would inherit silently. The parsers and the
 row rules are fuzzed (`freebsd_kinfo`) and run under miri on Linux. The FFI
-itself has run under no sanitizer, and on no FreeBSD host yet (DIVERGENCES 140).
+itself has run under no sanitizer. It has run on one FreeBSD host (14.5
+amd64, 2026-11-21: the crate's tests against the live system, and every
+listing of the side-by-side run, as a user and as root; DIVERGENCES 140);
+i386's layout is from the headers alone.
 
 **FreeBSD's bounded calls run in a helper process, protected as Linux's
-is** (DIVERGENCES 144; followed from source, run on Linux only). The C forks
+is** (DIVERGENCES 144; its protocol and its timeouts are tested on Linux,
+and it has run on FreeBSD 14.5 amd64, 2026-11-21, where no file system
+failed to answer). The C forks
 a child for `statsafely()`, `lstatsafely()` and `Readlink()` and gives each
 call `alarm(TmLimit)`; a threaded Rust process cannot fork safely, so
 `lsof-backend-freebsd::safefs` runs this binary again through std's
@@ -1121,9 +1128,29 @@ call `alarm(TmLimit)`; a threaded Rust process cannot fork safely, so
   `can't fork: No child processes`. Not a hash of the code: someone who can
   rewrite lsof's binary in place, keeping its inode, size and time, owns the
   next run anyway.
+- **When.** Only where the C's child exists (DIVERGENCES 182): the first
+  bounded call starts it, and on FreeBSD those are a path argument's, a
+  `+d`/`+D` walk's and the mount table's, which is read for a path
+  argument alone. A run that names none (`lsof`, `-p`, `-u`, `-i`, `-U`,
+  `-N`, `-K`, `-b`) starts no process at all, and reads no mount table;
+  it had started one on every run but `-i`'s (measured on FreeBSD:
+  `lsof -n -P` lists one lsof process, `lsof -n -P /` two).
 - **What it is given.** One fixed argument, an empty environment, lsof's
   working directory, `/dev/null` as stderr and two pipes as stdin and
-  stdout. It serves only on pipes (a FIFO by `fstat`; otherwise `lsof:
+  stdout. lsof opens that `/dev/null` itself, for reading and writing, and
+  hands it over: the open the C makes as it starts (`main.c:178`). std's
+  `Stdio::null()` opens it for writing alone, and such an open waits for
+  ever where the name is a FIFO (a `/dev` that is not devfs, or one
+  someone could write to); the open for both ends finds both there and
+  does not wait (the three opens measured on FreeBSD 14.5 and on Linux,
+  and the helper built with it on FreeBSD 14.5, DIVERGENCES 140). The
+  C's child has no descriptor 2 at all, and the difference shows
+  (`lsof /dev/null` lists the helper's descriptor 2); it is kept. Rust writes a panic's or an abort's message to descriptor 2;
+  with none, the next file the helper opened would be descriptor 2 and
+  could be written into. Today the helper opens only directories, for
+  reading, so nothing could be; `/dev/null` there makes that true of
+  whatever it opens later, where the C's child is safe because it opens
+  nothing. It serves only on pipes (a FIFO by `fstat`; otherwise `lsof:
   --lsof-rs-freebsd-bounded-calls-helper is lsof-rs's own, started by lsof;
   not an option`, exit 2), and then closes every descriptor past stderr it
   was given (`closefrom(3)`, as the C's child does with `closefrom_shim(ctx,
@@ -1188,7 +1215,15 @@ resolver for an `-i @name`, libc reads what it reads (`LOCALDOMAIN`,
 file's directory. The device cache is not ported (it is a
 Unix kernel-memory-access feature this port does not need — see §5), so the class
 of issues around a user-writable cache file consulted by a privileged binary does
-not exist here.
+not exist here. That holds on FreeBSD too, where the C does compile it and
+keeps `/dev`'s table in the home directory, in `.lsof_` and the host's name
+(`~/.lsof_freebsd` on the host measured: it creates the file
+on a first run, mode 0600, and trusts it on the next after a mode check and a
+CRC). lsof-rs reads `/dev` on every run and neither reads nor writes a cache
+file; `-D` is parsed as the C parses it and then changes nothing, so a path
+given to `-D b` or `-D u` is never created or truncated, one given to `-D r`
+never opened, and `LSOFDEVCACHE` and `LSOFPERSDCPATH` are not read
+(DIVERGENCES 148, a decision).
 
 ## 3. Privilege transitions
 
@@ -1313,7 +1348,9 @@ Stated so reviewers do not assume coverage that is not there.
   to an authorised caller.
 - **Kernel memory access is out of scope, permanently.** The C reads kernel
   memory on several platforms and carries the setgid model and the device cache
-  to support it. This port reads `/proc` and documented Windows APIs instead.
+  to support it. This port reads `/proc` and documented Windows APIs instead,
+  and on FreeBSD `sysctl(3)`: `-k` and `-m`, which the FreeBSD C takes, are
+  `unsupported option` there (DIVERGENCES 148).
   That is a deliberate capability reduction, not an unfinished feature.
 - **We do not defend the accuracy of data the platform will not give us.**
   Where an API cannot supply a field, lsof-rs reports it as unknown rather than

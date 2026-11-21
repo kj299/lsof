@@ -320,6 +320,17 @@ pub trait Backend {
         crate::EndpointTables::default()
     }
 
+    /// The devices of the files the last [`Backend::gather`] typed NFS files
+    /// itself, handed over once: what `-N` selects where the dialect types a
+    /// file by the file system its own vnode is on and reads no mount table
+    /// for it (FreeBSD: `Ntype = N_NFS`, `dnode.c:364`, `:524`; DIVERGENCES
+    /// 182). They replace [`Selection::nfs_devices`](crate::Selection) for
+    /// that gather's rows. `None`, the default, where the mount table says
+    /// which files are on NFS (Linux), or nothing does.
+    fn take_nfs_devices(&self) -> Option<std::collections::HashSet<u64>> {
+        None
+    }
+
     /// The login of `uid`, as bytes, for an owner the listing prints by
     /// name: the C's `getpwuid(3)` in `printuid()`, which it calls only as
     /// it prints a USER cell, an `-F L` field or a JSON `login`

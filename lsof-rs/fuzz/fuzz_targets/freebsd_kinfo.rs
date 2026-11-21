@@ -24,7 +24,11 @@ impl f::Env for Knows {
         (self.0 && !path.is_empty()).then(|| f::Vfs {
             dir: path.get(..path.len() / 2).unwrap_or_default().to_vec(),
             fsname: path.to_vec(),
-            typnm: if path.len() % 3 == 0 { b"nullfs".to_vec() } else { b"procfs".to_vec() },
+            typnm: match path.len() % 3 {
+                0 => b"nullfs".to_vec(),
+                1 => b"procfs".to_vec(),
+                _ => b"nfs".to_vec(),
+            },
             fsid,
         })
     }
@@ -47,10 +51,20 @@ impl f::Env for Knows {
     fn xfile(&self, _: i32, _: i32) -> Option<f::XFile> {
         self.0.then_some(f::XFile { file: u64::MAX, data: 1, vnode: 2, flag: u32::MAX })
     }
+    fn nfs_file(&self, _: u64) {}
 }
 
 fuzz_target!(|data: &[u8]| {
     let files = f::files(data);
+    // The first pass over a process's records, and the list it fills: every
+    // path is `statfs`ed by a function that answers from the path's bytes.
+    f::precache_vfs(&files, &Knows(true));
+    let list = f::VfsList::default();
+    for k in &files {
+        let _ = list.find(k.file_fsid(), k.path(), &|path| {
+            f::statfs_list(path).into_iter().next()
+        });
+    }
     let mut seen = 0usize;
     for (i, k) in files.iter().enumerate() {
         let env = Knows(i % 2 == 0);
@@ -68,6 +82,15 @@ fuzz_target!(|data: &[u8]| {
     for l in [f::PROC_AMD64, f::PROC_I386] {
         if let Ok(p) = f::procs(data, Some(&l)) {
             assert!(p.len() <= data.len() / l.size);
+            // The listing's entries, processes and then (`-K`) threads: never
+            // more than the records, and in PID then TID order.
+            let records = p.len();
+            for tasks in [false, true] {
+                let e = f::entries(p.clone(), tasks);
+                assert!(e.len() <= records);
+                assert!(e.windows(2).all(|w| (w[0].pid, w[0].tid) < (w[1].pid, w[1].tid)));
+                assert!(tasks || e.iter().all(|p| p.tid.is_none()));
+            }
         }
     }
     assert!(f::locks(data).len() <= data.len() / 1088);

@@ -286,7 +286,8 @@ Windows** lsof-rs names both by default as before (hosts by reverse DNS
 through `GetNameInfoW`, ports from a built-in table of common services;
 bounded at 2 s, each distinct address once: see
 [Sockets](#on-windows-socket-host-names-cost-up-to-2-s-per-distinct-address)),
-and `-n`/`-P`/`+n`/`+P` read the same flags. On FreeBSD nothing is named.
+and `-n`/`-P`/`+n`/`+P` read the same flags. On FreeBSD nothing is named
+(DIVERGENCES 185: measured, the C names both there).
 
 What lsof-rs does resolve, on every platform, is a name it is **given**: `-i
 @localhost` and `-i :http` are looked up where the option is read, as the C
@@ -301,15 +302,42 @@ file holds cost none. A service name comes from `/etc/services`.
 The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
-- **FreeBSD** (140-147): every row is the C dialect's rule as read from its
-  source; none has been run on FreeBSD. `-K` lists no task, where the
-  autotools build of the C lists threads (141); `statfs(2)` of a vnode's path
-  is not bounded by `-S`, as the C's is not (143). A bounded call's helper
-  greets with the build it is, and a run whose binary was replaced since it
-  started ends `can't fork`, where the C's forked child cannot differ (144).
-  The `/dev` walk stops past 4,096 directories or 65,536 character devices,
-  with a warning, where the C's has no bound; a device cache file (`-D`) is
-  neither read nor written (146, 148).
+- **FreeBSD** (140-148, 180-183, 185): measured beside the C on one host,
+  FreeBSD 14.5-RELEASE amd64 with UFS (2026-11-21, by hand with
+  `differential/freebsd-check.sh`; no CI runs lsof-rs on FreeBSD), as a user
+  and as root; what the two print there is the same but for the points below. **Not measured:**
+  ZFS, FreeBSD 15.x and 13.x, i386, NFS (`-N` selecting a file, `-S` and
+  `-b` against a server that does not answer), nullfs, jails, IPv6 beyond
+  `::1` (140).
+  - **Nothing is named** (185): a socket's host and port are numbers, as if
+    `-n -P` were always given, where the C prints `localhost:41000->*:*` and
+    `127.0.0.1:nfsd`. `+M` is read and asks no portmapper.
+  - **No device cache** (148): the C keeps `/dev`'s table in
+    `~/.lsof_<hostname>`, and says so when it creates or updates the file;
+    lsof-rs reads `/dev` on every run, writes nothing into the home
+    directory and trusts no file's contents. `-D` is read as the C reads it
+    and changes nothing: `-D b path` writes no file, `-D r path` reads none,
+    `-D ?` reports that there is no path.
+  - **`-k` and `-m`** (148) are `unsupported option`, where the C takes
+    them: lsof-rs reads nothing from kernel memory.
+  - **The bounded calls' helper** (144) keeps `/dev/null` on descriptor 2,
+    where the C's child has none: on a run that names a path, a listing that
+    holds the helper has that one row more (`lsof /dev/null`). lsof opens
+    it for reading and writing, as the C opens `/dev/null` when it starts,
+    so a FIFO in its place holds no run (this last change has run on
+    Linux only; the rest of the list was measured on FreeBSD). The helper
+    greets with the build it is, and a run whose binary was replaced since
+    it started ends `can't fork`, where the C's forked child cannot differ.
+    It exists only when the C's child does: on a run that names a path or
+    `+d`/`+D` (182).
+  - `statfs(2)` of a vnode's path is not bounded by `-S`, as the C's is not
+    (143). The `/dev` walk stops past 4,096 directories or 65,536 character
+    devices, with a warning, where the C's has no bound (146).
+  - An Internet socket's JSON object has a `name`, the `-F n` text
+    (`127.0.0.1:39999->*:*`), where the C's has none (134).
+  - The IPv4 far end `->*:*` is what the C built by FreeBSD's own compiler
+    prints; its source reads as if it meant to leave it out, and a C built
+    otherwise may (180).
 - **Refused, where the C works:** a `-c /regex/` expression with groups
   and repetitions nested 100 deep (38; every other POSIX expression glibc
   takes is taken, back-references and intervals of any size among them); a

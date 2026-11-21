@@ -30,7 +30,11 @@
 //! and it closes every other descriptor it was given (`closefrom(3)`; the
 //! C's child closes from 2, `closefrom_shim(ctx, 2)` at `lib/misc.c:345`, so
 //! it has no stderr where this one has `/dev/null`, as the Linux helper
-//! does: DIVERGENCES 123). It greets with the build it is
+//! does: DIVERGENCES 123, 144). That `/dev/null` is opened by lsof, for
+//! reading and writing as the C opens it when it starts (`main.c:178`), and
+//! handed over ([`helper_command`]): an open for writing alone waits where
+//! the name is a FIFO, and lsof would wait with it. It greets with the build
+//! it is
 //! ([`token`]), and a greeting that is not this build's is refused: the
 //! helper is killed, and the run ends `can't fork`.
 //!
@@ -580,15 +584,37 @@ pub type OnFailure = Box<dyn Fn(&io::Error)>;
 
 /// The helper's command line and surroundings, `program` with `args`: stdin
 /// and stdout pipes, stderr `/dev/null`, no environment. Its working
-/// directory is lsof's, as a forked child's is.
-pub fn helper_command(program: impl AsRef<OsStr>, args: &[&OsStr]) -> Command {
+/// directory is lsof's, as a forked child's is. An error is `/dev/null`'s,
+/// which could not be opened: no helper, as for a `fork()` that fails.
+pub fn helper_command(program: impl AsRef<OsStr>, args: &[&OsStr]) -> io::Result<Command> {
+    helper_command_with(program, args, Path::new("/dev/null"))
+}
+
+/// [`helper_command`], its descriptor 2 the file at `null`, which lsof
+/// opens itself, for reading and writing, and hands over. `Stdio::null()`
+/// would open `/dev/null` for writing alone, and such an open waits for a
+/// reader where the name is a FIFO (a `/dev` that is not devfs): lsof would
+/// wait in it for ever, where the C lists. The C opens `/dev/null` once as
+/// it starts, `open("/dev/null", O_RDWR)` (`main.c:178`), and an open for
+/// both never waits on a FIFO: each side finds the other there (FreeBSD's
+/// `fifo_open()`; measured on FreeBSD 14.5 and on Linux). The same open,
+/// then, with nothing added to it.
+fn helper_command_with(
+    program: impl AsRef<OsStr>,
+    args: &[&OsStr],
+    null: &Path,
+) -> io::Result<Command> {
+    let stderr = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(null)?;
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    cmd
+        .stderr(stderr);
+    Ok(cmd)
 }
 
 /// An error as another value, the same `errno` or words: what a launcher
@@ -656,7 +682,7 @@ impl Helper {
         let exe = std::env::current_exe().and_then(|p| token(&p).map(|t| (p, t)));
         let greeting = exe.as_ref().map(|(_, t)| hello(t)).unwrap_or_default();
         let launch: Launcher = Box::new(move || match &exe {
-            Ok((program, _)) => Ok(helper_command(program, &[OsStr::new(HELPER_ARG)])),
+            Ok((program, _)) => helper_command(program, &[OsStr::new(HELPER_ARG)]),
             Err(e) => Err(again(e)),
         });
         Helper::with_launcher(
@@ -1038,7 +1064,13 @@ mod tests {
         // not asked for.
         let mut big = vec![R_STAT];
         big.extend_from_slice(&(MAX_FRAME as u32 + 1).to_le_bytes());
-        assert!(read_frame(&mut &big[..], &REPLIES).is_none());
+        // Its payload is there to read: a frame taken one byte past the
+        // limit would be returned whole.
+        big.extend(vec![b'a'; MAX_FRAME + 1]);
+        let mut stream = &big[..];
+        assert!(read_frame(&mut stream, &REPLIES).is_none());
+        assert_eq!(stream.len(), MAX_FRAME + 1, "the payload is not read");
+        assert!(read_frame(&mut &big[..5], &REPLIES).is_none());
         let mut at_limit = vec![R_LINK];
         at_limit.extend_from_slice(&(MAX_FRAME as u32).to_le_bytes());
         at_limit.extend(vec![b'a'; MAX_FRAME]);
@@ -1209,10 +1241,7 @@ mod tests {
         Helper::with_launcher(
             Box::new(move || {
                 starts.set(starts.get() + 1);
-                Ok(helper_command(
-                    "/bin/sh",
-                    &[OsStr::new("-c"), OsStr::new(&script)],
-                ))
+                helper_command("/bin/sh", &[OsStr::new("-c"), OsStr::new(&script)])
             }),
             Box::new(move |_| failed.set(failed.get() + 1)),
             hello(TEST_TOKEN),
@@ -1500,7 +1529,7 @@ mod tests {
         assert!(dead(pid_in(&pidfile)), "the mute helper ran on");
         // Not startable, or no program at all.
         for launch in [
-            Box::new(|| Ok(helper_command("/nonexistent/lsof-rs-helper", &[]))) as Launcher,
+            Box::new(|| helper_command("/nonexistent/lsof-rs-helper", &[])) as Launcher,
             Box::new(|| Err(io::Error::from_raw_os_error(2))),
         ] {
             let failed = Rc::new(Cell::new(0));
@@ -1615,13 +1644,93 @@ mod tests {
         assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
         assert_eq!(said, "none none\n");
         // What `serve` asks of its stdin and stdout.
-        let mut child = helper_command("cat", &[]).spawn().unwrap();
+        let mut child = helper_command("cat", &[]).unwrap().spawn().unwrap();
         assert!(is_pipe(child.stdin.as_ref().unwrap().as_fd()));
         assert!(is_pipe(child.stdout.as_ref().unwrap().as_fd()));
         drop(child.stdin.take());
         let _ = child.wait();
         let file = std::fs::File::create(dir.0.join("f")).unwrap();
         assert!(!is_pipe(file.as_fd()));
+    }
+
+    /// The helper's descriptor 2 is `/dev/null` as lsof opened it, for
+    /// reading and writing (the C's own open of it, `main.c:178`): the
+    /// helper can read it, which finds its end, and write to it.
+    #[test]
+    #[cfg_attr(miri, ignore = "starts processes")]
+    fn the_helpers_descriptor_2_is_dev_null_open_both_ways() {
+        let dir = Scratch::new("null");
+        let out = dir.0.join("out");
+        // `cat <&2` reads descriptor 2 to its end (0), or cannot read one
+        // open for writing alone (1); `echo` cannot write one open for
+        // reading alone. What either says goes where it cannot matter.
+        let script = format!(
+            "cat <&2 >/dev/null; r=$?; echo x >&2; w=$?; echo \"$r $w\" > '{}'",
+            out.display()
+        );
+        let mut child = helper_command("/bin/sh", &[OsStr::new("-c"), OsStr::new(&script)])
+            .unwrap()
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "0 0\n");
+        // And it is the file named, whatever that is: here one that holds
+        // what the helper writes to it.
+        let file = dir.0.join("as-null");
+        std::fs::write(&file, "").unwrap();
+        let mut child = helper_command_with(
+            "/bin/sh",
+            &[OsStr::new("-c"), OsStr::new("echo said >&2")],
+            &file,
+        )
+        .unwrap()
+        .spawn()
+        .unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "said\n");
+        // No such file is no helper, with the error the open gave.
+        let e = helper_command_with("/bin/sh", &[], &dir.0.join("none")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Where `/dev/null` is a FIFO (a `/dev` that is not devfs) the start
+    /// does not wait: lsof's open of it is for reading and writing, which
+    /// finds both ends there, where an open for writing alone waits for a
+    /// reader for ever (DIVERGENCES 144).
+    #[test]
+    #[cfg_attr(miri, ignore = "starts processes")]
+    fn a_fifo_where_dev_null_is_holds_no_start() {
+        let dir = Scratch::new("fifo");
+        let fifo = dir.0.join("null");
+        let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success(), "mkfifo");
+        let (done, waited) = mpsc::channel();
+        let path = fifo.clone();
+        let opener = std::thread::spawn(move || {
+            let started =
+                helper_command_with("/bin/sh", &[OsStr::new("-c"), OsStr::new(":")], &path)
+                    .and_then(|mut cmd| cmd.spawn())
+                    .and_then(|mut child| {
+                        drop(child.stdin.take());
+                        child.wait()
+                    });
+            let _ = done.send(started.map(|status| status.success()));
+        });
+        let got = waited.recv_timeout(Duration::from_secs(10));
+        if got.is_err() {
+            // Let the open that waits go, so that the test ends: both ends,
+            // which wait for nothing.
+            let _both = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo);
+            let _ = opener.join();
+            panic!("the start waited on a FIFO at /dev/null's place");
+        }
+        let _ = opener.join();
+        assert!(matches!(got, Ok(Ok(true))), "{got:?}");
     }
 
     /// lsof's own helper is the running executable by its path, with
@@ -1669,7 +1778,7 @@ mod tests {
                     OsStr::new("--test-threads=1"),
                     OsStr::new("--include-ignored"),
                 ],
-            );
+            )?;
             // The entry serves only where it is asked to.
             cmd.env("LSOF_RS_FB_HELPER_TEST", &mode);
             Ok(cmd)

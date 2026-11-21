@@ -60,6 +60,10 @@ pub struct Reports {
     pub field_help: bool,
     /// `-v`.
     pub version: bool,
+    /// `-D ?` (FreeBSD): the C's report of its device cache file's paths,
+    /// which `usage()` prints after the field letters and before the
+    /// version (`DChelp`, `usage.c:859-860`), and ends the run as `-h` does.
+    pub device_cache: bool,
 }
 
 impl Reports {
@@ -68,23 +72,80 @@ impl Reports {
         help: true,
         field_help: false,
         version: false,
+        device_cache: false,
     };
     /// `-F ?` alone.
     pub const FIELD_HELP: Reports = Reports {
         help: false,
         field_help: true,
         version: false,
+        device_cache: false,
     };
     /// `-v` alone.
     pub const VERSION: Reports = Reports {
         help: false,
         field_help: false,
         version: true,
+        device_cache: false,
     };
 
     /// Whether any was asked for.
     pub fn any(&self) -> bool {
-        self.help || self.field_help || self.version
+        self.help || self.field_help || self.version || self.device_cache
+    }
+}
+
+/// What `-D ?` reports of a build that keeps no device cache, in the words
+/// the C's `report_HASDCACHE()` has for a path list with nothing in it
+/// (`usage.c:117-119`, `:149-151`): no file is read, and none is written
+/// (DIVERGENCES 148).
+pub const DEVICE_CACHE_REPORT: &str = "Device cache file read-only paths:
+    none
+Device cache file write paths:
+    none
+";
+
+/// What a `-D` value asks of the C's device cache (`ctrl_dcache()`,
+/// `arg.c:483-565`): `?`, `i`, `b`, `r` or `u`, the last three with a path
+/// after them. lsof-rs keeps no cache, so each but `?` is read, checked and
+/// then does nothing: `/dev` is read on every run, as under the C's `-D i`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceCache {
+    /// `?`: report the cache file's paths, and list nothing.
+    Report,
+    /// `i`: ignore the cache. What lsof-rs always does.
+    Ignore,
+    /// `b[path]`: the C builds the cache file anew. Nothing is written.
+    Build,
+    /// `r[path]`: the C reads the cache file and writes none. Nothing is
+    /// read.
+    Read,
+    /// `u[path]`: the C reads the cache file and rebuilds it when it must
+    /// (its default). Nothing is read or written.
+    Update,
+}
+
+/// A `-D` value as `ctrl_dcache()` reads it, or the C's line for one it
+/// refuses (measured on FreeBSD 14.5): no value, `no device cache option
+/// control string`; `?` with anything after it, `nothing should follow -D?`;
+/// `i` (either case) alone; `b`, `r`, `u` (either case) and whatever follows,
+/// which the C takes for the file's path after the blanks and tabs before
+/// it; anything else, `unknown -D option: ` and the value as it stands. The
+/// C refuses `b` and `u`, and `r` with a path, to a setuid-root lsof (`-D
+/// option restricted to root`): lsof-rs is not installed so, and reads and
+/// writes no file here, so it does not ask.
+pub fn device_cache(value: Option<&[u8]>) -> Result<DeviceCache, String> {
+    let Some(value) = value else {
+        return Err("no device cache option control string".to_string());
+    };
+    match (value.first(), value.len()) {
+        (Some(b'?'), 1) => Ok(DeviceCache::Report),
+        (Some(b'?'), _) => Err("nothing should follow -D?".to_string()),
+        (Some(b'i' | b'I'), 1) => Ok(DeviceCache::Ignore),
+        (Some(b'b' | b'B'), _) => Ok(DeviceCache::Build),
+        (Some(b'r' | b'R'), _) => Ok(DeviceCache::Read),
+        (Some(b'u' | b'U'), _) => Ok(DeviceCache::Update),
+        _ => Err(format!("unknown -D option: {}", shown_bytes(value))),
     }
 }
 
@@ -1594,9 +1655,16 @@ fn parse_options<'s>(
                 // either prefix, so `-X -X` is off again and `-X -X -i` is
                 // no conflict (DIVERGENCES 45): the C judges `-i` against
                 // the value every `-X` leaves.
-                'X' => sel.skip_inet_tables = !sel.skip_inet_tables,
+                'X' if !freebsd_options() => sel.skip_inet_tables = !sel.skip_inet_tables,
                 'N' => sel.nfs_only = true,
-                'Z' => {
+                // `+M`, `-M`: whether the C asks the portmapper for the
+                // programs registered on a port it names (`FportMap`; `-M`
+                // is its default). FreeBSD's C has the pair (`[+|-M]`) and
+                // Linux's does not. lsof-rs asks no portmapper, and on
+                // FreeBSD names no port either: both are read, and change
+                // nothing (DIVERGENCES 183).
+                'M' if freebsd_options() => {}
+                'Z' if !freebsd_options() => {
                     if (host.selinux_enabled)() {
                         // `-Z [context]`. The value is attached or the next
                         // word, and a word that opens an option is not one —
@@ -1623,7 +1691,7 @@ fn parse_options<'s>(
                     j = chars.len();
                     continue;
                 }
-                'e' => {
+                'e' if !freebsd_options() => {
                     // `-e s` / `+e s`. The value may be attached or the next
                     // word, and the C takes that word WHATEVER it is — a
                     // missing value is reported by quoting what it found:
@@ -1676,7 +1744,7 @@ fn parse_options<'s>(
                 'U' => sel.unix_only = true,
                 // `+E` also lists the peers' own files. `-E` after `+E` must
                 // not downgrade that — lsof treats +E as a superset of -E.
-                'E' => {
+                'E' if !freebsd_options() => {
                     if plus {
                         sel.endpoints = Some(EndpointMode::Files);
                     } else if sel.endpoints != Some(EndpointMode::Files) {
@@ -2024,6 +2092,23 @@ fn parse_options<'s>(
                 // `unsupported option` (DIVERGENCES 148).
                 // `--` is no value to `GetOpt` here either, as for `-Z`:
                 // `-D -- -W` is `-D`'s line alone, `-W` a name (measured).
+                // FreeBSD's `-D` is the C's device cache control
+                // (`HASDCACHE`), read as `ctrl_dcache()` reads it and then
+                // without effect: lsof-rs keeps no cache (DIVERGENCES 148).
+                // The value is `GetOpt`'s, the rest of the word or else the
+                // next word whatever it opens with (measured: `-D -p 1` is
+                // `unknown -D option: -p`).
+                'D' if !plus && freebsd_options() => {
+                    let value = path_value(&chars, j, letters_ok, &raw, &mut i);
+                    took_bytes = true;
+                    match device_cache(value.as_deref().map(std::ffi::OsStr::as_encoded_bytes)) {
+                        Ok(DeviceCache::Report) => reports.device_cache = true,
+                        Ok(_) => {}
+                        Err(line) => early.line(&line),
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'D' | 'm' if !plus => {
                     if c == 'm' && !cfg!(target_os = "freebsd") {
                         early.line("-m not supported");
@@ -3249,6 +3334,31 @@ thread_local! {
         const { std::cell::Cell::new(cfg!(target_os = "freebsd")) };
 }
 
+/// Whether the options are those of FreeBSD's C (measured on 14.5, the
+/// autotools build): `-D` is its device cache control, `+M` and `-M` its
+/// portmapper switch, `-s` knows no `UDP:` protocol, and `-e`, `-E`, `-X`
+/// and `-Z`, which its `GetOpt` string lacks, are illegal option characters
+/// (DIVERGENCES 148, 183).
+#[cfg(not(test))]
+fn freebsd_options() -> bool {
+    cfg!(target_os = "freebsd")
+}
+
+/// [`freebsd_options`] in a test: off on every host, FreeBSD too, unless the
+/// test turns it on ([`FREEBSD_OPTIONS`]), so that a test of `-e`, `-E`,
+/// `-X` or `-Z` reads the C that has the option wherever it runs, and the
+/// tests of FreeBSD's set run on every host.
+#[cfg(test)]
+fn freebsd_options() -> bool {
+    FREEBSD_OPTIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread's parses read the options as FreeBSD's C does.
+    static FREEBSD_OPTIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Whether `--etw`, `--unicode` and `--ascii` are lsof-rs's own options:
 /// on Windows alone, where there is no C to match (DIVERGENCES 155).
 #[cfg(not(test))]
@@ -3683,7 +3793,10 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str, early: &mut Early) {
     let lower = value.get(..4).map(str::to_ascii_lowercase);
     let proto = match lower.as_deref() {
         Some("tcp:") => "TCP",
-        Some("udp:") => "UDP",
+        // FreeBSD's C knows TCP alone (`USE_LIB_PRINT_TCPTPI`,
+        // `arg.c:1750-1756`): measured, `-s UDP:Idle` is its `unknown -s
+        // protocol: "UDP:Idle"`.
+        Some("udp:") if !freebsd_options() => "UDP",
         _ => return early.line(&format!("unknown -s protocol: \"{}\"", shown(value))),
     };
     let names = value.get(4..).unwrap_or("");
@@ -4354,7 +4467,31 @@ mod tests {
             .expect("a filter");
         assert_eq!(f.include, [Listen, Established]);
         assert_eq!(f.exclude, [TimeWait]);
-        if cfg!(not(windows)) {
+        if cfg!(target_os = "freebsd") {
+            // FreeBSD's names (`tcpstates[]`), each measured against its C
+            // on 14.5: `CLOSED` and `SYN_RCVD`, the two `FIN_WAIT_`s with
+            // their second underscore, and neither of Linux's `CLOSE` and
+            // `SYN_RECV`, nor Windows' `DELETE_TCB`.
+            use lsof_core::TcpState::{Closed, FinWaitOne, FinWaitTwo, SynReceived};
+            assert_eq!(
+                states(&["-sTCP:closed,syn_rcvd"]).unwrap().unwrap().include,
+                [Closed, SynReceived]
+            );
+            assert_eq!(
+                states(&["-sTCP:FIN_WAIT_1,fin_wait_2"])
+                    .unwrap()
+                    .unwrap()
+                    .include,
+                [FinWaitOne, FinWaitTwo]
+            );
+            for name in ["close", "syn_recv", "FIN_WAIT1", "DELETE_TCB"] {
+                assert_eq!(
+                    states(&[&format!("-sTCP:{name}")]).err(),
+                    Some(format!("unknown TCP state name: {name}"))
+                );
+            }
+            let _ = Close;
+        } else if cfg!(not(windows)) {
             // The Linux names, which are not Windows': CLOSE and SYN_RECV.
             assert_eq!(states(&["-sTCP:close"]).unwrap().unwrap().include, [Close]);
             assert_eq!(
@@ -7540,13 +7677,20 @@ mod tests {
             columns(&["+d", &d, "-x", "/tmp"]).unwrap_err(),
             each("unknown cross-over option: ", "/tmp")
         );
+        // FreeBSD's C has the letter `n` (and `c` and `f`), so there
+        // `/dev/null`'s `n` is no error: measured on 14.5, the eight lines.
+        let no_letter = if has_file_struct() {
+            "/dev/ull"
+        } else {
+            "/dev/null"
+        };
         assert_eq!(
             columns(&["-f", "/dev/null"]).unwrap_err(),
-            each("unknown file struct option: ", "/dev/null")
+            each("unknown file struct option: ", no_letter)
         );
         assert_eq!(
             columns(&["+f", "/dev/null"]).unwrap_err(),
-            each("unknown file struct option: ", "/dev/null")
+            each("unknown file struct option: ", no_letter)
         );
         // `g` is the C's file-flags letter (DIVERGENCES 46): `-f g` hides the
         // flags, which is the default, and leaves the path arguments alone.
@@ -7748,6 +7892,227 @@ mod tests {
             NO_FILE_FLAGS,
             "WARNING: can't report file flags; disregarding +f."
         );
+    }
+
+    /// `run` with the options read as FreeBSD's C reads them
+    /// ([`freebsd_options`]), on any host.
+    fn as_freebsd<T>(run: impl FnOnce() -> T) -> T {
+        FREEBSD_OPTIONS.with(|on| on.set(true));
+        let out = run();
+        FREEBSD_OPTIONS.with(|on| on.set(false));
+        out
+    }
+
+    /// A `-D` value as the C's `ctrl_dcache()` reads it, each line and each
+    /// acceptance measured against the C on FreeBSD 14.5 (DIVERGENCES 148).
+    #[test]
+    fn a_device_cache_value_is_read_as_ctrl_dcache_reads_it() {
+        use DeviceCache::{Build, Ignore, Read, Report, Update};
+        for (value, want) in [
+            (&b"?"[..], Report),
+            (b"i", Ignore),
+            (b"I", Ignore),
+            (b"b", Build),
+            (b"B", Build),
+            (b"b/tmp/built", Build),
+            (b"r", Read),
+            (b"R", Read),
+            (b"r/tmp/nosuch", Read),
+            (b"r\t /tmp/x y", Read),
+            (b"r/\xff", Read),
+            (b"u", Update),
+            (b"U", Update),
+            (b"u/tmp/upd", Update),
+        ] {
+            assert_eq!(device_cache(Some(value)), Ok(want), "{value:?}");
+        }
+        for (value, line) in [
+            (None, "no device cache option control string"),
+            (Some(&b"??"[..]), "nothing should follow -D?"),
+            (Some(b"?x"), "nothing should follow -D?"),
+            (Some(b""), "unknown -D option: "),
+            (Some(b"x"), "unknown -D option: x"),
+            (Some(b"ix"), "unknown -D option: ix"),
+            (Some(b"i "), "unknown -D option: i "),
+            (Some(b"-p"), "unknown -D option: -p"),
+            (Some(b"\xff"), "unknown -D option: \\xff"),
+            (Some(b"x\x1b[2J"), "unknown -D option: x^[[2J"),
+        ] {
+            assert_eq!(device_cache(value), Err(line.to_string()), "{value:?}");
+        }
+    }
+
+    /// FreeBSD's `-D` through the parser: the value is the rest of the word
+    /// or the next word whatever it opens with, `--` aside; `i`, `b`, `r`
+    /// and `u` change nothing of the run; `?` is a report that ends it; and
+    /// each refusal is the C's line, read on after (all measured on 14.5).
+    /// Elsewhere `-D` is the Linux C's `unsupported option: -D`.
+    #[test]
+    #[cfg(unix)]
+    fn freebsds_dash_d_is_parsed_and_changes_nothing() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        assert_eq!(
+            columns(&["-D", "i"]).unwrap_err(),
+            "unsupported option: -D",
+            "not FreeBSD's options"
+        );
+        as_freebsd(|| {
+            // The run as its `Debug` text: every field of the selection
+            // and of the columns.
+            let shape = |argv: &[&str]| format!("{:?}", columns(argv).unwrap());
+            let plain = shape(&["-a", "-p", "1"]);
+            for argv in [
+                &["-D", "i", "-a", "-p", "1"][..],
+                &["-Di", "-a", "-p", "1"],
+                &["-aDi", "-p", "1"],
+                &["-a", "-p", "1", "-D", "I"],
+                &["-D", "r", "-a", "-p", "1"],
+                &["-D", "r\t /tmp/x y", "-a", "-p", "1"],
+                &["-Dr/tmp/nosuch", "-a", "-p", "1"],
+                &["-D", "b", "-a", "-p", "1"],
+                &["-D", "b/tmp/built", "-a", "-p", "1"],
+                &["-D", "u", "-a", "-p", "1"],
+                &["-D", "U", "-D", "i", "-a", "-p", "1"],
+            ] {
+                assert_eq!(shape(argv), plain, "{argv:?}");
+            }
+            // `+D` is still the directory tree.
+            assert_eq!(
+                columns(&["+D"]).unwrap_err(),
+                "+d not followed by a directory path"
+            );
+            for (argv, line) in [
+                (&["-D"][..], "no device cache option control string"),
+                (&["-D", "--"], "no device cache option control string"),
+                (&["-D", "--", "-W"], "no device cache option control string"),
+                (&["-D", "-p", "1"], "unknown -D option: -p"),
+                (&["-D", "x", "-p", "1"], "unknown -D option: x"),
+                (&["-D", "ix"], "unknown -D option: ix"),
+                (&["-D", ""], "unknown -D option: "),
+                (&["-D", "??"], "nothing should follow -D?"),
+                (
+                    &["-D", "x", "-W"],
+                    "unknown -D option: x\nlsof: illegal option character: W",
+                ),
+            ] {
+                assert_eq!(columns(argv).unwrap_err(), line, "{argv:?}");
+            }
+            // A value that is not UTF-8 is a value like any other.
+            for argv in [vec![os(b"-D"), os(b"\xff")], vec![os(b"-D\xff")]] {
+                let (got, _) = parse_reporting(
+                    argv.clone(),
+                    &SafeFs::in_process(),
+                    &no_mounts,
+                    &HostChecks::DEFERRED,
+                );
+                let e = got.unwrap_err();
+                assert!(!e.is_fatal(), "{argv:?}");
+                assert_eq!(e.to_string(), "unknown -D option: \\xff", "{argv:?}");
+            }
+            let (got, _) = parse_reporting(
+                vec![os(b"-Dr/\xff"), os(b"-p"), os(b"1")],
+                &SafeFs::in_process(),
+                &no_mounts,
+                &HostChecks::DEFERRED,
+            );
+            assert!(matches!(got, Ok(Action::Run { .. })), "a path is bytes");
+            // `-D ?`: the report, and nothing listed, whatever else was
+            // asked; after an error it is recorded and the error stands.
+            let reported = |argv: &[&str]| {
+                parse_reporting(
+                    argv.iter().map(|s| s.to_string()).collect(),
+                    &SafeFs::in_process(),
+                    &no_mounts,
+                    &HostChecks::DEFERRED,
+                )
+            };
+            let dc = Reports {
+                device_cache: true,
+                ..Reports::default()
+            };
+            assert!(dc.any());
+            for argv in [&["-D", "?"][..], &["-D?"], &["-D", "?", "-p", "1"]] {
+                let (got, reports) = reported(argv);
+                assert!(matches!(got, Ok(Action::Report(r)) if r == dc), "{argv:?}");
+                assert_eq!(reports, dc, "{argv:?}");
+            }
+            let (got, reports) = reported(&["-D", "?", "-h", "-v"]);
+            let all = Reports {
+                help: true,
+                version: true,
+                ..dc
+            };
+            assert!(matches!(got, Ok(Action::Report(r)) if r == all));
+            assert_eq!(reports, all);
+            let (got, reports) = reported(&["-D", "?", "-W"]);
+            assert_eq!(got.unwrap_err().to_string(), "illegal option character: W");
+            assert_eq!(reports, dc);
+        });
+        assert_eq!(
+            DEVICE_CACHE_REPORT,
+            "Device cache file read-only paths:\n    none\nDevice cache file write paths:\n    none\n"
+        );
+    }
+
+    /// FreeBSD's C has no `-e`, `-E`, `-X` or `-Z` (each `illegal option
+    /// character`, the word after it a name, and the letters after it read
+    /// on), has `+M` and `-M`, which change nothing here, and no `UDP:`
+    /// protocol for `-s`: each measured on 14.5 (DIVERGENCES 183).
+    #[test]
+    fn freebsds_option_letters_are_its_cs() {
+        let ill = |c: &str| format!("illegal option character: {c}");
+        // Elsewhere each is the option it was.
+        assert!(columns(&["-X", "-p", "1"]).unwrap().1.skip_inet_tables);
+        assert!(columns(&["-E", "-p", "1"]).unwrap().1.endpoints.is_some());
+        assert_eq!(columns(&["-M"]).unwrap_err(), ill("M"));
+        assert_eq!(
+            columns(&["-sUDP:"]).unwrap_err(),
+            "no UDP state names in: UDP:"
+        );
+        as_freebsd(|| {
+            for (argv, line) in [
+                (&["-e", "/tmp"][..], ill("e")),
+                (&["+e", "/tmp"], ill("e")),
+                (&["-E"], ill("E")),
+                (&["+E"], ill("E")),
+                (&["-X"], ill("X")),
+                (&["-Z"], ill("Z")),
+                (&["-Z", "x"], ill("Z")),
+                (&["-aE", "-p", "1"], ill("E")),
+                (
+                    &["-Xe", "/tmp"],
+                    format!("{}\nlsof: {}", ill("X"), ill("e")),
+                ),
+                (&["-sUDP:"], "unknown -s protocol: \"UDP:\"".to_string()),
+                (
+                    &["-s", "UDP:Idle"],
+                    "unknown -s protocol: \"UDP:Idle\"".to_string(),
+                ),
+                (&["-sudp:^x"], "unknown -s protocol: \"udp:^x\"".to_string()),
+                (&["-sTCP:"], "no TCP state names in: TCP:".to_string()),
+            ] {
+                assert_eq!(columns(argv).unwrap_err(), line, "{argv:?}");
+            }
+            // `-Z` takes no word there: the letter after it is read on.
+            assert_eq!(
+                columns(&["-ZW"]).unwrap_err(),
+                format!("{}\nlsof: {}", ill("Z"), ill("W"))
+            );
+            // `-M` and `+M`, alone or among other letters: read, no effect.
+            let shape = |argv: &[&str]| format!("{:?}", columns(argv).unwrap());
+            let plain = shape(&["-a", "-p", "1"]);
+            for argv in [
+                &["-M", "-a", "-p", "1"][..],
+                &["+M", "-a", "-p", "1"],
+                &["-aM", "-p", "1"],
+                &["-Ma", "-p", "1"],
+            ] {
+                assert_eq!(shape(argv), plain, "{argv:?}");
+            }
+            // TCP states are read as ever.
+            assert!(columns(&["-sTCP:LISTEN"]).unwrap().1.state_filter.is_some());
+        });
     }
 
     /// Where the backend records no flags (Windows), `g` and `G` are refused
@@ -8100,8 +8465,9 @@ mod tests {
             .unwrap_err(),
             // Each conflicting state in the order of the platform's state
             // table: the C's (Linux) has ESTABLISHED before LISTEN, the
-            // Windows table (MIB_TCP_STATE) LISTEN first.
-            if cfg!(windows) {
+            // Windows table (MIB_TCP_STATE) LISTEN first, and FreeBSD's
+            // (`tcpstates[]`) too: measured against its C on 14.5.
+            if cfg!(any(windows, target_os = "freebsd")) {
                 "can't include and exclude TCP state: LISTEN\n\
                  lsof: can't include and exclude TCP state: ESTABLISHED\n\
                  lsof: -x must accompany +d or +D"
@@ -9249,6 +9615,7 @@ mod tests {
             help: true,
             field_help: true,
             version: true,
+            device_cache: false,
         };
         for argv in [
             &["-h", "-v", "-F", "?"][..],
@@ -9264,6 +9631,7 @@ mod tests {
             help: true,
             field_help: false,
             version: true,
+            device_cache: false,
         };
         assert!(matches!(got, Ok(Action::Report(r)) if r == help_and_version));
         assert_eq!(reports, help_and_version);
@@ -9276,6 +9644,7 @@ mod tests {
                 help: false,
                 field_help: true,
                 version: true,
+                device_cache: false,
             }
         );
         let (got, reports) = reported(&["-x", "-h"]);
@@ -9352,20 +9721,33 @@ mod tests {
             selinux_enabled: &disabled,
             ..HostChecks::DEFERRED
         };
-        for (letter, line) in [
-            (&b"-Z"[..], "-Z limited to SELinux"),
-            (b"-m", "-m not supported"),
-            (b"-D", "unsupported option: -D"),
-        ] {
-            let (got, _) = parse_reporting(
-                vec![os(letter), os(b"\xff")],
-                &SafeFs::in_process(),
-                &no_mounts,
-                &host,
-            );
-            let e = got.unwrap_err();
-            assert!(!e.is_fatal(), "{letter:?}");
-            assert_eq!(e.to_string(), line, "{letter:?}");
+        // `-m` is the Linux C's `-m not supported`; on FreeBSD, whose C
+        // takes the word for its kernel memory file, lsof-rs's own
+        // `unsupported option` (DIVERGENCES 148).
+        let dash_m = if cfg!(target_os = "freebsd") {
+            "unsupported option: -m"
+        } else {
+            "-m not supported"
+        };
+        // Twice: as the words are, read with stand-ins for their bytes; and
+        // with a name that holds a stand-in's own character as text, where
+        // stand-ins cannot be used, so the dropped word is not marked read
+        // as text and only the option's having taken it keeps it unread.
+        let stand_in = "\u{10FF41}".as_bytes();
+        assert!(!stand_ins_usable(&[os(b"\xff"), os(stand_in)]));
+        for extra in [None, Some(stand_in)] {
+            for (letter, line) in [
+                (&b"-Z"[..], "-Z limited to SELinux"),
+                (b"-m", dash_m),
+                (b"-D", "unsupported option: -D"),
+            ] {
+                let mut words = vec![os(letter), os(b"\xff")];
+                words.extend(extra.map(os));
+                let (got, _) = parse_reporting(words, &SafeFs::in_process(), &no_mounts, &host);
+                let e = got.unwrap_err();
+                assert!(!e.is_fatal(), "{letter:?} {extra:?}");
+                assert_eq!(e.to_string(), line, "{letter:?} {extra:?}");
+            }
         }
     }
 
@@ -9648,9 +10030,15 @@ mod tests {
             ),
             (vec![os(b"+f\xff")], "unknown file struct option: \\xff"),
             (vec![os(b"-af\xff")], "unknown file struct option: \\xff"),
+            // FreeBSD's C has the letter `c`: measured on 14.5, the one
+            // line for the byte.
             (
                 vec![os(b"-fc\xff")],
-                "unknown file struct option: c\nlsof: unknown file struct option: \\xff",
+                if has_file_struct() {
+                    "unknown file struct option: \\xff"
+                } else {
+                    "unknown file struct option: c\nlsof: unknown file struct option: \\xff"
+                },
             ),
             (vec![os(b"+p"), os(b"\xff")], "illegal process ID: \\xff"),
             (vec![os(b"+g\xff")], "illegal process group ID: \\xff"),
@@ -9670,7 +10058,14 @@ mod tests {
                 "unsupported TCP/TPI info selection: \\xff",
             ),
             (vec![os(b"+Z\xff")], "-Z limited to SELinux"),
-            (vec![os(b"-m\xff")], "-m not supported"),
+            (
+                vec![os(b"-m\xff")],
+                if cfg!(target_os = "freebsd") {
+                    "unsupported option: -m"
+                } else {
+                    "-m not supported"
+                },
+            ),
             (vec![os(b"-D\xff")], "unsupported option: -D"),
         ] {
             let (got, _) = parse_reporting(
@@ -9706,9 +10101,11 @@ mod tests {
             [os(b"\xffx")]
         );
         assert_eq!(sel(vec![os(b"-cz\xc3")]).commands, [os(b"z\xc3")]);
-        let err = parse(vec![os(b"-c"), os(&[0xff; 16])]).unwrap_err();
+        // 20 bytes: past Linux's 15 and FreeBSD's 19 (measured on FreeBSD
+        // 14.5: 16 and 19 are taken there, 20 refused in these words).
+        let err = parse(vec![os(b"-c"), os(&[0xff; 20])]).unwrap_err();
         assert!(
-            err.contains(&format!("\"-c {}\" length (16)", "\\xff".repeat(16))),
+            err.contains(&format!("\"-c {}\" length (20)", "\\xff".repeat(20))),
             "{err}"
         );
         // A byte that is no character, where a letter stands, is the C's

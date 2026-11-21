@@ -234,7 +234,11 @@ impl InetSpec {
         let Some(sock) = &f.socket else {
             return false;
         };
-        if !f.is_internet() || !family_matches(self.family, f) {
+        // A FreeBSD row is compared as that dialect's `ent_inaddr()` hands
+        // it to `is_nw_addr()`: by the ends it entered and the family it
+        // entered them in, below (DIVERGENCES 180).
+        let bsd = sock.is_bsd();
+        if !f.is_internet() || !(bsd || family_matches(self.family, f)) {
             return false;
         }
         // Protocol names are family-agnostic (like TCP/UDP): `-iICMP` matches
@@ -255,10 +259,22 @@ impl InetSpec {
         // (`dsock.c`: `if (tp->faddr || tp->fport) fa = …; else fa = NULL`),
         // so a listener's `0.0.0.0:0` far end is not port 0: measured, `-i
         // :0-` selects no listener.
+        //
+        // FreeBSD's dialect enters an end whatever it holds, and the foreign
+        // end of every IPv4 socket (`SocketInfo::entered_ends`), so there
+        // `-i :0` selects a listener by its `*:*` far end; a socket it
+        // entered no end for (no PCB) no specification selects; and the
+        // family a specification names is the one the ends were entered in,
+        // IPv4 for an IPv6 socket whose addresses are IPv4-mapped (`af !=
+        // n->af`). All measured on FreeBSD 14.5.
+        let [local, remote] = sock.entered_ends();
         let end_matches = |a: Option<std::net::SocketAddr>| -> bool {
-            let Some(a) = a.filter(|a| !a.ip().is_unspecified() || a.port() != 0) else {
+            let Some(a) = a else {
                 return false;
             };
+            if bsd && self.family.is_some_and(|fam| (fam == 6) != a.is_ipv6()) {
+                return false;
+            }
             if let Some(h) = self.host {
                 if a.ip() != h {
                     return false;
@@ -270,10 +286,10 @@ impl InetSpec {
                     .iter()
                     .any(|&(lo, hi)| (lo..=hi).contains(&u32::from(a.port())))
         };
-        if self.host.is_none() && self.ports.is_empty() {
+        if !bsd && self.host.is_none() && self.ports.is_empty() {
             return true;
         }
-        end_matches(sock.local) || end_matches(sock.remote)
+        end_matches(local) || end_matches(remote)
     }
 }
 
@@ -1279,7 +1295,7 @@ impl Selection {
         if self.nfs_only && self.is_nfs_file(f) {
             k.insert(SelKinds::NFS);
         }
-        if self.inet.all_matches(f) {
+        if self.bare_inet_selects(f) {
             k.insert(SelKinds::NET);
         }
         if self.inet.specs.iter().any(|s| s.matches(f)) {
@@ -1405,6 +1421,30 @@ impl Selection {
         self.state_filter
             .as_ref()
             .is_none_or(|filter| filter.admits(f))
+    }
+
+    /// Whether the bare `-i` selects `f`: [`InetFilter::all_matches`], but
+    /// for a FreeBSD row once `-s` names a TCP state to include. That
+    /// dialect then gives `SELNET` to a TCP socket in one of those states,
+    /// whatever IP version `-i4` or `-i6` asked for, and to no other
+    /// Internet socket (`dsock.c:441-447`: `if (!TcpStIn && !UdpStIn)`;
+    /// `ckstate()`, `:289-292`: `TcpStI[tsnx]` alone). Measured on FreeBSD
+    /// 14.5: `-i -s TCP:CLOSED` lists the closed TCP sockets and no UDP
+    /// one, `-i 4 -s TCP:ESTABLISHED` the IPv6 connections too (DIVERGENCES
+    /// 181).
+    fn bare_inet_selects(&self, f: &OpenFile) -> bool {
+        let include = self
+            .state_filter
+            .as_ref()
+            .map_or(&[][..], |s| &s.include[..]);
+        match f.socket.as_deref() {
+            Some(sock) if sock.is_bsd() && !include.is_empty() => {
+                self.inet.bare()
+                    && f.is_internet()
+                    && sock.filter_state().is_some_and(|st| include.contains(&st))
+            }
+            _ => self.inet.all_matches(f),
+        }
     }
 
     /// Whether `p` is absolutely excluded by a `^` negation on `-u`, `-c`,
@@ -5389,6 +5429,188 @@ mod tests {
         );
     }
 
+    /// `f` as the FreeBSD backend makes it: that dialect's record, and the
+    /// ends as it entered them.
+    fn bsd(mut f: OpenFile, local: Option<&str>, remote: Option<&str>) -> OpenFile {
+        use crate::model::{BsdSocket, TcpExtInfo};
+        let s = f.socket.as_deref_mut().expect("a socket row");
+        s.local = local.map(|a| a.parse().unwrap());
+        s.remote = remote.map(|a| a.parse().unwrap());
+        s.tcp = Some(TcpExtInfo {
+            bsd: Some(BsdSocket::default()),
+            ..Default::default()
+        });
+        f
+    }
+
+    /// FreeBSD's dialect enters an end whatever it holds, and the foreign
+    /// end of every IPv4 socket (DIVERGENCES 180). Measured on 14.5: `-i :0`
+    /// selects an IPv4 listener (its `*:*` far end), an unbound socket of
+    /// either version (its `*:*` near end) and no IPv6 listener; a socket
+    /// with no PCB, which has no end, is selected by no specification.
+    #[test]
+    fn a_freebsd_end_is_an_end_whatever_it_holds() {
+        let listen = TcpState::Listen;
+        let v4 = bsd(
+            tcp(4, 1, None, listen),
+            Some("127.0.0.1:41000"),
+            Some("0.0.0.0:0"),
+        );
+        let mut v6 = bsd(tcp(11, 1, None, listen), Some("[::1]:41002"), None);
+        v6.file_type = FileType::Ipv6;
+        let mut unbound6 = bsd(tcp(10, 1, None, TcpState::Closed), Some("[::]:0"), None);
+        unbound6.file_type = FileType::Ipv6;
+        let no_pcb = bsd(tcp(24, 1, None, listen), None, None);
+        let zero = spec(":0", &[(0, 0)], None);
+        assert!(zero.matches(&v4), "the far end, 0.0.0.0:0");
+        assert!(!zero.matches(&v6), "no far end was entered");
+        assert!(zero.matches(&unbound6), "the near end, [::]:0");
+        assert!(spec(":41000", &[(41000, 41000)], None).matches(&v4));
+        assert!(spec("@127.0.0.1", &[], Some("127.0.0.1")).matches(&v4));
+        assert!(!spec("@127.0.0.2", &[], Some("127.0.0.2")).matches(&v4));
+        // A protocol alone needs an end to be asked about.
+        let proto = InetSpec {
+            text: "TCP".into(),
+            proto: Some(Protocol::Tcp),
+            ..Default::default()
+        };
+        assert!(proto.matches(&v4) && proto.matches(&unbound6));
+        assert!(
+            !proto.matches(&no_pcb),
+            "no end, so `is_nw_addr()` is not asked"
+        );
+        assert!(!zero.matches(&no_pcb));
+        let udp_only = InetSpec {
+            proto: Some(Protocol::Udp),
+            ..proto.clone()
+        };
+        assert!(!udp_only.matches(&v4));
+        // Another backend's row with the same ends: the all-zero end is none,
+        // whatever else the row carries that is not FreeBSD's record.
+        let mut linux = tcp(4, 41000, Some("0.0.0.0:0"), listen);
+        assert!(!zero.matches(&linux));
+        assert!(proto.matches(&linux));
+        if let Some(s) = linux.socket.as_deref_mut() {
+            s.tcp = Some(crate::model::TcpExtInfo::default());
+        }
+        assert!(!zero.matches(&linux));
+    }
+
+    /// The family a specification names is the one FreeBSD's dialect entered
+    /// the ends in: IPv4 for an IPv6 socket whose addresses are IPv4-mapped
+    /// (measured: `-i 4TCP` lists the accepted end of a dual-stack listener,
+    /// `-i 6TCP` does not), while the bare `-i4` and `-i6` go by the
+    /// socket's own version (`-i 6` lists it, `-i 4` does not).
+    #[test]
+    fn a_freebsd_specification_names_the_family_of_the_ends() {
+        let est = TcpState::Established;
+        let mut mapped = bsd(
+            tcp(19, 1, None, est),
+            Some("127.0.0.1:41004"),
+            Some("127.0.0.1:57490"),
+        );
+        mapped.file_type = FileType::Ipv6;
+        let mut v6 = bsd(
+            tcp(13, 1, None, est),
+            Some("[::1]:41002"),
+            Some("[::1]:40324"),
+        );
+        v6.file_type = FileType::Ipv6;
+        let fam = |family: u8, port: u32| InetSpec {
+            family: Some(family),
+            ..spec("", &[(port, port)], None)
+        };
+        assert!(fam(4, 41004).matches(&mapped));
+        assert!(!fam(6, 41004).matches(&mapped));
+        assert!(fam(6, 41002).matches(&v6));
+        assert!(!fam(4, 41002).matches(&v6));
+        let proto = |family: u8| InetSpec {
+            family: Some(family),
+            proto: Some(Protocol::Tcp),
+            ..Default::default()
+        };
+        assert!(proto(4).matches(&mapped) && !proto(6).matches(&mapped));
+        assert!(proto(6).matches(&v6) && !proto(4).matches(&v6));
+        // The bare form: the socket's own version.
+        let mut six = InetFilter::default();
+        six.add_all(Some(6));
+        assert!(six.all_matches(&mapped) && six.all_matches(&v6));
+        let mut four = InetFilter::default();
+        four.add_all(Some(4));
+        assert!(!four.all_matches(&mapped));
+        // Another backend's IPv6 row is asked by its type, as before.
+        let mut linux = tcp(19, 41004, Some("127.0.0.1:57490"), est);
+        linux.file_type = FileType::Ipv6;
+        assert!(fam(6, 41004).matches(&linux) && !fam(4, 41004).matches(&linux));
+    }
+
+    /// With a TCP state to include, FreeBSD's bare `-i` selects the TCP
+    /// sockets in it, of either IP version, and no other Internet socket
+    /// (DIVERGENCES 181). Measured on 14.5: `-i -s TCP:CLOSED` lists the
+    /// closed TCP sockets and no UDP one; `-i 4 -s TCP:ESTABLISHED` the IPv6
+    /// connections too; an exclusion alone leaves `-i` as it was.
+    #[test]
+    fn a_freebsd_state_inclusion_is_what_the_bare_i_selects() {
+        let closed = bsd(
+            tcp(3, 1, None, TcpState::Closed),
+            Some("0.0.0.0:0"),
+            Some("0.0.0.0:0"),
+        );
+        let mut est6 = bsd(
+            tcp(12, 1, None, TcpState::Established),
+            Some("[::1]:40324"),
+            Some("[::1]:41002"),
+        );
+        est6.file_type = FileType::Ipv6;
+        let dgram = bsd(udp(7, 1, None), Some("0.0.0.0:0"), Some("0.0.0.0:0"));
+        let kept = |sel: &Selection| -> Vec<u64> {
+            let mut p = who(10, "socks", 0, 10);
+            p.files = vec![closed.clone(), est6.clone(), dgram.clone()];
+            sel.apply(vec![p])
+                .iter()
+                .flat_map(|p| &p.files)
+                .map(|f| match f.fd {
+                    FdType::Handle(n) => n,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        let with = |family: Option<u8>, include: &[TcpState], exclude: &[TcpState]| {
+            let mut sel = states(include, exclude);
+            sel.inet.add_all(family);
+            sel
+        };
+        assert_eq!(kept(&with(None, &[TcpState::Closed], &[])), [3]);
+        assert_eq!(kept(&with(Some(4), &[TcpState::Established], &[])), [12]);
+        assert_eq!(kept(&with(Some(4), &[TcpState::Closed], &[])), [3]);
+        // An exclusion alone: `-i` as ever, less the excluded state.
+        assert_eq!(kept(&with(None, &[], &[TcpState::Closed])), [12, 7]);
+        assert_eq!(kept(&with(Some(4), &[], &[TcpState::Established])), [3, 7]);
+        // No `-s`: the version decides, and the UDP socket is listed.
+        let mut plain = Selection::default();
+        plain.inet.add_all(Some(4));
+        assert_eq!(kept(&plain), [3, 7]);
+        // No bare `-i`: the inclusion selects nothing by itself, and only
+        // vetoes (the sockets not in it), as on every platform.
+        assert_eq!(kept(&states(&[TcpState::Closed], &[])), [3, 7]);
+        let other_pid = Selection {
+            pids: vec![99],
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(
+            kept(&other_pid),
+            [],
+            "`-p 99 -s TCP:CLOSED` selects no socket"
+        );
+        // Another backend's rows keep the rule they had: the version, and a
+        // socket with no TCP state is not vetoed.
+        let linux: Vec<OpenFile> = vec![tcp(3, 80, None, TcpState::Established), udp(7, 81, None)];
+        let mut p = who(10, "srv", 0, 10);
+        p.files = linux;
+        let got = with(Some(4), &[TcpState::Established], &[]).apply(vec![p]);
+        assert_eq!(got[0].files.len(), 2);
+    }
+
     #[test]
     fn under_and_a_bare_i_and_a_spec_are_separate_requirements() {
         // The C's SELNET and SELNA: `-a -p P -i -i:9` needs both, so P's
@@ -5475,8 +5697,11 @@ mod tests {
     // socket here would be outside the table and pass. The platform-neutral
     // half — a TCP list vetoes TCP sockets and nothing else — is
     // `a_state_filter_can_only_veto_never_select`.
+    // Not FreeBSD's either: its table (`tcpstates[]`) has no `CLOSE`, its
+    // rows give a UDP socket no state, and its C's rule under `-s` is
+    // another, measured there: `a_freebsd_state_inclusion_is_what_the_bare_i_selects`.
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "freebsd")))]
     fn a_tcp_state_list_filters_udp_by_its_reused_state_and_nothing_else() {
         // Measured against the C on a process holding every shape: a TCP
         // listener, an established TCP socket, an unconnected UDP socket

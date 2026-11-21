@@ -630,6 +630,32 @@ impl SocketInfo {
         }
     }
 
+    /// Whether this is a FreeBSD row's socket: the one backend that fills
+    /// [`TcpExtInfo::bsd`], and fills it for every socket row it makes.
+    pub fn is_bsd(&self) -> bool {
+        self.tcp.is_some_and(|t| t.bsd.is_some())
+    }
+
+    /// The two ends the C entered for the socket (`ent_inaddr()`), local
+    /// then foreign: what NAME prints (`printinaddr()`) and what `-i`'s
+    /// address specifications are compared with, an end at a time
+    /// (`is_nw_addr()`).
+    ///
+    /// On Linux an end whose address is unspecified and whose port is 0 is
+    /// none (`dsock.c`: `if (tp->faddr || tp->fport) fa = …; else fa = NULL`).
+    /// A FreeBSD row's ends are the ones its backend recorded, as they are:
+    /// that dialect enters the local end of every Internet socket it finds a
+    /// PCB for, and the foreign end of every IPv4 one, unspecified or not
+    /// (DIVERGENCES 180), so `0.0.0.0:0` is an end there, printed `*:*` and
+    /// matched by `-i :0`.
+    pub fn entered_ends(&self) -> [Option<SocketAddr>; 2] {
+        if self.is_bsd() {
+            return [self.local, self.remote];
+        }
+        let end = |a: Option<SocketAddr>| a.filter(|a| !is_unspecified(a));
+        [end(self.local), end(self.remote)]
+    }
+
     /// Render the lsof NAME field for a socket, honoring name/port resolution
     /// suppression. With both `numeric_*` flags set the output is purely
     /// numeric (the `-n -P` behavior).

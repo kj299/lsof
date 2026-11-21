@@ -22,10 +22,11 @@ const INCOMPLETE: &str = "      Output information may be incomplete.";
 /// 3. The directory is `stat`ed. One that cannot be is **kept**, unlike on
 ///    Linux: the C warns `can't stat() TYPE file system DIR`, then `assuming
 ///    "dev=…" from mount table`, and records `f_fsid.val[0]` as its device.
-/// 4. The source, `f_mntfromname`, is spelt by `Readlink()` when it is a
-///    path and `stat`ed for whether it is a block device — which on FreeBSD
-///    nothing is, disks being character devices, so a mount's source never
-///    names its file system as an argument here, as in the C.
+/// 4. The source, `f_mntfromname`, is spelt by `Readlink()`, a path or not
+///    (`devfs` is read as a name in lsof's directory), and `stat`ed for
+///    whether it is a block device — which on FreeBSD nothing is, disks
+///    being character devices, so a mount's source never names its file
+///    system as an argument here, as in the C.
 ///
 /// An `-e`/`+e` mount is neither `stat`ed nor, for `+e`, read the links of,
 /// as on Linux. No two rows are merged: the C's FreeBSD table keeps every
@@ -66,7 +67,10 @@ pub fn resolve(list: &[StatFs], req: &MountRequest, fs: &SafeFs) -> MountTable {
             match fs.stat(Path::new(&dir)) {
                 Ok(st) => Some(st.dev),
                 Err(_) => {
-                    let dev = u64::from(m.fsid0);
+                    // `sb.st_dev = (dev_t)mb->f_fsid.val[0]` (`dmnt.c:131`):
+                    // an `int32_t` widened to the 64-bit `dev_t`, its sign
+                    // with it.
+                    let dev = i64::from(m.fsid0 as i32) as u64;
                     if fs.warns() {
                         fs.tell(&format!(
                             "lsof: WARNING: can't stat() {} file system {}",
@@ -80,10 +84,11 @@ pub fn resolve(list: &[StatFs], req: &MountRequest, fs: &SafeFs) -> MountTable {
                 }
             }
         };
+        // The table's `has_nfs` stays 0: it is the Linux dialect's `HasNFS`,
+        // under which that dialect makes its per-file calls through the
+        // child. FreeBSD's `readmnt()` notes nothing of the kind, and `-N`
+        // goes by each vnode's own file system (DIVERGENCES 182).
         let kind = if m.fstypename.eq_ignore_ascii_case(b"nfs") {
-            if table.has_nfs < 2 {
-                table.has_nfs = 2;
-            }
             MountKind::Nfs
         } else {
             MountKind::Regular
@@ -111,9 +116,14 @@ fn source(
     esc: lsof_core::Escaper,
 ) -> (Option<OsString>, bool) {
     let raw_os = OsStr::from_bytes(raw);
-    if exempt.is_some_and(|e| e.plus) || raw.first() != Some(&b'/') {
+    if exempt.is_some_and(|e| e.plus) {
         return (Some(raw_os.to_os_string()), false);
     }
+    // Whatever the source is, a path or a name like `devfs`: the dialect's
+    // `readmnt()` hands every `f_mntfromname` to `Readlink()` and then to
+    // `statsafely()` (`dmnt.c:167-177`), where Linux's asks only of a path.
+    // Measured on FreeBSD 14.5: `lsof -b /` says `avoiding readlink(devfs)`
+    // and `avoiding stat(devfs)` after `/dev`'s own lines.
     match lsof_core::readlink::resolve(raw_os, fs) {
         Ok(path) => {
             let is_block = exempt.is_none()
@@ -172,7 +182,7 @@ mod tests {
             nfs.source_resolved.as_deref(),
             Some(OsStr::new("srv:/export"))
         );
-        assert_eq!(t.has_nfs, 2);
+        assert_eq!(t.has_nfs, 0, "Linux's HasNFS: not FreeBSD's");
         let said = lines.borrow().join("\n");
         assert!(
             said.contains("can't stat() nfs file system /lsof-rs-no-such-dir-xyz")
@@ -180,5 +190,73 @@ mod tests {
             "{said}"
         );
         assert!(has_type(&list, "nfs") && !has_type(&list, "zfs"));
+    }
+
+    /// Under `-b` every call the read would make says so, a mount at a
+    /// time: its directory's `Readlink()` and `stat`, then its source's,
+    /// whether that is a path or a name. Measured against the C on FreeBSD
+    /// 14.5 (`lsof -b /`): after `/dev`'s lines, `avoiding readlink(devfs)`
+    /// and `avoiding stat(devfs)`.
+    #[test]
+    fn a_source_is_read_and_stated_path_or_not() {
+        let lines: std::cell::RefCell<Vec<String>> = Default::default();
+        let say = |l: &str| lines.borrow_mut().push(l.to_string());
+        let avoid = lsof_core::Blocking {
+            avoid: true,
+            ..Default::default()
+        };
+        let fs = SafeFs::new(&lsof_core::InProcess, &say).with(avoid, true);
+        let mut dev = m(5, "devfs", "devfs", "/dev");
+        dev.fsid0 = 0x7100_ff00;
+        let t = resolve(
+            &[m(1, "ufs", "/dev/gpt/rootfs", "/"), dev],
+            &MountRequest::default(),
+            &fs,
+        );
+        assert_eq!(
+            *lines.borrow(),
+            [
+                "lsof: avoiding readlink(/): -b was specified.",
+                "lsof: avoiding stat(/): -b was specified.",
+                "lsof: WARNING: can't stat() ufs file system /",
+                "      Output information may be incomplete.",
+                "      assuming \"dev=1234\" from mount table",
+                "lsof: avoiding readlink(/dev/gpt/rootfs): -b was specified.",
+                "lsof: avoiding stat(/dev/gpt/rootfs): -b was specified.",
+                "lsof: avoiding readlink(/dev): -b was specified.",
+                "lsof: avoiding stat(/dev): -b was specified.",
+                "lsof: WARNING: can't stat() devfs file system /dev",
+                "      Output information may be incomplete.",
+                "      assuming \"dev=7100ff00\" from mount table",
+                "lsof: avoiding readlink(devfs): -b was specified.",
+                "lsof: avoiding stat(devfs): -b was specified.",
+            ]
+        );
+        assert_eq!(
+            t.entries[1].source_resolved.as_deref(),
+            Some(OsStr::new("devfs"))
+        );
+        assert!(!t.entries[1].source_is_block);
+    }
+
+    /// `f_fsid.val[0]` is an `int32_t`, and the C's cast to `dev_t` keeps its
+    /// sign: a negative one is assumed, and printed (`%lx`), as 64 bits.
+    #[test]
+    fn an_assumed_device_keeps_the_sign_of_the_fsid() {
+        let lines: std::cell::RefCell<Vec<String>> = Default::default();
+        let say = |l: &str| lines.borrow_mut().push(l.to_string());
+        let fs = SafeFs::new(&lsof_core::InProcess, &say);
+        let mut gone = m(2, "ufs", "/dev/x", "/lsof-rs-no-such-dir-xyz");
+        gone.fsid0 = 0x8a9a_cc5c;
+        let t = resolve(&[gone], &MountRequest::default(), &fs);
+        assert_eq!(t.entries[0].device, Some(0xffff_ffff_8a9a_cc5c));
+        assert!(
+            lines
+                .borrow()
+                .iter()
+                .any(|l| l == "      assuming \"dev=ffffffff8a9acc5c\" from mount table"),
+            "{:?}",
+            lines.borrow()
+        );
     }
 }

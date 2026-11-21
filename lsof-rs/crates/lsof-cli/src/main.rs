@@ -184,8 +184,9 @@ SELECTION:
     -U            list UNIX-domain (AF_UNIX) sockets (on Windows through ETW,
                   which needs Administrator)
     -N            list NFS files
-    -K [i]        list threads: on Linux in TID and TASKCMD columns, as the C
-                  does; on Windows as `task` rows, the TID in NODE. -K i: none
+    -K [i]        list threads: on Linux in TID and TASKCMD columns, on
+                  FreeBSD each thread in a TID column, as each C does; on
+                  Windows as `task` rows, the TID in NODE. -K i: none
     -T [fqsw]     TCP info on socket rows: s=state, q=queue sizes, w=window
                   (Windows); f socket options, states and TCP flags (FreeBSD;
                   elsewhere accepted and shows nothing). The letters
@@ -266,6 +267,14 @@ MISCELLANEOUS:
                   through its links; +e <fs> is taken as typed, and the
                   mount's links are not read either
     -Z            SELinux security contexts: not supported (exits 1)
+    -D <D>        (FreeBSD) the C's device cache control, ?|i|b|r|u[path],
+                  read as the C reads it. lsof-rs keeps no cache: it reads
+                  /dev on every run and neither reads nor writes a cache
+                  file, so i, b, r and u change nothing, and -D ? reports
+                  no path. Elsewhere, as in the Linux C: unsupported
+    +M / -M       (FreeBSD) read, as the C's portmapper switch is; no
+                  portmapper is asked
+                  On FreeBSD -e, -E, -X and -Z are no options, as in its C
     -b            make none of the calls that can block on a file system
                   (stat, lstat, readlink) for a path given or a mount point;
                   say so unless -w. A path argument then fails, and +d/+D
@@ -844,6 +853,11 @@ fn report(reports: Reports) {
     if reports.field_help {
         write_stderr(&fields::field_help());
     }
+    // `-D ?`, where the C's `usage()` reports its device cache
+    // (`usage.c:859-860`): lsof-rs has none (DIVERGENCES 148).
+    if reports.device_cache {
+        write_stderr(lsof_cli::args::DEVICE_CACHE_REPORT);
+    }
     if reports.version {
         write_stderr(&format!(
             "lsof-rs {} (memory-safe lsof)\n",
@@ -1082,7 +1096,7 @@ fn main() {
         // before anything is `stat`ed, or else just before it lists
         // (`initialize()`, `dproc.c:670`) — each under the options as they
         // ended (DIVERGENCES 87, 110, 113).
-        let needs_table = sel.needs_mount_table();
+        let needs_table = table_before_listing(&sel, cfg!(target_os = "freebsd"));
         let mut table: Option<MountTable> = mounts;
         let reader = |req: &MountRequest, fs: &SafeFs| env.backend.mount_table(req, fs);
         let read_table = |sel: &Selection| read_mount_table(sel, &fs, &reader);
@@ -1355,11 +1369,16 @@ fn main() {
                 lsof_cli::stdio::exit(1);
             }
         };
+        // Where the backend typed the NFS files itself as it gathered
+        // (FreeBSD, which reads no mount table for `-N`), `-N` selects by
+        // what this gather found (DIVERGENCES 182).
+        let nfs_typed = with_nfs_devices(&selection, env.backend.take_nfs_devices());
+        let selecting = nfs_typed.as_ref().unwrap_or(&selection);
         // The process-level search items, marked from what the backend
         // gathered BEFORE any file is selected, so a PID whose files `-a`
         // drops is still located; see `Selection::locate`.
-        let located = selection.locate(&gathered);
-        let mut procs = selection.apply_with(gathered, env.backend.take_endpoint_tables());
+        let located = selecting.locate(&gathered);
+        let mut procs = selecting.apply_with(gathered, env.backend.take_endpoint_tables());
         // Where the C cannot tell a file's offset no file has one
         // (`Lf->off_def`, `dnode.c:774-783`, `dsock.c:3441`): `-F` prints no
         // `o`, as the table, the size's now, prints none (DIVERGENCES 177).
@@ -1490,6 +1509,31 @@ fn main() {
     }
     #[cfg(not(windows))]
     lsof_cli::stdio::exit(code);
+}
+
+/// Whether the mount table is read before the listing by a run that names
+/// no path and no `+d`/`+D` (each of which reads it where the C's
+/// `ck_file_arg()` does, `arg.c:184`, and `-e` where its check does). On
+/// Linux the C's `initialize()` reads it unless the run asks about Internet
+/// files alone ([`Selection::needs_mount_table`]). FreeBSD's dialect has no
+/// such read: its `readmnt()` is `ck_file_arg()`'s alone, so `lsof`, `lsof
+/// -p PID`, `-N`, `-U` and `-b` read no table, start no helper, and say
+/// nothing of any mount (measured on FreeBSD 14.5: DIVERGENCES 182).
+fn table_before_listing(sel: &Selection, freebsd: bool) -> bool {
+    !freebsd && sel.needs_mount_table()
+}
+
+/// `sel` with `devices` for [`Selection::nfs_devices`], where a backend
+/// typed its NFS files itself ([`lsof_core::Backend::take_nfs_devices`])
+/// and `-N` asks for them; `None` where `sel` is to be used as it is.
+fn with_nfs_devices(
+    sel: &Selection,
+    devices: Option<std::collections::HashSet<u64>>,
+) -> Option<Selection> {
+    devices.filter(|_| sel.nfs_only).map(|devices| Selection {
+        nfs_devices: devices,
+        ..sel.clone()
+    })
 }
 
 /// The run's side of the repeat loop: its cycle, the clock, the sleep.
@@ -1702,6 +1746,61 @@ mod tests {
     use lsof_cli::args::{parse, Action};
     use lsof_core::render::Format;
     use lsof_core::Selection;
+
+    /// FreeBSD's C reads its mount table for a path, a `+d`/`+D` or nothing
+    /// (DIVERGENCES 182): no read before the listing there, whatever the
+    /// run asks; elsewhere the Linux C's rule, every run but `-i` alone.
+    #[test]
+    fn freebsd_reads_no_mount_table_before_it_lists() {
+        let plain = Selection::default();
+        let mut inet = Selection::default();
+        inet.inet.add_all(None);
+        let nfs = Selection {
+            nfs_only: true,
+            ..Default::default()
+        };
+        for sel in [&plain, &inet, &nfs] {
+            assert!(!super::table_before_listing(sel, true));
+        }
+        assert!(super::table_before_listing(&plain, false));
+        assert!(super::table_before_listing(&nfs, false));
+        assert!(!super::table_before_listing(&inet, false), "-i alone");
+    }
+
+    /// `-N` goes by the devices a backend typed NFS itself, where it did:
+    /// they replace the selection's for that gather, and only under `-N`.
+    #[test]
+    fn nfs_devices_a_backend_typed_are_the_cycles() {
+        let typed = || {
+            Some(
+                [7u64, 9]
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            )
+        };
+        let nfs = Selection {
+            nfs_only: true,
+            nfs_devices: [1u64].into_iter().collect(),
+            pids: vec![42],
+            ..Default::default()
+        };
+        let got = super::with_nfs_devices(&nfs, typed()).expect("a selection for the cycle");
+        assert_eq!(got.nfs_devices, typed().unwrap());
+        assert_eq!(
+            (got.nfs_only, &got.pids[..]),
+            (true, &[42][..]),
+            "the rest as it was"
+        );
+        assert!(
+            super::with_nfs_devices(&nfs, None).is_none(),
+            "the table's stand"
+        );
+        let plain = Selection::default();
+        assert!(super::with_nfs_devices(&plain, typed()).is_none(), "no -N");
+        // Typed, and none found: an empty set, which selects no file.
+        let none = super::with_nfs_devices(&nfs, Some(Default::default())).unwrap();
+        assert!(none.nfs_devices.is_empty());
+    }
 
     /// Processes owned by `uid`, named `user` or by no password entry, with
     /// `files` files each — what [`super::printuid`] is asked about.

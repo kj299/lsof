@@ -39,9 +39,12 @@ task:
 # `kinfo_file` agree on st_dev and st_ino), and the core and CLI suites.
 #
 # What does not gate yet: the side-by-side run against the C built from this
-# tree. It prints both outputs and their diff for a reader; it becomes the
-# FreeBSD differential, with DIVERGENCES.md as its ledger, once the rows that
-# differ have been triaged on a real host (docs/freebsd-backend-scope.md).
+# tree, lsof-rs/differential/freebsd-check.sh (the script a person runs on a
+# FreeBSD host; differential/README.md says how to read it). It prints, per
+# command line, SAME or the diff, and a summary line; DIVERGENCES.md rows
+# 140-148 and 180-185 say what is expected to differ. It was first run by
+# hand on 2026-11-21 (FreeBSD 14.5 amd64); it has never run here, where
+# Cirrus CI is not connected, so this task's wiring of it is untested.
 lsof_rs_task:
   only_if: changesInclude('lsof-rs/**', 'lib/**', 'src/**', 'include/**', '.cirrus.yml')
   freebsd_instance:
@@ -55,24 +58,14 @@ lsof_rs_task:
     - pkg install -y bash curl git autoconf automake libtool pkgconf
     - curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
     - rustc --version
-  kernel_src_script: |
-    if [ ! -d /usr/src/sys ]; then
-      git clone --depth 1 --branch releng/$(uname -r | cut -d- -f1) https://git.FreeBSD.org/src.git /usr/src
-    fi
+  kernel_src_script:
+    - sh lsof-rs/differential/freebsd-check.sh sources
   test_script:
-    - cd lsof-rs && cargo test -p lsof-backend-freebsd -p lsof-core -p lsof-cli
+    - cd lsof-rs && cargo test -p lsof-backend-freebsd -p lsof-core -p lsof-cli --no-fail-fast
   build_script:
     - cd lsof-rs && cargo build --release
   side_by_side_script: |
     autoreconf -vif >/dev/null && ./configure >/dev/null && make lsof >/dev/null
-    sleep 600 < /etc/passwd &
-    pid=$!
-    for args in "-n -P -p $pid" "-n -P -i" "-n -P -U -a -p $$" "-F pcftDsin -p $pid"; do
-      echo "=== lsof $args"
-      ./lsof $args > c.out 2>&1 || true
-      ./lsof-rs/target/release/lsof $args > rs.out 2>&1 || true
-      echo "--- C";       cat c.out
-      echo "--- lsof-rs"; cat rs.out
-      echo "--- diff";    diff c.out rs.out || true
-    done
-    kill $pid
+    LSOF_C=$PWD/lsof LSOF_RS=$PWD/lsof-rs/target/release/lsof DIR=/tmp/lsof-check \
+      sh lsof-rs/differential/freebsd-check.sh compare
+    cat lsof-rs-freebsd-compare-$(id -un).txt

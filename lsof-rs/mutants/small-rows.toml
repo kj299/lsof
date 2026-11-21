@@ -64,6 +64,18 @@
 # re-read made occur twice.
 # Run again 2026-11-14 with --first-kill (unit gates split by crate, then
 # the whole differential): each killed by a unit gate.
+# Run again 2026-11-21 (the FreeBSD first-run fixes, anchors within 12 lines
+# of the change) with --first-kill, these three, the whole unit suite and
+# the differential: all three SURVIVED, as they survive the unit gate on
+# d58b041 before the change. disabled-z-reads-its-word and
+# dropped-m-word-read: since the words read with stand-ins (`as_text`) mark
+# a dropped word read as text whenever stand-ins can be used, only a
+# command line where they cannot (a word holding a stand-in's own
+# character) tells them apart; `a_dropped_word_is_not_read_as_text` now
+# has one, and kills both. command-column-from-lossy-text: EQUIVALENT
+# since `-r`'s round (6ee85b2), which prints COMMAND from
+# `Cell::Command(p.command_bytes())` at the width `cmd_cut` and so never
+# shows the cell `row_for` makes; it should be retired with its anchor.
 
 [run]
 dir = ".."

@@ -618,9 +618,16 @@ pub fn render_naming(
     // how the C decides (`print.c` sets TaskPrtTid/TaskPrtCmd while sizing).
     // A run that asked for tasks and found none — a single-threaded process —
     // therefore looks exactly like a run that did not ask.
+    // Each by itself (`print.c:847-860`): TID where an entry has one,
+    // TASKCMD where one has a task's command. A Linux task has both;
+    // FreeBSD's dialect sets no task command, so its `-K` listing has TID
+    // alone (measured on 14.5, DIVERGENCES 141).
     let show_tasks = procs.iter().any(|p| p.tid.is_some());
+    let show_task_cmd = procs.iter().any(|p| p.task_command.is_some());
     if show_tasks {
         cols.push(Col::right("TID"));
+    }
+    if show_task_cmd {
         cols.push(Col::left("TASKCMD"));
     }
     if show_ppid {
@@ -674,11 +681,13 @@ pub fn render_naming(
         // pass one, not the `+c` number.
         let cmd = esc.command_bytes_truncated(p.command_bytes(), cmd_cut);
         let mut r = vec![cmd, p.pid.to_string()];
+        // The process's own row leaves both cells blank; only a task fills
+        // them. TASKCMD is a command name, so it is escaped and cut the
+        // same way COMMAND is — but at `task_cut`, its own column width.
         if show_tasks {
-            // The process's own row leaves both cells blank; only a task fills
-            // them. TASKCMD is a command name, so it is escaped and cut the
-            // same way COMMAND is — but at `task_cut`, its own column width.
             r.push(p.tid.map(|t| t.to_string()).unwrap_or_default());
+        }
+        if show_task_cmd {
             // Its bytes, as COMMAND's: a thread name that is not UTF-8 is cut
             // and escaped byte by byte, as the C prints it, not the U+FFFD
             // it was read as (DIVERGENCES 93).
