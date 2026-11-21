@@ -42,13 +42,7 @@ const INCOMPLETE: &str = "      Output information may be incomplete.";
 /// C's `fgets()` loop ends.
 fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     let mut text = Vec::new();
-    let file = std::fs::File::open(path).map_err(|e| {
-        format!(
-            "lsof: can't fopen({}, \"r\"): {}",
-            Escaper::for_host().bytes(path.as_os_str().as_encoded_bytes()),
-            lsof_core::errno_text(&e)
-        )
-    })?;
+    let file = open_table(path)?;
     // One byte past the cap tells a table that ends there from a longer one.
     if file
         .take(cap.saturating_add(1))
@@ -66,6 +60,27 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
         text.truncate(keep);
     }
     Ok(text)
+}
+
+/// The table at `path`, opened, or the C's words for one it cannot open
+/// (`readmnt()`, `dmnt.c:391-397`): `lsof: can't fopen(/proc/mounts, "r"):
+/// ERR`.
+fn open_table(path: &Path) -> Result<std::fs::File, String> {
+    std::fs::File::open(path).map_err(|e| {
+        format!(
+            "lsof: can't fopen({}, \"r\"): {}",
+            Escaper::for_host().bytes(path.as_os_str().as_encoded_bytes()),
+            lsof_core::errno_text(&e)
+        )
+    })
+}
+
+/// What the C says of the host's table where it cannot open it, `None`
+/// where it can: asked where no helper can be started, since the C, whose
+/// child is a fork, goes on from there to the table and ends at it
+/// ([`crate::safefs::no_helper`]).
+pub(crate) fn unopenable() -> Option<String> {
+    open_table(Path::new(PROC_MOUNTS)).err()
 }
 
 /// Where the kernel lists this process's mounts: `/proc/mounts`, the name
@@ -291,23 +306,54 @@ enum SupplementState {
 /// FIFO or device named as the file is opened, and the rest are opened
 /// without blocking: one put in a regular file's place after the look may
 /// be opened, cannot hold the open, and is refused unread (DIVERGENCES 153).
+///
+/// A name that leads to a descriptor lsof was started with (`/dev/fd/9`,
+/// `/proc/self/fd/9`, `<(cmd)`) is `WARNING: access F: No such file or
+/// directory`, as in the C: both have closed every descriptor from 3 up by
+/// now (`closefrom_shim(ctx, 3)`; `lsof-sigpipe`'s constructor).
 fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
+    supplement_bytes_as(path, &readable_by_the_real_user)
+}
+
+/// `access(path, R_OK)`, the C's `is_readable()` (`lib/misc.c:990-999`):
+/// whether the **real** user and group may read the file, whatever the
+/// effective ones may. The C asks it before it opens the supplement
+/// (`dmnt.c:178`), so that an lsof whose effective user is another (a
+/// setuid installation, a wrapper that sets the effective uid alone) reads
+/// no file its caller could not read; and one the caller may read and the
+/// effective user may not is refused by the open, in other words. Safe:
+/// rustix's call, on the path alone.
+fn readable_by_the_real_user(path: &OsStr) -> std::io::Result<()> {
+    // Not under miri, which has no `access()`: the open decides there.
+    if cfg!(miri) {
+        return Ok(());
+    }
+    rustix::fs::access(path, rustix::fs::Access::READ_OK).map_err(std::io::Error::from)
+}
+
+/// [`supplement_bytes`], asking `readable` what the C asks `access()`.
+fn supplement_bytes_as(
+    path: &OsStr,
+    readable: &dyn Fn(&OsStr) -> std::io::Result<()>,
+) -> Result<Vec<u8>, String> {
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
     let shown = Escaper::UNIX.bytes(path.as_bytes()).into_owned();
+    // `ACCESSERRFMT`: what `access()` refused, and its reason.
     let access = |e: &std::io::Error| {
         format!(
             "lsof: WARNING: access {shown}: {}",
             lsof_core::errno_text(e)
         )
     };
+    // The C's words for an `fopen()` that fails once `access()` has passed
+    // (`dmnt.c:192`), whatever the reason.
+    let open =
+        |e: &std::io::Error| format!("lsof: can't open({shown}): {}", lsof_core::errno_text(e));
     let error = || format!("lsof: error reading {shown}");
-    // A descriptor lsof inherited is one the C has closed by now
-    // (`closefrom_shim(ctx, 3)`, `main.c:173-176`): its name, `/dev/fd/N`
-    // or `/proc/self/fd/N`, is none to the C's `access()` (measured).
-    if names_an_inherited_fd(Path::new(path), inherited_fds()) {
-        return Err(access(&std::io::Error::from_raw_os_error(ENOENT)));
-    }
-    let meta = std::fs::metadata(path).map_err(|e| access(&e))?;
+    readable(path).map_err(|e| access(&e))?;
+    // What the file is, before it is opened: where this fails `fopen()`
+    // would, and of the same error.
+    let meta = std::fs::metadata(path).map_err(|e| open(&e))?;
     let kind = meta.file_type();
     if kind.is_fifo() || kind.is_char_device() || kind.is_block_device() {
         return Err(error());
@@ -323,11 +369,7 @@ fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
         .read(true)
         .custom_flags(nonblocking)
         .open(path)
-        .map_err(|e| match e.kind() {
-            // What `access(R_OK)` would have refused first.
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => access(&e),
-            _ => format!("lsof: can't open({shown}): {}", lsof_core::errno_text(&e)),
-        })?;
+        .map_err(|e| open(&e))?;
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return Err(error());
     }
@@ -339,124 +381,6 @@ fn supplement_bytes(path: &OsStr) -> Result<Vec<u8>, String> {
         return Err(error());
     }
     Ok(text)
-}
-
-/// The descriptors from 3 up this process had when [`note_inherited_fds`]
-/// looked, first thing in `main`: what the C closes at its start.
-static INHERITED: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
-
-/// Note the descriptors from 3 up this process holds now, before it opens
-/// any: those it inherited. lsof-rs cannot close them as the C does
-/// (`closefrom_shim()`; a close is `unsafe` in Rust, which this crate
-/// forbids), so it reads a name that leads to one as the C would find it,
-/// gone (DIVERGENCES 153). The listing of `/proc/self/fd` used to look is
-/// itself a descriptor, and is told apart by what it is.
-pub fn note_inherited_fds() {
-    let own = Path::new("/proc/self/fd");
-    let listing = Path::new("/proc")
-        .join(std::process::id().to_string())
-        .join("fd");
-    let fds = std::fs::read_dir(own)
-        .map(|dir| {
-            dir.filter_map(Result::ok)
-                .filter_map(|e| {
-                    let n: u32 = e.file_name().to_str()?.parse().ok()?;
-                    let target = std::fs::read_link(e.path()).ok()?;
-                    // The directory listing's own descriptor names this
-                    // process's fd directory.
-                    (n >= 3 && target != listing).then_some(n)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let _ = INHERITED.set(fds);
-}
-
-/// `ENOENT`, which `access()` says of a closed descriptor's name.
-const ENOENT: i32 = 2;
-
-fn inherited_fds() -> &'static [u32] {
-    INHERITED.get().map_or(&[], Vec::as_slice)
-}
-
-/// Whether `path`, its links followed one by one as the kernel follows
-/// them, leads through `/proc/PID/fd/N` (or a task's) of this process, `N`
-/// one of `inherited`: `/dev/fd/9`, `/proc/self/fd/9`, `<(cmd)`. At most 40
-/// links, as the kernel follows.
-fn names_an_inherited_fd(path: &Path, inherited: &[u32]) -> bool {
-    use std::path::Component;
-    if inherited.is_empty() {
-        return false;
-    }
-    let pid = std::process::id().to_string();
-    let ours = |p: &Path| -> bool {
-        let parts: Vec<&OsStr> = p
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => Some(n),
-                _ => None,
-            })
-            .collect();
-        let fd = match parts.as_slice() {
-            [proc, id, fd, n] if *proc == "proc" && *id == pid.as_str() && *fd == "fd" => n,
-            [proc, id, task, _, fd, n]
-                if *proc == "proc" && *id == pid.as_str() && *task == "task" && *fd == "fd" =>
-            {
-                n
-            }
-            _ => return false,
-        };
-        fd.to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-            .is_some_and(|n| inherited.contains(&n))
-    };
-    let start = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(path),
-            Err(_) => return false,
-        }
-    };
-    let mut todo: std::collections::VecDeque<std::ffi::OsString> =
-        std::collections::VecDeque::new();
-    let push_front = |todo: &mut std::collections::VecDeque<std::ffi::OsString>, p: &Path| {
-        for c in p.components().rev() {
-            todo.push_front(c.as_os_str().to_os_string());
-        }
-    };
-    push_front(&mut todo, &start);
-    let mut done = std::path::PathBuf::from("/");
-    let mut links = 0u32;
-    while let Some(c) = todo.pop_front() {
-        match c.to_str() {
-            Some("/") => done = std::path::PathBuf::from("/"),
-            Some(".") => {}
-            Some("..") => {
-                done.pop();
-            }
-            _ => {
-                done.push(&c);
-                if ours(&done) {
-                    return true;
-                }
-                let is_link =
-                    std::fs::symlink_metadata(&done).is_ok_and(|m| m.file_type().is_symlink());
-                if is_link {
-                    links = links.saturating_add(1);
-                    if links > 40 {
-                        return false;
-                    }
-                    let Ok(target) = std::fs::read_link(&done) else {
-                        return false;
-                    };
-                    done.pop();
-                    push_front(&mut todo, &target);
-                }
-            }
-        }
-    }
-    false
 }
 
 impl Supplement {
@@ -1347,30 +1271,91 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A name that leads to a descriptor lsof inherited is gone, as the C
-    /// finds it: `/dev/fd/N`, `/proc/self/fd/N`, `/proc/PID/fd/N`; another
-    /// descriptor's, or the file's own name, is not.
+    /// The supplement is asked of `access()` first, as the C's
+    /// `is_readable()` asks (`lib/misc.c:990-999`, `dmnt.c:178`): what it
+    /// refuses is `WARNING: access F: ERR` and the file is not opened,
+    /// though this process could read it; and once it has passed, a file
+    /// that cannot be opened is the C's `can't open(F): ERR`, whatever the
+    /// error (`dmnt.c:192`). lsof-rs had asked nothing and read the file as
+    /// its effective user, so a caller who could not read a file was quoted
+    /// its lines (DIVERGENCES 172).
     #[test]
-    #[cfg_attr(miri, ignore = "it opens a file and reads /proc")]
-    fn a_name_through_an_inherited_descriptor_is_none() {
-        use std::os::fd::AsRawFd;
-        let file = std::fs::File::open("/proc/self/stat").unwrap();
-        let n = u32::try_from(file.as_raw_fd()).unwrap();
-        let held = [n];
-        let pid = std::process::id();
-        for name in [
-            format!("/dev/fd/{n}"),
-            format!("/proc/self/fd/{n}"),
-            format!("/proc/{pid}/fd/{n}"),
-            format!("/proc/thread-self/fd/{n}"),
-            format!("/dev/../dev/fd/{n}"),
-        ] {
-            assert!(names_an_inherited_fd(Path::new(&name), &held), "{name}");
-            assert!(!names_an_inherited_fd(Path::new(&name), &[n + 1]), "{name}");
-        }
-        assert!(!names_an_inherited_fd(Path::new("/proc/self/stat"), &held));
-        assert!(!names_an_inherited_fd(Path::new("/dev/fd/0"), &held));
-        drop(file);
+    #[cfg_attr(miri, ignore = "it writes a file")]
+    fn a_supplement_is_asked_of_access_before_it_is_opened() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-supa-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sup");
+        std::fs::write(&file, "/proc 0x15\n").unwrap();
+        let shown = file.to_str().unwrap().to_string();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let refuses = |errno: i32| {
+            let asked = &asked;
+            move |p: &OsStr| -> std::io::Result<()> {
+                asked.borrow_mut().push(p.to_os_string());
+                Err(std::io::Error::from_raw_os_error(errno))
+            }
+        };
+        let passes = |_: &OsStr| -> std::io::Result<()> { Ok(()) };
+        // Refused: the file is there, and readable, and is not read.
+        assert_eq!(
+            supplement_bytes_as(file.as_os_str(), &refuses(13)).unwrap_err(),
+            format!("lsof: WARNING: access {shown}: Permission denied")
+        );
+        assert_eq!(
+            supplement_bytes_as(file.as_os_str(), &refuses(2)).unwrap_err(),
+            format!("lsof: WARNING: access {shown}: No such file or directory")
+        );
+        // It is asked of the path as given, once.
+        assert_eq!(*asked.borrow(), [file.as_os_str(), file.as_os_str()]);
+        // Passed: the file is read.
+        assert_eq!(
+            supplement_bytes_as(file.as_os_str(), &passes).unwrap(),
+            b"/proc 0x15\n"
+        );
+        // Passed, and no file to open (one removed since, or one the
+        // effective user cannot reach): the open's words, with its reason.
+        let gone = dir.join("gone");
+        assert_eq!(
+            supplement_bytes_as(gone.as_os_str(), &passes).unwrap_err(),
+            format!(
+                "lsof: can't open({}): No such file or directory",
+                gone.to_str().unwrap()
+            )
+        );
+        let under_a_file = file.join("x");
+        assert_eq!(
+            supplement_bytes_as(under_a_file.as_os_str(), &passes).unwrap_err(),
+            format!(
+                "lsof: can't open({}): Not a directory",
+                under_a_file.to_str().unwrap()
+            )
+        );
+        // The real question, of this process's real user: a file it wrote
+        // may be read, and one that is not there is `ENOENT`.
+        assert!(readable_by_the_real_user(file.as_os_str()).is_ok());
+        assert_eq!(
+            readable_by_the_real_user(gone.as_os_str())
+                .unwrap_err()
+                .raw_os_error(),
+            Some(2)
+        );
+        assert_eq!(
+            supplement_bytes(gone.as_os_str()).unwrap_err(),
+            format!(
+                "lsof: WARNING: access {}: No such file or directory",
+                gone.to_str().unwrap()
+            )
+        );
+        // The table's own file: the C's words where it cannot be opened.
+        assert_eq!(
+            open_table(&gone).unwrap_err(),
+            format!(
+                "lsof: can't fopen({}, \"r\"): No such file or directory",
+                gone.to_str().unwrap()
+            )
+        );
+        assert!(open_table(&file).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// An empty supplement names no mount: each mount not `stat`ed is

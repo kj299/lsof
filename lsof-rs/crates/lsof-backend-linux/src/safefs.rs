@@ -35,13 +35,16 @@
 //! on the file system would.
 //!
 //! The C's child forks; this one execs, so it differs from it where lsof
-//! lists itself (DIVERGENCES 123): it has a `/dev/null` on fd 2, an fd lsof
-//! was started with and that is not close-on-exec is its too (std cannot
-//! close it without `unsafe`), and while it waits on a call it holds the
-//! `O_PATH` descriptor (or the directory) the call opened. A helper killed
-//! there keeps that descriptor until the file system answers, and whoever
-//! `stat`s it through `/proc/PID/fd` waits as it does; lsof-rs itself never
-//! does ([`HelperFds`]).
+//! lists itself (DIVERGENCES 123): it has a `/dev/null` on fd 2, and while
+//! it waits on a call it holds the `O_PATH` descriptor (or the directory)
+//! the call opened. A helper killed there keeps that descriptor until the
+//! file system answers, and whoever `stat`s it through `/proc/PID/fd` waits
+//! as it does; lsof-rs itself never does ([`HelperFds`]). It is handed
+//! nothing from 3 up, as the C's child keeps nothing (`closefrom_shim(ctx,
+//! 2)`, `lib/misc.c:345`): lsof closed every descriptor it was started with
+//! before anything else, as the C does (`lsof-sigpipe`'s constructor,
+//! DIVERGENCES 170), std opens its own close-on-exec, and the helper, this
+//! binary again, closes from 3 as it starts too.
 //!
 //! # The protocol
 //!
@@ -758,9 +761,10 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
 /// such descriptor (it calls `stat(2)` on the path).
 ///
 /// Every descriptor a helper opens is close-on-exec, as std opens them all;
-/// its pipes, its `/dev/null` and what it inherited from lsof are not (a
-/// descriptor `dup2()` puts in place, or one that survived the exec, never
-/// is). So a helper's close-on-exec descriptors are what a scan skips: not
+/// its pipes and its `/dev/null` are not (a descriptor `dup2()` puts in
+/// place never is), and it has no other: what lsof was started with was
+/// closed before lsof ran, and again as the helper started (DIVERGENCES
+/// 170). So a helper's close-on-exec descriptors are what a scan skips: not
 /// `stat`ed, and not listed (DIVERGENCES 123).
 #[derive(Clone, Debug, Default)]
 pub struct HelperFds {
@@ -909,7 +913,8 @@ impl Helper {
                 helper_command("/proc/self/exe", &args)
             }),
             Box::new(|e| {
-                lsof_core::safefs::write_stderr(&format!("lsof: {}\n", cannot_start(e)));
+                let line = no_helper(e, crate::mounts::unopenable);
+                lsof_core::safefs::write_stderr(&format!("{line}\n"));
                 // The C's `Exit()`: stdout flushed, then 1.
                 lsof_core::safefs::exit(1);
             }),
@@ -1070,6 +1075,32 @@ pub fn cannot_start(e: &io::Error) -> String {
         _ => "can't fork",
     };
     format!("{what}: {}", lsof_core::errno_text(e))
+}
+
+/// Whether a helper that could not be started failed as the C's own child
+/// would have: for want of descriptors for its pipes (`EMFILE`, `ENFILE`),
+/// or of a process or memory for its `fork()` (`EAGAIN`, `ENOMEM`; 11, 12,
+/// 23 and 24 in `errno-base.h` on every Linux architecture). Any other
+/// failure is of the `exec` the C does not make: `/proc/self/exe` is not
+/// there (no `/proc`, or one that is no procfs), cannot be run, or did not
+/// greet.
+fn a_fork_fails_too(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(11 | 12 | 23 | 24))
+}
+
+/// The line a run ends with where no helper can be started (`e`): the C's
+/// words for its own failed step ([`cannot_start`]), unless the failure is
+/// one its fork would not have had ([`a_fork_fails_too`]) and `table`, what
+/// the C says of a mount table it cannot open, has something to say. The
+/// C's child needs no `/proc`: with none, a run that names a path, a
+/// `+d`/`+D` or an `-e` forks, goes on, and ends where it first reads the
+/// table, `can't fopen(/proc/mounts, "r"): No such file or directory`
+/// (measured with a tmpfs over `/proc`); lsof-rs, whose helper is
+/// `/proc/self/exe`, had said `can't fork: No such file or directory`
+/// there (DIVERGENCES 175).
+pub(crate) fn no_helper(e: &io::Error, table: impl FnOnce() -> Option<String>) -> String {
+    let unread = if a_fork_fails_too(e) { None } else { table() };
+    unread.unwrap_or_else(|| format!("lsof: {}", cannot_start(e)))
 }
 
 impl Default for Helper {
@@ -1470,6 +1501,61 @@ mod tests {
         );
     }
 
+    /// Where no helper can start for a reason a `fork()` would not have had,
+    /// and the mount table cannot be opened either, the run ends in the C's
+    /// words for the table, which the C reaches first (DIVERGENCES 175).
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's strerror is not the C library's")]
+    fn no_helper_and_no_table_is_said_of_the_table() {
+        let table = "lsof: can't fopen(/proc/mounts, \"r\"): No such file or directory";
+        let some = || Some(table.to_string());
+        // No `/proc/self/exe` (2), one that cannot be run (13, 8), a helper
+        // that did not greet (`ECHILD`, `ETIMEDOUT`): the table's line.
+        for errno in [2, 13, 8, 20, 40] {
+            assert_eq!(
+                no_helper(&io::Error::from_raw_os_error(errno), some),
+                table,
+                "{errno}"
+            );
+        }
+        assert_eq!(no_helper(&lost_child(), some), table);
+        assert_eq!(no_helper(&timed_out(), some), table);
+        // With a table that opens, the C's words for the helper.
+        assert_eq!(
+            no_helper(&io::Error::from_raw_os_error(2), || None),
+            "lsof: can't fork: No such file or directory"
+        );
+        assert_eq!(
+            no_helper(&lost_child(), || None),
+            "lsof: can't fork: No child processes"
+        );
+        // What the C's own `pipe()` and `fork()` fail of is said of them,
+        // and the table is not asked: under a descriptor limit it could not
+        // be opened either, and the C never gets to it.
+        let asked = std::cell::Cell::new(0);
+        let counted = || {
+            asked.set(asked.get() + 1);
+            Some(table.to_string())
+        };
+        assert_eq!(
+            no_helper(&io::Error::from_raw_os_error(24), counted),
+            "lsof: can't open pipes: Too many open files"
+        );
+        assert_eq!(
+            no_helper(&io::Error::from_raw_os_error(23), counted),
+            "lsof: can't open pipes: Too many open files in system"
+        );
+        assert_eq!(
+            no_helper(&io::Error::from_raw_os_error(11), counted),
+            "lsof: can't fork: Resource temporarily unavailable"
+        );
+        assert_eq!(
+            no_helper(&io::Error::from_raw_os_error(12), counted),
+            "lsof: can't fork: Cannot allocate memory"
+        );
+        assert_eq!(asked.get(), 0);
+    }
+
     /// Started by name, the helper takes [`HELPER_ARG`] alone; started
     /// through the loader, the loader's options and the program come first,
     /// as lsof's own words had them.
@@ -1520,7 +1606,9 @@ mod tests {
         let fds = HelperFds {
             pids: [42].into_iter().collect(),
         };
-        // The pipes and `/dev/null` it was started with; an fd it inherited.
+        // The pipes and `/dev/null` it was started with; and any other that
+        // is not close-on-exec, which no helper lsof starts has (it closes
+        // from 3 as it starts, DIVERGENCES 170), is listed like anyone's.
         assert!(!fds.skips(42, 0, Some(0)));
         assert!(!fds.skips(42, 1, Some(0o1)));
         assert!(!fds.skips(42, 2, Some(0o100002)));
@@ -2055,10 +2143,14 @@ mod tests {
         );
     }
 
-    /// The helper holds its two pipes and `/dev/null`, and nothing else lsof
-    /// had open — but what lsof itself was given without close-on-exec,
-    /// which std cannot close (DIVERGENCES 123); its working directory is
-    /// lsof's, as a forked child's is, and its environment is empty.
+    /// The helper holds its two pipes and `/dev/null`, and nothing else its
+    /// parent had open; its working directory is its parent's, as a forked
+    /// child's is, and its environment is empty. The parent here is this
+    /// test binary, and the helper a shell: what the test binary itself was
+    /// given without close-on-exec is the shell's too and is set aside. In
+    /// lsof there is none: it closes every descriptor from 3 up it was
+    /// started with before anything else, and so does its helper
+    /// (DIVERGENCES 170; `tests/startup.rs` in lsof-cli pins both).
     #[test]
     #[cfg_attr(miri, ignore = "miri cannot spawn a process")]
     fn the_helper_holds_its_pipes_and_dev_null_and_works_where_lsof_does() {

@@ -8109,3 +8109,248 @@ with_stderr = true
 # reads it as a file that names no mount. Ledgered.
 name = "plus-m-file-empty-crashes-the-c"
 args = ["+m", "{SUPEMPTY}", "-b", "-a", "-d", "cwd", "-p", "{A}"]
+
+# ------------------------------------------------- start-up (audit, 2026-11-21)
+#
+# How lsof starts, as the C's `main()` starts (`main.c:173-183`; DIVERGENCES
+# 170, 171): every descriptor from 3 up it was handed is closed, /dev/null is
+# opened until the descriptor it gets is past 1, and a run that cannot open
+# it ends there, exit 1, with nothing said, before an option is read. lsof-rs
+# had kept the descriptors (it listed itself and its helper for a file only
+# it was handed, exit 0) and had no /dev/null step (it printed its version,
+# listed, or died of SIGABRT inside the Rust runtime's start-up). Each case
+# runs in an `su-*` mode of `mt-wrap.sh` (`linux_diff.py`, `SU_MODES`).
+
+[[case]]
+# `lsof FILE 9<FILE`: descriptor 9 is closed before anything is looked at,
+# so no process holds the file: nothing listed, exit 1. The mode takes the
+# first argument as the file descriptor 9 is opened on.
+name = "startup-handed-descriptor-file-not-found"
+args = ["{SUPEMPTY}", "-n", "-P", "--", "{SUPEMPTY}"]
+env = { LSOF_DIFF_MT = "su-fd9" }
+with_stderr = true
+
+[[case]]
+# No pid for it either: lsof-rs had printed lsof's and its helper's.
+name = "startup-handed-descriptor-terse"
+args = ["{SUPEMPTY}", "-n", "-P", "-t", "--", "{SUPEMPTY}"]
+env = { LSOF_DIFF_MT = "su-fd9" }
+with_stderr = true
+
+[[case]]
+# `-V` says so, on stdout.
+name = "startup-handed-descriptor-not-located"
+args = ["{SUPEMPTY}", "-n", "-P", "-V", "--", "{SUPEMPTY}"]
+env = { LSOF_DIFF_MT = "su-fd9" }
+with_stderr = true
+
+[[case]]
+# Its name through the descriptor is no file: a status error on lsof's own
+# `/proc/PID/fd/9` (stderr holds the pid, and is not compared), exit 1.
+# lsof-rs had found /dev/null by it, and listed every process that holds it.
+name = "startup-handed-descriptor-by-its-dev-fd-name"
+args = ["/dev/null", "-n", "-P", "-a", "-p", "{A}", "--", "/dev/fd/9"]
+env = { LSOF_DIFF_MT = "su-fd9" }
+
+[[case]]
+# A supplement named through it is `access /dev/fd/9: No such file or
+# directory` in both, now for the same reason (lsof-rs had followed the
+# name's links to tell).
+name = "startup-supplement-through-a-handed-descriptor"
+args = ["{SUPEX}", "-e", "/dev", "+m", "/dev/fd/9", "-a", "-d", "0", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-fd9" }
+with_stderr = true
+
+[[case]]
+# No /dev/null: `-v` prints nothing and exits 1 (lsof-rs: its version, 0).
+name = "startup-no-dev-null-version"
+args = ["-v"]
+env = { LSOF_DIFF_MT = "su-nodev" }
+with_stderr = true
+
+[[case]]
+# ...a listing that needs no helper too (lsof-rs: the row, exit 0)...
+name = "startup-no-dev-null-listing"
+args = ["-n", "-P", "-b", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-nodev" }
+with_stderr = true
+
+[[case]]
+# ...and an option that is none: no message, no usage. No option is read.
+name = "startup-no-dev-null-usage-error"
+args = ["-W"]
+env = { LSOF_DIFF_MT = "su-nodev" }
+with_stderr = true
+
+[[case]]
+# With stdin closed as well lsof-rs died of SIGABRT (the Rust runtime's own
+# start-up cannot put /dev/null on it).
+name = "startup-no-dev-null-stdin-closed"
+args = ["-v"]
+env = { LSOF_DIFF_MT = "su-nodev-closed0" }
+with_stderr = true
+
+[[case]]
+# The same with stderr closed.
+name = "startup-no-dev-null-stderr-closed"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-nodev-closed2" }
+
+[[case]]
+# A /dev/null that is there and cannot be opened for writing (a file of mode
+# 0444, the binary run as uid 65534) ends the run the same way.
+name = "startup-dev-null-not-writable"
+args = ["-v"]
+env = { LSOF_DIFF_MT = "su-ronull" }
+with_stderr = true
+
+[[case]]
+name = "startup-dev-null-not-writable-listing"
+args = ["-n", "-P", "-b", "-w", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-ronull" }
+with_stderr = true
+
+[[case]]
+# No descriptor left for it (stdin closed, `ulimit -n 3`): /dev/null goes on
+# 0 and the next open fails. lsof-rs had printed its version...
+name = "startup-no-descriptor-for-dev-null"
+args = ["-v"]
+env = { LSOF_DIFF_MT = "su-nofile3" }
+with_stderr = true
+
+[[case]]
+# ...and said `can't fopen(/proc/mounts, "r"): Too many open files`.
+name = "startup-no-descriptor-for-dev-null-listing"
+args = ["-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-nofile3" }
+with_stderr = true
+
+[[case]]
+# What lsof lists for itself (alone in a process namespace, pid 1) with its
+# stdin and stderr closed and descriptor 9 handed down: 0 and 2 are
+# /dev/null, read and write, and there is no 9.
+name = "startup-own-rows-closed-descriptors"
+args = ["-n", "-P", "-a", "-p", "1", "-d", "0,2,9"]
+env = { LSOF_DIFF_MT = "su-self" }
+
+[[case]]
+# With the flags the C's `open("/dev/null", O_RDWR)` has: `RW,LG`.
+name = "startup-own-rows-closed-descriptors-flags"
+args = ["-n", "-P", "+f", "g", "-a", "-p", "1", "-d", "0,2,9"]
+env = { LSOF_DIFF_MT = "su-self" }
+
+[[case]]
+# Descriptor 9 alone: no row, and the process is there (exit 0).
+name = "startup-own-rows-no-handed-descriptor"
+args = ["-n", "-P", "-a", "-p", "1", "-d", "9", "-F", "fn"]
+env = { LSOF_DIFF_MT = "su-self" }
+
+[[case]]
+# No /proc (DIVERGENCES 175): the C's child is a fork, so a run that names a
+# path goes on to the mount table and ends there, `can't fopen(/proc/mounts,
+# "r"): No such file or directory`. lsof-rs, whose helper is
+# `/proc/self/exe`, had said `can't fork: No such file or directory`.
+name = "startup-no-proc-path-argument"
+args = ["-n", "-P", "/"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+name = "startup-no-proc-plus-d"
+args = ["-n", "-P", "+d", "/"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+name = "startup-no-proc-exempt"
+args = ["-n", "-P", "-e", "/proc", "-a", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# LEDGERED (DECISION, DIVERGENCES 175): with no /proc and a `+d` of what is
+# no directory, the C's child `stat`s it and the C says so and ends in its
+# usage, never reaching the table; lsof-rs has no helper to ask, and ends at
+# the table it cannot open. Exit 1 in both.
+name = "startup-no-proc-plus-d-no-such-directory"
+args = ["-n", "-P", "+d", "/nonexistent-lsof-rs"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# LEDGERED (OPEN, DIVERGENCES 176): a limit of seven descriptors leaves
+# four free, which the C's two pipes take; lsof-rs's helper wants a fifth,
+# the /dev/null its stderr is (row 123). A file no process holds: the C
+# finds nothing and says nothing, lsof-rs says `can't open pipes: Too many
+# open files`. Exit 1 in both. (With a limit of 6 both say it, with 8
+# neither: measured, and no case, since a whole-host scan under eight
+# descriptors is at the edge of what either can open at once.)
+name = "startup-descriptor-limit-leaves-four"
+args = ["-n", "-P", "--", "{UNOPENED}"]
+env = { LSOF_DIFF_NOFILE = "7" }
+with_stderr = true
+
+[[case]]
+# One fewer, and the two agree: `can't open pipes: Too many open files`.
+name = "startup-descriptor-limit-leaves-three"
+args = ["-n", "-P", "--", "{UNOPENED}"]
+env = { LSOF_DIFF_NOFILE = "6" }
+with_stderr = true
+
+[[case]]
+# `+m m` asks `access()`, the real user's rights, before it reads `m`
+# (DIVERGENCES 172): with a real user who may not read it (uid 65534, the
+# effective one root) the C warns and reads none of it; lsof-rs had read it
+# as root and taken `/proc`'s device from it (`dev=0x7ffe1234`).
+name = "plus-m-file-the-real-user-may-not-read"
+args = ["-n", "-P", "-e", "/proc", "+m", "{MTSUP}", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-ruid" }
+with_stderr = true
+
+[[case]]
+# The other way round, `access()` passes and the open fails: `can't
+# open(m): Permission denied`, which lsof-rs had called an access warning.
+name = "plus-m-file-the-effective-user-may-not-read"
+args = ["-n", "-P", "-e", "/proc", "+m", "{MTSUP}", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-euid" }
+with_stderr = true
+
+# ------------------------------------------- option messages (audit, 2026-11-21)
+
+[[case]]
+# The `-d` mixture message quotes 254 bytes of `^` and the item, as the C's
+# `snpf()` into `char buf[256]` keeps (DIVERGENCES 173): of 300 `a`s, 253.
+name = "fd-mixture-item-cut-at-254-bytes"
+args = ["-d", "5,^aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+with_stderr = true
+
+[[case]]
+# A character of several bytes among an option's letters is a line a byte,
+# as the C's loops over the value say `%c` of each (DIVERGENCES 174). The C
+# prints the byte raw, lsof-rs `\xc3` (122), and the runner reads a byte
+# that is no character as `\xc3` too: the lines are the same.
+name = "letters-multibyte-field"
+args = ["-F", "pén"]
+with_stderr = true
+
+[[case]]
+name = "letters-multibyte-tcp-info"
+args = ["-T", "qé"]
+with_stderr = true
+
+[[case]]
+# With a letter `-x` knows: the two lines, then `-x must accompany +d or +D`.
+name = "letters-multibyte-cross-over"
+args = ["-xfé"]
+with_stderr = true
+
+[[case]]
+name = "letters-multibyte-file-struct"
+args = ["+fé"]
+with_stderr = true
+
+[[case]]
+# Three bytes each: six lines.
+name = "letters-multibyte-cjk"
+args = ["-F", "日本"]
+with_stderr = true

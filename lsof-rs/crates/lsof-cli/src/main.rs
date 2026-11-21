@@ -844,6 +844,13 @@ fn report(reports: Reports) {
 }
 
 fn main() {
+    // Before this, and before the Rust runtime: what the C's `main()` does
+    // first (`main.c:173-183`). `lsof_sigpipe`'s constructor closed every
+    // descriptor from 3 up this process was started with, put `/dev/null`
+    // on each of 0, 1 and 2 that was closed, and ended the run, exit 1 and
+    // nothing said, where `/dev/null` cannot be opened (DIVERGENCES 170,
+    // 171). So nothing below finds a descriptor it did not open itself.
+    //
     // The bounded layer's helper is this binary, re-executed with an argument
     // no user types (`lsof_backend_linux::safefs`). It is served before
     // anything else is looked at — options, the locale, the environment,
@@ -877,10 +884,6 @@ fn main() {
     // helper that cannot start) ends it through `lsof_core::safefs::exit`,
     // which flushes stdout first, as the C's `exit()` does.
     lsof_core::safefs::set_exit_flush(lsof_cli::stdio::flush);
-    // What the C closes first (`closefrom_shim(ctx, 3)`): noted before any
-    // descriptor of lsof-rs's own is opened (DIVERGENCES 153).
-    #[cfg(target_os = "linux")]
-    lsof_backend_linux::note_inherited_fds();
 
     // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
     // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —

@@ -1,0 +1,526 @@
+# Mutants for the start-up and options audit (2026-11-21): DIVERGENCES 170
+# (every descriptor from 3 up closed as lsof starts), 171 (/dev/null on a
+# closed 0, 1 or 2, and a silent exit 1 without it), 172 (`+m m` asked of
+# access(2) first), 173 (the -d mixture's item cut at 254 bytes), 174 (a
+# letter of several bytes a line a byte) and 175 (no /proc: the mount
+# table's line, not `can't fork`). One per rule, bound and branch the fixes
+# added, each a plausible way to get it wrong. The kill table is this file,
+# run (porting-kit LESSONS #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/audit-startup.toml
+#
+# It needs root (or a user who may make a user namespace), `setpriv` and an
+# `strace` that can inject an error, for four of the gate's cases:
+# `tests/startup.rs` skips its mount-namespace, change-of-user and injected
+# cases elsewhere, and `no-helper-says-cant-fork`,
+# `supplement-asked-of-the-effective-user` and `close-range-result-unread`
+# then survive. CI runs only --apply-only.
+#
+# Run 2026-11-21 as root, --first-kill: 48 mutants, 48 killed (unit-sigpipe
+# 23, unit-cli 12, startup 10, unit-linux 3; the gates run in that order,
+# so the backend's unit tests are asked last).
+#
+# The differential sees the rules too, and is no gate here for its cost:
+# of its 29 cases about them (`startup-*`, `plus-m-file-the-*-user-may-not-
+# read`, `fd-mixture-*`, `letters-multibyte-*`), 28 DIVERGE on the tree
+# before the fixes (measured 2026-11-21).
+#
+# Rules with no mutant here, and why:
+# * `O_LARGEFILE` on the constructor's `/dev/null`: 0 on every 64-bit glibc
+#   target, where the kernel sets the flag itself, so no test on such a
+#   host can see it gone; `+f g` shows `RW,LG` either way.
+# * The constructor's `cfg!(miri)` return, and its FreeBSD half
+#   (`closefrom(3)`): no gate here runs miri, or FreeBSD.
+# * `/proc/self/fd` as the directory the fallback lists: any other
+#   directory of numbers this process has (`/proc/self/fdinfo`) lists the
+#   same ones.
+# * `Access::READ_OK` against the other rights (`F_OK`, `W_OK`): root has
+#   them all, and for the user the gate's case runs as the directories
+#   above the file may refuse first, with the same words.
+# * The four errors a `fork()` fails of, one by one: `fork-errors-are-the-
+#   pipes-alone` drops the two that are `fork()`'s own.
+# * An open that fails past access() being `can't open`, whatever its
+#   error: plus4.toml's `socket-says-access`, re-anchored on this code.
+# * A directory entry that says it has no length ending the reading: a
+#   mutant without the check reads on, to no effect, for as many turns as
+#   there are bytes (the loop is bounded by them), and ends the same.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "-p", "lsof-sigpipe", "-p", "lsof-backend-linux", "-p", "lsof-cli"]]
+
+[[run.gate]]
+name = "unit-sigpipe"
+cmd = ["cargo", "test", "-p", "lsof-sigpipe", "--lib"]
+timeout = 600
+
+[[run.gate]]
+name = "unit-cli"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--lib"]
+timeout = 900
+
+[[run.gate]]
+name = "startup"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--test", "startup", "--test", "arguments"]
+timeout = 1200
+
+[[run.gate]]
+name = "unit-linux"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "--lib"]
+timeout = 900
+
+# ------------------------------------------- 170: the descriptors handed down
+
+[[mutant]]
+name = "startup-not-run"
+rule = "the constructor takes the C's first two steps (170, 171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''    startup::start_up(&mut kernel);
+}'''
+new = '''    if false {
+        startup::start_up(&mut kernel);
+    }
+}'''
+
+[[mutant]]
+name = "close-from-not-called"
+rule = "every descriptor from 3 up is closed (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        close_from(sys, FIRST_CLOSED);
+        open_standard(sys);'''
+new = '''        open_standard(sys);'''
+
+[[mutant]]
+name = "dev-null-before-the-close"
+rule = "the close comes before /dev/null is opened, as in the C (170, 171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        close_from(sys, FIRST_CLOSED);
+        open_standard(sys);'''
+new = '''        open_standard(sys);
+        close_from(sys, FIRST_CLOSED);'''
+
+[[mutant]]
+name = "first-closed-is-four"
+rule = "the first descriptor closed is 3 (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''    pub(crate) const FIRST_CLOSED: c_int = 3;'''
+new = '''    pub(crate) const FIRST_CLOSED: c_int = 4;'''
+
+[[mutant]]
+name = "close-range-closes-one"
+rule = "close_range() runs from 3 to the last number there is (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            let (last, flags): (libc::c_uint, libc::c_uint) = (libc::c_uint::MAX, 0);'''
+new = '''            let (last, flags): (libc::c_uint, libc::c_uint) = (first, 0);'''
+
+[[mutant]]
+name = "close-range-result-unread"
+rule = "where close_range() failed, nothing was closed, and the fallback runs (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            let rc = unsafe { libc::syscall(libc::SYS_close_range, first, last, flags) };
+            rc == 0'''
+new = '''            let rc = unsafe { libc::syscall(libc::SYS_close_range, first, last, flags) };
+            rc == 0 || rc == -1'''
+
+[[mutant]]
+name = "listing-before-the-one-call"
+rule = "where close_range() is there, it is all that is called (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        if sys.close_from(low) || close_listed(sys, low) {'''
+new = '''        if close_listed(sys, low) || sys.close_from(low) {'''
+
+[[mutant]]
+name = "no-listing-fallback"
+rule = "without close_range(), the descriptors /proc/self/fd lists are closed (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        if sys.close_from(low) || close_listed(sys, low) {'''
+new = '''        if sys.close_from(low) {'''
+
+[[mutant]]
+name = "no-sweep-fallback"
+rule = "with neither, every number below the limit is closed (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        for fd in low..sweep_end(sys.table_size()) {'''
+new = '''        for fd in low..low.min(sweep_end(sys.table_size())) {'''
+
+[[mutant]]
+name = "sweep-stops-at-a-low-limit"
+rule = "the sweep runs to 53 at least, the C's MaxFd (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        table_size.clamp(SWEEP_MIN, SWEEP_MAX)'''
+new = '''        table_size.clamp(FIRST_CLOSED, SWEEP_MAX)'''
+
+[[mutant]]
+name = "sweep-unbounded"
+rule = "the sweep closes 1,048,576 numbers at most (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        table_size.clamp(SWEEP_MIN, SWEEP_MAX)'''
+new = '''        table_size.max(SWEEP_MIN)'''
+
+[[mutant]]
+name = "listing-closes-below-three"
+rule = "the walk closes the numbers from 3 up alone (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''                if fd >= low && fd != dir {'''
+new = '''                if fd != dir {'''
+
+[[mutant]]
+name = "listing-closes-itself"
+rule = "the walk does not close the descriptor it is read through (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''                if fd >= low && fd != dir {'''
+new = '''                if fd >= low {'''
+
+[[mutant]]
+name = "listing-left-open"
+rule = "the walk's own descriptor is closed when it ends (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        sys.close(dir);
+        true'''
+new = '''        true'''
+
+[[mutant]]
+name = "listing-read-once"
+rule = "the walk reads the directory to its end (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            listed(records, &mut |fd| {
+                if fd >= low && fd != dir {
+                    sys.close(fd);
+                }
+            });
+        }'''
+new = '''            listed(records, &mut |fd| {
+                if fd >= low && fd != dir {
+                    sys.close(fd);
+                }
+            });
+            break;
+        }'''
+
+[[mutant]]
+name = "dirent-name-a-byte-early"
+rule = "a directory entry's name begins at byte 19 (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''    pub(crate) const DIRENT_NAME: usize = 19;'''
+new = '''    pub(crate) const DIRENT_NAME: usize = 18;'''
+
+[[mutant]]
+name = "dirent-length-misplaced"
+rule = "a directory entry's length is its bytes 16 and 17 (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''    pub(crate) const DIRENT_RECLEN: std::ops::Range<usize> = 16..18;'''
+new = '''    pub(crate) const DIRENT_RECLEN: std::ops::Range<usize> = 8..10;'''
+
+[[mutant]]
+name = "dirent-stops-at-the-first-entry"
+rule = "every entry a read gave is looked at (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            records = records.get(len..).unwrap_or_default();'''
+new = '''            records = records.get(records.len()..).unwrap_or_default();'''
+
+[[mutant]]
+name = "fd-name-not-digits"
+rule = "a descriptor's name is digits and nothing else (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            if !b.is_ascii_digit() {
+                return None;
+            }'''
+new = '''            if !b.is_ascii_digit() {
+                continue;
+            }'''
+
+[[mutant]]
+name = "fd-name-empty-is-zero"
+rule = "an empty name is no descriptor (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        if name.is_empty() {
+            return None;
+        }
+        let mut fd: c_int = 0;'''
+new = '''        let mut fd: c_int = 0;'''
+
+[[mutant]]
+name = "fd-name-int-max-taken"
+rule = "a descriptor's number is below INT_MAX, as the C's (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        (fd < c_int::MAX).then_some(fd)'''
+new = '''        Some(fd)'''
+
+# ------------------------------------------------------- 171: /dev/null
+
+[[mutant]]
+name = "no-dev-null-run-goes-on"
+rule = "a run that cannot open /dev/null ends there (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''                sys.exit(NO_DEV_NULL);
+                return;'''
+new = '''                return;'''
+
+[[mutant]]
+name = "no-dev-null-exits-zero"
+rule = "a run that cannot open /dev/null exits 1 (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''    pub(crate) const NO_DEV_NULL: c_int = 1;'''
+new = '''    pub(crate) const NO_DEV_NULL: c_int = 0;'''
+
+[[mutant]]
+name = "kernel-exit-returns"
+rule = "the exit is the kernel's: nothing runs after it (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            unsafe { libc::_exit(status) }
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]'''
+new = '''            let _ = status;
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]'''
+
+[[mutant]]
+name = "dev-null-loop-past-two"
+rule = "a descriptor of 2 ends the loop and is kept (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            if fd < 2 {
+                continue;
+            }'''
+new = '''            if fd <= 2 {
+                continue;
+            }'''
+
+[[mutant]]
+name = "dev-null-opened-once"
+rule = "/dev/null is opened until its descriptor is at least 2 (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            if fd < 2 {
+                continue;
+            }'''
+new = '''            if fd < 1 {
+                continue;
+            }'''
+
+[[mutant]]
+name = "dev-null-extra-kept"
+rule = "the descriptor the loop got past 2 is closed again (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            if fd > 2 {
+                sys.close(fd);
+            }'''
+new = '''            if fd > 3 {
+                sys.close(fd);
+            }'''
+
+[[mutant]]
+name = "dev-null-read-only"
+rule = "/dev/null is opened for reading and writing (171)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''libc::O_RDWR | libc::O_LARGEFILE'''
+new = '''libc::O_RDONLY | libc::O_LARGEFILE'''
+
+# ------------------------------------------------- 172: `+m m` and access(2)
+
+[[mutant]]
+name = "supplement-not-asked-of-access"
+rule = "the supplement is asked of access() before it is opened (172)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    readable(path).map_err(|e| access(&e))?;'''
+new = '''    let _ = readable;'''
+
+[[mutant]]
+name = "supplement-access-always-passes"
+rule = "access() is asked, of the path (172)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    rustix::fs::access(path, rustix::fs::Access::READ_OK).map_err(std::io::Error::from)'''
+new = '''    let _ = path;
+    Ok(())'''
+
+[[mutant]]
+name = "supplement-asked-of-the-effective-user"
+rule = "the question is access(2)'s, the real user's rights, not an open's (172)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    rustix::fs::access(path, rustix::fs::Access::READ_OK).map_err(std::io::Error::from)'''
+new = '''    std::fs::File::open(path).map(drop)'''
+
+[[mutant]]
+name = "supplement-stat-failure-called-access"
+rule = "past access(), a file that is not there is `can't open` (172)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = '''    let meta = std::fs::metadata(path).map_err(|e| open(&e))?;'''
+new = '''    let meta = std::fs::metadata(path).map_err(|e| access(&e))?;'''
+
+# ---------------------------------------- 173: the -d mixture's item, 254 bytes
+
+[[mutant]]
+name = "fd-mixture-item-whole"
+rule = "the -d mixture message quotes 254 bytes of its item (173)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    bytes.truncate(FD_MIXTURE_ITEM);'''
+new = ''''''
+
+[[mutant]]
+name = "fd-mixture-item-255"
+rule = "254 bytes, as snpf(buf, 255) keeps (173)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''const FD_MIXTURE_ITEM: usize = 254;'''
+new = '''const FD_MIXTURE_ITEM: usize = 255;'''
+
+[[mutant]]
+name = "fd-mixture-caret-not-counted"
+rule = "the `^` is one of the 254 bytes (173)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    let mut bytes = caret.as_bytes().to_vec();
+                    bytes.extend_from_slice(&text_bytes(body));
+                    bytes.truncate(FD_MIXTURE_ITEM);
+                    shown_bytes(&bytes).into_owned()'''
+new = '''                    let mut bytes = text_bytes(body).into_owned();
+                    bytes.truncate(FD_MIXTURE_ITEM);
+                    format!("{caret}{}", shown_bytes(&bytes))'''
+
+[[mutant]]
+name = "fd-mixture-cut-after-escaping"
+rule = "the cut is of the bytes given, not of what is shown for them (173)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                    bytes.truncate(FD_MIXTURE_ITEM);
+                    shown_bytes(&bytes).into_owned()'''
+new = '''                    let cut: String = shown_bytes(&bytes).chars().take(FD_MIXTURE_ITEM).collect();
+                    cut'''
+
+[[mutant]]
+name = "fd-mixture-stand-ins-as-characters"
+rule = "a byte that is no character counts one of the 254 (173)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if stand_ins && arg.chars().any(|c| byte_letter(c).is_some()) {
+        return std::borrow::Cow::Owned(stand_in_bytes(arg));
+    }'''
+new = '''    let _ = stand_ins;'''
+
+# ------------------------------------- 174: a letter of several bytes, by byte
+
+[[mutant]]
+name = "letter-a-line-a-character"
+rule = "a letter of several bytes is an error a byte (174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        if c.is_ascii() || a_byte {'''
+new = '''        if c.is_ascii() || a_byte || c.len_utf8() > 1 {'''
+
+[[mutant]]
+name = "letter-stand-in-split"
+rule = "a byte that is no character is one line, as it was (174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''        let a_byte = STAND_INS.with(std::cell::Cell::get) && byte_letter(c).is_some();'''
+new = '''        let a_byte = false;'''
+
+[[mutant]]
+name = "letter-byte-shown-as-its-stand-in"
+rule = "each byte is shown escaped, `\\xNN` (122, 174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                        Some(b) => buf.push_str(&shown_bytes(&[b])),'''
+new = '''                        Some(b) if b == 0 => buf.push_str(&shown_bytes(&[b])),
+                        Some(_) => buf.push(c),'''
+
+[[mutant]]
+name = "field-letter-by-character"
+rule = "-F's letters are read a byte at a time (174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                                early.letters(Early::FIELD, bad);'''
+new = '''                                early.letter(Early::FIELD, bad);'''
+
+[[mutant]]
+name = "tcp-info-letter-by-character"
+rule = "-T's letters are read a byte at a time (174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''            other => early.letters(Early::TCP_TPI, other),'''
+new = '''            other => early.letter(Early::TCP_TPI, other),'''
+
+[[mutant]]
+name = "file-struct-letter-by-character"
+rule = "-f's and +f's letters are read a byte at a time (174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                                    other => early.letters(Early::FILE_STRUCT, other),'''
+new = '''                                    other => early.letter(Early::FILE_STRUCT, other),'''
+
+[[mutant]]
+name = "cross-over-letter-by-character"
+rule = "-x's letters are read a byte at a time (174)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                                    other => early.letters(Early::CROSS_OVER, other),'''
+new = '''                                    other => early.letter(Early::CROSS_OVER, other),'''
+
+# ----------------------------------------- 175: no /proc, and the mount table
+
+[[mutant]]
+name = "no-helper-says-cant-fork"
+rule = "where no helper can start and the table cannot be opened, the table's line is said (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''                let line = no_helper(e, crate::mounts::unopenable);'''
+new = '''                let line = no_helper(e, || None);'''
+
+[[mutant]]
+name = "no-helper-table-never-asked"
+rule = "a failure a fork would not have had asks the table (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    let unread = if a_fork_fails_too(e) { None } else { table() };'''
+new = '''    let unread = if a_fork_fails_too(e) || e.raw_os_error().is_some() { None } else { table() };'''
+
+[[mutant]]
+name = "no-helper-table-always-asked"
+rule = "the C's own failed pipe() or fork() is said of them, whatever the table (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    let unread = if a_fork_fails_too(e) { None } else { table() };'''
+new = '''    let unread = table();'''
+
+[[mutant]]
+name = "fork-errors-are-the-pipes-alone"
+rule = "EAGAIN and ENOMEM are a fork()'s own, as EMFILE and ENFILE are the pipes' (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = '''    matches!(e.raw_os_error(), Some(11 | 12 | 23 | 24))'''
+new = '''    matches!(e.raw_os_error(), Some(23 | 24))'''

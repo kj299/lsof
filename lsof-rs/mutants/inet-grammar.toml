@@ -35,6 +35,11 @@
 # `incomplete-check-dropped`, `empty-spec-read-as-bare`) and run again as
 # root with --first-kill: 4 of 4 killed, by the unit gate.
 
+# 2026-11-21 (DIVERGENCES 173): `d-mixture-raw` was re-anchored on the
+# mixture's item as it is built since it is cut at 254 bytes (its bytes,
+# then escaped), and run again with the unit gate alone (`cargo test -p
+# lsof-cli --lib`), --first-kill: killed.
+
 [run]
 dir = ".."
 build = [["cargo", "build", "--release", "--bin", "lsof"]]
@@ -237,8 +242,8 @@ name = "d-mixture-raw"
 rule = "the -d mixture's item is escaped, where the C prints it raw (122)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                None => shown(body).into_owned(),'''
-new = '''                None => body.to_string(),'''
+old = '''                    shown_bytes(&bytes).into_owned()'''
+new = '''                    String::from_utf8_lossy(&bytes).into_owned()'''
 
 [[mutant]]
 name = "s-protocol-raw"

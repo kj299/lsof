@@ -47,6 +47,40 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   shows its queues** (147), as the C sets them for every socket.
 
 ### Changed — output and exit status a script may notice
+- **lsof closes every descriptor from 3 up it was started with, as the C
+  does first** (DIVERGENCES 170): `lsof FILE 9<FILE` lists nothing and
+  exits 1, where lsof-rs had listed itself and its helper for the file
+  and exited 0 (two pids under `-t`); a whole-host listing run from a
+  parent that leaves descriptors open no longer has them in lsof's rows;
+  `lsof /dev/fd/9` is a status error; a reader of a pipe lsof was handed
+  no longer waits on lsof's helper; and the numbers they took no longer
+  count against lsof's descriptor limit. Done in `lsof-sigpipe`'s
+  constructor, before the Rust runtime starts: `close_range(3, ~0U, 0)`,
+  else the descriptors `/proc/self/fd` lists, else every number below the
+  limit (1,048,576 at most). On FreeBSD, `closefrom(3)`.
+- **With no usable `/dev/null`, every run exits 1 and prints nothing, as
+  the C's does** (171): the C opens it before it reads an option, to put
+  it on a closed stdin, stdout or stderr, and ends in silence where it
+  cannot (no `/dev/null`, one its user cannot write, no descriptor left
+  for it). lsof-rs had printed its version, listed, or said `can't fork`,
+  and with a standard descriptor closed as well it died of `SIGABRT`
+  (exit 134) inside the Rust runtime's start-up.
+- **`+m FILE` is asked of `access(2)` before it is read** (172), the real
+  user's rights, as the C's `is_readable()` asks: where lsof's effective
+  user is another (a setuid installation, a wrapper that sets it), a
+  supplement the caller may not read is `WARNING: access FILE: Permission
+  denied` and none of its lines is quoted, where lsof-rs had read it; and
+  one the caller may read and the effective user may not is `can't
+  open(FILE): Permission denied`, which lsof-rs had called an access
+  warning.
+- **Messages** (stderr; exit status unchanged): the `-d` mixture message
+  quotes 254 bytes of its item, as the C's buffer keeps (173); a character
+  of several bytes among the letters of `-F`, `-T`, `-x` or `+f` is a line
+  a byte, `unknown field: \xc3` and `unknown field: \xa9` for `é`, as the
+  C says one of each byte (174; lsof-rs said one line a character); and
+  with no `/proc`, a run that names a path, a `+d`/`+D` or an `-e` ends
+  `can't fopen(/proc/mounts, "r"): No such file or directory`, the C's
+  words, where lsof-rs said `can't fork` (175).
 - **`-u name` and USER ask the C library, as the C does** (DIVERGENCES
   39): `getpwnam_r(3)` and `getpwuid_r(3)`, so an account only LDAP, SSSD,
   systemd-homed, NIS or Hesiod serves has its name in USER, `-F L` and
@@ -438,6 +472,24 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   which matches names, the walk still comes after the parse.
 
 ### Security
+
+- **`unsafe` stays in the small audited crates, and one of them has a new
+  job** (DIVERGENCES 170, 171): closing the descriptors lsof was started
+  with needs calls no safe interface offers, and is sound only before any
+  code of the program has run, so it is in `lsof-sigpipe`'s `.init_array`
+  constructor and nowhere else: thirteen more `unsafe` blocks there, each
+  with a `SAFETY:` comment (eleven single system calls, seven for Linux and
+  four for FreeBSD; the one that makes the value they sit behind, whose
+  `unsafe fn` constructor has that point in time for its contract; and one
+  in a unit test), with the steps themselves safe code that the unit tests
+  run over a descriptor table of their own. lsof-core, lsof-cli and
+  lsof-backend-linux keep `#![forbid(unsafe_code)]`; no crate was added. A
+  test reads the built binary's `.init_array` and fails on a constructor
+  the argument does not name. THREAT-MODEL §2.
+- **A mount supplement its caller may not read is not read** (172), and
+  **nothing lsof was handed reaches its helper** (170): the helper had
+  kept every descriptor the shell left open, for as long as a file system
+  that did not answer held it.
 
 - **DNS replies are read by a parser of lsof-rs's own** (DIVERGENCES 154,
   THREAT-MODEL): a reverse lookup's reply is bytes from the network, chosen

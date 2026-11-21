@@ -533,6 +533,16 @@ fn stand_in_bytes(text: &str) -> Vec<u8> {
     out
 }
 
+/// The bytes `arg`, text an option read, was given as: each stand-in its
+/// byte where this parse has stand-ins ([`shown`]), else the text's own.
+fn text_bytes(arg: &str) -> std::borrow::Cow<'_, [u8]> {
+    let stand_ins = STAND_INS.with(std::cell::Cell::get);
+    if stand_ins && arg.chars().any(|c| byte_letter(c).is_some()) {
+        return std::borrow::Cow::Owned(stand_in_bytes(arg));
+    }
+    std::borrow::Cow::Borrowed(arg.as_bytes())
+}
+
 /// [`shown`] for an argument kept as bytes (a path `Readlink()` spelt).
 fn shown_bytes(arg: &[u8]) -> std::borrow::Cow<'_, str> {
     Escaper::for_host().bytes(arg)
@@ -700,7 +710,9 @@ impl std::fmt::Display for ParseError {
 ///
 /// An error that holds a letter of an option's value (`unknown cross-over
 /// option: q`, the C's `-x`, `-f`, `-F` and `-T` say one per letter) is
-/// [`Early::ESC`], a kind and the letter, three characters and no text. And
+/// [`Early::ESC`], a kind and the letter, three characters and no text; a
+/// letter is a byte to the C, so a character of several bytes is as many
+/// errors, each byte held as its stand-in ([`Early::letters`]). And
 /// what is held is printed through the parse's sink, where the C has printed
 /// it already, once it passes [`Early::SPILL`] bytes ([`Early::spill`]), as
 /// each line is stored: so that no argument list, however many errors it
@@ -801,12 +813,33 @@ impl Early<'_> {
         }
     }
 
-    /// The error of a `kind` naming `c`, one letter of an option's value.
+    /// The error of a `kind` naming `c`, one letter of an option's value:
+    /// an ASCII letter, or a byte's stand-in ([`letter_for_byte`]).
     fn letter(&mut self, kind: char, c: char) {
         self.codes.push(Self::ESC);
         self.codes.push(kind);
         self.codes.push(c);
         self.spill();
+    }
+
+    /// The errors of a `kind` for `c`, a character of an option's value the
+    /// option does not know, as the C makes them: its loops over a value
+    /// read a byte at a time (`for (; *GOv; GOv++)`, `main.c:413-466,
+    /// 498-546, 905-936, 963-976`) and say `%c` of each, so a character of
+    /// several bytes is one line a byte (`-F é` is two, measured), the byte
+    /// shown escaped (DIVERGENCES 122, 174). A byte that is no character,
+    /// read as its stand-in where this parse has stand-ins, is one line, as
+    /// it was; any other character past ASCII is its UTF-8 bytes, each held
+    /// as its stand-in, so that a stand-in held here is always a byte.
+    fn letters(&mut self, kind: char, c: char) {
+        let a_byte = STAND_INS.with(std::cell::Cell::get) && byte_letter(c).is_some();
+        if c.is_ascii() || a_byte {
+            self.letter(kind, c);
+            return;
+        }
+        for &b in c.encode_utf8(&mut [0; 4]).as_bytes() {
+            self.letter(kind, letter_for_byte(b));
+        }
     }
 
     /// `illegal option character: X`, `X` escaped (DIVERGENCES 122).
@@ -904,7 +937,13 @@ impl Early<'_> {
                         Self::FIELD => "unknown field: ",
                         _ => "unsupported TCP/TPI info selection: ",
                     };
-                    buf.push_str(&quoting(message, c.encode_utf8(&mut [0; 4])));
+                    buf.push_str(message);
+                    // A stand-in held for these is a byte, whatever this
+                    // parse's words were ([`Early::letters`]).
+                    match byte_letter(c) {
+                        Some(b) => buf.push_str(&shown_bytes(&[b])),
+                        None => buf.push_str(&shown(c.encode_utf8(&mut [0; 4]))),
+                    }
                     None
                 }
                 // `ESC ESC`: a NUL letter.
@@ -1579,7 +1618,7 @@ fn parse_options<'s>(
                                 match c {
                                     'f' => sel.cross_filesystems = true,
                                     'l' => sel.cross_symlinks = true,
-                                    other => early.letter(Early::CROSS_OVER, other),
+                                    other => early.letters(Early::CROSS_OVER, other),
                                 }
                             }
                         }
@@ -1641,7 +1680,7 @@ fn parse_options<'s>(
                                     'f' | 'F' if has_file_struct() => fsv.addr = plus,
                                     'n' | 'N' if has_file_struct() => fsv.node = plus,
                                     // Each one the C's error, and it reads on.
-                                    other => early.letter(Early::FILE_STRUCT, other),
+                                    other => early.letters(Early::FILE_STRUCT, other),
                                 }
                             }
                         }
@@ -1758,7 +1797,7 @@ fn parse_options<'s>(
                         // mutually exclusive` (measured).
                         Some(list) => {
                             for bad in list.chars().filter(|f| !field_known(*f)) {
-                                early.letter(Early::FIELD, bad);
+                                early.letters(Early::FIELD, bad);
                             }
                             false
                         }
@@ -2569,18 +2608,25 @@ fn enter_fd_list(
                 continue;
             }
             let kind = |x: bool| if x { "exclude" } else { "include" };
-            // The item escaped, where the C prints it raw (`arg.c`,
-            // `enter_fd_lst()`: `%s`), a C-DEFECT not reproduced
-            // (DIVERGENCES 122).
+            let caret = if exclude { "^" } else { "" };
+            // The item as the C quotes it: `^` and the name, the first
+            // [`FD_MIXTURE_ITEM`] bytes of them. Escaped, where the C prints
+            // them raw (`arg.c`, `enter_fd_lst()`: `%s`), a C-DEFECT not
+            // reproduced (DIVERGENCES 122): a character the cut divides is
+            // its bytes that are left, each `\xNN`.
             let item = match range {
-                Some((lo, hi)) => format!("{lo}-{hi}"),
-                None => shown(body).into_owned(),
+                Some((lo, hi)) => format!("{caret}{lo}-{hi}"),
+                None => {
+                    let mut bytes = caret.as_bytes().to_vec();
+                    bytes.extend_from_slice(&text_bytes(body));
+                    bytes.truncate(FD_MIXTURE_ITEM);
+                    shown_bytes(&bytes).into_owned()
+                }
             };
             early.line(&format!(
-                "{} in an {} -d list: {}{item}",
+                "{} in an {} -d list: {item}",
                 kind(exclude),
-                kind(was),
-                if exclude { "^" } else { "" }
+                kind(was)
             ));
             continue;
         }
@@ -2609,6 +2655,12 @@ fn enter_fd_list(
     }
     Ok(())
 }
+
+/// How much of an item the `-d` mixture message quotes, `^` included: the C
+/// formats it into `char buf[256]` with `snpf(buf, sizeof(buf) - 1, "%s%s",
+/// …)`, which keeps 254 bytes (`arg.c:707, 720-732`; measured, `-d
+/// 5,^aaa…` of 300 `a`s prints `^` and 253 of them).
+const FD_MIXTURE_ITEM: usize = 254;
 
 /// `ckfd_range()`: digits on both sides of an item's last `-`, the low end
 /// below the high one. `3-3` is refused, and `1-` is a high end of 0.
@@ -3532,7 +3584,7 @@ fn parse_tcp_info(letters: Option<&str>, plus: bool, early: &mut Early) -> TcpIn
             'q' => flags.queue = true,
             's' => flags.state = true,
             'w' if HAS_TCP_WINDOW => flags.window = true,
-            other => early.letter(Early::TCP_TPI, other),
+            other => early.letters(Early::TCP_TPI, other),
         }
     }
     flags
@@ -4403,6 +4455,166 @@ mod tests {
             fd(&["-d", "1-2\x1b"]).unwrap_err(),
             "non-digit in -d FD range: 1-2^["
         );
+    }
+
+    /// The `-d` mixture message quotes `^` and the item, 254 bytes of them:
+    /// the C formats them into `char buf[256]` with `snpf(buf, sizeof(buf) -
+    /// 1, …)` (`arg.c:707, 720-732`; measured, 300 `a`s print as `^` and
+    /// 253). lsof-rs had quoted the whole item (DIVERGENCES 173). The cut
+    /// is of the bytes given, which are then escaped (122).
+    #[test]
+    fn the_dash_d_mixture_quotes_254_bytes_of_its_item() {
+        let fd = |argv: &[&str]| columns(argv).map(|(_, sel)| sel.fd_filter);
+        let said = |list: &str| fd(&["-d", list]).unwrap_err();
+        let excl = "exclude in an include -d list: ";
+        let incl = "include in an exclude -d list: ";
+        // With its `^`, a name of 253 bytes is whole, and a longer one cut.
+        for n in [1, 100, 252, 253] {
+            assert_eq!(
+                said(&format!("5,^{}", "a".repeat(n))),
+                format!("{excl}^{}", "a".repeat(n)),
+                "{n}"
+            );
+        }
+        for n in [254, 255, 300, 5000] {
+            assert_eq!(
+                said(&format!("5,^{}", "a".repeat(n))),
+                format!("{excl}^{}", "a".repeat(253)),
+                "{n}"
+            );
+        }
+        // An inclusion has no `^`: 254 bytes of the name.
+        for n in [253, 254] {
+            assert_eq!(
+                said(&format!("^5,{}", "b".repeat(n))),
+                format!("{incl}{}", "b".repeat(n)),
+                "{n}"
+            );
+        }
+        assert_eq!(
+            said(&format!("^5,{}", "b".repeat(300))),
+            format!("{incl}{}", "b".repeat(254))
+        );
+        // A character the cut divides is the bytes of it that are left,
+        // each escaped: `^`, 252 bytes and the first of `é`'s two.
+        assert_eq!(
+            said(&format!("5,^{}\u{e9}zz", "a".repeat(252))),
+            format!("{excl}^{}\\xc3", "a".repeat(252))
+        );
+        // The cut counts the bytes given, not the characters shown for
+        // them: an ESC is one byte of the 254 and two characters.
+        assert_eq!(
+            said(&format!("5,^{}\x1b{}", "a".repeat(100), "b".repeat(300))),
+            format!("{excl}^{}^[{}", "a".repeat(100), "b".repeat(152))
+        );
+        // A range is its two numbers, never that long.
+        assert_eq!(said("5,^1-2"), format!("{excl}^1-2"));
+        // Bytes that are no characters count one each.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let mut list = b"5,^".to_vec();
+            list.extend_from_slice(&[0xff; 300]);
+            let err = parse(vec![OsString::from("-d"), OsString::from_vec(list)]).unwrap_err();
+            assert_eq!(err, format!("{excl}^{}", "\\xff".repeat(253)));
+        }
+    }
+
+    /// A character of several bytes among the letters of `-F`, `-T`, `-x`
+    /// or `-f`/`+f` is one error a byte, as the C's loops over a value read
+    /// it (`for (; *GOv; GOv++)` and `%c`, `main.c:413-466, 498-546,
+    /// 905-936, 963-976`; measured, `-F é` is two lines), each byte shown
+    /// escaped (DIVERGENCES 122). lsof-rs had said one line a character
+    /// (DIVERGENCES 174).
+    #[test]
+    fn a_letter_of_several_bytes_is_an_error_a_byte() {
+        let said = |argv: &[&str]| parse(argv.to_vec()).unwrap_err();
+        let each = |message: &str, bytes: &[&str]| {
+            bytes
+                .iter()
+                .map(|b| format!("{message}{b}"))
+                .collect::<Vec<_>>()
+                .join("\nlsof: ")
+        };
+        let field = "unknown field: ";
+        let tcp = "unsupported TCP/TPI info selection: ";
+        let cross = "unknown cross-over option: ";
+        let fstruct = "unknown file struct option: ";
+        for (argv, message) in [
+            (&["-F", "\u{e9}"][..], field),
+            (&["-F\u{e9}"], field),
+            (&["+F", "\u{e9}"], field),
+            (&["-T", "\u{e9}"], tcp),
+            (&["+T\u{e9}"], tcp),
+            (&["-x", "\u{e9}"], cross),
+            (&["-x\u{e9}"], cross),
+            (&["-f", "\u{e9}"], fstruct),
+            (&["+f\u{e9}"], fstruct),
+        ] {
+            assert_eq!(said(argv), each(message, &["\\xc3", "\\xa9"]), "{argv:?}");
+        }
+        // Among letters the option knows, in the value's order, and the
+        // known ones still taken: `-x f` there, `-x` asks for its `+d`.
+        assert_eq!(said(&["-Fp\u{e9}n"]), each(field, &["\\xc3", "\\xa9"]));
+        assert_eq!(said(&["-T", "q\u{e9}s"]), each(tcp, &["\\xc3", "\\xa9"]));
+        assert_eq!(
+            said(&["-xf\u{e9}"]),
+            format!(
+                "{}\nlsof: -x must accompany +d or +D",
+                each(cross, &["\\xc3", "\\xa9"])
+            )
+        );
+        assert_eq!(
+            said(&["-F", "x\u{e9}y"]),
+            each(field, &["x", "\\xc3", "\\xa9", "y"])
+        );
+        // Three bytes, four, and two characters: a line a byte.
+        assert_eq!(
+            said(&["-F", "\u{65e5}"]),
+            each(field, &["\\xe6", "\\x97", "\\xa5"])
+        );
+        assert_eq!(
+            said(&["-T", "\u{1f600}"]),
+            each(tcp, &["\\xf0", "\\x9f", "\\x98", "\\x80"])
+        );
+        assert_eq!(
+            said(&["+f", "\u{e9}\u{e8}"]),
+            each(fstruct, &["\\xc3", "\\xa9", "\\xc3", "\\xa8"])
+        );
+        // A character that stands in for a byte elsewhere is, as text, its
+        // own four bytes.
+        assert_eq!(
+            said(&["-F", "\u{10ff41}"]),
+            each(field, &["\\xf4", "\\x8f", "\\xbd", "\\x81"])
+        );
+        // An ASCII letter is one line, as it was, and escaped as it was.
+        assert_eq!(said(&["-Fpx"]), "unknown field: x");
+        assert_eq!(said(&["-T", "\x1b"]), format!("{tcp}^["));
+        assert_eq!(said(&["-x", "\\"]), format!("{cross}\\\\"));
+        // Beside a byte that is no character, which is one line too: the
+        // character's bytes, then the byte.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+            for (argv, want) in [
+                (
+                    vec![os(b"-F"), os(b"\xc3\xa9\xff")],
+                    each(field, &["\\xc3", "\\xa9", "\\xff"]),
+                ),
+                (
+                    vec![os(b"-T\xff\xc3\xa9")],
+                    each(tcp, &["\\xff", "\\xc3", "\\xa9"]),
+                ),
+                (
+                    vec![os(b"+f"), os(b"\xc3\xe6\x97\xa5")],
+                    each(fstruct, &["\\xc3", "\\xe6", "\\x97", "\\xa5"]),
+                ),
+                (vec![os(b"-x\xc3")], each(cross, &["\\xc3"])),
+            ] {
+                assert_eq!(parse(argv.clone()).unwrap_err(), want, "{argv:?}");
+            }
+        }
     }
 
     /// A UID both selected and excluded ends the run before `-h` or `-v` is

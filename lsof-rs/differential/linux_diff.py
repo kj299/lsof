@@ -183,6 +183,13 @@ another descriptor; or LSOF_DIFF_STACK: both run under that stack limit in
 KiB (`ulimit -s`), for a C defect whose cost is the depth of its recursion,
 so that it ends the same way on every host whatever stack the host gives.
 
+The cases about how lsof starts (DIVERGENCES 170-172, 175) set LSOF_DIFF_MT
+to an `su-*` mode of `mt-wrap.sh` (`SU_MODES`): a descriptor handed down,
+no /dev/null or one that cannot be written, no descriptor left for it, no
+/proc, the binary alone in a process namespace with its stdin and stderr
+closed, a real or an effective user who is not root. Root and `unshare`,
+as MT; `setpriv` for the modes that change user.
+
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
 every byte isprint() rejects before printing them. lsof-rs printed them raw
@@ -1809,6 +1816,19 @@ WR_TRACE_MODES = tuple(
 )
 WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk") + WR_TRACE_MODES
 
+# The `su-*` modes: how lsof starts (DIVERGENCES 170-172, 175). The C closes
+# every descriptor from 3 up, opens /dev/null until it has one past 1 and
+# ends in silence, exit 1, where it cannot, before it reads an option
+# (`main.c:173-183`); with no /proc it ends at the mount table; and it asks
+# `access()`, the real user, before it reads a `+m` file. See `mt_wrap`.
+SU_MODES = (
+    "su-fd9", "su-nodev", "su-nodev-closed0", "su-nodev-closed2", "su-ronull", "su-nofile3",
+    "su-noproc", "su-self", "su-ruid", "su-euid",
+)
+# The supplement the `su-ruid` and `su-euid` modes write, mode 0600 and
+# root's, on a tmpfs of the run's own ({MTSUP}): a device no host gives /proc.
+SU_SUPPLEMENT = "/proc 0x7ffe1234\\n"
+
 
 # The `tz-*` modes' variants (DIVERGENCES 152).
 TZ_VARIANTS = (
@@ -1934,7 +1954,12 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     under which glibc gives every address a name has; and `namesnopw` the
     same with an nsswitch.conf of `passwd: sss` alone, under which glibc
     reads no password file, so that no account has a name (DIVERGENCES
-    39)."""
+    39). And the `su-*` modes ([`SU_MODES`]) start the binary as a case
+    about its start-up needs: with a descriptor handed down, with no
+    /dev/null or one it cannot write, with no descriptor left for it, with
+    no /proc, alone in a process namespace with its stdin and stderr
+    closed, or as a real or effective user who is not root (DIVERGENCES
+    170-172, 175)."""
     path = os.path.join(work, "mt-wrap.sh")
     b = shlex.quote(base)
     passwd = os.path.join(work, "passwd-mt")
@@ -2059,6 +2084,43 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             'if [ "${mode#wr-trace-}" != "$mode" ]; then\n'
             '    t=${mode#wr-trace-}\n'
             f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_TRACE)} \"${{t%%-*}}\" \"${{t#*-}}\" \"$@\"\n"
+            "fi\n"
+            # The `su-*` modes ([`SU_MODES`]). `su-fd9`: descriptor 9 open
+            # on the file the case names first, which is taken off its
+            # arguments. `su-nodev`: no /dev/null (a tmpfs over /dev);
+            # `-closed0` and `-closed2`, with stdin or stderr closed too.
+            # `su-ronull`: a /dev/null of mode 0444, the binary run as uid
+            # 65534. `su-nofile3`: stdin closed and a descriptor limit of
+            # three, so that /dev/null is opened once and not again.
+            # `su-noproc`: no /proc (a tmpfs over it). `su-self`: the binary
+            # alone in a process namespace, pid 1, with stdin and stderr
+            # closed and descriptor 9 handed down, so that `-p 1` is its own
+            # rows. `su-ruid` and `su-euid`: the real, or the effective,
+            # user 65534, and a supplement only root may read at $B/su.sup.
+            'if [ "${mode#su-}" != "$mode" ]; then\n'
+            '    su=${mode#su-}; bin=$1; shift\n'
+            '    nosu() { echo "linux_diff: no MT su $su ($$)"; exit 2; }\n'
+            '    case "$su" in\n'
+            # Each ends in `exec`: a shell left waiting would hold what it
+            # handed down (dash opens a redirection in itself first), and
+            # be listed for it by both binaries, under a pid of its own.
+            '    fd9) f=$1; shift; exec "$bin" "$@" 9<"$f" ;;\n'
+            '    nodev) mount -t tmpfs lsof-rs-su /dev || nosu; exec "$bin" "$@" ;;\n'
+            '    nodev-closed0) mount -t tmpfs lsof-rs-su /dev || nosu; exec "$bin" "$@" <&- ;;\n'
+            '    nodev-closed2) mount -t tmpfs lsof-rs-su /dev || nosu; exec "$bin" "$@" 2>&- ;;\n'
+            '    ronull) mount -t tmpfs lsof-rs-su /dev || nosu\n'
+            '        : > /dev/null && chmod 0444 /dev/null && chmod 0755 /dev || nosu\n'
+            '        command -v setpriv >/dev/null 2>&1 || nosu\n'
+            '        exec setpriv --reuid 65534 --regid 65534 --clear-groups "$bin" "$@" ;;\n'
+            '    nofile3) exec <&-; ulimit -n 3 || exit 2; exec "$bin" "$@" ;;\n'
+            '    noproc) mount -t tmpfs lsof-rs-su /proc || nosu; exec "$bin" "$@" ;;\n'
+            "    self) exec unshare -p -f --mount-proc sh -c 'exec \"$0\" \"$@\" 9</dev/null <&- 2>&-' \"$bin\" \"$@\" ;;\n"
+            '    ruid|euid) mount -t tmpfs lsof-rs-su "$B" || nosu\n'
+            f"        printf {shlex.quote(SU_SUPPLEMENT)} > \"$B/su.sup\" && chmod 0600 \"$B/su.sup\" || nosu\n"
+            '        command -v setpriv >/dev/null 2>&1 || nosu\n'
+            '        exec setpriv "--$su" 65534 "$bin" "$@" ;;\n'
+            '    *) nosu ;;\n'
+            '    esac\n'
             "fi\n"
             # The `tz-*` modes (DIVERGENCES 152): a tmpfs over /etc holding
             # the host's password file and the zone files a case reads; a
@@ -4332,6 +4394,8 @@ def run(args) -> int:
                 "FUSE": os.path.join(fuseprobe.cwd, "fuse"),
                 # MT's and AUTOFS's, under the base `mt-wrap.sh` mounts over.
                 "MTPLAIN": os.path.join(work, "mt", "plain"),
+                # The `su-ruid` and `su-euid` modes' supplement.
+                "MTSUP": os.path.join(work, "mt", "su.sup"),
                 "MTGONE": os.path.join(work, "mt", "gone", "m"),
                 "MTD": os.path.join(work, "mt", "d"),
                 "MTWL": os.path.join(work, "mt", "wl"),
@@ -4392,6 +4456,7 @@ def run(args) -> int:
                         + tuple(f"names-{v}" for v in NAMES_VARIANTS)
                         + tuple(f"tz-{v}" for v in TZ_VARIANTS)
                         + WR_MODES
+                        + SU_MODES
                     )
                     and c["name"] not in dropped
                 ]
@@ -4725,6 +4790,24 @@ def self_test() -> int:
         # every other mode runs it at the last `"$@"`.
         check("the MT script mounts before the binary and unmounts after it",
               text.index("mount -t tmpfs lsof-rs-mt") < text.rindex('"$@"') < text.rindex('umount -l "$B"'))
+        su_branch = text.split('if [ "${mode#su-}" != "$mode" ]; then', 1)[-1].split("\nfi\n", 1)[0]
+        check("the MT su modes are each a branch of the script, before the table's mounts",
+              all(any(spelt in su_branch for spelt in (f"    {m[3:]})", f"    {m[3:]}|", f"|{m[3:]})"))
+                  for m in SU_MODES)
+              and text.index('if [ "${mode#su-}"') < text.index("mount -t tmpfs lsof-rs-mt"))
+        check("...su-fd9 hands descriptor 9 down on the case's first argument, and takes it off",
+              'fd9) f=$1; shift; exec "$bin" "$@" 9<"$f"' in su_branch)
+        check("...su-nofile3 closes stdin before the limit, and execs",
+              'nofile3) exec <&-; ulimit -n 3 || exit 2; exec "$bin" "$@" ;;' in su_branch)
+        check("...and every su mode ends in an exec, so that no shell is left holding what it handed down",
+              all(line.rstrip().endswith(";;") and "exec " in line.rsplit(";", 3)[-3]
+                  for line in su_branch.splitlines() if line.rstrip().endswith(";;") and "*) nosu" not in line))
+        check("...su-ronull and su-ruid change user by number, and a mode that cannot be set up is no result",
+              "--reuid 65534 --regid 65534 --clear-groups" in su_branch and 'setpriv "--$su" 65534' in su_branch
+              and "no MT su $su ($$)" in su_branch and "chmod 0444 /dev/null" in su_branch
+              and "chmod 0600" in su_branch)
+        check("...su-self runs the binary as pid 1 with stdin and stderr closed and 9 handed down",
+              "unshare -p -f --mount-proc sh -c 'exec \"$0\" \"$@\" 9</dev/null <&- 2>&-'" in su_branch)
         tz_branch = text.split('if [ "${mode#tz-}" != "$mode" ]; then', 1)[-1].split("\nfi\n", 1)[0]
         check("the MT tz modes end their binary with the shell the runner kills",
               'setpriv --pdeathsig KILL -- "$@"' in tz_branch)

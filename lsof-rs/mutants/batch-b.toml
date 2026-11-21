@@ -16,7 +16,8 @@
 #   whose mutants are mounts.toml's.
 # * `-T`'s and `-f`'s letters each named: the same `early.letter` arm as
 #   `-x`'s, which `cross-over-first-letter-only` breaks; the unit test names
-#   each of `-f qz` and `-x qz`.
+#   each of `-f qz` and `-x qz`. (Since 2026-11-21 the arm is
+#   `early.letters`, a line a byte: mutants/audit-startup.toml.)
 # * A `-s` list that ends in a comma: no plausible one-line way back to the
 #   old `split(',')` reading; pinned by `every_error_the_c_reads_past_is_read_past`
 #   and the differential's `dash-s-list-ending-in-a-comma`.
@@ -35,6 +36,13 @@
 # `fatal-prints-the-usage` and `walked-entries-dropped` by the differential.
 # Not here: a mutant on the Windows `-g` message, which a Linux gate cannot
 # reach; the unit case expects `illegal -g ppid:` under cfg!(windows).
+#
+# Re-anchored 2026-11-21 (the start-up and options audit, DIVERGENCES 173,
+# 174): `cross-over-first-letter-only` and `unknown-field-ends-the-parse`
+# on `early.letters`, which says a line a byte, and
+# `fd-list-stops-at-a-mixture` on the mixture message as it is built since
+# its item is cut at 254 bytes. Run again with the unit gate alone (`cargo
+# test -p lsof-cli --lib`), --first-kill: 3 of 3 killed.
 
 [run]
 dir = ".."
@@ -93,9 +101,9 @@ name = "cross-over-first-letter-only"
 rule = "-x names each letter it does not know, and reads on (83)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                                    other => early.letter(Early::CROSS_OVER, other),'''
+old = '''                                    other => early.letters(Early::CROSS_OVER, other),'''
 new = '''                                    other => {
-                                        early.letter(Early::CROSS_OVER, other);
+                                        early.letters(Early::CROSS_OVER, other);
                                         break;
                                     }'''
 
@@ -105,7 +113,7 @@ rule = "-F names each letter its table lacks, and reads on, -F still given (83)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
 old = '''                            for bad in list.chars().filter(|f| !field_known(*f)) {
-                                early.letter(Early::FIELD, bad);
+                                early.letters(Early::FIELD, bad);
                             }'''
 new = '''                            if let Some(bad) = list.chars().find(|f| !field_known(*f)) {
                                 return Err(quoting("unknown field: ", &bad.to_string()));
@@ -116,10 +124,10 @@ name = "fd-list-stops-at-a-mixture"
 rule = "each -d item's error is read on after, to the next item (83)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = '''                if exclude { "^" } else { "" }
+old = '''                kind(was)
             ));
             continue;'''
-new = '''                if exclude { "^" } else { "" }
+new = '''                kind(was)
             ));
             return Ok(());'''
 

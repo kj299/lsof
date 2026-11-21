@@ -299,8 +299,11 @@ pub fn not_an_option() -> String {
 /// ends. It refuses, and says why on stderr, unless both are pipes: that is
 /// how lsof starts it, and nothing else should talk to it. Then, as the C's
 /// child does (`closefrom_shim()`, `lib/misc.c:345`), it closes every
-/// descriptor past stderr it was given, which an exec keeps where lsof's
-/// own were not close-on-exec. Returns the exit status.
+/// descriptor past stderr it was given. Since 2026-11-21 there is none
+/// left by then: `lsof-sigpipe`'s constructor closes from 3 up in every
+/// process of the binary, lsof and this helper alike, before the Rust
+/// runtime starts (DIVERGENCES 170); the call is kept as the C's own.
+/// Returns the exit status.
 pub fn serve() -> i32 {
     if !is_pipe(io::stdin().as_fd()) || !is_pipe(io::stdout().as_fd()) {
         lsof_core::safefs::to_stderr(&not_an_option());
