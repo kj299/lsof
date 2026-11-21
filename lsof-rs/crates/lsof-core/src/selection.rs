@@ -867,8 +867,21 @@ pub struct Selection {
     /// `-c ^name`: commands whose processes are never listed. The same
     /// absolute exclusion as [`Selection::user_excludes`] (Lsof.8 `-c`: "then
     /// the following characters specify a command name whose processes are to
-    /// be ignored").
+    /// be ignored"). A name may be empty (`-c ^`): it names every command,
+    /// as the C's `strncmp(…, 0)` does.
     pub command_excludes: Vec<OsString>,
+    /// Each `-c ^` given with **no name**, by how many `-c` names had been
+    /// entered before it. The C enters an exclusion in the list it reports
+    /// on (`lsof_select_process()`), and nothing ever marks one located, so
+    /// its end-of-run loop names it: `command not located: `, the name
+    /// empty, and the run exits 1. For a named exclusion that is the
+    /// C-DEFECT lsof-rs does not copy (DIVERGENCES 13: it fails a listing
+    /// that succeeded); for the empty one it is what the run came to, since
+    /// it excluded every command there is, and lsof-rs says the C's line,
+    /// where the C says it among the `-c` names it did not locate (last
+    /// entered, first reported), and exits 1 as the C does (DIVERGENCES
+    /// 168).
+    pub empty_command_excludes: Vec<usize>,
     pub inet: InetFilter,
     /// `-a`: AND together the specified process selectors.
     pub and_mode: bool,
@@ -1229,6 +1242,14 @@ impl Selection {
         if self.and_mode && !k.contains(needed) {
             return k;
         }
+        // A process a `-c ^` names matches no `-c`: `is_cmd_excl()` tests
+        // the exclusions first and returns before its inclusion loops can
+        // set `SELCMD` (`lib/proc.c:518-523`). It matters under `-E`/`+E`
+        // alone, where the process is read all the same
+        // ([`Selection::excludes_process`]).
+        if self.command_excluded(p) {
+            return k;
+        }
         if self.commands.iter().any(|c| self.command_matches(c, p))
             || self
                 .command_regexes
@@ -1395,19 +1416,20 @@ impl Selection {
     /// process.
     ///
     /// Under `-E`/`+E` on Linux ([`Selection::reads_every_process`]) a `-c
-    /// ^` exclusion is no exclusion at all: the C asks `is_cmd_excl()` after
+    /// ^` does not drop the process: the C asks `is_cmd_excl()` after
     /// `is_proc_excl()` has given the process its marks, and `if (!FeptE)
-    /// return (1)` ignores its answer, so the process keeps them and is
-    /// listed as if no `-c ^` had been given (measured: `lsof -E -c
-    /// ^python3` lists every python3, and `-E -c ^kid -a -p B -d 3` B's fd
-    /// 3). The other three stay exclusions there, of a process that is
-    /// still read ([`Selection::apply`]).
+    /// return (1)` ignores its answer, so the process keeps those marks and
+    /// is listed by them (measured: `lsof -E -c ^python3` lists every
+    /// python3, and `-E -c ^kid -a -p B -d 3` B's fd 3). What the exclusion
+    /// still stops there is the command selection itself: `is_cmd_excl()`
+    /// returned at the exclusion, before any `-c` name or regular
+    /// expression could mark the process or be marked located
+    /// (`Selection::command_excluded`; measured: `lsof -E -a -d 3 -c ^fixA
+    /// -c fix` lists `fixB` alone, where lsof-rs listed `fixA` too). The
+    /// other three stay exclusions there, of a process that is still read
+    /// ([`Selection::apply`]).
     pub fn excludes_process(&self, p: &Process) -> bool {
-        (!self.reads_every_process()
-            && self
-                .command_excludes
-                .iter()
-                .any(|c| self.command_matches(c, p)))
+        (!self.reads_every_process() && self.command_excluded(p))
             || self
                 .user_excludes
                 .iter()
@@ -1415,6 +1437,19 @@ impl Selection {
             || p.uid.is_some_and(|u| self.uid_excludes.contains(&u))
             || self.pid_excludes.contains(&p.pid)
             || p.pgid.is_some_and(|g| self.pgid_excludes.contains(&g))
+    }
+
+    /// Whether a `-c ^` exclusion names `p`'s command: the C's first loop
+    /// in `is_cmd_excl()` (`lib/proc.c:518-523`), which returns before a
+    /// `-c` inclusion is compared. Such a process has no command mark
+    /// ([`Selection::proc_kinds`]) and locates no `-c` name or regular
+    /// expression ([`Selection::locate`]), whether or not it is read. An
+    /// empty exclusion, `-c ^`, names every command, as the C's
+    /// `strncmp(…, 0)` does.
+    fn command_excluded(&self, p: &Process) -> bool {
+        self.command_excludes
+            .iter()
+            .any(|c| self.command_matches(c, p))
     }
 
     /// Whether `p`'s owner is one of the `-u` inclusions, by name or by ID.
@@ -1521,7 +1556,10 @@ impl Selection {
             if !excluded {
                 self.mark_process_items(p, &mut found);
             }
-            if passes {
+            // And not one a `-c ^` names, read under `-E`/`+E`: the C's
+            // `is_cmd_excl()` returned at the exclusion, before `sp->f` or
+            // `CmdRx[i].mc` could be set (`lib/proc.c:518-550`).
+            if passes && !self.command_excluded(p) {
                 for (hit, c) in found.commands.iter_mut().zip(&self.commands) {
                     *hit |= self.command_matches(c, p);
                 }
@@ -5980,6 +6018,129 @@ mod tests {
             ..sel
         }
         .excludes_process(&gathered[0]));
+    }
+
+    /// Under `-E`/`+E` a process a `-c ^` names is read all the same, but
+    /// it fails every `-c` inclusion and locates none of them: the C's
+    /// `is_cmd_excl()` returns at the exclusion, before its inclusion loops
+    /// set `SELCMD`, `sp->f` or `CmdRx[i].mc` (`lib/proc.c:518-550`), and
+    /// `process_id()` then keeps the process with what `is_proc_excl()`
+    /// left it (`dproc.c:899-908`). Measured: `lsof -E -a -d 3 -c ^fixA -c
+    /// fix` lists `fixB` alone, `-E -t -c ^fixA -c fix` prints `fixB`'s pid
+    /// alone, and `-E -a -d 3 -V -c ^fixA -c /fixA/` lists nothing and says
+    /// `no command found for regex: fixA`; lsof-rs had listed `fixA` in all
+    /// three.
+    #[test]
+    fn under_endpoints_a_command_exclusion_still_fails_every_c_inclusion() {
+        let row = |fd: u64| {
+            let mut f = k_row(FdType::Handle(fd), FileType::Regular);
+            f.name = format!("/f{fd}");
+            f
+        };
+        let mut a = who(10, "fixA", 0, 10);
+        a.files = vec![row(3), row(4)];
+        let mut b = who(20, "fixB", 0, 20);
+        b.files = vec![row(3), row(4)];
+        let gathered = vec![a, b];
+        let rx =
+            |s: &str| crate::posix_regex::CommandRegex::new(s.as_bytes(), true, false).unwrap();
+        let fd3 = Some(FdFilter {
+            include: vec![FdSpec::Num(3)],
+            exclude: Vec::new(),
+        });
+        let e = Selection {
+            endpoints: Some(EndpointMode::Info),
+            endpoints_in_core: true,
+            command_excludes: vec!["fixA".into()],
+            commands: vec!["fix".into()],
+            ..Default::default()
+        };
+        let rows = |sel: &Selection| -> Vec<(u32, Vec<String>)> {
+            sel.apply(gathered.clone())
+                .iter()
+                .map(|p| (p.pid, p.files.iter().map(|f| f.fd.code()).collect()))
+                .collect()
+        };
+        // `-E -a -d 3 -c ^fixA -c fix`.
+        let anded = Selection {
+            and_mode: true,
+            fd_filter: fd3.clone(),
+            ..e.clone()
+        };
+        assert!(anded.reads_every_process());
+        assert!(!anded.excludes_process(&gathered[0]), "it is read");
+        assert_eq!(rows(&anded), [(20, vec!["3".into()])]);
+        assert_eq!(anded.locate(&gathered).commands, [true], "fixB locates it");
+        // `-E -c ^fixA -c fix` (what `-t` prints the pids of).
+        assert_eq!(rows(&e), [(20, vec!["3".into(), "4".into()])]);
+        // The exclusion's own process alone: nothing listed, nothing located.
+        let only_a = vec![gathered[0].clone()];
+        assert!(e.apply(only_a.clone()).is_empty());
+        assert_eq!(e.locate(&only_a).commands, [false]);
+        // `-E -a -d 3 -c ^fixA -c /fixA/`: the regular expression too.
+        let by_regex = Selection {
+            commands: Vec::new(),
+            command_regexes: vec![rx("fixA")],
+            and_mode: true,
+            fd_filter: fd3.clone(),
+            ..e.clone()
+        };
+        assert!(rows(&by_regex).is_empty());
+        assert_eq!(by_regex.locate(&gathered).command_regexes, [false]);
+        // ORed with `-d 3`, the excluded process's fd 3 is a row the file
+        // item selects, and no other row of it is (it has no command mark
+        // to give them); the other process's are all its command's.
+        let ored = Selection {
+            fd_filter: fd3.clone(),
+            ..e.clone()
+        };
+        assert_eq!(
+            rows(&ored),
+            [(10, vec!["3".into()]), (20, vec!["3".into(), "4".into()])]
+        );
+        // The marks `is_proc_excl()` gave it stay: `-E -c ^fixA -a -p 10 -d
+        // 3` lists its fd 3 (ledger `endpoints-E-ignores-a-c-exclusion`),
+        // and `-p 10` is located.
+        let by_pid = Selection {
+            commands: Vec::new(),
+            pids: vec![10],
+            and_mode: true,
+            fd_filter: fd3.clone(),
+            ..e.clone()
+        };
+        assert_eq!(rows(&by_pid), [(10, vec!["3".into()])]);
+        assert_eq!(by_pid.locate(&gathered).pids, [true]);
+        // ...but not with a `-c` it would have matched ANDed in.
+        let pid_and_command = Selection {
+            commands: vec!["fix".into()],
+            ..by_pid.clone()
+        };
+        assert!(rows(&pid_and_command).is_empty());
+        let found = pid_and_command.locate(&gathered);
+        assert_eq!((found.pids, found.commands), (vec![true], vec![false]));
+        // An empty exclusion, `-c ^`, names every command.
+        let all = Selection {
+            command_excludes: vec!["".into()],
+            ..e.clone()
+        };
+        assert!(all.apply(gathered.clone()).is_empty());
+        assert_eq!(all.locate(&gathered).commands, [false]);
+        // Without `-E` the excluded process is not read at all, as before.
+        let plain = Selection {
+            endpoints: None,
+            ..anded.clone()
+        };
+        assert!(plain.excludes_process(&gathered[0]));
+        assert_eq!(rows(&plain), [(20, vec!["3".into()])]);
+        assert_eq!(plain.locate(&gathered).commands, [true]);
+        let none = Selection {
+            endpoints: None,
+            command_excludes: vec!["".into()],
+            commands: Vec::new(),
+            ..Default::default()
+        };
+        assert!(gathered.iter().all(|p| none.excludes_process(p)));
+        assert!(none.apply(gathered.clone()).is_empty());
     }
 
     /// Under `-E`/`+E` on Linux the C sets no per-process `Ckscko`, so the

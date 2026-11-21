@@ -3,7 +3,7 @@
 // Fuzz the Linux backend's `/proc/net/*` parsers (lsof-backend-linux, `net`).
 //
 // These read kernel-written tables — tcp, tcp6, udp, udp6, udplite,
-// udplite6, raw, raw6, packet, unix —
+// udplite6, raw, raw6, packet, unix, icmp —
 // and join them to fds by inode. The kernel is trusted to write well-formed
 // text, but the port must not *depend* on that: the AF_UNIX `Path` column is
 // whatever bytes a local process bound, a future kernel may add or reorder
@@ -56,6 +56,14 @@ fuzz_target!(|data: &[u8]| {
     let mut t = SocketTable::default();
     t.parse_packet(&format!(
         "sk               RefCnt Type Proto  Iface R Rmem   User   Inode\n{text}"
+    ));
+    // /proc/net/icmp the same two ways (DIVERGENCES 159): the bare input for
+    // the header check, and behind the kernel's header for the lines.
+    let mut t = SocketTable::default();
+    t.parse_icmp(&text);
+    let mut t = SocketTable::default();
+    t.parse_icmp(&format!(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n{text}"
     ));
     // A packet row's NODE is byte-truncated to 7, so the decoders that build
     // it get the input's own bytes as well as the table's fields.

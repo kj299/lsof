@@ -27,6 +27,16 @@
 # `plus-m-pipe-exit` retired with the rules they pinned (no 1 MiB bound on a
 # zone file; no 141 of lsof-rs's own for a closed pipe: the C's SIGPIPE).
 #
+# Retired 2026-11-21 (the start-up audit, DIVERGENCES 170):
+# `inherited-fd-read`, `inherited-fds-not-noted` and
+# `inherited-fd-link-not-followed`, with the code they mutated. lsof-rs
+# closes every descriptor from 3 up it was started with, as the C does, so
+# there is no list of them to note and no name to follow to one: a
+# supplement named through one is gone because it is. The rule's mutants are
+# mutants/audit-startup.toml's (`startup-not-run`, `close-from-not-called`),
+# killed by the same test, `a_supplement_through_an_inherited_descriptor_is_none`,
+# among others. 52 mutants.
+#
 # Rules with no mutant here, and why:
 # * The values of `RESOLV_LINE_LIMIT` (1 MiB a line) and `RESOLV_CONF_LIMIT`
 #   (256 MiB): `resolv_conf_is_read_whole_or_not_at_all` pins both rules
@@ -49,9 +59,6 @@
 # * `+m not supported` off Linux (`args.rs`): FreeBSD and Windows both build
 #   the arm, and the args tests gated on them pin it there; no Linux gate
 #   builds it.
-# * `note_inherited_fds`'s exclusion of its own listing's descriptor: the
-#   descriptor is closed before any supplement is read, so a mutant that
-#   kept it would name a number no path can reach.
 
 [run]
 dir = ".."
@@ -163,31 +170,6 @@ rule = "a supplement hit marks the mount's device as the file's (the review)"
 file = "crates/lsof-backend-linux/src/mounts.rs"
 old = '''                        supplied = hit.is_some();'''
 new = '''                        supplied = false;'''
-
-[[mutant]]
-name = "inherited-fd-read"
-rule = "a supplement named through an inherited descriptor is gone, as the C finds it (153, the review)"
-[[mutant.edit]]
-file = "crates/lsof-backend-linux/src/mounts.rs"
-old = '''    if names_an_inherited_fd(Path::new(path), inherited_fds()) {'''
-new = '''    if false && names_an_inherited_fd(Path::new(path), inherited_fds()) {'''
-
-[[mutant]]
-name = "inherited-fds-not-noted"
-rule = "the inherited descriptors are noted before lsof opens any (the review)"
-[[mutant.edit]]
-file = "crates/lsof-cli/src/main.rs"
-old = '''    lsof_backend_linux::note_inherited_fds();
-'''
-new = ''''''
-
-[[mutant]]
-name = "inherited-fd-link-not-followed"
-rule = "the name's links are followed one by one to /proc/PID/fd/N (the review)"
-[[mutant.edit]]
-file = "crates/lsof-backend-linux/src/mounts.rs"
-old = '''                    push_front(&mut todo, &target);'''
-new = '''                    let _ = target;'''
 
 [[mutant]]
 name = "resolv-conf-failure-defaults"

@@ -152,6 +152,23 @@ reads
 .I /etc/passwd
 itself.
 .TP
+.B A /proc that is another PID namespace's
+Run in a PID namespace whose
+.I /proc
+is still another's
+.RB ( "unshare \-p \-f"
+without
+.BR \-\-mount\-proc ,
+a container given the host's
+.IR /proc ),
+the C cannot find itself there: it prints no offset, no file flags and no
+eventfd, pidfd or eventpoll identity, drops
+.B \-o
+with a warning, and dies on the first eventpoll it reads.
+.B lsof
+reads each descriptor's fdinfo there as anywhere, and prints what both
+print on the host.
+.TP
 .B Version
 .B \-v
 prints one line, the lsof-rs version, where the C prints a report of its

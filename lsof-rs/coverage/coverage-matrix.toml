@@ -453,6 +453,14 @@ args = ["-n", "-P", "-a", "-d", "^mem", "-p", "PID"]
 covers = ["type:raw"]
 
 [[case]]
+name = "linux/ping-socket-row"
+# ../differential/linux-matrix.toml ping-sockets-*: fixture PING's ping
+# sockets, bound and connected, typed `icmp` from /proc/net/icmp with the
+# C's NAME, DEVICE and `-F` (DIVERGENCES 159); one never used stays `sock`.
+args = ["-n", "-P", "-a", "-d", "20-24", "-p", "PID"]
+covers = ["type:icmp"]
+
+[[case]]
 name = "linux/netlink-and-unlisted-table"
 # ../differential/linux-matrix.toml netlink-and-unlisted-*: fixture NLK's
 # bound netlink sockets, typed `netlink` from /proc/net/netlink (DIVERGENCES

@@ -86,6 +86,20 @@ ledger — those are the kit's, on purpose.
              device and inode: a TCP socket bound and never listening, and
              an `O_PATH` descriptor on the file of a unix socket bound at
              {SFSOCK}, on the file system mounted at {SFFS}
+  fixture AUD what the 2026-11-21 audit found printed apart (DIVERGENCES
+             156-163), each at a descriptor of its own: namespace files (20,
+             21), a pidfd whose process has been reaped and one whose has
+             not (22, 23), `/proc/self/mem` at a position above 2^63 and at
+             -1 (24, 25), a `flock()` on a TCP socket no table lists, on a
+             bound UDP socket, on a unix socket and on a file (26-29), a file
+             whose path is too long for its link to be read (30), eventpolls
+             watching 31, 32 and 33 descriptors (40-42), and a thread named
+             `é`
+  fixtures MBJ, MBN, MBE sleepers whose commands are `日本語`, `naïve-app`
+             and `é`: a COMMAND cell cut inside a character (DIVERGENCES 158)
+  fixtures XK, XG sleepers named `lsofrsx-keep` and `lsofrsx-gone`: under
+             `-E`, a `-c ^` that names one and a `-c` that names both
+             (DIVERGENCES 165)
 
   These need a capability the runner may lack. Without it, the fixture is
   unavailable and its cases are skipped by name, not failed:
@@ -168,6 +182,23 @@ ledger — those are the kit's, on purpose.
              directory beside them, for the `nfs3` mode, which lists NFS
              mounts at {NFSDIR}/sub, {NFSDIR}2 and {NFSDIR}2/zz as well, all
              on one device (DIVERGENCES 151). Root and `unshare`, as MT
+  fixture PING ping sockets (`SOCK_DGRAM`, `IPPROTO_ICMP`) in a network
+             namespace of its own, where `ping_group_range` is opened for
+             them: one bound to 127.0.0.1 with id 4242 (fd 20), one bound
+             and connected (21), one never used (22), an ICMPv6 one bound to
+             ::1 where there is IPv6 (23, else another never used), and a
+             TCP listener (24). Its cases set LSOF_DIFF_MT to `ping`, and
+             both binaries then run in that namespace (`nsenter --net`), so
+             that its `/proc/net/icmp` is the one they read (DIVERGENCES
+             159). Root (or passwordless sudo), `unshare` and `nsenter`
+  the PID namespace modes, which need no fixture of their own: with
+             LSOF_DIFF_MT `pidns` a binary runs as PID 1 of a PID and
+             network namespace of its own with a procfs of its own
+             (`unshare -n -p -f --mount-proc`), where its own rows can be
+             compared (DIVERGENCES 166); with `pidns-outer` in a PID
+             namespace whose `/proc` is still the host's (`unshare -p -f`),
+             where the C cannot find itself (DIVERGENCES 164). Root and
+             `unshare`, as MT
   fixture WRACE a holder of a directory and a file in it, beside the
              directory {WRACEDIR} a `+d`/`+D` walks, and of a file on
              /dev/shm: for a walk whose entry is renamed while strace holds
@@ -182,6 +213,13 @@ descriptor limit (`ulimit -n`), for what a run does when it cannot open
 another descriptor; or LSOF_DIFF_STACK: both run under that stack limit in
 KiB (`ulimit -s`), for a C defect whose cost is the depth of its recursion,
 so that it ends the same way on every host whatever stack the host gives.
+
+The cases about how lsof starts (DIVERGENCES 170-172, 175) set LSOF_DIFF_MT
+to an `su-*` mode of `mt-wrap.sh` (`SU_MODES`): a descriptor handed down,
+no /dev/null or one that cannot be written, no descriptor left for it, no
+/proc, the binary alone in a process namespace with its stdin and stderr
+closed, a real or an effective user who is not root. Root and `unshare`,
+as MT; `setpriv` for the modes that change user.
 
 C and D exist because COMMAND and NAME are the two cells a local user chooses
 outright (a process names itself; anyone can name a file), and the C escapes
@@ -598,6 +636,183 @@ def anon_inode_holder(work: str) -> Fixture:
         "time.sleep(3600)\n" % adir
     )
     return Fixture("G(anon inodes)", [sys.executable, "-c", py], cwd=adir, expect_fds=3)
+
+
+# Fixtures MBJ, MBN and MBE's commands: each holds a character of several
+# bytes where the C's `safestrprtn()`, which walks bytes, cuts the COMMAND
+# cell (DIVERGENCES 158): `日本語` in the default nine columns is `\xe6\x97`,
+# `naïve-app` is `na\xc3`, and `é` under `+c 1` (a cell of seven, the
+# title's width) is `\xc3`. Chosen so that the C's own sizing of the column,
+# which counts such a byte as two columns and prints four (the ledgered
+# `hostile-comm-utf8-table`), comes to the same width as lsof-rs's.
+MULTIBYTE_COMMS = {"MBJ": "日本語", "MBN": "naïve-app", "MBE": "é"}
+
+# Fixtures XK and XG's commands: two names with one prefix, which no other
+# process on a host has, for a `-c ^lsofrsx-gone -c lsofrsx-` under `-E`
+# (DIVERGENCES 165): the exclusion names one, the inclusion both.
+EXCLUSION_COMMS = {"XK": "lsofrsx-keep", "XG": "lsofrsx-gone"}
+
+
+def audit_holder(work: str) -> Fixture:
+    """Fixture AUD: one of each object the 2026-11-21 audit found the two
+    binaries printing apart, each `dup2`ed to a descriptor of its own.
+
+      20, 21  `/proc/self/ns/net` and `ns/mnt`: links `net:[N]`, `mnt:[N]`,
+              which the C cuts at the colon (DIVERGENCES 156)
+      22      a pidfd of a child that has been reaped (fdinfo `Pid: -1`):
+              `[pidfd]`; 23 one of this process: `[pidfd:PID]` (157)
+      24      `/proc/self/mem` at -0xa00000, which fdinfo writes as a
+              negative `pos:` and the C prints as `0xffffffffff600000`;
+              25 the same file at -1, the C's "no position" (161)
+      26      a TCP socket no table lists, under a `flock()`; 27 a bound UDP
+              socket and 28 a unix socket, each under one; 29 a regular file
+              under one, the control: no socket row has a lock character
+              (160)
+      30      a file opened at a path of more than 4095 bytes, whose link
+              cannot be read (`ENAMETOOLONG`) though its fdinfo can: no
+              access letter (163)
+      40-42   eventpolls watching 31, 32 and 33 descriptors (100 up, dups of
+              one pipe's read end at 98): the C marks the list `...` once it
+              holds 32 (162)
+      thread  one named `é`, for a TASKCMD cell cut inside a character (158)
+
+    The deep directory is made under the fixture's own, and removed with it
+    (`shutil.rmtree` walks by descriptor, so the length of the path is no
+    obstacle)."""
+    adir = os.path.join(work, "aud")
+    os.makedirs(adir)
+    py = (
+        "import ctypes,fcntl,os,select,socket,threading,time\n"
+        "d=%r\n"
+        "libc=ctypes.CDLL(None,use_errno=True)\n"
+        "def at(fd,n):\n"
+        "    os.dup2(fd,n); os.close(fd); return n\n"
+        "at(os.open('/proc/self/ns/net',os.O_RDONLY),20)\n"
+        "at(os.open('/proc/self/ns/mnt',os.O_RDONLY),21)\n"
+        "c=os.fork()\n"
+        "if c==0: os._exit(0)\n"
+        "p=os.pidfd_open(c); os.waitpid(c,0); at(p,22)\n"
+        "at(os.pidfd_open(os.getpid()),23)\n"
+        "libc.lseek.restype=ctypes.c_longlong\n"
+        "libc.lseek.argtypes=[ctypes.c_int,ctypes.c_longlong,ctypes.c_int]\n"
+        "for n,pos in ((24,-0xa00000),(25,-1)):\n"
+        "    at(os.open('/proc/self/mem',os.O_RDONLY),n)\n"
+        "    assert libc.lseek(n,pos,0)==pos\n"
+        "fcntl.flock(at(socket.socket().detach(),26),fcntl.LOCK_EX)\n"
+        "u=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); u.bind(('127.0.0.1',0))\n"
+        "fcntl.flock(at(u.detach(),27),fcntl.LOCK_EX)\n"
+        "fcntl.flock(at(socket.socket(socket.AF_UNIX).detach(),28),fcntl.LOCK_SH)\n"
+        "fcntl.flock(at(os.open(os.path.join(d,'locked'),os.O_RDWR|os.O_CREAT,0o600),29),fcntl.LOCK_EX)\n"
+        "os.chdir(d)\n"
+        "for i in range(22):\n"
+        "    os.mkdir('d'*200); os.chdir('d'*200)\n"
+        "at(os.open('f',os.O_RDWR|os.O_CREAT,0o600),30)\n"
+        "os.chdir(d)\n"
+        "r,w=os.pipe(); at(r,98); at(w,99)\n"
+        "for i in range(33): os.dup2(98,100+i)\n"
+        "for n,k in ((40,31),(41,32),(42,33)):\n"
+        "    e=select.epoll()\n"
+        "    for i in range(k): e.register(100+i,select.EPOLLIN)\n"
+        "    os.dup2(e.fileno(),n); e.close()\n"
+        "up=threading.Event()\n"
+        "def t():\n"
+        "    libc.prctl(15,b'\\xc3\\xa9',0,0,0); up.set(); time.sleep(3600)\n"
+        "threading.Thread(target=t,daemon=True).start(); up.wait()\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(3600)\n" % adir
+    )
+    # The count alone is reached before the eventpolls and the thread are
+    # there; `ready` is the gate.
+    return Fixture("AUD(audit objects)", [sys.executable, "-c", py], cwd=adir, expect_fds=3)
+
+
+def ping_unavailable() -> str | None:
+    """Why fixture PING cannot run here, or None."""
+    if root_prefix() is None:
+        return "not root, and no passwordless sudo"
+    for tool in ("unshare", "nsenter"):
+        if shutil.which(tool) is None:
+            return f"no {tool}"
+    return None
+
+
+def ping_holder(work: str) -> Fixture:
+    """Fixture PING: ping sockets in a network namespace of its own.
+
+    A ping socket (`socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)`, what an
+    unprivileged `ping` holds) is listed in `/proc/net/icmp` once the kernel
+    has hashed it: bound, connected or sent on. The C reads that table and
+    makes the row `icmp`, no DEVICE, the inode in NODE and the table's two
+    addresses for a NAME (`get_icmp()`, `dsock.c:1536-1657, 4095-4141`);
+    lsof-rs read no such table and printed `sock … protocol: PING`, which is
+    right only for one never used (DIVERGENCES 159). The sockets need
+    `net.ipv4.ping_group_range` to allow the caller, which is a sysctl of
+    the network namespace, shut by default in a new one and on this host;
+    so the fixture makes a namespace of its own, opens the range there and
+    brings `lo` up, and its cases run both binaries in that namespace
+    (LSOF_DIFF_MT `ping`: `nsenter --net`), where `/proc/net` is the
+    fixture's.
+
+      20  bound to 127.0.0.1, id 4242: `0100007F:1092->00000000:0000`
+      21  bound to id 4243 and connected to 127.0.0.1:
+          `0100007F:1093->0100007F:0000`
+      22  never used: in no table, `sock … protocol: PING`
+      23  an ICMPv6 ping socket bound to ::1, id 4244, where the namespace
+          has IPv6: in `/proc/net/icmp6`, which the C does not read, so
+          `sock … protocol: PINGv6`; without IPv6, another never used
+      24  a TCP listener on 127.0.0.1, the namespace's own tables' row
+
+    Its pid is the Python's, written to `pid`: under `sudo` the process
+    this harness started is `sudo`'s."""
+    pdir = os.path.join(work, "ping")
+    os.makedirs(pdir)
+    py = (
+        "import fcntl,os,socket,struct,time\n"
+        "d=%r\n"
+        "s=socket.socket()\n"
+        "f=struct.unpack('16sH',fcntl.ioctl(s,0x8913,struct.pack('16sH',b'lo',0).ljust(40,b'\\0'))[:18])[1]\n"
+        "fcntl.ioctl(s,0x8914,struct.pack('16sH',b'lo',f|1).ljust(40,b'\\0')); s.close()\n"
+        "open('/proc/sys/net/ipv4/ping_group_range','w').write('0 2147483647')\n"
+        "def at(s,n):\n"
+        "    fd=s.detach(); os.dup2(fd,n); os.close(fd)\n"
+        "def ping(): return socket.socket(socket.AF_INET,socket.SOCK_DGRAM,socket.IPPROTO_ICMP)\n"
+        "b=ping(); b.bind(('127.0.0.1',4242)); at(b,20)\n"
+        "c=ping(); c.bind(('127.0.0.1',4243)); c.connect(('127.0.0.1',0)); at(c,21)\n"
+        "at(ping(),22)\n"
+        "try:\n"
+        "    v=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM,socket.IPPROTO_ICMPV6); v.bind(('::1',4244))\n"
+        "except OSError:\n"
+        "    v=ping()\n"
+        "at(v,23)\n"
+        "t=socket.socket(); t.bind(('127.0.0.1',0)); t.listen(1); at(t,24)\n"
+        "open(os.path.join(d,'pid'),'w').write(str(os.getpid()))\n"
+        "open(os.path.join(d,'ready'),'w').close()\n"
+        "time.sleep(3600)\n" % pdir
+    )
+    return Fixture(
+        "PING(ping sockets)",
+        [*(root_prefix() or []), "unshare", "-n", sys.executable, "-c", py],
+        cwd=pdir,
+        expect_fds=3,
+        optional=True,
+        unavailable=ping_unavailable(),
+    )
+
+
+def ping_ready(fx: Fixture) -> int:
+    """Fixture PING's own pid, once it has made its sockets; or why it is
+    unavailable (no ping sockets even in a namespace of its own)."""
+    ready, pidfile = os.path.join(fx.cwd, "ready"), os.path.join(fx.cwd, "pid")
+    deadline = time.monotonic() + 5.0
+    while not os.path.exists(ready):
+        if fx.proc is not None and fx.proc.poll() is not None:
+            fx.skipped = True
+            raise FixtureUnavailable(f"{fx.name}: no ping sockets here (rc={fx.proc.returncode})")
+        if time.monotonic() > deadline:
+            raise FixtureUnavailable(f"{fx.name}: not ready within 5s")
+        time.sleep(0.02)
+    with open(pidfile) as f:
+        return int(f.read())
 
 
 LONG_COMM = "abcdefghijklmno"  # 15 chars, the Linux comm ceiling
@@ -1809,6 +2024,19 @@ WR_TRACE_MODES = tuple(
 )
 WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk") + WR_TRACE_MODES
 
+# The `su-*` modes: how lsof starts (DIVERGENCES 170-172, 175). The C closes
+# every descriptor from 3 up, opens /dev/null until it has one past 1 and
+# ends in silence, exit 1, where it cannot, before it reads an option
+# (`main.c:173-183`); with no /proc it ends at the mount table; and it asks
+# `access()`, the real user, before it reads a `+m` file. See `mt_wrap`.
+SU_MODES = (
+    "su-fd9", "su-nodev", "su-nodev-closed0", "su-nodev-closed2", "su-ronull", "su-nofile3",
+    "su-noproc", "su-self", "su-ruid", "su-euid",
+)
+# The supplement the `su-ruid` and `su-euid` modes write, mode 0600 and
+# root's, on a tmpfs of the run's own ({MTSUP}): a device no host gives /proc.
+SU_SUPPLEMENT = "/proc 0x7ffe1234\\n"
+
 
 # The `tz-*` modes' variants (DIVERGENCES 152).
 TZ_VARIANTS = (
@@ -1934,7 +2162,28 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     under which glibc gives every address a name has; and `namesnopw` the
     same with an nsswitch.conf of `passwd: sss` alone, under which glibc
     reads no password file, so that no account has a name (DIVERGENCES
-    39)."""
+    39). And the `su-*` modes ([`SU_MODES`]) start the binary as a case
+    about its start-up needs: with a descriptor handed down, with no
+    /dev/null or one it cannot write, with no descriptor left for it, with
+    no /proc, alone in a process namespace with its stdin and stderr
+    closed, or as a real or effective user who is not root (DIVERGENCES
+    170-172, 175).
+
+    Three modes use no mount at all, only the root the script runs as.
+    `ping` runs the binary in fixture PING's network namespace (`nsenter
+    --net`, the fixture's pid read from its `pid` file), so that the
+    `/proc/net/icmp` both binaries read is the one that lists its ping
+    sockets (DIVERGENCES 159). `pidns` runs it as PID 1 of a PID and network
+    namespace of its own, with a procfs of its own over `/proc` (`unshare
+    -n -p -f --mount-proc`): the only processes there are the lsof and what
+    it starts, at the same pids on both sides, so lsof's own rows can be
+    compared (DIVERGENCES 166). `pidns-outer` runs it in a PID namespace
+    whose `/proc` is still the host's (`unshare -p -f`): `getpid()` is 1
+    there and names another process in that `/proc`, which is where the C
+    loses its fdinfo (DIVERGENCES 164). The last two are run as the
+    script's child and its status passed on, a signal as 128 plus its
+    number, so that a C that dies of one is the same status under `sudo`
+    and without it."""
     path = os.path.join(work, "mt-wrap.sh")
     b = shlex.quote(base)
     passwd = os.path.join(work, "passwd-mt")
@@ -1985,6 +2234,20 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             f"    mount --bind {shlex.quote(passwd)} /etc/passwd || "
             '{ echo "linux_diff: no MT passwd ($$)"; exit 2; }\n'
             '    "$@"\n'
+            "    exit $?\n"
+            "fi\n"
+            # The `ping` and PID namespace modes, which mount nothing.
+            'if [ "$mode" = ping ]; then\n'
+            f"    P=$(cat {shlex.quote(os.path.join(work, 'ping', 'pid'))} 2>/dev/null)\n"
+            '    [ -n "$P" ] || { echo "linux_diff: no MT ping ($$)"; exit 2; }\n'
+            '    exec nsenter --net="/proc/$P/ns/net" "$@"\n'
+            "fi\n"
+            'if [ "$mode" = pidns ]; then\n'
+            '    unshare -n -p -f --mount-proc "$@"\n'
+            "    exit $?\n"
+            "fi\n"
+            'if [ "$mode" = pidns-outer ]; then\n'
+            '    unshare -p -f "$@"\n'
             "    exit $?\n"
             "fi\n"
             'if [ "$mode" = noetc ]; then\n'
@@ -2059,6 +2322,43 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             'if [ "${mode#wr-trace-}" != "$mode" ]; then\n'
             '    t=${mode#wr-trace-}\n'
             f"    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(WR_TRACE)} \"${{t%%-*}}\" \"${{t#*-}}\" \"$@\"\n"
+            "fi\n"
+            # The `su-*` modes ([`SU_MODES`]). `su-fd9`: descriptor 9 open
+            # on the file the case names first, which is taken off its
+            # arguments. `su-nodev`: no /dev/null (a tmpfs over /dev);
+            # `-closed0` and `-closed2`, with stdin or stderr closed too.
+            # `su-ronull`: a /dev/null of mode 0444, the binary run as uid
+            # 65534. `su-nofile3`: stdin closed and a descriptor limit of
+            # three, so that /dev/null is opened once and not again.
+            # `su-noproc`: no /proc (a tmpfs over it). `su-self`: the binary
+            # alone in a process namespace, pid 1, with stdin and stderr
+            # closed and descriptor 9 handed down, so that `-p 1` is its own
+            # rows. `su-ruid` and `su-euid`: the real, or the effective,
+            # user 65534, and a supplement only root may read at $B/su.sup.
+            'if [ "${mode#su-}" != "$mode" ]; then\n'
+            '    su=${mode#su-}; bin=$1; shift\n'
+            '    nosu() { echo "linux_diff: no MT su $su ($$)"; exit 2; }\n'
+            '    case "$su" in\n'
+            # Each ends in `exec`: a shell left waiting would hold what it
+            # handed down (dash opens a redirection in itself first), and
+            # be listed for it by both binaries, under a pid of its own.
+            '    fd9) f=$1; shift; exec "$bin" "$@" 9<"$f" ;;\n'
+            '    nodev) mount -t tmpfs lsof-rs-su /dev || nosu; exec "$bin" "$@" ;;\n'
+            '    nodev-closed0) mount -t tmpfs lsof-rs-su /dev || nosu; exec "$bin" "$@" <&- ;;\n'
+            '    nodev-closed2) mount -t tmpfs lsof-rs-su /dev || nosu; exec "$bin" "$@" 2>&- ;;\n'
+            '    ronull) mount -t tmpfs lsof-rs-su /dev || nosu\n'
+            '        : > /dev/null && chmod 0444 /dev/null && chmod 0755 /dev || nosu\n'
+            '        command -v setpriv >/dev/null 2>&1 || nosu\n'
+            '        exec setpriv --reuid 65534 --regid 65534 --clear-groups "$bin" "$@" ;;\n'
+            '    nofile3) exec <&-; ulimit -n 3 || exit 2; exec "$bin" "$@" ;;\n'
+            '    noproc) mount -t tmpfs lsof-rs-su /proc || nosu; exec "$bin" "$@" ;;\n'
+            "    self) exec unshare -p -f --mount-proc sh -c 'exec \"$0\" \"$@\" 9</dev/null <&- 2>&-' \"$bin\" \"$@\" ;;\n"
+            '    ruid|euid) mount -t tmpfs lsof-rs-su "$B" || nosu\n'
+            f"        printf {shlex.quote(SU_SUPPLEMENT)} > \"$B/su.sup\" && chmod 0600 \"$B/su.sup\" || nosu\n"
+            '        command -v setpriv >/dev/null 2>&1 || nosu\n'
+            '        exec setpriv "--$su" 65534 "$bin" "$@" ;;\n'
+            '    *) nosu ;;\n'
+            '    esac\n'
             "fi\n"
             # The `tz-*` modes (DIVERGENCES 152): a tmpfs over /etc holding
             # the host's password file and the zone files a case reads; a
@@ -3781,6 +4081,10 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     sf = socket_file_holder(work)
     wr = walk_race_holder(work)
     ns = names_socket_holder(work)
+    aud = audit_holder(work)
+    mbj, mbn, mbe = (hostile_sleeper(key, work, comm) for key, comm in MULTIBYTE_COMMS.items())
+    xk, xg = (hostile_sleeper(key, work, comm) for key, comm in EXCLUSION_COMMS.items())
+    ping = ping_holder(work)
     # MT's and AUTOFS's base: a directory here, mounted over in each run's
     # namespace, where the cases' paths ({MTPLAIN}...) lead.
     os.makedirs(os.path.join(work, "mt"))
@@ -3790,7 +4094,7 @@ def make_fixtures(work: str) -> tuple[Fixture, ...]:
     return (
         a, b, c, d, e, f, g, h, i, j, k, ln, o, x, z, u, st, nl, v, q, y, m, w, ms, r,
         em, pn, rn, t, fh, mz, pth, ptg, dn, sf, wr, mt, af, raw, udpl, nsraw, cr,
-        nlk, nsx, nlc, mq, nfs, ep, ns,
+        nlk, nsx, nlc, mq, nfs, ep, ns, aud, mbj, mbn, mbe, xk, xg, ping,
     )
 
 
@@ -3939,7 +4243,7 @@ def run(args) -> int:
             relnames, tabname, fuseprobe, userzero, ptyhost, ptyguest, devnode,
             sockfiles, walkrace, mtprobe, autofsprobe, rawsocks, udplite, nsraw,
             crcomm, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles, endpoints,
-            namesocks,
+            namesocks, audit, mbj, mbn, mbe, xkeep, xgone, pingsocks,
         ) = fixtures
         # Every fixture that needs a capability the runner may not have, with the
         # matrix placeholder its cases use and the reason to print when it is
@@ -3958,6 +4262,7 @@ def run(args) -> int:
             "NLK": (unlisted, "no AF_NETLINK here"),
             "NSX": (nsunlisted, "no unprivileged user namespaces, or no ping sockets in one"),
             "MQ": (mqueues, "no POSIX message queues in this kernel"),
+            "PING": (pingsocks, pingsocks.unavailable or "no ping sockets in a network namespace here"),
             "U": (unreadable, "no user here that cannot read a non-dumpable process"),
             # M's paths name a plain directory here whether or not M came up; a
             # case naming one without M would MATCH on nothing, so they go with it.
@@ -4109,6 +4414,14 @@ def run(args) -> int:
                     print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
                     for key in keys:
                         optional[key] = (None, optional[key][1])
+        # PING's pid is its Python's, known once its sockets are made.
+        ping_pid = 0
+        if started_optional["PING"] is not None:
+            try:
+                ping_pid = ping_ready(started_optional["PING"])
+            except FixtureUnavailable as unavailable:
+                print(f"linux_diff: optional fixture unavailable: {unavailable}", file=sys.stderr)
+                optional["PING"] = (None, optional["PING"][1])
         # P maps its files only once its tmpfs is there.
         if pathnotes is not None:
             try:
@@ -4134,6 +4447,7 @@ def run(args) -> int:
                 mntsock, spellings, exmaps, pathnotes, relnames, tabname, userzero,
                 ptyhost, ptyguest, devnode, optional["WRACE"][0], rawsocks, udplite,
                 nsraw, unlisted, nsunlisted, nlcomm, mqueues, nfsfiles, endpoints,
+                audit,
             )
             if f is not None
         ]:
@@ -4239,6 +4553,15 @@ def run(args) -> int:
                     for key, (fx, _) in optional.items()
                 },
                 "A": str(a.pid),
+                "AUD": str(audit.pid),
+                "MBJ": str(mbj.pid),
+                "MBN": str(mbn.pid),
+                "MBE": str(mbe.pid),
+                "XK": str(xkeep.pid),
+                "XG": str(xgone.pid),
+                # PING's own pid, not its `sudo`'s (after the optional
+                # fixtures' entries above, which it replaces).
+                "PING": str(ping_pid),
                 "NS": str(namesocks.pid),
                 "NSPORT": nsport,
                 "NSUPORT": nsuport,
@@ -4332,6 +4655,8 @@ def run(args) -> int:
                 "FUSE": os.path.join(fuseprobe.cwd, "fuse"),
                 # MT's and AUTOFS's, under the base `mt-wrap.sh` mounts over.
                 "MTPLAIN": os.path.join(work, "mt", "plain"),
+                # The `su-ruid` and `su-euid` modes' supplement.
+                "MTSUP": os.path.join(work, "mt", "su.sup"),
                 "MTGONE": os.path.join(work, "mt", "gone", "m"),
                 "MTD": os.path.join(work, "mt", "d"),
                 "MTWL": os.path.join(work, "mt", "wl"),
@@ -4388,10 +4713,12 @@ def run(args) -> int:
                     for c in cases
                     if any(
                         needs_mt(c, mode)
-                        for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc", "names", "namesmulti", "namesnopw")
+                        for mode in ("table", "passwd", "mqueue", "nfs", "nfs3", "nfsws", "nomounts", "noetc", "names", "namesmulti", "namesnopw",
+                                     "ping", "pidns", "pidns-outer")
                         + tuple(f"names-{v}" for v in NAMES_VARIANTS)
                         + tuple(f"tz-{v}" for v in TZ_VARIANTS)
                         + WR_MODES
+                        + SU_MODES
                     )
                     and c["name"] not in dropped
                 ]
@@ -4725,6 +5052,24 @@ def self_test() -> int:
         # every other mode runs it at the last `"$@"`.
         check("the MT script mounts before the binary and unmounts after it",
               text.index("mount -t tmpfs lsof-rs-mt") < text.rindex('"$@"') < text.rindex('umount -l "$B"'))
+        su_branch = text.split('if [ "${mode#su-}" != "$mode" ]; then', 1)[-1].split("\nfi\n", 1)[0]
+        check("the MT su modes are each a branch of the script, before the table's mounts",
+              all(any(spelt in su_branch for spelt in (f"    {m[3:]})", f"    {m[3:]}|", f"|{m[3:]})"))
+                  for m in SU_MODES)
+              and text.index('if [ "${mode#su-}"') < text.index("mount -t tmpfs lsof-rs-mt"))
+        check("...su-fd9 hands descriptor 9 down on the case's first argument, and takes it off",
+              'fd9) f=$1; shift; exec "$bin" "$@" 9<"$f"' in su_branch)
+        check("...su-nofile3 closes stdin before the limit, and execs",
+              'nofile3) exec <&-; ulimit -n 3 || exit 2; exec "$bin" "$@" ;;' in su_branch)
+        check("...and every su mode ends in an exec, so that no shell is left holding what it handed down",
+              all(line.rstrip().endswith(";;") and "exec " in line.rsplit(";", 3)[-3]
+                  for line in su_branch.splitlines() if line.rstrip().endswith(";;") and "*) nosu" not in line))
+        check("...su-ronull and su-ruid change user by number, and a mode that cannot be set up is no result",
+              "--reuid 65534 --regid 65534 --clear-groups" in su_branch and 'setpriv "--$su" 65534' in su_branch
+              and "no MT su $su ($$)" in su_branch and "chmod 0444 /dev/null" in su_branch
+              and "chmod 0600" in su_branch)
+        check("...su-self runs the binary as pid 1 with stdin and stderr closed and 9 handed down",
+              "unshare -p -f --mount-proc sh -c 'exec \"$0\" \"$@\" 9</dev/null <&- 2>&-'" in su_branch)
         tz_branch = text.split('if [ "${mode#tz-}" != "$mode" ]; then', 1)[-1].split("\nfi\n", 1)[0]
         check("the MT tz modes end their binary with the shell the runner kills",
               'setpriv --pdeathsig KILL -- "$@"' in tz_branch)
@@ -4883,6 +5228,65 @@ def self_test() -> int:
                   got.get("waiter") not in (None, "0", "124"))
         else:
             print(f"SKIP  the AUTOFS daemon's lifetime ({why})")
+    # The modes that mount nothing (DIVERGENCES 159, 164, 166).
+    with tempfile.TemporaryDirectory() as td:
+        text = open(mt_wrap(td, os.path.join(td, "mt"))).read()
+        branch = lambda mode: text.split(f'if [ "$mode" = {mode} ]; then', 1)[-1].split("\nfi\n", 1)[0]
+        ping = branch("ping")
+        check("the MT ping mode runs its binary in fixture PING's network namespace",
+              os.path.join(td, "ping", "pid") in ping and 'exec nsenter --net="/proc/$P/ns/net" "$@"' in ping
+              and "no MT ping ($$)" in ping and ping.index("no MT ping") < ping.index("nsenter"))
+        check("the MT pidns mode runs its binary as PID 1 with a procfs of its own, and passes its status on",
+              'unshare -n -p -f --mount-proc "$@"\n    exit $?' in branch("pidns"))
+        outer = branch("pidns-outer")
+        check("the MT pidns-outer mode keeps the host's /proc",
+              'unshare -p -f "$@"\n    exit $?' in outer and "--mount-proc" not in outer)
+    check("the multibyte comms fit TASK_COMM_LEN and hold a character of several bytes",
+          all(len(c.encode()) <= 15 and len(c.encode()) > len(c) for c in MULTIBYTE_COMMS.values()))
+    check("the exclusion comms fit TASK_COMM_LEN and share the prefix their cases name",
+          all(len(c) <= 15 and c.startswith("lsofrsx-") for c in EXCLUSION_COMMS.values())
+          and len(set(EXCLUSION_COMMS.values())) == 2)
+    # Fixture AUD really holds what its cases name: a case over a fixture
+    # that is not what it says compares nothing (LESSONS #6).
+    with tempfile.TemporaryDirectory() as td:
+        aud = audit_holder(td)
+        aud.start()
+        ready = os.path.join(aud.cwd, "ready")
+        deadline = time.monotonic() + 10.0
+        while not os.path.exists(ready) and time.monotonic() < deadline and aud.proc.poll() is None:
+            time.sleep(0.02)
+        up = os.path.exists(ready)
+        check("fixture AUD comes up", up)
+        if up:
+            link = lambda fd: os.readlink(f"/proc/{aud.pid}/fd/{fd}")
+            info = lambda fd: open(f"/proc/{aud.pid}/fdinfo/{fd}").read()
+            field = lambda fd, key: [l.split()[1] for l in info(fd).splitlines() if l.split()[:1] == [key]]
+            check("AUD's fds 20 and 21 are namespace files", re.fullmatch(r"net:\[\d+\]", link(20)) is not None
+                  and re.fullmatch(r"mnt:\[\d+\]", link(21)) is not None)
+            check("AUD's fd 22 is a pidfd of a reaped process, 23 of itself",
+                  field(22, "Pid:") == ["-1"] and field(23, "Pid:") == [str(aud.pid)])
+            check("AUD's fd 24 is at a negative position, 25 at -1",
+                  field(24, "pos:") == [str(-0xa00000)] and field(25, "pos:") == ["-1"])
+            with open("/proc/locks") as f:
+                locked = {l.split()[5] for l in f if l.split()[4:5] == [str(aud.pid)]}
+            inode = lambda fd: os.stat(f"/proc/{aud.pid}/fd/{fd}").st_ino
+            check("AUD's fds 26 to 29 are each under a flock",
+                  all(any(k.endswith(f":{inode(fd)}") for k in locked) for fd in (26, 27, 28, 29)))
+            try:
+                link(30)
+                long_link = False
+            except OSError as e:
+                long_link = e.errno == 36  # ENAMETOOLONG
+            check("AUD's fd 30 is a link too long to read, with an fdinfo that reads",
+                  long_link and field(30, "pos:") == ["0"])
+            check("AUD's fds 40, 41 and 42 are eventpolls watching 31, 32 and 33",
+                  [len(field(fd, "tfd:")) for fd in (40, 41, 42)] == [31, 32, 33])
+            comms = set()
+            for tid in os.listdir(f"/proc/{aud.pid}/task"):
+                with open(f"/proc/{aud.pid}/task/{tid}/comm", "rb") as f:
+                    comms.add(f.read().rstrip(b"\n"))
+            check("AUD has a thread named with a character of two bytes", "é".encode() in comms)
+        aud.stop()
     check("a case that sets LSOF_DIFF_MT table needs fixture MT",
           needs_mt({"args": ["-V", "+f", "--", "src_dup_top"], "env": {"LSOF_DIFF_MT": "table"}}, "table"))
     check("...and not AUTOFS", not needs_mt({"env": {"LSOF_DIFF_MT": "table"}}, "autofs"))

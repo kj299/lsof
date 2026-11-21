@@ -245,8 +245,10 @@ name = "failed-row-named-by-its-target"
 rule = "a row the C could not stat is named by the link's source (124)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''    let mut name = if ctx.fs.is_some() && meta.is_none() {'''
-new = '''    let mut name = if ctx.fs.is_some() && meta.is_none() && false {'''
+old = '''    } else if anon {
+        LinkNode::Anon'''
+new = '''    } else if anon || meta.is_none() {
+        LinkNode::Anon'''
 
 # ------------------------------------------------------------ N_NFS
 
@@ -255,8 +257,8 @@ name = "nfs-suffix-never"
 rule = "an fd's file on a recorded NFS mount is named with its source (124)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''    if let Some(nfs) = nfs_suffix(ctx.nfs_mounts, &file_type, fs_device, source) {'''
-new = '''    if let Some(nfs) = nfs_suffix(&[], &file_type, fs_device, source) {'''
+old = '''    let nfs = nfs_suffix(ctx.nfs_mounts, &file_type, fs_device, source);'''
+new = '''    let nfs = nfs_suffix(&[], &file_type, fs_device, source);'''
 
 [[mutant]]
 name = "nfs-suffix-on-any-type"

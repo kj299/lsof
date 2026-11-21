@@ -354,6 +354,23 @@ meet. Each number is a row there, with the measurement behind it.
 - **Linux, the time a name costs** (154): a socket row's host that
   `/etc/hosts` does not name is asked of DNS once a run, as the C asks it,
   under `/etc/resolv.conf`'s timeouts (above); `-n` asks nothing.
+- **How lsof starts** (170-176): since 2026-11-21 lsof-rs closes every
+  descriptor from 3 up it was started with and wants a `/dev/null` it can
+  open for reading and writing, before it reads an option, as the C does:
+  a file only lsof itself was handed (`lsof FILE 9<FILE`) is open in no
+  process, and with no usable `/dev/null` every run, `-v` included, prints
+  nothing and exits 1. What stays lsof-rs's own is rare. With no `/proc`
+  at all a run that names a path ends in the C's words for the mount table,
+  but where the C would say something of the path first (a `+d` of what is
+  no directory, a link loop) lsof-rs says the table's line all the same,
+  and with a `/proc` that is no procfs but holds a `mounts` file it says
+  `can't fork` where the C lists nothing: its helper is `/proc/self/exe`,
+  and it makes no bounded call without one (175). With a path argument and
+  a descriptor limit that leaves exactly four free (`ulimit -n 7`) the C
+  lists and lsof-rs says `can't open pipes`: its helper's stderr is a
+  fifth (176). On a kernel with neither `close_range(2)` (before 5.9, or
+  refused by a seccomp filter) nor a `/proc/self/fd`, descriptors numbered
+  past 1,048,576 stay open (170).
 - **`-r m<fmt>`, `+m m` and their residues** (152, 153): a zone file that is
   no regular file (a FIFO, a device) is waited on 3 seconds at most in all,
   where glibc's waits for ever, and then taken as unreadable (a FIFO with
@@ -423,8 +440,38 @@ meet. Each number is a row there, with the measurement behind it.
   a socket file is the C's `sock` row (126); 2026-10-30: AF_VSOCK, ping and
   unbound sockets are named as the C names them, from
   `system.sockprotoname` (22), and a bound netlink socket from its table
-  (109)]; a login name is glibc's (39, since 2026-11-20), and a control
-  byte in one is escaped where the C prints it raw (70).
+  (109); 2026-11-21: a ping socket that has been bound or connected is the
+  C's `icmp` row, from `/proc/net/icmp` (159)]; a login name is glibc's
+  (39, since 2026-11-20), and a control byte in one is escaped where the C
+  prints it raw (70).
+- **Linux, lsof listing itself** (123, 166): its own rows are the C's
+  since 2026-11-21 (`/proc`, held for the scan, and its own
+  `/proc/PID/fd`), but for the process that makes the bounded calls: the
+  pipes to it are lsof-rs's descriptors 4 and 5 where the C's are 5 and 6
+  (so `/proc/PID/fd` is 6, the C's 4) unless a path argument was given,
+  the helper has `/dev/null` on its fd 2, and `-K` lists the thread that
+  reads its replies. A script that looks for lsof's own `/proc` row finds
+  it at 3 in both.
+- **Linux, in a PID namespace whose `/proc` is the host's** (`unshare -p
+  -f` with no `--mount-proc`, a container given the host's `/proc`; 164):
+  lsof-rs prints what it prints on a host. The C, which looks for itself
+  under `/proc/<getpid()>`, prints no offset, file flag or
+  `[eventfd:N]`-style name there, drops `-o` with a warning, and crashes
+  on the first eventpoll it reads. Not followed, by decision.
+- **`-c ^` with no name** (168) excludes every command, as in the C:
+  nothing is listed and the run exits 1. Under `-V` beside a `-p`, `-g` or
+  `-u`, lsof-rs also reports that id as not located, where the C counts
+  it located before it tests the exclusion (13).
+- **Exit status after `-c ^name`, a `-c` given twice, or two `-c` or `-i`
+  that one process or file matches** (13): the C enters each as a search
+  item of its own and marks only the first that matches (a `-c ^name`,
+  never), so it exits 1 after a listing that succeeded, and `-V` reports
+  the other `not located`: `lsof -c python -c python`, `-c py -c python`,
+  `-c /py/ -c /py/`, `-iTCP:80 -iTCP`. lsof-rs marks every one a process
+  or file matches and exits 0. C-DEFECT, not followed, by decision
+  (2026-09-25). A `-p`, `-g`, `-u` or `-d` value given twice is one entry
+  in both, and a path given twice is two in both (the second `no file use
+  located`, exit 1).
 - **Output shape:** `-J`/`-j` print the C's schema since 2.0.0 (91), but an
   Internet row keeps a `name` (134) and DEL, C1 and U+2028/2029 are escaped
   (135), both C-DEFECT; a byte that is not UTF-8 prints as U+FFFD in NAME,

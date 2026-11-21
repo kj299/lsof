@@ -45,9 +45,11 @@
 //! * **Sockets every way the C names them** (2026-10-30): a bound netlink
 //!   socket from `/proc/net/netlink`, typed `netlink` (DIVERGENCES 109), and
 //!   a socket no table of this namespace lists — AF_VSOCK, an unbound UDP,
-//!   UDP-Lite, TCP or netlink socket, a ping socket, any socket of another
-//!   network namespace — from `system.sockprotoname`, `sock … protocol: UDP`
-//!   (item 22), read through a descriptor pinned `O_PATH` (`net.rs`).
+//!   UDP-Lite, TCP or netlink socket, a ping socket never used, any socket
+//!   of another network namespace — from `system.sockprotoname`, `sock …
+//!   protocol: UDP` (item 22), read through a descriptor pinned `O_PATH`
+//!   (`net.rs`). A ping socket that has been bound, connected or sent on
+//!   is in `/proc/net/icmp`, and typed `icmp` from it (DIVERGENCES 159).
 //!
 //! # What it does not cover yet
 //!
@@ -132,10 +134,6 @@ pub mod zonefile;
 
 #[cfg(target_os = "linux")]
 pub use backend::LinuxBackend;
-/// What lsof-rs inherited from 3 up, noted before it opens any (DIVERGENCES
-/// 153: the C closes them at its start).
-#[cfg(target_os = "linux")]
-pub use mounts::note_inherited_fds;
 /// Whether this process runs in secure-execution mode (`AT_SECURE`), where
 /// glibc's loader takes `TZDIR`, `RES_OPTIONS` and the like out of the
 /// environment and `tzset()` reads only the system's zone files.
@@ -181,7 +179,7 @@ pub fn stdout_blksize() -> Option<u64> {
 #[doc(hidden)]
 pub mod fuzz_api {
     pub use crate::diag::{parse_reply, Ends, Step};
-    pub use crate::files::{name_for_target, parse_fdinfo, FdInfo};
+    pub use crate::files::{name_for_target, parse_fdinfo, FdInfo, LinkNode};
     pub use crate::locks::parse_locks;
     pub use crate::maps::{parse_maps, parse_maps_bytes, Mapping};
     pub use crate::mounts::{parse_mounts, parse_supplement, resolve_table, MountLine};

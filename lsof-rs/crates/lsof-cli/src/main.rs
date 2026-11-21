@@ -648,9 +648,18 @@ fn miss_calls(line: &str, out: &mut lsof_core::render::Calls) {
 fn unlocated(sel: &Selection, located: &Located, esc: Escaper) -> Vec<String> {
     let mut miss = Vec::new();
     // `-c`. The C keeps these in a list it PREPENDS to (`Cmdl = lpt`), so it
-    // reports them last-given first.
-    for (c, hit) in sel.commands.iter().zip(&located.commands).rev() {
-        if !hit {
+    // reports them last-given first. An exclusion is in that list too, and
+    // nothing ever marks one: the C names every `-c ^name` here. lsof-rs
+    // does not (DIVERGENCES 13), but for the exclusion with no name, `-c
+    // ^`, which named every command: its line, the name empty, where the C
+    // prints it, after the names entered after it and before those entered
+    // before it (`-c a -c ^ -c b`: `b`, the empty one, `a`).
+    for i in (0..=sel.commands.len()).rev() {
+        for _ in sel.empty_command_excludes.iter().filter(|&&at| at == i) {
+            miss.push("lsof: command not located: ".to_string());
+        }
+        let Some(at) = i.checked_sub(1) else { continue };
+        if let (Some(c), Some(false)) = (sel.commands.get(at), located.commands.get(at)) {
             miss.push(format!(
                 "lsof: command not located: {}",
                 esc.bytes(c.as_encoded_bytes())
@@ -844,6 +853,13 @@ fn report(reports: Reports) {
 }
 
 fn main() {
+    // Before this, and before the Rust runtime: what the C's `main()` does
+    // first (`main.c:173-183`). `lsof_sigpipe`'s constructor closed every
+    // descriptor from 3 up this process was started with, put `/dev/null`
+    // on each of 0, 1 and 2 that was closed, and ended the run, exit 1 and
+    // nothing said, where `/dev/null` cannot be opened (DIVERGENCES 170,
+    // 171). So nothing below finds a descriptor it did not open itself.
+    //
     // The bounded layer's helper is this binary, re-executed with an argument
     // no user types (`lsof_backend_linux::safefs`). It is served before
     // anything else is looked at — options, the locale, the environment,
@@ -877,10 +893,6 @@ fn main() {
     // helper that cannot start) ends it through `lsof_core::safefs::exit`,
     // which flushes stdout first, as the C's `exit()` does.
     lsof_core::safefs::set_exit_flush(lsof_cli::stdio::flush);
-    // What the C closes first (`closefrom_shim(ctx, 3)`): noted before any
-    // descriptor of lsof-rs's own is opened (DIVERGENCES 153).
-    #[cfg(target_os = "linux")]
-    lsof_backend_linux::note_inherited_fds();
 
     // `args_os`, not `args`: `std::env::args()` PANICS on an argument that is
     // not UTF-8, and a Linux file name may hold any byte but `/` and NUL —
@@ -2234,6 +2246,60 @@ mod tests {
             ]
         );
         assert!(lines(vec![true, true], vec![true, true, true]).is_empty());
+    }
+
+    /// `-c ^`, the exclusion with no name, is an item the C never locates:
+    /// `-V` says `command not located: `, the name empty, where the
+    /// exclusion stands in the C's list (each `-c` value prepended), and
+    /// the run exits 1 (measured: `lsof -V -c ^` prints that one line). A
+    /// named exclusion is no item here (DIVERGENCES 13).
+    #[test]
+    fn an_empty_command_exclusion_is_reported_where_the_c_reports_it() {
+        use lsof_core::render::Escaper;
+        use lsof_core::Located;
+        let lines = |argv: &[&str], commands: Vec<bool>| {
+            let (sel, _) = parsed(argv);
+            let located = Located {
+                commands,
+                ..Default::default()
+            };
+            super::unlocated(&sel, &located, Escaper::UNIX)
+        };
+        let none = "lsof: command not located: ";
+        assert_eq!(lines(&["-c", "^"], vec![]), [none]);
+        assert_eq!(lines(&["-c", "^", "-c", "^"], vec![]), [none, none]);
+        assert!(
+            lines(&["-c", "^x"], vec![]).is_empty(),
+            "a named one is no item"
+        );
+        // Last entered, first reported: `-c a -c ^ -c b`.
+        let argv = ["-c", "a", "-c", "^", "-c", "b"];
+        assert_eq!(
+            lines(&argv, vec![false, false]),
+            [
+                "lsof: command not located: b",
+                none,
+                "lsof: command not located: a"
+            ]
+        );
+        assert_eq!(lines(&argv, vec![true, true]), [none]);
+        assert_eq!(
+            lines(&argv, vec![true, false]),
+            ["lsof: command not located: b", none]
+        );
+        assert_eq!(
+            lines(
+                &["-c", "^", "-c", "a", "-c", "b", "-c", "^"],
+                vec![false, true]
+            ),
+            [none, "lsof: command not located: a", none]
+        );
+        // The line as the C prints it: its words, an empty name, a newline.
+        let mut calls = lsof_core::render::Calls::new();
+        super::miss_calls(none, &mut calls);
+        let mut out = Vec::new();
+        calls.write_to(&mut out).unwrap();
+        assert_eq!(out, b"lsof: command not located: \n");
     }
 
     /// The C strips trailing slashes from a path argument longer than one

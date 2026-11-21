@@ -47,6 +47,90 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   shows its queues** (147), as the C sets them for every socket.
 
 ### Changed — output and exit status a script may notice
+- **lsof closes every descriptor from 3 up it was started with, as the C
+  does first** (DIVERGENCES 170): `lsof FILE 9<FILE` lists nothing and
+  exits 1, where lsof-rs had listed itself and its helper for the file
+  and exited 0 (two pids under `-t`); a whole-host listing run from a
+  parent that leaves descriptors open no longer has them in lsof's rows;
+  `lsof /dev/fd/9` is a status error; a reader of a pipe lsof was handed
+  no longer waits on lsof's helper; and the numbers they took no longer
+  count against lsof's descriptor limit. Done in `lsof-sigpipe`'s
+  constructor, before the Rust runtime starts: `close_range(3, ~0U, 0)`,
+  else the descriptors `/proc/self/fd` lists, else every number below the
+  limit (1,048,576 at most). On FreeBSD, `closefrom(3)`.
+- **With no usable `/dev/null`, every run exits 1 and prints nothing, as
+  the C's does** (171): the C opens it before it reads an option, to put
+  it on a closed stdin, stdout or stderr, and ends in silence where it
+  cannot (no `/dev/null`, one its user cannot write, no descriptor left
+  for it). lsof-rs had printed its version, listed, or said `can't fork`,
+  and with a standard descriptor closed as well it died of `SIGABRT`
+  (exit 134) inside the Rust runtime's start-up.
+- **`+m FILE` is asked of `access(2)` before it is read** (172), the real
+  user's rights, as the C's `is_readable()` asks: where lsof's effective
+  user is another (a setuid installation, a wrapper that sets it), a
+  supplement the caller may not read is `WARNING: access FILE: Permission
+  denied` and none of its lines is quoted, where lsof-rs had read it; and
+  one the caller may read and the effective user may not is `can't
+  open(FILE): Permission denied`, which lsof-rs had called an access
+  warning.
+- **Messages** (stderr; exit status unchanged): the `-d` mixture message
+  quotes 254 bytes of its item, as the C's buffer keeps (173); a character
+  of several bytes among the letters of `-F`, `-T`, `-x` or `+f` is a line
+  a byte, `unknown field: \xc3` and `unknown field: \xa9` for `é`, as the
+  C says one of each byte (174; lsof-rs said one line a character); and
+  with no `/proc`, a run that names a path, a `+d`/`+D` or an `-e` ends
+  `can't fopen(/proc/mounts, "r"): No such file or directory`, the C's
+  words, where lsof-rs said `can't fork` (175).
+- **Linux, eleven differences an audit against the C found** (DIVERGENCES
+  156-168; each now prints what lsof 4.99.6 prints):
+  - a descriptor on a **namespace file** (`/proc/PID/ns/net`, what
+    container runtimes and `ip netns` hold) is NAME `net`, `mnt`, `pid`…,
+    where lsof-rs printed the link whole, `net:[4026531833]` (156); a link
+    that is no path is cut at its first colon, as the C's `getlinksrc()`
+    cuts it, and Linux 6.9's `pidfd:[N]` is `[pidfd:PID]`;
+  - a **pidfd whose process has been reaped** is `[pidfd]`, not
+    `[pidfd:-1]` (157);
+  - **COMMAND and TASKCMD cut inside a character** print the bytes that
+    fit, as the C does: a process named `日本語` is `\xe6\x97` in the
+    default nine columns, where lsof-rs left the cell **empty**;
+    `naïve-app` is `na\xc3` (158). Which characters are escaped is
+    unchanged;
+  - a **ping socket** that has been bound, connected or sent on (what an
+    unprivileged `ping` holds) is TYPE `icmp`, with no DEVICE and the
+    addresses of `/proc/net/icmp` for a NAME
+    (`0100007F:1092->00000000:0000`), under `-X` too, where lsof-rs printed
+    `sock … protocol: PING` (159). No `-i` selects it, as in the C;
+  - **no socket row has a lock character**: a `flock()` on a socket no
+    table names printed `3uW`, `-F l` `lW` and a JSON `lock` (160);
+  - an **offset above 2^63** (`/proc/PID/mem` at the top of the address
+    space, fdinfo `pos: -10485760`) is printed, unsigned
+    (`0xffffffffff600000`, JSON `"offset":"18446744073699065856"`), where
+    lsof-rs printed none (161);
+  - an **eventpoll watching exactly 32 descriptors** ends its list `...`,
+    as one watching more does (162);
+  - a descriptor whose link cannot be read (`readlink: File name too
+    long`) has **no access letter**; lsof-rs printed `3u`, `-F a` `au` and
+    a JSON `access` (163);
+  - under **`-E`/`+E`, a command a `-c ^name` excludes** is no longer
+    selected by another `-c` that matches it: `lsof -E -c ^fixA -c fix`
+    listed `fixA` (165);
+  - **lsof's own rows**: lsof-rs listed itself with a row it could not
+    read, `3 unknown /proc/PID/fd/3 (readlink: No such file or
+    directory)`, in every whole-host listing; it now holds `/proc` and its
+    own `/proc/PID/fd` open as the C does, and lists them (`3r DIR …
+    /proc`), so **`lsof /proc` exits 0**, finding lsof itself, where it
+    exited 1 (166). The descriptor numbers of those rows can differ from
+    the C's where the pipes to lsof-rs's helper are (123);
+  - **`-c ^`**, an exclusion with no name, is accepted, as the C accepts
+    it: it excludes every command, so nothing is listed and the run exits
+    1, with `command not located: ` under `-V`. lsof-rs refused it:
+    `option -c^ requires a name` (168).
+
+  Recorded and not followed (164): run in a PID namespace whose `/proc`
+  is the host's (`unshare -p -f` with no `--mount-proc`), the C takes
+  fdinfo for unavailable (no offsets, no file flags, `-o` dropped) and
+  crashes on the first eventpoll it reads; lsof-rs reads fdinfo there as
+  anywhere.
 - **`-u name` and USER ask the C library, as the C does** (DIVERGENCES
   39): `getpwnam_r(3)` and `getpwuid_r(3)`, so an account only LDAP, SSSD,
   systemd-homed, NIS or Hesiod serves has its name in USER, `-F L` and
@@ -438,6 +522,24 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   which matches names, the walk still comes after the parse.
 
 ### Security
+
+- **`unsafe` stays in the small audited crates, and one of them has a new
+  job** (DIVERGENCES 170, 171): closing the descriptors lsof was started
+  with needs calls no safe interface offers, and is sound only before any
+  code of the program has run, so it is in `lsof-sigpipe`'s `.init_array`
+  constructor and nowhere else: thirteen more `unsafe` blocks there, each
+  with a `SAFETY:` comment (eleven single system calls, seven for Linux and
+  four for FreeBSD; the one that makes the value they sit behind, whose
+  `unsafe fn` constructor has that point in time for its contract; and one
+  in a unit test), with the steps themselves safe code that the unit tests
+  run over a descriptor table of their own. lsof-core, lsof-cli and
+  lsof-backend-linux keep `#![forbid(unsafe_code)]`; no crate was added. A
+  test reads the built binary's `.init_array` and fails on a constructor
+  the argument does not name. THREAT-MODEL §2.
+- **A mount supplement its caller may not read is not read** (172), and
+  **nothing lsof was handed reaches its helper** (170): the helper had
+  kept every descriptor the shell left open, for as long as a file system
+  that did not answer held it.
 
 - **DNS replies are read by a parser of lsof-rs's own** (DIVERGENCES 154,
   THREAT-MODEL): a reverse lookup's reply is bytes from the network, chosen

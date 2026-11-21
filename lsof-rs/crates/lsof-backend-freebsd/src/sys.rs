@@ -147,8 +147,10 @@ pub fn euid() -> u32 {
 /// `closefrom(2)` from `lowfd`: every descriptor from `lowfd` on closed.
 /// Only the bounded calls' helper calls it, first thing in
 /// [`crate::safefs::serve`], as the C's child calls `closefrom_shim()`
-/// (`lib/misc.c:345`): what it closes are the descriptors lsof was given
-/// without close-on-exec, which the exec kept.
+/// (`lib/misc.c:345`): what it closed were the descriptors lsof was given
+/// without close-on-exec, which the exec kept. Since 2026-11-21 lsof and
+/// the helper have each closed them already, before their runtime started
+/// (`lsof-sigpipe`'s constructor, DIVERGENCES 170), and this finds none.
 pub fn close_from(lowfd: c_int) {
     // SAFETY: `closefrom` touches no memory of ours. It closes descriptors,
     // which is unsound only where safe code owns one it closes (an

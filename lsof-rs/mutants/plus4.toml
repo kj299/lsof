@@ -32,6 +32,13 @@
 # differential as the last gate: 7 of 7 killed, by the unit gates. No code
 # changed between the runs, only tests.
 #
+# Re-anchored 2026-11-21 (the start-up and options audit, DIVERGENCES 172):
+# `socket-says-access`, on the open as it reads since `access(2)` is asked
+# first and every failure after it is `can't open`; it no longer maps an
+# open refused for `EACCES` or `ENOENT` to the access warning. Run again
+# with the backend's unit gate alone (`cargo test -p lsof-backend-linux
+# --lib`), --first-kill: killed.
+#
 # Rules with no mutant here, and why:
 # * `RES_OPTIONS` ignored in secure-execution mode (`LinuxNames::resolver`):
 #   no test runs set-uid; `at_secure` itself is row 38's, unit-tested.
@@ -870,8 +877,10 @@ name = "socket-says-access"
 rule = "fopen() failing past access() is can't open (153)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/mounts.rs"
-old = '''            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => access(&e),'''
-new = '''            _ if true => access(&e),'''
+old = '''        .open(path)
+        .map_err(|e| open(&e))?;'''
+new = '''        .open(path)
+        .map_err(|e| access(&e))?;'''
 
 [[mutant]]
 name = "supplement-unbounded"

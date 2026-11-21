@@ -709,9 +709,12 @@ fn what_the_parse_says_comes_in_the_cs_order() {
 /// A helper that cannot be started ends the run, in the C's words for the
 /// step that failed: under a descriptor limit its pipes cannot be made, and
 /// the C says `can't open pipes: Too many open files` (measured with
-/// `ulimit -n 5`), exit 1. The limit leaves exactly three descriptor numbers
-/// free below it ([`limit_leaving_free`]): enough to load the binary, not for
-/// the helper's pipes.
+/// `ulimit -n 5` and `-n 6`), exit 1. The limit is 6: lsof closes every
+/// descriptor from 3 up it was started with, as the C does (DIVERGENCES
+/// 170), so exactly three numbers are free below it whatever this test was
+/// handed, enough to open the mount table and not for the helper's pipes.
+/// (The shell closes 3 to 5 first, so that the loader has a number below
+/// the limit to map the libraries through.)
 #[test]
 #[cfg_attr(
     miri,
@@ -721,8 +724,7 @@ fn no_helper_no_run() {
     let out = Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "ulimit -n {} && exec '{}' -a -d cwd -p 1 /",
-            limit_leaving_free(3),
+            "exec 3>&- 4>&- 5>&-; ulimit -n 6 && exec '{}' -a -d cwd -p 1 /",
             env!("CARGO_BIN_EXE_lsof")
         ))
         .output()
@@ -733,39 +735,6 @@ fn no_helper_no_run() {
         stderr_of(&out),
         "lsof: can't open pipes: Too many open files\n"
     );
-}
-
-/// The `ulimit -n` under which a child of this process starts with exactly
-/// `free` descriptor numbers to open: past its stdin, stdout and stderr, and
-/// past every descriptor this process holds without close-on-exec, which the
-/// child inherits (`flags:` in fdinfo, octal; `O_CLOEXEC` is `02000000` on
-/// x86 and arm). Counted, not taken as the highest one plus `free`: a CI
-/// runner passed one down at a high number, which left the gap below it
-/// free, and the helper started.
-fn limit_leaving_free(free: usize) -> usize {
-    let mut held: std::collections::BTreeSet<usize> = [0, 1, 2].into();
-    for entry in std::fs::read_dir("/proc/self/fd")
-        .expect("/proc/self/fd")
-        .flatten()
-    {
-        let Ok(fd) = entry.file_name().to_string_lossy().parse::<usize>() else {
-            continue;
-        };
-        let flags = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
-            .ok()
-            .and_then(|info| {
-                let f = info.lines().find_map(|l| l.strip_prefix("flags:"))?;
-                u32::from_str_radix(f.trim(), 8).ok()
-            });
-        if flags.is_some_and(|f| f & 0o2_000_000 == 0) {
-            held.insert(fd);
-        }
-    }
-    let last = (0..)
-        .filter(|fd| !held.contains(fd))
-        .nth(free - 1)
-        .expect("a free descriptor number");
-    last + 1
 }
 
 /// A process to list, killed and reaped when it goes out of scope.
@@ -1594,6 +1563,65 @@ fn an_illegal_option_character_reads_on() {
     }
 }
 
+/// A character of several bytes among the letters of `-F`, `-T`, `-x` or
+/// `+f` is a line a byte, as the C's loops over the value say `%c` of each
+/// (measured: two lines for `é`, six for two CJK characters), the byte
+/// escaped where the C prints it raw (DIVERGENCES 122, 174). lsof-rs had
+/// said one line a character.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's streams"
+)]
+fn a_letter_of_several_bytes_is_a_line_a_byte() {
+    let hint = "Try 'lsof -h' for usage.";
+    for (args, message) in [
+        (&["-F\u{e9}"][..], "unknown field"),
+        (&["-T", "\u{e9}"], "unsupported TCP/TPI info selection"),
+        (&["-x\u{e9}"], "unknown cross-over option"),
+        (&["+f\u{e9}"], "unknown file struct option"),
+    ] {
+        let out = lsof(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            stderr_of(&out),
+            format!("lsof: {message}: \\xc3\nlsof: {message}: \\xa9\n{hint}\n"),
+            "{args:?}"
+        );
+    }
+    let out = lsof(&["-F", "p\u{65e5}\u{672c}n"]);
+    assert_eq!(
+        stderr_of(&out),
+        ["e6", "97", "a5", "e6", "9c", "ac"]
+            .map(|b| format!("lsof: unknown field: \\x{b}\n"))
+            .concat()
+            + hint
+            + "\n"
+    );
+}
+
+/// The `-d` mixture message quotes 254 bytes of `^` and the item, as the
+/// C's `snpf()` into `char buf[256]` keeps (`arg.c:707, 720-732`; measured:
+/// a line of 291 bytes for an item of 300). lsof-rs had quoted all of it
+/// (DIVERGENCES 173).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri cannot spawn a process (posix_spawn is an unsupported operation); this test is about the spawned binary's streams"
+)]
+fn the_dash_d_mixture_line_is_cut_as_the_cs() {
+    let out = lsof(&["-d", &format!("5,^{}", "a".repeat(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_of(&out);
+    let line = err.lines().next().unwrap_or_default();
+    assert_eq!(
+        line,
+        format!("lsof: exclude in an include -d list: ^{}", "a".repeat(253))
+    );
+    assert_eq!(line.len(), 291);
+}
+
 /// `-m` is the C's `-m not supported` on Linux, which reads no kernel memory
 /// file, and takes its value word as the C's `GetOpt` does (measured).
 #[test]
@@ -1627,11 +1655,11 @@ fn dash_m_is_not_supported_in_the_cs_words() {
     }
 }
 
-/// A mount supplement named through a descriptor lsof inherited
+/// A mount supplement named through a descriptor lsof was started with
 /// (`/dev/fd/9`): the C closes every descriptor from 3 up as it starts, so
 /// it finds no such file, warns, and takes no device from it (measured);
-/// lsof-rs, which cannot close them, reads the name as the C finds it
-/// (DIVERGENCES 153).
+/// and so does lsof-rs, which closes them too (DIVERGENCES 170; it had kept
+/// them, and read such a name as gone by following its links).
 #[cfg(target_os = "linux")]
 #[test]
 #[cfg_attr(

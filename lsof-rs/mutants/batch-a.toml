@@ -268,9 +268,11 @@ name = "netlink-last-line-wins"
 rule = "the first line for an inode is kept (109)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/net.rs"
-old = '''            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {'''
+old = '''            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {
+                // The C's LSOF_FILE_NETLINK.'''
 new = '''            self.by_inode.remove(&inode);
-            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {'''
+            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {
+                // The C's LSOF_FILE_NETLINK.'''
 
 [[mutant]]
 name = "netlink-sock-diag-name"

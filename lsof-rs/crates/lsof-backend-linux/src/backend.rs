@@ -141,7 +141,17 @@ impl Backend for LinuxBackend {
         sel: &Selection,
         fs: &lsof_core::SafeFs,
     ) -> Result<Vec<Process>, BackendError> {
-        let process::Enumerated { mut procs, zombies } = process::enumerate();
+        // `/proc` stays open until this gather has read its last file, as
+        // the C's `opendir(PROCFS)` does (`dproc.c:301, 437-440`): lsof's
+        // own listing then has its `/proc` row, and a run that names the
+        // `/proc` file system finds lsof itself using it (measured in a PID
+        // namespace of its own: `lsof /proc` exits 0 in the C, and exited 1
+        // here, `no file system use located`).
+        let process::Enumerated {
+            mut procs,
+            zombies,
+            proc_dir: _proc_dir,
+        } = process::enumerate();
         // Nothing of an earlier cycle's (`-r`) is left for this one.
         self.keep_ends(lsof_core::EndpointTables::default());
 
@@ -446,6 +456,39 @@ mod tests {
             .expect("this process appears in the gather");
         assert!(!mine.command.is_empty(), "own command name is populated");
         assert!(!mine.files.is_empty(), "own files are readable");
+    }
+
+    /// lsof's own rows, as the C's are (DIVERGENCES 166): `/proc`, which it
+    /// holds open for the whole scan, and its own `/proc/PID/fd`, which it
+    /// holds open while it reads its links. lsof-rs had closed each before
+    /// it read a link, and its own listing had neither row, but a
+    /// descriptor it could no longer read (`N unknown /proc/PID/fd/N
+    /// (readlink: No such file or directory)`).
+    #[test]
+    #[cfg_attr(miri, ignore = "miri's emulated fds do not appear in the host's /proc")]
+    fn the_gather_lists_its_own_proc_and_fd_directories() {
+        let me: u32 = std::fs::read_to_string("/proc/self/stat")
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let sel = Selection {
+            pids: vec![me],
+            ..Default::default()
+        };
+        let procs = LinuxBackend::new().gather(&sel).expect("gather succeeds");
+        let mine = procs.iter().find(|p| p.pid == me).expect("this process");
+        let dir = |name: &str| {
+            mine.files.iter().any(|f| {
+                f.name == name
+                    && f.file_type == lsof_core::FileType::Dir
+                    && matches!(f.fd, lsof_core::FdType::Handle(_))
+            })
+        };
+        assert!(dir("/proc"), "{:?}", mine.files);
+        assert!(dir(&format!("/proc/{me}/fd")), "{:?}", mine.files);
     }
 
     #[test]

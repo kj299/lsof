@@ -1,0 +1,690 @@
+# Mutants for the Linux audit fixes (2026-11-21): DIVERGENCES 156 (a link
+# that is no path is named up to its first colon: namespace files, and
+# Linux 6.9's `pidfd:[N]`), 157 (a pidfd whose process has been reaped is
+# `[pidfd]`), 158 (COMMAND and TASKCMD are cut between the bytes of a
+# character), 159 (ping sockets from `/proc/net/icmp`), 160 (no socket row
+# carries a lock), 161 (fdinfo's numbers as `strtoul()` reads them: a
+# negative `pos:`), 162 (an eventpoll's list is marked at 32), 163 (a
+# descriptor whose link will not read has no access letter), 165 (under -E
+# a `-c ^` still fails every `-c`), 166 (lsof's own `/proc` and
+# `/proc/PID/fd` rows) and 168 (`-c ^`, the exclusion with no name). One or
+# more per rule. The kill table is this file, run (porting-kit LESSONS
+# #083):
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/audit-linux.toml
+#
+# It needs the C oracle built at ../lsof (README: Building) and root, or
+# passwordless sudo: the differential's fixture PING makes a network
+# namespace of its own, and its `LSOF_DIFF_MT` modes `ping`, `pidns` and
+# `pidns-outer` enter one or make a PID namespace for each run. CI runs
+# only --apply-only.
+#
+# The unit gates are the three crates' own unit tests, a crate a gate, the
+# backend's first (most of these mutants are its). Then `integration`,
+# lsof-cli's `tests/audit_rows.rs`: lsof run as a process of its own, and
+# beside a ping socket in a network namespace made for it. Its own `/proc`
+# row is the one rule here no unit test can pin: inside a test binary other
+# threads hold `/proc` open at any moment, so the row is there whether or
+# not the gather keeps its own directory. The differential is the last
+# gate, and no mutant here is left to it (the three it alone killed at
+# first, `proc-not-held-by-the-gather`, `icmp-table-not-read` and
+# `icmp-table-gated-by-dash-x`, are the integration test's and the unit
+# test `the_load_reads_the_ping_table_with_and_without_dash_x`'s now).
+#
+# Run of 2026-11-21, on the tree as committed: 56 mutants, 56 KILLED
+# (unit-backend 44, unit-core 5, unit-cli 6, integration 1:
+# `icmp-table-read-from-icmp6`). `proc-not-held-by-the-gather` is killed
+# by the backend's own test of the gather in a run where no other test
+# thread holds `/proc` open at that moment (this run; not the first), and
+# by `integration` in every run: `lsof_lists_its_own_proc_and_fd_directories`
+# fails on it by itself. Each of the three the differential alone had
+# killed was also run against the whole differential once more, by itself
+# and with no other differential alive on the machine: it fails for the
+# mutant's own cases and no other (`own-rows-proc-is-open-for-the-scan`,
+# `own-rows-name-the-proc-file-system` and `own-rows-descriptor-numbers`;
+# five `ping-sockets-*`; `ping-sockets-are-not-gated-by-X`), no timeout.
+#
+# Rules with no mutant here, each pinned elsewhere:
+# * 164 (lsof in a PID namespace whose `/proc` is the host's): no code of
+#   lsof-rs's follows the C there; the three ledgered `pidns-outer-*` cases
+#   pin what the C does and that lsof-rs reads fdinfo all the same.
+# * The helper's pipes among lsof's own descriptors (123): the ledgered
+#   `own-rows-descriptor-numbers` pins the numbers on both sides.
+
+[run]
+dir = ".."
+build = [["cargo", "build", "--release", "--bin", "lsof"]]
+
+[[run.gate]]
+name = "unit-backend"
+cmd = ["cargo", "test", "-p", "lsof-backend-linux", "--lib"]
+timeout = 1200
+
+[[run.gate]]
+name = "unit-core"
+cmd = ["cargo", "test", "-p", "lsof-core", "--lib"]
+timeout = 1200
+
+[[run.gate]]
+name = "unit-cli"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--lib", "--bins"]
+timeout = 1200
+
+[[run.gate]]
+name = "integration"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--test", "audit_rows"]
+timeout = 1200
+
+[[run.gate]]
+name = "differential"
+cmd = ["unshare", "-m", "--propagation", "private", "python3", "differential/linux_diff.py", "--oracle", "../lsof", "--rust", "target/release/lsof"]
+infra = [2]
+timeout = 2400
+
+# ---------------- 156: a link that is no path is named up to its first colon
+
+[[mutant]]
+name = "link-not-cut-at-its-colon"
+rule = "a link text that is no path is cut at its first colon: `net:[N]` is `net` (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        _ => source.to_string(),
+    }
+}'''
+new = '''        _ => target.to_string(),
+    }
+}'''
+
+[[mutant]]
+name = "path-cut-at-a-colon"
+rule = "a link text that opens with `/` is a path, and the name whole (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if target.starts_with('/') {
+        return target.to_string();
+    }
+    let Some((source, rest)) = target.split_once(':') else {'''
+new = '''    if target.starts_with("//") {
+        return target.to_string();
+    }
+    let Some((source, rest)) = target.split_once(':') else {'''
+
+[[mutant]]
+name = "pidfd-6-9-named-by-its-source"
+rule = "Linux 6.9's `pidfd:[N]`, a regular file, is `[pidfd:PID]` (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        LinkNode::Regular if !rest.is_empty() && source == "pidfd" => {'''
+new = '''        LinkNode::Regular if !rest.is_empty() && source == "pidfd-" => {'''
+
+[[mutant]]
+name = "pidfd-6-9-any-source"
+rule = "only the source `pidfd` is named by a pid (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        LinkNode::Regular if !rest.is_empty() && source == "pidfd" => {'''
+new = '''        LinkNode::Regular if !rest.is_empty() && source.starts_with("pidfd") => {'''
+
+[[mutant]]
+name = "pidfd-6-9-without-a-rest"
+rule = "`pidfd:` with nothing after the colon keeps its source, the C's `rest && *rest` (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        LinkNode::Regular if !rest.is_empty() && source == "pidfd" => {'''
+new = '''        LinkNode::Regular if source == "pidfd" => {'''
+
+[[mutant]]
+name = "pidfd-6-9-no-pid-is-zero"
+rule = "the 6.9 branch prints the pid whatever it is, -1 where fdinfo gave none (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            format!("[pidfd:{}]", info.pidfd_pid.unwrap_or(-1))'''
+new = '''            format!("[pidfd:{}]", info.pidfd_pid.unwrap_or(0))'''
+
+[[mutant]]
+name = "anon-kind-without-a-rest"
+rule = "an anonymous inode's link with no kind keeps its source (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        LinkNode::Anon if !rest.is_empty() => match rest {'''
+new = '''        LinkNode::Anon => match rest {'''
+
+[[mutant]]
+name = "anon-by-the-link-alone"
+rule = "an anonymous inode is one by a `stat` with no file type, not by its link alone (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let anon = meta.is_some_and(|m| m.mode & S_IFMT == 0) && source == b"anon_inode";'''
+new = '''    let anon = meta.is_some() && source == b"anon_inode";'''
+
+[[mutant]]
+name = "anon-kind-names-any-node"
+rule = "the kind names the row only where the node is an anonymous inode (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    } else if anon {
+        LinkNode::Anon'''
+new = '''    } else if anon || source == b"anon_inode" {
+        LinkNode::Anon'''
+
+[[mutant]]
+name = "a-special-links-rest-is-used"
+rule = "the C asks a cwd's, rtd's or txt's link for no rest (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let link_node = if !matches!(fd, FdType::Handle(_)) {'''
+new = '''    let link_node = if false {'''
+
+[[mutant]]
+name = "a-fifo-is-a-regular-node"
+rule = "a FIFO or a device is no `N_REGLR`, whose `pidfd` source is named by a pid (156)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    } else if nfs.is_some() || matches!(file_type, FileType::Chr | FileType::Block | FileType::Fifo)
+'''
+new = '''    } else if nfs.is_some() || matches!(file_type, FileType::Chr | FileType::Block)
+'''
+
+# ---- 157: a pidfd whose process has been reaped; 161: fdinfo's numbers as strtoul() reads them
+
+[[mutant]]
+name = "ulong-max-is-a-number"
+rule = "`ULONG_MAX` is the C's refusal: `Pid: -1` is no pid, `pos: -1` no position (157, 161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    (value != u64::MAX).then_some(value)'''
+new = '''    Some(value)'''
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),'''
+new = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)),'''
+
+[[mutant]]
+name = "a-negative-int-is-a-pid"
+rule = "a pid the C's `int` holds as negative is -1, no pid (157)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),'''
+new = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)),'''
+
+[[mutant]]
+name = "a-negative-int-is-an-eventfd-id"
+rule = "an eventfd id the C's `int` holds as negative is -1, no id (157)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            "eventfd-id:" => out.eventfd_id = Some(c_int(ul)).filter(|&id| id != -1),'''
+new = '''            "eventfd-id:" => out.eventfd_id = Some(c_int(ul)),'''
+
+[[mutant]]
+name = "int-refused-past-32-bits"
+rule = "the C's `(int)ul` keeps the low 32 bits (157)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let val = (ul & 0xffff_ffff) as u32 as i32;'''
+new = '''    let val = i32::try_from(ul).unwrap_or(-1);'''
+
+[[mutant]]
+name = "a-sign-is-refused"
+rule = "`strtoull()` takes a sign: a negative `pos:` is a position (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        Some(b'-') => (true, &s[1..]),
+'''
+new = ''''''
+
+[[mutant]]
+name = "a-negative-number-is-its-magnitude"
+rule = "`-N` is the two's complement of N, `0xffffffffff600000` for -10485760 (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        value.wrapping_neg()
+'''
+new = '''        value
+'''
+
+[[mutant]]
+name = "a-leading-zero-is-decimal"
+rule = "base 0: a leading 0 is octal, as the kernel writes `flags:` (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    } else if b.first() == Some(&b'0') {
+        (8, s)'''
+new = '''    } else if b.first() == Some(&b'0') {
+        (10, s)'''
+
+[[mutant]]
+name = "hex-is-refused"
+rule = "base 0: `0x` opens a hexadecimal number (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let (radix, digits) = if hex {
+        (16, &s[2..])'''
+new = '''    let (radix, digits) = if false {
+        (16, &s[2..])'''
+
+[[mutant]]
+name = "an-overflow-wraps"
+rule = "past 64 bits `strtoull()` answers `ULLONG_MAX`, which the C refuses (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        value = value
+            .checked_mul(u64::from(radix))?
+            .checked_add(u64::from(d))?;'''
+new = '''        value = value
+            .wrapping_mul(u64::from(radix))
+            .wrapping_add(u64::from(d));'''
+
+[[mutant]]
+name = "leading-white-space-is-junk"
+rule = "`strtoul()` skips white space before the number (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let s = field.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);'''
+new = '''    let s = field;'''
+
+[[mutant]]
+name = "flags-past-32-bits-refused"
+rule = "`flags:` is kept as the C's `unsigned int`, the low 32 bits (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                let flags = (ul & 0xffff_ffff) as u32;'''
+new = '''                let Ok(flags) = u32::try_from(ul) else { continue };'''
+
+[[mutant]]
+name = "a-key-is-a-prefix"
+rule = "a line is cut into fields at blanks and tabs, and the first is the name whole (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        let mut fields = line.split([' ', '\t']).filter(|f| !f.is_empty());'''
+new = '''        let mut fields = line.splitn(2, ':').map(str::trim).filter(|f| !f.is_empty()).enumerate().map(|(i, f)| if i == 0 { match f { "flags" => "flags:", "pos" => "pos:", "Pid" => "Pid:", "tfd" => "tfd:", "eventfd-id" => "eventfd-id:", "tty-index" => "tty-index:", o => o } } else { f.split([' ', '\t']).next().unwrap_or(f) });'''
+
+[[mutant]]
+name = "a-cr-ends-a-line"
+rule = "a line ends at its newline alone; a CR before it is the last field's (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    for line in info.split('\n') {
+        let mut fields'''
+new = '''    for line in info.lines() {
+        let mut fields'''
+
+[[mutant]]
+name = "a-refused-pos-clears-it"
+rule = "a line whose number the C refuses changes nothing (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        let Some(ul) = (match key {
+            "flags:" | "pos:" | "eventfd-id:" | "tty-index:" | "Pid:" | "tfd:" => c_strtoul(value),
+            _ => None,
+        }) else {
+            continue;
+        };'''
+new = '''        let Some(ul) = (match key {
+            "flags:" | "pos:" | "eventfd-id:" | "tty-index:" | "Pid:" | "tfd:" => c_strtoul(value),
+            _ => None,
+        }) else {
+            if key == "pos:" {
+                out.pos = None;
+            }
+            if key == "Pid:" {
+                out.pidfd_pid = None;
+            }
+            continue;
+        };'''
+
+# ------- 162: an eventpoll's list is marked once the C's array of 32 is full
+
+[[mutant]]
+name = "eventpoll-marked-only-past-32"
+rule = "the list ends in `...` once it holds 32, whether or not there was a 33rd (162)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''                let more = if info.tfds.len() == EPOLL_MAX_TFDS {'''
+new = '''                let more = if info.tfds.len() > EPOLL_MAX_TFDS {'''
+
+[[mutant]]
+name = "eventpoll-keeps-33"
+rule = "the C keeps the first 32 `tfd:` lines (162)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''const EPOLL_MAX_TFDS: usize = 32;'''
+new = '''const EPOLL_MAX_TFDS: usize = 33;'''
+
+# ----------------------------------------- 160: no socket row carries a lock
+
+[[mutant]]
+name = "a-sock-row-keeps-its-lock"
+rule = "no socket row has a lock character, the `sock` row with sockfs's device included (160)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if f.is_socket() {
+        return None;
+    }
+    let dev = f.fs_device?;'''
+new = '''    let dev = f.fs_device?;'''
+
+# ----------- 163: a descriptor whose link will not read has no access letter
+
+[[mutant]]
+name = "an-unreadable-link-keeps-its-letter"
+rule = "no `lstat`, no access letter: fdinfo's flags give none to a link that will not read (163)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        access: AccessMode::Unknown,
+        file_type: FileType::Unknown,
+        name,'''
+new = '''        access: info.access(),
+        file_type: FileType::Unknown,
+        name,'''
+
+# ------ 166: lsof's own /proc and /proc/PID/fd stay open while they are read
+
+[[mutant]]
+name = "fd-directory-closed-before-its-links"
+rule = "`/proc/PID/fd` stays open until every link it listed has been read (166)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    fds.sort_unstable_by_key(|(n, _)| *n);
+
+    for (num, name) in fds {'''
+new = '''    fds.sort_unstable_by_key(|(n, _)| *n);
+    drop(dir);
+    let dir = ();
+
+    for (num, name) in fds {'''
+
+[[mutant]]
+name = "proc-closed-after-enumeration"
+rule = "`/proc` is handed back open by the enumeration (166)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/process.rs"
+old = '''    out.proc_dir = Some(dir);
+'''
+new = '''    drop(dir);
+'''
+
+[[mutant]]
+name = "proc-not-held-by-the-gather"
+rule = "`/proc` stays open until the gather has read its last file (166)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = '''            proc_dir: _proc_dir,
+'''
+new = '''            proc_dir: _,
+'''
+
+# ------------------------------------ 159: ping sockets, from /proc/net/icmp
+
+[[mutant]]
+name = "icmp-table-not-read"
+rule = "`/proc/net/icmp` is read: a bound ping socket is an `icmp` row (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        t.load_icmp(icmp);
+        t
+'''
+new = '''        t
+'''
+
+[[mutant]]
+name = "icmp-table-read-from-icmp6"
+rule = "the table the load reads is `/proc/net/icmp` (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        Self::load_with_icmp(want_queues, skip_inet, "/proc/net/icmp")'''
+new = '''        Self::load_with_icmp(want_queues, skip_inet, "/proc/net/icmp6")'''
+
+[[mutant]]
+name = "icmp-table-gated-by-dash-x"
+rule = "`-X` does not skip `/proc/net/icmp` (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''        t.load_icmp(icmp);
+        t
+'''
+new = '''        if !skip_inet {
+            t.load_icmp(icmp);
+        }
+        t
+'''
+
+[[mutant]]
+name = "icmp-line-replaces-another-tables"
+rule = "the ping table is looked up last, and its first line for an inode wins (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {
+                // The C's LSOF_FILE_ICMP.'''
+new = '''            self.by_inode.remove(&inode);
+            self.by_inode.entry(inode).or_insert_with(|| SocketEntry {
+                // The C's LSOF_FILE_ICMP.'''
+
+[[mutant]]
+name = "icmp-inode-in-the-headers-column"
+rule = "a socket's line holds its inode in the tenth field, not the header's twelfth (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''const ICMP_INODE: usize = 9;'''
+new = '''const ICMP_INODE: usize = 11;'''
+
+[[mutant]]
+name = "icmp-header-not-checked"
+rule = "a header that does not name the three columns drops the table (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                    && h.get(ICMP_HEADER_INODE) == Some(&"inode") => {}
+            _ => return,'''
+new = '''                    && h.get(ICMP_HEADER_INODE) == Some(&"inode") => {}
+            Some(_) => {}
+            None => return,'''
+
+[[mutant]]
+name = "icmp-header-inode-not-checked"
+rule = "the header must name `inode` in its twelfth column (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                    && h.get(ICMP_HEADER_INODE) == Some(&"inode") => {}'''
+new = '''                    && h.get(ICMP_HEADER_INODE).is_some() => {}'''
+
+[[mutant]]
+name = "icmp-short-lines-are-lines"
+rule = "a line of fewer than eleven fields is none of the table's lines (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''const ICMP_MIN_FIELDS: usize = 11;'''
+new = '''const ICMP_MIN_FIELDS: usize = 10;'''
+
+[[mutant]]
+name = "icmp-eleven-fields-are-too-few"
+rule = "a line of eleven fields is one of the table's lines (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''const ICMP_MIN_FIELDS: usize = 11;'''
+new = '''const ICMP_MIN_FIELDS: usize = 12;'''
+
+[[mutant]]
+name = "icmp-name-with-a-state"
+rule = "an `icmp` row's NAME is the two addresses, with no `st=` (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                name: Some(format!("{local}->{remote}")),'''
+new = '''                name: Some(format!("{local}->{remote} st={}", f[3])),'''
+
+[[mutant]]
+name = "icmp-typed-raw"
+rule = "a ping socket's TYPE is `icmp` (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                file_type: FileType::Socket("icmp"),'''
+new = '''                file_type: FileType::Socket("raw"),'''
+
+[[mutant]]
+name = "icmp-inode-read-in-decimal-only"
+rule = "the inode is read as `strtoull(…, 0)` reads it (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''                f.get(ICMP_INODE).and_then(|i| crate::files::c_strtoul(i)),'''
+new = '''                f.get(ICMP_INODE).and_then(|i| i.parse::<u64>().ok()),'''
+
+[[mutant]]
+name = "icmp-fields-cut-at-any-white-space"
+rule = "a line's fields are cut at blanks and tabs alone, and a line ends at its newline (159)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/net.rs"
+old = '''            .split('\n')
+            .map(|l| {
+                l.split([' ', '\t'])
+                    .filter(|f| !f.is_empty())
+                    .collect::<Vec<&str>>()
+            })'''
+new = '''            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<&str>>())'''
+
+# --------- 158: COMMAND and TASKCMD are cut between the bytes of a character
+
+[[mutant]]
+name = "command-cut-by-whole-characters"
+rule = "each byte that is not ASCII is an escape of its own, four wide (158)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''            let w = if byte.is_ascii() {
+                escaped_width(char::from(byte), Mode::Command, self.backslash)
+            } else {
+                4
+            };'''
+new = '''            let w = if byte.is_ascii() {
+                escaped_width(char::from(byte), Mode::Command, self.backslash)
+            } else if byte & 0xc0 == 0x80 {
+                0
+            } else {
+                4 * (byte.leading_ones().max(1) as usize)
+            };'''
+
+[[mutant]]
+name = "command-cut-skips-to-a-shorter-unit"
+rule = "the walk ends at the first unit that does not fit (158)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''            if used + w > width {
+                break;
+            }
+            used += w;
+            put(byte);'''
+new = '''            if used + w > width {
+                continue;
+            }
+            used += w;
+            put(byte);'''
+
+[[mutant]]
+name = "command-cut-one-column-early"
+rule = "a unit that fits exactly is printed (158)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/escape.rs"
+old = '''            if used + w > width {
+                break;
+            }
+            used += w;
+            put(byte);'''
+new = '''            if used + w >= width {
+                break;
+            }
+            used += w;
+            put(byte);'''
+
+# ------------------ 165: under -E a `-c ^` still stops the command selection
+
+[[mutant]]
+name = "an-excluded-command-keeps-its-command-mark"
+rule = "a process a `-c ^` names matches no `-c` (165)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''        if self.command_excluded(p) {
+            return k;
+        }
+'''
+new = ''''''
+
+[[mutant]]
+name = "an-excluded-command-locates-a-c"
+rule = "a process a `-c ^` names locates no `-c` name or regular expression (165)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = '''            if passes && !self.command_excluded(p) {'''
+new = '''            if passes {'''
+
+# ----------------------------------- 168: `-c ^`, the exclusion with no name
+
+[[mutant]]
+name = "an-empty-exclusion-is-refused"
+rule = "`-c ^` is entered, as `enter_cmd()` enters it (168)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    let (excl, name) = match bytes.strip_prefix(b"^") {
+        Some(name) => (true, name),'''
+new = '''    let (excl, name) = match bytes.strip_prefix(b"^") {
+        Some(b"") => return Err("option -c^ requires a name".to_string()),
+        Some(name) => (true, name),'''
+
+[[mutant]]
+name = "an-empty-exclusion-is-not-recorded"
+rule = "`-c ^` is recorded where it stands among the names (168)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if excl && name.is_empty() {
+        sel.empty_command_excludes.push(sel.commands.len());'''
+new = '''    if false {
+        sel.empty_command_excludes.push(sel.commands.len());'''
+
+[[mutant]]
+name = "a-named-exclusion-is-recorded-too"
+rule = "a named `-c ^x` is no search item (13, 168)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''    if excl && name.is_empty() {
+        sel.empty_command_excludes.push(sel.commands.len());'''
+new = '''    if excl {
+        sel.empty_command_excludes.push(sel.commands.len());'''
+
+[[mutant]]
+name = "an-empty-exclusion-is-not-reported"
+rule = "`-V` says `command not located: ` of `-c ^`, and the run exits 1 (168)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''            miss.push("lsof: command not located: ".to_string());'''
+new = '''            let _ = &mut miss;'''
+
+[[mutant]]
+name = "an-empty-exclusion-is-reported-in-entry-order"
+rule = "the C reports its `-c` items last entered first, the empty exclusion among them (168)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''    for i in (0..=sel.commands.len()).rev() {'''
+new = '''    for i in 0..=sel.commands.len() {'''
+
+[[mutant]]
+name = "an-empty-exclusion-is-reported-after-its-name"
+rule = "the empty exclusion is reported before the names entered before it (168)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = '''        for _ in sel.empty_command_excludes.iter().filter(|&&at| at == i) {
+            miss.push("lsof: command not located: ".to_string());
+        }
+        let Some(at) = i.checked_sub(1) else { continue };
+        if let (Some(c), Some(false)) = (sel.commands.get(at), located.commands.get(at)) {
+            miss.push(format!(
+                "lsof: command not located: {}",
+                esc.bytes(c.as_encoded_bytes())
+            ));
+        }'''
+new = '''        if let Some(at) = i.checked_sub(1) {
+            if let (Some(c), Some(false)) = (sel.commands.get(at), located.commands.get(at)) {
+                miss.push(format!(
+                    "lsof: command not located: {}",
+                    esc.bytes(c.as_encoded_bytes())
+                ));
+            }
+        }
+        for _ in sel.empty_command_excludes.iter().filter(|&&at| at == i) {
+            miss.push("lsof: command not located: ".to_string());
+        }'''

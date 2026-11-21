@@ -63,7 +63,7 @@ it is a gap, not a formatting choice.
 | `/proc/PID/ns/{net,mnt}` (compared by inode, never parsed), `/proc/self/status` | kernel | untrusted | `lsof-backend-linux::net`, `::maps`, `::process` | not applicable |
 | `/proc/PID/fdinfo/N` | kernel, per-fd | untrusted | `lsof-backend-linux::files` | `proc_fdinfo` |
 | `/proc/PID/maps` | kernel + mapped filenames | **hostile** | `lsof-backend-linux::maps` | `proc_maps` |
-| `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
+| `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,packet,unix,icmp}`, and the same under `/proc/PID/net/` for another network namespace | kernel, shaped by **remote** traffic | **hostile** | `lsof-backend-linux::net` | `proc_net` |
 | `/proc/self/mounts` | kernel + mount namespace | untrusted | `lsof-backend-linux::mounts` | `proc_mounts` |
 | each mount directory, and its source, read through `Readlink()` and `stat`ed on a run that reads the table (an NFS or FUSE mount among them; never an autofs one, nor an `-e`/`+e` one) | whoever serves that file system: a remote server, a FUSE daemon a local user runs | **hostile** to availability | `lsof-backend-linux::mounts` | `proc_mounts` drives the table's rules under `-b`; the calls are a liveness hazard, not a parser: see below |
 | a bound AF_UNIX socket's path, `stat`ed when a path argument is given | filesystem, any local user | **hostile** to availability | `lsof-backend-linux::net` | not applicable; see below |
@@ -254,10 +254,13 @@ hidden argument by hand gets nothing they could not do anyway: the helper
 (§3). The helper names lsof's `/proc/PID` for `/proc/self`, however a path
 spells its way there, by the pids procfs gives (DIVERGENCES 89). One killed
 on a timeout can stay in state D until the file system answers or its
-connection is aborted, holding its pipes, `/dev/null`, and any descriptor
-lsof was given without close-on-exec, which std cannot close: a reader waiting
-for EOF on such an inherited pipe waits as long. The C's child, a fork, holds
-the same. It also holds what its call opened, which the C's child does not:
+connection is aborted, holding its pipes and `/dev/null`. It holds nothing
+lsof was started with: lsof closes every descriptor from 3 up before
+anything else, as the C does, and the helper, the same binary, closes from
+3 again as it starts (DIVERGENCES 170, below); until 2026-11-21 a helper
+kept what lsof had been handed without close-on-exec, and a reader waiting
+for EOF on such a pipe waited as long as the helper did. The C's child, a
+fork, holds its two pipes alone. The helper also holds what its call opened, which the C's child does not:
 the `O_PATH` descriptor of a `stat` (std's one `stat` that mounts no
 automount point) or a directory it was listing, on the file system that did
 not answer. **Whatever `stat`s `/proc/HELPER/fd/N` meanwhile waits there
@@ -509,22 +512,96 @@ can be polled and a rustix one read as a `File`; no crate added) and
 file.
 
 **`lsof-sigpipe` is the one crate of the workspace's own with `unsafe` on
-every Unix target, three sites, for `SIGPIPE`** (DIVERGENCES 36). The Rust
-runtime sets `SIGPIPE` to `SIG_IGN` before `main` and keeps nothing of what
-it replaced; to die at a closed pipe as the C does, lsof-rs must know what
-it inherited. A constructor in `.init_array`, which glibc and FreeBSD's
-rtld run before the runtime's initialisation, makes one query-only
+every Unix target: what must happen before the Rust runtime starts**
+(DIVERGENCES 36, 170, 171). Two things, in one constructor in
+`.init_array`, which glibc, musl and FreeBSD's rtld run before `main` and
+so before the runtime's initialisation.
+
+*`SIGPIPE`.* The Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main` and
+keeps nothing of what it replaced; to die at a closed pipe as the C does,
+lsof-rs must know what it inherited. The constructor makes one query-only
 `sigaction(SIGPIPE, NULL, &old)` into a zeroed local and stores one atomic;
 `restore_default()` is one `signal(SIGPIPE, SIG_DFL)`, which installs no
-handler, so no code of lsof-rs's runs on the signal. Each site carries a
-`SAFETY:` comment and is in the `unsafe-audit` gate; lsof-core, lsof-cli
-and lsof-backend-linux keep `#![forbid(unsafe_code)]`. Its one dependency
-is `libc` (`=0.2.190`, already in the lock file for rustix's other
-targets, MIT OR Apache-2.0, no default features, a build script that
-probes the compiler), built on Linux and FreeBSD only; `cargo deny` audits
-it with the workspace. The constructor runs in every process of the binary,
-the `-S` helper too, before anything else; under miri, which has no
-`sigaction`, it reads nothing.
+handler, so no code of lsof-rs's runs on the signal.
+
+*The descriptors lsof starts with* (since 2026-11-21). The C's `main()`
+begins by closing every descriptor from 3 up (`closefrom_shim(ctx, 3)`) and
+opening `/dev/null` until it holds 0, 1 and 2, and ends, exit 1 with
+nothing said, where it cannot (`main.c:173-183`). lsof-rs had done neither:
+it listed, and handed to its helper, whatever the shell that ran it had
+left open (a file only lsof held was "found", exit 0; a reader of a pipe
+lsof had been handed waited on a killed helper), and where `/dev/null`
+could not be opened it ran on, or died of `SIGABRT` in the runtime's own
+start-up. The constructor now takes both steps, in the C's order:
+`close_range(3, ~0U, 0)` by `syscall(2)` (FreeBSD: `closefrom(3)`), else
+each descriptor `/proc/self/fd` lists (`getdents64(2)` into 4,096 bytes on
+the stack, parsed by safe code that reads nothing outside what the kernel
+wrote and ends whatever it holds), else every number from 3 to the
+descriptor limit, 1,048,576 at most; then `open("/dev/null", O_RDWR)`
+until the descriptor is at least 2, `close()` of one past 2, and
+`_exit(1)` where the open fails.
+
+Closing a descriptor by number is the one thing here that could be
+unsound: a `File`, a socket or an `OwnedFd` whose descriptor is closed
+under it next closes, or reads, whatever was opened at that number since
+(Rust's I/O safety). It is sound at this point and at no later one,
+because **nothing of the program has run yet, so no such object exists**:
+
+- The calls are reached through one value, `startup::Kernel`, whose
+  constructor is an `unsafe fn` with that contract; it is made once, in
+  the `.init_array` function, and dropped there. The steps themselves are
+  safe code over a trait of seven system calls (`startup::start_up`), and
+  the unit tests run the same code over a descriptor table of their own.
+- The only other constructor in the program is std's, which stores
+  `argc`, `argv` and `envp` and opens nothing: the binary's `.init_array`
+  holds `frame_dummy` (the C start-up files'), std's and this one,
+  identified by their relocations (two entries on musl), and there is no
+  `.preinit_array`. `lsof-cli/tests/startup.rs` reads the section table of
+  the binary cargo built and fails on a fourth entry, so a dependency that
+  brought a constructor of its own would be seen before it shipped.
+- A shared object loaded before the program (libc; a library someone
+  preloads) has run its constructors by then. What one of them opened and
+  kept from 3 up is closed, exactly as the C closes it, whose
+  `closefrom()` comes after every constructor too: such a library works,
+  or fails, under lsof-rs as under the C. NSS modules (DIVERGENCES 39) are
+  loaded later, when an account is asked, and are not affected.
+- No allocation, no panic, no formatting and no Rust I/O happen there: no
+  index, no arithmetic that can overflow (the release profile's overflow
+  checks have nothing to trip on), a buffer on the stack, and an `extern
+  "C"` function that cannot unwind. `_exit()` runs no handler and flushes
+  no stream, and there is none of the program's yet.
+- It runs in every process of the binary. The helper the bounded calls
+  run in is lsof re-executed (Linux: `/proc/self/exe`; FreeBSD: the
+  executable's path): it is given two pipes and `/dev/null` on 0 to 2 and
+  nothing above on purpose (std opens its own descriptors close-on-exec),
+  so there the close finds nothing and the loop opens and closes one
+  descriptor. lsof-rs starts no other process. FreeBSD's helper also
+  calls `closefrom(3)` itself (below), which finds nothing now.
+- It also runs in two test binaries, the ones whose link takes the
+  crate's object in (the unit tests of `lsof-cli/src/main.rs`, which
+  refers to the crate, and the crate's own; measured with `strace` over
+  every test binary of the workspace), and in no fuzz target. cargo
+  hands a test binary 0 to 2 alone, so nothing is closed there; one run
+  where `/dev/null` cannot be opened exits 1 with no message, as lsof
+  does. Under miri, which runs constructors and has none of these calls,
+  the constructor does nothing, as before.
+- valgrind keeps its own descriptors out of its client's reach, and the C
+  makes the same `close_range()` under it; `valgrind lsof -b …` was run. No
+  Linux job builds with a sanitizer or a profiler; a runtime that kept a
+  descriptor open from a constructor of its own would lose it, as under
+  the C.
+- Windows has no constructor and closes nothing: the crate is an empty
+  shell there.
+
+Each `unsafe` site carries a `SAFETY:` comment and is in the `unsafe-audit`
+gate (16 blocks: the three for `SIGPIPE`, the one that makes
+`startup::Kernel` in the constructor, seven system calls on Linux and four
+on FreeBSD, one in a unit test that reads its own descriptors through the
+real `getdents64()`); lsof-core, lsof-cli and lsof-backend-linux keep
+`#![forbid(unsafe_code)]`. Its one dependency is `libc` (`=0.2.190`,
+already in the lock file for rustix's other targets, MIT OR Apache-2.0, no
+default features, a build script that probes the compiler), built on
+Linux and FreeBSD only; `cargo deny` audits it with the workspace.
 
 **`lsof-getpw` is the second crate of the workspace's own with `unsafe`
 on Linux and FreeBSD, three sites, for accounts** (DIVERGENCES 39, the
@@ -927,8 +1004,14 @@ the inventory's cross-check found it), reads one that has a writer to its
 close, reads `/dev/zero` until it is killed, and dies (exit 139) on an
 empty file or `/dev/null`; lsof-rs says `error reading` the FIFO, pipe or
 device and reads no mount from the empty file. A name that leads to a
-descriptor lsof-rs inherited is read as gone, as the C, which closes them,
-finds it. On FreeBSD the zone file is opened the same way, with FreeBSD's
+descriptor lsof was started with (`/dev/fd/9`) is gone, as in the C: both
+have closed it (DIVERGENCES 170). And the file is asked of `access(2)`
+first, the **real** user's and group's rights, as the C's `is_readable()`
+asks (DIVERGENCES 172; rustix's safe call): lsof-rs is not installed
+setuid (§3), but where its effective user is another all the same (a
+wrapper that sets it), a supplement its caller may not read is not read,
+and none of its lines is quoted back in a message; until 2026-11-21 it was
+opened as the effective user. On FreeBSD the zone file is opened the same way, with FreeBSD's
 `O_NONBLOCK`, and anything but a regular file is not read.
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never
@@ -974,6 +1057,9 @@ call `alarm(TmLimit)`; a threaded Rust process cannot fork safely, so
   not an option`, exit 2), and then closes every descriptor past stderr it
   was given (`closefrom(3)`, as the C's child does with `closefrom_shim(ctx,
   2)`: the one `unsafe` call this adds, in the crate's audited `sys.rs`).
+  Since 2026-11-21 there is none left by then: `lsof-sigpipe`'s
+  constructor has closed them in lsof and again in the helper, before
+  either's runtime started (above).
 - **The frames.** Every frame is a kind byte, a length and a payload of at
   most 64 KiB, the length checked before anything is allocated, on both
   sides; a request's path is at most `MAXPATHLEN`, a link's target too; a
