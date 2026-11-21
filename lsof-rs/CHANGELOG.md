@@ -56,8 +56,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   no longer waits on lsof's helper; and the numbers they took no longer
   count against lsof's descriptor limit. Done in `lsof-sigpipe`'s
   constructor, before the Rust runtime starts: `close_range(3, ~0U, 0)`,
-  else the descriptors `/proc/self/fd` lists, else every number below the
-  limit (1,048,576 at most). On FreeBSD, `closefrom(3)`.
+  else the descriptors `/proc/self/fd` lists, else every number from 3
+  below 1,048,576, whatever the descriptor limit is (one opened under a
+  higher soft limit keeps its number). On FreeBSD, `closefrom(3)` (from
+  source; not yet run there).
 - **With no usable `/dev/null`, every run exits 1 and prints nothing, as
   the C's does** (171): the C opens it before it reads an option, to put
   it on a closed stdin, stdout or stderr, and ends in silence where it
@@ -67,12 +69,31 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   (exit 134) inside the Rust runtime's start-up.
 - **`+m FILE` is asked of `access(2)` before it is read** (172), the real
   user's rights, as the C's `is_readable()` asks: where lsof's effective
-  user is another (a setuid installation, a wrapper that sets it), a
-  supplement the caller may not read is `WARNING: access FILE: Permission
-  denied` and none of its lines is quoted, where lsof-rs had read it; and
-  one the caller may read and the effective user may not is `can't
+  user is another (a wrapper that sets it; lsof-rs is never set-user-ID),
+  a supplement the caller may not read is `WARNING: access FILE:
+  Permission denied`, where lsof-rs had read it as the effective user;
+  and one the caller may read and the effective user may not is `can't
   open(FILE): Permission denied`, which lsof-rs had called an access
-  warning.
+  warning. The check is advisory, the C's own, in the C's order (check,
+  then open): a name changed between the two is opened all the same, in
+  both.
+- **With no `/proc`, or where lsof cannot tell a file's offset, `-o` and
+  `+f` are disregarded with the C's warnings** (177): `lsof: WARNING:
+  can't report offset; disregarding -o.` and the SIZE column, and `lsof:
+  WARNING: can't report file flags; disregarding +f.` with no FILE-FLAG
+  column, `-F` `o` or `G`, or JSON `offset` or `flags`, at the points the
+  C's start-up probe says them; muted by `-w` and `-t`. lsof-rs made no
+  probe. It asks `/proc/self/fdinfo`, so it succeeds in a pid namespace
+  that shares the outer `/proc`, where the C's fails.
+- **A FIFO at `/dev/null` no longer holds every run that starts the
+  helper** (123): the helper's stderr is `/dev/null` opened read and write
+  (`2u`), as lsof's own start-up opens it; it was opened for writing alone,
+  which waits on a FIFO for ever. The C lists there; so does lsof-rs.
+- **A FIFO or a device where `/proc/mounts` should be ends the run at
+  once** (175): `can't fopen(/proc/mounts, "r"): No such device or
+  address`, exit 1, where the C waits for ever on the FIFO and reads a
+  device such as `/dev/zero` until memory runs out; `/dev/null` there is
+  the empty table, as in the C.
 - **Messages** (stderr; exit status unchanged): the `-d` mixture message
   quotes 254 bytes of its item, as the C's buffer keeps (173); a character
   of several bytes among the letters of `-F`, `-T`, `-x` or `+f` is a line

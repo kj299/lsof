@@ -65,20 +65,48 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
 /// The table at `path`, opened, or the C's words for one it cannot open
 /// (`readmnt()`, `dmnt.c:391-397`): `lsof: can't fopen(/proc/mounts, "r"):
 /// ERR`.
+///
+/// Opened without waiting ([`crate::text::open_unwaiting`]): the table is
+/// read in lsof's own process, and where `/proc` is not procfs a FIFO in the
+/// table's place held the open for ever, as it holds the C's `fopen()`
+/// (measured). A FIFO there is refused instead, in these same words with
+/// `No such device or address`, the reason the kernel gives for a socket
+/// there (the C's line too, measured). A directory is opened, as the C's
+/// `fopen()` opens it, and read as the empty table it reads.
+///
+/// A device there is a table only if it is empty: `/dev/null`, which is
+/// how a sandbox masks a `/proc` file, and which the C reads as no mount
+/// at all (measured). One that has a byte to give, or that would have to
+/// be waited on, is refused like the FIFO, after one read of one byte. The
+/// C reads it: `/dev/zero` is one line that never ends to glibc's
+/// `getmntent()`, whose buffer grows with it until memory runs out
+/// (measured: 4.47 GB in five seconds, and the kernel killed another
+/// process for it).
 fn open_table(path: &Path) -> Result<std::fs::File, String> {
-    std::fs::File::open(path).map_err(|e| {
+    use std::os::unix::fs::FileTypeExt;
+    let refused = |e: &std::io::Error| {
         format!(
             "lsof: can't fopen({}, \"r\"): {}",
             Escaper::for_host().bytes(path.as_os_str().as_encoded_bytes()),
-            lsof_core::errno_text(&e)
+            lsof_core::errno_text(e)
         )
-    })
+    };
+    let mut file = crate::text::open_unwaiting(path).map_err(|e| refused(&e))?;
+    let kind = file.metadata().map_err(|e| refused(&e))?.file_type();
+    let device = kind.is_char_device() || kind.is_block_device();
+    if device && !matches!(file.read(&mut [0u8; 1]), Ok(0)) {
+        return Err(refused(&std::io::Error::from_raw_os_error(
+            crate::text::ENXIO,
+        )));
+    }
+    Ok(file)
 }
 
 /// What the C says of the host's table where it cannot open it, `None`
 /// where it can: asked where no helper can be started, since the C, whose
 /// child is a fork, goes on from there to the table and ends at it
-/// ([`crate::safefs::no_helper`]).
+/// ([`crate::safefs::no_helper`]). The question cannot wait: the open is
+/// [`open_table`]'s.
 pub(crate) fn unopenable() -> Option<String> {
     open_table(Path::new(PROC_MOUNTS)).err()
 }
@@ -900,6 +928,86 @@ mod tests {
         assert!(e == want || (cfg!(miri) && e.starts_with(want)), "{e}");
         assert!(!has_type_in(gone, 10, "proc"));
         assert_eq!(PROC_MOUNTS, "/proc/mounts", "the name the C opens");
+    }
+
+    /// The table is opened without waiting, whatever is in its place: a
+    /// FIFO, which holds the C's `fopen()` for ever (measured: a tmpfs over
+    /// `/proc` and `mkfifo /proc/mounts`), is refused at once in the words
+    /// the C has for a socket there, which the kernel refuses; a directory
+    /// and `/dev/null` are the empty tables the C reads them as (measured).
+    #[test]
+    #[cfg_attr(miri, ignore = "it makes files")]
+    fn a_table_that_is_no_file_is_not_waited_on() {
+        let dir = std::env::temp_dir().join(format!("lsof-rs-mounts-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let refused = |p: &Path| {
+            format!(
+                "lsof: can't fopen({}, \"r\"): No such device or address",
+                p.to_str().unwrap()
+            )
+        };
+        let fifo = dir.join("fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            std::ffi::CString::new(fifo.as_os_str().as_bytes())
+                .unwrap()
+                .as_c_str(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        // No writer ever opens it: an open that waited would never return,
+        // so it is made on a thread of its own and given ten seconds.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_table(&path).map(drop));
+        });
+        let opened = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the open waited on the FIFO");
+        assert_eq!(opened.unwrap_err(), refused(&fifo));
+        let quiet = |_: &str| {};
+        let fs = SafeFs::new(&lsof_core::InProcess, &quiet);
+        assert_eq!(
+            load_from(&fifo, 1 << 20, &MountRequest::default(), &fs).unwrap_err(),
+            refused(&fifo)
+        );
+        assert!(!has_type_in(&fifo, 1 << 20, "proc"));
+        // With a writer, too: what it would write is not waited for.
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        assert_eq!(open_table(&fifo).unwrap_err(), refused(&fifo));
+        drop(writer);
+        let sock = dir.join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert_eq!(open_table(&sock).unwrap_err(), refused(&sock));
+        // A directory opens, as it does for the C, and reads as no mount.
+        assert!(open_table(&dir).is_ok());
+        assert_eq!(read_capped(&dir, 1 << 20).unwrap(), b"");
+        let t = load_from(&dir, 1 << 20, &MountRequest::default(), &fs).unwrap();
+        assert!(t.entries.is_empty());
+        // So does `/dev/null`, a masked table. A device that has a byte to
+        // give is no table, and one byte is all that is read of it: the
+        // C's `getmntent()` reads `/dev/zero` as one line with no end, into
+        // a buffer that grows until memory runs out (measured).
+        let null = Path::new("/dev/null");
+        assert_eq!(read_capped(null, 1 << 20).unwrap(), b"");
+        assert!(load_from(null, 1 << 20, &MountRequest::default(), &fs).is_ok());
+        // (Under a cap of a page here, so that a reader that did read the
+        // device would stop.)
+        for device in ["/dev/zero", "/dev/urandom", "/dev/full"] {
+            let device = Path::new(device);
+            assert_eq!(open_table(device).unwrap_err(), refused(device));
+            assert_eq!(read_capped(device, 1 << 12).unwrap_err(), refused(device));
+            assert!(!has_type_in(device, 1 << 12, "proc"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Both reads of the table, the mounts and `-Z`'s types, stop at the

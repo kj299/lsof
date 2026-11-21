@@ -28,6 +28,46 @@
 
 use std::path::Path;
 
+/// `ENXIO`, `No such device or address` (6 in `errno-base.h` on every Linux
+/// architecture): what the kernel answers an `open()` of a socket file, and
+/// what [`open_unwaiting`] answers for a FIFO.
+pub const ENXIO: i32 = 6;
+
+/// The file at `path`, opened for reading in a way that cannot wait, for a
+/// table lsof-rs reads in its own process.
+///
+/// A plain `open()` of a FIFO waits until a writer opens it, for ever where
+/// none does; the C's `fopen()` does (measured: a `/proc` that is a tmpfs
+/// with `mkfifo /proc/mounts` holds the C at `readmnt()`). Here the open is
+/// `O_NONBLOCK`, which returns at once on a FIFO and on a device, and a
+/// FIFO is then refused with [`ENXIO`], the error the kernel itself gives a
+/// socket there, so that a table that is no file to read is said one way.
+///
+/// Anything else is given back: a regular file (procfs's own are), a
+/// directory (whose read fails at once: the C's empty table), and a
+/// device, the descriptor still `O_NONBLOCK`, so that a read of it does not
+/// wait either as far as its driver honours the flag. What a device may
+/// give is for the caller to bound: a table's reader takes none of it
+/// (`mounts::open_table`), and the offset probe at most a page. On procfs
+/// the flag changes nothing.
+pub fn open_unwaiting(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    // Not under miri, whose `open` refuses the flag.
+    let nonblocking = if cfg!(miri) {
+        0
+    } else {
+        i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0)
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblocking)
+        .open(path)?;
+    if file.metadata()?.file_type().is_fifo() {
+        return Err(std::io::Error::from_raw_os_error(ENXIO));
+    }
+    Ok(file)
+}
+
 /// The file at `path` as text, with any byte sequence that is not UTF-8
 /// replaced by U+FFFD. `None` only when the file cannot be read at all — the
 /// same meaning `read_to_string(..).ok()` had, minus the one it should never

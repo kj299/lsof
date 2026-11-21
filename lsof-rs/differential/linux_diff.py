@@ -2035,6 +2035,25 @@ WR_MODES = ("wr-full", "wr-closed", "wr-closed-ign", "wr-closed-blk") + WR_TRACE
 SU_MODES = (
     "su-fd9", "su-nodev", "su-nodev-closed0", "su-nodev-closed2", "su-ronull", "su-nofile3",
     "su-noproc", "su-self", "su-ruid", "su-euid",
+    "su-null", "su-fifomounts", "su-noroot", "su-self-pipe", "su-self-sock",
+)
+# `su-null`: what is put where /dev/null should be, named by the case's
+# first argument.
+SU_NULL_SOCKET = 'import socket; socket.socket(socket.AF_UNIX).bind("/dev/null")'
+# `su-self-sock`: the binary in this process's place, a UDP socket on 9.
+SU_SELF_SOCK = (
+    "import os,socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); "
+    "os.dup2(s.fileno(),9,inheritable=True); os.execv(sys.argv[1],sys.argv[1:])"
+)
+# `su-noroot`: in a process namespace of its own, a shell that is pid 1,
+# uid 65534, its root the tmpfs at $1 (mode 0711: it may not open it) and
+# its stdin /etc/hostname, runs the binary on itself and then prints what
+# the binary said, so that the two are compared together.
+SU_NOROOT_INNER = 'cd /tmp; exec < /etc/hostname; /b/lsof "$@" -p $$ 2> /tmp/err; rc=$?; cat /tmp/err; exit $rc'
+SU_NOROOT = (
+    'R=$1; shift; mount -t proc proc "$R/proc" || exit 2\n'
+    'exec chroot "$R" setpriv --reuid 65534 --regid 65534 --clear-groups '
+    f"/bin/sh -c {shlex.quote(SU_NOROOT_INNER)} sh \"$@\"\n"
 )
 # The supplement the `su-ruid` and `su-euid` modes write, mode 0600 and
 # root's, on a tmpfs of the run's own ({MTSUP}): a device no host gives /proc.
@@ -2170,7 +2189,10 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
     /dev/null or one it cannot write, with no descriptor left for it, with
     no /proc, alone in a process namespace with its stdin and stderr
     closed, or as a real or effective user who is not root (DIVERGENCES
-    170-172, 175).
+    170-172, 175); or, since the reviews of that work, with something else
+    where /dev/null should be, a FIFO for the mount table, a root directory
+    it may not open, or a pipe or a socket handed down (DIVERGENCES 123,
+    170, 175, 177).
 
     Three modes use no mount at all, only the root the script runs as.
     `ping` runs the binary in fixture PING's network namespace (`nsenter
@@ -2338,6 +2360,14 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             # closed and descriptor 9 handed down, so that `-p 1` is its own
             # rows. `su-ruid` and `su-euid`: the real, or the effective,
             # user 65534, and a supplement only root may read at $B/su.sup.
+            # `su-null`: a tmpfs over /dev with, as /dev/null, what the
+            # case's first argument names: a FIFO, a directory, a link to
+            # nothing, a link to itself, a socket. `su-fifomounts`: a tmpfs
+            # over /proc holding a FIFO named `mounts`. `su-noroot`: the
+            # binary run by a shell that is pid 1 and uid 65534 in a root
+            # directory it may not open, on that shell ([`SU_NOROOT`]).
+            # `su-self-pipe` and `su-self-sock`: as `su-self`, with a FIFO's
+            # read end or a UDP socket on 9 and no descriptor closed.
             'if [ "${mode#su-}" != "$mode" ]; then\n'
             '    su=${mode#su-}; bin=$1; shift\n'
             '    nosu() { echo "linux_diff: no MT su $su ($$)"; exit 2; }\n'
@@ -2356,6 +2386,33 @@ def mt_wrap(work: str, base: str, nfs_dir: str | None = None) -> str:
             '    nofile3) exec <&-; ulimit -n 3 || exit 2; exec "$bin" "$@" ;;\n'
             '    noproc) mount -t tmpfs lsof-rs-su /proc || nosu; exec "$bin" "$@" ;;\n'
             "    self) exec unshare -p -f --mount-proc sh -c 'exec \"$0\" \"$@\" 9</dev/null <&- 2>&-' \"$bin\" \"$@\" ;;\n"
+            '    null) shape=$1; shift; mount -t tmpfs lsof-rs-su /dev || nosu\n'
+            '        if [ "$shape" = fifo ]; then mkfifo -m 666 /dev/null || nosu\n'
+            '        elif [ "$shape" = dir ]; then mkdir /dev/null || nosu\n'
+            '        elif [ "$shape" = dangling ]; then ln -s /dev/nowhere /dev/null || nosu\n'
+            '        elif [ "$shape" = loop ]; then ln -s /dev/null /dev/null || nosu\n'
+            f"        elif [ \"$shape\" = sock ]; then {shlex.quote(sys.executable)} -I -c {shlex.quote(SU_NULL_SOCKET)} || nosu\n"
+            '        else nosu; fi\n'
+            '        exec "$bin" "$@" ;;\n'
+            # Nothing but the binary runs once the FIFO is there: a tool
+            # that links libselinux reads /proc/mounts as it starts.
+            # And under an address-space limit: where the table is no file
+            # the C's reader has no bound of its own.
+            '    fifomounts) mount -t tmpfs lsof-rs-su /proc || nosu; mkfifo /proc/mounts || nosu; ulimit -v 2097152; exec "$bin" "$@" ;;\n'
+            '    noroot) mount -t tmpfs -o mode=0711 lsof-rs-su "$B" || nosu\n'
+            '        mkdir "$B/usr" "$B/etc" "$B/proc" "$B/dev" "$B/b" "$B/tmp" || nosu\n'
+            '        for l in bin sbin lib lib32 lib64 libx32; do\n'
+            '            if [ -L "/$l" ]; then ln -s "$(readlink "/$l")" "$B/$l" || nosu\n'
+            '            elif [ -d "/$l" ]; then mkdir "$B/$l" && mount --rbind "/$l" "$B/$l" || nosu; fi\n'
+            '        done\n'
+            '        mount --rbind /usr "$B/usr" && mount --bind /etc "$B/etc" && mount --rbind /dev "$B/dev" || nosu\n'
+            '        cp "$bin" "$B/b/lsof" && chmod 755 "$B/b" "$B/b/lsof" && chmod 1777 "$B/tmp" || nosu\n'
+            f"        printf %s {shlex.quote(SU_NOROOT)} > \"$B/b/run\" || nosu\n"
+            '        command -v setpriv >/dev/null 2>&1 && command -v chroot >/dev/null 2>&1 || nosu\n'
+            '        exec unshare -p -f sh "$B/b/run" "$B" "$@" ;;\n'
+            '    self-pipe) [ -p "$B/su.p9" ] || mkfifo "$B/su.p9" || nosu\n'
+            "        exec unshare -p -f --mount-proc sh -c 'f=$0; bin=$1; shift; exec 8<>\"$f\" || exit 2; exec \"$bin\" \"$@\" 9<\"$f\" 8>&-' \"$B/su.p9\" \"$bin\" \"$@\" ;;\n"
+            f"    self-sock) py={shlex.quote(SU_SELF_SOCK)}; exec unshare -p -f --mount-proc {shlex.quote(sys.executable)} -I -c \"$py\" \"$bin\" \"$@\" ;;\n"
             '    ruid|euid) mount -t tmpfs lsof-rs-su "$B" || nosu\n'
             f"        printf {shlex.quote(SU_SUPPLEMENT)} > \"$B/su.sup\" && chmod 0600 \"$B/su.sup\" || nosu\n"
             '        command -v setpriv >/dev/null 2>&1 || nosu\n'
@@ -5073,6 +5130,20 @@ def self_test() -> int:
               and "chmod 0600" in su_branch)
         check("...su-self runs the binary as pid 1 with stdin and stderr closed and 9 handed down",
               "unshare -p -f --mount-proc sh -c 'exec \"$0\" \"$@\" 9</dev/null <&- 2>&-'" in su_branch)
+        check("...su-null puts what the case names where /dev/null should be, and a shape it does not know is no result",
+              all(f'[ "$shape" = {k} ]' in su_branch for k in ("fifo", "dir", "dangling", "loop", "sock"))
+              and "mkfifo -m 666 /dev/null" in su_branch and "ln -s /dev/null /dev/null" in su_branch
+              and "else nosu; fi" in su_branch)
+        check("...su-fifomounts runs nothing but the binary once the FIFO is there",
+              'mkfifo /proc/mounts || nosu; ulimit -v 2097152; exec "$bin" "$@" ;;' in su_branch)
+        check("...su-noroot's root is a tmpfs its user may search and not open, and its shell is pid 1",
+              "-o mode=0711" in su_branch and 'exec unshare -p -f sh "$B/b/run" "$B" "$@" ;;' in su_branch
+              and "--reuid 65534 --regid 65534 --clear-groups /bin/sh -c" in SU_NOROOT
+              and '/b/lsof "$@" -p $$ 2> /tmp/err' in SU_NOROOT_INNER and "exit $rc" in SU_NOROOT_INNER)
+        check("...su-self-pipe and su-self-sock hand a FIFO's read end and a socket down on 9, and nothing else",
+              '9<\"$f\" 8>&-' in su_branch.replace('"', '\\"') or '9<"$f" 8>&-' in su_branch)
+        check("...and the socket is put on 9 by the process the binary replaces",
+              "os.dup2(s.fileno(),9,inheritable=True)" in SU_SELF_SOCK and "os.execv(sys.argv[1],sys.argv[1:])" in SU_SELF_SOCK)
         tz_branch = text.split('if [ "${mode#tz-}" != "$mode" ]; then', 1)[-1].split("\nfi\n", 1)[0]
         check("the MT tz modes end their binary with the shell the runner kills",
               'setpriv --pdeathsig KILL -- "$@"' in tz_branch)

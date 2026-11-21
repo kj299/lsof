@@ -290,6 +290,19 @@ pub trait Backend {
         false
     }
 
+    /// Whether this platform can tell a file's offset, and the file flags
+    /// it reads from the same place: the C's Linux `OffType`, set by a
+    /// probe of its own `fdinfo` once its file arguments are entered and
+    /// before it reads the mount table for a run that has none
+    /// (`initialize()`, `lib/dialects/linux/dproc.c:630-656`). Where it
+    /// cannot, the C disregards `-o` and `+f`, with a warning for each
+    /// unless `-w`, and shows sizes (`dproc.c:657-664`, `main.c:1279-1286`;
+    /// DIVERGENCES 177). Asked once a run, where the C probes. `true`, the
+    /// default, on a platform whose C makes no such probe.
+    fn reports_offsets(&self) -> bool {
+        true
+    }
+
     /// Whether `-E`/`+E` are left to the core, which names a pipe's and a
     /// local connection's other ends from the rows gathered
     /// ([`Selection::endpoints_in_core`](crate::Selection)), rather than

@@ -354,7 +354,7 @@ meet. Each number is a row there, with the measurement behind it.
 - **Linux, the time a name costs** (154): a socket row's host that
   `/etc/hosts` does not name is asked of DNS once a run, as the C asks it,
   under `/etc/resolv.conf`'s timeouts (above); `-n` asks nothing.
-- **How lsof starts** (170-176): since 2026-11-21 lsof-rs closes every
+- **How lsof starts** (170-179): since 2026-11-21 lsof-rs closes every
   descriptor from 3 up it was started with and wants a `/dev/null` it can
   open for reading and writing, before it reads an option, as the C does:
   a file only lsof itself was handed (`lsof FILE 9<FILE`) is open in no
@@ -365,12 +365,23 @@ meet. Each number is a row there, with the measurement behind it.
   no directory, a link loop) lsof-rs says the table's line all the same,
   and with a `/proc` that is no procfs but holds a `mounts` file it says
   `can't fork` where the C lists nothing: its helper is `/proc/self/exe`,
-  and it makes no bounded call without one (175). With a path argument and
-  a descriptor limit that leaves exactly four free (`ulimit -n 7`) the C
-  lists and lsof-rs says `can't open pipes`: its helper's stderr is a
-  fifth (176). On a kernel with neither `close_range(2)` (before 5.9, or
-  refused by a seccomp filter) nor a `/proc/self/fd`, descriptors numbered
-  past 1,048,576 stay open (170).
+  and it makes no bounded call without one (175). A FIFO or a device where
+  the mount table should be (a `/proc` of someone's making) ends the run
+  at once, `can't fopen(/proc/mounts, "r"): No such device or address`,
+  where the C waits for ever or runs out of memory (175). With a path
+  argument, a `+d`/`+D` or an `-e` and a descriptor limit that leaves
+  exactly four free (`ulimit -n 7`, and no other) the C lists and lsof-rs
+  says `can't open pipes`: its helper's stderr is a fifth (176). Under a
+  process limit that leaves room for one more task (`ulimit -u 2`) or a
+  small address space (`ulimit -v 6000`) the C lists and lsof-rs says
+  `can't fork`: it needs a helper and a thread to read it (178). An
+  allocation that fails (an address-space limit near a capped file's
+  size, such as a 15 MiB `+m` file under `ulimit -v 60000`) ends lsof-rs
+  with `SIGABRT` where the C says `no space for …` and exits 1 (179). In a
+  pid namespace sharing the outer `/proc`, lsof-rs tells offsets where
+  the C cannot (177). On a kernel with neither `close_range(2)` (before
+  5.9, or refused by a seccomp filter) nor a `/proc/self/fd`, descriptors
+  numbered past 1,048,576 stay open (170).
 - **`-r m<fmt>`, `+m m` and their residues** (152, 153): a zone file that is
   no regular file (a FIFO, a device) is waited on 3 seconds at most in all,
   where glibc's waits for ever, and then taken as unreadable (a FIFO with

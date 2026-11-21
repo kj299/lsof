@@ -206,6 +206,37 @@ relative name the C would look up in its working directory there is not
 looked up (as 102). `-e` exempts by a plain prefix of
 the path, as the C does, so `-e /mnt` exempts `/mnt2` as well.
 
+**What is and is not bounded where `/proc` is not procfs** (since
+2026-11-21, DIVERGENCES 175, 177). Replacing `/proc` takes root (a tmpfs
+over it in a mount namespace, a chroot with a `/proc` of files), so this is
+no attack by another user; it is what an operator's sandbox may hand lsof.
+The C waits for ever on a FIFO at `/proc/mounts` (its `fopen()`), and reads
+a device there as one line with no end, into a buffer glibc's `getmntent()`
+grows until memory runs out (measured: 4.47 GB in five seconds, and the
+kernel killed another process for it). lsof-rs opens the mount table in
+its own process `O_NONBLOCK` (`text::open_unwaiting`) every time it opens
+it: for its mounts, for `-Z`'s question of a type, and for the question
+asked of it where no helper can start (`mounts::unopenable`). A FIFO there
+is refused, `can't fopen(/proc/mounts, "r"): No such device or address`
+(`ENXIO`, the kernel's own answer for a socket there, so that both are one
+line); a device is read for one byte and refused unless it is empty
+(`/dev/null`, a masked table, is the empty table the C reads it as); a
+directory reads as empty, as in the C; a regular file, however long, is
+read to 64 MiB (129). Each is measured to end within milliseconds, under
+an address-space limit of 256 MiB (`tests/startup.rs`). The offset probe
+(177: the C's start-up check that a file's offset can be told, which opens
+`/`, seeks it to 1 and asks its own `fdinfo` for the position) reads
+`/proc/self/fdinfo/N` the same way, at most 4 KiB, and a failure of any
+step only turns `-o` and `+f` off, with the C's warnings.
+lsof-rs reads no `mountinfo`. **What is not bounded there**, and is not
+promised: every other read of `/proc` in lsof's own process is an ordinary
+open and read, as it is in the C: `/proc/self/cmdline` (the helper's
+start, `safefs::words`), `/proc/thread-self/status` (`lsof-sigpipe`'s
+`blocked()`), and each process's `/proc/PID/...` files (`std::fs::read`
+and their parsers), which on procfs cannot be FIFOs or endless but on a
+`/proc` of someone's making can, and would hold the run or grow it as they
+hold or grow the C's.
+
 **A mount directory is `stat`ed only when the run needs the table, through a
 bounded helper** (DIVERGENCES 110, resolved 2026-10-17; its timeout half
 2026-10-09 by 94). lsof-rs reads the mount table as the C does: only when a
@@ -245,7 +276,11 @@ the helper's; run through the dynamic loader, the loader is that image and is
 given the program's path, as lsof was — with one fixed argument, an empty
 environment, lsof's working directory (as the C's forked child has it, so a
 relative path names the same file), `/dev/null` as stderr and two pipes as
-stdin and stdout.
+stdin and stdout. Its `/dev/null` is opened for reading and writing, as
+lsof's own start-up opens it, since an open for writing alone (std's
+`Stdio::null()`) waits for ever where `/dev/null` is a FIFO, and had held
+every run that started the helper there (DIVERGENCES 123; the C, which
+opens it once read and write, lists).
 The helper serves only on pipes; every frame is length-checked on both sides
 before anything is allocated, and lsof takes no reply from a process that did
 not greet it with the protocol's magic and version. A user who runs the
@@ -536,8 +571,12 @@ start-up. The constructor now takes both steps, in the C's order:
 `close_range(3, ~0U, 0)` by `syscall(2)` (FreeBSD: `closefrom(3)`), else
 each descriptor `/proc/self/fd` lists (`getdents64(2)` into 4,096 bytes on
 the stack, parsed by safe code that reads nothing outside what the kernel
-wrote and ends whatever it holds), else every number from 3 to the
-descriptor limit, 1,048,576 at most; then `open("/dev/null", O_RDWR)`
+wrote and ends whatever it holds), else every number from 3 below
+1,048,576, whatever the descriptor limit is (a descriptor opened under a
+higher soft limit keeps its number when the limit is lowered, and the C's
+shim, which stops at the limit, leaves it open); a `/proc/self/fd` that
+opens and lists nothing closes nothing, as the C's walk does; then
+`open("/dev/null", O_RDWR)`
 until the descriptor is at least 2, `close()` of one past 2, and
 `_exit(1)` where the open fails.
 
@@ -550,15 +589,34 @@ because **nothing of the program has run yet, so no such object exists**:
 - The calls are reached through one value, `startup::Kernel`, whose
   constructor is an `unsafe fn` with that contract; it is made once, in
   the `.init_array` function, and dropped there. The steps themselves are
-  safe code over a trait of seven system calls (`startup::start_up`), and
+  safe code over a trait of six system calls (`startup::start_up`), and
   the unit tests run the same code over a descriptor table of their own.
-- The only other constructor in the program is std's, which stores
-  `argc`, `argv` and `envp` and opens nothing: the binary's `.init_array`
-  holds `frame_dummy` (the C start-up files'), std's and this one,
-  identified by their relocations (two entries on musl), and there is no
-  `.preinit_array`. `lsof-cli/tests/startup.rs` reads the section table of
-  the binary cargo built and fails on a fourth entry, so a dependency that
-  brought a constructor of its own would be seen before it shipped.
+  The value's one field is private to a module of its own
+  (`startup::token`), so no code, the rest of `startup` included, can make
+  one but through that `unsafe fn`.
+- The other constructors in the program open nothing: on glibc the C
+  start-up files' `frame_dummy` and std's, which stores `argc` and `argv`;
+  on musl the start-up files' `__do_init` alone (std has none there).
+  There is no `.preinit_array` and no `.ctors`.
+  `lsof-cli/tests/startup.rs`
+  (`the_binary_has_no_constructor_the_safety_argument_does_not_name`) reads
+  the binary cargo built for the test, which has a symbol table: it
+  resolves each `.init_array` slot to the function it points at (through
+  its `R_*_RELATIVE` relocation where the binary is position-independent)
+  and that function to its name, and fails on any entry that is not one of
+  these, on a count other than three (glibc) or two (musl), on a
+  `.preinit_array` or `.ctors`, and on a shared object the binary asks for
+  (`DT_NEEDED`) that is not the C library's own or `libgcc_s` (a shared
+  object's constructors run before the program's and are not in its
+  file). A stripped binary is held to the count alone, and the test says
+  so. An instrumented build (`-C instrument-coverage`, a sanitizer) adds
+  its runtime's own entry and fails the test, whose message says that this
+  is the case and that the test is not to be loosened for it. **What it
+  does not see**: FreeBSD (the test is Linux's); the two test binaries
+  that also run the constructor (below); a shared object loaded later
+  (`dlopen()`, an NSS module), whose constructors run after the close and
+  so cannot have a descriptor closed under them; and whether an allowed
+  entry still does what it did (it reads names, not code).
 - A shared object loaded before the program (libc; a library someone
   preloads) has run its constructors by then. What one of them opened and
   kept from 3 up is closed, exactly as the C closes it, whose
@@ -576,28 +634,36 @@ because **nothing of the program has run yet, so no such object exists**:
   nothing above on purpose (std opens its own descriptors close-on-exec),
   so there the close finds nothing and the loop opens and closes one
   descriptor. lsof-rs starts no other process. FreeBSD's helper also
-  calls `closefrom(3)` itself (below), which finds nothing now.
+  calls `closefrom(3)` itself (below). The FreeBSD half of the constructor
+  (`closefrom(3)`, `open`, `close`, `_exit`) is followed from source and
+  lint alone: it has not yet been run on a FreeBSD host.
 - It also runs in two test binaries, the ones whose link takes the
   crate's object in (the unit tests of `lsof-cli/src/main.rs`, which
   refers to the crate, and the crate's own; measured with `strace` over
-  every test binary of the workspace), and in no fuzz target. cargo
-  hands a test binary 0 to 2 alone, so nothing is closed there; one run
+  every test binary of the workspace), and in no fuzz target. A plain
+  `cargo test` hands a test binary 0 to 2 alone, so nothing is closed
+  there; under a `make` jobserver (or with a descriptor handed to cargo)
+  the test binary gets those as well, the jobserver's pipe on 3 to 6
+  (measured), and closes them, which no test needs them for. One run
   where `/dev/null` cannot be opened exits 1 with no message, as lsof
   does. Under miri, which runs constructors and has none of these calls,
   the constructor does nothing, as before.
 - valgrind keeps its own descriptors out of its client's reach, and the C
-  makes the same `close_range()` under it; `valgrind lsof -b …` was run. No
-  Linux job builds with a sanitizer or a profiler; a runtime that kept a
+  makes the same `close_range()` under it; `valgrind lsof -b …` was run.
+  The one Linux job that builds with a sanitizer, `fuzz` (cargo-fuzz's
+  ASan), builds targets that do not link this crate. A runtime that kept a
   descriptor open from a constructor of its own would lose it, as under
-  the C.
+  the C (measured: an ASan `log_path` descriptor, ld.so's
+  `LD_DEBUG_OUTPUT` and `libmemusage.so`'s file are closed in both).
 - Windows has no constructor and closes nothing: the crate is an empty
   shell there.
 
 Each `unsafe` site carries a `SAFETY:` comment and is in the `unsafe-audit`
-gate (16 blocks: the three for `SIGPIPE`, the one that makes
-`startup::Kernel` in the constructor, seven system calls on Linux and four
+gate (15 blocks: the three for `SIGPIPE`, the one that makes
+`startup::Kernel` in the constructor, six system calls on Linux and four
 on FreeBSD, one in a unit test that reads its own descriptors through the
-real `getdents64()`); lsof-core, lsof-cli and lsof-backend-linux keep
+real `getdents64()`; `getdtablesize()` went with the sweep's end at the
+limit); lsof-core, lsof-cli and lsof-backend-linux keep
 `#![forbid(unsafe_code)]`. Its one dependency is `libc` (`=0.2.190`,
 already in the lock file for rustix's other targets, MIT OR Apache-2.0, no
 default features, a build script that probes the compiler), built on
@@ -1007,11 +1073,16 @@ device and reads no mount from the empty file. A name that leads to a
 descriptor lsof was started with (`/dev/fd/9`) is gone, as in the C: both
 have closed it (DIVERGENCES 170). And the file is asked of `access(2)`
 first, the **real** user's and group's rights, as the C's `is_readable()`
-asks (DIVERGENCES 172; rustix's safe call): lsof-rs is not installed
-setuid (§3), but where its effective user is another all the same (a
-wrapper that sets it), a supplement its caller may not read is not read,
-and none of its lines is quoted back in a message; until 2026-11-21 it was
-opened as the effective user. On FreeBSD the zone file is opened the same way, with FreeBSD's
+asks (DIVERGENCES 172; rustix's safe call). The check is **advisory**, as
+the C's is, and in the C's order, check then open: a name that changes
+between the two (a symlink flipped) is opened as the effective user all
+the same, in both (the review of 2026-11-21 did it, with the open delayed
+under `strace`, and each quoted the other file's first line), and lsof-rs
+makes one more lookup in that window than the C. It is no barrier because
+none is needed: lsof-rs is never set-user-ID (§3), so the real and
+effective users differ only where a wrapper made them differ, and that
+wrapper's user may read the file anyway. Until 2026-11-21 the file was
+opened as the effective user with no check at all. On FreeBSD the zone file is opened the same way, with FreeBSD's
 `O_NONBLOCK`, and anything but a regular file is not read.
 
 **The FreeBSD backend's FFI is four libc calls, and it reads bytes, never

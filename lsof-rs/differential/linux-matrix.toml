@@ -8180,8 +8180,9 @@ env = { LSOF_DIFF_MT = "su-fd9" }
 with_stderr = true
 
 [[case]]
-# Its name through the descriptor is no file: a status error on lsof's own
-# `/proc/PID/fd/9` (stderr holds the pid, and is not compared), exit 1.
+# Its name through the descriptor is no file: a status error on
+# `/proc/PID/fd/9`, the C's PID its child's and lsof-rs's lsof's own (row 89;
+# stderr holds the pid, and is not compared), exit 1.
 # lsof-rs had found /dev/null by it, and listed every process that holds it.
 name = "startup-handed-descriptor-by-its-dev-fd-name"
 args = ["/dev/null", "-n", "-P", "-a", "-p", "{A}", "--", "/dev/fd/9"]
@@ -8725,3 +8726,253 @@ with_stderr = true
 name = "pidns-outer-proc-c-reads-no-fdinfo"
 args = ["-n", "-P", "-F", "falto", "-a", "-p", "{A}", "-d", "6"]
 env = { LSOF_DIFF_MT = "pidns-outer" }
+
+# --------------------------- start-up, what its two reviews found (2026-11-21)
+#
+# The cases the reviews of the block above asked for: what else may be where
+# /dev/null should be, the C's probe for a file's offset and its two warnings
+# (DIVERGENCES 177), a mount table that is no file (175), a descriptor
+# handed down that is no regular file, and row 176's other three options.
+
+[[case]]
+# /dev/null is a FIFO. The C opens it once, for reading and writing, which
+# never waits on a FIFO, and lists. lsof-rs opened it a second time, for
+# writing alone, as its helper's descriptor 2, and waited for a reader for
+# ever: every run that started the helper hung (DIVERGENCES 123).
+name = "startup-dev-null-a-fifo-lists"
+args = ["fifo", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-null" }
+timeout = 20
+
+[[case]]
+# ...a path argument, which starts the helper for itself.
+name = "startup-dev-null-a-fifo-path-argument"
+args = ["fifo", "-n", "-P", "-a", "-p", "{A}", "--", "{FILE}"]
+env = { LSOF_DIFF_MT = "su-null" }
+timeout = 20
+
+[[case]]
+# What cannot be opened for reading and writing ends the run in silence,
+# exit 1, before an option is read: a directory...
+name = "startup-dev-null-a-directory"
+args = ["dir", "-v"]
+env = { LSOF_DIFF_MT = "su-null" }
+with_stderr = true
+
+[[case]]
+# ...a link to nothing...
+name = "startup-dev-null-a-dangling-link"
+args = ["dangling", "-v"]
+env = { LSOF_DIFF_MT = "su-null" }
+with_stderr = true
+
+[[case]]
+# ...a link to itself...
+name = "startup-dev-null-a-link-loop"
+args = ["loop", "-n", "-P", "-a", "-d", "cwd", "-p", "{A}"]
+env = { LSOF_DIFF_MT = "su-null" }
+with_stderr = true
+
+[[case]]
+# ...and a socket.
+name = "startup-dev-null-a-socket"
+args = ["sock", "-v"]
+env = { LSOF_DIFF_MT = "su-null" }
+with_stderr = true
+
+[[case]]
+# With no /proc the C cannot tell a file's offset: it probes for it once its
+# file arguments are entered (`initialize()`, `dproc.c:630-664`) and says
+# so where `-o` asked for one. lsof-rs made no probe (DIVERGENCES 177).
+name = "startup-no-proc-offset-warning"
+args = ["-n", "-P", "-i", "-o"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# What `+f` selected is dropped next, with its own line (`main.c:1279-1286`).
+name = "startup-no-proc-file-flags-warning"
+args = ["-n", "-P", "-i", "+f", "g"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+name = "startup-no-proc-both-warnings"
+args = ["-n", "-P", "-i", "-o", "+f", "G"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# A run that reads the mount table says the first before it ends there, and
+# never gets to the second.
+name = "startup-no-proc-offset-warning-then-the-table"
+args = ["-n", "-P", "-o", "+f", "g"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# `-w` mutes both...
+name = "startup-no-proc-warnings-muted-by-dash-w"
+args = ["-n", "-P", "-i", "-o", "+f", "g", "-w"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# ...and so does `-t`, which sets the same switch.
+name = "startup-no-proc-warnings-muted-by-dash-t"
+args = ["-n", "-P", "-i", "-o", "-t"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# `-o` with digits is a width, and asks for no offset.
+name = "startup-no-proc-offset-digits-ask-nothing"
+args = ["-n", "-P", "-i", "-o", "10"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# `-F` with an `o` asks as `-o` does (`Foffset = 1`).
+name = "startup-no-proc-offset-field-asks"
+args = ["-n", "-P", "-i", "-F", "po"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# `-F`'s `G` selects the flags and says nothing when they are dropped: the
+# warning is `+f`'s (`FsvByf`).
+name = "startup-no-proc-flags-by-dash-F-say-nothing"
+args = ["-n", "-P", "-i", "-F", "G"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# A `+f g` that a `-f g` took back still counts, once `-F G` selects them.
+name = "startup-no-proc-flags-warning-remembers-plus-f"
+args = ["-n", "-P", "-i", "+f", "g", "-f", "g", "-F", "G"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# A path argument reaches the mount table before the probe is made.
+name = "startup-no-proc-path-before-the-probe"
+args = ["-n", "-P", "-o", "+f", "g", "/"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# Under `+m` and `-i` the table is read after both steps.
+name = "startup-no-proc-supplement-after-the-warnings"
+args = ["-n", "-P", "-i", "-o", "+f", "g", "+m"]
+env = { LSOF_DIFF_MT = "su-noproc" }
+with_stderr = true
+
+[[case]]
+# The probe holds two descriptors at once: under a limit that leaves one it
+# fails with /proc there, in both.
+name = "startup-probe-under-a-limit-of-four-offset"
+args = ["-n", "-P", "-i", "-o"]
+env = { LSOF_DIFF_NOFILE = "4" }
+with_stderr = true
+
+[[case]]
+name = "startup-probe-under-a-limit-of-four-file-flags"
+args = ["-n", "-P", "-i", "+f", "g"]
+env = { LSOF_DIFF_NOFILE = "4" }
+with_stderr = true
+
+[[case]]
+# One more and it succeeds: no word, and the run ends where both are short
+# of descriptors for the helper's pipes. (Not `-i` here: at five the C holds
+# /proc and its /proc/PID/fd open while it scans and lists nothing, where
+# lsof-rs lists; that is the scan's count, not the probe's.)
+name = "startup-probe-under-a-limit-of-five"
+args = ["-n", "-P", "-o", "+f", "g", "-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_NOFILE = "5" }
+with_stderr = true
+
+[[case]]
+# And where the run has room to list: the OFFSET and FILE-FLAG columns.
+name = "startup-probe-under-a-limit-of-eight"
+args = ["-n", "-P", "-o", "+f", "g", "-a", "-p", "{A}", "-d", "cwd"]
+env = { LSOF_DIFF_NOFILE = "8" }
+with_stderr = true
+
+[[case]]
+# A root directory lsof may not open (mode 0711, uid 65534): the probe fails
+# at its first step and the listing goes on, of the shell that runs lsof
+# (pid 1, its stdin /etc/hostname). `-o` is disregarded: the warning, and
+# the column is the size's, headed SIZE. (The mode prints what was said on
+# stderr after the listing.)
+name = "startup-root-not-opened-offset"
+args = ["-n", "-P", "-o", "-a", "-d", "0"]
+env = { LSOF_DIFF_MT = "su-noroot" }
+
+[[case]]
+# `+f g`: the warning, and no FILE-FLAG column.
+name = "startup-root-not-opened-file-flags"
+args = ["-n", "-P", "+f", "g", "-a", "-d", "0"]
+env = { LSOF_DIFF_MT = "su-noroot" }
+
+[[case]]
+# Neither asked for: nothing is said, and the header is SIZE all the same.
+name = "startup-root-not-opened-sizes"
+args = ["-n", "-P", "-a", "-d", "0"]
+env = { LSOF_DIFF_MT = "su-noroot" }
+
+[[case]]
+# `-F`: both lines, the size, and neither an `o` nor a `G`.
+name = "startup-root-not-opened-fields"
+args = ["-n", "-P", "-o", "+f", "G", "-a", "-d", "0", "-F", "fosG"]
+env = { LSOF_DIFF_MT = "su-noroot" }
+
+[[case]]
+name = "startup-root-not-opened-muted"
+args = ["-n", "-P", "-o", "+f", "g", "-w", "-a", "-d", "0"]
+env = { LSOF_DIFF_MT = "su-noroot" }
+
+[[case]]
+# LEDGERED (DECISION, DIVERGENCES 175): a FIFO where the mount table should
+# be (a /proc that is not procfs). The C's `fopen()` waits for a writer for
+# ever and is killed at the case's limit; lsof-rs opens without waiting and
+# refuses it, `can't fopen(/proc/mounts, "r"): No such device or address`.
+name = "startup-mount-table-a-fifo-holds-the-c"
+args = ["-n", "-P", "-p", "1"]
+env = { LSOF_DIFF_MT = "su-fifomounts" }
+with_stderr = true
+timeout = 4
+
+[[case]]
+# A descriptor handed down that is no regular file is closed like any
+# other: a FIFO's read end on 9 is no row of lsof's own (pid 1)...
+name = "startup-own-rows-no-handed-pipe"
+args = ["-n", "-P", "-a", "-p", "1", "-d", "9", "-F", "fn"]
+env = { LSOF_DIFF_MT = "su-self-pipe" }
+
+[[case]]
+# ...nor is a socket...
+name = "startup-own-rows-no-handed-socket"
+args = ["-n", "-P", "-a", "-p", "1", "-d", "9", "-F", "fn"]
+env = { LSOF_DIFF_MT = "su-self-sock" }
+
+[[case]]
+# ...which `-U`/`-i` would have listed had it been kept.
+name = "startup-handed-socket-is-no-internet-file"
+args = ["-n", "-P", "-a", "-p", "1", "-i"]
+env = { LSOF_DIFF_MT = "su-self-sock" }
+
+[[case]]
+# LEDGERED (OPEN, DIVERGENCES 176): the limit of seven with an `-e`: the C
+# forks for its `Readlink()` before it reads the table, and lists; lsof-rs's
+# helper wants the fifth descriptor.
+name = "startup-descriptor-limit-leaves-four-exempt"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "cwd", "-e", "/proc"]
+env = { LSOF_DIFF_NOFILE = "7" }
+with_stderr = true
+
+[[case]]
+# LEDGERED (OPEN, DIVERGENCES 176): the same with a `+d`.
+name = "startup-descriptor-limit-leaves-four-plus-d"
+args = ["-n", "-P", "-a", "-p", "{A}", "-d", "cwd", "+d", "/"]
+env = { LSOF_DIFF_NOFILE = "7" }
+with_stderr = true

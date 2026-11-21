@@ -231,6 +231,14 @@ pub struct Columns {
     /// count and node address, in their columns and in `-F`'s `F`, `C` and
     /// `N` fields (DIVERGENCES 142).
     pub file_struct: FsValues,
+    /// `-F` with the letter `o`: the C's `Foffset` set without `-o`'s
+    /// column, which collides with `-s` as `-o` does and is disregarded
+    /// with it where no offset can be told (DIVERGENCES 177).
+    pub fields_offset: bool,
+    /// `+f` with a letter it knows: the C's `FsvByf`, which nothing clears,
+    /// and without which nothing is said when the file-structure selections
+    /// are dropped (DIVERGENCES 177).
+    pub flags_by_f: bool,
 }
 
 impl Default for Columns {
@@ -244,7 +252,44 @@ impl Default for Columns {
             nlink: false,
             file_flags: FileFlags::Off,
             file_struct: FsValues::default(),
+            fields_offset: false,
+            flags_by_f: false,
         }
+    }
+}
+
+/// What the C says where it cannot tell a file's offset and `-o` asked for
+/// it (`dproc.c:658-661`), and where `+f` asked for what it reads from the
+/// same place (`main.c:1281-1284`), after `lsof: `.
+pub const NO_OFFSET: &str = "WARNING: can't report offset; disregarding -o.";
+pub const NO_FILE_FLAGS: &str = "WARNING: can't report file flags; disregarding +f.";
+
+impl Columns {
+    /// The C's first step where its probe could not tell a file's offset
+    /// (`OffType` is `OFFSET_UNKNOWN`; `initialize()`, `dproc.c:657-664`),
+    /// taken before it reads the mount table: `Foffset = 0; Fsize = 1`, so
+    /// the column is the size's and headed `SIZE`, after [`NO_OFFSET`]
+    /// where offsets were asked for (`-o`, or `-F` with `o`) and warnings
+    /// are not off (`warns`: neither `-w` nor `-t`). Whether the line is to
+    /// be said. An `-o` with digits asks for no offset, and says nothing.
+    pub fn disregard_offset(&mut self, warns: bool) -> bool {
+        let asked = self.offset || self.fields_offset;
+        self.offset = false;
+        self.fields_offset = false;
+        self.size = true;
+        asked && warns
+    }
+
+    /// The second step (`main.c:1279-1286`), taken once the table is read:
+    /// `Fsv = 0`, every file-structure selection off, after
+    /// [`NO_FILE_FLAGS`] where one is still set (`selected`, the C's
+    /// `Fsv`), a `+f` gave one at some point (`FsvByf`: `-F`'s `G` alone
+    /// says nothing) and warnings are not off. Whether the line is to be
+    /// said.
+    pub fn disregard_flags(&mut self, selected: bool, warns: bool) -> bool {
+        self.file_flags = FileFlags::Off;
+        self.file_struct = FsValues::default();
+        selected && self.flags_by_f && warns
     }
 }
 
@@ -1034,6 +1079,8 @@ fn parse_options<'s>(
     // read.
     let mut flags_shown = false;
     let mut flags_hex = false;
+    // The C's `FsvByf`: a `+f` gave a letter it knows, at any point.
+    let mut flags_by_f = false;
     // The C's other `Fsv` bits, `FSV_FA`, `FSV_CT` and `FSV_NI`, set and
     // cleared the same way: by `+f`/`-f`'s `f`, `c` and `n`, and set by
     // `-F` where it selects `F`, `C` or `N`.
@@ -1673,12 +1720,22 @@ fn parse_options<'s>(
                                     'g' | 'G' if HAS_FILE_FLAGS => {
                                         flags_shown = plus;
                                         flags_hex = c == 'G';
+                                        flags_by_f |= plus;
                                     }
                                     // FreeBSD's, as its C has them
                                     // (`main.c:412-458`, no `HASNOFS*`).
-                                    'c' | 'C' if has_file_struct() => fsv.count = plus,
-                                    'f' | 'F' if has_file_struct() => fsv.addr = plus,
-                                    'n' | 'N' if has_file_struct() => fsv.node = plus,
+                                    'c' | 'C' if has_file_struct() => {
+                                        fsv.count = plus;
+                                        flags_by_f |= plus;
+                                    }
+                                    'f' | 'F' if has_file_struct() => {
+                                        fsv.addr = plus;
+                                        flags_by_f |= plus;
+                                    }
+                                    'n' | 'N' if has_file_struct() => {
+                                        fsv.node = plus;
+                                        flags_by_f |= plus;
+                                    }
                                     // Each one the C's error, and it reads on.
                                     other => early.letters(Early::FILE_STRUCT, other),
                                 }
@@ -2085,6 +2142,8 @@ fn parse_options<'s>(
         (true, true) => FileFlags::Hex,
     };
     columns.file_struct = fsv;
+    columns.fields_offset = fields_offset;
+    columns.flags_by_f = flags_by_f;
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
@@ -7587,6 +7646,107 @@ mod tests {
         assert_eq!(
             columns(&["+fx"]).unwrap_err(),
             "unknown file struct option: x"
+        );
+    }
+
+    /// Where the C cannot tell a file's offset it takes two steps
+    /// (`dproc.c:657-664`, then `main.c:1279-1286`; DIVERGENCES 177): `-o`
+    /// is disregarded and sizes are shown, with a warning where offsets
+    /// were asked for; and every `+f` selection is dropped, with a warning
+    /// where a `+f` gave one. Neither is said under `-w` or `-t`. Each rule
+    /// measured on the C with no `/proc`.
+    #[test]
+    fn where_no_offset_can_be_told_dash_o_and_plus_f_are_disregarded() {
+        let cols = |argv: &[&str]| columns(argv).unwrap().0;
+        // What asks for offsets: `-o`, and `-F` with an `o`. Not `-o` with
+        // digits, which is a width, nor a bare `-F`.
+        for (argv, asked) in [
+            (&["-o"][..], true),
+            (&["-o", "-o", "10"], true),
+            (&["-F", "o"], true),
+            (&["-F", "pfo"], true),
+            (&["-o", "10"], false),
+            (&["-F"], false),
+            (&["-F", "pf"], false),
+            (&[], false),
+        ] {
+            let mut c = cols(argv);
+            assert_eq!(c.offset || c.fields_offset, asked, "{argv:?}");
+            assert_eq!(c.disregard_offset(true), asked, "{argv:?}");
+            // `Foffset = 0; Fsize = 1`, whatever was asked.
+            assert!(!c.offset && !c.fields_offset && c.size, "{argv:?}");
+            // `-w` or `-t`: nothing is said, and the same is done.
+            let mut c = cols(argv);
+            assert!(!c.disregard_offset(false), "{argv:?}");
+            assert!(!c.offset && !c.fields_offset && c.size, "{argv:?}");
+        }
+        // Each of the two that asks is enough by itself.
+        let asks = |offset, fields_offset| Columns {
+            offset,
+            fields_offset,
+            ..Columns::default()
+        };
+        assert!(asks(true, false).disregard_offset(true));
+        assert!(asks(false, true).disregard_offset(true));
+        assert!(!asks(false, false).disregard_offset(true));
+        // The flags: said where a selection is still set, a `+f` gave one at
+        // some point (the C's `FsvByf`, which `-f` does not clear and `-F`
+        // does not set) and warnings are on; dropped in every case.
+        let by_f = |flags_by_f| Columns {
+            flags_by_f,
+            file_flags: FileFlags::Names,
+            file_struct: FsValues {
+                addr: true,
+                count: true,
+                node: true,
+            },
+            ..Columns::default()
+        };
+        for (flags_by_f, selected, warns) in [
+            (true, true, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let mut c = by_f(flags_by_f);
+            assert_eq!(
+                c.disregard_flags(selected, warns),
+                flags_by_f && selected && warns,
+                "{flags_by_f} {selected} {warns}"
+            );
+            assert_eq!(
+                (c.file_flags, c.file_struct),
+                (FileFlags::Off, FsValues::default())
+            );
+        }
+        // As the options set them, where the platform records the flags.
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            for (argv, by_f, selected) in [
+                (&["+f", "g"][..], true, true),
+                (&["+f", "G"], true, true),
+                (&["+fg", "-fg"], true, false),
+                (&["-fg"], false, false),
+                (&["-F", "G"], false, true),
+                (&["-F"], false, true),
+                (&["-fg", "-F", "G"], false, true),
+                (&["+fg", "-fg", "-F", "G"], true, true),
+                (&[], false, false),
+            ] {
+                let (mut c, sel) = columns(argv).unwrap();
+                assert_eq!(c.flags_by_f, by_f, "{argv:?}");
+                assert_eq!(sel.file_struct, selected, "{argv:?}");
+                assert_eq!(
+                    c.disregard_flags(sel.file_struct, true),
+                    by_f && selected,
+                    "{argv:?}"
+                );
+            }
+        }
+        assert_eq!(NO_OFFSET, "WARNING: can't report offset; disregarding -o.");
+        assert_eq!(
+            NO_FILE_FLAGS,
+            "WARNING: can't report file flags; disregarding +f."
         );
     }
 

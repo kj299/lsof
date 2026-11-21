@@ -55,11 +55,19 @@
 //! FreeBSD `closefrom(3)`; on Linux the raw `close_range(3, ~0U, 0)` (no
 //! glibc version is needed for it), where that fails (a kernel before 5.9,
 //! a seccomp filter that refuses it) the walk of `/proc/self/fd`, read with
-//! `getdents64(2)` into a buffer on the stack, and where there is no
-//! `/proc` either the numbers below the limit, at most 1,048,576 of them
-//! (`startup::SWEEP_MAX`). glibc's `closefrom()` aborts in that last case,
-//! and the shim's loop runs to the limit whatever it is (a limit of 2^30 is
-//! a thousand million `close()` calls): the bound is lsof-rs's own.
+//! `getdents64(2)` into a buffer on the stack, and where `/proc/self/fd`
+//! cannot be opened either every number from 3 below 1,048,576
+//! (`startup::SWEEP_MAX`), whatever the descriptor limit is: one opened
+//! under a higher soft limit keeps its number when the limit is lowered.
+//! glibc's `closefrom()` aborts in that last case alone (it cannot open
+//! `/proc/self/fd`; where `close_range()` alone fails it walks the
+//! directory, as here), and the shim's loop ends at the soft limit (so it
+//! leaves such a descriptor open, and a limit of 2^30 is a thousand million
+//! `close()` calls): the bound is lsof-rs's own. A `/proc/self/fd` that
+//! opens and lists nothing (a `/proc` that is no procfs, a filter that
+//! refuses `getdents64(2)`) closes nothing and sweeps nothing, as the C's
+//! walk does; where `getdents64(2)` is refused the C as built aborts and
+//! lsof-rs runs on (measured).
 //!
 //! This runs in every process of the binary: lsof, and the helper its
 //! bounded calls run in, which is lsof re-executed. The helper is given two
@@ -68,8 +76,11 @@
 //! also runs in the two test binaries whose link takes this crate's object
 //! in (measured with `strace`): the unit tests of the binary's own source,
 //! `lsof-cli/src/main.rs`, which calls [`inherited_ignored`], and this
-//! crate's. cargo hands a test binary 0 to 2 alone (measured), so nothing is
-//! closed there; one whose `/dev/null` cannot be opened ends with status 1
+//! crate's. A plain `cargo test` hands a test binary 0 to 2 alone
+//! (measured), so nothing is closed there; under a `make` jobserver, or with
+//! a descriptor handed to cargo, the test binary gets those too (the
+//! jobserver's pipe on 3 to 6, measured), and they are closed, which no test
+//! needs them for. One whose `/dev/null` cannot be opened ends with status 1
 //! and no message, as lsof does. No other test binary, and no fuzz target,
 //! refers to this crate, and none runs the constructor.
 //!
@@ -81,7 +92,8 @@
 //! lsof-backend-linux keep it), its query-only `sigaction()`,
 //! `restore_default`'s `signal()`, the one place a `startup::Kernel` is made,
 //! and the system calls behind it, one a block: `close_range` (or FreeBSD's
-//! `closefrom`), `open`, `getdents64`, `getdtablesize`, `close`, `_exit`.
+//! `closefrom`), `open`, `getdents64`, `close`, `_exit`. The FreeBSD half
+//! is from its source and lint alone: it has not yet been run.
 //! None writes memory but a local of its own. The constructor allocates
 //! nothing, cannot panic (no index, no arithmetic that can overflow, no
 //! formatting) and uses nothing of std but an atomic. Off Linux and FreeBSD
@@ -166,14 +178,13 @@ mod startup {
     /// The first descriptor the C closes as it starts: `closefrom_shim(ctx, 3)`.
     pub(crate) const FIRST_CLOSED: c_int = 3;
 
-    /// The C's `MaxFd` is never below this (`main.c:173-174`): where every
-    /// number is closed one by one, at least these are.
-    pub(crate) const SWEEP_MIN: c_int = 53;
-
-    /// At most this many numbers are closed one by one where neither
-    /// `close_range(2)` nor `/proc/self/fd` is there: the kernel's default
+    /// Where neither `close_range(2)` nor `/proc/self/fd` is there, every
+    /// number below this is closed one by one: the kernel's default
     /// `fs.nr_open`, past which no descriptor is numbered unless root raised
-    /// it. The C's loop runs to the soft limit whatever it is.
+    /// it. Whatever the descriptor limit is: a descriptor opened under a
+    /// higher soft limit keeps its number when the limit is lowered, so the
+    /// C's loop, which ends at the soft limit (`MaxFd`, `main.c:173-174`),
+    /// leaves it open, and runs for ever where the limit is 2^30.
     pub(crate) const SWEEP_MAX: c_int = 1 << 20;
 
     /// The exit status of a run that cannot open `/dev/null`: the C's
@@ -191,8 +202,6 @@ mod startup {
         /// The next entries of that directory, as `getdents64(2)` writes them:
         /// how many bytes of `buf` were filled, 0 at its end or on an error.
         fn read_fd_dir(&mut self, dir: c_int, buf: &mut [u8]) -> usize;
-        /// `getdtablesize()`: the descriptor limit.
-        fn table_size(&mut self) -> c_int;
         /// `close(fd)`, its result unread, as the C leaves it.
         fn close(&mut self, fd: c_int);
         /// `open("/dev/null", O_RDWR)`: the descriptor, or a negative number.
@@ -235,21 +244,22 @@ mod startup {
 
     /// `closefrom_shim(ctx, low)` (`lib/misc.c:215-250`): the one call where
     /// the system has it; else each descriptor `/proc/self/fd` lists, but the
-    /// listing's own; else every number from `low` to the descriptor limit
-    /// ([`sweep_end`]).
+    /// listing's own; else every number from `low` up to [`SWEEP_MAX`]
+    /// ([`sweep`]).
     pub(crate) fn close_from(sys: &mut impl Fds, low: c_int) {
         if sys.close_from(low) || close_listed(sys, low) {
             return;
         }
-        for fd in low..sweep_end(sys.table_size()) {
-            sys.close(fd);
-        }
+        sweep(sys, low, SWEEP_MAX);
     }
 
-    /// Where the one-by-one close ends: the C's `MaxFd`, the descriptor limit
-    /// and at least [`SWEEP_MIN`], and here at most [`SWEEP_MAX`].
-    pub(crate) fn sweep_end(table_size: c_int) -> c_int {
-        table_size.clamp(SWEEP_MIN, SWEEP_MAX)
+    /// Every number from `low` up to `end`, closed one by one, open or not:
+    /// the C's last resort (`lib/misc.c:245-249`), which asks the descriptor
+    /// limit for its end where lsof-rs takes [`SWEEP_MAX`].
+    pub(crate) fn sweep(sys: &mut impl Fds, low: c_int, end: c_int) {
+        for fd in low..end {
+            sys.close(fd);
+        }
     }
 
     /// The C's walk of `/proc/self/fd` (`lib/misc.c:230-243`): every entry
@@ -257,7 +267,10 @@ mod startup {
     /// directory itself is read through, which is closed last. `false` where
     /// the directory cannot be opened, and nothing was closed. Closing while
     /// listing skips nothing: procfs lists by descriptor number, from the last
-    /// one it gave.
+    /// one it gave. A directory that opens and lists nothing (a `/proc` that
+    /// is no procfs, a filter that refuses `getdents64(2)`) is `true` with
+    /// nothing closed, and no number is swept: as in the C's shim, whose
+    /// `readdir()` loop ends the same way.
     pub(crate) fn close_listed(sys: &mut impl Fds, low: c_int) -> bool {
         let Some(dir) = sys.open_fd_dir() else {
             return false;
@@ -327,30 +340,39 @@ mod startup {
         (fd < c_int::MAX).then_some(fd)
     }
 
-    /// The system itself ([`Fds`]). [`Kernel::at_start`] is the one way to
-    /// make it, and the constructor the one place lsof-rs does.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub(crate) struct Kernel(());
+    pub(crate) use token::Kernel;
 
+    /// [`Kernel`], in a module of its own: its one field is private to this
+    /// module, so nothing outside it, the rest of `startup` included, can
+    /// make the value but through [`Kernel::at_start`], which is `unsafe`.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    impl Kernel {
-        /// The system's descriptor table, to be closed and reopened as
-        /// [`start_up`] does.
-        ///
-        /// # Safety
-        ///
-        /// No descriptor that is closed through the value may be owned by
-        /// an object of this program: its methods close descriptors by
-        /// number, whoever opened them, and a `File`, a socket or an
-        /// `OwnedFd` whose descriptor was closed under it would next close,
-        /// or read, whatever was opened at that number since. [`start_up`]
-        /// closes every descriptor from 3 up, so for it no object may own
-        /// one at all, which holds at one point alone: in a `.init_array`
-        /// constructor, before `main` and before the Rust runtime's own
-        /// initialisation, when nothing of this program has run yet and
-        /// the process holds only what it was started with.
-        pub(crate) unsafe fn at_start() -> Self {
-            Kernel(())
+    mod token {
+        /// The system itself ([`super::Fds`]). [`Kernel::at_start`] is the
+        /// one way to make it, and the constructor the one place lsof-rs
+        /// does.
+        pub(crate) struct Kernel(());
+
+        impl Kernel {
+            /// The system's descriptor table, to be closed and reopened as
+            /// [`super::start_up`] does.
+            ///
+            /// # Safety
+            ///
+            /// No descriptor that is closed through the value may be owned
+            /// by an object of this program: its methods close descriptors
+            /// by number, whoever opened them, and a `File`, a socket or an
+            /// `OwnedFd` whose descriptor was closed under it would next
+            /// close, or read, whatever was opened at that number since.
+            /// [`super::start_up`] closes every descriptor from 3 up, so
+            /// for it no object may own one at all, which holds at one
+            /// point alone: in a `.init_array` constructor, before `main`
+            /// and before the Rust runtime's own initialisation, when
+            /// nothing of this program has run yet and the process holds
+            /// only what it was started with.
+            pub(crate) unsafe fn at_start() -> Self {
+                Kernel(())
+            }
         }
     }
 
@@ -399,18 +421,13 @@ mod startup {
             usize::try_from(filled).unwrap_or(0)
         }
 
-        fn table_size(&mut self) -> c_int {
-            // SAFETY: `getdtablesize()` takes nothing and returns an integer.
-            unsafe { libc::getdtablesize() }
-        }
-
         fn close(&mut self, fd: c_int) {
-            // SAFETY: `close()` takes a descriptor number and touches no memory
-            // of this process. Closing one is unsound only where an object
-            // owns it, and `Kernel::at_start`'s contract, taken on by whoever
-            // made this value, says none owns one closed here: `fd` is one
-            // the process was started with, or one opened through this value
-            // and held in no object.
+            // SAFETY: `close()` takes a number and touches no memory of this
+            // process (one not open is `EBADF`, nothing else). It is unsound
+            // only where an object owns the number, and `Kernel::at_start`'s
+            // contract, taken on by whoever made this value, says none does:
+            // `fd` is one the process was started with, or one opened through
+            // this value and held in no object.
             unsafe {
                 libc::close(fd);
             }
@@ -452,10 +469,6 @@ mod startup {
         }
 
         fn read_fd_dir(&mut self, _dir: c_int, _buf: &mut [u8]) -> usize {
-            0
-        }
-
-        fn table_size(&mut self) -> c_int {
             0
         }
 
@@ -512,12 +525,13 @@ extern "C" fn capture() {
     // with (`startup`). This is a `.init_array` constructor: the C runtime
     // calls it before `main`, so before the Rust runtime's initialisation
     // and before any code of lsof-rs or of a crate it links, on the one
-    // thread there is. The only other constructor in the program is std's,
-    // which stores `argc`, `argv` and `envp` and opens nothing (measured:
-    // the binary's `.init_array` holds three entries, the C start-up files'
-    // `frame_dummy`, std's and this one; lsof-cli's `tests/startup.rs`
-    // fails on a fourth). So the process holds exactly what it was started
-    // with. What a shared object loaded before the program opened in a
+    // thread there is. The other constructors in the program open nothing:
+    // on glibc the C start-up files' `frame_dummy` and std's, which stores
+    // `argc` and `argv`; on musl the start-up files' `__do_init` alone (std
+    // has none there). lsof-cli's `tests/startup.rs` resolves each
+    // `.init_array` entry to its symbol and fails on any other, on a
+    // `.preinit_array` and on a shared object it does not know. So the
+    // process holds exactly what it was started with. What a shared object loaded before the program opened in a
     // constructor of its own (a preloaded library) is closed too, as the C,
     // whose `closefrom()` comes after every constructor, closes it.
     //
@@ -583,14 +597,15 @@ mod tests {
     #[derive(Debug, Default)]
     struct Table {
         open: BTreeSet<c_int>,
-        /// `RLIMIT_NOFILE`: no descriptor is opened at or past it.
+        /// `RLIMIT_NOFILE`: no descriptor is opened at or past it. One opened
+        /// under a higher limit keeps its number.
         limit: c_int,
-        /// What `getdtablesize()` answers, where that is not the limit.
-        table_size: Option<c_int>,
         /// Whether `close_range(2)` is there, `/proc/self/fd`, `/dev/null`.
         has_close_range: bool,
         has_proc: bool,
         has_null: bool,
+        /// A `/proc/self/fd` that opens and has no entry to give.
+        lists_nothing: bool,
         /// The descriptors `/dev/null` was opened on and still is.
         null: BTreeSet<c_int>,
         /// The status the run ended with, and what was called after it.
@@ -663,6 +678,9 @@ mod tests {
             self.called();
             assert!(self.open.contains(&dir), "a listing through a closed fd");
             self.reads += 1;
+            if self.lists_nothing {
+                return 0;
+            }
             let mut filled = 0;
             loop {
                 // `.` and `..` first, then each open number from where the
@@ -684,11 +702,6 @@ mod tests {
                 self.at = next;
             }
             filled
-        }
-
-        fn table_size(&mut self) -> c_int {
-            self.called();
-            self.table_size.unwrap_or(self.limit)
         }
 
         fn close(&mut self, fd: c_int) {
@@ -834,36 +847,75 @@ mod tests {
         assert_eq!(t.fds(), [0, 1, 2, 3, 4]);
     }
 
-    /// With neither, every number below the descriptor limit is closed, at
-    /// least to 53 and at most [`SWEEP_MAX`] of them.
+    /// The one-by-one close: every number from the first up to the end it
+    /// is given, in order, open or not, and none outside them.
     #[test]
-    fn without_proc_every_number_below_the_limit_is_closed() {
-        let mut t = Table::holding(&[0, 1, 2, 4, 9, 63]);
-        t.has_close_range = false;
-        t.has_proc = false;
-        t.limit = 64;
-        close_from(&mut t, FIRST_CLOSED);
-        assert_eq!(t.fds(), [0, 1, 2]);
+    fn a_sweep_closes_every_number_from_the_first_to_its_end() {
+        let mut t = Table::holding(&[0, 1, 2, 4, 9, 63, 64]);
+        sweep(&mut t, FIRST_CLOSED, 64);
+        assert_eq!(t.fds(), [0, 1, 2, 64]);
         assert_eq!(t.closed, (3..64).collect::<Vec<_>>());
-        // A limit below 53: the C's `MaxFd` is 53 all the same.
-        let mut t = Table::holding(&[0, 1, 2, 52, 53]);
-        t.has_close_range = false;
-        t.has_proc = false;
-        t.table_size = Some(20);
-        close_from(&mut t, FIRST_CLOSED);
-        assert_eq!(t.fds(), [0, 1, 2, 53]);
-        assert_eq!(t.closed.len(), 50);
-        assert_eq!(sweep_end(20), 53);
-        assert_eq!(sweep_end(-1), 53, "an unlimited table is -1 to the C");
-        assert_eq!(sweep_end(54), 54);
-        assert_eq!(sweep_end(1024), 1024);
-        assert_eq!(sweep_end(SWEEP_MAX), SWEEP_MAX);
-        assert_eq!(sweep_end(c_int::MAX), SWEEP_MAX);
-        assert_eq!(sweep_end(1 << 30), 1 << 20);
+        // From another number; and an end at or below the start closes none.
+        let mut t = Table::holding(&[0, 1, 2, 3, 4, 5, 6]);
+        sweep(&mut t, 5, 7);
+        assert_eq!(
+            (t.fds(), t.closed.clone()),
+            (vec![0, 1, 2, 3, 4], vec![5, 6])
+        );
+        sweep(&mut t, 5, 5);
+        sweep(&mut t, 5, 4);
+        assert_eq!(t.closed, [5, 6]);
         // The one call, where it is there, is all that is made.
         let mut t = Table::holding(&[0, 1, 2, 4]);
         close_from(&mut t, FIRST_CLOSED);
         assert_eq!((t.fds(), t.closed.len(), t.reads), (vec![0, 1, 2], 0, 0));
+    }
+
+    /// With neither `close_range(2)` nor `/proc/self/fd`, every number from
+    /// 3 up to [`SWEEP_MAX`] is closed, whatever the descriptor limit is: a
+    /// descriptor opened under a higher limit (15,000 under a soft limit of
+    /// 1,024, measured) is closed with the rest, where a sweep that ended at
+    /// the limit, the C's, left it open.
+    #[test]
+    #[cfg_attr(miri, ignore = "a million calls of the table: minutes under miri")]
+    fn without_proc_every_number_is_closed_whatever_the_limit() {
+        let mut t = Table::holding(&[0, 1, 2, 4, 9, 1023, 1024, 15_000, SWEEP_MAX - 1, SWEEP_MAX]);
+        t.has_close_range = false;
+        t.has_proc = false;
+        t.limit = 1024;
+        close_from(&mut t, FIRST_CLOSED);
+        assert_eq!(
+            t.fds(),
+            [0, 1, 2, SWEEP_MAX],
+            "all but what is past the bound"
+        );
+        assert_eq!(t.closed.len(), (SWEEP_MAX - FIRST_CLOSED) as usize);
+        assert_eq!(t.closed.first(), Some(&FIRST_CLOSED));
+        assert_eq!(t.closed.last(), Some(&(SWEEP_MAX - 1)));
+        assert_eq!(SWEEP_MAX, 1_048_576);
+        // A limit of 20: no fewer, and `/dev/null` still finds its number.
+        let mut t = Table::holding(&[0, 1, 52, 53, 15_000]);
+        t.has_close_range = false;
+        t.has_proc = false;
+        t.limit = 20;
+        start_up(&mut t);
+        assert_eq!((t.fds(), t.exited), (vec![0, 1, 2], None));
+    }
+
+    /// A `/proc/self/fd` that opens and lists nothing (a `/proc` that is no
+    /// procfs; a filter that refuses `getdents64(2)`): nothing is closed but
+    /// the listing's own descriptor, and no number is swept, as in the C's
+    /// shim, whose `readdir()` loop ends at once the same way (measured: a
+    /// descriptor handed down stays open in both).
+    #[test]
+    fn a_listing_that_lists_nothing_closes_nothing() {
+        let mut t = Table::holding(&[0, 1, 2, 4, 9]);
+        t.has_close_range = false;
+        t.lists_nothing = true;
+        close_from(&mut t, FIRST_CLOSED);
+        assert_eq!(t.fds(), [0, 1, 2, 4, 9]);
+        assert_eq!(t.closed, [3], "the listing's own, and no sweep");
+        assert_eq!(t.reads, 1);
     }
 
     /// A listing's entries are read as the kernel lays them out, and
@@ -970,6 +1022,5 @@ mod tests {
         }
         assert!(seen.contains(&dir), "the listing lists itself: {seen:?}");
         assert!(seen.contains(&0) && seen.contains(&2), "{seen:?}");
-        assert!(kernel.table_size() >= 3);
     }
 }

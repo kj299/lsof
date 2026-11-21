@@ -122,6 +122,8 @@ mod net;
 #[cfg(target_os = "linux")]
 mod netnames;
 #[cfg(target_os = "linux")]
+mod offtype;
+#[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
 pub mod safefs;

@@ -1008,7 +1008,7 @@ fn main() {
         }
     };
 
-    let (selection, format, repeat, columns, mounts) = match action {
+    let (selection, mut format, repeat, mut columns, mounts) = match action {
         // To stderr, as the C's `usage()` writes them, and exit 0
         // (DIVERGENCES 114, 150): `lsof -h 2>/dev/null` and `lsof -v
         // 2>/dev/null` print nothing in either.
@@ -1053,7 +1053,9 @@ fn main() {
     // && ErrStat) rv = LSOF_EXIT_ERROR`). lsof-rs had made a search item of it
     // as well, so `-V` reported it a second time (DIVERGENCES 62).
     let mut dropped_an_argument = false;
-    let selection = {
+    // With the selection, the C's `OffType`: whether a file's offset can be
+    // told, asked where the C probes for it (below).
+    let (selection, offsets_known) = {
         let mut sel = selection;
         sel.paths_identified = env.backend.identifies_paths();
         sel.endpoints_in_core = env.backend.leaves_endpoints_to_core();
@@ -1238,6 +1240,33 @@ fn main() {
         if !sel.paths.is_empty() && survived == 0 && !sel.quiet {
             lsof_cli::stdio::exit(1);
         }
+        // The C's `initialize()`, called here, once the file arguments are
+        // entered (`main.c:1278`): it probes whether it can tell a file's
+        // offset (`dproc.c:630-656`), and where it cannot it says so if `-o`
+        // asked for offsets, and shows sizes; then it reads the mount table
+        // where the run needs one and none was read yet; and then, back in
+        // `main()`, it drops what `+f` selected, with a second warning
+        // (`main.c:1279-1286`). So with no `/proc` a run without a path
+        // says `can't report offset` and then ends at the table, and one
+        // with a path, a `+d` or an `-e` never gets here (DIVERGENCES 177).
+        let offsets_known = env.backend.reports_offsets();
+        let warns = !sel.omit_unreadable;
+        if !offsets_known && columns.disregard_offset(warns) {
+            say!("lsof: {}", lsof_cli::args::NO_OFFSET);
+        }
+        if table.is_none() && needs_table {
+            table = Some(read_table(&sel));
+        }
+        if !offsets_known {
+            let said = columns.disregard_flags(sel.file_struct, warns);
+            sel.file_struct = false;
+            if let Format::Json(j) = &mut format {
+                j.file_flags = lsof_core::render::FileFlags::Off;
+            }
+            if said {
+                say!("lsof: {}", lsof_cli::args::NO_FILE_FLAGS);
+            }
+        }
         // `+m`: the C reads its table (and prints each mount as it records
         // it) where it has not yet, and ends the run, exit 0, before
         // anything is gathered (`main.c:1326-1331`). A table read before
@@ -1250,9 +1279,6 @@ fn main() {
             #[cfg(target_os = "linux")]
             calls.finish();
             lsof_cli::stdio::exit(0);
-        }
-        if table.is_none() && needs_table {
-            table = Some(read_table(&sel));
         }
         // A POSIX message queue is a regular file on the `mqueue` file
         // system the table recorded (`dnode.c:815-819`, DIVERGENCES 128).
@@ -1281,7 +1307,7 @@ fn main() {
         // the file system that did not answer: the scan must not `stat` that
         // (DIVERGENCES 123), or it waits there itself.
         sel.helpers = lsof_core::FsCalls::helper_pids(&calls);
-        sel
+        (sel, offsets_known)
     };
 
     let _ = env.elevated; // read on all platforms; used for the hint on Windows.
@@ -1334,6 +1360,14 @@ fn main() {
         // drops is still located; see `Selection::locate`.
         let located = selection.locate(&gathered);
         let mut procs = selection.apply_with(gathered, env.backend.take_endpoint_tables());
+        // Where the C cannot tell a file's offset no file has one
+        // (`Lf->off_def`, `dnode.c:774-783`, `dsock.c:3441`): `-F` prints no
+        // `o`, as the table, the size's now, prints none (DIVERGENCES 177).
+        if !offsets_known {
+            for f in procs.iter_mut().flat_map(|p| p.files.iter_mut()) {
+                f.offset = None;
+            }
+        }
         // JSON's numeric `name`, which looks nothing up; the table's and
         // `-F`'s names are asked as each row is written, below.
         if matches!(format, Format::Json(_)) {
