@@ -197,7 +197,7 @@ pub fn entries(kprocs: Vec<KProc>, tasks: bool) -> Vec<Process> {
                 task_command: None,
                 uid: Some(k.uid),
                 pgid: u32::try_from(k.pgid).ok(),
-                files: Vec::new(),
+                files: Vec::new().into(),
                 endpoint_peer: false,
                 unlisted: false,
                 raw_names: None,

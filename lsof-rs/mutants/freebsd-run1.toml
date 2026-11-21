@@ -194,32 +194,32 @@ name = "state-inclusion-leaves-bare-i"
 rule = "with a state inclusion the bare -i selects the TCP sockets in it alone (181)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = "Some(sock) if sock.is_bsd() && !include.is_empty() => {"
-new = "Some(sock) if false && sock.is_bsd() && !include.is_empty() => {"
+old = "Some(sock) if sock.is_bsd() && self.includes_states() => {"
+new = "Some(sock) if false && sock.is_bsd() && self.includes_states() => {"
 
 [[mutant]]
 name = "state-inclusion-rule-for-every-row"
 rule = "the rule is FreeBSD's rows' (181)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = "Some(sock) if sock.is_bsd() && !include.is_empty() => {"
-new = "Some(_sock @ sock) if !include.is_empty() => {"
+old = "Some(sock) if sock.is_bsd() && self.includes_states() => {"
+new = "Some(_sock @ sock) if self.includes_states() => {"
 
 [[mutant]]
 name = "state-exclusion-alone-is-the-rule-too"
 rule = "an exclusion alone leaves the bare -i as it was (181)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = "Some(sock) if sock.is_bsd() && !include.is_empty() => {"
+old = "Some(sock) if sock.is_bsd() && self.includes_states() => {"
 new = "Some(sock) if sock.is_bsd() && self.state_filter.is_some() => {"
 
 [[mutant]]
 name = "state-inclusion-selects-without-i"
-rule = "the inclusion selects nothing unless the bare -i was given (181)"
+rule = "the bare -i's arm selects by the state only where -i is bare; without it the state selects only in a process the C reads (181, re-anchored 2026-11-21 for the OR rule)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = "                self.inet.bare()\n                    && f.is_internet()"
-new = "                f.is_internet()"
+old = "                self.inet.bare() && self.state_selects(f)"
+new = "                self.state_selects(f)"
 
 [[mutant]]
 name = "freebsd-reads-the-table-first"
@@ -498,8 +498,8 @@ name = "dash-d-error-swallowed"
 rule = "a -D value the C refuses is its error (148)"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = "                        Err(line) => early.line(&line),\n                    }\n                    j = chars.len();\n                    continue;\n                }\n                'D' | 'm' if !plus => {"
-new = "                        Err(_) => {}\n                    }\n                    j = chars.len();\n                    continue;\n                }\n                'D' | 'm' if !plus => {"
+old = "                        Err(line) => early.line(&line),\n                    }\n                    j = chars.len();\n                    continue;\n                }\n                // FreeBSD's C has `-k`"
+new = "                        Err(_) => {}\n                    }\n                    j = chars.len();\n                    continue;\n                }\n                // FreeBSD's C has `-k`"
 
 [[mutant]]
 name = "dash-d-report-is-no-report"

@@ -307,29 +307,45 @@ meet. Each number is a row there, with the measurement behind it.
   `differential/freebsd-check.sh`; no CI runs lsof-rs on FreeBSD), as a user
   and as root; what the two print there is the same but for the points below. **Not measured:**
   ZFS, FreeBSD 15.x and 13.x, i386, NFS (`-N` selecting a file, `-S` and
-  `-b` against a server that does not answer), nullfs, jails, IPv6 beyond
-  `::1` (140).
+  `-b` against a server that does not answer), nullfs, jails (140). IPv6
+  beyond `::1` (site-local, link-local with a scope, the host's own
+  address) was measured by the parity review and is the same (140, 180).
   - **Nothing is named** (185): a socket's host and port are numbers, as if
     `-n -P` were always given, where the C prints `localhost:41000->*:*` and
-    `127.0.0.1:nfsd`. `+M` is read and asks no portmapper.
+    `127.0.0.1:nfsd`. `+M` is read and asks no portmapper: where no
+    `rpcbind` runs, the C's `+M` blocks on a run that lists an Internet
+    socket (measured: `-n -P -o +M` was still waiting after 30 seconds),
+    and lsof-rs returns at once, a difference kept for safety (185).
   - **No device cache** (148): the C keeps `/dev`'s table in
     `~/.lsof_<hostname>`, and says so when it creates or updates the file;
     lsof-rs reads `/dev` on every run, writes nothing into the home
     directory and trusts no file's contents. `-D` is read as the C reads it
     and changes nothing: `-D b path` writes no file, `-D r path` reads none,
     `-D ?` reports that there is no path.
-  - **`-k` and `-m`** (148) are `unsupported option`, where the C takes
-    them: lsof-rs reads nothing from kernel memory.
+  - **`-k` and `-m`** (148) are `unsupported option` where the C takes
+    their path: lsof-rs reads nothing from kernel memory. Followed by no
+    word, or by one that opens with `-` or `+`, each is the C's `-k not
+    followed by path` (`-m …`), and that word is read as options (149).
+  - **`-c /regex/`** is read by FreeBSD libc's `regcomp()` grammar, as the
+    C's is, with its refusals in its words (`repetition-operator operand
+    invalid`, `empty (sub)expression`, `trailing backslash (\)`; no GNU
+    `\|`, `\+` or `\w`). Two things beside a character past ASCII are not
+    its: a word operator (`\<`, `[[:<:]]`), which FreeBSD's matcher decides
+    by the character's low byte, and a class under `i`, whose other case is
+    Unicode's folding here and FreeBSD's `towupper()`/`towlower()` there
+    (183).
   - **The bounded calls' helper** (144) keeps `/dev/null` on descriptor 2,
     where the C's child has none: on a run that names a path, a listing that
     holds the helper has that one row more (`lsof /dev/null`). lsof opens
     it for reading and writing, as the C opens `/dev/null` when it starts,
-    so a FIFO in its place holds no run (this last change has run on
-    Linux only; the rest of the list was measured on FreeBSD). The helper
+    so a FIFO in its place holds no run (measured on FreeBSD: the helper's
+    row is `2u`). The helper
     greets with the build it is, and a run whose binary was replaced since
     it started ends `can't fork`, where the C's forked child cannot differ.
     It exists only when the C's child does: on a run that names a path or
-    `+d`/`+D` (182).
+    `+d`/`+D` (182). Under `-K` with a path, lsof's own process has a second
+    thread, the helper's reader (`lsof-safefs`), which the C does not
+    (141).
   - `statfs(2)` of a vnode's path is not bounded by `-S`, as the C's is not
     (143). The `/dev` walk stops past 4,096 directories or 65,536 character
     devices, with a warning, where the C's has no bound (146).

@@ -610,11 +610,11 @@ name = "helper-dev-null-not-read"
 rule = "...for reading too (123)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/safefs.rs"
-old = """    std::fs::OpenOptions::new()
+old = """    let null = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/null")"""
-new = """    std::fs::OpenOptions::new()
+new = """    let null = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/null")"""
 

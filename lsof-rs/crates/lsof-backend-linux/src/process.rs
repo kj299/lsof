@@ -141,7 +141,7 @@ fn read_one(pid: u32) -> Option<(Process, bool)> {
         ppid: st.ppid,
         command: st.command,
         user: None,
-        files: Vec::new(),
+        files: Vec::new().into(),
         endpoint_peer: false,
         unlisted: false,
         raw_names,
@@ -208,7 +208,7 @@ pub fn tasks_of(parent: &Process) -> Vec<Process> {
             Some(Process {
                 tid: Some(tid),
                 task_command: Some(st.command),
-                files: Vec::new(),
+                files: Vec::new().into(),
                 raw_names,
                 ..parent.clone()
             })

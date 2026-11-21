@@ -6,10 +6,12 @@
 > **It has run on one FreeBSD host**: FreeBSD 14.5-RELEASE amd64, UFS, a
 > QEMU guest, beside the C built there with autotools, as a normal user and
 > as root (2026-11-21). The first run found the differences DIVERGENCES'
-> section "FreeBSD: the first run beside the C" lists; the second, of the
-> tree that fixed them, is recorded in row 140, with the one later change
-> that has not run on FreeBSD (the helper's `/dev/null`, row 144). **Not run:** ZFS, FreeBSD
-> 15.x and 13.x, i386, NFS, nullfs, jails. The CI task that would run it on
+> section "FreeBSD: the first run beside the C" lists; the second and the
+> final run, of the tree that fixed them (the helper's `/dev/null` included,
+> `2u`, row 144), are recorded in row 140, and the third, after the two
+> reviews of that work (section "FreeBSD: the two reviews of the first-run
+> fixes"), there too. **Not run:** ZFS, FreeBSD 15.x and 13.x, i386, NFS,
+> nullfs, jails. The CI task that would run it on
 > every change (`.cirrus.yml`, `lsof_rs_task`) needs Cirrus CI connected to
 > this repository, which it is not
 > (`porting-kit/harnesses/platforms/platforms.toml`); until then the run is
@@ -93,7 +95,7 @@ source in the C.
 | Gate | State |
 |---|---|
 | `ported` | yes: `progress.json` says `ported` |
-| `differential` | **no gate yet**: the C was diffed against it by hand, on one host, twice (2026-11-21, `differential/freebsd-check.sh compare`, as a user and as root; DIVERGENCES 140 has the counts). Nothing runs it on every change: the side-by-side in `lsof_rs_task` calls the same script and is not a gate while Cirrus CI is not connected. |
+| `differential` | **no gate yet**: the C was diffed against it by hand, on one host (2026-11-21, `differential/freebsd-check.sh compare`, as a user and as root: the first run, before the fixes; the second and the final run after them; the third after the two reviews; DIVERGENCES 140 has the counts). Nothing runs it on every change: the side-by-side in `lsof_rs_task` calls the same script and is not a gate while Cirrus CI is not connected. |
 | `fuzzed` | `fuzz/fuzz_targets/freebsd_kinfo.rs`: every parser and the row rules on arbitrary bytes. 8.7 million runs locally, and in the CI smoke loop. |
 | `sanitized` | the miri job runs `-p lsof-backend-freebsd`: the pure modules, on Linux. The FFI itself has no sanitizer run. |
 | `unsafe_audited` | `audit_unsafe.py` covers `src/`: seven blocks, each with `// SAFETY:` (the 2026-11-21 work added none). The crate is `#![deny(unsafe_code)]` with one `#[allow]`, so the `forbid` gate does not apply to it, as it does not to the Windows backend. |

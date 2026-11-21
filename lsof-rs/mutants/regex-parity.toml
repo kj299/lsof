@@ -68,8 +68,8 @@ name = "rx-own-for-everything"
 rule = "the crate answers what it takes (new_own is the tests' and the fuzz target's)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex.rs"
-old = '''        Self::compile(expression, extended, icase, false)'''
-new = '''        Self::compile(expression, extended, icase, true)'''
+old = '''        Self::compile(dialect, expression, extended, icase, false)'''
+new = '''        Self::compile(dialect, expression, extended, icase, true)'''
 
 [[mutant]]
 name = "rx-tree-limit-off-by-one"

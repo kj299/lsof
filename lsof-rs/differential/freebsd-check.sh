@@ -23,6 +23,9 @@
 #   LSOF_C=/usr/local/sbin/lsof LSOF_RS=$HOME/lsof sh freebsd-check.sh compare
 #
 # Every lsof run here has -n -P: no name is looked up, nothing leaves the host.
+# And each is held to 2 GiB of address space and 60 seconds (LSOF_VMEM_KB,
+# LSOF_TIMEOUT): the C's `+M` waits on a portmapper that is not there, and a
+# run of the C has grown past 4 GB on a test host.
 # What the comparison is expected to show is DIVERGENCES.md's (rows 140-148,
 # 180-185); differential/README.md says how to read it.
 
@@ -43,6 +46,12 @@ header() {
     command -v rustc >/dev/null && rustc -V
     [ -d "$DIR/src/.git" ] && git -C "$DIR/src" log --oneline -1
     echo
+}
+
+# bounded CMD...: one run of a binary, in a subshell under `ulimit -v` and
+# `timeout`, its exit status the run's (124 for one that ran out of time).
+bounded() {
+    (ulimit -v "${LSOF_VMEM_KB:-2097152}" 2>/dev/null; exec timeout "${LSOF_TIMEOUT:-60}" "$@")
 }
 
 case "$step" in
@@ -124,6 +133,7 @@ compare)
     work="$DIR/work-$me"
     rm -rf "$work"; mkdir -p "$work/small" "$work/big" || exit 1
     for i in 1 2 3 4 5; do : > "$work/small/f$i"; done
+    : > "$work/stdin"
     (cd "$work/big" && jot 50000 | xargs touch)
 
     # Two fixtures of our own, built with the base system's compiler: a
@@ -245,8 +255,12 @@ EOF
     cmp_runs() {
         how=$1; shift
         echo "=== lsof $*"
-        "$C" "$@" > "$work/c.out" 2>&1; crc=$?
-        "$RS" "$@" > "$work/rs.out" 2>&1; rrc=$?
+        # In a subshell, so that the redirections are the run's alone and not
+        # the script's own shell's (a function's are its caller's while it
+        # runs), and with a standard input of its own: a file no case names,
+        # never the /dev/null of a detached run.
+        (bounded "$C" "$@") < "$work/stdin" > "$work/c.out" 2>&1; crc=$?
+        (bounded "$RS" "$@") < "$work/stdin" > "$work/rs.out" 2>&1; rrc=$?
         echo "rc: C=$crc lsof-rs=$rrc   lines: C=$(wc -l < "$work/c.out") lsof-rs=$(wc -l < "$work/rs.out")"
         case "$how" in
         usage)
@@ -254,9 +268,18 @@ EOF
             sed -e "/^Try 'lsof -h' for usage\.\$/d" "$work/rs.out" > "$work/rs.cmp"
             note=" (the usage block and the usage line aside)" ;;
         own)
-            grep -v '^lsof  *[0-9]' "$work/c.out" > "$work/c.cmp"
-            grep -v '^lsof  *[0-9]' "$work/rs.out" > "$work/rs.cmp"
+            # And the rows of the `timeout` each run is started under.
+            grep -Ev '^(lsof|timeout)  *[0-9]' "$work/c.out" > "$work/c.cmp"
+            grep -Ev '^(lsof|timeout)  *[0-9]' "$work/rs.out" > "$work/rs.cmp"
             note=" (the rows of the lsof processes aside: C $(grep -c '^lsof  *[0-9]' "$work/c.out"), lsof-rs $(grep -c '^lsof  *[0-9]' "$work/rs.out"))" ;;
+        ownf)
+            # -F with c: every process block but those of lsof and its timeout.
+            for f in c rs; do
+                awk '/^p[0-9]/ { pl = $0; skip = -1; next }
+                     skip == -1 && /^c/ { skip = ($0 == "clsof" || $0 == "ctimeout"); if (!skip) { print pl; print }; next }
+                     !skip { print }' "$work/$f.out" > "$work/$f.cmp"
+            done
+            note=" (the lsof processes and their timeout aside)" ;;
         json)
             sed -e 's/"lsof_version":"[^"]*"/"lsof_version":"V"/' "$work/c.out" > "$work/c.cmp"
             sed -e 's/"lsof_version":"[^"]*"/"lsof_version":"V"/' "$work/rs.out" > "$work/rs.cmp"
@@ -286,6 +309,7 @@ EOF
     run() { cmp_runs exact "$@"; }
     runu() { cmp_runs usage "$@"; }
     runo() { cmp_runs own "$@"; }
+    runof() { cmp_runs ownf "$@"; }
     runj() { cmp_runs json "$@"; }
     runjs() { cmp_runs jsonsock "$@"; }
     runs() { cmp_runs self "$@"; }
@@ -299,8 +323,8 @@ EOF
         # none (DIVERGENCES 148). What the C says of it on its first run is
         # shown here, once, so that no comparison below holds it.
         echo "=== the C's device cache, as its first run finds it"
-        "$C" -n -P -p "$P" 2>&1 >/dev/null | grep -i 'cache' || echo "(nothing said)"
-        "$C" -D '?' 2>&1 | grep 'Personal path:' | sort -u
+        bounded "$C" -n -P -p "$P" 2>&1 >/dev/null | grep -i 'cache' || echo "(nothing said)"
+        bounded "$C" -D '?' 2>&1 | grep 'Personal path:' | sort -u
         echo
         # Row 142: +f c/f/g/G/n and their -F / JSON forms.
         run -n -P -p "$P"
@@ -356,8 +380,8 @@ EOF
         runu -n -P -D
         runu -n -P -D '??'
         echo "=== lsof -D ? (the C reports its cache paths, lsof-rs that it has none)"
-        "$C" -D '?' > "$work/c.out" 2>&1; crc=$?
-        "$RS" -D '?' > "$work/rs.out" 2>&1; rrc=$?
+        (bounded "$C" -D '?') > "$work/c.out" 2>&1; crc=$?
+        (bounded "$RS" -D '?') > "$work/rs.out" 2>&1; rrc=$?
         echo "rc: C=$crc lsof-rs=$rrc"
         echo "--- C"; cat "$work/c.out"
         echo "--- lsof-rs"; cat "$work/rs.out"; echo
@@ -371,6 +395,17 @@ EOF
         runu -n -P -s UDP:Idle
         runu -n -P -s TCP:CLOSE
         runu -n -P -K x
+        # Row 149: FreeBSD's -k and -m give back a word that opens an option.
+        runu -n -P -k -W
+        runu -n -P -k -p
+        runu -n -P -m +W
+        runu -n -P -k -- x
+        # Row 183: -c /re/ by FreeBSD libc's regcomp(), its grammar and words.
+        for re in '/a**/' '/a|/' '//' '/a\w/' '/a[/' '/a{1/' '/*a/' '/[[:foo:]]/' '/\(/b' '/a{2,1}/' \
+            '/[z-a]/' '/\/' '/a{256}/' '/[--a]/' '/a)/' '/^sle*p$/' '/sle\+p/b' '/sl\|x/b' '/\(e\)\1/b' \
+            '/[[:<:]]sleep/' '/[[:alpha:]]\{5\}/b' '/SLEEP/i'; do
+            runu -n -P -c "$re" -a -p "$P"
+        done
         if [ -n "$SK" ]; then
             # Row 180: Internet sockets, each kind; -i by end and by family.
             run -n -P -a -p "$SK" -d 3-30
@@ -387,6 +422,15 @@ EOF
             run -n -P -a -p "$SK" -F f -i -s TCP:^LISTEN
             run -n -P -a -p "$SK" -F f -i 4 -s TCP:ESTABLISHED
             run -n -P -a -p "$SK" -F f -s TCP:LISTEN
+            # Row 181 under the OR: a TCP socket in an included state is
+            # selected by that alone, whatever -i says, in every process the
+            # C reads (the lsof processes and their timeout left out).
+            runof -n -P -F pcfn -U -s TCP:LISTEN
+            runof -n -P -F pcfn -s TCP:LISTEN -i UDP
+            runof -n -P -F pcfn -d 0 -s TCP:CLOSED
+            run -n -P -s TCP:LISTEN -i :9 -t
+            runof -n -P -F pcfn -s TCP:LISTEN -i :9
+            runof -n -P -F pcfn -p "$P" -u "$me" -s TCP:LISTEN
         else
             echo "=== no compiler: the socket and thread fixtures were not built"; cat "$work/cc.log"; echo
         fi
@@ -408,12 +452,12 @@ EOF
         echo "=== large directory, +d over 50000 files (seconds)"
         for b in "$C" "$RS"; do
             t0=$(date +%s)
-            "$b" -n -P +d "$work/big" > /dev/null 2>&1
+            (bounded "$b" -n -P +d "$work/big") > /dev/null 2>&1
             echo "$b rc=$? $(( $(date +%s) - t0 ))s"
         done
         echo
         echo "=== the helper's hidden argument from a terminal or /dev/null must be refused"
-        "$RS" --lsof-rs-freebsd-bounded-calls-helper < /dev/null; echo "rc=$?"
+        (bounded "$RS" --lsof-rs-freebsd-bounded-calls-helper) < /dev/null; echo "rc=$?"
         echo
         echo "=== summary: $same comparisons the same, $differ with a difference"
         echo "=== done"

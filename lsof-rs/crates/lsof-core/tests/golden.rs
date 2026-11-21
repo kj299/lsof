@@ -213,7 +213,8 @@ fn table_offset_with_dash_o() {
             links: None,
             socket: None,
             name_addition: None,
-        }],
+        }]
+        .into(),
     };
     // Default prefers size; -o prefers the offset (0t<dec>).
     assert!(table::render(
@@ -276,7 +277,8 @@ fn the_size_off_column_has_three_modes() {
             file(FdType::Handle(3), FileType::Regular, Some(100), Some(42)),
             file(FdType::Cwd, FileType::Dir, Some(4096), None),
             file(FdType::Handle(4), FileType::Fifo, None, Some(9)),
-        ],
+        ]
+        .into(),
     };
     let render = |opts: TableOpts| table::render(std::slice::from_ref(&p), opts);
     let cells = |out: &str| -> Vec<String> {
@@ -417,7 +419,8 @@ fn a_long_offset_prints_in_hex_past_the_digit_limit() {
             links: None,
             socket: None,
             name_addition: None,
-        }],
+        }]
+        .into(),
     };
     let f = fields::render(
         std::slice::from_ref(&p),
@@ -480,7 +483,8 @@ fn task_entry(command: &str, task_command: &str) -> lsof_core::Process {
             links: None,
             socket: None,
             name_addition: None,
-        }],
+        }]
+        .into(),
     }
 }
 
@@ -682,7 +686,7 @@ fn a_task_row_is_distinguishable_from_a_thread_handle() {
         unlisted: false,
         raw_names: None,
         file_structs: None,
-        files: vec![file(FdType::Task), file(FdType::Handle(180))],
+        files: vec![file(FdType::Task), file(FdType::Handle(180))].into(),
     };
     let out = table::render(&[p], TableOpts::new(Escaper::WINDOWS));
 
@@ -735,7 +739,8 @@ fn table_command_width_caps() {
             links: None,
             socket: None,
             name_addition: None,
-        }],
+        }]
+        .into(),
     };
     // +c 4: the COMMAND cell is truncated to 4 chars; the full name is gone.
     let capped = table::render(
@@ -798,7 +803,8 @@ fn fields_skips_empty_name() {
             links: None,
             socket: None,
             name_addition: None,
-        }],
+        }]
+        .into(),
     };
     let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
     assert!(out.contains("ftask\n"), "task FD field expected: {out:?}");
@@ -929,7 +935,8 @@ fn windows_object_types_render() {
                 FileType::Other("SEM".into()),
                 "\\BaseNamedObjects\\Foo",
             ),
-        ],
+        ]
+        .into(),
     };
     let table = table::render(
         std::slice::from_ref(&p),
@@ -1068,7 +1075,8 @@ fn named(command: &str, user: &str, name: &str) -> lsof_core::model::Process {
             links: None,
             socket: None,
             name_addition: None,
-        }],
+        }]
+        .into(),
     }
 }
 
@@ -1294,7 +1302,8 @@ fn tcp_info_fixture() -> Vec<lsof_core::model::Process> {
             links: None,
             socket: Some(Box::new(sock)),
             name_addition: None,
-        }],
+        }]
+        .into(),
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
@@ -1588,7 +1597,8 @@ fn the_f_marker_is_emitted_for_a_row_with_no_handle_value() {
                 tcp: None,
             })),
             name_addition: None,
-        }],
+        }]
+        .into(),
     };
     let out = fields::render(&[p], false, None, TcpInfoFlags::DEFAULT, Escaper::WINDOWS);
     assert!(out.contains("funk\n"), "{out:?}");
@@ -2060,7 +2070,8 @@ fn packet_row() -> Vec<lsof_core::model::Process> {
                 tcp: None,
             })),
             name_addition: None,
-        }],
+        }]
+        .into(),
     }]
 }
 
@@ -2166,7 +2177,8 @@ fn an_af_unix_row_reports_its_inode_as_i_and_has_no_p() {
                 tcp: None,
             })),
             name_addition: None,
-        }],
+        }]
+        .into(),
     }];
     let out = fields::render(&procs, false, None, TcpInfoFlags::DEFAULT, Escaper::UNIX);
     assert!(out.contains("i3939\n"), "unix NODE is its inode: {out:?}");
@@ -2224,7 +2236,7 @@ fn python3(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
         ppid: Some(493),
         command: "python3".into(),
         user: Some("root".into()),
-        files,
+        files: files.into(),
         endpoint_peer: false,
         unlisted: false,
         raw_names: None,
@@ -2564,7 +2576,7 @@ fn jproc(files: Vec<lsof_core::OpenFile>) -> lsof_core::Process {
         unlisted: false,
         raw_names: None,
         file_structs: None,
-        files,
+        files: files.into(),
     }
 }
 
@@ -3231,7 +3243,7 @@ fn freebsd_file_structure_columns_are_the_cs_by_its_source() {
         "/tmp",
     );
     let mut p = python3(vec![cwd, reg]);
-    p.file_structs = Some(Box::new([(
+    p.file_structs = Some(std::sync::Arc::new([(
         3,
         FileStruct {
             count: Some(2),

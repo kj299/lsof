@@ -1108,6 +1108,21 @@ amd64, 2026-11-21: the crate's tests against the live system, and every
 listing of the side-by-side run, as a user and as root; DIVERGENCES 140);
 i386's layout is from the headers alone.
 
+**FreeBSD's `-K` holds a process's rows once, however many threads it
+has** (DIVERGENCES 141). Every thread is an entry, as the C makes it, and
+each entry had been given its own copy of its process's rows, so a run's
+memory was the threads times the files: a process any local user runs can
+have `kern.threads.max_threads_per_proc` threads (1,500) and
+`kern.maxfilesperproc` descriptors. The entries now share one list
+(`lsof_core::Files`, copied only for an entry the selection takes rows
+from), so a full listing holds O(files) rows a process and O(threads)
+entries; what it prints is still the threads times the files, as the C's
+does. Measured on FreeBSD 14.5 by the safety review's fixture (1,001
+threads, 206 descriptors) before and after: DIVERGENCES 141. A table read
+while threads come and go is retried (`sys.rs`'s `read_with`: the size
+asked again, a quarter and 4 KiB of slack, eight tries), where the C asks
+once and ends `can't read process table: Cannot allocate memory` (186).
+
 **FreeBSD's bounded calls run in a helper process, protected as Linux's
 is** (DIVERGENCES 144; its protocol and its timeouts are tested on Linux,
 and it has run on FreeBSD 14.5 amd64, 2026-11-21, where no file system
@@ -1131,12 +1146,17 @@ call `alarm(TmLimit)`; a threaded Rust process cannot fork safely, so
 - **When.** Only where the C's child exists (DIVERGENCES 182): the first
   bounded call starts it, and on FreeBSD those are a path argument's, a
   `+d`/`+D` walk's and the mount table's, which is read for a path
-  argument alone. A run that names none (`lsof`, `-p`, `-u`, `-i`, `-U`,
+  argument or a `+d`/`+D` directory alone (`ck_file_arg()`). A run that names none (`lsof`, `-p`, `-u`, `-i`, `-U`,
   `-N`, `-K`, `-b`) starts no process at all, and reads no mount table;
   it had started one on every run but `-i`'s (measured on FreeBSD:
   `lsof -n -P` lists one lsof process, `lsof -n -P /` two).
 - **What it is given.** One fixed argument, an empty environment, lsof's
-  working directory, `/dev/null` as stderr and two pipes as stdin and
+  working directory (so a mount's source that is no absolute path, `devfs`
+  or `srv:/x`, is `readlink`ed and `stat`ed relative to it, as the C's
+  child resolves it, `dmnt.c:167-177`: whoever controls the directory lsof
+  is run in can put a symlink by that name there, and what it says is
+  escaped, `SafeFs::shown`, and each call bounded by `-S`; measured on
+  FreeBSD by the safety review with an escape sequence in the target), `/dev/null` as stderr and two pipes as stdin and
   stdout. lsof opens that `/dev/null` itself, for reading and writing, and
   hands it over: the open the C makes as it starts (`main.c:178`). std's
   `Stdio::null()` opens it for writing alone, and such an open waits for

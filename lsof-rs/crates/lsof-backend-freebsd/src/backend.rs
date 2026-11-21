@@ -259,7 +259,7 @@ impl Env for Live<'_> {
 }
 
 /// A process's [`lsof_core::Process::file_structs`].
-type FileStructs = Option<Box<[(u64, lsof_core::FileStruct)]>>;
+type FileStructs = Option<std::sync::Arc<[(u64, lsof_core::FileStruct)]>>;
 
 /// The rows of one process, in the kernel's order (`process_file_descriptors()`),
 /// and, where `+f` asks for it, each numbered row's file structure, by
@@ -320,7 +320,7 @@ fn rows_of(
     // Sorted and one per descriptor, for `Process::file_struct`'s search.
     structs.sort_by_key(|(n, _)| *n);
     structs.dedup_by_key(|(n, _)| *n);
-    let structs = opts.file_struct.then(|| structs.into_boxed_slice());
+    let structs = opts.file_struct.then(|| structs.into());
     (out, structs)
 }
 
@@ -442,8 +442,10 @@ impl Backend for FreeBsdBackend {
         let opts = Opts::of(sel);
         // The rows of the process whose task was read last: every thread of
         // a process is given the same files (the C reads them again for
-        // each, `process_file_descriptors()` of the same PID).
-        let mut last: Option<(u32, bool, Vec<lsof_core::model::OpenFile>, FileStructs)> = None;
+        // each, `process_file_descriptors()` of the same PID), and shares
+        // them, so that they are held once a process however many threads
+        // it has (`Files`).
+        let mut last: Option<(u32, bool, lsof_core::Files, FileStructs)> = None;
         for p in procs.iter_mut() {
             if restrict
                 .as_ref()
@@ -465,10 +467,11 @@ impl Backend for FreeBsdBackend {
                     // and so no line, as in the C (`kinfo_getfile()` returns
                     // NULL, and nothing is linked): there is no `NOFD` row on
                     // FreeBSD.
-                    (p.files, p.file_structs) = match filedesc(pid) {
+                    let (files, structs) = match filedesc(pid) {
                         Ok(files) => rows_of(pid, &files, &env, sockets_only, opts),
                         Err(_) => (Vec::new(), None),
                     };
+                    (p.files, p.file_structs) = (files.into(), structs);
                     if tasks {
                         last = Some((p.pid, sockets_only, p.files.clone(), p.file_structs.clone()));
                     }

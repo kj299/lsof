@@ -26,7 +26,8 @@ run"). What follows is what that changed; each is now the C's, measured.
   (182): `lsof`, `-p`, `-u`, `-i`, `-U`, `-N` and `-K` read no mount, so
   lsof no longer lists a helper and two pipes of its own, `-b -p PID` prints
   no `avoiding …` line, and a mount that does not answer costs such a run
-  nothing. `-N` goes by the file system each file is on. A path argument, or
+  no `stat` or `readlink` of the mount table (each vnode's path is still
+  `statfs`ed in lsof itself, unbounded, as the C's is: row 143). `-N` goes by the file system each file is on. A path argument, or
   `+d`/`+D`, reads the table and starts the helper, as the C forks its
   child.
 - **`-K` lists every thread** (141): one entry a thread, its TID in a TID
@@ -57,6 +58,35 @@ run"). What follows is what that changed; each is now the C's, measured.
 - Not changed, and recorded: the helper keeps a descriptor 2, `/dev/null`,
   where the C's child has none (144); nothing is named without `-n -P`
   (185).
+
+### Fixed — FreeBSD, after the two reviews of that work (2026-11-21)
+A parity review and a safety review of the changes above, each in the same
+FreeBSD 14.5 guest; what they found, now the C's (measured there,
+DIVERGENCES "FreeBSD: the two reviews of the first-run fixes"):
+- **`-s TCP:<state>` selects under the OR whatever `-i` says** (181): a
+  TCP socket in an included state is listed beside what the other selectors
+  list, in every process the C reads (`-s TCP:LISTEN -i UDP` lists the UDP
+  sockets and every listener; `-U -s TCP:LISTEN`, `-d 0 -s TCP:CLOSED`, `-s
+  TCP:LISTEN -i :9 -t` the same). lsof-rs had done so for the bare `-i`
+  alone. Linux is unchanged: its C gives a socket that mark only for `-i`.
+- **`-c /regex/` is read by FreeBSD libc's `regcomp()`** (183): Henry
+  Spencer's grammar, with no GNU operator (`\|`, `\+` and `\?` are the
+  characters, `\w`, `\s`, `\b` and the like `trailing backslash (\)`), an
+  empty expression or alternative refused (`empty (sub)expression`), `a**`
+  refused, a count at most 255, an unmatched `)` a character, FreeBSD's
+  classes (`[[:number:]]`, `[[:rune:]]`, …) and `[[:<:]]`/`[[:>:]]`, and its
+  `regerror()` words throughout. lsof-rs had read glibc's grammar there.
+  Every answer measured against FreeBSD 14.5's libc: 2,165 expressions
+  against 72 commands (`tests/posix_regex_freebsd.txt`). Linux is unchanged.
+- **`-k` and `-m`** (149): followed by no word, or by one that opens with
+  `-` or `+`, each is the C's `-k not followed by path` (`-m …`), and that
+  word is read as options (`-k -p` then says `no process ID specified`).
+- **`-K` holds a process's files once** (141): every thread entry shares
+  its process's rows, where each had a copy; a run's memory was the threads
+  times the files (the safety review's LOW-1).
+- **No `3w` in lsof's own listing under `-r`**: standard output is written
+  through a duplicate of descriptor 1 made for each write, where one kept
+  for the run showed from the second cycle on.
 
 ### Changed — FreeBSD, written from the C's source (2026-11-20; measured 2026-11-21, see above)
 - **`+f c`, `+f f`, `+f g`/`G` and `+f n`** (DIVERGENCES 142): FCT,

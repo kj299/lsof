@@ -69,7 +69,8 @@ pub fn sample_processes() -> Vec<Process> {
                     socket: None,
                     name_addition: None,
                 },
-            ],
+            ]
+            .into(),
         },
         Process {
             tid: None,
@@ -157,7 +158,8 @@ pub fn sample_processes() -> Vec<Process> {
                     })),
                     name_addition: None,
                 },
-            ],
+            ]
+            .into(),
         },
     ]
 }

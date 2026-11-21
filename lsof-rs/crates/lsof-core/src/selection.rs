@@ -1433,18 +1433,43 @@ impl Selection {
     /// one, `-i 4 -s TCP:ESTABLISHED` the IPv6 connections too (DIVERGENCES
     /// 181).
     fn bare_inet_selects(&self, f: &OpenFile) -> bool {
-        let include = self
-            .state_filter
-            .as_ref()
-            .map_or(&[][..], |s| &s.include[..]);
         match f.socket.as_deref() {
-            Some(sock) if sock.is_bsd() && !include.is_empty() => {
-                self.inet.bare()
-                    && f.is_internet()
-                    && sock.filter_state().is_some_and(|st| include.contains(&st))
+            Some(sock) if sock.is_bsd() && self.includes_states() => {
+                self.inet.bare() && self.state_selects(f)
             }
             _ => self.inet.all_matches(f),
         }
+    }
+
+    /// Whether `-s` names a TCP state to include.
+    fn includes_states(&self) -> bool {
+        self.state_filter
+            .as_ref()
+            .is_some_and(|s| !s.include.is_empty())
+    }
+
+    /// Whether `f` is a FreeBSD TCP socket in a state `-s` includes, which
+    /// that dialect's `ckstate()` gives `SELNET` with no regard to `-i`
+    /// (`dsock.c:288-292`, called for every TCP socket with a PCB at `:470`
+    /// and `:513`), and which `is_file_sel()` then keeps under the OR, as it
+    /// keeps any non-empty `lf->sf` (`lib/proc.c:566-585`). So in OR mode
+    /// the C lists such a socket of every process it reads whether `-i` is
+    /// bare, a specification or absent: measured on FreeBSD 14.5, `-s
+    /// TCP:LISTEN -i UDP` lists the UDP sockets and every listener, `-U -s
+    /// TCP:LISTEN` the UNIX sockets and every listener. Under `-a` the bit
+    /// is one more the AND need not have asked for. Linux's dialect gives
+    /// `SELNET` to a socket only for `-i` (`dsock.c:3882`), and its rows are
+    /// not BSD ones (DIVERGENCES 181).
+    fn state_selects(&self, f: &OpenFile) -> bool {
+        let Some(filter) = &self.state_filter else {
+            return false;
+        };
+        f.is_internet()
+            && f.socket.as_deref().is_some_and(|s| {
+                s.is_bsd()
+                    && s.filter_state()
+                        .is_some_and(|st| filter.include.contains(&st))
+            })
     }
 
     /// Whether `p` is absolutely excluded by a `^` negation on `-u`, `-c`,
@@ -2171,15 +2196,17 @@ impl Selection {
                 self.entry_kinds(&p, &with_tasks)
             };
             let peer_only = !excluded && p.endpoint_peer && inherited.is_empty();
-            p.files.retain_mut(|f| {
+            // A FreeBSD TCP socket in a state `-s` includes is selected by
+            // that alone ([`Selection::state_selects`]), in every process the
+            // C reads: not in one `is_proc_excl()` drops before its files are
+            // read, as `-p Q -s TCP:LISTEN` drops every process but Q.
+            let states_select = !excluded && self.includes_states() && self.selects_process(&p);
+            let keeps = |f: &crate::model::OpenFile| {
                 // `-s` is not a list option: it can only veto. Its exclusion
                 // form is the C's `SELEXCLF`, which outranks even the OR
                 // (`lib/proc.c:572`).
                 if !self.state_matches(f) {
                     return false;
-                }
-                if let Some(ix) = &naming {
-                    self.rename_located(ix, f);
                 }
                 if specified.is_empty() {
                     return true; // AllProc
@@ -2194,7 +2221,11 @@ impl Selection {
                     }
                     specified
                 } else {
-                    inherited.union(self.file_kinds(f))
+                    let mut sf = inherited.union(self.file_kinds(f));
+                    if states_select && self.state_selects(f) {
+                        sf.insert(SelKinds::NET);
+                    }
+                    sf
                 };
                 if sf.is_empty() {
                     return false;
@@ -2205,7 +2236,22 @@ impl Selection {
                 // requirement, which matched the C on a multi-threaded process
                 // and listed a single-threaded one the C does not.
                 !self.and_mode || sf.contains(specified)
-            });
+            };
+            // A path names the rows it locates as they are read. Otherwise a
+            // list every row of which is kept is left as it is, and so still
+            // shared with the other entries that share it: a `-K` thread's
+            // with its process's (`Files`).
+            if let Some(ix) = &naming {
+                p.files.retain_mut(|f| {
+                    if !self.state_matches(f) {
+                        return false;
+                    }
+                    self.rename_located(ix, f);
+                    keeps(f)
+                });
+            } else if !p.files.iter().all(keeps) {
+                p.files.retain(keeps);
+            }
             if p.files.is_empty() {
                 // A process with no rows left is a result only when it was
                 // itself selected and no file selecter was given — the case
@@ -3449,7 +3495,8 @@ mod tests {
             files: vec![
                 row("/usr/bin/python3", 65024), // on the named filesystem
                 row("/dev/null", 6),            // NOT on it — a different mount
-            ],
+            ]
+            .into(),
         };
         let got = sel.apply(vec![p]);
         assert_eq!(got.len(), 1);
@@ -3509,7 +3556,8 @@ mod tests {
                 // Named under the query, but a different file: the old
                 // prefix match invented this row.
                 row("C:\\dir\\inside.txt", "C:", "99"),
-            ],
+            ]
+            .into(),
         };
         let got = sel.apply(vec![p]);
         assert_eq!(got.len(), 1);
@@ -3559,7 +3607,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files,
+            files: files.into(),
         }
     }
 
@@ -3876,7 +3924,8 @@ mod tests {
                     "502",
                     Some(bound("/d/other.sock", None)),
                 ),
-            ],
+            ]
+            .into(),
         };
         let got = sel.apply(vec![p]);
         let nodes: Vec<&str> = got[0]
@@ -3936,7 +3985,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files,
+            files: files.into(),
         };
         let item = |id: Option<(u64, u64)>, fs: Option<u64>, name: &str| PathItem {
             id: id.map(|(dev, ino)| FileId { dev, ino }),
@@ -4286,7 +4335,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![file(name)],
+            files: vec![file(name)].into(),
         };
         assert_eq!(sel.locate(&[p("c:\\dir\\a.txt")]).paths, [true, false]);
         // Only a file the path filter selects is compared: `+d` takes what is
@@ -4469,7 +4518,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![pipe.clone(), reg.clone()],
+            files: vec![pipe.clone(), reg.clone()].into(),
         };
         // 8888 matches no selector and is no peer: dropped as usual.
         let stranger = Process {
@@ -4485,7 +4534,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![pipe, reg],
+            files: vec![pipe, reg].into(),
         };
         let sel = Selection {
             pids: vec![1000],
@@ -4680,7 +4729,7 @@ mod tests {
         ];
         let p = Process {
             pid: 9,
-            files,
+            files: files.into(),
             ..who(9, "x", 0, 9)
         };
         let listed = |args: &[(&str, bool)]| {
@@ -4834,7 +4883,7 @@ mod tests {
         };
         let p = Process {
             pid: 9,
-            files: vec![f],
+            files: vec![f].into(),
             ..who(9, "x", 0, 9)
         };
         for linux in [true, false] {
@@ -4921,12 +4970,58 @@ mod tests {
             ppid: Some(1),
             command: command.into(),
             user: Some(format!("u{uid}")),
-            files: Vec::new(),
+            files: Vec::new().into(),
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
             file_structs: None,
         }
+    }
+
+    /// Safety review LOW-1 (DIVERGENCES 141): under `-K` a process's thread
+    /// entries share its files, and the selection leaves them shared where
+    /// it keeps every row, so a run holds them once a process, not once a
+    /// thread; where it drops rows, the entry it drops them from has a list
+    /// of its own, and the others keep theirs.
+    #[test]
+    fn a_threads_files_stay_shared_where_every_row_is_kept() {
+        let mut main = who(10, "thr", 0, 10);
+        main.files = vec![tcp(3, 80, None, TcpState::Listen), udp(4, 81, None)].into();
+        let threads: Vec<Process> = (0..3)
+            .map(|t| {
+                let mut p = main.clone();
+                p.tid = Some(100 + t);
+                p
+            })
+            .collect();
+        assert!(threads.iter().all(|t| t.files.shares(&main.files)));
+        let kept = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            ..Default::default()
+        }
+        .apply(threads.clone());
+        assert_eq!(kept.len(), 3);
+        assert!(kept
+            .iter()
+            .all(|t| t.files.shares(&main.files) && t.files.len() == 2));
+        // `-a -K -p 10 -d 3`: each entry keeps fd 3 alone, in its own list.
+        let one = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            and_mode: true,
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(3)],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        }
+        .apply(threads);
+        assert_eq!(one.len(), 3);
+        assert!(one
+            .iter()
+            .all(|t| !t.files.shares(&main.files) && t.files.len() == 1));
+        assert_eq!(main.files.len(), 2, "the process's own list is untouched");
     }
 
     /// The C's per-process `Ckscko` (`dproc.c:263-286, 909-916`): a network
@@ -5186,7 +5281,15 @@ mod tests {
     #[test]
     fn a_command_regex_selects_and_is_located_as_a_name_is() {
         use crate::posix_regex::CommandRegex;
-        let rx = |e: &str| CommandRegex::new(e.as_bytes(), true, false).unwrap();
+        let rx = |e: &str| {
+            CommandRegex::new_in(
+                crate::posix_regex::Dialect::Glibc,
+                e.as_bytes(),
+                true,
+                false,
+            )
+            .unwrap()
+        };
         let sel = Selection {
             command_regexes: vec![rx("^py"), rx("zz")],
             ..Default::default()
@@ -5235,7 +5338,13 @@ mod tests {
             ..who(13, "py\u{fffd}", 0, 1)
         };
         let bytes = Selection {
-            command_regexes: vec![CommandRegex::new(b"^py\xff$", true, false).unwrap()],
+            command_regexes: vec![CommandRegex::new_in(
+                crate::posix_regex::Dialect::Glibc,
+                b"^py\xff$",
+                true,
+                false,
+            )
+            .unwrap()],
             ..Default::default()
         };
         assert!(bytes.selects_process(&raw));
@@ -5249,7 +5358,8 @@ mod tests {
     #[test]
     fn under_and_a_command_regex_is_asked_only_of_what_the_ids_let_through() {
         use crate::posix_regex::CommandRegex;
-        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let rx = CommandRegex::new_in(crate::posix_regex::Dialect::Glibc, b"(.)\\1", true, false)
+            .unwrap();
         let and = Selection {
             pids: vec![11],
             command_regexes: vec![rx.clone()],
@@ -5267,7 +5377,8 @@ mod tests {
         assert_eq!(and.locate(&procs).command_regexes, [true]);
         assert_eq!(rx.kept(), 1);
         // Without -a, every process is asked.
-        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let rx = CommandRegex::new_in(crate::posix_regex::Dialect::Glibc, b"(.)\\1", true, false)
+            .unwrap();
         let or = Selection {
             pids: vec![11],
             command_regexes: vec![rx.clone()],
@@ -5277,7 +5388,8 @@ mod tests {
         assert_eq!(or.locate(&procs).command_regexes, [true]);
         assert_eq!(rx.kept(), 4);
         // Under -a with -u, a process of another user is not asked either.
-        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let rx = CommandRegex::new_in(crate::posix_regex::Dialect::Glibc, b"(.)\\1", true, false)
+            .unwrap();
         let user = Selection {
             users: vec!["u1".to_string()],
             command_regexes: vec![rx.clone()],
@@ -5398,7 +5510,8 @@ mod tests {
             tcp(3, 80, None, crate::TcpState::Listen),
             tcp(4, 443, None, crate::TcpState::Listen),
             tcp(5, 5000, None, crate::TcpState::Listen),
-        ];
+        ]
+        .into();
         assert_eq!(
             sel.locate(std::slice::from_ref(&p)).inet,
             [true, true, false]
@@ -5565,7 +5678,7 @@ mod tests {
         let dgram = bsd(udp(7, 1, None), Some("0.0.0.0:0"), Some("0.0.0.0:0"));
         let kept = |sel: &Selection| -> Vec<u64> {
             let mut p = who(10, "socks", 0, 10);
-            p.files = vec![closed.clone(), est6.clone(), dgram.clone()];
+            p.files = vec![closed.clone(), est6.clone(), dgram.clone()].into();
             sel.apply(vec![p])
                 .iter()
                 .flat_map(|p| &p.files)
@@ -5590,9 +5703,10 @@ mod tests {
         let mut plain = Selection::default();
         plain.inet.add_all(Some(4));
         assert_eq!(kept(&plain), [3, 7]);
-        // No bare `-i`: the inclusion selects nothing by itself, and only
-        // vetoes (the sockets not in it), as on every platform.
+        // No selector at all: every file but the ones the inclusion vetoes.
         assert_eq!(kept(&states(&[TcpState::Closed], &[])), [3, 7]);
+        // `-p 99` alone: `is_proc_excl()` drops the process before its files
+        // are read, so its sockets select nothing.
         let other_pid = Selection {
             pids: vec![99],
             ..states(&[TcpState::Closed], &[])
@@ -5602,13 +5716,74 @@ mod tests {
             [],
             "`-p 99 -s TCP:CLOSED` selects no socket"
         );
+        // Any other selector, under the OR: a TCP socket in an included state
+        // is selected by that alone (`ckstate()` sets `SELNET` whatever `-i`
+        // says), beside what the selectors select. Measured on FreeBSD 14.5:
+        // `-s TCP:LISTEN -i :9`, `-i UDP`, `-U`, `-d 0`.
+        let mut port9 = states(&[TcpState::Closed], &[]);
+        port9.inet.specs.push(spec(":9", &[(9, 9)], None));
+        assert_eq!(kept(&port9), [3], "-s TCP:CLOSED -i :9");
+        let mut by_udp = states(&[TcpState::Closed], &[]);
+        by_udp.inet.specs.push(InetSpec {
+            text: "UDP".into(),
+            proto: Some(Protocol::Udp),
+            ..Default::default()
+        });
+        assert_eq!(kept(&by_udp), [3, 7], "-s TCP:CLOSED -i UDP");
+        let unix = Selection {
+            unix_only: true,
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(kept(&unix), [3], "-U -s TCP:CLOSED");
+        let fd0 = Selection {
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(0)],
+                exclude: vec![],
+            }),
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(kept(&fd0), [3], "-d 0 -s TCP:CLOSED");
+        // Two process selectors skip no process in the C, so the socket of
+        // a process neither names is selected all the same.
+        let two = Selection {
+            pids: vec![99],
+            users: vec!["nobody".into()],
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(kept(&two), [3], "-p 99 -u nobody -s TCP:CLOSED");
+        // A state the inclusion does not name selects nothing.
+        let mut est = states(&[TcpState::Established], &[]);
+        est.inet.specs.push(spec(":9", &[(9, 9)], None));
+        assert_eq!(kept(&est), [12]);
+        // Under `-a` the state's bit is not what the AND asked for.
+        for (sel, want) in [
+            (port9, &[][..]),
+            (by_udp, &[7][..]),
+            (unix, &[]),
+            (fd0, &[]),
+        ] {
+            let and = Selection {
+                and_mode: true,
+                ..sel
+            };
+            assert_eq!(kept(&and), want, "under -a");
+        }
         // Another backend's rows keep the rule they had: the version, and a
         // socket with no TCP state is not vetoed.
         let linux: Vec<OpenFile> = vec![tcp(3, 80, None, TcpState::Established), udp(7, 81, None)];
         let mut p = who(10, "srv", 0, 10);
-        p.files = linux;
+        p.files = linux.into();
         let got = with(Some(4), &[TcpState::Established], &[]).apply(vec![p]);
         assert_eq!(got[0].files.len(), 2);
+        // And without -i, a Linux row in an included state is no selected
+        // row: the Linux C's ckstate() gives it no SELNET.
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![tcp(3, 80, None, TcpState::Established)].into();
+        let unix_only = Selection {
+            unix_only: true,
+            ..states(&[TcpState::Established], &[])
+        };
+        assert!(unix_only.apply(vec![p]).iter().all(|p| p.files.is_empty()));
     }
 
     #[test]
@@ -5626,7 +5801,8 @@ mod tests {
         p.files = vec![
             tcp(3, 5000, None, crate::TcpState::Listen),
             tcp(4, 9, None, crate::TcpState::Listen),
-        ];
+        ]
+        .into();
         let kept: Vec<u16> = sel
             .apply(vec![p])
             .iter()
@@ -5652,7 +5828,7 @@ mod tests {
         };
         sel.inet.add_all(None);
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![tcp(9, 5000, None, crate::TcpState::Listen)];
+        p.files = vec![tcp(9, 5000, None, crate::TcpState::Listen)].into();
         assert!(sel.locate(std::slice::from_ref(&p)).inet_all);
         assert!(sel
             .apply(vec![p.clone()])
@@ -5733,7 +5909,7 @@ mod tests {
         ];
         let kept = |sel: Selection| -> Vec<u64> {
             let mut p = who(10, "srv", 0, 10);
-            p.files = files.to_vec();
+            p.files = files.to_vec().into();
             sel.apply(vec![p])
                 .iter()
                 .flat_map(|p| &p.files)
@@ -5759,7 +5935,7 @@ mod tests {
         // newer than its table is neither required nor excluded.
         let sel = states(&[TcpState::Listen], &[]);
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![tcp(4, 80, None, TcpState::Unknown)];
+        p.files = vec![tcp(4, 80, None, TcpState::Unknown)].into();
         assert_eq!(sel.apply(vec![p])[0].files.len(), 1);
     }
 
@@ -5779,12 +5955,12 @@ mod tests {
             exclude: vec![],
         });
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![tcp(4, 80, None, TcpState::Listen)];
+        p.files = vec![tcp(4, 80, None, TcpState::Listen)].into();
         assert_eq!(sel.locate(&[p]).states, [false, false, true]);
         // An unconnected UDP socket locates CLOSE, as it is filtered by it.
         let sel = states(&[TcpState::Close], &[]);
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![udp(7, 82, Some(TcpState::Close))];
+        p.files = vec![udp(7, 82, Some(TcpState::Close))].into();
         assert_eq!(sel.locate(&[p]).states, [true]);
     }
 
@@ -5870,13 +6046,13 @@ mod tests {
     fn k_linux() -> Vec<Process> {
         let cwd = || k_row(FdType::Cwd, FileType::Dir);
         let mut one = who(1, "one", 0, 1);
-        one.files = vec![cwd()];
+        one.files = vec![cwd()].into();
         let mut two = who(2, "two", 0, 2);
-        two.files = vec![cwd()];
+        two.files = vec![cwd()].into();
         let mut task = who(2, "two", 0, 2);
         task.tid = Some(3);
         task.task_command = Some("t".into());
-        task.files = vec![cwd()];
+        task.files = vec![cwd()].into();
         vec![one, two, task]
     }
 
@@ -5980,7 +6156,8 @@ mod tests {
             k_row(FdType::Handle(4), FileType::Regular),
             k_row(FdType::Handle(8), FileType::Thread),
             k_row(FdType::Task, FileType::Thread),
-        ];
+        ]
+        .into();
         let bare = Selection {
             tasks: TaskMode::Always,
             ..Default::default()
@@ -6017,7 +6194,7 @@ mod tests {
             ..and_p7.clone()
         };
         let mut no_socket = who(7, "app.exe", 0, 7);
-        no_socket.files = vec![k_row(FdType::Task, FileType::Thread)];
+        no_socket.files = vec![k_row(FdType::Task, FileType::Thread)].into();
         assert!(!and_i.locate(std::slice::from_ref(&no_socket)).tasks);
         let mut with_socket = no_socket.clone();
         with_socket
@@ -6064,10 +6241,10 @@ mod tests {
             bound: None,
         }));
         let mut other = who(2, "other", 0, 2);
-        other.files = vec![inet];
+        other.files = vec![inet].into();
         let mut task = who(2, "other", 0, 2);
         task.tid = Some(5);
-        task.files = vec![k_row(FdType::Cwd, FileType::Dir)];
+        task.files = vec![k_row(FdType::Cwd, FileType::Dir)].into();
         let mine = who(1, "mine", 0, 1);
         let gathered = vec![mine, other, task];
         let mut sel = Selection {
@@ -6172,9 +6349,9 @@ mod tests {
             f
         };
         let mut a = who(10, "python3", 0, 10);
-        a.files = vec![row(3), row(4)];
+        a.files = vec![row(3), row(4)].into();
         let mut b = who(20, "kidb", 0, 10);
-        b.files = vec![row(3)];
+        b.files = vec![row(3)].into();
         let gathered = vec![a, b];
         let base = Selection {
             endpoints: Some(EndpointMode::Info),
@@ -6265,12 +6442,19 @@ mod tests {
             f
         };
         let mut a = who(10, "fixA", 0, 10);
-        a.files = vec![row(3), row(4)];
+        a.files = vec![row(3), row(4)].into();
         let mut b = who(20, "fixB", 0, 20);
-        b.files = vec![row(3), row(4)];
+        b.files = vec![row(3), row(4)].into();
         let gathered = vec![a, b];
-        let rx =
-            |s: &str| crate::posix_regex::CommandRegex::new(s.as_bytes(), true, false).unwrap();
+        let rx = |s: &str| {
+            crate::posix_regex::CommandRegex::new_in(
+                crate::posix_regex::Dialect::Glibc,
+                s.as_bytes(),
+                true,
+                false,
+            )
+            .unwrap()
+        };
         let fd3 = Some(FdFilter {
             include: vec![FdSpec::Num(3)],
             exclude: Vec::new(),
@@ -6421,9 +6605,9 @@ mod tests {
             f
         };
         let mut w = who(10, "w", 0, 10);
-        w.files = vec![pipe(4, crate::model::AccessMode::Write)];
+        w.files = vec![pipe(4, crate::model::AccessMode::Write)].into();
         let mut r = who(20, "r", 0, 20);
-        r.files = vec![pipe(3, crate::model::AccessMode::Read)];
+        r.files = vec![pipe(3, crate::model::AccessMode::Read)].into();
         let gathered = vec![w, r];
         let mut sel = Selection {
             pids: vec![10],

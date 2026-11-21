@@ -1,0 +1,274 @@
+# Mutants for the fixes after the two reviews of the FreeBSD first-run work
+# (2026-11-21, FreeBSD 14.5-RELEASE amd64): DIVERGENCES 181 (a -s TCP state
+# inclusion selects under the OR, whatever -i says), 183 (-c /regex/ by
+# FreeBSD libc's regcomp(): its grammar, its words, its classes), 141
+# (-K: a process's thread entries share its files). Every rule was measured
+# against the C on FreeBSD (the regex rules against FreeBSD 14.5's libc,
+# tests/posix_regex_freebsd.txt); every gate is a unit suite that runs on
+# Linux.
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/freebsd-run3.toml
+#
+# Not mutated, and why: the lines that compile into a FreeBSD build alone
+# and so run in no Linux test: args.rs's FreeBSD -k/-m arm (`-k not followed
+# by path`, its give-back), stdio.rs's per-write duplicate of descriptor 1,
+# and the FreeBSD backend's gather that shares a process's files with its
+# threads. Each has its tests on FreeBSD (args.rs's
+# `an_illegal_option_character_is_read_past`, `a_dropped_word_is_not_read_as_text`,
+# the backend's live tests, differential/freebsd-check.sh), run in the VM.
+
+# Run 2026-11-21 (--first-kill, on a copy of the tree): 32 mutants, 27
+# killed (unit-core 26, unit-cli 1), 5 survived. One, state-selects-linux-rows,
+# was a missing test (a Linux row in an included state, no -i: added to
+# a_freebsd_state_inclusion_is_what_the_bare_i_selects), then KILLED. Four
+# were EQUIVALENT and are retired from this table: state-selects-any-state (a
+# socket not in the inclusion is vetoed by -s before state_selects is asked),
+# fb-empty-alternative-taken (an empty last alternative is refused by the
+# next branch's own empty check either way), fb-bar-opens-nothing (p_re()
+# stops at a | before p_ere_exp() could see it), fb-class-name-unbounded (no
+# class of wctype()'s has a name of 15 letters).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "-p", "lsof-core", "-p", "lsof-cli"]]
+
+[[run.gate]]
+name = "unit-core"
+cmd = ["cargo", "test", "-p", "lsof-core", "--lib", "--test", "golden", "--test", "posix_regex"]
+timeout = 1200
+
+[[run.gate]]
+name = "unit-cli"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--lib", "--bin", "lsof"]
+timeout = 900
+
+# --- 181: a state inclusion selects under the OR.
+
+[[mutant]]
+name = "state-selects-nothing-without-bare-i"
+rule = "a TCP socket in an included state is selected under the OR whatever -i says (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "                    if states_select && self.state_selects(f) {"
+new = "                    if false && states_select && self.state_selects(f) {"
+
+[[mutant]]
+name = "state-selects-in-a-process-the-c-drops"
+rule = "not in a process is_proc_excl() drops before its files are read (-p Q -s TCP:LISTEN) (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "            let states_select = !excluded && self.includes_states() && self.selects_process(&p);"
+new = "            let states_select = !excluded && self.includes_states();"
+
+[[mutant]]
+name = "state-selects-linux-rows"
+rule = "the rule is FreeBSD's rows' alone: Linux's C gives SELNET only for -i (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "                s.is_bsd()\n                    && s.filter_state()"
+new = "                s.filter_state()"
+
+[[mutant]]
+name = "state-exclusion-includes"
+rule = "an exclusion alone includes nothing (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "            .is_some_and(|s| !s.include.is_empty())"
+new = "            .is_some()"
+
+# --- 141: thread entries share their process's files.
+
+[[mutant]]
+name = "kept-files-copied"
+rule = "a list every row of which is kept stays shared (141, the safety review's LOW-1)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "            } else if !p.files.iter().all(keeps) {"
+new = "            } else if true {"
+
+[[mutant]]
+name = "files-never-shared"
+rule = "a copy of an entry shares its files until one changes them (141)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "        std::sync::Arc::ptr_eq(&self.0, &other.0)"
+new = "        false"
+
+# --- 183: FreeBSD's grammar.
+
+[[mutant]]
+name = "fb-dupmax-glibcs"
+rule = "a count is at most 255, FreeBSD's RE_DUP_MAX (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "const DUPMAX: i64 = 255;"
+new = "const DUPMAX: i64 = 0x7fff;"
+
+[[mutant]]
+name = "fb-count-bound-off-by-one"
+rule = "255 is a count, 256 is not (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        if digits == 0 || count > DUPMAX {"
+new = "        if digits == 0 || count >= DUPMAX {"
+
+[[mutant]]
+name = "fb-empty-expression-taken"
+rule = "an empty (sub)expression is REG_EMPTY (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            if !emitted {"
+new = "            if false {"
+
+[[mutant]]
+name = "fb-letters-may-be-escaped"
+rule = "a backslash before a letter is REG_EESCAPE (`\\w`) (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        !(c.is_alphabetic() || c == '\\'' || c == '`')"
+new = "        !(c == '\\'' || c == '`')"
+
+[[mutant]]
+name = "fb-caret-repeated"
+rule = "a repetition of ^ is REG_BADRPT (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        if wascaret {"
+new = "        if false {"
+
+[[mutant]]
+name = "fb-basic-star-after-an-atom"
+rule = "a basic * that does not open the expression and follows a repetition is REG_BADRPT (`a**`) (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            (false, Some(b'*')) if nchain != 0 => return Err(RegexError::BadRepeat),"
+new = "            (false, Some(b'*')) if false => return Err(RegexError::BadRepeat),"
+
+[[mutant]]
+name = "fb-back-reference-unchecked"
+rule = "a back-reference names a closed group, else REG_ESUBREG (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                if self.completed & (1u16 << n) == 0 {"
+new = "                if false {"
+
+[[mutant]]
+name = "fb-dollar-never-an-anchor"
+rule = "a basic $ that ends a (sub)expression is its end (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            if terminate {"
+new = "            if false {"
+
+[[mutant]]
+name = "fb-basic-caret-a-character"
+rule = "a basic ^ that opens a (sub)expression is its start (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            if !self.extended && self.fb_eat(b'^') {"
+new = "            if false && !self.extended && self.fb_eat(b'^') {"
+
+[[mutant]]
+name = "fb-hyphen-a-character"
+rule = "a - inside a list that ends no range is REG_ERANGE (`[--a]`, `[a-z-9]`) (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            Some(b'-') => return Err(RegexError::Range),"
+new = "            Some(b'-') => None,"
+
+[[mutant]]
+name = "fb-range-reversed-taken"
+rule = "a range whose end is below its start is REG_ERANGE (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                    if start > finish {"
+new = "                    if start > finish && false {"
+
+[[mutant]]
+name = "fb-word-ends-not-kludged"
+rule = "[[:<:]] and [[:>:]] are the word's ends (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "        if self.items.len().saturating_sub(self.pos) > 5 {"
+new = "        if false {"
+
+[[mutant]]
+name = "fb-zero-width-repeated-kept"
+rule = "an anchor repeated from zero times may be left out (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                frag: if from == 0 { None } else { piece.frag },"
+new = "                frag: piece.frag,"
+
+[[mutant]]
+name = "fb-zero-repetition-emits"
+rule = "{0} drops what it repeats, so an expression of it alone is empty (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "                frag: None,\n                emitted: false,"
+new = "                frag: None,\n                emitted: true,"
+
+[[mutant]]
+name = "fb-collating-name-of-many"
+rule = "a collating element is one character or a name of cname.h, else REG_ECOLLATE (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            Some(Item::Char(c)) if name.len() == 1 => Ok(*c),"
+new = "            Some(Item::Char(c)) => Ok(*c),"
+
+[[mutant]]
+name = "fb-cname-not-looked-up"
+rule = "a collating element may be a name of cname.h (`[[.space.]]`) (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = "            if let Some(&(_, c)) = CNAMES.iter().find(|(n, _)| n == text) {"
+new = "            if let Some(&(_, c)) = CNAMES.iter().find(|(n, _)| n.is_empty() && n == text) {"
+
+[[mutant]]
+name = "fb-alpha-glibcs"
+rule = "alpha is the letters alone (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = '''            b"alpha" => r"\p{L}",'''
+new = '''            b"alpha" => r"\p{Alphabetic}\p{Nd}",'''
+
+[[mutant]]
+name = "fb-blank-glibcs"
+rule = "blank is the tab and the space alone (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = '''            b"blank" => r"\t\x20",'''
+new = '''            b"blank" => r"\t\p{Zs}",'''
+
+[[mutant]]
+name = "fb-punct-glibcs"
+rule = "punct is the punctuation and ASCII's symbols (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex/freebsd.rs"
+old = '''            b"punct" => r"\p{P}$+<=>^`|~",'''
+new = '''            b"punct" => r"\p{P}\p{S}",'''
+
+[[mutant]]
+name = "fb-words-glibcs"
+rule = "the refusal is in FreeBSD's regerror() words (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = "        if dialect == Dialect::FreeBsd {\n            return match self {"
+new = "        if dialect != Dialect::FreeBsd {\n            return match self {"
+
+[[mutant]]
+name = "fb-host-is-glibc"
+rule = "the C's dialect on FreeBSD is FreeBSD's, elsewhere glibc's (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = "    pub const HOST: Dialect = if cfg!(target_os = \"freebsd\") {"
+new = "    pub const HOST: Dialect = if !cfg!(target_os = \"freebsd\") {"
+
+[[mutant]]
+name = "fb-grammar-glibcs"
+rule = "a FreeBSD expression is read by FreeBSD's grammar (183)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/posix_regex.rs"
+old = "        Dialect::FreeBsd => p.freebsd()?,"
+new = "        Dialect::FreeBsd => {\n            p.fetch(true);\n            p.parse_reg_exp(0)?\n        }"
+

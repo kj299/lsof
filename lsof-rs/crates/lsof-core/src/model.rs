@@ -1061,6 +1061,83 @@ impl OpenFile {
     }
 }
 
+/// A process's files: a list a copy of the process shares until one of
+/// them changes it (`Arc::make_mut`). Under `-K` every thread of a process
+/// is an entry of its own with the process's files (the C reads them again
+/// for each, `dproc.c:432-477`); shared, they are held once a process
+/// however many threads it has, where a copy each made the run's memory the
+/// threads times the files (DIVERGENCES 141). It reads as a
+/// `Vec<OpenFile>`, and a change to it is made to the entry's own copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Files(std::sync::Arc<Vec<OpenFile>>);
+
+impl Files {
+    /// Whether `self` and `other` are one list, not two copies.
+    pub fn shares(&self, other: &Files) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::ops::Deref for Files {
+    type Target = Vec<OpenFile>;
+
+    fn deref(&self) -> &Vec<OpenFile> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Files {
+    /// The entry's own list, copied first where another entry shares it.
+    fn deref_mut(&mut self) -> &mut Vec<OpenFile> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl From<Vec<OpenFile>> for Files {
+    fn from(files: Vec<OpenFile>) -> Self {
+        Files(std::sync::Arc::new(files))
+    }
+}
+
+impl FromIterator<OpenFile> for Files {
+    fn from_iter<I: IntoIterator<Item = OpenFile>>(iter: I) -> Self {
+        Files::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl IntoIterator for Files {
+    type Item = OpenFile;
+    type IntoIter = std::vec::IntoIter<OpenFile>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::unwrap_or_clone(self.0).into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Files {
+    type Item = &'a OpenFile;
+    type IntoIter = std::slice::Iter<'a, OpenFile>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Files {
+    type Item = &'a mut OpenFile;
+    type IntoIter = std::slice::IterMut<'a, OpenFile>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::make_mut(&mut self.0).iter_mut()
+    }
+}
+
+impl PartialEq<Vec<OpenFile>> for Files {
+    fn eq(&self, other: &Vec<OpenFile>) -> bool {
+        *self.0 == *other
+    }
+}
+
 /// A process and the files it has open — analog of `struct lproc`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Process {
@@ -1089,7 +1166,7 @@ pub struct Process {
     /// Process group ID, for lsof's `-F g` field. `None` on platforms without
     /// process groups (Windows).
     pub pgid: Option<u32>,
-    pub files: Vec<OpenFile>,
+    pub files: Files,
     /// `+E`: set by a backend when this process is in the result only because
     /// it is the peer endpoint of a selected process's pipe. The selection
     /// engine keeps such a process (its pipe rows only) even though it matches
@@ -1110,7 +1187,7 @@ pub struct Process {
     /// FreeBSD: each numbered descriptor's [`FileStruct`], by descriptor
     /// number, sorted; `None` where none was asked for (no `+f c`/`f`/`n`)
     /// and on every other platform.
-    pub file_structs: Option<Box<[(u64, FileStruct)]>>,
+    pub file_structs: Option<std::sync::Arc<[(u64, FileStruct)]>>,
 }
 
 /// A command, login or thread name that is not UTF-8, kept as the bytes it

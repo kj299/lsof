@@ -192,7 +192,8 @@ Six forms of comparison, because some output cannot be equal:
 |---|---|---|
 | `run` | every byte | the default |
 | `runu` | every byte but the C's usage block and lsof-rs's `Try 'lsof -h' for usage.` | an option error: DIVERGENCES 114 |
-| `runo` | every row but those of processes named `lsof`, which are counted | a listing that holds the lsof making it: its PID, path and output file are its own |
+| `runo` | every row but those of processes named `lsof`, which are counted, and of the `timeout` each run is started under | a listing that holds the lsof making it: its PID, path and output file are its own |
+| `runof` | as `runo`, for `-F` output that holds `c`: every process block but those of `lsof` and `timeout` | a listing of every process in `-F` form (row 181's) |
 | `runj` | every byte but `"lsof_version"` | JSON: DIVERGENCES 91 |
 | `runjs` | as `runj`, and without the `"name"` lsof-rs gives an Internet socket's object (they are counted) | JSON that holds such sockets: the C's object has no `name`, DIVERGENCES 134 |
 | `runs` | lsof's own rows, its PID and its output file's name and inode masked | the lsof that lists, compared with itself |
@@ -201,8 +202,18 @@ The fixtures are its own: a `sleep`, a `tail -f` (a kqueue), an `nc`
 listener, and two programs it compiles with the base system's `cc`, one
 holding 24 sockets of every kind the dialect names differently (TCP and UDP,
 IPv4, IPv6 and v4-mapped, unbound, bound, listening, connected, accepted,
-shut down; raw, routing, UDP-Lite) and one with four threads. Without a
-compiler those comparisons are skipped, and the file says so.
+shut down; raw, routing, UDP-Lite) and one with four threads. (Row 180's
+33 sockets were a larger fixture of the measurement that row records, not
+this one.) Without a compiler those comparisons are skipped, and the file
+says so. Every run of either binary is made under `ulimit -v` (2 GiB) and
+`timeout` (60 s; `LSOF_VMEM_KB`, `LSOF_TIMEOUT`): the C's `+M` waits on a
+portmapper that is not running, and one run of it grew past 4 GB on a test
+host. Each run is made in a subshell of its own, its standard input an
+empty file of the work directory (so that neither the script's own shell
+nor a detached run's `/dev/null` shows in a listing). The forms of row 181 that list every process (`-U -s TCP:LISTEN` and
+its like) are `runof`'s: an exclusion `-c ^lsof` would not do, as the C
+then exits 1 (its `-c ^` is a search item: DIVERGENCES'
+`search-c-negated-is-a-search-item-in-the-c`).
 
 What is expected not to be `SAME`, on a tree where nothing is wrong:
 

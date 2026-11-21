@@ -2109,21 +2109,33 @@ fn parse_options<'s>(
                     j = chars.len();
                     continue;
                 }
+                // FreeBSD's C has `-k` (`HASKOPT`) and `-m` (`HASMOPT`), and
+                // gives back a value that opens with `-` or `+`, or none, as
+                // `-K` does: `if (!GOv || *GOv == '-' || *GOv == '+')` says
+                // `-k not followed by path` (or `-m …`) and reads that word
+                // again as options (`main.c:600-610`, `:676-686`; `-k`
+                // whatever its prefix, and its line says `-k`). Measured on
+                // FreeBSD 14.5: `-k -W` is that line and `illegal option
+                // character: W`, `-k -p` that line and `no process ID
+                // specified`. A path is lsof-rs's `unsupported option`, as
+                // before (DIVERGENCES 148, 149).
+                'k' | 'm' if cfg!(target_os = "freebsd") && (c == 'k' || !plus) => {
+                    match optional_value(&chars, j, &args, &mut i) {
+                        None => early.line(&format!("-{c} not followed by path")),
+                        Some(_) => {
+                            early.line(&format!("unsupported option: {prefix}{c}"));
+                            took_bytes = true;
+                        }
+                    }
+                    j = past_value(&chars, j);
+                    continue;
+                }
                 'D' | 'm' if !plus => {
                     if c == 'm' && !cfg!(target_os = "freebsd") {
                         early.line("-m not supported");
                     } else {
                         early.line(&format!("unsupported option: -{c}"));
                     }
-                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
-                        i += 1;
-                        took_bytes = true;
-                    }
-                    j = chars.len();
-                    continue;
-                }
-                'k' if cfg!(target_os = "freebsd") => {
-                    early.line(&format!("unsupported option: {prefix}k"));
                     if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
                         i += 1;
                         took_bytes = true;
@@ -5274,11 +5286,23 @@ mod tests {
         assert!(matches(&["-c", "/abc/ib"], "ABC"));
         assert!(matches(&["-c", "/abc/xi"], "ABC"));
         // Anywhere in the command, unless anchored; the empty expression
-        // matches every command.
+        // matches every command, where glibc reads it (FreeBSD's libc
+        // refuses it: `dash_c_reads_a_regular_expression_as_the_c_reads_it`).
         assert!(matches(&["-c", "/ytho/"], "python3"));
         assert!(!matches(&["-c", "/^ytho/"], "python3"));
-        assert!(matches(&["-c", "//"], "anything"));
-        assert!(matches(&["-c", "//b"], ""));
+        if !cfg!(target_os = "freebsd") {
+            assert!(matches(&["-c", "//"], "anything"));
+            assert!(matches(&["-c", "//b"], ""));
+        }
+        // glibc's GNU operators are FreeBSD's characters (DIVERGENCES 183).
+        let freebsd = cfg!(target_os = "freebsd");
+        assert_eq!(matches(&["-c", r"/t\|s/b"], "thr"), !freebsd);
+        assert!(matches(&["-c", r"/t\|s/b"], "t|s"));
+        assert_eq!(matches(&["-c", r"/^t\+$/b"], "tt"), !freebsd);
+        assert!(matches(&["-c", r"/t\+/b"], "t+"));
+        assert_eq!(matches(&["-c", r"/(t)\1/"], "tt"), !freebsd);
+        assert_eq!(matches(&["-c", r"/(t)\1/"], "t1"), freebsd);
+        assert!(matches(&["-c", r"/\(t\)\1/b"], "tt"));
     }
 
     /// `-c /regex/[bix]` (DIVERGENCES 38), each measured against the C: the
@@ -5292,7 +5316,7 @@ mod tests {
         };
         assert_eq!(regexes(&["-c", "/a.c/"]).len(), 1);
         assert_eq!(regexes(&["-c", "/a.c/"])[0].expression(), b"a.c");
-        assert_eq!(regexes(&["-c/a/", "-c", "/b/i", "-c", "//"]).len(), 3);
+        assert_eq!(regexes(&["-c/a/", "-c", "/b/i", "-c", "/c/b"]).len(), 3);
         // A regular expression is no name, and a name no expression.
         assert!(run(&["-c", "/a.c/"]).0.commands.is_empty());
         assert!(run(&["-c", "a.c"]).0.command_regexes.is_empty());
@@ -5307,6 +5331,70 @@ mod tests {
                 .err()
                 .unwrap_or_default()
         };
+        // `regerror()`'s words: glibc's, or FreeBSD's libc's (DIVERGENCES
+        // 183, each measured there).
+        let fb = cfg!(target_os = "freebsd");
+        let words = |glibc: &'static str, freebsd: &'static str| if fb { freebsd } else { glibc };
+        let bracket = words(
+            "Unmatched [, [^, [:, [., or [=",
+            "brackets ([ ]) not balanced",
+        );
+        let regexp = |value: &str, glibc: &'static str, freebsd: &'static str| {
+            (
+                value.to_string(),
+                format!(
+                    "regexp error: {}: {}",
+                    Escaper::for_host().text(value),
+                    words(glibc, freebsd)
+                ),
+            )
+        };
+        let refused = [
+            regexp(
+                "/a[/",
+                "Invalid regular expression",
+                "brackets ([ ]) not balanced",
+            ),
+            regexp("/[a/", bracket, bracket),
+            regexp("/a(/", r"Unmatched ( or \(", "parentheses not balanced"),
+            regexp(
+                "/*a/",
+                "Invalid preceding regular expression",
+                "repetition-operator operand invalid",
+            ),
+            regexp("/a{1/", r"Unmatched \{", "braces not balanced"),
+            regexp(
+                "/a{2,1}/",
+                r"Invalid content of \{\}",
+                "invalid repetition count(s)",
+            ),
+            regexp(
+                "/a{99999}/",
+                "Regular expression too big",
+                "invalid repetition count(s)",
+            ),
+            regexp(
+                "/[[:foo:]]/",
+                "Invalid character class name",
+                "invalid character class",
+            ),
+            regexp("/[b-a]/", "Invalid range end", "invalid character range"),
+            regexp(
+                "/[[.ab.]]/",
+                "Invalid collation character",
+                "invalid collating element",
+            ),
+            // FreeBSD's alone.
+            regexp("/a**/", "", "repetition-operator operand invalid"),
+            regexp("/a|/", "", "empty (sub)expression"),
+            regexp("//", "", "empty (sub)expression"),
+            regexp(r"/a\w/", "", r"trailing backslash (\)"),
+        ];
+        for (value, want) in refused {
+            if fb || !want.ends_with(": ") {
+                assert_eq!(err(&["-c", &value]), want, "{value}");
+            }
+        }
         for (value, want) in [
             ("/abc", "regexp doesn't end with '/': /abc"),
             ("/", "regexp doesn't end with '/': /"),
@@ -5337,38 +5425,8 @@ mod tests {
             ),
             // A modifier's error comes before the expression is compiled.
             ("/a[/q", "invalid regexp modifier: q"),
-            // `regerror()`'s words, after the argument as typed.
-            ("/a[/", "regexp error: /a[/: Invalid regular expression"),
-            ("/[a/", "regexp error: /[a/: Unmatched [, [^, [:, [., or [="),
-            ("/a(/", r"regexp error: /a(/: Unmatched ( or \("),
-            (
-                "/*a/",
-                "regexp error: /*a/: Invalid preceding regular expression",
-            ),
-            ("/a{1/", r"regexp error: /a{1/: Unmatched \{"),
-            (
-                "/a{2,1}/",
-                r"regexp error: /a{2,1}/: Invalid content of \{\}",
-            ),
-            (
-                "/a{99999}/",
-                "regexp error: /a{99999}/: Regular expression too big",
-            ),
-            (
-                "/[[:foo:]]/",
-                "regexp error: /[[:foo:]]/: Invalid character class name",
-            ),
-            ("/[b-a]/", "regexp error: /[b-a]/: Invalid range end"),
-            (
-                "/[[.ab.]]/",
-                "regexp error: /[[.ab.]]/: Invalid collation character",
-            ),
             // The argument is escaped, as `safestrprt()` escapes it; a
             // modifier too, which the C prints raw (DIVERGENCES 122).
-            (
-                "/\x1b[2J[/",
-                "regexp error: /^[[2J[/: Unmatched [, [^, [:, [., or [=",
-            ),
             ("/a/\x1b", "invalid regexp modifier: ^["),
             (
                 "/a/\u{e9}",
@@ -5377,19 +5435,28 @@ mod tests {
         ] {
             assert_eq!(err(&["-c", value]), want, "{value}");
         }
+        assert_eq!(
+            err(&["-c", "/\x1b[2J[/"]),
+            format!("regexp error: /^[[2J[/: {bracket}")
+        );
         // An argument that holds a backslash, which the host's escaping
         // doubles where a backslash is no path separator (`safestrprt()`).
         let shown = |value: &str| Escaper::for_host().text(value).into_owned();
         assert_eq!(shown(r"a\b"), if cfg!(windows) { r"a\b" } else { r"a\\b" });
+        let paren = words(r"Unmatched ( or \(", "parentheses not balanced");
+        let back = words("Invalid back reference", "invalid backreference number");
         for (value, want) in [
-            (r"/a\(/b", r"Unmatched ( or \("),
-            (r"/a\)/b", r"Unmatched ( or \("),
-            (r"/a\{1/b", r"Unmatched \{"),
-            (r"/\1/", "Invalid back reference"),
-            (r"/a\/", "Trailing backslash"),
+            (r"/a\(/b", paren),
+            (r"/a\)/b", paren),
+            (r"/a\{1/b", words(r"Unmatched \{", "braces not balanced")),
+            (r"/\1/b", back),
+            (
+                r"/a\/",
+                words("Trailing backslash", r"trailing backslash (\)"),
+            ),
             // A back-reference to a group still open, or to none.
-            (r"/(a\1)/", "Invalid back reference"),
-            (r"/\(a\)\2/b", "Invalid back reference"),
+            (r"/\(a\1\)/b", back),
+            (r"/\(a\)\2/b", back),
         ] {
             assert_eq!(
                 err(&["-c", value]),
@@ -5397,19 +5464,32 @@ mod tests {
                 "{value}"
             );
         }
+        // An extended expression's back-reference is glibc's; to FreeBSD's
+        // libc `\1` there is the character `1`.
+        for value in [r"/\1/", r"/(a\1)/"] {
+            let said = err(&["-c", value]);
+            if fb {
+                assert_eq!(said, "", "{value}");
+            } else {
+                assert_eq!(said, format!("regexp error: {}: {back}", shown(value)));
+            }
+        }
         // The parse reads on after each, as after every `-c` error, and
         // what was entered before it stays.
         assert_eq!(
             err(&["-c", "/a/", "-c", "/[/", "-c", "/b/q", "-x", "q"]),
-            "regexp error: /[/: Invalid regular expression\n\
-             lsof: invalid regexp modifier: q\n\
-             lsof: unknown cross-over option: q"
+            format!(
+                "regexp error: /[/: {}\n\
+                 lsof: invalid regexp modifier: q\n\
+                 lsof: unknown cross-over option: q",
+                words("Invalid regular expression", "brackets ([ ]) not balanced")
+            )
         );
     }
 
     /// `-c /regex/` as bytes: an expression need not be UTF-8, and a byte of
     /// it that is no character is shown `\xNN` (measured).
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "freebsd")))]
     #[test]
     fn dash_c_reads_a_regular_expression_that_is_not_utf8() {
         use std::os::unix::ffi::OsStringExt;
@@ -5426,6 +5506,29 @@ mod tests {
         assert_eq!(
             parse(vec![os(b"-c"), os(b"/\xffa[/")]).unwrap_err(),
             "regexp error: /\\xffa[/: Invalid regular expression"
+        );
+    }
+
+    /// The same on FreeBSD, whose libc reads the expression by the
+    /// locale's characters (UTF-8): a byte that is none is `illegal byte
+    /// sequence`, wherever it is (DIVERGENCES 183, measured).
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn dash_c_refuses_a_byte_that_is_no_character_on_freebsd() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        for (value, shown) in [
+            (&b"/bad\xffbyte/"[..], "/bad\\xffbyte/"),
+            (b"/\xffa[/", "/\\xffa[/"),
+        ] {
+            assert_eq!(
+                parse(vec![os(b"-c"), os(value)]).unwrap_err(),
+                format!("regexp error: {shown}: illegal byte sequence")
+            );
+        }
+        assert_eq!(
+            parse(vec![os(b"-c"), os(b"/a/\xff")]).unwrap_err(),
+            "invalid regexp modifier: \\xff"
         );
         assert_eq!(
             parse(vec![os(b"-c"), os(b"/a/\xff")]).unwrap_err(),
@@ -8863,6 +8966,20 @@ mod tests {
         } else {
             "-m not supported".to_string()
         };
+        // FreeBSD's C gives `-m` no value that opens with `-` or `+`, and
+        // none at all: it says `-m not followed by path` and reads that word
+        // again as options (`main.c:676-686`). Linux's takes the word.
+        let m_none = if cfg!(target_os = "freebsd") {
+            "-m not followed by path".to_string()
+        } else {
+            m.clone()
+        };
+        let m_given_back = |after: &[&str]| -> Vec<String> {
+            let mut lines = vec![m_none.clone()];
+            let skip = usize::from(!cfg!(target_os = "freebsd"));
+            lines.extend(after.iter().skip(skip).map(|c| ill(c)));
+            lines
+        };
         let cases: Vec<(&[&str], Vec<String>)> = vec![
             (&["-W"], vec![ill("W")]),
             (&["+W"], vec![ill("W")]),
@@ -8912,14 +9029,14 @@ mod tests {
             ),
             (&["-aD"], vec!["unsupported option: -D".into()]),
             (&["-Da"], vec!["unsupported option: -D".into()]),
-            (&["-m"], vec![m.clone()]),
-            (&["-m", "-W", "-Y"], vec![m.clone(), ill("Y")]),
+            (&["-m"], vec![m_none.clone()]),
+            (&["-m", "-W", "-Y"], m_given_back(&["W", "Y"])),
             (&["-mfoo", "-W"], vec![m.clone(), ill("W")]),
-            (&["-W", "-m"], vec![ill("W"), m.clone()]),
+            (&["-W", "-m"], vec![ill("W"), m_none.clone()]),
             // `--` is no value to `-D` or `-m`, as to `-Z`: it ends the
             // options, and `-W` after it is a name (measured).
             (&["-D", "--", "-W"], vec!["unsupported option: -D".into()]),
-            (&["-m", "--", "-W"], vec![m.clone()]),
+            (&["-m", "--", "-W"], vec![m_none.clone()]),
             (
                 &["-W", "-D", "--", "-Y"],
                 vec![ill("W"), "unsupported option: -D".into()],
@@ -8982,12 +9099,38 @@ mod tests {
         } else {
             assert_eq!(k, [ill("k")]);
         }
-        // Nor is `--` a value to FreeBSD's `-k`.
-        let k = error_lines(parse_on_host(&["-k", "--", "-W"], false));
+        // Nor is `--` a value to FreeBSD's `-k`, nor a word that opens with
+        // `-` or `+`, nor none: the C says `-k not followed by path` and
+        // reads the word again as options (`main.c:600-610`; measured on
+        // FreeBSD 14.5, `-k -W`, `-k -p`, `+k -W`, `-k -- x`, `-k-W`).
+        let freebsd_k: [(&[&str], Vec<String>); 7] = [
+            (&["-k", "--", "-W"], vec![]),
+            (&["-k"], vec![]),
+            (&["-k", "-W"], vec![ill("W")]),
+            (&["-k", "-p"], vec!["no process ID specified".to_string()]),
+            (&["+k", "-W"], vec![ill("W")]),
+            (&["-k", "+W"], vec![ill("W")]),
+            (&["-k-W"], vec![ill("-"), ill("W")]),
+        ];
+        for (argv, after) in freebsd_k {
+            let k = error_lines(parse_on_host(argv, false));
+            if cfg!(target_os = "freebsd") {
+                let mut want = vec!["-k not followed by path".to_string()];
+                want.extend(after);
+                assert_eq!(k, want, "{argv:?}");
+            } else {
+                assert_eq!(
+                    k.first().map(String::as_str),
+                    Some(ill("k").as_str()),
+                    "{argv:?}"
+                );
+            }
+        }
+        // `+k` with a path is the same option, and lsof-rs's refusal names
+        // its prefix.
+        let k = error_lines(parse_on_host(&["+k", "/x"], false));
         if cfg!(target_os = "freebsd") {
-            assert_eq!(k, ["unsupported option: -k"]);
-        } else {
-            assert_eq!(k, [ill("k")]);
+            assert_eq!(k, ["unsupported option: +k"]);
         }
     }
 

@@ -3246,7 +3246,7 @@ mod tests {
             f.add_name_addition(a);
         }
         let mut p = owned(0, Some("root"), 0);
-        p.files = vec![f];
+        p.files = vec![f].into();
         p
     }
 

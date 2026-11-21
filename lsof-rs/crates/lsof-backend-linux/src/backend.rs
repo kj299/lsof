@@ -329,7 +329,7 @@ impl Backend for LinuxBackend {
                         sockets_only: sel.sockets_only_for(&t),
                         ..ctx
                     };
-                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
+                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx).into();
                     if ctx.stopped() {
                         return failed();
                     }
@@ -371,7 +371,7 @@ impl Backend for LinuxBackend {
                 sockets_only: sel.sockets_only_for(p),
                 ..ctx
             };
-            p.files = files::for_pid(p.pid, p.uid, &ctx);
+            p.files = files::for_pid(p.pid, p.uid, &ctx).into();
             if ctx.stopped() {
                 return failed();
             }

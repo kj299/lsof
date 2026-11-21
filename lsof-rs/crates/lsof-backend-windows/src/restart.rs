@@ -120,7 +120,7 @@ pub fn lookup(paths: &[std::ffi::OsString], by_pid: &HashMap<u32, Process>) -> V
                     unlisted: false,
                     raw_names: None,
                     file_structs: None,
-                    files: Vec::new(),
+                    files: Vec::new().into(),
                 }
             });
             entry.files.push(OpenFile {

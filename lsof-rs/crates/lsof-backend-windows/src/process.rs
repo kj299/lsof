@@ -55,7 +55,7 @@ pub fn enumerate(numeric_ids: bool) -> Vec<Process> {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: Vec::new(),
+            files: Vec::new().into(),
         });
         // SAFETY: same invariants as Process32FirstW.
         more = unsafe { Process32NextW(snapshot.raw(), &mut entry) };

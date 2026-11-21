@@ -542,7 +542,7 @@ fn header(p: &Process) -> Process {
         task_command: p.task_command.clone(),
         uid: p.uid,
         pgid: p.pgid,
-        files: Vec::new(),
+        files: Vec::new().into(),
         endpoint_peer: p.endpoint_peer,
         unlisted: p.unlisted,
         // The command's own bytes, where it is not UTF-8: a row `+E` adds
@@ -609,7 +609,7 @@ mod tests {
             uid: None,
             user: None,
             command: cmd.into(),
-            files,
+            files: files.into(),
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
